@@ -60,7 +60,7 @@ export function HomeShell({ slug, doctorName }: Props) {
               className="w-44 h-44 rounded-full bg-even-blue-600 disabled:bg-even-blue-300 text-white text-display flex flex-col items-center justify-center gap-2 shadow-card-hover"
               aria-label="Start recording (wired in Sprint 1.E)"
             >
-              <span className="text-4xl">\u{1F3A4}</span>
+              <span className="text-4xl" aria-hidden="true">🎤</span>
               <span className="text-label">Record</span>
             </button>
           </div>
