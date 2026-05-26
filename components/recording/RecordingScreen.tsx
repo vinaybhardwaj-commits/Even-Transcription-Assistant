@@ -170,7 +170,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       } catch {
         /* private mode */
       }
-      router.push(`/${slug}`);
+      // Land on the encounter detail page — it will auto-trigger processing
+      // and show the note + CDMSS as they come back.
+      router.push(`/${slug}/encounter/${r.encounterId}`);
     }
   }, [submit, router, slug]);
 
