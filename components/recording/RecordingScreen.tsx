@@ -31,7 +31,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/encounters", {
+        const res = await fetch(`/${slug}/api/encounters`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),

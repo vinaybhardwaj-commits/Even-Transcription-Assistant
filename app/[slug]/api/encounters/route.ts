@@ -1,7 +1,10 @@
 /**
- * POST /api/encounters — creates a blank draft encounter row at the
- * moment the doctor lands on the Record screen. Returns the id so the
- * client can address chunks (IndexedDB key + R2 object key) by it.
+ * POST /{slug}/api/encounters — creates a blank draft encounter row at
+ * the moment the doctor lands on the Record screen.
+ *
+ * The route lives under [slug] because the doctor cookie is path-scoped
+ * to /{slug}/ per PRD §4.15. Routes at /api/* never receive the cookie
+ * because the browser respects cookie scope.
  *
  * Body: { patient_label?: string }
  * Returns: { ok: true, encounter: { id, status: 'draft' } }
@@ -15,8 +18,13 @@ import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
 
-export async function POST(req: NextRequest) {
-  // 1. Auth — doctor cookie required
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await params;
+
+  // 1. Cookie + JWT verify
   const cookie = await readDoctorCookie();
   if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
 
@@ -27,7 +35,12 @@ export async function POST(req: NextRequest) {
     return respondError("AUTH_EXPIRED", "Session invalid");
   }
 
-  // 2. Body — patient_label optional
+  // 2. URL slug must match JWT slug — defense in depth against cookie reuse
+  if (claims.slug !== slug) {
+    return respondError("FORBIDDEN", "Slug mismatch");
+  }
+
+  // 3. Body — patient_label optional
   let patientLabel: string | null = null;
   try {
     const body = (await req.json().catch(() => ({}))) as {
@@ -41,7 +54,7 @@ export async function POST(req: NextRequest) {
     /* empty body is fine */
   }
 
-  // 3. Insert
+  // 4. Insert
   const id = newEncounterId();
   try {
     await sql`
