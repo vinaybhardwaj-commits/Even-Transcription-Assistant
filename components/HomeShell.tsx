@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/Input";
+import { RecoveryModal } from "@/components/RecoveryModal";
 
 type Props = { slug: string; doctorName: string };
 
@@ -91,6 +92,8 @@ export function HomeShell({ slug, doctorName }: Props) {
           </p>
         </div>
       )}
+
+      <RecoveryModal />
     </main>
   );
 }

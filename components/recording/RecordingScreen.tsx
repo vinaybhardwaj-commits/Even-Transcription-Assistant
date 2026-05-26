@@ -9,6 +9,7 @@ import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
+import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { Button } from "@/components/ui/Button";
 
 type Props = { slug: string; doctorName: string };
@@ -83,9 +84,21 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       setBytesEmitted((b) => b + chunk.size);
       dg.sendChunk(chunk);
       wh.sendChunk(chunk);
-      // Sprint 1.F.4+ : also persist to IndexedDB
+      // Persist to IndexedDB for crash recovery (PRD §4.18). Fire-and-forget;
+      // we don't block the live transcription pipeline on disk write.
+      if (encounter) {
+        void putChunk(
+          encounter.id,
+          _idx,
+          chunk,
+          chunk.type || "audio/webm",
+        ).catch((e) => {
+          // eslint-disable-next-line no-console
+          console.warn("idb_put_failed", e);
+        });
+      }
     },
-    [dg, wh],
+    [dg, wh, encounter],
   );
 
   const rec = useMediaRecorder({ chunkMs: 250, onChunk });
@@ -143,7 +156,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
         <button
           type="button"
-          onClick={() => router.push(`/${slug}`)}
+          onClick={async () => {
+            // Purge any chunks we wrote — Cancel = clean abandon.
+            if (encounter) {
+              try { await purgeEncounter(encounter.id); } catch { /* noop */ }
+            }
+            router.push(`/${slug}`);
+          }}
           className="text-label text-even-blue-600 hover:underline"
         >
           ‹ Cancel
