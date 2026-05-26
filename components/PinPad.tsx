@@ -91,7 +91,7 @@ export function PinPad({ length = 4, onComplete, disabled = false, errorShake = 
           aria-label="Backspace"
           className="aspect-square rounded-xl text-display text-even-ink-500 hover:bg-even-ink-50 focus:outline-none focus:ring-2 focus:ring-even-blue-300 disabled:opacity-30 disabled:cursor-not-allowed transition"
         >
-          \u232B
+          ⌫
         </button>
       </div>
     </div>
