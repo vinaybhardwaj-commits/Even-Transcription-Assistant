@@ -7,6 +7,8 @@ import { ElapsedTimer } from "@/components/recording/ElapsedTimer";
 import { LiveTranscript } from "@/components/recording/LiveTranscript";
 import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
+import { useWhisperRolling } from "@/lib/use-whisper-rolling";
+import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
 import { Button } from "@/components/ui/Button";
 
 type Props = { slug: string; doctorName: string };
@@ -64,15 +66,26 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     }, []),
   });
 
-  // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + counter
+  // 2b. Whisper rolling — cumulative-from-zero every 10s for higher-accuracy
+  // transcript of medical terms. Replaces (not appends) — each pass returns
+  // the full transcript-to-date.
+  const wh = useWhisperRolling({
+    slug,
+    enabled: encounter !== null,
+    encounterId: encounter?.id,
+    intervalMs: 10_000,
+  });
+
+  // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
   const onChunk = React.useCallback(
     (chunk: Blob, _idx: number) => {
       setChunksCount((c) => c + 1);
       setBytesEmitted((b) => b + chunk.size);
       dg.sendChunk(chunk);
-      // Sprint 1.F.3+ : also persist to IndexedDB + post to Whisper
+      wh.sendChunk(chunk);
+      // Sprint 1.F.4+ : also persist to IndexedDB
     },
-    [dg],
+    [dg, wh],
   );
 
   const rec = useMediaRecorder({ chunkMs: 250, onChunk });
@@ -201,8 +214,17 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           </p>
         ) : null}
 
-        <div className="w-full max-w-2xl mt-2">
+        <div className="w-full max-w-2xl mt-2 space-y-3">
           <LiveTranscript finals={finals} interim={interim} />
+          <WhisperTranscript
+            state={wh.state}
+            text={wh.latest?.text ?? ""}
+            latencyMs={wh.latest?.latency_ms ?? null}
+            passIdx={wh.latest?.pass_idx ?? null}
+            language={wh.latest?.language ?? null}
+            bytes={wh.latest?.bytes ?? null}
+            error={wh.error}
+          />
         </div>
       </section>
 
