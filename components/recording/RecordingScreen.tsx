@@ -58,6 +58,15 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     };
   }, [slug]);
 
+  // 2a. Per-utterance cleanup via llama3.1:8b — strips filler words,
+  // normalizes mispronunciations on Deepgram finals. Soft-fail to raw.
+  // Declared above Deepgram so onFinal can reference it.
+  const cleanup = useUtteranceCleanup({
+    slug,
+    enabled: encounter !== null,
+    concurrency: 2,
+  });
+
   // 2. Deepgram live — enabled once we have an encounter row
   const dg = useDeepgramLive({
     slug,
@@ -83,13 +92,6 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     intervalMs: 10_000,
   });
 
-  // 2c. Per-utterance cleanup via llama3.1:8b — strips filler words,
-  // normalizes mispronunciations on Deepgram finals. Soft-fail to raw.
-  const cleanup = useUtteranceCleanup({
-    slug,
-    enabled: encounter !== null,
-    concurrency: 2,
-  });
 
   // Submit pipeline (read IDB → R2 PUT → finalize)
   const submit = useEncounterSubmit({
