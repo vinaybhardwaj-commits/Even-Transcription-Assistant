@@ -9,19 +9,14 @@ import path from "path";
  * Auth: Authorization: Bearer ${MIGRATION_SECRET}
  *
  * Reads every .sql file in /db/migrations/ in version order, checks
- * schema_migrations to find unapplied ones, runs each in a single
- * statement chunk against Neon. Each migration file is responsible
- * for its own transaction (BEGIN/COMMIT) and for inserting its row
- * into schema_migrations on success.
+ * schema_migrations to find unapplied ones, runs each migration as one
+ * Neon HTTP transaction so partial failures roll back.
  *
- * Returns { applied: [...], skipped: [...], errored: ... }.
+ * Each migration's SQL is split by the dollar-quote-aware splitter below
+ * (Neon HTTP does not accept multi-statement strings directly), then
+ * passed to sql.transaction([...]) as an array of prepared queries.
  *
- * Idempotent: safe to re-hit. Migrations that already ran are skipped.
- *
- * Per OPD lesson: splitSqlStatements doesn't handle quoted strings
- * containing semicolons. Feed each migration as ONE chunk to the
- * sql template tag (with .query() for non-parameterised) and let
- * Postgres' own lexer parse.
+ * GET returns the applied list (no auth) for status checks.
  */
 
 export const runtime = "nodejs";
@@ -46,6 +41,84 @@ function discoverMigrations(): MigrationFile[] {
   return out.sort((a, b) => a.version - b.version);
 }
 
+/**
+ * Split a SQL script into individual statements, respecting:
+ *   - `$$` dollar-quoted blocks (used by DO and CREATE FUNCTION bodies)
+ *   - line comments (-- ...)
+ *   - block comments (/* ... *\/)
+ *   - single-quoted strings (incl. doubled-up '' escapes)
+ *
+ * Drops BEGIN; and COMMIT; (we wrap the whole thing in sql.transaction()
+ * which gives us atomicity; doubled-up BEGINs would error).
+ */
+function splitSql(body: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  let i = 0;
+  let inDollar = false;
+  let inSingleQuote = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  while (i < body.length) {
+    const c = body[i]!;
+    const next = body[i + 1] ?? "";
+    if (inLineComment) {
+      buf += c;
+      if (c === "\n") inLineComment = false;
+      i++;
+      continue;
+    }
+    if (inBlockComment) {
+      buf += c;
+      if (c === "*" && next === "/") {
+        buf += next;
+        inBlockComment = false;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (inSingleQuote) {
+      buf += c;
+      if (c === "'") {
+        if (next === "'") { buf += next; i += 2; continue; } // doubled-up escape
+        inSingleQuote = false;
+      }
+      i++;
+      continue;
+    }
+    if (inDollar) {
+      buf += c;
+      if (c === "$" && next === "$") {
+        buf += next;
+        inDollar = false;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    // not inside anything
+    if (c === "-" && next === "-") { inLineComment = true; buf += c; i++; continue; }
+    if (c === "/" && next === "*") { inBlockComment = true; buf += c; i++; continue; }
+    if (c === "'") { inSingleQuote = true; buf += c; i++; continue; }
+    if (c === "$" && next === "$") { inDollar = true; buf += c + next; i += 2; continue; }
+    if (c === ";") {
+      const s = buf.trim();
+      if (s && !/^(BEGIN|COMMIT|ROLLBACK)$/i.test(s)) out.push(s);
+      buf = "";
+      i++;
+      continue;
+    }
+    buf += c;
+    i++;
+  }
+  const tail = buf.trim();
+  if (tail && !/^(BEGIN|COMMIT|ROLLBACK)$/i.test(tail)) out.push(tail);
+  return out;
+}
+
 export async function POST(req: NextRequest) {
   const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.MIGRATION_SECRET ?? ""}`;
@@ -56,7 +129,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Ensure schema_migrations exists (bootstrap for 0001 which itself creates it).
+  // Bootstrap schema_migrations
   try {
     await sql`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -72,7 +145,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Get applied versions
+  // List applied
   let appliedVersions: number[] = [];
   try {
     const rows = (await sql`SELECT version FROM schema_migrations`) as Array<{ version: number }>;
@@ -88,26 +161,33 @@ export async function POST(req: NextRequest) {
   const applied: string[] = [];
   const skipped: string[] = [];
 
+  // Type-narrow sql to access the transaction() method
+  const sqlAny = sql as unknown as {
+    transaction: (queries: unknown[]) => Promise<unknown>;
+  };
+
   for (const m of all) {
     if (appliedVersions.includes(m.version)) {
       skipped.push(m.name);
       continue;
     }
     const body = fs.readFileSync(m.path, "utf8");
+    const statements = splitSql(body);
     try {
-      // Neon HTTP driver supports .query() for raw multi-statement SQL.
-      // Cast through unknown to access the lower-level method.
-      const sqlAny = sql as unknown as {
-        query: (q: string, params?: unknown[]) => Promise<unknown>;
-      };
-      await sqlAny.query(body);
+      // Build queries by calling sql as a template tag with each prepared statement
+      const queries = statements.map((s) =>
+        (sql as unknown as (strs: TemplateStringsArray, ...vals: unknown[]) => unknown)(
+          Object.assign([s], { raw: [s] }) as unknown as TemplateStringsArray
+        )
+      );
+      await sqlAny.transaction(queries);
       applied.push(m.name);
     } catch (e) {
       return NextResponse.json(
         {
           applied,
           skipped,
-          errored: { migration: m.name, error: String(e) },
+          errored: { migration: m.name, error: String(e), statement_count: statements.length },
         },
         { status: 500 }
       );
@@ -117,7 +197,6 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ applied, skipped, errored: null });
 }
 
-// Also support GET for status check (no secret needed; just lists applied)
 export async function GET() {
   try {
     const rows = (await sql`
