@@ -1,0 +1,203 @@
+import {
+  pgTable, pgEnum, uuid, text, integer, boolean, jsonb, timestamp,
+  numeric, inet, index, primaryKey,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { customType } from "drizzle-orm/pg-core";
+
+// citext custom type — Postgres case-insensitive text
+const citext = customType<{ data: string; driverData: string }>({
+  dataType() { return "citext"; },
+});
+
+// ----------------------- ENUMS -----------------------
+export const adminRole       = pgEnum("admin_role", ["super", "ops"]);
+export const doctorStatus    = pgEnum("doctor_status", ["active", "disabled", "locked"]);
+export const encounterStatus = pgEnum("encounter_status", ["draft", "processing", "complete", "failed", "deleted"]);
+export const sendStatusEnum  = pgEnum("send_status", ["pending", "sent", "failed"]);
+export const sendEventStatus = pgEnum("send_event_status", ["queued", "sent", "delivered", "opened", "bounced", "complained", "failed"]);
+export const traceStage      = pgEnum("trace_stage", ["capture", "transcribe", "clean", "critique", "revise", "cdmss", "email"]);
+export const traceStatus     = pgEnum("trace_status", ["ok", "warn", "fail"]);
+export const recipientRole   = pgEnum("recipient_role", ["admin", "records", "finance", "compliance", "other"]);
+export const recipientSetBy  = pgEnum("recipient_set_by", ["admin", "doctor"]);
+export const actorType       = pgEnum("actor_type", ["admin", "doctor", "system"]);
+export const retryBackoff    = pgEnum("retry_backoff", ["linear", "exponential"]);
+
+// ----------------------- TABLES -----------------------
+
+// admin_user (PRD §6.1)
+export const adminUser = pgTable("admin_user", {
+  id:             uuid("id").defaultRandom().primaryKey(),
+  email:          citext("email").notNull().unique(),
+  name:           text("name").notNull(),
+  passwordHash:   text("password_hash").notNull(),
+  role:           adminRole("role").notNull().default("super"),
+  lastActiveAt:   timestamp("last_active_at", { withTimezone: true }),
+  createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:      timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// doctor (PRD §6.1, §4.14, §4.15)
+export const doctor = pgTable("doctor", {
+  id:               text("id").primaryKey(), // doc_<8-char nanoid>
+  fullName:         text("full_name").notNull(),
+  email:            citext("email").notNull().unique(),
+  phone:            text("phone"),
+  urlSlug:          text("url_slug").notNull().unique(),
+  urlToken:         text("url_token").notNull(),
+  pinHash:          text("pin_hash"),
+  pinSetAt:         timestamp("pin_set_at", { withTimezone: true }),
+  failedPinCount:   integer("failed_pin_count").notNull().default(0),
+  lockedUntil:      timestamp("locked_until", { withTimezone: true }),
+  status:           doctorStatus("status").notNull().default("active"),
+  lastActiveAt:     timestamp("last_active_at", { withTimezone: true }),
+  joinedAt:         timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  createdBy:        uuid("created_by").notNull().references(() => adminUser.id),
+  deletedAt:        timestamp("deleted_at", { withTimezone: true }),
+  createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byUrlSlug:      index("idx_doctor_url_slug").on(t.urlSlug),
+  byEmail:        index("idx_doctor_email").on(t.email),
+  byStatusActive: index("idx_doctor_status_active").on(t.status, t.lastActiveAt),
+}));
+
+// pin_attempt (PRD §6.1 — 90d TTL via cron)
+export const pinAttempt = pgTable("pin_attempt", {
+  id:         uuid("id").defaultRandom().primaryKey(),
+  doctorId:   text("doctor_id").notNull().references(() => doctor.id),
+  success:    boolean("success").notNull(),
+  ip:         inet("ip"),
+  userAgent:  text("user_agent"),
+  createdAt:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byDoctorTime: index("idx_pin_attempt_doctor_time").on(t.doctorId, t.createdAt),
+}));
+
+// encounter (PRD §6.1, §4.4, §4.9, §4.10)
+export const encounter = pgTable("encounter", {
+  id:                  text("id").primaryKey(), // enc_<10-char nanoid>
+  doctorId:            text("doctor_id").notNull().references(() => doctor.id),
+  patientLabelRaw:     text("patient_label_raw"),
+  patientAge:          integer("patient_age"),
+  patientSex:          text("patient_sex"),
+  chiefComplaint:      text("chief_complaint"),
+  recordedAt:          timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  durationSeconds:     integer("duration_seconds"),
+  status:              encounterStatus("status").notNull().default("draft"),
+  audioObjectKey:      text("audio_object_key"),
+  audioBytes:          integer("audio_bytes"),
+  transcriptRaw:       text("transcript_raw"),
+  transcriptClean:     text("transcript_clean"),
+  noteJson:            jsonb("note_json"),
+  cdmssJson:           jsonb("cdmss_json"),
+  sendStatus:          sendStatusEnum("send_status").notNull().default("pending"),
+  sentAt:              timestamp("sent_at", { withTimezone: true }),
+  retryCount:          integer("retry_count").notNull().default(0),
+  deletedAt:           timestamp("deleted_at", { withTimezone: true }),
+  createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byDoctorRecorded: index("idx_enc_doctor_recorded").on(t.doctorId, t.recordedAt),
+  byStatus:         index("idx_enc_status_recorded").on(t.status, t.recordedAt),
+  bySendStatus:     index("idx_enc_send_status").on(t.sendStatus, t.recordedAt),
+}));
+
+// trace (PRD §6.1, §4.11, §4.16)
+export const trace = pgTable("trace", {
+  id:               text("id").primaryKey(), // trace_<6-char nanoid>
+  encounterId:      text("encounter_id").notNull().references(() => encounter.id, { onDelete: "cascade" }),
+  stage:            traceStage("stage").notNull(),
+  model:            text("model").notNull(),
+  promptFull:       text("prompt_full"),
+  responseFull:     text("response_full"),
+  inputTokens:      integer("input_tokens"),
+  outputTokens:     integer("output_tokens"),
+  latencyMs:        integer("latency_ms"),
+  costEstimateUsd:  numeric("cost_estimate_usd", { precision: 10, scale: 5 }),
+  status:           traceStatus("status").notNull(),
+  errorMessage:     text("error_message"),
+  metadataJson:     jsonb("metadata_json"),
+  startedAt:        timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt:      timestamp("completed_at", { withTimezone: true }),
+}, (t) => ({
+  byEncStarted: index("idx_trace_enc_started").on(t.encounterId, t.startedAt),
+  byStageDone:  index("idx_trace_stage_completed").on(t.stage, t.completedAt),
+  byStatusTime: index("idx_trace_status_started").on(t.status, t.startedAt),
+}));
+
+// recipient_global (PRD §6.1, §4.13)
+export const recipientGlobal = pgTable("recipient_global", {
+  id:         uuid("id").defaultRandom().primaryKey(),
+  email:      citext("email").notNull(),
+  name:       text("name").notNull(),
+  role:       recipientRole("role").notNull(),
+  active:     boolean("active").notNull().default(true),
+  createdAt:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdBy:  uuid("created_by").notNull().references(() => adminUser.id),
+});
+
+// recipient_per_doctor (PRD §6.1, §4.13)
+export const recipientPerDoctor = pgTable("recipient_per_doctor", {
+  id:         uuid("id").defaultRandom().primaryKey(),
+  doctorId:   text("doctor_id").notNull().references(() => doctor.id),
+  email:      citext("email").notNull(),
+  name:       text("name").notNull(),
+  role:       recipientRole("role").notNull(),
+  setBy:      recipientSetBy("set_by").notNull(),
+  createdAt:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// send_event (PRD §6.1, §4.13)
+export const sendEvent = pgTable("send_event", {
+  id:                text("id").primaryKey(), // em_<9-char nanoid> — surfaced in sends UI
+  encounterId:       text("encounter_id").notNull().references(() => encounter.id, { onDelete: "cascade" }),
+  recipientEmail:    citext("recipient_email").notNull(),
+  recipientRole:     text("recipient_role"),
+  subjectRendered:   text("subject_rendered").notNull(),
+  resendMessageId:   text("resend_message_id"),
+  status:            sendEventStatus("status").notNull().default("queued"),
+  openedAt:          timestamp("opened_at", { withTimezone: true }),
+  bouncedAt:         timestamp("bounced_at", { withTimezone: true }),
+  complainedAt:      timestamp("complained_at", { withTimezone: true }),
+  failureReason:     text("failure_reason"),
+  createdAt:         timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byEncounter:    index("idx_se_encounter").on(t.encounterId),
+  byStatusTime:   index("idx_se_status_created").on(t.status, t.createdAt),
+  byResendMsgId:  index("idx_se_resend_msg_id").on(t.resendMessageId),
+}));
+
+// audit_log (PRD §6.1, §4.16, §4.20)
+export const auditLog = pgTable("audit_log", {
+  id:           uuid("id").defaultRandom().primaryKey(),
+  actorType:    actorType("actor_type").notNull(),
+  actorId:      text("actor_id"),
+  action:       text("action").notNull(), // namespaced: doctor.create, pin.reset, etc.
+  targetType:   text("target_type").notNull(),
+  targetId:     text("target_id"),
+  metadataJson: jsonb("metadata_json"),
+  ip:           inet("ip"),
+  userAgent:    text("user_agent"),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byTargetTime: index("idx_audit_target_time").on(t.targetType, t.targetId, t.createdAt),
+  byActorTime:  index("idx_audit_actor_time").on(t.actorId, t.createdAt),
+}));
+
+// settings (PRD §6.1) — singleton, id = 1
+export const settings = pgTable("settings", {
+  id:                  integer("id").primaryKey().default(1),
+  subjectTemplate:     text("subject_template").notNull().default("[Even] {patient_name}, {patient_demo} - {chief_complaint} - {date}"),
+  includePatientOnSend: boolean("include_patient_on_send").notNull().default(false),
+  sendDrafts:          boolean("send_drafts").notNull().default(false),
+  blockOnCritiqueFail: boolean("block_on_critique_fail").notNull().default(true),
+  retryPolicyMax:      integer("retry_policy_max").notNull().default(3),
+  retryPolicyBackoff:  retryBackoff("retry_policy_backoff").notNull().default("exponential"),
+  resendFromEmail:     text("resend_from_email"),
+  updatedAt:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedBy:           uuid("updated_by"),
+});
