@@ -11,6 +11,7 @@ import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
+import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 
 type Props = { slug: string; doctorName: string };
@@ -65,7 +66,8 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     onFinal: React.useCallback((u: LiveUtterance) => {
       setFinals((prev) => [...prev, { id: u.id, text: u.text }]);
       setInterim("");
-    }, []),
+      cleanup.enqueue(u.id, u.text);
+    }, [cleanup]),
     onInterim: React.useCallback((u: LiveUtterance) => {
       setInterim(u.text);
     }, []),
@@ -81,12 +83,22 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     intervalMs: 10_000,
   });
 
+  // 2c. Per-utterance cleanup via llama3.1:8b — strips filler words,
+  // normalizes mispronunciations on Deepgram finals. Soft-fail to raw.
+  const cleanup = useUtteranceCleanup({
+    slug,
+    enabled: encounter !== null,
+    concurrency: 2,
+  });
+
   // Submit pipeline (read IDB → R2 PUT → finalize)
   const submit = useEncounterSubmit({
     slug,
     encounterId: encounter?.id ?? null,
     durationSeconds: recordedSeconds,
-    deepgramTranscript: finals.map((f) => f.text).join(" "),
+    deepgramTranscript: finals
+      .map((f) => cleanup.cleanedById[f.id] ?? f.text)
+      .join(" "),
     whisperTranscript: wh.latest?.text ?? "",
   });
 
@@ -316,7 +328,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         ) : null}
 
         <div className="w-full max-w-2xl mt-2 space-y-3">
-          <LiveTranscript finals={finals} interim={interim} />
+          <LiveTranscript finals={finals} interim={interim} cleanedById={cleanup.cleanedById} />
           <WhisperTranscript
             state={wh.state}
             text={wh.latest?.text ?? ""}

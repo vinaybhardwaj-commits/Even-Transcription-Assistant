@@ -13,10 +13,17 @@ export function LiveTranscript({
   finals,
   interim,
   empty,
+  cleanedById,
 }: {
   finals: { id: string; text: string }[];
   interim: string;
   empty?: string;
+  /**
+   * Optional map of utterance_id → cleaned text (post-llama3.1:8b).
+   * When present, the cleaned version is shown instead of the raw one.
+   * Raw is the fallback while cleanup is still in flight.
+   */
+  cleanedById?: Record<string, string>;
 }) {
   const ref = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
@@ -40,11 +47,19 @@ export function LiveTranscript({
       aria-atomic="false"
       role="log"
     >
-      {finals.map((u) => (
-        <p key={u.id} className="text-even-ink-800 mb-2 leading-relaxed">
-          {u.text}
-        </p>
-      ))}
+      {finals.map((u) => {
+        const text = cleanedById?.[u.id] ?? u.text;
+        const isClean = cleanedById?.[u.id] !== undefined;
+        return (
+          <p
+            key={u.id}
+            className={`mb-2 leading-relaxed ${isClean ? "text-even-ink-800" : "text-even-ink-700"}`}
+            title={isClean && text !== u.text ? `raw: ${u.text}` : undefined}
+          >
+            {text}
+          </p>
+        );
+      })}
       {interim ? (
         <p className="text-even-ink-400 italic mb-0 leading-relaxed">
           {interim}
