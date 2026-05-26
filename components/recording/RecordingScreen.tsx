@@ -10,6 +10,7 @@ import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
+import { useEncounterSubmit } from "@/lib/use-encounter-submit";
 import { Button } from "@/components/ui/Button";
 
 type Props = { slug: string; doctorName: string };
@@ -26,6 +27,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const [bytesEmitted, setBytesEmitted] = React.useState(0);
   const [finals, setFinals] = React.useState<FinalRow[]>([]);
   const [interim, setInterim] = React.useState("");
+  // duration_seconds at stop — captured when the user taps Submit
+  const recordStartedAtRef = React.useRef<number | null>(null);
+  const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
 
   // 1. Create draft encounter row on mount
   React.useEffect(() => {
@@ -77,6 +81,15 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     intervalMs: 10_000,
   });
 
+  // Submit pipeline (read IDB → R2 PUT → finalize)
+  const submit = useEncounterSubmit({
+    slug,
+    encounterId: encounter?.id ?? null,
+    durationSeconds: recordedSeconds,
+    deepgramTranscript: finals.map((f) => f.text).join(" "),
+    whisperTranscript: wh.latest?.text ?? "",
+  });
+
   // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
   const onChunk = React.useCallback(
     (chunk: Blob, _idx: number) => {
@@ -103,6 +116,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
 
   const rec = useMediaRecorder({ chunkMs: 250, onChunk });
 
+  // Track when recording actually started (for duration_seconds at Submit)
+  React.useEffect(() => {
+    if (rec.state === "recording" && recordStartedAtRef.current === null) {
+      recordStartedAtRef.current = Date.now();
+    }
+  }, [rec.state]);
+
   // 4. Auto-start recording once we have an encounter id + Deepgram open-ish
   const autoStartedRef = React.useRef(false);
   React.useEffect(() => {
@@ -114,6 +134,12 @@ export function RecordingScreen({ slug, doctorName }: Props) {
 
   const onButton = React.useCallback(() => {
     if (rec.state === "recording") {
+      // Stop = first phase of finalize. Capture duration; submit button appears.
+      if (recordStartedAtRef.current !== null) {
+        setRecordedSeconds(
+          Math.max(1, Math.floor((Date.now() - recordStartedAtRef.current) / 1000)),
+        );
+      }
       void rec.stop();
     } else if (rec.state === "paused") {
       rec.resume();
@@ -121,6 +147,18 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       void rec.start();
     }
   }, [rec]);
+
+  const onSubmit = React.useCallback(async () => {
+    const r = await submit.submit();
+    if (r.ok) {
+      try {
+        sessionStorage.setItem("eta:last_submitted_encounter", r.encounterId);
+      } catch {
+        /* private mode */
+      }
+      router.push(`/${slug}`);
+    }
+  }, [submit, router, slug]);
 
   const buttonMode =
     rec.state === "recording"
@@ -231,6 +269,50 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           <p className="text-caption text-danger-700 max-w-sm text-center">
             Could not create encounter: {createError}
           </p>
+        ) : null}
+
+        {/* Submit appears after recording has stopped and we have any audio */}
+        {rec.state === "idle" && chunksCount > 0 && submit.stage !== "done" ? (
+          <div className="w-full max-w-md mt-2 space-y-3">
+            {submit.stage === "idle" || submit.stage === "error" ? (
+              <Button
+                variant="primary"
+                size="lg"
+                onClick={() => void onSubmit()}
+                className="w-full"
+              >
+                Submit recording
+              </Button>
+            ) : (
+              <div className="rounded-md border border-even-blue-100 bg-even-blue-50 p-4">
+                <p className="text-label text-even-navy-800 mb-2">
+                  {submit.stage === "reading" && "Reading audio…"}
+                  {submit.stage === "requesting_url" && "Requesting upload URL…"}
+                  {submit.stage === "uploading" &&
+                    `Uploading… ${(submit.totalBytes / 1024).toFixed(1)} KB`}
+                  {submit.stage === "finalizing" && "Finalizing…"}
+                  {submit.stage === "purging" && "Cleaning up…"}
+                </p>
+                <div
+                  className="h-1.5 w-full rounded-full bg-even-ink-100 overflow-hidden"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(submit.progress * 100)}
+                >
+                  <div
+                    className="h-full bg-even-blue-600 transition-all"
+                    style={{ width: `${Math.round(submit.progress * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            {submit.error ? (
+              <p className="text-caption text-danger-700 text-center">
+                {submit.error}
+              </p>
+            ) : null}
+          </div>
         ) : null}
 
         <div className="w-full max-w-2xl mt-2 space-y-3">
