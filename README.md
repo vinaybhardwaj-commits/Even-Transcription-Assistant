@@ -3,7 +3,7 @@
 Mobile-first PWA for clinicians at Even Hospital. Doctor records the encounter, an LLM pipeline produces a structured Medical Encounter Note + CDMSS-grounded analysis, the output ships via email.
 
 **Status:** Sprint 0 — scaffolding. Not yet deployed.
-**Live URL (target):** https://eta.even.in
+**Live URL (target):** https://eta.llmvinayminihome.uk
 **Vercel project:** `even-transcription-assistant` on team `team_yu1wWpsKdjsf90haai1ETJDG`, region `bom1`
 
 ## Source docs
@@ -52,8 +52,8 @@ Migrations run via Drizzle Kit (`npm run db:push` for local; `db/migrations/*.sq
 ## Health checks
 
 ```bash
-curl https://eta.even.in/api/health        # full probe
-curl https://eta.even.in/api/health/ping   # cheap (mobile pre-flight)
+curl https://eta.llmvinayminihome.uk/api/health        # full probe
+curl https://eta.llmvinayminihome.uk/api/health/ping   # cheap (mobile pre-flight)
 ```
 
 ## Service worker killswitch
