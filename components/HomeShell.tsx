@@ -1,14 +1,28 @@
 "use client";
 
 import * as React from "react";
-import { Button } from "@/components/ui/Button";
+import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/Input";
 
 type Props = { slug: string; doctorName: string };
 
 export function HomeShell({ slug, doctorName }: Props) {
+  const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
   const [patientLabel, setPatientLabel] = React.useState("");
+
+  const goRecord = React.useCallback(() => {
+    // patient_label is captured in the recording screen / submit step;
+    // we pass via sessionStorage so the create call can hand it to the API.
+    if (patientLabel.trim()) {
+      try {
+        sessionStorage.setItem("eta:pending_patient_label", patientLabel.trim());
+      } catch {
+        /* private mode */
+      }
+    }
+    router.push(`/${slug}/record`);
+  }, [router, slug, patientLabel]);
 
   return (
     <main className="min-h-screen bg-even-white">
@@ -16,7 +30,7 @@ export function HomeShell({ slug, doctorName }: Props) {
         <span className="text-label text-even-navy-800">
           Dr {doctorName.replace(/^Dr\.?\s+/i, "")}
         </span>
-        <span className="text-caption text-even-ink-400">{/* settings + menu (Sprint 1.E) */}</span>
+        <span className="text-caption text-even-ink-400">{/* settings + menu (Sprint 2) */}</span>
       </header>
 
       <div className="px-4 pt-4">
@@ -56,9 +70,9 @@ export function HomeShell({ slug, doctorName }: Props) {
           <div className="flex justify-center mt-12">
             <button
               type="button"
-              disabled
-              className="w-44 h-44 rounded-full bg-even-blue-600 disabled:bg-even-blue-300 text-white text-display flex flex-col items-center justify-center gap-2 shadow-card-hover"
-              aria-label="Start recording (wired in Sprint 1.E)"
+              onClick={goRecord}
+              className="w-44 h-44 rounded-full bg-even-blue-600 hover:bg-even-blue-700 active:bg-even-blue-800 text-white text-display flex flex-col items-center justify-center gap-2 shadow-card-hover focus:outline-none focus:ring-4 focus:ring-even-blue-300 transition"
+              aria-label="Start recording"
             >
               <span className="text-4xl" aria-hidden="true">🎤</span>
               <span className="text-label">Record</span>
@@ -66,7 +80,7 @@ export function HomeShell({ slug, doctorName }: Props) {
           </div>
 
           <p className="mt-8 text-caption text-even-ink-400 text-center">
-            Recording wiring (MediaRecorder + Deepgram + Whisper) lands in Sprint 1.E.
+            Tap to begin. We will ask for microphone permission on the next screen.
           </p>
         </div>
       ) : (
