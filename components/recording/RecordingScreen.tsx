@@ -4,12 +4,16 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { RecordButton } from "@/components/recording/RecordButton";
 import { ElapsedTimer } from "@/components/recording/ElapsedTimer";
+import { LiveTranscript } from "@/components/recording/LiveTranscript";
 import { useMediaRecorder } from "@/lib/use-media-recorder";
+import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { Button } from "@/components/ui/Button";
 
 type Props = { slug: string; doctorName: string };
 
 type EncounterDraft = { id: string; status: "draft" };
+
+type FinalRow = { id: string; text: string };
 
 export function RecordingScreen({ slug, doctorName }: Props) {
   const router = useRouter();
@@ -17,14 +21,8 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const [createError, setCreateError] = React.useState<string | null>(null);
   const [chunksCount, setChunksCount] = React.useState(0);
   const [bytesEmitted, setBytesEmitted] = React.useState(0);
-
-  const onChunk = React.useCallback((chunk: Blob, _idx: number) => {
-    setChunksCount((c) => c + 1);
-    setBytesEmitted((b) => b + chunk.size);
-    // Sprint 1.F.2+ : pipe to Deepgram WS + IndexedDB + Whisper
-  }, []);
-
-  const rec = useMediaRecorder({ chunkMs: 5000, onChunk });
+  const [finals, setFinals] = React.useState<FinalRow[]>([]);
+  const [interim, setInterim] = React.useState("");
 
   // 1. Create draft encounter row on mount
   React.useEffect(() => {
@@ -50,10 +48,36 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [slug]);
 
-  // 2. Auto-start recording once we have an encounter id + mic permission
-  // Per PRD §8.1.3 — clinicians shouldn't have to tap twice.
+  // 2. Deepgram live — enabled once we have an encounter row
+  const dg = useDeepgramLive({
+    slug,
+    enabled: encounter !== null,
+    encounterId: encounter?.id,
+    onFinal: React.useCallback((u: LiveUtterance) => {
+      setFinals((prev) => [...prev, { id: u.id, text: u.text }]);
+      setInterim("");
+    }, []),
+    onInterim: React.useCallback((u: LiveUtterance) => {
+      setInterim(u.text);
+    }, []),
+  });
+
+  // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + counter
+  const onChunk = React.useCallback(
+    (chunk: Blob, _idx: number) => {
+      setChunksCount((c) => c + 1);
+      setBytesEmitted((b) => b + chunk.size);
+      dg.sendChunk(chunk);
+      // Sprint 1.F.3+ : also persist to IndexedDB + post to Whisper
+    },
+    [dg],
+  );
+
+  const rec = useMediaRecorder({ chunkMs: 250, onChunk });
+
+  // 4. Auto-start recording once we have an encounter id + Deepgram open-ish
   const autoStartedRef = React.useRef(false);
   React.useEffect(() => {
     if (encounter && !autoStartedRef.current && rec.state === "idle") {
@@ -83,6 +107,24 @@ export function RecordingScreen({ slug, doctorName }: Props) {
 
   const running = rec.state === "recording";
 
+  const dgStatus =
+    dg.state === "open"
+      ? "Live"
+      : dg.state === "connecting"
+      ? "Connecting…"
+      : dg.state === "closed"
+      ? "Disconnected"
+      : dg.state === "error"
+      ? `Error: ${dg.error ?? "unknown"}`
+      : "Idle";
+
+  const dgPillCls =
+    dg.state === "open"
+      ? "bg-success-100 text-success-700"
+      : dg.state === "error"
+      ? "bg-danger-100 text-danger-700"
+      : "bg-even-ink-100 text-even-ink-500";
+
   return (
     <main className="min-h-screen bg-even-white flex flex-col">
       <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
@@ -94,17 +136,20 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           ‹ Cancel
         </button>
         <span className="text-label text-even-navy-800">Dr {doctorName}</span>
-        <span className="text-caption text-even-ink-400">
-          {encounter ? encounter.id.slice(0, 8) : "…"}
+        <span
+          className={`text-caption rounded-full px-2 py-0.5 ${dgPillCls}`}
+          aria-live="polite"
+        >
+          {dgStatus}
         </span>
       </header>
 
-      <section className="flex-1 flex flex-col items-center justify-center px-6 py-12">
-        <div className="text-display text-even-navy-800 mb-2">
+      <section className="flex-1 flex flex-col items-center px-6 py-8 gap-6">
+        <div className="text-display text-even-navy-800 mt-2">
           <ElapsedTimer running={running} />
         </div>
 
-        <p className="text-caption text-even-ink-400 mb-12">
+        <p className="text-caption text-even-ink-400 -mt-3">
           {rec.state === "recording"
             ? "Recording…"
             : rec.state === "paused"
@@ -131,7 +176,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         />
 
         {rec.state === "permission_denied" ? (
-          <div className="mt-10 max-w-sm text-center">
+          <div className="mt-6 max-w-sm text-center">
             <p className="text-body text-danger-700 mb-3">
               We need microphone access to capture the encounter.
             </p>
@@ -145,21 +190,25 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         ) : null}
 
         {rec.error && rec.state === "error" ? (
-          <p className="mt-6 text-caption text-danger-700 max-w-sm text-center">
+          <p className="text-caption text-danger-700 max-w-sm text-center">
             {rec.error}
           </p>
         ) : null}
 
         {createError ? (
-          <p className="mt-6 text-caption text-danger-700 max-w-sm text-center">
+          <p className="text-caption text-danger-700 max-w-sm text-center">
             Could not create encounter: {createError}
           </p>
         ) : null}
+
+        <div className="w-full max-w-2xl mt-2">
+          <LiveTranscript finals={finals} interim={interim} />
+        </div>
       </section>
 
       <footer className="px-4 py-3 border-t border-even-ink-100 flex items-center justify-between text-caption text-even-ink-400">
         <span>
-          {chunksCount} chunks · {(bytesEmitted / 1024).toFixed(1)} KB
+          {chunksCount} chunks · {(bytesEmitted / 1024).toFixed(1)} KB · {finals.length} finals
         </span>
         <span>{rec.mimeType ?? "—"}</span>
       </footer>

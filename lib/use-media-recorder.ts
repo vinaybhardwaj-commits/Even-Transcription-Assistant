@@ -49,7 +49,7 @@ function pickMime(): string | undefined {
 }
 
 export function useMediaRecorder(opts: Options = {}) {
-  const chunkMs = opts.chunkMs ?? 5000;
+  const chunkMs = opts.chunkMs ?? 250;
   const [state, setState] = React.useState<RecorderState>("idle");
   const [error, setError] = React.useState<string | null>(null);
   const [mimeType, setMimeType] = React.useState<string | undefined>(undefined);
