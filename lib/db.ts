@@ -22,7 +22,7 @@ let _db: NeonHttpDatabase<typeof schema> | null = null;
 
 function init(): void {
   if (_sql) return;
-  const url = process.env.APP_DATABASE_URL;
+  const url = process.env.APP_DATABASE_URL || process.env.DATABASE_URL;
   if (!url) {
     throw new Error(
       "APP_DATABASE_URL not set. Configure in Vercel env (see ETA-BUILD-PLAN.md §2)."
