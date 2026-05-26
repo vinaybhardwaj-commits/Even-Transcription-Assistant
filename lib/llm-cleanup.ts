@@ -9,7 +9,7 @@
  * Target latency: <1s on llama3.1:8b warm. Soft-fail: on any error
  * the caller falls back to the raw text.
  *
- * Uses the OpenAI-compatible Ollama endpoint at $OLLAMA_BASE_URL/v1.
+ * Uses the OpenAI-compatible Ollama endpoint at $OLLAMA_BASE_URL (already includes /v1).
  */
 
 const CLEANUP_MODEL = process.env.CLEANUP_MODEL || "llama3.1:8b";
@@ -55,7 +55,7 @@ export async function cleanUtterance(
     return { ok: true, cleaned: "", latency_ms: 0, model: CLEANUP_MODEL };
   }
 
-  const url = `${base.replace(/\/+$/, "")}/v1/chat/completions`;
+  const url = `${base.replace(/\/+$/, "")}/chat/completions`;
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
   if (opts.signal) {
