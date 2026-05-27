@@ -108,8 +108,9 @@ export async function POST(req: NextRequest) {
     return respondError("VALIDATION_FAILED", "name_and_email_required");
   }
 
-  const { slug } = buildDoctorSlug(fullName);
-  const token = slug.split("-").pop() ?? "";
+  const built = buildDoctorSlug(fullName);
+  const slug = built.full;   // dr-{name}-{4char-token} — what goes into URLs
+  const token = built.token; // just the 4-char tail, stored separately
   const pinHash = await bcrypt.hash(pin, 12);
   const id = `doc_${doctorId()}`;
 
