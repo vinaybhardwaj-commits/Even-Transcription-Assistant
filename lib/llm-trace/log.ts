@@ -235,3 +235,184 @@ export async function listTracesForPatient(
     return [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 6.2 admin query helpers — list + aggregates for the admin
+// dashboard at /admin/traces.
+//
+// Window predicate uses a pre-computed JS Date (passed as a bound timestamp
+// parameter) rather than SQL date functions; lets us stick to the safe
+// tagged-template pattern of the Neon HTTP driver (no sql.unsafe).
+// ---------------------------------------------------------------------------
+
+export type AdminTraceFilter = {
+  surface?: string | null;
+  status?: TraceStatus | null;
+  window?: "today" | "last24h" | "all";
+  limit?: number;
+  offset?: number;
+};
+
+export type AdminTraceRow = {
+  id: string;
+  surface: string;
+  status: TraceStatus;
+  total_ms: number | null;
+  started_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  encounter_id: string | null;
+  model_summary: string | null;
+  tokens_total: number | null;
+};
+
+export type AdminTraceAggregates = {
+  count_window: number;
+  errored_window: number;
+  p50_ms: number | null;
+  tokens_window: number;
+};
+
+function windowSince(window: AdminTraceFilter["window"]): Date {
+  const d = new Date();
+  switch (window) {
+    case "today":
+      d.setUTCHours(0, 0, 0, 0);
+      return d;
+    case "last24h":
+      return new Date(d.getTime() - 24 * 60 * 60 * 1000);
+    case "all":
+      return new Date(0);
+    default:
+      return new Date(d.getTime() - 24 * 60 * 60 * 1000);
+  }
+}
+
+export async function listAdminTraces(filter: AdminTraceFilter = {}): Promise<{
+  rows: AdminTraceRow[];
+  total: number;
+}> {
+  const surface = filter.surface ?? null;
+  const status  = filter.status  ?? null;
+  const since   = windowSince(filter.window ?? "last24h").toISOString();
+  const limit   = Math.min(Math.max(filter.limit ?? 50, 1), 500);
+  const offset  = Math.max(filter.offset ?? 0, 0);
+
+  try {
+    const countRows = (await sql`
+      SELECT COUNT(*)::int AS n
+        FROM llm_traces
+       WHERE started_at >= ${since}::timestamptz
+         AND (${surface}::text IS NULL OR surface = ${surface})
+         AND (${status}::text  IS NULL OR status  = ${status})
+    `) as Array<{ n: number }>;
+    const total = countRows[0]?.n ?? 0;
+
+    const rows = (await sql`
+      SELECT
+        id,
+        surface,
+        status,
+        total_ms,
+        started_at::text   AS started_at,
+        completed_at::text AS completed_at,
+        error_message,
+        encounter_id,
+        (
+          SELECT string_agg(DISTINCT (c->>'model'), ' · ')
+            FROM jsonb_array_elements(COALESCE(model_calls, '[]'::jsonb)) AS c
+        ) AS model_summary,
+        (
+          SELECT COALESCE(SUM(
+            COALESCE((c->>'tokens_in')::int,  0) +
+            COALESCE((c->>'tokens_out')::int, 0)
+          ), 0)
+            FROM jsonb_array_elements(COALESCE(model_calls, '[]'::jsonb)) AS c
+        )::int AS tokens_total
+      FROM llm_traces
+      WHERE started_at >= ${since}::timestamptz
+        AND (${surface}::text IS NULL OR surface = ${surface})
+        AND (${status}::text  IS NULL OR status  = ${status})
+      ORDER BY started_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `) as Array<Record<string, unknown>>;
+
+    return {
+      rows: rows.map((r) => ({
+        id: String(r.id),
+        surface: String(r.surface),
+        status: (r.status as TraceStatus) ?? "in_progress",
+        total_ms: r.total_ms == null ? null : Number(r.total_ms),
+        started_at: String(r.started_at),
+        completed_at: r.completed_at ? String(r.completed_at) : null,
+        error_message: r.error_message ? String(r.error_message) : null,
+        encounter_id: r.encounter_id ? String(r.encounter_id) : null,
+        model_summary: r.model_summary ? String(r.model_summary) : null,
+        tokens_total: r.tokens_total == null ? null : Number(r.tokens_total),
+      })),
+      total,
+    };
+  } catch (e) {
+    console.warn("[llm-trace] listAdminTraces failed:", e);
+    return { rows: [], total: 0 };
+  }
+}
+
+export async function getAdminTraceAggregates(
+  window: AdminTraceFilter["window"] = "today",
+): Promise<AdminTraceAggregates> {
+  const since = windowSince(window).toISOString();
+  try {
+    const aggRows = (await sql`
+      SELECT
+        COUNT(*)::int                                       AS count_window,
+        COUNT(*) FILTER (WHERE status = 'errored')::int     AS errored_window,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_ms)
+          FILTER (WHERE total_ms IS NOT NULL)               AS p50_ms
+      FROM llm_traces
+      WHERE started_at >= ${since}::timestamptz
+    `) as Array<{ count_window: number; errored_window: number; p50_ms: number | null }>;
+
+    const tokenRows = (await sql`
+      SELECT COALESCE(SUM(
+        COALESCE((c->>'tokens_in')::int,  0) +
+        COALESCE((c->>'tokens_out')::int, 0)
+      ), 0)::int AS tokens_window
+      FROM llm_traces, jsonb_array_elements(COALESCE(model_calls, '[]'::jsonb)) AS c
+      WHERE started_at >= ${since}::timestamptz
+    `) as Array<{ tokens_window: number }>;
+
+    return {
+      count_window:   aggRows[0]?.count_window   ?? 0,
+      errored_window: aggRows[0]?.errored_window ?? 0,
+      p50_ms:         aggRows[0]?.p50_ms == null ? null : Math.round(Number(aggRows[0].p50_ms)),
+      tokens_window:  tokenRows[0]?.tokens_window ?? 0,
+    };
+  } catch (e) {
+    console.warn("[llm-trace] getAdminTraceAggregates failed:", e);
+    return { count_window: 0, errored_window: 0, p50_ms: null, tokens_window: 0 };
+  }
+}
+
+/**
+ * Distinct surfaces present in llm_traces — used to render the filter chip
+ * row dynamically (so S6.2b adding new surfaces just appears automatically).
+ */
+export async function listAdminTraceSurfaces(
+  window: AdminTraceFilter["window"] = "all",
+): Promise<Array<{ surface: string; count: number }>> {
+  const since = windowSince(window).toISOString();
+  try {
+    const rows = (await sql`
+      SELECT surface, COUNT(*)::int AS count
+        FROM llm_traces
+       WHERE started_at >= ${since}::timestamptz
+       GROUP BY surface
+       ORDER BY count DESC
+    `) as Array<{ surface: string; count: number }>;
+    return rows.map((r) => ({ surface: String(r.surface), count: Number(r.count) }));
+  } catch (e) {
+    console.warn("[llm-trace] listAdminTraceSurfaces failed:", e);
+    return [];
+  }
+}

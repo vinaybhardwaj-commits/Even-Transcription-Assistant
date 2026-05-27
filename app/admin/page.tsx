@@ -1,6 +1,7 @@
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { AdminLoginClient } from "@/components/admin/AdminLoginClient";
+import { AdminShell } from "@/components/admin/AdminShell";
 import { AdminDashboard } from "@/components/admin/AdminDashboard";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +11,12 @@ export default async function AdminEntry() {
   if (cookie) {
     try {
       const claims = await verifyAdminJwt(cookie);
-      return <AdminDashboard adminEmail={String(claims.email ?? "")} />;
+      const email = String(claims.email ?? "");
+      return (
+        <AdminShell adminEmail={email} active="dashboard" pageTitle="Dashboard">
+          <AdminDashboard />
+        </AdminShell>
+      );
     } catch {
       /* fall through to login */
     }

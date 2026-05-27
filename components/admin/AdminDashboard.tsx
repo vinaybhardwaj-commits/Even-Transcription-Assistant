@@ -1,8 +1,19 @@
 "use client";
 
+/**
+ * AdminDashboard — content for /admin (the dashboard surface).
+ *
+ * Sprint 6.2 refactor (27 May 2026): hoisted the page chrome (top header,
+ * sign-out, change-password) into AdminShell which now wraps every admin
+ * page. This component is now pure content: banners + doctors table +
+ * GlobalRecipients + CreateDoctorModal.
+ *
+ * Caller (app/admin/page.tsx) is responsible for wrapping this in
+ * <AdminShell adminEmail={...} active="dashboard" pageTitle="Dashboard" />.
+ */
+
 import * as React from "react";
 import { GlobalRecipients } from "@/components/admin/GlobalRecipients";
-import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 
 type Doctor = {
   id: string;
@@ -21,12 +32,11 @@ type Banner =
   | { kind: "info"; message: string; details?: string }
   | { kind: "error"; message: string };
 
-export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
+export function AdminDashboard() {
   const [doctors, setDoctors] = React.useState<Doctor[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [banner, setBanner] = React.useState<Banner | null>(null);
-  const [changingPw, setChangingPw] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -42,11 +52,6 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   React.useEffect(() => {
     void load();
   }, [load]);
-
-  const onLogout = React.useCallback(async () => {
-    await fetch("/api/admin/logout", { method: "POST" });
-    window.location.reload();
-  }, []);
 
   const onResetPin = React.useCallback(
     async (d: Doctor) => {
@@ -94,147 +99,110 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   );
 
   return (
-    <main className="min-h-screen bg-even-ink-50">
-      <header className="bg-even-white border-b border-even-ink-100 px-4 py-3 flex items-center justify-between">
-        <div>
-          <h1 className="text-label text-even-navy-800">Even Hospital · Admin</h1>
-          <p className="text-caption text-even-ink-500">{adminEmail}</p>
-        </div>
-        <div className="flex items-center gap-4">
+    <div className="space-y-6">
+      {banner ? (
+        <div
+          className={`rounded-md border p-3 text-body ${
+            banner.kind === "error"
+              ? "border-danger-500 bg-danger-100/40 text-danger-700"
+              : "border-success-500 bg-success-100/40 text-even-ink-800"
+          }`}
+        >
+          <p className="font-semibold">{banner.message}</p>
+          {banner.kind === "info" && banner.details ? (
+            <p className="mt-1 text-caption text-even-ink-700 whitespace-pre-line font-mono">{banner.details}</p>
+          ) : null}
           <button
             type="button"
-            onClick={() => setChangingPw(true)}
-            className="text-label text-even-blue-600 hover:underline"
+            onClick={() => setBanner(null)}
+            className="text-caption text-even-ink-500 hover:underline mt-2"
           >
-            Change password
-          </button>
-          <button
-            type="button"
-            onClick={onLogout}
-            className="text-label text-even-blue-600 hover:underline"
-          >
-            Sign out
+            Dismiss
           </button>
         </div>
-      </header>
-
-      <div className="px-4 py-6 max-w-5xl mx-auto space-y-4">
-        {banner ? (
-          <div
-            className={`rounded-md border p-3 text-body ${
-              banner.kind === "error"
-                ? "border-danger-500 bg-danger-100/40 text-danger-700"
-                : "border-success-500 bg-success-100/40 text-even-ink-800"
-            }`}
-          >
-            <p className="font-semibold">{banner.message}</p>
-            {banner.kind === "info" && banner.details ? (
-              <p className="mt-1 text-caption text-even-ink-700 whitespace-pre-line font-mono">{banner.details}</p>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setBanner(null)}
-              className="text-caption text-even-ink-500 hover:underline mt-2"
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-
-        <div className="flex items-center justify-between">
-          <h2 className="text-heading text-even-navy-800">Doctors</h2>
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="px-4 py-2 rounded-md bg-even-blue-600 hover:bg-even-blue-700 text-white text-label"
-          >
-            + Add doctor
-          </button>
-        </div>
-
-        {error ? (
-          <p className="text-body text-danger-700">Could not load: {error}</p>
-        ) : !doctors ? (
-          <p className="text-body text-even-ink-500">Loading…</p>
-        ) : doctors.length === 0 ? (
-          <p className="text-body text-even-ink-500">No doctors yet. Add the first.</p>
-        ) : (
-          <div className="rounded-xl border border-even-ink-100 bg-even-white overflow-hidden">
-            <table className="w-full text-left">
-              <thead className="text-caption uppercase tracking-wide text-even-ink-500 bg-even-ink-50/40">
-                <tr>
-                  <th className="px-4 py-2 font-semibold">Name</th>
-                  <th className="px-4 py-2 font-semibold">Email</th>
-                  <th className="px-4 py-2 font-semibold">Status</th>
-                  <th className="px-4 py-2 font-semibold">Last active</th>
-                  <th className="px-4 py-2 font-semibold text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="text-body">
-                {doctors.map((d) => (
-                  <tr
-                    key={d.id}
-                    className={`border-t border-even-ink-100 ${d.deleted ? "opacity-50" : ""}`}
-                  >
-                    <td className="px-4 py-2">
-                      <a
-                        href={`/${d.url_slug}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-even-navy-800 hover:underline"
-                      >
-                        {d.full_name}
-                      </a>
-                      <div className="text-caption text-even-ink-400">{d.url_slug}</div>
-                    </td>
-                    <td className="px-4 py-2 text-even-ink-700">{d.email}</td>
-                    <td className="px-4 py-2">
-                      <StatusPill status={d.status} deleted={d.deleted} />
-                    </td>
-                    <td className="px-4 py-2 text-caption text-even-ink-500">
-                      {d.last_active_at ? new Date(d.last_active_at).toLocaleString("en-IN") : "—"}
-                    </td>
-                    <td className="px-4 py-2 text-right space-x-3 text-caption">
-                      {d.deleted ? null : (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => void onResetPin(d)}
-                            className="text-even-blue-600 hover:underline"
-                          >
-                            Reset PIN
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void onToggleStatus(d)}
-                            className="text-even-blue-600 hover:underline"
-                          >
-                            {d.status === "active" ? "Disable" : "Enable"}
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      <div className="px-4 py-2 max-w-5xl mx-auto">
-        <GlobalRecipients />
-      </div>
-
-      {changingPw ? (
-        <ChangePasswordModal
-          onClose={() => setChangingPw(false)}
-          onChanged={() => {
-            setChangingPw(false);
-            setBanner({ kind: "info", message: "Password changed." });
-          }}
-        />
       ) : null}
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-heading text-even-navy-800">Doctors</h2>
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="px-4 py-2 rounded-md bg-even-blue-600 hover:bg-even-blue-700 text-white text-label"
+        >
+          + Add doctor
+        </button>
+      </div>
+
+      {error ? (
+        <p className="text-body text-danger-700">Could not load: {error}</p>
+      ) : !doctors ? (
+        <p className="text-body text-even-ink-500">Loading…</p>
+      ) : doctors.length === 0 ? (
+        <p className="text-body text-even-ink-500">No doctors yet. Add the first.</p>
+      ) : (
+        <div className="rounded-xl border border-even-ink-100 bg-even-white overflow-hidden">
+          <table className="w-full text-left">
+            <thead className="text-caption uppercase tracking-wide text-even-ink-500 bg-even-ink-50/40">
+              <tr>
+                <th className="px-4 py-2 font-semibold">Name</th>
+                <th className="px-4 py-2 font-semibold">Email</th>
+                <th className="px-4 py-2 font-semibold">Status</th>
+                <th className="px-4 py-2 font-semibold">Last active</th>
+                <th className="px-4 py-2 font-semibold text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="text-body">
+              {doctors.map((d) => (
+                <tr
+                  key={d.id}
+                  className={`border-t border-even-ink-100 ${d.deleted ? "opacity-50" : ""}`}
+                >
+                  <td className="px-4 py-2">
+                    <a
+                      href={`/${d.url_slug}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-even-navy-800 hover:underline"
+                    >
+                      {d.full_name}
+                    </a>
+                    <div className="text-caption text-even-ink-400">{d.url_slug}</div>
+                  </td>
+                  <td className="px-4 py-2 text-even-ink-700">{d.email}</td>
+                  <td className="px-4 py-2">
+                    <StatusPill status={d.status} deleted={d.deleted} />
+                  </td>
+                  <td className="px-4 py-2 text-caption text-even-ink-500" suppressHydrationWarning>
+                    {d.last_active_at ? new Date(d.last_active_at).toLocaleString("en-IN") : "—"}
+                  </td>
+                  <td className="px-4 py-2 text-right space-x-3 text-caption">
+                    {d.deleted ? null : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void onResetPin(d)}
+                          className="text-even-blue-600 hover:underline"
+                        >
+                          Reset PIN
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onToggleStatus(d)}
+                          className="text-even-blue-600 hover:underline"
+                        >
+                          {d.status === "active" ? "Disable" : "Enable"}
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <GlobalRecipients />
 
       {creating ? (
         <CreateDoctorModal
@@ -250,7 +218,7 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
           }}
         />
       ) : null}
-    </main>
+    </div>
   );
 }
 

@@ -10,15 +10,17 @@
  *
  * Returns: { encounter: {id, status}, note, cdmss, note_ms, cdmss_ms }
  *
- * S6.3 (27 May 2026): added AbortError handling on the streaming branch.
+ * S6.3 (27 May 2026): AbortError handling on the streaming branch.
  * When the client aborts (cancel button), the upstream LLM call rejects
  * with AbortError → the outer catch detects it, flips status to
  * 'draft_partial', PRESERVES whatever note_json / cdmss_json was already
  * written to the row (per V's Q2 lock), and writes an audit_log entry.
- * The detail page renders a banner inviting re-process or use-as-is.
  *
- * Why one endpoint not two: keeps the Vercel function count down and
- * lets us stream stages in a future polish round.
+ * S6.2b (27 May 2026): instruments the streaming branch with llm_traces
+ * rows — one for surface='note-pipeline' wrapping generateNote(), one for
+ * surface='cdmss-analysis' wrapping runCdmssPipeline(). On AbortError,
+ * whichever trace is still in_progress is finalised as 'aborted'. The
+ * admin trace dashboard at /admin/traces reads these rows.
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
@@ -27,6 +29,7 @@ import { verifyDoctorJwt } from "@/lib/auth";
 import { generateNote, type EncounterNote } from "@/lib/note-generation";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
+import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
@@ -41,8 +44,6 @@ type Row = {
   cdmss_json: CdmssOutput | CdmssRich | null;
 };
 
-// True when an error came from req.signal.abort() — either AbortError DOMException
-// or the various shapes Node / fetch wrappers throw (ERR_ABORTED, AbortError name).
 function isAbortError(e: unknown): boolean {
   if (!e || typeof e !== "object") return false;
   const err = e as { name?: unknown; code?: unknown };
@@ -121,6 +122,7 @@ export async function POST(
   if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
     const encoder = new TextEncoder();
     const doctorId = claims.doctor_id;
+
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const emit = (obj: unknown) => {
@@ -134,24 +136,70 @@ export async function POST(
           try { controller.close(); } catch { /* already closed */ }
         };
 
+        // S6.2b: trace handles for each surface. Kept as locals in this
+        // closure so the outer catch (abort handler) can finalise whichever
+        // is still in_progress as 'aborted'.
+        let noteTrace:  TraceHandle | null = null;
+        let cdmssTrace: TraceHandle | null = null;
+
         // Heartbeat every 5s so proxies don't kill the stream
         const hbInterval = setInterval(() => {
           emit({ stage: "heartbeat", ts: Date.now() });
         }, 5000);
 
         try {
-          // Note generation
+          // ---- Note generation (surface=note-pipeline) ----
+          noteTrace = await openTrace({
+            surface: "note-pipeline",
+            encounter_id: id,
+            doctor_email: null,
+            request_input: { transcript_chars: row.transcript_raw!.length },
+          });
+          noteTrace.event("start", "Generating encounter note");
+
           const noteRes = await generateNote(row.transcript_raw!, {
             signal: req.signal,
-            onEvent: (e) => emit(e),
+            onEvent: (e) => {
+              emit(e);
+              // Mirror the same event into the trace's events array.
+              const ev = e as Record<string, unknown>;
+              const stage = typeof ev.stage === "string" ? ev.stage : "?";
+              const state = typeof ev.state === "string" ? ev.state : undefined;
+              const msNum = typeof ev.ms === "number" ? ev.ms : undefined;
+              noteTrace?.event(
+                `${stage}:${state ?? "tick"}`,
+                JSON.stringify(ev).slice(0, 300),
+                msNum,
+                state === "done",
+                state === "error",
+              );
+            },
           });
+
           if (!noteRes.ok) {
             emit({ stage: "error", where: "note", message: noteRes.error });
+            await noteTrace.finalise({
+              status: "errored",
+              error_message: noteRes.error,
+            });
+            noteTrace = null;
             await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => {});
             close();
             clearInterval(hbInterval);
             return;
           }
+
+          await noteTrace.finalise({
+            status: "completed",
+            result_summary: { chief_complaint: noteRes.note.chief_complaint ?? null },
+            model_calls: [
+              {
+                model: "qwen2.5:14b",
+                latency_ms: noteRes.latency_ms,
+              },
+            ],
+          });
+          noteTrace = null;
 
           // Persist note immediately
           try {
@@ -169,10 +217,31 @@ export async function POST(
             return;
           }
 
-          // CDMSS pipeline with event passthrough
+          // ---- CDMSS pipeline (surface=cdmss-analysis) ----
+          cdmssTrace = await openTrace({
+            surface: "cdmss-analysis",
+            encounter_id: id,
+            doctor_email: null,
+            request_input: { note_summary: noteRes.note.chief_complaint ?? null },
+          });
+          cdmssTrace.event("start", "Running CDMSS pipeline");
+
           const pipelineRes = await runCdmssPipeline(noteRes.note, {
             signal: req.signal,
-            onEvent: (e) => emit(e),
+            onEvent: (e) => {
+              emit(e);
+              const ev = e as Record<string, unknown>;
+              const stage = typeof ev.stage === "string" ? ev.stage : "?";
+              const state = typeof ev.state === "string" ? ev.state : undefined;
+              const msNum = typeof ev.ms === "number" ? ev.ms : undefined;
+              cdmssTrace?.event(
+                `${stage}:${state ?? "tick"}`,
+                JSON.stringify(ev).slice(0, 300),
+                msNum,
+                state === "done",
+                state === "error",
+              );
+            },
           });
 
           let cdmssToStore: CdmssRich | CdmssOutput;
@@ -191,6 +260,19 @@ export async function POST(
             };
             cdmssErr = pipelineRes.error;
           }
+
+          await cdmssTrace.finalise({
+            status: pipelineRes.ok ? "completed" : "errored",
+            error_message: cdmssErr ?? null,
+            result_summary: pipelineRes.ok
+              ? { citations_count: (cdmssToStore as { citations?: unknown[] }).citations?.length ?? 0 }
+              : null,
+            model_calls: [
+              { model: "llama3.1:8b",  latency_ms: pipelineRes.latency_ms ?? 0 },
+              { model: "qwen2.5:14b", latency_ms: pipelineRes.latency_ms ?? 0 },
+            ],
+          });
+          cdmssTrace = null;
 
           try {
             await sql`
@@ -218,14 +300,25 @@ export async function POST(
           });
         } catch (e) {
           // S6.3: distinguish doctor cancel from real errors.
-          // On cancel: flip status to 'draft_partial' and PRESERVE whatever
-          // note_json / cdmss_json already landed. Per V's Q2 lock.
-          // On other errors: fall through to existing "error" emit (no DB
-          // touch — let the row stay 'processing' and be reaped later if
-          // really stuck. We avoid auto-flipping to 'failed' here because
-          // the outer catch fires for *any* unhandled throw including
-          // transient Ollama hiccups that the doctor might want to retry.)
+          // S6.2b: finalise any in-progress trace before returning.
           if (isAbortError(e) || req.signal.aborted) {
+            // Trace finalisation as 'aborted'
+            try {
+              if (noteTrace) {
+                await noteTrace.finalise({
+                  status: "aborted",
+                  error_message: "cancelled by user",
+                });
+                noteTrace = null;
+              }
+              if (cdmssTrace) {
+                await cdmssTrace.finalise({
+                  status: "aborted",
+                  error_message: "cancelled by user",
+                });
+                cdmssTrace = null;
+              }
+            } catch { /* best-effort */ }
             try {
               await sql`
                 UPDATE encounter
@@ -243,10 +336,20 @@ export async function POST(
             } catch {
               /* best-effort; client is already gone */
             }
-            // Best-effort emit (may no-op if controller already closed)
             emit({ stage: "cancelled", message: "processing cancelled by user" });
           } else {
             const msg = e instanceof Error ? e.message : String(e);
+            // Trace finalisation as 'errored'
+            try {
+              if (noteTrace) {
+                await noteTrace.finalise({ status: "errored", error_message: msg });
+                noteTrace = null;
+              }
+              if (cdmssTrace) {
+                await cdmssTrace.finalise({ status: "errored", error_message: msg });
+                cdmssTrace = null;
+              }
+            } catch { /* best-effort */ }
             emit({ stage: "error", where: "outer", message: msg.slice(0, 200) });
           }
         } finally {
@@ -257,7 +360,8 @@ export async function POST(
       cancel() {
         /* client disconnect — req.signal will abort upstream LLM calls
            which throws AbortError, caught by the start()-body try/catch
-           above, where we write status='draft_partial' + audit_log. */
+           above, where we write status='draft_partial' + audit_log and
+           finalise any in-progress llm_traces row as 'aborted'. */
       },
     });
 
@@ -271,7 +375,7 @@ export async function POST(
     });
   }
 
-  // 1) Note generation
+  // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
   const noteRes = await generateNote(row.transcript_raw, { signal: req.signal });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
@@ -281,7 +385,6 @@ export async function POST(
     );
   }
 
-  // Persist note immediately so a CDMSS failure doesn't lose it
   try {
     await sql`
       UPDATE encounter
@@ -294,11 +397,8 @@ export async function POST(
     return respondError("PIPELINE_FAILED", `note_persist_failed: ${msg.slice(0, 120)}`);
   }
 
-  // 2) Real CDMSS pipeline (HyDE → KB retrieve → draft → critique → revise)
   const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal });
 
-  // Pick the cdmss object to persist + return. Rich on success; fallback
-  // stub-shape on retrieve failure; empty on hard failure.
   let cdmssToStore: CdmssRich | CdmssOutput;
   let cdmssErr: string | undefined;
   if (pipelineRes.ok) {
