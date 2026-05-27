@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/Input";
 import { RecoveryModal } from "@/components/RecoveryModal";
+import { Library } from "@/components/Library";
 
 type Props = { slug: string; doctorName: string };
 
@@ -87,9 +88,7 @@ export function HomeShell({ slug, doctorName }: Props) {
       ) : (
         <div className="px-4 pt-6 pb-12">
           <h2 className="text-heading text-even-navy-800 mb-4">Library</h2>
-          <p className="text-body text-even-ink-500 text-center mt-12">
-            No encounters yet. Tap Record to begin.
-          </p>
+          <Library slug={slug} />
         </div>
       )}
 

@@ -70,3 +70,73 @@ export async function POST(
     encounter: { id, status: "draft" as const },
   });
 }
+
+
+/**
+ * GET /{slug}/api/encounters — list this doctor's encounters,
+ * newest-first, last 50. Each row has the minimum fields the Library
+ * card needs to render without a follow-up fetch.
+ */
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await params;
+  const cookie = await readDoctorCookie();
+  if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  let claims;
+  try {
+    claims = await verifyDoctorJwt(cookie);
+  } catch {
+    return respondError("AUTH_EXPIRED", "Session invalid");
+  }
+  if (claims.slug !== slug) return respondError("FORBIDDEN", "Slug mismatch");
+
+  type ListRow = {
+    id: string;
+    recorded_at: string | Date;
+    duration_seconds: number | null;
+    patient_label_raw: string | null;
+    status: "draft" | "processing" | "complete" | "failed";
+    send_status: "pending" | "sent" | "failed";
+    chief_complaint: string | null;
+  };
+
+  try {
+    const rows = (await sql`
+      SELECT id,
+             recorded_at,
+             duration_seconds,
+             patient_label_raw,
+             status,
+             send_status,
+             COALESCE(
+               (note_json_edited->>'chief_complaint'),
+               (note_json->>'chief_complaint')
+             ) AS chief_complaint
+        FROM encounter
+       WHERE doctor_id = ${claims.doctor_id}
+         AND deleted_at IS NULL
+       ORDER BY recorded_at DESC
+       LIMIT 50
+    `) as ListRow[];
+
+    return respondOk({
+      encounters: rows.map((r) => ({
+        id: r.id,
+        recorded_at:
+          r.recorded_at instanceof Date
+            ? r.recorded_at.toISOString()
+            : new Date(r.recorded_at).toISOString(),
+        duration_seconds: r.duration_seconds,
+        patient_label: r.patient_label_raw,
+        status: r.status,
+        send_status: r.send_status,
+        chief_complaint: r.chief_complaint,
+      })),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return respondError("PIPELINE_FAILED", msg.slice(0, 150));
+  }
+}
