@@ -40,8 +40,8 @@ const NAV: NavItem[] = [
   { key: "doctors",    label: "Doctors",    href: "/admin/doctors",  icon: "◯", section: "operate" },
   { key: "encounters", label: "Encounters", href: "/admin/encounters", icon: "◐", section: "operate" },
   { key: "traces",     label: "LLM traces", href: "/admin/traces",   icon: "◈", section: "observe" },
-  { key: "sends",      label: "Sends",      href: null,              icon: "◉", section: "observe" },
-  { key: "settings",   label: "Settings",   href: null,              icon: "◧", section: "configure" },
+  { key: "sends",      label: "Sends",      href: "/admin/sends",    icon: "◉", section: "observe" },
+  { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },
 ];
 
 type Props = {

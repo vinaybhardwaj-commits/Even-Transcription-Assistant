@@ -102,13 +102,13 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   // ---- HTML body ----
   const noteSections = [
     note.chief_complaint
-      ? `${sectionHeading("Chief complaint")}${paragraph(note.chief_complaint)}`
+      ? `${sectionHeading("Reason for visit")}${paragraph(note.chief_complaint)}`
       : "",
     note.history_present_illness
-      ? `${sectionHeading("History of present illness")}${paragraph(note.history_present_illness)}`
+      ? `${sectionHeading("History")}${paragraph(note.history_present_illness)}`
       : "",
     note.past_medical_history.length
-      ? `${sectionHeading("Past medical history")}${bulletList(note.past_medical_history)}`
+      ? `${sectionHeading("Medical history")}${bulletList(note.past_medical_history)}`
       : "",
     note.current_medications.length
       ? `${sectionHeading("Current medications")}${bulletList(note.current_medications)}`
@@ -120,7 +120,7 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
       ? `${sectionHeading("Examination")}${paragraph(note.examination)}`
       : "",
     note.assessment
-      ? `${sectionHeading("Assessment")}${paragraph(note.assessment)}`
+      ? `${sectionHeading("Disposition")}${paragraph(note.assessment)}`
       : "",
     note.plan.investigations.length || note.plan.treatment.length || note.plan.follow_up
       ? `${sectionHeading("Plan")}${
@@ -210,10 +210,38 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:${C.ink50};padding:24px 0;">
     <tr><td align="center">
       <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="max-width:600px;width:100%;background:${C.white};border:1px solid ${C.ink100};border-radius:12px;">
-        <tr><td style="padding:24px 28px 12px 28px;border-bottom:1px solid ${C.ink100};">
-          <p style="margin:0;font-size:13px;color:${C.ink500};">Even Hospital · Encounter Note</p>
-          <h1 style="margin:6px 0 0 0;font-size:20px;color:${C.navy};font-weight:700;line-height:1.3;">${escape(doctorName)}</h1>
-          <p style="margin:4px 0 0 0;font-size:13px;color:${C.ink500};">${escape(ddmmyyyy)}${patientLabel ? ` · ${escape(patientLabel)}` : ""}</p>
+        <tr><td style="padding:20px 28px 10px 28px;border-bottom:1px solid ${C.ink100};">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+            <tr>
+              <td style="vertical-align:middle;">
+                <p style="margin:0;font-family:Inter,Arial,sans-serif;font-size:13px;letter-spacing:0.14em;text-transform:uppercase;color:${C.navy};font-weight:700;">Even Hospital</p>
+              </td>
+              <td align="right" style="vertical-align:middle;">
+                <span style="display:inline-block;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:${C.ink500};font-weight:600;background:${C.ink50};border:1px solid ${C.ink100};border-radius:999px;padding:4px 10px;">Encounter Note</span>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:14px 0 0 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:${C.ink400};font-weight:600;">${escape(ddmmyyyy)} IST</p>
+        </td></tr>
+        <tr><td style="padding:16px 28px 4px 28px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+            <tr>
+              <td style="vertical-align:top;width:50%;padding-right:12px;">
+                <p style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:${C.ink500};font-weight:600;">Patient</p>
+                <p style="margin:0;font-family:Inter,Arial,sans-serif;font-size:15px;color:${C.ink800};font-weight:600;">${escape(patientLabel ?? "(no patient label)")}</p>
+              </td>
+              <td style="vertical-align:top;width:50%;padding-left:12px;border-left:1px solid ${C.ink100};">
+                <p style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:${C.ink500};font-weight:600;">Attending</p>
+                <p style="margin:0;font-family:Inter,Arial,sans-serif;font-size:15px;color:${C.ink800};font-weight:600;">${escape(doctorName)}</p>
+                <p style="margin:2px 0 0 0;font-family:Inter,Arial,sans-serif;font-size:12px;color:${C.ink500};">Even Hospital</p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:14px 28px 4px 28px;">
+          <p style="margin:0;padding:10px 12px;font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.5;color:${C.ink700};background:${C.ink50};border:1px solid ${C.ink100};border-radius:8px;">
+            <span style="color:${C.ink500};">ⓘ</span> Transcribed from a voice recording by the Even Encounter Assistant. Reviewed and submitted by ${escape(doctorName)}.
+          </p>
         </td></tr>
         <tr><td style="padding:20px 28px;">${noteSections}${cdmssBlock}</td></tr>
         <tr><td style="padding:14px 28px 22px 28px;border-top:1px solid ${C.ink100};">
