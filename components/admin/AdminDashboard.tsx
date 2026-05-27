@@ -14,6 +14,7 @@
 
 import * as React from "react";
 import { GlobalRecipients } from "@/components/admin/GlobalRecipients";
+import { AdminDashboardOverview } from "@/components/admin/AdminDashboardOverview";
 
 type Doctor = {
   id: string;
@@ -32,7 +33,7 @@ type Banner =
   | { kind: "info"; message: string; details?: string }
   | { kind: "error"; message: string };
 
-export function AdminDashboard() {
+export function AdminDashboard({ adminName }: { adminName: string }) {
   const [doctors, setDoctors] = React.useState<Doctor[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
@@ -99,7 +100,17 @@ export function AdminDashboard() {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-10">
+      <AdminDashboardOverview adminName={adminName} />
+
+      <section className="space-y-6">
+        <header className="pb-2 border-b border-even-ink-100">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">Manage</p>
+          <h2 className="text-heading text-even-navy-800">Doctors &amp; recipients</h2>
+          <p className="text-caption text-even-ink-500 mt-0.5">
+            Onboard new doctors, reset PINs, manage global CC list. Will move to <code className="font-mono">/admin/doctors</code> in Sprint 10.
+          </p>
+        </header>
       {banner ? (
         <div
           className={`rounded-md border p-3 text-body ${
@@ -202,7 +213,8 @@ export function AdminDashboard() {
         </div>
       )}
 
-      <GlobalRecipients />
+        <GlobalRecipients />
+      </section>
 
       {creating ? (
         <CreateDoctorModal
