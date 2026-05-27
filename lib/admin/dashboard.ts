@@ -399,10 +399,14 @@ async function getHealth(): Promise<{ status: "ok" | "degraded"; services: Healt
   try {
     // Build URL from the request host — server-side fetch needs an absolute URL.
     // process.env.VERCEL_URL is set in production; otherwise fall back to APP_URL or localhost.
+    // APP_URL on prod is still set to the stale 'eta.even.in' (see carryover
+    // §6). Prefer VERCEL_URL when it's the production canonical host, else
+    // hard-fall to the known live host.
+    const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
     const base =
+      raw && !/eta\.even\.in/i.test(raw) ? raw :
       process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` :
-      process.env.APP_URL    ? process.env.APP_URL.replace(/\/+$/, "") :
-      "http://localhost:3000";
+      "https://eta.llmvinayminihome.uk";
     const res = await fetch(`${base}/api/health`, { cache: "no-store" });
     if (!res.ok) throw new Error(`health_http_${res.status}`);
     const j = (await res.json()) as {
