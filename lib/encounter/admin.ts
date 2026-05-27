@@ -54,8 +54,7 @@ export type EncounterFull = {
     subject_rendered: string | null;
     resend_message_id: string | null;
     failure_reason: string | null;
-    sent_at: string | null;
-    delivered_at: string | null;
+    updated_at: string | null;
     opened_at: string | null;
     bounced_at: string | null;
     complained_at: string | null;
@@ -139,8 +138,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       subject_rendered,
       resend_message_id,
       failure_reason,
-      sent_at::text       AS sent_at,
-      delivered_at::text  AS delivered_at,
+      updated_at::text    AS updated_at,
       opened_at::text     AS opened_at,
       bounced_at::text    AS bounced_at,
       complained_at::text AS complained_at,
@@ -225,8 +223,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       subject_rendered: x.subject_rendered ? String(x.subject_rendered) : null,
       resend_message_id: x.resend_message_id ? String(x.resend_message_id) : null,
       failure_reason: x.failure_reason ? String(x.failure_reason) : null,
-      sent_at: x.sent_at ? String(x.sent_at) : null,
-      delivered_at: x.delivered_at ? String(x.delivered_at) : null,
+      updated_at: x.updated_at ? String(x.updated_at) : null,
       opened_at: x.opened_at ? String(x.opened_at) : null,
       bounced_at: x.bounced_at ? String(x.bounced_at) : null,
       complained_at: x.complained_at ? String(x.complained_at) : null,
@@ -287,7 +284,6 @@ export async function listEncounterRecipientCandidates(
       SELECT id::text AS id, email, name, role
         FROM recipient_per_doctor
        WHERE doctor_id = ${doctorId}
-         AND active = TRUE
        ORDER BY name
     `,
     sql`

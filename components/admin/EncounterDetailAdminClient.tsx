@@ -50,8 +50,7 @@ type SendEventRow = {
   subject_rendered: string | null;
   resend_message_id: string | null;
   failure_reason: string | null;
-  sent_at: string | null;
-  delivered_at: string | null;
+  updated_at: string | null;
   opened_at: string | null;
   bounced_at: string | null;
   complained_at: string | null;
@@ -364,8 +363,10 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                       </p>
                       <div className="text-caption text-even-ink-500 flex flex-wrap gap-x-3" suppressHydrationWarning>
                         <span>Queued: {fmtDate(s.created_at)}</span>
-                        {s.sent_at      ? <span>Sent: {fmtDate(s.sent_at)}</span> : null}
-                        {s.delivered_at ? <span>Delivered: {fmtDate(s.delivered_at)}</span> : null}
+                        {(s.status === "sent" || s.status === "delivered" || s.status === "opened") && s.updated_at ?
+                          <span>Sent: {fmtDate(s.updated_at)}</span> : null}
+                        {(s.status === "delivered" || s.status === "opened") && s.updated_at ?
+                          <span>Delivered: {fmtDate(s.updated_at)}</span> : null}
                         {s.opened_at    ? <span>Opened: {fmtDate(s.opened_at)}</span> : null}
                         {s.bounced_at   ? <span>Bounced: {fmtDate(s.bounced_at)}</span> : null}
                       </div>
