@@ -201,4 +201,8 @@ export const settings = pgTable("settings", {
   resendFromEmail:     text("resend_from_email"),
   updatedAt:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   updatedBy:           uuid("updated_by"),
+  // Sprint 12: manual attestation for PRD §10.1 audio-data-loss criterion
+  audioOfflineTestPassed: boolean("audio_offline_test_passed").notNull().default(false),
+  audioOfflineTestAt:     timestamp("audio_offline_test_at", { withTimezone: true }),
+  audioOfflineTestBy:     uuid("audio_offline_test_by"),
 });
