@@ -263,7 +263,7 @@ export async function POST(
 
           await cdmssTrace.finalise({
             status: pipelineRes.ok ? "completed" : "errored",
-            error_message: cdmssErr ?? null,
+            error_message: cdmssErr,
             result_summary: pipelineRes.ok
               ? { citations_count: (cdmssToStore as { citations?: unknown[] }).citations?.length ?? 0 }
               : null,
