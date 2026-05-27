@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { GlobalRecipients } from "@/components/admin/GlobalRecipients";
+import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 
 type Doctor = {
   id: string;
@@ -24,6 +26,7 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   const [error, setError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [banner, setBanner] = React.useState<Banner | null>(null);
+  const [changingPw, setChangingPw] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -97,13 +100,22 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
           <h1 className="text-label text-even-navy-800">Even Hospital · Admin</h1>
           <p className="text-caption text-even-ink-500">{adminEmail}</p>
         </div>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="text-label text-even-blue-600 hover:underline"
-        >
-          Sign out
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => setChangingPw(true)}
+            className="text-label text-even-blue-600 hover:underline"
+          >
+            Change password
+          </button>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="text-label text-even-blue-600 hover:underline"
+          >
+            Sign out
+          </button>
+        </div>
       </header>
 
       <div className="px-4 py-6 max-w-5xl mx-auto space-y-4">
@@ -209,6 +221,20 @@ export function AdminDashboard({ adminEmail }: { adminEmail: string }) {
           </div>
         )}
       </div>
+
+      <div className="px-4 py-2 max-w-5xl mx-auto">
+        <GlobalRecipients />
+      </div>
+
+      {changingPw ? (
+        <ChangePasswordModal
+          onClose={() => setChangingPw(false)}
+          onChanged={() => {
+            setChangingPw(false);
+            setBanner({ kind: "info", message: "Password changed." });
+          }}
+        />
+      ) : null}
 
       {creating ? (
         <CreateDoctorModal

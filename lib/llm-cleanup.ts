@@ -44,6 +44,45 @@ export type CleanupResult =
       latency_ms: number;
     };
 
+
+/**
+ * Belt-and-suspenders revert: if the doctor said an abbreviation
+ * (BD/TDS/QID/PRN/OD/...) and the 8B cleanup model expanded it
+ * anyway, swap the expansion back to the abbreviation. Only fires
+ * when the raw text contained the abbreviation as a whole word — so
+ * we never invent abbreviations.
+ *
+ * Single-pass, case-preserving, idempotent.
+ */
+const ABBREV_REVERTS: Array<{
+  abbr: string;
+  raw_re: RegExp; // matches the abbreviation as a whole word in the raw
+  expand_re: RegExp; // matches the expansion in the cleaned text (i replace flag)
+}> = [
+  { abbr: "BD",  raw_re: /\bBD\b/i,  expand_re: /\b(?:twice\s+(?:daily|a\s+day))\b/gi },
+  { abbr: "BID", raw_re: /\bBID\b/i, expand_re: /\b(?:twice\s+(?:daily|a\s+day))\b/gi },
+  { abbr: "TDS", raw_re: /\bTDS\b/i, expand_re: /\b(?:three\s+times\s+(?:daily|a\s+day)|thrice\s+daily|t\.?d\.?s\.?)\b/gi },
+  { abbr: "TID", raw_re: /\bTID\b/i, expand_re: /\b(?:three\s+times\s+(?:daily|a\s+day)|thrice\s+daily)\b/gi },
+  { abbr: "QID", raw_re: /\bQID\b/i, expand_re: /\b(?:four\s+times\s+(?:daily|a\s+day))\b/gi },
+  { abbr: "OD",  raw_re: /\bOD\b/i,  expand_re: /\b(?:once\s+(?:daily|a\s+day))\b/gi },
+  { abbr: "QD",  raw_re: /\bQD\b/i,  expand_re: /\b(?:once\s+(?:daily|a\s+day))\b/gi },
+  { abbr: "QOD", raw_re: /\bQOD\b/i, expand_re: /\b(?:every\s+other\s+day|alternate\s+days?)\b/gi },
+  { abbr: "QHS", raw_re: /\bQHS\b/i, expand_re: /\b(?:at\s+bedtime|every\s+night\s+at\s+bedtime)\b/gi },
+  { abbr: "HS",  raw_re: /\bHS\b/i,  expand_re: /\b(?:at\s+bedtime|hour\s+of\s+sleep)\b/gi },
+  { abbr: "PRN", raw_re: /\bPRN\b/i, expand_re: /\b(?:as\s+needed|when\s+(?:needed|required))\b/gi },
+  { abbr: "STAT",raw_re: /\bSTAT\b/i,expand_re: /\b(?:immediately|right\s+away)\b/gi },
+];
+
+export function revertAbbrevExpansions(raw: string, cleaned: string): string {
+  let out = cleaned;
+  for (const { abbr, raw_re, expand_re } of ABBREV_REVERTS) {
+    if (raw_re.test(raw)) {
+      out = out.replace(expand_re, abbr);
+    }
+  }
+  return out;
+}
+
 export async function cleanUtterance(
   raw: string,
   opts: { signal?: AbortSignal } = {},
@@ -104,7 +143,8 @@ export async function cleanUtterance(
     if (cleaned.length === 0) {
       return { ok: false, error: "empty_response", latency_ms };
     }
-    return { ok: true, cleaned, latency_ms, model: CLEANUP_MODEL };
+    const revertedClean = revertAbbrevExpansions(trimmed, cleaned);
+    return { ok: true, cleaned: revertedClean, latency_ms, model: CLEANUP_MODEL };
   } catch (e: unknown) {
     clearTimeout(tid);
     const latency_ms = Date.now() - t0;

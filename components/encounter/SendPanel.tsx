@@ -50,19 +50,28 @@ export function SendPanel({
   const [sending, setSending] = React.useState(false);
   const [sendError, setSendError] = React.useState<string | null>(null);
 
+  const [globals, setGlobals] = React.useState<SavedRecipient[]>([]);
+
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/${slug}/api/recipients`, { cache: "no-store" });
-        if (!res.ok) {
-          if (!cancelled) setSavedLoaded(true);
-          return;
-        }
-        const j = (await res.json()) as { recipients: SavedRecipient[] };
+        const [pRes, gRes] = await Promise.all([
+          fetch(`/${slug}/api/recipients`, { cache: "no-store" }),
+          fetch(`/${slug}/api/recipients/global`, { cache: "no-store" }),
+        ]);
+        const pJson = pRes.ok ? ((await pRes.json()) as { recipients: SavedRecipient[] }) : { recipients: [] };
+        const gJson = gRes.ok ? ((await gRes.json()) as { recipients: SavedRecipient[] }) : { recipients: [] };
         if (!cancelled) {
-          setSaved(j.recipients);
+          setSaved(pJson.recipients);
+          setGlobals(gJson.recipients);
           setSavedLoaded(true);
+          // Auto-check active globals (org default — admin curated)
+          setChecked((prev) => {
+            const next = { ...prev };
+            for (const g of gJson.recipients) next[g.email.toLowerCase()] = true;
+            return next;
+          });
         }
       } catch {
         if (!cancelled) setSavedLoaded(true);
@@ -76,10 +85,11 @@ export function SendPanel({
   const allEmails = React.useMemo(
     () => [
       doctorEmail.toLowerCase(),
+      ...globals.map((r) => r.email.toLowerCase()),
       ...saved.map((r) => r.email.toLowerCase()),
       ...extras,
     ],
-    [doctorEmail, saved, extras],
+    [doctorEmail, globals, saved, extras],
   );
   const selected = React.useMemo(
     () => Array.from(new Set(allEmails.filter((e) => checked[e]))),
@@ -165,7 +175,44 @@ export function SendPanel({
           </label>
         </li>
 
-        {/* Saved contacts */}
+        {/* Global contacts (admin-curated) */}
+        {globals.length > 0 ? (
+          <li className="text-caption text-even-ink-500 px-1 pt-1">Hospital-wide contacts</li>
+        ) : null}
+        {globals.map((r) => {
+          const e = r.email.toLowerCase();
+          return (
+            <li key={`g-${r.id}`}
+              className="flex items-center justify-between gap-3 rounded-md border border-ai-200 bg-ai-50/40 px-3 py-2">
+              <label className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!checked[e]}
+                  onChange={(ev) =>
+                    setChecked((prev) => ({ ...prev, [e]: ev.target.checked }))
+                  }
+                  className="h-4 w-4 accent-even-blue-600"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-body text-even-navy-800 truncate">
+                    {r.name}
+                  </span>
+                  <span className="block text-caption text-even-ink-500 truncate">
+                    {r.email}
+                  </span>
+                </span>
+                <span className="text-caption rounded-full px-2 py-0.5 bg-ai-200 text-ai-700 shrink-0">
+                  {r.role}
+                </span>
+              </label>
+            </li>
+          );
+        })}
+
+        {/* Saved contacts (personal) */}
+        {saved.length > 0 && globals.length > 0 ? (
+          <li className="text-caption text-even-ink-500 px-1 pt-2">Your contacts</li>
+        ) : null}
         {saved.map((r) => {
           const e = r.email.toLowerCase();
           return (
