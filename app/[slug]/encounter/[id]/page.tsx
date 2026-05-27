@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 type Row = {
   id: string;
   doctor_id: string;
-  status: "draft" | "processing" | "complete" | "failed" | "deleted";
+  status: "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
   transcript_raw: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;

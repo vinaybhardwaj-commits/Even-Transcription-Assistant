@@ -10,7 +10,10 @@ import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel"
 import type { EncounterNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
-type Status = "draft" | "processing" | "complete" | "failed" | "deleted";
+// Sprint 6.3 (27 May 2026): 'draft_partial' added — encounter state after the
+// doctor cancels mid-process. Note/CDMSS may be partially populated; the UI
+// renders an inviting banner with Re-process or Use-as-is. See PRD §8.1.6.
+type Status = "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
 type SendStatus = "pending" | "sent" | "failed";
 
 type InitialState = {
@@ -54,6 +57,11 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     sendEvents: initial.sendEvents,
     editing: false,
   });
+
+  // Sprint 6.3 cancel: AbortController for the in-flight /process fetch,
+  // plus a confirm-modal flag (PRD §8.1.6 — destructive copy locked).
+  const abortRef = React.useRef<AbortController | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = React.useState(false);
 
   const autoTriggeredRef = React.useRef(false);
   React.useEffect(() => {
@@ -141,8 +149,23 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     [],
   );
 
+  // Detect whether an error came from us calling abort() on the controller.
+  // Native fetch throws DOMException name='AbortError'; reader.read() too.
+  const isClientAbort = (e: unknown): boolean => {
+    if (!e || typeof e !== "object") return false;
+    const err = e as { name?: unknown; code?: unknown };
+    return err.name === "AbortError" || err.code === 20;
+  };
+
   const runProcess = React.useCallback(
     async (force: boolean) => {
+      // Sprint 6.3: bind a fresh AbortController so the Cancel button can
+      // abort this fetch (which propagates through req.signal to upstream
+      // LLM calls on the server, which then throws AbortError → server
+      // flips status to 'draft_partial'.)
+      const ac = new AbortController();
+      abortRef.current = ac;
+
       setS((prev) => ({ ...prev, processing: true, error: null }));
       setStages(STAGE_ORDER.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" })));
       try {
@@ -153,6 +176,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             Accept: "application/x-ndjson",
           },
           body: JSON.stringify({ force }),
+          signal: ac.signal,
         });
         if (!res.ok || !res.body) {
           const j = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
@@ -236,12 +260,44 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           setS((prev) => ({ ...prev, processing: false, error: lastError ?? "stream_ended_without_final" }));
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setS((prev) => ({ ...prev, processing: false, error: msg }));
+        if (isClientAbort(e)) {
+          // S6.3 cancel: server has flipped status='draft_partial' + audit log.
+          // We optimistically mirror that in client state (the server route
+          // races our request — by the time we get here it's already written.)
+          setS((prev) => ({
+            ...prev,
+            status: "draft_partial",
+            processing: false,
+            error: null,
+          }));
+          // Server may have populated note/cdmss before the abort — re-fetch
+          // the encounter from server to pull the latest persisted view.
+          // (Cheaper than tracking partial state across the stream events.)
+          router.refresh();
+        } else {
+          const msg = e instanceof Error ? e.message : String(e);
+          setS((prev) => ({ ...prev, processing: false, error: msg }));
+        }
+      } finally {
+        if (abortRef.current === ac) abortRef.current = null;
       }
     },
-    [slug, initial.id, updateStage],
+    [slug, initial.id, updateStage, router],
   );
+
+  // S6.3: user-initiated cancel from the Cancel button on the processing card.
+  // Opens the confirm modal. Confirm → abortRef.current?.abort().
+  const onCancelClick = React.useCallback(() => {
+    if (!abortRef.current) return;
+    setShowCancelConfirm(true);
+  }, []);
+  const onCancelConfirm = React.useCallback(() => {
+    abortRef.current?.abort();
+    setShowCancelConfirm(false);
+  }, []);
+  const onCancelDismiss = React.useCallback(() => {
+    setShowCancelConfirm(false);
+  }, []);
 
   const onSend = React.useCallback(
     async (recipients: string[]): Promise<{ ok: boolean; error?: string }> => {
@@ -323,6 +379,16 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     [slug, initial.id],
   );
 
+  const statusLabel = (() => {
+    switch (s.status) {
+      case "processing":     return "Processing";
+      case "complete":       return "Complete";
+      case "failed":         return "Failed";
+      case "draft_partial":  return "Saved (partial)";
+      default:               return s.status;
+    }
+  })();
+
   return (
     <main className="min-h-screen bg-even-white">
       <header className="sticky top-0 z-10 bg-even-white border-b border-even-ink-100 flex items-center justify-between px-4 py-3">
@@ -335,26 +401,31 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         </button>
         <span className="text-label text-even-navy-800">{initial.id.slice(0, 14)}…</span>
         <span className="text-caption text-even-ink-400">
-          {s.status === "processing"
-            ? "Processing"
-            : s.status === "complete"
-            ? "Complete"
-            : s.status === "failed"
-            ? "Failed"
-            : s.status}
+          {statusLabel}
         </span>
       </header>
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
         {s.processing ? (
           <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4">
-            <div>
-              <p className="text-label text-even-navy-800 mb-1">
-                Generating your note + clinical decision support
-              </p>
-              <p className="text-caption text-even-ink-500">
-                Live pipeline. ~90&ndash;150s total.
-              </p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-label text-even-navy-800 mb-1">
+                  Generating your note + clinical decision support
+                </p>
+                <p className="text-caption text-even-ink-500">
+                  Live pipeline. ~90&ndash;150s total.
+                </p>
+              </div>
+              {/* S6.3 cancel button — opens confirm modal. PRD §8.1.6. */}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onCancelClick}
+                className="shrink-0"
+              >
+                Cancel
+              </Button>
             </div>
             <div
               className="h-1.5 w-full rounded-full bg-even-ink-100 overflow-hidden"
@@ -402,6 +473,35 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           </div>
         ) : null}
 
+        {/* S6.3: banner shown on encounters left in 'draft_partial' state by
+            the cancel flow. Offers Re-process (re-runs the full pipeline) or
+            Use-as-is and send (skips straight to the SendPanel). */}
+        {s.status === "draft_partial" && !s.processing ? (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 p-5 space-y-3">
+            <p className="text-label text-amber-900">
+              This note was not fully reviewed against your final transcript.
+            </p>
+            <p className="text-body text-even-ink-700">
+              You can re-process to generate a fresh note, or send as-is.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button variant="primary" size="sm" onClick={() => void runProcess(true)}>
+                Re-process
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  const el = document.getElementById("send-panel-anchor");
+                  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+              >
+                Use as-is and send
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
         {s.error && !s.processing ? (
           <div className="rounded-xl border border-danger-500 bg-danger-100/40 p-4">
             <p className="text-label text-danger-700 mb-2">Processing problem</p>
@@ -418,7 +518,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
               <h2 className="text-heading text-even-navy-800">
                 Medical Encounter Note
               </h2>
-              {!s.editing && s.status === "complete" ? (
+              {!s.editing && (s.status === "complete" || s.status === "draft_partial") ? (
                 <button
                   type="button"
                   onClick={() => setS((prev) => ({ ...prev, editing: true }))}
@@ -442,15 +542,20 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
 
         {s.cdmss ? <CdmssCard cdmss={s.cdmss} /> : null}
 
-        {s.status === "complete" && s.note ? (
-          <SendPanel
-            slug={slug}
-            doctorEmail={doctorEmail}
-            doctorName={doctorName}
-            sendEvents={s.sendEvents}
-            sendStatus={s.sendStatus}
-            onSend={onSend}
-          />
+        {/* SendPanel is reachable from both 'complete' AND 'draft_partial'
+            (per V's Q2 lock: doctor can send as-is on a partial). The anchor
+            below lets the banner's 'Use as-is and send' button scroll here. */}
+        {(s.status === "complete" || s.status === "draft_partial") && s.note ? (
+          <div id="send-panel-anchor">
+            <SendPanel
+              slug={slug}
+              doctorEmail={doctorEmail}
+              doctorName={doctorName}
+              sendEvents={s.sendEvents}
+              sendStatus={s.sendStatus}
+              onSend={onSend}
+            />
+          </div>
         ) : null}
 
         {s.status === "complete" && !s.processing ? (
@@ -472,6 +577,39 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           </details>
         ) : null}
       </div>
+
+      {/* S6.3 cancel confirm modal — PRD §8.1.6 copy locked verbatim.
+          Renders only when the user has tapped Cancel during processing. */}
+      {showCancelConfirm ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-even-navy-800/40"
+          onClick={onCancelDismiss}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-confirm-title"
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-even-white shadow-card p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p id="cancel-confirm-title" className="text-heading text-even-navy-800">
+              Cancel processing?
+            </p>
+            <p className="text-body text-even-ink-700">
+              Your transcript will return to the review screen for editing. The
+              pipelines will not run.
+            </p>
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+              <Button variant="secondary" size="md" onClick={onCancelDismiss}>
+                Keep processing
+              </Button>
+              <Button variant="destructive" size="md" onClick={onCancelConfirm}>
+                Yes, cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

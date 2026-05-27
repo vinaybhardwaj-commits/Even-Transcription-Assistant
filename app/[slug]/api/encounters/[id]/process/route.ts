@@ -10,6 +10,13 @@
  *
  * Returns: { encounter: {id, status}, note, cdmss, note_ms, cdmss_ms }
  *
+ * S6.3 (27 May 2026): added AbortError handling on the streaming branch.
+ * When the client aborts (cancel button), the upstream LLM call rejects
+ * with AbortError → the outer catch detects it, flips status to
+ * 'draft_partial', PRESERVES whatever note_json / cdmss_json was already
+ * written to the row (per V's Q2 lock), and writes an audit_log entry.
+ * The detail page renders a banner inviting re-process or use-as-is.
+ *
  * Why one endpoint not two: keeps the Vercel function count down and
  * lets us stream stages in a future polish round.
  */
@@ -28,11 +35,21 @@ export const maxDuration = 300;
 type Row = {
   id: string;
   doctor_id: string;
-  status: "draft" | "processing" | "complete" | "failed" | "deleted";
+  status: "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
   transcript_raw: string | null;
   note_json: EncounterNote | null;
   cdmss_json: CdmssOutput | CdmssRich | null;
 };
+
+// True when an error came from req.signal.abort() — either AbortError DOMException
+// or the various shapes Node / fetch wrappers throw (ERR_ABORTED, AbortError name).
+function isAbortError(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { name?: unknown; code?: unknown };
+  if (typeof err.name === "string" && err.name === "AbortError") return true;
+  if (typeof err.code === "string" && err.code === "ERR_ABORTED") return true;
+  return false;
+}
 
 export async function POST(
   req: NextRequest,
@@ -103,6 +120,7 @@ export async function POST(
   const accept = req.headers.get("accept") ?? "";
   if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
     const encoder = new TextEncoder();
+    const doctorId = claims.doctor_id;
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const emit = (obj: unknown) => {
@@ -199,15 +217,47 @@ export async function POST(
             cdmss_error: cdmssErr,
           });
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          emit({ stage: "error", where: "outer", message: msg.slice(0, 200) });
+          // S6.3: distinguish doctor cancel from real errors.
+          // On cancel: flip status to 'draft_partial' and PRESERVE whatever
+          // note_json / cdmss_json already landed. Per V's Q2 lock.
+          // On other errors: fall through to existing "error" emit (no DB
+          // touch — let the row stay 'processing' and be reaped later if
+          // really stuck. We avoid auto-flipping to 'failed' here because
+          // the outer catch fires for *any* unhandled throw including
+          // transient Ollama hiccups that the doctor might want to retry.)
+          if (isAbortError(e) || req.signal.aborted) {
+            try {
+              await sql`
+                UPDATE encounter
+                   SET status = 'draft_partial'
+                 WHERE id = ${id}
+                   AND status = 'processing'
+              `;
+              await sql`
+                INSERT INTO audit_log
+                  (actor_type, actor_id, action, target_type, target_id, metadata_json)
+                VALUES
+                  ('doctor', ${doctorId}, 'encounter.cancel_processing', 'encounter', ${id},
+                   ${JSON.stringify({ reason: "client_abort" })}::jsonb)
+              `;
+            } catch {
+              /* best-effort; client is already gone */
+            }
+            // Best-effort emit (may no-op if controller already closed)
+            emit({ stage: "cancelled", message: "processing cancelled by user" });
+          } else {
+            const msg = e instanceof Error ? e.message : String(e);
+            emit({ stage: "error", where: "outer", message: msg.slice(0, 200) });
+          }
         } finally {
           clearInterval(hbInterval);
           close();
         }
       },
       cancel() {
-        /* client disconnect — req.signal will abort upstream LLM calls */
+        /* client disconnect — req.signal will abort upstream LLM calls
+           which throws AbortError, caught by the start()-body try/catch
+           above, where we write status='draft_partial' + audit_log. */
       },
     });
 
