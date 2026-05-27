@@ -84,6 +84,11 @@ export function HomeShell({ slug, doctorName }: Props) {
           <p className="mt-8 text-caption text-even-ink-400 text-center">
             Tap to begin. We will ask for microphone permission on the next screen.
           </p>
+          <p className="mt-6 text-caption text-even-ink-500 text-center">
+            <a href={`/${slug}/recipients`} className="text-even-blue-600 hover:underline">
+              Manage saved contacts
+            </a>
+          </p>
         </div>
       ) : (
         <div className="px-4 pt-6 pb-12">

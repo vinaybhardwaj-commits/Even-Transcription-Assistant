@@ -266,6 +266,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
 
         {s.status === "complete" && s.note ? (
           <SendPanel
+            slug={slug}
             doctorEmail={doctorEmail}
             doctorName={doctorName}
             sendEvents={s.sendEvents}

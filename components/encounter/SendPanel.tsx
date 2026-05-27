@@ -11,9 +11,17 @@ export type SendEventLite = {
   created_at: string;
 };
 
+type SavedRecipient = {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+};
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type Props = {
+  slug: string;
   doctorEmail: string;
   doctorName: string;
   sendEvents: SendEventLite[];
@@ -22,39 +30,70 @@ type Props = {
 };
 
 export function SendPanel({
+  slug,
   doctorEmail,
   doctorName,
   sendEvents,
   sendStatus,
   onSend,
 }: Props) {
-  // Track which addresses are checked; doctor is checked by default.
+  const [saved, setSaved] = React.useState<SavedRecipient[]>([]);
+  const [savedLoaded, setSavedLoaded] = React.useState(false);
+
+  // Track which addresses are checked. Doctor checked by default.
   const [checked, setChecked] = React.useState<Record<string, boolean>>({
     [doctorEmail.toLowerCase()]: true,
   });
-  const [extras, setExtras] = React.useState<string[]>([]); // user-added beyond doctor
+  const [extras, setExtras] = React.useState<string[]>([]);
   const [pendingInput, setPendingInput] = React.useState("");
   const [inputError, setInputError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const [sendError, setSendError] = React.useState<string | null>(null);
 
-  const recipientList = React.useMemo(
-    () => [doctorEmail.toLowerCase(), ...extras],
-    [doctorEmail, extras],
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/${slug}/api/recipients`, { cache: "no-store" });
+        if (!res.ok) {
+          if (!cancelled) setSavedLoaded(true);
+          return;
+        }
+        const j = (await res.json()) as { recipients: SavedRecipient[] };
+        if (!cancelled) {
+          setSaved(j.recipients);
+          setSavedLoaded(true);
+        }
+      } catch {
+        if (!cancelled) setSavedLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  const allEmails = React.useMemo(
+    () => [
+      doctorEmail.toLowerCase(),
+      ...saved.map((r) => r.email.toLowerCase()),
+      ...extras,
+    ],
+    [doctorEmail, saved, extras],
   );
   const selected = React.useMemo(
-    () => recipientList.filter((e) => checked[e]),
-    [recipientList, checked],
+    () => Array.from(new Set(allEmails.filter((e) => checked[e]))),
+    [allEmails, checked],
   );
 
-  const addRecipient = React.useCallback(() => {
+  const addExtra = React.useCallback(() => {
     const v = pendingInput.trim().toLowerCase();
     if (!v) return;
     if (!EMAIL_RE.test(v)) {
       setInputError("That doesn't look like a valid email address.");
       return;
     }
-    if (recipientList.includes(v)) {
+    if (allEmails.includes(v)) {
       setInputError("Already in the list.");
       return;
     }
@@ -62,7 +101,7 @@ export function SendPanel({
     setChecked((prev) => ({ ...prev, [v]: true }));
     setPendingInput("");
     setInputError(null);
-  }, [pendingInput, recipientList]);
+  }, [pendingInput, allEmails]);
 
   const removeExtra = React.useCallback((email: string) => {
     setExtras((prev) => prev.filter((e) => e !== email));
@@ -85,7 +124,6 @@ export function SendPanel({
     if (!r.ok) {
       setSendError(r.error ?? "Send failed");
     } else {
-      // Clear extras after a successful send so the form is "fresh"
       setExtras([]);
       setPendingInput("");
     }
@@ -96,52 +134,97 @@ export function SendPanel({
       <div>
         <h3 className="text-heading text-even-navy-800">Send</h3>
         <p className="text-caption text-even-ink-500 mt-0.5">
-          Email this note to yourself and anyone else who needs it.
+          Email this note to yourself and anyone else who needs it.{" "}
+          <a href={`/${slug}/recipients`} className="text-even-blue-600 hover:underline">
+            Manage contacts
+          </a>
         </p>
       </div>
 
       <ul className="space-y-2">
-        {recipientList.map((email) => {
-          const isYou = email === doctorEmail.toLowerCase();
-          const isChecked = !!checked[email];
+        {/* Doctor row */}
+        <li className="flex items-center justify-between gap-3 rounded-md border border-even-ink-100 px-3 py-2">
+          <label className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!checked[doctorEmail.toLowerCase()]}
+              onChange={(e) =>
+                setChecked((prev) => ({
+                  ...prev,
+                  [doctorEmail.toLowerCase()]: e.target.checked,
+                }))
+              }
+              className="h-4 w-4 accent-even-blue-600"
+            />
+            <span className="block text-body text-even-navy-800 truncate">
+              {doctorEmail}
+              <span className="ml-2 text-caption text-even-ink-500">
+                (You · {doctorName.replace(/^Dr\.?\s+/i, "")})
+              </span>
+            </span>
+          </label>
+        </li>
+
+        {/* Saved contacts */}
+        {saved.map((r) => {
+          const e = r.email.toLowerCase();
           return (
             <li
-              key={email}
+              key={r.id}
               className="flex items-center justify-between gap-3 rounded-md border border-even-ink-100 px-3 py-2"
             >
               <label className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={isChecked}
-                  onChange={(e) =>
-                    setChecked((prev) => ({ ...prev, [email]: e.target.checked }))
+                  checked={!!checked[e]}
+                  onChange={(ev) =>
+                    setChecked((prev) => ({ ...prev, [e]: ev.target.checked }))
                   }
                   className="h-4 w-4 accent-even-blue-600"
                 />
-                <span className="min-w-0">
+                <span className="min-w-0 flex-1">
                   <span className="block text-body text-even-navy-800 truncate">
-                    {email}
-                    {isYou ? (
-                      <span className="ml-2 text-caption text-even-ink-500">
-                        (You · {doctorName.replace(/^Dr\.?\s+/i, "")})
-                      </span>
-                    ) : null}
+                    {r.name}
+                  </span>
+                  <span className="block text-caption text-even-ink-500 truncate">
+                    {r.email}
                   </span>
                 </span>
+                <span className="text-caption rounded-full px-2 py-0.5 bg-even-ink-100 text-even-ink-700 shrink-0">
+                  {r.role}
+                </span>
               </label>
-              {!isYou ? (
-                <button
-                  type="button"
-                  onClick={() => removeExtra(email)}
-                  className="text-caption text-even-ink-400 hover:text-danger-700 px-1"
-                  aria-label={`Remove ${email}`}
-                >
-                  Remove
-                </button>
-              ) : null}
             </li>
           );
         })}
+
+        {/* Ad-hoc extras */}
+        {extras.map((email) => (
+          <li
+            key={email}
+            className="flex items-center justify-between gap-3 rounded-md border border-even-ink-100 px-3 py-2"
+          >
+            <label className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!checked[email]}
+                onChange={(e) =>
+                  setChecked((prev) => ({ ...prev, [email]: e.target.checked }))
+                }
+                className="h-4 w-4 accent-even-blue-600"
+              />
+              <span className="block text-body text-even-navy-800 truncate">{email}</span>
+            </label>
+            <button
+              type="button"
+              onClick={() => removeExtra(email)}
+              className="text-caption text-even-ink-400 hover:text-danger-700 px-1"
+              aria-label={`Remove ${email}`}
+            >
+              Remove
+            </button>
+          </li>
+        ))}
       </ul>
 
       <div>
@@ -157,18 +240,29 @@ export function SendPanel({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                addRecipient();
+                addExtra();
               }
             }}
             autoComplete="email"
             className="flex-1 rounded-md border border-even-ink-200 px-3 py-2 text-body text-even-ink-800 focus:outline-none focus:ring-2 focus:ring-even-blue-300"
           />
-          <Button variant="secondary" onClick={addRecipient}>
+          <Button variant="secondary" onClick={addExtra}>
             Add
           </Button>
         </div>
         {inputError ? (
           <p className="mt-1 text-caption text-danger-700">{inputError}</p>
+        ) : null}
+        {!savedLoaded ? (
+          <p className="mt-2 text-caption text-even-ink-400">Loading your contacts…</p>
+        ) : saved.length === 0 ? (
+          <p className="mt-2 text-caption text-even-ink-400">
+            Tip: save frequent recipients via{" "}
+            <a href={`/${slug}/recipients`} className="text-even-blue-600 hover:underline">
+              Manage contacts
+            </a>
+            {" "}to one-tap them here.
+          </p>
         ) : null}
       </div>
 
