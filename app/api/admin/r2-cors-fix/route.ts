@@ -48,8 +48,17 @@ export async function POST() {
   }
 
   const endpoint = process.env.R2_ENDPOINT;
-  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+  // Prefer R2_ADMIN_* credentials when set — needed because the regular
+  // R2_ACCESS_KEY_ID token only has Object scope (PutObject etc.) and
+  // PutBucketCors requires Admin scope. V creates a separate
+  // 'Admin Read & Write' token in Cloudflare R2 → API Tokens, pastes
+  // here as env vars; this endpoint uses them; the regular token stays
+  // Object-only for the runtime upload path.
+  const accessKeyId =
+    process.env.R2_ADMIN_ACCESS_KEY_ID ?? process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey =
+    process.env.R2_ADMIN_SECRET_ACCESS_KEY ?? process.env.R2_SECRET_ACCESS_KEY;
+  const usingAdminToken = !!process.env.R2_ADMIN_ACCESS_KEY_ID;
   const bucketName = process.env.R2_BUCKET ?? "eta-audio";
   if (!endpoint || !accessKeyId || !secretAccessKey) {
     return respondError("UPSTREAM_UNAVAILABLE", "r2_credentials_missing");
@@ -115,6 +124,7 @@ export async function POST() {
   return respondOk({
     ok: true,
     bucket: bucketName,
+    used_admin_token: usingAdminToken,
     allowed_origins: ALLOWED_ORIGINS,
     before,
     after,
