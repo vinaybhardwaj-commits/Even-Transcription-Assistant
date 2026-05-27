@@ -309,7 +309,14 @@ export function TracesListClient() {
                     </span>
                   </td>
                   <td className="px-4 py-2 text-caption font-mono text-even-ink-500">
-                    {t.encounter_id ? t.encounter_id.slice(0, 14) + "…" : "—"}
+                    {t.encounter_id ? (
+                      <Link
+                        href={`/admin/encounters/${t.encounter_id}`}
+                        className="text-even-blue-600 hover:underline"
+                      >
+                        {t.encounter_id.slice(0, 14)}…
+                      </Link>
+                    ) : "—"}
                   </td>
                 </tr>
               ))

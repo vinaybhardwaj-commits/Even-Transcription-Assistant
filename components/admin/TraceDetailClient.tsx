@@ -146,7 +146,7 @@ export function TraceDetailClient({ traceId }: { traceId: string }) {
               <span><strong className="text-even-ink-700">Completed:</strong> {new Date(trace.completed_at).toLocaleString()}</span>
             ) : null}
             {trace.encounter_id ? (
-              <span><strong className="text-even-ink-700">Encounter:</strong> <code className="font-mono">{trace.encounter_id}</code></span>
+              <span><strong className="text-even-ink-700">Encounter:</strong> <Link href={`/admin/encounters/${trace.encounter_id}`} className="text-even-blue-600 hover:underline font-mono">{trace.encounter_id}</Link></span>
             ) : null}
             {trace.doctor_email ? (
               <span><strong className="text-even-ink-700">Doctor:</strong> {trace.doctor_email}</span>
