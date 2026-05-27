@@ -17,7 +17,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
@@ -153,6 +153,22 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  // Sprint 8 deep-link support: /admin/encounters/[id]?action=resend
+  // auto-opens the ResendModal once data has loaded.
+  const searchParams = useSearchParams();
+  const autoOpenedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (autoOpenedRef.current) return;
+    if (!data) return;
+    if (searchParams?.get("action") === "resend") {
+      const enc = data.encounter;
+      if (enc.status === "complete" || enc.status === "draft_partial") {
+        autoOpenedRef.current = true;
+        setShowResend(true);
+      }
+    }
+  }, [data, searchParams]);
 
   const enc = data?.encounter ?? null;
   const noteFinal = enc?.note_json_edited ?? enc?.note_json ?? null;

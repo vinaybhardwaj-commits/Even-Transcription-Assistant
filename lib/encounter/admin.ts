@@ -308,3 +308,214 @@ export async function listEncounterRecipientCandidates(
     })),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 8 list helpers — cross-doctor encounter list for /admin/encounters.
+//
+// Per V's Q1 lock (27 May 2026), the filter chips are:
+//   - all        → no status/send_status filter
+//   - sent       → send_status = 'sent'
+//   - failed     → send_status = 'failed'
+//   - draft      → status = 'draft'
+//   - processing → status = 'processing'
+//
+// Per V's Q3 lock — rows are grouped by recorded_at bucket (today /
+// yesterday / earlier_this_week / earlier_this_month / older) in the
+// CLIENT, not the API. API just returns ORDER BY recorded_at DESC.
+// ---------------------------------------------------------------------------
+
+export type EncountersBucket = "all" | "sent" | "failed" | "draft" | "processing";
+export type EncountersWindow = "today" | "week" | "month" | "all";
+
+export type AdminEncounterListRow = {
+  id: string;
+  status: EncounterStatus;
+  send_status: "pending" | "sent" | "failed";
+  patient_label_raw: string | null;
+  chief_complaint: string | null;
+  recorded_at: string;
+  duration_seconds: number | null;
+  sent_at: string | null;
+  doctor: {
+    id: string;
+    full_name: string;
+    email: string;
+    url_slug: string;
+  } | null;
+  // For the PIPELINE column — yes/no flags for note + cdmss completion
+  has_note: boolean;
+  has_cdmss: boolean;
+  // For the SEND column — recipient count from send_events with terminal success
+  delivered_count: number;
+};
+
+export type AdminEncounterListResult = {
+  rows: AdminEncounterListRow[];
+  total: number;
+  // Bucket counts (always computed across the chosen WINDOW, never the bucket)
+  // so the filter chips can show 'Sent 14 / Failed 1 / Draft 2 …'
+  counts: {
+    all: number;
+    sent: number;
+    failed: number;
+    draft: number;
+    processing: number;
+    today: number;
+    week: number;
+    month: number;
+  };
+};
+
+function windowSinceForEnc(window: EncountersWindow): Date {
+  const d = new Date();
+  switch (window) {
+    case "today": d.setUTCHours(0, 0, 0, 0); return d;
+    case "week":  return new Date(d.getTime() - 7 * 24 * 60 * 60 * 1000);
+    case "month": return new Date(d.getTime() - 30 * 24 * 60 * 60 * 1000);
+    case "all":   return new Date(0);
+  }
+}
+
+export async function listAdminEncounters(args: {
+  bucket?: EncountersBucket;
+  window?: EncountersWindow;
+  limit?: number;
+  offset?: number;
+}): Promise<AdminEncounterListResult> {
+  const bucket = args.bucket ?? "all";
+  const window = args.window ?? "month";
+  const limit = Math.min(Math.max(args.limit ?? 25, 1), 200);
+  const offset = Math.max(args.offset ?? 0, 0);
+  const since = windowSinceForEnc(window).toISOString();
+
+  // Translate bucket → (statusFilter, sendStatusFilter)
+  const statusFilter: string | null =
+    bucket === "draft" ? "draft" :
+    bucket === "processing" ? "processing" :
+    null;
+  const sendStatusFilter: string | null =
+    bucket === "sent" ? "sent" :
+    bucket === "failed" ? "failed" :
+    null;
+
+  try {
+    // Total + rows (parallel)
+    const [totalRows, rows] = await Promise.all([
+      sql`
+        SELECT COUNT(*)::int AS n
+          FROM encounter e
+         WHERE e.recorded_at >= ${since}::timestamptz
+           AND (e.deleted_at IS NULL)
+           AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
+           AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
+      `,
+      sql`
+        SELECT
+          e.id,
+          e.status,
+          e.send_status,
+          e.patient_label_raw,
+          e.chief_complaint,
+          e.recorded_at::text  AS recorded_at,
+          e.duration_seconds,
+          e.sent_at::text      AS sent_at,
+          (e.note_json IS NOT NULL OR e.note_json_edited IS NOT NULL) AS has_note,
+          (e.cdmss_json IS NOT NULL) AS has_cdmss,
+          d.id                 AS doctor_id,
+          d.full_name          AS doctor_full_name,
+          d.email              AS doctor_email,
+          d.url_slug           AS doctor_url_slug,
+          (
+            SELECT COUNT(*)::int FROM send_event se
+             WHERE se.encounter_id = e.id
+               AND se.status IN ('sent','delivered','opened')
+          ) AS delivered_count
+        FROM encounter e
+        LEFT JOIN doctor d ON d.id = e.doctor_id
+        WHERE e.recorded_at >= ${since}::timestamptz
+          AND (e.deleted_at IS NULL)
+          AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
+          AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
+        ORDER BY e.recorded_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `,
+    ]);
+
+    // Bucket counts — single query computing all five bucket counters + window counters
+    const countRows = (await sql`
+      WITH window_today AS (
+        SELECT COUNT(*)::int AS n FROM encounter
+         WHERE recorded_at >= date_trunc('day', NOW()) AND deleted_at IS NULL
+      ),
+      window_week AS (
+        SELECT COUNT(*)::int AS n FROM encounter
+         WHERE recorded_at >= NOW() - INTERVAL '7 days' AND deleted_at IS NULL
+      ),
+      window_month AS (
+        SELECT COUNT(*)::int AS n FROM encounter
+         WHERE recorded_at >= NOW() - INTERVAL '30 days' AND deleted_at IS NULL
+      ),
+      window_set AS (
+        SELECT * FROM encounter
+         WHERE recorded_at >= ${since}::timestamptz AND deleted_at IS NULL
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM window_set)                                      AS all_count,
+        (SELECT COUNT(*)::int FROM window_set WHERE send_status = 'sent')           AS sent_count,
+        (SELECT COUNT(*)::int FROM window_set WHERE send_status = 'failed')         AS failed_count,
+        (SELECT COUNT(*)::int FROM window_set WHERE status = 'draft')               AS draft_count,
+        (SELECT COUNT(*)::int FROM window_set WHERE status = 'processing')          AS processing_count,
+        (SELECT n FROM window_today)                                                AS today_count,
+        (SELECT n FROM window_week)                                                 AS week_count,
+        (SELECT n FROM window_month)                                                AS month_count
+    `) as Array<{
+      all_count: number; sent_count: number; failed_count: number;
+      draft_count: number; processing_count: number;
+      today_count: number; week_count: number; month_count: number;
+    }>;
+    const c = countRows[0] ?? {
+      all_count: 0, sent_count: 0, failed_count: 0,
+      draft_count: 0, processing_count: 0,
+      today_count: 0, week_count: 0, month_count: 0,
+    };
+
+    return {
+      rows: (rows as Array<Record<string, unknown>>).map((r) => ({
+        id: String(r.id),
+        status: r.status as EncounterStatus,
+        send_status: (r.send_status as "pending" | "sent" | "failed") ?? "pending",
+        patient_label_raw: r.patient_label_raw ? String(r.patient_label_raw) : null,
+        chief_complaint: r.chief_complaint ? String(r.chief_complaint) : null,
+        recorded_at: String(r.recorded_at),
+        duration_seconds: r.duration_seconds == null ? null : Number(r.duration_seconds),
+        sent_at: r.sent_at ? String(r.sent_at) : null,
+        doctor: r.doctor_id ? {
+          id: String(r.doctor_id),
+          full_name: String(r.doctor_full_name ?? ""),
+          email:     String(r.doctor_email ?? ""),
+          url_slug:  String(r.doctor_url_slug ?? ""),
+        } : null,
+        has_note: Boolean(r.has_note),
+        has_cdmss: Boolean(r.has_cdmss),
+        delivered_count: r.delivered_count == null ? 0 : Number(r.delivered_count),
+      })),
+      total: (totalRows as Array<{ n: number }>)[0]?.n ?? 0,
+      counts: {
+        all:        c.all_count,
+        sent:       c.sent_count,
+        failed:     c.failed_count,
+        draft:      c.draft_count,
+        processing: c.processing_count,
+        today:      c.today_count,
+        week:       c.week_count,
+        month:      c.month_count,
+      },
+    };
+  } catch (e) {
+    console.warn("[admin] listAdminEncounters failed:", e);
+    return {
+      rows: [], total: 0,
+      counts: { all: 0, sent: 0, failed: 0, draft: 0, processing: 0, today: 0, week: 0, month: 0 },
+    };
+  }
+}

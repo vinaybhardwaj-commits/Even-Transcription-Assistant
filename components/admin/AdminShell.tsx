@@ -38,7 +38,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { key: "dashboard",  label: "Dashboard",  href: "/admin",          icon: "▤", section: "operate" },
   { key: "doctors",    label: "Doctors",    href: null,              icon: "◯", section: "operate" },
-  { key: "encounters", label: "Encounters", href: null,              icon: "◐", section: "operate" },
+  { key: "encounters", label: "Encounters", href: "/admin/encounters", icon: "◐", section: "operate" },
   { key: "traces",     label: "LLM traces", href: "/admin/traces",   icon: "◈", section: "observe" },
   { key: "sends",      label: "Sends",      href: null,              icon: "◉", section: "observe" },
   { key: "settings",   label: "Settings",   href: null,              icon: "◧", section: "configure" },
