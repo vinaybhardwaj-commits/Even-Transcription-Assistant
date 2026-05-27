@@ -10,12 +10,8 @@ export async function POST() {
     httpOnly: true,
     secure: true,
     sameSite: "strict",
-    path: `/${process.env.ADMIN_BASE_PATH ?? "admin"}`,
+    path: "/",
     maxAge: 0,
-  });
-  // Also clear the conventional /admin path in case ADMIN_BASE_PATH was rotated
-  c.set(ADMIN_COOKIE, "", {
-    httpOnly: true, secure: true, sameSite: "strict", path: "/admin", maxAge: 0,
   });
   return respondOk({ ok: true });
 }

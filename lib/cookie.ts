@@ -46,12 +46,14 @@ export async function readDoctorCookie(): Promise<string | null> {
 
 export async function setAdminCookie(jwt: string): Promise<void> {
   const c = await cookies();
-  const path = `/${process.env.ADMIN_BASE_PATH ?? "admin"}`;
+  // Path=/ so the cookie travels to both /admin (dashboard) and /api/admin/*.
+  // Per-doctor isolation isn't a concern for admin; HttpOnly+Secure+
+  // SameSite=Strict still prevent xss/csrf/cross-doctor leak.
   c.set(ADMIN_COOKIE, jwt, {
     httpOnly: true,
     secure: true,
     sameSite: "strict",
-    path,
+    path: "/",
     maxAge: TTL_SECONDS,
   });
 }
