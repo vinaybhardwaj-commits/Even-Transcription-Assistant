@@ -16,6 +16,20 @@ import bcrypt from "bcryptjs";
 
 export const runtime = "nodejs";
 
+/**
+ * Resolve the canonical app URL for outbound links (login_url, email
+ * footers). Reads APP_URL but overrides the legacy eta.even.in value
+ * that's stuck in the Vercel env (would need V to update the dashboard).
+ * Falls back to the live llmvinayminihome.uk domain.
+ */
+function canonicalAppUrl(): string {
+  const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
+  if (!raw) return "https://eta.llmvinayminihome.uk";
+  // Hard override: the stale eta.even.in env value is unreachable
+  if (/eta\.even\.in/i.test(raw)) return "https://eta.llmvinayminihome.uk";
+  return raw;
+}
+
 function generatePin(): string {
   const n = Math.floor(Math.random() * 10_000);
   return String(n).padStart(4, "0");
@@ -61,7 +75,7 @@ export async function POST(
     if (rows.length === 0) {
       return respondError("NOT_FOUND", "doctor_not_found");
     }
-    const appUrl = process.env.APP_URL ?? "https://eta.llmvinayminihome.uk";
+    const appUrl = canonicalAppUrl();
     return respondOk({
       doctor: { id: rows[0].id, url_slug: rows[0].url_slug },
       pin_plaintext: pin,

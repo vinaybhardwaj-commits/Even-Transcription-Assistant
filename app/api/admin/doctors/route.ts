@@ -27,6 +27,20 @@ import { customAlphabet } from "nanoid";
 
 export const runtime = "nodejs";
 
+/**
+ * Resolve the canonical app URL for outbound links (login_url, email
+ * footers). Reads APP_URL but overrides the legacy eta.even.in value
+ * that's stuck in the Vercel env (would need V to update the dashboard).
+ * Falls back to the live llmvinayminihome.uk domain.
+ */
+function canonicalAppUrl(): string {
+  const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
+  if (!raw) return "https://eta.llmvinayminihome.uk";
+  // Hard override: the stale eta.even.in env value is unreachable
+  if (/eta\.even\.in/i.test(raw)) return "https://eta.llmvinayminihome.uk";
+  return raw;
+}
+
 const doctorId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
 
 async function guard(): Promise<GuardResult> {
@@ -132,7 +146,7 @@ export async function POST(req: NextRequest) {
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
-  const appUrl = process.env.APP_URL ?? "https://eta.llmvinayminihome.uk";
+  const appUrl = canonicalAppUrl();
   return respondOk({
     doctor: {
       id,
