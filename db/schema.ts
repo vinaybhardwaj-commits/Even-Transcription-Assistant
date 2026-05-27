@@ -13,7 +13,7 @@ const citext = customType<{ data: string; driverData: string }>({
 // ----------------------- ENUMS -----------------------
 export const adminRole       = pgEnum("admin_role", ["super", "ops"]);
 export const doctorStatus    = pgEnum("doctor_status", ["active", "disabled", "locked"]);
-export const encounterStatus = pgEnum("encounter_status", ["draft", "processing", "complete", "failed", "deleted"]);
+export const encounterStatus = pgEnum("encounter_status", ["draft", "processing", "complete", "failed", "deleted", "draft_partial"]);
 export const sendStatusEnum  = pgEnum("send_status", ["pending", "sent", "failed"]);
 export const sendEventStatus = pgEnum("send_event_status", ["queued", "sent", "delivered", "opened", "bounced", "complained", "failed"]);
 export const traceStage      = pgEnum("trace_stage", ["capture", "transcribe", "clean", "critique", "revise", "cdmss", "email"]);
