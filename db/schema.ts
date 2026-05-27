@@ -90,6 +90,7 @@ export const encounter = pgTable("encounter", {
   transcriptRaw:       text("transcript_raw"),
   transcriptClean:     text("transcript_clean"),
   noteJson:            jsonb("note_json"),
+  noteJsonEdited:      jsonb("note_json_edited"),
   cdmssJson:           jsonb("cdmss_json"),
   sendStatus:          sendStatusEnum("send_status").notNull().default("pending"),
   sentAt:              timestamp("sent_at", { withTimezone: true }),

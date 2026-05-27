@@ -5,31 +5,42 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
+import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel";
 import type { EncounterNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
+type Status = "draft" | "processing" | "complete" | "failed" | "deleted";
+type SendStatus = "pending" | "sent" | "failed";
+
 type InitialState = {
   id: string;
-  status: "draft" | "processing" | "complete" | "failed" | "deleted";
+  status: Status;
   note: EncounterNote | null;
   cdmss: CdmssOutput | null;
   transcript: string | null;
+  sendStatus: SendStatus;
+  sentAt: string | null;
+  sendEvents: SendEventLite[];
 };
 
 type Props = {
   slug: string;
+  doctorEmail: string;
+  doctorName: string;
   initial: InitialState;
 };
 
 type LiveState = {
-  status: InitialState["status"];
+  status: Status;
   note: EncounterNote | null;
   cdmss: CdmssOutput | null;
   error: string | null;
   processing: boolean;
+  sendStatus: SendStatus;
+  sendEvents: SendEventLite[];
 };
 
-export function EncounterDetailClient({ slug, initial }: Props) {
+export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }: Props) {
   const router = useRouter();
   const [s, setS] = React.useState<LiveState>({
     status: initial.status,
@@ -37,9 +48,10 @@ export function EncounterDetailClient({ slug, initial }: Props) {
     cdmss: initial.cdmss,
     error: null,
     processing: false,
+    sendStatus: initial.sendStatus,
+    sendEvents: initial.sendEvents,
   });
 
-  // Auto-kick processing if row is processing AND note is missing
   const autoTriggeredRef = React.useRef(false);
   React.useEffect(() => {
     if (autoTriggeredRef.current) return;
@@ -69,21 +81,75 @@ export function EncounterDetailClient({ slug, initial }: Props) {
           throw new Error(j.error?.message ?? `http_${res.status}`);
         }
         const j = (await res.json()) as {
-          encounter: { status: LiveState["status"] };
+          encounter: { status: Status };
           note: EncounterNote;
           cdmss: CdmssOutput;
           cdmss_error?: string;
         };
-        setS({
+        setS((prev) => ({
+          ...prev,
           status: j.encounter.status,
           note: j.note,
           cdmss: j.cdmss,
           error: j.cdmss_error ?? null,
           processing: false,
-        });
+        }));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setS((prev) => ({ ...prev, processing: false, error: msg }));
+      }
+    },
+    [slug, initial.id],
+  );
+
+  const onSend = React.useCallback(
+    async (recipients: string[]): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch(
+          `/${slug}/api/encounters/${initial.id}/send`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recipients }),
+          },
+        );
+        const j = await res.json();
+        if (!res.ok) {
+          const err = (j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`;
+          return { ok: false, error: err };
+        }
+        const payload = j as {
+          ok: boolean;
+          sent: { email: string; send_event_id: string; resend_message_id: string }[];
+          failed: { email: string; error: string }[];
+          subject: string;
+        };
+        // Optimistically update send events list with the new rows
+        const newEvents: SendEventLite[] = [
+          ...payload.sent.map((s) => ({
+            id: s.send_event_id,
+            recipient_email: s.email,
+            status: "sent",
+            subject: payload.subject,
+            created_at: new Date().toISOString(),
+          })),
+          ...payload.failed.map((f) => ({
+            id: `local_${Math.random().toString(36).slice(2, 8)}`,
+            recipient_email: f.email,
+            status: "failed",
+            subject: payload.subject,
+            created_at: new Date().toISOString(),
+          })),
+        ];
+        setS((prev) => ({
+          ...prev,
+          sendStatus: payload.sent.length > 0 ? "sent" : "failed",
+          sendEvents: [...newEvents, ...prev.sendEvents],
+        }));
+        return { ok: payload.sent.length > 0 };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: msg };
       }
     },
     [slug, initial.id],
@@ -101,7 +167,13 @@ export function EncounterDetailClient({ slug, initial }: Props) {
         </button>
         <span className="text-label text-even-navy-800">{initial.id.slice(0, 14)}…</span>
         <span className="text-caption text-even-ink-400">
-          {s.status === "processing" ? "Processing" : s.status === "complete" ? "Complete" : s.status === "failed" ? "Failed" : s.status}
+          {s.status === "processing"
+            ? "Processing"
+            : s.status === "complete"
+            ? "Complete"
+            : s.status === "failed"
+            ? "Failed"
+            : s.status}
         </span>
       </header>
 
@@ -142,6 +214,16 @@ export function EncounterDetailClient({ slug, initial }: Props) {
         ) : null}
 
         {s.cdmss ? <CdmssCard cdmss={s.cdmss} /> : null}
+
+        {s.status === "complete" && s.note ? (
+          <SendPanel
+            doctorEmail={doctorEmail}
+            doctorName={doctorName}
+            sendEvents={s.sendEvents}
+            sendStatus={s.sendStatus}
+            onSend={onSend}
+          />
+        ) : null}
 
         {s.status === "complete" && !s.processing ? (
           <div className="flex justify-end">
