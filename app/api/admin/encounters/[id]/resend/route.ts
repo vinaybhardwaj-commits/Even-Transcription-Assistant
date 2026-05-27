@@ -123,7 +123,7 @@ export async function POST(
     recordedAt,
     note: noteFinal,
     cdmss: enc.cdmss_json,
-    appUrl: process.env.APP_URL ?? "https://eta.llmvinayminihome.uk",
+    appUrl: process.env.APP_URL ?? "https://evenscribe.app",
   });
 
   const fromAddress = process.env.RESEND_FROM_EMAIL;

@@ -20,13 +20,13 @@ export const runtime = "nodejs";
  * Resolve the canonical app URL for outbound links (login_url, email
  * footers). Reads APP_URL but overrides the legacy eta.even.in value
  * that's stuck in the Vercel env (would need V to update the dashboard).
- * Falls back to the live llmvinayminihome.uk domain.
+ * Falls back to evenscribe.app (the canonical user-facing domain).
  */
 function canonicalAppUrl(): string {
   const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
-  if (!raw) return "https://eta.llmvinayminihome.uk";
+  if (!raw) return "https://evenscribe.app";
   // Hard override: the stale eta.even.in env value is unreachable
-  if (/eta\.even\.in/i.test(raw)) return "https://eta.llmvinayminihome.uk";
+  if (/eta\.even\.in/i.test(raw)) return "https://evenscribe.app";
   return raw;
 }
 

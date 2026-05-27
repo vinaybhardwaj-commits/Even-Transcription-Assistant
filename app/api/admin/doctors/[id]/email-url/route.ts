@@ -19,7 +19,7 @@ export const maxDuration = 30;
 
 function canonicalAppUrl(): string {
   const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
-  if (!raw || /eta\.even\.in/i.test(raw)) return "https://eta.llmvinayminihome.uk";
+  if (!raw || /eta\.even\.in/i.test(raw)) return "https://evenscribe.app";
   return raw;
 }
 
