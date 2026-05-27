@@ -84,3 +84,32 @@ export async function PATCH(
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 }
+
+/**
+ * GET /api/admin/doctors/{id}
+ *
+ * Returns full bundle for the admin Doctor detail page (Sprint 10):
+ * doctor row + KPIs + recent encounters + per-doctor recipients +
+ * audit_log entries scoped to this doctor.
+ */
+import { getFullDoctor } from "@/lib/admin/doctor-detail";
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const cookie = await readAdminCookie();
+  if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  try {
+    await verifyAdminJwt(cookie);
+  } catch {
+    return respondError("AUTH_EXPIRED", "Session invalid");
+  }
+
+  const { id } = await params;
+  if (!id.startsWith("doc_")) return respondError("VALIDATION_FAILED", "bad_doctor_id");
+
+  const bundle = await getFullDoctor(id);
+  if (!bundle.doctor) return respondError("NOT_FOUND", "doctor_not_found");
+  return respondOk(bundle);
+}
