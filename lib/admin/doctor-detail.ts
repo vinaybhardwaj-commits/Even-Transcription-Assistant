@@ -134,7 +134,7 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
           WHERE doctor_id = ${id}
             AND recorded_at >= NOW() - INTERVAL '30 days'
             AND deleted_at IS NULL)                                    AS active_days_30d
-    ` as Promise<Array<{
+    ` as unknown as Promise<Array<{
       encounters_30d: number; encounters_total: number;
       sent_30d: number; failed_30d: number; active_days_30d: number;
     }>>,
@@ -147,13 +147,13 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
          AND deleted_at IS NULL
        ORDER BY recorded_at DESC
        LIMIT 8
-    ` as Promise<Array<Record<string, unknown>>>,
+    ` as unknown as Promise<Array<Record<string, unknown>>>,
     sql`
       SELECT id::text AS id, email, name, role, set_by
         FROM recipient_per_doctor
        WHERE doctor_id = ${id}
        ORDER BY name
-    ` as Promise<Array<Record<string, unknown>>>,
+    ` as unknown as Promise<Array<Record<string, unknown>>>,
     sql`
       SELECT id, actor_type, actor_id, action, metadata_json,
              created_at::text AS created_at
@@ -161,7 +161,7 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
        WHERE (target_type = 'doctor' AND target_id = ${id})
        ORDER BY created_at DESC
        LIMIT 25
-    ` as Promise<Array<Record<string, unknown>>>,
+    ` as unknown as Promise<Array<Record<string, unknown>>>,
   ]);
 
   const k = kpiRow[0] ?? { encounters_30d: 0, encounters_total: 0, sent_30d: 0, failed_30d: 0, active_days_30d: 0 };
