@@ -12,6 +12,7 @@
 
 import type { EncounterNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
+import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
 function escape(s: string): string {
   return String(s ?? "")
@@ -39,6 +40,19 @@ const C = {
   white: "#FCFCFC",
 } as const;
 
+
+function rfPlain(items: unknown[]): string[] {
+  return items
+    .map((it) => (typeof it === "string" ? it : it && typeof it === "object" && "text" in it ? String((it as { text: unknown }).text) : ""))
+    .filter((s) => s.length > 0);
+}
+function citeRefs(cites: unknown): string {
+  if (!Array.isArray(cites) || cites.length === 0) return "";
+  const valid = cites.filter((c): c is number => typeof c === "number");
+  if (valid.length === 0) return "";
+  return ` <span style="color:${C.ai700};font-size:12px;">[${valid.join("][")}]</span>`;
+}
+
 function sectionHeading(label: string): string {
   return `<p style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ink500};font-weight:600;">${escape(label)}</p>`;
 }
@@ -65,7 +79,7 @@ export type RenderOpts = {
   encounterId: string;
   recordedAt: Date;
   note: EncounterNote;
-  cdmss: CdmssOutput | null;
+  cdmss: CdmssOutput | CdmssRich | null;
   appUrl: string;
 };
 
@@ -127,43 +141,68 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     .filter(Boolean)
     .join("");
 
-  const cdmssBlock =
-    cdmss &&
-    (cdmss.differentials_to_consider.length ||
-      cdmss.red_flags.length ||
-      cdmss.evidence_based_suggestions.length ||
-      cdmss.follow_up_considerations.length)
-      ? `
+  // Render CDS card; supports both legacy stub (string arrays) and rich pipeline (cited items + sources).
+  const cdmssBlock = (() => {
+    if (!cdmss) return "";
+    const ddx = Array.isArray(cdmss.differentials_to_consider) ? cdmss.differentials_to_consider : [];
+    const rf = Array.isArray((cdmss as { red_flags?: unknown[] }).red_flags) ? (cdmss as { red_flags: unknown[] }).red_flags : [];
+    const sg = Array.isArray((cdmss as { evidence_based_suggestions?: unknown[] }).evidence_based_suggestions) ? (cdmss as { evidence_based_suggestions: unknown[] }).evidence_based_suggestions : [];
+    const fu = Array.isArray((cdmss as { follow_up_considerations?: unknown[] }).follow_up_considerations) ? (cdmss as { follow_up_considerations: unknown[] }).follow_up_considerations : [];
+    const sources: CdmssSource[] = Array.isArray((cdmss as { sources?: CdmssSource[] }).sources) ? (cdmss as { sources: CdmssSource[] }).sources : [];
+
+    if (ddx.length === 0 && rf.length === 0 && sg.length === 0 && fu.length === 0) return "";
+
+    const renderCitedList = (items: unknown[]): string => {
+      if (items.length === 0) return "";
+      const rows = items
+        .map((it) => {
+          if (typeof it === "string") {
+            return `<li style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${C.ink800};">${escape(it)}</li>`;
+          }
+          if (it && typeof it === "object") {
+            const obj = it as { text?: unknown; cites?: unknown };
+            const text = typeof obj.text === "string" ? obj.text : "";
+            if (!text) return "";
+            return `<li style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${C.ink800};">${escape(text)}${citeRefs(obj.cites)}</li>`;
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("");
+      return `<ul style="margin:0 0 14px 0;padding-left:20px;color:${C.ink800};">${rows}</ul>`;
+    };
+
+    const ddxList = ddx.length === 0 ? "" : `<ul style="margin:0 0 14px 0;padding-left:20px;">${ddx
+      .map((d) => {
+        const o = d as { dx?: unknown; why?: unknown; cites?: unknown };
+        const dx = typeof o.dx === "string" ? o.dx : "";
+        if (!dx) return "";
+        const why = typeof o.why === "string" ? o.why : "";
+        return `<li style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${C.ink800};"><strong>${escape(dx)}</strong>${why ? ` — ${escape(why)}` : ""}${citeRefs(o.cites)}</li>`;
+      })
+      .filter(Boolean)
+      .join("")}</ul>`;
+
+    const sourcesBlock = sources.length === 0 ? "" : `
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid ${C.ai200};">
+        <p style="margin:0 0 8px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Sources</p>
+        <ol style="margin:0;padding-left:20px;color:${C.ink700};font-size:12px;line-height:1.45;font-family:Inter,Arial,sans-serif;">
+          ${sources
+            .map((s) => `<li style="margin:0 0 6px 0;"><span style="font-weight:600;color:${C.ink700};">[${s.index}]</span> ${escape(s.book ?? "—")}${s.chapter ? ` · ${escape(s.chapter)}` : ""}${s.section ? ` · ${escape(s.section)}` : ""}${s.page_start ? ` · pp.${s.page_start}${s.page_end ? `-${s.page_end}` : ""}` : ""}</li>`)
+            .join("")}
+        </ol>
+      </div>`;
+
+    return `
       <div style="margin-top:24px;padding:20px;background:${C.ai50};border:1px solid ${C.ai200};border-radius:12px;">
         <p style="margin:0 0 12px 0;font-family:Inter,Arial,sans-serif;font-size:13px;color:${C.ai700};font-weight:600;">Clinical Decision Support</p>
-        ${
-          cdmss.differentials_to_consider.length
-            ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Differentials to consider</p>
-        <ul style="margin:0 0 14px 0;padding-left:20px;">${cdmss.differentials_to_consider
-          .map(
-            (d) =>
-              `<li style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${C.ink800};"><strong>${escape(d.dx)}</strong>${d.why ? ` — ${escape(d.why)}` : ""}</li>`,
-          )
-          .join("")}</ul>`
-            : ""
-        }
-        ${
-          cdmss.red_flags.length
-            ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.danger700};font-weight:600;">Red flags</p>${bulletList(cdmss.red_flags)}`
-            : ""
-        }
-        ${
-          cdmss.evidence_based_suggestions.length
-            ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Evidence-based suggestions</p>${bulletList(cdmss.evidence_based_suggestions)}`
-            : ""
-        }
-        ${
-          cdmss.follow_up_considerations.length
-            ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Follow-up considerations</p>${bulletList(cdmss.follow_up_considerations)}`
-            : ""
-        }
-      </div>`
-      : "";
+        ${ddx.length ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Differentials to consider</p>${ddxList}` : ""}
+        ${rf.length ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.danger700};font-weight:600;">Red flags</p>${renderCitedList(rf)}` : ""}
+        ${sg.length ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Evidence-based suggestions</p>${renderCitedList(sg)}` : ""}
+        ${fu.length ? `<p style="margin:0 0 6px 0;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.ai700};font-weight:600;">Follow-up considerations</p>${renderCitedList(fu)}` : ""}
+        ${sourcesBlock}
+      </div>`;
+  })();
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(subject)}</title></head>
@@ -207,16 +246,31 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     textLines.push(`Treatment: ${note.plan.treatment.join("; ")}`);
   if (note.plan.follow_up) textLines.push(`Follow-up: ${note.plan.follow_up}`);
 
-  if (cdmss && cdmss.differentials_to_consider.length) {
-    textLines.push("", "--- Clinical Decision Support ---");
-    cdmss.differentials_to_consider.forEach((d) =>
-      textLines.push(`  · ${d.dx}${d.why ? ` — ${d.why}` : ""}`),
-    );
-    if (cdmss.red_flags.length) textLines.push(`Red flags: ${cdmss.red_flags.join("; ")}`);
-    if (cdmss.evidence_based_suggestions.length)
-      textLines.push(
-        `Suggestions: ${cdmss.evidence_based_suggestions.join("; ")}`,
-      );
+  if (cdmss) {
+    const ddxArr = Array.isArray(cdmss.differentials_to_consider) ? cdmss.differentials_to_consider : [];
+    const rfArr = rfPlain((cdmss as { red_flags?: unknown[] }).red_flags ?? []);
+    const sgArr = rfPlain((cdmss as { evidence_based_suggestions?: unknown[] }).evidence_based_suggestions ?? []);
+    const fuArr = rfPlain((cdmss as { follow_up_considerations?: unknown[] }).follow_up_considerations ?? []);
+    const sourcesArr: CdmssSource[] = Array.isArray((cdmss as { sources?: CdmssSource[] }).sources) ? (cdmss as { sources: CdmssSource[] }).sources : [];
+    if (ddxArr.length || rfArr.length || sgArr.length || fuArr.length) {
+      textLines.push("", "--- Clinical Decision Support ---");
+      ddxArr.forEach((d) => {
+        const o = d as { dx?: unknown; why?: unknown; cites?: number[] };
+        const dx = typeof o.dx === "string" ? o.dx : "";
+        const why = typeof o.why === "string" ? o.why : "";
+        const cites = Array.isArray(o.cites) ? o.cites.filter((c): c is number => typeof c === "number") : [];
+        textLines.push(`  · ${dx}${why ? ` — ${why}` : ""}${cites.length ? ` [${cites.join("][")}]` : ""}`);
+      });
+      if (rfArr.length) textLines.push(`Red flags: ${rfArr.join("; ")}`);
+      if (sgArr.length) textLines.push(`Suggestions: ${sgArr.join("; ")}`);
+      if (fuArr.length) textLines.push(`Follow-up: ${fuArr.join("; ")}`);
+      if (sourcesArr.length) {
+        textLines.push("", "Sources:");
+        sourcesArr.forEach((s) =>
+          textLines.push(`  [${s.index}] ${s.book ?? "—"}${s.chapter ? ` · ${s.chapter}` : ""}${s.page_start ? ` · pp.${s.page_start}${s.page_end ? `-${s.page_end}` : ""}` : ""}`),
+        );
+      }
+    }
   }
 
   textLines.push("", `Reference: ${encounterId}`);

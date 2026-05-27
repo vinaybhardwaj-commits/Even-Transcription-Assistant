@@ -19,6 +19,7 @@ import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { generateNote, type EncounterNote } from "@/lib/note-generation";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
+import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
@@ -30,7 +31,7 @@ type Row = {
   status: "draft" | "processing" | "complete" | "failed" | "deleted";
   transcript_raw: string | null;
   note_json: EncounterNote | null;
-  cdmss_json: CdmssOutput | null;
+  cdmss_json: CdmssOutput | CdmssRich | null;
 };
 
 export async function POST(
@@ -121,36 +122,32 @@ export async function POST(
     return respondError("PIPELINE_FAILED", `note_persist_failed: ${msg.slice(0, 120)}`);
   }
 
-  // 2) CDMSS stub
-  const cdmssRes = await runCdmssStub(noteRes.note, { signal: req.signal });
-  if (!cdmssRes.ok) {
-    // Note is saved; CDMSS soft-failed — mark complete with empty CDMSS
-    const empty: CdmssOutput = {
+  // 2) Real CDMSS pipeline (HyDE → KB retrieve → draft → critique → revise)
+  const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal });
+
+  // Pick the cdmss object to persist + return. Rich on success; fallback
+  // stub-shape on retrieve failure; empty on hard failure.
+  let cdmssToStore: CdmssRich | CdmssOutput;
+  let cdmssErr: string | undefined;
+  if (pipelineRes.ok) {
+    cdmssToStore = pipelineRes.cdmss;
+  } else if (pipelineRes.fallback) {
+    cdmssToStore = pipelineRes.fallback;
+    cdmssErr = pipelineRes.error;
+  } else {
+    cdmssToStore = {
       differentials_to_consider: [],
       red_flags: [],
       evidence_based_suggestions: [],
       follow_up_considerations: [],
     };
-    await sql`
-      UPDATE encounter
-         SET cdmss_json = ${JSON.stringify(empty)}::jsonb,
-             status     = 'complete'
-       WHERE id = ${id}
-    `;
-    return respondOk({
-      encounter: { id, status: "complete" as const },
-      note: noteRes.note,
-      cdmss: empty,
-      note_ms: noteRes.latency_ms,
-      cdmss_error: cdmssRes.error,
-    });
+    cdmssErr = pipelineRes.error;
   }
 
-  // 3) Persist CDMSS + flip status
   try {
     await sql`
       UPDATE encounter
-         SET cdmss_json = ${JSON.stringify(cdmssRes.cdmss)}::jsonb,
+         SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
              status     = 'complete'
        WHERE id = ${id}
     `;
@@ -162,8 +159,9 @@ export async function POST(
   return respondOk({
     encounter: { id, status: "complete" as const },
     note: noteRes.note,
-    cdmss: cdmssRes.cdmss,
+    cdmss: cdmssToStore,
     note_ms: noteRes.latency_ms,
-    cdmss_ms: cdmssRes.latency_ms,
+    cdmss_ms: pipelineRes.latency_ms,
+    cdmss_error: cdmssErr,
   });
 }
