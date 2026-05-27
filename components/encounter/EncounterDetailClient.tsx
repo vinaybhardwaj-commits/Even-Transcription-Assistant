@@ -65,44 +65,180 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Stage tracking for streaming progress
+  type StageId = "note" | "hyde" | "retrieve" | "draft" | "critique" | "revise" | "fallback" | "final";
+  type StageRow = {
+    id: StageId;
+    label: string;
+    state: "pending" | "running" | "done" | "skipped" | "error";
+    started_at?: number;
+    ended_at?: number;
+    detail?: string;
+  };
+  const STAGE_ORDER: StageId[] = ["note", "hyde", "retrieve", "draft", "critique", "revise"];
+  const STAGE_LABELS: Record<StageId, string> = {
+    note: "Generating note",
+    hyde: "Expanding query",
+    retrieve: "Searching knowledge base",
+    draft: "Drafting decision support",
+    critique: "Auditing claims",
+    revise: "Revising for citation support",
+    fallback: "Falling back",
+    final: "Done",
+  };
+  // Approximate weight per stage (sum ≈ 1.0). Tuned from Sprint 3.A.3 smoke
+  // (~150s total: note ~15s, hyde ~8s, retrieve ~1.5s, draft ~51s, critique
+  // ~29s, revise ~60s). Numbers don't need to be precise — just need to
+  // make the bar move sensibly.
+  const STAGE_WEIGHTS: Record<StageId, number> = {
+    note: 0.10, hyde: 0.05, retrieve: 0.02, draft: 0.30, critique: 0.18, revise: 0.35, fallback: 0, final: 0,
+  };
+  const [stages, setStages] = React.useState<StageRow[]>(() =>
+    STAGE_ORDER.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" })),
+  );
+  const [tick, setTick] = React.useState(0);
+
+  // Re-render every 500ms while processing so elapsed counters move
+  React.useEffect(() => {
+    if (!s.processing) return;
+    const i = window.setInterval(() => setTick((t) => t + 1), 500);
+    return () => window.clearInterval(i);
+  }, [s.processing]);
+
+  const progressFraction = React.useMemo(() => {
+    let done = 0;
+    let runningPartial = 0;
+    for (const st of stages) {
+      const w = STAGE_WEIGHTS[st.id] ?? 0;
+      if (st.state === "done" || st.state === "skipped") done += w;
+      else if (st.state === "running") {
+        // Time-interp within the stage band
+        const elapsed = st.started_at ? Date.now() - st.started_at : 0;
+        const bandMs = (() => {
+          switch (st.id) {
+            case "note": return 20_000;
+            case "hyde": return 10_000;
+            case "retrieve": return 3_000;
+            case "draft": return 55_000;
+            case "critique": return 32_000;
+            case "revise": return 65_000;
+            default: return 10_000;
+          }
+        })();
+        runningPartial = w * Math.min(0.9, elapsed / bandMs);
+      }
+    }
+    return Math.min(0.97, done + runningPartial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stages, tick]);
+
+  const updateStage = React.useCallback(
+    (id: StageId, patch: Partial<StageRow>) => {
+      setStages((prev) =>
+        prev.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+      );
+    },
+    [],
+  );
+
   const runProcess = React.useCallback(
     async (force: boolean) => {
       setS((prev) => ({ ...prev, processing: true, error: null }));
+      setStages(STAGE_ORDER.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" })));
       try {
-        const res = await fetch(
-          `/${slug}/api/encounters/${initial.id}/process`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ force }),
+        const res = await fetch(`/${slug}/api/encounters/${initial.id}/process`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson",
           },
-        );
-        if (!res.ok) {
-          const j = (await res.json().catch(() => ({}))) as {
-            error?: { message?: string };
-          };
+          body: JSON.stringify({ force }),
+        });
+        if (!res.ok || !res.body) {
+          const j = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
           throw new Error(j.error?.message ?? `http_${res.status}`);
         }
-        const j = (await res.json()) as {
-          encounter: { status: Status };
-          note: EncounterNote;
-          cdmss: CdmssOutput;
-          cdmss_error?: string;
-        };
-        setS((prev) => ({
-          ...prev,
-          status: j.encounter.status,
-          note: j.note,
-          cdmss: j.cdmss,
-          error: j.cdmss_error ?? null,
-          processing: false,
-        }));
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalEvent: { encounter: { status: Status }; note: EncounterNote; cdmss: CdmssOutput; cdmss_error?: string } | null = null;
+        let lastError: string | null = null;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let nl = buffer.indexOf("\n");
+          while (nl >= 0) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            nl = buffer.indexOf("\n");
+            if (!line) continue;
+            let evt: Record<string, unknown>;
+            try {
+              evt = JSON.parse(line) as Record<string, unknown>;
+            } catch {
+              continue;
+            }
+            const stageId = evt.stage as StageId | undefined;
+            const state = evt.state as string | undefined;
+            if (stageId === "heartbeat") continue;
+            if (stageId === "error") {
+              lastError = String(evt.message ?? "unknown_error");
+              continue;
+            }
+            if (stageId === "final") {
+              finalEvent = evt as typeof finalEvent;
+              continue;
+            }
+            if (!stageId) continue;
+            if (state === "start") {
+              updateStage(stageId, { state: "running", started_at: Date.now(), detail: undefined });
+            } else if (state === "done") {
+              const ms = typeof evt.ms === "number" ? evt.ms : undefined;
+              const detailBits: string[] = [];
+              if (stageId === "note" && typeof evt.chief_complaint === "string") detailBits.push(evt.chief_complaint.slice(0, 60));
+              if (stageId === "retrieve") {
+                const hits = typeof evt.hits === "number" ? evt.hits : 0;
+                const topBook = typeof evt.top_book === "string" ? evt.top_book : null;
+                detailBits.push(`${hits} hits${topBook ? ` · ${topBook}` : ""}`);
+              }
+              if (stageId === "critique" && typeof evt.needs_revision === "boolean") {
+                detailBits.push(evt.needs_revision ? `needs revision (${evt.unsupported ?? 0})` : "passed");
+              }
+              updateStage(stageId, {
+                state: "done",
+                ended_at: Date.now(),
+                detail: [ms ? `${(ms / 1000).toFixed(1)}s` : null, ...detailBits].filter(Boolean).join(" · "),
+              });
+            } else if (state === "skipped") {
+              updateStage(stageId, { state: "skipped", ended_at: Date.now(), detail: String(evt.reason ?? evt.message ?? "skipped") });
+            } else if (state === "error") {
+              updateStage(stageId, { state: "error", ended_at: Date.now(), detail: String(evt.message ?? "error") });
+              lastError = String(evt.message ?? "error");
+            }
+          }
+        }
+
+        if (finalEvent) {
+          setS((prev) => ({
+            ...prev,
+            status: finalEvent.encounter.status,
+            note: finalEvent.note,
+            cdmss: finalEvent.cdmss,
+            error: finalEvent.cdmss_error ?? lastError,
+            processing: false,
+          }));
+        } else {
+          setS((prev) => ({ ...prev, processing: false, error: lastError ?? "stream_ended_without_final" }));
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setS((prev) => ({ ...prev, processing: false, error: msg }));
       }
     },
-    [slug, initial.id],
+    [slug, initial.id, updateStage],
   );
 
   const onSend = React.useCallback(
@@ -209,18 +345,58 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
         {s.processing ? (
-          <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 p-6 text-center">
-            <p className="text-label text-even-navy-800 mb-1">
-              Generating your note + clinical decision support
-            </p>
-            <p className="text-caption text-even-ink-500 mb-4">
-              This usually takes 30-60 seconds. Don&apos;t close this page.
-            </p>
-            <div className="inline-block">
-              <div className="h-1.5 w-48 rounded-full bg-even-ink-100 overflow-hidden">
-                <div className="h-full w-1/2 bg-even-blue-600 animate-pulse" />
-              </div>
+          <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4">
+            <div>
+              <p className="text-label text-even-navy-800 mb-1">
+                Generating your note + clinical decision support
+              </p>
+              <p className="text-caption text-even-ink-500">
+                Live pipeline. ~90&ndash;150s total.
+              </p>
             </div>
+            <div
+              className="h-1.5 w-full rounded-full bg-even-ink-100 overflow-hidden"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progressFraction * 100)}
+            >
+              <div
+                className="h-full bg-even-blue-600 transition-all"
+                style={{ width: `${Math.round(progressFraction * 100)}%` }}
+              />
+            </div>
+            <ul className="space-y-1.5">
+              {stages.map((st) => {
+                const elapsed =
+                  st.state === "running" && st.started_at
+                    ? `${((Date.now() - st.started_at) / 1000).toFixed(0)}s`
+                    : undefined;
+                const dot =
+                  st.state === "done"
+                    ? "bg-success-500"
+                    : st.state === "running"
+                    ? "bg-even-blue-500 animate-pulse"
+                    : st.state === "skipped"
+                    ? "bg-even-ink-300"
+                    : st.state === "error"
+                    ? "bg-danger-500"
+                    : "bg-even-ink-200";
+                return (
+                  <li key={st.id} className="flex items-center gap-3 text-body">
+                    <span className={`inline-block h-2 w-2 rounded-full ${dot}`} aria-hidden="true" />
+                    <span className={`flex-1 ${st.state === "pending" ? "text-even-ink-400" : "text-even-ink-800"}`}>
+                      {st.label}
+                    </span>
+                    {st.detail ? (
+                      <span className="text-caption text-even-ink-500">{st.detail}</span>
+                    ) : elapsed ? (
+                      <span className="text-caption font-mono text-even-ink-500">{elapsed}</span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         ) : null}
 

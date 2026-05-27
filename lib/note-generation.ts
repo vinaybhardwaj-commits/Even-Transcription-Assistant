@@ -13,6 +13,12 @@
  * row in failed state. Never blocks the rest of the app.
  */
 
+
+export type NoteEvent =
+  | { stage: "note"; state: "start" }
+  | { stage: "note"; state: "done"; ms: number; chief_complaint?: string }
+  | { stage: "note"; state: "error"; message: string; ms: number };
+
 const NOTE_MODEL = process.env.NOTE_MODEL || "qwen2.5:14b";
 const NOTE_TIMEOUT_MS = 240_000;
 const NOTE_TEMPERATURE = 0;
@@ -64,7 +70,7 @@ export type NoteResult =
 
 export async function generateNote(
   transcript: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void } = {},
 ): Promise<NoteResult> {
   const base = process.env.OLLAMA_BASE_URL;
   if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
@@ -82,6 +88,7 @@ export async function generateNote(
   }
 
   const t0 = Date.now();
+  opts.onEvent?.({ stage: "note", state: "start" });
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -153,14 +160,18 @@ export async function generateNote(
         follow_up: typeof parsed.plan?.follow_up === "string" ? parsed.plan.follow_up : "",
       },
     };
+    opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: note.chief_complaint });
     return { ok: true, note, latency_ms, model: NOTE_MODEL, raw_response: content };
   } catch (e: unknown) {
     clearTimeout(tid);
     const latency_ms = Date.now() - t0;
-    if (controller.signal.aborted) {
-      return { ok: false, error: `timeout_${NOTE_TIMEOUT_MS}ms`, latency_ms };
-    }
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg.slice(0, 200), latency_ms };
+    const err =
+      controller.signal.aborted
+        ? `timeout_${NOTE_TIMEOUT_MS}ms`
+        : e instanceof Error
+        ? e.message.slice(0, 200)
+        : String(e).slice(0, 200);
+    opts.onEvent?.({ stage: "note", state: "error", message: err, ms: latency_ms });
+    return { ok: false, error: err, latency_ms };
   }
 }

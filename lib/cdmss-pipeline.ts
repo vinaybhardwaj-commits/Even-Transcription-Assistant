@@ -27,6 +27,25 @@ import { retrieve } from "@/lib/kb-retrieve";
 import type { KbChunkHit } from "@/lib/kb-db";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 
+export type CdmssPipelineEvent =
+  | { stage: "seed"; state: "done"; ms: number; seed_chars: number }
+  | { stage: "hyde"; state: "start" }
+  | { stage: "hyde"; state: "done"; ms: number; used: boolean; expanded_chars: number }
+  | { stage: "retrieve"; state: "start" }
+  | { stage: "retrieve"; state: "done"; ms: number; hits: number; top_book: string | null; top_sim: number }
+  | { stage: "retrieve"; state: "error"; ms: number; message: string }
+  | { stage: "draft"; state: "start"; model: string }
+  | { stage: "draft"; state: "done"; ms: number }
+  | { stage: "draft"; state: "error"; ms: number; message: string }
+  | { stage: "critique"; state: "start"; model: string }
+  | { stage: "critique"; state: "done"; ms: number; needs_revision: boolean; unsupported: number }
+  | { stage: "critique"; state: "skipped"; ms: number; message: string }
+  | { stage: "revise"; state: "start"; model: string }
+  | { stage: "revise"; state: "done"; ms: number }
+  | { stage: "revise"; state: "skipped"; reason: string }
+  | { stage: "fallback"; state: "done"; ms: number; source: "stub" | "empty"; reason: string };
+
+
 const DRAFT_MODEL = process.env.CDS_DRAFT_MODEL || "qwen2.5:14b";
 const CRITIQUE_MODEL = process.env.CDS_CRITIQUE_MODEL || "llama3.1:8b";
 const REVISE_MODEL = process.env.CDS_REVISE_MODEL || "qwen2.5:14b";
@@ -295,26 +314,39 @@ type RawCritique = {
 
 export async function runCdmssPipeline(
   note: EncounterNote,
-  opts: { signal?: AbortSignal; topK?: number } = {},
+  opts: { signal?: AbortSignal; topK?: number; onEvent?: (e: CdmssPipelineEvent) => void } = {},
 ): Promise<CdmssPipelineResult> {
   const totalT0 = Date.now();
   const topK = opts.topK ?? 8;
 
   // 1. Seed
+  const seedT0 = Date.now();
   const seed = noteToSeedQuery(note);
   if (!seed.trim()) {
     return { ok: false, error: "note_too_empty_for_seed", latency_ms: Date.now() - totalT0 };
   }
+  opts.onEvent?.({ stage: "seed", state: "done", ms: Date.now() - seedT0, seed_chars: seed.length });
 
   // 2. HyDE
+  opts.onEvent?.({ stage: "hyde", state: "start" });
   const hyde = await expandQuery(seed, { signal: opts.signal });
+  opts.onEvent?.({
+    stage: "hyde",
+    state: "done",
+    ms: hyde.latency_ms,
+    used: hyde.ok,
+    expanded_chars: hyde.expanded.length,
+  });
   const queryForEmbed = hyde.expanded;
 
   // 3. Retrieve
+  opts.onEvent?.({ stage: "retrieve", state: "start" });
   const r = await retrieve(queryForEmbed, { topK, signal: opts.signal });
   if (!r.ok) {
-    // Fall back to stub — note-only, no sources
+    opts.onEvent?.({ stage: "retrieve", state: "error", ms: 0, message: r.error });
+    const stubT0 = Date.now();
     const stub = await runCdmssStub(note, { signal: opts.signal });
+    opts.onEvent?.({ stage: "fallback", state: "done", ms: Date.now() - stubT0, source: stub.ok ? "stub" : "empty", reason: r.error });
     return {
       ok: false,
       error: `kb_retrieve_failed: ${r.error}`,
@@ -323,8 +355,10 @@ export async function runCdmssPipeline(
     };
   }
   if (r.hits.length === 0) {
-    // KB returned nothing — fall back to stub
+    opts.onEvent?.({ stage: "retrieve", state: "done", ms: r.embed_ms + r.query_ms, hits: 0, top_book: null, top_sim: 0 });
+    const stubT0 = Date.now();
     const stub = await runCdmssStub(note, { signal: opts.signal });
+    opts.onEvent?.({ stage: "fallback", state: "done", ms: Date.now() - stubT0, source: stub.ok ? "stub" : "empty", reason: "kb_no_hits" });
     return {
       ok: false,
       error: "kb_no_hits",
@@ -332,10 +366,19 @@ export async function runCdmssPipeline(
       fallback: stub.ok ? stub.cdmss : undefined,
     };
   }
+  opts.onEvent?.({
+    stage: "retrieve",
+    state: "done",
+    ms: r.embed_ms + r.query_ms,
+    hits: r.hits.length,
+    top_book: r.hits[0]?.book ?? null,
+    top_sim: typeof r.hits[0]?.similarity === "number" ? Number(r.hits[0].similarity.toFixed(3)) : 0,
+  });
 
   const { numbered, sources } = formatSources(r.hits);
 
   // 4. Draft
+  opts.onEvent?.({ stage: "draft", state: "start", model: DRAFT_MODEL });
   const draftRes = await callJson<RawDraft>(
     DRAFT_MODEL,
     DRAFT_TIMEOUT_MS,
@@ -344,16 +387,19 @@ export async function runCdmssPipeline(
     { signal: opts.signal, temperature: 0.1 },
   );
   if (!draftRes.ok) {
+    opts.onEvent?.({ stage: "draft", state: "error", ms: draftRes.latency_ms, message: draftRes.error });
     return {
       ok: false,
       error: `draft_failed: ${draftRes.error}`,
       latency_ms: Date.now() - totalT0,
     };
   }
+  opts.onEvent?.({ stage: "draft", state: "done", ms: draftRes.latency_ms });
   const draftRaw = draftRes.raw;
   const maxIndex = sources.length;
 
   // 5. Critique
+  opts.onEvent?.({ stage: "critique", state: "start", model: CRITIQUE_MODEL });
   const critiqueRes = await callJson<RawCritique>(
     CRITIQUE_MODEL,
     CRITIQUE_TIMEOUT_MS,
@@ -361,6 +407,15 @@ export async function runCdmssPipeline(
     buildCritiqueUser(draftRaw, numbered),
     { signal: opts.signal, temperature: 0 },
   );
+  if (critiqueRes.ok) {
+    const needs = critiqueRes.data.overall_quality === "needs_revision";
+    const unsupportedCount = Array.isArray(critiqueRes.data.unsupported_items)
+      ? critiqueRes.data.unsupported_items.length
+      : 0;
+    opts.onEvent?.({ stage: "critique", state: "done", ms: critiqueRes.latency_ms, needs_revision: needs, unsupported: unsupportedCount });
+  } else {
+    opts.onEvent?.({ stage: "critique", state: "skipped", ms: critiqueRes.latency_ms, message: critiqueRes.error });
+  }
 
   let finalRaw = draftRaw;
   let finalParsed = draftRes.data;
@@ -376,6 +431,7 @@ export async function runCdmssPipeline(
     Array.isArray(critiqueRes.data.unsupported_items) &&
     critiqueRes.data.unsupported_items.length > 0
   ) {
+    opts.onEvent?.({ stage: "revise", state: "start", model: REVISE_MODEL });
     const reviseRes = await callJson<RawDraft>(
       REVISE_MODEL,
       REVISE_TIMEOUT_MS,
@@ -388,8 +444,12 @@ export async function runCdmssPipeline(
       finalParsed = reviseRes.data;
       reviseLatency = reviseRes.latency_ms;
       usedRevise = true;
+      opts.onEvent?.({ stage: "revise", state: "done", ms: reviseRes.latency_ms });
+    } else {
+      opts.onEvent?.({ stage: "revise", state: "skipped", reason: `revise_failed: ${reviseRes.error}` });
     }
-    // If revise fails, ship the draft as-is — soft-fail
+  } else {
+    opts.onEvent?.({ stage: "revise", state: "skipped", reason: critiqueRes.ok ? "draft_passed_critique" : "critique_unavailable" });
   }
 
   // 7. Sanitize + shape

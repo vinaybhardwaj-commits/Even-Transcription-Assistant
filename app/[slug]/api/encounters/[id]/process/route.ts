@@ -99,6 +99,128 @@ export async function POST(
     );
   }
 
+  // ---- NDJSON streaming branch ----
+  const accept = req.headers.get("accept") ?? "";
+  if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const emit = (obj: unknown) => {
+          try {
+            controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+          } catch {
+            /* client gone */
+          }
+        };
+        const close = () => {
+          try { controller.close(); } catch { /* already closed */ }
+        };
+
+        // Heartbeat every 5s so proxies don't kill the stream
+        const hbInterval = setInterval(() => {
+          emit({ stage: "heartbeat", ts: Date.now() });
+        }, 5000);
+
+        try {
+          // Note generation
+          const noteRes = await generateNote(row.transcript_raw!, {
+            signal: req.signal,
+            onEvent: (e) => emit(e),
+          });
+          if (!noteRes.ok) {
+            emit({ stage: "error", where: "note", message: noteRes.error });
+            await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => {});
+            close();
+            clearInterval(hbInterval);
+            return;
+          }
+
+          // Persist note immediately
+          try {
+            await sql`
+              UPDATE encounter
+                 SET note_json = ${JSON.stringify(noteRes.note)}::jsonb,
+                     transcript_clean = ${row.transcript_raw}
+               WHERE id = ${id}
+            `;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            emit({ stage: "error", where: "persist_note", message: msg });
+            close();
+            clearInterval(hbInterval);
+            return;
+          }
+
+          // CDMSS pipeline with event passthrough
+          const pipelineRes = await runCdmssPipeline(noteRes.note, {
+            signal: req.signal,
+            onEvent: (e) => emit(e),
+          });
+
+          let cdmssToStore: CdmssRich | CdmssOutput;
+          let cdmssErr: string | undefined;
+          if (pipelineRes.ok) {
+            cdmssToStore = pipelineRes.cdmss;
+          } else if (pipelineRes.fallback) {
+            cdmssToStore = pipelineRes.fallback;
+            cdmssErr = pipelineRes.error;
+          } else {
+            cdmssToStore = {
+              differentials_to_consider: [],
+              red_flags: [],
+              evidence_based_suggestions: [],
+              follow_up_considerations: [],
+            };
+            cdmssErr = pipelineRes.error;
+          }
+
+          try {
+            await sql`
+              UPDATE encounter
+                 SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
+                     status     = 'complete'
+               WHERE id = ${id}
+            `;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            emit({ stage: "error", where: "persist_cdmss", message: msg });
+            close();
+            clearInterval(hbInterval);
+            return;
+          }
+
+          emit({
+            stage: "final",
+            encounter: { id, status: "complete" },
+            note: noteRes.note,
+            cdmss: cdmssToStore,
+            note_ms: noteRes.latency_ms,
+            cdmss_ms: pipelineRes.latency_ms,
+            cdmss_error: cdmssErr,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          emit({ stage: "error", where: "outer", message: msg.slice(0, 200) });
+        } finally {
+          clearInterval(hbInterval);
+          close();
+        }
+      },
+      cancel() {
+        /* client disconnect — req.signal will abort upstream LLM calls */
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
+
   // 1) Note generation
   const noteRes = await generateNote(row.transcript_raw, { signal: req.signal });
   if (!noteRes.ok) {
