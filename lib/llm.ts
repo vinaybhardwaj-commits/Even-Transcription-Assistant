@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 
-const baseURL = `${process.env.OLLAMA_BASE_URL!}/v1`;
+// OLLAMA_BASE_URL already includes /v1 (verified Sprint 1.F.6 H2)
+const baseURL = `${process.env.OLLAMA_BASE_URL!}`;
 
 export const llm = new OpenAI({ baseURL, apiKey: 'ollama' });
 
