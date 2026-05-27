@@ -395,37 +395,88 @@ function humanizeAction(action: string): string {
   return map[action] ?? action.replace(/[._]/g, " ");
 }
 
-async function getHealth(): Promise<{ status: "ok" | "degraded"; services: HealthServiceRow[] }> {
+/**
+ * Inline health probes (Sprint 9 H2): same logic as /api/health/route.ts
+ * but called directly so the dashboard doesn't have to make a HTTP round-
+ * trip back to its own deployment (which proved flaky in S9 H1). Each
+ * probe gets 5s of its own AbortSignal timeout so a slow service can't
+ * stall the dashboard load.
+ */
+async function probeService(fn: () => Promise<unknown>): Promise<{ ok: boolean; latency_ms: number }> {
+  const t0 = Date.now();
   try {
-    // Build URL from the request host — server-side fetch needs an absolute URL.
-    // process.env.VERCEL_URL is set in production; otherwise fall back to APP_URL or localhost.
-    // APP_URL on prod is still set to the stale 'eta.even.in' (see carryover
-    // §6). Prefer VERCEL_URL when it's the production canonical host, else
-    // hard-fall to the known live host.
-    const raw = (process.env.APP_URL ?? "").trim().replace(/\/+$/, "");
-    const base =
-      raw && !/eta\.even\.in/i.test(raw) ? raw :
-      process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` :
-      "https://eta.llmvinayminihome.uk";
-    const res = await fetch(`${base}/api/health`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`health_http_${res.status}`);
-    const j = (await res.json()) as {
-      ok: boolean;
-      services: Record<string, { ok: boolean; latency_ms?: number }>;
-    };
-    const services: HealthServiceRow[] = Object.entries(j.services ?? {}).map(([name, s]) => ({
-      name,
-      ok: !!s.ok,
-      p50_ms: typeof s.latency_ms === "number" ? s.latency_ms : null,
-    }));
-    return {
-      status: j.ok ? "ok" : "degraded",
-      services,
-    };
-  } catch (e) {
-    console.warn("[admin] health proxy failed:", e);
-    return { status: "degraded", services: [] };
+    await fn();
+    return { ok: true, latency_ms: Date.now() - t0 };
+  } catch {
+    return { ok: false, latency_ms: Date.now() - t0 };
   }
+}
+
+async function getHealth(): Promise<{ status: "ok" | "degraded"; services: HealthServiceRow[] }> {
+  const [db, kb, llm, whisper, resend, r2] = await Promise.all([
+    probeService(async () => {
+      await sql`SELECT 1 AS ok`;
+    }),
+    probeService(async () => {
+      const url = process.env.KB_DATABASE_URL;
+      if (!url) throw new Error("no_kb_url");
+      const { neon } = await import("@neondatabase/serverless");
+      const kbSql = neon(url);
+      await kbSql`SELECT 1 AS ok`;
+    }),
+    probeService(async () => {
+      const base = process.env.OLLAMA_BASE_URL;
+      if (!base) throw new Error("no_ollama_url");
+      const r = await fetch(`${base}/models`, {
+        headers: { Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) throw new Error(`ollama_${r.status}`);
+    }),
+    probeService(async () => {
+      const base = process.env.WHISPER_BASE_URL;
+      if (!base) throw new Error("no_whisper_url");
+      const r = await fetch(`${base}/inference`, {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (r.status >= 500 && r.status !== 501) throw new Error(`whisper_${r.status}`);
+    }),
+    probeService(async () => {
+      const key = process.env.RESEND_API_KEY;
+      if (!key) throw new Error("no_resend_key");
+      const r = await fetch("https://api.resend.com/domains", {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) throw new Error(`resend_${r.status}`);
+    }),
+    probeService(async () => {
+      const acct = process.env.R2_ACCOUNT_ID;
+      const akid = process.env.R2_ACCESS_KEY_ID;
+      const sec  = process.env.R2_SECRET_ACCESS_KEY;
+      const bkt  = process.env.R2_BUCKET ?? "eta-audio";
+      if (!acct || !akid || !sec) throw new Error("no_r2_creds");
+      const { S3Client, HeadBucketCommand } = await import("@aws-sdk/client-s3");
+      const client = new S3Client({
+        region: "auto",
+        endpoint: `https://${acct}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: akid, secretAccessKey: sec },
+      });
+      await client.send(new HeadBucketCommand({ Bucket: bkt }));
+    }),
+  ]);
+
+  const services: HealthServiceRow[] = [
+    { name: "db",      ok: db.ok,      p50_ms: db.latency_ms },
+    { name: "kb",      ok: kb.ok,      p50_ms: kb.latency_ms },
+    { name: "llm",     ok: llm.ok,     p50_ms: llm.latency_ms },
+    { name: "whisper", ok: whisper.ok, p50_ms: whisper.latency_ms },
+    { name: "resend",  ok: resend.ok,  p50_ms: resend.latency_ms },
+    { name: "r2",      ok: r2.ok,      p50_ms: r2.latency_ms },
+  ];
+  const allOk = services.every((s) => s.ok);
+  return { status: allOk ? "ok" : "degraded", services };
 }
 
 // ---- main entrypoint -------------------------------------------------------
