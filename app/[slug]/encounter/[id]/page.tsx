@@ -18,7 +18,7 @@ type Row = {
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
   send_status: "pending" | "sent" | "failed";
-  sent_at: Date | null;
+  sent_at: string | Date | null;
 };
 
 type DoctorRow = { full_name: string; email: string };
@@ -28,7 +28,7 @@ type SendEventRow = {
   recipient_email: string;
   status: string;
   subject_rendered: string;
-  created_at: Date;
+  created_at: string | Date;
 };
 
 export default async function EncounterPage({
@@ -93,13 +93,13 @@ export default async function EncounterPage({
         cdmss: row.cdmss_json,
         transcript: row.transcript_raw,
         sendStatus: row.send_status,
-        sentAt: row.sent_at ? row.sent_at.toISOString() : null,
+        sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : null,
         sendEvents: sendEvents.map((e) => ({
           id: e.id,
           recipient_email: e.recipient_email,
           status: e.status,
           subject: e.subject_rendered,
-          created_at: e.created_at.toISOString(),
+          created_at: new Date(e.created_at).toISOString(),
         })),
       }}
     />
