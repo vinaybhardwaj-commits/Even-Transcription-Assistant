@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
+import { NoteEditor } from "@/components/encounter/NoteEditor";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
 import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel";
 import type { EncounterNote } from "@/lib/note-generation";
@@ -38,6 +39,7 @@ type LiveState = {
   processing: boolean;
   sendStatus: SendStatus;
   sendEvents: SendEventLite[];
+  editing: boolean;
 };
 
 export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }: Props) {
@@ -50,6 +52,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     processing: false,
     sendStatus: initial.sendStatus,
     sendEvents: initial.sendEvents,
+    editing: false,
   });
 
   const autoTriggeredRef = React.useRef(false);
@@ -155,6 +158,33 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     [slug, initial.id],
   );
 
+  const onSaveNote = React.useCallback(
+    async (note: EncounterNote): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch(
+          `/${slug}/api/encounters/${initial.id}/note`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(note),
+          },
+        );
+        const j = await res.json();
+        if (!res.ok) {
+          const err = (j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`;
+          return { ok: false, error: err };
+        }
+        const payload = j as { note: EncounterNote };
+        setS((prev) => ({ ...prev, note: payload.note, editing: false }));
+        return { ok: true };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: msg };
+      }
+    },
+    [slug, initial.id],
+  );
+
   return (
     <main className="min-h-screen bg-even-white">
       <header className="sticky top-0 z-10 bg-even-white border-b border-even-ink-100 flex items-center justify-between px-4 py-3">
@@ -206,10 +236,29 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
 
         {s.note ? (
           <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 shadow-card">
-            <h2 className="text-heading text-even-navy-800 mb-4">
-              Medical Encounter Note
-            </h2>
-            <NoteView note={s.note} />
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <h2 className="text-heading text-even-navy-800">
+                Medical Encounter Note
+              </h2>
+              {!s.editing && s.status === "complete" ? (
+                <button
+                  type="button"
+                  onClick={() => setS((prev) => ({ ...prev, editing: true }))}
+                  className="text-label text-even-blue-600 hover:underline shrink-0"
+                >
+                  Edit
+                </button>
+              ) : null}
+            </div>
+            {s.editing && s.note ? (
+              <NoteEditor
+                initial={s.note}
+                onSave={onSaveNote}
+                onCancel={() => setS((prev) => ({ ...prev, editing: false }))}
+              />
+            ) : (
+              <NoteView note={s.note} />
+            )}
           </section>
         ) : null}
 

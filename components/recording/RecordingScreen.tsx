@@ -13,6 +13,7 @@ import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
 import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
+import { PreflightCheck } from "@/components/recording/PreflightCheck";
 
 type Props = { slug: string; doctorName: string };
 
@@ -22,6 +23,8 @@ type FinalRow = { id: string; text: string };
 
 export function RecordingScreen({ slug, doctorName }: Props) {
   const router = useRouter();
+  const [preflightPassed, setPreflightPassed] = React.useState(false);
+  const [preflightCancelled, setPreflightCancelled] = React.useState(false);
   const [encounter, setEncounter] = React.useState<EncounterDraft | null>(null);
   const [createError, setCreateError] = React.useState<string | null>(null);
   const [chunksCount, setChunksCount] = React.useState(0);
@@ -32,8 +35,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const recordStartedAtRef = React.useRef<number | null>(null);
   const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
 
-  // 1. Create draft encounter row on mount
+  // 1. Create draft encounter row only after preflight gate clears
   React.useEffect(() => {
+    if (!preflightPassed) return;
     let cancelled = false;
     (async () => {
       try {
@@ -56,7 +60,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [slug]);
+  }, [slug, preflightPassed]);
 
   // 2a. Per-utterance cleanup via llama3.1:8b — strips filler words,
   // normalizes mispronunciations on Deepgram finals. Soft-fail to raw.
@@ -146,20 +150,27 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     }
   }, [encounter, rec]);
 
+  // Main big-button: when recording → Finalize (stops + shows Submit).
+  // When paused → Resume. When idle → Start.
   const onButton = React.useCallback(() => {
-    if (rec.state === "recording") {
-      // Stop = first phase of finalize. Capture duration; submit button appears.
+    if (rec.state === "recording" || rec.state === "paused") {
       if (recordStartedAtRef.current !== null) {
         setRecordedSeconds(
           Math.max(1, Math.floor((Date.now() - recordStartedAtRef.current) / 1000)),
         );
       }
       void rec.stop();
-    } else if (rec.state === "paused") {
-      rec.resume();
     } else if (rec.state === "idle") {
       void rec.start();
     }
+  }, [rec]);
+
+  // Separate pause button — only meaningful while recording.
+  const onPause = React.useCallback(() => {
+    rec.pause();
+  }, [rec]);
+  const onResume = React.useCallback(() => {
+    rec.resume();
   }, [rec]);
 
   const onSubmit = React.useCallback(async () => {
@@ -184,6 +195,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       : rec.state === "permission_pending" || rec.state === "finalizing"
       ? "busy"
       : "idle";
+  const showPauseControls = rec.state === "recording" || rec.state === "paused";
 
   const running = rec.state === "recording";
 
@@ -205,8 +217,19 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       ? "bg-danger-100 text-danger-700"
       : "bg-even-ink-100 text-even-ink-500";
 
+  // Pre-flight: when cancelled, bounce back to home
+  React.useEffect(() => {
+    if (preflightCancelled) router.push(`/${slug}`);
+  }, [preflightCancelled, router, slug]);
+
   return (
     <main className="min-h-screen bg-even-white flex flex-col">
+      {!preflightPassed && !preflightCancelled ? (
+        <PreflightCheck
+          onProceed={() => setPreflightPassed(true)}
+          onCancel={() => setPreflightCancelled(true)}
+        />
+      ) : null}
       <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
         <button
           type="button"
@@ -231,6 +254,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       </header>
 
       <section className="flex-1 flex flex-col items-center px-6 py-8 gap-6">
+        {rec.state === "paused" ? (
+          <div className="w-full max-w-md rounded-md border border-warning-500 bg-warning-100/40 px-4 py-2 text-center" role="status">
+            <p className="text-label text-warning-700">Recording paused</p>
+            <p className="text-caption text-even-ink-500">Resume to keep capturing audio.</p>
+          </div>
+        ) : null}
+
         <div className="text-display text-even-navy-800 mt-2">
           <ElapsedTimer running={running} />
         </div>
@@ -254,12 +284,29 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           onClick={onButton}
           ariaLabel={
             rec.state === "recording"
-              ? "Stop recording"
+              ? "Finalize recording"
               : rec.state === "paused"
-              ? "Resume recording"
+              ? "Finalize paused recording"
               : "Start recording"
           }
         />
+
+        {showPauseControls ? (
+          <div className="flex items-center gap-3 mt-1">
+            {rec.state === "recording" ? (
+              <Button variant="secondary" size="sm" onClick={onPause}>
+                Pause
+              </Button>
+            ) : (
+              <Button variant="primary" size="sm" onClick={onResume}>
+                Resume
+              </Button>
+            )}
+            <span className="text-caption text-even-ink-400">
+              Big button finalizes the recording
+            </span>
+          </div>
+        ) : null}
 
         {rec.state === "permission_denied" ? (
           <div className="mt-6 max-w-sm text-center">
