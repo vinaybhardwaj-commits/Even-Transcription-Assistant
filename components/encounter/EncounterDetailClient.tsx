@@ -181,18 +181,19 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             } catch {
               continue;
             }
-            const stageId = evt.stage as StageId | undefined;
-            const state = evt.state as string | undefined;
-            if (stageId === "heartbeat") continue;
-            if (stageId === "error") {
+            const rawStage = typeof evt.stage === "string" ? evt.stage : "";
+            const state = typeof evt.state === "string" ? evt.state : undefined;
+            if (rawStage === "heartbeat") continue;
+            if (rawStage === "error") {
               lastError = String(evt.message ?? "unknown_error");
               continue;
             }
-            if (stageId === "final") {
+            if (rawStage === "final") {
               finalEvent = evt as typeof finalEvent;
               continue;
             }
-            if (!stageId) continue;
+            const stageId = rawStage as StageId;
+            if (!STAGE_LABELS[stageId]) continue;
             if (state === "start") {
               updateStage(stageId, { state: "running", started_at: Date.now(), detail: undefined });
             } else if (state === "done") {
