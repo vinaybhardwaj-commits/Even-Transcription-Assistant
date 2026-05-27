@@ -162,7 +162,8 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        let finalEvent: { encounter: { status: Status }; note: EncounterNote; cdmss: CdmssOutput; cdmss_error?: string } | null = null;
+        type FinalEvent = { encounter: { status: Status }; note: EncounterNote; cdmss: CdmssOutput; cdmss_error?: string };
+        let finalEvent: FinalEvent | null = null;
         let lastError: string | null = null;
 
         while (true) {
@@ -189,7 +190,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
               continue;
             }
             if (rawStage === "final") {
-              finalEvent = evt as typeof finalEvent;
+              finalEvent = evt as unknown as FinalEvent;
               continue;
             }
             const stageId = rawStage as StageId;
