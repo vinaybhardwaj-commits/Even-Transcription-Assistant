@@ -8,13 +8,14 @@
 import * as React from "react";
 import Link from "next/link";
 
-type TabKey = "global-cc" | "retention" | "resend" | "health";
+type TabKey = "global-cc" | "retention" | "resend" | "health" | "launch-readiness";
 
 const TABS: Array<{ key: TabKey; label: string; href: string }> = [
-  { key: "global-cc", label: "Global CC list", href: "/admin/settings/global-cc" },
-  { key: "retention", label: "Retention",      href: "/admin/settings/retention" },
-  { key: "resend",    label: "Resend config",  href: "/admin/settings/resend" },
-  { key: "health",    label: "Health probes",  href: "/admin/settings/health" },
+  { key: "global-cc",        label: "Global CC list",   href: "/admin/settings/global-cc" },
+  { key: "retention",        label: "Retention",        href: "/admin/settings/retention" },
+  { key: "resend",           label: "Resend config",    href: "/admin/settings/resend" },
+  { key: "health",           label: "Health probes",    href: "/admin/settings/health" },
+  { key: "launch-readiness", label: "Launch readiness", href: "/admin/settings/launch-readiness" },
 ];
 
 export function SettingsTabs({
