@@ -15,7 +15,11 @@
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
-import { verifyAdminJwt } from "@/lib/auth";
+import { verifyAdminJwt, type AdminClaims } from "@/lib/auth";
+
+type GuardResult =
+  | { ok: true; claims: AdminClaims }
+  | { ok: false; code: "AUTH_REQUIRED" | "AUTH_EXPIRED"; msg: string };
 import { buildDoctorSlug } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
 import bcrypt from "bcryptjs";
@@ -25,14 +29,14 @@ export const runtime = "nodejs";
 
 const doctorId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
 
-async function guard() {
+async function guard(): Promise<GuardResult> {
   const cookie = await readAdminCookie();
-  if (!cookie) return { ok: false, code: "AUTH_REQUIRED" as const, msg: "Sign in required" };
+  if (!cookie) return { ok: false, code: "AUTH_REQUIRED", msg: "Sign in required" };
   try {
     const claims = await verifyAdminJwt(cookie);
-    return { ok: true as const, claims };
+    return { ok: true, claims };
   } catch {
-    return { ok: false, code: "AUTH_EXPIRED" as const, msg: "Session invalid" };
+    return { ok: false, code: "AUTH_EXPIRED", msg: "Session invalid" };
   }
 }
 
