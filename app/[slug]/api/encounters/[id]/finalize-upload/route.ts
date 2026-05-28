@@ -104,14 +104,53 @@ export async function POST(
       ? Math.floor(body.duration_seconds)
       : null;
 
-  // Prefer Whisper transcript when present (higher accuracy), else Deepgram raw
-  const transcriptRaw =
-    typeof body.whisper_transcript === "string" &&
-    body.whisper_transcript.trim().length > 0
+  // B6 fix (28 May 2026): pick whichever source has more content, instead of
+  // always preferring Whisper.
+  //
+  // Why: useWhisperRolling only updates `latest.text` on a SUCCESSFUL pass.
+  // If a pass errors mid-recording (B7 — happens on long sessions), the
+  // hook's latest.text is frozen at the last good pass, which can cover
+  // only the first ~30-90s of audio. Deepgram, meanwhile, keeps appending
+  // final utterances for the full recording. The previous "always prefer
+  // Whisper" rule silently discarded the full Deepgram transcript and saved
+  // the short Whisper stub, leading to a near-empty note and the downstream
+  // `note_too_empty_for_seed` error.
+  //
+  // The new rule: trust Whisper only if it is materially longer than
+  // Deepgram (>=120% — Whisper is more accurate on medical terms, so a
+  // small win in length confirms it actually covered the full audio).
+  // Otherwise prefer the longer Deepgram-cleaned text.
+  const wh =
+    typeof body.whisper_transcript === "string"
       ? body.whisper_transcript.trim()
-      : typeof body.deepgram_transcript === "string"
+      : "";
+  const dg =
+    typeof body.deepgram_transcript === "string"
       ? body.deepgram_transcript.trim()
-      : null;
+      : "";
+
+  let transcriptRaw: string | null = null;
+  let chosenSource: "whisper" | "deepgram" | "none" = "none";
+  if (wh.length > 0 && dg.length > 0) {
+    if (wh.length >= dg.length * 1.2) {
+      transcriptRaw = wh;
+      chosenSource = "whisper";
+    } else {
+      transcriptRaw = dg;
+      chosenSource = "deepgram";
+    }
+  } else if (wh.length > 0) {
+    transcriptRaw = wh;
+    chosenSource = "whisper";
+  } else if (dg.length > 0) {
+    transcriptRaw = dg;
+    chosenSource = "deepgram";
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[finalize-upload] enc=${id} chosen=${chosenSource} whisper_chars=${wh.length} deepgram_chars=${dg.length} kept=${transcriptRaw?.length ?? 0}`,
+  );
 
   // Update row → processing
   try {
@@ -132,5 +171,11 @@ export async function POST(
   return respondOk({
     encounter: { id, status: "processing" as const },
     audio: { key: body.key, bytes: head.size, content_type: head.content_type },
+    transcript: {
+      chosen_source: chosenSource,
+      whisper_chars: wh.length,
+      deepgram_chars: dg.length,
+      kept_chars: transcriptRaw?.length ?? 0,
+    },
   });
 }
