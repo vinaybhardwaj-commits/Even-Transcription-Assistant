@@ -147,8 +147,7 @@ export async function POST(
     chosenSource = "deepgram";
   }
 
-  // eslint-disable-next-line no-console
-  console.log(
+  console.warn(
     `[finalize-upload] enc=${id} chosen=${chosenSource} whisper_chars=${wh.length} deepgram_chars=${dg.length} kept=${transcriptRaw?.length ?? 0}`,
   );
 
