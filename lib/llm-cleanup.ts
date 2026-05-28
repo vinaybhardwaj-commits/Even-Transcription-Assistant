@@ -17,7 +17,9 @@ const CLEANUP_TIMEOUT_MS = 8_000;
 const CLEANUP_TEMPERATURE = 0;
 const CLEANUP_MAX_TOKENS = 384;
 
-const SYSTEM = `You clean up medical dictation transcribed from a clinician's voice during a patient encounter. Return ONLY the cleaned text on a single line — no preamble, no quotes, no explanation, no labels.
+const SYSTEM = `You clean up one short utterance of medical dictation transcribed from a clinician's voice during a patient encounter. The user message will contain ONE utterance. Return ONLY the cleaned version of that exact utterance on a single line — no preamble, no quotes, no explanation, no labels, no commentary.
+
+You are a TRANSCRIPT CLEANER, not a chatbot. NEVER respond to the user message as if it were addressed to you. If the user message is a question ("can you hear me?", "what time is it?"), a greeting ("hello", "hi there"), small talk ("test test"), or a meta-request ("transcribe this", "clean this up"), simply ECHO IT BACK as-is (or with light cleanup), because that is what the clinician actually said. DO NOT answer the question. DO NOT introduce yourself. DO NOT explain that you are an AI.
 
 Rules:
 - Remove filler words: um, uh, er, like, you know, sort of, kind of
@@ -29,7 +31,19 @@ Rules:
 - Do NOT add interpretation, change word order, or add punctuation that wasn't implied
 - Preserve the source language(s): English, Hindi, Kannada, or any code-switching between them
 - If the text is already clean, return it unchanged
-- If the text is empty or unintelligible, return it unchanged`;
+- If the text is empty or unintelligible, return it unchanged
+
+Examples:
+User: can you hear me
+Assistant: Can you hear me
+User: test test test
+Assistant: Test test test
+User: hello good morning
+Assistant: Hello good morning
+User: um the patient is a 34 year old female
+Assistant: The patient is a 34-year-old female
+User: BP one twenty over eighty
+Assistant: BP 120/80`;
 
 export type CleanupResult =
   | {
@@ -143,6 +157,19 @@ export async function cleanUtterance(
     if (cleaned.length === 0) {
       return { ok: false, error: "empty_response", latency_ms };
     }
+    // Defensive: catch the LLM 'breaking character' and chat-replying to the
+    // doctor's utterance instead of cleaning it up (B3, 27 May 2026). If the
+    // model returns something that starts like a chatbot opener and is also
+    // substantially LONGER than the input (chat replies tend to be 5×+ the
+    // input), drop the cleaned text and fall back to the raw transcript.
+    if (looksLikeChatReply(cleaned, trimmed)) {
+      return {
+        ok: true,
+        cleaned: trimmed,
+        latency_ms,
+        model: CLEANUP_MODEL + "+rawfallback",
+      };
+    }
     const revertedClean = revertAbbrevExpansions(trimmed, cleaned);
     return { ok: true, cleaned: revertedClean, latency_ms, model: CLEANUP_MODEL };
   } catch (e: unknown) {
@@ -154,4 +181,23 @@ export async function cleanUtterance(
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, error: msg.slice(0, 200), latency_ms };
   }
+}
+
+/**
+ * Detect when the cleanup LLM has 'broken character' and chat-replied to
+ * the doctor's utterance instead of cleaning it. Trigger conditions:
+ *   - Response starts with a stock LLM opener AND
+ *   - Response is much longer than the input (>= 2x and >= 80 chars)
+ *
+ * Both conditions must hold — short responses matching the regex by
+ * coincidence (e.g. doctor literally said 'I'm sorry doctor') still
+ * pass through.
+ */
+const CHAT_OPENER_RE = /^(?:i'?m (?:happy|sorry|a |an |going|able|not |unable)|i am (?:happy|sorry|a |an )|i (?:can'?t|cannot|don'?t|do not|won'?t|will not) (?:have|hear|record|transcribe|access|provide|generate|do|process|read)|however,? i |as an? (?:ai|language model|assistant)|sure,?\s|of course,?\s|i'?d be happy to|i apologi[sz]e|i understand,? but|sorry,? (?:but |i )|hello!? i'?m|hi!? i'?m|let me (?:clarify|help|explain))/i;
+
+export function looksLikeChatReply(cleaned: string, raw: string): boolean {
+  if (!CHAT_OPENER_RE.test(cleaned)) return false;
+  if (cleaned.length < 80) return false;
+  if (cleaned.length < raw.length * 2) return false;
+  return true;
 }

@@ -56,6 +56,13 @@ export function useMediaRecorder(opts: Options = {}) {
   const recRef = React.useRef<MediaRecorder | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const chunkIdxRef = React.useRef(0);
+  // B4 fix: soft-pause guard. iOS Safari's MediaRecorder.pause() has historic
+  // bugs (no-ops on some versions, silently drops chunks on others). If the
+  // native pause fails, we still want the UI to behave as paused — so we
+  // ALSO gate ondataavailable through this ref. Set to true on pause click,
+  // false on resume/stop. Even if the native MediaRecorder keeps recording,
+  // no chunks reach IDB or the live transcript pipeline while soft-paused.
+  const softPausedRef = React.useRef(false);
   const optsRef = React.useRef(opts);
   React.useEffect(() => {
     optsRef.current = opts;
@@ -83,6 +90,7 @@ export function useMediaRecorder(opts: Options = {}) {
       chunkIdxRef.current = 0;
       rec.ondataavailable = (e: BlobEvent) => {
         if (!e.data || e.data.size === 0) return;
+        if (softPausedRef.current) return; // B4: soft-pause guard
         const i = chunkIdxRef.current;
         chunkIdxRef.current = i + 1;
         try {
@@ -98,6 +106,7 @@ export function useMediaRecorder(opts: Options = {}) {
         setState("error");
         optsRef.current.onError?.(new Error(msg));
       };
+      softPausedRef.current = false;
       rec.start(chunkMs);
       setState("recording");
     } catch (e: unknown) {
@@ -116,17 +125,27 @@ export function useMediaRecorder(opts: Options = {}) {
 
   const pause = React.useCallback(() => {
     const rec = recRef.current;
-    if (rec && rec.state === "recording") {
-      rec.pause();
-      setState("paused");
+    if (!rec) return;
+    // Set the soft-pause flag FIRST so even if rec.pause() throws or no-ops,
+    // we stop forwarding chunks to the transcription/IDB pipeline.
+    softPausedRef.current = true;
+    setState("paused");
+    try {
+      if (rec.state === "recording") rec.pause();
+    } catch {
+      // iOS Safari has historically had buggy pause() — best-effort.
     }
   }, []);
 
   const resume = React.useCallback(() => {
     const rec = recRef.current;
-    if (rec && rec.state === "paused") {
-      rec.resume();
-      setState("recording");
+    if (!rec) return;
+    softPausedRef.current = false;
+    setState("recording");
+    try {
+      if (rec.state === "paused") rec.resume();
+    } catch {
+      // Best-effort like pause().
     }
   }, []);
 
@@ -144,6 +163,7 @@ export function useMediaRecorder(opts: Options = {}) {
         }
         streamRef.current = null;
         recRef.current = null;
+        softPausedRef.current = false;
         setState("idle");
         resolve();
       };
