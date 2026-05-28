@@ -167,6 +167,14 @@ export async function POST(
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
+  // B7 cleanup: the rolling Whisper pipeline accumulated raw
+  // MediaRecorder output at whisper-buffer/{enc_id}.webm while
+  // recording. The canonical audio is now at audio_object_key, so
+  // the rolling buffer can be dropped. Best-effort; failure here
+  // doesn't affect the encounter (and orphan buffers stay capped at
+  // 60 MB by the route's MAX_BUFFER_BYTES guard).
+  void deleteObject(whisperBufferKey(id));
+
   return respondOk({
     encounter: { id, status: "processing" as const },
     audio: { key: body.key, bytes: head.size, content_type: head.content_type },

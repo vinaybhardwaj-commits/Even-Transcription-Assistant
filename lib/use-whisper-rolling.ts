@@ -3,19 +3,30 @@
 import * as React from "react";
 
 /**
- * useWhisperRolling — rolling cumulative pass to whisper.cpp on the
- * Mac Mini for higher-accuracy transcription of medical terms.
+ * useWhisperRolling — rolling Whisper transcription via delta uploads
+ * with a server-side R2 buffer (B7 fix).
  *
- * Strategy: cumulative-from-zero. Every intervalMs (default 10s), if
- * new chunks have arrived since the last pass, we concatenate ALL
- * chunks since enable and POST as one WebM blob. The response replaces
- * the in-flight transcript state. (MediaRecorder only writes the WebM
- * container header in the first chunk, so windowed-from-middle slices
- * are not standalone-playable. Cumulative-from-zero sidesteps this.)
+ * Strategy (post-B7): each pass sends ONLY the new chunks since the
+ * last pass. The server maintains a per-encounter WebM buffer in R2
+ * at `whisper-buffer/{encounter_id}.webm`, appends new chunks to the
+ * existing buffer, and runs whisper.cpp on the full concatenated
+ * audio. The cumulative blob NEVER traverses the client → Vercel
+ * boundary as one request, so the Vercel serverless 4.5 MB body
+ * limit no longer caps recording length.
  *
- * Trade-off: linearly growing payload + processing time as the visit
- * lengthens. At 5min visit on whisper-large-v3-turbo this is ~5-8s
- * per pass — still well under the 60s function timeout.
+ * Why the WebM container is still valid: whisper.cpp needs the WebM
+ * init segment (cluster header + codec config) which MediaRecorder
+ * writes ONLY in the first chunk. The is_first flag tells the server
+ * "this delta starts a new buffer." Subsequent passes append raw
+ * MediaRecorder output to the existing buffer server-side — the
+ * resulting concatenated blob is the same shape as the old
+ * cumulative-from-zero blob, just assembled server-side.
+ *
+ * Self-healing: if a pass fails (network blip, 5xx from Mac Mini)
+ * we DO NOT advance nextChunkIdxRef, so the next interval tick
+ * retries from the same delta start plus anything new. Pre-B7 the
+ * rolling would silently freeze at the last good pass and never
+ * recover; now any single failure recovers on the next tick.
  */
 
 export type WhisperPass = {
@@ -24,8 +35,9 @@ export type WhisperPass = {
   language: string | null;
   duration_seconds: number | null;
   latency_ms: number;
-  bytes: number;
-  received_at: number; // client ms epoch when response arrived
+  bytes: number;            // size of delta sent THIS pass (not cumulative)
+  cumulative_bytes: number; // server-reported total buffer size
+  received_at: number;
 };
 
 export type WhisperRollingState =
@@ -53,7 +65,11 @@ export function useWhisperRolling(opts: Options) {
   const chunksRef = React.useRef<Blob[]>([]);
   const mimeRef = React.useRef<string>("audio/webm");
   const passIdxRef = React.useRef(0);
-  const lastSeenChunksRef = React.useRef(0); // count at last pass
+  // Index of the next chunk to send. After a successful POST we advance
+  // this to chunksRef.current.length. On failure we leave it untouched
+  // so the next tick retries the same range + anything that's arrived
+  // since.
+  const nextChunkIdxRef = React.useRef(0);
   const inFlightRef = React.useRef(false);
   const optsRef = React.useRef(opts);
   React.useEffect(() => {
@@ -69,21 +85,27 @@ export function useWhisperRolling(opts: Options) {
   const flush = React.useCallback(async () => {
     if (inFlightRef.current) return;
     const all = chunksRef.current;
-    if (all.length === 0 || all.length === lastSeenChunksRef.current) return;
-    lastSeenChunksRef.current = all.length;
+    const startIdx = nextChunkIdxRef.current;
+    const endIdx = all.length;
+    if (endIdx === startIdx) return;          // no new chunks since last pass
+    if (!optsRef.current.encounterId) return; // delta uploads need an encounter to key the R2 buffer
+
     inFlightRef.current = true;
     setState("in_flight");
 
     const idx = ++passIdxRef.current;
-    const blob = new Blob(all, { type: mimeRef.current });
+    const delta = all.slice(startIdx, endIdx);
+    const isFirst = startIdx === 0;
+    const blob = new Blob(delta, { type: mimeRef.current });
 
     try {
       const form = new FormData();
-      form.append("audio", blob, `pass_${idx}.webm`);
+      form.append("audio", blob, `delta_${idx}.webm`);
       form.append("pass_idx", String(idx));
-      if (optsRef.current.encounterId) {
-        form.append("encounter_id", optsRef.current.encounterId);
-      }
+      form.append("encounter_id", optsRef.current.encounterId);
+      form.append("is_first", isFirst ? "1" : "0");
+      form.append("delta_start_idx", String(startIdx));
+      form.append("delta_end_idx", String(endIdx));
 
       const res = await fetch(
         `/${optsRef.current.slug}/api/transcribe/whisper-chunk`,
@@ -99,8 +121,11 @@ export function useWhisperRolling(opts: Options) {
         duration_seconds?: number | null;
         latency_ms?: number;
         bytes?: number;
+        cumulative_bytes?: number;
         pass_idx?: string;
       };
+      // Pass succeeded — advance the watermark so we don't resend this delta.
+      nextChunkIdxRef.current = endIdx;
       const pass: WhisperPass = {
         pass_idx: idx,
         text: (json.text ?? "").trim(),
@@ -108,6 +133,7 @@ export function useWhisperRolling(opts: Options) {
         duration_seconds: json.duration_seconds ?? null,
         latency_ms: json.latency_ms ?? 0,
         bytes: json.bytes ?? blob.size,
+        cumulative_bytes: json.cumulative_bytes ?? 0,
         received_at: Date.now(),
       };
       setLatest(pass);
@@ -115,6 +141,8 @@ export function useWhisperRolling(opts: Options) {
       setState("running");
       setError(null);
     } catch (e) {
+      // Failure: DO NOT advance nextChunkIdxRef. Next tick retries the
+      // same delta range plus any new chunks that have arrived since.
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       setState("error");
