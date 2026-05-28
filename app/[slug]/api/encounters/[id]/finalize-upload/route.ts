@@ -14,7 +14,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
-import { headObject } from "@/lib/r2";
+import { headObject, deleteObject, whisperBufferKey } from "@/lib/r2";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
