@@ -21,6 +21,7 @@ export const runtime = "nodejs";
 const TEAM: Array<{ email: string; name: string }> = [
   { email: "sandhya.cherukuri@even.in", name: "Sandhya Cherukuri" },
   { email: "vanshika.jain@even.in", name: "Vanshika Jain" },
+  { email: "ira@even.in", name: "Ira Banerjee" },
 ];
 
 const INITIAL_PASSWORD = "ETA-strong-pw-2026";
