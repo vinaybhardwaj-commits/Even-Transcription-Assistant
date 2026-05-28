@@ -36,6 +36,8 @@ const C = {
   ai50: "#F5F3FF",
   ai200: "#DDD6FE",
   ai700: "#6D28D9",
+  danger50: "#FFF7ED",
+  danger200: "#FED7AA",
   danger700: "#B91C1C",
   white: "#FCFCFC",
 } as const;
@@ -141,6 +143,16 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     .filter(Boolean)
     .join("");
 
+  // B10 defensive fallback (28 May 2026): if every clinical section is
+  // empty, surface that explicitly instead of silently sending an email
+  // with just the chrome. The /send and /resend routes already guard
+  // against this; this is belt-and-suspenders for any path that bypasses
+  // those guards.
+  const noteSectionsFinal =
+    noteSections.length > 0
+      ? noteSections
+      : `<div style="padding:14px 16px;background:${C.danger50};border:1px solid ${C.danger200};border-radius:8px;"><p style="margin:0;font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${C.danger700};font-weight:600;">No clinical content was extracted from this recording.</p><p style="margin:6px 0 0 0;font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.5;color:${C.ink700};">The transcript may have been too short, silent, or non-clinical. Please re-record the encounter or contact the clinician.</p></div>`;
+
   // Render CDS card; supports both legacy stub (string arrays) and rich pipeline (cited items + sources).
   const cdmssBlock = (() => {
     if (!cdmss) return "";
@@ -243,7 +255,7 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
             <span style="color:${C.ink500};">ⓘ</span> Transcribed from a voice recording by the Even Encounter Assistant. Reviewed and submitted by ${escape(doctorName)}.
           </p>
         </td></tr>
-        <tr><td style="padding:20px 28px;">${noteSections}${cdmssBlock}</td></tr>
+        <tr><td style="padding:20px 28px;">${noteSectionsFinal}${cdmssBlock}</td></tr>
         <tr><td style="padding:14px 28px 22px 28px;border-top:1px solid ${C.ink100};">
           <p style="margin:0;font-size:11px;color:${C.ink400};">Generated automatically from a voice-recorded encounter. <a href="${escape(appUrl)}/encounter/${escape(encounterId)}" style="color:${C.blue};text-decoration:none;">View in app</a>. Reference: ${escape(encounterId)}.</p>
         </td></tr>

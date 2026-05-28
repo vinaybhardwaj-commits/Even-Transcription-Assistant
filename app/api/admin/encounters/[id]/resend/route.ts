@@ -114,6 +114,26 @@ export async function POST(
   const noteFinal = enc.note_json_edited ?? enc.note_json;
   if (!noteFinal) return respondError("VALIDATION_FAILED", "note_not_ready");
 
+  // B10 guard (28 May 2026): refuse to send a note with zero clinical
+  // content — see /[slug]/api/encounters/[id]/send/route.ts for context.
+  const hasContent =
+    (noteFinal.chief_complaint ?? "").trim().length > 0 ||
+    (noteFinal.history_present_illness ?? "").trim().length > 0 ||
+    (noteFinal.examination ?? "").trim().length > 0 ||
+    (noteFinal.assessment ?? "").trim().length > 0 ||
+    (noteFinal.past_medical_history?.length ?? 0) > 0 ||
+    (noteFinal.current_medications?.length ?? 0) > 0 ||
+    (noteFinal.allergies?.length ?? 0) > 0 ||
+    (noteFinal.plan?.investigations?.length ?? 0) > 0 ||
+    (noteFinal.plan?.treatment?.length ?? 0) > 0 ||
+    (noteFinal.plan?.follow_up ?? "").trim().length > 0;
+  if (!hasContent) {
+    return respondError(
+      "VALIDATION_FAILED",
+      "note_has_no_clinical_content",
+    );
+  }
+
   // Render template once
   const recordedAt = new Date(enc.recorded_at);
   const { subject, html, text } = renderNoteEmail({
