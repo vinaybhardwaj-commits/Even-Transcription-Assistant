@@ -15,6 +15,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 
 type Bucket = "all" | "sent" | "failed" | "draft" | "processing";
@@ -50,10 +51,25 @@ type ListResp = {
 
 const PAGE_SIZE = 25;
 
+type DoctorOption = { id: string; full_name: string };
+
 export function EncountersListClient() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Read ?doctor_id= from URL once at mount. We deliberately don't watch
+  // searchParams across renders because we own the param and write to it
+  // via router.replace below.
+  const initialDoctorId = React.useMemo<string | null>(() => {
+    const raw = searchParams?.get("doctor_id") ?? null;
+    return raw && raw.startsWith("doc_") ? raw : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [bucket, setBucket] = React.useState<Bucket>("all");
   const [window, setWindow] = React.useState<Window>("month");
   const [offset, setOffset] = React.useState(0);
+  const [doctorId, setDoctorId] = React.useState<string | null>(initialDoctorId);
+  const [doctors, setDoctors] = React.useState<DoctorOption[] | null>(null);
   const [data, setData] = React.useState<ListResp | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -61,6 +77,36 @@ export function EncountersListClient() {
   const [openMenuId, setOpenMenuId] = React.useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<EncounterRow | null>(null);
   const [actionInflight, setActionInflight] = React.useState(false);
+
+  // Fetch the doctor roster once for the filter dropdown. Cheap query
+  // (small table), fire-and-forget. Soft-fails to "All doctors only".
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/admin/doctors", { cache: "no-store" });
+        if (!res.ok) return;
+        const j = (await res.json()) as { doctors?: Array<{ id: string; full_name: string }> };
+        if (cancelled) return;
+        const list = (j.doctors ?? [])
+          .map((d) => ({ id: String(d.id), full_name: String(d.full_name) }))
+          .sort((a, b) => a.full_name.localeCompare(b.full_name));
+        setDoctors(list);
+      } catch { /* soft-fail */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Mirror doctorId into the URL (?doctor_id=) so the filter is shareable +
+  // back/forward survivable. Replace, don't push, to avoid history pollution
+  // as the user clicks chips.
+  React.useEffect(() => {
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (doctorId) params.set("doctor_id", doctorId); else params.delete("doctor_id");
+    const qs = params.toString();
+    router.replace(qs ? `/admin/encounters?${qs}` : `/admin/encounters`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doctorId]);
 
   const fetchOnce = React.useCallback(async () => {
     setLoading(true);
@@ -70,6 +116,7 @@ export function EncountersListClient() {
       qs.set("window", window);
       qs.set("limit",  String(PAGE_SIZE));
       qs.set("offset", String(offset));
+      if (doctorId) qs.set("doctor_id", doctorId);
       const res = await fetch(`/api/admin/encounters?${qs.toString()}`, { cache: "no-store" });
       const j = await res.json();
       if (!res.ok) {
@@ -83,7 +130,7 @@ export function EncountersListClient() {
     } finally {
       setLoading(false);
     }
-  }, [bucket, window, offset]);
+  }, [bucket, window, offset, doctorId]);
 
   React.useEffect(() => { void fetchOnce(); }, [fetchOnce]);
 
@@ -97,6 +144,12 @@ export function EncountersListClient() {
 
   const onChipChange = (b: Bucket) => { setBucket(b); setOffset(0); };
   const onWindowChange = (w: Window) => { setWindow(w); setOffset(0); };
+  const onDoctorChange = (id: string | null) => { setDoctorId(id); setOffset(0); };
+
+  const selectedDoctor = React.useMemo<DoctorOption | null>(
+    () => (doctorId && doctors ? doctors.find((d) => d.id === doctorId) ?? null : null),
+    [doctorId, doctors],
+  );
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
@@ -167,6 +220,35 @@ export function EncountersListClient() {
             </Chip>
           );
         })}
+
+        {/* Doctor filter */}
+        <div className="flex items-center gap-1 ml-2">
+          {selectedDoctor ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-caption bg-even-blue-100 text-even-blue-700">
+              <span>Doctor: {selectedDoctor.full_name}</span>
+              <button
+                type="button"
+                onClick={() => onDoctorChange(null)}
+                aria-label="Clear doctor filter"
+                className="text-even-blue-700 hover:text-danger-700"
+              >
+                ×
+              </button>
+            </span>
+          ) : (
+            <select
+              value={doctorId ?? ""}
+              onChange={(e) => onDoctorChange(e.target.value || null)}
+              className="px-2.5 py-1 rounded-md text-caption bg-even-ink-100 text-even-ink-700 hover:bg-even-ink-200 border border-transparent focus:border-even-blue-400 focus:outline-none"
+              disabled={!doctors}
+            >
+              <option value="">{doctors ? "All doctors" : "Loading doctors…"}</option>
+              {(doctors ?? []).map((d) => (
+                <option key={d.id} value={d.id}>{d.full_name}</option>
+              ))}
+            </select>
+          )}
+        </div>
 
         <button
           type="button"
@@ -301,8 +383,18 @@ function Row({
     <tr className="border-t border-even-ink-100 hover:bg-even-ink-50/40 group">
       <td className="px-4 py-2">
         <Link href={`/admin/encounters/${row.id}`} className="block min-w-0">
-          <p className="text-even-navy-800 truncate">{row.patient_label_raw ?? <span className="text-even-ink-400">(no label)</span>}</p>
-          <p className="text-caption text-even-ink-500 truncate">{row.chief_complaint ?? <span className="text-even-ink-400">—</span>}</p>
+          {row.patient_label_raw ? (
+            <>
+              <p className="text-even-navy-800 truncate">{row.patient_label_raw}</p>
+              {row.chief_complaint ? (
+                <p className="text-caption text-even-ink-500 truncate">{row.chief_complaint}</p>
+              ) : null}
+            </>
+          ) : row.chief_complaint ? (
+            <p className="text-even-navy-800 truncate">{row.chief_complaint}</p>
+          ) : (
+            <p className="text-even-navy-800 truncate"><span className="text-even-ink-400">(no label)</span></p>
+          )}
         </Link>
       </td>
       <td className="px-4 py-2 text-body text-even-ink-700">

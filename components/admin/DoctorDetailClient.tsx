@@ -368,7 +368,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
           <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-label text-even-navy-800">Recent encounters</h3>
-              <Link href={`/admin/encounters?bucket=all&window=all`} className="text-caption text-even-blue-600 hover:underline">View all →</Link>
+              <Link href={`/admin/encounters?bucket=all&window=all&doctor_id=${doctorId}`} className="text-caption text-even-blue-600 hover:underline">View all →</Link>
             </div>
             {!data || data.recent_encounters.length === 0 ? (
               <p className="text-body text-even-ink-400">No encounters yet.</p>

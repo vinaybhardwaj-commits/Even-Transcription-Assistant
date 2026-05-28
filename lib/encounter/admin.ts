@@ -381,11 +381,18 @@ export async function listAdminEncounters(args: {
   window?: EncountersWindow;
   limit?: number;
   offset?: number;
+  doctorId?: string | null;
 }): Promise<AdminEncounterListResult> {
   const bucket = args.bucket ?? "all";
   const window = args.window ?? "month";
   const limit = Math.min(Math.max(args.limit ?? 25, 1), 200);
   const offset = Math.max(args.offset ?? 0, 0);
+  // Optional per-doctor scope. Each SQL below adds an extra AND when set.
+  // We bind as text or NULL so the same query plan handles both cases.
+  const doctorId: string | null =
+    typeof args.doctorId === "string" && args.doctorId.length > 0
+      ? args.doctorId
+      : null;
   const since = windowSinceForEnc(window).toISOString();
 
   // Translate bucket → (statusFilter, sendStatusFilter)
@@ -408,6 +415,7 @@ export async function listAdminEncounters(args: {
            AND (e.deleted_at IS NULL)
            AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
            AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
+           AND (${doctorId}::text         IS NULL OR e.doctor_id   = ${doctorId})
       `,
       sql`
         SELECT
@@ -415,7 +423,11 @@ export async function listAdminEncounters(args: {
           e.status,
           e.send_status,
           e.patient_label_raw,
-          e.chief_complaint,
+          COALESCE(
+            (e.note_json_edited->>'chief_complaint'),
+            (e.note_json->>'chief_complaint'),
+            e.chief_complaint
+          )                    AS chief_complaint,
           e.recorded_at::text  AS recorded_at,
           e.duration_seconds,
           e.sent_at::text      AS sent_at,
@@ -436,6 +448,7 @@ export async function listAdminEncounters(args: {
           AND (e.deleted_at IS NULL)
           AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
           AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
+          AND (${doctorId}::text         IS NULL OR e.doctor_id   = ${doctorId})
         ORDER BY e.recorded_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `,
@@ -446,18 +459,22 @@ export async function listAdminEncounters(args: {
       WITH window_today AS (
         SELECT COUNT(*)::int AS n FROM encounter
          WHERE recorded_at >= date_trunc('day', NOW()) AND deleted_at IS NULL
+           AND (${doctorId}::text IS NULL OR doctor_id = ${doctorId})
       ),
       window_week AS (
         SELECT COUNT(*)::int AS n FROM encounter
          WHERE recorded_at >= NOW() - INTERVAL '7 days' AND deleted_at IS NULL
+           AND (${doctorId}::text IS NULL OR doctor_id = ${doctorId})
       ),
       window_month AS (
         SELECT COUNT(*)::int AS n FROM encounter
          WHERE recorded_at >= NOW() - INTERVAL '30 days' AND deleted_at IS NULL
+           AND (${doctorId}::text IS NULL OR doctor_id = ${doctorId})
       ),
       window_set AS (
         SELECT * FROM encounter
          WHERE recorded_at >= ${since}::timestamptz AND deleted_at IS NULL
+           AND (${doctorId}::text IS NULL OR doctor_id = ${doctorId})
       )
       SELECT
         (SELECT COUNT(*)::int FROM window_set)                                      AS all_count,
