@@ -35,16 +35,34 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const recordStartedAtRef = React.useRef<number | null>(null);
   const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
 
-  // 1. Create draft encounter row only after preflight gate clears
+  // 1. Create draft encounter row only after preflight gate clears.
+  //    B11 Part A: read the patient label HomeShell stashed in sessionStorage
+  //    and pass it to the POST so it persists as encounter.patient_label_raw.
+  //    Without this, every encounter ends up with patient_label_raw = NULL
+  //    and the library shows "Untitled encounter" until the LLM populates
+  //    note_json.chief_complaint (which still doesn't reflect the typed name).
   React.useEffect(() => {
     if (!preflightPassed) return;
     let cancelled = false;
+    let pendingLabel: string | null = null;
+    try {
+      const raw = sessionStorage.getItem("eta:pending_patient_label");
+      if (raw && raw.trim().length > 0) {
+        pendingLabel = raw.trim().slice(0, 200);
+      }
+      // Clear immediately so a subsequent "blank" recording doesn't reuse it.
+      sessionStorage.removeItem("eta:pending_patient_label");
+    } catch {
+      /* private mode / storage disabled — silently skip */
+    }
     (async () => {
       try {
         const res = await fetch(`/${slug}/api/encounters`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify(
+            pendingLabel ? { patient_label: pendingLabel } : {},
+          ),
         });
         if (!res.ok) {
           setCreateError(`http_${res.status}`);

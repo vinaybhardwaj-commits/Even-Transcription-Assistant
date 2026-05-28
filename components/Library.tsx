@@ -49,6 +49,28 @@ export function Library({ slug }: Props) {
     void load();
   }, [load]);
 
+  // B11 Part B: refetch when the tab becomes visible again (user came back
+  // from another app or another browser tab), on window focus, and on
+  // bfcache restore (iOS Safari swipe-back). Without these listeners the
+  // doctor sees a stale list every time they record + send and then return
+  // to the Library without a full page reload.
+  React.useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    const onPageshow = (e: PageTransitionEvent) => {
+      if (e.persisted) void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    window.addEventListener("pageshow", onPageshow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.removeEventListener("pageshow", onPageshow);
+    };
+  }, [load]);
+
   if (state.kind === "loading") {
     return (
       <p className="text-body text-even-ink-500 text-center mt-12">
@@ -74,46 +96,67 @@ export function Library({ slug }: Props) {
 
   if (state.rows.length === 0) {
     return (
-      <p className="text-body text-even-ink-500 text-center mt-12">
-        No encounters yet. Tap Record to begin.
-      </p>
+      <div className="text-center mt-12 space-y-3">
+        <p className="text-body text-even-ink-500">
+          No encounters yet. Tap Record to begin.
+        </p>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="text-caption text-even-blue-600 hover:underline"
+        >
+          Refresh
+        </button>
+      </div>
     );
   }
 
   return (
-    <ul className="space-y-2">
-      {state.rows.map((r) => (
-        <li key={r.id}>
-          <button
-            type="button"
-            onClick={() => router.push(`/${slug}/encounter/${r.id}`)}
-            className="w-full text-left rounded-lg border border-even-ink-100 bg-even-white p-4 hover:bg-even-ink-50 focus:outline-none focus:ring-2 focus:ring-even-blue-300 transition"
-          >
-            <div className="flex items-start justify-between gap-3 mb-1">
-              <p className="text-body text-even-navy-800 truncate">
-                {r.chief_complaint || r.patient_label || "Untitled encounter"}
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="text-caption text-even-blue-600 hover:underline"
+          aria-label="Refresh encounter list"
+        >
+          Refresh
+        </button>
+      </div>
+      <ul className="space-y-2">
+        {state.rows.map((r) => (
+          <li key={r.id}>
+            <button
+              type="button"
+              onClick={() => router.push(`/${slug}/encounter/${r.id}`)}
+              className="w-full text-left rounded-lg border border-even-ink-100 bg-even-white p-4 hover:bg-even-ink-50 focus:outline-none focus:ring-2 focus:ring-even-blue-300 transition"
+            >
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <p className="text-body text-even-navy-800 truncate">
+                  {r.chief_complaint || r.patient_label || "Untitled encounter"}
+                </p>
+                <StatusPill status={r.status} sendStatus={r.send_status} />
+              </div>
+              <p className="text-caption text-even-ink-500 flex items-center gap-2">
+                <span>{formatDate(r.recorded_at)}</span>
+                {r.duration_seconds ? (
+                  <>
+                    <span>·</span>
+                    <span>{formatDuration(r.duration_seconds)}</span>
+                  </>
+                ) : null}
+                {r.patient_label && r.chief_complaint ? (
+                  <>
+                    <span>·</span>
+                    <span className="truncate">{r.patient_label}</span>
+                  </>
+                ) : null}
               </p>
-              <StatusPill status={r.status} sendStatus={r.send_status} />
-            </div>
-            <p className="text-caption text-even-ink-500 flex items-center gap-2">
-              <span>{formatDate(r.recorded_at)}</span>
-              {r.duration_seconds ? (
-                <>
-                  <span>·</span>
-                  <span>{formatDuration(r.duration_seconds)}</span>
-                </>
-              ) : null}
-              {r.patient_label && r.chief_complaint ? (
-                <>
-                  <span>·</span>
-                  <span className="truncate">{r.patient_label}</span>
-                </>
-              ) : null}
-            </p>
-          </button>
-        </li>
-      ))}
-    </ul>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

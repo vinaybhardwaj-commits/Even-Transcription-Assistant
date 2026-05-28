@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'eta-shell-v1';   // bump on every SW change
+const SHELL_CACHE = 'eta-shell-v2';   // bump on every SW change — v2 fixes B11 stale Library
 const SHELL_URLS = ['/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -52,15 +52,33 @@ self.addEventListener('fetch', (e) => {
     );
     return;
   }
-  // Network-first for /api/* (no caching of RAG responses)
-  if (url.pathname.startsWith('/api/')) {
+  // Network-first for ANY API path — including doctor-scoped /<slug>/api/*.
+  // B11 root cause: prior code used url.pathname.startsWith('/api/'), which
+  // does NOT match /dr-vinay-bhardwaj-cjzs/api/encounters. Those GET responses
+  // fell through to the cache-first static-asset branch below and were
+  // permanently pinned in the SHELL cache — the doctor's Library never showed
+  // new encounters even after switching tabs or hard-refreshing.
+  if (url.pathname.includes('/api/')) {
     e.respondWith(
       fetch(e.request).catch(() => new Response(JSON.stringify({ error: 'offline' }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
     );
     return;
   }
-  // Static assets — cache-first, fall through to network
+  // Static assets — cache-first, fall through to network. Only cache the
+  // hashed Next build output to avoid pinning anything else by accident.
   if (e.request.method === 'GET') {
+    const cacheable =
+      url.pathname.startsWith('/_next/static/') ||
+      url.pathname.startsWith('/icons/') ||
+      url.pathname.endsWith('.webmanifest') ||
+      url.pathname.endsWith('.svg') ||
+      url.pathname.endsWith('.png') ||
+      url.pathname.endsWith('.ico');
+    if (!cacheable) {
+      // Anything else: pure network, no caching. Safer default than the prior
+      // catch-all that cached every GET on the origin.
+      return;
+    }
     e.respondWith(
       caches.match(e.request).then((cached) =>
         cached || fetch(e.request).then((resp) => {
