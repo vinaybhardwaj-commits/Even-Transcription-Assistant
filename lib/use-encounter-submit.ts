@@ -44,6 +44,10 @@ type Options = {
   durationSeconds: number | null;
   deepgramTranscript: string;
   whisperTranscript: string;
+  // Multilingual (Sarvam) accumulated transcripts from the live rolling hook.
+  sarvamOriginal?: string;
+  sarvamEnglish?: string;
+  sarvamLanguage?: string | null;
 };
 
 const STAGE_WEIGHTS: Record<SubmitStage, number> = {
@@ -166,6 +170,9 @@ export function useEncounterSubmit(opts: Options) {
             duration_seconds: o.durationSeconds,
             deepgram_transcript: o.deepgramTranscript || null,
             whisper_transcript: o.whisperTranscript || null,
+            sarvam_original: o.sarvamOriginal || null,
+            sarvam_english: o.sarvamEnglish || null,
+            sarvam_language: o.sarvamLanguage || null,
           }),
         },
       );

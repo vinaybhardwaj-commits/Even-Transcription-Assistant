@@ -9,6 +9,8 @@ import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
+import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
+import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
 import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
@@ -114,6 +116,18 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     intervalMs: 10_000,
   });
 
+  // 2c. Sarvam near-live rolling — multilingual (Indian-language) transcription.
+  // Sends decodable <=30s webm windows every 10s; accumulates the original
+  // script (for the live panel + preservation) and the English translation
+  // (for the note). Drives the native-script live panel for non-English
+  // encounters; English encounters keep the Deepgram experience untouched.
+  const sv = useSarvamRolling({
+    slug,
+    enabled: encounter !== null,
+    encounterId: encounter?.id,
+    intervalMs: 10_000,
+  });
+
 
   // Submit pipeline (read IDB → R2 PUT → finalize)
   const submit = useEncounterSubmit({
@@ -124,6 +138,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       .map((f) => cleanup.cleanedById[f.id] ?? f.text)
       .join(" "),
     whisperTranscript: wh.latest?.text ?? "",
+    sarvamOriginal: sv.original,
+    sarvamEnglish: sv.english,
+    sarvamLanguage: sv.language,
   });
 
   // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
@@ -133,6 +150,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       setBytesEmitted((b) => b + chunk.size);
       dg.sendChunk(chunk);
       wh.sendChunk(chunk);
+      sv.sendChunk(chunk);
       // Persist to IndexedDB for crash recovery (PRD §4.18). Fire-and-forget;
       // we don't block the live transcription pipeline on disk write.
       if (encounter) {
@@ -147,7 +165,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         });
       }
     },
-    [dg, wh, encounter],
+    [dg, wh, sv, encounter],
   );
 
   const rec = useMediaRecorder({ chunkMs: 250, onChunk });
@@ -398,6 +416,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
 
         <div className="w-full max-w-2xl mt-2 space-y-3">
           <LiveTranscript finals={finals} interim={interim} cleanedById={cleanup.cleanedById} />
+          <SarvamTranscript
+            text={sv.original}
+            language={sv.language}
+            latencyMs={sv.latest?.latency_ms ?? null}
+            nonEnglish={(() => { const lc=(sv.language||"").toLowerCase(); return !!lc && lc!=="unknown" && !lc.startsWith("en"); })()}
+            error={sv.error}
+          />
           <WhisperTranscript
             state={wh.state}
             text={wh.latest?.text ?? ""}

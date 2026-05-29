@@ -23,7 +23,7 @@ const NOTE_MODEL = process.env.NOTE_MODEL || "qwen2.5:14b";
 const NOTE_TIMEOUT_MS = 240_000;
 const NOTE_TEMPERATURE = 0;
 
-const SYSTEM = `You are converting a clinician's voice-dictated patient encounter into a structured Medical Encounter Note. Use ONLY information explicitly stated in the transcript — do not invent symptoms, medications, exam findings, doses, or follow-up plans. If a section was not discussed, return an empty string or empty array for that field.
+const SYSTEM = `You are converting a clinician's voice-dictated patient encounter into a structured Medical Encounter Note. The transcript may be in English, an Indian language (e.g. Hindi, Kannada), or code-mixed — ALWAYS write the note in clear clinical English, translating faithfully and never adding content. Use ONLY information explicitly stated in the transcript — do not invent symptoms, medications, exam findings, doses, or follow-up plans. If a section was not discussed, return an empty string or empty array for that field.
 
 Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
 

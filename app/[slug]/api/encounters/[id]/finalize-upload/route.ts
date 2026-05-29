@@ -75,6 +75,9 @@ export async function POST(
     duration_seconds?: number;
     deepgram_transcript?: string;
     whisper_transcript?: string;
+    sarvam_original?: string;
+    sarvam_english?: string;
+    sarvam_language?: string;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -130,7 +133,7 @@ export async function POST(
       : "";
 
   let transcriptRaw: string | null = null;
-  let chosenSource: "whisper" | "deepgram" | "none" = "none";
+  let chosenSource: "whisper" | "deepgram" | "sarvam" | "none" = "none";
   if (wh.length > 0 && dg.length > 0) {
     if (wh.length >= dg.length * 1.2) {
       transcriptRaw = wh;
@@ -147,24 +150,74 @@ export async function POST(
     chosenSource = "deepgram";
   }
 
+  // Multilingual override (Sarvam). For a non-English encounter Deepgram is
+  // ~empty and Whisper mistranslates/romanizes, so the Sarvam English
+  // translation becomes the canonical transcript that feeds the note, and the
+  // original-language transcript is preserved. English encounters are NOT
+  // touched (Deepgram path stands).
+  const svOriginal = typeof body.sarvam_original === "string" ? body.sarvam_original.trim() : "";
+  const svEnglish = typeof body.sarvam_english === "string" ? body.sarvam_english.trim() : "";
+  const svLang = typeof body.sarvam_language === "string" ? body.sarvam_language.trim() : "";
+  const svNonEnglish =
+    svLang.length > 0 && svLang.toLowerCase() !== "unknown" && !svLang.toLowerCase().startsWith("en");
+
+  let detectedLanguage: string | null = svLang.length > 0 ? svLang : null;
+  let transcriptOriginal: string | null = null;
+  if (svNonEnglish && svEnglish.length > 0) {
+    transcriptRaw = svEnglish;
+    chosenSource = "sarvam";
+    transcriptOriginal = svOriginal.length > 0 ? svOriginal : null;
+  }
+
   console.warn(
-    `[finalize-upload] enc=${id} chosen=${chosenSource} whisper_chars=${wh.length} deepgram_chars=${dg.length} kept=${transcriptRaw?.length ?? 0}`,
+    `[finalize-upload] enc=${id} chosen=${chosenSource} lang=${detectedLanguage ?? "-"} whisper_chars=${wh.length} deepgram_chars=${dg.length} sarvam_en_chars=${svEnglish.length} kept=${transcriptRaw?.length ?? 0}`,
   );
 
   // Update row → processing
   try {
     await sql`
       UPDATE encounter
-         SET audio_object_key = ${body.key},
-             audio_bytes      = ${head.size},
-             duration_seconds = ${durationSeconds},
-             transcript_raw   = ${transcriptRaw},
-             status           = 'processing'
+         SET audio_object_key   = ${body.key},
+             audio_bytes        = ${head.size},
+             duration_seconds   = ${durationSeconds},
+             transcript_raw     = ${transcriptRaw},
+             transcript_original = ${transcriptOriginal},
+             detected_language  = ${detectedLanguage},
+             status             = 'processing'
        WHERE id = ${id}
     `;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
+  }
+
+  // Testbed log: one transcription_run row per engine for side-by-side
+  // comparison. Best-effort — never block finalize on it.
+  try {
+    const mk = () =>
+      `trun_${globalThis.crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const runs: Array<{
+      engine: string;
+      original: string | null;
+      english: string | null;
+      lang: string | null;
+      winner: boolean;
+    }> = [
+      { engine: "deepgram", original: null, english: dg || null, lang: null, winner: chosenSource === "deepgram" },
+      { engine: "whisper", original: wh || null, english: null, lang: null, winner: chosenSource === "whisper" },
+      { engine: "sarvam", original: svOriginal || null, english: svEnglish || null, lang: svLang || null, winner: chosenSource === "sarvam" },
+    ];
+    for (const r of runs) {
+      if (!r.original && !r.english) continue;
+      await sql`
+        INSERT INTO transcription_run
+          (id, encounter_id, engine, mode, detected_language, transcript_original, transcript_english, is_winner)
+        VALUES
+          (${mk()}, ${id}, ${r.engine}, 'live', ${r.lang}, ${r.original}, ${r.english}, ${r.winner})
+      `;
+    }
+  } catch (e) {
+    console.warn(`[finalize-upload] transcription_run log failed enc=${id}`, e);
   }
 
   // B7 cleanup: the rolling Whisper pipeline accumulated raw
