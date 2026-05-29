@@ -130,8 +130,14 @@ export async function POST(
   // never block the note on it — fall back to whatever transcript_raw is.
   const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
-    if (!row.detected_language || !isNonEnglish(row.detected_language)) return;
     if (!row.audio_object_key) return;
+    // Fire when the detected language is non-English, OR (robustness — language
+    // detection can come back null) when the working transcript contains Indic
+    // script (Devanagari..Sinhala, U+0900-U+0DFF: Hindi/Bengali/Gujarati/Tamil/
+    // Telugu/Kannada/Malayalam). English-only transcripts skip this.
+    const langNonEn = !!row.detected_language && isNonEnglish(row.detected_language);
+    const hasIndic = /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
+    if (!langNonEn && !hasIndic) return;
     emit?.({ stage: "progress", msg: "Translating full conversation (Sarvam)\u2026" });
     try {
       const head = await headObject(row.audio_object_key);
