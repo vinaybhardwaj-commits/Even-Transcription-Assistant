@@ -89,6 +89,8 @@ export const encounter = pgTable("encounter", {
   audioBytes:          integer("audio_bytes"),
   transcriptRaw:       text("transcript_raw"),
   transcriptClean:     text("transcript_clean"),
+  detectedLanguage:    text("detected_language"),
+  transcriptOriginal:  text("transcript_original"),
   noteJson:            jsonb("note_json"),
   noteJsonEdited:      jsonb("note_json_edited"),
   cdmssJson:           jsonb("cdmss_json"),
@@ -206,3 +208,23 @@ export const settings = pgTable("settings", {
   audioOfflineTestAt:     timestamp("audio_offline_test_at", { withTimezone: true }),
   audioOfflineTestBy:     uuid("audio_offline_test_by"),
 });
+
+
+// transcription_run (migration 0006) — multi-engine comparison testbed log.
+// One row per engine per encounter (Deepgram | Whisper | Sarvam | ...).
+export const transcriptionRun = pgTable("transcription_run", {
+  id:                  text("id").primaryKey(), // trun_<nanoid>
+  encounterId:         text("encounter_id").notNull().references(() => encounter.id, { onDelete: "cascade" }),
+  engine:              text("engine").notNull(),
+  mode:                text("mode").notNull(), // live | submit | batch
+  detectedLanguage:    text("detected_language"),
+  transcriptOriginal:  text("transcript_original"),
+  transcriptEnglish:   text("transcript_english"),
+  latencyMs:           integer("latency_ms"),
+  judgeScore:          numeric("judge_score", { precision: 4, scale: 2 }),
+  isWinner:            boolean("is_winner").notNull().default(false),
+  error:               text("error"),
+  createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byEncounter: index("idx_transcription_run_encounter").on(t.encounterId, t.createdAt),
+}));
