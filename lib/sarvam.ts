@@ -45,9 +45,13 @@ async function callSync(
   const key = process.env.SARVAM_API_KEY;
   if (!key) return { ok: false, error: "sarvam_api_key_missing", latencyMs: 0 };
 
+  // Sarvam's MIME allow-list rejects parameterized types like
+  // "audio/webm; codecs=opus" (what MediaRecorder blobs carry) — it only
+  // accepts the BARE type "audio/webm". Strip any ;codecs=... parameter.
+  const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const form = new FormData();
-  const blob = new Blob([audio], { type: contentType });
-  form.append("file", blob, `audio.${extName(contentType)}`);
+  const blob = new Blob([audio], { type: baseType });
+  form.append("file", blob, `audio.${extName(baseType)}`);
   form.append("model", MODEL);
   form.append("mode", mode);
 
