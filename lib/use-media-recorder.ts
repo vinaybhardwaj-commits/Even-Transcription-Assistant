@@ -123,30 +123,27 @@ export function useMediaRecorder(opts: Options = {}) {
     }
   }, [state, chunkMs]);
 
+  // iOS Safari fix (B-pause): we do NOT call native MediaRecorder.pause()/
+  // resume(). On iOS Safari, resume() after pause() frequently fails to
+  // restart timeslice data emission — ondataavailable never fires again, so
+  // recording is stuck even though rec.state reports "recording" (exactly the
+  // "recording froze after Resume" report). Instead the recorder runs
+  // CONTINUOUSLY for the whole session and we SOFT-pause: ondataavailable is
+  // gated by softPausedRef, so chunks recorded while paused are dropped (never
+  // written to IDB, never sent to Deepgram/Whisper/Sarvam). The final audio is
+  // therefore the non-paused chunks with a time gap where the pause was —
+  // which is exactly what the user wants (the paused audio is excluded).
+  // Resume is just a flag flip; there is no fragile native call to fail.
   const pause = React.useCallback(() => {
-    const rec = recRef.current;
-    if (!rec) return;
-    // Set the soft-pause flag FIRST so even if rec.pause() throws or no-ops,
-    // we stop forwarding chunks to the transcription/IDB pipeline.
+    if (!recRef.current) return;
     softPausedRef.current = true;
     setState("paused");
-    try {
-      if (rec.state === "recording") rec.pause();
-    } catch {
-      // iOS Safari has historically had buggy pause() — best-effort.
-    }
   }, []);
 
   const resume = React.useCallback(() => {
-    const rec = recRef.current;
-    if (!rec) return;
+    if (!recRef.current) return;
     softPausedRef.current = false;
     setState("recording");
-    try {
-      if (rec.state === "paused") rec.resume();
-    } catch {
-      // Best-effort like pause().
-    }
   }, []);
 
   const stop = React.useCallback(async (): Promise<void> => {
