@@ -30,6 +30,8 @@ export type EncounterFull = {
   duration_seconds: number | null;
   transcript_raw: string | null;
   transcript_clean: string | null;
+  detected_language: string | null;
+  transcript_original: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -71,6 +73,20 @@ export type EncounterFull = {
     created_at: string;
   }>;
 
+  // Multi-engine transcription comparison (testbed): one row per engine.
+  transcription_runs: Array<{
+    id: string;
+    engine: string;
+    mode: string;
+    detected_language: string | null;
+    transcript_original: string | null;
+    transcript_english: string | null;
+    latency_ms: number | null;
+    judge_score: number | null;
+    is_winner: boolean;
+    created_at: string;
+  }>;
+
   // LLM traces (one per surface invocation). Full payload with events.
   llm_traces: Array<{
     id: string;
@@ -109,6 +125,8 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       e.duration_seconds,
       e.transcript_raw,
       e.transcript_clean,
+      e.detected_language,
+      e.transcript_original,
       e.note_json,
       e.note_json_edited,
       e.cdmss_json,
@@ -163,6 +181,16 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     LIMIT 100
   `) as Array<Record<string, unknown>>;
 
+  // 3b) transcription_run — per-engine comparison rows (testbed)
+  const trRows = (await sql`
+    SELECT id, engine, mode, detected_language, transcript_original,
+           transcript_english, latency_ms, judge_score, is_winner,
+           created_at::text AS created_at
+    FROM transcription_run
+    WHERE encounter_id = ${id}
+    ORDER BY created_at ASC
+  `) as Array<Record<string, unknown>>;
+
   // 4) llm_traces — first summary, then full detail for each
   const traceSummary = await listTracesForEncounter(id, 20);
   const tracesFull = await Promise.all(
@@ -202,6 +230,8 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     transcript_raw: r.transcript_raw ? String(r.transcript_raw) : null,
     transcript_clean: r.transcript_clean ? String(r.transcript_clean) : null,
     note_json: (r.note_json as EncounterNote | null) ?? null,
+    detected_language: r.detected_language ? String(r.detected_language) : null,
+    transcript_original: r.transcript_original ? String(r.transcript_original) : null,
     note_json_edited: (r.note_json_edited as EncounterNote | null) ?? null,
     cdmss_json: (r.cdmss_json as CdmssOutput | null) ?? null,
     audio_object_key: r.audio_object_key ? String(r.audio_object_key) : null,
@@ -235,6 +265,18 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       actor_id: x.actor_id ? String(x.actor_id) : null,
       action: String(x.action),
       metadata_json: x.metadata_json ?? null,
+      created_at: String(x.created_at),
+    })),
+    transcription_runs: trRows.map((x) => ({
+      id: String(x.id),
+      engine: String(x.engine),
+      mode: String(x.mode),
+      detected_language: x.detected_language ? String(x.detected_language) : null,
+      transcript_original: x.transcript_original ? String(x.transcript_original) : null,
+      transcript_english: x.transcript_english ? String(x.transcript_english) : null,
+      latency_ms: x.latency_ms == null ? null : Number(x.latency_ms),
+      judge_score: x.judge_score == null ? null : Number(x.judge_score),
+      is_winner: Boolean(x.is_winner),
       created_at: String(x.created_at),
     })),
     llm_traces: tracesFull.filter(

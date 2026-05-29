@@ -75,6 +75,18 @@ type LlmTrace = {
   events: TraceEventLog[];
   model_calls: ModelCall[];
 };
+type TranscriptionRunRow = {
+  id: string;
+  engine: string;
+  mode: string;
+  detected_language: string | null;
+  transcript_original: string | null;
+  transcript_english: string | null;
+  latency_ms: number | null;
+  judge_score: number | null;
+  is_winner: boolean;
+  created_at: string;
+};
 type EncounterFull = {
   id: string;
   status: EncounterStatus;
@@ -84,6 +96,9 @@ type EncounterFull = {
   duration_seconds: number | null;
   transcript_raw: string | null;
   transcript_clean: string | null;
+  detected_language: string | null;
+  transcript_original: string | null;
+  transcription_runs: TranscriptionRunRow[];
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -110,12 +125,13 @@ type FetchResp = {
   };
 };
 
-type TabKey = "note" | "transcript" | "cdmss" | "send" | "audit";
+type TabKey = "note" | "transcript" | "engines" | "cdmss" | "send" | "audit";
 
-const TAB_ORDER: TabKey[] = ["note", "transcript", "cdmss", "send", "audit"];
+const TAB_ORDER: TabKey[] = ["note", "transcript", "engines", "cdmss", "send", "audit"];
 const TAB_LABEL: Record<TabKey, string> = {
   note: "Note",
   transcript: "Transcript",
+  engines: "Engines",
   cdmss: "CDMSS",
   send: "Send",
   audit: "Audit log",
@@ -351,6 +367,67 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
               </section>
             ) : (
               <p className="text-body text-even-ink-400">No transcript captured (encounter may be deleted or processing failed).</p>
+            )
+          ) : null}
+
+          {activeTab === "engines" ? (
+            enc.transcription_runs.length > 0 || enc.detected_language || enc.transcript_original ? (
+              <section className="space-y-4">
+                <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                  <p className="text-caption text-even-ink-500">
+                    Detected language:{" "}
+                    <span className="font-medium text-even-navy-800">{enc.detected_language ?? "\u2014 (English / not set)"}</span>
+                  </p>
+                  <p className="text-caption text-even-ink-400 mt-1">
+                    Per-engine outputs for the same audio. The winner feeds the note (for non-English, that is the full-file Sarvam batch translation).
+                  </p>
+                  {enc.transcript_original ? (
+                    <details className="mt-3 rounded-md border border-even-ink-100 bg-even-ink-50/40">
+                      <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
+                        Live original-language transcript (code-mixed)
+                      </summary>
+                      <pre className="px-3 pb-3 text-body text-even-ink-800 whitespace-pre-wrap font-sans leading-relaxed">{enc.transcript_original}</pre>
+                    </details>
+                  ) : null}
+                </div>
+                {enc.transcription_runs.map((run) => (
+                  <div key={run.id} className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      <span className="text-label font-semibold text-even-navy-800 uppercase tracking-wide">{run.engine}</span>
+                      <span className="text-caption rounded-full px-2 py-0.5 bg-even-ink-100 text-even-ink-600">{run.mode}</span>
+                      {run.detected_language ? (
+                        <span className="text-caption text-even-ink-500">{run.detected_language}</span>
+                      ) : null}
+                      {run.latency_ms != null ? (
+                        <span className="text-caption text-even-ink-400">{(run.latency_ms / 1000).toFixed(1)}s</span>
+                      ) : null}
+                      {run.judge_score != null ? (
+                        <span className="text-caption text-even-ink-400">score {run.judge_score}</span>
+                      ) : null}
+                      {run.is_winner ? (
+                        <span className="text-caption rounded-full px-2 py-0.5 bg-success-100 text-success-700">winner → note</span>
+                      ) : null}
+                    </div>
+                    {run.transcript_english ? (
+                      <>
+                        <p className="text-caption text-even-ink-400 mb-0.5">English</p>
+                        <pre className="whitespace-pre-wrap text-body text-even-ink-800 font-sans leading-relaxed mb-2">{run.transcript_english}</pre>
+                      </>
+                    ) : null}
+                    {run.transcript_original ? (
+                      <>
+                        <p className="text-caption text-even-ink-400 mb-0.5">Original</p>
+                        <pre className="whitespace-pre-wrap text-body text-even-ink-700 font-sans leading-relaxed">{run.transcript_original}</pre>
+                      </>
+                    ) : null}
+                    {!run.transcript_english && !run.transcript_original ? (
+                      <p className="text-caption text-even-ink-400 italic">No output (engine returned nothing for this audio).</p>
+                    ) : null}
+                  </div>
+                ))}
+              </section>
+            ) : (
+              <p className="text-body text-even-ink-400">No engine-comparison data (English-only encounter, or predates the multilingual testbed).</p>
             )
           ) : null}
 
