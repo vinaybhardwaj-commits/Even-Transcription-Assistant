@@ -75,8 +75,7 @@ export async function POST(
     duration_seconds?: number;
     deepgram_transcript?: string;
     whisper_transcript?: string;
-    sarvam_original?: string;
-    sarvam_english?: string;
+    sarvam_codemix?: string;
     sarvam_language?: string;
   };
   try {
@@ -155,22 +154,29 @@ export async function POST(
   // translation becomes the canonical transcript that feeds the note, and the
   // original-language transcript is preserved. English encounters are NOT
   // touched (Deepgram path stands).
-  const svOriginal = typeof body.sarvam_original === "string" ? body.sarvam_original.trim() : "";
-  const svEnglish = typeof body.sarvam_english === "string" ? body.sarvam_english.trim() : "";
+  // Multilingual: the live rolling sends an accumulated CODE-MIXED transcript +
+  // detected language. For a non-English encounter we preserve that as the
+  // original-language transcript and use it as a PLACEHOLDER canonical so the
+  // encounter has a working transcript; /process then REPLACES transcript_raw
+  // with a full-file batch English translation (best accuracy). English
+  // encounters are untouched (Deepgram/Whisper path stands).
+  const svCodemix = typeof body.sarvam_codemix === "string" ? body.sarvam_codemix.trim() : "";
   const svLang = typeof body.sarvam_language === "string" ? body.sarvam_language.trim() : "";
   const svNonEnglish =
     svLang.length > 0 && svLang.toLowerCase() !== "unknown" && !svLang.toLowerCase().startsWith("en");
 
-  let detectedLanguage: string | null = svLang.length > 0 ? svLang : null;
+  const detectedLanguage: string | null = svLang.length > 0 ? svLang : null;
   let transcriptOriginal: string | null = null;
-  if (svNonEnglish && svEnglish.length > 0) {
-    transcriptRaw = svEnglish;
-    chosenSource = "sarvam";
-    transcriptOriginal = svOriginal.length > 0 ? svOriginal : null;
+  if (svNonEnglish) {
+    transcriptOriginal = svCodemix.length > 0 ? svCodemix : null;
+    if (svCodemix.length > 0) {
+      transcriptRaw = svCodemix; // placeholder; /process replaces with batch English
+      chosenSource = "sarvam";
+    }
   }
 
   console.warn(
-    `[finalize-upload] enc=${id} chosen=${chosenSource} lang=${detectedLanguage ?? "-"} whisper_chars=${wh.length} deepgram_chars=${dg.length} sarvam_en_chars=${svEnglish.length} kept=${transcriptRaw?.length ?? 0}`,
+    `[finalize-upload] enc=${id} chosen=${chosenSource} lang=${detectedLanguage ?? "-"} dg=${dg.length} wh=${wh.length} sarvam_cm=${svCodemix.length} kept=${transcriptRaw?.length ?? 0}`,
   );
 
   // Update row → processing
@@ -205,7 +211,7 @@ export async function POST(
     }> = [
       { engine: "deepgram", original: null, english: dg || null, lang: null, winner: chosenSource === "deepgram" },
       { engine: "whisper", original: wh || null, english: null, lang: null, winner: chosenSource === "whisper" },
-      { engine: "sarvam", original: svOriginal || null, english: svEnglish || null, lang: svLang || null, winner: chosenSource === "sarvam" },
+      { engine: "sarvam", original: svCodemix || null, english: null, lang: svLang || null, winner: chosenSource === "sarvam" },
     ];
     for (const r of runs) {
       if (!r.original && !r.english) continue;

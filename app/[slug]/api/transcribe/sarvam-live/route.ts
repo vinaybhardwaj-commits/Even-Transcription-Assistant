@@ -18,13 +18,13 @@
  *   - encounter_id: string (optional, for logging)
  *   - block_idx:    string (optional, echoed)
  *
- * Returns: { block_idx, original, english, language_code, latency_ms, errors }
+ * Returns: { block_idx, text (codemix), language_code, latency_ms, error }
  * Soft-fail: a failed engine returns null for that field; never throws.
  */
 import { NextRequest } from "next/server";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
-import { sarvamTranscribe, sarvamTranslate } from "@/lib/sarvam";
+import { sarvamCodemix } from "@/lib/sarvam";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
@@ -61,27 +61,15 @@ export async function POST(
   const contentType = audio.type || "audio/webm";
   const buf = Buffer.from(await audio.arrayBuffer());
 
-  // Run both engines in parallel. Each soft-fails independently.
-  const [tr, tl] = await Promise.all([
-    sarvamTranscribe(buf, contentType),
-    sarvamTranslate(buf, contentType),
-  ]);
-
-  const original = tr.ok ? tr.transcript : null;
-  const english = tl.ok ? tl.transcript : null;
-  const language_code =
-    (tr.ok ? tr.languageCode : null) ?? (tl.ok ? tl.languageCode : null);
-  const latency_ms = Math.max(tr.latencyMs, tl.latencyMs);
+  // Code-mixed transcription: one engine, one continuous transcript that keeps
+  // English in English and Indic in native script — drives the single live box.
+  const cm = await sarvamCodemix(buf, contentType);
 
   return respondOk({
     block_idx: blockIdx,
-    original,
-    english,
-    language_code,
-    latency_ms,
-    errors: {
-      transcribe: tr.ok ? null : tr.error,
-      translate: tl.ok ? null : tl.error,
-    },
+    text: cm.ok ? cm.transcript : null,
+    language_code: cm.ok ? cm.languageCode : null,
+    latency_ms: cm.latencyMs,
+    error: cm.ok ? null : cm.error,
   });
 }

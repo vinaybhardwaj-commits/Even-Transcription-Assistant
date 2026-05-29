@@ -16,7 +16,6 @@ type Props = {
   text: string;
   language: string | null;
   latencyMs: number | null;
-  nonEnglish: boolean;
   error: string | null;
 };
 
@@ -26,7 +25,7 @@ const LANG_NAMES: Record<string, string> = {
   "pa-IN": "Punjabi", "od-IN": "Odia", "ur-IN": "Urdu", "en-IN": "English",
 };
 
-export function SarvamTranscript({ text, language, latencyMs, nonEnglish, error }: Props) {
+export function SarvamTranscript({ text, language, latencyMs, error }: Props) {
   if (!text && !error) return null;
   const langLabel = language ? (LANG_NAMES[language] ?? language) : null;
 
@@ -34,7 +33,7 @@ export function SarvamTranscript({ text, language, latencyMs, nonEnglish, error 
     <div className="rounded-md border border-even-blue-200 bg-even-blue-50/40 p-3">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-caption font-medium text-even-navy-800">
-          Live transcript{langLabel ? ` · ${langLabel}` : ""}{nonEnglish ? " (original script)" : ""}
+          Live transcript{langLabel ? ` · ${langLabel}` : ""}
         </span>
         <span className="text-caption text-even-ink-400">
           Sarvam{latencyMs != null ? ` · ${(latencyMs / 1000).toFixed(1)}s` : ""}

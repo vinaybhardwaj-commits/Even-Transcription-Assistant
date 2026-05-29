@@ -107,3 +107,120 @@ export function isNonEnglish(languageCode: string | null | undefined): boolean {
   if (c === "unknown") return false;
   return !c.startsWith("en");
 }
+
+/** Code-mixed transcription (mode=codemix): English words in English, Indic in
+ *  native script — the natural single-box live view for bilingual consults. */
+export function sarvamCodemix(audio: Buffer | Uint8Array, contentType = "audio/webm"): Promise<SarvamResult> {
+  return callSync("/speech-to-text", "codemix" as SarvamMode, audio, contentType);
+}
+
+// ---------------------------------------------------------------------------
+// Batch translate (full-file, >30s) — async job. Used at submit for the
+// canonical English transcript: whole-conversation context => materially
+// better accuracy than the per-window live rolling, and a robust safety net
+// independent of what the live panel accumulated.
+//
+// Flow: init -> upload-files (presigned) -> Azure PUT -> start -> poll status
+//       -> download-files -> GET output JSON. Model saaras:v2.5 (translate job).
+// ---------------------------------------------------------------------------
+
+export type SarvamBatchResult =
+  | { ok: true; transcript: string; languageCode: string | null; latencyMs: number }
+  | { ok: false; error: string; latencyMs: number };
+
+type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number };
+
+export async function sarvamBatchTranslate(
+  audio: Buffer | Uint8Array,
+  contentType = "audio/webm",
+  opts: BatchOpts = {},
+): Promise<SarvamBatchResult> {
+  const key = process.env.SARVAM_API_KEY;
+  if (!key) return { ok: false, error: "sarvam_api_key_missing", latencyMs: 0 };
+  const H = { "api-subscription-key": key, "Content-Type": "application/json" };
+  const t0 = Date.now();
+  const maxWaitMs = opts.maxWaitMs ?? 150_000;
+  const pollMs = opts.pollMs ?? 4_000;
+  const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
+  const fname = `audio.${extName(baseType)}`;
+
+  try {
+    // 1. init
+    const initRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1`, {
+      method: "POST", headers: H, cache: "no-store",
+      body: JSON.stringify({ job_parameters: { model: "saaras:v2.5", ...(opts.prompt ? { prompt: opts.prompt } : {}) } }),
+    });
+    if (!initRes.ok) return { ok: false, error: `init_${initRes.status}: ${(await initRes.text()).slice(0, 120)}`, latencyMs: Date.now() - t0 };
+    const jobId = (await initRes.json() as { job_id: string }).job_id;
+
+    // 2. presigned upload URL
+    const upRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/upload-files`, {
+      method: "POST", headers: H, cache: "no-store",
+      body: JSON.stringify({ job_id: jobId, files: [fname] }),
+    });
+    if (!upRes.ok) return { ok: false, error: `upload_links_${upRes.status}`, latencyMs: Date.now() - t0 };
+    const upJson = await upRes.json() as { upload_urls: Record<string, { file_url: string }> };
+    const putUrl = upJson.upload_urls[fname]?.file_url;
+    if (!putUrl) return { ok: false, error: "no_upload_url", latencyMs: Date.now() - t0 };
+
+    // 3. PUT to Azure blob
+    const sv = /[?&]sv=([^&]+)/.exec(putUrl)?.[1];
+    const putRes = await fetch(putUrl, {
+      method: "PUT",
+      headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": baseType, ...(sv ? { "x-ms-version": sv } : {}) },
+      body: Buffer.from(audio),
+    });
+    if (!putRes.ok) return { ok: false, error: `azure_put_${putRes.status}`, latencyMs: Date.now() - t0 };
+
+    // 4. start
+    const startRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/start`, {
+      method: "POST", headers: H, cache: "no-store", body: "{}",
+    });
+    if (!startRes.ok) return { ok: false, error: `start_${startRes.status}`, latencyMs: Date.now() - t0 };
+
+    // 5. poll status
+    let outputs: string[] = [];
+    let state = "Pending";
+    while (Date.now() - t0 < maxWaitMs) {
+      if (opts.signal?.aborted) return { ok: false, error: "aborted", latencyMs: Date.now() - t0 };
+      await new Promise((r) => setTimeout(r, pollMs));
+      const stRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/status`, { headers: H, cache: "no-store" });
+      if (!stRes.ok) continue;
+      const st = await stRes.json() as { job_state: string; job_details?: Array<{ outputs?: Array<{ file_name: string }> }> };
+      state = st.job_state;
+      if (state === "Completed") {
+        outputs = (st.job_details ?? []).flatMap((d) => (d.outputs ?? []).map((o) => o.file_name));
+        break;
+      }
+      if (state === "Failed") return { ok: false, error: "job_failed", latencyMs: Date.now() - t0 };
+    }
+    if (state !== "Completed") return { ok: false, error: `timeout_state_${state}`, latencyMs: Date.now() - t0 };
+    if (outputs.length === 0) return { ok: false, error: "no_outputs", latencyMs: Date.now() - t0 };
+
+    // 6. download output(s) + concat transcripts
+    const dlRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/download-files`, {
+      method: "POST", headers: H, cache: "no-store",
+      body: JSON.stringify({ job_id: jobId, files: outputs }),
+    });
+    if (!dlRes.ok) return { ok: false, error: `download_links_${dlRes.status}`, latencyMs: Date.now() - t0 };
+    const dlJson = await dlRes.json() as { download_urls: Record<string, { file_url: string }> };
+    let transcript = ""; let lang: string | null = null;
+    for (const name of outputs) {
+      const u = dlJson.download_urls[name]?.file_url;
+      if (!u) continue;
+      const r = await fetch(u, { cache: "no-store" });
+      if (!r.ok) continue;
+      const j = await r.json() as { transcript?: string; language_code?: string | null };
+      if (j.transcript) transcript += (transcript ? " " : "") + j.transcript.trim();
+      if (!lang && j.language_code) lang = j.language_code;
+    }
+    if (!transcript.trim()) return { ok: false, error: "empty_batch_transcript", latencyMs: Date.now() - t0 };
+    return { ok: true, transcript: transcript.trim(), languageCode: lang, latencyMs: Date.now() - t0 };
+  } catch (e: unknown) {
+    return { ok: false, error: `batch_exc: ${e instanceof Error ? e.message : String(e)}`, latencyMs: Date.now() - t0 };
+  }
+}
+
+/** Medical-context prompt passed to Sarvam translate to nudge clinical accuracy. */
+export const SARVAM_MEDICAL_PROMPT =
+  "Medical doctor-patient consultation in an Indian OPD clinic. Preserve drug names, dosages, symptoms, and clinical terms accurately.";

@@ -4,11 +4,9 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { RecordButton } from "@/components/recording/RecordButton";
 import { ElapsedTimer } from "@/components/recording/ElapsedTimer";
-import { LiveTranscript } from "@/components/recording/LiveTranscript";
 import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
-import { WhisperTranscript } from "@/components/recording/WhisperTranscript";
 import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
 import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
@@ -32,7 +30,6 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const [chunksCount, setChunksCount] = React.useState(0);
   const [bytesEmitted, setBytesEmitted] = React.useState(0);
   const [finals, setFinals] = React.useState<FinalRow[]>([]);
-  const [interim, setInterim] = React.useState("");
   // duration_seconds at stop — captured when the user taps Submit
   const recordStartedAtRef = React.useRef<number | null>(null);
   const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
@@ -98,12 +95,8 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     encounterId: encounter?.id,
     onFinal: React.useCallback((u: LiveUtterance) => {
       setFinals((prev) => [...prev, { id: u.id, text: u.text }]);
-      setInterim("");
       cleanup.enqueue(u.id, u.text);
     }, [cleanup]),
-    onInterim: React.useCallback((u: LiveUtterance) => {
-      setInterim(u.text);
-    }, []),
   });
 
   // 2b. Whisper rolling — cumulative-from-zero every 10s for higher-accuracy
@@ -138,8 +131,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       .map((f) => cleanup.cleanedById[f.id] ?? f.text)
       .join(" "),
     whisperTranscript: wh.latest?.text ?? "",
-    sarvamOriginal: sv.original,
-    sarvamEnglish: sv.english,
+    sarvamCodemix: sv.text,
     sarvamLanguage: sv.language,
   });
 
@@ -414,23 +406,12 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           </div>
         ) : null}
 
-        <div className="w-full max-w-2xl mt-2 space-y-3">
-          <LiveTranscript finals={finals} interim={interim} cleanedById={cleanup.cleanedById} />
+        <div className="w-full max-w-2xl mt-2">
           <SarvamTranscript
-            text={sv.original}
+            text={sv.text}
             language={sv.language}
             latencyMs={sv.latest?.latency_ms ?? null}
-            nonEnglish={(() => { const lc=(sv.language||"").toLowerCase(); return !!lc && lc!=="unknown" && !lc.startsWith("en"); })()}
             error={sv.error}
-          />
-          <WhisperTranscript
-            state={wh.state}
-            text={wh.latest?.text ?? ""}
-            latencyMs={wh.latest?.latency_ms ?? null}
-            passIdx={wh.latest?.pass_idx ?? null}
-            language={wh.latest?.language ?? null}
-            bytes={wh.latest?.bytes ?? null}
-            error={wh.error}
           />
         </div>
       </section>

@@ -31,6 +31,8 @@ import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
 import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
+import { getObjectBytes, headObject } from "@/lib/r2";
+import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -40,6 +42,8 @@ type Row = {
   doctor_id: string;
   status: "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
   transcript_raw: string | null;
+  detected_language: string | null;
+  audio_object_key: string | null;
   note_json: EncounterNote | null;
   cdmss_json: CdmssOutput | CdmssRich | null;
 };
@@ -81,7 +85,8 @@ export async function POST(
   let row: Row | undefined;
   try {
     const rows = (await sql`
-      SELECT id, doctor_id, status, transcript_raw, note_json, cdmss_json
+      SELECT id, doctor_id, status, transcript_raw, detected_language,
+             audio_object_key, note_json, cdmss_json
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
        LIMIT 1
@@ -117,6 +122,42 @@ export async function POST(
     );
   }
 
+  // For a non-English encounter, replace the (placeholder/code-mixed) canonical
+  // transcript with a FULL-FILE Sarvam batch translation. Whole-conversation
+  // context is materially more accurate than the per-window live rolling, and
+  // this is also the safety net if the live rolling under-captured. English
+  // encounters skip this entirely (Deepgram/Whisper path stands). Soft-fail:
+  // never block the note on it — fall back to whatever transcript_raw is.
+  const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
+    if (!row) return;
+    if (!row.detected_language || !isNonEnglish(row.detected_language)) return;
+    if (!row.audio_object_key) return;
+    emit?.({ stage: "progress", msg: "Translating full conversation (Sarvam)\u2026" });
+    try {
+      const head = await headObject(row.audio_object_key);
+      const bytes = await getObjectBytes(row.audio_object_key);
+      if (!bytes) {
+        emit?.({ stage: "progress", msg: "Audio unavailable for batch translate; using live transcript" });
+        return;
+      }
+      const bt = await sarvamBatchTranslate(bytes, head.content_type || "audio/webm", {
+        prompt: SARVAM_MEDICAL_PROMPT,
+        signal: req.signal,
+      });
+      if (bt.ok && bt.transcript.trim().length > 0) {
+        row.transcript_raw = bt.transcript;
+        await sql`UPDATE encounter SET transcript_raw = ${bt.transcript} WHERE id = ${id}`;
+        emit?.({ stage: "progress", msg: `Full-conversation translation ready (${bt.transcript.length} chars)` });
+      } else {
+        emit?.({ stage: "progress", msg: `Batch translate unavailable (${bt.ok ? "empty" : bt.error}); using live transcript` });
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      console.warn(`[process] batch-translate failed enc=${id}: ${m}`);
+      emit?.({ stage: "progress", msg: "Batch translate error; using live transcript" });
+    }
+  };
+
   // ---- NDJSON streaming branch ----
   const accept = req.headers.get("accept") ?? "";
   if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
@@ -148,6 +189,9 @@ export async function POST(
         }, 5000);
 
         try {
+          // Full-file Sarvam batch translate for non-English (accuracy + safety net).
+          await translateIfNeeded(emit);
+
           // ---- Note generation (surface=note-pipeline) ----
           noteTrace = await openTrace({
             surface: "note-pipeline",
@@ -376,6 +420,7 @@ export async function POST(
   }
 
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
+  await translateIfNeeded();
   const noteRes = await generateNote(row.transcript_raw, { signal: req.signal });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;

@@ -30,8 +30,7 @@ import * as React from "react";
 
 export type SarvamBlock = {
   block_idx: number;
-  original: string | null;
-  english: string | null;
+  text: string | null;          // code-mixed transcript for this window
   language_code: string | null;
   latency_ms: number;
   received_at: number;
@@ -51,8 +50,7 @@ type Options = {
 export function useSarvamRolling(opts: Options) {
   const intervalMs = opts.intervalMs ?? 10_000;
   const [state, setState] = React.useState<SarvamRollingState>("idle");
-  const [original, setOriginal] = React.useState("");   // accumulated original-language
-  const [english, setEnglish] = React.useState("");     // accumulated English
+  const [text, setText] = React.useState("");           // accumulated code-mixed transcript
   const [language, setLanguage] = React.useState<string | null>(null);
   const [latest, setLatest] = React.useState<SarvamBlock | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -108,8 +106,7 @@ export function useSarvamRolling(opts: Options) {
         throw new Error(`http_${res.status}: ${t.slice(0, 120)}`);
       }
       const json = (await res.json()) as {
-        original?: string | null;
-        english?: string | null;
+        text?: string | null;
         language_code?: string | null;
         latency_ms?: number;
       };
@@ -117,14 +114,12 @@ export function useSarvamRolling(opts: Options) {
       nextIdxRef.current = end;
       const block: SarvamBlock = {
         block_idx: idx,
-        original: (json.original ?? null),
-        english: (json.english ?? null),
+        text: (json.text ?? null),
         language_code: json.language_code ?? null,
         latency_ms: json.latency_ms ?? 0,
         received_at: Date.now(),
       };
-      if (block.original) setOriginal((p) => (p ? `${p} ${block.original}` : block.original!).trim());
-      if (block.english) setEnglish((p) => (p ? `${p} ${block.english}` : block.english!).trim());
+      if (block.text) setText((p) => (p ? `${p} ${block.text}` : block.text!).trim());
       if (block.language_code) setLanguage(block.language_code);
       setLatest(block);
       setState("running");
@@ -151,5 +146,5 @@ export function useSarvamRolling(opts: Options) {
     };
   }, [opts.enabled, intervalMs, flush]);
 
-  return { state, original, english, language, latest, error, sendChunk, flushNow: flush };
+  return { state, text, language, latest, error, sendChunk, flushNow: flush };
 }

@@ -44,9 +44,10 @@ type Options = {
   durationSeconds: number | null;
   deepgramTranscript: string;
   whisperTranscript: string;
-  // Multilingual (Sarvam) accumulated transcripts from the live rolling hook.
-  sarvamOriginal?: string;
-  sarvamEnglish?: string;
+  // Multilingual (Sarvam) accumulated code-mixed transcript + detected language
+  // from the live rolling hook. The canonical English note is produced at submit
+  // from a full-file batch translate (see /process), not from this.
+  sarvamCodemix?: string;
   sarvamLanguage?: string | null;
 };
 
@@ -170,8 +171,7 @@ export function useEncounterSubmit(opts: Options) {
             duration_seconds: o.durationSeconds,
             deepgram_transcript: o.deepgramTranscript || null,
             whisper_transcript: o.whisperTranscript || null,
-            sarvam_original: o.sarvamOriginal || null,
-            sarvam_english: o.sarvamEnglish || null,
+            sarvam_codemix: o.sarvamCodemix || null,
             sarvam_language: o.sarvamLanguage || null,
           }),
         },
