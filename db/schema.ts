@@ -1,6 +1,6 @@
 import {
   pgTable, pgEnum, uuid, text, integer, boolean, jsonb, timestamp,
-  numeric, inet, index, primaryKey,
+  numeric, inet, index, primaryKey, doublePrecision,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { customType } from "drizzle-orm/pg-core";
@@ -8,6 +8,11 @@ import { customType } from "drizzle-orm/pg-core";
 // citext custom type — Postgres case-insensitive text
 const citext = customType<{ data: string; driverData: string }>({
   dataType() { return "citext"; },
+});
+
+// bytea — Postgres binary (voice_print ECAPA centroid: 192 float32 = 768 bytes)
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() { return "bytea"; },
 });
 
 // ----------------------- ENUMS -----------------------
@@ -43,6 +48,7 @@ export const doctor = pgTable("doctor", {
   fullName:         text("full_name").notNull(),
   email:            citext("email").notNull().unique(),
   phone:            text("phone"),
+  emailShowConversationWith: boolean("email_show_conversation_with").notNull().default(false), // SD-Q4 (v2.1)
   urlSlug:          text("url_slug").notNull().unique(),
   urlToken:         text("url_token").notNull(),
   pinHash:          text("pin_hash"),
@@ -91,6 +97,18 @@ export const encounter = pgTable("encounter", {
   transcriptClean:     text("transcript_clean"),
   detectedLanguage:    text("detected_language"),
   transcriptOriginal:  text("transcript_original"),
+  // v2.1 speaker diarization (migration 0007)
+  speakers:            jsonb("speakers"),
+  transcriptSegments:  jsonb("transcript_segments"),
+  overlapWindows:      jsonb("overlap_windows"),
+  manualRelabels:      jsonb("manual_relabels").notNull().default(sql`'[]'::jsonb`),
+  aggregates:          jsonb("aggregates"),
+  micDeviceId:         text("mic_device_id"),
+  diarizeStatus:       text("diarize_status"), // pending|running|complete|skipped|failed
+  diarizeStartedAt:    timestamp("diarize_started_at", { withTimezone: true }),
+  diarizeCompletedAt:  timestamp("diarize_completed_at", { withTimezone: true }),
+  diarizeError:        text("diarize_error"),
+  diarizeUsedBuffer:   boolean("diarize_used_buffer").notNull().default(false),
   noteJson:            jsonb("note_json"),
   noteJsonEdited:      jsonb("note_json_edited"),
   cdmssJson:           jsonb("cdmss_json"),
@@ -227,4 +245,19 @@ export const transcriptionRun = pgTable("transcription_run", {
   createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   byEncounter: index("idx_transcription_run_encounter").on(t.encounterId, t.createdAt),
+}));
+
+// voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).
+// FK references doctor for now (renamed to clinician in v2.0).
+export const voicePrint = pgTable("voice_print", {
+  doctorId:               text("doctor_id").primaryKey().references(() => doctor.id, { onDelete: "cascade" }),
+  centroid:               bytea("centroid").notNull(),
+  sampleCount:            integer("sample_count").notNull().default(0),
+  samplesJson:            jsonb("samples_json").notNull().default(sql`'[]'::jsonb`),
+  enrolledAt:             timestamp("enrolled_at", { withTimezone: true }).notNull().defaultNow(),
+  lastSampleAt:           timestamp("last_sample_at", { withTimezone: true }).notNull().defaultNow(),
+  matchConfidence30dAvg:  doublePrecision("match_confidence_30d_avg"),
+  needsReenrollment:      boolean("needs_reenrollment").notNull().default(false),
+}, (t) => ({
+  byNeedsReenroll: index("idx_voice_print_needs_reenrollment").on(t.needsReenrollment),
 }));
