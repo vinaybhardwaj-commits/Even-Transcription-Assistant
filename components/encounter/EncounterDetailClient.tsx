@@ -264,6 +264,12 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             error: finalEvent.cdmss_error ?? lastError,
             processing: false,
           }));
+          // Diarization + batch translation are persisted AFTER the 'final'
+          // event (the server awaits diarizeStore before closing the stream,
+          // so by the time this read loop ends they're written). Refresh the
+          // server props so the speaker summary + tagged conversation +
+          // English/vernacular transcript boxes appear without a manual reload.
+          router.refresh();
         } else {
           setS((prev) => ({ ...prev, processing: false, error: lastError ?? "stream_ended_without_final" }));
         }
