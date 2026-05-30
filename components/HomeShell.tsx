@@ -12,6 +12,7 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
   const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
   const [patientLabel, setPatientLabel] = React.useState("");
+  const [noteType, setNoteType] = React.useState<"clinic_encounter" | "general_medical">("clinic_encounter");
 
   const goRecord = React.useCallback(() => {
     // patient_label is captured in the recording screen / submit step;
@@ -23,8 +24,13 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
         /* private mode */
       }
     }
+    try {
+      sessionStorage.setItem("eta:pending_note_type", noteType);
+    } catch {
+      /* private mode */
+    }
     router.push(`/${slug}/record`);
-  }, [router, slug, patientLabel]);
+  }, [router, slug, patientLabel, noteType]);
 
   return (
     <main className="min-h-screen bg-even-white">
@@ -67,6 +73,23 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
               <span className="block text-caption text-even-ink-500">~90 seconds — lets the app label you (vs the patient) in recordings.</span>
             </a>
           ) : null}
+
+          <div className="mb-4">
+            <span className="block text-label text-even-navy-800 mb-1.5">Note type</span>
+            <div className="inline-flex w-full rounded-md border border-even-ink-200 overflow-hidden text-label">
+              {([["clinic_encounter", "Clinic Encounter"], ["general_medical", "General Medical"]] as const).map(([v, lbl]) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setNoteType(v)}
+                  aria-pressed={noteType === v}
+                  className={`flex-1 px-3 py-2 ${noteType === v ? "bg-even-blue-600 text-white" : "bg-even-white text-even-navy-800"}`}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <Input
             label="Patient (optional)"

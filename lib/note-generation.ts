@@ -49,6 +49,37 @@ Style rules:
 - Do not add a diagnosis the doctor didn't state
 - If the transcript is too short or non-clinical, fill what you can and leave the rest empty`;
 
+// General Medical Note — inpatient round / ward consult framing (V2.S2). Outputs
+// the SAME JSON shape as the clinic note so every downstream consumer (editor,
+// email, CDMSS) is unchanged in S2a; V2.S2b splits this into a distinct schema.
+const SYSTEM_GENERAL = `You are converting a clinician's voice-dictated INPATIENT ROUND or WARD CONSULT into a structured General Medical Note. The transcript may be in English, an Indian language (e.g. Hindi, Kannada), or code-mixed — ALWAYS write the note in clear clinical English, translating faithfully and never adding content. Use ONLY information explicitly stated in the transcript — do not invent problems, medications, exam findings, doses, or plans. If a section was not discussed, return an empty string or empty array for that field.
+
+This is a FOLLOW-UP / round encounter, not a first outpatient visit. Focus on what is happening with the patient TODAY and what has CHANGED since they were last seen or since admission.
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
+
+{
+  "chief_complaint": string,                      // reason for today's review / the active problem in focus (one line)
+  "history_present_illness": string,              // INTERVAL HISTORY — what has changed since the last review / since admission: events, response to treatment, new symptoms
+  "past_medical_history": [string, ...],          // active/ongoing problems + relevant comorbidities
+  "current_medications": [string, ...],           // current inpatient meds with dose + frequency; note recent starts/stops/dose changes
+  "allergies": [string, ...],                     // empty array if NKDA or not discussed
+  "examination": string,                          // today's exam findings, may include vital signs
+  "assessment": string,                           // TODAY'S clinical impression / synthesis, per active problem
+  "plan": {
+    "investigations": [string, ...],              // labs, imaging, procedures ordered today
+    "treatment": [string, ...],                   // treatment changes today (started/stopped/dose-adjusted) AND consultations requested (e.g. cardiology, neurology)
+    "follow_up": string                           // plan for next review, disposition, red-flag advice
+  }
+}
+
+Style rules:
+- Preserve exact medication doses, frequencies, lab values, vital signs, exam findings
+- Use clinical shorthand the doctor used (BD/TDS/QID/PRN/SOB/CP) — don't expand
+- Prefer the doctor's wording over reformulation
+- Do not add a diagnosis the doctor didn't state
+- If the transcript is too short or non-clinical, fill what you can and leave the rest empty`;
+
 export type EncounterNote = {
   chief_complaint: string;
   history_present_illness: string;
@@ -70,7 +101,7 @@ export type NoteResult =
 
 export async function generateNote(
   transcript: string,
-  opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void } = {},
+  opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string } = {},
 ): Promise<NoteResult> {
   const base = process.env.OLLAMA_BASE_URL;
   if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
@@ -87,6 +118,8 @@ export async function generateNote(
     else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  const system = opts.noteType === "general_medical" ? SYSTEM_GENERAL : SYSTEM;
+
   const t0 = Date.now();
   opts.onEvent?.({ stage: "note", state: "start" });
   try {
@@ -99,7 +132,7 @@ export async function generateNote(
       body: JSON.stringify({
         model: NOTE_MODEL,
         messages: [
-          { role: "system", content: SYSTEM },
+          { role: "system", content: system },
           { role: "user", content: `Transcript:\n\n${cleanTranscript}` },
         ],
         temperature: NOTE_TEMPERATURE,

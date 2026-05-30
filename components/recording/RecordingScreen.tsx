@@ -46,6 +46,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     if (!preflightPassed) return;
     let cancelled = false;
     let pendingLabel: string | null = null;
+    let pendingNoteType: string | null = null;
     try {
       const raw = sessionStorage.getItem("eta:pending_patient_label");
       if (raw && raw.trim().length > 0) {
@@ -53,17 +54,22 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       }
       // Clear immediately so a subsequent "blank" recording doesn't reuse it.
       sessionStorage.removeItem("eta:pending_patient_label");
+      // V2.S2 note-type (physician allow-list); default clinic_encounter server-side.
+      const nt = sessionStorage.getItem("eta:pending_note_type");
+      if (nt === "general_medical" || nt === "clinic_encounter") pendingNoteType = nt;
+      sessionStorage.removeItem("eta:pending_note_type");
     } catch {
       /* private mode / storage disabled — silently skip */
     }
     (async () => {
       try {
+        const createBody: Record<string, string> = {};
+        if (pendingLabel) createBody.patient_label = pendingLabel;
+        if (pendingNoteType) createBody.note_type = pendingNoteType;
         const res = await fetch(`/${slug}/api/encounters`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            pendingLabel ? { patient_label: pendingLabel } : {},
-          ),
+          body: JSON.stringify(createBody),
         });
         if (!res.ok) {
           setCreateError(`http_${res.status}`);

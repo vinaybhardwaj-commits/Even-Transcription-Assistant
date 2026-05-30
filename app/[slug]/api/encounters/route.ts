@@ -40,15 +40,22 @@ export async function POST(
     return respondError("FORBIDDEN", "Slug mismatch");
   }
 
-  // 3. Body — patient_label optional
+  // 3. Body — patient_label + note_type optional (V2.S2)
   let patientLabel: string | null = null;
+  let noteType: "clinic_encounter" | "general_medical" = "clinic_encounter";
   try {
     const body = (await req.json().catch(() => ({}))) as {
       patient_label?: string;
+      note_type?: string;
     };
     if (typeof body.patient_label === "string") {
       const trimmed = body.patient_label.trim();
       patientLabel = trimmed.length > 0 ? trimmed.slice(0, 200) : null;
+    }
+    // Physician allow-list. Dietetic/physio/operative arrive with their
+    // clinician types in later sprints; default to clinic_encounter otherwise.
+    if (body.note_type === "general_medical" || body.note_type === "clinic_encounter") {
+      noteType = body.note_type;
     }
   } catch {
     /* empty body is fine */
@@ -58,8 +65,8 @@ export async function POST(
   const id = newEncounterId();
   try {
     await sql`
-      INSERT INTO encounter (id, doctor_id, patient_label_raw, status, send_status)
-      VALUES (${id}, ${claims.doctor_id}, ${patientLabel}, 'draft', 'pending')
+      INSERT INTO encounter (id, doctor_id, patient_label_raw, note_type, status, send_status)
+      VALUES (${id}, ${claims.doctor_id}, ${patientLabel}, ${noteType}::note_type, 'draft', 'pending')
     `;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

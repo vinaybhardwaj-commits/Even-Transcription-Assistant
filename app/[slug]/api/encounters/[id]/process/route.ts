@@ -48,6 +48,7 @@ type Row = {
   transcript_raw: string | null;
   transcript_original: string | null;
   detected_language: string | null;
+  note_type: string | null;
   audio_object_key: string | null;
   note_json: EncounterNote | null;
   cdmss_json: CdmssOutput | CdmssRich | null;
@@ -90,7 +91,7 @@ export async function POST(
   let row: Row | undefined;
   try {
     const rows = (await sql`
-      SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language,
+      SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, note_type,
              audio_object_key, note_json, cdmss_json
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
@@ -350,6 +351,7 @@ export async function POST(
 
           const noteRes = await generateNote(row.transcript_raw!, {
             signal: req.signal,
+            noteType: row.note_type ?? undefined,
             onEvent: (e) => {
               emit(e);
               // Mirror the same event into the trace's events array.
@@ -572,7 +574,7 @@ export async function POST(
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
   await translateIfNeeded();
   await guardTranscripts();
-  const noteRes = await generateNote(row.transcript_raw, { signal: req.signal });
+  const noteRes = await generateNote(row.transcript_raw, { signal: req.signal, noteType: row.note_type ?? undefined });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
     return respondError(
