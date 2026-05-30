@@ -85,6 +85,13 @@ type DiarizeSpeaker = {
   confidence?: number;
   clinician_id?: string;
 };
+type TranscriptSegment = {
+  start_ms: number;
+  end_ms: number;
+  speaker_idx: number;
+  text?: string;
+  overlap?: boolean;
+};
 type TranscriptionRunRow = {
   id: string;
   engine: string;
@@ -110,6 +117,7 @@ type EncounterFull = {
   transcript_original: string | null;
   transcription_runs: TranscriptionRunRow[];
   speakers: DiarizeSpeaker[] | null;
+  transcript_segments: TranscriptSegment[] | null;
   overlap_windows: unknown[] | null;
   aggregates: Record<string, unknown> | null;
   diarize_status: string | null;
@@ -463,7 +471,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                     <p className="text-caption text-danger-700 mt-1">{enc.diarize_error}</p>
                   ) : null}
                   <p className="text-caption text-even-ink-400 mt-1">
-                    Heuristic roles (no enrolled voiceprints yet — clinician naming arrives with enrollment). Full timeline + playback in a later sub-sprint.
+                    Heuristic roles (no enrolled voiceprints yet — clinician naming arrives with enrollment). Timeline below; audio playback + super-admin re-run come in a later sub-sprint.
                   </p>
                 </div>
                 {enc.speakers && enc.speakers.length > 0 ? (
@@ -485,6 +493,45 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                 ) : enc.diarize_status === "complete" ? (
                   <p className="text-body text-even-ink-400">No speakers detected in the audio.</p>
                 ) : null}
+                {enc.transcript_segments && enc.transcript_segments.length > 0 && enc.speakers && enc.speakers.length > 0 ? (() => {
+                  const segs = enc.transcript_segments as TranscriptSegment[];
+                  const sps = enc.speakers as DiarizeSpeaker[];
+                  const totalMs = Math.max((enc.duration_seconds ?? 0) * 1000, ...segs.map((x) => x.end_ms || 0), 1);
+                  const COLORS = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#EF4444", "#0EA5E9"];
+                  const ows = (enc.overlap_windows ?? []) as Array<{ start_ms?: number; end_ms?: number }>;
+                  return (
+                    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                      <p className="text-caption text-even-ink-500 mb-3">Timeline · {(totalMs / 1000).toFixed(0)}s (who spoke when)</p>
+                      <div className="space-y-2">
+                        {sps.map((sp, si) => (
+                          <div key={sp.idx} className="flex items-center gap-2">
+                            <span className="w-24 shrink-0 text-caption font-medium truncate" style={{ color: COLORS[si % COLORS.length] }}>{sp.label}</span>
+                            <div className="relative flex-1 h-5 rounded bg-even-ink-50 overflow-hidden">
+                              {segs.filter((x) => x.speaker_idx === sp.idx).map((x, k) => (
+                                <div
+                                  key={k}
+                                  title={`${(x.start_ms / 1000).toFixed(1)}–${(x.end_ms / 1000).toFixed(1)}s${x.overlap ? " (overlap)" : ""}`}
+                                  className="absolute top-0 h-full rounded-sm"
+                                  style={{ left: `${(x.start_ms / totalMs) * 100}%`, width: `${Math.max(0.4, ((x.end_ms - x.start_ms) / totalMs) * 100)}%`, backgroundColor: COLORS[si % COLORS.length], opacity: x.overlap ? 0.55 : 1 }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                        {ows.length > 0 ? (
+                          <div className="flex items-center gap-2">
+                            <span className="w-24 shrink-0 text-caption text-danger-700">overlap</span>
+                            <div className="relative flex-1 h-3 rounded bg-even-ink-50 overflow-hidden">
+                              {ows.map((o, k) => (o.start_ms != null && o.end_ms != null ? (
+                                <div key={k} className="absolute top-0 h-full bg-danger-500" style={{ left: `${(o.start_ms / totalMs) * 100}%`, width: `${Math.max(0.4, ((o.end_ms - o.start_ms) / totalMs) * 100)}%` }} />
+                              ) : null))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })() : null}
                 {enc.overlap_windows && enc.overlap_windows.length > 0 ? (
                   <p className="text-caption text-even-ink-500">{enc.overlap_windows.length} overlapping-speech window(s) detected.</p>
                 ) : null}
