@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const secret = process.env.STT_RELAY_SECRET;
   const relayUrl = process.env.NEXT_PUBLIC_STT_RELAY_URL || process.env.STT_RELAY_URL || "";
-  if (!secret || !relayUrl) return respondError("UNAVAILABLE", "streaming_not_configured");
+  if (!secret || !relayUrl) return respondError("UPSTREAM_UNAVAILABLE", "streaming_not_configured");
 
   const cookie = await readDoctorCookie();
   if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
