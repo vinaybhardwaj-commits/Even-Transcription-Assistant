@@ -95,7 +95,7 @@ export async function POST(
     enc = encRows[0];
     if (!enc) return respondError("NOT_FOUND", "encounter_not_found");
     const docRows = (await sql`
-      SELECT id, full_name, email FROM doctor
+      SELECT id, full_name, email FROM clinician
        WHERE id = ${enc.doctor_id} AND deleted_at IS NULL LIMIT 1
     `) as DoctorRow[];
     doc = docRows[0];

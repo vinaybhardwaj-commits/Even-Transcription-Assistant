@@ -228,7 +228,7 @@ function CreateDoctorModal({
   return (
     <div className="fixed inset-0 z-40 bg-even-ink-800/40 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <form onSubmit={onSubmit} className="rounded-xl bg-even-white border border-even-ink-100 p-6 max-w-md w-full shadow-card-hover space-y-3">
-        <h3 className="text-heading text-even-navy-800">Add doctor</h3>
+        <h3 className="text-heading text-even-navy-800">Add clinician</h3>
         <p className="text-caption text-even-ink-500">URL slug + PIN auto-generated. PIN is shown once.</p>
         <input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Full name" required minLength={2}
           className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300" />
@@ -246,7 +246,7 @@ function CreateDoctorModal({
         <div className="flex items-center justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} disabled={submitting} className="text-label text-even-ink-500 hover:underline px-3 py-2">Cancel</button>
           <button type="submit" disabled={submitting} className="px-4 py-2 rounded-md bg-even-blue-600 hover:bg-even-blue-700 disabled:bg-even-blue-300 text-white text-label">
-            {submitting ? "Creating…" : "Create doctor"}
+            {submitting ? "Creating…" : "Create clinician"}
           </button>
         </div>
       </form>

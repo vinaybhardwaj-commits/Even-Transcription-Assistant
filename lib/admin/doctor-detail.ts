@@ -82,7 +82,7 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
         last_active_at::text   AS last_active_at,
         joined_at::text        AS joined_at,
         deleted_at::text       AS deleted_at
-      FROM doctor
+      FROM clinician
       WHERE id = ${id}
       LIMIT 1
     `) as Array<Record<string, unknown>>;

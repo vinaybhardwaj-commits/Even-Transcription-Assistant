@@ -106,11 +106,11 @@ async function getKpis(): Promise<AdminDashboardBundle["kpi"]> {
              AND status IN ('failed','bounced','complained')
         ),
         doctors_active AS (
-          SELECT COUNT(*)::int AS n FROM doctor
+          SELECT COUNT(*)::int AS n FROM clinician
            WHERE status = 'active' AND deleted_at IS NULL
         ),
         doctors_total AS (
-          SELECT COUNT(*)::int AS n FROM doctor
+          SELECT COUNT(*)::int AS n FROM clinician
            WHERE deleted_at IS NULL
         )
       SELECT
@@ -194,7 +194,7 @@ async function getAttention(): Promise<AttentionItem[]> {
   try {
     const rows = (await sql`
       SELECT id, full_name, locked_until::text AS locked_until
-        FROM doctor
+        FROM clinician
        WHERE status = 'locked'
          AND deleted_at IS NULL
        ORDER BY locked_until DESC NULLS LAST

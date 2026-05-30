@@ -76,9 +76,8 @@ export async function GET() {
     const rows = (await sql`
       SELECT d.id, d.full_name, d.email, d.phone, d.url_slug, d.status,
              d.pin_set_at, d.last_active_at, d.joined_at, d.deleted_at,
-             c.clinician_type
-        FROM doctor d
-        LEFT JOIN clinician c ON c.id = d.id
+             d.clinician_type
+        FROM clinician d
        ORDER BY d.joined_at DESC
        LIMIT 200
     `) as Row[];

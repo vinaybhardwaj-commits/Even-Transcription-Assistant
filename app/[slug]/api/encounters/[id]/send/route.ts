@@ -96,7 +96,7 @@ export async function POST(
       sql`SELECT id, doctor_id, status, patient_label_raw, recorded_at, note_type,
                  note_json, note_json_edited, cdmss_json
             FROM encounter WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`,
-      sql`SELECT id, full_name, email FROM doctor
+      sql`SELECT id, full_name, email FROM clinician
             WHERE id = ${claims.doctor_id} AND deleted_at IS NULL LIMIT 1`,
     ]);
     enc = (encRows as EncounterRow[])[0];

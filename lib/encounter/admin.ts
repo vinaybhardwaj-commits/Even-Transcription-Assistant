@@ -160,7 +160,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       d.email               AS doctor_email,
       d.url_slug            AS doctor_url_slug
     FROM encounter e
-    LEFT JOIN doctor d ON d.id = e.doctor_id
+    LEFT JOIN clinician d ON d.id = e.doctor_id
     WHERE e.id = ${id}
     LIMIT 1
   `) as Array<Record<string, unknown>>;
@@ -518,7 +518,7 @@ export async function listAdminEncounters(args: {
                AND se.status IN ('sent','delivered','opened')
           ) AS delivered_count
         FROM encounter e
-        LEFT JOIN doctor d ON d.id = e.doctor_id
+        LEFT JOIN clinician d ON d.id = e.doctor_id
         WHERE e.recorded_at >= ${since}::timestamptz
           AND (e.deleted_at IS NULL)
           AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)

@@ -21,7 +21,7 @@ export default async function AdminDoctorsPage() {
   }
 
   return (
-    <AdminShell adminEmail={email} active="doctors" pageTitle="Doctors">
+    <AdminShell adminEmail={email} active="doctors" pageTitle="Clinicians">
       <DoctorsListClient />
     </AdminShell>
   );
