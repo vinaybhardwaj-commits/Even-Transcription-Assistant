@@ -132,6 +132,7 @@ type EncounterFull = {
   tagged_transcript: TaggedEntry[] | null;
   diarize_status: string | null;
   diarize_error: string | null;
+  note_type: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -372,7 +373,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                     ✎ Doctor-edited version shown. Original on file.
                   </p>
                 ) : null}
-                <NoteView note={noteFinal} />
+                <NoteView note={noteFinal} noteType={enc.note_type ?? undefined} />
               </section>
             ) : (
               <p className="text-body text-even-ink-400">No note generated yet.</p>

@@ -23,7 +23,8 @@ import { verifyDoctorJwt } from "@/lib/auth";
 import { renderNoteEmail } from "@/lib/email-template";
 import { respondOk, respondError } from "@/lib/respond";
 import { customAlphabet } from "nanoid";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { AnyNote } from "@/lib/note-generation";
+import { noteHasContent } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
 export const runtime = "nodejs";
@@ -38,8 +39,9 @@ type EncounterRow = {
   status: string;
   patient_label_raw: string | null;
   recorded_at: Date;
-  note_json: EncounterNote | null;
-  note_json_edited: EncounterNote | null;
+  note_type: string | null;
+  note_json: AnyNote | null;
+  note_json_edited: AnyNote | null;
   cdmss_json: CdmssOutput | null;
 };
 
@@ -91,7 +93,7 @@ export async function POST(
   let doc: DoctorRow | undefined;
   try {
     const [encRows, docRows] = await Promise.all([
-      sql`SELECT id, doctor_id, status, patient_label_raw, recorded_at,
+      sql`SELECT id, doctor_id, status, patient_label_raw, recorded_at, note_type,
                  note_json, note_json_edited, cdmss_json
             FROM encounter WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`,
       sql`SELECT id, full_name, email FROM doctor
@@ -127,17 +129,7 @@ export async function POST(
   // gets just a header card with no body. That confuses readers and
   // wastes Resend send budget. Doctor edits a draft to add content, then
   // sends.
-  const hasContent =
-    (noteFinal.chief_complaint ?? "").trim().length > 0 ||
-    (noteFinal.history_present_illness ?? "").trim().length > 0 ||
-    (noteFinal.examination ?? "").trim().length > 0 ||
-    (noteFinal.assessment ?? "").trim().length > 0 ||
-    (noteFinal.past_medical_history?.length ?? 0) > 0 ||
-    (noteFinal.current_medications?.length ?? 0) > 0 ||
-    (noteFinal.allergies?.length ?? 0) > 0 ||
-    (noteFinal.plan?.investigations?.length ?? 0) > 0 ||
-    (noteFinal.plan?.treatment?.length ?? 0) > 0 ||
-    (noteFinal.plan?.follow_up ?? "").trim().length > 0;
+  const hasContent = noteHasContent(noteFinal, enc.note_type ?? undefined);
   if (!hasContent) {
     return respondError(
       "VALIDATION_FAILED",
@@ -153,6 +145,7 @@ export async function POST(
     encounterId: enc.id,
     recordedAt,
     note: noteFinal,
+    noteType: enc.note_type ?? undefined,
     cdmss: enc.cdmss_json,
     appUrl: process.env.APP_URL ?? "https://evenscribe.app",
   });

@@ -2,15 +2,23 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
 
 type Props = {
-  initial: EncounterNote;
-  onSave: (note: EncounterNote) => Promise<{ ok: boolean; error?: string }>;
+  initial: AnyNote;
+  noteType?: string;
+  onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>;
   onCancel: () => void;
 };
 
-export function NoteEditor({ initial, onSave, onCancel }: Props) {
+export function NoteEditor({ initial, noteType, onSave, onCancel }: Props) {
+  if (noteType === "general_medical") {
+    return <GeneralMedicalEditor initial={initial as GeneralMedicalNote} onSave={onSave} onCancel={onCancel} />;
+  }
+  return <ClinicEditor initial={initial as EncounterNote} onSave={onSave} onCancel={onCancel} />;
+}
+
+function ClinicEditor({ initial, onSave, onCancel }: { initial: EncounterNote; onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>; onCancel: () => void }) {
   const [note, setNote] = React.useState<EncounterNote>(initial);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -70,6 +78,56 @@ export function NoteEditor({ initial, onSave, onCancel }: Props) {
         <Button variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
+        <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+          {saving ? "Saving…" : "Save edits"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function GeneralMedicalEditor({ initial, onSave, onCancel }: { initial: GeneralMedicalNote; onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>; onCancel: () => void }) {
+  const [note, setNote] = React.useState<GeneralMedicalNote>(initial);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const handleSave = React.useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    const r = await onSave(note);
+    setSaving(false);
+    if (!r.ok) setError(r.error ?? "Save failed");
+  }, [note, onSave]);
+
+  const setStr = (field: keyof GeneralMedicalNote, value: string) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const setArr = (field: keyof GeneralMedicalNote, value: string[]) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const setPlan = <K extends keyof GeneralMedicalNote["plan"]>(field: K, value: GeneralMedicalNote["plan"][K]) =>
+    setNote((prev) => ({ ...prev, plan: { ...prev.plan, [field]: value } }));
+
+  return (
+    <div className="space-y-5">
+      <StringField label="Reason for visit" value={note.reason_for_visit} onChange={(v) => setStr("reason_for_visit", v)} singleLine />
+      <ListField label="Active problems" items={note.active_problems} onChange={(v) => setArr("active_problems", v)} placeholder="e.g. CAP, AKI" />
+      <StringField label="Interval history" value={note.interval_history} onChange={(v) => setStr("interval_history", v)} rows={5} />
+      <ListField label="Current medications" items={note.current_medications} onChange={(v) => setArr("current_medications", v)} placeholder="e.g. Ceftriaxone 1 g BD" />
+      <ListField label="Allergies" items={note.allergies} onChange={(v) => setArr("allergies", v)} placeholder="e.g. Penicillin (rash)" />
+      <StringField label="Examination" value={note.examination} onChange={(v) => setStr("examination", v)} rows={4} />
+      <StringField label="Impression" value={note.impression} onChange={(v) => setStr("impression", v)} rows={3} />
+
+      <fieldset className="space-y-4 pt-2">
+        <legend className="text-label text-even-navy-800 uppercase tracking-wide text-caption">Plan</legend>
+        <ListField label="Investigations ordered" items={note.plan.investigations_ordered} onChange={(v) => setPlan("investigations_ordered", v)} placeholder="e.g. Repeat CBC AM" small />
+        <ListField label="Treatment changes" items={note.plan.treatment_changes} onChange={(v) => setPlan("treatment_changes", v)} placeholder="e.g. Stop frusemide" small />
+        <ListField label="Consultations requested" items={note.plan.consultations_requested} onChange={(v) => setPlan("consultations_requested", v)} placeholder="e.g. Cardiology" small />
+        <StringField label="Follow-up" value={note.plan.follow_up} onChange={(v) => setPlan("follow_up", v)} rows={2} small />
+      </fieldset>
+
+      {error ? <p className="text-caption text-danger-700">{error}</p> : null}
+
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-even-ink-100">
+        <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
           {saving ? "Saving…" : "Save edits"}
         </Button>

@@ -59,17 +59,18 @@ This is a FOLLOW-UP / round encounter, not a first outpatient visit. Focus on wh
 Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
 
 {
-  "chief_complaint": string,                      // reason for today's review / the active problem in focus (one line)
-  "history_present_illness": string,              // INTERVAL HISTORY — what has changed since the last review / since admission: events, response to treatment, new symptoms
-  "past_medical_history": [string, ...],          // active/ongoing problems + relevant comorbidities
-  "current_medications": [string, ...],           // current inpatient meds with dose + frequency; note recent starts/stops/dose changes
-  "allergies": [string, ...],                     // empty array if NKDA or not discussed
-  "examination": string,                          // today's exam findings, may include vital signs
-  "assessment": string,                           // TODAY'S clinical impression / synthesis, per active problem
+  "reason_for_visit": string,                      // why this clinician is seeing the patient today (one line)
+  "active_problems": [string, ...],                // ongoing issues being addressed this admission/visit
+  "interval_history": string,                      // what has changed since the last review / since admission: events, response to treatment, new symptoms
+  "current_medications": [string, ...],            // current meds with dose + frequency; note recent starts/stops/dose changes
+  "allergies": [string, ...],                      // empty array if NKDA or not discussed
+  "examination": string,                           // today's exam findings, may include vital signs
+  "impression": string,                            // today's clinical synthesis / impression
   "plan": {
-    "investigations": [string, ...],              // labs, imaging, procedures ordered today
-    "treatment": [string, ...],                   // treatment changes today (started/stopped/dose-adjusted) AND consultations requested (e.g. cardiology, neurology)
-    "follow_up": string                           // plan for next review, disposition, red-flag advice
+    "investigations_ordered": [string, ...],       // labs, imaging, procedures ordered today
+    "treatment_changes": [string, ...],            // started / stopped / dose-adjusted today
+    "consultations_requested": [string, ...],      // referrals requested (e.g. cardiology, neurology)
+    "follow_up": string                            // plan for next review, disposition, red-flag advice
   }
 }
 
@@ -95,8 +96,69 @@ export type EncounterNote = {
   };
 };
 
+// GeneralMedicalNote — inpatient round / ward consult (V2.S2b). Distinct schema
+// per PRD §7.2.2; discriminated at the consumer by encounter.note_type.
+export type GeneralMedicalNote = {
+  reason_for_visit: string;
+  active_problems: string[];
+  interval_history: string;
+  current_medications: string[];
+  allergies: string[];
+  examination: string;
+  impression: string;
+  plan: {
+    investigations_ordered: string[];
+    treatment_changes: string[];
+    consultations_requested: string[];
+    follow_up: string;
+  };
+};
+
+export type AnyNote = EncounterNote | GeneralMedicalNote;
+
+/** One-line headline for an encounter (list titles, trace summaries, subject). */
+export function noteHeadline(note: AnyNote | null | undefined, noteType?: string): string {
+  if (!note) return "";
+  if (noteType === "general_medical") return (note as GeneralMedicalNote).reason_for_visit ?? "";
+  return (note as EncounterNote).chief_complaint ?? "";
+}
+
+/** True if the note has ANY clinical content (B10 send guard, both shapes). */
+export function noteHasContent(note: AnyNote | null | undefined, noteType?: string): boolean {
+  if (!note) return false;
+  if (noteType === "general_medical") {
+    const g = note as GeneralMedicalNote;
+    return (
+      (g.reason_for_visit ?? "").trim().length > 0 ||
+      (g.interval_history ?? "").trim().length > 0 ||
+      (g.examination ?? "").trim().length > 0 ||
+      (g.impression ?? "").trim().length > 0 ||
+      (g.active_problems?.length ?? 0) > 0 ||
+      (g.current_medications?.length ?? 0) > 0 ||
+      (g.allergies?.length ?? 0) > 0 ||
+      (g.plan?.investigations_ordered?.length ?? 0) > 0 ||
+      (g.plan?.treatment_changes?.length ?? 0) > 0 ||
+      (g.plan?.consultations_requested?.length ?? 0) > 0 ||
+      (g.plan?.follow_up ?? "").trim().length > 0
+    );
+  }
+  const c = note as EncounterNote;
+  return (
+    (c.chief_complaint ?? "").trim().length > 0 ||
+    (c.history_present_illness ?? "").trim().length > 0 ||
+    (c.examination ?? "").trim().length > 0 ||
+    (c.assessment ?? "").trim().length > 0 ||
+    (c.past_medical_history?.length ?? 0) > 0 ||
+    (c.current_medications?.length ?? 0) > 0 ||
+    (c.allergies?.length ?? 0) > 0 ||
+    (c.plan?.investigations?.length ?? 0) > 0 ||
+    (c.plan?.treatment?.length ?? 0) > 0 ||
+    (c.plan?.follow_up ?? "").trim().length > 0
+  );
+}
+
 export type NoteResult =
-  | { ok: true; note: EncounterNote; latency_ms: number; model: string; raw_response: string }
+  | { ok: true; note: AnyNote; latency_ms: number; model: string; raw_response: string }
   | { ok: false; error: string; latency_ms: number; raw_response?: string };
 
 export async function generateNote(
@@ -155,9 +217,9 @@ export async function generateNote(
     if (!content) {
       return { ok: false, error: "empty_response", latency_ms };
     }
-    let parsed: EncounterNote;
+    let parsedRaw: Record<string, unknown>;
     try {
-      parsed = JSON.parse(content) as EncounterNote;
+      parsedRaw = JSON.parse(content) as Record<string, unknown>;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return {
@@ -167,33 +229,45 @@ export async function generateNote(
         raw_response: content.slice(0, 400),
       };
     }
-    // Soft-shape — fill in missing fields with sensible defaults
-    const note: EncounterNote = {
-      chief_complaint: typeof parsed.chief_complaint === "string" ? parsed.chief_complaint : "",
-      history_present_illness:
-        typeof parsed.history_present_illness === "string" ? parsed.history_present_illness : "",
-      past_medical_history: Array.isArray(parsed.past_medical_history)
-        ? parsed.past_medical_history.filter((s) => typeof s === "string")
-        : [],
-      current_medications: Array.isArray(parsed.current_medications)
-        ? parsed.current_medications.filter((s) => typeof s === "string")
-        : [],
-      allergies: Array.isArray(parsed.allergies)
-        ? parsed.allergies.filter((s) => typeof s === "string")
-        : [],
-      examination: typeof parsed.examination === "string" ? parsed.examination : "",
-      assessment: typeof parsed.assessment === "string" ? parsed.assessment : "",
-      plan: {
-        investigations: Array.isArray(parsed.plan?.investigations)
-          ? parsed.plan.investigations.filter((s) => typeof s === "string")
-          : [],
-        treatment: Array.isArray(parsed.plan?.treatment)
-          ? parsed.plan.treatment.filter((s) => typeof s === "string")
-          : [],
-        follow_up: typeof parsed.plan?.follow_up === "string" ? parsed.plan.follow_up : "",
-      },
-    };
-    opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: note.chief_complaint });
+    // Soft-shape — coerce missing/wrong-typed fields to sensible defaults.
+    const S = (v: unknown): string => (typeof v === "string" ? v : "");
+    const A = (v: unknown): string[] =>
+      Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    const pl = (parsedRaw.plan ?? {}) as Record<string, unknown>;
+    let note: AnyNote;
+    if (opts.noteType === "general_medical") {
+      note = {
+        reason_for_visit: S(parsedRaw.reason_for_visit),
+        active_problems: A(parsedRaw.active_problems),
+        interval_history: S(parsedRaw.interval_history),
+        current_medications: A(parsedRaw.current_medications),
+        allergies: A(parsedRaw.allergies),
+        examination: S(parsedRaw.examination),
+        impression: S(parsedRaw.impression),
+        plan: {
+          investigations_ordered: A(pl.investigations_ordered),
+          treatment_changes: A(pl.treatment_changes),
+          consultations_requested: A(pl.consultations_requested),
+          follow_up: S(pl.follow_up),
+        },
+      };
+    } else {
+      note = {
+        chief_complaint: S(parsedRaw.chief_complaint),
+        history_present_illness: S(parsedRaw.history_present_illness),
+        past_medical_history: A(parsedRaw.past_medical_history),
+        current_medications: A(parsedRaw.current_medications),
+        allergies: A(parsedRaw.allergies),
+        examination: S(parsedRaw.examination),
+        assessment: S(parsedRaw.assessment),
+        plan: {
+          investigations: A(pl.investigations),
+          treatment: A(pl.treatment),
+          follow_up: S(pl.follow_up),
+        },
+      };
+    }
+    opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: noteHeadline(note, opts.noteType) });
     return { ok: true, note, latency_ms, model: NOTE_MODEL, raw_response: content };
   } catch (e: unknown) {
     clearTimeout(tid);

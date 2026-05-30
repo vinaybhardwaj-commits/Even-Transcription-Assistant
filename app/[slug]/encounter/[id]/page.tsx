@@ -4,7 +4,7 @@ import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { parseDoctorSlug } from "@/lib/doctor-slug";
 import { EncounterDetailClient } from "@/components/encounter/EncounterDetailClient";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
 export const dynamic = "force-dynamic";
@@ -19,8 +19,9 @@ type Row = {
   speakers: unknown[] | null;
   tagged_transcript: unknown[] | null;
   diarize_status: string | null;
-  note_json: EncounterNote | null;
-  note_json_edited: EncounterNote | null;
+  note_type: string | null;
+  note_json: AnyNote | null;
+  note_json_edited: AnyNote | null;
   cdmss_json: CdmssOutput | null;
   send_status: "pending" | "sent" | "failed";
   sent_at: string | Date | null;
@@ -62,7 +63,7 @@ export default async function EncounterPage({
   try {
     const [encRows, docRows, eventRows] = await Promise.all([
       sql`
-        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, speakers, tagged_transcript, diarize_status, note_json,
+        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, speakers, tagged_transcript, diarize_status, note_type, note_json,
                note_json_edited, cdmss_json, send_status, sent_at
           FROM encounter
          WHERE id = ${id} AND deleted_at IS NULL
@@ -95,6 +96,7 @@ export default async function EncounterPage({
         id: row.id,
         status: row.status,
         note: row.note_json_edited ?? row.note_json,
+        noteType: row.note_type ?? undefined,
         cdmss: row.cdmss_json,
         transcript: row.transcript_raw,
         transcriptOriginal: row.transcript_original,

@@ -16,7 +16,7 @@ import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { AnyNote } from "@/lib/note-generation";
 
 export const runtime = "nodejs";
 
@@ -24,6 +24,7 @@ type Row = {
   id: string;
   doctor_id: string;
   status: string;
+  note_type: string | null;
 };
 
 function strOrEmpty(v: unknown): string {
@@ -55,7 +56,7 @@ export async function PATCH(
     return respondError("VALIDATION_FAILED", "bad_encounter_id");
   }
 
-  let body: Partial<EncounterNote> & { plan?: Partial<EncounterNote["plan"]> };
+  let body: Record<string, unknown> & { plan?: Record<string, unknown> };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -65,7 +66,7 @@ export async function PATCH(
   let row: Row | undefined;
   try {
     const rows = (await sql`
-      SELECT id, doctor_id, status FROM encounter
+      SELECT id, doctor_id, status, note_type FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL LIMIT 1
     `) as Row[];
     row = rows[0];
@@ -81,20 +82,40 @@ export async function PATCH(
     return respondError("VALIDATION_FAILED", "encounter_deleted");
   }
 
-  const note: EncounterNote = {
-    chief_complaint: strOrEmpty(body.chief_complaint),
-    history_present_illness: strOrEmpty(body.history_present_illness),
-    past_medical_history: strArr(body.past_medical_history),
-    current_medications: strArr(body.current_medications),
-    allergies: strArr(body.allergies),
-    examination: strOrEmpty(body.examination),
-    assessment: strOrEmpty(body.assessment),
-    plan: {
-      investigations: strArr(body.plan?.investigations),
-      treatment: strArr(body.plan?.treatment),
-      follow_up: strOrEmpty(body.plan?.follow_up),
-    },
-  };
+  const plan = (body.plan ?? {}) as Record<string, unknown>;
+  let note: AnyNote;
+  if (row.note_type === "general_medical") {
+    note = {
+      reason_for_visit: strOrEmpty(body.reason_for_visit),
+      active_problems: strArr(body.active_problems),
+      interval_history: strOrEmpty(body.interval_history),
+      current_medications: strArr(body.current_medications),
+      allergies: strArr(body.allergies),
+      examination: strOrEmpty(body.examination),
+      impression: strOrEmpty(body.impression),
+      plan: {
+        investigations_ordered: strArr(plan.investigations_ordered),
+        treatment_changes: strArr(plan.treatment_changes),
+        consultations_requested: strArr(plan.consultations_requested),
+        follow_up: strOrEmpty(plan.follow_up),
+      },
+    };
+  } else {
+    note = {
+      chief_complaint: strOrEmpty(body.chief_complaint),
+      history_present_illness: strOrEmpty(body.history_present_illness),
+      past_medical_history: strArr(body.past_medical_history),
+      current_medications: strArr(body.current_medications),
+      allergies: strArr(body.allergies),
+      examination: strOrEmpty(body.examination),
+      assessment: strOrEmpty(body.assessment),
+      plan: {
+        investigations: strArr(plan.investigations),
+        treatment: strArr(plan.treatment),
+        follow_up: strOrEmpty(plan.follow_up),
+      },
+    };
+  }
 
   try {
     await sql`

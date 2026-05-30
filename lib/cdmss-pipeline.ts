@@ -21,7 +21,7 @@
  *   - Critique failure → ship the draft un-revised (no revision pass)
  */
 
-import type { EncounterNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
 import { expandQuery } from "@/lib/hyde";
 import { retrieve } from "@/lib/kb-retrieve";
 import type { KbChunkHit } from "@/lib/kb-db";
@@ -95,15 +95,31 @@ export type CdmssPipelineResult =
 
 // ---------- helpers ----------
 
-function noteToSeedQuery(note: EncounterNote): string {
+function noteToSeedQuery(note: AnyNote, noteType?: string): string {
   const lines: string[] = [];
-  if (note.chief_complaint) lines.push(`Chief complaint: ${note.chief_complaint}`);
-  if (note.assessment) lines.push(`Provisional diagnosis: ${note.assessment}`);
-  if (note.history_present_illness) lines.push(`HPI: ${note.history_present_illness}`);
-  if (note.examination) lines.push(`Exam findings: ${note.examination}`);
+  if (noteType === "general_medical") {
+    const gm = note as GeneralMedicalNote;
+    if (gm.reason_for_visit) lines.push(`Reason for visit: ${gm.reason_for_visit}`);
+    if (gm.impression) lines.push(`Impression: ${gm.impression}`);
+    if (gm.active_problems.length) lines.push(`Active problems: ${gm.active_problems.join("; ")}`);
+    if (gm.interval_history) lines.push(`Interval history: ${gm.interval_history}`);
+    if (gm.examination) lines.push(`Exam findings: ${gm.examination}`);
+    const planBits = [
+      ...gm.plan.investigations_ordered.map((s) => `investigation: ${s}`),
+      ...gm.plan.treatment_changes.map((s) => `treatment: ${s}`),
+      ...gm.plan.consultations_requested.map((s) => `consult: ${s}`),
+    ];
+    if (planBits.length) lines.push(`Current plan: ${planBits.join("; ")}`);
+    return lines.join("\n");
+  }
+  const cn = note as EncounterNote;
+  if (cn.chief_complaint) lines.push(`Chief complaint: ${cn.chief_complaint}`);
+  if (cn.assessment) lines.push(`Provisional diagnosis: ${cn.assessment}`);
+  if (cn.history_present_illness) lines.push(`HPI: ${cn.history_present_illness}`);
+  if (cn.examination) lines.push(`Exam findings: ${cn.examination}`);
   const planBits = [
-    ...note.plan.investigations.map((s) => `investigation: ${s}`),
-    ...note.plan.treatment.map((s) => `treatment: ${s}`),
+    ...cn.plan.investigations.map((s) => `investigation: ${s}`),
+    ...cn.plan.treatment.map((s) => `treatment: ${s}`),
   ];
   if (planBits.length) lines.push(`Current plan: ${planBits.join("; ")}`);
   return lines.join("\n");
@@ -313,15 +329,15 @@ type RawCritique = {
 };
 
 export async function runCdmssPipeline(
-  note: EncounterNote,
-  opts: { signal?: AbortSignal; topK?: number; onEvent?: (e: CdmssPipelineEvent) => void } = {},
+  note: AnyNote,
+  opts: { signal?: AbortSignal; topK?: number; noteType?: string; onEvent?: (e: CdmssPipelineEvent) => void } = {},
 ): Promise<CdmssPipelineResult> {
   const totalT0 = Date.now();
   const topK = opts.topK ?? 8;
 
   // 1. Seed
   const seedT0 = Date.now();
-  const seed = noteToSeedQuery(note);
+  const seed = noteToSeedQuery(note, opts.noteType);
   if (!seed.trim()) {
     return { ok: false, error: "note_too_empty_for_seed", latency_ms: Date.now() - totalT0 };
   }

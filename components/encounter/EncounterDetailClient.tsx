@@ -7,7 +7,7 @@ import { NoteView } from "@/components/encounter/NoteView";
 import { NoteEditor } from "@/components/encounter/NoteEditor";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
 import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
 // Sprint 6.3 (27 May 2026): 'draft_partial' added — encounter state after the
@@ -22,7 +22,8 @@ type TaggedTurn = { text: string; speaker_idx: number | null; name: string; type
 type InitialState = {
   id: string;
   status: Status;
-  note: EncounterNote | null;
+  note: AnyNote | null;
+  noteType?: string;
   cdmss: CdmssOutput | null;
   transcript: string | null;
   transcriptOriginal: string | null;
@@ -44,7 +45,7 @@ type Props = {
 
 type LiveState = {
   status: Status;
-  note: EncounterNote | null;
+  note: AnyNote | null;
   cdmss: CdmssOutput | null;
   error: string | null;
   processing: boolean;
@@ -194,7 +195,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        type FinalEvent = { encounter: { status: Status }; note: EncounterNote; cdmss: CdmssOutput; cdmss_error?: string };
+        type FinalEvent = { encounter: { status: Status }; note: AnyNote; cdmss: CdmssOutput; cdmss_error?: string };
         let finalEvent: FinalEvent | null = null;
         let lastError: string | null = null;
 
@@ -367,7 +368,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
   );
 
   const onSaveNote = React.useCallback(
-    async (note: EncounterNote): Promise<{ ok: boolean; error?: string }> => {
+    async (note: AnyNote): Promise<{ ok: boolean; error?: string }> => {
       try {
         const res = await fetch(
           `/${slug}/api/encounters/${initial.id}/note`,
@@ -382,7 +383,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           const err = (j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`;
           return { ok: false, error: err };
         }
-        const payload = j as { note: EncounterNote };
+        const payload = j as { note: AnyNote };
         setS((prev) => ({ ...prev, note: payload.note, editing: false }));
         return { ok: true };
       } catch (e) {
@@ -545,11 +546,12 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             {s.editing && s.note ? (
               <NoteEditor
                 initial={s.note}
+                noteType={initial.noteType}
                 onSave={onSaveNote}
                 onCancel={() => setS((prev) => ({ ...prev, editing: false }))}
               />
             ) : (
-              <NoteView note={s.note} />
+              <NoteView note={s.note} noteType={initial.noteType} />
             )}
           </section>
         ) : null}

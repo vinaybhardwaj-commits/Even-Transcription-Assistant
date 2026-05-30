@@ -26,7 +26,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
-import { generateNote, type EncounterNote } from "@/lib/note-generation";
+import { generateNote, noteHeadline, type EncounterNote } from "@/lib/note-generation";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
 import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
@@ -384,7 +384,7 @@ export async function POST(
 
           await noteTrace.finalise({
             status: "completed",
-            result_summary: { chief_complaint: noteRes.note.chief_complaint ?? null },
+            result_summary: { chief_complaint: noteHeadline(noteRes.note, row.note_type ?? undefined) || null },
             model_calls: [
               {
                 model: "qwen2.5:14b",
@@ -415,11 +415,12 @@ export async function POST(
             surface: "cdmss-analysis",
             encounter_id: id,
             doctor_email: null,
-            request_input: { note_summary: noteRes.note.chief_complaint ?? null },
+            request_input: { note_summary: noteHeadline(noteRes.note, row.note_type ?? undefined) || null },
           });
           cdmssTrace.event("start", "Running CDMSS pipeline");
 
           const pipelineRes = await runCdmssPipeline(noteRes.note, {
+            noteType: row.note_type ?? undefined,
             signal: req.signal,
             onEvent: (e) => {
               emit(e);
@@ -595,7 +596,7 @@ export async function POST(
     return respondError("PIPELINE_FAILED", `note_persist_failed: ${msg.slice(0, 120)}`);
   }
 
-  const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal });
+  const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal, noteType: row.note_type ?? undefined });
 
   let cdmssToStore: CdmssRich | CdmssOutput;
   let cdmssErr: string | undefined;

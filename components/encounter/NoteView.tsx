@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { EncounterNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
 
 /**
  * Renders a Medical Encounter Note as a clinical document. Prose
@@ -9,7 +9,9 @@ import type { EncounterNote } from "@/lib/note-generation";
  * paragraphs; list sections (PMH, meds, allergies, plan items) render
  * as bulleted lists. Empty sections collapse out of the way.
  */
-export function NoteView({ note }: { note: EncounterNote }) {
+export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?: string }) {
+  if (noteType === "general_medical") return <GeneralMedicalView note={noteAny as GeneralMedicalNote} />;
+  const note = noteAny as EncounterNote;
   return (
     <article className="space-y-5 text-body text-even-ink-800">
       {note.chief_complaint ? (
@@ -75,6 +77,53 @@ export function NoteView({ note }: { note: EncounterNote }) {
               <p className="text-label text-even-ink-500 mt-3 mb-1">Follow-up</p>
               <p className="whitespace-pre-line">{note.plan.follow_up}</p>
             </>
+          ) : null}
+        </Section>
+      ) : null}
+    </article>
+  );
+}
+
+function GeneralMedicalView({ note }: { note: GeneralMedicalNote }) {
+  return (
+    <article className="space-y-5 text-body text-even-ink-800">
+      {note.reason_for_visit ? (
+        <Section title="Reason for visit"><p>{note.reason_for_visit}</p></Section>
+      ) : null}
+      {note.active_problems.length > 0 ? (
+        <Section title="Active problems"><BulletList items={note.active_problems} /></Section>
+      ) : null}
+      {note.interval_history ? (
+        <Section title="Interval history"><p className="whitespace-pre-line">{note.interval_history}</p></Section>
+      ) : null}
+      {note.current_medications.length > 0 ? (
+        <Section title="Current medications"><BulletList items={note.current_medications} /></Section>
+      ) : null}
+      {note.allergies.length > 0 ? (
+        <Section title="Allergies"><BulletList items={note.allergies} /></Section>
+      ) : null}
+      {note.examination ? (
+        <Section title="Examination"><p className="whitespace-pre-line">{note.examination}</p></Section>
+      ) : null}
+      {note.impression ? (
+        <Section title="Impression"><p className="whitespace-pre-line">{note.impression}</p></Section>
+      ) : null}
+      {note.plan.investigations_ordered.length > 0 ||
+      note.plan.treatment_changes.length > 0 ||
+      note.plan.consultations_requested.length > 0 ||
+      note.plan.follow_up ? (
+        <Section title="Plan">
+          {note.plan.investigations_ordered.length > 0 ? (
+            <><p className="text-label text-even-ink-500 mt-1 mb-1">Investigations ordered</p><BulletList items={note.plan.investigations_ordered} /></>
+          ) : null}
+          {note.plan.treatment_changes.length > 0 ? (
+            <><p className="text-label text-even-ink-500 mt-3 mb-1">Treatment changes</p><BulletList items={note.plan.treatment_changes} /></>
+          ) : null}
+          {note.plan.consultations_requested.length > 0 ? (
+            <><p className="text-label text-even-ink-500 mt-3 mb-1">Consultations requested</p><BulletList items={note.plan.consultations_requested} /></>
+          ) : null}
+          {note.plan.follow_up ? (
+            <><p className="text-label text-even-ink-500 mt-3 mb-1">Follow-up</p><p className="whitespace-pre-line">{note.plan.follow_up}</p></>
           ) : null}
         </Section>
       ) : null}

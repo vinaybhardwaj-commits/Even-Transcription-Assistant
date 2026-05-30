@@ -42,6 +42,7 @@ export type EncounterFull = {
   diarize_error: string | null;
   diarize_started_at: string | null;
   diarize_completed_at: string | null;
+  note_type: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -146,6 +147,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       e.diarize_error,
       e.diarize_started_at::text   AS diarize_started_at,
       e.diarize_completed_at::text AS diarize_completed_at,
+      e.note_type,
       e.note_json,
       e.note_json_edited,
       e.cdmss_json,
@@ -248,6 +250,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     duration_seconds: r.duration_seconds == null ? null : Number(r.duration_seconds),
     transcript_raw: r.transcript_raw ? String(r.transcript_raw) : null,
     transcript_clean: r.transcript_clean ? String(r.transcript_clean) : null,
+    note_type: r.note_type ? String(r.note_type) : null,
     note_json: (r.note_json as EncounterNote | null) ?? null,
     detected_language: r.detected_language ? String(r.detected_language) : null,
     transcript_original: r.transcript_original ? String(r.transcript_original) : null,
@@ -496,6 +499,8 @@ export async function listAdminEncounters(args: {
           COALESCE(
             (e.note_json_edited->>'chief_complaint'),
             (e.note_json->>'chief_complaint'),
+            (e.note_json_edited->>'reason_for_visit'),
+            (e.note_json->>'reason_for_visit'),
             e.chief_complaint
           )                    AS chief_complaint,
           e.recorded_at::text  AS recorded_at,

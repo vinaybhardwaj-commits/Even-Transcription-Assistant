@@ -10,7 +10,7 @@
  * component tree. Future polish can swap in @react-email/components.
  */
 
-import type { EncounterNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
@@ -80,13 +80,19 @@ export type RenderOpts = {
   patientLabel: string | null;
   encounterId: string;
   recordedAt: Date;
-  note: EncounterNote;
+  note: AnyNote;
+  noteType?: string;
   cdmss: CdmssOutput | CdmssRich | null;
   appUrl: string;
 };
 
 export function renderNoteEmail(opts: RenderOpts): { subject: string; html: string; text: string } {
   const { note, cdmss, doctorName, patientLabel, recordedAt, encounterId, appUrl } = opts;
+  const isGM = opts.noteType === "general_medical";
+  const gm = note as GeneralMedicalNote;
+  const cn = note as EncounterNote;
+  const planSub = (t: string) =>
+    `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">${t}</p>`;
   const ddmmyyyy = recordedAt.toLocaleDateString("en-IN", {
     year: "numeric",
     month: "short",
@@ -94,54 +100,41 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     timeZone: "Asia/Kolkata",
   });
 
-  // ---- Subject ----
-  const ccBit = note.chief_complaint
-    ? ` · ${note.chief_complaint.slice(0, 60)}${note.chief_complaint.length > 60 ? "…" : ""}`
+  // ---- Subject (O4: note type at start) ----
+  const typeLabel = isGM ? "General Medical" : "Clinic Encounter";
+  const headline = isGM ? gm.reason_for_visit : cn.chief_complaint;
+  const ccBit = headline
+    ? ` · ${headline.slice(0, 60)}${headline.length > 60 ? "…" : ""}`
     : "";
   const patBit = patientLabel ? ` · ${patientLabel}` : "";
-  const subject = `Encounter ${ddmmyyyy}${patBit}${ccBit}`.slice(0, 140);
+  const subject = `[${typeLabel}] ${ddmmyyyy}${patBit}${ccBit}`.slice(0, 140);
 
   // ---- HTML body ----
-  const noteSections = [
-    note.chief_complaint
-      ? `${sectionHeading("Reason for visit")}${paragraph(note.chief_complaint)}`
+  const clinicSections = () => [
+    cn.chief_complaint ? `${sectionHeading("Reason for visit")}${paragraph(cn.chief_complaint)}` : "",
+    cn.history_present_illness ? `${sectionHeading("History")}${paragraph(cn.history_present_illness)}` : "",
+    cn.past_medical_history.length ? `${sectionHeading("Medical history")}${bulletList(cn.past_medical_history)}` : "",
+    cn.current_medications.length ? `${sectionHeading("Current medications")}${bulletList(cn.current_medications)}` : "",
+    cn.allergies.length ? `${sectionHeading("Allergies")}${bulletList(cn.allergies)}` : "",
+    cn.examination ? `${sectionHeading("Examination")}${paragraph(cn.examination)}` : "",
+    cn.assessment ? `${sectionHeading("Disposition")}${paragraph(cn.assessment)}` : "",
+    cn.plan.investigations.length || cn.plan.treatment.length || cn.plan.follow_up
+      ? `${sectionHeading("Plan")}${cn.plan.investigations.length ? `${planSub("Investigations")}${bulletList(cn.plan.investigations)}` : ""}${cn.plan.treatment.length ? `${planSub("Treatment")}${bulletList(cn.plan.treatment)}` : ""}${cn.plan.follow_up ? `${planSub("Follow-up")}${paragraph(cn.plan.follow_up)}` : ""}`
       : "",
-    note.history_present_illness
-      ? `${sectionHeading("History")}${paragraph(note.history_present_illness)}`
+  ];
+  const gmSections = () => [
+    gm.reason_for_visit ? `${sectionHeading("Reason for visit")}${paragraph(gm.reason_for_visit)}` : "",
+    gm.active_problems?.length ? `${sectionHeading("Active problems")}${bulletList(gm.active_problems)}` : "",
+    gm.interval_history ? `${sectionHeading("Interval history")}${paragraph(gm.interval_history)}` : "",
+    gm.current_medications?.length ? `${sectionHeading("Current medications")}${bulletList(gm.current_medications)}` : "",
+    gm.allergies?.length ? `${sectionHeading("Allergies")}${bulletList(gm.allergies)}` : "",
+    gm.examination ? `${sectionHeading("Examination")}${paragraph(gm.examination)}` : "",
+    gm.impression ? `${sectionHeading("Impression")}${paragraph(gm.impression)}` : "",
+    (gm.plan?.investigations_ordered?.length || gm.plan?.treatment_changes?.length || gm.plan?.consultations_requested?.length || gm.plan?.follow_up)
+      ? `${sectionHeading("Plan")}${gm.plan.investigations_ordered.length ? `${planSub("Investigations ordered")}${bulletList(gm.plan.investigations_ordered)}` : ""}${gm.plan.treatment_changes.length ? `${planSub("Treatment changes")}${bulletList(gm.plan.treatment_changes)}` : ""}${gm.plan.consultations_requested.length ? `${planSub("Consultations requested")}${bulletList(gm.plan.consultations_requested)}` : ""}${gm.plan.follow_up ? `${planSub("Follow-up")}${paragraph(gm.plan.follow_up)}` : ""}`
       : "",
-    note.past_medical_history.length
-      ? `${sectionHeading("Medical history")}${bulletList(note.past_medical_history)}`
-      : "",
-    note.current_medications.length
-      ? `${sectionHeading("Current medications")}${bulletList(note.current_medications)}`
-      : "",
-    note.allergies.length
-      ? `${sectionHeading("Allergies")}${bulletList(note.allergies)}`
-      : "",
-    note.examination
-      ? `${sectionHeading("Examination")}${paragraph(note.examination)}`
-      : "",
-    note.assessment
-      ? `${sectionHeading("Disposition")}${paragraph(note.assessment)}`
-      : "",
-    note.plan.investigations.length || note.plan.treatment.length || note.plan.follow_up
-      ? `${sectionHeading("Plan")}${
-          note.plan.investigations.length
-            ? `<p style="margin:0 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">Investigations</p>${bulletList(note.plan.investigations)}`
-            : ""
-        }${
-          note.plan.treatment.length
-            ? `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">Treatment</p>${bulletList(note.plan.treatment)}`
-            : ""
-        }${
-          note.plan.follow_up
-            ? `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">Follow-up</p>${paragraph(note.plan.follow_up)}`
-            : ""
-        }`
-      : "",
-  ]
-    .filter(Boolean)
-    .join("");
+  ];
+  const noteSections = (isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
 
   // B10 defensive fallback (28 May 2026): if every clinical section is
   // empty, surface that explicitly instead of silently sending an email
@@ -269,22 +262,30 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   textLines.push(`Even Hospital — Encounter Note`);
   textLines.push(`${doctorName} · ${ddmmyyyy}${patientLabel ? ` · ${patientLabel}` : ""}`);
   textLines.push("");
-  if (note.chief_complaint) textLines.push(`Chief complaint: ${note.chief_complaint}`, "");
-  if (note.history_present_illness)
-    textLines.push(`HPI:`, note.history_present_illness, "");
-  if (note.past_medical_history.length)
-    textLines.push(`PMH: ${note.past_medical_history.join("; ")}`, "");
-  if (note.current_medications.length)
-    textLines.push(`Medications: ${note.current_medications.join("; ")}`, "");
-  if (note.allergies.length)
-    textLines.push(`Allergies: ${note.allergies.join("; ")}`, "");
-  if (note.examination) textLines.push(`Examination:`, note.examination, "");
-  if (note.assessment) textLines.push(`Assessment:`, note.assessment, "");
-  if (note.plan.investigations.length)
-    textLines.push(`Investigations: ${note.plan.investigations.join("; ")}`);
-  if (note.plan.treatment.length)
-    textLines.push(`Treatment: ${note.plan.treatment.join("; ")}`);
-  if (note.plan.follow_up) textLines.push(`Follow-up: ${note.plan.follow_up}`);
+  if (isGM) {
+    if (gm.reason_for_visit) textLines.push(`Reason for visit: ${gm.reason_for_visit}`, "");
+    if (gm.active_problems.length) textLines.push(`Active problems: ${gm.active_problems.join("; ")}`, "");
+    if (gm.interval_history) textLines.push(`Interval history:`, gm.interval_history, "");
+    if (gm.current_medications.length) textLines.push(`Medications: ${gm.current_medications.join("; ")}`, "");
+    if (gm.allergies.length) textLines.push(`Allergies: ${gm.allergies.join("; ")}`, "");
+    if (gm.examination) textLines.push(`Examination:`, gm.examination, "");
+    if (gm.impression) textLines.push(`Impression:`, gm.impression, "");
+    if (gm.plan.investigations_ordered.length) textLines.push(`Investigations ordered: ${gm.plan.investigations_ordered.join("; ")}`);
+    if (gm.plan.treatment_changes.length) textLines.push(`Treatment changes: ${gm.plan.treatment_changes.join("; ")}`);
+    if (gm.plan.consultations_requested.length) textLines.push(`Consultations: ${gm.plan.consultations_requested.join("; ")}`);
+    if (gm.plan.follow_up) textLines.push(`Follow-up: ${gm.plan.follow_up}`);
+  } else {
+    if (cn.chief_complaint) textLines.push(`Chief complaint: ${cn.chief_complaint}`, "");
+    if (cn.history_present_illness) textLines.push(`HPI:`, cn.history_present_illness, "");
+    if (cn.past_medical_history.length) textLines.push(`PMH: ${cn.past_medical_history.join("; ")}`, "");
+    if (cn.current_medications.length) textLines.push(`Medications: ${cn.current_medications.join("; ")}`, "");
+    if (cn.allergies.length) textLines.push(`Allergies: ${cn.allergies.join("; ")}`, "");
+    if (cn.examination) textLines.push(`Examination:`, cn.examination, "");
+    if (cn.assessment) textLines.push(`Assessment:`, cn.assessment, "");
+    if (cn.plan.investigations.length) textLines.push(`Investigations: ${cn.plan.investigations.join("; ")}`);
+    if (cn.plan.treatment.length) textLines.push(`Treatment: ${cn.plan.treatment.join("; ")}`);
+    if (cn.plan.follow_up) textLines.push(`Follow-up: ${cn.plan.follow_up}`);
+  }
 
   if (cdmss) {
     const ddxArr = Array.isArray(cdmss.differentials_to_consider) ? cdmss.differentials_to_consider : [];

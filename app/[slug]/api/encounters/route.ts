@@ -119,7 +119,9 @@ export async function GET(
              send_status,
              COALESCE(
                (note_json_edited->>'chief_complaint'),
-               (note_json->>'chief_complaint')
+               (note_json->>'chief_complaint'),
+               (note_json_edited->>'reason_for_visit'),
+               (note_json->>'reason_for_visit')
              ) AS chief_complaint
         FROM encounter
        WHERE doctor_id = ${claims.doctor_id}
