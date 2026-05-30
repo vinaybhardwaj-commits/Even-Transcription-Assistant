@@ -187,9 +187,29 @@ export async function POST(
         emit?.({ stage: "progress", msg: "Diarization skipped (audio unavailable)" });
         return;
       }
+      // Load the doctor's enrolled voiceprint (if any) so /diarize can NAME them
+      // (otherwise speakers stay heuristic — Patient/Attender/Nurse).
+      let clinicianCentroids: unknown[] = [];
+      try {
+        const vp = (await sql`
+          SELECT encode(vp.centroid, 'base64') AS centroid_b64, d.full_name AS full_name
+            FROM voice_print vp JOIN doctor d ON d.id = vp.doctor_id
+           WHERE vp.doctor_id = ${row.doctor_id} LIMIT 1
+        `) as Array<{ centroid_b64: string; full_name: string }>;
+        if (vp[0]?.centroid_b64) {
+          clinicianCentroids = [{
+            clinician_id: row.doctor_id,
+            full_name: vp[0].full_name,
+            centroid_base64: vp[0].centroid_b64,
+          }];
+        }
+      } catch (e) {
+        console.warn(`[process] voice_print load failed enc=${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
       const d = await runDiarize(bytes, head.content_type || "audio/webm", {
         encounterId: id,
-        clinicianCentroids: [],
+        clinicianCentroids,
         manualRelabels: [],
         signal: req.signal,
       });
