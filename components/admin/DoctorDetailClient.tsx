@@ -15,6 +15,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 
 type Doctor = {
@@ -39,6 +40,7 @@ type AuditEntry = { id: string; actor_type: "admin" | "doctor" | "system"; actor
 type DoctorBundle = { doctor: Doctor | null; kpis: Kpi; recent_encounters: Encounter[]; recipients: Recipient[]; audit_log: AuditEntry[] };
 
 export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
+  const router = useRouter();
   const [data, setData] = React.useState<DoctorBundle | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -283,6 +285,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
         <div className="flex flex-col items-end gap-2 shrink-0">
           <StatusPill status={d.status} deleted={d.deleted_at !== null} />
           <div className="flex gap-2">
+            <Button variant="primary" size="sm" onClick={() => router.push(`/admin/doctors/${doctorId}/voice`)} disabled={d.deleted_at !== null} title="Record this doctor's voice for speaker diarization (doctor must be present at this mic)">🎙 Record voice</Button>
             <Button variant="secondary" size="sm" onClick={() => void emailUrl()} disabled={actionInflight || d.deleted_at !== null}>✉ Email URL</Button>
             {d.status === "locked" ? (
               <Button variant="primary" size="sm" onClick={() => void unlock()} disabled={actionInflight}>Unlock</Button>
