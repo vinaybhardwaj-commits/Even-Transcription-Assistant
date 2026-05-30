@@ -12,7 +12,7 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
   const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
   const [patientLabel, setPatientLabel] = React.useState("");
-  const [noteType, setNoteType] = React.useState<"clinic_encounter" | "general_medical">("clinic_encounter");
+  const [noteType, setNoteType] = React.useState<"clinic_encounter" | "general_medical" | "operative_procedure">("clinic_encounter");
 
   const goRecord = React.useCallback(() => {
     // patient_label is captured in the recording screen / submit step;
@@ -77,7 +77,7 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
           <div className="mb-4">
             <span className="block text-label text-even-navy-800 mb-1.5">Note type</span>
             <div className="inline-flex w-full rounded-md border border-even-ink-200 overflow-hidden text-label">
-              {([["clinic_encounter", "Clinic Encounter"], ["general_medical", "General Medical"]] as const).map(([v, lbl]) => (
+              {([["clinic_encounter", "Clinic"], ["general_medical", "General Medical"], ["operative_procedure", "Operative"]] as const).map(([v, lbl]) => (
                 <button
                   key={v}
                   type="button"

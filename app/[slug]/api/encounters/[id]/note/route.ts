@@ -100,6 +100,46 @@ export async function PATCH(
         follow_up: strOrEmpty(plan.follow_up),
       },
     };
+  } else if (row.note_type === "operative_procedure") {
+    const num = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+    const boolOrNull = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+    const specimens = Array.isArray(body.specimens)
+      ? (body.specimens as unknown[]).map((x) => {
+          const ob = (x ?? {}) as Record<string, unknown>;
+          const sent = strOrEmpty(ob.sent_to).toLowerCase();
+          return { description: strOrEmpty(ob.description), sent_to: sent === "pathology" || sent === "discarded" ? sent : "other" };
+        }).filter((z) => z.description.trim().length > 0)
+      : [];
+    const implants = Array.isArray(body.implants)
+      ? (body.implants as unknown[]).map((x) => {
+          const ob = (x ?? {}) as Record<string, unknown>;
+          return { description: strOrEmpty(ob.description), catalog_or_serial: strOrEmpty(ob.catalog_or_serial) };
+        }).filter((z) => z.description.trim().length > 0)
+      : [];
+    note = {
+      procedure_date_time: strOrEmpty(body.procedure_date_time),
+      surgical_specialty: strOrEmpty(body.surgical_specialty),
+      pre_op_diagnosis: strOrEmpty(body.pre_op_diagnosis),
+      post_op_diagnosis: strOrEmpty(body.post_op_diagnosis),
+      procedure_performed: strArr(body.procedure_performed),
+      surgeon: strOrEmpty(body.surgeon),
+      assistants: strArr(body.assistants),
+      anesthesiologist: strOrEmpty(body.anesthesiologist),
+      anesthesia_type: strOrEmpty(body.anesthesia_type),
+      indication: strOrEmpty(body.indication),
+      findings: strOrEmpty(body.findings),
+      procedure_narrative: strOrEmpty(body.procedure_narrative),
+      estimated_blood_loss_ml: num(body.estimated_blood_loss_ml),
+      fluids_in: strOrEmpty(body.fluids_in),
+      urine_output_ml: num(body.urine_output_ml),
+      specimens,
+      implants,
+      drains_placed: strArr(body.drains_placed),
+      complications: strOrEmpty(body.complications),
+      counts_correct: boolOrNull(body.counts_correct),
+      antibiotic_given: strOrEmpty(body.antibiotic_given),
+      disposition: strOrEmpty(body.disposition),
+    };
   } else {
     note = {
       chief_complaint: strOrEmpty(body.chief_complaint),

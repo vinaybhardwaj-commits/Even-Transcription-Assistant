@@ -26,7 +26,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
-import { generateNote, noteHeadline, type EncounterNote } from "@/lib/note-generation";
+import { generateNote, noteHeadline, noteTypeHasCdmss, type EncounterNote } from "@/lib/note-generation";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
 import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
@@ -410,77 +410,93 @@ export async function POST(
             return;
           }
 
-          // ---- CDMSS pipeline (surface=cdmss-analysis) ----
-          cdmssTrace = await openTrace({
-            surface: "cdmss-analysis",
-            encounter_id: id,
-            doctor_email: null,
-            request_input: { note_summary: noteHeadline(noteRes.note, row.note_type ?? undefined) || null },
-          });
-          cdmssTrace.event("start", "Running CDMSS pipeline");
-
-          const pipelineRes = await runCdmssPipeline(noteRes.note, {
-            noteType: row.note_type ?? undefined,
-            signal: req.signal,
-            onEvent: (e) => {
-              emit(e);
-              const ev = e as Record<string, unknown>;
-              const stage = typeof ev.stage === "string" ? ev.stage : "?";
-              const state = typeof ev.state === "string" ? ev.state : undefined;
-              const msNum = typeof ev.ms === "number" ? ev.ms : undefined;
-              cdmssTrace?.event(
-                `${stage}:${state ?? "tick"}`,
-                JSON.stringify(ev).slice(0, 300),
-                msNum,
-                state === "done",
-                state === "error",
-              );
-            },
-          });
-
-          let cdmssToStore: CdmssRich | CdmssOutput;
+          // ---- CDMSS pipeline (surface=cdmss-analysis) — OFF for operative/dietetic/physio (note matrix) ----
+          let cdmssToStore: CdmssRich | CdmssOutput | null = null;
           let cdmssErr: string | undefined;
-          if (pipelineRes.ok) {
-            cdmssToStore = pipelineRes.cdmss;
-          } else if (pipelineRes.fallback) {
-            cdmssToStore = pipelineRes.fallback;
-            cdmssErr = pipelineRes.error;
+          let cdmssLatencyMs: number | undefined;
+          if (noteTypeHasCdmss(row.note_type ?? undefined)) {
+            cdmssTrace = await openTrace({
+              surface: "cdmss-analysis",
+              encounter_id: id,
+              doctor_email: null,
+              request_input: { note_summary: noteHeadline(noteRes.note, row.note_type ?? undefined) || null },
+            });
+            cdmssTrace.event("start", "Running CDMSS pipeline");
+
+            const pipelineRes = await runCdmssPipeline(noteRes.note, {
+              noteType: row.note_type ?? undefined,
+              signal: req.signal,
+              onEvent: (e) => {
+                emit(e);
+                const ev = e as Record<string, unknown>;
+                const stage = typeof ev.stage === "string" ? ev.stage : "?";
+                const state = typeof ev.state === "string" ? ev.state : undefined;
+                const msNum = typeof ev.ms === "number" ? ev.ms : undefined;
+                cdmssTrace?.event(
+                  `${stage}:${state ?? "tick"}`,
+                  JSON.stringify(ev).slice(0, 300),
+                  msNum,
+                  state === "done",
+                  state === "error",
+                );
+              },
+            });
+            cdmssLatencyMs = pipelineRes.latency_ms;
+
+            if (pipelineRes.ok) {
+              cdmssToStore = pipelineRes.cdmss;
+            } else if (pipelineRes.fallback) {
+              cdmssToStore = pipelineRes.fallback;
+              cdmssErr = pipelineRes.error;
+            } else {
+              cdmssToStore = {
+                differentials_to_consider: [],
+                red_flags: [],
+                evidence_based_suggestions: [],
+                follow_up_considerations: [],
+              };
+              cdmssErr = pipelineRes.error;
+            }
+
+            await cdmssTrace.finalise({
+              status: pipelineRes.ok ? "completed" : "errored",
+              error_message: cdmssErr,
+              result_summary: pipelineRes.ok
+                ? { citations_count: (cdmssToStore as { citations?: unknown[] }).citations?.length ?? 0 }
+                : null,
+              model_calls: [
+                { model: "llama3.1:8b",  latency_ms: pipelineRes.latency_ms ?? 0 },
+                { model: "qwen2.5:14b", latency_ms: pipelineRes.latency_ms ?? 0 },
+              ],
+            });
+            cdmssTrace = null;
+
+            try {
+              await sql`
+                UPDATE encounter
+                   SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
+                       status     = 'complete'
+                 WHERE id = ${id}
+              `;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              emit({ stage: "error", where: "persist_cdmss", message: msg });
+              close();
+              clearInterval(hbInterval);
+              return;
+            }
           } else {
-            cdmssToStore = {
-              differentials_to_consider: [],
-              red_flags: [],
-              evidence_based_suggestions: [],
-              follow_up_considerations: [],
-            };
-            cdmssErr = pipelineRes.error;
-          }
-
-          await cdmssTrace.finalise({
-            status: pipelineRes.ok ? "completed" : "errored",
-            error_message: cdmssErr,
-            result_summary: pipelineRes.ok
-              ? { citations_count: (cdmssToStore as { citations?: unknown[] }).citations?.length ?? 0 }
-              : null,
-            model_calls: [
-              { model: "llama3.1:8b",  latency_ms: pipelineRes.latency_ms ?? 0 },
-              { model: "qwen2.5:14b", latency_ms: pipelineRes.latency_ms ?? 0 },
-            ],
-          });
-          cdmssTrace = null;
-
-          try {
-            await sql`
-              UPDATE encounter
-                 SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
-                     status     = 'complete'
-               WHERE id = ${id}
-            `;
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            emit({ stage: "error", where: "persist_cdmss", message: msg });
-            close();
-            clearInterval(hbInterval);
-            return;
+            // CDMSS-off note type: no decision support, just finalise.
+            emit({ stage: "progress", msg: "Clinical decision support is not applicable for this note type" });
+            try {
+              await sql`UPDATE encounter SET status = 'complete' WHERE id = ${id}`;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              emit({ stage: "error", where: "persist_status", message: msg });
+              close();
+              clearInterval(hbInterval);
+              return;
+            }
           }
 
           emit({
@@ -489,7 +505,7 @@ export async function POST(
             note: noteRes.note,
             cdmss: cdmssToStore,
             note_ms: noteRes.latency_ms,
-            cdmss_ms: pipelineRes.latency_ms,
+            cdmss_ms: cdmssLatencyMs,
             cdmss_error: cdmssErr,
           });
 
@@ -596,35 +612,44 @@ export async function POST(
     return respondError("PIPELINE_FAILED", `note_persist_failed: ${msg.slice(0, 120)}`);
   }
 
-  const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal, noteType: row.note_type ?? undefined });
-
-  let cdmssToStore: CdmssRich | CdmssOutput;
+  let cdmssToStore: CdmssRich | CdmssOutput | null = null;
   let cdmssErr: string | undefined;
-  if (pipelineRes.ok) {
-    cdmssToStore = pipelineRes.cdmss;
-  } else if (pipelineRes.fallback) {
-    cdmssToStore = pipelineRes.fallback;
-    cdmssErr = pipelineRes.error;
+  let cdmssLatencyMs: number | undefined;
+  if (noteTypeHasCdmss(row.note_type ?? undefined)) {
+    const pipelineRes = await runCdmssPipeline(noteRes.note, { signal: req.signal, noteType: row.note_type ?? undefined });
+    cdmssLatencyMs = pipelineRes.latency_ms;
+    if (pipelineRes.ok) {
+      cdmssToStore = pipelineRes.cdmss;
+    } else if (pipelineRes.fallback) {
+      cdmssToStore = pipelineRes.fallback;
+      cdmssErr = pipelineRes.error;
+    } else {
+      cdmssToStore = {
+        differentials_to_consider: [],
+        red_flags: [],
+        evidence_based_suggestions: [],
+        follow_up_considerations: [],
+      };
+      cdmssErr = pipelineRes.error;
+    }
+    try {
+      await sql`
+        UPDATE encounter
+           SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
+               status     = 'complete'
+         WHERE id = ${id}
+      `;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return respondError("PIPELINE_FAILED", `cdmss_persist_failed: ${msg.slice(0, 120)}`);
+    }
   } else {
-    cdmssToStore = {
-      differentials_to_consider: [],
-      red_flags: [],
-      evidence_based_suggestions: [],
-      follow_up_considerations: [],
-    };
-    cdmssErr = pipelineRes.error;
-  }
-
-  try {
-    await sql`
-      UPDATE encounter
-         SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
-             status     = 'complete'
-       WHERE id = ${id}
-    `;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return respondError("PIPELINE_FAILED", `cdmss_persist_failed: ${msg.slice(0, 120)}`);
+    try {
+      await sql`UPDATE encounter SET status = 'complete' WHERE id = ${id}`;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return respondError("PIPELINE_FAILED", `status_persist_failed: ${msg.slice(0, 120)}`);
+    }
   }
 
   await diarizeStore();
@@ -634,7 +659,7 @@ export async function POST(
     note: noteRes.note,
     cdmss: cdmssToStore,
     note_ms: noteRes.latency_ms,
-    cdmss_ms: pipelineRes.latency_ms,
+    cdmss_ms: cdmssLatencyMs,
     cdmss_error: cdmssErr,
   });
 }

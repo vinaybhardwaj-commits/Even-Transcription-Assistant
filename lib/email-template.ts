@@ -10,7 +10,7 @@
  * component tree. Future polish can swap in @react-email/components.
  */
 
-import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
@@ -89,8 +89,10 @@ export type RenderOpts = {
 export function renderNoteEmail(opts: RenderOpts): { subject: string; html: string; text: string } {
   const { note, cdmss, doctorName, patientLabel, recordedAt, encounterId, appUrl } = opts;
   const isGM = opts.noteType === "general_medical";
+  const isOp = opts.noteType === "operative_procedure";
   const gm = note as GeneralMedicalNote;
   const cn = note as EncounterNote;
+  const op = note as OperativeProcedureNote;
   const planSub = (t: string) =>
     `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">${t}</p>`;
   const ddmmyyyy = recordedAt.toLocaleDateString("en-IN", {
@@ -101,8 +103,8 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   });
 
   // ---- Subject (O4: note type at start) ----
-  const typeLabel = isGM ? "General Medical" : "Clinic Encounter";
-  const headline = isGM ? gm.reason_for_visit : cn.chief_complaint;
+  const typeLabel = isOp ? "Operative Note" : isGM ? "General Medical" : "Clinic Encounter";
+  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isGM ? gm.reason_for_visit : cn.chief_complaint;
   const ccBit = headline
     ? ` · ${headline.slice(0, 60)}${headline.length > 60 ? "…" : ""}`
     : "";
@@ -134,7 +136,39 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
       ? `${sectionHeading("Plan")}${gm.plan.investigations_ordered.length ? `${planSub("Investigations ordered")}${bulletList(gm.plan.investigations_ordered)}` : ""}${gm.plan.treatment_changes.length ? `${planSub("Treatment changes")}${bulletList(gm.plan.treatment_changes)}` : ""}${gm.plan.consultations_requested.length ? `${planSub("Consultations requested")}${bulletList(gm.plan.consultations_requested)}` : ""}${gm.plan.follow_up ? `${planSub("Follow-up")}${paragraph(gm.plan.follow_up)}` : ""}`
       : "",
   ];
-  const noteSections = (isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
+  const opSections = () => {
+    const meta = [
+      op.procedure_date_time ? `Date/time: ${op.procedure_date_time}` : "",
+      op.surgical_specialty ? `Specialty: ${op.surgical_specialty}` : "",
+      op.surgeon ? `Surgeon: ${op.surgeon}` : "",
+      op.assistants.length ? `Assistants: ${op.assistants.join(", ")}` : "",
+      op.anesthesiologist ? `Anesthesiologist: ${op.anesthesiologist}` : "",
+      op.anesthesia_type ? `Anesthesia: ${op.anesthesia_type}` : "",
+    ].filter(Boolean);
+    const intra = [
+      op.estimated_blood_loss_ml != null ? `EBL: ${op.estimated_blood_loss_ml} ml` : "",
+      op.fluids_in ? `Fluids in: ${op.fluids_in}` : "",
+      op.urine_output_ml != null ? `Urine output: ${op.urine_output_ml} ml` : "",
+      op.antibiotic_given ? `Antibiotic: ${op.antibiotic_given}` : "",
+      op.counts_correct != null ? `Counts correct: ${op.counts_correct ? "Yes" : "No"}` : "",
+    ].filter(Boolean);
+    return [
+      meta.length ? `${sectionHeading("Procedure details")}${bulletList(meta)}` : "",
+      op.pre_op_diagnosis ? `${sectionHeading("Pre-operative diagnosis")}${paragraph(op.pre_op_diagnosis)}` : "",
+      op.post_op_diagnosis ? `${sectionHeading("Post-operative diagnosis")}${paragraph(op.post_op_diagnosis)}` : "",
+      op.procedure_performed.length ? `${sectionHeading("Procedure(s) performed")}${bulletList(op.procedure_performed)}` : "",
+      op.indication ? `${sectionHeading("Indication")}${paragraph(op.indication)}` : "",
+      op.findings ? `${sectionHeading("Findings")}${paragraph(op.findings)}` : "",
+      op.procedure_narrative ? `${sectionHeading("Procedure narrative")}${paragraph(op.procedure_narrative)}` : "",
+      op.specimens.length ? `${sectionHeading("Specimens")}${bulletList(op.specimens.map((sp) => `${sp.description} \u2192 ${sp.sent_to}`))}` : "",
+      op.implants.length ? `${sectionHeading("Implants")}${bulletList(op.implants.map((im) => im.catalog_or_serial ? `${im.description} (${im.catalog_or_serial})` : im.description))}` : "",
+      op.drains_placed.length ? `${sectionHeading("Drains")}${bulletList(op.drains_placed)}` : "",
+      intra.length ? `${sectionHeading("Intra-operative summary")}${bulletList(intra)}` : "",
+      op.complications ? `${sectionHeading("Complications")}${paragraph(op.complications)}` : "",
+      op.disposition ? `${sectionHeading("Disposition")}${paragraph(op.disposition)}` : "",
+    ];
+  };
+  const noteSections = (isOp ? opSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
 
   // B10 defensive fallback (28 May 2026): if every clinical section is
   // empty, surface that explicitly instead of silently sending an email
@@ -262,7 +296,27 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   textLines.push(`Even Hospital — Encounter Note`);
   textLines.push(`${doctorName} · ${ddmmyyyy}${patientLabel ? ` · ${patientLabel}` : ""}`);
   textLines.push("");
-  if (isGM) {
+  if (isOp) {
+    if (op.procedure_performed.length) textLines.push(`Procedures: ${op.procedure_performed.join("; ")}`, "");
+    if (op.pre_op_diagnosis) textLines.push(`Pre-op dx: ${op.pre_op_diagnosis}`);
+    if (op.post_op_diagnosis) textLines.push(`Post-op dx: ${op.post_op_diagnosis}`);
+    if (op.surgeon) textLines.push(`Surgeon: ${op.surgeon}`);
+    if (op.assistants.length) textLines.push(`Assistants: ${op.assistants.join(", ")}`);
+    if (op.anesthesia_type) textLines.push(`Anesthesia: ${op.anesthesia_type}`);
+    if (op.indication) textLines.push("", `Indication:`, op.indication);
+    if (op.findings) textLines.push("", `Findings:`, op.findings);
+    if (op.procedure_narrative) textLines.push("", `Narrative:`, op.procedure_narrative);
+    if (op.specimens.length) textLines.push("", `Specimens: ${op.specimens.map((x) => `${x.description} \u2192 ${x.sent_to}`).join("; ")}`);
+    if (op.implants.length) textLines.push(`Implants: ${op.implants.map((x) => x.catalog_or_serial ? `${x.description} (${x.catalog_or_serial})` : x.description).join("; ")}`);
+    if (op.drains_placed.length) textLines.push(`Drains: ${op.drains_placed.join("; ")}`);
+    if (op.estimated_blood_loss_ml != null) textLines.push(`EBL: ${op.estimated_blood_loss_ml} ml`);
+    if (op.urine_output_ml != null) textLines.push(`Urine output: ${op.urine_output_ml} ml`);
+    if (op.fluids_in) textLines.push(`Fluids in: ${op.fluids_in}`);
+    if (op.antibiotic_given) textLines.push(`Antibiotic: ${op.antibiotic_given}`);
+    if (op.counts_correct != null) textLines.push(`Counts correct: ${op.counts_correct ? "Yes" : "No"}`);
+    if (op.complications) textLines.push("", `Complications: ${op.complications}`);
+    if (op.disposition) textLines.push(`Disposition: ${op.disposition}`);
+  } else if (isGM) {
     if (gm.reason_for_visit) textLines.push(`Reason for visit: ${gm.reason_for_visit}`, "");
     if (gm.active_problems.length) textLines.push(`Active problems: ${gm.active_problems.join("; ")}`, "");
     if (gm.interval_history) textLines.push(`Interval history:`, gm.interval_history, "");

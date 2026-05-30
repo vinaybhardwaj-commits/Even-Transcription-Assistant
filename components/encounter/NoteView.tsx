@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
 
 /**
  * Renders a Medical Encounter Note as a clinical document. Prose
@@ -11,6 +11,7 @@ import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-gene
  */
 export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?: string }) {
   if (noteType === "general_medical") return <GeneralMedicalView note={noteAny as GeneralMedicalNote} />;
+  if (noteType === "operative_procedure") return <OperativeView note={noteAny as OperativeProcedureNote} />;
   const note = noteAny as EncounterNote;
   return (
     <article className="space-y-5 text-body text-even-ink-800">
@@ -80,6 +81,41 @@ export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?
           ) : null}
         </Section>
       ) : null}
+    </article>
+  );
+}
+
+function OperativeView({ note }: { note: OperativeProcedureNote }) {
+  const meta = [
+    note.procedure_date_time ? `Date/time: ${note.procedure_date_time}` : "",
+    note.surgical_specialty ? `Specialty: ${note.surgical_specialty}` : "",
+    note.surgeon ? `Surgeon: ${note.surgeon}` : "",
+    note.assistants.length ? `Assistants: ${note.assistants.join(", ")}` : "",
+    note.anesthesiologist ? `Anesthesiologist: ${note.anesthesiologist}` : "",
+    note.anesthesia_type ? `Anesthesia: ${note.anesthesia_type}` : "",
+  ].filter(Boolean);
+  const intra = [
+    note.estimated_blood_loss_ml != null ? `EBL: ${note.estimated_blood_loss_ml} ml` : "",
+    note.fluids_in ? `Fluids in: ${note.fluids_in}` : "",
+    note.urine_output_ml != null ? `Urine output: ${note.urine_output_ml} ml` : "",
+    note.antibiotic_given ? `Antibiotic: ${note.antibiotic_given}` : "",
+    note.counts_correct != null ? `Counts correct: ${note.counts_correct ? "Yes" : "No"}` : "",
+  ].filter(Boolean);
+  return (
+    <article className="space-y-5 text-body text-even-ink-800">
+      {meta.length > 0 ? <Section title="Procedure details"><BulletList items={meta} /></Section> : null}
+      {note.pre_op_diagnosis ? <Section title="Pre-operative diagnosis"><p className="whitespace-pre-line">{note.pre_op_diagnosis}</p></Section> : null}
+      {note.post_op_diagnosis ? <Section title="Post-operative diagnosis"><p className="whitespace-pre-line">{note.post_op_diagnosis}</p></Section> : null}
+      {note.procedure_performed.length > 0 ? <Section title="Procedure(s) performed"><BulletList items={note.procedure_performed} /></Section> : null}
+      {note.indication ? <Section title="Indication"><p className="whitespace-pre-line">{note.indication}</p></Section> : null}
+      {note.findings ? <Section title="Findings"><p className="whitespace-pre-line">{note.findings}</p></Section> : null}
+      {note.procedure_narrative ? <Section title="Procedure narrative"><p className="whitespace-pre-line">{note.procedure_narrative}</p></Section> : null}
+      {note.specimens.length > 0 ? <Section title="Specimens"><BulletList items={note.specimens.map((sp) => `${sp.description} → ${sp.sent_to}`)} /></Section> : null}
+      {note.implants.length > 0 ? <Section title="Implants"><BulletList items={note.implants.map((im) => im.catalog_or_serial ? `${im.description} (${im.catalog_or_serial})` : im.description)} /></Section> : null}
+      {note.drains_placed.length > 0 ? <Section title="Drains"><BulletList items={note.drains_placed} /></Section> : null}
+      {intra.length > 0 ? <Section title="Intra-operative summary"><BulletList items={intra} /></Section> : null}
+      {note.complications ? <Section title="Complications"><p className="whitespace-pre-line">{note.complications}</p></Section> : null}
+      {note.disposition ? <Section title="Disposition"><p>{note.disposition}</p></Section> : null}
     </article>
   );
 }

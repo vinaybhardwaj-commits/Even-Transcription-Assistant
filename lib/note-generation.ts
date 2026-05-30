@@ -81,6 +81,44 @@ Style rules:
 - Do not add a diagnosis the doctor didn't state
 - If the transcript is too short or non-clinical, fill what you can and leave the rest empty`;
 
+// Operative / Procedure Note (V2.S3) — surgeon's dictation. CDMSS is OFF for
+// this note type (see noteTypeHasCdmss). Distinct schema per PRD §7.2.3.
+const SYSTEM_OPERATIVE = `You are converting a surgeon's voice-dictated operative or procedure note into a structured Operative Note. The transcript may be in English, an Indian language, or code-mixed — ALWAYS write the note in clear clinical English, translating faithfully. Use ONLY information explicitly stated in the transcript — do not invent surgical findings, complications, EBL values, implants, or specimens. If a section was not discussed, return an empty string or empty array (or null for numeric/boolean fields).
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
+
+{
+  "procedure_date_time": string,                 // ISO if dictated, else free text; "" if not stated
+  "surgical_specialty": string,                  // e.g. "general surgery", "orthopedics"; "" if not inferable
+  "pre_op_diagnosis": string,
+  "post_op_diagnosis": string,
+  "procedure_performed": [string, ...],          // first entry = PRIMARY procedure, rest = secondary/incidental
+  "surgeon": string,                             // primary surgeon
+  "assistants": [string, ...],
+  "anesthesiologist": string,                    // "" if not mentioned
+  "anesthesia_type": string,                     // GA / regional / MAC / local; "" if not stated
+  "indication": string,
+  "findings": string,                            // intra-operative findings
+  "procedure_narrative": string,                 // step-by-step prose
+  "estimated_blood_loss_ml": number | null,
+  "fluids_in": string,                           // free text, e.g. "1.5 L NS"; "" if not stated
+  "urine_output_ml": number | null,
+  "specimens": [{ "description": string, "sent_to": "pathology" | "discarded" | "other" }, ...],
+  "implants": [{ "description": string, "catalog_or_serial": string }, ...],
+  "drains_placed": [string, ...],
+  "complications": string,                       // "None" if surgeon explicitly stated none
+  "counts_correct": boolean | null,              // null if sponge/needle/instrument counts not addressed
+  "antibiotic_given": string,                    // prophylactic abx + timing; "" if not stated
+  "disposition": string                          // PACU / ICU / floor / home / other
+}
+
+Style rules:
+- Preserve exact medication doses, anesthesia type, fluid volumes, EBL
+- Use the surgeon's wording for the procedure name
+- Do not add complications that were not stated
+- If counts were not explicitly addressed, set counts_correct to null
+- For implants prefer "manufacturer + product + catalog/serial" if stated, else just the product name`;
+
 export type EncounterNote = {
   chief_complaint: string;
   history_present_illness: string;
@@ -114,12 +152,47 @@ export type GeneralMedicalNote = {
   };
 };
 
-export type AnyNote = EncounterNote | GeneralMedicalNote;
+// OperativeProcedureNote — surgeon's op/procedure note (V2.S3, PRD §7.2.3). CDMSS OFF.
+export type OperativeProcedureNote = {
+  procedure_date_time: string;
+  surgical_specialty: string;
+  pre_op_diagnosis: string;
+  post_op_diagnosis: string;
+  procedure_performed: string[];
+  surgeon: string;
+  assistants: string[];
+  anesthesiologist: string;
+  anesthesia_type: string;
+  indication: string;
+  findings: string;
+  procedure_narrative: string;
+  estimated_blood_loss_ml: number | null;
+  fluids_in: string;
+  urine_output_ml: number | null;
+  specimens: { description: string; sent_to: string }[];
+  implants: { description: string; catalog_or_serial: string }[];
+  drains_placed: string[];
+  complications: string;
+  counts_correct: boolean | null;
+  antibiotic_given: string;
+  disposition: string;
+};
+
+export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote;
+
+/** Note types that get the CDMSS pipeline (clinic + general medical only). */
+export function noteTypeHasCdmss(noteType?: string): boolean {
+  return noteType === undefined || noteType === "clinic_encounter" || noteType === "general_medical";
+}
 
 /** One-line headline for an encounter (list titles, trace summaries, subject). */
 export function noteHeadline(note: AnyNote | null | undefined, noteType?: string): string {
   if (!note) return "";
   if (noteType === "general_medical") return (note as GeneralMedicalNote).reason_for_visit ?? "";
+  if (noteType === "operative_procedure") {
+    const op = note as OperativeProcedureNote;
+    return op.procedure_performed?.[0] || op.post_op_diagnosis || op.pre_op_diagnosis || "";
+  }
   return (note as EncounterNote).chief_complaint ?? "";
 }
 
@@ -140,6 +213,18 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
       (g.plan?.treatment_changes?.length ?? 0) > 0 ||
       (g.plan?.consultations_requested?.length ?? 0) > 0 ||
       (g.plan?.follow_up ?? "").trim().length > 0
+    );
+  }
+  if (noteType === "operative_procedure") {
+    const op = note as OperativeProcedureNote;
+    return (
+      (op.procedure_performed?.length ?? 0) > 0 ||
+      (op.pre_op_diagnosis ?? "").trim().length > 0 ||
+      (op.post_op_diagnosis ?? "").trim().length > 0 ||
+      (op.indication ?? "").trim().length > 0 ||
+      (op.findings ?? "").trim().length > 0 ||
+      (op.procedure_narrative ?? "").trim().length > 0 ||
+      (op.surgeon ?? "").trim().length > 0
     );
   }
   const c = note as EncounterNote;
@@ -180,7 +265,10 @@ export async function generateNote(
     else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const system = opts.noteType === "general_medical" ? SYSTEM_GENERAL : SYSTEM;
+  const system =
+    opts.noteType === "general_medical" ? SYSTEM_GENERAL :
+    opts.noteType === "operative_procedure" ? SYSTEM_OPERATIVE :
+    SYSTEM;
 
   const t0 = Date.now();
   opts.onEvent?.({ stage: "note", state: "start" });
@@ -250,6 +338,46 @@ export async function generateNote(
           consultations_requested: A(pl.consultations_requested),
           follow_up: S(pl.follow_up),
         },
+      };
+    } else if (opts.noteType === "operative_procedure") {
+      const N = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+      const B = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+      const specimens = Array.isArray(parsedRaw.specimens)
+        ? (parsedRaw.specimens as unknown[]).map((x) => {
+            const ob = (x ?? {}) as Record<string, unknown>;
+            const sent = S(ob.sent_to).toLowerCase();
+            return { description: S(ob.description), sent_to: sent === "pathology" || sent === "discarded" ? sent : "other" };
+          }).filter((z) => z.description.trim().length > 0)
+        : [];
+      const implants = Array.isArray(parsedRaw.implants)
+        ? (parsedRaw.implants as unknown[]).map((x) => {
+            const ob = (x ?? {}) as Record<string, unknown>;
+            return { description: S(ob.description), catalog_or_serial: S(ob.catalog_or_serial) };
+          }).filter((z) => z.description.trim().length > 0)
+        : [];
+      note = {
+        procedure_date_time: S(parsedRaw.procedure_date_time),
+        surgical_specialty: S(parsedRaw.surgical_specialty),
+        pre_op_diagnosis: S(parsedRaw.pre_op_diagnosis),
+        post_op_diagnosis: S(parsedRaw.post_op_diagnosis),
+        procedure_performed: A(parsedRaw.procedure_performed),
+        surgeon: S(parsedRaw.surgeon),
+        assistants: A(parsedRaw.assistants),
+        anesthesiologist: S(parsedRaw.anesthesiologist),
+        anesthesia_type: S(parsedRaw.anesthesia_type),
+        indication: S(parsedRaw.indication),
+        findings: S(parsedRaw.findings),
+        procedure_narrative: S(parsedRaw.procedure_narrative),
+        estimated_blood_loss_ml: N(parsedRaw.estimated_blood_loss_ml),
+        fluids_in: S(parsedRaw.fluids_in),
+        urine_output_ml: N(parsedRaw.urine_output_ml),
+        specimens,
+        implants,
+        drains_placed: A(parsedRaw.drains_placed),
+        complications: S(parsedRaw.complications),
+        counts_correct: B(parsedRaw.counts_correct),
+        antibiotic_given: S(parsedRaw.antibiotic_given),
+        disposition: S(parsedRaw.disposition),
       };
     } else {
       note = {

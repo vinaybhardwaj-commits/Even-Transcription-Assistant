@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
-import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
 
 type Props = {
   initial: AnyNote;
@@ -14,6 +14,9 @@ type Props = {
 export function NoteEditor({ initial, noteType, onSave, onCancel }: Props) {
   if (noteType === "general_medical") {
     return <GeneralMedicalEditor initial={initial as GeneralMedicalNote} onSave={onSave} onCancel={onCancel} />;
+  }
+  if (noteType === "operative_procedure") {
+    return <OperativeEditor initial={initial as OperativeProcedureNote} onSave={onSave} onCancel={onCancel} />;
   }
   return <ClinicEditor initial={initial as EncounterNote} onSave={onSave} onCancel={onCancel} />;
 }
@@ -78,6 +81,63 @@ function ClinicEditor({ initial, onSave, onCancel }: { initial: EncounterNote; o
         <Button variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
+        <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+          {saving ? "Saving…" : "Save edits"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function OperativeEditor({ initial, onSave, onCancel }: { initial: OperativeProcedureNote; onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>; onCancel: () => void }) {
+  const [note, setNote] = React.useState<OperativeProcedureNote>(initial);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const handleSave = React.useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    const r = await onSave(note);
+    setSaving(false);
+    if (!r.ok) setError(r.error ?? "Save failed");
+  }, [note, onSave]);
+  const setStr = (field: keyof OperativeProcedureNote, value: string) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const setArr = (field: keyof OperativeProcedureNote, value: string[]) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const autoBits = [
+    note.estimated_blood_loss_ml != null ? `EBL ${note.estimated_blood_loss_ml} ml` : "",
+    note.urine_output_ml != null ? `Urine ${note.urine_output_ml} ml` : "",
+    note.counts_correct != null ? `Counts ${note.counts_correct ? "correct" : "incorrect"}` : "",
+    note.specimens.length ? `${note.specimens.length} specimen(s)` : "",
+    note.implants.length ? `${note.implants.length} implant(s)` : "",
+  ].filter(Boolean);
+  return (
+    <div className="space-y-5">
+      <StringField label="Procedure date / time" value={note.procedure_date_time} onChange={(v) => setStr("procedure_date_time", v)} singleLine />
+      <StringField label="Surgical specialty" value={note.surgical_specialty} onChange={(v) => setStr("surgical_specialty", v)} singleLine />
+      <StringField label="Pre-operative diagnosis" value={note.pre_op_diagnosis} onChange={(v) => setStr("pre_op_diagnosis", v)} rows={2} />
+      <StringField label="Post-operative diagnosis" value={note.post_op_diagnosis} onChange={(v) => setStr("post_op_diagnosis", v)} rows={2} />
+      <ListField label="Procedure(s) performed" items={note.procedure_performed} onChange={(v) => setArr("procedure_performed", v)} placeholder="first entry = primary" />
+      <StringField label="Surgeon" value={note.surgeon} onChange={(v) => setStr("surgeon", v)} singleLine />
+      <ListField label="Assistants" items={note.assistants} onChange={(v) => setArr("assistants", v)} />
+      <StringField label="Anesthesiologist" value={note.anesthesiologist} onChange={(v) => setStr("anesthesiologist", v)} singleLine />
+      <StringField label="Anesthesia type" value={note.anesthesia_type} onChange={(v) => setStr("anesthesia_type", v)} singleLine />
+      <StringField label="Indication" value={note.indication} onChange={(v) => setStr("indication", v)} rows={2} />
+      <StringField label="Findings" value={note.findings} onChange={(v) => setStr("findings", v)} rows={3} />
+      <StringField label="Procedure narrative" value={note.procedure_narrative} onChange={(v) => setStr("procedure_narrative", v)} rows={6} />
+      <ListField label="Drains placed" items={note.drains_placed} onChange={(v) => setArr("drains_placed", v)} small />
+      <StringField label="Complications" value={note.complications} onChange={(v) => setStr("complications", v)} rows={2} />
+      <StringField label="Antibiotic given" value={note.antibiotic_given} onChange={(v) => setStr("antibiotic_given", v)} singleLine />
+      <StringField label="Fluids in" value={note.fluids_in} onChange={(v) => setStr("fluids_in", v)} singleLine />
+      <StringField label="Disposition" value={note.disposition} onChange={(v) => setStr("disposition", v)} singleLine />
+      {autoBits.length > 0 ? (
+        <div className="rounded-md border border-even-ink-100 bg-even-ink-50/40 px-3 py-2">
+          <p className="text-caption text-even-ink-500">Auto-captured (re-record to change): {autoBits.join(" · ")}</p>
+        </div>
+      ) : null}
+      {error ? <p className="text-caption text-danger-700">{error}</p> : null}
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-even-ink-100">
+        <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
           {saving ? "Saving…" : "Save edits"}
         </Button>
