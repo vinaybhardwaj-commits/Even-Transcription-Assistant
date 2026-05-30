@@ -14,6 +14,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { generateToken } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
+import { syncClinicianFromDoctor } from "@/lib/clinician";
 
 export const runtime = "nodejs";
 
@@ -71,6 +72,7 @@ export async function POST(
         ('admin', ${adminId}, 'doctor.rotate_url_token', 'doctor', ${id},
          ${JSON.stringify({ old_token: old.url_token, new_token: newToken })}::jsonb)
     `;
+    await syncClinicianFromDoctor(id); // V2.S1 dual-write
     const loginUrl = `${canonicalAppUrl()}/${newSlug}`;
     return respondOk({
       doctor: { id, url_slug: newSlug, url_token: newToken, login_url: loginUrl },

@@ -22,6 +22,7 @@ type GuardResult =
   | { ok: false; code: "AUTH_REQUIRED" | "AUTH_EXPIRED"; msg: string };
 import { buildDoctorSlug } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
+import { syncClinicianFromDoctor } from "@/lib/clinician";
 import bcrypt from "bcryptjs";
 import { customAlphabet } from "nanoid";
 
@@ -69,13 +70,16 @@ export async function GET() {
     last_active_at: string | Date | null;
     joined_at: string | Date;
     deleted_at: string | Date | null;
+    clinician_type: string | null;
   };
   try {
     const rows = (await sql`
-      SELECT id, full_name, email, phone, url_slug, status,
-             pin_set_at, last_active_at, joined_at, deleted_at
-        FROM doctor
-       ORDER BY joined_at DESC
+      SELECT d.id, d.full_name, d.email, d.phone, d.url_slug, d.status,
+             d.pin_set_at, d.last_active_at, d.joined_at, d.deleted_at,
+             c.clinician_type
+        FROM doctor d
+        LEFT JOIN clinician c ON c.id = d.id
+       ORDER BY d.joined_at DESC
        LIMIT 200
     `) as Row[];
     return respondOk({
@@ -90,6 +94,7 @@ export async function GET() {
         last_active_at: r.last_active_at ? new Date(r.last_active_at).toISOString() : null,
         joined_at: new Date(r.joined_at).toISOString(),
         deleted: r.deleted_at !== null,
+        clinician_type: r.clinician_type ?? "physician",
       })),
     });
   } catch (e) {
@@ -145,6 +150,8 @@ export async function POST(req: NextRequest) {
     }
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
+
+  await syncClinicianFromDoctor(id); // V2.S1 dual-write
 
   const appUrl = canonicalAppUrl();
   return respondOk({

@@ -12,6 +12,7 @@ import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { syncClinicianFromDoctor } from "@/lib/clinician";
 import bcrypt from "bcryptjs";
 
 export const runtime = "nodejs";
@@ -75,6 +76,7 @@ export async function POST(
     if (rows.length === 0) {
       return respondError("NOT_FOUND", "doctor_not_found");
     }
+    await syncClinicianFromDoctor(id); // V2.S1 dual-write
     const appUrl = canonicalAppUrl();
     return respondOk({
       doctor: { id: rows[0].id, url_slug: rows[0].url_slug },

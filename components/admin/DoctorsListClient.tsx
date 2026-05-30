@@ -16,6 +16,7 @@ type Doctor = {
   email: string;
   phone: string | null;
   url_slug: string;
+  clinician_type?: string;
   status: "active" | "disabled" | "locked";
   pin_set_at: string | null;
   last_active_at: string | null;
@@ -113,6 +114,7 @@ export function DoctorsListClient() {
                 <th className="px-4 py-2.5 font-semibold">Name</th>
                 <th className="px-4 py-2.5 font-semibold">Email</th>
                 <th className="px-4 py-2.5 font-semibold">URL slug</th>
+                <th className="px-4 py-2.5 font-semibold">Type</th>
                 <th className="px-4 py-2.5 font-semibold">Status</th>
                 <th className="px-4 py-2.5 font-semibold">Last active</th>
               </tr>
@@ -138,6 +140,9 @@ export function DoctorsListClient() {
                   </td>
                   <td className="px-4 py-2 text-even-ink-700">{d.email}</td>
                   <td className="px-4 py-2 text-caption text-even-ink-500 font-mono">/{d.url_slug}</td>
+                  <td className="px-4 py-2">
+                    <TypePill type={d.clinician_type} />
+                  </td>
                   <td className="px-4 py-2">
                     <StatusPill status={d.status} deleted={d.deleted} />
                   </td>
@@ -167,6 +172,12 @@ export function DoctorsListClient() {
       ) : null}
     </div>
   );
+}
+
+function TypePill({ type }: { type?: string }) {
+  const t = type ?? "physician";
+  const label = t.charAt(0).toUpperCase() + t.slice(1);
+  return <span className="text-caption rounded-full px-2 py-0.5 bg-even-ink-100 text-even-ink-700">{label}</span>;
 }
 
 function StatusPill({ status, deleted }: { status: string; deleted: boolean }) {

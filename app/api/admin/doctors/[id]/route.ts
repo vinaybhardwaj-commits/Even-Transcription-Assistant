@@ -13,6 +13,7 @@ import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { syncClinicianFromDoctor } from "@/lib/clinician";
 
 export const runtime = "nodejs";
 
@@ -65,6 +66,7 @@ export async function PATCH(
     if (typeof body.phone === "string") {
       await sql`UPDATE doctor SET phone = ${body.phone.trim() || null}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
     }
+    await syncClinicianFromDoctor(id); // V2.S1 dual-write
     const rows = (await sql`
       SELECT id, full_name, email, phone, url_slug, status, deleted_at
         FROM doctor WHERE id = ${id}
