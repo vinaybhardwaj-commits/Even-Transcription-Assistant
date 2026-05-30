@@ -361,7 +361,7 @@ export async function runCdmssPipeline(
   if (!r.ok) {
     opts.onEvent?.({ stage: "retrieve", state: "error", ms: 0, message: r.error });
     const stubT0 = Date.now();
-    const stub = await runCdmssStub(note, { signal: opts.signal });
+    const stub = await runCdmssStub(note, { signal: opts.signal, noteType: opts.noteType });
     opts.onEvent?.({ stage: "fallback", state: "done", ms: Date.now() - stubT0, source: stub.ok ? "stub" : "empty", reason: r.error });
     return {
       ok: false,
@@ -373,7 +373,7 @@ export async function runCdmssPipeline(
   if (r.hits.length === 0) {
     opts.onEvent?.({ stage: "retrieve", state: "done", ms: r.embed_ms + r.query_ms, hits: 0, top_book: null, top_sim: 0 });
     const stubT0 = Date.now();
-    const stub = await runCdmssStub(note, { signal: opts.signal });
+    const stub = await runCdmssStub(note, { signal: opts.signal, noteType: opts.noteType });
     opts.onEvent?.({ stage: "fallback", state: "done", ms: Date.now() - stubT0, source: stub.ok ? "stub" : "empty", reason: "kb_no_hits" });
     return {
       ok: false,

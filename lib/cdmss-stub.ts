@@ -14,7 +14,7 @@
  * without changing the render shape.
  */
 
-import type { EncounterNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, AnyNote } from "@/lib/note-generation";
 
 const CDS_MODEL = process.env.CDS_MODEL || "llama3.1:8b";
 const CDS_TIMEOUT_MS = 60_000;
@@ -52,8 +52,8 @@ export type CdmssResult =
   | { ok: false; error: string; latency_ms: number };
 
 export async function runCdmssStub(
-  note: EncounterNote,
-  opts: { signal?: AbortSignal } = {},
+  note: AnyNote,
+  opts: { signal?: AbortSignal; noteType?: string } = {},
 ): Promise<CdmssResult> {
   const base = process.env.OLLAMA_BASE_URL;
   if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
@@ -66,19 +66,37 @@ export async function runCdmssStub(
     else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  // Format the note as a compact context block
-  const noteCtx = [
-    `Chief complaint: ${note.chief_complaint || "—"}`,
-    `HPI: ${note.history_present_illness || "—"}`,
-    `Past medical: ${note.past_medical_history.join(", ") || "—"}`,
-    `Medications: ${note.current_medications.join(", ") || "—"}`,
-    `Allergies: ${note.allergies.join(", ") || "NKDA"}`,
-    `Examination: ${note.examination || "—"}`,
-    `Assessment: ${note.assessment || "—"}`,
-    `Investigations: ${note.plan.investigations.join(", ") || "—"}`,
-    `Treatment: ${note.plan.treatment.join(", ") || "—"}`,
-    `Follow-up: ${note.plan.follow_up || "—"}`,
-  ].join("\n");
+  // Format the note as a compact context block (note-type aware)
+  const isGM = opts.noteType === "general_medical";
+  const gm = note as GeneralMedicalNote;
+  const cn = note as EncounterNote;
+  const noteCtx = (isGM
+    ? [
+        `Reason for visit: ${gm.reason_for_visit || "—"}`,
+        `Active problems: ${gm.active_problems.join(", ") || "—"}`,
+        `Interval history: ${gm.interval_history || "—"}`,
+        `Medications: ${gm.current_medications.join(", ") || "—"}`,
+        `Allergies: ${gm.allergies.join(", ") || "NKDA"}`,
+        `Examination: ${gm.examination || "—"}`,
+        `Impression: ${gm.impression || "—"}`,
+        `Investigations ordered: ${gm.plan.investigations_ordered.join(", ") || "—"}`,
+        `Treatment changes: ${gm.plan.treatment_changes.join(", ") || "—"}`,
+        `Consultations: ${gm.plan.consultations_requested.join(", ") || "—"}`,
+        `Follow-up: ${gm.plan.follow_up || "—"}`,
+      ]
+    : [
+        `Chief complaint: ${cn.chief_complaint || "—"}`,
+        `HPI: ${cn.history_present_illness || "—"}`,
+        `Past medical: ${cn.past_medical_history.join(", ") || "—"}`,
+        `Medications: ${cn.current_medications.join(", ") || "—"}`,
+        `Allergies: ${cn.allergies.join(", ") || "NKDA"}`,
+        `Examination: ${cn.examination || "—"}`,
+        `Assessment: ${cn.assessment || "—"}`,
+        `Investigations: ${cn.plan.investigations.join(", ") || "—"}`,
+        `Treatment: ${cn.plan.treatment.join(", ") || "—"}`,
+        `Follow-up: ${cn.plan.follow_up || "—"}`,
+      ]
+  ).join("\n");
 
   const t0 = Date.now();
   try {
