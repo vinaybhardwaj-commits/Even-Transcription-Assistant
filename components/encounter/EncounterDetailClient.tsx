@@ -22,6 +22,8 @@ type InitialState = {
   note: EncounterNote | null;
   cdmss: CdmssOutput | null;
   transcript: string | null;
+  transcriptOriginal: string | null;
+  detectedLanguage: string | null;
   sendStatus: SendStatus;
   sentAt: string | null;
   sendEvents: SendEventLite[];
@@ -566,10 +568,21 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           </div>
         ) : null}
 
+        {initial.transcriptOriginal ? (
+          <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
+            <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
+              Original transcript{initial.detectedLanguage ? ` · ${initial.detectedLanguage}` : ""} ({(initial.transcriptOriginal.length / 1024).toFixed(1)} KB)
+            </summary>
+            <p className="px-3 pb-3 text-body text-even-ink-700 whitespace-pre-wrap leading-relaxed">
+              {initial.transcriptOriginal}
+            </p>
+          </details>
+        ) : null}
+
         {initial.transcript ? (
           <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
             <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
-              Raw transcript ({(initial.transcript.length / 1024).toFixed(1)} KB)
+              {initial.transcriptOriginal ? "English translation" : "Transcript"} ({(initial.transcript.length / 1024).toFixed(1)} KB)
             </summary>
             <p className="px-3 pb-3 text-body text-even-ink-700 whitespace-pre-wrap leading-relaxed">
               {initial.transcript}

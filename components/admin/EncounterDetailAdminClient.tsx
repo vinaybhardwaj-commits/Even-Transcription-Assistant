@@ -383,7 +383,9 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
             enc.transcript_clean || enc.transcript_raw ? (
               <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
                 <p className="text-caption text-even-ink-500 mb-3">
-                  {enc.transcript_clean ? "Cleaned transcript shown. Raw available below." : "Raw transcript (no cleaned version)."}
+                  {enc.transcript_original
+                    ? "English translation of the full conversation (note source). Original vernacular below."
+                    : enc.transcript_clean ? "Cleaned transcript shown. Raw available below." : "Transcript."}
                 </p>
                 <pre className="whitespace-pre-wrap text-body text-even-ink-800 leading-relaxed font-sans">
                   {enc.transcript_clean ?? enc.transcript_raw}
@@ -395,6 +397,16 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                     </summary>
                     <pre className="px-3 pb-3 text-caption text-even-ink-700 whitespace-pre-wrap font-sans">
                       {enc.transcript_raw}
+                    </pre>
+                  </details>
+                ) : null}
+                {enc.transcript_original ? (
+                  <details className="mt-4 rounded-md border border-even-ink-100 bg-even-ink-50/40">
+                    <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
+                      Original transcript (vernacular){enc.detected_language ? ` · ${enc.detected_language}` : ""}
+                    </summary>
+                    <pre className="px-3 pb-3 text-body text-even-ink-800 whitespace-pre-wrap font-sans leading-relaxed">
+                      {enc.transcript_original}
                     </pre>
                   </details>
                 ) : null}
