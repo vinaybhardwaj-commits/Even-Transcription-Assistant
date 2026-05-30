@@ -27,6 +27,8 @@ export const recipientRole   = pgEnum("recipient_role", ["admin", "records", "fi
 export const recipientSetBy  = pgEnum("recipient_set_by", ["admin", "doctor"]);
 export const actorType       = pgEnum("actor_type", ["admin", "doctor", "system"]);
 export const retryBackoff    = pgEnum("retry_backoff", ["linear", "exponential"]);
+export const clinicianType   = pgEnum("clinician_type", ["physician", "dietitian", "physiotherapist"]); // V2.S0 (0010)
+export const noteType        = pgEnum("note_type", ["clinic_encounter", "general_medical", "operative_procedure", "dietetic_consult", "physiotherapy"]); // V2.S0 (0011)
 
 // ----------------------- TABLES -----------------------
 
@@ -68,6 +70,36 @@ export const doctor = pgTable("doctor", {
   byStatusActive: index("idx_doctor_status_active").on(t.status, t.lastActiveAt),
 }));
 
+// clinician (V2.S0, migration 0010) — generalizes doctor. ADDITIVE: doctor stays
+// the read path until V2.S6; clinician.id == doctor.id for copied rows.
+export const clinician = pgTable("clinician", {
+  id:               text("id").primaryKey(), // = source doctor id
+  legacyDoctorId:   text("legacy_doctor_id").unique(),
+  clinicianType:    clinicianType("clinician_type").notNull().default("physician"),
+  fullName:         text("full_name").notNull(),
+  email:            citext("email").notNull().unique(),
+  phone:            text("phone"),
+  emailShowConversationWith: boolean("email_show_conversation_with").notNull().default(false),
+  urlSlug:          text("url_slug").notNull().unique(),
+  urlToken:         text("url_token").notNull(),
+  pinHash:          text("pin_hash"),
+  pinSetAt:         timestamp("pin_set_at", { withTimezone: true }),
+  failedPinCount:   integer("failed_pin_count").notNull().default(0),
+  lockedUntil:      timestamp("locked_until", { withTimezone: true }),
+  status:           doctorStatus("status").notNull().default("active"),
+  lastActiveAt:     timestamp("last_active_at", { withTimezone: true }),
+  joinedAt:         timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  createdBy:        uuid("created_by").references(() => adminUser.id),
+  deletedAt:        timestamp("deleted_at", { withTimezone: true }),
+  createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byUrlSlug:      index("idx_clinician_url_slug").on(t.urlSlug),
+  byEmail:        index("idx_clinician_email").on(t.email),
+  byType:         index("idx_clinician_type").on(t.clinicianType),
+  byStatusActive: index("idx_clinician_status_active").on(t.status, t.lastActiveAt),
+}));
+
 // pin_attempt (PRD §6.1 — 90d TTL via cron)
 export const pinAttempt = pgTable("pin_attempt", {
   id:         uuid("id").defaultRandom().primaryKey(),
@@ -84,6 +116,7 @@ export const pinAttempt = pgTable("pin_attempt", {
 export const encounter = pgTable("encounter", {
   id:                  text("id").primaryKey(), // enc_<10-char nanoid>
   doctorId:            text("doctor_id").notNull().references(() => doctor.id),
+  noteType:            noteType("note_type").notNull().default("clinic_encounter"), // V2.S0 (0011)
   patientLabelRaw:     text("patient_label_raw"),
   patientAge:          integer("patient_age"),
   patientSex:          text("patient_sex"),
