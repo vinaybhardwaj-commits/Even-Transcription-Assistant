@@ -33,7 +33,8 @@ import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
-import { runDiarize, reconcileTagged } from "@/lib/diarize";
+import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
+import { transcribeDiarized } from "@/lib/transcribe";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
@@ -231,20 +232,31 @@ export async function POST(
                  diarize_error        = NULL
            WHERE id = ${id}
         `;
-        // Speaker-tag the English note transcript: map Sarvam's anonymous
-        // speaker_ids onto pyannote's named speakers by time overlap.
-        if (sarvamEntries.length > 0) {
-          try {
-            const tagged = reconcileTagged(
-              sarvamEntries,
-              d.result.transcript_segments as Array<{ start_ms?: number; end_ms?: number; speaker_idx?: number }>,
-              d.result.speakers,
-            );
-            await sql`UPDATE encounter SET tagged_transcript = ${JSON.stringify(tagged)}::jsonb WHERE id = ${id}`;
-            emit?.({ stage: "progress", msg: `Speaker-tagged conversation ready (${tagged.length} turn(s))` });
-          } catch (te) {
-            console.warn(`[process] tag reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
+        // Speaker-tag the note transcript. Non-English: Sarvam batch-diarized
+        // English segments (captured in translateIfNeeded). English: Deepgram
+        // diarized batch utterances. Either way, reconcile anonymous speaker
+        // ids onto pyannote's NAMED speakers by time overlap, then refine roles
+        // from the per-speaker text (first-person → Patient).
+        try {
+          const segs = d.result.transcript_segments as Array<{ start_ms?: number; end_ms?: number; speaker_idx?: number }>;
+          let entries = sarvamEntries;
+          const isEnglish =
+            !(!!row.detected_language && isNonEnglish(row.detected_language)) &&
+            !/[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
+          if (entries.length === 0 && isEnglish) {
+            const dgd = await transcribeDiarized(bytes, head.content_type || "audio/webm");
+            if (dgd.ok) entries = dgd.entries;
           }
+          if (entries.length > 0) {
+            const tagged = reconcileTagged(entries, segs, d.result.speakers);
+            const { speakers: refined, changed } = applyRoleOverrides(d.result.speakers, tagged);
+            const finalTagged = changed ? reconcileTagged(entries, segs, refined) : tagged;
+            await sql`UPDATE encounter SET tagged_transcript = ${JSON.stringify(finalTagged)}::jsonb WHERE id = ${id}`;
+            if (changed) await sql`UPDATE encounter SET speakers = ${JSON.stringify(refined)}::jsonb WHERE id = ${id}`;
+            emit?.({ stage: "progress", msg: `Speaker-tagged conversation ready (${finalTagged.length} turn(s)${changed ? ", roles refined" : ""})` });
+          }
+        } catch (te) {
+          console.warn(`[process] tag/role reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
         }
         emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${d.latencyMs}ms)` });
       } else {

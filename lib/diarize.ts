@@ -23,6 +23,7 @@ export type DiarizeSpeaker = {
   source?: string;
   clinician_id?: string;
   confidence?: number;
+  role_source?: string;
 };
 export type DiarizeResult = {
   speakers: DiarizeSpeaker[];
@@ -157,4 +158,43 @@ export function reconcileTagged(
     }
     return { text: e.transcript, start_ms: Math.round(e.start * 1000), end_ms: Math.round(e.end * 1000), speaker_id: e.speakerId, speaker_idx: idx, name, type: type ?? "other" };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Role refinement (diarization polish) — first-person "patient" override.
+// pyannote/Mac-Mini role labels are coarse (duration/segment heuristics). Now
+// that we have per-speaker text (tagged_transcript), promote the speaker with
+// the strongest first-person symptom language to Patient — UNLESS they are the
+// enrolled-clinician auto-match (never override that). Conservative: needs ≥2
+// first-person markers and only relabels a non-patient, non-clinician speaker.
+// ---------------------------------------------------------------------------
+const FIRST_PERSON = /\b(i\s+(have|had|feel|felt|am|was|get|got|can'?t|cannot|need|noticed|started|stopped|take|took)|i'?ve\s+been|i'?m\s+(having|feeling|getting)|my\s+(pain|chest|head|stomach|belly|back|leg|arm|knee|fever|cough|cold|throat|breathing|sugar|bp|pressure|period|wound|eye|ear|skin)|it\s+(hurts|pains)|since\s+(yesterday|last|two|three|four|five|a\s+(week|month|year)))\b/gi;
+
+export function applyRoleOverrides(
+  speakers: DiarizeSpeaker[],
+  tagged: TaggedEntry[],
+): { speakers: DiarizeSpeaker[]; changed: boolean } {
+  if (!Array.isArray(tagged) || tagged.length === 0) return { speakers, changed: false };
+  const hits = new Map<number, number>();
+  for (const t of tagged) {
+    if (t.speaker_idx == null || !t.text) continue;
+    const m = t.text.match(FIRST_PERSON);
+    if (m) hits.set(t.speaker_idx, (hits.get(t.speaker_idx) ?? 0) + m.length);
+  }
+  let bestIdx = -1, bestN = 0;
+  for (const [idx, n] of hits) {
+    const sp = speakers.find((s) => s.idx === idx);
+    if (!sp || sp.source === "auto") continue;   // never override an enrolled-clinician match
+    if (n > bestN) { bestN = n; bestIdx = idx; }
+  }
+  if (bestIdx < 0 || bestN < 2) return { speakers, changed: false };
+  let changed = false;
+  const out = speakers.map((s) => {
+    if (s.idx === bestIdx && s.type !== "patient") {
+      changed = true;
+      return { ...s, type: "patient", label: "Patient", role_source: "first_person_override" };
+    }
+    return s;
+  });
+  return { speakers: out, changed };
 }
