@@ -34,6 +34,7 @@ import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
+import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
 
@@ -45,6 +46,7 @@ type Row = {
   doctor_id: string;
   status: "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
   transcript_raw: string | null;
+  transcript_original: string | null;
   detected_language: string | null;
   audio_object_key: string | null;
   note_json: EncounterNote | null;
@@ -88,7 +90,7 @@ export async function POST(
   let row: Row | undefined;
   try {
     const rows = (await sql`
-      SELECT id, doctor_id, status, transcript_raw, detected_language,
+      SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language,
              audio_object_key, note_json, cdmss_json
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
@@ -169,6 +171,37 @@ export async function POST(
       const m = e instanceof Error ? e.message : String(e);
       console.warn(`[process] batch-translate failed enc=${id}: ${m}`);
       emit?.({ stage: "progress", msg: "Batch translate error; using live transcript" });
+    }
+  };
+
+  // B14 guard — strip non-clinical lead-in (foreign-language intro + ASR/ad
+  // hallucination) from the canonical transcripts BEFORE they seed the note +
+  // the displayed boxes. Leading-anchored, bounded, length-floored (see
+  // lib/transcript-guard.ts). Soft: never blocks the encounter.
+  const guardTranscripts = async (emit?: (o: unknown) => void): Promise<void> => {
+    if (!row) return;
+    const beforeEn = row.transcript_raw ?? "";
+    const beforeOrig = row.transcript_original ?? "";
+    const cleanedEn = sanitizeEnglish(beforeEn);
+    const cleanedOrig = sanitizeOriginal(beforeOrig, row.detected_language);
+    sarvamEntries = trimLeadingNoiseEntries(sarvamEntries);
+    const enChanged = cleanedEn !== beforeEn && cleanedEn.trim().length > 0;
+    const origChanged =
+      beforeOrig.length > 0 && cleanedOrig !== beforeOrig && cleanedOrig.trim().length > 0;
+    if (!enChanged && !origChanged) return;
+    if (enChanged) row.transcript_raw = cleanedEn;
+    if (origChanged) row.transcript_original = cleanedOrig;
+    try {
+      if (enChanged && origChanged) {
+        await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw}, transcript_original = ${row.transcript_original} WHERE id = ${id}`;
+      } else if (enChanged) {
+        await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw} WHERE id = ${id}`;
+      } else {
+        await sql`UPDATE encounter SET transcript_original = ${row.transcript_original} WHERE id = ${id}`;
+      }
+      emit?.({ stage: "progress", msg: "Removed non-clinical lead-in from transcript" });
+    } catch (e) {
+      console.warn(`[process] transcript guard persist failed enc=${id}: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -304,6 +337,7 @@ export async function POST(
         try {
           // Full-file Sarvam batch translate for non-English (accuracy + safety net).
           await translateIfNeeded(emit);
+          await guardTranscripts(emit);
 
           // ---- Note generation (surface=note-pipeline) ----
           noteTrace = await openTrace({
@@ -537,6 +571,7 @@ export async function POST(
 
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
   await translateIfNeeded();
+  await guardTranscripts();
   const noteRes = await generateNote(row.transcript_raw, { signal: req.signal });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
