@@ -119,7 +119,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     slug,
     enabled: encounter !== null,
     encounterId: encounter?.id,
-    intervalMs: 10_000,
+    intervalMs: 2_000,
   });
 
   // 2d. Live clinician identification (V2.SD.2) — drives the Speakers pill.
