@@ -6,12 +6,19 @@ import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { Button } from "@/components/ui/Button";
 
 /**
- * VoiceEnrollClient — V2.SD.1 voice-enrollment wizard.
- * Six English sentences (1-3 phonetically diverse, 4-6 medical register, per
- * PRD §20.4.1) recorded one at a time. Each is a complete standalone webm clip.
- * On finish, all clips POST to /api/voice/enroll → Mac Mini /enroll ×N → centroid
- * → voice_print. English-only at launch; Hindi/Kannada enter via passive
- * accumulation. Skip (behind confirm) proceeds to recording un-enrolled.
+ * VoiceEnrollClient — voice-enrollment wizard (V2.SD.1 + recording-evidence).
+ * Six English sentences recorded one at a time; each is a standalone webm clip.
+ * On finish all clips POST to `enrollUrl` → Mac Mini /enroll ×N → centroid →
+ * voice_print.
+ *
+ * Two contexts via props:
+ *  - doctor self-serve (/{slug}/onboarding/voice): enrollUrl=/{slug}/api/voice/enroll,
+ *    doneUrl=/{slug}/record, skip-confirm → /record.
+ *  - admin kiosk (/admin/doctors/[id]/voice): enrollUrl=/api/admin/doctors/[id]/voice-enroll,
+ *    doneUrl/cancelUrl=/admin/doctors, "Back to doctors" instead of skip.
+ *
+ * Recording evidence: live mic level meter (AnalyserNode) + elapsed timer +
+ * pulsing red dot + live English transcription (via `transcribeUrl`).
  */
 
 const SENTENCES = [
@@ -23,20 +30,59 @@ const SENTENCES = [
   "Please follow up in one week with the results of the lab tests.",
 ];
 
-type Props = { slug: string; doctorName: string };
+type Props = {
+  doctorName: string;
+  enrollUrl: string;
+  doneUrl: string;
+  context: "doctor" | "admin";
+  cancelUrl?: string;
+  transcribeUrl?: string;
+};
 
-export function VoiceEnrollClient({ slug, doctorName }: Props) {
+export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, cancelUrl, transcribeUrl }: Props) {
   const router = useRouter();
   const [idx, setIdx] = React.useState(0);
   const [clips, setClips] = React.useState<(Blob | null)[]>(() => Array(SENTENCES.length).fill(null));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [showSkip, setShowSkip] = React.useState(false);
+  const [level, setLevel] = React.useState(0);
+  const [elapsed, setElapsed] = React.useState(0);
+  const [liveText, setLiveText] = React.useState("");
   const chunksRef = React.useRef<Blob[]>([]);
   const mimeRef = React.useRef<string>("audio/webm");
 
+  const audioCtxRef = React.useRef<AudioContext | null>(null);
+  const rafRef = React.useRef<number | null>(null);
+  const onStream = React.useCallback((stream: MediaStream | null) => {
+    if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (audioCtxRef.current) { void audioCtxRef.current.close().catch(() => {}); audioCtxRef.current = null; }
+    setLevel(0);
+    if (!stream) return;
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new Ctx();
+      audioCtxRef.current = ctx;
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const loop = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+        const rms = Math.sqrt(sum / data.length);
+        setLevel(Math.min(1, rms * 3.2));
+        rafRef.current = requestAnimationFrame(loop);
+      };
+      rafRef.current = requestAnimationFrame(loop);
+    } catch { /* meter is best-effort */ }
+  }, []);
+
   const rec = useMediaRecorder({
     chunkMs: 1000,
+    onStream,
     onChunk: (chunk) => {
       if (chunk && chunk.size > 0) {
         chunksRef.current.push(chunk);
@@ -49,26 +95,51 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
   const recordedCount = clips.filter(Boolean).length;
   const allDone = recordedCount === SENTENCES.length;
 
+  React.useEffect(() => {
+    if (!recording) return;
+    setElapsed(0);
+    const t0 = Date.now();
+    const h = setInterval(() => setElapsed((Date.now() - t0) / 1000), 200);
+    return () => clearInterval(h);
+  }, [recording]);
+
+  const sendingRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!recording || !transcribeUrl) return;
+    const h = setInterval(async () => {
+      if (sendingRef.current || chunksRef.current.length === 0) return;
+      sendingRef.current = true;
+      try {
+        const blob = new Blob(chunksRef.current, { type: mimeRef.current });
+        const fd = new FormData();
+        fd.append("audio", blob, "win.webm");
+        const r = await fetch(transcribeUrl, { method: "POST", body: fd });
+        const j = (await r.json().catch(() => ({}))) as { data?: { text?: string }; text?: string };
+        const text = j?.data?.text ?? j?.text ?? "";
+        if (text) setLiveText(text);
+      } catch { /* best-effort */ } finally { sendingRef.current = false; }
+    }, 1600);
+    return () => clearInterval(h);
+  }, [recording, transcribeUrl]);
+
+  React.useEffect(() => () => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => {});
+  }, []);
+
   const startRec = React.useCallback(() => {
     chunksRef.current = [];
     setError(null);
+    setLiveText("");
     void rec.start();
   }, [rec]);
 
   const stopRec = React.useCallback(async () => {
     await rec.stop();
-    // chunks have flushed by the time stop() resolves
     const blob = new Blob(chunksRef.current, { type: mimeRef.current });
     chunksRef.current = [];
-    if (blob.size === 0) {
-      setError("Nothing recorded — try again.");
-      return;
-    }
-    setClips((prev) => {
-      const next = [...prev];
-      next[idx] = blob;
-      return next;
-    });
+    if (blob.size === 0) { setError("Nothing recorded — try again."); return; }
+    setClips((prev) => { const next = [...prev]; next[idx] = blob; return next; });
   }, [rec, idx]);
 
   const finish = React.useCallback(async () => {
@@ -76,35 +147,32 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
     setError(null);
     try {
       const form = new FormData();
-      clips.forEach((c, i) => {
-        if (c) form.append(`clip_${i}`, c, `clip_${i}.webm`);
-      });
-      const res = await fetch(`/${slug}/api/voice/enroll`, { method: "POST", body: form });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; sample_count?: number; error?: { message?: string } };
-      if (!res.ok || !json.ok) {
-        setError(json?.error?.message || `Enrollment failed (${res.status})`);
-        setSubmitting(false);
-        return;
-      }
-      try { sessionStorage.setItem("eta:voice_enrolled", "1"); } catch { /* noop */ }
-      router.push(`/${slug}/record`);
+      clips.forEach((c, i) => { if (c) form.append(`clip_${i}`, c, `clip_${i}.webm`); });
+      const res = await fetch(enrollUrl, { method: "POST", body: form });
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; data?: { ok?: boolean }; error?: { message?: string } };
+      const ok = json?.ok ?? json?.data?.ok;
+      if (!res.ok || !ok) { setError(json?.error?.message || `Enrollment failed (${res.status})`); setSubmitting(false); return; }
+      if (context === "doctor") { try { sessionStorage.setItem("eta:voice_enrolled", "1"); } catch { /* noop */ } }
+      router.push(doneUrl);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSubmitting(false);
     }
-  }, [clips, slug, router]);
+  }, [clips, enrollUrl, doneUrl, context, router]);
 
   const skip = React.useCallback(() => {
-    try { sessionStorage.setItem("eta:voice_enroll_skipped", "1"); } catch { /* noop */ }
-    router.push(`/${slug}/record`);
-  }, [slug, router]);
+    if (context === "doctor") { try { sessionStorage.setItem("eta:voice_enroll_skipped", "1"); } catch { /* noop */ } }
+    router.push(cancelUrl ?? doneUrl);
+  }, [context, cancelUrl, doneUrl, router]);
+
+  const backLabel = context === "admin" ? "Back to doctors" : "Skip for now";
 
   return (
     <main className="min-h-screen bg-even-white flex flex-col">
       <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
         <span className="text-label text-even-navy-800">Voice setup · Dr {doctorName}</span>
-        <button type="button" onClick={() => setShowSkip(true)} className="text-caption text-even-ink-400 hover:text-even-ink-600">
-          Skip for now
+        <button type="button" onClick={() => (context === "admin" ? skip() : setShowSkip(true))} className="text-caption text-even-ink-400 hover:text-even-ink-600">
+          {backLabel}
         </button>
       </header>
 
@@ -112,17 +180,15 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
         <div>
           <h1 className="text-display text-even-navy-800 text-center">Set up voice recognition</h1>
           <p className="text-caption text-even-ink-500 text-center mt-2">
-            Read {SENTENCES.length} short sentences aloud (~90 seconds). This lets the app label you in recordings. English only for now.
+            {context === "admin"
+              ? `Have Dr ${doctorName} read ${SENTENCES.length} short sentences aloud (~90 seconds) at this mic. This lets the app label them in recordings. English only for now.`
+              : `Read ${SENTENCES.length} short sentences aloud (~90 seconds). This lets the app label you in recordings. English only for now.`}
           </p>
         </div>
 
-        {/* progress dots */}
         <div className="flex items-center gap-2" aria-label={`Sentence ${idx + 1} of ${SENTENCES.length}`}>
           {SENTENCES.map((_, i) => (
-            <span
-              key={i}
-              className={`h-2.5 w-2.5 rounded-full ${clips[i] ? "bg-success-500" : i === idx ? "bg-even-blue-600" : "bg-even-ink-200"}`}
-            />
+            <span key={i} className={`h-2.5 w-2.5 rounded-full ${clips[i] ? "bg-success-500" : i === idx ? "bg-even-blue-600" : "bg-even-ink-200"}`} />
           ))}
         </div>
 
@@ -133,6 +199,35 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
           </p>
         </div>
 
+        {recording ? (
+          <div className="w-full rounded-xl border border-danger-200 bg-danger-50/60 p-4 flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-3 w-3">
+                <span className="absolute inline-flex h-full w-full rounded-full bg-danger-500 opacity-75 animate-ping" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-danger-500" />
+              </span>
+              <span className="text-label text-danger-700">Recording</span>
+              <span className="ml-auto text-caption tabular-nums text-even-ink-600">{elapsed.toFixed(1)}s</span>
+            </div>
+            <div className="flex items-end gap-[3px] h-8" aria-hidden>
+              {Array.from({ length: 28 }).map((_, i) => {
+                const center = Math.abs(i - 13.5) / 13.5;
+                const gain = level * (1.1 - center * 0.6);
+                const hPct = Math.max(6, Math.min(100, gain * 140));
+                const lit = level > 0.04 + center * 0.12;
+                return (
+                  <span key={i} className="flex-1 rounded-sm transition-all duration-75" style={{ height: `${hPct}%`, backgroundColor: lit ? "#EF4444" : "#FCA5A5", opacity: lit ? 1 : 0.5 }} />
+                );
+              })}
+            </div>
+            {transcribeUrl ? (
+              <p className="text-caption text-even-ink-600 min-h-[1.2em]">
+                {liveText ? liveText : <span className="text-even-ink-400">Listening…</span>}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         {!recording ? (
           <Button variant="primary" size="lg" onClick={startRec} className="w-full max-w-xs" disabled={submitting}>
             {clips[idx] ? "Re-record this sentence" : "Tap to record"}
@@ -142,8 +237,6 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
             Stop
           </Button>
         )}
-
-        {recording ? <p className="text-caption text-even-blue-600">Recording… read the sentence, then tap Stop.</p> : null}
 
         <div className="flex items-center gap-3">
           <Button variant="secondary" size="sm" onClick={() => setIdx((i) => Math.max(0, i - 1))} disabled={idx === 0 || recording || submitting}>

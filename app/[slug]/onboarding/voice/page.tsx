@@ -32,5 +32,13 @@ export default async function VoiceOnboardingPage({
     redirect(`/${slug}`);
   }
 
-  return <VoiceEnrollClient slug={slug} doctorName={doctor.full_name.replace(/^Dr\.?\s+/i, "")} />;
+  return (
+    <VoiceEnrollClient
+      doctorName={doctor.full_name.replace(/^Dr\.?\s+/i, "")}
+      context="doctor"
+      enrollUrl={`/${slug}/api/voice/enroll`}
+      doneUrl={`/${slug}/record`}
+      transcribeUrl="/api/voice/transcribe-window"
+    />
+  );
 }

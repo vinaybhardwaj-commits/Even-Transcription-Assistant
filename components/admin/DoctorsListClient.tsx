@@ -124,10 +124,17 @@ export function DoctorsListClient() {
                   className={`border-t border-even-ink-100 hover:bg-even-ink-50/40 ${d.deleted ? "opacity-50" : ""}`}
                 >
                   <td className="px-4 py-2">
-                    <Link href={`/admin/doctors/${d.id}`} className="text-even-navy-800 hover:underline font-medium">
+                    <Link
+                      href={d.deleted ? `/admin/doctors/${d.id}` : `/admin/doctors/${d.id}/voice`}
+                      className="text-even-navy-800 hover:underline font-medium"
+                      title={d.deleted ? "View doctor" : "Set up / re-record voice for diarization"}
+                    >
                       {d.full_name}
                     </Link>
-                    <div className="text-caption text-even-ink-400 font-mono">{d.id}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-caption text-even-ink-400 font-mono">{d.id}</span>
+                      <Link href={`/admin/doctors/${d.id}`} className="text-caption text-even-blue-600 hover:underline">Details</Link>
+                    </div>
                   </td>
                   <td className="px-4 py-2 text-even-ink-700">{d.email}</td>
                   <td className="px-4 py-2 text-caption text-even-ink-500 font-mono">/{d.url_slug}</td>

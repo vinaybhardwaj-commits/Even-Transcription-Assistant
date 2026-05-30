@@ -31,6 +31,9 @@ type Options = {
   chunkMs?: number;
   onChunk?: (chunk: Blob, indexFromZero: number) => void;
   onError?: (e: Error) => void;
+  /** Fired with the live MediaStream when recording starts, and null when it
+   *  stops — lets a consumer attach an AnalyserNode for a live level meter. */
+  onStream?: (stream: MediaStream | null) => void;
 };
 
 const MIME_CANDIDATES = [
@@ -83,6 +86,7 @@ export function useMediaRecorder(opts: Options = {}) {
         },
       });
       streamRef.current = stream;
+      try { optsRef.current.onStream?.(stream); } catch { /* noop */ }
       const mt = pickMime();
       setMimeType(mt);
       const rec = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
@@ -161,6 +165,7 @@ export function useMediaRecorder(opts: Options = {}) {
         streamRef.current = null;
         recRef.current = null;
         softPausedRef.current = false;
+        try { optsRef.current.onStream?.(null); } catch { /* noop */ }
         setState("idle");
         resolve();
       };
