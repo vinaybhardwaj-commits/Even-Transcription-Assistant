@@ -138,7 +138,7 @@ export function VoiceEnrollClient({ slug, doctorName }: Props) {
             {clips[idx] ? "Re-record this sentence" : "Tap to record"}
           </Button>
         ) : (
-          <Button variant="danger" size="lg" onClick={() => void stopRec()} className="w-full max-w-xs">
+          <Button variant="destructive" size="lg" onClick={() => void stopRec()} className="w-full max-w-xs">
             Stop
           </Button>
         )}
