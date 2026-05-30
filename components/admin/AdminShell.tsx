@@ -25,7 +25,8 @@ export type AdminNavKey =
   | "encounters"
   | "traces"
   | "sends"
-  | "settings";
+  | "settings"
+  | "diarization";
 
 type NavItem = {
   key: AdminNavKey;
@@ -41,6 +42,7 @@ const NAV: NavItem[] = [
   { key: "encounters", label: "Encounters", href: "/admin/encounters", icon: "◐", section: "operate" },
   { key: "traces",     label: "LLM traces", href: "/admin/traces",   icon: "◈", section: "observe" },
   { key: "sends",      label: "Sends",      href: "/admin/sends",    icon: "◉", section: "observe" },
+  { key: "diarization", label: "Diarization", href: "/admin/diarization", icon: "◍", section: "observe" },
   { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },
 ];
 
