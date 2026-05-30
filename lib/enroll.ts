@@ -58,3 +58,21 @@ export function averageEmbeddings(b64s: string[]): string {
   for (let i = 0; i < DIM; i++) mean[i] /= n;
   return Buffer.from(mean.buffer, mean.byteOffset, DIM * 4).toString("base64");
 }
+
+/** Cosine similarity between two base64 float32[192] embeddings. */
+export function cosineSimilarity(aB64: string, bB64: string): number | null {
+  const a = b64ToF32(aB64);
+  const b = b64ToF32(bB64);
+  if (!a || !b || a.length !== b.length) return null;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (na === 0 || nb === 0) return null;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+function b64ToF32(b64: string): Float32Array | null {
+  const buf = Buffer.from(b64, "base64");
+  if (buf.length < DIM * 4) return null;
+  // copy into a fresh, 4-byte-aligned ArrayBuffer (Buffer.from may be unaligned)
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + DIM * 4);
+  return new Float32Array(ab);
+}

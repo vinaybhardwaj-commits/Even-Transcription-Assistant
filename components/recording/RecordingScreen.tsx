@@ -9,6 +9,7 @@ import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
 import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
+import { useSpeakerIdentify } from "@/lib/use-speaker-identify";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
 import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
@@ -121,6 +122,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     intervalMs: 10_000,
   });
 
+  // 2d. Live clinician identification (V2.SD.2) — drives the Speakers pill.
+  const spk = useSpeakerIdentify({ slug, enabled: encounter !== null });
+
 
   // Submit pipeline (read IDB → R2 PUT → finalize)
   const submit = useEncounterSubmit({
@@ -143,6 +147,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       dg.sendChunk(chunk);
       wh.sendChunk(chunk);
       sv.sendChunk(chunk);
+      spk.sendChunk(chunk);
       // Persist to IndexedDB for crash recovery (PRD §4.18). Fire-and-forget;
       // we don't block the live transcription pipeline on disk write.
       if (encounter) {
@@ -157,7 +162,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         });
       }
     },
-    [dg, wh, sv, encounter],
+    [dg, wh, sv, spk, encounter],
   );
 
   const rec = useMediaRecorder({ chunkMs: 250, onChunk });
@@ -403,6 +408,17 @@ export function RecordingScreen({ slug, doctorName }: Props) {
                 {submit.error}
               </p>
             ) : null}
+          </div>
+        ) : null}
+
+        {spk.enrolled ? (
+          <div className="w-full max-w-2xl">
+            <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-caption ${spk.identified ? "border-success-500 bg-success-100/40 text-success-700" : "border-even-ink-200 bg-even-ink-50 text-even-ink-500"}`}>
+              <span className={`h-2 w-2 rounded-full ${spk.identified ? "bg-success-500" : "bg-even-ink-300 animate-pulse"}`} />
+              {spk.identified
+                ? <span>Identified · Dr {spk.name}{spk.confidence != null ? ` · ${(spk.confidence * 100).toFixed(0)}%` : ""}</span>
+                : <span>Listening for your voice…</span>}
+            </div>
           </div>
         ) : null}
 
