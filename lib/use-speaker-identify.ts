@@ -19,6 +19,8 @@ export function useSpeakerIdentify(opts: Options) {
   const [name, setName] = React.useState<string | null>(null);
   const [confidence, setConfidence] = React.useState<number | null>(null);
   const [identified, setIdentified] = React.useState(false);
+  // latest window's result (NOT latched) — drives the live You/other-voice cue
+  const [current, setCurrent] = React.useState<{ isClinician: boolean; confidence: number } | null>(null);
 
   const chunksRef = React.useRef<Blob[]>([]);
   const headerRef = React.useRef<Blob | null>(null);
@@ -52,6 +54,7 @@ export function useSpeakerIdentify(opts: Options) {
       setEnrolled(!!j.enrolled);
       if (j.name) setName(j.name);
       if (typeof j.confidence === "number") {
+        setCurrent({ isClinician: !!j.identified, confidence: j.confidence });
         if (j.confidence > bestRef.current) { bestRef.current = j.confidence; setConfidence(j.confidence); }
       }
       if (j.identified) setIdentified(true);
@@ -68,5 +71,5 @@ export function useSpeakerIdentify(opts: Options) {
     return () => window.clearInterval(id);
   }, [opts.enabled, intervalMs, flush]);
 
-  return { enrolled, name, confidence, identified, sendChunk };
+  return { enrolled, name, confidence, identified, current, sendChunk };
 }

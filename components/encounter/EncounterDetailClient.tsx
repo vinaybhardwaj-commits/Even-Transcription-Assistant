@@ -16,6 +16,9 @@ import type { CdmssOutput } from "@/lib/cdmss-stub";
 type Status = "draft" | "processing" | "complete" | "failed" | "deleted" | "draft_partial";
 type SendStatus = "pending" | "sent" | "failed";
 
+type Speaker = { idx: number; label?: string; type?: string; source?: string; total_speech_sec?: number; confidence?: number };
+type TaggedTurn = { text: string; speaker_idx: number | null; name: string; type?: string };
+
 type InitialState = {
   id: string;
   status: Status;
@@ -24,6 +27,9 @@ type InitialState = {
   transcript: string | null;
   transcriptOriginal: string | null;
   detectedLanguage: string | null;
+  speakers: Speaker[] | null;
+  taggedTranscript: TaggedTurn[] | null;
+  diarizeStatus: string | null;
   sendStatus: SendStatus;
   sentAt: string | null;
   sendEvents: SendEventLite[];
@@ -567,6 +573,41 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             </Button>
           </div>
         ) : null}
+
+        {initial.diarizeStatus === "complete" && initial.speakers && initial.speakers.length > 0 ? (() => {
+          const COLORS = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#EF4444", "#0EA5E9"];
+          const sps = initial.speakers as Speaker[];
+          const clinician = sps.find((sp) => sp.source === "auto");
+          const turns = (initial.taggedTranscript ?? []) as TaggedTurn[];
+          const names = Array.from(new Set(turns.map((t) => t.name)));
+          const colorOf = (n: string) => COLORS[Math.max(0, names.indexOf(n)) % COLORS.length];
+          return (
+            <div className="rounded-md border border-even-ink-100 bg-even-white overflow-hidden">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2.5">
+                <span className="text-caption font-medium text-even-navy-800">{sps.length} speaker{sps.length > 1 ? "s" : ""} detected</span>
+                {clinician ? <span className="text-caption text-success-700">· {clinician.label} identified</span> : null}
+                <span className="ml-auto flex items-center gap-1">
+                  {sps.slice(0, 6).map((sp, i) => (
+                    <span key={sp.idx} className="h-2 w-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} title={sp.label} />
+                  ))}
+                </span>
+              </div>
+              {turns.length > 0 ? (
+                <details className="border-t border-even-ink-100">
+                  <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">Conversation by speaker ({turns.length} turns)</summary>
+                  <div className="px-3 pb-3 space-y-1.5">
+                    {turns.map((t, i) => (
+                      <div key={i} className="flex gap-2.5">
+                        <span className="w-24 shrink-0 text-caption font-medium truncate" style={{ color: colorOf(t.name) }}>{t.name}</span>
+                        <span className="flex-1 text-body text-even-ink-800 leading-relaxed">{t.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          );
+        })() : null}
 
         {initial.transcriptOriginal ? (
           <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">

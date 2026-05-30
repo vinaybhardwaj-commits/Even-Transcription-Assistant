@@ -425,16 +425,37 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           </div>
         ) : null}
 
-        {spk.enrolled ? (
-          <div className="w-full max-w-2xl">
-            <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-caption ${spk.identified ? "border-success-500 bg-success-100/40 text-success-700" : "border-even-ink-200 bg-even-ink-50 text-even-ink-500"}`}>
-              <span className={`h-2 w-2 rounded-full ${spk.identified ? "bg-success-500" : "bg-even-ink-300 animate-pulse"}`} />
-              {spk.identified
-                ? <span>Identified · Dr {spk.name}{spk.confidence != null ? ` · ${(spk.confidence * 100).toFixed(0)}%` : ""}</span>
-                : <span>Listening for your voice…</span>}
+        {spk.enrolled ? (() => {
+          // Subtle live speaker cue. The identify window (~9s) tells us whether
+          // YOU dominated the latest audio; when another voice does, we show it.
+          // True N-speaker separation is computed at submit (shown post-record).
+          const cur = spk.current;
+          const speaking = sv.text.trim().length > 0;
+          const state: "you" | "other" | "listening" =
+            cur?.isClinician ? "you" : cur && speaking ? "other" : "listening";
+          const cfg = {
+            you: { ring: "border-success-500 bg-success-100/40 text-success-700", dot: "bg-success-500" },
+            other: { ring: "border-warning-500 bg-warning-100/50 text-warning-700", dot: "bg-warning-500" },
+            listening: { ring: "border-even-ink-200 bg-even-ink-50 text-even-ink-500", dot: "bg-even-ink-300 animate-pulse" },
+          }[state];
+          return (
+            <div className="w-full max-w-2xl flex flex-col items-start gap-1">
+              <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-caption transition-colors duration-300 ${cfg.ring}`}>
+                <span className={`h-2 w-2 rounded-full ${cfg.dot} ${state === "other" ? "animate-pulse" : ""}`} />
+                {state === "you" ? (
+                  <span>You · Dr {spk.name}{cur?.confidence != null ? ` · ${(cur.confidence * 100).toFixed(0)}%` : ""}</span>
+                ) : state === "other" ? (
+                  <span>Another voice in the room</span>
+                ) : (
+                  <span>Listening for your voice…</span>
+                )}
+              </div>
+              {state === "other" ? (
+                <span className="pl-1 text-[11px] text-even-ink-400">Full speaker breakdown ready after you finish.</span>
+              ) : null}
             </div>
-          </div>
-        ) : null}
+          );
+        })() : null}
 
         <div className="w-full max-w-2xl mt-2">
           <SarvamTranscript
