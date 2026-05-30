@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
   try {
     const rows = (await sql`
       SELECT id, full_name, url_slug, pin_hash, failed_pin_count, locked_until, status
-        FROM doctor
+        FROM clinician
        WHERE url_slug = ${slug}
          AND deleted_at IS NULL
        LIMIT 1

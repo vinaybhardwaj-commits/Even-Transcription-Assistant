@@ -37,9 +37,8 @@ async function findDoctor(fullSlug: string): Promise<DoctorRow | null> {
   // url_slug stores the full slug INCLUDING the token (per PRD §4.14 db note)
   try {
     const rows = (await sql`
-      SELECT id, full_name, url_slug, url_token, pin_hash, status,
-             (SELECT clinician_type FROM clinician WHERE clinician.id = doctor.id) AS clinician_type
-        FROM doctor
+      SELECT id, full_name, url_slug, url_token, pin_hash, status, clinician_type
+        FROM clinician
        WHERE url_slug = ${fullSlug}
          AND deleted_at IS NULL
        LIMIT 1

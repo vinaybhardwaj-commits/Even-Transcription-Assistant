@@ -109,7 +109,7 @@ export async function recordFailedAttempt(
 
   try {
     await sql`
-      UPDATE doctor
+      UPDATE clinician
          SET failed_pin_count = ${newCount},
              locked_until = ${lockedUntilSec ? `NOW() + INTERVAL '${lockedUntilSec} seconds'` : null}::timestamptz,
              status = ${newStatus},
@@ -121,7 +121,7 @@ export async function recordFailedAttempt(
     if (lockedUntilSec) {
       try {
         await sql`
-          UPDATE doctor
+          UPDATE clinician
              SET failed_pin_count = ${newCount},
                  locked_until = NOW() + (${lockedUntilSec}::int * INTERVAL '1 second'),
                  status = ${newStatus},
@@ -134,7 +134,7 @@ export async function recordFailedAttempt(
     } else {
       try {
         await sql`
-          UPDATE doctor
+          UPDATE clinician
              SET failed_pin_count = ${newCount},
                  locked_until = NULL,
                  status = ${newStatus},
@@ -175,7 +175,7 @@ export async function recordSuccessfulAttempt(
   }
   try {
     await sql`
-      UPDATE doctor
+      UPDATE clinician
          SET failed_pin_count = 0,
              locked_until = NULL,
              last_active_at = NOW(),
