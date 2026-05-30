@@ -27,8 +27,8 @@ type InitialState = {
   transcript: string | null;
   transcriptOriginal: string | null;
   detectedLanguage: string | null;
-  speakers: Speaker[] | null;
-  taggedTranscript: TaggedTurn[] | null;
+  speakers: unknown[] | null;
+  taggedTranscript: unknown[] | null;
   diarizeStatus: string | null;
   sendStatus: SendStatus;
   sentAt: string | null;
