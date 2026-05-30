@@ -103,6 +103,7 @@ export const encounter = pgTable("encounter", {
   overlapWindows:      jsonb("overlap_windows"),
   manualRelabels:      jsonb("manual_relabels").notNull().default(sql`'[]'::jsonb`),
   aggregates:          jsonb("aggregates"),
+  taggedTranscript:    jsonb("tagged_transcript"),
   micDeviceId:         text("mic_device_id"),
   diarizeStatus:       text("diarize_status"), // pending|running|complete|skipped|failed
   diarizeStartedAt:    timestamp("diarize_started_at", { withTimezone: true }),

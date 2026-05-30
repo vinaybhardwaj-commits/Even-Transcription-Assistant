@@ -124,11 +124,13 @@ export function sarvamCodemix(audio: Buffer | Uint8Array, contentType = "audio/w
 //       -> download-files -> GET output JSON. Model saaras:v2.5 (translate job).
 // ---------------------------------------------------------------------------
 
+export type SarvamDiarEntry = { transcript: string; start: number; end: number; speakerId: string };
+
 export type SarvamBatchResult =
-  | { ok: true; transcript: string; languageCode: string | null; latencyMs: number }
+  | { ok: true; transcript: string; languageCode: string | null; entries: SarvamDiarEntry[]; latencyMs: number }
   | { ok: false; error: string; latencyMs: number };
 
-type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number };
+type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; withDiarization?: boolean; numSpeakers?: number };
 
 export async function sarvamBatchTranslate(
   audio: Buffer | Uint8Array,
@@ -148,7 +150,7 @@ export async function sarvamBatchTranslate(
     // 1. init
     const initRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1`, {
       method: "POST", headers: H, cache: "no-store",
-      body: JSON.stringify({ job_parameters: { model: "saaras:v2.5", ...(opts.prompt ? { prompt: opts.prompt } : {}) } }),
+      body: JSON.stringify({ job_parameters: { model: "saaras:v2.5", ...(opts.prompt ? { prompt: opts.prompt } : {}), ...(opts.withDiarization ? { with_diarization: true } : {}), ...(opts.numSpeakers ? { num_speakers: opts.numSpeakers } : {}) } }),
     });
     if (!initRes.ok) return { ok: false, error: `init_${initRes.status}: ${(await initRes.text()).slice(0, 120)}`, latencyMs: Date.now() - t0 };
     const jobId = (await initRes.json() as { job_id: string }).job_id;
@@ -204,18 +206,23 @@ export async function sarvamBatchTranslate(
     });
     if (!dlRes.ok) return { ok: false, error: `download_links_${dlRes.status}`, latencyMs: Date.now() - t0 };
     const dlJson = await dlRes.json() as { download_urls: Record<string, { file_url: string }> };
-    let transcript = ""; let lang: string | null = null;
+    let transcript = ""; let lang: string | null = null; const entries: SarvamDiarEntry[] = [];
     for (const name of outputs) {
       const u = dlJson.download_urls[name]?.file_url;
       if (!u) continue;
       const r = await fetch(u, { cache: "no-store" });
       if (!r.ok) continue;
-      const j = await r.json() as { transcript?: string; language_code?: string | null };
+      const j = await r.json() as { transcript?: string; language_code?: string | null; diarized_transcript?: { entries?: Array<{ transcript?: string; start_time_seconds?: number; end_time_seconds?: number; speaker_id?: string }> } };
       if (j.transcript) transcript += (transcript ? " " : "") + j.transcript.trim();
       if (!lang && j.language_code) lang = j.language_code;
+      for (const e of j.diarized_transcript?.entries ?? []) {
+        if (e.transcript && e.transcript.trim()) {
+          entries.push({ transcript: e.transcript.trim(), start: e.start_time_seconds ?? 0, end: e.end_time_seconds ?? 0, speakerId: String(e.speaker_id ?? "") });
+        }
+      }
     }
     if (!transcript.trim()) return { ok: false, error: "empty_batch_transcript", latencyMs: Date.now() - t0 };
-    return { ok: true, transcript: transcript.trim(), languageCode: lang, latencyMs: Date.now() - t0 };
+    return { ok: true, transcript: transcript.trim(), languageCode: lang, entries, latencyMs: Date.now() - t0 };
   } catch (e: unknown) {
     return { ok: false, error: `batch_exc: ${e instanceof Error ? e.message : String(e)}`, latencyMs: Date.now() - t0 };
   }

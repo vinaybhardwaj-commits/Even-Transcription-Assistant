@@ -92,6 +92,15 @@ type TranscriptSegment = {
   text?: string;
   overlap?: boolean;
 };
+type TaggedEntry = {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  speaker_id: string;
+  speaker_idx: number | null;
+  name: string;
+  type: string;
+};
 type TranscriptionRunRow = {
   id: string;
   engine: string;
@@ -120,6 +129,7 @@ type EncounterFull = {
   transcript_segments: TranscriptSegment[] | null;
   overlap_windows: unknown[] | null;
   aggregates: Record<string, unknown> | null;
+  tagged_transcript: TaggedEntry[] | null;
   diarize_status: string | null;
   diarize_error: string | null;
   note_json: EncounterNote | null;
@@ -535,6 +545,23 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                 {enc.overlap_windows && enc.overlap_windows.length > 0 ? (
                   <p className="text-caption text-even-ink-500">{enc.overlap_windows.length} overlapping-speech window(s) detected.</p>
                 ) : null}
+                {enc.tagged_transcript && enc.tagged_transcript.length > 0 ? (() => {
+                  const turns = enc.tagged_transcript as TaggedEntry[];
+                  const COLORS = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#EF4444", "#0EA5E9"];
+                  const names = Array.from(new Set(turns.map((t) => t.name)));
+                  const colorOf = (n: string) => COLORS[names.indexOf(n) % COLORS.length];
+                  return (
+                    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4 space-y-2">
+                      <p className="text-caption text-even-ink-500 mb-1">Speaker-tagged conversation · {turns.length} turn(s) (English, time-aligned to identified speakers)</p>
+                      {turns.map((t, i) => (
+                        <div key={i} className="flex gap-3">
+                          <span className="w-28 shrink-0 text-caption font-medium truncate" style={{ color: colorOf(t.name) }} title={`${(t.start_ms / 1000).toFixed(1)}s`}>{t.name}</span>
+                          <span className="flex-1 text-body text-even-ink-800">{t.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })() : null}
                 {enc.aggregates && Object.keys(enc.aggregates).length > 0 ? (
                   <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
                     <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">Speech-time aggregates</summary>

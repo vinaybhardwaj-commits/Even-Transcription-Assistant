@@ -33,7 +33,8 @@ import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
-import { runDiarize } from "@/lib/diarize";
+import { runDiarize, reconcileTagged } from "@/lib/diarize";
+import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -129,6 +130,9 @@ export async function POST(
   // this is also the safety net if the live rolling under-captured. English
   // encounters skip this entirely (Deepgram/Whisper path stands). Soft-fail:
   // never block the note on it — fall back to whatever transcript_raw is.
+  // Sarvam batch diarized English segments — captured in translateIfNeeded,
+  // reconciled against pyannote in diarizeStore for the speaker-tagged note.
+  let sarvamEntries: SarvamDiarEntry[] = [];
   const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) return;
@@ -149,8 +153,10 @@ export async function POST(
       }
       const bt = await sarvamBatchTranslate(bytes, head.content_type || "audio/webm", {
         prompt: SARVAM_MEDICAL_PROMPT,
+        withDiarization: true,
         signal: req.signal,
       });
+      if (bt.ok && Array.isArray(bt.entries)) sarvamEntries = bt.entries;
       if (bt.ok && bt.transcript.trim().length > 0) {
         row.transcript_raw = bt.transcript;
         await sql`UPDATE encounter SET transcript_raw = ${bt.transcript} WHERE id = ${id}`;
@@ -225,6 +231,21 @@ export async function POST(
                  diarize_error        = NULL
            WHERE id = ${id}
         `;
+        // Speaker-tag the English note transcript: map Sarvam's anonymous
+        // speaker_ids onto pyannote's named speakers by time overlap.
+        if (sarvamEntries.length > 0) {
+          try {
+            const tagged = reconcileTagged(
+              sarvamEntries,
+              d.result.transcript_segments as Array<{ start_ms?: number; end_ms?: number; speaker_idx?: number }>,
+              d.result.speakers,
+            );
+            await sql`UPDATE encounter SET tagged_transcript = ${JSON.stringify(tagged)}::jsonb WHERE id = ${id}`;
+            emit?.({ stage: "progress", msg: `Speaker-tagged conversation ready (${tagged.length} turn(s))` });
+          } catch (te) {
+            console.warn(`[process] tag reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
+          }
+        }
         emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${d.latencyMs}ms)` });
       } else {
         await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${d.error.slice(0, 300)} WHERE id = ${id}`;

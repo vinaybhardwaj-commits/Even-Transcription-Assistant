@@ -37,6 +37,7 @@ export type EncounterFull = {
   transcript_segments: unknown[] | null;
   overlap_windows: unknown[] | null;
   aggregates: Record<string, unknown> | null;
+  tagged_transcript: unknown[] | null;
   diarize_status: string | null;
   diarize_error: string | null;
   diarize_started_at: string | null;
@@ -140,6 +141,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       e.transcript_segments,
       e.overlap_windows,
       e.aggregates,
+      e.tagged_transcript,
       e.diarize_status,
       e.diarize_error,
       e.diarize_started_at::text   AS diarize_started_at,
@@ -253,6 +255,7 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     transcript_segments: (r.transcript_segments as unknown[] | null) ?? null,
     overlap_windows: (r.overlap_windows as unknown[] | null) ?? null,
     aggregates: (r.aggregates as Record<string, unknown> | null) ?? null,
+    tagged_transcript: (r.tagged_transcript as unknown[] | null) ?? null,
     diarize_status: r.diarize_status ? String(r.diarize_status) : null,
     diarize_error: r.diarize_error ? String(r.diarize_error) : null,
     diarize_started_at: r.diarize_started_at ? String(r.diarize_started_at) : null,

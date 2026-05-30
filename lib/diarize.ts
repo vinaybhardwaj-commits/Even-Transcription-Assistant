@@ -93,3 +93,68 @@ export async function runDiarize(
     return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Note speaker-tagging (V2.SD — reconciliation)
+//
+// Sarvam batch translate (with_diarization) yields ENGLISH text segments with
+// timing + an ANONYMOUS speaker_id ("speaker_0"…). pyannote (/diarize) yields
+// NAMED speakers (clinician matched by voiceprint) + timed segments but NO
+// text. We reconcile by TIME OVERLAP: each Sarvam speaker_id is mapped to the
+// pyannote speaker index it overlaps most (summed across all its entries),
+// then every English entry inherits that pyannote speaker's name/role. The
+// result is a speaker-tagged English conversation for the note + admin view.
+// ---------------------------------------------------------------------------
+
+export type TaggedEntry = {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  speaker_id: string;       // Sarvam's anonymous id
+  speaker_idx: number | null; // matched pyannote idx (null = unmatched)
+  name: string;             // resolved display name (clinician name / role / "Speaker N")
+  type: string;             // clinician|patient|attender|nurse|other
+};
+
+type SarvamEntryLike = { transcript: string; start: number; end: number; speakerId: string };
+type SegLike = { start_ms?: number; end_ms?: number; speaker_idx?: number };
+
+export function reconcileTagged(
+  entries: SarvamEntryLike[],
+  segments: SegLike[],
+  speakers: DiarizeSpeaker[],
+): TaggedEntry[] {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  // 1. accumulate overlap(ms) between each Sarvam speaker_id and each pyannote idx
+  const overlap = new Map<string, Map<number, number>>();
+  for (const e of entries) {
+    const es = e.start * 1000, ee = e.end * 1000;
+    const m = overlap.get(e.speakerId) ?? new Map<number, number>();
+    for (const s of segments) {
+      const ss = s.start_ms ?? 0, se = s.end_ms ?? 0;
+      const ov = Math.min(ee, se) - Math.max(es, ss);
+      if (ov > 0 && typeof s.speaker_idx === "number") m.set(s.speaker_idx, (m.get(s.speaker_idx) ?? 0) + ov);
+    }
+    overlap.set(e.speakerId, m);
+  }
+  // 2. argmax → sarvam speaker_id ⇒ pyannote idx
+  const idxFor = new Map<string, number | null>();
+  for (const [sid, m] of overlap) {
+    let best: number | null = null, bestv = 0;
+    for (const [idx, v] of m) if (v > bestv) { bestv = v; best = idx; }
+    idxFor.set(sid, best);
+  }
+  // 3. tag every entry; unmatched ids get a stable "Speaker N"
+  const byIdx = new Map(speakers.map((s) => [s.idx, s] as const));
+  const fallback = new Map<string, number>(); let fc = 0;
+  return entries.map((e) => {
+    const idx = idxFor.get(e.speakerId) ?? null;
+    const sp = idx != null ? byIdx.get(idx) : undefined;
+    let name = sp?.label, type = sp?.type;
+    if (!name) {
+      if (!fallback.has(e.speakerId)) fallback.set(e.speakerId, ++fc);
+      name = `Speaker ${fallback.get(e.speakerId)}`; type = "other";
+    }
+    return { text: e.transcript, start_ms: Math.round(e.start * 1000), end_ms: Math.round(e.end * 1000), speaker_id: e.speakerId, speaker_idx: idx, name, type: type ?? "other" };
+  });
+}
