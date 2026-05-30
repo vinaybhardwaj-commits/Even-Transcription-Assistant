@@ -9,6 +9,7 @@ import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
 import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
+import { useSarvamStreaming } from "@/lib/use-sarvam-streaming";
 import { useSpeakerIdentify } from "@/lib/use-speaker-identify";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
@@ -100,6 +101,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     }, [cleanup]),
   });
 
+  // Mic stream captured from the recorder; feeds the Sarvam streaming worklet.
+  const [micStream, setMicStream] = React.useState<MediaStream | null>(null);
+
   // 2b. Whisper rolling — cumulative-from-zero every 10s for higher-accuracy
   // transcript of medical terms. Replaces (not appends) — each pass returns
   // the full transcript-to-date.
@@ -115,12 +119,22 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // script (for the live panel + preservation) and the English translation
   // (for the note). Drives the native-script live panel for non-English
   // encounters; English encounters keep the Deepgram experience untouched.
-  const sv = useSarvamRolling({
+  // Real-time streaming (B) when a relay is configured, else the REST refine (A).
+  const RELAY_URL = process.env.NEXT_PUBLIC_STT_RELAY_URL || null;
+  const STREAMING = !!RELAY_URL;
+  const svRoll = useSarvamRolling({
     slug,
-    enabled: encounter !== null,
+    enabled: encounter !== null && !STREAMING,
     encounterId: encounter?.id,
     intervalMs: 2_000,
   });
+  const svStream = useSarvamStreaming({
+    slug,
+    enabled: encounter !== null && STREAMING,
+    stream: micStream,
+    relayUrl: RELAY_URL,
+  });
+  const sv = STREAMING ? svStream : svRoll;
 
   // 2d. Live clinician identification (V2.SD.2) — drives the Speakers pill.
   const spk = useSpeakerIdentify({ slug, enabled: encounter !== null });
@@ -165,7 +179,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     [dg, wh, sv, spk, encounter],
   );
 
-  const rec = useMediaRecorder({ chunkMs: 250, onChunk });
+  const rec = useMediaRecorder({ chunkMs: 250, onChunk, onStream: setMicStream });
 
   // Track when recording actually started (for duration_seconds at Submit)
   React.useEffect(() => {
