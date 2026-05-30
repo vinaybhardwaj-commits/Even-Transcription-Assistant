@@ -6,9 +6,9 @@ import { Input } from "@/components/ui/Input";
 import { RecoveryModal } from "@/components/RecoveryModal";
 import { Library } from "@/components/Library";
 
-type Props = { slug: string; doctorName: string };
+type Props = { slug: string; doctorName: string; voiceEnrolled?: boolean };
 
-export function HomeShell({ slug, doctorName }: Props) {
+export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
   const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
   const [patientLabel, setPatientLabel] = React.useState("");
@@ -57,6 +57,16 @@ export function HomeShell({ slug, doctorName }: Props) {
       {tab === "record" ? (
         <div className="px-4 pt-6 pb-12">
           <h2 className="text-heading text-even-navy-800 mb-4">New encounter</h2>
+
+          {!voiceEnrolled ? (
+            <a
+              href={`/${slug}/onboarding/voice`}
+              className="mb-4 block rounded-md border border-even-blue-200 bg-even-blue-50 px-4 py-3"
+            >
+              <span className="text-label text-even-navy-800">Set up voice recognition</span>
+              <span className="block text-caption text-even-ink-500">~90 seconds — lets the app label you (vs the patient) in recordings.</span>
+            </a>
+          ) : null}
 
           <Input
             label="Patient (optional)"

@@ -78,7 +78,12 @@ export default async function DoctorPage({
   }
 
   if (authed) {
-    return <HomeShell slug={slug} doctorName={doctor.full_name} />;
+    let voiceEnrolled = false;
+    try {
+      const vp = (await sql`SELECT 1 FROM voice_print WHERE doctor_id = ${doctor.id} LIMIT 1`) as Array<unknown>;
+      voiceEnrolled = vp.length > 0;
+    } catch { /* table may not exist on older deploys */ }
+    return <HomeShell slug={slug} doctorName={doctor.full_name} voiceEnrolled={voiceEnrolled} />;
   }
 
   // PIN entry shell
