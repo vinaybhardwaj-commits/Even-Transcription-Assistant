@@ -120,21 +120,24 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // (for the note). Drives the native-script live panel for non-English
   // encounters; English encounters keep the Deepgram experience untouched.
   // Real-time streaming (B) when a relay is configured, else the REST refine (A).
+  // If streaming errors (token/WS), fall back to the REST trace so the live
+  // panel + multilingual detection keep working (note is safe regardless).
   const RELAY_URL = process.env.NEXT_PUBLIC_STT_RELAY_URL || null;
   const STREAMING = !!RELAY_URL;
-  const svRoll = useSarvamRolling({
-    slug,
-    enabled: encounter !== null && !STREAMING,
-    encounterId: encounter?.id,
-    intervalMs: 2_000,
-  });
   const svStream = useSarvamStreaming({
     slug,
     enabled: encounter !== null && STREAMING,
     stream: micStream,
     relayUrl: RELAY_URL,
   });
-  const sv = STREAMING ? svStream : svRoll;
+  const useStream = STREAMING && svStream.state !== "error";
+  const svRoll = useSarvamRolling({
+    slug,
+    enabled: encounter !== null && !useStream,
+    encounterId: encounter?.id,
+    intervalMs: 2_000,
+  });
+  const sv = useStream ? svStream : svRoll;
 
   // 2d. Live clinician identification (V2.SD.2) — drives the Speakers pill.
   const spk = useSpeakerIdentify({ slug, enabled: encounter !== null });

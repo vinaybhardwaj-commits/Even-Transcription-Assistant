@@ -63,7 +63,7 @@ export function useSarvamStreaming(opts: Options) {
       committedRef.current = "";
       setText("");
       try {
-        const tr = await fetch("/api/voice/stt-token", { cache: "no-store" });
+        const tr = await fetch(`/${optsRef.current.slug}/api/voice/stt-token`, { cache: "no-store" });
         const tj = (await tr.json().catch(() => ({}))) as { token?: string; relay_url?: string; error?: unknown };
         const token = tj.token;
         const relay = (tj.relay_url || opts.relayUrl) as string;
