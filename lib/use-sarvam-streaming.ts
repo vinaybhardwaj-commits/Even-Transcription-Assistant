@@ -60,12 +60,35 @@ export function useSarvamStreaming(opts: Options) {
     let ws: WebSocket | null = null;
     let flushTimer: number | null = null;
 
-    // language auto-detect → lock
-    const langCount = new Map<string, number>();
+    // language auto-detect → lock (confidence-weighted by utterance length)
+    const langWeight = new Map<string, number>();
     let locked: string | null = null;
     let dataSeen = 0;
+    // auto-reconnect (mid-encounter WS drop) state
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | null = null;
+    let intentionalClose = false;
+    let everOpened = false;
+    const MAX_RECONNECTS = 5;
 
     const clearFlush = () => { if (flushTimer != null) { clearInterval(flushTimer); flushTimer = null; } };
+    const clearReconnect = () => { if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; } };
+    // Reconnect after an UNEXPECTED drop (network blip, relay/Sarvam idle close)
+    // with exponential backoff, preserving the audio graph + accumulated
+    // transcript (only the upstream socket is recreated). After MAX_RECONNECTS,
+    // surface error so RecordingScreen falls back to the REST refine path.
+    const scheduleReconnect = (lang: string) => {
+      if (cancelled) return;
+      clearReconnect();
+      if (reconnectAttempts >= MAX_RECONNECTS) { setError("ws_lost"); setState("error"); return; }
+      const delay = Math.min(8000, 500 * 2 ** reconnectAttempts);
+      reconnectAttempts += 1;
+      setState("connecting");
+      reconnectTimer = window.setTimeout(() => {
+        if (cancelled) return;
+        void openConnection(lang).catch(() => scheduleReconnect(lang));
+      }, delay);
+    };
 
     const openConnection = async (lang: string) => {
       const tr = await fetch(`/${optsRef.current.slug}/api/voice/stt-token`, { cache: "no-store" });
@@ -81,6 +104,9 @@ export function useSarvamStreaming(opts: Options) {
       w.onopen = () => {
         if (cancelled) return;
         setState("live");
+        everOpened = true;
+        reconnectAttempts = 0;
+        clearReconnect();
         clearFlush();
         flushTimer = window.setInterval(() => { try { w.readyState === WebSocket.OPEN && w.send(JSON.stringify({ type: "flush" })); } catch { /* noop */ } }, 1500);
       };
@@ -100,21 +126,35 @@ export function useSarvamStreaming(opts: Options) {
           } else if (lc) {
             setLanguage(lc);
             dataSeen += 1;
-            if (lc !== "en-IN") langCount.set(lc, (langCount.get(lc) ?? 0) + 1);
-            // lock once an Indian language clearly dominates (>=3 hits), or after
-            // 8 utterances pick the most frequent non-English seen.
+            // Confidence-weighted vote: weight each detection by the utterance's
+            // word count. A long, clearly-vernacular utterance is far more
+            // reliable than a 1-2 word blip that can misdetect hi vs mr.
+            if (lc !== "en-IN") {
+              const wc = t.split(/\s+/).filter(Boolean).length;
+              langWeight.set(lc, (langWeight.get(lc) ?? 0) + Math.max(1, wc));
+            }
+            // Lock when the leader has enough accumulated weight AND clearly
+            // beats the runner-up; or, as a timeout fallback, after 10
+            // utterances pick the leader if it is ahead at all.
             let pick: string | null = null;
-            for (const [l, n] of langCount) if (n >= 3) { pick = l; break; }
-            if (!pick && dataSeen >= 8 && langCount.size > 0) {
-              pick = [...langCount.entries()].sort((a, b) => b[1] - a[1])[0][0];
+            const ranked = [...langWeight.entries()].sort((a, b) => b[1] - a[1]);
+            if (ranked.length > 0) {
+              const [topLang, topW] = ranked[0];
+              const runnerW = ranked[1]?.[1] ?? 0;
+              const enoughWeight = topW >= 12;
+              const clearMargin = topW >= runnerW * 1.5 + 2;
+              if ((enoughWeight && clearMargin) || (dataSeen >= 10 && topW > runnerW)) {
+                pick = topLang;
+              }
             }
             if (pick) {
               locked = pick;
               setLanguage(pick);
               // swap the socket to the pinned language; keep audio + transcript
+              intentionalClose = true;
               try { w.close(); } catch { /* noop */ }
               clearFlush();
-              void openConnection(pick).catch(() => {});
+              void openConnection(pick).catch(() => scheduleReconnect(pick));
             }
           }
         } else if (r.type === "events") {
@@ -123,8 +163,14 @@ export function useSarvamStreaming(opts: Options) {
           setState("error");
         }
       };
-      w.onerror = () => { if (!cancelled) { setError("ws_error"); setState("error"); } };
-      w.onclose = () => { /* may be an intentional lock-swap; ignore unless cancelled */ };
+      w.onerror = () => { /* a close event always follows; reconnect/fallback handled in onclose */ };
+      w.onclose = () => {
+        clearFlush();
+        if (cancelled) return;
+        if (intentionalClose) { intentionalClose = false; return; } // lock-swap, expected
+        if (!everOpened) { setError("ws_error"); setState("error"); return; } // initial connect failed -> REST fallback
+        scheduleReconnect(locked ?? "unknown");
+      };
     };
 
     (async () => {
@@ -156,6 +202,7 @@ export function useSarvamStreaming(opts: Options) {
     return () => {
       cancelled = true;
       clearFlush();
+      clearReconnect();
       try { ws?.close(); } catch { /* noop */ }
       try { node?.disconnect(); src?.disconnect(); sink?.disconnect(); } catch { /* noop */ }
       try { void ctx?.close(); } catch { /* noop */ }

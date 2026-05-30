@@ -38,7 +38,7 @@ export default async function VoiceOnboardingPage({
       context="doctor"
       enrollUrl={`/${slug}/api/voice/enroll`}
       doneUrl={`/${slug}/record`}
-      transcribeUrl="/api/voice/transcribe-window"
+      transcribeUrl={`/${slug}/api/voice/transcribe-window`}
     />
   );
 }
