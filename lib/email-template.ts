@@ -10,7 +10,7 @@
  * component tree. Future polish can swap in @react-email/components.
  */
 
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, PhysiotherapyNote, AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
@@ -91,10 +91,12 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   const isGM = opts.noteType === "general_medical";
   const isOp = opts.noteType === "operative_procedure";
   const isDt = opts.noteType === "dietetic_consult";
+  const isPt = opts.noteType === "physiotherapy";
   const gm = note as GeneralMedicalNote;
   const cn = note as EncounterNote;
   const op = note as OperativeProcedureNote;
   const dt = note as DieteticConsultNote;
+  const pt = note as PhysiotherapyNote;
   const planSub = (t: string) =>
     `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">${t}</p>`;
   const ddmmyyyy = recordedAt.toLocaleDateString("en-IN", {
@@ -105,8 +107,8 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   });
 
   // ---- Subject (O4: note type at start) ----
-  const typeLabel = isOp ? "Operative Note" : isDt ? "Dietetic Consult" : isGM ? "General Medical" : "Clinic Encounter";
-  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isDt ? dt.reason_for_consult : isGM ? gm.reason_for_visit : cn.chief_complaint;
+  const typeLabel = isOp ? "Operative Note" : isDt ? "Dietetic Consult" : isPt ? "Physiotherapy" : isGM ? "General Medical" : "Clinic Encounter";
+  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isDt ? dt.reason_for_consult : isPt ? pt.reason_for_consult : isGM ? gm.reason_for_visit : cn.chief_complaint;
   const ccBit = headline
     ? ` · ${headline.slice(0, 60)}${headline.length > 60 ? "…" : ""}`
     : "";
@@ -198,7 +200,35 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
       dt.follow_up ? `${sectionHeading("Follow-up")}${paragraph(dt.follow_up)}` : "",
     ];
   };
-  const noteSections = (isOp ? opSections() : isDt ? dietSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
+  const physioSections = () => {
+    const pa = pt.pain_assessment;
+    const pain = [
+      pa.location ? `Location: ${pa.location}` : "",
+      pa.score_0_10 != null ? `Score: ${pa.score_0_10}/10` : "",
+      pa.quality ? `Quality: ${pa.quality}` : "",
+      pa.aggravating_factors.length ? `Aggravating: ${pa.aggravating_factors.join(", ")}` : "",
+      pa.relieving_factors.length ? `Relieving: ${pa.relieving_factors.join(", ")}` : "",
+    ].filter(Boolean);
+    const tp = pt.treatment_plan;
+    const tpEmpty = !tp.modalities.length && !tp.exercises_prescribed.length && !tp.home_program.length && !tp.precautions.length && !tp.expected_outcomes && tp.sessions_per_week == null && tp.expected_duration_weeks == null;
+    const sched = [tp.sessions_per_week != null ? `${tp.sessions_per_week} sessions/week` : "", tp.expected_duration_weeks != null ? `${tp.expected_duration_weeks} weeks` : ""].filter(Boolean);
+    return [
+      pt.reason_for_consult ? `${sectionHeading("Reason for consult")}${paragraph(pt.reason_for_consult)}` : "",
+      pt.relevant_medical_history.length ? `${sectionHeading("Relevant medical history")}${bulletList(pt.relevant_medical_history)}` : "",
+      pt.current_medications.length ? `${sectionHeading("Current medications")}${bulletList(pt.current_medications)}` : "",
+      pt.functional_status_baseline ? `${sectionHeading("Baseline functional status")}${paragraph(pt.functional_status_baseline)}` : "",
+      pt.current_functional_status ? `${sectionHeading("Current functional status")}${paragraph(pt.current_functional_status)}` : "",
+      pain.length ? `${sectionHeading("Pain assessment")}${bulletList(pain)}` : "",
+      pt.rom_findings ? `${sectionHeading("Range of motion")}${paragraph(pt.rom_findings)}` : "",
+      pt.strength_findings ? `${sectionHeading("Strength")}${paragraph(pt.strength_findings)}` : "",
+      pt.special_tests.length ? `${sectionHeading("Special tests")}${bulletList(pt.special_tests)}` : "",
+      pt.posture_and_gait ? `${sectionHeading("Posture & gait")}${paragraph(pt.posture_and_gait)}` : "",
+      pt.assessment ? `${sectionHeading("Assessment")}${paragraph(pt.assessment)}` : "",
+      !tpEmpty ? `${sectionHeading("Treatment plan")}${tp.modalities.length ? `${planSub("Modalities")}${bulletList(tp.modalities)}` : ""}${tp.exercises_prescribed.length ? `${planSub("Exercises prescribed")}${bulletList(tp.exercises_prescribed)}` : ""}${tp.home_program.length ? `${planSub("Home program")}${bulletList(tp.home_program)}` : ""}${tp.precautions.length ? `${planSub("Precautions")}${bulletList(tp.precautions)}` : ""}${tp.expected_outcomes ? `${planSub("Expected outcomes")}${paragraph(tp.expected_outcomes)}` : ""}${sched.length ? planSub(sched.join(" \u00b7 ")) : ""}` : "",
+      pt.follow_up ? `${sectionHeading("Follow-up")}${paragraph(pt.follow_up)}` : "",
+    ];
+  };
+  const noteSections = (isOp ? opSections() : isDt ? dietSections() : isPt ? physioSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
 
   // B10 defensive fallback (28 May 2026): if every clinical section is
   // empty, surface that explicitly instead of silently sending an email
@@ -371,6 +401,24 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     if (dpl.supplements_recommended.length) textLines.push(`Supplements: ${dpl.supplements_recommended.join("; ")}`);
     if (dpl.behavioural_goals.length) textLines.push(`Goals: ${dpl.behavioural_goals.join("; ")}`);
     if (dt.follow_up) textLines.push("", `Follow-up: ${dt.follow_up}`);
+  } else if (isPt) {
+    if (pt.reason_for_consult) textLines.push(`Reason for consult: ${pt.reason_for_consult}`, "");
+    if (pt.relevant_medical_history.length) textLines.push(`Medical history: ${pt.relevant_medical_history.join("; ")}`);
+    if (pt.current_functional_status) textLines.push("", `Current functional status:`, pt.current_functional_status);
+    const pa = pt.pain_assessment;
+    const pain = [pa.location ? `loc ${pa.location}` : "", pa.score_0_10 != null ? `${pa.score_0_10}/10` : "", pa.quality ? pa.quality : ""].filter(Boolean);
+    if (pain.length) textLines.push(`Pain: ${pain.join(", ")}`);
+    if (pt.rom_findings) textLines.push(`ROM: ${pt.rom_findings}`);
+    if (pt.strength_findings) textLines.push(`Strength: ${pt.strength_findings}`);
+    if (pt.special_tests.length) textLines.push(`Special tests: ${pt.special_tests.join("; ")}`);
+    if (pt.assessment) textLines.push("", `Assessment:`, pt.assessment);
+    const tpl = pt.treatment_plan;
+    if (tpl.modalities.length) textLines.push(`Modalities: ${tpl.modalities.join("; ")}`);
+    if (tpl.exercises_prescribed.length) textLines.push(`Exercises: ${tpl.exercises_prescribed.join("; ")}`);
+    if (tpl.home_program.length) textLines.push(`Home program: ${tpl.home_program.join("; ")}`);
+    if (tpl.sessions_per_week != null) textLines.push(`Sessions/week: ${tpl.sessions_per_week}`);
+    if (tpl.expected_duration_weeks != null) textLines.push(`Duration: ${tpl.expected_duration_weeks} weeks`);
+    if (pt.follow_up) textLines.push("", `Follow-up: ${pt.follow_up}`);
   } else if (isGM) {
     if (gm.reason_for_visit) textLines.push(`Reason for visit: ${gm.reason_for_visit}`, "");
     if (gm.active_problems.length) textLines.push(`Active problems: ${gm.active_problems.join("; ")}`, "");

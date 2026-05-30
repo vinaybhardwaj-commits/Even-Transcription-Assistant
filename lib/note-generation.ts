@@ -157,6 +157,46 @@ Style rules:
 - If BMI was not stated but weight and height were, compute BMI = weight_kg / (height_cm/100)^2, rounded to 1 decimal
 - Do not invent a diet plan the dietitian didn't describe`;
 
+// Physiotherapy Note (V2.S5) — physiotherapist assessment. CDMSS OFF. PRD §7.2.5.
+const SYSTEM_PHYSIO = `You are converting a physiotherapist's voice-dictated patient assessment into a structured Physiotherapy Note. The transcript may be in English, an Indian language, or code-mixed — ALWAYS write the note in clear clinical English, translating faithfully. Use ONLY information explicitly stated in the transcript — do not invent ROM degrees, strength grades, pain scores, or exercises. If a section was not discussed, return an empty string, empty array, or null (for numeric fields).
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
+
+{
+  "reason_for_consult": string,
+  "relevant_medical_history": [string, ...],
+  "current_medications": [string, ...],
+  "functional_status_baseline": string,
+  "current_functional_status": string,
+  "pain_assessment": {
+    "location": string,
+    "score_0_10": number | null,
+    "quality": string,
+    "aggravating_factors": [string, ...],
+    "relieving_factors": [string, ...]
+  },
+  "rom_findings": string,
+  "strength_findings": string,
+  "special_tests": [string, ...],
+  "posture_and_gait": string,
+  "assessment": string,
+  "treatment_plan": {
+    "modalities": [string, ...],
+    "exercises_prescribed": [string, ...],
+    "home_program": [string, ...],
+    "precautions": [string, ...],
+    "expected_outcomes": string,
+    "sessions_per_week": number | null,
+    "expected_duration_weeks": number | null
+  },
+  "follow_up": string
+}
+
+Style rules:
+- Preserve exact ROM degrees, MMT grades, pain scores, and exercise sets/reps
+- Use the physiotherapist's wording for special tests
+- Do not invent findings or a treatment plan that was not described`;
+
 export type EncounterNote = {
   chief_complaint: string;
   history_present_illness: string;
@@ -245,7 +285,38 @@ export type DieteticConsultNote = {
   follow_up: string;
 };
 
-export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote | DieteticConsultNote;
+// PhysiotherapyNote — physiotherapist assessment (V2.S5, PRD §7.2.5). CDMSS OFF.
+export type PhysiotherapyNote = {
+  reason_for_consult: string;
+  relevant_medical_history: string[];
+  current_medications: string[];
+  functional_status_baseline: string;
+  current_functional_status: string;
+  pain_assessment: {
+    location: string;
+    score_0_10: number | null;
+    quality: string;
+    aggravating_factors: string[];
+    relieving_factors: string[];
+  };
+  rom_findings: string;
+  strength_findings: string;
+  special_tests: string[];
+  posture_and_gait: string;
+  assessment: string;
+  treatment_plan: {
+    modalities: string[];
+    exercises_prescribed: string[];
+    home_program: string[];
+    precautions: string[];
+    expected_outcomes: string;
+    sessions_per_week: number | null;
+    expected_duration_weeks: number | null;
+  };
+  follow_up: string;
+};
+
+export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote | DieteticConsultNote | PhysiotherapyNote;
 
 /** Note types that get the CDMSS pipeline (clinic + general medical only). */
 export function noteTypeHasCdmss(noteType?: string): boolean {
@@ -261,6 +332,7 @@ export function noteHeadline(note: AnyNote | null | undefined, noteType?: string
     return op.procedure_performed?.[0] || op.post_op_diagnosis || op.pre_op_diagnosis || "";
   }
   if (noteType === "dietetic_consult") return (note as DieteticConsultNote).reason_for_consult ?? "";
+  if (noteType === "physiotherapy") return (note as PhysiotherapyNote).reason_for_consult ?? "";
   return (note as EncounterNote).chief_complaint ?? "";
 }
 
@@ -281,6 +353,18 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
       (g.plan?.treatment_changes?.length ?? 0) > 0 ||
       (g.plan?.consultations_requested?.length ?? 0) > 0 ||
       (g.plan?.follow_up ?? "").trim().length > 0
+    );
+  }
+  if (noteType === "physiotherapy") {
+    const pt = note as PhysiotherapyNote;
+    return (
+      (pt.reason_for_consult ?? "").trim().length > 0 ||
+      (pt.assessment ?? "").trim().length > 0 ||
+      (pt.current_functional_status ?? "").trim().length > 0 ||
+      (pt.rom_findings ?? "").trim().length > 0 ||
+      (pt.strength_findings ?? "").trim().length > 0 ||
+      (pt.treatment_plan?.exercises_prescribed?.length ?? 0) > 0 ||
+      (pt.treatment_plan?.modalities?.length ?? 0) > 0
     );
   }
   if (noteType === "dietetic_consult") {
@@ -350,6 +434,7 @@ export async function generateNote(
     opts.noteType === "general_medical" ? SYSTEM_GENERAL :
     opts.noteType === "operative_procedure" ? SYSTEM_OPERATIVE :
     opts.noteType === "dietetic_consult" ? SYSTEM_DIETETIC :
+    opts.noteType === "physiotherapy" ? SYSTEM_PHYSIO :
     SYSTEM;
 
   const t0 = Date.now();
@@ -488,6 +573,38 @@ export async function generateNote(
           foods_to_limit_or_avoid: A(dp.foods_to_limit_or_avoid),
           supplements_recommended: A(dp.supplements_recommended),
           behavioural_goals: A(dp.behavioural_goals),
+        },
+        follow_up: S(parsedRaw.follow_up),
+      };
+    } else if (opts.noteType === "physiotherapy") {
+      const pa = (parsedRaw.pain_assessment ?? {}) as Record<string, unknown>;
+      const tp = (parsedRaw.treatment_plan ?? {}) as Record<string, unknown>;
+      note = {
+        reason_for_consult: S(parsedRaw.reason_for_consult),
+        relevant_medical_history: A(parsedRaw.relevant_medical_history),
+        current_medications: A(parsedRaw.current_medications),
+        functional_status_baseline: S(parsedRaw.functional_status_baseline),
+        current_functional_status: S(parsedRaw.current_functional_status),
+        pain_assessment: {
+          location: S(pa.location),
+          score_0_10: N(pa.score_0_10),
+          quality: S(pa.quality),
+          aggravating_factors: A(pa.aggravating_factors),
+          relieving_factors: A(pa.relieving_factors),
+        },
+        rom_findings: S(parsedRaw.rom_findings),
+        strength_findings: S(parsedRaw.strength_findings),
+        special_tests: A(parsedRaw.special_tests),
+        posture_and_gait: S(parsedRaw.posture_and_gait),
+        assessment: S(parsedRaw.assessment),
+        treatment_plan: {
+          modalities: A(tp.modalities),
+          exercises_prescribed: A(tp.exercises_prescribed),
+          home_program: A(tp.home_program),
+          precautions: A(tp.precautions),
+          expected_outcomes: S(tp.expected_outcomes),
+          sessions_per_week: N(tp.sessions_per_week),
+          expected_duration_weeks: N(tp.expected_duration_weeks),
         },
         follow_up: S(parsedRaw.follow_up),
       };

@@ -171,6 +171,39 @@ export async function PATCH(
       },
       follow_up: strOrEmpty(body.follow_up),
     };
+  } else if (row.note_type === "physiotherapy") {
+    const num = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+    const pa = (body.pain_assessment ?? {}) as Record<string, unknown>;
+    const tp = (body.treatment_plan ?? {}) as Record<string, unknown>;
+    note = {
+      reason_for_consult: strOrEmpty(body.reason_for_consult),
+      relevant_medical_history: strArr(body.relevant_medical_history),
+      current_medications: strArr(body.current_medications),
+      functional_status_baseline: strOrEmpty(body.functional_status_baseline),
+      current_functional_status: strOrEmpty(body.current_functional_status),
+      pain_assessment: {
+        location: strOrEmpty(pa.location),
+        score_0_10: num(pa.score_0_10),
+        quality: strOrEmpty(pa.quality),
+        aggravating_factors: strArr(pa.aggravating_factors),
+        relieving_factors: strArr(pa.relieving_factors),
+      },
+      rom_findings: strOrEmpty(body.rom_findings),
+      strength_findings: strOrEmpty(body.strength_findings),
+      special_tests: strArr(body.special_tests),
+      posture_and_gait: strOrEmpty(body.posture_and_gait),
+      assessment: strOrEmpty(body.assessment),
+      treatment_plan: {
+        modalities: strArr(tp.modalities),
+        exercises_prescribed: strArr(tp.exercises_prescribed),
+        home_program: strArr(tp.home_program),
+        precautions: strArr(tp.precautions),
+        expected_outcomes: strOrEmpty(tp.expected_outcomes),
+        sessions_per_week: num(tp.sessions_per_week),
+        expected_duration_weeks: num(tp.expected_duration_weeks),
+      },
+      follow_up: strOrEmpty(body.follow_up),
+    };
   } else {
     note = {
       chief_complaint: strOrEmpty(body.chief_complaint),

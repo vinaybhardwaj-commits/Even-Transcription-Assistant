@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, PhysiotherapyNote, AnyNote } from "@/lib/note-generation";
 
 /**
  * Renders a Medical Encounter Note as a clinical document. Prose
@@ -13,6 +13,7 @@ export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?
   if (noteType === "general_medical") return <GeneralMedicalView note={noteAny as GeneralMedicalNote} />;
   if (noteType === "operative_procedure") return <OperativeView note={noteAny as OperativeProcedureNote} />;
   if (noteType === "dietetic_consult") return <DieteticView note={noteAny as DieteticConsultNote} />;
+  if (noteType === "physiotherapy") return <PhysioView note={noteAny as PhysiotherapyNote} />;
   const note = noteAny as EncounterNote;
   return (
     <article className="space-y-5 text-body text-even-ink-800">
@@ -82,6 +83,49 @@ export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?
           ) : null}
         </Section>
       ) : null}
+    </article>
+  );
+}
+
+function PhysioView({ note }: { note: PhysiotherapyNote }) {
+  const pa = note.pain_assessment;
+  const pain = [
+    pa.location ? `Location: ${pa.location}` : "",
+    pa.score_0_10 != null ? `Score: ${pa.score_0_10}/10` : "",
+    pa.quality ? `Quality: ${pa.quality}` : "",
+    pa.aggravating_factors.length ? `Aggravating: ${pa.aggravating_factors.join(", ")}` : "",
+    pa.relieving_factors.length ? `Relieving: ${pa.relieving_factors.join(", ")}` : "",
+  ].filter(Boolean);
+  const tp = note.treatment_plan;
+  const tpEmpty =
+    !tp.modalities.length && !tp.exercises_prescribed.length && !tp.home_program.length &&
+    !tp.precautions.length && !tp.expected_outcomes && tp.sessions_per_week == null && tp.expected_duration_weeks == null;
+  return (
+    <article className="space-y-5 text-body text-even-ink-800">
+      {note.reason_for_consult ? <Section title="Reason for consult"><p>{note.reason_for_consult}</p></Section> : null}
+      {note.relevant_medical_history.length > 0 ? <Section title="Relevant medical history"><BulletList items={note.relevant_medical_history} /></Section> : null}
+      {note.current_medications.length > 0 ? <Section title="Current medications"><BulletList items={note.current_medications} /></Section> : null}
+      {note.functional_status_baseline ? <Section title="Baseline functional status"><p className="whitespace-pre-line">{note.functional_status_baseline}</p></Section> : null}
+      {note.current_functional_status ? <Section title="Current functional status"><p className="whitespace-pre-line">{note.current_functional_status}</p></Section> : null}
+      {pain.length > 0 ? <Section title="Pain assessment"><BulletList items={pain} /></Section> : null}
+      {note.rom_findings ? <Section title="Range of motion"><p className="whitespace-pre-line">{note.rom_findings}</p></Section> : null}
+      {note.strength_findings ? <Section title="Strength"><p className="whitespace-pre-line">{note.strength_findings}</p></Section> : null}
+      {note.special_tests.length > 0 ? <Section title="Special tests"><BulletList items={note.special_tests} /></Section> : null}
+      {note.posture_and_gait ? <Section title="Posture & gait"><p className="whitespace-pre-line">{note.posture_and_gait}</p></Section> : null}
+      {note.assessment ? <Section title="Assessment"><p className="whitespace-pre-line">{note.assessment}</p></Section> : null}
+      {!tpEmpty ? (
+        <Section title="Treatment plan">
+          {tp.modalities.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Modalities</p><BulletList items={tp.modalities} /></> : null}
+          {tp.exercises_prescribed.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Exercises prescribed</p><BulletList items={tp.exercises_prescribed} /></> : null}
+          {tp.home_program.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Home program</p><BulletList items={tp.home_program} /></> : null}
+          {tp.precautions.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Precautions</p><BulletList items={tp.precautions} /></> : null}
+          {tp.expected_outcomes ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Expected outcomes</p><p>{tp.expected_outcomes}</p></> : null}
+          {tp.sessions_per_week != null || tp.expected_duration_weeks != null ? (
+            <p className="mt-2">{[tp.sessions_per_week != null ? `${tp.sessions_per_week} sessions/week` : "", tp.expected_duration_weeks != null ? `${tp.expected_duration_weeks} weeks` : ""].filter(Boolean).join(" \u00b7 ")}</p>
+          ) : null}
+        </Section>
+      ) : null}
+      {note.follow_up ? <Section title="Follow-up"><p className="whitespace-pre-line">{note.follow_up}</p></Section> : null}
     </article>
   );
 }

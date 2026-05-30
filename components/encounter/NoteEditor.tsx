@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, PhysiotherapyNote, AnyNote } from "@/lib/note-generation";
 
 type Props = {
   initial: AnyNote;
@@ -20,6 +20,9 @@ export function NoteEditor({ initial, noteType, onSave, onCancel }: Props) {
   }
   if (noteType === "dietetic_consult") {
     return <DieteticEditor initial={initial as DieteticConsultNote} onSave={onSave} onCancel={onCancel} />;
+  }
+  if (noteType === "physiotherapy") {
+    return <PhysioEditor initial={initial as PhysiotherapyNote} onSave={onSave} onCancel={onCancel} />;
   }
   return <ClinicEditor initial={initial as EncounterNote} onSave={onSave} onCancel={onCancel} />;
 }
@@ -84,6 +87,74 @@ function ClinicEditor({ initial, onSave, onCancel }: { initial: EncounterNote; o
         <Button variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
+        <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+          {saving ? "Saving…" : "Save edits"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PhysioEditor({ initial, onSave, onCancel }: { initial: PhysiotherapyNote; onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>; onCancel: () => void }) {
+  const [note, setNote] = React.useState<PhysiotherapyNote>(initial);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const handleSave = React.useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    const r = await onSave(note);
+    setSaving(false);
+    if (!r.ok) setError(r.error ?? "Save failed");
+  }, [note, onSave]);
+  const setStr = (field: keyof PhysiotherapyNote, value: string) => setNote((prev) => ({ ...prev, [field]: value }));
+  const setArr = (field: keyof PhysiotherapyNote, value: string[]) => setNote((prev) => ({ ...prev, [field]: value }));
+  const setPain = <K extends keyof PhysiotherapyNote["pain_assessment"]>(field: K, value: PhysiotherapyNote["pain_assessment"][K]) =>
+    setNote((prev) => ({ ...prev, pain_assessment: { ...prev.pain_assessment, [field]: value } }));
+  const setTreat = <K extends keyof PhysiotherapyNote["treatment_plan"]>(field: K, value: PhysiotherapyNote["treatment_plan"][K]) =>
+    setNote((prev) => ({ ...prev, treatment_plan: { ...prev.treatment_plan, [field]: value } }));
+  const pa = note.pain_assessment;
+  const tp = note.treatment_plan;
+  const autoBits = [
+    pa.score_0_10 != null ? `Pain ${pa.score_0_10}/10` : "",
+    tp.sessions_per_week != null ? `${tp.sessions_per_week} sessions/week` : "",
+    tp.expected_duration_weeks != null ? `${tp.expected_duration_weeks} weeks` : "",
+  ].filter(Boolean);
+  return (
+    <div className="space-y-5">
+      <StringField label="Reason for consult" value={note.reason_for_consult} onChange={(v) => setStr("reason_for_consult", v)} singleLine />
+      <ListField label="Relevant medical history" items={note.relevant_medical_history} onChange={(v) => setArr("relevant_medical_history", v)} />
+      <ListField label="Current medications" items={note.current_medications} onChange={(v) => setArr("current_medications", v)} />
+      <StringField label="Baseline functional status" value={note.functional_status_baseline} onChange={(v) => setStr("functional_status_baseline", v)} rows={2} />
+      <StringField label="Current functional status" value={note.current_functional_status} onChange={(v) => setStr("current_functional_status", v)} rows={2} />
+      <fieldset className="space-y-4 pt-2">
+        <legend className="text-label text-even-navy-800 uppercase tracking-wide text-caption">Pain assessment</legend>
+        <StringField label="Location" value={pa.location} onChange={(v) => setPain("location", v)} singleLine small />
+        <StringField label="Quality" value={pa.quality} onChange={(v) => setPain("quality", v)} singleLine small />
+        <ListField label="Aggravating factors" items={pa.aggravating_factors} onChange={(v) => setPain("aggravating_factors", v)} small />
+        <ListField label="Relieving factors" items={pa.relieving_factors} onChange={(v) => setPain("relieving_factors", v)} small />
+      </fieldset>
+      <StringField label="Range of motion findings" value={note.rom_findings} onChange={(v) => setStr("rom_findings", v)} rows={3} />
+      <StringField label="Strength findings" value={note.strength_findings} onChange={(v) => setStr("strength_findings", v)} rows={2} />
+      <ListField label="Special tests" items={note.special_tests} onChange={(v) => setArr("special_tests", v)} placeholder="e.g. Lachman positive on right" />
+      <StringField label="Posture & gait" value={note.posture_and_gait} onChange={(v) => setStr("posture_and_gait", v)} rows={2} />
+      <StringField label="Assessment" value={note.assessment} onChange={(v) => setStr("assessment", v)} rows={3} />
+      <fieldset className="space-y-4 pt-2">
+        <legend className="text-label text-even-navy-800 uppercase tracking-wide text-caption">Treatment plan</legend>
+        <ListField label="Modalities" items={tp.modalities} onChange={(v) => setTreat("modalities", v)} small />
+        <ListField label="Exercises prescribed" items={tp.exercises_prescribed} onChange={(v) => setTreat("exercises_prescribed", v)} placeholder="Exercise: 3 sets x 10" small />
+        <ListField label="Home program" items={tp.home_program} onChange={(v) => setTreat("home_program", v)} small />
+        <ListField label="Precautions" items={tp.precautions} onChange={(v) => setTreat("precautions", v)} small />
+        <StringField label="Expected outcomes" value={tp.expected_outcomes} onChange={(v) => setTreat("expected_outcomes", v)} rows={2} small />
+      </fieldset>
+      <StringField label="Follow-up" value={note.follow_up} onChange={(v) => setStr("follow_up", v)} rows={2} />
+      {autoBits.length > 0 ? (
+        <div className="rounded-md border border-even-ink-100 bg-even-ink-50/40 px-3 py-2">
+          <p className="text-caption text-even-ink-500">Auto-captured (re-record to change): {autoBits.join(" \u00b7 ")}</p>
+        </div>
+      ) : null}
+      {error ? <p className="text-caption text-danger-700">{error}</p> : null}
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-even-ink-100">
+        <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
           {saving ? "Saving…" : "Save edits"}
         </Button>

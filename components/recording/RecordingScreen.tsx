@@ -58,7 +58,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       const nt = sessionStorage.getItem("eta:pending_note_type");
       if (
         nt === "general_medical" || nt === "clinic_encounter" ||
-        nt === "operative_procedure" || nt === "dietetic_consult"
+        nt === "operative_procedure" || nt === "dietetic_consult" || nt === "physiotherapy"
       ) pendingNoteType = nt;
       sessionStorage.removeItem("eta:pending_note_type");
     } catch {
