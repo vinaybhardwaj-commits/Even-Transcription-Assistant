@@ -14,7 +14,8 @@ import { sql } from "@/lib/db";
  * doctor write already succeeded. clinician_type is set once on insert and is
  * deliberately NOT overwritten on update (a future v2 surface changes type).
  */
-export async function syncClinicianFromDoctor(doctorId: string): Promise<void> {
+export async function syncClinicianFromDoctor(doctorId: string, clinicianType: string = "physician"): Promise<void> {
+  const ct = ["physician", "dietitian", "physiotherapist"].includes(clinicianType) ? clinicianType : "physician";
   try {
     await sql`
       INSERT INTO clinician (
@@ -24,7 +25,7 @@ export async function syncClinicianFromDoctor(doctorId: string): Promise<void> {
         created_by, deleted_at, created_at, updated_at
       )
       SELECT
-        id, id, 'physician'::clinician_type, full_name, email, phone,
+        id, id, ${ct}::clinician_type, full_name, email, phone,
         email_show_conversation_with, url_slug, url_token, pin_hash, pin_set_at,
         failed_pin_count, locked_until, status, last_active_at, joined_at,
         created_by, deleted_at, created_at, updated_at

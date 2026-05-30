@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
 
 type Props = {
   initial: AnyNote;
@@ -17,6 +17,9 @@ export function NoteEditor({ initial, noteType, onSave, onCancel }: Props) {
   }
   if (noteType === "operative_procedure") {
     return <OperativeEditor initial={initial as OperativeProcedureNote} onSave={onSave} onCancel={onCancel} />;
+  }
+  if (noteType === "dietetic_consult") {
+    return <DieteticEditor initial={initial as DieteticConsultNote} onSave={onSave} onCancel={onCancel} />;
   }
   return <ClinicEditor initial={initial as EncounterNote} onSave={onSave} onCancel={onCancel} />;
 }
@@ -81,6 +84,67 @@ function ClinicEditor({ initial, onSave, onCancel }: { initial: EncounterNote; o
         <Button variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
+        <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+          {saving ? "Saving…" : "Save edits"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function DieteticEditor({ initial, onSave, onCancel }: { initial: DieteticConsultNote; onSave: (note: AnyNote) => Promise<{ ok: boolean; error?: string }>; onCancel: () => void }) {
+  const [note, setNote] = React.useState<DieteticConsultNote>(initial);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const handleSave = React.useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    const r = await onSave(note);
+    setSaving(false);
+    if (!r.ok) setError(r.error ?? "Save failed");
+  }, [note, onSave]);
+  const setStr = (field: keyof DieteticConsultNote, value: string) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const setArr = (field: keyof DieteticConsultNote, value: string[]) =>
+    setNote((prev) => ({ ...prev, [field]: value }));
+  const setPlan = <K extends keyof DieteticConsultNote["diet_plan"]>(field: K, value: DieteticConsultNote["diet_plan"][K]) =>
+    setNote((prev) => ({ ...prev, diet_plan: { ...prev.diet_plan, [field]: value } }));
+  const a = note.anthropometrics;
+  const anthroBits = [
+    a.weight_kg != null ? `Weight ${a.weight_kg} kg` : "",
+    a.height_cm != null ? `Height ${a.height_cm} cm` : "",
+    a.bmi != null ? `BMI ${a.bmi}` : "",
+    a.waist_circumference_cm != null ? `Waist ${a.waist_circumference_cm} cm` : "",
+    a.body_fat_percent != null ? `Body fat ${a.body_fat_percent}%` : "",
+    note.diet_plan.daily_calorie_target_kcal != null ? `Target ${note.diet_plan.daily_calorie_target_kcal} kcal` : "",
+  ].filter(Boolean);
+  return (
+    <div className="space-y-5">
+      <StringField label="Reason for consult" value={note.reason_for_consult} onChange={(v) => setStr("reason_for_consult", v)} singleLine />
+      <ListField label="Relevant medical history" items={note.relevant_medical_history} onChange={(v) => setArr("relevant_medical_history", v)} placeholder="e.g. Type 2 diabetes" />
+      <ListField label="Current medications" items={note.current_medications} onChange={(v) => setArr("current_medications", v)} />
+      <ListField label="Allergies & intolerances" items={note.allergies_and_intolerances} onChange={(v) => setArr("allergies_and_intolerances", v)} placeholder="e.g. Lactose intolerance" />
+      <StringField label="24-hour diet recall" value={note.diet_recall} onChange={(v) => setStr("diet_recall", v)} rows={4} />
+      <ListField label="Food preferences & aversions" items={note.food_preferences_and_aversions} onChange={(v) => setArr("food_preferences_and_aversions", v)} />
+      <StringField label="Nutritional assessment" value={note.nutritional_assessment} onChange={(v) => setStr("nutritional_assessment", v)} rows={3} />
+      <fieldset className="space-y-4 pt-2">
+        <legend className="text-label text-even-navy-800 uppercase tracking-wide text-caption">Diet plan</legend>
+        <StringField label="Macronutrient distribution" value={note.diet_plan.macronutrient_distribution} onChange={(v) => setPlan("macronutrient_distribution", v)} singleLine small />
+        <ListField label="Meal pattern" items={note.diet_plan.meal_pattern} onChange={(v) => setPlan("meal_pattern", v)} placeholder="Breakfast: ..." small />
+        <ListField label="Foods to emphasize" items={note.diet_plan.foods_to_emphasize} onChange={(v) => setPlan("foods_to_emphasize", v)} small />
+        <ListField label="Foods to limit / avoid" items={note.diet_plan.foods_to_limit_or_avoid} onChange={(v) => setPlan("foods_to_limit_or_avoid", v)} small />
+        <ListField label="Supplements" items={note.diet_plan.supplements_recommended} onChange={(v) => setPlan("supplements_recommended", v)} small />
+        <ListField label="Behavioural goals" items={note.diet_plan.behavioural_goals} onChange={(v) => setPlan("behavioural_goals", v)} small />
+      </fieldset>
+      <StringField label="Follow-up" value={note.follow_up} onChange={(v) => setStr("follow_up", v)} rows={2} />
+      {anthroBits.length > 0 ? (
+        <div className="rounded-md border border-even-ink-100 bg-even-ink-50/40 px-3 py-2">
+          <p className="text-caption text-even-ink-500">Auto-captured (re-record to change): {anthroBits.join(" · ")}</p>
+        </div>
+      ) : null}
+      {error ? <p className="text-caption text-danger-700">{error}</p> : null}
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-even-ink-100">
+        <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
           {saving ? "Saving…" : "Save edits"}
         </Button>

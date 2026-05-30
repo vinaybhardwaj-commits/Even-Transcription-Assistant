@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
   const g = await guard();
   if (!g.ok) return respondError(g.code, g.msg);
 
-  let body: { full_name?: string; email?: string; phone?: string; pin?: string };
+  let body: { full_name?: string; email?: string; phone?: string; pin?: string; clinician_type?: string };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -122,6 +122,7 @@ export async function POST(req: NextRequest) {
   const email = (body.email ?? "").trim().toLowerCase();
   const phone = body.phone ? body.phone.trim() : null;
   const pin = body.pin && /^[0-9]{4}$/.test(body.pin) ? body.pin : generatePin();
+  const clinicianType = ["physician", "dietitian", "physiotherapist"].includes(String(body.clinician_type)) ? String(body.clinician_type) : "physician";
 
   if (fullName.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return respondError("VALIDATION_FAILED", "name_and_email_required");
@@ -151,7 +152,7 @@ export async function POST(req: NextRequest) {
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
-  await syncClinicianFromDoctor(id); // V2.S1 dual-write
+  await syncClinicianFromDoctor(id, clinicianType); // V2.S1 dual-write (clinician_type set on create)
 
   const appUrl = canonicalAppUrl();
   return respondOk({

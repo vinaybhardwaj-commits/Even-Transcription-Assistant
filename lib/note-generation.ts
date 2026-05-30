@@ -119,6 +119,44 @@ Style rules:
 - If counts were not explicitly addressed, set counts_correct to null
 - For implants prefer "manufacturer + product + catalog/serial" if stated, else just the product name`;
 
+// Dietetic Consult Note (V2.S4) — clinical dietitian. CDMSS OFF. PRD §7.2.4.
+const SYSTEM_DIETETIC = `You are converting a clinical dietitian's voice-dictated patient consultation into a structured Dietetic Consult Note. The transcript may be in English, an Indian language, or code-mixed — ALWAYS write the note in clear clinical English, translating faithfully. Use ONLY information explicitly stated in the transcript — do not invent diet recall details, anthropometric values, calorie targets, or dietary preferences. If a section was not discussed, return an empty string, empty array, or null (for numeric fields).
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence, no explanation):
+
+{
+  "reason_for_consult": string,
+  "relevant_medical_history": [string, ...],          // DM2, HTN, CKD, GI disease, etc.
+  "current_medications": [string, ...],               // esp. those affecting weight/appetite/glucose
+  "allergies_and_intolerances": [string, ...],        // food + drug (lactose, gluten, nut, etc.)
+  "anthropometrics": {
+    "weight_kg": number | null,
+    "height_cm": number | null,
+    "bmi": number | null,                             // compute from weight/height if not stated, round to 1 dp
+    "waist_circumference_cm": number | null,
+    "body_fat_percent": number | null,
+    "other": string                                   // any other measurement, free text
+  },
+  "diet_recall": string,                              // 24-hour intake as a narrative paragraph
+  "food_preferences_and_aversions": [string, ...],    // likes + dislikes / can't eat
+  "nutritional_assessment": string,                   // dietitian's clinical synthesis
+  "diet_plan": {
+    "daily_calorie_target_kcal": number | null,
+    "macronutrient_distribution": string,             // e.g. "50% CHO, 20% protein, 30% fat"
+    "meal_pattern": [string, ...],                    // "Breakfast: ...", "Mid-morning: ..."
+    "foods_to_emphasize": [string, ...],
+    "foods_to_limit_or_avoid": [string, ...],
+    "supplements_recommended": [string, ...],
+    "behavioural_goals": [string, ...]                // e.g. "log meals daily", "walk 30 min/day"
+  },
+  "follow_up": string
+}
+
+Style rules:
+- Preserve exact anthropometric values, calorie targets, and macro splits
+- If BMI was not stated but weight and height were, compute BMI = weight_kg / (height_cm/100)^2, rounded to 1 decimal
+- Do not invent a diet plan the dietitian didn't describe`;
+
 export type EncounterNote = {
   chief_complaint: string;
   history_present_illness: string;
@@ -178,7 +216,36 @@ export type OperativeProcedureNote = {
   disposition: string;
 };
 
-export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote;
+// DieteticConsultNote — clinical dietitian consult (V2.S4, PRD §7.2.4). CDMSS OFF.
+export type DieteticConsultNote = {
+  reason_for_consult: string;
+  relevant_medical_history: string[];
+  current_medications: string[];
+  allergies_and_intolerances: string[];
+  anthropometrics: {
+    weight_kg: number | null;
+    height_cm: number | null;
+    bmi: number | null;
+    waist_circumference_cm: number | null;
+    body_fat_percent: number | null;
+    other: string;
+  };
+  diet_recall: string;
+  food_preferences_and_aversions: string[];
+  nutritional_assessment: string;
+  diet_plan: {
+    daily_calorie_target_kcal: number | null;
+    macronutrient_distribution: string;
+    meal_pattern: string[];
+    foods_to_emphasize: string[];
+    foods_to_limit_or_avoid: string[];
+    supplements_recommended: string[];
+    behavioural_goals: string[];
+  };
+  follow_up: string;
+};
+
+export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote | DieteticConsultNote;
 
 /** Note types that get the CDMSS pipeline (clinic + general medical only). */
 export function noteTypeHasCdmss(noteType?: string): boolean {
@@ -193,6 +260,7 @@ export function noteHeadline(note: AnyNote | null | undefined, noteType?: string
     const op = note as OperativeProcedureNote;
     return op.procedure_performed?.[0] || op.post_op_diagnosis || op.pre_op_diagnosis || "";
   }
+  if (noteType === "dietetic_consult") return (note as DieteticConsultNote).reason_for_consult ?? "";
   return (note as EncounterNote).chief_complaint ?? "";
 }
 
@@ -213,6 +281,19 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
       (g.plan?.treatment_changes?.length ?? 0) > 0 ||
       (g.plan?.consultations_requested?.length ?? 0) > 0 ||
       (g.plan?.follow_up ?? "").trim().length > 0
+    );
+  }
+  if (noteType === "dietetic_consult") {
+    const dt = note as DieteticConsultNote;
+    return (
+      (dt.reason_for_consult ?? "").trim().length > 0 ||
+      (dt.nutritional_assessment ?? "").trim().length > 0 ||
+      (dt.diet_recall ?? "").trim().length > 0 ||
+      (dt.relevant_medical_history?.length ?? 0) > 0 ||
+      (dt.diet_plan?.meal_pattern?.length ?? 0) > 0 ||
+      (dt.diet_plan?.foods_to_emphasize?.length ?? 0) > 0 ||
+      dt.anthropometrics?.weight_kg != null ||
+      dt.anthropometrics?.height_cm != null
     );
   }
   if (noteType === "operative_procedure") {
@@ -268,6 +349,7 @@ export async function generateNote(
   const system =
     opts.noteType === "general_medical" ? SYSTEM_GENERAL :
     opts.noteType === "operative_procedure" ? SYSTEM_OPERATIVE :
+    opts.noteType === "dietetic_consult" ? SYSTEM_DIETETIC :
     SYSTEM;
 
   const t0 = Date.now();
@@ -321,6 +403,8 @@ export async function generateNote(
     const S = (v: unknown): string => (typeof v === "string" ? v : "");
     const A = (v: unknown): string[] =>
       Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    const N = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+    const B = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
     const pl = (parsedRaw.plan ?? {}) as Record<string, unknown>;
     let note: AnyNote;
     if (opts.noteType === "general_medical") {
@@ -340,8 +424,6 @@ export async function generateNote(
         },
       };
     } else if (opts.noteType === "operative_procedure") {
-      const N = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
-      const B = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
       const specimens = Array.isArray(parsedRaw.specimens)
         ? (parsedRaw.specimens as unknown[]).map((x) => {
             const ob = (x ?? {}) as Record<string, unknown>;
@@ -378,6 +460,36 @@ export async function generateNote(
         counts_correct: B(parsedRaw.counts_correct),
         antibiotic_given: S(parsedRaw.antibiotic_given),
         disposition: S(parsedRaw.disposition),
+      };
+    } else if (opts.noteType === "dietetic_consult") {
+      const an = (parsedRaw.anthropometrics ?? {}) as Record<string, unknown>;
+      const dp = (parsedRaw.diet_plan ?? {}) as Record<string, unknown>;
+      note = {
+        reason_for_consult: S(parsedRaw.reason_for_consult),
+        relevant_medical_history: A(parsedRaw.relevant_medical_history),
+        current_medications: A(parsedRaw.current_medications),
+        allergies_and_intolerances: A(parsedRaw.allergies_and_intolerances),
+        anthropometrics: {
+          weight_kg: N(an.weight_kg),
+          height_cm: N(an.height_cm),
+          bmi: N(an.bmi),
+          waist_circumference_cm: N(an.waist_circumference_cm),
+          body_fat_percent: N(an.body_fat_percent),
+          other: S(an.other),
+        },
+        diet_recall: S(parsedRaw.diet_recall),
+        food_preferences_and_aversions: A(parsedRaw.food_preferences_and_aversions),
+        nutritional_assessment: S(parsedRaw.nutritional_assessment),
+        diet_plan: {
+          daily_calorie_target_kcal: N(dp.daily_calorie_target_kcal),
+          macronutrient_distribution: S(dp.macronutrient_distribution),
+          meal_pattern: A(dp.meal_pattern),
+          foods_to_emphasize: A(dp.foods_to_emphasize),
+          foods_to_limit_or_avoid: A(dp.foods_to_limit_or_avoid),
+          supplements_recommended: A(dp.supplements_recommended),
+          behavioural_goals: A(dp.behavioural_goals),
+        },
+        follow_up: S(parsedRaw.follow_up),
       };
     } else {
       note = {

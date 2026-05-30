@@ -140,6 +140,37 @@ export async function PATCH(
       antibiotic_given: strOrEmpty(body.antibiotic_given),
       disposition: strOrEmpty(body.disposition),
     };
+  } else if (row.note_type === "dietetic_consult") {
+    const num = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+    const an = (body.anthropometrics ?? {}) as Record<string, unknown>;
+    const dp = (body.diet_plan ?? {}) as Record<string, unknown>;
+    note = {
+      reason_for_consult: strOrEmpty(body.reason_for_consult),
+      relevant_medical_history: strArr(body.relevant_medical_history),
+      current_medications: strArr(body.current_medications),
+      allergies_and_intolerances: strArr(body.allergies_and_intolerances),
+      anthropometrics: {
+        weight_kg: num(an.weight_kg),
+        height_cm: num(an.height_cm),
+        bmi: num(an.bmi),
+        waist_circumference_cm: num(an.waist_circumference_cm),
+        body_fat_percent: num(an.body_fat_percent),
+        other: strOrEmpty(an.other),
+      },
+      diet_recall: strOrEmpty(body.diet_recall),
+      food_preferences_and_aversions: strArr(body.food_preferences_and_aversions),
+      nutritional_assessment: strOrEmpty(body.nutritional_assessment),
+      diet_plan: {
+        daily_calorie_target_kcal: num(dp.daily_calorie_target_kcal),
+        macronutrient_distribution: strOrEmpty(dp.macronutrient_distribution),
+        meal_pattern: strArr(dp.meal_pattern),
+        foods_to_emphasize: strArr(dp.foods_to_emphasize),
+        foods_to_limit_or_avoid: strArr(dp.foods_to_limit_or_avoid),
+        supplements_recommended: strArr(dp.supplements_recommended),
+        behavioural_goals: strArr(dp.behavioural_goals),
+      },
+      follow_up: strOrEmpty(body.follow_up),
+    };
   } else {
     note = {
       chief_complaint: strOrEmpty(body.chief_complaint),

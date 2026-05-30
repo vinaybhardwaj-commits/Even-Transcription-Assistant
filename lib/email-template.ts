@@ -10,7 +10,7 @@
  * component tree. Future polish can swap in @react-email/components.
  */
 
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
@@ -90,9 +90,11 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   const { note, cdmss, doctorName, patientLabel, recordedAt, encounterId, appUrl } = opts;
   const isGM = opts.noteType === "general_medical";
   const isOp = opts.noteType === "operative_procedure";
+  const isDt = opts.noteType === "dietetic_consult";
   const gm = note as GeneralMedicalNote;
   const cn = note as EncounterNote;
   const op = note as OperativeProcedureNote;
+  const dt = note as DieteticConsultNote;
   const planSub = (t: string) =>
     `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">${t}</p>`;
   const ddmmyyyy = recordedAt.toLocaleDateString("en-IN", {
@@ -103,8 +105,8 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   });
 
   // ---- Subject (O4: note type at start) ----
-  const typeLabel = isOp ? "Operative Note" : isGM ? "General Medical" : "Clinic Encounter";
-  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isGM ? gm.reason_for_visit : cn.chief_complaint;
+  const typeLabel = isOp ? "Operative Note" : isDt ? "Dietetic Consult" : isGM ? "General Medical" : "Clinic Encounter";
+  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isDt ? dt.reason_for_consult : isGM ? gm.reason_for_visit : cn.chief_complaint;
   const ccBit = headline
     ? ` · ${headline.slice(0, 60)}${headline.length > 60 ? "…" : ""}`
     : "";
@@ -168,7 +170,35 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
       op.disposition ? `${sectionHeading("Disposition")}${paragraph(op.disposition)}` : "",
     ];
   };
-  const noteSections = (isOp ? opSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
+  const dietSections = () => {
+    const a = dt.anthropometrics;
+    const anthro = [
+      a.weight_kg != null ? `Weight: ${a.weight_kg} kg` : "",
+      a.height_cm != null ? `Height: ${a.height_cm} cm` : "",
+      a.bmi != null ? `BMI: ${a.bmi}` : "",
+      a.waist_circumference_cm != null ? `Waist: ${a.waist_circumference_cm} cm` : "",
+      a.body_fat_percent != null ? `Body fat: ${a.body_fat_percent}%` : "",
+      a.other ? a.other : "",
+    ].filter(Boolean);
+    const dp = dt.diet_plan;
+    const planEmpty =
+      dp.daily_calorie_target_kcal == null && !dp.macronutrient_distribution &&
+      !dp.meal_pattern.length && !dp.foods_to_emphasize.length && !dp.foods_to_limit_or_avoid.length &&
+      !dp.supplements_recommended.length && !dp.behavioural_goals.length;
+    return [
+      dt.reason_for_consult ? `${sectionHeading("Reason for consult")}${paragraph(dt.reason_for_consult)}` : "",
+      dt.relevant_medical_history.length ? `${sectionHeading("Relevant medical history")}${bulletList(dt.relevant_medical_history)}` : "",
+      dt.current_medications.length ? `${sectionHeading("Current medications")}${bulletList(dt.current_medications)}` : "",
+      dt.allergies_and_intolerances.length ? `${sectionHeading("Allergies & intolerances")}${bulletList(dt.allergies_and_intolerances)}` : "",
+      anthro.length ? `${sectionHeading("Anthropometrics")}${bulletList(anthro)}` : "",
+      dt.diet_recall ? `${sectionHeading("24-hour diet recall")}${paragraph(dt.diet_recall)}` : "",
+      dt.food_preferences_and_aversions.length ? `${sectionHeading("Food preferences & aversions")}${bulletList(dt.food_preferences_and_aversions)}` : "",
+      dt.nutritional_assessment ? `${sectionHeading("Nutritional assessment")}${paragraph(dt.nutritional_assessment)}` : "",
+      !planEmpty ? `${sectionHeading("Diet plan")}${dp.daily_calorie_target_kcal != null ? planSub(`Calorie target: ${dp.daily_calorie_target_kcal} kcal/day`) : ""}${dp.macronutrient_distribution ? `${planSub("Macronutrients")}${paragraph(dp.macronutrient_distribution)}` : ""}${dp.meal_pattern.length ? `${planSub("Meal pattern")}${bulletList(dp.meal_pattern)}` : ""}${dp.foods_to_emphasize.length ? `${planSub("Foods to emphasize")}${bulletList(dp.foods_to_emphasize)}` : ""}${dp.foods_to_limit_or_avoid.length ? `${planSub("Foods to limit / avoid")}${bulletList(dp.foods_to_limit_or_avoid)}` : ""}${dp.supplements_recommended.length ? `${planSub("Supplements")}${bulletList(dp.supplements_recommended)}` : ""}${dp.behavioural_goals.length ? `${planSub("Behavioural goals")}${bulletList(dp.behavioural_goals)}` : ""}` : "",
+      dt.follow_up ? `${sectionHeading("Follow-up")}${paragraph(dt.follow_up)}` : "",
+    ];
+  };
+  const noteSections = (isOp ? opSections() : isDt ? dietSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
 
   // B10 defensive fallback (28 May 2026): if every clinical section is
   // empty, surface that explicitly instead of silently sending an email
@@ -316,6 +346,31 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     if (op.counts_correct != null) textLines.push(`Counts correct: ${op.counts_correct ? "Yes" : "No"}`);
     if (op.complications) textLines.push("", `Complications: ${op.complications}`);
     if (op.disposition) textLines.push(`Disposition: ${op.disposition}`);
+  } else if (isDt) {
+    if (dt.reason_for_consult) textLines.push(`Reason for consult: ${dt.reason_for_consult}`, "");
+    if (dt.relevant_medical_history.length) textLines.push(`Medical history: ${dt.relevant_medical_history.join("; ")}`);
+    if (dt.current_medications.length) textLines.push(`Medications: ${dt.current_medications.join("; ")}`);
+    if (dt.allergies_and_intolerances.length) textLines.push(`Allergies/intolerances: ${dt.allergies_and_intolerances.join("; ")}`);
+    const an = dt.anthropometrics;
+    const anthro = [
+      an.weight_kg != null ? `Wt ${an.weight_kg}kg` : "",
+      an.height_cm != null ? `Ht ${an.height_cm}cm` : "",
+      an.bmi != null ? `BMI ${an.bmi}` : "",
+      an.waist_circumference_cm != null ? `Waist ${an.waist_circumference_cm}cm` : "",
+      an.body_fat_percent != null ? `BF ${an.body_fat_percent}%` : "",
+    ].filter(Boolean);
+    if (anthro.length) textLines.push(`Anthropometrics: ${anthro.join(", ")}`);
+    if (dt.diet_recall) textLines.push("", `Diet recall:`, dt.diet_recall);
+    if (dt.nutritional_assessment) textLines.push("", `Assessment:`, dt.nutritional_assessment);
+    const dpl = dt.diet_plan;
+    if (dpl.daily_calorie_target_kcal != null) textLines.push(`Calorie target: ${dpl.daily_calorie_target_kcal} kcal/day`);
+    if (dpl.macronutrient_distribution) textLines.push(`Macros: ${dpl.macronutrient_distribution}`);
+    if (dpl.meal_pattern.length) textLines.push(`Meal pattern: ${dpl.meal_pattern.join(" | ")}`);
+    if (dpl.foods_to_emphasize.length) textLines.push(`Emphasize: ${dpl.foods_to_emphasize.join("; ")}`);
+    if (dpl.foods_to_limit_or_avoid.length) textLines.push(`Limit/avoid: ${dpl.foods_to_limit_or_avoid.join("; ")}`);
+    if (dpl.supplements_recommended.length) textLines.push(`Supplements: ${dpl.supplements_recommended.join("; ")}`);
+    if (dpl.behavioural_goals.length) textLines.push(`Goals: ${dpl.behavioural_goals.join("; ")}`);
+    if (dt.follow_up) textLines.push("", `Follow-up: ${dt.follow_up}`);
   } else if (isGM) {
     if (gm.reason_for_visit) textLines.push(`Reason for visit: ${gm.reason_for_visit}`, "");
     if (gm.active_problems.length) textLines.push(`Active problems: ${gm.active_problems.join("; ")}`, "");

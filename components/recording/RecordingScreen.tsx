@@ -56,7 +56,10 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       sessionStorage.removeItem("eta:pending_patient_label");
       // V2.S2 note-type (physician allow-list); default clinic_encounter server-side.
       const nt = sessionStorage.getItem("eta:pending_note_type");
-      if (nt === "general_medical" || nt === "clinic_encounter" || nt === "operative_procedure") pendingNoteType = nt;
+      if (
+        nt === "general_medical" || nt === "clinic_encounter" ||
+        nt === "operative_procedure" || nt === "dietetic_consult"
+      ) pendingNoteType = nt;
       sessionStorage.removeItem("eta:pending_note_type");
     } catch {
       /* private mode / storage disabled — silently skip */

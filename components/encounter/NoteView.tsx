@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, AnyNote } from "@/lib/note-generation";
 
 /**
  * Renders a Medical Encounter Note as a clinical document. Prose
@@ -12,6 +12,7 @@ import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, AnyNote
 export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?: string }) {
   if (noteType === "general_medical") return <GeneralMedicalView note={noteAny as GeneralMedicalNote} />;
   if (noteType === "operative_procedure") return <OperativeView note={noteAny as OperativeProcedureNote} />;
+  if (noteType === "dietetic_consult") return <DieteticView note={noteAny as DieteticConsultNote} />;
   const note = noteAny as EncounterNote;
   return (
     <article className="space-y-5 text-body text-even-ink-800">
@@ -81,6 +82,48 @@ export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?
           ) : null}
         </Section>
       ) : null}
+    </article>
+  );
+}
+
+function DieteticView({ note }: { note: DieteticConsultNote }) {
+  const a = note.anthropometrics;
+  const anthro = [
+    a.weight_kg != null ? `Weight: ${a.weight_kg} kg` : "",
+    a.height_cm != null ? `Height: ${a.height_cm} cm` : "",
+    a.bmi != null ? `BMI: ${a.bmi}` : "",
+    a.waist_circumference_cm != null ? `Waist: ${a.waist_circumference_cm} cm` : "",
+    a.body_fat_percent != null ? `Body fat: ${a.body_fat_percent}%` : "",
+    a.other ? a.other : "",
+  ].filter(Boolean);
+  const dp = note.diet_plan;
+  const planEmpty =
+    dp.daily_calorie_target_kcal == null && !dp.macronutrient_distribution &&
+    dp.meal_pattern.length === 0 && dp.foods_to_emphasize.length === 0 &&
+    dp.foods_to_limit_or_avoid.length === 0 && dp.supplements_recommended.length === 0 &&
+    dp.behavioural_goals.length === 0;
+  return (
+    <article className="space-y-5 text-body text-even-ink-800">
+      {note.reason_for_consult ? <Section title="Reason for consult"><p>{note.reason_for_consult}</p></Section> : null}
+      {note.relevant_medical_history.length > 0 ? <Section title="Relevant medical history"><BulletList items={note.relevant_medical_history} /></Section> : null}
+      {note.current_medications.length > 0 ? <Section title="Current medications"><BulletList items={note.current_medications} /></Section> : null}
+      {note.allergies_and_intolerances.length > 0 ? <Section title="Allergies & intolerances"><BulletList items={note.allergies_and_intolerances} /></Section> : null}
+      {anthro.length > 0 ? <Section title="Anthropometrics"><BulletList items={anthro} /></Section> : null}
+      {note.diet_recall ? <Section title="24-hour diet recall"><p className="whitespace-pre-line">{note.diet_recall}</p></Section> : null}
+      {note.food_preferences_and_aversions.length > 0 ? <Section title="Food preferences & aversions"><BulletList items={note.food_preferences_and_aversions} /></Section> : null}
+      {note.nutritional_assessment ? <Section title="Nutritional assessment"><p className="whitespace-pre-line">{note.nutritional_assessment}</p></Section> : null}
+      {!planEmpty ? (
+        <Section title="Diet plan">
+          {dp.daily_calorie_target_kcal != null ? <p className="mb-1">Calorie target: {dp.daily_calorie_target_kcal} kcal/day</p> : null}
+          {dp.macronutrient_distribution ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Macronutrients</p><p>{dp.macronutrient_distribution}</p></> : null}
+          {dp.meal_pattern.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Meal pattern</p><BulletList items={dp.meal_pattern} /></> : null}
+          {dp.foods_to_emphasize.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Foods to emphasize</p><BulletList items={dp.foods_to_emphasize} /></> : null}
+          {dp.foods_to_limit_or_avoid.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Foods to limit / avoid</p><BulletList items={dp.foods_to_limit_or_avoid} /></> : null}
+          {dp.supplements_recommended.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Supplements</p><BulletList items={dp.supplements_recommended} /></> : null}
+          {dp.behavioural_goals.length > 0 ? <><p className="text-label text-even-ink-500 mt-2 mb-1">Behavioural goals</p><BulletList items={dp.behavioural_goals} /></> : null}
+        </Section>
+      ) : null}
+      {note.follow_up ? <Section title="Follow-up"><p className="whitespace-pre-line">{note.follow_up}</p></Section> : null}
     </article>
   );
 }

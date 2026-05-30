@@ -30,13 +30,15 @@ type DoctorRow = {
   url_token: string;
   pin_hash: string | null;
   status: "active" | "disabled" | "locked";
+  clinician_type: string | null;
 };
 
 async function findDoctor(fullSlug: string): Promise<DoctorRow | null> {
   // url_slug stores the full slug INCLUDING the token (per PRD §4.14 db note)
   try {
     const rows = (await sql`
-      SELECT id, full_name, url_slug, url_token, pin_hash, status
+      SELECT id, full_name, url_slug, url_token, pin_hash, status,
+             (SELECT clinician_type FROM clinician WHERE clinician.id = doctor.id) AS clinician_type
         FROM doctor
        WHERE url_slug = ${fullSlug}
          AND deleted_at IS NULL
@@ -83,7 +85,7 @@ export default async function DoctorPage({
       const vp = (await sql`SELECT 1 FROM voice_print WHERE doctor_id = ${doctor.id} LIMIT 1`) as Array<unknown>;
       voiceEnrolled = vp.length > 0;
     } catch { /* table may not exist on older deploys */ }
-    return <HomeShell slug={slug} doctorName={doctor.full_name} voiceEnrolled={voiceEnrolled} />;
+    return <HomeShell slug={slug} doctorName={doctor.full_name} voiceEnrolled={voiceEnrolled} clinicianType={doctor.clinician_type ?? "physician"} />;
   }
 
   // PIN entry shell

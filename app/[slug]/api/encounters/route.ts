@@ -42,7 +42,7 @@ export async function POST(
 
   // 3. Body — patient_label + note_type optional (V2.S2)
   let patientLabel: string | null = null;
-  let noteType: "clinic_encounter" | "general_medical" | "operative_procedure" = "clinic_encounter";
+  let noteType: "clinic_encounter" | "general_medical" | "operative_procedure" | "dietetic_consult" = "clinic_encounter";
   try {
     const body = (await req.json().catch(() => ({}))) as {
       patient_label?: string;
@@ -57,7 +57,8 @@ export async function POST(
     if (
       body.note_type === "general_medical" ||
       body.note_type === "clinic_encounter" ||
-      body.note_type === "operative_procedure"
+      body.note_type === "operative_procedure" ||
+      body.note_type === "dietetic_consult"
     ) {
       noteType = body.note_type;
     }

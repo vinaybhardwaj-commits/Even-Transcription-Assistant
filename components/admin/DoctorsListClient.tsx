@@ -198,6 +198,7 @@ function CreateDoctorModal({
   const [fullName, setFullName] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [phone, setPhone] = React.useState("");
+  const [clinicianType, setClinicianType] = React.useState("physician");
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -210,7 +211,7 @@ function CreateDoctorModal({
         const res = await fetch("/api/admin/doctors", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ full_name: fullName, email, phone: phone || undefined }),
+          body: JSON.stringify({ full_name: fullName, email, phone: phone || undefined, clinician_type: clinicianType }),
         });
         const j = await res.json();
         if (!res.ok) throw new Error((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
@@ -221,7 +222,7 @@ function CreateDoctorModal({
         setSubmitting(false);
       }
     },
-    [fullName, email, phone, onCreated],
+    [fullName, email, phone, clinicianType, onCreated],
   );
 
   return (
@@ -235,6 +236,12 @@ function CreateDoctorModal({
           className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300" />
         <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="phone (optional)" autoComplete="off"
           className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300" />
+        <select value={clinicianType} onChange={(e) => setClinicianType(e.target.value)} aria-label="Clinician type"
+          className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300">
+          <option value="physician">Physician</option>
+          <option value="dietitian">Dietitian</option>
+          <option value="physiotherapist">Physiotherapist</option>
+        </select>
         {error ? <p className="text-caption text-danger-700">{error}</p> : null}
         <div className="flex items-center justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} disabled={submitting} className="text-label text-even-ink-500 hover:underline px-3 py-2">Cancel</button>

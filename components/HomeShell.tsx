@@ -6,13 +6,17 @@ import { Input } from "@/components/ui/Input";
 import { RecoveryModal } from "@/components/RecoveryModal";
 import { Library } from "@/components/Library";
 
-type Props = { slug: string; doctorName: string; voiceEnrolled?: boolean };
+type Props = { slug: string; doctorName: string; voiceEnrolled?: boolean; clinicianType?: string };
 
-export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
+export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianType = "physician" }: Props) {
   const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
   const [patientLabel, setPatientLabel] = React.useState("");
-  const [noteType, setNoteType] = React.useState<"clinic_encounter" | "general_medical" | "operative_procedure">("clinic_encounter");
+  const noteOptions: ReadonlyArray<readonly [string, string]> =
+    clinicianType === "dietitian" ? [["dietetic_consult", "Dietetic Consult"]]
+    : clinicianType === "physiotherapist" ? [["physiotherapy", "Physiotherapy"]]
+    : [["clinic_encounter", "Clinic"], ["general_medical", "General Medical"], ["operative_procedure", "Operative"]];
+  const [noteType, setNoteType] = React.useState<string>(noteOptions[0][0]);
 
   const goRecord = React.useCallback(() => {
     // patient_label is captured in the recording screen / submit step;
@@ -77,7 +81,7 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true }: Props) {
           <div className="mb-4">
             <span className="block text-label text-even-navy-800 mb-1.5">Note type</span>
             <div className="inline-flex w-full rounded-md border border-even-ink-200 overflow-hidden text-label">
-              {([["clinic_encounter", "Clinic"], ["general_medical", "General Medical"], ["operative_procedure", "Operative"]] as const).map(([v, lbl]) => (
+              {noteOptions.map(([v, lbl]) => (
                 <button
                   key={v}
                   type="button"
