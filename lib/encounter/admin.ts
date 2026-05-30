@@ -32,6 +32,15 @@ export type EncounterFull = {
   transcript_clean: string | null;
   detected_language: string | null;
   transcript_original: string | null;
+  // v2.1 diarization (migration 0007)
+  speakers: unknown[] | null;
+  transcript_segments: unknown[] | null;
+  overlap_windows: unknown[] | null;
+  aggregates: Record<string, unknown> | null;
+  diarize_status: string | null;
+  diarize_error: string | null;
+  diarize_started_at: string | null;
+  diarize_completed_at: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -127,6 +136,14 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       e.transcript_clean,
       e.detected_language,
       e.transcript_original,
+      e.speakers,
+      e.transcript_segments,
+      e.overlap_windows,
+      e.aggregates,
+      e.diarize_status,
+      e.diarize_error,
+      e.diarize_started_at::text   AS diarize_started_at,
+      e.diarize_completed_at::text AS diarize_completed_at,
       e.note_json,
       e.note_json_edited,
       e.cdmss_json,
@@ -232,6 +249,14 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     note_json: (r.note_json as EncounterNote | null) ?? null,
     detected_language: r.detected_language ? String(r.detected_language) : null,
     transcript_original: r.transcript_original ? String(r.transcript_original) : null,
+    speakers: (r.speakers as unknown[] | null) ?? null,
+    transcript_segments: (r.transcript_segments as unknown[] | null) ?? null,
+    overlap_windows: (r.overlap_windows as unknown[] | null) ?? null,
+    aggregates: (r.aggregates as Record<string, unknown> | null) ?? null,
+    diarize_status: r.diarize_status ? String(r.diarize_status) : null,
+    diarize_error: r.diarize_error ? String(r.diarize_error) : null,
+    diarize_started_at: r.diarize_started_at ? String(r.diarize_started_at) : null,
+    diarize_completed_at: r.diarize_completed_at ? String(r.diarize_completed_at) : null,
     note_json_edited: (r.note_json_edited as EncounterNote | null) ?? null,
     cdmss_json: (r.cdmss_json as CdmssOutput | null) ?? null,
     audio_object_key: r.audio_object_key ? String(r.audio_object_key) : null,

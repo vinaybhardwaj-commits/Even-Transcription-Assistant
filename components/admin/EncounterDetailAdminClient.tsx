@@ -75,6 +75,16 @@ type LlmTrace = {
   events: TraceEventLog[];
   model_calls: ModelCall[];
 };
+type DiarizeSpeaker = {
+  idx: number;
+  label: string;
+  type: string;
+  total_speech_sec?: number;
+  first_heard_at_sec?: number;
+  source?: string;
+  confidence?: number;
+  clinician_id?: string;
+};
 type TranscriptionRunRow = {
   id: string;
   engine: string;
@@ -99,6 +109,11 @@ type EncounterFull = {
   detected_language: string | null;
   transcript_original: string | null;
   transcription_runs: TranscriptionRunRow[];
+  speakers: DiarizeSpeaker[] | null;
+  overlap_windows: unknown[] | null;
+  aggregates: Record<string, unknown> | null;
+  diarize_status: string | null;
+  diarize_error: string | null;
   note_json: EncounterNote | null;
   note_json_edited: EncounterNote | null;
   cdmss_json: CdmssOutput | null;
@@ -125,13 +140,14 @@ type FetchResp = {
   };
 };
 
-type TabKey = "note" | "transcript" | "engines" | "cdmss" | "send" | "audit";
+type TabKey = "note" | "transcript" | "engines" | "speakers" | "cdmss" | "send" | "audit";
 
-const TAB_ORDER: TabKey[] = ["note", "transcript", "engines", "cdmss", "send", "audit"];
+const TAB_ORDER: TabKey[] = ["note", "transcript", "engines", "speakers", "cdmss", "send", "audit"];
 const TAB_LABEL: Record<TabKey, string> = {
   note: "Note",
   transcript: "Transcript",
   engines: "Engines",
+  speakers: "Speakers",
   cdmss: "CDMSS",
   send: "Send",
   audit: "Audit log",
@@ -428,6 +444,57 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
               </section>
             ) : (
               <p className="text-body text-even-ink-400">No engine-comparison data (English-only encounter, or predates the multilingual testbed).</p>
+            )
+          ) : null}
+
+          {activeTab === "speakers" ? (
+            !enc.diarize_status ? (
+              <p className="text-body text-even-ink-400">No diarization for this encounter (predates v2.1, or audio was unavailable).</p>
+            ) : (
+              <section className="space-y-4">
+                <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-caption text-even-ink-500">Speaker diarization</span>
+                    <span className={`text-caption rounded-full px-2 py-0.5 ${enc.diarize_status === "complete" ? "bg-success-100 text-success-700" : enc.diarize_status === "failed" ? "bg-danger-100 text-danger-700" : "bg-even-ink-100 text-even-ink-600"}`}>
+                      {enc.diarize_status}
+                    </span>
+                  </div>
+                  {enc.diarize_error ? (
+                    <p className="text-caption text-danger-700 mt-1">{enc.diarize_error}</p>
+                  ) : null}
+                  <p className="text-caption text-even-ink-400 mt-1">
+                    Heuristic roles (no enrolled voiceprints yet — clinician naming arrives with enrollment). Full timeline + playback in a later sub-sprint.
+                  </p>
+                </div>
+                {enc.speakers && enc.speakers.length > 0 ? (
+                  <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                    {enc.speakers.map((sp) => (
+                      <div key={sp.idx} className="flex items-center justify-between py-2 border-b border-even-ink-50 last:border-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-label font-medium text-even-navy-800">{sp.label}</span>
+                          <span className="text-caption rounded-full px-2 py-0.5 bg-even-ink-100 text-even-ink-600">{sp.type}</span>
+                          {sp.source ? <span className="text-caption text-even-ink-400">{sp.source}</span> : null}
+                          {sp.confidence != null ? <span className="text-caption text-even-ink-400">{(sp.confidence * 100).toFixed(0)}%</span> : null}
+                        </div>
+                        <span className="text-caption text-even-ink-500">
+                          {sp.total_speech_sec != null ? `${sp.total_speech_sec.toFixed(1)}s` : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : enc.diarize_status === "complete" ? (
+                  <p className="text-body text-even-ink-400">No speakers detected in the audio.</p>
+                ) : null}
+                {enc.overlap_windows && enc.overlap_windows.length > 0 ? (
+                  <p className="text-caption text-even-ink-500">{enc.overlap_windows.length} overlapping-speech window(s) detected.</p>
+                ) : null}
+                {enc.aggregates && Object.keys(enc.aggregates).length > 0 ? (
+                  <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
+                    <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">Speech-time aggregates</summary>
+                    <pre className="px-3 pb-3 text-caption text-even-ink-700 whitespace-pre-wrap font-sans">{JSON.stringify(enc.aggregates, null, 2)}</pre>
+                  </details>
+                ) : null}
+              </section>
             )
           ) : null}
 

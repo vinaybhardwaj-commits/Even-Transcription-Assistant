@@ -33,6 +33,7 @@ import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
+import { runDiarize } from "@/lib/diarize";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -161,6 +162,59 @@ export async function POST(
       const m = e instanceof Error ? e.message : String(e);
       console.warn(`[process] batch-translate failed enc=${id}: ${m}`);
       emit?.({ stage: "progress", msg: "Batch translate error; using live transcript" });
+    }
+  };
+
+  // V2.SD.3 — submit-time speaker diarization. NON-CRITICAL: never blocks the
+  // encounter. Calls the live Mac Mini /diarize on the canonical R2 audio and
+  // stores speakers/segments/overlap/aggregates + a status lifecycle. No
+  // clinician centroids yet (enrollment = V2.SD.1) so roles are heuristic;
+  // no manual_relabels yet (live relabel = V2.SD.2). Soft-fails to
+  // diarize_status='failed' and the note/email behave as v2.0 (unlabeled).
+  const diarizeStore = async (emit?: (o: unknown) => void): Promise<void> => {
+    if (!row) return;
+    if (!row.audio_object_key) {
+      try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch {}
+      return;
+    }
+    emit?.({ stage: "progress", msg: "Identifying speakers (diarization)\u2026" });
+    try {
+      await sql`UPDATE encounter SET diarize_status = 'running', diarize_started_at = NOW() WHERE id = ${id}`;
+      const head = await headObject(row.audio_object_key);
+      const bytes = await getObjectBytes(row.audio_object_key);
+      if (!bytes) {
+        await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = 'audio_missing' WHERE id = ${id}`;
+        emit?.({ stage: "progress", msg: "Diarization skipped (audio unavailable)" });
+        return;
+      }
+      const d = await runDiarize(bytes, head.content_type || "audio/webm", {
+        encounterId: id,
+        clinicianCentroids: [],
+        manualRelabels: [],
+        signal: req.signal,
+      });
+      if (d.ok) {
+        await sql`
+          UPDATE encounter
+             SET speakers             = ${JSON.stringify(d.result.speakers)}::jsonb,
+                 transcript_segments  = ${JSON.stringify(d.result.transcript_segments)}::jsonb,
+                 overlap_windows      = ${JSON.stringify(d.result.overlap_windows)}::jsonb,
+                 aggregates           = ${JSON.stringify(d.result.aggregates)}::jsonb,
+                 diarize_status       = 'complete',
+                 diarize_completed_at = NOW(),
+                 diarize_error        = NULL
+           WHERE id = ${id}
+        `;
+        emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${d.latencyMs}ms)` });
+      } else {
+        await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${d.error.slice(0, 300)} WHERE id = ${id}`;
+        emit?.({ stage: "progress", msg: `Diarization unavailable (${d.error.slice(0, 80)})` });
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      console.warn(`[process] diarize failed enc=${id}: ${m}`);
+      try { await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)} WHERE id = ${id}`; } catch {}
+      emit?.({ stage: "progress", msg: "Diarization error (non-critical)" });
     }
   };
 
@@ -348,6 +402,9 @@ export async function POST(
             cdmss_ms: pipelineRes.latency_ms,
             cdmss_error: cdmssErr,
           });
+
+          // V2.SD.3 — diarization runs AFTER the note is delivered to the client.
+          await diarizeStore(emit);
         } catch (e) {
           // S6.3: distinguish doctor cancel from real errors.
           // S6.2b: finalise any in-progress trace before returning.
@@ -478,6 +535,8 @@ export async function POST(
     const msg = e instanceof Error ? e.message : String(e);
     return respondError("PIPELINE_FAILED", `cdmss_persist_failed: ${msg.slice(0, 120)}`);
   }
+
+  await diarizeStore();
 
   return respondOk({
     encounter: { id, status: "complete" as const },
