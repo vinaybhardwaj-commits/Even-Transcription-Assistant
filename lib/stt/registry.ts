@@ -6,12 +6,14 @@ import { deepgramAdapter } from "./adapters/deepgram";
 import { whisperAdapter } from "./adapters/whisper";
 import { sarvamAdapter } from "./adapters/sarvam";
 import { elevenlabsAdapter } from "./adapters/elevenlabs";
+import { ekascribeAdapter } from "./adapters/ekascribe";
 
 export const ADAPTERS: Record<string, SttAdapter> = {
   deepgram: deepgramAdapter,
   whisper: whisperAdapter,
   sarvam: sarvamAdapter,
   elevenlabs: elevenlabsAdapter,
+  ekascribe: ekascribeAdapter,
 };
 
 export function adapterFor(key: string): SttAdapter | null {
