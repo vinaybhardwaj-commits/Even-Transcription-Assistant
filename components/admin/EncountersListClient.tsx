@@ -29,6 +29,7 @@ type EncounterRow = {
   status: EncounterStatus;
   send_status: "pending" | "sent" | "failed";
   patient_label_raw: string | null;
+  note_type: string | null;
   chief_complaint: string | null;
   recorded_at: string;
   duration_seconds: number | null;
@@ -68,6 +69,7 @@ export function EncountersListClient() {
   const [bucket, setBucket] = React.useState<Bucket>("all");
   const [window, setWindow] = React.useState<Window>("month");
   const [offset, setOffset] = React.useState(0);
+  const [noteTypeFilter, setNoteTypeFilter] = React.useState<string | null>(null);
   const [doctorId, setDoctorId] = React.useState<string | null>(initialDoctorId);
   const [doctors, setDoctors] = React.useState<DoctorOption[] | null>(null);
   const [data, setData] = React.useState<ListResp | null>(null);
@@ -117,6 +119,7 @@ export function EncountersListClient() {
       qs.set("limit",  String(PAGE_SIZE));
       qs.set("offset", String(offset));
       if (doctorId) qs.set("doctor_id", doctorId);
+      if (noteTypeFilter) qs.set("note_type", noteTypeFilter);
       const res = await fetch(`/api/admin/encounters?${qs.toString()}`, { cache: "no-store" });
       const j = await res.json();
       if (!res.ok) {
@@ -130,7 +133,7 @@ export function EncountersListClient() {
     } finally {
       setLoading(false);
     }
-  }, [bucket, window, offset, doctorId]);
+  }, [bucket, window, offset, doctorId, noteTypeFilter]);
 
   React.useEffect(() => { void fetchOnce(); }, [fetchOnce]);
 
@@ -145,6 +148,7 @@ export function EncountersListClient() {
   const onChipChange = (b: Bucket) => { setBucket(b); setOffset(0); };
   const onWindowChange = (w: Window) => { setWindow(w); setOffset(0); };
   const onDoctorChange = (id: string | null) => { setDoctorId(id); setOffset(0); };
+  const onNoteTypeChange = (nt: string | null) => { setNoteTypeFilter(nt); setOffset(0); };
 
   const selectedDoctor = React.useMemo<DoctorOption | null>(
     () => (doctorId && doctors ? doctors.find((d) => d.id === doctorId) ?? null : null),
@@ -220,6 +224,23 @@ export function EncountersListClient() {
             </Chip>
           );
         })}
+
+        {/* Note-type filter */}
+        <div className="flex items-center gap-1 ml-2">
+          <select
+            value={noteTypeFilter ?? ""}
+            onChange={(e) => onNoteTypeChange(e.target.value || null)}
+            aria-label="Filter by note type"
+            className="px-2.5 py-1 rounded-md text-caption bg-even-ink-100 text-even-ink-700 hover:bg-even-ink-200 border border-transparent focus:border-even-blue-400 focus:outline-none"
+          >
+            <option value="">All note types</option>
+            <option value="clinic_encounter">Clinic</option>
+            <option value="general_medical">General Medical</option>
+            <option value="operative_procedure">Operative</option>
+            <option value="dietetic_consult">Dietetic</option>
+            <option value="physiotherapy">Physiotherapy</option>
+          </select>
+        </div>
 
         {/* Doctor filter */}
         <div className="flex items-center gap-1 ml-2">
@@ -383,6 +404,7 @@ function Row({
     <tr className="border-t border-even-ink-100 hover:bg-even-ink-50/40 group">
       <td className="px-4 py-2">
         <Link href={`/admin/encounters/${row.id}`} className="block min-w-0">
+          <NoteTypePill noteType={row.note_type} />
           {row.patient_label_raw ? (
             <>
               <p className="text-even-navy-800 truncate">{row.patient_label_raw}</p>
@@ -488,6 +510,21 @@ function SendBadge({ status, count }: { status: "pending" | "sent" | "failed"; c
     return <span className="text-caption text-danger-700">⚠ Failed</span>;
   }
   return <span className="text-caption text-even-ink-500">○ Pending</span>;
+}
+
+function NoteTypePill({ noteType }: { noteType: string | null }) {
+  if (!noteType || noteType === "clinic_encounter") return null;
+  const label: Record<string, string> = {
+    general_medical: "General Medical",
+    operative_procedure: "Operative",
+    dietetic_consult: "Dietetic",
+    physiotherapy: "Physiotherapy",
+  };
+  return (
+    <span className="inline-block mb-0.5 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-even-blue-50 text-even-blue-700">
+      {label[noteType] ?? noteType}
+    </span>
+  );
 }
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {

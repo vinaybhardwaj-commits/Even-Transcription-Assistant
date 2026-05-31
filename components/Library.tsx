@@ -13,6 +13,7 @@ type Row = {
   patient_label: string | null;
   status: Status;
   send_status: SendStatus;
+  note_type: string | null;
   chief_complaint: string | null;
 };
 
@@ -133,6 +134,7 @@ export function Library({ slug }: Props) {
             >
               <div className="flex items-start justify-between gap-3 mb-1">
                 <p className="text-body text-even-navy-800 truncate">
+                  <LibNoteTypePill noteType={r.note_type} />
                   {r.chief_complaint || r.patient_label || "Untitled encounter"}
                 </p>
                 <StatusPill status={r.status} sendStatus={r.send_status} />
@@ -157,6 +159,21 @@ export function Library({ slug }: Props) {
         ))}
       </ul>
     </div>
+  );
+}
+
+function LibNoteTypePill({ noteType }: { noteType: string | null }) {
+  if (!noteType || noteType === "clinic_encounter") return null;
+  const label: Record<string, string> = {
+    general_medical: "General",
+    operative_procedure: "Operative",
+    dietetic_consult: "Dietetic",
+    physiotherapy: "Physio",
+  };
+  return (
+    <span className="inline-block mr-1.5 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-even-blue-50 text-even-blue-700 align-middle">
+      {label[noteType] ?? noteType}
+    </span>
   );
 }
 

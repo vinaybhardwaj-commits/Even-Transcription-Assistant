@@ -455,6 +455,7 @@ export async function listAdminEncounters(args: {
   limit?: number;
   offset?: number;
   doctorId?: string | null;
+  noteType?: string | null;
 }): Promise<AdminEncounterListResult> {
   const bucket = args.bucket ?? "all";
   const window = args.window ?? "month";
@@ -466,6 +467,8 @@ export async function listAdminEncounters(args: {
     typeof args.doctorId === "string" && args.doctorId.length > 0
       ? args.doctorId
       : null;
+  const noteTypeFilter: string | null =
+    typeof args.noteType === "string" && args.noteType.length > 0 ? args.noteType : null;
   const since = windowSinceForEnc(window).toISOString();
 
   // Translate bucket → (statusFilter, sendStatusFilter)
@@ -489,12 +492,14 @@ export async function listAdminEncounters(args: {
            AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
            AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
            AND (${doctorId}::text         IS NULL OR e.doctor_id   = ${doctorId})
+          AND (${noteTypeFilter}::text   IS NULL OR e.note_type   = ${noteTypeFilter}::note_type)
       `,
       sql`
         SELECT
           e.id,
           e.status,
           e.send_status,
+          e.note_type,
           e.patient_label_raw,
           COALESCE(
             (e.note_json_edited->>'chief_complaint'),
@@ -524,6 +529,7 @@ export async function listAdminEncounters(args: {
           AND (${statusFilter}::text     IS NULL OR e.status      = ${statusFilter}::encounter_status)
           AND (${sendStatusFilter}::text IS NULL OR e.send_status = ${sendStatusFilter}::send_status)
           AND (${doctorId}::text         IS NULL OR e.doctor_id   = ${doctorId})
+          AND (${noteTypeFilter}::text   IS NULL OR e.note_type   = ${noteTypeFilter}::note_type)
         ORDER BY e.recorded_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `,
@@ -576,6 +582,7 @@ export async function listAdminEncounters(args: {
         id: String(r.id),
         status: r.status as EncounterStatus,
         send_status: (r.send_status as "pending" | "sent" | "failed") ?? "pending",
+        note_type: r.note_type ? String(r.note_type) : null,
         patient_label_raw: r.patient_label_raw ? String(r.patient_label_raw) : null,
         chief_complaint: r.chief_complaint ? String(r.chief_complaint) : null,
         recorded_at: String(r.recorded_at),

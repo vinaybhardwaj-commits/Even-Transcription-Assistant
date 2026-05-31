@@ -49,6 +49,9 @@ export async function GET(req: NextRequest) {
   }
 
   const url = new URL(req.url);
+  const NOTE_TYPES = ["clinic_encounter", "general_medical", "operative_procedure", "dietetic_consult", "physiotherapy"];
+  const rawNoteType = url.searchParams.get("note_type");
+  const noteType = rawNoteType && NOTE_TYPES.includes(rawNoteType) ? rawNoteType : null;
   const bucket = parseBucket(url.searchParams.get("bucket"));
   const window = parseWindow(url.searchParams.get("window"));
   const limit  = Number.parseInt(url.searchParams.get("limit") ?? "25", 10);
@@ -67,6 +70,7 @@ export async function GET(req: NextRequest) {
     limit: Number.isFinite(limit) ? limit : 25,
     offset: Number.isFinite(offset) ? offset : 0,
     doctorId,
+    noteType,
   });
 
   return respondOk({

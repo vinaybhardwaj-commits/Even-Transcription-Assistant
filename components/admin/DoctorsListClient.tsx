@@ -33,6 +33,7 @@ export function DoctorsListClient() {
   const [banner, setBanner] = React.useState<Banner | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [filter, setFilter] = React.useState<"all" | "active" | "disabled" | "locked">("all");
+  const [typeFilter, setTypeFilter] = React.useState<"all" | "physician" | "dietitian" | "physiotherapist">("all");
 
   const load = React.useCallback(async () => {
     try {
@@ -47,10 +48,11 @@ export function DoctorsListClient() {
   React.useEffect(() => { void load(); }, [load]);
 
   const visible = (doctors ?? []).filter((d) =>
-    filter === "all" ? true :
-    filter === "active" ? d.status === "active" && !d.deleted :
-    filter === "disabled" ? d.status === "disabled" || d.deleted :
-    d.status === "locked"
+    (filter === "all" ? true :
+     filter === "active" ? d.status === "active" && !d.deleted :
+     filter === "disabled" ? d.status === "disabled" || d.deleted :
+     d.status === "locked") &&
+    (typeFilter === "all" || (d.clinician_type ?? "physician") === typeFilter)
   );
   const counts = (doctors ?? []).reduce(
     (a, d) => {
@@ -83,6 +85,17 @@ export function DoctorsListClient() {
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value as "all" | "physician" | "dietitian" | "physiotherapist")}
+          aria-label="Filter by clinician type"
+          className="px-2.5 py-1 rounded-full text-caption bg-even-ink-100 text-even-ink-700 hover:bg-even-ink-200 border border-transparent focus:border-even-blue-400 focus:outline-none"
+        >
+          <option value="all">All types</option>
+          <option value="physician">Physician</option>
+          <option value="dietitian">Dietitian</option>
+          <option value="physiotherapist">Physiotherapist</option>
+        </select>
         {(["all", "active", "disabled", "locked"] as const).map((k) => (
           <button
             key={k}
