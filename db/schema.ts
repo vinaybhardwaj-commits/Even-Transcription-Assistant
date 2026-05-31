@@ -318,3 +318,19 @@ export const voiceSample = pgTable("voice_sample", {
   byClinician: index("idx_voice_sample_clinician").on(t.clinicianId),
   bySource:    index("idx_voice_sample_source").on(t.source),
 }));
+
+// stt_engine (migration 0018) — STT Engine Lab registry. One row per engine;
+// a code adapter (lib/stt/adapters/<adapter_key>.ts) implements the calls.
+export const sttEngine = pgTable("stt_engine", {
+  id:               text("id").primaryKey(),
+  displayName:      text("display_name").notNull(),
+  adapterKey:       text("adapter_key").notNull(),
+  capabilitiesJson: jsonb("capabilities_json").notNull().default(sql`'{}'::jsonb`),
+  enabled:          boolean("enabled").notNull().default(true),
+  fanoutEnabled:    boolean("fanout_enabled").notNull().default(true),
+  isPaid:           boolean("is_paid").notNull().default(true),
+  costPerMinUsd:    numeric("cost_per_min_usd", { precision: 10, scale: 5 }),
+  configJson:       jsonb("config_json").notNull().default(sql`'{}'::jsonb`),
+  sortOrder:        integer("sort_order").notNull().default(100),
+  createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}));
