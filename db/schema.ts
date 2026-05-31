@@ -327,6 +327,17 @@ export const sttGold = pgTable("stt_gold", {
   updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// stt_routing (migration 0021) — active production engine per stage x language.
+export const sttRouting = pgTable("stt_routing", {
+  stage:            text("stage").notNull(),
+  languageBucket:   text("language_bucket").notNull(),
+  engineId:         text("engine_id").notNull().default("auto"),
+  updatedByAdminId: text("updated_by_admin_id"),
+  updatedAt:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.stage, t.languageBucket] }),
+}));
+
 // voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).
 // FK references doctor for now (renamed to clinician in v2.0).
 export const voicePrint = pgTable("voice_print", {

@@ -81,6 +81,8 @@ export function SttLabClient() {
         <LeaderboardTab />
       ) : tab === "Runs" ? (
         <RunsTab />
+      ) : tab === "Routing" ? (
+        <RoutingTab />
       ) : tab === "Engines" ? (
         <EnginesTab />
       ) : tab !== "Health" ? (
@@ -512,5 +514,67 @@ function EnginesTab() {
         </tbody>
       </table>
     </section>
+  );
+}
+
+// ---- Routing tab (L5) ------------------------------------------------------
+type RoutingCell = { stage: string; language_bucket: string; engine_id: string };
+type RoutingEngine = { id: string; display_name: string; enabled: boolean; capabilities_json: { languages?: string[] } };
+type RoutingBundle = { routing: RoutingCell[]; engines: RoutingEngine[]; stages: string[]; buckets: string[] };
+
+function RoutingTab() {
+  const [data, setData] = React.useState<RoutingBundle | null>(null);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const load = React.useCallback(async () => { const r = await fetch("/api/admin/stt-lab/routing", { cache: "no-store" }); const j = await r.json(); if (r.ok) setData(j as RoutingBundle); }, []);
+  React.useEffect(() => { void load(); }, [load]);
+  const cellFor = (stage: string, bucket: string) => data?.routing.find((c) => c.stage === stage && c.language_bucket === bucket)?.engine_id ?? "auto";
+  const set = async (stage: string, bucket: string, engine_id: string) => {
+    const key = `${stage}:${bucket}`; setBusy(key);
+    try { await fetch("/api/admin/stt-lab/routing", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage, language_bucket: bucket, engine_id }) }); await load(); }
+    finally { setBusy(null); }
+  };
+  const label = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const enforced: Record<string, string> = { "note:english": "enforced (server-side note pick)", "note:indic": "Sarvam (non-English note path)", "live:english": "advisory — live engine is client-side (enforcement pending)", "live:indic": "advisory — live engine is client-side (enforcement pending)" };
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        <h3 className="text-label text-even-navy-800 mb-1">Production routing</h3>
+        <p className="text-caption text-even-ink-500 mb-4">Which engine runs in production per stage × language. <span className="font-mono">auto</span> = built-in default. Changes are safe + reversible; an unhealthy/disabled engine falls back to the default automatically.</p>
+        {!data ? <p className="text-body text-even-ink-400">Loading…</p> : (
+          <div className="space-y-5">
+            {data.stages.map((stage) => (
+              <div key={stage}>
+                <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">{label(stage)} stage</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {data.buckets.map((bucket) => {
+                    const eligible = data.engines.filter((e) => {
+                      const langs = e.capabilities_json?.languages || [];
+                      if (bucket === "english") return langs.includes("english") || langs.includes("multi");
+                      return langs.includes("indic") || langs.includes("multi");
+                    });
+                    const cur = cellFor(stage, bucket);
+                    const key = `${stage}:${bucket}`;
+                    return (
+                      <div key={bucket} className="rounded-md border border-even-ink-100 p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-label text-even-navy-800">{label(bucket)}</span>
+                          <select value={cur} disabled={busy === key} onChange={(e) => void set(stage, bucket, e.target.value)} className="rounded border border-even-ink-200 px-2 py-1 text-caption">
+                            <option value="auto">auto (default)</option>
+                            {eligible.map((e) => <option key={e.id} value={e.id} disabled={!e.enabled}>{e.display_name}{!e.enabled ? " (disabled)" : ""}</option>)}
+                          </select>
+                        </div>
+                        <p className="text-caption text-even-ink-400">{enforced[key] || ""}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+      <p className="text-caption text-even-ink-400">Note: the <b>note/English</b> cell is enforced server-side today (chooses the canonical note transcript). <b>Live</b> routing is recorded but client-side enforcement is a later integration; non-English notes already use Sarvam. Diarization has a single engine (pyannote), so it isn't routed.</p>
+    </div>
   );
 }

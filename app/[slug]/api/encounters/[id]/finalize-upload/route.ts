@@ -15,6 +15,7 @@ import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { headObject, deleteObject, whisperBufferKey } from "@/lib/r2";
+import { resolveRouting } from "@/lib/stt/routing";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
@@ -133,8 +134,14 @@ export async function POST(
 
   let transcriptRaw: string | null = null;
   let chosenSource: "whisper" | "deepgram" | "sarvam" | "none" = "none";
+  // L5: honor an admin routing override for the English note engine (null = auto).
+  const noteEngine = await resolveRouting("note", "english");
   if (wh.length > 0 && dg.length > 0) {
-    if (wh.length >= dg.length * 1.2) {
+    if (noteEngine === "whisper") {
+      transcriptRaw = wh; chosenSource = "whisper";
+    } else if (noteEngine === "deepgram") {
+      transcriptRaw = dg; chosenSource = "deepgram";
+    } else if (wh.length >= dg.length * 1.2) {
       transcriptRaw = wh;
       chosenSource = "whisper";
     } else {
