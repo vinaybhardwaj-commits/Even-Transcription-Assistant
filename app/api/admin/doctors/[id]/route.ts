@@ -93,7 +93,6 @@ export async function PATCH(
  * audit_log entries scoped to this doctor.
  */
 import { getFullDoctor } from "@/lib/admin/doctor-detail";
-import { sql } from "@/lib/db";
 
 export async function GET(
   _req: NextRequest,
