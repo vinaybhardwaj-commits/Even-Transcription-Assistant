@@ -333,4 +333,4 @@ export const sttEngine = pgTable("stt_engine", {
   configJson:       jsonb("config_json").notNull().default(sql`'{}'::jsonb`),
   sortOrder:        integer("sort_order").notNull().default(100),
   createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}));
+});
