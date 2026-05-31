@@ -141,8 +141,9 @@ export async function scoreEncounter(encounterId: string): Promise<ScoreResult> 
 export async function scorePending(limit = 5): Promise<{ processed: number; results: ScoreResult[] }> {
   const encs = (await sql`
     SELECT DISTINCT encounter_id FROM transcription_run
-     WHERE mode = 'batch' AND tier = 'asr' AND error IS NULL AND agreement_score IS NULL
+     WHERE mode = 'batch' AND tier = 'asr' AND error IS NULL
        AND COALESCE(NULLIF(TRIM(transcript_english), ''), NULLIF(TRIM(transcript_original), '')) IS NOT NULL
+       AND (metrics_json ->> 'scored_at') IS NULL
      LIMIT ${limit}
   `) as Array<{ encounter_id: string }>;
   const results: ScoreResult[] = [];
@@ -157,7 +158,8 @@ export async function scorePending(limit = 5): Promise<{ processed: number; resu
 /** Clear all scores so every encounter is re-scored fresh (e.g. after a judge-prompt change). */
 export async function resetScores(): Promise<number> {
   const r = (await sql`
-    UPDATE transcription_run SET agreement_score = NULL, judge_score = NULL, is_winner = false
+    UPDATE transcription_run SET agreement_score = NULL, judge_score = NULL, is_winner = false,
+           metrics_json = (COALESCE(metrics_json, '{}'::jsonb) - 'scored_at')
      WHERE mode = 'batch' AND tier = 'asr' RETURNING id
   `) as Array<{ id: string }>;
   return r.length;
