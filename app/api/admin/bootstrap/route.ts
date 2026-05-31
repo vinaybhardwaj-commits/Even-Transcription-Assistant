@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
   let doctor: DoctorRow;
   try {
     const existing = (await sql`
-      SELECT id, url_slug FROM doctor WHERE email = ${doctorEmail} AND deleted_at IS NULL LIMIT 1
+      SELECT id, url_slug FROM clinician WHERE email = ${doctorEmail} AND deleted_at IS NULL LIMIT 1
     `) as DoctorRow[];
     if (existing[0]) {
       doctor = existing[0];
@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
       if (body.doctor_pin) {
         const pinHash = await bcrypt.hash(doctorPin, 12);
         await sql`
-          UPDATE doctor
+          UPDATE clinician
              SET pin_hash = ${pinHash}, pin_set_at = NOW(),
                  failed_pin_count = 0, locked_until = NULL,
                  status = 'active', updated_at = NOW()
@@ -110,11 +110,11 @@ export async function POST(req: NextRequest) {
       const { full: fullSlug, token } = buildDoctorSlug(doctorFullName);
       const pinHash = await bcrypt.hash(doctorPin, 12);
       const inserted = (await sql`
-        INSERT INTO doctor (
-          id, full_name, email, url_slug, url_token, pin_hash, pin_set_at,
+        INSERT INTO clinician (
+          id, legacy_doctor_id, clinician_type, full_name, email, url_slug, url_token, pin_hash, pin_set_at,
           status, created_by
         ) VALUES (
-          ${id}, ${doctorFullName}, ${doctorEmail}, ${fullSlug}, ${token},
+          ${id}, NULL, 'physician'::clinician_type, ${doctorFullName}, ${doctorEmail}, ${fullSlug}, ${token},
           ${pinHash}, NOW(), 'active', ${admin.id}::uuid
         )
         RETURNING id, url_slug

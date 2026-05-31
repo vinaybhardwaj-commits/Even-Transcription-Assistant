@@ -13,7 +13,6 @@ import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
-import { syncClinicianFromDoctor } from "@/lib/clinician";
 
 export const runtime = "nodejs";
 
@@ -52,24 +51,23 @@ export async function PATCH(
   // dynamic column lists nicely, so we use simple guarded branches.
   try {
     if (body.deleted === true) {
-      await sql`UPDATE doctor SET deleted_at = NOW(), status='disabled', updated_at = NOW() WHERE id = ${id}`;
+      await sql`UPDATE clinician SET deleted_at = NOW(), status='disabled', updated_at = NOW() WHERE id = ${id}`;
     }
     if (typeof body.status === "string" && ALLOWED_STATUS.has(body.status)) {
-      await sql`UPDATE doctor SET status = ${body.status}::doctor_status, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      await sql`UPDATE clinician SET status = ${body.status}::doctor_status, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
     }
     if (typeof body.full_name === "string" && body.full_name.trim().length >= 2) {
-      await sql`UPDATE doctor SET full_name = ${body.full_name.trim()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      await sql`UPDATE clinician SET full_name = ${body.full_name.trim()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
     }
     if (typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
-      await sql`UPDATE doctor SET email = ${body.email.trim().toLowerCase()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      await sql`UPDATE clinician SET email = ${body.email.trim().toLowerCase()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
     }
     if (typeof body.phone === "string") {
-      await sql`UPDATE doctor SET phone = ${body.phone.trim() || null}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      await sql`UPDATE clinician SET phone = ${body.phone.trim() || null}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
     }
-    await syncClinicianFromDoctor(id); // V2.S1 dual-write
     const rows = (await sql`
       SELECT id, full_name, email, phone, url_slug, status, deleted_at
-        FROM doctor WHERE id = ${id}
+        FROM clinician WHERE id = ${id}
     `) as Array<{ id: string; full_name: string; email: string; phone: string | null; url_slug: string; status: string; deleted_at: string | Date | null }>;
     if (rows.length === 0) return respondError("NOT_FOUND", "doctor_not_found");
     const r = rows[0];

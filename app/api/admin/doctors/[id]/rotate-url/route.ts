@@ -14,7 +14,6 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { generateToken } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
-import { syncClinicianFromDoctor } from "@/lib/clinician";
 
 export const runtime = "nodejs";
 
@@ -44,7 +43,7 @@ export async function POST(
   // Load current url_slug to derive the base (everything before the last '-XXXX' suffix).
   try {
     const rows = (await sql`
-      SELECT id, url_slug, url_token FROM doctor
+      SELECT id, url_slug, url_token FROM clinician
        WHERE id = ${id} AND deleted_at IS NULL LIMIT 1
     `) as Array<{ id: string; url_slug: string; url_token: string }>;
     if (rows.length === 0) return respondError("NOT_FOUND", "doctor_not_found");
@@ -59,7 +58,7 @@ export async function POST(
     const newSlug = `${base}-${newToken}`;
 
     await sql`
-      UPDATE doctor
+      UPDATE clinician
          SET url_slug  = ${newSlug},
              url_token = ${newToken},
              updated_at = NOW()
@@ -72,7 +71,6 @@ export async function POST(
         ('admin', ${adminId}, 'doctor.rotate_url_token', 'doctor', ${id},
          ${JSON.stringify({ old_token: old.url_token, new_token: newToken })}::jsonb)
     `;
-    await syncClinicianFromDoctor(id); // V2.S1 dual-write
     const loginUrl = `${canonicalAppUrl()}/${newSlug}`;
     return respondOk({
       doctor: { id, url_slug: newSlug, url_token: newToken, login_url: loginUrl },

@@ -22,7 +22,6 @@ type GuardResult =
   | { ok: false; code: "AUTH_REQUIRED" | "AUTH_EXPIRED"; msg: string };
 import { buildDoctorSlug } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
-import { syncClinicianFromDoctor } from "@/lib/clinician";
 import bcrypt from "bcryptjs";
 import { customAlphabet } from "nanoid";
 
@@ -135,12 +134,12 @@ export async function POST(req: NextRequest) {
 
   try {
     await sql`
-      INSERT INTO doctor (
-        id, full_name, email, phone, url_slug, url_token, pin_hash, pin_set_at,
-        status, created_by
+      INSERT INTO clinician (
+        id, legacy_doctor_id, clinician_type, full_name, email, phone, url_slug,
+        url_token, pin_hash, pin_set_at, status, created_by
       ) VALUES (
-        ${id}, ${fullName}, ${email}, ${phone}, ${slug}, ${token},
-        ${pinHash}, NOW(), 'active', ${g.claims.admin_id}
+        ${id}, NULL, ${clinicianType}::clinician_type, ${fullName}, ${email}, ${phone}, ${slug},
+        ${token}, ${pinHash}, NOW(), 'active', ${g.claims.admin_id}
       )
     `;
   } catch (e) {
@@ -151,7 +150,6 @@ export async function POST(req: NextRequest) {
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
-  await syncClinicianFromDoctor(id, clinicianType); // V2.S1 dual-write (clinician_type set on create)
 
   const appUrl = canonicalAppUrl();
   return respondOk({
