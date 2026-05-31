@@ -7,6 +7,7 @@
  * Gold set / Routing / Engines tabs alongside Health.
  */
 import * as React from "react";
+import { Button } from "@/components/ui/Button";
 
 type Capabilities = {
   tiers?: string[]; stages?: string[]; languages?: string[];
