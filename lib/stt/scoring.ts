@@ -142,6 +142,7 @@ export async function scorePending(limit = 5): Promise<{ processed: number; resu
   const encs = (await sql`
     SELECT DISTINCT encounter_id FROM transcription_run
      WHERE mode = 'batch' AND tier = 'asr' AND error IS NULL AND agreement_score IS NULL
+       AND COALESCE(NULLIF(TRIM(transcript_english), ''), NULLIF(TRIM(transcript_original), '')) IS NOT NULL
      LIMIT ${limit}
   `) as Array<{ encounter_id: string }>;
   const results: ScoreResult[] = [];
