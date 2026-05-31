@@ -211,3 +211,29 @@ export async function resetAllJobs(): Promise<number> {
   const r = (await sql`UPDATE stt_fanout_job SET status = 'pending', error = NULL WHERE status <> 'pending' RETURNING encounter_id`) as Array<{ encounter_id: string }>;
   return r.length;
 }
+
+
+/** Remove duplicate batch ASR rows (keep best per encounter+engine), then clear
+ *  the scored_at marker on affected encounters so they re-score cleanly. */
+export async function dedupRuns(): Promise<{ deleted: number; affected: number }> {
+  const del = (await sql`
+    WITH ranked AS (
+      SELECT id, encounter_id,
+             ROW_NUMBER() OVER (PARTITION BY encounter_id, engine, mode, tier
+                                ORDER BY (error IS NULL) DESC, created_at DESC) AS rn
+        FROM transcription_run WHERE mode='batch' AND tier='asr'
+    )
+    DELETE FROM transcription_run WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
+    RETURNING encounter_id
+  `) as Array<{ encounter_id: string }>;
+  const affected = Array.from(new Set(del.map((r) => r.encounter_id)));
+  if (affected.length > 0) {
+    await sql`
+      UPDATE transcription_run
+         SET metrics_json = (COALESCE(metrics_json, '{}'::jsonb) - 'scored_at'),
+             agreement_score = NULL, judge_score = NULL
+       WHERE mode='batch' AND tier='asr' AND encounter_id = ANY(${affected})
+    `;
+  }
+  return { deleted: del.length, affected: affected.length };
+}
