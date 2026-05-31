@@ -12,6 +12,7 @@ import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { listEngines, adapterFor, type EngineRow } from "./registry";
+import { scoreEncounter } from "./scoring";
 
 const nano = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 12);
 const runId = () => `trun_${nano()}`;
@@ -121,6 +122,9 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
       errors.push(`${e.id}_insert: ${String(err).slice(0, 100)}`);
     }
   }
+  // L2: reference-free scoring (agreement + LLM judge) over this encounter's runs.
+  try { await scoreEncounter(encounterId); } catch (e) { errors.push(`score: ${String(e).slice(0, 80)}`); }
+
   return { encounter_id: encounterId, inserted, skipped: engines.length - todo.length, errors };
 }
 
@@ -179,22 +183,26 @@ export type FanoutStatus = {
   jobs: Record<string, number>;
   batch_runs: number;
   batch_ok: number;
-  per_engine: Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null }>;
+  scored_runs: number;
+  per_engine: Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null; avg_judge: number | null; avg_agreement: number | null; wins: number }>;
 };
 
 /** Fast queue + batch-run summary (no processing). */
 export async function fanoutStatus(): Promise<FanoutStatus> {
   const js = (await sql`SELECT status, COUNT(*)::int AS n FROM stt_fanout_job GROUP BY status`) as Array<{ status: string; n: number }>;
-  const tot = (await sql`SELECT COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok FROM transcription_run WHERE mode='batch' AND tier='asr'`) as Array<{ runs: number; ok: number }>;
+  const tot = (await sql`SELECT COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok, COUNT(*) FILTER (WHERE agreement_score IS NOT NULL)::int AS scored FROM transcription_run WHERE mode='batch' AND tier='asr'`) as Array<{ runs: number; ok: number; scored: number }>;
   const pe = (await sql`
     SELECT engine, COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok,
-           ROUND(AVG(latency_ms) FILTER (WHERE error IS NULL))::int AS avg_latency_ms
+           ROUND(AVG(latency_ms) FILTER (WHERE error IS NULL))::int AS avg_latency_ms,
+           ROUND(AVG(judge_score)::numeric, 2)::float8 AS avg_judge,
+           ROUND(AVG(agreement_score)::numeric, 3)::float8 AS avg_agreement,
+           COUNT(*) FILTER (WHERE is_winner)::int AS wins
       FROM transcription_run WHERE mode='batch' AND tier='asr'
      GROUP BY engine ORDER BY engine
-  `) as Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null }>;
+  `) as Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null; avg_judge: number | null; avg_agreement: number | null; wins: number }>;
   const jobs: Record<string, number> = {};
   for (const r of js) jobs[r.status] = r.n;
-  return { jobs, batch_runs: tot[0]?.runs ?? 0, batch_ok: tot[0]?.ok ?? 0, per_engine: pe };
+  return { jobs, batch_runs: tot[0]?.runs ?? 0, batch_ok: tot[0]?.ok ?? 0, scored_runs: tot[0]?.scored ?? 0, per_engine: pe };
 }
 
 
