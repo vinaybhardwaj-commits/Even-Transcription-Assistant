@@ -30,7 +30,7 @@ export default async function EncounterDeepLink(
     rows = (await sql`
       SELECT d.url_slug
         FROM encounter e
-        JOIN doctor d ON d.id = e.doctor_id
+        JOIN clinician d ON d.id = e.doctor_id
        WHERE e.id = ${id} AND e.deleted_at IS NULL
        LIMIT 1
     `) as LookupRow[];

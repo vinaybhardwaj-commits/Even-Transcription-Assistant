@@ -69,7 +69,7 @@ export default async function EncounterPage({
          WHERE id = ${id} AND deleted_at IS NULL
          LIMIT 1
       `,
-      sql`SELECT full_name, email FROM doctor WHERE id = ${claims.doctor_id} LIMIT 1`,
+      sql`SELECT full_name, email FROM clinician WHERE id = ${claims.doctor_id} LIMIT 1`,
       sql`
         SELECT id, recipient_email, status, subject_rendered, created_at
           FROM send_event

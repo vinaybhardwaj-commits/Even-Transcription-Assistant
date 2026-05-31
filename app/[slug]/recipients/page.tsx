@@ -27,7 +27,7 @@ export default async function RecipientsPage({
   // Sanity-check the doctor row exists
   try {
     const rows = (await sql`
-      SELECT id FROM doctor WHERE id = ${claims.doctor_id} AND deleted_at IS NULL LIMIT 1
+      SELECT id FROM clinician WHERE id = ${claims.doctor_id} AND deleted_at IS NULL LIMIT 1
     `) as Array<{ id: string }>;
     if (rows.length === 0) redirect(`/${slug}`);
   } catch {

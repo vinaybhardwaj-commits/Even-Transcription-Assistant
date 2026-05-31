@@ -20,7 +20,7 @@ export default async function AdminDoctorVoicePage({ params }: { params: Promise
   try { await verifyAdminJwt(cookie); } catch { redirect("/admin"); }
 
   const { id } = await params;
-  const rows = (await sql`SELECT id, full_name FROM doctor WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`) as Row[];
+  const rows = (await sql`SELECT id, full_name FROM clinician WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`) as Row[];
   const doctor = rows[0];
   if (!doctor) notFound();
 

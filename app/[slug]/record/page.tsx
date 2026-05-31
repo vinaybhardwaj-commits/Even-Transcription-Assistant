@@ -21,7 +21,7 @@ async function findDoctor(fullSlug: string): Promise<Row | null> {
   try {
     const rows = (await sql`
       SELECT id, full_name, url_slug
-        FROM doctor
+        FROM clinician
        WHERE url_slug = ${fullSlug}
          AND deleted_at IS NULL
        LIMIT 1

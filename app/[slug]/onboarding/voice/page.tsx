@@ -18,7 +18,7 @@ export default async function VoiceOnboardingPage({
   const { slug } = await params;
   if (!parseDoctorSlug(slug)) notFound();
   const rows = (await sql`
-    SELECT id, full_name FROM doctor WHERE url_slug = ${slug} AND deleted_at IS NULL LIMIT 1
+    SELECT id, full_name FROM clinician WHERE url_slug = ${slug} AND deleted_at IS NULL LIMIT 1
   `) as Row[];
   const doctor = rows[0];
   if (!doctor) notFound();
