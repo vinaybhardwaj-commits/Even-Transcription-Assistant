@@ -39,6 +39,8 @@ type Encounter = { id: string; patient_label_raw: string | null; chief_complaint
 type Recipient = { id: string; email: string; name: string; role: string; set_by: string };
 type AuditEntry = { id: string; actor_type: "admin" | "doctor" | "system"; actor_id: string | null; action: string; metadata_json: unknown; created_at: string };
 type DoctorBundle = { doctor: Doctor | null; kpis: Kpi; recent_encounters: Encounter[]; recipients: Recipient[]; audit_log: AuditEntry[] };
+type VsSample = { id: string; source: string; session_id: string | null; sample_index: number | null; match_confidence: number | null; has_audio: boolean; created_at: string };
+type VsBundle = { voiceprint: { sample_count: number; enrolled_at: string; last_sample_at: string; needs_reenrollment: boolean; has_centroid: boolean } | null; total_samples: number; samples: VsSample[] };
 
 export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
   const router = useRouter();
@@ -53,6 +55,8 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
   const [showDelete, setShowDelete] = React.useState(false);
   const [actionInflight, setActionInflight] = React.useState(false);
   const [copyState, setCopyState] = React.useState<"idle" | "copied">("idle");
+  const [vs, setVs] = React.useState<VsBundle | null>(null);
+  const [vsBusy, setVsBusy] = React.useState(false);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -69,6 +73,43 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
     }
   }, [doctorId]);
   React.useEffect(() => { void load(); }, [load]);
+
+  const loadVoiceSamples = React.useCallback(async () => {
+    try {
+      const res = await fetch(`/api/admin/doctors/${doctorId}/voice-samples`, { cache: "no-store" });
+      const j = await res.json();
+      if (res.ok) setVs(j as VsBundle);
+    } catch { /* non-blocking */ }
+  }, [doctorId]);
+  React.useEffect(() => { void loadVoiceSamples(); }, [loadVoiceSamples]);
+
+  const retrainVoice = async () => {
+    if (vsBusy) return;
+    setVsBusy(true);
+    try {
+      const res = await fetch(`/api/admin/doctors/${doctorId}/voice-retrain`, { method: "POST" });
+      const j = await res.json();
+      if (!res.ok) throw new Error((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
+      setBanner({ kind: "info", message: `Voiceprint retrained from ${(j as { sample_count: number }).sample_count} sample(s).` });
+      await loadVoiceSamples();
+    } catch (e) {
+      setBanner({ kind: "error", message: "Retrain failed", details: e instanceof Error ? e.message : String(e) });
+    } finally { setVsBusy(false); }
+  };
+  const deleteVoiceSample = async (sid: string) => {
+    if (vsBusy) return;
+    if (!confirm("Delete this voice sample? The voiceprint will be rebuilt from the remaining samples.")) return;
+    setVsBusy(true);
+    try {
+      const res = await fetch(`/api/admin/doctors/${doctorId}/voice-samples/${sid}`, { method: "DELETE" });
+      const j = await res.json();
+      if (!res.ok) throw new Error((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
+      setBanner({ kind: "info", message: `Sample deleted. Voiceprint rebuilt from ${(j as { remaining_samples: number }).remaining_samples} sample(s).` });
+      await loadVoiceSamples();
+    } catch (e) {
+      setBanner({ kind: "error", message: "Delete failed", details: e instanceof Error ? e.message : String(e) });
+    } finally { setVsBusy(false); }
+  };
 
   const d = data?.doctor ?? null;
   const k = data?.kpis ?? null;
@@ -371,6 +412,50 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
               their own iat-based 30d clock.
             </p>
             <Button variant="ghost" size="sm" disabled className="mt-2">Force logout (v2)</Button>
+          </section>
+
+          {/* Voice samples (Voiceprint Retention) */}
+          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-label text-even-navy-800">Voice samples</h3>
+              <div className="flex items-center gap-3">
+                {vs?.voiceprint?.has_centroid ? (
+                  <a href={`/api/admin/doctors/${doctorId}/voiceprint/embedding`} className="text-caption text-even-blue-600 hover:underline">Download voiceprint</a>
+                ) : null}
+                <Button variant="secondary" size="sm" onClick={() => void retrainVoice()} disabled={vsBusy || !vs || vs.total_samples === 0}>↻ Retrain</Button>
+              </div>
+            </div>
+            <p className="text-caption text-even-ink-600 mb-3">
+              {vs
+                ? `${vs.total_samples} sample(s) retained${vs.voiceprint ? ` · voiceprint from ${vs.voiceprint.sample_count}` : ""}${vs.voiceprint?.last_sample_at ? ` · last ${fmtDate(vs.voiceprint.last_sample_at)}` : ""}.`
+                : "Loading…"}
+              {vs?.voiceprint?.needs_reenrollment ? <span className="text-warning-700"> Needs re-enrollment.</span> : null}
+            </p>
+            {vs && vs.samples.length === 0 ? (
+              <p className="text-body text-even-ink-400">No voice samples yet. Use “🎙 Record voice” to enroll.</p>
+            ) : (
+              <ul className="space-y-2">
+                {vs?.samples.map((s) => (
+                  <li key={s.id} className="flex items-center justify-between gap-3 border-b border-even-ink-100 last:border-b-0 pb-2 last:pb-0">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-body text-even-navy-800 truncate">
+                        <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide mr-2 ${s.source === "passive" ? "bg-even-blue-100 text-even-blue-700" : "bg-even-ink-100 text-even-ink-600"}`}>{s.source}</span>
+                        {s.session_id === "legacy" ? "legacy embedding" : `clip ${s.sample_index ?? ""}`}
+                        {typeof s.match_confidence === "number" ? <span className="text-even-ink-500"> · conf {s.match_confidence.toFixed(2)}</span> : null}
+                      </p>
+                      <p className="text-caption text-even-ink-500" suppressHydrationWarning>{fmtDate(s.created_at)}</p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {s.has_audio
+                        ? <a href={`/api/admin/doctors/${doctorId}/voice-samples/${s.id}/audio`} className="text-caption text-even-blue-600 hover:underline">Audio</a>
+                        : <span className="text-caption text-even-ink-300" title="Audio not stored for this sample">no audio</span>}
+                      <a href={`/api/admin/doctors/${doctorId}/voice-samples/${s.id}/embedding`} className="text-caption text-even-blue-600 hover:underline">Embedding</a>
+                      <button onClick={() => void deleteVoiceSample(s.id)} disabled={vsBusy} className="text-caption text-danger-600 hover:underline disabled:opacity-50">Delete</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           {/* Recent encounters */}
