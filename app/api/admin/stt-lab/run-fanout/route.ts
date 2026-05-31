@@ -9,7 +9,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { drainFanout, enqueueBackfill, fanoutStatus, resetAllJobs } from "@/lib/stt/fanout";
-import { scorePending } from "@/lib/stt/scoring";
+import { scorePending, resetScores } from "@/lib/stt/scoring";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -25,9 +25,10 @@ async function authorized(req: NextRequest): Promise<boolean> {
 
 export async function POST(req: NextRequest) {
   if (!(await authorized(req))) return respondError("AUTH_REQUIRED", "admin or migration secret required");
-  let body: { limit?: number; backfill?: boolean; status?: boolean; reset?: boolean; score?: boolean } = {};
+  let body: { limit?: number; backfill?: boolean; status?: boolean; reset?: boolean; score?: boolean; rescore?: boolean } = {};
   try { body = (await req.json()) as typeof body; } catch { /* empty body ok */ }
   if (body.status) return respondOk(await fanoutStatus());
+  if (body.rescore) { const cleared = await resetScores(); return respondOk({ rescore_cleared: cleared }); }
   if (body.score) {
     const limit = Math.min(Math.max(Number(body.limit) || 5, 1), 25);
     return respondOk(await scorePending(limit));

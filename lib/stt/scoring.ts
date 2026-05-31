@@ -151,3 +151,13 @@ export async function scorePending(limit = 5): Promise<{ processed: number; resu
   }
   return { processed: encs.length, results };
 }
+
+
+/** Clear all scores so every encounter is re-scored fresh (e.g. after a judge-prompt change). */
+export async function resetScores(): Promise<number> {
+  const r = (await sql`
+    UPDATE transcription_run SET agreement_score = NULL, judge_score = NULL, is_winner = false
+     WHERE mode = 'batch' AND tier = 'asr' RETURNING id
+  `) as Array<{ id: string }>;
+  return r.length;
+}
