@@ -34,6 +34,7 @@ import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
+import { capturePassiveSample } from "@/lib/voice-samples";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
@@ -266,6 +267,28 @@ export async function POST(
                  diarize_error        = NULL
            WHERE id = ${id}
         `;
+        // Passive voiceprint capture (Voiceprint Retention Sprint B): if the
+        // Mini returned this clinician's speaker embedding and the match is
+        // confident, retain it as a passive sample (audio = this encounter's
+        // recording). No-op until /diarize returns embedding_base64. Fully
+        // non-blocking — never affects the note/email/diarize result.
+        try {
+          const mine = d.result.speakers.find(
+            (sp) => sp.clinician_id === row!.doctor_id && typeof sp.embedding_base64 === "string" && sp.embedding_base64.length > 0,
+          );
+          if (mine?.embedding_base64) {
+            await capturePassiveSample({
+              clinicianId: row.doctor_id,
+              embeddingBase64: mine.embedding_base64,
+              encounterId: id,
+              audioR2Key: row.audio_object_key,
+              contentType: head.content_type ?? null,
+              confidence: typeof mine.confidence === "number" ? mine.confidence : null,
+            });
+          }
+        } catch (pe) {
+          console.warn(`[process] passive voice capture failed enc=${id}: ${pe instanceof Error ? pe.message : String(pe)}`);
+        }
         // Speaker-tag the note transcript. Non-English: Sarvam batch-diarized
         // English segments (captured in translateIfNeeded). English: Deepgram
         // diarized batch utterances. Either way, reconcile anonymous speaker

@@ -169,3 +169,50 @@ export function embeddingBase64ToFloats(b64: string): number[] {
   for (let i = 0; i < n; i++) out[i] = buf.readFloatLE(i * 4);
   return out;
 }
+
+// ---- passive capture (Sprint B) --------------------------------------------
+
+/** Confidence at/above which a passively-captured sample is auto-included in
+ *  the centroid average. Below it, the sample is retained + downloadable but
+ *  NOT averaged (admin can delete; future: include toggle). Strict by default
+ *  so a marginal speaker match can't poison recognition. */
+const PASSIVE_INCLUDE_GATE = Number(process.env.PASSIVE_VOICEPRINT_GATE ?? "0.82");
+
+/**
+ * Retain the clinician's own voice from a real encounter as a passive sample.
+ * Deduped to one row per (clinician, encounter). Audio is REFERENCED (the
+ * existing encounter recording) — never a fresh patient-bearing clip. Only
+ * recomputes the centroid when the sample clears the include gate. No-op if no
+ * embedding is supplied (e.g. the Mini hasn't been upgraded to return one).
+ */
+export async function capturePassiveSample(opts: {
+  clinicianId: string;
+  embeddingBase64: string;
+  encounterId: string;
+  audioR2Key: string | null;
+  contentType?: string | null;
+  confidence: number | null;
+}): Promise<{ captured: boolean; included: boolean }> {
+  const { clinicianId, embeddingBase64, encounterId } = opts;
+  if (!embeddingBase64) return { captured: false, included: false };
+  const dup = (await sql`
+    SELECT 1 FROM voice_sample
+     WHERE clinician_id = ${clinicianId} AND source = 'passive' AND source_encounter_id = ${encounterId}
+     LIMIT 1
+  `) as Array<unknown>;
+  if (dup.length) return { captured: false, included: false };
+  const conf = typeof opts.confidence === "number" ? opts.confidence : null;
+  const included = conf !== null && conf >= PASSIVE_INCLUDE_GATE;
+  const id = newSampleId();
+  await sql`
+    INSERT INTO voice_sample
+      (id, clinician_id, source, embedding, audio_r2_key, source_encounter_id,
+       content_type, session_id, match_confidence, included, created_at)
+    VALUES
+      (${id}, ${clinicianId}, 'passive', decode(${embeddingBase64}, 'base64'),
+       ${opts.audioR2Key}, ${encounterId}, ${opts.contentType ?? null},
+       ${"passive:" + encounterId}, ${conf}, ${included}, NOW())
+  `;
+  if (included) await recomputeCentroid(clinicianId);
+  return { captured: true, included };
+}

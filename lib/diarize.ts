@@ -24,6 +24,7 @@ export type DiarizeSpeaker = {
   clinician_id?: string;
   confidence?: number;
   role_source?: string;
+  embedding_base64?: string; // Sprint B: per-speaker ECAPA embedding (Mini returns it → passive capture)
 };
 export type DiarizeResult = {
   speakers: DiarizeSpeaker[];
