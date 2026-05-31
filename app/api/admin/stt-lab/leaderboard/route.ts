@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const lang = url.searchParams.get("lang");
   const since = url.searchParams.get("since");
+  const tier = url.searchParams.get("tier") === "scribe" ? "scribe" : "asr";
   const languageBucket = lang === "english" || lang === "indic" ? lang : "all";
-  return respondOk(await computeLeaderboard({ languageBucket, sinceDays: since ? Number(since) : null }));
+  return respondOk(await computeLeaderboard({ languageBucket, sinceDays: since ? Number(since) : null, tier }));
 }

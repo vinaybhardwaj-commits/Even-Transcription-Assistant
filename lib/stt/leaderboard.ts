@@ -28,11 +28,12 @@ export type LeaderRow = {
   components: Record<string, number | null>;
 };
 
-export type LeaderFilters = { languageBucket?: "all" | "english" | "indic"; sinceDays?: number | null };
+export type LeaderFilters = { languageBucket?: "all" | "english" | "indic"; sinceDays?: number | null; tier?: "asr" | "scribe" };
 
 export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{ engines: LeaderRow[]; weights: typeof DEFAULT_WEIGHTS; total_runs: number }> {
   const bucket = filters.languageBucket ?? "all";
   const since = filters.sinceDays && filters.sinceDays > 0 ? filters.sinceDays : null;
+  const tier = filters.tier === "scribe" ? "scribe" : "asr";
 
   const sinceVal = since ?? null;
 
@@ -54,7 +55,7 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
       FROM transcription_run tr
       JOIN encounter e ON e.id = tr.encounter_id
       LEFT JOIN stt_engine eng ON eng.id = tr.engine
-     WHERE tr.mode = 'batch' AND tr.tier = 'asr'
+     WHERE tr.mode = 'batch' AND tr.tier = ${tier}
        AND ( ${bucket} = 'all'
              OR (${bucket} = 'english' AND e.detected_language ILIKE 'en%')
              OR (${bucket} = 'indic' AND e.detected_language IS NOT NULL AND e.detected_language NOT ILIKE 'en%') )

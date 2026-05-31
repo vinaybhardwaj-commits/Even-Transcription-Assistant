@@ -12,7 +12,7 @@ import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { listEngines, adapterFor, type EngineRow } from "./registry";
-import { scoreEncounter } from "./scoring";
+import { scoreEncounter, scoreScribe, renderNoteText } from "./scoring";
 
 const nano = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 12);
 const runId = () => `trun_${nano()}`;
@@ -236,4 +236,92 @@ export async function dedupRuns(): Promise<{ deleted: number; affected: number }
     `;
   }
   return { deleted: del.length, affected: affected.length };
+}
+
+
+// ---- L7: scribe-tier fan-out (audio -> finished note) ----------------------
+
+/** Run scribe-tier engines (ekascribe + the virtual even_pipeline) for one
+ *  encounter, then rubric-score them vs the clinician note. */
+export async function runScribeForEncounter(encounterId: string): Promise<{ encounter_id: string; inserted: number; errors: string[] }> {
+  const rows = (await sql`
+    SELECT id, audio_object_key, detected_language, note_json
+      FROM encounter WHERE id = ${encounterId} LIMIT 1
+  `) as Array<{ id: string; audio_object_key: string | null; detected_language: string | null; note_json: unknown }>;
+  const enc = rows[0];
+  if (!enc || !enc.note_json) return { encounter_id: encounterId, inserted: 0, errors: ["no_generated_note"] };
+
+  const existing = (await sql`
+    SELECT engine FROM transcription_run WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND error IS NULL
+  `) as Array<{ engine: string }>;
+  const done = new Set(existing.map((r) => r.engine));
+
+  const errors: string[] = [];
+  let inserted = 0;
+
+  // even_pipeline (virtual): the encounter's own generated note.
+  if (!done.has("even_pipeline")) {
+    try {
+      await sql`
+        INSERT INTO transcription_run
+          (id, encounter_id, engine, stt_engine_id, mode, tier, note_text, note_json, latency_ms, error, created_at)
+        VALUES (${runId()}, ${encounterId}, 'even_pipeline', 'even_pipeline', 'batch', 'scribe',
+                ${renderNoteText(enc.note_json)}, ${JSON.stringify(enc.note_json)}::jsonb, 0, NULL, NOW())
+      `;
+      inserted++;
+    } catch (e) { errors.push(`even_pipeline_insert: ${String(e).slice(0, 80)}`); }
+  }
+
+  // scribe engines with a generateNote() adapter (ekascribe).
+  const engines = (await listEngines()).filter((e) => {
+    if (!e.enabled || !e.fanout_enabled) return false;
+    const caps = (e.capabilities_json ?? {}) as { tiers?: string[] };
+    if (!caps.tiers || !caps.tiers.includes("scribe")) return false;
+    const a = adapterFor(e.adapter_key);
+    return !!a && typeof a.generateNote === "function";
+  });
+  const todo = engines.filter((e) => !done.has(e.id));
+  if (todo.length > 0 && enc.audio_object_key) {
+    let bytes: Buffer | null = null; let contentType = "audio/webm";
+    try {
+      const head = await headObject(enc.audio_object_key);
+      contentType = head.content_type || "audio/webm";
+      const b = await getObjectBytes(enc.audio_object_key);
+      if (b) bytes = Buffer.from(b);
+    } catch (e) { errors.push(`audio_load: ${String(e).slice(0, 80)}`); }
+    if (bytes) {
+      for (const e of todo) {
+        await sql`DELETE FROM transcription_run WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND engine = ${e.id} AND error IS NOT NULL`;
+        const adapter = adapterFor(e.adapter_key)!;
+        try {
+          const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined });
+          await sql`
+            INSERT INTO transcription_run
+              (id, encounter_id, engine, stt_engine_id, mode, tier, note_text, note_json, latency_ms, cost_usd, error, created_at)
+            VALUES (${runId()}, ${encounterId}, ${e.id}, ${e.id}, 'batch', 'scribe',
+                    ${r.noteText}, ${r.note ? JSON.stringify(r.note) : null}::jsonb, ${r.latencyMs}, ${r.costUsd}, ${r.error}, NOW())
+          `;
+          inserted++;
+          if (r.error) errors.push(`${e.id}: ${r.error}`);
+        } catch (err) { errors.push(`${e.id}: ${String(err).slice(0, 80)}`); }
+      }
+    }
+  }
+
+  try { await scoreScribe(encounterId); } catch (e) { errors.push(`scribe_score: ${String(e).slice(0, 60)}`); }
+  return { encounter_id: encounterId, inserted, errors };
+}
+
+/** Run scribe tier for up to `limit` encounters that have a generated note + audio but no scribe rows yet. */
+export async function scribePending(limit = 3): Promise<{ processed: number; results: Array<{ encounter_id: string; inserted: number; errors: string[] }> }> {
+  const encs = (await sql`
+    SELECT e.id FROM encounter e
+     WHERE e.note_json IS NOT NULL AND e.audio_object_key IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM transcription_run tr WHERE tr.encounter_id = e.id AND tr.tier = 'scribe' AND (tr.metrics_json ->> 'scored_at') IS NOT NULL)
+     ORDER BY e.recorded_at DESC NULLS LAST
+     LIMIT ${limit}
+  `) as Array<{ id: string }>;
+  const results = [];
+  for (const e of encs) results.push(await runScribeForEncounter(e.id));
+  return { processed: encs.length, results };
 }

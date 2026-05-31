@@ -275,3 +275,59 @@ export async function deleteGold(encounterId: string): Promise<boolean> {
   `;
   return true;
 }
+
+// ---- L7: scribe-tier rubric scoring (audio->note vs clinician note) ---------
+
+/** Flatten a structured note object into readable text for rubric comparison. */
+export function renderNoteText(note: unknown): string {
+  if (note == null) return "";
+  if (typeof note === "string") return note;
+  const out: string[] = [];
+  const walk = (v: unknown, key?: string) => {
+    if (v == null) return;
+    if (typeof v === "string") { if (v.trim()) out.push(key ? `${key}: ${v.trim()}` : v.trim()); return; }
+    if (typeof v === "number" || typeof v === "boolean") { out.push(key ? `${key}: ${v}` : String(v)); return; }
+    if (Array.isArray(v)) { v.forEach((x) => walk(x, key)); return; }
+    if (typeof v === "object") { for (const [k, val] of Object.entries(v as Record<string, unknown>)) walk(val, k); }
+  };
+  walk(note);
+  return out.join("\n");
+}
+
+const SCRIBE_RUBRIC_SYSTEM = `You compare a CANDIDATE clinical note against a REFERENCE clinical note for the SAME patient encounter. Score the candidate 1-10 on each axis: factual_capture (did it capture the reference's medications, doses, findings, diagnoses, plan), completeness, structure/formatting, and safety (heavily penalize invented facts or hallucinations NOT supported by the reference). Output STRICT JSON only: {"factual":<1-10>,"completeness":<1-10>,"structure":<1-10>,"safety":<1-10>,"overall":<1-10>,"reasoning":"<one sentence>"}.`;
+
+type ScribeRubric = { factual: number; completeness: number; structure: number; safety: number; overall: number; reasoning: string };
+
+export async function scoreScribe(encounterId: string): Promise<{ ok: boolean; scored: number }> {
+  const enc = (await sql`SELECT note_json, note_json_edited FROM encounter WHERE id = ${encounterId} LIMIT 1`) as Array<{ note_json: unknown; note_json_edited: unknown }>;
+  if (!enc[0]) return { ok: false, scored: 0 };
+  const refText = renderNoteText(enc[0].note_json_edited ?? enc[0].note_json).trim();
+  if (!refText) return { ok: false, scored: 0 };
+
+  const rows = (await sql`
+    SELECT id, engine, note_text FROM transcription_run
+     WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND error IS NULL
+  `) as Array<{ id: string; engine: string; note_text: string | null }>;
+  if (rows.length === 0) return { ok: false, scored: 0 };
+
+  let bestId: string | null = null; let bestScore = -1;
+  for (const r of rows) {
+    const cand = (r.note_text || "").trim();
+    let rubric: ScribeRubric | null = null;
+    if (cand) {
+      try {
+        const j = await qwenJson<ScribeRubric>(SCRIBE_RUBRIC_SYSTEM, `REFERENCE NOTE:\n${refText.slice(0, 6000)}\n\nCANDIDATE NOTE:\n${cand.slice(0, 6000)}`, { temperature: 0, timeoutMs: 60_000 });
+        rubric = j.json ?? null;
+      } catch { rubric = null; }
+    }
+    const overall = rubric && typeof rubric.overall === "number" ? Math.max(0, Math.min(10, rubric.overall)) : null;
+    const meta = JSON.stringify({ scribe_rubric: rubric, scored_at: new Date().toISOString() });
+    await sql`UPDATE transcription_run SET judge_score = ${overall}, metrics_json = COALESCE(metrics_json, '{}'::jsonb) || ${meta}::jsonb WHERE id = ${r.id}`;
+    if (overall !== null && overall > bestScore) { bestScore = overall; bestId = r.id; }
+  }
+  if (bestId) {
+    await sql`UPDATE transcription_run SET is_winner = false WHERE encounter_id = ${encounterId} AND tier = 'scribe'`;
+    await sql`UPDATE transcription_run SET is_winner = true WHERE id = ${bestId}`;
+  }
+  return { ok: true, scored: rows.length };
+}

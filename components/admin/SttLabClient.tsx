@@ -344,9 +344,10 @@ function LeaderboardTab() {
   const [tier, setTier] = React.useState<"ASR" | "Scribe">("ASR");
   const load = React.useCallback(async () => {
     const qs = new URLSearchParams(); if (lang !== "all") qs.set("lang", lang); if (since) qs.set("since", since);
+    if (tier === "Scribe") qs.set("tier", "scribe");
     const r = await fetch(`/api/admin/stt-lab/leaderboard?${qs}`, { cache: "no-store" });
     const j = await r.json(); if (r.ok) setData(j as LeaderBundle);
-  }, [lang, since]);
+  }, [lang, since, tier]);
   React.useEffect(() => { void load(); }, [load]);
   const pct = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
   const werFmt = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
@@ -368,9 +369,7 @@ function LeaderboardTab() {
         <span className="text-caption text-even-ink-400">{data ? `${data.total_runs} runs` : ""}</span>
       </div>
 
-      {tier === "Scribe" ? (
-        <div className="rounded-xl border border-even-ink-100 bg-even-white p-8 text-center text-body text-even-ink-400">Scribe-tier leaderboard arrives with Ekascribe (L7).</div>
-      ) : (
+      {(
         <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
           <table className="w-full text-body">
             <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
@@ -395,7 +394,7 @@ function LeaderboardTab() {
               ))}
             </tbody>
           </table>
-          <p className="text-caption text-even-ink-400 mt-3">Composite (0-100) blends accuracy, med-term, judge, agreement, speed, reliability, cost. WER/accuracy/med-term need gold labels; "—" = not yet available.</p>
+          <p className="text-caption text-even-ink-400 mt-3">{tier === "Scribe" ? "Scribe tier: audio→finished note (Ekascribe vs the Even pipeline), scored by an LLM rubric vs the clinician's note. Judge = rubric overall; WER/agreement are ASR-tier only." : "Composite (0-100) blends accuracy, med-term, judge, agreement, speed, reliability, cost. WER/accuracy/med-term need gold labels; — = not yet available."}</p>
         </section>
       )}
     </div>
@@ -404,7 +403,7 @@ function LeaderboardTab() {
 
 // ---- Runs tab (L4) ---------------------------------------------------------
 type RunListItem = { id: string; patient_label_raw: string | null; recorded_at: string | null; detected_language: string | null; note_type: string | null; engines: number; errored: number; winner: string | null; has_gold: boolean; avg_judge: number | null };
-type RunDetailRow = { engine: string; transcript_english: string | null; transcript_original: string | null; latency_ms: number | null; error: string | null; judge_score: number | null; agreement_score: number | null; wer: number | null; cer: number | null; med_term_recall: number | null; is_winner: boolean };
+type RunDetailRow = { engine: string; tier?: string; transcript_english: string | null; transcript_original: string | null; note_text?: string | null; latency_ms: number | null; error: string | null; judge_score: number | null; agreement_score: number | null; wer: number | null; cer: number | null; med_term_recall: number | null; is_winner: boolean };
 type RunDetail = { encounter: { id: string; patient_label_raw: string | null; detected_language: string | null }; runs: RunDetailRow[]; gold: { reference_english: string | null; reference_original: string | null } | null };
 
 function diffWords(text: string, goldWords: Set<string> | null) {
@@ -461,12 +460,14 @@ function RunsTab() {
               {detail.runs.map((r) => (
                 <div key={r.engine} className={`rounded-md border p-3 ${r.is_winner ? "border-even-blue-400 bg-even-blue-50/40" : "border-even-ink-100"}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-even-navy-800 text-label">{r.engine} {r.is_winner && <span className="text-caption text-even-blue-600">★ winner</span>}</span>
+                    <span className="text-even-navy-800 text-label">{r.engine} {r.tier === "scribe" && <span className="text-caption text-even-ink-400">scribe</span>} {r.is_winner && <span className="text-caption text-even-blue-600">★ winner</span>}</span>
                     <span className="font-mono text-caption text-even-ink-500">
-                      {r.error ? <span className="text-danger-600">{r.error.slice(0, 40)}</span> : <>judge {r.judge_score ?? "—"} · agree {r.agreement_score ?? "—"} · WER {r.wer === null ? "—" : pct(r.wer)} · term {pct(r.med_term_recall)} · {r.latency_ms === null ? "—" : `${(r.latency_ms / 1000).toFixed(1)}s`}</>}
+                      {r.error ? <span className="text-danger-600">{r.error.slice(0, 40)}</span> : r.tier === "scribe" ? <>rubric {r.judge_score ?? "—"} · {r.latency_ms === null ? "—" : `${(r.latency_ms / 1000).toFixed(1)}s`}</> : <>judge {r.judge_score ?? "—"} · agree {r.agreement_score ?? "—"} · WER {r.wer === null ? "—" : pct(r.wer)} · term {pct(r.med_term_recall)} · {r.latency_ms === null ? "—" : `${(r.latency_ms / 1000).toFixed(1)}s`}</>}
                     </span>
                   </div>
-                  {!r.error && <p className="text-caption text-even-ink-700 whitespace-pre-wrap">{diffWords(r.transcript_english || r.transcript_original || "(empty)", goldWords)}</p>}
+                  {!r.error && (r.tier === "scribe"
+                    ? <p className="text-caption text-even-ink-700 whitespace-pre-wrap">{r.note_text || "(empty note)"}</p>
+                    : <p className="text-caption text-even-ink-700 whitespace-pre-wrap">{diffWords(r.transcript_english || r.transcript_original || "(empty)", goldWords)}</p>)}
                 </div>
               ))}
             </div>
