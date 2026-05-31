@@ -35,7 +35,7 @@ export interface SttHealth { ok: boolean; latencyMs: number; error?: string }
 export interface SttAdapter {
   key: string;
   capabilities: SttCapabilities;
-  transcribe(audio: Buffer, opts: { contentType: string; language?: string }): Promise<SttTranscribeResult>;
+  transcribe(audio: Buffer, opts: { contentType: string; language?: string; longForm?: boolean }): Promise<SttTranscribeResult>;
   generateNote?(audio: Buffer, opts: { contentType: string; language?: string; template?: string }): Promise<SttNoteResult>;
   health(): Promise<SttHealth>;
 }

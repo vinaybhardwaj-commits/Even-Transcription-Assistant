@@ -69,7 +69,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   // Which engines already have a batch run for this encounter? (idempotent)
   const existing = (await sql`
     SELECT engine FROM transcription_run
-     WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr'
+     WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND error IS NULL
   `) as Array<{ engine: string }>;
   const done = new Set(existing.map((r) => r.engine));
   const todo = engines.filter((e) => !done.has(e.id));
@@ -87,12 +87,18 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   }
   if (!bytes) return { encounter_id: encounterId, inserted: 0, skipped: 0, errors: ["audio_object_missing"] };
 
+  // Drop any prior errored batch rows for the engines we are re-running (so a
+  // retry replaces the failure rather than duplicating it).
+  for (const e of todo) {
+    await sql`DELETE FROM transcription_run WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND engine = ${e.id} AND error IS NOT NULL`;
+  }
+
   const errors: string[] = [];
   let inserted = 0;
   const results = await Promise.all(todo.map(async (e) => {
     const adapter = adapterFor(e.adapter_key)!;
     try {
-      const r = await adapter.transcribe(bytes as Buffer, { contentType });
+      const r = await adapter.transcribe(bytes as Buffer, { contentType, longForm: true });
       return { e, r };
     } catch (err) {
       return { e, r: { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: String(err).slice(0, 150) } };
@@ -137,6 +143,9 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
   const spendUsd = await todaySpendUsd();
   const allowPaid = spendUsd < budgetUsd;
 
+  // Reclaim jobs left 'running' by a killed/timed-out worker call.
+  await sql`UPDATE stt_fanout_job SET status = 'pending' WHERE status = 'running'`;
+
   const claim = (await sql`
     SELECT encounter_id FROM stt_fanout_job
      WHERE status IN ('pending', 'failed')
@@ -163,4 +172,27 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
     }
   }
   return { processed: claim.length, allowPaid, budgetUsd, spendUsd, jobs };
+}
+
+
+export type FanoutStatus = {
+  jobs: Record<string, number>;
+  batch_runs: number;
+  batch_ok: number;
+  per_engine: Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null }>;
+};
+
+/** Fast queue + batch-run summary (no processing). */
+export async function fanoutStatus(): Promise<FanoutStatus> {
+  const js = (await sql`SELECT status, COUNT(*)::int AS n FROM stt_fanout_job GROUP BY status`) as Array<{ status: string; n: number }>;
+  const tot = (await sql`SELECT COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok FROM transcription_run WHERE mode='batch' AND tier='asr'`) as Array<{ runs: number; ok: number }>;
+  const pe = (await sql`
+    SELECT engine, COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok,
+           ROUND(AVG(latency_ms) FILTER (WHERE error IS NULL))::int AS avg_latency_ms
+      FROM transcription_run WHERE mode='batch' AND tier='asr'
+     GROUP BY engine ORDER BY engine
+  `) as Array<{ engine: string; runs: number; ok: number; avg_latency_ms: number | null }>;
+  const jobs: Record<string, number> = {};
+  for (const r of js) jobs[r.status] = r.n;
+  return { jobs, batch_runs: tot[0]?.runs ?? 0, batch_ok: tot[0]?.ok ?? 0, per_engine: pe };
 }
