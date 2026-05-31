@@ -198,6 +198,19 @@ function GoldTab() {
     finally { setBusy(false); }
   };
 
+  const removeGold = async () => {
+    if (!sel || busy) return;
+    if (!confirm("Remove this encounter from the gold set? Its WER/term scores will be cleared.")) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/admin/stt-lab/gold/${sel}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(`http_${r.status}`);
+      setMsg("Removed from gold set.");
+      await open(sel); await loadList();
+    } catch (e) { setMsg("Remove failed: " + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+
   const fmtWer = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 
   return (
@@ -283,6 +296,7 @@ function GoldTab() {
                 <div className="flex items-center gap-2 mt-2">
                   <input value={refLang} onChange={(e) => setRefLang(e.target.value)} placeholder="lang (e.g. en, hi)" className="w-28 rounded-md border border-even-ink-200 px-2 py-1 text-caption" />
                   <Button variant="primary" size="sm" onClick={() => void save()} disabled={busy || !refText.trim()}>{busy ? "Scoring…" : "Save + score"}</Button>
+                  {detail.gold && <Button variant="ghost" size="sm" onClick={() => void removeGold()} disabled={busy}>Remove from gold</Button>}
                   {detail.gold && <span className="text-caption text-even-ink-500">{detail.gold.critical_terms_json?.length ?? 0} terms · {detail.gold.terms_model}</span>}
                 </div>
                 {msg && <p className="text-caption text-even-ink-600 mt-2">{msg}</p>}

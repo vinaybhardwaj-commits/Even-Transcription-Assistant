@@ -7,7 +7,7 @@ import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
-import { saveGold } from "@/lib/stt/scoring";
+import { saveGold, deleteGold } from "@/lib/stt/scoring";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -65,4 +65,16 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
               VALUES ('admin', ${adminId || null}, 'stt_gold.label', 'encounter', ${id}, ${JSON.stringify({ terms: res.terms, terms_model: res.terms_model, engines: res.engines })}::jsonb)`;
   } catch { /* best-effort */ }
   return respondOk(res);
+}
+
+export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const cookie = await readAdminCookie();
+  if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  let adminId = "";
+  try { adminId = String((await verifyAdminJwt(cookie)).admin_id ?? ""); } catch { return respondError("AUTH_EXPIRED", "Session invalid"); }
+  const ar = (await sql`SELECT role FROM admin_user WHERE id = ${adminId}::uuid LIMIT 1`) as Array<{ role: string }>;
+  if (ar[0]?.role === "viewer") return respondError("FORBIDDEN", "Read-only admins cannot remove gold");
+  await deleteGold(id);
+  return respondOk({ ok: true });
 }

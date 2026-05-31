@@ -264,3 +264,14 @@ export async function saveGold(opts: {
   const scored = await scoreGold(encounterId);
   return { ok: true, terms: terms.length, terms_model: model, engines: scored.engines };
 }
+
+
+/** Remove a gold label and clear the WER/CER/term-recall it produced. */
+export async function deleteGold(encounterId: string): Promise<boolean> {
+  await sql`DELETE FROM stt_gold WHERE encounter_id = ${encounterId}`;
+  await sql`
+    UPDATE transcription_run SET wer = NULL, cer = NULL, med_term_recall = NULL
+     WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr'
+  `;
+  return true;
+}
