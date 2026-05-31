@@ -44,8 +44,8 @@ export type ScoreItem = { runId: string; engine: string; text: string };
 export function computeAgreement(items: ScoreItem[]): Map<string, number> {
   const toks = items.map((i) => normTokens(i.text));
   const out = new Map<string, number>();
+  if (items.length < 2) return out; // no peers -> agreement is N/A (null)
   for (let i = 0; i < items.length; i++) {
-    if (items.length < 2) { out.set(items[i].engine, 1); continue; }
     let sum = 0, n = 0;
     for (let j = 0; j < items.length; j++) {
       if (i === j) continue;
@@ -109,7 +109,7 @@ export async function scoreEncounter(encounterId: string): Promise<ScoreResult> 
   }
 
   for (const it of items) {
-    const ag = agreement.get(it.engine) ?? null;
+    const ag = agreement.has(it.engine) ? (agreement.get(it.engine) as number) : null;
     const je = judgeByEngine.get(it.engine);
     const js = je && typeof je.score === "number" ? Math.max(0, Math.min(10, je.score)) : null;
     const meta = JSON.stringify({ judge_rank: je?.rank ?? null, judge_reasoning: j?.reasoning ?? null, agreement_n: items.length, scored_at: new Date().toISOString() });
