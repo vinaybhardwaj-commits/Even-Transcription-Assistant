@@ -276,9 +276,42 @@ export const transcriptionRun = pgTable("transcription_run", {
   judgeScore:          numeric("judge_score", { precision: 4, scale: 2 }),
   isWinner:            boolean("is_winner").notNull().default(false),
   error:               text("error"),
+  // STT Engine Lab (migration 0019) — tier + per-engine id + cost + scoring + scribe note
+  tier:                text("tier").notNull().default("asr"), // asr | scribe
+  sttEngineId:         text("stt_engine_id"),
+  costUsd:             numeric("cost_usd", { precision: 10, scale: 5 }),
+  wer:                 doublePrecision("wer"),
+  cer:                 doublePrecision("cer"),
+  medTermRecall:       doublePrecision("med_term_recall"),
+  agreementScore:      doublePrecision("agreement_score"),
+  noteText:            text("note_text"),
+  noteJson:            jsonb("note_json"),
+  metricsJson:         jsonb("metrics_json").notNull().default(sql`'{}'::jsonb`),
   createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   byEncounter: index("idx_transcription_run_encounter").on(t.encounterId, t.createdAt),
+}));
+
+// stt_fanout_job (migration 0019) — one offline fan-out job per encounter.
+export const sttFanoutJob = pgTable("stt_fanout_job", {
+  encounterId: text("encounter_id").primaryKey().references(() => encounter.id, { onDelete: "cascade" }),
+  status:      text("status").notNull().default("pending"), // pending|running|done|failed|deferred
+  attempts:    integer("attempts").notNull().default(0),
+  error:       text("error"),
+  enqueuedAt:  timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (t) => ({
+  byStatus: index("idx_stt_fanout_job_status").on(t.status, t.enqueuedAt),
+}));
+
+// stt_lab_config (migration 0019) — singleton (id=1).
+export const sttLabConfig = pgTable("stt_lab_config", {
+  id:                integer("id").primaryKey().default(1),
+  dailyBudgetUsd:    numeric("daily_budget_usd", { precision: 10, scale: 2 }).notNull().default("5"),
+  fanoutConcurrency: integer("fanout_concurrency").notNull().default(3),
+  judgeModel:        text("judge_model").notNull().default("qwen"),
+  weightsJson:       jsonb("weights_json").notNull().default(sql`'{}'::jsonb`),
+  updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }));
 
 // voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).

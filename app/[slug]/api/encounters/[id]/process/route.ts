@@ -22,7 +22,7 @@
  * whichever trace is still in_progress is finalised as 'aborted'. The
  * admin trace dashboard at /admin/traces reads these rows.
  */
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
@@ -35,6 +35,7 @@ import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
+import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
@@ -599,6 +600,13 @@ export async function POST(
            above, where we write status='draft_partial' + audit_log and
            finalise any in-progress llm_traces row as 'aborted'. */
       },
+    });
+
+    // STT Engine Lab (L1): fan the submitted audio out to all enabled engines
+    // AFTER the response completes. Fully non-blocking; never affects the note.
+    after(async () => {
+      try { await enqueueFanout(id); await runFanoutForEncounter(id); }
+      catch (e) { console.warn(`[stt-fanout] enc=${id}: ${e instanceof Error ? e.message : String(e)}`); }
     });
 
     return new Response(stream, {
