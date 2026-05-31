@@ -295,3 +295,26 @@ export const voicePrint = pgTable("voice_print", {
 }, (t) => ({
   byNeedsReenroll: index("idx_voice_print_needs_reenrollment").on(t.needsReenrollment),
 }));
+
+// voice_sample (migration 0017) — per-sample retention. One row per enrollment
+// clip (and, Sprint B, per passive encounter match). voice_print stays the
+// computed-centroid cache = running average of all `included` rows here.
+export const voiceSample = pgTable("voice_sample", {
+  id:                 text("id").primaryKey(),
+  clinicianId:        text("clinician_id").notNull().references(() => clinician.id, { onDelete: "cascade" }),
+  source:             text("source").notNull().default("enrollment"), // enrollment | passive
+  embedding:          bytea("embedding").notNull(),                   // float32[192]
+  audioR2Key:         text("audio_r2_key"),
+  sourceEncounterId:  text("source_encounter_id"),
+  contentType:        text("content_type"),
+  durationMs:         integer("duration_ms"),
+  sessionId:          text("session_id"),
+  sampleIndex:        integer("sample_index"),
+  matchConfidence:    doublePrecision("match_confidence"),
+  included:           boolean("included").notNull().default(true),
+  capturedByAdminId:  text("captured_by_admin_id"),
+  createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byClinician: index("idx_voice_sample_clinician").on(t.clinicianId),
+  bySource:    index("idx_voice_sample_source").on(t.source),
+}));
