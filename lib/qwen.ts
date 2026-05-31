@@ -60,9 +60,9 @@ export async function qwenJson<T = unknown>(
   userMessage: string,
   opts: { timeoutMs?: number; model?: string; temperature?: number; signal?: AbortSignal } = {},
 ): Promise<QwenJsonResult<T>> {
-  const base = process.env.LLM_BASE_URL;
+  const base = process.env.LLM_BASE_URL || process.env.OLLAMA_BASE_URL;
   if (!base) {
-    throw new QwenError('no_env', 'LLM_BASE_URL is not configured');
+    throw new QwenError('no_env', 'LLM_BASE_URL / OLLAMA_BASE_URL is not configured');
   }
   const model = opts.model ?? QWEN_MODEL;
   const temperature = opts.temperature ?? QWEN_TEMPERATURE;
