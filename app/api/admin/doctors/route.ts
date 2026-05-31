@@ -136,10 +136,10 @@ export async function POST(req: NextRequest) {
     await sql`
       INSERT INTO clinician (
         id, legacy_doctor_id, clinician_type, full_name, email, phone, url_slug,
-        url_token, pin_hash, pin_set_at, status, created_by
+        url_token, pin_hash, pin_plaintext, pin_set_at, status, created_by
       ) VALUES (
         ${id}, NULL, ${clinicianType}::clinician_type, ${fullName}, ${email}, ${phone}, ${slug},
-        ${token}, ${pinHash}, NOW(), 'active', ${g.claims.admin_id}
+        ${token}, ${pinHash}, ${pin}, NOW(), 'active', ${g.claims.admin_id}
       )
     `;
   } catch (e) {

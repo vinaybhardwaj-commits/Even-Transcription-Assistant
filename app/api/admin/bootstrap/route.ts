@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
         const pinHash = await bcrypt.hash(doctorPin, 12);
         await sql`
           UPDATE clinician
-             SET pin_hash = ${pinHash}, pin_set_at = NOW(),
+             SET pin_hash = ${pinHash}, pin_plaintext = ${doctorPin}, pin_set_at = NOW(),
                  failed_pin_count = 0, locked_until = NULL,
                  status = 'active', updated_at = NOW()
            WHERE id = ${doctor.id}
@@ -111,11 +111,11 @@ export async function POST(req: NextRequest) {
       const pinHash = await bcrypt.hash(doctorPin, 12);
       const inserted = (await sql`
         INSERT INTO clinician (
-          id, legacy_doctor_id, clinician_type, full_name, email, url_slug, url_token, pin_hash, pin_set_at,
+          id, legacy_doctor_id, clinician_type, full_name, email, url_slug, url_token, pin_hash, pin_plaintext, pin_set_at,
           status, created_by
         ) VALUES (
           ${id}, NULL, 'physician'::clinician_type, ${doctorFullName}, ${doctorEmail}, ${fullSlug}, ${token},
-          ${pinHash}, NOW(), 'active', ${admin.id}::uuid
+          ${pinHash}, ${doctorPin}, NOW(), 'active', ${admin.id}::uuid
         )
         RETURNING id, url_slug
       `) as DoctorRow[];

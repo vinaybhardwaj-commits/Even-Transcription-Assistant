@@ -93,6 +93,7 @@ export async function PATCH(
  * audit_log entries scoped to this doctor.
  */
 import { getFullDoctor } from "@/lib/admin/doctor-detail";
+import { sql } from "@/lib/db";
 
 export async function GET(
   _req: NextRequest,
@@ -100,8 +101,10 @@ export async function GET(
 ) {
   const cookie = await readAdminCookie();
   if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  let adminId = "";
   try {
-    await verifyAdminJwt(cookie);
+    const claims = await verifyAdminJwt(cookie);
+    adminId = String(claims.admin_id ?? "");
   } catch {
     return respondError("AUTH_EXPIRED", "Session invalid");
   }
@@ -111,5 +114,10 @@ export async function GET(
 
   const bundle = await getFullDoctor(id);
   if (!bundle.doctor) return respondError("NOT_FOUND", "doctor_not_found");
+  // PIN plaintext is visible to super-admins only.
+  try {
+    const ar = (await sql`SELECT role FROM admin_user WHERE id = ${adminId}::uuid LIMIT 1`) as Array<{ role: string }>;
+    if (ar[0]?.role !== "super") bundle.doctor.pin_plaintext = null;
+  } catch { bundle.doctor.pin_plaintext = null; }
   return respondOk(bundle);
 }

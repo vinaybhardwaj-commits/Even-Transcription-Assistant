@@ -15,6 +15,7 @@ export type DoctorFull = {
     url_token: string;
     status: "active" | "disabled" | "locked";
     pin_set_at: string | null;
+    pin_plaintext: string | null;
     failed_pin_count: number;
     locked_until: string | null;
     last_active_at: string | null;
@@ -77,6 +78,7 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
         id, full_name, email, phone,
         url_slug, url_token, status,
         pin_set_at::text       AS pin_set_at,
+        pin_plaintext,
         failed_pin_count,
         locked_until::text     AS locked_until,
         last_active_at::text   AS last_active_at,
@@ -97,6 +99,7 @@ export async function getFullDoctor(id: string): Promise<DoctorFull> {
       url_token: String(r.url_token),
       status: r.status as "active" | "disabled" | "locked",
       pin_set_at: r.pin_set_at ? String(r.pin_set_at) : null,
+      pin_plaintext: r.pin_plaintext ? String(r.pin_plaintext) : null,
       failed_pin_count: Number(r.failed_pin_count ?? 0),
       locked_until: r.locked_until ? String(r.locked_until) : null,
       last_active_at: r.last_active_at ? String(r.last_active_at) : null,

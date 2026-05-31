@@ -64,6 +64,7 @@ export async function POST(
     const rows = (await sql`
       UPDATE clinician
          SET pin_hash         = ${pinHash},
+             pin_plaintext    = ${pin},
              pin_set_at       = NOW(),
              failed_pin_count = 0,
              locked_until     = NULL,

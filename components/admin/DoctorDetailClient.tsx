@@ -27,6 +27,7 @@ type Doctor = {
   url_token: string;
   status: "active" | "disabled" | "locked";
   pin_set_at: string | null;
+  pin_plaintext: string | null;
   failed_pin_count: number;
   locked_until: string | null;
   last_active_at: string | null;
@@ -352,6 +353,11 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
               {d.pin_set_at ? `Set ${fmtDate(d.pin_set_at)}` : <span className="text-even-ink-400">Not set yet</span>}
               {" · "}
               {d.failed_pin_count > 0 ? <span className="text-warning-700">{d.failed_pin_count} failed attempts</span> : "0 failed attempts"}
+            </p>
+            <p className="text-caption text-even-ink-700 mt-1">
+              {d.pin_plaintext
+                ? <>Current PIN: <span className="font-mono font-semibold text-even-navy-800 text-body">{d.pin_plaintext}</span></>
+                : <span className="text-even-ink-400">PIN not recorded — reset to reveal (super-admin only)</span>}
             </p>
             <div className="flex flex-wrap gap-2 mt-2">
               <Button variant="secondary" size="sm" onClick={() => void resetPin()} disabled={actionInflight}>🔑 Reset PIN</Button>
