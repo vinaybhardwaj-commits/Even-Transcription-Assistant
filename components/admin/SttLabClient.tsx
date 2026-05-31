@@ -77,6 +77,12 @@ export function SttLabClient() {
 
       {tab === "Gold set" ? (
         <GoldTab />
+      ) : tab === "Leaderboard" ? (
+        <LeaderboardTab />
+      ) : tab === "Runs" ? (
+        <RunsTab />
+      ) : tab === "Engines" ? (
+        <EnginesTab />
       ) : tab !== "Health" ? (
         <div className="rounded-xl border border-even-ink-100 bg-even-white p-8 text-center text-body text-even-ink-400">
           {tab} — coming in a later sprint.
@@ -317,5 +323,194 @@ function GoldTab() {
         </section>
       </div>
     </div>
+  );
+}
+
+// ---- Leaderboard tab (L4) --------------------------------------------------
+type LeaderRow = {
+  engine: string; display_name: string | null; runs: number; ok: number; success_rate: number;
+  avg_latency_ms: number | null; p95_latency_ms: number | null; avg_judge: number | null; avg_agreement: number | null;
+  gold_n: number; avg_wer: number | null; avg_cer: number | null; avg_term_recall: number | null;
+  wins: number; cost_per_min: number | null; composite: number | null;
+};
+type LeaderBundle = { engines: LeaderRow[]; weights: Record<string, number>; total_runs: number };
+
+function LeaderboardTab() {
+  const [data, setData] = React.useState<LeaderBundle | null>(null);
+  const [lang, setLang] = React.useState("all");
+  const [since, setSince] = React.useState("");
+  const [tier, setTier] = React.useState<"ASR" | "Scribe">("ASR");
+  const load = React.useCallback(async () => {
+    const qs = new URLSearchParams(); if (lang !== "all") qs.set("lang", lang); if (since) qs.set("since", since);
+    const r = await fetch(`/api/admin/stt-lab/leaderboard?${qs}`, { cache: "no-store" });
+    const j = await r.json(); if (r.ok) setData(j as LeaderBundle);
+  }, [lang, since]);
+  React.useEffect(() => { void load(); }, [load]);
+  const pct = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
+  const werFmt = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="inline-flex rounded-md border border-even-ink-200 overflow-hidden text-caption">
+          {(["ASR", "Scribe"] as const).map((t) => (
+            <button key={t} onClick={() => setTier(t)} className={`px-3 py-1 ${tier === t ? "bg-even-navy-800 text-even-white" : "text-even-ink-600"}`}>{t}</button>
+          ))}
+        </div>
+        <select value={lang} onChange={(e) => setLang(e.target.value)} className="rounded-md border border-even-ink-200 px-2 py-1 text-caption">
+          <option value="all">All languages</option><option value="english">English</option><option value="indic">Indic</option>
+        </select>
+        <select value={since} onChange={(e) => setSince(e.target.value)} className="rounded-md border border-even-ink-200 px-2 py-1 text-caption">
+          <option value="">All time</option><option value="30">Last 30 days</option><option value="7">Last 7 days</option>
+        </select>
+        <span className="text-caption text-even-ink-400">{data ? `${data.total_runs} runs` : ""}</span>
+      </div>
+
+      {tier === "Scribe" ? (
+        <div className="rounded-xl border border-even-ink-100 bg-even-white p-8 text-center text-body text-even-ink-400">Scribe-tier leaderboard arrives with Ekascribe (L7).</div>
+      ) : (
+        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
+          <table className="w-full text-body">
+            <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
+              <th className="py-2 pr-2">#</th><th className="py-2 pr-3">Engine</th><th className="py-2 pr-3">Composite ↑</th><th className="py-2 pr-3">Accuracy</th><th className="py-2 pr-3">WER ↓</th><th className="py-2 pr-3">Med-term ↑</th><th className="py-2 pr-3">Judge</th><th className="py-2 pr-3">Agree</th><th className="py-2 pr-3">Latency</th><th className="py-2 pr-3">Reliab.</th><th className="py-2 pr-3">Wins</th><th className="py-2 pr-3">Gold n</th>
+            </tr></thead>
+            <tbody>
+              {data?.engines.map((e, i) => (
+                <tr key={e.engine} className="border-b border-even-ink-100 last:border-b-0">
+                  <td className="py-2 pr-2 text-even-ink-400">{i + 1}</td>
+                  <td className="py-2 pr-3 text-even-navy-800">{e.display_name || e.engine}</td>
+                  <td className="py-2 pr-3"><span className="font-mono font-semibold text-even-navy-800">{e.composite ?? "—"}</span></td>
+                  <td className="py-2 pr-3 font-mono">{e.avg_wer === null ? "—" : pct(Math.max(0, 1 - Math.min(e.avg_wer, 1)))}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-600">{werFmt(e.avg_wer)}</td>
+                  <td className="py-2 pr-3 font-mono">{e.avg_term_recall === null ? "—" : pct(e.avg_term_recall)}</td>
+                  <td className="py-2 pr-3 font-mono">{e.avg_judge ?? "—"}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-600">{e.avg_agreement ?? "—"}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-600">{e.avg_latency_ms === null ? "—" : `${(e.avg_latency_ms / 1000).toFixed(1)}s`}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-600">{pct(e.success_rate)}</td>
+                  <td className="py-2 pr-3 font-mono">{e.wins}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-400">{e.gold_n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-caption text-even-ink-400 mt-3">Composite (0-100) blends accuracy, med-term, judge, agreement, speed, reliability, cost. WER/accuracy/med-term need gold labels; "—" = not yet available.</p>
+        </section>
+      )}
+    </div>
+  );
+}
+
+// ---- Runs tab (L4) ---------------------------------------------------------
+type RunListItem = { id: string; patient_label_raw: string | null; recorded_at: string | null; detected_language: string | null; note_type: string | null; engines: number; errored: number; winner: string | null; has_gold: boolean; avg_judge: number | null };
+type RunDetailRow = { engine: string; transcript_english: string | null; transcript_original: string | null; latency_ms: number | null; error: string | null; judge_score: number | null; agreement_score: number | null; wer: number | null; cer: number | null; med_term_recall: number | null; is_winner: boolean };
+type RunDetail = { encounter: { id: string; patient_label_raw: string | null; detected_language: string | null }; runs: RunDetailRow[]; gold: { reference_english: string | null; reference_original: string | null } | null };
+
+function diffWords(text: string, goldWords: Set<string> | null) {
+  if (!goldWords) return <>{text}</>;
+  return <>{text.split(/(\s+)/).map((w, i) => {
+    const norm = w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    if (!norm) return <span key={i}>{w}</span>;
+    return <span key={i} className={goldWords.has(norm) ? "" : "bg-danger-100/60 text-danger-700 rounded-sm"}>{w}</span>;
+  })}</>;
+}
+
+function RunsTab() {
+  const [list, setList] = React.useState<RunListItem[] | null>(null);
+  const [sel, setSel] = React.useState<string | null>(null);
+  const [detail, setDetail] = React.useState<RunDetail | null>(null);
+  React.useEffect(() => { (async () => { const r = await fetch("/api/admin/stt-lab/runs", { cache: "no-store" }); const j = await r.json(); if (r.ok) setList(j.runs); })(); }, []);
+  const open = async (id: string) => { setSel(id); setDetail(null); const r = await fetch(`/api/admin/stt-lab/runs/${id}`, { cache: "no-store" }); const j = await r.json(); if (r.ok) setDetail(j as RunDetail); };
+  const goldWords = React.useMemo(() => {
+    const ref = detail?.gold ? (detail.gold.reference_english || detail.gold.reference_original || "") : "";
+    if (!ref) return null;
+    return new Set(ref.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean));
+  }, [detail]);
+  const pct = (v: number | null) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[280px,1fr] gap-5">
+      <section className="rounded-xl border border-even-ink-100 bg-even-white p-4 max-h-[640px] overflow-y-auto">
+        <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Encounters ({list?.length ?? 0})</h4>
+        <ul className="space-y-1">
+          {list?.map((r) => (
+            <li key={r.id}>
+              <button onClick={() => void open(r.id)} className={`w-full text-left px-2 py-1.5 rounded-md text-caption ${sel === r.id ? "bg-even-blue-100 text-even-navy-800" : "hover:bg-even-ink-50"}`}>
+                <div className="truncate">{r.patient_label_raw || r.id}</div>
+                <div className="text-even-ink-400">{r.detected_language || "?"} · {r.engines} eng{r.has_gold ? " · gold" : ""}{r.winner ? ` · ${r.winner}` : ""}</div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        {!sel || !detail ? (
+          <p className="text-body text-even-ink-400">Select an encounter to see the engine comparison.</p>
+        ) : (
+          <div className="space-y-4">
+            <h3 className="text-label text-even-navy-800">{detail.encounter.patient_label_raw || detail.encounter.id} <span className="text-caption text-even-ink-400">{detail.encounter.detected_language}</span></h3>
+            {detail.gold && (
+              <div className="rounded-md border border-success-500/40 bg-success-100/20 p-3">
+                <div className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">Gold reference</div>
+                <p className="text-caption text-even-ink-800 whitespace-pre-wrap">{detail.gold.reference_english || detail.gold.reference_original}</p>
+              </div>
+            )}
+            <div className="space-y-3">
+              {detail.runs.map((r) => (
+                <div key={r.engine} className={`rounded-md border p-3 ${r.is_winner ? "border-even-blue-400 bg-even-blue-50/40" : "border-even-ink-100"}`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-even-navy-800 text-label">{r.engine} {r.is_winner && <span className="text-caption text-even-blue-600">★ winner</span>}</span>
+                    <span className="font-mono text-caption text-even-ink-500">
+                      {r.error ? <span className="text-danger-600">{r.error.slice(0, 40)}</span> : <>judge {r.judge_score ?? "—"} · agree {r.agreement_score ?? "—"} · WER {r.wer === null ? "—" : pct(r.wer)} · term {pct(r.med_term_recall)} · {r.latency_ms === null ? "—" : `${(r.latency_ms / 1000).toFixed(1)}s`}</>}
+                    </span>
+                  </div>
+                  {!r.error && <p className="text-caption text-even-ink-700 whitespace-pre-wrap">{diffWords(r.transcript_english || r.transcript_original || "(empty)", goldWords)}</p>}
+                </div>
+              ))}
+            </div>
+            {goldWords && <p className="text-caption text-even-ink-400">Words <span className="bg-danger-100/60 text-danger-700 px-1 rounded-sm">highlighted</span> are not in the gold reference.</p>}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ---- Engines tab (L4) ------------------------------------------------------
+type EngineRow2 = { id: string; display_name: string; adapter_key: string; capabilities_json: { tiers?: string[]; languages?: string[] }; enabled: boolean; fanout_enabled: boolean; is_paid: boolean; cost_per_min_usd: number | null; sort_order: number };
+
+function EnginesTab() {
+  const [engines, setEngines] = React.useState<EngineRow2[] | null>(null);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const load = React.useCallback(async () => { const r = await fetch("/api/admin/stt-lab/engines", { cache: "no-store" }); const j = await r.json(); if (r.ok) setEngines(j.engines); }, []);
+  React.useEffect(() => { void load(); }, [load]);
+  const patch = async (id: string, body: Record<string, unknown>) => {
+    setBusy(id);
+    try { await fetch("/api/admin/stt-lab/engines", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, ...body }) }); await load(); }
+    finally { setBusy(null); }
+  };
+  return (
+    <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
+      <p className="text-caption text-even-ink-500 mb-3">Registered engines. A new engine = one adapter file + one row here. Toggle whether each is enabled (routing pool) and participates in fan-out; set cost/min for the composite + budget.</p>
+      <table className="w-full text-body">
+        <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
+          <th className="py-2 pr-3">Engine</th><th className="py-2 pr-3">Adapter</th><th className="py-2 pr-3">Tiers</th><th className="py-2 pr-3">Enabled</th><th className="py-2 pr-3">Fan-out</th><th className="py-2 pr-3">$/min</th>
+        </tr></thead>
+        <tbody>
+          {engines?.map((e) => (
+            <tr key={e.id} className="border-b border-even-ink-100 last:border-b-0">
+              <td className="py-2 pr-3"><span className="text-even-navy-800">{e.display_name}</span> <span className="font-mono text-caption text-even-ink-400">{e.id}</span></td>
+              <td className="py-2 pr-3 font-mono text-caption text-even-ink-500">{e.adapter_key}</td>
+              <td className="py-2 pr-3 text-caption text-even-ink-600">{(e.capabilities_json?.tiers || []).join("+")}</td>
+              <td className="py-2 pr-3"><button disabled={busy === e.id} onClick={() => void patch(e.id, { enabled: !e.enabled })} className={`text-caption px-2 py-0.5 rounded ${e.enabled ? "bg-success-100 text-success-700" : "bg-even-ink-100 text-even-ink-500"}`}>{e.enabled ? "on" : "off"}</button></td>
+              <td className="py-2 pr-3"><button disabled={busy === e.id} onClick={() => void patch(e.id, { fanout_enabled: !e.fanout_enabled })} className={`text-caption px-2 py-0.5 rounded ${e.fanout_enabled ? "bg-success-100 text-success-700" : "bg-even-ink-100 text-even-ink-500"}`}>{e.fanout_enabled ? "on" : "off"}</button></td>
+              <td className="py-2 pr-3">
+                <input type="number" step="0.001" defaultValue={e.cost_per_min_usd ?? ""} onBlur={(ev) => { const v = ev.target.value === "" ? null : Number(ev.target.value); if (v !== e.cost_per_min_usd) void patch(e.id, { cost_per_min_usd: v }); }} className="w-20 rounded border border-even-ink-200 px-1.5 py-0.5 text-caption font-mono" placeholder="—" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
