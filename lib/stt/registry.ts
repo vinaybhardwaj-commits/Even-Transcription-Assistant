@@ -5,11 +5,13 @@ import type { SttAdapter } from "./types";
 import { deepgramAdapter } from "./adapters/deepgram";
 import { whisperAdapter } from "./adapters/whisper";
 import { sarvamAdapter } from "./adapters/sarvam";
+import { elevenlabsAdapter } from "./adapters/elevenlabs";
 
 export const ADAPTERS: Record<string, SttAdapter> = {
   deepgram: deepgramAdapter,
   whisper: whisperAdapter,
   sarvam: sarvamAdapter,
+  elevenlabs: elevenlabsAdapter,
 };
 
 export function adapterFor(key: string): SttAdapter | null {
