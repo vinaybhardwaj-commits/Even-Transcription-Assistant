@@ -18,7 +18,7 @@ type EngineRow = {
   id: string; display_name: string; adapter_key: string;
   enabled: boolean; fanout_enabled: boolean; is_paid: boolean;
   cost_per_min_usd: number | null; capabilities: Capabilities;
-  has_adapter: boolean; health: EngineHealth;
+  has_adapter: boolean; virtual?: boolean; health: EngineHealth;
 };
 type Bundle = { engines: EngineRow[]; checked_at: string };
 
@@ -44,8 +44,8 @@ export function SttLabClient() {
   }, []);
   React.useEffect(() => { void load(); }, [load]);
 
-  const dot = (h: EngineHealth, hasAdapter: boolean) => {
-    const color = !hasAdapter ? "bg-even-ink-300" : h.ok ? "bg-success-500" : "bg-danger-500";
+  const dot = (h: EngineHealth, hasAdapter: boolean, virtual?: boolean) => {
+    const color = virtual ? "bg-even-blue-400" : !hasAdapter ? "bg-even-ink-300" : h.ok ? "bg-success-500" : "bg-danger-500";
     return <span className={`inline-block w-2.5 h-2.5 rounded-full ${color}`} />;
   };
   const caps = (c: Capabilities) => {
@@ -124,15 +124,15 @@ export function SttLabClient() {
                 <tbody>
                   {data.engines.map((e) => (
                     <tr key={e.id} className="border-b border-even-ink-100 last:border-b-0">
-                      <td className="py-2.5 pr-3">{dot(e.health, e.has_adapter)}</td>
+                      <td className="py-2.5 pr-3">{dot(e.health, e.has_adapter, e.virtual)}</td>
                       <td className="py-2.5 pr-3">
                         <span className="text-even-navy-800">{e.display_name}</span>
                         <span className="text-even-ink-400 font-mono text-caption ml-2">{e.id}</span>
-                        {!e.has_adapter && <span className="ml-2 text-caption text-warning-700">no adapter yet</span>}
-                        {e.health.error && <div className="text-caption text-danger-600 truncate max-w-md">{e.health.error}</div>}
+                        {e.virtual ? <span className="ml-2 text-caption text-even-blue-600">virtual · no probe</span> : !e.has_adapter && <span className="ml-2 text-caption text-warning-700">no adapter yet</span>}
+                        {e.health.error && !e.virtual && <div className="text-caption text-danger-600 truncate max-w-md">{e.health.error}</div>}
                       </td>
                       <td className="py-2.5 pr-3 text-caption text-even-ink-600">{caps(e.capabilities)}</td>
-                      <td className="py-2.5 pr-3 font-mono text-caption text-even-ink-600">{e.has_adapter ? `${e.health.latencyMs}ms` : "—"}</td>
+                      <td className="py-2.5 pr-3 font-mono text-caption text-even-ink-600">{e.virtual || !e.has_adapter ? "—" : `${e.health.latencyMs}ms`}</td>
                       <td className="py-2.5 pr-3 text-caption">{e.enabled ? "✓" : <span className="text-even-ink-400">off</span>}</td>
                       <td className="py-2.5 pr-3 text-caption">{e.fanout_enabled ? "✓" : <span className="text-even-ink-400">off</span>}</td>
                       <td className="py-2.5 pr-3 font-mono text-caption text-even-ink-600">{e.cost_per_min_usd === 0 ? "free" : e.cost_per_min_usd === null ? "—" : `$${e.cost_per_min_usd}`}</td>

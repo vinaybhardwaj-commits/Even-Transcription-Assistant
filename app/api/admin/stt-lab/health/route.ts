@@ -16,8 +16,12 @@ export async function GET(_req: NextRequest) {
   const engines = await listEngines();
   const results = await Promise.all(engines.map(async (e) => {
     const adapter = adapterFor(e.adapter_key);
+    const cfg = (e.config_json ?? {}) as Record<string, unknown>;
+    const virtual = cfg.virtual === true;
     let health: { ok: boolean; latencyMs: number; error?: string };
-    if (!adapter) {
+    if (virtual) {
+      health = { ok: true, latencyMs: 0 }; // virtual engine — its output is the encounter's own note; nothing to probe
+    } else if (!adapter) {
       health = { ok: false, latencyMs: 0, error: "no_adapter_registered" };
     } else {
       try { health = await adapter.health(); }
@@ -33,6 +37,7 @@ export async function GET(_req: NextRequest) {
       cost_per_min_usd: e.cost_per_min_usd,
       capabilities: e.capabilities_json,
       has_adapter: !!adapter,
+      virtual,
       health,
     };
   }));
