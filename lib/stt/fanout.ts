@@ -196,3 +196,10 @@ export async function fanoutStatus(): Promise<FanoutStatus> {
   for (const r of js) jobs[r.status] = r.n;
   return { jobs, batch_runs: tot[0]?.runs ?? 0, batch_ok: tot[0]?.ok ?? 0, per_engine: pe };
 }
+
+
+/** Reset every job to pending (idempotent re-run: successful engines are skipped). */
+export async function resetAllJobs(): Promise<number> {
+  const r = (await sql`UPDATE stt_fanout_job SET status = 'pending', error = NULL WHERE status <> 'pending' RETURNING encounter_id`) as Array<{ encounter_id: string }>;
+  return r.length;
+}
