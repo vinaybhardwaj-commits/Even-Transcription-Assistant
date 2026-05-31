@@ -23,7 +23,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   let adminId = "";
   try { adminId = String((await verifyAdminJwt(cookie)).admin_id ?? ""); } catch { return respondError("AUTH_EXPIRED", "Session invalid"); }
 
-  const dr = (await sql`SELECT id FROM doctor WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`) as Array<{ id: string }>;
+  const dr = (await sql`SELECT id FROM clinician WHERE id = ${id} AND deleted_at IS NULL LIMIT 1`) as Array<{ id: string }>;
   if (!dr[0]) return respondError("NOT_FOUND", "doctor_not_found");
 
   let form: FormData;

@@ -42,7 +42,7 @@ export async function POST(
 
   const rows = (await sql`
     SELECT id, full_name, email, url_slug
-      FROM doctor WHERE id = ${id} AND deleted_at IS NULL LIMIT 1
+      FROM clinician WHERE id = ${id} AND deleted_at IS NULL LIMIT 1
   `) as Array<{ id: string; full_name: string; email: string; url_slug: string }>;
   if (rows.length === 0) return respondError("NOT_FOUND", "doctor_not_found");
   const doc = rows[0]!;

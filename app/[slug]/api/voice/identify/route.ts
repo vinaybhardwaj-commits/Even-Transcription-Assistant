@@ -32,7 +32,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   // Load the doctor's enrolled centroid + name.
   const vp = (await sql`
     SELECT encode(vp.centroid, 'base64') AS centroid_b64, d.full_name AS full_name
-      FROM voice_print vp JOIN doctor d ON d.id = vp.doctor_id
+      FROM voice_print vp JOIN clinician d ON d.id = vp.doctor_id
      WHERE vp.doctor_id = ${claims.doctor_id} LIMIT 1
   `) as Array<{ centroid_b64: string; full_name: string }>;
   if (!vp[0]?.centroid_b64) {
