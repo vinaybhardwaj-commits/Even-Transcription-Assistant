@@ -11,6 +11,7 @@
  */
 import { sql } from "@/lib/db";
 import { qwenJson } from "@/lib/qwen";
+import { wer, cer, termRecall } from "./wer";
 
 const MAX_TOKENS = 1500;
 
@@ -163,4 +164,103 @@ export async function resetScores(): Promise<number> {
      WHERE mode = 'batch' AND tier = 'asr' RETURNING id
   `) as Array<{ id: string }>;
   return r.length;
+}
+
+// ---- L3: gold-set objective accuracy (WER/CER + medical-term fidelity) ------
+
+const EXTRACT_SYSTEM = `You extract the clinically critical terms from a medical encounter transcript: drug names, doses with units, lab/vital values, diagnoses, anatomical sites, procedures, and explicit negations (e.g. "no chest pain"). Return STRICT JSON only: {"terms":[{"term":"<verbatim phrase>","type":"drug|dose|finding|diagnosis|site|procedure|negation|other"}]}. Include only terms actually present in the text. Keep each term short (the exact phrase). No commentary.`;
+
+type Term = { term: string; type: string };
+
+/** Extract critical terms from the gold reference. Prefers a cloud LLM (OPENAI_API_KEY)
+ *  per the Q1 decision; falls back to the Mac-Mini qwen so it works without a key. */
+export async function extractCriticalTerms(reference: string): Promise<{ terms: Term[]; model: string }> {
+  const text = (reference || "").slice(0, 8000);
+  if (!text.trim()) return { terms: [], model: "none" };
+
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const OpenAI = (await import("openai")).default;
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const model = process.env.STT_GOLD_EXTRACT_MODEL || "gpt-4o-mini";
+      const r = await client.chat.completions.create({
+        model, temperature: 0, response_format: { type: "json_object" },
+        messages: [{ role: "system", content: EXTRACT_SYSTEM }, { role: "user", content: text }],
+      });
+      const j = JSON.parse(r.choices[0]?.message?.content || "{}") as { terms?: Term[] };
+      return { terms: Array.isArray(j.terms) ? j.terms.filter((t) => t && t.term) : [], model: `cloud:${model}` };
+    } catch { /* fall through to qwen */ }
+  }
+  try {
+    const r = await qwenJson<{ terms?: Term[] }>(EXTRACT_SYSTEM, text, { temperature: 0, timeoutMs: 60_000 });
+    return { terms: Array.isArray(r.json?.terms) ? r.json!.terms!.filter((t) => t && t.term) : [], model: "qwen2.5:14b" };
+  } catch {
+    return { terms: [], model: "none" };
+  }
+}
+
+/** Compute WER/CER + term-recall for every engine run of a gold-labeled encounter. */
+export async function scoreGold(encounterId: string): Promise<{ ok: boolean; engines: number; terms: number }> {
+  const g = (await sql`
+    SELECT reference_original, reference_english, critical_terms_json
+      FROM stt_gold WHERE encounter_id = ${encounterId} LIMIT 1
+  `) as Array<{ reference_original: string | null; reference_english: string | null; critical_terms_json: unknown }>;
+  if (!g[0]) return { ok: false, engines: 0, terms: 0 };
+  const refOrig = (g[0].reference_original || "").trim();
+  const refEng = (g[0].reference_english || "").trim();
+  const refPrimary = refEng || refOrig;
+  if (!refPrimary) return { ok: false, engines: 0, terms: 0 };
+  const terms = (Array.isArray(g[0].critical_terms_json) ? g[0].critical_terms_json : []) as Term[];
+
+  const rows = (await sql`
+    SELECT id, engine, transcript_english, transcript_original
+      FROM transcription_run
+     WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND error IS NULL
+  `) as Array<{ id: string; engine: string; transcript_english: string | null; transcript_original: string | null }>;
+
+  for (const r of rows) {
+    const hyp = (r.transcript_english || r.transcript_original || "");
+    const w = wer(refPrimary, hyp);
+    const c = cer(refPrimary, hyp);
+    const recall = termRecall(terms, hyp);
+    const extra: Record<string, unknown> = { gold_scored_at: new Date().toISOString() };
+    if (refOrig && r.transcript_original) extra.wer_original = wer(refOrig, r.transcript_original);
+    await sql`
+      UPDATE transcription_run
+         SET wer = ${w}, cer = ${c}, med_term_recall = ${recall},
+             metrics_json = COALESCE(metrics_json, '{}'::jsonb) || ${JSON.stringify(extra)}::jsonb
+       WHERE id = ${r.id}
+    `;
+  }
+  return { ok: true, engines: rows.length, terms: terms.length };
+}
+
+/** Save (upsert) a verbatim gold reference, extract its critical terms, then score WER/term-recall. */
+export async function saveGold(opts: {
+  encounterId: string;
+  referenceOriginal?: string | null;
+  referenceEnglish?: string | null;
+  referenceLanguage?: string | null;
+  adminId?: string | null;
+}): Promise<{ ok: boolean; terms: number; terms_model: string; engines: number }> {
+  const { encounterId } = opts;
+  const refOrig = (opts.referenceOriginal ?? "").trim() || null;
+  const refEng = (opts.referenceEnglish ?? "").trim() || null;
+  const refPrimary = (refEng || refOrig || "").trim();
+  if (!refPrimary) return { ok: false, terms: 0, terms_model: "none", engines: 0 };
+
+  const { terms, model } = await extractCriticalTerms(refPrimary);
+  await sql`
+    INSERT INTO stt_gold (encounter_id, reference_original, reference_english, reference_language, critical_terms_json, terms_model, labeled_by_admin_id, labeled_at, updated_at)
+    VALUES (${encounterId}, ${refOrig}, ${refEng}, ${opts.referenceLanguage ?? null}, ${JSON.stringify(terms)}::jsonb, ${model}, ${opts.adminId ?? null}, NOW(), NOW())
+    ON CONFLICT (encounter_id) DO UPDATE SET
+      reference_original = EXCLUDED.reference_original,
+      reference_english = EXCLUDED.reference_english,
+      reference_language = EXCLUDED.reference_language,
+      critical_terms_json = EXCLUDED.critical_terms_json,
+      terms_model = EXCLUDED.terms_model,
+      updated_at = NOW()
+  `;
+  const scored = await scoreGold(encounterId);
+  return { ok: true, terms: terms.length, terms_model: model, engines: scored.engines };
 }

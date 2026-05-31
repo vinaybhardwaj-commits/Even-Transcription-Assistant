@@ -314,6 +314,19 @@ export const sttLabConfig = pgTable("stt_lab_config", {
   updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// stt_gold (migration 0020) — verbatim reference per gold-labeled encounter (L3).
+export const sttGold = pgTable("stt_gold", {
+  encounterId:       text("encounter_id").primaryKey().references(() => encounter.id, { onDelete: "cascade" }),
+  referenceOriginal: text("reference_original"),
+  referenceEnglish:  text("reference_english"),
+  referenceLanguage: text("reference_language"),
+  criticalTermsJson: jsonb("critical_terms_json").notNull().default(sql`'[]'::jsonb`),
+  termsModel:        text("terms_model"),
+  labeledByAdminId:  text("labeled_by_admin_id"),
+  labeledAt:         timestamp("labeled_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).
 // FK references doctor for now (renamed to clinician in v2.0).
 export const voicePrint = pgTable("voice_print", {
