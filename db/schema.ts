@@ -312,7 +312,7 @@ export const sttLabConfig = pgTable("stt_lab_config", {
   judgeModel:        text("judge_model").notNull().default("qwen"),
   weightsJson:       jsonb("weights_json").notNull().default(sql`'{}'::jsonb`),
   updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}));
+});
 
 // voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).
 // FK references doctor for now (renamed to clinician in v2.0).
