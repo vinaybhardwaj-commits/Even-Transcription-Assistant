@@ -115,11 +115,15 @@ async function runJob(audio: Buffer, contentType: string, templateId: string, op
 
 export const ekascribeAdapter: SttAdapter = {
   key: "ekascribe",
-  capabilities: { tiers: ["asr", "scribe"], stages: ["note"], languages: ["indic", "multi"], streaming: false, translates: true, async: true },
-  async transcribe(audio, opts): Promise<SttTranscribeResult> {
-    const r = await runJob(audio, opts.contentType, process.env.EKASCRIBE_ASR_TEMPLATE || "transcript_template", { language: opts.language });
-    if (r.ok) return { original: r.text, english: r.text, language: null, latencyMs: r.latencyMs, costUsd: null, error: null };
-    return { original: null, english: null, language: null, latencyMs: r.latencyMs, costUsd: null, error: r.error };
+  capabilities: { tiers: ["scribe"], stages: ["note"], languages: ["indic", "multi"], streaming: false, translates: true, async: true },
+  async transcribe(): Promise<SttTranscribeResult> {
+    // EkaScribe is an end-to-end medical scribe. This account does NOT expose a
+    // verbatim ASR transcript — transcript_template is silently unsupported
+    // (eka.care returns clinical_notes_template / eka_emr_template only). So we
+    // do not participate in the ASR tier; EkaScribe competes on the scribe tier
+    // via generateNote(). Capability 'asr' is removed from the registry row too
+    // (migration 0023) so the ASR fan-out never selects this engine.
+    return { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: "asr_unsupported_on_account" };
   },
   async generateNote(audio, opts): Promise<SttNoteResult> {
     const r = await runJob(audio, opts.contentType, opts.template || process.env.EKASCRIBE_SCRIBE_TEMPLATE || "clinical_notes_template", { language: opts.language });
