@@ -59,7 +59,7 @@ function decodeValue(value: unknown): { obj: unknown; text: string } {
 
 type JobResult = { ok: true; obj: unknown; text: string; latencyMs: number } | { ok: false; error: string; latencyMs: number };
 
-async function runJob(audio: Buffer, contentType: string, templateId: string, opts: { language?: string; maxWaitMs?: number }): Promise<JobResult> {
+async function runJob(audio: Buffer, contentType: string, requestTemplates: string[], extractTemplate: string, opts: { language?: string; maxWaitMs?: number }): Promise<JobResult> {
   const t0 = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 150_000;
   const token = await getToken();
@@ -87,23 +87,36 @@ async function runJob(audio: Buffer, contentType: string, templateId: string, op
       batch_s3_url: pj.uploadData.url + pj.folderPath,
       client_generated_files: [fname], model_type: process.env.EKASCRIBE_MODEL || "pro",
       input_language: [lang], output_language: "en-IN",
-      output_format_template: [{ template_id: templateId, codification_needed: false }],
+      output_format_template: requestTemplates.map((t) => ({ template_id: t, codification_needed: false })),
     };
     const init = await fetch(`${BASE}/voice/api/v2/transaction/init/${encodeURIComponent(txn)}`, { method: "POST", headers: { ...H, "Content-Type": "application/json" }, body: JSON.stringify(initBody), cache: "no-store", signal: AbortSignal.timeout(20_000) });
     if (!(init.status === 200 || init.status === 201)) return { ok: false, error: `init_${init.status}: ${(await init.text()).slice(0, 100)}`, latencyMs: Date.now() - t0 };
-    // 4. poll
+    // 4. poll. eka.care returns 206 (partial) while some templates are still
+    // pending, 200 when all are done. Keep polling on 206 if our target
+    // template hasn't appeared yet; only error out on a 200 or an explicit
+    // per-template failure.
     while (Date.now() - t0 < maxWaitMs) {
       await new Promise((r) => setTimeout(r, 5000));
       const st = await fetch(`${BASE}/voice/api/v3/status/${encodeURIComponent(txn)}`, { headers: H, cache: "no-store", signal: AbortSignal.timeout(20_000) });
       if (st.status === 202) continue;
       if (st.status === 200 || st.status === 206) {
-        const sj = (await st.json()) as { data?: { output?: Array<{ template_id: string; value: unknown; status: string }> } };
-        const out = (sj.data?.output ?? []).find((o) => o.template_id === templateId);
-        if (!out) return { ok: false, error: "no_output_for_template", latencyMs: Date.now() - t0 };
-        if (out.status === "failure") return { ok: false, error: "template_failure", latencyMs: Date.now() - t0 };
-        const { obj, text } = decodeValue(out.value);
-        if (!text || !text.trim()) return { ok: false, error: "empty_output", latencyMs: Date.now() - t0 };
-        return { ok: true, obj, text: text.trim(), latencyMs: Date.now() - t0 };
+        const sj = (await st.json()) as { data?: { output?: Array<{ template_id: string; value: unknown; status: string; errors?: Array<{ msg?: string; code?: string }> }> } };
+        const out = (sj.data?.output ?? []).find((o) => o.template_id === extractTemplate);
+        if (out && out.status !== "failure") {
+          const { obj, text } = decodeValue(out.value);
+          if (!text || !text.trim()) {
+            if (st.status === 206) continue; // not finished yet
+            return { ok: false, error: "empty_output", latencyMs: Date.now() - t0 };
+          }
+          return { ok: true, obj, text: text.trim(), latencyMs: Date.now() - t0 };
+        }
+        if (out && out.status === "failure") {
+          const code = out.errors?.[0]?.code || out.errors?.[0]?.msg || "failure";
+          return { ok: false, error: `template_failure: ${String(code).slice(0, 60)}`, latencyMs: Date.now() - t0 };
+        }
+        // target template not present yet
+        if (st.status === 206) continue;
+        return { ok: false, error: "no_output_for_template", latencyMs: Date.now() - t0 };
       }
       return { ok: false, error: `status_${st.status}`, latencyMs: Date.now() - t0 };
     }
@@ -126,7 +139,14 @@ export const ekascribeAdapter: SttAdapter = {
     return { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: "asr_unsupported_on_account" };
   },
   async generateNote(audio, opts): Promise<SttNoteResult> {
-    const r = await runJob(audio, opts.contentType, opts.template || process.env.EKASCRIBE_SCRIBE_TEMPLATE || "clinical_notes_template", { language: opts.language });
+    const primary = opts.template || process.env.EKASCRIBE_SCRIBE_TEMPLATE || "clinical_notes_template";
+    const companion = process.env.EKASCRIBE_SCRIBE_COMPANION_TEMPLATE || "eka_emr_template";
+    // On our eka.care account clinical_notes_template only resolves when
+    // eka_emr_template is co-requested (requested alone it returns
+    // "Template not found"/llm_structring_failure). Request both, extract the
+    // readable clinical note (primary).
+    const request = primary === companion ? [primary] : [primary, companion];
+    const r = await runJob(audio, opts.contentType, request, primary, { language: opts.language });
     if (r.ok) return { note: r.obj, noteText: r.text, latencyMs: r.latencyMs, costUsd: null, error: null };
     return { note: null, noteText: null, latencyMs: r.latencyMs, costUsd: null, error: r.error };
   },
