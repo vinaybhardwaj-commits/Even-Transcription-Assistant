@@ -17,6 +17,21 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 
+/**
+ * iOS/WebKit can't reliably run MediaRecorder AND a WebAudio worklet on the
+ * same getUserMedia track at once — the worklet starves MediaRecorder, so no
+ * audio chunks are recorded for upload (Submit then fails with
+ * `no_audio_chunks`) even though the worklet-fed live transcript still shows.
+ * We use this to disable the Sarvam *streaming* worklet on iOS and fall back
+ * to the chunk-based Sarvam *rolling* path (single consumer = MediaRecorder).
+ */
+function detectIOS(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  // iPhone/iPod/iPad, plus iPadOS 13+ which reports as Mac with a touchscreen.
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1);
+}
+
 type Props = { slug: string; doctorName: string };
 
 type EncounterDraft = { id: string; status: "draft" };
@@ -132,7 +147,12 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // If streaming errors (token/WS), fall back to the REST trace so the live
   // panel + multilingual detection keep working (note is safe regardless).
   const RELAY_URL = process.env.NEXT_PUBLIC_STT_RELAY_URL || null;
-  const STREAMING = !!RELAY_URL;
+  // iOS: skip the streaming worklet (it starves MediaRecorder -> no_audio_chunks)
+  // and use the chunk-based rolling path instead. Resolved after mount so SSR
+  // and hydration stay consistent (recording can't start before then anyway).
+  const [isIOSDevice, setIsIOSDevice] = React.useState(false);
+  React.useEffect(() => { setIsIOSDevice(detectIOS()); }, []);
+  const STREAMING = !!RELAY_URL && !isIOSDevice;
   const svStream = useSarvamStreaming({
     slug,
     enabled: encounter !== null && STREAMING,
