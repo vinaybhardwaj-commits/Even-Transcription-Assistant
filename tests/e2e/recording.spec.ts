@@ -126,4 +126,39 @@ test("B18 regression: Submit still uploads audio when IndexedDB is unavailable (
   expect(hits.r2PutBytes).toBeGreaterThan(0);
 });
 
-// TODO(next): mic-denied scenario (separate context, denied mic permission).
+test("mic-denied: a denied microphone shows the permission UI, not a crash, and uploads nothing", async ({ page }) => {
+  // Force getUserMedia to reject with NotAllowedError (what a real permission
+  // denial throws). Override the whole mediaDevices accessor so the method is
+  // definitely replaceable (the native one can be non-writable).
+  await page.addInitScript(() => {
+    const denied = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+    try {
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        get: () => ({
+          getUserMedia: denied,
+          enumerateDevices: () => Promise.resolve([]),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }),
+      });
+    } catch {
+      try { (navigator.mediaDevices as MediaDevices).getUserMedia = denied as MediaDevices["getUserMedia"]; } catch { /* ignore */ }
+    }
+  });
+
+  const hits = await installMocks(page);
+  await page.goto(`/${SLUG}/record`);
+  await passPreflight(page);
+
+  // The recorder hits getUserMedia on auto-start; denial must surface the
+  // permission_denied UI gracefully (status line + guidance + Reload).
+  await expect(page.getByText("Microphone permission denied")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText(/we need microphone access/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: /reload/i })).toBeVisible();
+
+  // Nothing should have been recorded or uploaded — the failure is contained.
+  expect(hits.uploadUrl).toBe(false);
+  expect(hits.finalize).toBe(false);
+  expect(hits.r2PutBytes).toBe(0);
+});
