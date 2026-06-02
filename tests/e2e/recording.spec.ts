@@ -54,14 +54,16 @@ async function installMocks(page: Page): Promise<Hits> {
   return hits;
 }
 
-/** Dismiss preflight deterministically: wait until EITHER the "Record anyway"
- *  modal button (degraded — e.g. IndexedDB blocked) OR the record button is
- *  visible, then click "Record anyway" if it's the one showing. */
+/** Dismiss preflight. When degraded (e.g. IndexedDB blocked) it renders a
+ *  "Record anyway" modal OVER the record button, so we can't `.or()` (matches
+ *  2 elements). Instead: if the modal appears within a few seconds, click it;
+ *  otherwise preflight auto-proceeded (healthy) and there is nothing to do. */
 async function passPreflight(page: Page) {
   const recordAnyway = page.getByRole("button", { name: /record anyway/i });
-  const recordBtn = page.getByRole("button", { name: "Start recording" });
-  await expect(recordAnyway.or(recordBtn)).toBeVisible({ timeout: 20000 });
-  if (await recordAnyway.isVisible().catch(() => false)) await recordAnyway.click();
+  try {
+    await recordAnyway.waitFor({ state: "visible", timeout: 6000 });
+    await recordAnyway.click();
+  } catch { /* healthy: preflight auto-proceeded, no modal to dismiss */ }
 }
 
 const RECORD = "Start recording";
