@@ -236,7 +236,7 @@ export async function POST(
       await sql`
         UPDATE send_event SET status = 'failed', failure_reason = ${msg.slice(0, 200)}
          WHERE id = ${seId}
-      `.catch(() => {});
+      `.catch(() => { /* intentional: best-effort status side-write; response already formed */ });
       failed.push({ email, error: msg.slice(0, 120) });
     }
   }
@@ -247,7 +247,7 @@ export async function POST(
     UPDATE encounter SET send_status = ${newStatus},
                          sent_at = ${sent.length > 0 ? new Date() : null}
      WHERE id = ${enc.id}
-  `.catch(() => {});
+  `.catch(() => { /* intentional: best-effort status side-write; response already formed */ });
 
   return respondOk({
     ok: sent.length > 0,

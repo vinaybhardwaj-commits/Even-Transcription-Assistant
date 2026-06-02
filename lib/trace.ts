@@ -30,7 +30,7 @@ export async function logEvent(
        VALUES ($1, COALESCE((SELECT MAX(seq) + 1 FROM trace_events WHERE trace_id = $1), 1), $2, $3, $4::jsonb, $5)`,
       [traceId, kind, stage, JSON.stringify(payload ?? null), latencyMs ?? null]
     );
-  } catch {}
+  } catch { /* intentional: tracing is best-effort observability; never block the request */ }
 }
 
 export async function finishTrace(
@@ -44,7 +44,7 @@ export async function finishTrace(
        total_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000 WHERE trace_id = $3`,
       [status, errorMessage ?? null, traceId]
     );
-  } catch {}
+  } catch { /* intentional: tracing is best-effort observability; never block the request */ }
 }
 
 // Wraps llm.chat.completions.create with automatic event logging.

@@ -35,7 +35,7 @@ export async function consumeNdjson(
           const ev = JSON.parse(line) as ServerEvent;
           if (ev.type === 'done') sawDone = true;
           onEvent(ev);
-        } catch {}
+        } catch { /* intentional: skip an incomplete/garbled NDJSON line */ }
       }
     }
   } catch (e) {
@@ -50,6 +50,6 @@ export async function consumeNdjson(
   // flush any tail (shouldn't happen with our protocol but be defensive)
   const tail = buf.trim();
   if (tail) {
-    try { onEvent(JSON.parse(tail) as ServerEvent); } catch {}
+    try { onEvent(JSON.parse(tail) as ServerEvent); } catch { /* intentional: skip an incomplete/garbled NDJSON line */ }
   }
 }

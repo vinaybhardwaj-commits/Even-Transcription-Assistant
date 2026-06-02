@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Update last_active
-  await sql`UPDATE admin_user SET last_active_at = NOW() WHERE id = ${row.id}`.catch(() => {});
+  await sql`UPDATE admin_user SET last_active_at = NOW() WHERE id = ${row.id}`.catch(() => { /* intentional: best-effort last_active_at touch */ });
 
   // Sign + set cookie
   const jwt = await signAdminJwt({ admin_id: row.id, email: row.email });

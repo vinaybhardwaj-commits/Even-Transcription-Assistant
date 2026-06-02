@@ -119,7 +119,7 @@ export async function POST() {
     VALUES
       ('admin', ${adminId}, 'r2.cors_update', 'r2_bucket', ${bucketName},
        ${JSON.stringify({ allowed_origins: ALLOWED_ORIGINS, before, after })}::jsonb)
-  `.catch(() => {});
+  `.catch(() => { /* intentional: best-effort audit write */ });
 
   return respondOk({
     ok: true,

@@ -104,7 +104,7 @@ async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
       VALUES
         ('system', 'reaper', 'encounter.reap_stuck', 'encounter', NULL,
          ${JSON.stringify({ minutes, reaped_partial: reapedPartial, reaped_failed: reapedFailed })}::jsonb)
-    `.catch(() => {});
+    `.catch(() => { /* intentional: best-effort audit write */ });
   }
 
   return { dry_run: false, minutes, stuck_count: total, reaped_partial: reapedPartial, reaped_failed: reapedFailed };

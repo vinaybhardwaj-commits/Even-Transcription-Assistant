@@ -99,7 +99,7 @@ export async function POST(
       VALUES
         ('admin', ${adminId}, 'doctor.email_url', 'doctor', ${id},
          ${JSON.stringify({ to: doc.email, resend_message_id: j.id ?? null })}::jsonb)
-    `.catch(() => {});
+    `.catch(() => { /* intentional: best-effort audit write */ });
     return respondOk({ ok: true, sent_to: doc.email, resend_message_id: j.id ?? null });
   } catch (e) {
     return respondError("PIPELINE_FAILED", e instanceof Error ? e.message.slice(0, 200) : String(e));

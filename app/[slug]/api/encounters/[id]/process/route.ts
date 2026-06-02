@@ -87,7 +87,7 @@ export async function POST(
   try {
     const body = (await req.json().catch(() => ({}))) as { force?: boolean };
     force = body.force === true;
-  } catch {}
+  } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
 
   // Load row
   let row: Row | undefined;
@@ -217,7 +217,7 @@ export async function POST(
   const diarizeStore = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) {
-      try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch {}
+      try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
       return;
     }
     emit?.({ stage: "progress", msg: "Identifying speakers (diarization)\u2026" });
@@ -324,7 +324,7 @@ export async function POST(
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       console.warn(`[process] diarize failed enc=${id}: ${m}`);
-      try { await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)} WHERE id = ${id}`; } catch {}
+      try { await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)} WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
       emit?.({ stage: "progress", msg: "Diarization error (non-critical)" });
     }
   };
@@ -400,7 +400,7 @@ export async function POST(
               error_message: noteRes.error,
             });
             noteTrace = null;
-            await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => {});
+            await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => { /* intentional: best-effort side-write/parse; main flow continues */ });
             close();
             clearInterval(hbInterval);
             return;

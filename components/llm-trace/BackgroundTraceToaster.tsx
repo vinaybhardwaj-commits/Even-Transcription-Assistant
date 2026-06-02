@@ -79,7 +79,7 @@ function saveDismissed(ids: Set<string>): void {
   if (typeof window === 'undefined') return;
   try {
     window.sessionStorage.setItem(STALE_DISMISS_KEY, JSON.stringify([...ids]));
-  } catch {}
+  } catch { /* intentional: best-effort trace poll */ }
 }
 
 export default function BackgroundTraceToaster(props: BackgroundTraceToasterProps) {
@@ -108,7 +108,7 @@ export default function BackgroundTraceToaster(props: BackgroundTraceToasterProp
         if (!cancelled && body.ok && Array.isArray(body.traces)) {
           setTraces(body.traces as TraceRow[]);
         }
-      } catch {}
+      } catch { /* intentional: best-effort trace poll */ }
     }
     void pollOnce();
     const handle = window.setInterval(() => void pollOnce(), POLL_INTERVAL_MS);

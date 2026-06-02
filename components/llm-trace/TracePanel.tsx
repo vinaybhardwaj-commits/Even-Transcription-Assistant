@@ -254,7 +254,7 @@ export default function TracePanel({
       .then((j) => {
         if (!cancelled && j && typeof j.total_p50 === 'number') setMedians(j);
       })
-      .catch(() => {});
+      .catch(() => { /* intentional: best-effort trace fetch */ });
     return () => {
       cancelled = true;
     };
@@ -267,7 +267,7 @@ export default function TracePanel({
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
-      .catch(() => {});
+      .catch(() => { /* intentional: best-effort trace fetch */ });
   }
 
   const last = events.length > 0 ? events[events.length - 1] : null;

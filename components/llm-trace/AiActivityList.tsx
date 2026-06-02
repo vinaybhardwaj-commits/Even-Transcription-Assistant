@@ -72,7 +72,7 @@ export default function AiActivityList(props: AiActivityListProps) {
           setTraces(body.traces as TraceRow[]);
         }
       })
-      .catch(() => {})
+      .catch(() => { /* intentional: best-effort UI refresh */ })
       .finally(() => {
         setLoading(false);
         setLoaded(true);

@@ -56,7 +56,7 @@ export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, can
   const rafRef = React.useRef<number | null>(null);
   const onStream = React.useCallback((stream: MediaStream | null) => {
     if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    if (audioCtxRef.current) { void audioCtxRef.current.close().catch(() => {}); audioCtxRef.current = null; }
+    if (audioCtxRef.current) { void audioCtxRef.current.close().catch(() => { /* intentional: closing AudioContext; failure is harmless */ }); audioCtxRef.current = null; }
     setLevel(0);
     if (!stream) return;
     try {
@@ -124,7 +124,7 @@ export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, can
 
   React.useEffect(() => () => {
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-    if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => {});
+    if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => { /* intentional: closing AudioContext; failure is harmless */ });
   }, []);
 
   const startRec = React.useCallback(() => {
