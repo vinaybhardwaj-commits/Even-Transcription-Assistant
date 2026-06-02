@@ -5,63 +5,67 @@ import { test, expect, type Page } from "@playwright/test";
  * mutating/STT call mocked so nothing real is created/sent. The headline test
  * regression-guards B18/B19: with IndexedDB disabled (iOS Private Browsing),
  * Submit must STILL upload audio via the in-memory failsafe.
+ *
+ * Button accessible names (aria-label) are "Start recording" (idle) and
+ * "Finalize recording" (while recording) — NOT the visible "Record"/"Stop".
  */
 const SLUG = process.env.PLAYWRIGHT_DOCTOR_SLUG || "dr-vinay-bhardwaj-cjzs";
 const MOCK_R2 = "https://mock-r2.evenscribe-e2e.invalid/put";
 
 type Hits = { uploadUrl: boolean; r2PutBytes: number; finalize: boolean };
 
-/** Mock the whole client side of the pipeline; record what was hit. */
+/** Mock the whole client side of the pipeline; record what was hit.
+ *  Playwright checks the LAST-registered matching route first, so the broad
+ *  fail-closed guard is registered FIRST and the specific mocks AFTER it. */
 async function installMocks(page: Page): Promise<Hits> {
   const hits: Hits = { uploadUrl: false, r2PutBytes: 0, finalize: false };
 
-  // Create draft encounter
+  // Fail-closed FIRST (lowest precedence): any unmocked mutating call to the
+  // encounters API is aborted so a missed mock can never touch real prod data.
+  await page.route("**/api/encounters/**", (route) =>
+    route.request().method() === "GET" ? route.continue() : route.abort(),
+  );
+
+  // Specific mocks AFTER (higher precedence):
   await page.route(`**/${SLUG}/api/encounters`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ encounter: { id: "enc_e2e_test", status: "draft" } }) }),
   );
-  // Presigned upload URL → point at our intercepted mock R2
   await page.route(`**/${SLUG}/api/encounters/*/upload-url`, (route) => {
     hits.uploadUrl = true;
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ url: MOCK_R2, key: "encounters/enc_e2e_test.webm", method: "PUT", content_type: "audio/webm" }) });
   });
-  // The R2 PUT itself — capture the uploaded byte count (proves audio existed)
-  await page.route(`${MOCK_R2}`, async (route) => {
+  await page.route(MOCK_R2, async (route) => {
     const body = route.request().postDataBuffer();
     hits.r2PutBytes = body ? body.length : 0;
     return route.fulfill({ status: 200, body: "" });
   });
-  // Finalize
   await page.route(`**/${SLUG}/api/encounters/*/finalize-upload`, (route) => {
     hits.finalize = true;
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ encounter: { id: "enc_e2e_test", status: "processing" } }) });
   });
   // Live STT / cleanup / speaker — benign so the live path quietly no-ops.
   await page.route("**/api/voice/stt-token", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "UPSTREAM_UNAVAILABLE", message: "streaming_not_configured" } }) }));
-  for (const p of ["**/api/transcribe/**", "**/api/voice/identify", "**/api/voice/transcribe-window"]) {
+  for (const p of ["**/api/transcribe/**", "**/api/voice/**"]) {
     await page.route(p, (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
   }
-  // FAIL-CLOSED: any other POST/PUT to our encounters API that we did not mock
-  // is aborted, so a missed mock can never create/mutate real prod data.
-  await page.route("**/api/encounters/**", (route) => {
-    const m = route.request().method();
-    if (m === "GET") return route.continue();
-    return route.abort();
-  });
   return hits;
 }
 
-/** Click through the preflight modal (auto-proceeds when healthy; "Record anyway" when degraded). */
+/** Dismiss preflight: auto-proceeds when healthy; "Record anyway" when degraded. */
 async function passPreflight(page: Page) {
   const recordAnyway = page.getByRole("button", { name: /record anyway/i });
-  try { await recordAnyway.click({ timeout: 6000 }); } catch { /* auto-proceeded */ }
+  try { await recordAnyway.click({ timeout: 4000 }); } catch { /* auto-proceeded */ }
 }
+
+const RECORD = "Start recording";
+const STOP = "Finalize recording";
 
 async function recordAndSubmit(page: Page) {
   await passPreflight(page);
-  await page.getByRole("button", { name: /^record$/i }).click();
-  await expect(page.getByRole("button", { name: /^stop$/i })).toBeVisible();
+  await page.getByRole("button", { name: RECORD }).click();
+  await expect(page.getByRole("button", { name: STOP })).toBeVisible();
   await page.waitForTimeout(2500); // ~10 chunks at 250ms
-  await page.getByRole("button", { name: /^stop$/i }).click();
+  await page.getByRole("button", { name: STOP }).click();
   const submit = page.getByRole("button", { name: /submit recording/i });
   await expect(submit).toBeVisible({ timeout: 10000 });
   await submit.click();
@@ -71,11 +75,10 @@ test("authed recording page renders with a Record control (smoke)", async ({ pag
   await installMocks(page);
   await page.goto(`/${SLUG}/record`);
   await passPreflight(page);
-  await expect(page.getByRole("button", { name: /^record$/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: RECORD })).toBeVisible({ timeout: 20000 });
 });
 
 test("B18 regression: Submit still uploads audio when IndexedDB is unavailable (Private Browsing)", async ({ page }) => {
-  // Simulate iOS Safari Private Browsing: IndexedDB.open throws.
   await page.addInitScript(() => {
     const broken = { open() { throw new DOMException("IndexedDB disabled", "InvalidStateError"); } };
     try { Object.defineProperty(window, "indexedDB", { configurable: true, get: () => broken }); } catch { /* ignore */ }
@@ -83,11 +86,9 @@ test("B18 regression: Submit still uploads audio when IndexedDB is unavailable (
   const hits = await installMocks(page);
   await page.goto(`/${SLUG}/record`);
   await recordAndSubmit(page);
-  // The in-memory failsafe must have supplied the chunks: audio reached R2 + finalize ran.
   await expect.poll(() => hits.finalize, { timeout: 15000 }).toBe(true);
   expect(hits.uploadUrl).toBe(true);
   expect(hits.r2PutBytes).toBeGreaterThan(0);
 });
 
-// TODO(next): mic-denied scenario (separate context without --use-fake-ui + denied
-// microphone permission → assert graceful permission_denied UI, no crash).
+// TODO(next): mic-denied scenario (separate context, denied mic permission).
