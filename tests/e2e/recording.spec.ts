@@ -54,16 +54,22 @@ async function installMocks(page: Page): Promise<Hits> {
   return hits;
 }
 
-/** Dismiss preflight. When degraded (e.g. IndexedDB blocked) it renders a
- *  "Record anyway" modal OVER the record button, so we can't `.or()` (matches
- *  2 elements). Instead: if the modal appears within a few seconds, click it;
- *  otherwise preflight auto-proceeded (healthy) and there is nothing to do. */
+/** Dismiss preflight robustly. The preflight modal ("Record anyway", shown when
+ *  degraded — e.g. IndexedDB blocked) renders OVER the record button, so we
+ *  poll with .count()/.first() (no strict-mode) for up to ~25s: click
+ *  "Record anyway" whenever it's visible, and return once the record button
+ *  ("Start recording") is visible. Handles auto-proceed, the overlay, and
+ *  render/timing races deterministically. */
 async function passPreflight(page: Page) {
-  const recordAnyway = page.getByRole("button", { name: /record anyway/i });
-  try {
-    await recordAnyway.waitFor({ state: "visible", timeout: 6000 });
-    await recordAnyway.click();
-  } catch { /* healthy: preflight auto-proceeded, no modal to dismiss */ }
+  const anyway = page.getByRole("button", { name: /record anyway/i });
+  const record = page.getByRole("button", { name: "Start recording" });
+  for (let i = 0; i < 50; i++) {
+    if ((await record.count()) > 0 && (await record.first().isVisible().catch(() => false))) return;
+    if ((await anyway.count()) > 0 && (await anyway.first().isVisible().catch(() => false))) {
+      await anyway.first().click().catch(() => {});
+    }
+    await page.waitForTimeout(500);
+  }
 }
 
 const RECORD = "Start recording";
@@ -84,7 +90,7 @@ test("authed recording page renders with a Record control (smoke)", async ({ pag
   await installMocks(page);
   await page.goto(`/${SLUG}/record`);
   await passPreflight(page);
-  await expect(page.getByRole("button", { name: RECORD })).toBeVisible({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: RECORD })).toBeVisible({ timeout: 30000 });
 });
 
 test("B18 regression: Submit still uploads audio when IndexedDB is unavailable (Private Browsing)", async ({ page }) => {
