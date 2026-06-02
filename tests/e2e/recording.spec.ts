@@ -87,25 +87,30 @@ async function passPreflight(page: Page) {
   }
 }
 
-const RECORD = "Start recording";
 const STOP = "Finalize recording";
 
+// RecordingScreen AUTO-STARTS recording as soon as the encounter is created
+// (autoStartedRef effect) — there is no manual "Start recording" click in the
+// real flow; the big button is the Stop/finalize control. So: dismiss preflight,
+// wait for recording to auto-start (Stop button appears), let it capture audio,
+// finalize, then submit.
 async function recordAndSubmit(page: Page) {
   await passPreflight(page);
-  await page.getByRole("button", { name: RECORD }).click();
-  await expect(page.getByRole("button", { name: STOP })).toBeVisible();
-  await page.waitForTimeout(2500); // ~10 chunks at 250ms
-  await page.getByRole("button", { name: STOP }).click();
+  const stop = page.getByRole("button", { name: STOP });
+  await expect(stop).toBeVisible({ timeout: 20000 }); // auto-start kicked in
+  await page.waitForTimeout(2500); // let a few chunks accumulate
+  await stop.click();
   const submit = page.getByRole("button", { name: /submit recording/i });
   await expect(submit).toBeVisible({ timeout: 10000 });
   await submit.click();
 }
 
-test("authed recording page renders with a Record control (smoke)", async ({ page }) => {
+test("authed recording page renders and recording auto-starts (smoke)", async ({ page }) => {
   await installMocks(page);
   await page.goto(`/${SLUG}/record`);
   await passPreflight(page);
-  await expect(page.getByRole("button", { name: RECORD })).toBeVisible({ timeout: 30000 });
+  // Recording auto-starts on encounter creation -> the Stop/finalize button appears.
+  await expect(page.getByRole("button", { name: STOP })).toBeVisible({ timeout: 30000 });
 });
 
 test("B18 regression: Submit still uploads audio when IndexedDB is unavailable (Private Browsing)", async ({ page }) => {
