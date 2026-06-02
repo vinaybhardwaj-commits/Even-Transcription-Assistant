@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "smoke": "node scripts/smoke.mjs",
+    "check:silent": "node scripts/check-silent-failures.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.703.0",
