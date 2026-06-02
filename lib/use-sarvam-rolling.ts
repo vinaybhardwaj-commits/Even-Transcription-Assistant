@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { TRIM_LIVE_BUFFERS } from "@/lib/live-flags";
 
 /**
  * useSarvamRolling — low-latency multilingual live transcription via Sarvam REST.
@@ -64,7 +65,8 @@ export function useSarvamRolling(opts: Options) {
   const headerRef = React.useRef<Blob | null>(null);
   const mimeRef = React.useRef<string>("audio/webm");
   const committedRef = React.useRef<string>("");   // frozen prefix
-  const watermarkRef = React.useRef(0);            // chunk idx where committed ends
+  const watermarkRef = React.useRef(0);            // chunk idx where committed ends (absolute)
+  const baseRef = React.useRef(0);                 // absolute idx of chunksRef.current[0] (front-trim offset)
   const blockIdxRef = React.useRef(0);
   const inFlightRef = React.useRef(false);
   const optsRef = React.useRef(opts);
@@ -80,8 +82,9 @@ export function useSarvamRolling(opts: Options) {
   const flush = React.useCallback(async () => {
     if (inFlightRef.current) return;
     const all = chunksRef.current;
+    const base = baseRef.current;
     const start = watermarkRef.current;
-    const end = all.length;
+    const end = base + all.length;
     if (end <= start) return; // nothing new since last commit
 
     inFlightRef.current = true;
@@ -91,10 +94,10 @@ export function useSarvamRolling(opts: Options) {
     // Decodable window over the uncommitted span. Span 0 already has the header.
     const parts =
       start === 0
-        ? all.slice(0, end)
+        ? all.slice(0, end - base)
         : headerRef.current
-          ? [headerRef.current, ...all.slice(start, end)]
-          : all.slice(start, end);
+          ? [headerRef.current, ...all.slice(start - base, end - base)]
+          : all.slice(start - base, end - base);
     const blob = new Blob(parts, { type: mimeRef.current });
 
     try {
@@ -139,6 +142,12 @@ export function useSarvamRolling(opts: Options) {
       if (tail && end - start >= COMMIT_CHUNKS) {
         committedRef.current = `${committedRef.current}${committedRef.current ? " " : ""}${tail}`.trim();
         watermarkRef.current = end;
+        // Drop committed chunks off the front (the header is kept in headerRef
+        // and prepended to later windows). Bounds memory on long consults.
+        if (TRIM_LIVE_BUFFERS) {
+          const consumed = watermarkRef.current - baseRef.current;
+          if (consumed > 0) { all.splice(0, consumed); baseRef.current += consumed; }
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

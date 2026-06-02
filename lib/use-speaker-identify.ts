@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { TRIM_LIVE_BUFFERS } from "@/lib/live-flags";
 
 /**
  * useSpeakerIdentify — V2.SD.2 live clinician identification for the Speakers
@@ -11,6 +12,11 @@ import * as React from "react";
  */
 
 type Options = { slug: string; enabled: boolean; intervalMs?: number; windowChunks?: number };
+
+// This hook only ever reads the recent tail window (+ header). Cap the buffer so
+// a long consult can't grow it without bound; ~30s is far more than the ~9s
+// window. The header is held separately in headerRef, so front-trim is safe.
+const SPK_MAX_CHUNKS = 120;
 
 export function useSpeakerIdentify(opts: Options) {
   const intervalMs = opts.intervalMs ?? 8000;
@@ -35,6 +41,9 @@ export function useSpeakerIdentify(opts: Options) {
     if (chunksRef.current.length === 0) headerRef.current = chunk;
     chunksRef.current.push(chunk);
     if (chunk.type) mimeRef.current = chunk.type;
+    if (TRIM_LIVE_BUFFERS && chunksRef.current.length > SPK_MAX_CHUNKS) {
+      chunksRef.current.splice(0, chunksRef.current.length - SPK_MAX_CHUNKS);
+    }
   }, []);
 
   const flush = React.useCallback(async () => {

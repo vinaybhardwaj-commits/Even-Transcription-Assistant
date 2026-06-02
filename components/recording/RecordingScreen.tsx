@@ -16,7 +16,8 @@ import { useEncounterSubmit } from "@/lib/use-encounter-submit";
 import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
-import { detectIOS } from "@/lib/platform";
+import { detectIOS, detectDesktopSafari } from "@/lib/platform";
+import { SAFARI_STREAMING_GUARD } from "@/lib/live-flags";
 
 type Props = { slug: string; doctorName: string };
 
@@ -142,8 +143,17 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // and use the chunk-based rolling path instead. Resolved after mount so SSR
   // and hydration stay consistent (recording can't start before then anyway).
   const [isIOSDevice, setIsIOSDevice] = React.useState(false);
-  React.useEffect(() => { setIsIOSDevice(detectIOS()); }, []);
-  const STREAMING = !!RELAY_URL && !isIOSDevice;
+  // Desktop Safari (WebKit) may share iOS's dual-consumer limitation (MediaRecorder
+  // vs the streaming worklet on one mic track = B18). When the flag is on, treat
+  // it like iOS and skip the worklet (fall back to chunk-based rolling). Default
+  // OFF -> behaviour unchanged.
+  const [isWebKitDesktop, setIsWebKitDesktop] = React.useState(false);
+  React.useEffect(() => {
+    setIsIOSDevice(detectIOS());
+    setIsWebKitDesktop(detectDesktopSafari());
+  }, []);
+  const blockStreaming = isIOSDevice || (SAFARI_STREAMING_GUARD && isWebKitDesktop);
+  const STREAMING = !!RELAY_URL && !blockStreaming;
   const svStream = useSarvamStreaming({
     slug,
     enabled: encounter !== null && STREAMING,

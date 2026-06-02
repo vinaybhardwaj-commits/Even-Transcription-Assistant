@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { TRIM_LIVE_BUFFERS } from "@/lib/live-flags";
 
 /**
  * useWhisperRolling — rolling Whisper transcription via delta uploads
@@ -70,6 +71,9 @@ export function useWhisperRolling(opts: Options) {
   // so the next tick retries the same range + anything that's arrived
   // since.
   const nextChunkIdxRef = React.useRef(0);
+  // Absolute index of chunksRef.current[0]. Stays 0 unless TRIM_LIVE_BUFFERS
+  // drops consumed (already-uploaded) chunks off the front to bound memory.
+  const baseRef = React.useRef(0);
   const inFlightRef = React.useRef(false);
   const optsRef = React.useRef(opts);
   React.useEffect(() => {
@@ -85,8 +89,9 @@ export function useWhisperRolling(opts: Options) {
   const flush = React.useCallback(async () => {
     if (inFlightRef.current) return;
     const all = chunksRef.current;
+    const base = baseRef.current;
     const startIdx = nextChunkIdxRef.current;
-    const endIdx = all.length;
+    const endIdx = base + all.length;
     if (endIdx === startIdx) return;          // no new chunks since last pass
     if (!optsRef.current.encounterId) return; // delta uploads need an encounter to key the R2 buffer
 
@@ -94,7 +99,7 @@ export function useWhisperRolling(opts: Options) {
     setState("in_flight");
 
     const idx = ++passIdxRef.current;
-    const delta = all.slice(startIdx, endIdx);
+    const delta = all.slice(startIdx - base, endIdx - base);
     const isFirst = startIdx === 0;
     const blob = new Blob(delta, { type: mimeRef.current });
 
@@ -126,6 +131,14 @@ export function useWhisperRolling(opts: Options) {
       };
       // Pass succeeded — advance the watermark so we don't resend this delta.
       nextChunkIdxRef.current = endIdx;
+      // Bound memory: drop uploaded chunks off the front. The server R2 buffer
+      // already holds them (incl. the WebM header from the first delta), and we
+      // never re-read consumed chunks here. The canonical upload copies (IDB +
+      // RecordingScreen chunksMemRef) are separate and untouched.
+      if (TRIM_LIVE_BUFFERS) {
+        const consumed = nextChunkIdxRef.current - baseRef.current;
+        if (consumed > 0) { all.splice(0, consumed); baseRef.current += consumed; }
+      }
       const pass: WhisperPass = {
         pass_idx: idx,
         text: (json.text ?? "").trim(),

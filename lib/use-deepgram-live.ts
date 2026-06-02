@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { DEEPGRAM_RECONNECT } from "@/lib/live-flags";
 
 /**
  * useDeepgramLive — Browser-side WebSocket to Deepgram's live transcription
@@ -60,6 +61,9 @@ const DG_PARAMS = new URLSearchParams({
   channels: "1",
 });
 
+// Backoff cap for the (flag-gated) live WS reconnect on an unexpected drop.
+const MAX_RECONNECTS = 5;
+
 export function useDeepgramLive(opts: Options) {
   const [state, setState] = React.useState<DeepgramLiveState>("idle");
   const [error, setError] = React.useState<string | null>(null);
@@ -74,8 +78,24 @@ export function useDeepgramLive(opts: Options) {
   React.useEffect(() => {
     if (!opts.enabled) return;
     let cancelled = false;
+    let attempts = 0;
+    let reconnectTimer: number | undefined;
 
-    (async () => {
+    function scheduleReconnect() {
+      // No-op unless the flag is on -> flag-off behaviour is identical to before.
+      if (cancelled || !DEEPGRAM_RECONNECT) return;
+      attempts += 1;
+      if (attempts > MAX_RECONNECTS) {
+        setState("error");
+        setError("ws_reconnect_exhausted");
+        return;
+      }
+      const delay = Math.min(1000 * 2 ** (attempts - 1), 8000); // 1s,2s,4s,8s,8s
+      reconnectTimer = window.setTimeout(() => { void connect(); }, delay);
+    }
+
+    async function connect() {
+      if (cancelled) return;
       setError(null);
       setState("connecting");
 
@@ -100,6 +120,7 @@ export function useDeepgramLive(opts: Options) {
         setState("error");
         setError(msg);
         optsRef.current.onError?.(new Error(msg));
+        scheduleReconnect();
         return;
       }
 
@@ -114,6 +135,7 @@ export function useDeepgramLive(opts: Options) {
         setState("error");
         setError(msg);
         optsRef.current.onError?.(new Error(msg));
+        scheduleReconnect();
         return;
       }
       wsRef.current = ws;
@@ -121,6 +143,7 @@ export function useDeepgramLive(opts: Options) {
 
       ws.onopen = () => {
         if (cancelled) return;
+        attempts = 0; // a successful connect resets the backoff
         setState("open");
         // drain queue
         const q = queueRef.current;
@@ -183,14 +206,19 @@ export function useDeepgramLive(opts: Options) {
       ws.onclose = (ev) => {
         if (cancelled) return;
         setState("closed");
-        if (ev.code !== 1000 && ev.code !== 1005) {
-          setError(`ws_close_${ev.code}`);
-        }
+        const abnormal = ev.code !== 1000 && ev.code !== 1005;
+        if (abnormal) setError(`ws_close_${ev.code}`);
+        // Unexpected mid-consult drop -> reconnect (re-mints the token). No-op
+        // when the flag is off.
+        if (abnormal && optsRef.current.enabled) scheduleReconnect();
       };
-    })();
+    }
+
+    void connect();
 
     return () => {
       cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
       const ws = wsRef.current;
       wsRef.current = null;
       if (ws) {
