@@ -132,6 +132,34 @@ export type SarvamBatchResult =
 
 type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; withDiarization?: boolean; numSpeakers?: number };
 
+// Per-request timeouts so a hung Azure/Sarvam transfer can't stall /process to
+// its maxDuration. Combines an outer caller signal with a per-request deadline
+// (no reliance on AbortSignal.any / .timeout being present).
+const SARVAM_CTRL_TIMEOUT_MS = 20_000;   // control plane (init/upload-links/start/download-links)
+const SARVAM_XFER_TIMEOUT_MS = 60_000;   // bulk transfers (Azure PUT, output download)
+const SARVAM_POLL_TIMEOUT_MS = 15_000;   // a single status poll
+
+async function tfetch(
+  input: string | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  outer?: AbortSignal,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  const timer = setTimeout(() => ctrl.abort(new Error("request_timeout")), timeoutMs);
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener("abort", onAbort, { once: true });
+  }
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+    if (outer) outer.removeEventListener("abort", onAbort);
+  }
+}
+
 export async function sarvamBatchTranslate(
   audio: Buffer | Uint8Array,
   contentType = "audio/webm",
@@ -148,18 +176,18 @@ export async function sarvamBatchTranslate(
 
   try {
     // 1. init
-    const initRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1`, {
+    const initRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1`, {
       method: "POST", headers: H, cache: "no-store",
       body: JSON.stringify({ job_parameters: { model: "saaras:v2.5", ...(opts.prompt ? { prompt: opts.prompt } : {}), ...(opts.withDiarization ? { with_diarization: true } : {}), ...(opts.numSpeakers ? { num_speakers: opts.numSpeakers } : {}) } }),
-    });
+    }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!initRes.ok) return { ok: false, error: `init_${initRes.status}: ${(await initRes.text()).slice(0, 120)}`, latencyMs: Date.now() - t0 };
     const jobId = (await initRes.json() as { job_id: string }).job_id;
 
     // 2. presigned upload URL
-    const upRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/upload-files`, {
+    const upRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/upload-files`, {
       method: "POST", headers: H, cache: "no-store",
       body: JSON.stringify({ job_id: jobId, files: [fname] }),
-    });
+    }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!upRes.ok) return { ok: false, error: `upload_links_${upRes.status}`, latencyMs: Date.now() - t0 };
     const upJson = await upRes.json() as { upload_urls: Record<string, { file_url: string }> };
     const putUrl = upJson.upload_urls[fname]?.file_url;
@@ -167,17 +195,17 @@ export async function sarvamBatchTranslate(
 
     // 3. PUT to Azure blob
     const sv = /[?&]sv=([^&]+)/.exec(putUrl)?.[1];
-    const putRes = await fetch(putUrl, {
+    const putRes = await tfetch(putUrl, {
       method: "PUT",
       headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": baseType, ...(sv ? { "x-ms-version": sv } : {}) },
       body: Buffer.from(audio),
-    });
+    }, SARVAM_XFER_TIMEOUT_MS, opts.signal);
     if (!putRes.ok) return { ok: false, error: `azure_put_${putRes.status}`, latencyMs: Date.now() - t0 };
 
     // 4. start
-    const startRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/start`, {
+    const startRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/start`, {
       method: "POST", headers: H, cache: "no-store", body: "{}",
-    });
+    }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!startRes.ok) return { ok: false, error: `start_${startRes.status}`, latencyMs: Date.now() - t0 };
 
     // 5. poll status
@@ -186,7 +214,12 @@ export async function sarvamBatchTranslate(
     while (Date.now() - t0 < maxWaitMs) {
       if (opts.signal?.aborted) return { ok: false, error: "aborted", latencyMs: Date.now() - t0 };
       await new Promise((r) => setTimeout(r, pollMs));
-      const stRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/status`, { headers: H, cache: "no-store" });
+      let stRes: Response;
+      try {
+        stRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/status`, { headers: H, cache: "no-store" }, SARVAM_POLL_TIMEOUT_MS, opts.signal);
+      } catch {
+        continue; // a single slow/timed-out poll: retry within the maxWaitMs window
+      }
       if (!stRes.ok) continue;
       const st = await stRes.json() as { job_state: string; job_details?: Array<{ outputs?: Array<{ file_name: string }> }> };
       state = st.job_state;
@@ -200,17 +233,17 @@ export async function sarvamBatchTranslate(
     if (outputs.length === 0) return { ok: false, error: "no_outputs", latencyMs: Date.now() - t0 };
 
     // 6. download output(s) + concat transcripts
-    const dlRes = await fetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/download-files`, {
+    const dlRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/download-files`, {
       method: "POST", headers: H, cache: "no-store",
       body: JSON.stringify({ job_id: jobId, files: outputs }),
-    });
+    }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!dlRes.ok) return { ok: false, error: `download_links_${dlRes.status}`, latencyMs: Date.now() - t0 };
     const dlJson = await dlRes.json() as { download_urls: Record<string, { file_url: string }> };
     let transcript = ""; let lang: string | null = null; const entries: SarvamDiarEntry[] = [];
     for (const name of outputs) {
       const u = dlJson.download_urls[name]?.file_url;
       if (!u) continue;
-      const r = await fetch(u, { cache: "no-store" });
+      const r = await tfetch(u, { cache: "no-store" }, SARVAM_XFER_TIMEOUT_MS, opts.signal);
       if (!r.ok) continue;
       const j = await r.json() as { transcript?: string; language_code?: string | null; diarized_transcript?: { entries?: Array<{ transcript?: string; start_time_seconds?: number; end_time_seconds?: number; speaker_id?: string }> } };
       if (j.transcript) transcript += (transcript ? " " : "") + j.transcript.trim();

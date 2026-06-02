@@ -113,14 +113,18 @@ export async function POST(
     let existing: Uint8Array | null = null;
     try {
       existing = await getObjectBytes(bufKey);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return respondError("PIPELINE_FAILED", `r2_get_failed: ${msg.slice(0, 120)}`);
+    } catch {
+      // Transient R2 read failure on an ephemeral, best-effort live-transcript
+      // buffer. Don't hard-fail the whole append (which would surface an error
+      // mid-consult); treat this window as a fresh buffer and keep going. The
+      // saved/uploaded audio is independent of this buffer, so nothing the note
+      // depends on is lost.
+      existing = null;
     }
     if (!existing) {
-      // No prior buffer. Either the client lost state or this is
-      // really the first chunk and is_first wasn't set. Treat the
-      // delta as the new buffer rather than failing — better UX.
+      // No prior buffer (transient read failure, client lost state, or this is
+      // really the first chunk and is_first wasn't set). Treat the delta as the
+      // new buffer rather than failing — better UX.
       combined = deltaBytes;
     } else {
       combined = new Uint8Array(existing.length + deltaBytes.length);
