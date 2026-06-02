@@ -49,6 +49,9 @@ type Options = {
   // from a full-file batch translate (see /process), not from this.
   sarvamCodemix?: string;
   sarvamLanguage?: string | null;
+  /** Failsafe: in-memory chunks kept by RecordingScreen this session, used when
+   *  IndexedDB is unavailable (iOS Safari Private Browsing / storage disabled). */
+  getFallbackChunks?: () => Blob[];
 };
 
 const STAGE_WEIGHTS: Record<SubmitStage, number> = {
@@ -96,7 +99,21 @@ export function useEncounterSubmit(opts: Options) {
         totalBytes: 0,
         error: null,
       });
-      const chunks = await getChunksForEncounter(encId);
+      let chunks: Blob[] = [];
+      try {
+        chunks = await getChunksForEncounter(encId);
+      } catch (e) {
+        // IndexedDB read failed (e.g. iOS Safari Private Browsing / storage
+        // disabled). Don't fail yet — fall back to the in-memory buffer below.
+        // eslint-disable-next-line no-console
+        console.warn("idb_read_failed", e);
+      }
+      let chunkSource: "idb" | "memory" = "idb";
+      if (chunks.length === 0) {
+        // Failsafe: chunks recorded this session but never persisted to IDB.
+        const fb = o.getFallbackChunks?.() ?? [];
+        if (fb.length > 0) { chunks = fb; chunkSource = "memory"; }
+      }
       if (chunks.length === 0) {
         const err = "no_audio_chunks";
         setState((s) => ({ ...s, stage: "error", error: err }));
@@ -104,6 +121,10 @@ export function useEncounterSubmit(opts: Options) {
       }
       const mime = chunks[0].type || "audio/webm";
       const blob = new Blob(chunks, { type: mime });
+      if (chunkSource === "memory") {
+        // eslint-disable-next-line no-console
+        console.warn("submit_used_memory_fallback", { chunks: chunks.length, bytes: blob.size });
+      }
 
       // 2. Request URL
       setState({

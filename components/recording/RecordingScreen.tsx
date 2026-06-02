@@ -50,6 +50,11 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // duration_seconds at stop — captured when the user taps Submit
   const recordStartedAtRef = React.useRef<number | null>(null);
   const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
+  // Failsafe: in-memory copy of every emitted chunk for the current encounter.
+  // IndexedDB (the primary store) can be unavailable on iOS Safari Private
+  // Browsing or when storage is disabled/full, where putChunk silently fails.
+  // Submit falls back to this buffer so audio is never lost mid-session.
+  const chunksMemRef = React.useRef<{ encounterId: string | null; chunks: Blob[] }>({ encounterId: null, chunks: [] });
 
   // 1. Create draft encounter row only after preflight gate clears.
   //    B11 Part A: read the patient label HomeShell stashed in sessionStorage
@@ -183,6 +188,10 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     whisperTranscript: wh.latest?.text ?? "",
     sarvamCodemix: sv.text,
     sarvamLanguage: sv.language,
+    getFallbackChunks: () => {
+      const mem = chunksMemRef.current;
+      return mem.encounterId === (encounter?.id ?? null) ? mem.chunks : [];
+    },
   });
 
   // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
@@ -197,6 +206,11 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       // Persist to IndexedDB for crash recovery (PRD §4.18). Fire-and-forget;
       // we don't block the live transcription pipeline on disk write.
       if (encounter) {
+        // Failsafe in-memory buffer (survives IndexedDB being unavailable, e.g.
+        // iOS Safari Private Browsing). Reset when a new encounter starts.
+        const mem = chunksMemRef.current;
+        if (mem.encounterId !== encounter.id) { mem.encounterId = encounter.id; mem.chunks = []; }
+        mem.chunks.push(chunk);
         void putChunk(
           encounter.id,
           _idx,
@@ -316,6 +330,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
             // Purge any chunks we wrote — Cancel = clean abandon.
             if (encounter) {
               try { await purgeEncounter(encounter.id); } catch { /* noop */ }
+              chunksMemRef.current = { encounterId: null, chunks: [] };
             }
             router.push(`/${slug}`);
           }}

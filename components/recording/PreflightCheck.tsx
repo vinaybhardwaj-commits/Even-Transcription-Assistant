@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
+import { probeIdbWritable } from "@/lib/chunk-store";
 
 type Probe = {
   ok: boolean;
@@ -67,6 +68,14 @@ export function PreflightCheck({ onProceed, onCancel }: Props) {
         const failed: string[] = [];
         for (const [name, probe] of Object.entries(json.services)) {
           if (probe && probe.ok === false) failed.push(FRIENDLY[name] ?? name);
+        }
+        // Verify local audio storage is actually writable. iOS Safari Private
+        // Browsing blocks IndexedDB — recording still works (in-memory failsafe)
+        // but the audio can't be recovered if the tab reloads.
+        const idbWritable = await probeIdbWritable();
+        if (cancelled) return;
+        if (!idbWritable) {
+          failed.push("Local audio backup is blocked — likely Private Browsing. Recording works, but it won't survive a tab reload; a normal Safari tab is recommended.");
         }
         setState(failed.length === 0 ? { kind: "ok" } : { kind: "degraded", failed });
       } catch (e) {

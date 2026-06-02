@@ -191,6 +191,48 @@ export async function purgeEncounter(encounter_id: string): Promise<void> {
   }
 }
 
+/**
+ * Probe whether IndexedDB is actually writable RIGHT NOW. Returns false when
+ * storage is unavailable — most importantly iOS Safari **Private Browsing**,
+ * where opening the DB can succeed but writes fail / quota is zero. Used by the
+ * preflight check to warn the clinician (recording still works via the
+ * in-memory fallback, but won't survive a tab reload).
+ */
+export async function probeIdbWritable(): Promise<boolean> {
+  if (!isClient()) return false;
+  try {
+    const db = await openDb();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        const testKey = `__probe__|${Date.now()}`;
+        const row: ChunkRow = {
+          key: testKey,
+          encounter_id: "__probe__",
+          chunk_idx: 0,
+          blob: new Blob([new Uint8Array([1])]),
+          mime_type: "application/octet-stream",
+          ts: Date.now(),
+        };
+        const req = store.put(row);
+        req.onsuccess = () => {
+          const del = store.delete(testKey);
+          del.onsuccess = () => resolve();
+          del.onerror = () => resolve(); // write worked; cleanup failing is ok
+        };
+        req.onerror = () => reject(req.error ?? new Error("probe_put_failed"));
+        tx.onabort = () => reject(tx.error ?? new Error("probe_tx_abort"));
+      });
+      return true;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
 export async function purgeAllOlderThan(maxAgeMs: number): Promise<number> {
   if (!isClient()) return 0;
   const summaries = await listEncounterSummaries();
