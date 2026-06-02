@@ -134,7 +134,7 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianTyp
         </div>
       )}
 
-      <RecoveryModal />
+      <RecoveryModal slug={slug} />
     </main>
   );
 }

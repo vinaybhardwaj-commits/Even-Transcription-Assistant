@@ -1,7 +1,9 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
+import { submitRecoveredEncounter } from "@/lib/submit-from-store";
 import {
   listEncounterSummaries,
   purgeEncounter,
@@ -25,12 +27,14 @@ import {
 const STALE_MS = 30_000; // 30s — protect against tripping on a sibling tab
 const POLL_MS = 60_000;  // re-check every minute in case user keeps tab open
 
-type Props = { className?: string };
+type Props = { slug: string; className?: string };
 
-export function RecoveryModal({ className = "" }: Props) {
+export function RecoveryModal({ slug, className = "" }: Props) {
   const [items, setItems] = React.useState<EncounterSummary[]>([]);
   const [dismissed, setDismissed] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [submittingId, setSubmittingId] = React.useState<string | null>(null);
+  const router = useRouter();
 
   const refresh = React.useCallback(async () => {
     try {
@@ -58,6 +62,24 @@ export function RecoveryModal({ className = "" }: Props) {
       }
     },
     [],
+  );
+
+  const onSubmitRecovered = React.useCallback(
+    async (s: EncounterSummary) => {
+      setSubmittingId(s.encounter_id);
+      setError(null);
+      const span = Math.round((s.last_ts - s.first_ts) / 1000);
+      const durationSeconds = Math.max(1, span > 0 ? span : Math.round(s.chunk_count * 0.25));
+      const r = await submitRecoveredEncounter({ slug, encounterId: s.encounter_id, durationSeconds });
+      if (r.ok) {
+        setItems((prev) => prev.filter((x) => x.encounter_id !== s.encounter_id));
+        router.push(`/${slug}/encounter/${r.encounterId}`);
+      } else {
+        setError(`Couldn't submit ${s.encounter_id.slice(0, 10)}…: ${r.error}`);
+        setSubmittingId(null);
+      }
+    },
+    [slug, router],
   );
 
   if (dismissed) return null;
@@ -116,22 +138,34 @@ export function RecoveryModal({ className = "" }: Props) {
                     {s.chunk_count} chunks · {sizeKb} KB · {ageMin}m ago
                   </p>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void onDiscard(s.encounter_id)}
-                  aria-label={`Discard recording ${s.encounter_id}`}
-                >
-                  Discard
-                </Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={submittingId !== null}
+                    onClick={() => void onSubmitRecovered(s)}
+                    aria-label={`Submit recording ${s.encounter_id}`}
+                  >
+                    {submittingId === s.encounter_id ? "Submitting…" : "Submit"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={submittingId !== null}
+                    onClick={() => void onDiscard(s.encounter_id)}
+                    aria-label={`Discard recording ${s.encounter_id}`}
+                  >
+                    Discard
+                  </Button>
+                </div>
               </li>
             );
           })}
         </ul>
 
         <p className="text-caption text-even-ink-400 mt-3 text-center">
-          Submit-from-recovered-audio lands in the next sprint. For now you
-          can keep them (they stay until you discard) or discard each one.
+          Submit uploads the recovered audio and generates the note. Discard
+          removes it permanently.
         </p>
       </div>
     </div>
