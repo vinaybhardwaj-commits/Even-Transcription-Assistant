@@ -1,5 +1,18 @@
 import { test, expect, type Page } from "@playwright/test";
 
+// On any failure, dump the page's ARIA snapshot + URL into the CI log so we can
+// see the exact page state (PIN page vs preflight modal vs recording screen,
+// and which buttons exist) without the report artifact.
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return;
+  console.log(`\n===== E2E FAILURE DEBUG: "${testInfo.title}" status=${testInfo.status} =====`);
+  try { console.log("URL:", page.url()); } catch { /* */ }
+  try {
+    const snap = await page.locator("body").ariaSnapshot();
+    console.log("ARIA SNAPSHOT (truncated 4000):\n" + String(snap).slice(0, 4000));
+  } catch (e) { console.log("ariaSnapshot failed:", String(e).slice(0, 200)); }
+});
+
 /**
  * Recording → submit e2e against the REAL deployed client bundle, with every
  * mutating/STT call mocked so nothing real is created/sent. The headline test
