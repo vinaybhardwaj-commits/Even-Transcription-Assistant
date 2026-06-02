@@ -14,7 +14,8 @@
     "smoke": "node scripts/smoke.mjs",
     "check:silent": "node scripts/check-silent-failures.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.703.0",
