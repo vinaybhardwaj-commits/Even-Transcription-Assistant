@@ -73,6 +73,17 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Replay guard: svix signs the timestamp, so a captured-and-replayed request
+  // keeps a valid signature forever. Reject anything more than 5 minutes off
+  // (svix's own tolerance) so an old event can't be resent to overwrite state.
+  const tsSec = Number(req.headers.get("svix-timestamp") ?? "");
+  if (!Number.isFinite(tsSec) || Math.abs(Date.now() / 1000 - tsSec) > 300) {
+    return new Response(JSON.stringify({ error: "stale_timestamp" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   let payload: { type?: string; data?: { email_id?: string } };
   try {
     payload = JSON.parse(raw) as typeof payload;
@@ -92,31 +103,40 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // A terminal NEGATIVE status (bounced/complained/failed) must stick: a late or
+  // out-of-order positive event (delivered/opened) must not overwrite it. We
+  // still record the event timestamp (the open genuinely happened) but only
+  // advance `status` when the transition is sensible.
   try {
-    if (mapping.field) {
-      // dynamic field write — guarded list ensures no injection
-      if (mapping.field === "opened_at") {
-        await sql`
-          UPDATE send_event
-             SET status = ${mapping.status}, opened_at = NOW()
-           WHERE resend_message_id = ${messageId}
-        `;
-      } else if (mapping.field === "bounced_at") {
-        await sql`
-          UPDATE send_event
-             SET status = ${mapping.status}, bounced_at = NOW()
-           WHERE resend_message_id = ${messageId}
-        `;
-      } else if (mapping.field === "complained_at") {
-        await sql`
-          UPDATE send_event
-             SET status = ${mapping.status}, complained_at = NOW()
-           WHERE resend_message_id = ${messageId}
-        `;
-      }
-    } else {
+    if (type === "email.opened") {
+      // record the open; keep a negative terminal status if already set
       await sql`
-        UPDATE send_event SET status = ${mapping.status}
+        UPDATE send_event
+           SET status = CASE WHEN status IN ('bounced','complained','failed') THEN status ELSE 'opened' END,
+               opened_at = COALESCE(opened_at, NOW()), updated_at = NOW()
+         WHERE resend_message_id = ${messageId}
+      `;
+    } else if (type === "email.delivered") {
+      // delivered only advances from pre-delivery states; never demotes opened or a negative
+      await sql`
+        UPDATE send_event
+           SET status = CASE WHEN status IN ('bounced','complained','failed','opened','delivered') THEN status ELSE 'delivered' END,
+               updated_at = NOW()
+         WHERE resend_message_id = ${messageId}
+      `;
+    } else if (type === "email.bounced") {
+      await sql`
+        UPDATE send_event SET status = 'bounced', bounced_at = COALESCE(bounced_at, NOW()), updated_at = NOW()
+         WHERE resend_message_id = ${messageId}
+      `;
+    } else if (type === "email.complained") {
+      await sql`
+        UPDATE send_event SET status = 'complained', complained_at = COALESCE(complained_at, NOW()), updated_at = NOW()
+         WHERE resend_message_id = ${messageId}
+      `;
+    } else if (type === "email.failed") {
+      await sql`
+        UPDATE send_event SET status = 'failed', updated_at = NOW()
          WHERE resend_message_id = ${messageId}
       `;
     }

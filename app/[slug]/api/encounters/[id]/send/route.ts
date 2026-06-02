@@ -157,10 +157,29 @@ export async function POST(
   }
 
   // Fire per-recipient Resend calls
-  const sent: { email: string; send_event_id: string; resend_message_id: string }[] = [];
+  const sent: { email: string; send_event_id: string; resend_message_id: string; deduped?: boolean }[] = [];
   const failed: { email: string; error: string }[] = [];
 
   for (const email of recipients) {
+    // Idempotency for accidental double-clicks / client retries: if this exact
+    // (encounter, recipient) was already sent in the last 90s, treat it as
+    // already-done instead of firing a second identical email. A *deliberate*
+    // resend (minutes later, or via the admin resend route) is past the window
+    // and proceeds normally — so legitimate resends are never blocked.
+    try {
+      const recent = (await sql`
+        SELECT id, resend_message_id FROM send_event
+         WHERE encounter_id = ${enc.id} AND recipient_email = ${email}
+           AND status IN ('queued', 'sent', 'delivered', 'opened')
+           AND created_at > NOW() - INTERVAL '90 seconds'
+         ORDER BY created_at DESC LIMIT 1
+      `) as Array<{ id: string; resend_message_id: string | null }>;
+      if (recent[0]) {
+        sent.push({ email, send_event_id: recent[0].id, resend_message_id: recent[0].resend_message_id ?? "", deduped: true });
+        continue;
+      }
+    } catch { /* non-fatal: fall through and send normally */ }
+
     const seId = `em_${sendEventId()}`;
     try {
       // Insert send_event in queued state
