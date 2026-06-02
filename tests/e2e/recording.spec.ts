@@ -48,13 +48,20 @@ async function installMocks(page: Page): Promise<Hits> {
   for (const p of ["**/api/transcribe/**", "**/api/voice/**"]) {
     await page.route(p, (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
   }
+  // Deterministic preflight: all services healthy (avoids slow real /api/health
+  // from the CI runner to the Mac Mini tunnels making preflight flaky).
+  await page.route("**/api/health", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, sha: "e2e", region: "ci", services: { db: { ok: true }, kb: { ok: true }, llm: { ok: true }, whisper: { ok: true }, resend: { ok: true }, r2: { ok: true } } }) }));
   return hits;
 }
 
-/** Dismiss preflight: auto-proceeds when healthy; "Record anyway" when degraded. */
+/** Dismiss preflight deterministically: wait until EITHER the "Record anyway"
+ *  modal button (degraded — e.g. IndexedDB blocked) OR the record button is
+ *  visible, then click "Record anyway" if it's the one showing. */
 async function passPreflight(page: Page) {
   const recordAnyway = page.getByRole("button", { name: /record anyway/i });
-  try { await recordAnyway.click({ timeout: 4000 }); } catch { /* auto-proceeded */ }
+  const recordBtn = page.getByRole("button", { name: "Start recording" });
+  await expect(recordAnyway.or(recordBtn)).toBeVisible({ timeout: 20000 });
+  if (await recordAnyway.isVisible().catch(() => false)) await recordAnyway.click();
 }
 
 const RECORD = "Start recording";

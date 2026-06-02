@@ -81,8 +81,11 @@ export function useMediaRecorder(opts: Options = {}) {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          channelCount: 1,
-          sampleRate: 16000,
+          // B19 P1: use `ideal` (not exact) so devices/headless-Chromium that
+          // can't open at exactly 16 kHz / mono don't throw OverconstrainedError
+          // (which silently aborted recording). The pipeline tolerates other rates.
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 16000 },
         },
       });
       streamRef.current = stream;
