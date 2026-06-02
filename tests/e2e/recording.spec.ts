@@ -67,21 +67,23 @@ async function installMocks(page: Page): Promise<Hits> {
   return hits;
 }
 
-/** Dismiss preflight robustly. The preflight modal ("Record anyway", shown when
- *  degraded — e.g. IndexedDB blocked) renders OVER the record button, so we
- *  poll with .count()/.first() (no strict-mode) for up to ~25s: click
- *  "Record anyway" whenever it's visible, and return once the record button
- *  ("Start recording") is visible. Handles auto-proceed, the overlay, and
- *  render/timing races deterministically. */
+/** Dismiss preflight. CRITICAL: when degraded (e.g. IndexedDB blocked in the
+ *  B18 test) the preflight modal renders as a fixed overlay OVER the record
+ *  button — so the record button reads as "visible" but is NOT clickable
+ *  (the overlay intercepts the click). We must therefore dismiss the modal
+ *  itself, not just wait for the record button. Wait up to 8s for the
+ *  "Record anyway" modal button; if it appears, click until it's gone; if it
+ *  never appears, preflight auto-proceeded (healthy) and there's nothing to do. */
 async function passPreflight(page: Page) {
   const anyway = page.getByRole("button", { name: /record anyway/i });
-  const record = page.getByRole("button", { name: "Start recording" });
-  for (let i = 0; i < 50; i++) {
-    if ((await record.count()) > 0 && (await record.first().isVisible().catch(() => false))) return;
-    if ((await anyway.count()) > 0 && (await anyway.first().isVisible().catch(() => false))) {
-      await anyway.first().click().catch(() => {});
-    }
-    await page.waitForTimeout(500);
+  try {
+    await anyway.first().waitFor({ state: "visible", timeout: 8000 });
+  } catch {
+    return; // healthy: auto-proceeded, no modal overlay
+  }
+  for (let i = 0; i < 10 && (await anyway.count()) > 0 && (await anyway.first().isVisible().catch(() => false)); i++) {
+    await anyway.first().click().catch(() => {});
+    await page.waitForTimeout(300);
   }
 }
 
