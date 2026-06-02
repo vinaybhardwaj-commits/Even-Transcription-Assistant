@@ -17,6 +17,24 @@ import { scoreEncounter, scoreScribe, renderNoteText } from "./scoring";
 const nano = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 12);
 const runId = () => `trun_${nano()}`;
 
+// Conservative placeholder rate for a PAID engine whose cost_per_min_usd hasn't
+// been set by an admin yet, so its runs still accrue toward the daily budget
+// instead of counting as free (which made the $5/day cap a no-op). Once the
+// admin sets a real cost_per_min_usd, that exact value is used. Errs slightly
+// high on purpose — the budget's job is to PAUSE runaway paid spend.
+const DEFAULT_PAID_RATE_USD_PER_MIN = 0.02;
+
+/** Best cost estimate for one run: the adapter's reported cost if any; else
+ *  cost_per_min_usd × duration; else (paid, unpriced) a conservative default;
+ *  free engines are 0. Returns a value so todaySpendUsd() can actually bind. */
+function estimateCostUsd(engine: EngineRow, durationSeconds: number | null, adapterCostUsd: number | null): number | null {
+  if (adapterCostUsd != null) return adapterCostUsd;
+  if (!engine.is_paid) return 0;
+  const rate = engine.cost_per_min_usd ?? DEFAULT_PAID_RATE_USD_PER_MIN;
+  const mins = (durationSeconds ?? 0) / 60;
+  return Number((rate * mins).toFixed(5));
+}
+
 /** Enqueue a fan-out job for one encounter (no-op if a job already exists). */
 export async function enqueueFanout(encounterId: string): Promise<void> {
   await sql`
@@ -39,7 +57,7 @@ export async function enqueueBackfill(): Promise<number> {
   return r.length;
 }
 
-type EncRow = { id: string; audio_object_key: string | null; detected_language: string | null };
+type EncRow = { id: string; audio_object_key: string | null; detected_language: string | null; duration_seconds: number | null };
 
 function asrEngines(engines: EngineRow[], allowPaid: boolean): EngineRow[] {
   return engines.filter((e) => {
@@ -58,7 +76,7 @@ export type FanoutResult = { encounter_id: string; inserted: number; skipped: nu
 export async function runFanoutForEncounter(encounterId: string, opts?: { allowPaid?: boolean }): Promise<FanoutResult> {
   const allowPaid = opts?.allowPaid ?? true;
   const rows = (await sql`
-    SELECT id, audio_object_key, detected_language FROM encounter WHERE id = ${encounterId} LIMIT 1
+    SELECT id, audio_object_key, detected_language, duration_seconds FROM encounter WHERE id = ${encounterId} LIMIT 1
   `) as EncRow[];
   const enc = rows[0];
   if (!enc) return { encounter_id: encounterId, inserted: 0, skipped: 0, errors: ["encounter_not_found"] };
@@ -108,6 +126,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
 
   for (const { e, r } of results) {
     if (r.error) errors.push(`${e.id}: ${r.error}`);
+    const costUsd = estimateCostUsd(e, enc.duration_seconds, r.costUsd);
     try {
       await sql`
         INSERT INTO transcription_run
@@ -115,7 +134,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
            transcript_original, transcript_english, latency_ms, cost_usd, error, created_at)
         VALUES
           (${runId()}, ${encounterId}, ${e.id}, ${e.id}, 'batch', 'asr', ${r.language ?? enc.detected_language},
-           ${r.original}, ${r.english}, ${r.latencyMs}, ${r.costUsd}, ${r.error}, NOW())
+           ${r.original}, ${r.english}, ${r.latencyMs}, ${costUsd}, ${r.error}, NOW())
       `;
       inserted++;
     } catch (err) {
@@ -147,19 +166,35 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
   const spendUsd = await todaySpendUsd();
   const allowPaid = spendUsd < budgetUsd;
 
-  // Reclaim jobs left 'running' by a killed/timed-out worker call.
-  await sql`UPDATE stt_fanout_job SET status = 'pending' WHERE status = 'running'`;
+  // Reclaim ONLY jobs left 'running' by a killed/timed-out worker call — i.e.
+  // claimed > 5 min ago (a worker call caps ~40s) or with no claim timestamp
+  // (legacy rows). A still-in-flight job from a concurrent drain has a fresh
+  // started_at and is left alone, so we don't yank a job another drain is
+  // actively processing (the old blanket reset caused double-processing).
+  await sql`
+    UPDATE stt_fanout_job SET status = 'pending'
+     WHERE status = 'running'
+       AND (started_at IS NULL OR started_at < NOW() - INTERVAL '5 minutes')
+  `;
 
+  // Atomic claim: flip up to `limit` pending/failed jobs to 'running' in ONE
+  // statement, locking the chosen rows with FOR UPDATE SKIP LOCKED so two
+  // concurrent drains never grab the same encounter. RETURNING gives us exactly
+  // the rows this call owns.
   const claim = (await sql`
-    SELECT encounter_id FROM stt_fanout_job
-     WHERE status IN ('pending', 'failed')
-     ORDER BY enqueued_at ASC
-     LIMIT ${limit}
+    UPDATE stt_fanout_job SET status = 'running', attempts = attempts + 1, started_at = NOW()
+     WHERE encounter_id IN (
+       SELECT encounter_id FROM stt_fanout_job
+        WHERE status IN ('pending', 'failed')
+        ORDER BY enqueued_at ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+     )
+    RETURNING encounter_id
   `) as Array<{ encounter_id: string }>;
 
   const jobs: FanoutResult[] = [];
   for (const j of claim) {
-    await sql`UPDATE stt_fanout_job SET status = 'running', attempts = attempts + 1 WHERE encounter_id = ${j.encounter_id}`;
     try {
       const res = await runFanoutForEncounter(j.encounter_id, { allowPaid });
       jobs.push(res);
@@ -245,9 +280,9 @@ export async function dedupRuns(): Promise<{ deleted: number; affected: number }
  *  encounter, then rubric-score them vs the clinician note. */
 export async function runScribeForEncounter(encounterId: string): Promise<{ encounter_id: string; inserted: number; errors: string[] }> {
   const rows = (await sql`
-    SELECT id, audio_object_key, detected_language, note_json
+    SELECT id, audio_object_key, detected_language, duration_seconds, note_json
       FROM encounter WHERE id = ${encounterId} LIMIT 1
-  `) as Array<{ id: string; audio_object_key: string | null; detected_language: string | null; note_json: unknown }>;
+  `) as Array<{ id: string; audio_object_key: string | null; detected_language: string | null; duration_seconds: number | null; note_json: unknown }>;
   const enc = rows[0];
   if (!enc || !enc.note_json) return { encounter_id: encounterId, inserted: 0, errors: ["no_generated_note"] };
 
@@ -295,11 +330,12 @@ export async function runScribeForEncounter(encounterId: string): Promise<{ enco
         const adapter = adapterFor(e.adapter_key)!;
         try {
           const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined });
+          const costUsd = estimateCostUsd(e, enc.duration_seconds, r.costUsd);
           await sql`
             INSERT INTO transcription_run
               (id, encounter_id, engine, stt_engine_id, mode, tier, note_text, note_json, latency_ms, cost_usd, error, created_at)
             VALUES (${runId()}, ${encounterId}, ${e.id}, ${e.id}, 'batch', 'scribe',
-                    ${r.noteText}, ${r.note ? JSON.stringify(r.note) : null}::jsonb, ${r.latencyMs}, ${r.costUsd}, ${r.error}, NOW())
+                    ${r.noteText}, ${r.note ? JSON.stringify(r.note) : null}::jsonb, ${r.latencyMs}, ${costUsd}, ${r.error}, NOW())
           `;
           inserted++;
           if (r.error) errors.push(`${e.id}: ${r.error}`);

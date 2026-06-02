@@ -298,17 +298,37 @@ const SCRIBE_RUBRIC_SYSTEM = `You compare a CANDIDATE clinical note against a RE
 
 type ScribeRubric = { factual: number; completeness: number; structure: number; safety: number; overall: number; reasoning: string };
 
+/** Stamp a done-marker on ALL of an encounter's scribe runs so a non-scoreable
+ *  encounter (empty reference note, or no candidate rows) is not re-selected by
+ *  scribePending() forever. No-op if the encounter has no scribe rows. */
+async function markScribeDone(encounterId: string, skip: string): Promise<void> {
+  const meta = JSON.stringify({ scored_at: new Date().toISOString(), scribe_skip: skip });
+  await sql`
+    UPDATE transcription_run
+       SET metrics_json = COALESCE(metrics_json, '{}'::jsonb) || ${meta}::jsonb
+     WHERE encounter_id = ${encounterId} AND tier = 'scribe'
+  `;
+}
+
 export async function scoreScribe(encounterId: string): Promise<{ ok: boolean; scored: number }> {
   const enc = (await sql`SELECT note_json, note_json_edited FROM encounter WHERE id = ${encounterId} LIMIT 1`) as Array<{ note_json: unknown; note_json_edited: unknown }>;
   if (!enc[0]) return { ok: false, scored: 0 };
   const refText = renderNoteText(enc[0].note_json_edited ?? enc[0].note_json).trim();
-  if (!refText) return { ok: false, scored: 0 };
+  if (!refText) {
+    // No reference note to score against — mark the scribe runs done so the
+    // encounter isn't re-picked every drain (the documented scribePending loop).
+    await markScribeDone(encounterId, "empty_reference");
+    return { ok: false, scored: 0 };
+  }
 
   const rows = (await sql`
     SELECT id, engine, note_text FROM transcription_run
      WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND error IS NULL
   `) as Array<{ id: string; engine: string; note_text: string | null }>;
-  if (rows.length === 0) return { ok: false, scored: 0 };
+  if (rows.length === 0) {
+    await markScribeDone(encounterId, "no_candidate_rows");
+    return { ok: false, scored: 0 };
+  }
 
   let bestId: string | null = null; let bestScore = -1;
   for (const r of rows) {
