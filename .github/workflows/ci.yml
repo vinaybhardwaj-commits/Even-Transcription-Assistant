@@ -26,3 +26,6 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Unit tests (vitest via npx — not a package dep, keeps npm ci/lockfile clean)
+        run: npx --yes vitest@^2 run

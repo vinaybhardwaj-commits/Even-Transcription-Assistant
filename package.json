@@ -12,7 +12,9 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "smoke": "node scripts/smoke.mjs",
-    "check:silent": "node scripts/check-silent-failures.mjs"
+    "check:silent": "node scripts/check-silent-failures.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.703.0",
