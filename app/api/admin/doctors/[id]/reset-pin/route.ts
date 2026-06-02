@@ -13,6 +13,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import bcrypt from "bcryptjs";
+import { randomInt } from "crypto";
 
 export const runtime = "nodejs";
 
@@ -31,7 +32,7 @@ function canonicalAppUrl(): string {
 }
 
 function generatePin(): string {
-  const n = Math.floor(Math.random() * 10_000);
+  const n = randomInt(0, 10_000); // crypto-strong (B19 P2)
   return String(n).padStart(4, "0");
 }
 

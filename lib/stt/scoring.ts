@@ -195,7 +195,7 @@ export async function extractCriticalTerms(reference: string): Promise<{ terms: 
     const r = await qwenJson<{ terms?: Term[] }>(EXTRACT_SYSTEM, text, { temperature: 0, timeoutMs: 60_000 });
     return { terms: Array.isArray(r.json?.terms) ? r.json!.terms!.filter((t) => t && t.term) : [], model: "qwen2.5:14b" };
   } catch {
-    return { terms: [], model: "none" };
+    return { terms: [], model: "extract_failed" }; // B19 P2: distinguish failure from "ran, found 0"
   }
 }
 
