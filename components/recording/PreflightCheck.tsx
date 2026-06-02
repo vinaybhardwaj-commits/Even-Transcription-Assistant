@@ -43,9 +43,29 @@ const FRIENDLY: Record<string, string> = {
 
 /**
  * Probes /api/health before recording starts. Per PRD §8.1.11 — warn
- * the doctor if any upstream is degraded but still let them record
- * (audio chunks always land in IndexedDB regardless of online state).
+ * the doctor if any upstream is degraded but still let them record.
+ * (Local audio backup is verified separately via probeIdbWritable(); it can
+ * be unavailable, e.g. iOS Safari Private Browsing, in which case we warn.)
  */
+// AbortSignal.timeout() is unavailable on Safari < 16 / iOS 15. Calling it
+// there throws and would mislabel a perfectly healthy backend as unreachable,
+// blocking the consult. Feature-detect and degrade gracefully.
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  try {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      return AbortSignal.timeout(ms);
+    }
+    if (typeof AbortController !== "undefined") {
+      const c = new AbortController();
+      setTimeout(() => c.abort(), ms);
+      return c.signal;
+    }
+  } catch {
+    /* very old engine — no abort support; proceed without a timeout */
+  }
+  return undefined;
+}
+
 export function PreflightCheck({ onProceed, onCancel }: Props) {
   const [state, setState] = React.useState<State>({ kind: "checking" });
 
@@ -55,7 +75,7 @@ export function PreflightCheck({ onProceed, onCancel }: Props) {
       try {
         const res = await fetch("/api/health", {
           cache: "no-store",
-          signal: AbortSignal.timeout(8000),
+          signal: timeoutSignal(8000),
         });
         if (cancelled) return;
         if (!res.ok) {

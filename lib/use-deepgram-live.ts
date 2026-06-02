@@ -223,8 +223,12 @@ export function useDeepgramLive(opts: Options) {
     } else {
       // queue until WS opens (drained in onopen)
       queueRef.current.push(chunk);
-      // cap queue at 200 chunks (~50s at 250ms cadence)
-      if (queueRef.current.length > 200) queueRef.current.shift();
+      // Cap the pre-open queue at 200 chunks (~50s at 250ms cadence). The FIRST
+      // chunk carries the WebM/opus container header (EBML + init segment); drop
+      // it and Deepgram can't decode the drained media clusters, so the live
+      // English transcript is garbled after a slow WS open. Preserve index 0 and
+      // evict the oldest *non-header* chunk instead.
+      if (queueRef.current.length > 200) queueRef.current.splice(1, 1);
     }
   }, []);
 

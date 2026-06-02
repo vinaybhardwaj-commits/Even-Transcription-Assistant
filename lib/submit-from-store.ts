@@ -1,6 +1,6 @@
 "use client";
 
-import { getChunksForEncounter, purgeEncounter } from "@/lib/chunk-store";
+import { getChunksForEncounter, markEncounterSubmitted, purgeEncounter } from "@/lib/chunk-store";
 
 /**
  * Upload a recovered encounter's audio straight from IndexedDB through the
@@ -68,6 +68,7 @@ export async function submitRecoveredEncounter(opts: {
     }
 
     // Success — drop the local copy so it stops showing as "unfinished".
+    try { await markEncounterSubmitted(encounterId); } catch { /* non-fatal */ }
     try { await purgeEncounter(encounterId); } catch { /* non-fatal */ }
     return { ok: true, encounterId };
   } catch (e) {

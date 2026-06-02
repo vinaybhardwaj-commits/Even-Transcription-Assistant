@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   getChunksForEncounter,
+  markEncounterSubmitted,
   purgeEncounter,
 } from "@/lib/chunk-store";
 
@@ -210,10 +211,19 @@ export function useEncounterSubmit(opts: Options) {
         totalBytes: blob.size,
         error: null,
       });
+      // Mark uploaded BEFORE purging so a failed purge can't resurface this
+      // encounter as "unfinished" in the recovery modal (would risk a dup
+      // upload). The marker is itself best-effort; the purge below is the
+      // primary cleanup and removes the marker too.
+      try {
+        await markEncounterSubmitted(encId);
+      } catch {
+        /* non-fatal: purge below is the primary cleanup */
+      }
       try {
         await purgeEncounter(encId);
       } catch {
-        // non-fatal: chunks will be cleaned up by recovery modal eventually
+        // non-fatal: the submitted-marker above keeps it out of recovery
       }
 
       setState({

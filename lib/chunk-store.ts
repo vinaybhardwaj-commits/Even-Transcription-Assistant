@@ -31,7 +31,16 @@ type ChunkRow = {
   blob: Blob;
   mime_type: string;
   ts: number;
+  // Sentinel rows written by markEncounterSubmitted() carry submitted=true so a
+  // successfully-uploaded encounter is hidden from recovery even if the
+  // post-submit chunk purge failed (it would otherwise resurface as
+  // "unfinished" and invite a duplicate upload).
+  submitted?: boolean;
 };
+
+function submittedMarkerKey(encounter_id: string): string {
+  return `${encounter_id}|__submitted__`;
+}
 
 export type EncounterSummary = {
   encounter_id: string;
@@ -107,10 +116,18 @@ export async function listEncounterSummaries(): Promise<EncounterSummary[]> {
       const store = tx.objectStore(STORE);
       const req = store.openCursor();
       const acc = new Map<string, EncounterSummary>();
+      const submitted = new Set<string>();
       req.onsuccess = () => {
         const cursor = req.result;
         if (cursor) {
           const row = cursor.value as ChunkRow;
+          if (row.submitted) {
+            // Sentinel marker — record that this encounter was uploaded; do not
+            // count it as a recoverable chunk.
+            submitted.add(row.encounter_id);
+            cursor.continue();
+            return;
+          }
           const existing = acc.get(row.encounter_id);
           if (existing) {
             existing.chunk_count += 1;
@@ -129,7 +146,11 @@ export async function listEncounterSummaries(): Promise<EncounterSummary[]> {
           }
           cursor.continue();
         } else {
-          resolve(Array.from(acc.values()).sort((a, b) => b.last_ts - a.last_ts));
+          resolve(
+            Array.from(acc.values())
+              .filter((e) => !submitted.has(e.encounter_id))
+              .sort((a, b) => b.last_ts - a.last_ts),
+          );
         }
       };
       req.onerror = () => reject(req.error ?? new Error("scan_failed"));
@@ -161,6 +182,38 @@ export async function getChunksForEncounter(
         }
       };
       req.onerror = () => reject(req.error ?? new Error("read_failed"));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Write a small sentinel row marking an encounter as successfully uploaded, so
+ * listEncounterSummaries() hides it from the recovery modal even when the
+ * subsequent purge fails (a non-fatal but confusing "unfinished" resurfacing
+ * that could trigger a duplicate submit). Best-effort: callers should ignore a
+ * throw here. The marker shares the encounter_id, so purgeEncounter() also
+ * removes it.
+ */
+export async function markEncounterSubmitted(encounter_id: string): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const row: ChunkRow = {
+        key: submittedMarkerKey(encounter_id),
+        encounter_id,
+        chunk_idx: -1,
+        blob: new Blob([]),
+        mime_type: "",
+        ts: Date.now(),
+        submitted: true,
+      };
+      const req = store.put(row);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error ?? new Error("mark_submitted_failed"));
     });
   } finally {
     db.close();
