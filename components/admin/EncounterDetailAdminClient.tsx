@@ -188,29 +188,37 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
   const [audioInfo, setAudioInfo] = React.useState<AudioInfo | null>(null);
   const [audioLoading, setAudioLoading] = React.useState(false);
   const [audioErr, setAudioErr] = React.useState<string | null>(null);
+  // Guards against re-entry: toggling audioLoading must NOT be an effect dep, or
+  // the effect re-runs, its cleanup cancels the in-flight fetch, and loading
+  // sticks forever. A ref tracks "already requested for this encounter".
+  const audioReqRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
-    if (activeTab !== "audio" || audioInfo || audioLoading) return;
+    if (activeTab !== "audio") return;
     const e = data?.encounter;
     if (!e || !e.audio_object_key) return;
-    let cancelled = false;
+    if (audioReqRef.current === encounterId) return; // already fetched/fetching
+    audioReqRef.current = encounterId;
     setAudioLoading(true);
     setAudioErr(null);
     (async () => {
       try {
         const res = await fetch(`/api/admin/encounters/${encounterId}/audio-url`, { cache: "no-store" });
         const j = await res.json();
-        if (cancelled) return;
-        if (!res.ok) setAudioErr((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
-        else setAudioInfo(j as AudioInfo);
+        if (!res.ok) {
+          setAudioErr((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
+          audioReqRef.current = null; // allow a retry on next tab open
+        } else {
+          setAudioInfo(j as AudioInfo);
+        }
       } catch (err) {
-        if (!cancelled) setAudioErr(err instanceof Error ? err.message : String(err));
+        setAudioErr(err instanceof Error ? err.message : String(err));
+        audioReqRef.current = null;
       } finally {
-        if (!cancelled) setAudioLoading(false);
+        setAudioLoading(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, [activeTab, audioInfo, audioLoading, data, encounterId]);
+  }, [activeTab, data, encounterId]);
 
   const load = React.useCallback(async () => {
     setLoading(true);
