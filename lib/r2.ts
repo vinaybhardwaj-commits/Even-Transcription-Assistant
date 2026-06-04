@@ -74,6 +74,31 @@ export async function signPutUrl(opts: {
   });
 }
 
+/**
+ * Presigned GET URL for reading an object back (admin audio playback/download).
+ * When `downloadFilename` is set, R2 returns Content-Disposition: attachment so
+ * the browser downloads instead of navigating; otherwise it streams (seekable,
+ * R2 honours Range) for an inline <audio> player.
+ */
+export async function signGetUrl(opts: {
+  key: string;
+  expiresInSeconds?: number;
+  downloadFilename?: string;
+  contentType?: string;
+}): Promise<string> {
+  const cmd = new GetObjectCommand({
+    Bucket: bucket(),
+    Key: opts.key,
+    ...(opts.downloadFilename
+      ? { ResponseContentDisposition: `attachment; filename="${opts.downloadFilename}"` }
+      : {}),
+    ...(opts.contentType ? { ResponseContentType: opts.contentType } : {}),
+  });
+  return getSignedUrl(client(), cmd, {
+    expiresIn: opts.expiresInSeconds ?? 3600, // 1 h — long enough to play a full consult
+  });
+}
+
 export async function headObject(key: string): Promise<{
   size: number | null;
   content_type: string | null;

@@ -159,12 +159,13 @@ type FetchResp = {
   };
 };
 
-type TabKey = "note" | "transcript" | "engines" | "speakers" | "cdmss" | "send" | "audit";
+type TabKey = "note" | "transcript" | "audio" | "engines" | "speakers" | "cdmss" | "send" | "audit";
 
-const TAB_ORDER: TabKey[] = ["note", "transcript", "engines", "speakers", "cdmss", "send", "audit"];
+const TAB_ORDER: TabKey[] = ["note", "transcript", "audio", "engines", "speakers", "cdmss", "send", "audit"];
 const TAB_LABEL: Record<TabKey, string> = {
   note: "Note",
   transcript: "Transcript",
+  audio: "Audio",
   engines: "Engines",
   speakers: "Speakers",
   cdmss: "CDMSS",
@@ -182,6 +183,34 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
   const [showDelete, setShowDelete] = React.useState(false);
   const [actionInflight, setActionInflight] = React.useState(false);
   const [actionMsg, setActionMsg] = React.useState<string | null>(null);
+  // Audio tab: presigned play/download URLs, fetched lazily when the tab opens.
+  type AudioInfo = { play_url: string; download_url: string; filename: string; content_type: string; bytes: number; duration_seconds: number | null };
+  const [audioInfo, setAudioInfo] = React.useState<AudioInfo | null>(null);
+  const [audioLoading, setAudioLoading] = React.useState(false);
+  const [audioErr, setAudioErr] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (activeTab !== "audio" || audioInfo || audioLoading) return;
+    const e = data?.encounter;
+    if (!e || !e.audio_object_key) return;
+    let cancelled = false;
+    setAudioLoading(true);
+    setAudioErr(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/admin/encounters/${encounterId}/audio-url`, { cache: "no-store" });
+        const j = await res.json();
+        if (cancelled) return;
+        if (!res.ok) setAudioErr((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
+        else setAudioInfo(j as AudioInfo);
+      } catch (err) {
+        if (!cancelled) setAudioErr(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setAudioLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, audioInfo, audioLoading, data, encounterId]);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -414,6 +443,44 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
               </section>
             ) : (
               <p className="text-body text-even-ink-400">No transcript captured (encounter may be deleted or processing failed).</p>
+            )
+          ) : null}
+
+          {activeTab === "audio" ? (
+            !enc.audio_object_key ? (
+              <p className="text-body text-even-ink-400">No audio stored for this encounter.</p>
+            ) : (
+              <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+                {audioLoading ? (
+                  <p className="text-body text-even-ink-400">Loading audio…</p>
+                ) : audioErr ? (
+                  <p className="text-body text-danger-700">Couldn’t load audio: {audioErr}</p>
+                ) : audioInfo ? (
+                  <div className="space-y-4">
+                    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                    <audio controls preload="metadata" src={audioInfo.play_url} className="w-full" />
+                    <div className="flex flex-wrap items-center gap-2 text-caption text-even-ink-600">
+                      <span className="rounded-full bg-even-ink-50 px-2.5 py-1">⏱ {fmtDur(audioInfo.duration_seconds)}</span>
+                      <span className="rounded-full bg-even-ink-50 px-2.5 py-1">⤓ {fmtBytes(audioInfo.bytes)}</span>
+                      <span className="rounded-full bg-even-ink-50 px-2.5 py-1">{audioInfo.content_type}</span>
+                    </div>
+                    <div>
+                      <a
+                        href={audioInfo.download_url}
+                        download={audioInfo.filename}
+                        className="inline-flex items-center gap-2 rounded-lg bg-even-navy-800 px-4 py-2 text-sm font-medium text-even-white hover:opacity-90"
+                      >
+                        ⤓ Download original audio
+                      </a>
+                    </div>
+                    <p className="text-[11px] text-even-ink-400">
+                      Original recording streamed from R2 · {audioInfo.filename}. Playback &amp; download are admin-only and audit-logged.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-body text-even-ink-400">Preparing audio…</p>
+                )}
+              </section>
             )
           ) : null}
 
