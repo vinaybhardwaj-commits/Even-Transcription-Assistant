@@ -29,6 +29,33 @@ export function AdminsClient({ currentEmail }: { currentEmail: string }) {
   const [formErr, setFormErr] = React.useState<string | null>(null);
   const [formOk, setFormOk] = React.useState<string | null>(null);
 
+  // Per-row password reset.
+  const [resetFor, setResetFor] = React.useState<string | null>(null);
+  const [resetPw, setResetPw] = React.useState("");
+  const [resetBusy, setResetBusy] = React.useState(false);
+  const [resetMsg, setResetMsg] = React.useState<{ id: string; ok: boolean; text: string } | null>(null);
+
+  const doReset = async (id: string) => {
+    setResetBusy(true);
+    setResetMsg(null);
+    try {
+      const res = await fetch(`/api/admin/admins/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: resetPw }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error((j as { error?: { message?: string } }).error?.message ?? `http_${res.status}`);
+      setResetMsg({ id, ok: true, text: "Password updated." });
+      setResetFor(null);
+      setResetPw("");
+    } catch (e) {
+      setResetMsg({ id, ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
@@ -118,18 +145,48 @@ export function AdminsClient({ currentEmail }: { currentEmail: string }) {
         ) : (
           <div className="divide-y divide-even-ink-100">
             {admins.map((a) => (
-              <div key={a.id} className="flex items-center justify-between py-3">
-                <div>
-                  <p className="text-body text-even-ink-800">
-                    {a.name}
-                    {a.email.toLowerCase() === currentEmail.toLowerCase() ? <span className="ml-2 text-[11px] text-even-ink-400">(you)</span> : null}
-                  </p>
-                  <p className="text-caption text-even-ink-500">{a.email}</p>
+              <div key={a.id} className="py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-body text-even-ink-800">
+                      {a.name}
+                      {a.email.toLowerCase() === currentEmail.toLowerCase() ? <span className="ml-2 text-[11px] text-even-ink-400">(you)</span> : null}
+                    </p>
+                    <p className="text-caption text-even-ink-500">{a.email}</p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div className="text-right">
+                      <p className="text-caption text-even-ink-600 capitalize">{a.role}</p>
+                      <p className="text-[11px] text-even-ink-400">last active {fmt(a.last_active_at)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { setResetFor(resetFor === a.id ? null : a.id); setResetPw(""); setResetMsg(null); }}
+                      className="text-caption text-even-blue-600 hover:text-even-blue-700 hover:underline whitespace-nowrap"
+                    >
+                      Reset password
+                    </button>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-caption text-even-ink-600 capitalize">{a.role}</p>
-                  <p className="text-[11px] text-even-ink-400">last active {fmt(a.last_active_at)}</p>
-                </div>
+                {resetFor === a.id ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <input
+                      className="rounded-lg border border-even-ink-100 px-3 py-1.5 text-body text-even-ink-800 focus:outline-none focus:ring-2 focus:ring-even-navy-800/20"
+                      type="password"
+                      value={resetPw}
+                      onChange={(e) => setResetPw(e.target.value)}
+                      placeholder="New password (min 8)"
+                      autoComplete="new-password"
+                    />
+                    <Button size="sm" onClick={() => doReset(a.id)} disabled={resetBusy || resetPw.length < 8}>
+                      {resetBusy ? "Saving…" : "Save"}
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => { setResetFor(null); setResetPw(""); }}>Cancel</Button>
+                  </div>
+                ) : null}
+                {resetMsg && resetMsg.id === a.id ? (
+                  <p className={`mt-1 text-caption ${resetMsg.ok ? "text-success-700" : "text-danger-700"}`}>{resetMsg.text}</p>
+                ) : null}
               </div>
             ))}
           </div>
