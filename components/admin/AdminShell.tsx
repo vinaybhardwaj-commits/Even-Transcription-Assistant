@@ -21,6 +21,7 @@ import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 
 export type AdminNavKey =
   | "dashboard"
+  | "admins"
   | "doctors"
   | "encounters"
   | "traces"
@@ -45,6 +46,7 @@ const NAV: NavItem[] = [
   { key: "sends",      label: "Sends",      href: "/admin/sends",    icon: "◉", section: "observe" },
   { key: "diarization", label: "Diarization", href: "/admin/diarization", icon: "◍", section: "observe" },
   { key: "stt-lab", label: "STT Lab", href: "/admin/stt-lab", icon: "◎", section: "observe" },
+  { key: "admins",     label: "Admins",     href: "/admin/admins",   icon: "◑", section: "configure" },
   { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },
 ];
 
