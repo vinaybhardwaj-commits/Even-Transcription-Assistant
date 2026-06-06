@@ -23,8 +23,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit tests (vitest via npx — not a package dep, keeps npm ci/lockfile clean)
-        run: npx --yes vitest@^2 run
+      - name: Unit tests (vitest installed ephemerally — not a committed dep; same pattern as e2e's playwright)
+        run: |
+          npm i -D vitest@^2 --no-audit --no-fund
+          npx vitest run
 
       - name: Silent-failure gate (no empty catch/.catch in critical paths; annotate deliberate ones)
         run: npm run check:silent
