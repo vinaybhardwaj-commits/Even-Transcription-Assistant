@@ -644,3 +644,21 @@ Triggered by V after B18: three parallel reviewers swept the client recording pi
 
 ### Verified-clean (no action) — recorded so they're not re-flagged
 Service worker is network-first for navigations + `/api/` with killswitch + cache-version purge (no stale-bundle risk). NDJSON `sawDone` swallow is a correct iOS workaround that re-throws real mid-stream errors. `run-migrations` dollar-quote splitter + per-migration transaction are sound and idempotent. Email template HTML-escapes all user/LLM content. `/process` is idempotent with per-step persist, partial-note preservation, and timeouts on all LLM/HTTP calls. No nested `sql` fragment composition anywhere (Neon-safe). PIN-login requires the URL-embedded token. `scorePending`/`resolveRouting` terminate safely.
+
+---
+
+## B20 — Admin "Audio" tab stuck on "Loading audio…" (2 Jun 2026, FIXED)
+
+**Reported:** V (screenshot) right after the admin encounter-audio play/download feature shipped (`97b2dc5`). The new **Audio** tab on `/admin/encounters/[id]` showed "Loading audio…" forever; the player never appeared.
+
+**Root cause (client effect, not server):** the lazy fetch effect listed `audioLoading`/`audioInfo` in its dependency array AND toggled `audioLoading` inside itself. So `setAudioLoading(true)` re-ran the effect; the previous run's cleanup set `cancelled = true`; the in-flight request's result was then discarded in the `if (cancelled) return` guard — so `audioInfo`/`audioErr`/`audioLoading=false` were never applied and the spinner stuck. (The request itself was completing fine; the server `audio-url` endpoint was healthy.)
+
+**Fix (`6fd5b64`):** replaced the cancel-on-rerun pattern with an `audioReqRef` guard keyed by `encounterId` (no cleanup-cancel), deps reduced to `[activeTab, data, encounterId]`; on error the ref resets so reopening the tab retries. Verified: build green, endpoint 401 unauth (no presigned-URL leak), smoke 9/9. Authed playback PENDING V visual check.
+
+**Lesson:** never put a loading/result state in an effect's deps when the effect toggles that same state and uses a cleanup-cancel — it self-cancels. Use a ref guard instead.
+
+---
+
+## 2 Jun 2026 — session features shipped (not bugs; logged for context)
+
+Reliability backlog complete (all 20 non-security items, Tiers 1–5 — see `ETA-BACKLOG-SCOPED.md`) + new admin surfaces: **/buglog** (this page, auth-gated, repo-sourced), **encounter Audio play/download** tab, **Admins management** (add + reset password; `seed-team` retired), and a **System Map** module. Full handoff: `ETA-CARRYOVER-PROMPT-2-JUN-2026.md`. The B19 register above is annotated with per-item FIX shas; the only OPEN security items are the 3 parked P0s (RBAC gates, finalize-upload key-binding, admin-login lockout) + the shared-password risk.
