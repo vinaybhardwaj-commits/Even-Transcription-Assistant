@@ -361,9 +361,12 @@ export async function scribeMissing(limit = 3): Promise<{ processed: number; res
           WHERE se.enabled AND se.fanout_enabled
             AND se.capabilities_json -> 'tiers' ? 'scribe'
             AND NOT EXISTS (
+              -- ANY attempt counts (errored too) — else junk/silent clips
+              -- (asr empty_transcript) get re-picked forever; retry those
+              -- explicitly via {scribe:true, encounterId}.
               SELECT 1 FROM transcription_run tr
                WHERE tr.encounter_id = e.id AND tr.tier = 'scribe'
-                 AND tr.engine = se.id AND tr.error IS NULL
+                 AND tr.engine = se.id
             )
        )
      ORDER BY e.recorded_at DESC NULLS LAST
