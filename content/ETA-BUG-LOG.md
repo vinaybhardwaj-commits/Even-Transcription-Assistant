@@ -662,3 +662,28 @@ Service worker is network-first for navigations + `/api/` with killswitch + cach
 ## 2 Jun 2026 — session features shipped (not bugs; logged for context)
 
 Reliability backlog complete (all 20 non-security items, Tiers 1–5 — see `ETA-BACKLOG-SCOPED.md`) + new admin surfaces: **/buglog** (this page, auth-gated, repo-sourced), **encounter Audio play/download** tab, **Admins management** (add + reset password; `seed-team` retired), and a **System Map** module. Full handoff: `ETA-CARRYOVER-PROMPT-2-JUN-2026.md`. The B19 register above is annotated with per-item FIX shas; the only OPEN security items are the 3 parked P0s (RBAC gates, finalize-upload key-binding, admin-login lockout) + the shared-password risk.
+
+---
+
+## B21 — CI had NEVER actually run: failed at "Setup Node" on every run since creation (6 Jun 2026, FIXED)
+
+**Found:** 6 Jun 2026, while dispatching the mic-denied e2e's first run.
+
+**Symptom:** Every `CI` workflow run in the repo's history (back through the 2 Jun hardening sprint) was red. Failure was at the **Setup Node** step — before install/typecheck/tests — so the "hard CI gates" (vitest unit suite, `check:silent` swallow-handler gate) had **never once executed in CI**. The Tier-5 claim "check:silent is now a hard CI gate at baseline 0" was true in the workflow file but vacuous in practice.
+
+**Root cause (three stacked, all lockfile-related):** the repo has **never had a `package-lock.json`** (no commit in history ever added one — Vercel builds with `npm install`, not `npm ci`).
+1. `actions/setup-node@v4` with `cache: "npm"` hard-errors when no lockfile exists ("Dependencies lock file is not found").
+2. Next step `npm ci` would also have failed for the same reason.
+3. Once those were fixed, two more latent failures surfaced because the later steps were finally reached for the first time: `next lint` exits 1 (no ESLint config exists — it prompts interactively), and bare `npx vitest@^2 run` can't resolve `vitest/config` from `vitest.config.ts` (vitest lives in the npx cache, not `node_modules`).
+
+**Fix (3 commits, 6 Jun):** `6bb3deb` drop the npm cache + `npm ci` → `npm install --no-audit --no-fund`; `c6ff5fa` drop the configless `next lint` step (typecheck is the real gate, matching the Vercel build); `6fcd2c8` install vitest ephemerally in the job (`npm i -D vitest@^2` then `npx vitest run` — the same pattern e2e.yml uses for Playwright). **CI is now green end-to-end for the first time**: typecheck → vitest (3 suites) → check:silent all really run. E2E was unaffected (its workflow never used the npm cache); its dispatched run incl. the mic-denied spec's first execution passed 3/3.
+
+**Lesson:** a gate that has never been seen green is not a gate. When adding a CI step, watch its first run actually pass before calling it a gate.
+
+---
+
+## 6 Jun 2026 — session changes (not bugs; logged for context)
+
+- **Tier-4 flag #17 ACTIVATED for device-test:** `NEXT_PUBLIC_ETA_TRIM_LIVE_BUFFERS=1` set in Vercel (Production+Preview) and baked into the live bundle. #18/#19 to follow one at a time after V's device test passes.
+- **EkaScribe RETIRED (V: too expensive), ElevenLabs showcased instead:** migration `0026` disables the `ekascribe` engine row (adapter code + API path + row all kept — reversible from the Engines tab). New composite scribe-tier engine **`elevenlabs_scribe`** (`lib/stt/adapters/elevenlabs-scribe.ts`): ElevenLabs Scribe v2 ASR → the SAME Even note-gen LLM → note, rubric-scored vs `even_pipeline` — so the scribe leaderboard isolates the ASR as the only variable. Fanned out across all encounters with note+audio (2 junk/silent clips correctly errored `asr: empty_transcript`). `runScribeForEncounter` now passes `encounter.note_type` as the template hint; new worker mode `{scribe:true, missing:true}` fills a newly added scribe engine on already-scored encounters (and counts errored attempts as attempted — avoids the B17-style junk-clip loop).
+- **eka.care `txn_limit_exceeded` RESOLVED** (credits now linked: auth + presigned + full scribe job all worked) — moot for spend now that EkaScribe is disabled, but the account works if ever re-enabled.
