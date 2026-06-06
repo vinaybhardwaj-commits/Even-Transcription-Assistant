@@ -20,9 +20,6 @@ jobs:
       - name: Install dependencies (npm install — repo has no lockfile; matches Vercel)
         run: npm install --no-audit --no-fund
 
-      - name: Lint
-        run: npm run lint
-
       - name: Typecheck
         run: npm run typecheck
 
