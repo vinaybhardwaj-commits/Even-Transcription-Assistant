@@ -280,9 +280,9 @@ export async function dedupRuns(): Promise<{ deleted: number; affected: number }
  *  encounter, then rubric-score them vs the clinician note. */
 export async function runScribeForEncounter(encounterId: string): Promise<{ encounter_id: string; inserted: number; errors: string[] }> {
   const rows = (await sql`
-    SELECT id, audio_object_key, detected_language, duration_seconds, note_json
+    SELECT id, audio_object_key, detected_language, duration_seconds, note_json, note_type
       FROM encounter WHERE id = ${encounterId} LIMIT 1
-  `) as Array<{ id: string; audio_object_key: string | null; detected_language: string | null; duration_seconds: number | null; note_json: unknown }>;
+  `) as Array<{ id: string; audio_object_key: string | null; detected_language: string | null; duration_seconds: number | null; note_json: unknown; note_type: string | null }>;
   const enc = rows[0];
   if (!enc || !enc.note_json) return { encounter_id: encounterId, inserted: 0, errors: ["no_generated_note"] };
 
@@ -329,7 +329,7 @@ export async function runScribeForEncounter(encounterId: string): Promise<{ enco
         await sql`DELETE FROM transcription_run WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND engine = ${e.id} AND error IS NOT NULL`;
         const adapter = adapterFor(e.adapter_key)!;
         try {
-          const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined });
+          const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined, template: enc.note_type ?? undefined });
           const costUsd = estimateCostUsd(e, enc.duration_seconds, r.costUsd);
           await sql`
             INSERT INTO transcription_run
@@ -346,6 +346,32 @@ export async function runScribeForEncounter(encounterId: string): Promise<{ enco
 
   try { await scoreScribe(encounterId); } catch (e) { errors.push(`scribe_score: ${String(e).slice(0, 60)}`); }
   return { encounter_id: encounterId, inserted, errors };
+}
+
+
+/** Run scribe tier for up to `limit` encounters where an enabled scribe engine
+ *  is missing a successful run (e.g. after adding a NEW scribe engine —
+ *  scribePending skips already-scored encounters, this one does not). */
+export async function scribeMissing(limit = 3): Promise<{ processed: number; results: Array<{ encounter_id: string; inserted: number; errors: string[] }> }> {
+  const encs = (await sql`
+    SELECT e.id FROM encounter e
+     WHERE e.note_json IS NOT NULL AND e.audio_object_key IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM stt_engine se
+          WHERE se.enabled AND se.fanout_enabled
+            AND se.capabilities_json -> 'tiers' ? 'scribe'
+            AND NOT EXISTS (
+              SELECT 1 FROM transcription_run tr
+               WHERE tr.encounter_id = e.id AND tr.tier = 'scribe'
+                 AND tr.engine = se.id AND tr.error IS NULL
+            )
+       )
+     ORDER BY e.recorded_at DESC NULLS LAST
+     LIMIT ${limit}
+  `) as Array<{ id: string }>;
+  const results = [];
+  for (const e of encs) results.push(await runScribeForEncounter(e.id));
+  return { processed: encs.length, results };
 }
 
 /** Run scribe tier for up to `limit` encounters that have a generated note + audio but no scribe rows yet. */
