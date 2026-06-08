@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'eta-shell-v2';   // bump on every SW change — v2 fixes B11 stale Library
+const SHELL_CACHE = 'eta-shell-v3';   // bump on every SW change — v3 fixes B22 undefined respondWith on cache-miss+offline
 const SHELL_URLS = ['/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -87,7 +87,7 @@ self.addEventListener('fetch', (e) => {
             caches.open(SHELL_CACHE).then((c) => c.put(e.request, clone).catch(() => {}));
           }
           return resp;
-        }).catch(() => cached)
+        }).catch(() => cached || Response.error())
       )
     );
   }

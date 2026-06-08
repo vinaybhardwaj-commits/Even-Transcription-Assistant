@@ -53,6 +53,14 @@ const CHUNK_MS = 250;
 const COMMIT_SECONDS = 22;
 const COMMIT_CHUNKS = Math.round((COMMIT_SECONDS * 1000) / CHUNK_MS); // ~88
 
+// Vercel serverless functions reject request bodies over ~4.5MB
+// (FUNCTION_PAYLOAD_TOO_LARGE → http_413). Keep the live window well under
+// that. Sustained silence/empty tails, or iOS Safari emitting large ~1s
+// chunks instead of 250ms ones, can otherwise grow the uncommitted span past
+// the cap — and because the watermark never advanced, EVERY later tick then
+// re-sends an even bigger window and the live transcript wedges permanently.
+const MAX_WINDOW_BYTES = 3_500_000;
+
 export function useSarvamRolling(opts: Options) {
   const intervalMs = opts.intervalMs ?? 2_000;
   const [state, setState] = React.useState<SarvamRollingState>("idle");
@@ -91,13 +99,32 @@ export function useSarvamRolling(opts: Options) {
     setState("in_flight");
     const idx = ++blockIdxRef.current;
 
-    // Decodable window over the uncommitted span. Span 0 already has the header.
+    // Bound the window under Vercel's serverless payload cap. Walk back from the
+    // newest chunk, keeping only what fits the byte budget, and slide the
+    // effective start forward — dropping the oldest UNCOMMITTED audio from the
+    // live window only (the submitted note is still built from the full audio).
+    const headerSize = start > 0 && headerRef.current ? headerRef.current.size : 0;
+    let effStart = start;
+    {
+      let acc = headerSize;
+      let i = end; // exclusive; first iteration always keeps the newest chunk
+      for (; i > start; i--) {
+        const sz = all[i - 1 - base]?.size ?? 0;
+        if (i < end && acc + sz > MAX_WINDOW_BYTES) break;
+        acc += sz;
+      }
+      effStart = i;
+    }
+    const forcedAdvance = effStart > start;
+
+    // Decodable window over the (bounded) uncommitted span. Span 0 already has
+    // the header; later windows prepend the webm init segment so Sarvam decodes.
     const parts =
-      start === 0
+      effStart === 0
         ? all.slice(0, end - base)
         : headerRef.current
-          ? [headerRef.current, ...all.slice(start - base, end - base)]
-          : all.slice(start - base, end - base);
+          ? [headerRef.current, ...all.slice(effStart - base, end - base)]
+          : all.slice(effStart - base, end - base);
     const blob = new Blob(parts, { type: mimeRef.current });
 
     try {
@@ -137,10 +164,15 @@ export function useSarvamRolling(opts: Options) {
       setError(null);
       optsRef.current.onBlock?.(block);
 
-      // Commit when the uncommitted span nears the 30s cap, so windows stay
-      // bounded and the committed transcript grows in ~22s blocks.
-      if (tail && end - start >= COMMIT_CHUNKS) {
-        committedRef.current = `${committedRef.current}${committedRef.current ? " " : ""}${tail}`.trim();
+      // Commit (freeze the tail, advance the watermark) when the uncommitted
+      // span nears the 30s cap so windows stay bounded — OR when we had to
+      // force-advance to fit the payload cap. Committing on chunk-count even if
+      // this tick's tail is empty prevents silence from growing the span
+      // without bound (the http_413 wedge). Tail text is appended only when
+      // present; the authoritative note always uses the full submitted audio.
+      const shouldCommit = end - start >= COMMIT_CHUNKS || forcedAdvance;
+      if (shouldCommit) {
+        if (tail) committedRef.current = `${committedRef.current}${committedRef.current ? " " : ""}${tail}`.trim();
         watermarkRef.current = end;
         // Drop committed chunks off the front (the header is kept in headerRef
         // and prepended to later windows). Bounds memory on long consults.
