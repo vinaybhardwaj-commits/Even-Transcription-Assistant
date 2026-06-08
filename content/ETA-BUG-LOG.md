@@ -687,3 +687,25 @@ Reliability backlog complete (all 20 non-security items, Tiers 1–5 — see `ET
 - **Tier-4 flag #17 ACTIVATED for device-test:** `NEXT_PUBLIC_ETA_TRIM_LIVE_BUFFERS=1` set in Vercel (Production+Preview) and baked into the live bundle. #18/#19 to follow one at a time after V's device test passes.
 - **EkaScribe RETIRED (V: too expensive), ElevenLabs showcased instead:** migration `0026` disables the `ekascribe` engine row (adapter code + API path + row all kept — reversible from the Engines tab). New composite scribe-tier engine **`elevenlabs_scribe`** (`lib/stt/adapters/elevenlabs-scribe.ts`): ElevenLabs Scribe v2 ASR → the SAME Even note-gen LLM → note, rubric-scored vs `even_pipeline` — so the scribe leaderboard isolates the ASR as the only variable. Fanned out across all encounters with note+audio (2 junk/silent clips correctly errored `asr: empty_transcript`). `runScribeForEncounter` now passes `encounter.note_type` as the template hint; new worker mode `{scribe:true, missing:true}` fills a newly added scribe engine on already-scored encounters (and counts errored attempts as attempted — avoids the B17-style junk-clip loop).
 - **eka.care `txn_limit_exceeded` RESOLVED** (credits now linked: auth + presigned + full scribe job all worked) — moot for spend now that EkaScribe is disabled, but the account works if ever re-enabled.
+
+---
+
+## B22 — Dr Ankit (weak signal): live `http_413 FUNCTION_PAYLOAD_TOO_LARGE` + `FetchEvent.respondWith ... Load failed` (6 Jun 2026, FIXED)
+
+**Reporter:** V, relaying Dr Ankit Bhojani — two recurring errors on his device (both screenshots show 2 bars of cellular).
+
+### (1) Live transcript: `Sarvam: http_413: Request Entity Too Large FUNCTION_PAYLOAD_TOO_LARGE`
+**Symptom:** mid-recording (footer "~162 chunks · ~4500 KB"), the live transcript box turns red with the 413; once it starts it never recovers for the rest of the consult.
+
+**Root cause:** `lib/use-sarvam-rolling.ts` sends the **entire uncommitted span** (`chunks[watermark..end]`, header prepended) to `/{slug}/api/transcribe/sarvam-live`, a Vercel serverless function. Vercel caps function request bodies at ~4.5 MB (`FUNCTION_PAYLOAD_TOO_LARGE`). The span only committed — advancing the watermark and resetting the window — when Sarvam returned a **non-empty** tail **and** the span reached ≥ `COMMIT_CHUNKS` (~88). So on sustained silence/empty tails, or on iOS Safari (which ignores the 250 ms `timeslice` and emits large ~1 s chunks), the window grew past 4.5 MB → 413. And because the watermark hadn't advanced, **every subsequent tick re-sent an even larger window → permanent wedge** (the recurring errors). The 4.5 MB cap is a Vercel platform limit on serverless request bodies and can't be raised by route config, so the fix must be client-side.
+
+**Fix (`52bb906`):** bound the window by **bytes** — `MAX_WINDOW_BYTES = 3.5 MB`; walk back from the newest chunk keeping only what fits, sliding the effective start forward (drops the oldest *uncommitted* live audio only). And **commit on chunk-count OR a forced size-advance, no longer gated on a non-empty tail**, so silence can't grow the span without bound and a 413 can't recur. Tail text is appended only when present. The submitted **note is unaffected** — it's always built from the full uploaded audio, never the live tail.
+
+### (2) Encounter page: `FetchEvent.respondWith received an error: Load failed`
+**Symptom:** opening an encounter (status Processing) shows a red "Processing problem" card with this text + a Retry button.
+
+**Root cause:** `public/sw.js` static-asset branch ended in `.catch(() => cached)`. On a **cache miss + network failure** (weak signal, asset not yet cached), `cached` is `undefined`, so `respondWith(undefined)` — the browser surfaces the cryptic "received an error: Load failed" and crashes the request instead of letting it fail like a normal (retryable) fetch.
+
+**Fix (`52bb906`):** `.catch(() => cached || Response.error())` — returns a real network-error Response so the request fails normally and is retryable; bumped `SHELL_CACHE` v2 → v3 (forces the new SW to activate; old caches purged on activate). Navigation and `/api/` branches were already safe (they always return a Response).
+
+**Verified:** build green, live `52bb906`, `npm run smoke` 9/9, served `/sw.js` is v3, CI green. **PENDING-V device retest on Dr Ankit's phone:** (a) a long consult no longer 413s the live box; (b) opening an encounter on weak signal degrades gracefully (Retry) instead of the SW error. Note: Dr Ankit must reload once so SW v3 activates.
