@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { TRIM_LIVE_BUFFERS } from "@/lib/live-flags";
+import { boundedWindowStart, MAX_WINDOW_BYTES } from "@/lib/live-window";
 
 /**
  * useSarvamRolling — low-latency multilingual live transcription via Sarvam REST.
@@ -53,14 +54,6 @@ const CHUNK_MS = 250;
 const COMMIT_SECONDS = 22;
 const COMMIT_CHUNKS = Math.round((COMMIT_SECONDS * 1000) / CHUNK_MS); // ~88
 
-// Vercel serverless functions reject request bodies over ~4.5MB
-// (FUNCTION_PAYLOAD_TOO_LARGE → http_413). Keep the live window well under
-// that. Sustained silence/empty tails, or iOS Safari emitting large ~1s
-// chunks instead of 250ms ones, can otherwise grow the uncommitted span past
-// the cap — and because the watermark never advanced, EVERY later tick then
-// re-sends an even bigger window and the live transcript wedges permanently.
-const MAX_WINDOW_BYTES = 3_500_000;
-
 export function useSarvamRolling(opts: Options) {
   const intervalMs = opts.intervalMs ?? 2_000;
   const [state, setState] = React.useState<SarvamRollingState>("idle");
@@ -104,17 +97,7 @@ export function useSarvamRolling(opts: Options) {
     // effective start forward — dropping the oldest UNCOMMITTED audio from the
     // live window only (the submitted note is still built from the full audio).
     const headerSize = start > 0 && headerRef.current ? headerRef.current.size : 0;
-    let effStart = start;
-    {
-      let acc = headerSize;
-      let i = end; // exclusive; first iteration always keeps the newest chunk
-      for (; i > start; i--) {
-        const sz = all[i - 1 - base]?.size ?? 0;
-        if (i < end && acc + sz > MAX_WINDOW_BYTES) break;
-        acc += sz;
-      }
-      effStart = i;
-    }
+    const effStart = boundedWindowStart(all.map((b) => b.size), start, base, headerSize, MAX_WINDOW_BYTES);
     const forcedAdvance = effStart > start;
 
     // Decodable window over the (bounded) uncommitted span. Span 0 already has
