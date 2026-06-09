@@ -71,6 +71,12 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
   // plus a confirm-modal flag (PRD §8.1.6 — destructive copy locked).
   const abortRef = React.useRef<AbortController | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = React.useState(false);
+  // B22 follow-up: a dropped /process stream on a weak mobile connection is the
+  // common failure for clinicians. /process is idempotent (returns the persisted
+  // note if the server already finished), so we auto-retry ONCE per user attempt
+  // before surfacing anything. runProcessRef avoids a self-reference cycle.
+  const netRetriedRef = React.useRef(false);
+  const runProcessRef = React.useRef<((force: boolean, isAutoRetry?: boolean) => Promise<void>) | null>(null);
 
   const autoTriggeredRef = React.useRef(false);
   React.useEffect(() => {
@@ -167,13 +173,16 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
   };
 
   const runProcess = React.useCallback(
-    async (force: boolean) => {
+    async (force: boolean, isAutoRetry = false) => {
       // Sprint 6.3: bind a fresh AbortController so the Cancel button can
       // abort this fetch (which propagates through req.signal to upstream
       // LLM calls on the server, which then throws AbortError → server
       // flips status to 'draft_partial'.)
       const ac = new AbortController();
       abortRef.current = ac;
+      // A user-initiated run (auto-trigger / Retry / Re-process) refreshes the
+      // one-shot auto-retry budget; the auto-retry itself does not.
+      if (!isAutoRetry) netRetriedRef.current = false;
 
       setS((prev) => ({ ...prev, processing: true, error: null }));
       setStages(STAGE_ORDER.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" })));
@@ -291,7 +300,24 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           router.refresh();
         } else {
           const msg = e instanceof Error ? e.message : String(e);
-          setS((prev) => ({ ...prev, processing: false, error: msg }));
+          // Distinguish a network/stream drop (weak signal) from a real
+          // server-side processing error. /process is idempotent, so on a
+          // network drop auto-retry once; if it drops again, show a calm,
+          // accurate message (the server may have finished — Retry re-checks).
+          const isNetwork = /load failed|failed to fetch|networkerror|network error|respondwith|network connection was lost|the request timed out/i.test(msg);
+          if (isNetwork && !netRetriedRef.current) {
+            netRetriedRef.current = true;
+            setS((prev) => ({ ...prev, processing: false, error: null }));
+            window.setTimeout(() => { void runProcessRef.current?.(force, true); }, 1500);
+          } else {
+            setS((prev) => ({
+              ...prev,
+              processing: false,
+              error: isNetwork
+                ? "Connection interrupted — your note may still be processing. Tap Retry to check."
+                : msg,
+            }));
+          }
         }
       } finally {
         if (abortRef.current === ac) abortRef.current = null;
@@ -299,6 +325,9 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     },
     [slug, initial.id, updateStage, router],
   );
+  // Keep a ref to the latest runProcess so the in-flight catch can schedule a
+  // one-shot auto-retry without a self-reference cycle in the useCallback.
+  React.useEffect(() => { runProcessRef.current = runProcess; }, [runProcess]);
 
   // S6.3: user-initiated cancel from the Cancel button on the processing card.
   // Opens the confirm modal. Confirm → abortRef.current?.abort().

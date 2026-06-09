@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'eta-shell-v3';   // bump on every SW change — v3 fixes B22 undefined respondWith on cache-miss+offline
+const SHELL_CACHE = 'eta-shell-v4';   // bump on every SW change — v4 (B22): stop proxying non-GET (/process stream) + v3 cache-miss fix
 const SHELL_URLS = ['/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -37,6 +37,17 @@ self.addEventListener('fetch', (e) => {
   // NEVER intercept the killswitch or the SW itself
   if (url.pathname === '/sw-killswitch.txt' || url.pathname === '/sw.js') {
     return; // let the browser handle it normally
+  }
+  // NEVER intercept non-GET requests (POST /process, /send, /note, etc.).
+  // B22 follow-up: /process streams NDJSON for 30-90s; proxying that stream
+  // through the SW made a weak-signal mid-stream drop surface as the cryptic
+  // "FetchEvent.respondWith received an error: Load failed" (Safari attributes
+  // the broken stream to the SW) AND can truncate SW-proxied streams on Safari.
+  // These requests are never cacheable and need no offline fallback, so let the
+  // browser run them directly — the page's own AbortController + error handling
+  // then work natively and a dropped stream is a normal, retryable fetch error.
+  if (e.request.method !== 'GET') {
+    return;
   }
   // Network-first for navigations (page loads). If network fails, fall back to cache.
   // This means a broken cached response can never permanently block the page.
