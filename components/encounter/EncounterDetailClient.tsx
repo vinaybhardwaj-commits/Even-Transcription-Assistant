@@ -4,6 +4,8 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
+import { NativeAnalysisCard } from "@/components/encounter/NativeAnalysisCard";
+import type { NativeAnalysis } from "@/lib/stt/indic-comprehension";
 import { NoteEditor } from "@/components/encounter/NoteEditor";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
 import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel";
@@ -28,6 +30,8 @@ type InitialState = {
   transcript: string | null;
   transcriptOriginal: string | null;
   detectedLanguage: string | null;
+  nativeAnalysis: NativeAnalysis | null;
+  nativeAnalysisLang: string | null;
   speakers: unknown[] | null;
   taggedTranscript: unknown[] | null;
   diarizeStatus: string | null;
@@ -643,6 +647,10 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             </div>
           );
         })() : null}
+
+        {initial.nativeAnalysis ? (
+          <NativeAnalysisCard analysis={initial.nativeAnalysis} lang={initial.nativeAnalysisLang} />
+        ) : null}
 
         {initial.transcriptOriginal ? (
           <details className="rounded-2xl border border-even-ink-100 bg-even-white">

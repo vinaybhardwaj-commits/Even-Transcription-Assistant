@@ -32,6 +32,8 @@ export type EncounterFull = {
   transcript_clean: string | null;
   detected_language: string | null;
   transcript_original: string | null;
+  native_analysis: unknown | null;
+  native_analysis_lang: string | null;
   // v2.1 diarization (migration 0007)
   speakers: unknown[] | null;
   transcript_segments: unknown[] | null;
@@ -138,6 +140,8 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
       e.transcript_clean,
       e.detected_language,
       e.transcript_original,
+      e.native_analysis,
+      e.native_analysis_lang,
       e.speakers,
       e.transcript_segments,
       e.overlap_windows,

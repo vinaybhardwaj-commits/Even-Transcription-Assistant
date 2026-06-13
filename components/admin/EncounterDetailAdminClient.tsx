@@ -20,6 +20,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
+import { NativeAnalysisCard } from "@/components/encounter/NativeAnalysisCard";
+import type { NativeAnalysis } from "@/lib/stt/indic-comprehension";
 import { CdmssCard } from "@/components/encounter/CdmssCard";
 import type { EncounterNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
@@ -107,6 +109,8 @@ type TranscriptionRunRow = {
   mode: string;
   detected_language: string | null;
   transcript_original: string | null;
+  native_analysis: NativeAnalysis | null;
+  native_analysis_lang: string | null;
   transcript_english: string | null;
   latency_ms: number | null;
   judge_score: number | null;
@@ -403,18 +407,23 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
 
           {/* Tab body */}
           {activeTab === "note" ? (
-            noteFinal ? (
-              <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
-                {enc.note_json_edited ? (
-                  <p className="text-caption text-even-ink-500 mb-3">
-                    ✎ Doctor-edited version shown. Original on file.
-                  </p>
-                ) : null}
-                <NoteView note={noteFinal} noteType={enc.note_type ?? undefined} />
-              </section>
-            ) : (
-              <p className="text-body text-even-ink-400">No note generated yet.</p>
-            )
+            <div className="space-y-4">
+              {noteFinal ? (
+                <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
+                  {enc.note_json_edited ? (
+                    <p className="text-caption text-even-ink-500 mb-3">
+                      ✎ Doctor-edited version shown. Original on file.
+                    </p>
+                  ) : null}
+                  <NoteView note={noteFinal} noteType={enc.note_type ?? undefined} />
+                </section>
+              ) : (
+                <p className="text-body text-even-ink-400">No note generated yet.</p>
+              )}
+              {enc.native_analysis ? (
+                <NativeAnalysisCard analysis={enc.native_analysis} lang={enc.native_analysis_lang} />
+              ) : null}
+            </div>
           ) : null}
 
           {activeTab === "transcript" ? (
