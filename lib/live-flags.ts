@@ -18,6 +18,10 @@ export const SAFARI_STREAMING_GUARD =
 
 // Show a SECOND live transcript box driven by AI4Bharat IndicConformer (pure
 // native script) alongside the Sarvam code-mix box, for non-English encounters.
-// Sarvam detects+locks the language and feeds it to IndicConformer. Default OFF.
+// Sarvam detects+locks the language and feeds it to IndicConformer — fully
+// AUTOMATIC: the box appears by itself on a non-English encounter and stays
+// hidden on English ones (no user/doctor action). Display-only: it never
+// touches the note/audio/submit, so a failure is at worst a blank/odd box.
+// ON by default; set NEXT_PUBLIC_ETA_INDIC_LIVE_BOX=0 in Vercel to kill-switch it.
 export const INDIC_LIVE_BOX =
-  process.env.NEXT_PUBLIC_ETA_INDIC_LIVE_BOX === "1";
+  process.env.NEXT_PUBLIC_ETA_INDIC_LIVE_BOX !== "0";
