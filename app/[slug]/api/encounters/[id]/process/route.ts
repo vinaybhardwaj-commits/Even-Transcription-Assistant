@@ -34,6 +34,7 @@ import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assist";
+import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-comprehension";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
@@ -382,6 +383,22 @@ export async function POST(
           await translateIfNeeded(emit);
           await guardTranscripts(emit);
 
+          // ---- Indic Comprehension Layer (non-English; flag ETA_INDIC_COMPREHENSION, default ON) ----
+          // Saves a faithful native-language analysis for inspection and supplies the native
+          // transcript as a ground-truth reference to the English note model. Soft-fail.
+          let nativeRef: string | undefined;
+          if (INDIC_COMPREHENSION_ON() && row &&
+              ((row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_original ?? ""))) {
+            nativeRef = (row.transcript_original ?? "").trim() || undefined;
+            try {
+              const na = await generateNativeAnalysis(row.transcript_original ?? "", row.detected_language);
+              if (na) {
+                await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row.detected_language}, translation_engine = 'saaras' WHERE id = ${id}`;
+                emit({ stage: "progress", msg: "Original-language analysis saved" });
+              }
+            } catch { /* soft-fail: note still generated from the English transcript */ }
+          }
+
           // ---- Note generation (surface=note-pipeline) ----
           noteTrace = await openTrace({
             surface: "note-pipeline",
@@ -394,6 +411,7 @@ export async function POST(
           const noteRes = await generateNote(row.transcript_raw!, {
             signal: req.signal,
             noteType: row.note_type ?? undefined,
+            nativeReference: nativeRef,
             onEvent: (e) => {
               emit(e);
               // Mirror the same event into the trace's events array.
@@ -640,7 +658,7 @@ export async function POST(
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
   await translateIfNeeded();
   await guardTranscripts();
-  const noteRes = await generateNote(row.transcript_raw, { signal: req.signal, noteType: row.note_type ?? undefined });
+  const noteRes = await generateNote(row.transcript_raw, { signal: req.signal, noteType: row.note_type ?? undefined, nativeReference: (INDIC_COMPREHENSION_ON() && row.detected_language && isNonEnglish(row.detected_language)) ? (row.transcript_original ?? undefined) : undefined });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
     return respondError(

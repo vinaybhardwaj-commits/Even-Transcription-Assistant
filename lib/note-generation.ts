@@ -413,7 +413,7 @@ export type NoteResult =
 
 export async function generateNote(
   transcript: string,
-  opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string } = {},
+  opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string; nativeReference?: string } = {},
 ): Promise<NoteResult> {
   const base = process.env.OLLAMA_BASE_URL;
   if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
@@ -450,7 +450,10 @@ export async function generateNote(
         model: NOTE_MODEL,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: `Transcript:\n\n${cleanTranscript}` },
+          { role: "user", content:
+            (opts.nativeReference && opts.nativeReference.trim().length > 0)
+              ? `Transcript (English, primary):\n\n${cleanTranscript}\n\n---\nOriginal-language transcript (REFERENCE ONLY — the English above is primary; consult this to resolve ambiguous wording, drug names, doses, and negations):\n${opts.nativeReference.trim().slice(0, 9000)}`
+              : `Transcript:\n\n${cleanTranscript}` },
         ],
         temperature: NOTE_TEMPERATURE,
         response_format: { type: "json_object" },
