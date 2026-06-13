@@ -50,6 +50,9 @@ type Options = {
   // from a full-file batch translate (see /process), not from this.
   sarvamCodemix?: string;
   sarvamLanguage?: string | null;
+  /** Whisper's detected language (robust LID) — corroborates the submit-side
+   *  English-vs-Indic decision so Sarvam's unreliable code can't misroute. */
+  whisperLanguage?: string | null;
   /** Failsafe: in-memory chunks kept by RecordingScreen this session, used when
    *  IndexedDB is unavailable (iOS Safari Private Browsing / storage disabled). */
   getFallbackChunks?: () => Blob[];
@@ -195,6 +198,7 @@ export function useEncounterSubmit(opts: Options) {
             whisper_transcript: o.whisperTranscript || null,
             sarvam_codemix: o.sarvamCodemix || null,
             sarvam_language: o.sarvamLanguage || null,
+            whisper_language: o.whisperLanguage || null,
           }),
         },
       );

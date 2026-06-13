@@ -17,6 +17,7 @@ import { verifyDoctorJwt } from "@/lib/auth";
 import { headObject, deleteObject, whisperBufferKey } from "@/lib/r2";
 import { resolveRouting } from "@/lib/stt/routing";
 import { respondOk, respondError } from "@/lib/respond";
+import { decideEncounterLanguage } from "@/lib/language-route";
 
 import { BACKGROUND_PROCESSING } from "@/lib/live-flags";
 export const runtime = "nodejs";
@@ -105,6 +106,7 @@ export async function POST(
     whisper_transcript?: string;
     sarvam_codemix?: string;
     sarvam_language?: string;
+    whisper_language?: string;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -196,10 +198,20 @@ export async function POST(
   // encounters are untouched (Deepgram/Whisper path stands).
   const svCodemix = typeof body.sarvam_codemix === "string" ? body.sarvam_codemix.trim() : "";
   const svLang = typeof body.sarvam_language === "string" ? body.sarvam_language.trim() : "";
-  const svNonEnglish =
-    svLang.length > 0 && svLang.toLowerCase() !== "unknown" && !svLang.toLowerCase().startsWith("en");
+  const whLang = typeof body.whisper_language === "string" ? body.whisper_language.trim() : "";
 
-  const detectedLanguage: string | null = svLang.length > 0 ? svLang : null;
+  // Corroborated, English-biased language decision. Sarvam's lone code is NOT
+  // trusted (it mislabels accented English as Bengali); we corroborate with
+  // Whisper LID + actual script before going down the Indic path.
+  const langDecision = decideEncounterLanguage({
+    whisperLang: whLang || null,
+    sarvamLang: svLang || null,
+    whisperText: wh || null,
+    sarvamText: svCodemix || null,
+    deepgramText: dg || null,
+  });
+  const svNonEnglish = langDecision.nonEnglish;
+  const detectedLanguage: string | null = langDecision.language ?? (svLang.length > 0 ? svLang : null);
   let transcriptOriginal: string | null = null;
   if (svNonEnglish) {
     transcriptOriginal = svCodemix.length > 0 ? svCodemix : null;
@@ -210,7 +222,7 @@ export async function POST(
   }
 
   console.warn(
-    `[finalize-upload] enc=${id} chosen=${chosenSource} lang=${detectedLanguage ?? "-"} dg=${dg.length} wh=${wh.length} sarvam_cm=${svCodemix.length} kept=${transcriptRaw?.length ?? 0}`,
+    `[finalize-upload] enc=${id} chosen=${chosenSource} lang=${detectedLanguage ?? "-"} nonEn=${svNonEnglish}(${langDecision.reason}) wLang=${whLang || "-"} sLang=${svLang || "-"} dg=${dg.length} wh=${wh.length} sarvam_cm=${svCodemix.length} kept=${transcriptRaw?.length ?? 0}`,
   );
 
   // Update row → processing

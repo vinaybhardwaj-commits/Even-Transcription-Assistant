@@ -32,3 +32,15 @@ export const INDIC_LIVE_BOX =
 // Default ON (per V) — kill-switch: set NEXT_PUBLIC_ETA_BACKGROUND_PROCESSING=0 + redeploy.
 export const BACKGROUND_PROCESSING =
   process.env.NEXT_PUBLIC_ETA_BACKGROUND_PROCESSING !== "0";
+
+// Continuous language router for the LIVE recording surface. Detects the spoken
+// language on a rolling window (Whisper LID + Sarvam + script, English-biased,
+// with hysteresis) and routes the PRIMARY on-screen transcript to the best
+// engine for that language (English -> Deepgram; non-English -> Sarvam +
+// IndicConformer native box). The engines already run in parallel, so this only
+// changes WHICH stream is shown — it never restarts an engine. Display-only:
+// the note is decided independently at submit (decideEncounterLanguage), so a
+// router glitch can't corrupt the note. ON by default; kill-switch
+// NEXT_PUBLIC_ETA_LANG_ROUTER=0 + redeploy.
+export const LANG_ROUTER =
+  process.env.NEXT_PUBLIC_ETA_LANG_ROUTER !== "0";

@@ -18,7 +18,8 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 import { detectIOS, detectDesktopSafari } from "@/lib/platform";
-import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING } from "@/lib/live-flags";
+import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING, LANG_ROUTER } from "@/lib/live-flags";
+import { useLanguageRouter } from "@/lib/use-language-router";
 
 type Props = { slug: string; doctorName: string };
 
@@ -170,11 +171,25 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   });
   const sv = useStream ? svStream : svRoll;
 
+  // Continuous language router (flag LANG_ROUTER, default ON): decides, on a
+  // rolling window with hysteresis, whether the doctor is currently speaking
+  // English or an Indic language, and routes the PRIMARY live box to the best
+  // engine (English -> Deepgram, non-English -> Sarvam + IndicConformer native
+  // box). Display-only; the note's language is decided server-side at submit.
+  const router = useLanguageRouter({
+    enabled: LANG_ROUTER && encounter !== null,
+    whisperLang: wh.latest?.language,
+    sarvamLang: sv.language,
+    whisperText: wh.latest?.text,
+    sarvamText: sv.text,
+  });
+  const routerEnglish = LANG_ROUTER ? router.isEnglish : false;
+
   // Parallel native-script live box via IndicConformer (flag-gated). Idle until
   // Sarvam locks a non-English language, which we feed in as `language`.
   const indic = useIndicRolling({
     slug,
-    enabled: INDIC_LIVE_BOX && encounter !== null,
+    enabled: INDIC_LIVE_BOX && encounter !== null && (!LANG_ROUTER || !router.isEnglish),
     language: sv.language,
     intervalMs: 2_000,
   });
@@ -183,17 +198,19 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const spk = useSpeakerIdentify({ slug, enabled: encounter !== null });
 
 
+  // Deepgram live English transcript (cleaned), reused for the English live box.
+  const dgText = finals.map((f) => cleanup.cleanedById[f.id] ?? f.text).join(" ");
+
   // Submit pipeline (read IDB → R2 PUT → finalize)
   const submit = useEncounterSubmit({
     slug,
     encounterId: encounter?.id ?? null,
     durationSeconds: recordedSeconds,
-    deepgramTranscript: finals
-      .map((f) => cleanup.cleanedById[f.id] ?? f.text)
-      .join(" "),
+    deepgramTranscript: dgText,
     whisperTranscript: wh.latest?.text ?? "",
     sarvamCodemix: sv.text,
     sarvamLanguage: sv.language,
+    whisperLanguage: wh.latest?.language ?? null,
     getFallbackChunks: () => {
       const mem = chunksMemRef.current;
       return mem.encounterId === (encounter?.id ?? null) ? mem.chunks : [];
@@ -513,19 +530,30 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         })() : null}
 
         <div className="w-full max-w-2xl mt-2">
-          <SarvamTranscript
-            text={sv.text}
-            language={sv.language}
-            latencyMs={sv.latest?.latency_ms ?? null}
-            error={sv.error}
-          />
+          {routerEnglish ? (
+            <SarvamTranscript
+              text={dgText}
+              language="en-IN"
+              latencyMs={null}
+              error={dg.error}
+              engine="Deepgram"
+              heading="Live transcript"
+            />
+          ) : (
+            <SarvamTranscript
+              text={sv.text}
+              language={sv.language}
+              latencyMs={sv.latest?.latency_ms ?? null}
+              error={sv.error}
+            />
+          )}
         </div>
 
-        {INDIC_LIVE_BOX && (indic.text || indic.error) ? (
+        {INDIC_LIVE_BOX && (LANG_ROUTER ? !router.isEnglish : true) && (indic.text || indic.error) ? (
           <div className="w-full max-w-2xl mt-2">
             <SarvamTranscript
               text={indic.text}
-              language={sv.language}
+              language={router.lang ?? sv.language}
               latencyMs={indic.latest?.latency_ms ?? null}
               error={indic.error}
               engine="IndicConformer"
