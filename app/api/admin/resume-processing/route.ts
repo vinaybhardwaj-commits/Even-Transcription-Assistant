@@ -53,7 +53,7 @@ export async function GET(req: NextRequest) {
     if (!rows[0]) return respondError("NOT_FOUND", "encounter_not_found");
     // Resurrect: back to processing, fresh attempt budget. Let the step machine
     // decide what still needs doing (it skips already-completed steps).
-    await sql`UPDATE encounter SET status = 'processing', process_attempts = 0 WHERE id = ${manualId}`;
+    await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL WHERE id = ${manualId}`;
     const ok = await resumeOne(origin, rows[0].slug, rows[0].id);
     return respondOk({ resumed: ok ? 1 : 0, encounter: manualId, mode: "manual" });
   }

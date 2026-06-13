@@ -449,8 +449,23 @@ export async function POST(
       return respondError("PIPELINE_FAILED", `gave_up_after_${attempts}_attempts_at_${nextStep}`);
     }
 
+    // Atomic per-encounter claim: only ONE step runs at a time. 5-min TTL covers
+    // the slowest step and auto-releases if a worker dies. This stops the
+    // self-chain and the resume cron from running qwen/llama on the SAME
+    // encounter concurrently (which thrashes the Mac Mini and times both out).
+    const claim = (await sql`
+      UPDATE encounter
+         SET processing_step_at = now(), process_attempts = process_attempts + 1, status = 'processing'
+       WHERE id = ${id}
+         AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
+       RETURNING id
+    `.catch(() => [] as Array<{ id: string }>)) as Array<{ id: string }>;
+    if (claim.length === 0) {
+      // Another invocation holds the lock; it will self-chain. No-op.
+      return respondOk({ step: nextStep, skipped: "locked" });
+    }
+
     // ACK immediately; perform the one step in after(); self-chain on progress.
-    await sql`UPDATE encounter SET process_attempts = process_attempts + 1, status = 'processing' WHERE id = ${id}`.catch(() => { /* best-effort */ });
     after(async () => {
       let progressed = false;
       try {
@@ -478,8 +493,10 @@ export async function POST(
           if (noteRes.ok) {
             await sql`UPDATE encounter SET note_json = ${JSON.stringify(noteRes.note)}::jsonb, transcript_clean = ${row!.transcript_raw} WHERE id = ${id}`;
             progressed = true;
+          } else {
+            console.warn(`[process:step] enc=${id} note not ok: ${noteRes.error}`);
           }
-          // note failure: leave row as-is (do NOT mark progressed) → bounded retry via cron
+          // note failure: leave row as-is (do NOT mark progressed) → bounded retry (lock held to TTL)
         } else if (nextStep === "cdms") {
           const pres = await runCdmssPipeline(row!.note_json as EncounterNote, { noteType: row!.note_type ?? undefined, onEvent: stepEmit });
           const store = pres.ok
@@ -498,9 +515,11 @@ export async function POST(
         console.warn(`[process:step] enc=${id} step=${nextStep} err=${e instanceof Error ? e.message : String(e)}`);
       }
       if (progressed) {
-        await sql`UPDATE encounter SET process_attempts = 0 WHERE id = ${id}`.catch(() => { /* best-effort */ });
+        // release lock + reset attempts so the next step can claim immediately
+        await sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id}`.catch(() => { /* best-effort */ });
         selfChain();
       }
+      // if NOT progressed: keep the lock until its 5-min TTL → natural backoff before retry
     });
 
     return respondOk({ step: nextStep, scheduled: true });
