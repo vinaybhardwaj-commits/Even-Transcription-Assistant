@@ -16,7 +16,7 @@ export function NoteView({ note: noteAny, noteType }: { note: AnyNote; noteType?
   if (noteType === "physiotherapy") return <PhysioView note={noteAny as PhysiotherapyNote} />;
   const note = noteAny as EncounterNote;
   return (
-    <article className="space-y-5 text-body text-even-ink-800">
+    <article className="space-y-6 text-body text-even-ink-800">
       {note.chief_complaint ? (
         <Section title="Chief complaint">
           <p>{note.chief_complaint}</p>
@@ -101,7 +101,7 @@ function PhysioView({ note }: { note: PhysiotherapyNote }) {
     !tp.modalities.length && !tp.exercises_prescribed.length && !tp.home_program.length &&
     !tp.precautions.length && !tp.expected_outcomes && tp.sessions_per_week == null && tp.expected_duration_weeks == null;
   return (
-    <article className="space-y-5 text-body text-even-ink-800">
+    <article className="space-y-6 text-body text-even-ink-800">
       {note.reason_for_consult ? <Section title="Reason for consult"><p>{note.reason_for_consult}</p></Section> : null}
       {note.relevant_medical_history.length > 0 ? <Section title="Relevant medical history"><BulletList items={note.relevant_medical_history} /></Section> : null}
       {note.current_medications.length > 0 ? <Section title="Current medications"><BulletList items={note.current_medications} /></Section> : null}
@@ -147,7 +147,7 @@ function DieteticView({ note }: { note: DieteticConsultNote }) {
     dp.foods_to_limit_or_avoid.length === 0 && dp.supplements_recommended.length === 0 &&
     dp.behavioural_goals.length === 0;
   return (
-    <article className="space-y-5 text-body text-even-ink-800">
+    <article className="space-y-6 text-body text-even-ink-800">
       {note.reason_for_consult ? <Section title="Reason for consult"><p>{note.reason_for_consult}</p></Section> : null}
       {note.relevant_medical_history.length > 0 ? <Section title="Relevant medical history"><BulletList items={note.relevant_medical_history} /></Section> : null}
       {note.current_medications.length > 0 ? <Section title="Current medications"><BulletList items={note.current_medications} /></Section> : null}
@@ -189,7 +189,7 @@ function OperativeView({ note }: { note: OperativeProcedureNote }) {
     note.counts_correct != null ? `Counts correct: ${note.counts_correct ? "Yes" : "No"}` : "",
   ].filter(Boolean);
   return (
-    <article className="space-y-5 text-body text-even-ink-800">
+    <article className="space-y-6 text-body text-even-ink-800">
       {meta.length > 0 ? <Section title="Procedure details"><BulletList items={meta} /></Section> : null}
       {note.pre_op_diagnosis ? <Section title="Pre-operative diagnosis"><p className="whitespace-pre-line">{note.pre_op_diagnosis}</p></Section> : null}
       {note.post_op_diagnosis ? <Section title="Post-operative diagnosis"><p className="whitespace-pre-line">{note.post_op_diagnosis}</p></Section> : null}
@@ -209,7 +209,7 @@ function OperativeView({ note }: { note: OperativeProcedureNote }) {
 
 function GeneralMedicalView({ note }: { note: GeneralMedicalNote }) {
   return (
-    <article className="space-y-5 text-body text-even-ink-800">
+    <article className="space-y-6 text-body text-even-ink-800">
       {note.reason_for_visit ? (
         <Section title="Reason for visit"><p>{note.reason_for_visit}</p></Section>
       ) : null}
@@ -257,7 +257,7 @@ function GeneralMedicalView({ note }: { note: GeneralMedicalNote }) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h3 className="text-label text-even-navy-800 uppercase tracking-wide text-caption mb-1">
+      <h3 className="text-caption font-medium text-even-blue-700 mb-1.5">
         {title}
       </h3>
       <div className="leading-relaxed">{children}</div>
