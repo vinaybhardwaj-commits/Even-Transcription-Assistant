@@ -56,6 +56,9 @@ type Row = {
   audio_object_key: string | null;
   note_json: EncounterNote | null;
   cdmss_json: CdmssOutput | CdmssRich | null;
+  translated: boolean | null;
+  diarize_status: string | null;
+  native_analysis: unknown | null;
 };
 
 function isAbortError(e: unknown): boolean {
@@ -102,7 +105,7 @@ export async function POST(
   try {
     const rows = (await sql`
       SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, note_type,
-             audio_object_key, note_json, cdmss_json
+             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
        LIMIT 1
@@ -150,6 +153,7 @@ export async function POST(
   const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) return;
+    if (row.translated) return; // resumable: batch translate already done on a prior invocation
     // Fire when the detected language is non-English, OR (robustness — language
     // detection can come back null) when the working transcript contains Indic
     // script (Devanagari..Sinhala, U+0900-U+0DFF: Hindi/Bengali/Gujarati/Tamil/
@@ -173,7 +177,8 @@ export async function POST(
       if (bt.ok && Array.isArray(bt.entries)) sarvamEntries = bt.entries;
       if (bt.ok && bt.transcript.trim().length > 0) {
         row.transcript_raw = bt.transcript;
-        await sql`UPDATE encounter SET transcript_raw = ${bt.transcript} WHERE id = ${id}`;
+        row.translated = true;
+        await sql`UPDATE encounter SET transcript_raw = ${bt.transcript}, translated = true WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: `Full-conversation translation ready (${bt.transcript.length} chars)` });
         // Optional submit-time parallel pick-best: run IndicConformer on the SAME
         // audio and keep whichever English transcript is the better note basis.
@@ -241,6 +246,7 @@ export async function POST(
   // diarize_status='failed' and the note/email behave as v2.0 (unlabeled).
   const diarizeStore = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
+    if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return; }
     if (!row.audio_object_key) {
       try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
       return;
@@ -418,7 +424,8 @@ export async function POST(
           // Saves a faithful native-language analysis for inspection and supplies the native
           // transcript as a ground-truth reference to the English note model. Soft-fail.
           let nativeRef: string | undefined;
-          if (INDIC_COMPREHENSION_ON() && row &&
+          if (INDIC_COMPREHENSION_ON() && row && ((row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_original ?? ""))) nativeRef = (row.transcript_original ?? "").trim() || undefined;
+          if (INDIC_COMPREHENSION_ON() && row && !row.native_analysis &&
               ((row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_original ?? ""))) {
             nativeRef = (row.transcript_original ?? "").trim() || undefined;
             try {
@@ -502,10 +509,10 @@ export async function POST(
           }
 
           // ---- CDMSS pipeline (surface=cdmss-analysis) — OFF for operative/dietetic/physio (note matrix) ----
-          let cdmssToStore: CdmssRich | CdmssOutput | null = null;
+          let cdmssToStore: CdmssRich | CdmssOutput | null = row.cdmss_json;
           let cdmssErr: string | undefined;
           let cdmssLatencyMs: number | undefined;
-          if (noteTypeHasCdmss(row.note_type ?? undefined)) {
+          if (noteTypeHasCdmss(row.note_type ?? undefined) && !row.cdmss_json) {
             cdmssTrace = await openTrace({
               surface: "cdmss-analysis",
               encounter_id: id,
