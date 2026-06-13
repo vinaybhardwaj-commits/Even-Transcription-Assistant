@@ -89,7 +89,7 @@ export function AdminShell({
           const isActive = n.key === active;
           const isDisabled = n.href === null;
           const base =
-            "flex items-center gap-3 px-3 py-2 rounded-md text-label transition-colors";
+            "flex items-center gap-3 px-3 py-2 rounded-xl text-label transition-colors";
           if (isDisabled) {
             return (
               <li key={n.key}>

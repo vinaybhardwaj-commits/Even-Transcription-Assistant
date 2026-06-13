@@ -181,7 +181,7 @@ function KpiCard({
   const sign  = delta > 0 ? "+" : "";
 
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4 shadow-soft">
       <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">{label}</p>
       <p className="text-heading text-even-navy-800 font-semibold">
         {kpi ? (
@@ -206,7 +206,7 @@ function KpiCard({
 
 function AttentionPanel({ items, loading }: { items: AttentionItem[]; loading: boolean }) {
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 shadow-soft">
       <div className="flex items-center justify-between mb-3">
         <p className="text-label text-even-navy-800">
           {items.length > 0 ? <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-100 text-amber-800 text-caption mr-2">{items.length}</span> : null}
@@ -269,7 +269,7 @@ function Chart7Days({
   const chartHeight = 100;
   const chartWidth = rows.length * (barWidth + gap) - gap;
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 shadow-soft">
       <div className="flex items-center justify-between mb-2">
         <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500">Encounters · Last 7 days</p>
         <p className="text-caption text-even-ink-700">
@@ -341,7 +341,7 @@ function HealthCard({ health }: { health: { status: "ok" | "degraded"; services:
     r2:      "Cloudflare R2",
   };
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 shadow-soft">
       <div className="flex items-center justify-between mb-2">
         <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500">System health</p>
         <span className={`text-caption font-medium ${health.status === "ok" ? "text-success-700" : "text-danger-700"}`}>
@@ -371,7 +371,7 @@ function HealthCard({ health }: { health: { status: "ok" | "degraded"; services:
 
 function ActivityFeed({ items }: { items: ActivityItem[] }) {
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 shadow-soft">
       <p className="text-label text-even-navy-800 mb-3">Recent activity</p>
       {items.length === 0 ? (
         <p className="text-body text-even-ink-400">Quiet. Activity will appear here as it happens.</p>
