@@ -54,7 +54,7 @@ async function pickBetter(sarvamEn: string, indicEn: string): Promise<{ winner: 
 
 /** Returns the chosen English transcript for the note. Soft-fails to Sarvam. */
 export async function indicNoteAssist(args: {
-  bytes: Buffer;
+  bytes: Buffer | Uint8Array;
   contentType: string;
   detectedLanguage: string | null;
   sarvamEnglish: string;
@@ -64,7 +64,7 @@ export async function indicNoteAssist(args: {
   if (!INDIC_NOTE_ASSIST_ON()) return sarvam;
 
   // IndicConformer native-script ASR. Indic-only: no-ops (skipped) on non-Indic.
-  const asr = await indicconformerAdapter.transcribe(args.bytes, {
+  const asr = await indicconformerAdapter.transcribe(args.bytes as Buffer, {
     contentType: args.contentType,
     language: args.detectedLanguage ?? undefined,
     longForm: true,
