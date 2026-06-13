@@ -176,20 +176,20 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // English or an Indic language, and routes the PRIMARY live box to the best
   // engine (English -> Deepgram, non-English -> Sarvam + IndicConformer native
   // box). Display-only; the note's language is decided server-side at submit.
-  const router = useLanguageRouter({
+  const langRouter = useLanguageRouter({
     enabled: LANG_ROUTER && encounter !== null,
     whisperLang: wh.latest?.language,
     sarvamLang: sv.language,
     whisperText: wh.latest?.text,
     sarvamText: sv.text,
   });
-  const routerEnglish = LANG_ROUTER ? router.isEnglish : false;
+  const routerEnglish = LANG_ROUTER ? langRouter.isEnglish : false;
 
   // Parallel native-script live box via IndicConformer (flag-gated). Idle until
   // Sarvam locks a non-English language, which we feed in as `language`.
   const indic = useIndicRolling({
     slug,
-    enabled: INDIC_LIVE_BOX && encounter !== null && (!LANG_ROUTER || !router.isEnglish),
+    enabled: INDIC_LIVE_BOX && encounter !== null && (!LANG_ROUTER || !langRouter.isEnglish),
     language: sv.language,
     intervalMs: 2_000,
   });
@@ -549,11 +549,11 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           )}
         </div>
 
-        {INDIC_LIVE_BOX && (LANG_ROUTER ? !router.isEnglish : true) && (indic.text || indic.error) ? (
+        {INDIC_LIVE_BOX && (LANG_ROUTER ? !langRouter.isEnglish : true) && (indic.text || indic.error) ? (
           <div className="w-full max-w-2xl mt-2">
             <SarvamTranscript
               text={indic.text}
-              language={router.lang ?? sv.language}
+              language={langRouter.lang ?? sv.language}
               latencyMs={indic.latest?.latency_ms ?? null}
               error={indic.error}
               engine="IndicConformer"
