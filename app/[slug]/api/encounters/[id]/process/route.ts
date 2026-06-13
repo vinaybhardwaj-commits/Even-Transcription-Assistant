@@ -379,14 +379,26 @@ export async function POST(
 
     // Same progress model as the streaming branch, so the Library bar + the
     // in-detail CDMSS pipeline tracker advance during background processing too.
-    const SP_ORDER = ["note", "hyde", "retrieve", "draft", "critique", "revise"] as const;
+    // Note-type-aware progress: clinic/general get the full note+CDS pipeline;
+    // operative/dietetic/physio have NO clinical decision support, so the tracker
+    // shows only the note stage (otherwise the 5 CDS rows hang grey forever and
+    // the bar sits near 0%). Running stages are credited at half weight so the
+    // bar actually advances mid-step instead of jumping 0 -> 100.
+    const cdsApplies = noteTypeHasCdmss(row.note_type ?? undefined);
+    const SP_ORDER: string[] = cdsApplies ? ["note", "hyde", "retrieve", "draft", "critique", "revise"] : ["note"];
     const SP_LABEL: Record<string, string> = { note: "Generating note", hyde: "Expanding query", retrieve: "Searching knowledge base", draft: "Drafting decision support", critique: "Auditing claims", revise: "Revising for citations" };
-    const SP_WEIGHT: Record<string, number> = { note: 0.10, hyde: 0.05, retrieve: 0.02, draft: 0.30, critique: 0.18, revise: 0.35 };
+    const SP_WEIGHT: Record<string, number> = cdsApplies
+      ? { note: 0.10, hyde: 0.05, retrieve: 0.02, draft: 0.30, critique: 0.18, revise: 0.35 }
+      : { note: 1.0 };
     const spState: Record<string, string> = {};
     const persistStepProgress = () => {
       const stages = SP_ORDER.map((idp) => ({ id: idp, label: SP_LABEL[idp], state: spState[idp] ?? "pending" }));
       let pct = 0;
-      for (const idp of SP_ORDER) if (spState[idp] === "done" || spState[idp] === "skipped") pct += SP_WEIGHT[idp];
+      for (const idp of SP_ORDER) {
+        const st = spState[idp];
+        if (st === "done" || st === "skipped") pct += SP_WEIGHT[idp];
+        else if (st === "running") pct += SP_WEIGHT[idp] * 0.5;
+      }
       const pctInt = Math.min(99, Math.round(pct * 100));
       void sql`UPDATE encounter SET processing_pct = ${pctInt}, processing_stages = ${JSON.stringify(stages)}::jsonb WHERE id = ${id}`.catch(() => { /* best-effort UI hint */ });
     };
@@ -415,7 +427,7 @@ export async function POST(
       (!!row.detected_language && isNonEnglish(row.detected_language)) ||
       /[\u0900-\u0DFF]/.test(row.transcript_original ?? "") ||
       /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
-    const hasCdms = noteTypeHasCdmss(row.note_type ?? undefined);
+    const hasCdms = cdsApplies;
     const needTranslate =
       !!row.audio_object_key && !row.translated &&
       ((!!row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_raw ?? ""));

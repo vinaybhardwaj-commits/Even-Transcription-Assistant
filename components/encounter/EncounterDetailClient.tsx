@@ -456,6 +456,11 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
     }
   })();
 
+  // CDS (clinical decision support) only applies to clinic/general notes;
+  // operative/dietetic/physio skip it, so don't show the CDS stages/label for them.
+  const hasCds = initial.noteType === undefined || initial.noteType === "clinic_encounter" || initial.noteType === "general_medical";
+  const procTitle = hasCds ? "Generating your note + clinical decision support" : "Generating your note";
+
   return (
     <main className="min-h-screen bg-even-ink-50">
       <header className="sticky top-0 z-10 flex items-center justify-between border-b border-even-ink-100 bg-even-white/90 px-4 py-3 backdrop-blur">
@@ -474,7 +479,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         {!s.processing && s.status === "processing" && !s.note ? (
           <div className="rounded-2xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4 shadow-soft">
             <div>
-              <p className="text-label text-even-navy-800 mb-1">Generating your note + clinical decision support</p>
+              <p className="text-label text-even-navy-800 mb-1">{procTitle}</p>
               <p className="text-caption text-even-ink-500">Running in the background — you can leave this page; it keeps going.</p>
             </div>
             <div className="flex items-center gap-2">
@@ -484,14 +489,16 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
               <span className="text-caption tabular-nums text-even-ink-600">{Math.max(0, Math.min(100, initial.processingPct ?? 0))}%</span>
             </div>
             <ul className="space-y-1.5">
-              {(initial.processingStages ?? [
+              {(initial.processingStages ?? (hasCds ? [
                 { id: "note", label: "Generating note", state: "pending" },
                 { id: "hyde", label: "Expanding query", state: "pending" },
                 { id: "retrieve", label: "Searching knowledge base", state: "pending" },
                 { id: "draft", label: "Drafting decision support", state: "pending" },
                 { id: "critique", label: "Auditing claims", state: "pending" },
                 { id: "revise", label: "Revising for citations", state: "pending" },
-              ]).map((st) => (
+              ] : [
+                { id: "note", label: "Generating note", state: "pending" },
+              ])).map((st) => (
                 <li key={st.id} className="flex items-center gap-2 text-caption">
                   <span className={`inline-block h-2.5 w-2.5 rounded-full ${st.state === "done" || st.state === "skipped" ? "bg-even-blue-600" : st.state === "running" ? "bg-even-blue-400 animate-pulse" : "bg-even-ink-200"}`} />
                   <span className={st.state === "running" ? "text-even-navy-800 font-medium" : st.state === "done" || st.state === "skipped" ? "text-even-ink-600" : "text-even-ink-400"}>{st.label}</span>
@@ -506,7 +513,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-label text-even-navy-800 mb-1">
-                  Generating your note + clinical decision support
+                  {procTitle}
                 </p>
                 <p className="text-caption text-even-ink-500">
                   Live pipeline. ~90&ndash;150s total.
