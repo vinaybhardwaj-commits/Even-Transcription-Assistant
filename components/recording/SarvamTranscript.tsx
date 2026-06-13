@@ -19,6 +19,7 @@ type Props = {
   error: string | null;
   engine?: string;   // default "Sarvam"
   heading?: string;  // default "Live transcript"
+  tone?: "blue" | "navy";  // default blue
 };
 
 const LANG_NAMES: Record<string, string> = {
@@ -27,14 +28,16 @@ const LANG_NAMES: Record<string, string> = {
   "pa-IN": "Punjabi", "od-IN": "Odia", "ur-IN": "Urdu", "en-IN": "English",
 };
 
-export function SarvamTranscript({ text, language, latencyMs, error, engine = "Sarvam", heading = "Live transcript" }: Props) {
+export function SarvamTranscript({ text, language, latencyMs, error, engine = "Sarvam", heading = "Live transcript", tone = "blue" }: Props) {
+  const wrap = tone === "navy" ? "border-even-navy-200 bg-even-navy-50" : "border-even-blue-200 bg-even-blue-50";
+  const head = tone === "navy" ? "text-even-navy-900" : "text-even-navy-800";
   if (!text && !error) return null;
   const langLabel = language ? (LANG_NAMES[language] ?? language) : null;
 
   return (
-    <div className="rounded-md border border-even-blue-200 bg-even-blue-50/40 p-3">
+    <div className={`rounded-2xl border ${wrap} p-3.5`}>
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-caption font-medium text-even-navy-800">
+        <span className={`text-caption font-medium ${head}`}>
           {heading}{langLabel ? ` · ${langLabel}` : ""}
         </span>
         <span className="text-caption text-even-ink-400">

@@ -323,14 +323,14 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   }, [preflightCancelled, router, slug]);
 
   return (
-    <main className="min-h-screen bg-even-white flex flex-col">
+    <main className="min-h-screen bg-even-ink-50 flex flex-col">
       {!preflightPassed && !preflightCancelled ? (
         <PreflightCheck
           onProceed={() => setPreflightPassed(true)}
           onCancel={() => setPreflightCancelled(true)}
         />
       ) : null}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-even-ink-100 bg-even-white/90 px-4 py-3 backdrop-blur">
         <button
           type="button"
           onClick={async () => {
@@ -354,7 +354,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
         </span>
       </header>
 
-      <section className="flex-1 flex flex-col items-center px-6 py-8 gap-6">
+      <section className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center gap-6 px-4 py-8">
         {rec.state === "paused" ? (
           <div className="w-full max-w-md rounded-md border border-warning-500 bg-warning-100/40 px-4 py-2 text-center" role="status">
             <p className="text-label text-warning-700">Recording paused</p>
@@ -448,7 +448,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
                 Submit recording
               </Button>
             ) : (
-              <div className="rounded-md border border-even-blue-100 bg-even-blue-50 p-4">
+              <div className="eta-card p-4">
                 <p className="text-label text-even-navy-800 mb-2">
                   {submit.stage === "reading" && "Reading audio…"}
                   {submit.stage === "requesting_url" && "Requesting upload URL…"}
@@ -529,16 +529,17 @@ export function RecordingScreen({ slug, doctorName }: Props) {
               error={indic.error}
               engine="IndicConformer"
               heading="Original script"
+              tone="navy"
             />
           </div>
         ) : null}
       </section>
 
-      <footer className="px-4 py-3 border-t border-even-ink-100 flex items-center justify-between text-caption text-even-ink-400">
-        <span>
-          {chunksCount} chunks · {(bytesEmitted / 1024).toFixed(1)} KB · {finals.length} finals
-        </span>
-        <span>{rec.mimeType ?? "—"}</span>
+      <footer className="border-t border-even-ink-100 bg-even-white">
+        <div className="mx-auto flex w-full max-w-xl items-center justify-between px-4 py-3 text-caption text-even-ink-400">
+          <span>{chunksCount} chunks · {(bytesEmitted / 1024).toFixed(1)} KB · {finals.length} finals</span>
+          <span>{rec.mimeType ?? "—"}</span>
+        </div>
       </footer>
     </main>
   );
