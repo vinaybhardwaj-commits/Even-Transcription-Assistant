@@ -362,7 +362,32 @@ export async function POST(
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        // Persist pipeline progress so the Library bar + in-detail tracker can
+        // show it while the background pipeline runs. Best-effort, non-blocking.
+        const PROG_ORDER = ["note","hyde","retrieve","draft","critique","revise"] as const;
+        const PROG_LABEL: Record<string,string> = { note:"Generating note", hyde:"Expanding query", retrieve:"Searching knowledge base", draft:"Drafting decision support", critique:"Auditing claims", revise:"Revising for citations" };
+        const PROG_WEIGHT: Record<string,number> = { note:0.10, hyde:0.05, retrieve:0.02, draft:0.30, critique:0.18, revise:0.35 };
+        const progState: Record<string,string> = {};
+        let lastPctWrite = -1;
+        const persistProgress = (final = false) => {
+          const stages = PROG_ORDER.map((idp) => ({ id: idp, label: PROG_LABEL[idp], state: progState[idp] ?? "pending" }));
+          let pct = 0;
+          for (const idp of PROG_ORDER) if (progState[idp] === "done" || progState[idp] === "skipped") pct += PROG_WEIGHT[idp];
+          const pctInt = final ? 100 : Math.min(99, Math.round(pct * 100));
+          if (pctInt === lastPctWrite && !final) return;
+          lastPctWrite = pctInt;
+          void sql`UPDATE encounter SET processing_pct = ${pctInt}, processing_stages = ${JSON.stringify(stages)}::jsonb WHERE id = ${id}`.catch(() => {});
+        };
         const emit = (obj: unknown) => {
+          try {
+            const o = obj as { stage?: string; state?: string };
+            if (o && typeof o.stage === "string" && o.stage in PROG_WEIGHT && typeof o.state === "string") {
+              progState[o.stage] = o.state === "start" ? "running" : o.state;
+              persistProgress();
+            } else if (o && o.stage === "final") {
+              persistProgress(true);
+            }
+          } catch { /* never block emit */ }
           try {
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
           } catch {

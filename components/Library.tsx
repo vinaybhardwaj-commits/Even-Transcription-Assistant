@@ -13,6 +13,7 @@ type Row = {
   patient_label: string | null;
   status: Status;
   send_status: SendStatus;
+  processing_pct: number | null;
   note_type: string | null;
   chief_complaint: string | null;
 };
@@ -164,6 +165,14 @@ export function Library({ slug }: Props) {
                   </>
                 ) : null}
               </p>
+              {r.status === "processing" ? (
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-even-ink-100">
+                    <div className="h-full rounded-full bg-even-blue-600 transition-all duration-500" style={{ width: `${Math.max(4, Math.min(100, r.processing_pct ?? 4))}%` }} />
+                  </div>
+                  <span className="text-caption tabular-nums text-even-ink-500">{Math.max(0, Math.min(100, r.processing_pct ?? 0))}%</span>
+                </div>
+              ) : null}
             </button>
           </li>
         ))}

@@ -6,6 +6,7 @@ import { parseDoctorSlug } from "@/lib/doctor-slug";
 import { EncounterDetailClient } from "@/components/encounter/EncounterDetailClient";
 import type { AnyNote } from "@/lib/note-generation";
 import type { NativeAnalysis } from "@/lib/stt/indic-comprehension";
+type ProcStage = { id: string; label: string; state: string };
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +20,8 @@ type Row = {
   detected_language: string | null;
   native_analysis: unknown | null;
   native_analysis_lang: string | null;
+  processing_pct: number | null;
+  processing_stages: unknown | null;
   speakers: unknown[] | null;
   tagged_transcript: unknown[] | null;
   diarize_status: string | null;
@@ -66,7 +69,7 @@ export default async function EncounterPage({
   try {
     const [encRows, docRows, eventRows] = await Promise.all([
       sql`
-        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, speakers, tagged_transcript, diarize_status, note_type, note_json,
+        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, processing_pct, processing_stages, speakers, tagged_transcript, diarize_status, note_type, note_json,
                note_json_edited, cdmss_json, send_status, sent_at
           FROM encounter
          WHERE id = ${id} AND deleted_at IS NULL
@@ -106,6 +109,8 @@ export default async function EncounterPage({
         detectedLanguage: row.detected_language,
         nativeAnalysis: (row.native_analysis as NativeAnalysis | null) ?? null,
         nativeAnalysisLang: row.native_analysis_lang,
+        processingPct: row.processing_pct,
+        processingStages: (row.processing_stages as ProcStage[] | null) ?? null,
         speakers: row.speakers,
         taggedTranscript: row.tagged_transcript,
         diarizeStatus: row.diarize_status,

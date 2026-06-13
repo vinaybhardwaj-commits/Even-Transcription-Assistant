@@ -112,6 +112,7 @@ export async function GET(
     patient_label_raw: string | null;
     status: "draft" | "processing" | "complete" | "failed";
     send_status: "pending" | "sent" | "failed";
+    processing_pct: number | null;
     note_type: string | null;
     chief_complaint: string | null;
   };
@@ -125,6 +126,7 @@ export async function GET(
              note_type,
              status,
              send_status,
+             processing_pct,
              COALESCE(
                (note_json_edited->>'chief_complaint'),
                (note_json->>'chief_complaint'),
@@ -149,6 +151,7 @@ export async function GET(
         patient_label: r.patient_label_raw,
         status: r.status,
         send_status: r.send_status,
+        processing_pct: r.processing_pct,
         note_type: r.note_type,
         chief_complaint: r.chief_complaint,
       })),

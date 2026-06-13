@@ -33,6 +33,8 @@ type InitialState = {
   detectedLanguage: string | null;
   nativeAnalysis: NativeAnalysis | null;
   nativeAnalysisLang: string | null;
+  processingPct: number | null;
+  processingStages: { id: string; label: string; state: string }[] | null;
   speakers: unknown[] | null;
   taggedTranscript: unknown[] | null;
   diarizeStatus: string | null;
@@ -469,6 +471,36 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
       </header>
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
+        {!s.processing && s.status === "processing" && !s.note ? (
+          <div className="rounded-2xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4 shadow-soft">
+            <div>
+              <p className="text-label text-even-navy-800 mb-1">Generating your note + clinical decision support</p>
+              <p className="text-caption text-even-ink-500">Running in the background — you can leave this page; it keeps going.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-even-ink-100">
+                <div className="h-full rounded-full bg-even-blue-600 transition-all duration-500" style={{ width: `${Math.max(4, Math.min(100, initial.processingPct ?? 4))}%` }} />
+              </div>
+              <span className="text-caption tabular-nums text-even-ink-600">{Math.max(0, Math.min(100, initial.processingPct ?? 0))}%</span>
+            </div>
+            <ul className="space-y-1.5">
+              {(initial.processingStages ?? [
+                { id: "note", label: "Generating note", state: "pending" },
+                { id: "hyde", label: "Expanding query", state: "pending" },
+                { id: "retrieve", label: "Searching knowledge base", state: "pending" },
+                { id: "draft", label: "Drafting decision support", state: "pending" },
+                { id: "critique", label: "Auditing claims", state: "pending" },
+                { id: "revise", label: "Revising for citations", state: "pending" },
+              ]).map((st) => (
+                <li key={st.id} className="flex items-center gap-2 text-caption">
+                  <span className={`inline-block h-2.5 w-2.5 rounded-full ${st.state === "done" || st.state === "skipped" ? "bg-even-blue-600" : st.state === "running" ? "bg-even-blue-400 animate-pulse" : "bg-even-ink-200"}`} />
+                  <span className={st.state === "running" ? "text-even-navy-800 font-medium" : st.state === "done" || st.state === "skipped" ? "text-even-ink-600" : "text-even-ink-400"}>{st.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         {s.processing ? (
           <div className="rounded-2xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4 shadow-soft">
             <div className="flex items-start justify-between gap-3">
@@ -649,7 +681,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
                 </span>
               </div>
               {turns.length > 0 ? (
-                <details className="border-t border-even-ink-100">
+                <details open className="border-t border-even-ink-100">
                   <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">Conversation by speaker ({turns.length} turns)</summary>
                   <div className="px-3 pb-3 space-y-1.5">
                     {turns.map((t, i) => (
