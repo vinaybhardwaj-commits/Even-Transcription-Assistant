@@ -52,6 +52,13 @@ play/download, self-serve Admins management, System Map. Migrations 0024–0025.
 - Retired EkaScribe (too costly; row disabled, code kept) and added **`elevenlabs_scribe`** as the showcased scribe competitor (ElevenLabs ASR → Even note-gen). Migration 0026.
 - **Dr-Ankit field bugs (B22):** live Sarvam `http_413` payload wedge → byte-capped the live window (`lib/live-window.ts`); service-worker "FetchEvent.respondWith … Load failed" → SW returns a real network error on cache-miss+offline and **no longer proxies non-GET** (so the long `/process` stream isn't SW-wrapped); client auto-recovers a dropped `/process` stream (idempotent route). Added vitest regressions for both (live-window byte cap + SW non-GET bypass).
 
+## IndicConformer STT (13 Jun) — code-ready
+AI4Bharat IndicConformer-600M (local Mac-Mini Indic ASR) wired into the STT Engine Lab as
+`indicconformer` (ASR) + `indicconformer_scribe` (IndicConformer → Even note-gen), migration 0027.
+Indic-only, submit-time fallback (not live, not English — per the 93%-English bucket scan). Fanout
+is OFF until the Mac-Mini exposes `indic.llmvinayminihome.uk` (Pattern B); then it A/B's against
+Sarvam/Whisper/etc. on the Indic slice. See `IndicConformer-Integration-Handoff.md`.
+
 ## Current state
 Migrations 0001–0026 applied; all backend services green; `npm run smoke` 9/9; CI green
 (typecheck + vitest + silent-gate); Playwright e2e green. See `ETA-OPEN-ITEMS.md` for pending-V

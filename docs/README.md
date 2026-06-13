@@ -25,6 +25,7 @@ repo-root [`.env.example`](../.env.example).
 ## Subsystem PRDs (ported)
 - `ETA-MULTILINGUAL-TRANSCRIPTION-PRD.md` — Sarvam multilingual.
 - `ETA-STT-ENGINE-LAB-PRD.md` — the engine comparison test-bed.
+- `IndicConformer-Integration-Handoff.md` — AI4Bharat IndicConformer Indic ASR (Mac-Mini) integration handoff.
 - `ETA-VOICEPRINT-RETENTION-PRD.md` — voice sample retention/retrain/passive capture.
 - `ETA-AUDIO-FAILSAFE-PRD.md` — capture failsafe design.
 - `ETA-TIER4-FLAGS-DEVICE-TEST.md` — the live-path feature flags + device-test checklist.

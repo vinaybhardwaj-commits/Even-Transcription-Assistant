@@ -23,7 +23,7 @@ Neon HTTP driver. Canonical migrations: `db/migrations/NNNN_name.sql`, applied i
 | **STT Engine Lab** | `stt_engine` (registry rows), `stt_fanout_job` (offline queue; `started_at` for atomic claim, 0025), `transcription_run` (per-engine ASR/scribe results + scores), `stt_gold` (verbatim references for WER), `stt_lab_config`, `stt_routing` (stage×language engine routing). |
 | `doctor` | **Deprecated** — declared in schema.ts but dropped in prod (0015). Do not use. |
 
-## Migrations (0001–0026; 0013 intentionally skipped)
+## Migrations (0001–0027; 0013 intentionally skipped)
 
 | # | Name | What |
 |---|---|---|
@@ -52,6 +52,7 @@ Neon HTTP driver. Canonical migrations: `db/migrations/NNNN_name.sql`, applied i
 | 0024 | voice_sample_passive_unique | partial-unique index on passive samples |
 | 0025 | stt_fanout_started_at | `started_at` for atomic drain claim |
 | 0026 | elevenlabs_scribe | disable EkaScribe; add `elevenlabs_scribe` scribe engine |
+| 0027 | indicconformer | add AI4Bharat IndicConformer ASR + scribe engines (Indic-only, fanout OFF until tunnel live) |
 
 ## 5 note types (by `encounter.note_type`)
 

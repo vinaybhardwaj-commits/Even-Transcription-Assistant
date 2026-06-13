@@ -117,7 +117,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   const results = await Promise.all(todo.map(async (e) => {
     const adapter = adapterFor(e.adapter_key)!;
     try {
-      const r = await adapter.transcribe(bytes as Buffer, { contentType, longForm: true });
+      const r = await adapter.transcribe(bytes as Buffer, { contentType, longForm: true, language: enc.detected_language ?? undefined });
       return { e, r };
     } catch (err) {
       return { e, r: { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: String(err).slice(0, 150) } };

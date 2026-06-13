@@ -57,7 +57,10 @@ adapters (`lib/stt/adapters/*`) so a new engine = 1 adapter + 1 row. Two tiers: 
 vs the `even_pipeline` reference). Offline fan-out queue (`stt_fanout_job`) + scoring. Engines:
 Deepgram, Whisper, Sarvam, ElevenLabs (ASR); **`elevenlabs_scribe`** (ElevenLabs ASR → Even
 note-gen) is the showcased scribe competitor as of migration 0026; **EkaScribe is disabled**
-(too costly — adapter/row kept, reversible). Admin UI at `/admin/stt-lab`.
+(too costly — adapter/row kept, reversible). **IndicConformer-600M** (AI4Bharat, local
+Mac-Mini, Indic-only, submit-time fallback) is registered as `indicconformer` (ASR) +
+`indicconformer_scribe` (scribe), fanout-off until its tunnel is exposed — see
+[`IndicConformer-Integration-Handoff.md`](IndicConformer-Integration-Handoff.md). Admin UI at `/admin/stt-lab`.
 
 ## 5. Resilience patterns (hard-won; see the bug log)
 
