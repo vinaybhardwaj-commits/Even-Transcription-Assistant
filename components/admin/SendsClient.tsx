@@ -115,7 +115,7 @@ export function SendsClient() {
 
       {/* Per-recipient + per-domain side by side */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
           <h3 className="text-label text-even-navy-800 mb-3">Top recipients</h3>
           {!data || data.per_recipient.length === 0 ? (
             <p className="text-body text-even-ink-400">No sends in this window.</p>
@@ -145,7 +145,7 @@ export function SendsClient() {
           )}
         </section>
 
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
           <h3 className="text-label text-even-navy-800 mb-3">Per domain</h3>
           {!data || data.per_domain.length === 0 ? (
             <p className="text-body text-even-ink-400">No domain data.</p>
@@ -177,7 +177,7 @@ export function SendsClient() {
       </div>
 
       {/* Failed sends */}
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         <h3 className="text-label text-even-navy-800 mb-3">Failed sends · most recent</h3>
         {!data || data.failed_recent.length === 0 ? (
           <p className="text-body text-even-ink-400">No failed sends in this window.</p>
@@ -229,7 +229,7 @@ export function SendsClient() {
 
 function KpiCard({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
       <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">{label}</p>
       <p className="text-heading text-even-navy-800 font-semibold">{value}</p>
       {sub ? <p className="text-caption text-even-ink-500 mt-1">{sub}</p> : null}

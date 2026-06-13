@@ -102,7 +102,7 @@ export function AdminsClient({ currentEmail }: { currentEmail: string }) {
   return (
     <div className="space-y-6 max-w-3xl">
       {/* Add admin */}
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         <h2 className="text-heading text-even-navy-800 mb-1">Add an admin</h2>
         <p className="text-caption text-even-ink-500 mb-4">
           New admins get the same (full) access everyone has. They sign in at <code className="font-mono">/admin</code> with the email + password you set here.
@@ -134,7 +134,7 @@ export function AdminsClient({ currentEmail }: { currentEmail: string }) {
       </section>
 
       {/* Current admins */}
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         <h2 className="text-heading text-even-navy-800 mb-3">Current admins {admins.length ? `(${admins.length})` : ""}</h2>
         {loading ? (
           <p className="text-body text-even-ink-400">Loading…</p>

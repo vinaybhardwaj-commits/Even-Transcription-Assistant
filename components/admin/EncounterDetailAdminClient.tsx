@@ -329,7 +329,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
       ) : null}
 
       {/* Hero */}
-      <div className="rounded-xl border border-even-ink-100 bg-even-white p-5 flex items-start justify-between gap-4">
+      <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3 flex-wrap">
             <h2 className="text-heading text-even-navy-800">
@@ -404,7 +404,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
           {/* Tab body */}
           {activeTab === "note" ? (
             noteFinal ? (
-              <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+              <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
                 {enc.note_json_edited ? (
                   <p className="text-caption text-even-ink-500 mb-3">
                     ✎ Doctor-edited version shown. Original on file.
@@ -419,7 +419,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
 
           {activeTab === "transcript" ? (
             enc.transcript_clean || enc.transcript_raw ? (
-              <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+              <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
                 <p className="text-caption text-even-ink-500 mb-3">
                   {enc.transcript_original
                     ? "English translation of the full conversation (note source). Original vernacular below."
@@ -458,7 +458,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
             !enc.audio_object_key ? (
               <p className="text-body text-even-ink-400">No audio stored for this encounter.</p>
             ) : (
-              <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+              <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
                 {audioLoading ? (
                   <p className="text-body text-even-ink-400">Loading audio…</p>
                 ) : audioErr ? (
@@ -495,7 +495,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
           {activeTab === "engines" ? (
             enc.transcription_runs.length > 0 || enc.detected_language || enc.transcript_original ? (
               <section className="space-y-4">
-                <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
                   <p className="text-caption text-even-ink-500">
                     Detected language:{" "}
                     <span className="font-medium text-even-navy-800">{enc.detected_language ?? "\u2014 (English / not set)"}</span>
@@ -513,7 +513,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                   ) : null}
                 </div>
                 {enc.transcription_runs.map((run) => (
-                  <div key={run.id} className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                  <div key={run.id} className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
                     <div className="flex flex-wrap items-center gap-2 mb-2">
                       <span className="text-label font-semibold text-even-navy-800 uppercase tracking-wide">{run.engine}</span>
                       <span className="text-caption rounded-full px-2 py-0.5 bg-even-ink-100 text-even-ink-600">{run.mode}</span>
@@ -558,7 +558,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
               <p className="text-body text-even-ink-400">No diarization for this encounter (predates v2.1, or audio was unavailable).</p>
             ) : (
               <section className="space-y-4">
-                <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
                   <div className="flex items-center gap-2">
                     <span className="text-caption text-even-ink-500">Speaker diarization</span>
                     <span className={`text-caption rounded-full px-2 py-0.5 ${enc.diarize_status === "complete" ? "bg-success-100 text-success-700" : enc.diarize_status === "failed" ? "bg-danger-100 text-danger-700" : "bg-even-ink-100 text-even-ink-600"}`}>
@@ -573,7 +573,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                   </p>
                 </div>
                 {enc.speakers && enc.speakers.length > 0 ? (
-                  <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                  <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
                     {enc.speakers.map((sp) => (
                       <div key={sp.idx} className="flex items-center justify-between py-2 border-b border-even-ink-50 last:border-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -598,7 +598,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                   const COLORS = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#EF4444", "#0EA5E9"];
                   const ows = (enc.overlap_windows ?? []) as Array<{ start_ms?: number; end_ms?: number }>;
                   return (
-                    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+                    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
                       <p className="text-caption text-even-ink-500 mb-3">Timeline · {(totalMs / 1000).toFixed(0)}s (who spoke when)</p>
                       <div className="space-y-2">
                         {sps.map((sp, si) => (
@@ -639,7 +639,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
                   const names = Array.from(new Set(turns.map((t) => t.name)));
                   const colorOf = (n: string) => COLORS[names.indexOf(n) % COLORS.length];
                   return (
-                    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4 space-y-2">
+                    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4 space-y-2">
                       <p className="text-caption text-even-ink-500 mb-1">Speaker-tagged conversation · {turns.length} turn(s) (English, time-aligned to identified speakers)</p>
                       {turns.map((t, i) => (
                         <div key={i} className="flex gap-3">
@@ -669,7 +669,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
           ) : null}
 
           {activeTab === "send" ? (
-            <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+            <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
               {enc.send_events.length === 0 ? (
                 <p className="text-body text-even-ink-400">No send events yet.</p>
               ) : (
@@ -706,7 +706,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
           ) : null}
 
           {activeTab === "audit" ? (
-            <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+            <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
               {enc.audit_log.length === 0 ? (
                 <p className="text-body text-even-ink-400">No audit entries.</p>
               ) : (
@@ -736,7 +736,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
 
         {/* Right rail */}
         <aside className="space-y-4">
-          <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+          <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
             <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Send status</p>
             {enc.send_events.length === 0 ? (
               <p className="text-caption text-even-ink-400">Not sent yet.</p>
@@ -757,7 +757,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
             )}
           </div>
 
-          <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+          <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
             <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Audit log</p>
             {enc.audit_log.length === 0 ? (
               <p className="text-caption text-even-ink-400">No entries.</p>
@@ -774,7 +774,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
           </div>
 
           {/* Audio metadata */}
-          <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+          <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
             <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Audio</p>
             <p className="text-caption text-even-ink-700">
               {enc.audio_object_key ? (
@@ -788,7 +788,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
 
           {/* Danger zone */}
           {enc.status !== "deleted" ? (
-            <div className="rounded-xl border border-danger-500/40 bg-danger-100/30 p-4">
+            <div className="rounded-2xl border border-danger-500/40 bg-danger-100/30 p-4">
               <p className="text-label text-danger-700 mb-2">Danger zone</p>
               <p className="text-caption text-even-ink-700 mb-3">
                 Soft-delete clears note + transcript + CDMSS. Audio kept in R2.
@@ -802,7 +802,7 @@ export function EncounterDetailAdminClient({ encounterId }: { encounterId: strin
               </Button>
             </div>
           ) : (
-            <div className="rounded-xl border border-even-ink-200 bg-even-ink-50 p-4">
+            <div className="rounded-2xl border border-even-ink-200 bg-even-ink-50 p-4">
               <p className="text-label text-even-ink-700 mb-1">Deleted</p>
               <p className="text-caption text-even-ink-500" suppressHydrationWarning>
                 Soft-deleted on {fmtDate(enc.deleted_at)}.
@@ -944,7 +944,7 @@ function PipelineStrip({
   };
 
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
       <div className="flex items-center justify-between mb-3">
         <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500">Pipeline</p>
         {enc.llm_traces.length > 0 ? (

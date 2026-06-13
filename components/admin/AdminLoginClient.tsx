@@ -46,7 +46,7 @@ export function AdminLoginClient() {
         </header>
         <section
           aria-label="Admin sign-in"
-          className="rounded-xl border border-even-ink-100 bg-even-white p-8 shadow-card space-y-4"
+          className="rounded-2xl border border-even-ink-100 bg-even-white p-8 shadow-card space-y-4"
         >
           <div>
             <label className="block text-label text-even-navy-800 mb-1" htmlFor="admin-email">

@@ -307,7 +307,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
       ) : null}
 
       {/* Hero */}
-      <div className="rounded-xl border border-even-ink-100 bg-even-white p-5 flex items-start justify-between gap-4">
+      <div className="rounded-2xl border border-even-ink-100 bg-even-white p-5 flex items-start justify-between gap-4">
         <div className="flex items-center gap-4 min-w-0">
           <span className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-even-navy-800 text-even-white text-label font-semibold shrink-0">
             {initials}
@@ -350,7 +350,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
         {/* Left: Account & access + Recent encounters + Audit */}
         <div className="space-y-4">
           {/* Account & access card */}
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-label text-even-navy-800">Account &amp; access</h3>
               {!editing ? (
@@ -415,7 +415,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
           </section>
 
           {/* Voice samples (Voiceprint Retention) */}
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-label text-even-navy-800">Voice samples</h3>
               <div className="flex items-center gap-3">
@@ -459,7 +459,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
           </section>
 
           {/* Recent encounters */}
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-label text-even-navy-800">Recent encounters</h3>
               <Link href={`/admin/encounters?bucket=all&window=all&doctor_id=${doctorId}`} className="text-caption text-even-blue-600 hover:underline">View all →</Link>
@@ -489,7 +489,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
           </section>
 
           {/* Audit */}
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
             <h3 className="text-label text-even-navy-800 mb-3">Audit log</h3>
             {!data || data.audit_log.length === 0 ? (
               <p className="text-body text-even-ink-400">No audit entries yet.</p>
@@ -509,7 +509,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
 
         {/* Right rail: recipients + danger zone */}
         <aside className="space-y-4">
-          <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+          <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
             <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Default email recipients</p>
             <p className="text-caption text-even-ink-500 mb-2">
               Always CC&apos;d on this doctor&apos;s sends. Edit in Sprint 11 (Settings).
@@ -529,12 +529,12 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
           </div>
 
           {d.deleted_at ? (
-            <div className="rounded-xl border border-even-ink-200 bg-even-ink-50 p-4">
+            <div className="rounded-2xl border border-even-ink-200 bg-even-ink-50 p-4">
               <p className="text-label text-even-ink-700 mb-1">Deleted</p>
               <p className="text-caption text-even-ink-500" suppressHydrationWarning>Soft-deleted on {fmtDate(d.deleted_at)}.</p>
             </div>
           ) : (
-            <div className="rounded-xl border border-danger-500/40 bg-danger-100/30 p-4 space-y-2">
+            <div className="rounded-2xl border border-danger-500/40 bg-danger-100/30 p-4 space-y-2">
               <p className="text-label text-danger-700">Danger zone</p>
               <p className="text-caption text-even-ink-700">{d.status === "active" ? "Disable to block sign-in" : "Enable to restore access"}.</p>
               <Button variant="secondary" size="sm" onClick={() => void toggleStatus()} disabled={actionInflight}>
@@ -572,7 +572,7 @@ export function DoctorDetailClient({ doctorId }: { doctorId: string }) {
 
 function KpiCard({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
       <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">{label}</p>
       <p className="text-heading text-even-navy-800 font-semibold">{value}</p>
       {sub ? <p className="text-caption text-even-ink-500 mt-1">{sub}</p> : null}

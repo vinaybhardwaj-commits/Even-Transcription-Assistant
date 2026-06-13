@@ -171,7 +171,7 @@ export function TraceDetailClient({ traceId }: { traceId: string }) {
           </div>
 
           {/* Events */}
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
             <h2 className="text-label text-even-navy-800 mb-3">
               Pipeline events · {trace.events.length}
             </h2>
@@ -206,7 +206,7 @@ export function TraceDetailClient({ traceId }: { traceId: string }) {
 
           {/* Model calls */}
           {modelCalls.length > 0 ? (
-            <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+            <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
               <h2 className="text-label text-even-navy-800 mb-3">Model calls</h2>
               <table className="w-full text-left text-body">
                 <thead className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500">
@@ -266,7 +266,7 @@ export function TraceDetailClient({ traceId }: { traceId: string }) {
 
 function KpiCard({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-even-ink-100 bg-even-white p-4">
+    <div className="rounded-2xl border border-even-ink-100 bg-even-white p-4">
       <p className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">
         {label}
       </p>

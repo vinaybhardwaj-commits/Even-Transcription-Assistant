@@ -86,11 +86,11 @@ export function SttLabClient() {
       ) : tab === "Engines" ? (
         <EnginesTab />
       ) : tab !== "Health" ? (
-        <div className="rounded-xl border border-even-ink-100 bg-even-white p-8 text-center text-body text-even-ink-400">
+        <div className="rounded-2xl border border-even-ink-100 bg-even-white p-8 text-center text-body text-even-ink-400">
           {tab} — coming in a later sprint.
         </div>
       ) : (
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-label text-even-navy-800">Engine health</h3>
@@ -224,7 +224,7 @@ function GoldTab() {
   return (
     <div className="space-y-5">
       {/* per-engine WER leaderboard over the gold set */}
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         <h3 className="text-label text-even-navy-800 mb-1">Accuracy on gold set</h3>
         <p className="text-caption text-even-ink-500 mb-3">{data ? `${data.gold.length} encounter(s) labeled` : "Loading…"}</p>
         {data && data.per_engine.length > 0 ? (
@@ -249,7 +249,7 @@ function GoldTab() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[300px,1fr] gap-5">
         {/* picker */}
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-4 max-h-[600px] overflow-y-auto">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-4 max-h-[600px] overflow-y-auto">
           <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Labeled ({data?.gold.length ?? 0})</h4>
           <ul className="space-y-1 mb-4">
             {data?.gold.map((g) => (
@@ -273,7 +273,7 @@ function GoldTab() {
         </section>
 
         {/* editor */}
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
           {!sel || !detail ? (
             <p className="text-body text-even-ink-400">Select an encounter to label its gold reference.</p>
           ) : (
@@ -370,7 +370,7 @@ function LeaderboardTab() {
       </div>
 
       {(
-        <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
+        <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
           <table className="w-full text-body">
             <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
               <th className="py-2 pr-2">#</th><th className="py-2 pr-3">Engine</th><th className="py-2 pr-3">Composite ↑</th><th className="py-2 pr-3">Accuracy</th><th className="py-2 pr-3">WER ↓</th><th className="py-2 pr-3">Med-term ↑</th><th className="py-2 pr-3">Judge</th><th className="py-2 pr-3">Agree</th><th className="py-2 pr-3">Latency</th><th className="py-2 pr-3">Reliab.</th><th className="py-2 pr-3">Wins</th><th className="py-2 pr-3">Gold n</th>
@@ -430,7 +430,7 @@ function RunsTab() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[280px,1fr] gap-5">
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-4 max-h-[640px] overflow-y-auto">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-4 max-h-[640px] overflow-y-auto">
         <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Encounters ({list?.length ?? 0})</h4>
         <ul className="space-y-1">
           {list?.map((r) => (
@@ -444,7 +444,7 @@ function RunsTab() {
         </ul>
       </section>
 
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         {!sel || !detail ? (
           <p className="text-body text-even-ink-400">Select an encounter to see the engine comparison.</p>
         ) : (
@@ -493,7 +493,7 @@ function EnginesTab() {
     finally { setBusy(null); }
   };
   return (
-    <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
+    <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
       <p className="text-caption text-even-ink-500 mb-3">Registered engines. A new engine = one adapter file + one row here. Toggle whether each is enabled (routing pool) and participates in fan-out; set cost/min for the composite + budget.</p>
       <table className="w-full text-body">
         <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
@@ -539,7 +539,7 @@ function RoutingTab() {
 
   return (
     <div className="space-y-4">
-      <section className="rounded-xl border border-even-ink-100 bg-even-white p-5">
+      <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         <h3 className="text-label text-even-navy-800 mb-1">Production routing</h3>
         <p className="text-caption text-even-ink-500 mb-4">Which engine runs in production per stage × language. <span className="font-mono">auto</span> = built-in default. Changes are safe + reversible; an unhealthy/disabled engine falls back to the default automatically.</p>
         {!data ? <p className="text-body text-even-ink-400">Loading…</p> : (

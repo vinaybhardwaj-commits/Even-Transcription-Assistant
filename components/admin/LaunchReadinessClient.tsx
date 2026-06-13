@@ -105,7 +105,7 @@ export function LaunchReadinessClient() {
       ) : null}
 
       {/* Criteria table */}
-      <div className="rounded-xl border border-even-ink-100 bg-even-white overflow-hidden">
+      <div className="rounded-2xl border border-even-ink-100 bg-even-white overflow-hidden">
         <table className="w-full text-left">
           <thead className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 bg-even-ink-50/40 border-b border-even-ink-100">
             <tr>

@@ -67,12 +67,12 @@ export function DiarizationEerClient() {
             ["Avg match confidence", stats.avg_confidence != null ? `${(stats.avg_confidence * 100).toFixed(1)}%` : "—"],
             ["Labeled (✓/✗)", `${stats.labeled_correct} / ${stats.labeled_incorrect}`],
           ].map(([k, v]) => (
-            <div key={k} className="rounded-xl border border-even-ink-100 bg-even-white p-3">
+            <div key={k} className="rounded-2xl border border-even-ink-100 bg-even-white p-3">
               <p className="text-caption text-even-ink-500">{k}</p>
               <p className="text-heading text-even-navy-800">{v}</p>
             </div>
           ))}
-          <div className="rounded-xl border border-even-blue-200 bg-even-blue-50 p-3 col-span-2 md:col-span-4">
+          <div className="rounded-2xl border border-even-blue-200 bg-even-blue-50 p-3 col-span-2 md:col-span-4">
             <p className="text-caption text-even-ink-500">Equal Error Rate (EER)</p>
             {stats.eer != null ? (
               <p className="text-heading text-even-navy-800">{(stats.eer * 100).toFixed(1)}% <span className="text-caption text-even-ink-500">at threshold {(stats.eer_threshold ?? 0).toFixed(3)}</span></p>
@@ -88,7 +88,7 @@ export function DiarizationEerClient() {
       ) : items.length === 0 ? (
         <p className="text-body text-even-ink-400">No encounters with a clinician auto-match yet. They appear here once an enrolled clinician records and diarization identifies them.</p>
       ) : (
-        <div className="rounded-xl border border-even-ink-100 bg-even-white divide-y divide-even-ink-50">
+        <div className="rounded-2xl border border-even-ink-100 bg-even-white divide-y divide-even-ink-50">
           {items.map((it) => (
             <div key={it.encounter_id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <Link href={`/admin/encounters/${it.encounter_id}`} className="text-label text-even-blue-600 hover:underline">{it.patient || it.encounter_id}</Link>

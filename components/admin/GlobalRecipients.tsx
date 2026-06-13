@@ -120,7 +120,7 @@ export function GlobalRecipients() {
       ) : items.length === 0 ? (
         <p className="text-body text-even-ink-500">No global contacts yet. Add one above.</p>
       ) : (
-        <div className="rounded-xl border border-even-ink-100 bg-even-white overflow-hidden">
+        <div className="rounded-2xl border border-even-ink-100 bg-even-white overflow-hidden">
           <table className="w-full text-left">
             <thead className="text-caption uppercase tracking-wide text-even-ink-500 bg-even-ink-50/40">
               <tr>
