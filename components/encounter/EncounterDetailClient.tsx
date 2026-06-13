@@ -434,8 +434,8 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
   })();
 
   return (
-    <main className="min-h-screen bg-even-white">
-      <header className="sticky top-0 z-10 bg-even-white border-b border-even-ink-100 flex items-center justify-between px-4 py-3">
+    <main className="min-h-screen bg-even-ink-50">
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-even-ink-100 bg-even-white/90 px-4 py-3 backdrop-blur">
         <button
           type="button"
           onClick={() => router.push(`/${slug}`)}
@@ -444,14 +444,12 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           ‹ Library
         </button>
         <span className="text-label text-even-navy-800">{initial.id.slice(0, 14)}…</span>
-        <span className="text-caption text-even-ink-400">
-          {statusLabel}
-        </span>
+        <span className="text-caption rounded-full bg-even-ink-100 px-2.5 py-0.5 text-even-ink-600">{statusLabel}</span>
       </header>
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
         {s.processing ? (
-          <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4">
+          <div className="rounded-2xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4 shadow-soft">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-label text-even-navy-800 mb-1">
@@ -521,7 +519,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
             the cancel flow. Offers Re-process (re-runs the full pipeline) or
             Use-as-is and send (skips straight to the SendPanel). */}
         {s.status === "draft_partial" && !s.processing ? (
-          <div className="rounded-xl border border-amber-300 bg-amber-50 p-5 space-y-3">
+          <div className="rounded-2xl border border-warning-500 bg-warning-100/40 p-5 space-y-3 shadow-soft">
             <p className="text-label text-amber-900">
               This note was not fully reviewed against your final transcript.
             </p>
@@ -547,7 +545,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         ) : null}
 
         {s.error && !s.processing ? (
-          <div className="rounded-xl border border-danger-500 bg-danger-100/40 p-4">
+          <div className="rounded-2xl border border-danger-500 bg-danger-100/40 p-4 shadow-soft">
             <p className="text-label text-danger-700 mb-2">Processing problem</p>
             <p className="text-body text-even-ink-700 mb-3">{s.error}</p>
             <Button variant="secondary" onClick={() => void runProcess(true)}>
@@ -557,7 +555,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         ) : null}
 
         {s.note ? (
-          <section className="rounded-xl border border-even-ink-100 bg-even-white p-5 shadow-card">
+          <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5 shadow-soft">
             <div className="flex items-start justify-between gap-3 mb-4">
               <h2 className="text-heading text-even-navy-800">
                 Medical Encounter Note
@@ -619,7 +617,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           const names = Array.from(new Set(turns.map((t) => t.name)));
           const colorOf = (n: string) => COLORS[Math.max(0, names.indexOf(n)) % COLORS.length];
           return (
-            <div className="rounded-md border border-even-ink-100 bg-even-white overflow-hidden">
+            <div className="rounded-2xl border border-even-ink-100 bg-even-white overflow-hidden">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2.5">
                 <span className="text-caption font-medium text-even-navy-800">{sps.length} speaker{sps.length > 1 ? "s" : ""} detected</span>
                 {clinician ? <span className="text-caption text-success-700">· {clinician.label} identified</span> : null}
@@ -647,7 +645,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         })() : null}
 
         {initial.transcriptOriginal ? (
-          <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
+          <details className="rounded-2xl border border-even-ink-100 bg-even-white">
             <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
               Original transcript{initial.detectedLanguage ? ` · ${initial.detectedLanguage}` : ""} ({(initial.transcriptOriginal.length / 1024).toFixed(1)} KB)
             </summary>
@@ -658,7 +656,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         ) : null}
 
         {initial.transcript ? (
-          <details className="rounded-md border border-even-ink-100 bg-even-ink-50/40">
+          <details className="rounded-2xl border border-even-ink-100 bg-even-white">
             <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
               {initial.transcriptOriginal ? "English translation" : "Transcript"} ({(initial.transcript.length / 1024).toFixed(1)} KB)
             </summary>
