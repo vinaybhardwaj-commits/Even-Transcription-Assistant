@@ -264,3 +264,42 @@ export async function sarvamBatchTranslate(
 /** Medical-context prompt passed to Sarvam translate to nudge clinical accuracy. */
 export const SARVAM_MEDICAL_PROMPT =
   "Medical doctor-patient consultation in an Indian OPD clinic. Preserve drug names, dosages, symptoms, and clinical terms accurately.";
+
+
+/** Sarvam Translate (text -> English) via the Mayura translate API. Chunks long
+ *  input (the API caps per-request length). Used by the translation bake-off. */
+export async function sarvamTranslateText(text: string, sourceLang?: string | null): Promise<{ ok: true; english: string; latencyMs: number } | { ok: false; error: string; latencyMs: number }> {
+  const key = process.env.SARVAM_API_KEY;
+  if (!key) return { ok: false, error: "sarvam_api_key_missing", latencyMs: 0 };
+  const src = (sourceLang && sourceLang.includes("-")) ? sourceLang : "auto";
+  const clean = (text || "").trim();
+  if (!clean) return { ok: false, error: "empty_input", latencyMs: 0 };
+  // Chunk on sentence-ish boundaries, ~900 chars each.
+  const chunks: string[] = [];
+  let buf = "";
+  for (const part of clean.split(/(?<=[.!?\u0964\n])\s+/)) {
+    if ((buf + " " + part).length > 900 && buf) { chunks.push(buf); buf = part; }
+    else buf = buf ? `${buf} ${part}` : part;
+  }
+  if (buf) chunks.push(buf);
+  const t0 = Date.now();
+  try {
+    const out: string[] = [];
+    for (const c of chunks) {
+      const res = await fetch("https://api.sarvam.ai/translate", {
+        method: "POST",
+        headers: { "api-subscription-key": key, "Content-Type": "application/json" },
+        body: JSON.stringify({ input: c, source_language_code: src, target_language_code: "en-IN", model: "mayura:v1", mode: "formal" }),
+        cache: "no-store", signal: AbortSignal.timeout(30_000),
+      });
+      const body = await res.text().catch(() => "");
+      if (!res.ok) return { ok: false, error: `http_${res.status}: ${body.slice(0, 140)}`, latencyMs: Date.now() - t0 };
+      const j = JSON.parse(body) as { translated_text?: string };
+      out.push((j.translated_text ?? "").trim());
+    }
+    const english = out.join(" ").trim();
+    return english ? { ok: true, english, latencyMs: Date.now() - t0 } : { ok: false, error: "empty_translation", latencyMs: Date.now() - t0 };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 140), latencyMs: Date.now() - t0 };
+  }
+}
