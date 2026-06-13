@@ -25,3 +25,10 @@ export const SAFARI_STREAMING_GUARD =
 // ON by default; set NEXT_PUBLIC_ETA_INDIC_LIVE_BOX=0 in Vercel to kill-switch it.
 export const INDIC_LIVE_BOX =
   process.env.NEXT_PUBLIC_ETA_INDIC_LIVE_BOX !== "0";
+
+// Background CDS pipeline: process the encounter SERVER-SIDE after finalize
+// (decoupled from the doctor's client), so the doctor can submit and move
+// straight to the next encounter; results appear in the Library when ready.
+// Default ON (per V) — kill-switch: set NEXT_PUBLIC_ETA_BACKGROUND_PROCESSING=0 + redeploy.
+export const BACKGROUND_PROCESSING =
+  process.env.NEXT_PUBLIC_ETA_BACKGROUND_PROCESSING !== "0";

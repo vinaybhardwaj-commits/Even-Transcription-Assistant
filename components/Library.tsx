@@ -114,7 +114,17 @@ export function Library({ slug }: Props) {
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between">
+        {(() => {
+          const ready = state.rows.filter((r) => r.status === "complete" && r.send_status !== "sent").length;
+          const processing = state.rows.filter((r) => r.status === "processing").length;
+          return (
+            <span className="text-caption text-even-ink-500">
+              {ready > 0 ? <span className="font-medium text-even-navy-800">{ready} ready to review</span> : <span>Up to date</span>}
+              {processing > 0 ? <span className="text-even-ink-400"> · {processing} processing</span> : null}
+            </span>
+          );
+        })()}
         <button
           type="button"
           onClick={() => void load()}

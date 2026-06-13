@@ -10,7 +10,7 @@
  * Body: { key, duration_seconds, deepgram_transcript?, whisper_transcript? }
  * Returns: { encounter: {id, status} }
  */
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
@@ -18,7 +18,9 @@ import { headObject, deleteObject, whisperBufferKey } from "@/lib/r2";
 import { resolveRouting } from "@/lib/stt/routing";
 import { respondOk, respondError } from "@/lib/respond";
 
+import { BACKGROUND_PROCESSING } from "@/lib/live-flags";
 export const runtime = "nodejs";
+export const maxDuration = 300; // allow the background pipeline (after()) to run to completion
 
 type EncounterRow = {
   id: string;
@@ -58,6 +60,30 @@ export async function POST(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
+  }
+
+  // Background CDS pipeline: run /process server-side, detached from the
+  // doctor's client, so they can submit and move to the next encounter. The
+  // internal header authenticates the server-to-server call; the response
+  // stream is drained so the function stays alive until processing completes.
+  // The stuck-'processing' reaper is the safety net if this ever dies.
+  if (BACKGROUND_PROCESSING && process.env.MIGRATION_SECRET) {
+    const origin = req.nextUrl.origin;
+    after(async () => {
+      try {
+        const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
+          body: JSON.stringify({ force: false }),
+          cache: "no-store",
+        });
+        if (res.body) {
+          const reader = res.body.getReader();
+          // drain to completion (keeps the function alive for the pipeline)
+          while (true) { const { done } = await reader.read(); if (done) break; }
+        }
+      } catch { /* reaper recovers stuck processing rows */ }
+    });
   }
   if (!row) return respondError("NOT_FOUND", "encounter_not_found");
   if (row.doctor_id !== claims.doctor_id) {

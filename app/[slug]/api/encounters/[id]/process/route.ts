@@ -72,15 +72,21 @@ export async function POST(
 ) {
   const { slug, id } = await params;
 
-  const cookie = await readDoctorCookie();
-  if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
-  let claims;
-  try {
-    claims = await verifyDoctorJwt(cookie);
-  } catch {
-    return respondError("AUTH_EXPIRED", "Session invalid");
+  // Internal background trigger (finalize-upload via after()): a trusted
+  // server-to-server call carrying the migration secret, so the pipeline can
+  // run detached from any doctor client. Skips the cookie/slug checks.
+  const internal = !!process.env.MIGRATION_SECRET && req.headers.get("x-eta-internal") === process.env.MIGRATION_SECRET;
+  let claims: Awaited<ReturnType<typeof verifyDoctorJwt>> | null = null;
+  if (!internal) {
+    const cookie = await readDoctorCookie();
+    if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+    try {
+      claims = await verifyDoctorJwt(cookie);
+    } catch {
+      return respondError("AUTH_EXPIRED", "Session invalid");
+    }
+    if (claims.slug !== slug) return respondError("FORBIDDEN", "Slug mismatch");
   }
-  if (claims.slug !== slug) return respondError("FORBIDDEN", "Slug mismatch");
   if (!id.startsWith("enc_")) {
     return respondError("VALIDATION_FAILED", "bad_encounter_id");
   }
@@ -107,7 +113,7 @@ export async function POST(
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
   if (!row) return respondError("NOT_FOUND", "encounter_not_found");
-  if (row.doctor_id !== claims.doctor_id) {
+  if (!internal && row.doctor_id !== claims!.doctor_id) {
     return respondError("FORBIDDEN", "not_your_encounter");
   }
   if (row.status === "deleted") {
@@ -352,7 +358,7 @@ export async function POST(
   const accept = req.headers.get("accept") ?? "";
   if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
     const encoder = new TextEncoder();
-    const doctorId = claims.doctor_id;
+    const doctorId = internal ? row.doctor_id : claims!.doctor_id;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {

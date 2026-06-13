@@ -18,7 +18,7 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 import { detectIOS, detectDesktopSafari } from "@/lib/platform";
-import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX } from "@/lib/live-flags";
+import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING } from "@/lib/live-flags";
 
 type Props = { slug: string; doctorName: string };
 
@@ -281,9 +281,10 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       } catch {
         /* private mode */
       }
-      // Land on the encounter detail page — it will auto-trigger processing
-      // and show the note + CDMSS as they come back.
-      router.push(`/${slug}/encounter/${r.encounterId}`);
+      // Background processing: hand off and return to Home so the doctor can
+      // start the next encounter; the note + CDS appear in the Library when
+      // ready. Otherwise land on the detail page (it auto-triggers processing).
+      router.push(BACKGROUND_PROCESSING ? `/${slug}` : `/${slug}/encounter/${r.encounterId}`);
     }
   }, [submit, router, slug]);
 

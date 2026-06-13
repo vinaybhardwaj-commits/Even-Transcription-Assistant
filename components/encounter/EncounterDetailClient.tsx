@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { BACKGROUND_PROCESSING } from "@/lib/live-flags";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { NoteView } from "@/components/encounter/NoteView";
@@ -85,12 +86,28 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
   const autoTriggeredRef = React.useRef(false);
   React.useEffect(() => {
     if (autoTriggeredRef.current) return;
-    if (initial.status === "processing" && initial.note === null) {
+    if (!BACKGROUND_PROCESSING && initial.status === "processing" && initial.note === null) {
       autoTriggeredRef.current = true;
       void runProcess(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Background mode: this page does NOT drive the pipeline (finalize kicked it
+  // server-side). Poll for the result while processing, and adopt fresh server
+  // props as they arrive so the note/CDS appear without a manual reload.
+  React.useEffect(() => {
+    if (!BACKGROUND_PROCESSING) return;
+    if (s.status !== "processing" || s.note) return;
+    const iv = window.setInterval(() => router.refresh(), 8000);
+    return () => window.clearInterval(iv);
+  }, [s.status, s.note, router]);
+  React.useEffect(() => {
+    if (!BACKGROUND_PROCESSING) return;
+    setS((prev) => (prev.editing || prev.processing)
+      ? prev
+      : { ...prev, status: initial.status, note: initial.note, cdmss: initial.cdmss, sendStatus: initial.sendStatus });
+  }, [initial.status, initial.note, initial.cdmss, initial.sendStatus]);
 
   // Stage tracking for streaming progress
   type StageId = "note" | "hyde" | "retrieve" | "draft" | "critique" | "revise" | "fallback" | "final";
