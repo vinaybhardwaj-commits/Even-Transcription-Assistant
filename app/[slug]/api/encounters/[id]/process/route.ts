@@ -376,7 +376,7 @@ export async function POST(
           const pctInt = final ? 100 : Math.min(99, Math.round(pct * 100));
           if (pctInt === lastPctWrite && !final) return;
           lastPctWrite = pctInt;
-          void sql`UPDATE encounter SET processing_pct = ${pctInt}, processing_stages = ${JSON.stringify(stages)}::jsonb WHERE id = ${id}`.catch(() => {});
+          void sql`UPDATE encounter SET processing_pct = ${pctInt}, processing_stages = ${JSON.stringify(stages)}::jsonb WHERE id = ${id}`.catch(() => { /* intentional: progress is a best-effort UI hint; never block or fail the pipeline on a progress write */ });
         };
         const emit = (obj: unknown) => {
           try {
