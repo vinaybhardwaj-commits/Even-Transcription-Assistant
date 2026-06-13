@@ -10,6 +10,7 @@ import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
 import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
 import { useSarvamStreaming } from "@/lib/use-sarvam-streaming";
+import { useIndicRolling } from "@/lib/use-indic-rolling";
 import { useSpeakerIdentify } from "@/lib/use-speaker-identify";
 import { putChunk, purgeEncounter } from "@/lib/chunk-store";
 import { useEncounterSubmit } from "@/lib/use-encounter-submit";
@@ -17,7 +18,7 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 import { detectIOS, detectDesktopSafari } from "@/lib/platform";
-import { SAFARI_STREAMING_GUARD } from "@/lib/live-flags";
+import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX } from "@/lib/live-flags";
 
 type Props = { slug: string; doctorName: string };
 
@@ -169,6 +170,15 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   });
   const sv = useStream ? svStream : svRoll;
 
+  // Parallel native-script live box via IndicConformer (flag-gated). Idle until
+  // Sarvam locks a non-English language, which we feed in as `language`.
+  const indic = useIndicRolling({
+    slug,
+    enabled: INDIC_LIVE_BOX && encounter !== null,
+    language: sv.language,
+    intervalMs: 2_000,
+  });
+
   // 2d. Live clinician identification (V2.SD.2) — drives the Speakers pill.
   const spk = useSpeakerIdentify({ slug, enabled: encounter !== null });
 
@@ -198,6 +208,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       dg.sendChunk(chunk);
       wh.sendChunk(chunk);
       sv.sendChunk(chunk);
+      indic.sendChunk(chunk);
       spk.sendChunk(chunk);
       // Persist to IndexedDB for crash recovery (PRD §4.18). Fire-and-forget;
       // we don't block the live transcription pipeline on disk write.
@@ -508,6 +519,19 @@ export function RecordingScreen({ slug, doctorName }: Props) {
             error={sv.error}
           />
         </div>
+
+        {INDIC_LIVE_BOX && (indic.text || indic.error) ? (
+          <div className="w-full max-w-2xl mt-2">
+            <SarvamTranscript
+              text={indic.text}
+              language={sv.language}
+              latencyMs={indic.latest?.latency_ms ?? null}
+              error={indic.error}
+              engine="IndicConformer"
+              heading="Original script"
+            />
+          </div>
+        ) : null}
       </section>
 
       <footer className="px-4 py-3 border-t border-even-ink-100 flex items-center justify-between text-caption text-even-ink-400">

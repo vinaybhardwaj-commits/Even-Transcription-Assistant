@@ -15,3 +15,9 @@ export const DEEPGRAM_RECONNECT =
 
 export const SAFARI_STREAMING_GUARD =
   process.env.NEXT_PUBLIC_ETA_SAFARI_STREAMING_GUARD === "1";
+
+// Show a SECOND live transcript box driven by AI4Bharat IndicConformer (pure
+// native script) alongside the Sarvam code-mix box, for non-English encounters.
+// Sarvam detects+locks the language and feeds it to IndicConformer. Default OFF.
+export const INDIC_LIVE_BOX =
+  process.env.NEXT_PUBLIC_ETA_INDIC_LIVE_BOX === "1";
