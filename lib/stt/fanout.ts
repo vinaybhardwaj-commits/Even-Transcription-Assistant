@@ -124,7 +124,12 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
     }
   }));
 
+  let langSkipped = 0;
   for (const { e, r } of results) {
+    // An engine may DECLINE a clip by language (e.g. IndicConformer is Indic-only
+    // and returns "skipped_non_indic" on English). Don't persist a row for that —
+    // it would otherwise show as a failed run and skew the engine's reliability.
+    if (r.error && r.error.startsWith("skipped")) { langSkipped++; continue; }
     if (r.error) errors.push(`${e.id}: ${r.error}`);
     const costUsd = estimateCostUsd(e, enc.duration_seconds, r.costUsd);
     try {
@@ -144,7 +149,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   // L2: reference-free scoring (agreement + LLM judge) over this encounter's runs.
   try { await scoreEncounter(encounterId); } catch (e) { errors.push(`score: ${String(e).slice(0, 80)}`); }
 
-  return { encounter_id: encounterId, inserted, skipped: engines.length - todo.length, errors };
+  return { encounter_id: encounterId, inserted, skipped: engines.length - todo.length + langSkipped, errors };
 }
 
 /** Today's batch spend (sum of known cost_usd). */
@@ -330,6 +335,8 @@ export async function runScribeForEncounter(encounterId: string): Promise<{ enco
         const adapter = adapterFor(e.adapter_key)!;
         try {
           const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined, template: enc.note_type ?? undefined });
+          // language-declined (e.g. indicconformer_scribe on English) -> don't persist
+          if (r.error && (r.error.startsWith("skipped") || r.error.startsWith("asr: skipped"))) continue;
           const costUsd = estimateCostUsd(e, enc.duration_seconds, r.costUsd);
           await sql`
             INSERT INTO transcription_run
