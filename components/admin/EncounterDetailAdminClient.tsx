@@ -109,8 +109,6 @@ type TranscriptionRunRow = {
   mode: string;
   detected_language: string | null;
   transcript_original: string | null;
-  native_analysis: NativeAnalysis | null;
-  native_analysis_lang: string | null;
   transcript_english: string | null;
   latency_ms: number | null;
   judge_score: number | null;
@@ -128,6 +126,8 @@ type EncounterFull = {
   transcript_clean: string | null;
   detected_language: string | null;
   transcript_original: string | null;
+  native_analysis: NativeAnalysis | null;
+  native_analysis_lang: string | null;
   transcription_runs: TranscriptionRunRow[];
   speakers: DiarizeSpeaker[] | null;
   transcript_segments: TranscriptSegment[] | null;

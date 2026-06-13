@@ -258,6 +258,8 @@ export async function getFullEncounter(id: string): Promise<EncounterFull | null
     note_json: (r.note_json as EncounterNote | null) ?? null,
     detected_language: r.detected_language ? String(r.detected_language) : null,
     transcript_original: r.transcript_original ? String(r.transcript_original) : null,
+    native_analysis: (r.native_analysis as unknown) ?? null,
+    native_analysis_lang: r.native_analysis_lang ? String(r.native_analysis_lang) : null,
     speakers: (r.speakers as unknown[] | null) ?? null,
     transcript_segments: (r.transcript_segments as unknown[] | null) ?? null,
     overlap_windows: (r.overlap_windows as unknown[] | null) ?? null,
