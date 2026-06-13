@@ -33,6 +33,7 @@ import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
+import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assist";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
@@ -167,6 +168,23 @@ export async function POST(
         row.transcript_raw = bt.transcript;
         await sql`UPDATE encounter SET transcript_raw = ${bt.transcript} WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: `Full-conversation translation ready (${bt.transcript.length} chars)` });
+        // Optional submit-time parallel pick-best: run IndicConformer on the SAME
+        // audio and keep whichever English transcript is the better note basis.
+        // Flag-gated (ETA_NOTE_PARALLEL_INDIC) + soft-fail: defaults to Sarvam.
+        if (INDIC_NOTE_ASSIST_ON()) {
+          try {
+            const assist = await indicNoteAssist({
+              bytes, contentType: head.content_type || "audio/webm",
+              detectedLanguage: row.detected_language, sarvamEnglish: row.transcript_raw, emit,
+            });
+            if (assist.used === "indicconformer" && assist.english.trim().length > 0 && assist.english !== row.transcript_raw) {
+              row.transcript_raw = assist.english;
+              await sql`UPDATE encounter SET transcript_raw = ${assist.english} WHERE id = ${id}`;
+            }
+          } catch (e) {
+            console.warn(`[process] indic note-assist failed enc=${id}: ${String(e).slice(0, 100)}`);
+          }
+        }
       } else {
         emit?.({ stage: "progress", msg: `Batch translate unavailable (${bt.ok ? "empty" : bt.error}); using live transcript` });
       }
