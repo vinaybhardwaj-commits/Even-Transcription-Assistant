@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
   if (manualId && secretOk) {
     // Manual recovery: resurrect (failed -> processing; keep transcripts/translated) and resume.
     const rows = (await sql`
-      SELECT e.id, c.slug, e.transcript_original FROM encounter e JOIN clinician c ON c.id = e.doctor_id
+      SELECT e.id, (c.url_slug || '-' || c.url_token) AS slug, e.transcript_original FROM encounter e JOIN clinician c ON c.id = e.doctor_id
        WHERE e.id = ${manualId} AND e.deleted_at IS NULL LIMIT 1
     `) as Array<{ id: string; slug: string; transcript_original: string | null }>;
     if (!rows[0]) return respondError("NOT_FOUND", "encounter_not_found");
@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
 
   // Cron: oldest encounter stuck in 'processing' for > 4 minutes.
   const rows = (await sql`
-    SELECT e.id, c.slug FROM encounter e JOIN clinician c ON c.id = e.doctor_id
+    SELECT e.id, (c.url_slug || '-' || c.url_token) AS slug FROM encounter e JOIN clinician c ON c.id = e.doctor_id
      WHERE e.status = 'processing' AND e.deleted_at IS NULL
        AND e.recorded_at < now() - interval '4 minutes'
      ORDER BY e.recorded_at ASC LIMIT 1
