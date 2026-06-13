@@ -71,18 +71,19 @@ export async function POST(
     const origin = req.nextUrl.origin;
     after(async () => {
       try {
+        // Kick the resumable STEP MACHINE: each invocation runs ONE pipeline
+        // step (translate → native → note → CDS → diarize) then self-chains the
+        // next in a fresh 300s function, so any recording length completes
+        // without dropping the expensive pre-note steps. The /3-min resume cron
+        // is the safety net if a link in the chain dies.
         const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
-          body: JSON.stringify({ force: false }),
+          headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
+          body: JSON.stringify({ step: true }),
           cache: "no-store",
         });
-        if (res.body) {
-          const reader = res.body.getReader();
-          // drain to completion (keeps the function alive for the pipeline)
-          while (true) { const { done } = await reader.read(); if (done) break; }
-        }
-      } catch { /* reaper recovers stuck processing rows */ }
+        await res.text().catch(() => {}); // ACK only; the step runs in the target's own after()
+      } catch { /* resume cron recovers stuck processing rows */ }
     });
   }
   if (!row) return respondError("NOT_FOUND", "encounter_not_found");

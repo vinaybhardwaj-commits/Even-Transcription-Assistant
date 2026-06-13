@@ -59,6 +59,7 @@ type Row = {
   translated: boolean | null;
   diarize_status: string | null;
   native_analysis: unknown | null;
+  process_attempts: number | null;
 };
 
 function isAbortError(e: unknown): boolean {
@@ -95,9 +96,11 @@ export async function POST(
   }
 
   let force = false;
+  let stepRequested = false;
   try {
-    const body = (await req.json().catch(() => ({}))) as { force?: boolean };
+    const body = (await req.json().catch(() => ({}))) as { force?: boolean; step?: boolean };
     force = body.force === true;
+    stepRequested = body.step === true;
   } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
 
   // Load row
@@ -105,7 +108,7 @@ export async function POST(
   try {
     const rows = (await sql`
       SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, note_type,
-             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis
+             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis, process_attempts
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
        LIMIT 1
@@ -124,7 +127,7 @@ export async function POST(
   }
 
   // Idempotent fast path
-  if (!force && row.note_json && row.cdmss_json) {
+  if (!force && !stepRequested && row.note_json && row.cdmss_json) {
     return respondOk({
       encounter: { id, status: row.status },
       note: row.note_json,
@@ -150,6 +153,10 @@ export async function POST(
   // Sarvam batch diarized English segments — captured in translateIfNeeded,
   // reconciled against pyannote in diarizeStore for the speaker-tagged note.
   let sarvamEntries: SarvamDiarEntry[] = [];
+  // Pipeline-scoped abort signal. Foreground (streaming) binds it to the client
+  // request so cancel works. Background step-mode nulls it out, because after()
+  // work outlives the request and req.signal aborts the moment we ACK.
+  let pipeSignal: AbortSignal | undefined = req.signal;
   const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) return;
@@ -172,7 +179,7 @@ export async function POST(
       const bt = await sarvamBatchTranslate(bytes, head.content_type || "audio/webm", {
         prompt: SARVAM_MEDICAL_PROMPT,
         withDiarization: true,
-        signal: req.signal,
+        signal: pipeSignal,
       });
       if (bt.ok && Array.isArray(bt.entries)) sarvamEntries = bt.entries;
       if (bt.ok && bt.transcript.trim().length > 0) {
@@ -285,7 +292,7 @@ export async function POST(
         encounterId: id,
         clinicianCentroids,
         manualRelabels: [],
-        signal: req.signal,
+        signal: pipeSignal,
       });
       if (d.ok) {
         await sql`
@@ -359,6 +366,145 @@ export async function POST(
       emit?.({ stage: "progress", msg: "Diarization error (non-critical)" });
     }
   };
+
+  // ===== BACKGROUND STEP MODE (one expensive step per invocation) =====
+  // Long recordings can exceed a single 300s function. When the internal
+  // background trigger passes {step:true}, run EXACTLY ONE pending step
+  // (translate → native → note → CDS → finalize → diarize), persist it, then
+  // self-chain the next step in its own fresh invocation. Any length completes.
+  // The foreground streaming branch below is unchanged.
+  if (internal && stepRequested) {
+    const origin = req.nextUrl.origin;
+    pipeSignal = undefined; // after() outlives the request; don't bind to req.signal
+
+    // Same progress model as the streaming branch, so the Library bar + the
+    // in-detail CDMSS pipeline tracker advance during background processing too.
+    const SP_ORDER = ["note", "hyde", "retrieve", "draft", "critique", "revise"] as const;
+    const SP_LABEL: Record<string, string> = { note: "Generating note", hyde: "Expanding query", retrieve: "Searching knowledge base", draft: "Drafting decision support", critique: "Auditing claims", revise: "Revising for citations" };
+    const SP_WEIGHT: Record<string, number> = { note: 0.10, hyde: 0.05, retrieve: 0.02, draft: 0.30, critique: 0.18, revise: 0.35 };
+    const spState: Record<string, string> = {};
+    const persistStepProgress = () => {
+      const stages = SP_ORDER.map((idp) => ({ id: idp, label: SP_LABEL[idp], state: spState[idp] ?? "pending" }));
+      let pct = 0;
+      for (const idp of SP_ORDER) if (spState[idp] === "done" || spState[idp] === "skipped") pct += SP_WEIGHT[idp];
+      const pctInt = Math.min(99, Math.round(pct * 100));
+      void sql`UPDATE encounter SET processing_pct = ${pctInt}, processing_stages = ${JSON.stringify(stages)}::jsonb WHERE id = ${id}`.catch(() => { /* best-effort UI hint */ });
+    };
+    const stepEmit = (obj: unknown) => {
+      const o = obj as { stage?: string; state?: string };
+      if (o && typeof o.stage === "string" && o.stage in SP_WEIGHT && typeof o.state === "string") {
+        spState[o.stage] = o.state === "start" ? "running" : o.state;
+        persistStepProgress();
+      }
+    };
+    const selfChain = () => {
+      after(async () => {
+        try {
+          const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
+            body: JSON.stringify({ step: true }),
+            cache: "no-store",
+          });
+          await res.text().catch(() => {}); // target ACKs fast and runs its step in its own after()
+        } catch { /* resume cron (every 3 min) is the safety net */ }
+      });
+    };
+
+    const isIndic =
+      (!!row.detected_language && isNonEnglish(row.detected_language)) ||
+      /[\u0900-\u0DFF]/.test(row.transcript_original ?? "") ||
+      /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
+    const hasCdms = noteTypeHasCdmss(row.note_type ?? undefined);
+    const needTranslate =
+      !!row.audio_object_key && !row.translated &&
+      ((!!row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_raw ?? ""));
+    const needNative = INDIC_COMPREHENSION_ON() && isIndic && !row.native_analysis;
+    const needNote = !row.note_json;
+    const needCdms = !!row.note_json && hasCdms && !row.cdmss_json;
+    const needFinalize = !!row.note_json && (!!row.cdmss_json || !hasCdms) && row.status !== "complete";
+    const needDiarize = !!row.audio_object_key && !["complete", "skipped", "failed"].includes(row.diarize_status ?? "");
+
+    const nextStep =
+      needTranslate ? "translate" :
+      needNative ? "native" :
+      needNote ? "note" :
+      needCdms ? "cdms" :
+      needFinalize ? "finalize" :
+      needDiarize ? "diarize" : "done";
+
+    if (nextStep === "done") {
+      if (row.status !== "complete" && row.note_json) {
+        await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`.catch(() => { /* best-effort */ });
+      }
+      // STT-lab fan-out once the clinical pipeline is finished (non-critical).
+      after(async () => { try { await enqueueFanout(id); await runFanoutForEncounter(id); } catch { /* non-critical */ } });
+      return respondOk({ step: "done", status: row.note_json ? "complete" : row.status });
+    }
+
+    // Bounded retry: give up if a step keeps failing without progress.
+    const attempts = row.process_attempts ?? 0;
+    if (attempts >= 15) {
+      await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => { /* best-effort */ });
+      return respondError("PIPELINE_FAILED", `gave_up_after_${attempts}_attempts_at_${nextStep}`);
+    }
+
+    // ACK immediately; perform the one step in after(); self-chain on progress.
+    await sql`UPDATE encounter SET process_attempts = process_attempts + 1, status = 'processing' WHERE id = ${id}`.catch(() => { /* best-effort */ });
+    after(async () => {
+      let progressed = false;
+      try {
+        if (nextStep === "translate") {
+          await translateIfNeeded();
+          await guardTranscripts();
+          progressed = true;
+        } else if (nextStep === "native") {
+          try {
+            const na = await generateNativeAnalysis(row!.transcript_original ?? "", row!.detected_language);
+            if (na) {
+              await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row!.detected_language}, translation_engine = 'saaras' WHERE id = ${id}`;
+            } else {
+              // soft-fail sentinel so we don't loop on this step forever
+              await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id}`;
+            }
+          } catch {
+            await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id}`.catch(() => { /* best-effort */ });
+          }
+          progressed = true;
+        } else if (nextStep === "note") {
+          let nativeRef: string | undefined;
+          if (INDIC_COMPREHENSION_ON() && isIndic) nativeRef = (row!.transcript_original ?? "").trim() || undefined;
+          const noteRes = await generateNote(row!.transcript_raw!, { noteType: row!.note_type ?? undefined, nativeReference: nativeRef, onEvent: stepEmit });
+          if (noteRes.ok) {
+            await sql`UPDATE encounter SET note_json = ${JSON.stringify(noteRes.note)}::jsonb, transcript_clean = ${row!.transcript_raw} WHERE id = ${id}`;
+            progressed = true;
+          }
+          // note failure: leave row as-is (do NOT mark progressed) → bounded retry via cron
+        } else if (nextStep === "cdms") {
+          const pres = await runCdmssPipeline(row!.note_json as EncounterNote, { noteType: row!.note_type ?? undefined, onEvent: stepEmit });
+          const store = pres.ok
+            ? pres.cdmss
+            : (pres.fallback ?? { differentials_to_consider: [], red_flags: [], evidence_based_suggestions: [], follow_up_considerations: [] });
+          await sql`UPDATE encounter SET cdmss_json = ${JSON.stringify(store)}::jsonb, status = 'complete', processing_pct = 100 WHERE id = ${id}`;
+          progressed = true;
+        } else if (nextStep === "finalize") {
+          await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`;
+          progressed = true;
+        } else if (nextStep === "diarize") {
+          await diarizeStore();
+          progressed = true;
+        }
+      } catch (e) {
+        console.warn(`[process:step] enc=${id} step=${nextStep} err=${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (progressed) {
+        await sql`UPDATE encounter SET process_attempts = 0 WHERE id = ${id}`.catch(() => { /* best-effort */ });
+        selfChain();
+      }
+    });
+
+    return respondOk({ step: nextStep, scheduled: true });
+  }
 
   // ---- NDJSON streaming branch ----
   const accept = req.headers.get("accept") ?? "";

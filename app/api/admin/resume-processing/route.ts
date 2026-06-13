@@ -21,13 +21,14 @@ export const maxDuration = 300;
 
 async function resumeOne(origin: string, slug: string, id: string): Promise<boolean> {
   try {
+    // Kick the resumable step machine (ONE step per invocation; self-chaining).
     const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson", "x-eta-internal": process.env.MIGRATION_SECRET as string },
-      body: JSON.stringify({ force: false }),
+      headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
+      body: JSON.stringify({ step: true }),
       cache: "no-store",
     });
-    if (res.body) { const r = res.body.getReader(); while (true) { const { done } = await r.read(); if (done) break; } }
+    await res.text().catch(() => {});
     return true;
   } catch { return false; }
 }
@@ -44,22 +45,26 @@ export async function GET(req: NextRequest) {
 
   if (manualId && secretOk) {
     // Manual recovery: resurrect (failed -> processing; keep transcripts/translated) and resume.
+    // NOTE: clinician.url_slug IS the full public path (token already appended); do NOT re-concat url_token.
     const rows = (await sql`
-      SELECT e.id, (c.url_slug || '-' || c.url_token) AS slug, e.transcript_original FROM encounter e JOIN clinician c ON c.id = e.doctor_id
+      SELECT e.id, c.url_slug AS slug, e.transcript_original FROM encounter e JOIN clinician c ON c.id = e.doctor_id
        WHERE e.id = ${manualId} AND e.deleted_at IS NULL LIMIT 1
     `) as Array<{ id: string; slug: string; transcript_original: string | null }>;
     if (!rows[0]) return respondError("NOT_FOUND", "encounter_not_found");
-    // mark translated if a translation already exists (skip re-translate on resume)
-    await sql`UPDATE encounter SET status = 'processing', translated = (transcript_raw IS NOT NULL) WHERE id = ${manualId}`;
+    // Resurrect: back to processing, fresh attempt budget. Let the step machine
+    // decide what still needs doing (it skips already-completed steps).
+    await sql`UPDATE encounter SET status = 'processing', process_attempts = 0 WHERE id = ${manualId}`;
     const ok = await resumeOne(origin, rows[0].slug, rows[0].id);
     return respondOk({ resumed: ok ? 1 : 0, encounter: manualId, mode: "manual" });
   }
 
   // Cron: oldest encounter stuck in 'processing' for > 4 minutes.
   const rows = (await sql`
-    SELECT e.id, (c.url_slug || '-' || c.url_token) AS slug FROM encounter e JOIN clinician c ON c.id = e.doctor_id
-     WHERE e.status = 'processing' AND e.deleted_at IS NULL
+    SELECT e.id, c.url_slug AS slug FROM encounter e JOIN clinician c ON c.id = e.doctor_id
+     WHERE e.status IN ('processing','failed') AND e.deleted_at IS NULL
        AND e.recorded_at < now() - interval '4 minutes'
+       AND e.recorded_at > now() - interval '6 hours'
+       AND e.process_attempts < 15
      ORDER BY e.recorded_at ASC LIMIT 1
   `) as Array<{ id: string; slug: string }>;
   if (!rows[0]) return respondOk({ resumed: 0 });
