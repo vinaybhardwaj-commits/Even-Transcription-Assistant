@@ -168,8 +168,8 @@ export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, can
   const backLabel = context === "admin" ? "Back to doctors" : "Skip for now";
 
   return (
-    <main className="min-h-screen bg-even-white flex flex-col">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
+    <main className="min-h-screen bg-even-ink-50 flex flex-col">
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-even-ink-100 bg-even-white/90 px-4 py-3 backdrop-blur">
         <span className="text-label text-even-navy-800">Voice setup · Dr {doctorName}</span>
         <button type="button" onClick={() => (context === "admin" ? skip() : setShowSkip(true))} className="text-caption text-even-ink-400 hover:text-even-ink-600">
           {backLabel}
@@ -192,7 +192,7 @@ export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, can
           ))}
         </div>
 
-        <div className="w-full rounded-xl border border-even-ink-100 bg-even-white p-6 text-center">
+        <div className="w-full rounded-2xl border border-even-ink-100 bg-even-white p-6 text-center shadow-soft">
           <p className="text-caption text-even-ink-400 mb-2">Sentence {idx + 1} of {SENTENCES.length}{idx >= 3 ? " · clinical" : ""}</p>
           <p className="text-[22px] leading-relaxed text-even-navy-800" style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}>
             {"“"}{SENTENCES[idx]}{"”"}
@@ -200,7 +200,7 @@ export function VoiceEnrollClient({ doctorName, enrollUrl, doneUrl, context, can
         </div>
 
         {recording ? (
-          <div className="w-full rounded-xl border border-danger-200 bg-danger-50/60 p-4 flex flex-col gap-3">
+          <div className="w-full rounded-2xl border border-danger-500 bg-danger-100/40 p-4 flex flex-col gap-3 shadow-soft">
             <div className="flex items-center gap-2">
               <span className="relative flex h-3 w-3">
                 <span className="absolute inline-flex h-full w-full rounded-full bg-danger-500 opacity-75 animate-ping" />

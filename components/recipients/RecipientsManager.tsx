@@ -125,8 +125,8 @@ export function RecipientsManager({ slug }: { slug: string }) {
   );
 
   return (
-    <main className="min-h-screen bg-even-white">
-      <header className="bg-even-white border-b border-even-ink-100 px-4 py-3 flex items-center justify-between">
+    <main className="min-h-screen bg-even-ink-50">
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-even-ink-100 bg-even-white/90 px-4 py-3 backdrop-blur">
         <button
           type="button"
           onClick={() => router.push(`/${slug}`)}
@@ -141,7 +141,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
       </header>
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
-        <form onSubmit={onAdd} className="rounded-xl border border-even-ink-100 bg-even-white p-4 shadow-card space-y-3">
+        <form onSubmit={onAdd} className="rounded-2xl border border-even-ink-100 bg-even-white p-4 shadow-soft space-y-3">
           <h2 className="text-heading text-even-navy-800">Add contact</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -152,7 +152,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
                 value={addName}
                 onChange={(e) => setAddName(e.target.value)}
                 placeholder="e.g. Records desk"
-                className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300"
+                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
               />
             </div>
             <div>
@@ -164,7 +164,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
                 onChange={(e) => setAddEmail(e.target.value)}
                 placeholder="records@even.in"
                 autoComplete="off"
-                className="w-full rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300"
+                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
               />
             </div>
           </div>
@@ -174,7 +174,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
               id="rn-role"
               value={addRole}
               onChange={(e) => setAddRole(e.target.value as Role)}
-              className="rounded-md border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-300"
+              className="rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
             >
               {ROLE_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -198,7 +198,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
             No saved contacts yet. Add one above to use it on the Send panel.
           </p>
         ) : (
-          <div className="rounded-xl border border-even-ink-100 bg-even-white overflow-hidden">
+          <div className="rounded-2xl border border-even-ink-100 bg-even-white overflow-hidden shadow-soft">
             <table className="w-full text-left">
               <thead className="text-caption uppercase tracking-wide text-even-ink-500 bg-even-ink-50/40">
                 <tr>
