@@ -124,13 +124,13 @@ export function Library({ slug }: Props) {
           Refresh
         </button>
       </div>
-      <ul className="space-y-2">
+      <ul className="space-y-2.5">
         {state.rows.map((r) => (
           <li key={r.id}>
             <button
               type="button"
               onClick={() => router.push(`/${slug}/encounter/${r.id}`)}
-              className="w-full text-left rounded-lg border border-even-ink-100 bg-even-white p-4 hover:bg-even-ink-50 focus:outline-none focus:ring-2 focus:ring-even-blue-300 transition"
+              className="w-full text-left rounded-2xl border border-even-ink-100 bg-even-white p-4 shadow-card hover:shadow-card-hover hover:border-even-ink-200 focus:outline-none focus:ring-2 focus:ring-even-blue-200 transition"
             >
               <div className="flex items-start justify-between gap-3 mb-1">
                 <p className="text-body text-even-navy-800 truncate">

@@ -8,6 +8,17 @@ import { Library } from "@/components/Library";
 
 type Props = { slug: string; doctorName: string; voiceEnrolled?: boolean; clinicianType?: string };
 
+function MicIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M9 5a3 3 0 0 1 6 0v5a3 3 0 0 1 -6 0z" />
+      <path d="M5 10a7 7 0 0 0 14 0" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+    </svg>
+  );
+}
+
 export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianType = "physician" }: Props) {
   const router = useRouter();
   const [tab, setTab] = React.useState<"record" | "library">("record");
@@ -19,117 +30,82 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianTyp
   const [noteType, setNoteType] = React.useState<string>(noteOptions[0][0]);
 
   const goRecord = React.useCallback(() => {
-    // patient_label is captured in the recording screen / submit step;
-    // we pass via sessionStorage so the create call can hand it to the API.
     if (patientLabel.trim()) {
-      try {
-        sessionStorage.setItem("eta:pending_patient_label", patientLabel.trim());
-      } catch {
-        /* private mode */
-      }
+      try { sessionStorage.setItem("eta:pending_patient_label", patientLabel.trim()); } catch { /* private mode */ }
     }
-    try {
-      sessionStorage.setItem("eta:pending_note_type", noteType);
-    } catch {
-      /* private mode */
-    }
+    try { sessionStorage.setItem("eta:pending_note_type", noteType); } catch { /* private mode */ }
     router.push(`/${slug}/record`);
   }, [router, slug, patientLabel, noteType]);
 
+  const cleanName = doctorName.replace(/^Dr\.?\s+/i, "");
+  const initials = cleanName.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+
   return (
-    <main className="min-h-screen bg-even-white">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-even-ink-100">
-        <span className="text-label text-even-navy-800">
-          Dr {doctorName.replace(/^Dr\.?\s+/i, "")}
-        </span>
-        <span className="text-caption text-even-ink-400">{/* settings + menu (Sprint 2) */}</span>
+    <main className="min-h-screen bg-even-ink-50">
+      <header className="sticky top-0 z-10 border-b border-even-ink-100 bg-even-white/90 backdrop-blur">
+        <div className="eta-page flex items-center justify-between py-3">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-even-blue-600 text-white text-caption font-medium">{initials}</span>
+            <span className="text-label text-even-navy-800">Dr {cleanName}</span>
+          </div>
+          <div className="inline-flex items-center gap-1 rounded-full bg-even-ink-100 p-1">
+            <button type="button" onClick={() => setTab("record")} className={`eta-tab ${tab === "record" ? "eta-tab-active" : "eta-tab-idle"}`}>Record</button>
+            <button type="button" onClick={() => setTab("library")} className={`eta-tab ${tab === "library" ? "eta-tab-active" : "eta-tab-idle"}`}>Library</button>
+          </div>
+        </div>
       </header>
 
-      <div className="px-4 pt-4">
-        <div className="inline-flex rounded-md border border-even-ink-200 overflow-hidden text-label">
-          <button
-            type="button"
-            onClick={() => setTab("record")}
-            className={`px-4 py-2 ${tab === "record" ? "bg-even-blue-600 text-white" : "bg-even-white text-even-navy-800"}`}
-          >
-            Record
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("library")}
-            className={`px-4 py-2 ${tab === "library" ? "bg-even-blue-600 text-white" : "bg-even-white text-even-navy-800"}`}
-          >
-            Library
-          </button>
-        </div>
-      </div>
-
       {tab === "record" ? (
-        <div className="px-4 pt-6 pb-12">
-          <h2 className="text-heading text-even-navy-800 mb-4">New encounter</h2>
-
+        <div className="eta-page pt-6 pb-16">
           {!voiceEnrolled ? (
-            <a
-              href={`/${slug}/onboarding/voice`}
-              className="mb-4 block rounded-md border border-even-blue-200 bg-even-blue-50 px-4 py-3"
-            >
-              <span className="text-label text-even-navy-800">Set up voice recognition</span>
-              <span className="block text-caption text-even-ink-500">~90 seconds — lets the app label you (vs the patient) in recordings.</span>
+            <a href={`/${slug}/onboarding/voice`} className="mb-4 flex items-start gap-3 rounded-2xl border border-even-blue-200 bg-even-blue-50 px-4 py-3">
+              <MicIcon className="mt-0.5 h-5 w-5 shrink-0 text-even-blue-600" />
+              <span>
+                <span className="block text-label text-even-navy-800">Set up voice recognition</span>
+                <span className="block text-caption text-even-ink-500">~90 seconds — lets the app label you (vs the patient) in recordings.</span>
+              </span>
             </a>
           ) : null}
 
-          <div className="mb-4">
-            <span className="block text-label text-even-navy-800 mb-1.5">Note type</span>
-            <div className="inline-flex w-full rounded-md border border-even-ink-200 overflow-hidden text-label">
-              {noteOptions.map(([v, lbl]) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => setNoteType(v)}
-                  aria-pressed={noteType === v}
-                  className={`flex-1 px-3 py-2 ${noteType === v ? "bg-even-blue-600 text-white" : "bg-even-white text-even-navy-800"}`}
-                >
-                  {lbl}
-                </button>
-              ))}
+          <div className="eta-card p-5">
+            <h2 className="text-heading text-even-navy-800">New encounter</h2>
+            <p className="mt-1 text-caption text-even-ink-400">Pick a note type, then tap record.</p>
+
+            <div className="mt-5">
+              <span className="mb-1.5 block text-label text-even-navy-800">Note type</span>
+              <div className="eta-seg">
+                {noteOptions.map(([v, lbl]) => (
+                  <button key={v} type="button" onClick={() => setNoteType(v)} aria-pressed={noteType === v}
+                    className={`eta-seg-item ${noteType === v ? "eta-seg-item-active" : ""}`}>{lbl}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <Input label="Patient (optional)" placeholder="e.g. Sarah, 34F, chest pain f/u"
+                value={patientLabel} onChange={(e) => setPatientLabel(e.target.value)}
+                autoComplete="off" spellCheck={false} autoCapitalize="off" data-gramm="false" />
+            </div>
+
+            <div className="mt-8 flex flex-col items-center">
+              <button type="button" onClick={goRecord} aria-label="Start recording"
+                className="eta-btn-primary group h-40 w-40 flex-col rounded-full shadow-card-hover">
+                <MicIcon className="h-9 w-9" />
+                <span className="mt-1 text-label">Record</span>
+              </button>
+              <p className="mt-6 max-w-xs text-center text-caption text-even-ink-400">
+                Tap to begin. We&rsquo;ll ask for microphone permission on the next screen.
+              </p>
             </div>
           </div>
 
-          <Input
-            label="Patient (optional)"
-            placeholder="e.g. Sarah, 34F, chest pain f/u"
-            value={patientLabel}
-            onChange={(e) => setPatientLabel(e.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-            autoCapitalize="off"
-            data-gramm="false"
-          />
-
-          <div className="flex justify-center mt-12">
-            <button
-              type="button"
-              onClick={goRecord}
-              className="w-44 h-44 rounded-full bg-even-blue-600 hover:bg-even-blue-700 active:bg-even-blue-800 text-white text-display flex flex-col items-center justify-center gap-2 shadow-card-hover focus:outline-none focus:ring-4 focus:ring-even-blue-300 transition"
-              aria-label="Start recording"
-            >
-              <span className="text-4xl" aria-hidden="true">🎤</span>
-              <span className="text-label">Record</span>
-            </button>
-          </div>
-
-          <p className="mt-8 text-caption text-even-ink-400 text-center">
-            Tap to begin. We will ask for microphone permission on the next screen.
-          </p>
-          <p className="mt-6 text-caption text-even-ink-500 text-center">
-            <a href={`/${slug}/recipients`} className="text-even-blue-600 hover:underline">
-              Manage saved contacts
-            </a>
+          <p className="mt-6 text-center text-caption text-even-ink-500">
+            <a href={`/${slug}/recipients`} className="text-even-blue-600 hover:underline">Manage saved contacts</a>
           </p>
         </div>
       ) : (
-        <div className="px-4 pt-6 pb-12">
-          <h2 className="text-heading text-even-navy-800 mb-4">Library</h2>
+        <div className="eta-page pt-6 pb-16">
+          <h2 className="mb-4 text-heading text-even-navy-800">Library</h2>
           <Library slug={slug} />
         </div>
       )}

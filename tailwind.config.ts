@@ -102,10 +102,13 @@ const config: Config = {
         md: "6px",
         lg: "8px",
         xl: "12px",
+        "2xl": "16px",
+        "3xl": "22px",
       },
       boxShadow: {
         card: "0 1px 2px rgba(0, 32, 84, 0.04)",
         "card-hover": "0 2px 8px rgba(0, 32, 84, 0.08)",
+        soft: "0 1px 3px rgba(0, 32, 84, 0.06), 0 8px 24px -12px rgba(0, 32, 84, 0.10)",
       },
     },
   },

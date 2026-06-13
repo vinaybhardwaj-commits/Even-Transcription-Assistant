@@ -41,3 +41,23 @@
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-caption font-medium bg-even-ink-100 text-even-ink-500;
   }
 }
+
+@layer components {
+  /* ===== Redesign foundation (v2 visual language) ===================== */
+  /* Centered, mobile-first content column. */
+  .eta-page { @apply mx-auto w-full max-w-xl px-4; }
+  /* Soft white card. */
+  .eta-card { @apply bg-even-white rounded-2xl border border-even-ink-100 shadow-soft; }
+  /* Primary action button. */
+  .eta-btn-primary { @apply inline-flex items-center justify-center gap-2 bg-even-blue-600 hover:bg-even-blue-700 active:bg-even-blue-800 text-white rounded-2xl font-medium transition focus:outline-none focus:ring-4 focus:ring-even-blue-200 disabled:opacity-50; }
+  /* Secondary / outline button. */
+  .eta-btn-secondary { @apply inline-flex items-center justify-center gap-2 bg-even-white text-even-navy-800 border border-even-ink-200 hover:bg-even-ink-50 rounded-2xl font-medium transition focus:outline-none focus:ring-4 focus:ring-even-blue-100; }
+  /* Segmented control (note-type, tabs). */
+  .eta-seg { @apply inline-flex w-full gap-1 rounded-2xl bg-even-ink-100 p-1; }
+  .eta-seg-item { @apply flex-1 rounded-xl px-3 py-2 text-label text-even-ink-500 transition; }
+  .eta-seg-item-active { @apply bg-even-white text-even-navy-800 shadow-card; }
+  /* Pill tabs (Record / Library). */
+  .eta-tab { @apply rounded-full px-4 py-1.5 text-label transition; }
+  .eta-tab-active { @apply bg-even-blue-600 text-white; }
+  .eta-tab-idle { @apply text-even-ink-500 hover:text-even-navy-800; }
+}
