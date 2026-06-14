@@ -40,6 +40,7 @@ import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
+import { transcribeWithWhisper } from "@/lib/whisper";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
@@ -167,7 +168,32 @@ export async function POST(
     // Telugu/Kannada/Malayalam). English-only transcripts skip this.
     const langNonEn = !!row.detected_language && isNonEnglish(row.detected_language);
     const hasIndic = /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
-    if (!langNonEn && !hasIndic) return;
+    if (!langNonEn && !hasIndic) {
+      // ENGLISH path: refine the canonical transcript with a full-file Whisper pass
+      // FORCED to English. The live transcript can be thin/garbled (especially when
+      // the language was mis-detected upstream); a whole-file Whisper run with
+      // language=en avoids whisper.cpp's whole-file language-detection drift and is
+      // usually the cleanest English transcript. Soft-fail + adopt-only-if-better, so
+      // it can never make the note worse than the live transcript. (Poornima fix.)
+      try {
+        const head = await headObject(row.audio_object_key);
+        const bytes = await getObjectBytes(row.audio_object_key);
+        if (!bytes) return;
+        emit?.({ stage: "progress", msg: "Refining English transcript (full-file Whisper)\u2026" });
+        const wr = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en" });
+        if (wr.ok) {
+          const cur = (row.transcript_raw ?? "").trim();
+          if (wr.transcript.length > cur.length * 1.1 || cur.length < 40) {
+            row.transcript_raw = wr.transcript;
+            await sql`UPDATE encounter SET transcript_raw = ${wr.transcript} WHERE id = ${id}`;
+            emit?.({ stage: "progress", msg: `English transcript refined (${wr.transcript.length} chars)` });
+          }
+        }
+      } catch (e) {
+        console.warn(`[process] english whisper refine failed enc=${id}: ${String(e).slice(0, 100)}`);
+      }
+      return;
+    }
     emit?.({ stage: "progress", msg: "Translating full conversation (Sarvam)\u2026" });
     try {
       const head = await headObject(row.audio_object_key);
@@ -428,9 +454,9 @@ export async function POST(
       /[\u0900-\u0DFF]/.test(row.transcript_original ?? "") ||
       /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
     const hasCdms = cdsApplies;
-    const needTranslate =
-      !!row.audio_object_key && !row.translated &&
-      ((!!row.detected_language && isNonEnglish(row.detected_language)) || /[\u0900-\u0DFF]/.test(row.transcript_raw ?? ""));
+    // Run the transcription/translation step once for EVERY encounter that has audio:
+    // Indic → Sarvam batch translate; English → full-file Whisper refine (language-forced).
+    const needTranslate = !!row.audio_object_key && !row.translated;
     const needNative = INDIC_COMPREHENSION_ON() && isIndic && !row.native_analysis;
     const needNote = !row.note_json;
     const needCdms = !!row.note_json && hasCdms && !row.cdmss_json;
@@ -484,6 +510,7 @@ export async function POST(
         if (nextStep === "translate") {
           await translateIfNeeded();
           await guardTranscripts();
+          await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
           progressed = true;
         } else if (nextStep === "native") {
           try {

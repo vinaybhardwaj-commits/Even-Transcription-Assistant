@@ -34,6 +34,7 @@ export type WhisperResult =
 export async function transcribeWithWhisper(
   audio: Buffer | Uint8Array,
   contentType: string = 'audio/webm',
+  opts: { language?: string } = {},
 ): Promise<WhisperResult> {
   const base = process.env.WHISPER_BASE_URL;
   if (!base) {
@@ -60,9 +61,12 @@ export async function transcribeWithWhisper(
   form.append('file', blob, `audio.${ext}`);
   form.append('response_format', 'json');
   form.append('temperature', '0.0');
-  // Hint at language — let whisper auto-detect; for Indian-context recordings
-  // this lets it handle English/Hindi/Kannada code-switching naturally.
-  // (If we set language='en' explicitly, we lose the code-switch benefit.)
+  // Language: by default let whisper auto-detect (good for code-switching). BUT
+  // whisper.cpp picks ONE language for the whole file from its first window, so a
+  // code-mixed tail can poison detection and garble the entire transcript. When
+  // the caller knows the dominant language (e.g. corroborated English), forcing it
+  // avoids that drift. See enc_6tcns74jp7 (Poornima) — auto garbled, language=en clean.
+  if (opts.language) form.append('language', opts.language);
 
   // 90s ceiling — short dictations should return in 1-5s; long ambient
   // recordings (60-180s) might need more. Cap at 90s as a safety net.
