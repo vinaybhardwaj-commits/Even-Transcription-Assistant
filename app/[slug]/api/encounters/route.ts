@@ -115,6 +115,7 @@ export async function GET(
     processing_pct: number | null;
     note_type: string | null;
     chief_complaint: string | null;
+    transcript_flag: string | null;
   };
 
   try {
@@ -127,6 +128,7 @@ export async function GET(
              status,
              send_status,
              processing_pct,
+             transcript_flag,
              COALESCE(
                (note_json_edited->>'chief_complaint'),
                (note_json->>'chief_complaint'),
@@ -154,6 +156,7 @@ export async function GET(
         processing_pct: r.processing_pct,
         note_type: r.note_type,
         chief_complaint: r.chief_complaint,
+        transcript_flag: r.transcript_flag,
       })),
     });
   } catch (e) {

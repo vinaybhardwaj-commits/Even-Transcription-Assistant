@@ -25,6 +25,8 @@ type Row = {
   speakers: unknown[] | null;
   tagged_transcript: unknown[] | null;
   diarize_status: string | null;
+  transcript_flag: string | null;
+  transcript_flag_reason: string | null;
   note_type: string | null;
   note_json: AnyNote | null;
   note_json_edited: AnyNote | null;
@@ -69,7 +71,7 @@ export default async function EncounterPage({
   try {
     const [encRows, docRows, eventRows] = await Promise.all([
       sql`
-        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, processing_pct, processing_stages, speakers, tagged_transcript, diarize_status, note_type, note_json,
+        SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, processing_pct, processing_stages, speakers, tagged_transcript, diarize_status, transcript_flag, transcript_flag_reason, note_type, note_json,
                note_json_edited, cdmss_json, send_status, sent_at
           FROM encounter
          WHERE id = ${id} AND deleted_at IS NULL
@@ -114,6 +116,8 @@ export default async function EncounterPage({
         speakers: row.speakers,
         taggedTranscript: row.tagged_transcript,
         diarizeStatus: row.diarize_status,
+        transcriptFlag: row.transcript_flag,
+        transcriptFlagReason: row.transcript_flag_reason,
         sendStatus: row.send_status,
         sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : null,
         sendEvents: sendEvents.map((e) => ({

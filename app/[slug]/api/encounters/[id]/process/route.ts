@@ -41,6 +41,7 @@ import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
 import { transcribeWithWhisper } from "@/lib/whisper";
+import { assessTranscriptQuality } from "@/lib/transcript-quality";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
@@ -61,6 +62,7 @@ type Row = {
   diarize_status: string | null;
   native_analysis: unknown | null;
   process_attempts: number | null;
+  duration_seconds: number | null;
 };
 
 function isAbortError(e: unknown): boolean {
@@ -109,7 +111,7 @@ export async function POST(
   try {
     const rows = (await sql`
       SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, note_type,
-             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis, process_attempts
+             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis, process_attempts, duration_seconds
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
        LIMIT 1
@@ -257,6 +259,18 @@ export async function POST(
       console.warn(`[process] batch-translate failed enc=${id}: ${m}`);
       emit?.({ stage: "progress", msg: "Batch translate error; using live transcript" });
     }
+  };
+
+  // Patient-safety guardrail: assess the FINAL transcript and flag empty /
+  // too-short-for-duration / degraded transcriptions so the UI warns the clinician
+  // instead of silently presenting an incomplete note (the Poornima failure class).
+  const assessAndFlag = async (emit?: (o: unknown) => void): Promise<void> => {
+    if (!row) return;
+    const q = assessTranscriptQuality(row.transcript_raw, row.duration_seconds);
+    try {
+      await sql`UPDATE encounter SET transcript_flag = ${q.flag}, transcript_flag_reason = ${q.reason} WHERE id = ${id}`;
+    } catch { /* best-effort: a flag-write must never block the pipeline */ }
+    if (q.flag) emit?.({ stage: "progress", msg: `\u26a0 Transcript flagged (${q.flag}): ${q.reason}` });
   };
 
   // B14 guard — strip non-clinical lead-in (foreign-language intro + ASR/ad
@@ -529,6 +543,7 @@ export async function POST(
         if (nextStep === "translate") {
           await translateIfNeeded();
           await guardTranscripts();
+          await assessAndFlag();
           await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
           progressed = true;
         } else if (nextStep === "native") {
@@ -642,6 +657,7 @@ export async function POST(
           // Full-file Sarvam batch translate for non-English (accuracy + safety net).
           await translateIfNeeded(emit);
           await guardTranscripts(emit);
+          await assessAndFlag(emit);
 
           // ---- Indic Comprehension Layer (non-English; flag ETA_INDIC_COMPREHENSION, default ON) ----
           // Saves a faithful native-language analysis for inspection and supplies the native

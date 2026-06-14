@@ -38,6 +38,8 @@ type InitialState = {
   speakers: unknown[] | null;
   taggedTranscript: unknown[] | null;
   diarizeStatus: string | null;
+  transcriptFlag?: string | null;
+  transcriptFlagReason?: string | null;
   sendStatus: SendStatus;
   sentAt: string | null;
   sendEvents: SendEventLite[];
@@ -476,6 +478,14 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
       </header>
 
       <div className="px-4 py-6 max-w-2xl mx-auto space-y-6">
+        {initial.transcriptFlag ? (
+          <div className="rounded-2xl border border-warning-500/40 bg-warning-100 p-4" role="alert">
+            <p className="text-label text-warning-700 mb-0.5">\u26a0 Transcription may be incomplete</p>
+            <p className="text-caption text-warning-700/90">
+              {initial.transcriptFlagReason || "The transcript looks empty or unusually short for this recording."} Please review the original audio before relying on this note.
+            </p>
+          </div>
+        ) : null}
         {!s.processing && s.status === "processing" && !s.note ? (
           <div className="rounded-2xl border border-even-blue-100 bg-even-blue-50 p-5 space-y-4 shadow-soft">
             <div>

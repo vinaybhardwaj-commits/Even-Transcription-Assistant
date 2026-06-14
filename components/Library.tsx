@@ -16,6 +16,7 @@ type Row = {
   processing_pct: number | null;
   note_type: string | null;
   chief_complaint: string | null;
+  transcript_flag?: string | null;
 };
 
 type Props = { slug: string };
@@ -172,6 +173,11 @@ export function Library({ slug }: Props) {
                   </div>
                   <span className="text-caption tabular-nums text-even-ink-500">{Math.max(0, Math.min(100, r.processing_pct ?? 0))}%</span>
                 </div>
+              ) : null}
+              {r.status !== "processing" && r.transcript_flag ? (
+                <p className="mt-2 inline-flex items-center gap-1 rounded-full bg-warning-100 px-2.5 py-0.5 text-caption text-warning-700">
+                  <span aria-hidden>\u26a0</span> Transcription may be incomplete \u2014 review
+                </p>
               ) : null}
             </button>
           </li>
