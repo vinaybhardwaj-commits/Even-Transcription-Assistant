@@ -168,7 +168,26 @@ export async function POST(
     // Telugu/Kannada/Malayalam). English-only transcripts skip this.
     const langNonEn = !!row.detected_language && isNonEnglish(row.detected_language);
     const hasIndic = /[\u0900-\u0DFF]/.test(row.transcript_raw ?? "");
-    if (!langNonEn && !hasIndic) {
+    // MIS-DETECTION GUARD (cheap, Vercel-side): an encounter tagged Indic but with
+    // NO Indic-script evidence anywhere (empty/near-empty native transcript AND no
+    // Indic script in the working transcript) AND a working transcript that
+    // positively looks like English is almost certainly accented English that Sarvam
+    // mislabelled — the exact signature of enc_6tcns74jp7 (kn, origLen 0) and
+    // enc_wy3bjj44kz (hi, origLen 46), both measured 100% English. Re-route such
+    // encounters to the English Whisper path and correct the stored language, instead
+    // of sending English audio down the Indic translate path (which garbles it).
+    const origRaw = (row.transcript_original ?? "").trim();
+    const origHasIndic = /[\u0900-\u0DFF]/.test(origRaw);
+    const work = (row.transcript_raw ?? "").trim();
+    const asciiRatio = work.length ? (work.match(/[a-zA-Z]/g) ?? []).length / work.length : 0;
+    const workLooksEnglish = work.length > 30 && asciiRatio > 0.5;
+    const misdetectedEnglish = langNonEn && !hasIndic && !origHasIndic && origRaw.length < 20 && workLooksEnglish;
+    if (misdetectedEnglish) {
+      emit?.({ stage: "progress", msg: `Language re-checked: tagged ${row.detected_language} but no native script found \u2014 treating as English` });
+      try { await sql`UPDATE encounter SET detected_language = 'en-IN' WHERE id = ${id}`; row.detected_language = "en-IN"; } catch { /* best-effort */ }
+      console.warn(`[process] misdetection-guard enc=${id}: tagged Indic, no native script, work looks English -> English`);
+    }
+    if ((!langNonEn && !hasIndic) || misdetectedEnglish) {
       // ENGLISH path: refine the canonical transcript with a full-file Whisper pass
       // FORCED to English. The live transcript can be thin/garbled (especially when
       // the language was mis-detected upstream); a whole-file Whisper run with
