@@ -51,11 +51,24 @@ export async function GET(req: NextRequest) {
        WHERE e.id = ${manualId} AND e.deleted_at IS NULL LIMIT 1
     `) as Array<{ id: string; slug: string; transcript_original: string | null }>;
     if (!rows[0]) return respondError("NOT_FOUND", "encounter_not_found");
-    // Resurrect: back to processing, fresh attempt budget. Let the step machine
-    // decide what still needs doing (it skips already-completed steps).
-    await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL WHERE id = ${manualId}`;
+    // ?reset=1 — full RE-PROCESS from the saved audio: clear the derived outputs
+    // (note/CDS/translation/flag/diarize) so the step machine regenerates them via
+    // the current pipeline (incl. the English Whisper-refine + guardrail). Use to
+    // recover encounters that completed with an empty/garbled note before the fixes.
+    const reset = req.nextUrl.searchParams.get("reset") === "1";
+    if (reset) {
+      await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL,
+                  translated = false, note_json = NULL, cdmss_json = NULL,
+                  transcript_flag = NULL, transcript_flag_reason = NULL,
+                  diarize_status = NULL, processing_pct = 0, processing_stages = NULL
+                WHERE id = ${manualId}`;
+    } else {
+      // Resurrect: back to processing, fresh attempt budget. Let the step machine
+      // decide what still needs doing (it skips already-completed steps).
+      await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL WHERE id = ${manualId}`;
+    }
     const ok = await resumeOne(origin, rows[0].slug, rows[0].id);
-    return respondOk({ resumed: ok ? 1 : 0, encounter: manualId, mode: "manual" });
+    return respondOk({ resumed: ok ? 1 : 0, encounter: manualId, mode: reset ? "reset" : "manual" });
   }
 
   // Cron: oldest encounter stuck in 'processing' for > 4 minutes.
