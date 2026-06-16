@@ -35,6 +35,7 @@ import { getObjectBytes, headObject } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assist";
 import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-comprehension";
+import { routeTranscribe, ETA_ROUTER_ON } from "@/lib/stt/eta-router";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
@@ -223,6 +224,39 @@ export async function POST(
         emit?.({ stage: "progress", msg: "Audio unavailable for batch translate; using live transcript" });
         return;
       }
+      // PRIMARY (Indic / code-mixed): the Mac-Mini eta-router does per-segment
+      // language detection + best-engine routing (whisper EN / IndicConformer native)
+      // + qwen English translation, returning a faithful native transcript AND clean
+      // English. Replaces the single-engine Sarvam batch translate for Indic. Default
+      // ON (ETA_ROUTER=0 kills it); soft-fail -> Sarvam below.
+      if (ETA_ROUTER_ON()) {
+        try {
+          emit?.({ stage: "progress", msg: "Per-segment transcription (eta-router)\u2026" });
+          const rr = await routeTranscribe(bytes, head.content_type || "audio/webm", { translate: true });
+          const eng = (rr.transcript_english || "").trim();
+          if (rr.ok && eng.length > 0) {
+            const native = (rr.transcript_native || "").trim();
+            row.transcript_raw = eng;
+            row.translated = true;
+            if (native) row.transcript_original = native;
+            if (rr.dominant_language) row.detected_language = rr.dominant_language;
+            await sql`UPDATE encounter
+                        SET transcript_raw = ${eng},
+                            transcript_original = ${native || row.transcript_original || null},
+                            translated = true,
+                            translation_engine = 'eta-router',
+                            detected_language = ${rr.dominant_language ?? row.detected_language},
+                            language_timeline = ${JSON.stringify(rr.language_timeline ?? null)}::jsonb
+                      WHERE id = ${id}`;
+            emit?.({ stage: "progress", msg: `eta-router transcript ready (${eng.length} chars, ${rr.dominant_language ?? "?"})` });
+            return; // router is canonical; skip Sarvam
+          }
+          emit?.({ stage: "progress", msg: `eta-router unavailable (${rr.ok ? "empty" : rr.error}); falling back to Sarvam` });
+        } catch (e) {
+          console.warn(`[process] eta-router failed enc=${id}: ${String(e).slice(0, 120)}`);
+        }
+      }
+
       const bt = await sarvamBatchTranslate(bytes, head.content_type || "audio/webm", {
         prompt: SARVAM_MEDICAL_PROMPT,
         withDiarization: true,
