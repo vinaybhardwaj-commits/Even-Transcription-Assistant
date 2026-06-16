@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
     SELECT e.id, c.url_slug AS slug FROM encounter e JOIN clinician c ON c.id = e.doctor_id
      WHERE e.status IN ('processing','failed') AND e.deleted_at IS NULL
        AND e.recorded_at < now() - interval '4 minutes'
-       AND e.recorded_at > now() - interval '6 hours'
+       AND e.recorded_at > now() - interval '30 days'  -- wide enough to drain back-catalogue recoveries (reset=1); bounded by process_attempts<15
        AND e.process_attempts < 15
      ORDER BY e.recorded_at ASC LIMIT 1
   `) as Array<{ id: string; slug: string }>;
