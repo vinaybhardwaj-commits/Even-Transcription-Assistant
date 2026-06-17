@@ -978,6 +978,12 @@ export async function POST(
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
   await translateIfNeeded();
   await guardTranscripts();
+  // translateIfNeeded re-transcribes the saved audio when the live transcript was
+  // empty; if there is STILL nothing usable, fail clearly (and narrow the type).
+  if (!row.transcript_raw || row.transcript_raw.trim().length === 0) {
+    await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
+    return respondError("PIPELINE_FAILED", "no_intelligible_audio");
+  }
   const noteRes = await generateNote(row.transcript_raw, { signal: req.signal, noteType: row.note_type ?? undefined, nativeReference: (INDIC_COMPREHENSION_ON() && row.detected_language && isNonEnglish(row.detected_language)) ? (row.transcript_original ?? undefined) : undefined });
   if (!noteRes.ok) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;

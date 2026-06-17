@@ -419,7 +419,7 @@ export async function generateNote(
 ): Promise<NoteResult> {
   const base = process.env.OLLAMA_BASE_URL;
   if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
-  const cleanTranscript = transcript.trim();
+  const cleanTranscript = (transcript ?? "").trim();
   if (cleanTranscript.length === 0) {
     return { ok: false, error: "empty_transcript", latency_ms: 0 };
   }
