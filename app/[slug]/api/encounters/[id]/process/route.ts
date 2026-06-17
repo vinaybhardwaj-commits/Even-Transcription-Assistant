@@ -245,7 +245,16 @@ export async function POST(
       // + qwen English translation, returning a faithful native transcript AND clean
       // English. Replaces the single-engine Sarvam batch translate for Indic. Default
       // ON (ETA_ROUTER=0 kills it); soft-fail -> Sarvam below.
-      if (ETA_ROUTER_ON()) {
+      // LONG-FILE GUARD: the per-segment router runs on the single Mac Mini and
+      // times out (~285s) on long recordings (>~8min), starving the rest of the
+      // step. For long audio, SKIP the router and use Sarvam's cloud BATCH job
+      // (handles full files, off-Mini) + Gemini fusion instead, so long encounters
+      // actually complete. (Proper fix = a chunked/parallel router — separate task.)
+      const tooLongForRouter = (row.duration_seconds ?? 0) > 480;
+      if (tooLongForRouter) {
+        emit?.({ stage: "progress", msg: "Long recording — using cloud batch translation + fusion (per-segment router skipped)" });
+      }
+      if (ETA_ROUTER_ON() && !tooLongForRouter) {
         try {
           emit?.({ stage: "progress", msg: "Per-segment transcription (eta-router)\u2026" });
           const rr = await routeTranscribe(bytes, head.content_type || "audio/webm", { translate: true });
