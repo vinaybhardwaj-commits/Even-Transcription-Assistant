@@ -34,7 +34,7 @@ export type WhisperResult =
 export async function transcribeWithWhisper(
   audio: Buffer | Uint8Array,
   contentType: string = 'audio/webm',
-  opts: { language?: string } = {},
+  opts: { language?: string; timeoutMs?: number } = {},
 ): Promise<WhisperResult> {
   const base = process.env.WHISPER_BASE_URL;
   if (!base) {
@@ -71,7 +71,7 @@ export async function transcribeWithWhisper(
   // 90s ceiling — short dictations should return in 1-5s; long ambient
   // recordings (60-180s) might need more. Cap at 90s as a safety net.
   const controller = new AbortController();
-  const timeoutMs = 90_000;
+  const timeoutMs = opts.timeoutMs ?? 90_000;
   const tid = setTimeout(() => controller.abort(), timeoutMs);
 
   const t0 = Date.now();

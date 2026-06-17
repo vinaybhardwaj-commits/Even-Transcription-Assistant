@@ -252,7 +252,27 @@ export async function POST(
       // actually complete. (Proper fix = a chunked/parallel router — separate task.)
       const tooLongForRouter = (row.duration_seconds ?? 0) > 480;
       if (tooLongForRouter) {
-        emit?.({ stage: "progress", msg: "Long recording — using cloud batch translation + fusion (per-segment router skipped)" });
+        emit?.({ stage: "progress", msg: "Long recording — Whisper full-file + cloud batch + fusion (per-segment router skipped)" });
+        // Whisper full-file (Mini, language-forced English) is the reliable
+        // transcriber for long recordings: no 285s router wrapper, no cloud-batch
+        // dependency, generous timeout. Produces a baseline transcript + a fusion
+        // candidate. Persisted immediately so the encounter survives even if a
+        // later engine/step dies.
+        try {
+          const wlong = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en", timeoutMs: 280_000 });
+          if (wlong.ok && wlong.transcript.trim().length > 0) {
+            const wt = wlong.transcript.trim();
+            fuseCands.push({ engine: "whisper-en", english: wt, native: null, language: "en" });
+            row.transcript_raw = wt;
+            row.translated = true;
+            await sql`UPDATE encounter SET transcript_raw = ${wt}, translated = true, translation_engine = 'whisper-en' WHERE id = ${id}`;
+            emit?.({ stage: "progress", msg: `Whisper transcript ready (${wt.length} chars)` });
+          } else {
+            emit?.({ stage: "progress", msg: `Whisper long-file unavailable (${wlong.ok ? "empty" : wlong.error})` });
+          }
+        } catch (e) {
+          console.warn(`[process] whisper long-file failed enc=${id}: ${String(e).slice(0, 120)}`);
+        }
       }
       if (ETA_ROUTER_ON() && !tooLongForRouter) {
         try {
