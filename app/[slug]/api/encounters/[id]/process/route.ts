@@ -31,11 +31,11 @@ import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
 import { runCdmssPipeline, type CdmssRich } from "@/lib/cdmss-pipeline";
 import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
 import { respondOk, respondError } from "@/lib/respond";
-import { getObjectBytes, headObject } from "@/lib/r2";
+import { getObjectBytes, headObject, signGetUrl } from "@/lib/r2";
 import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assist";
 import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-comprehension";
-import { routeTranscribe, ETA_ROUTER_ON } from "@/lib/stt/eta-router";
+import { routeTranscribe, ETA_ROUTER_ON, ROUTER_JOB_ON, submitRouteJob, pollRouteJob } from "@/lib/stt/eta-router";
 import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "@/lib/stt/fuse-transcript";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
@@ -65,6 +65,7 @@ type Row = {
   native_analysis: unknown | null;
   process_attempts: number | null;
   duration_seconds: number | null;
+  router_job_id: string | null;
 };
 
 function isAbortError(e: unknown): boolean {
@@ -113,7 +114,7 @@ export async function POST(
   try {
     const rows = (await sql`
       SELECT id, doctor_id, status, transcript_raw, transcript_original, detected_language, note_type,
-             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis, process_attempts, duration_seconds
+             audio_object_key, note_json, cdmss_json, translated, diarize_status, native_analysis, process_attempts, duration_seconds, router_job_id
         FROM encounter
        WHERE id = ${id} AND deleted_at IS NULL
        LIMIT 1
@@ -166,6 +167,9 @@ export async function POST(
   // request so cancel works. Background step-mode nulls it out, because after()
   // work outlives the request and req.signal aborts the moment we ACK.
   let pipeSignal: AbortSignal | undefined = req.signal;
+  // Set true when a long-file chunked job is still running, so the step machine
+  // re-polls on the next tick instead of finalizing the translate step.
+  let jobPending = false;
   const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) return;
@@ -252,26 +256,90 @@ export async function POST(
       // actually complete. (Proper fix = a chunked/parallel router — separate task.)
       const tooLongForRouter = (row.duration_seconds ?? 0) > 480;
       if (tooLongForRouter) {
-        emit?.({ stage: "progress", msg: "Long recording — Whisper full-file + cloud batch + fusion (per-segment router skipped)" });
-        // Whisper full-file (Mini, language-forced English) is the reliable
-        // transcriber for long recordings: no 285s router wrapper, no cloud-batch
-        // dependency, generous timeout. Produces a baseline transcript + a fusion
-        // candidate. Persisted immediately so the encounter survives even if a
-        // later engine/step dies.
-        try {
-          const wlong = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en", timeoutMs: 280_000 });
-          if (wlong.ok && wlong.transcript.trim().length > 0) {
-            const wt = wlong.transcript.trim();
-            fuseCands.push({ engine: "whisper-en", english: wt, native: null, language: "en" });
-            row.transcript_raw = wt;
-            row.translated = true;
-            await sql`UPDATE encounter SET transcript_raw = ${wt}, translated = true, translation_engine = 'whisper-en' WHERE id = ${id}`;
-            emit?.({ stage: "progress", msg: `Whisper transcript ready (${wt.length} chars)` });
-          } else {
-            emit?.({ stage: "progress", msg: `Whisper long-file unavailable (${wlong.ok ? "empty" : wlong.error})` });
+        // PREFERRED long-file path: the Mac-Mini CHUNKED JOB (ffmpeg windows ->
+        // per-segment router per window -> stitch), submitted with an R2 presigned
+        // URL and polled across step invocations. Each poll loop runs within budget;
+        // if the job is still running at budget, mark jobPending so the step machine
+        // re-polls next tick (router_job_id persists, so we resume, not resubmit).
+        if (ROUTER_JOB_ON() && row.audio_object_key) {
+          try {
+            let jobId = row.router_job_id;
+            if (!jobId) {
+              const audioUrl = await signGetUrl({ key: row.audio_object_key, expiresInSeconds: 3600 });
+              const sub = await submitRouteJob(audioUrl, { translate: true });
+              if (sub.ok && sub.job_id) {
+                jobId = sub.job_id;
+                row.router_job_id = jobId;
+                await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => {});
+                emit?.({ stage: "progress", msg: "Long recording — chunked transcription job submitted…" });
+              } else {
+                emit?.({ stage: "progress", msg: `Chunked job submit failed (${sub.error ?? "?"}); falling back to Whisper` });
+              }
+            }
+            if (jobId) {
+              const deadline = Date.now() + 240_000;
+              let done = false;
+              while (Date.now() < deadline) {
+                const st = await pollRouteJob(jobId);
+                if (st.ok && st.state === "done") {
+                  const eng = (st.transcript_english || "").trim();
+                  const nat = (st.transcript_native || "").trim();
+                  if (eng) fuseCands.push({ engine: "eta-router-chunked", english: eng, native: nat || null, language: st.dominant_language ?? null });
+                  if (nat) fuseNative = nat;
+                  if (st.dominant_language) fuseLang = st.dominant_language;
+                  fuseTimeline = st.language_timeline ?? null;
+                  if (eng) {
+                    row.transcript_raw = eng; row.translated = true;
+                    if (nat) row.transcript_original = nat;
+                    if (st.dominant_language) row.detected_language = st.dominant_language;
+                    await sql`UPDATE encounter
+                                SET transcript_raw = ${eng}, transcript_original = ${nat || row.transcript_original || null},
+                                    translated = true, translation_engine = 'eta-router-chunked',
+                                    detected_language = ${st.dominant_language ?? row.detected_language},
+                                    language_timeline = ${JSON.stringify(st.language_timeline ?? null)}::jsonb,
+                                    router_job_id = NULL
+                              WHERE id = ${id}`.catch(() => {});
+                    row.router_job_id = null;
+                  }
+                  emit?.({ stage: "progress", msg: `Chunked transcript ready (${eng.length} chars, ${st.dominant_language ?? "?"})` });
+                  done = true;
+                  break;
+                }
+                if (!st.ok || st.state === "failed") {
+                  await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => {});
+                  row.router_job_id = null;
+                  emit?.({ stage: "progress", msg: `Chunked job ${st.state ?? "error"} (${st.error ?? "?"}); falling back to Whisper` });
+                  break;
+                }
+                emit?.({ stage: "progress", msg: `Transcribing windows… (${st.progress?.done ?? 0}/${st.progress?.total ?? "?"})` });
+                await new Promise((r) => setTimeout(r, 6000));
+              }
+              // Still running at budget -> defer: re-poll on the next step tick.
+              if (!done && row.router_job_id) { jobPending = true; return; }
+            }
+          } catch (e) {
+            console.warn(`[process] chunked job failed enc=${id}: ${String(e).slice(0, 120)}`);
           }
-        } catch (e) {
-          console.warn(`[process] whisper long-file failed enc=${id}: ${String(e).slice(0, 120)}`);
+        }
+        // FALLBACK (job off / failed / produced nothing): Whisper full-file (Mini,
+        // 280s). Only when we still have no transcript.
+        if (!row.transcript_raw || row.transcript_raw.trim().length === 0) {
+          emit?.({ stage: "progress", msg: "Long recording — Whisper full-file fallback…" });
+          try {
+            const wlong = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en", timeoutMs: 280_000 });
+            if (wlong.ok && wlong.transcript.trim().length > 0) {
+              const wt = wlong.transcript.trim();
+              fuseCands.push({ engine: "whisper-en", english: wt, native: null, language: "en" });
+              row.transcript_raw = wt;
+              row.translated = true;
+              await sql`UPDATE encounter SET transcript_raw = ${wt}, translated = true, translation_engine = 'whisper-en' WHERE id = ${id}`;
+              emit?.({ stage: "progress", msg: `Whisper transcript ready (${wt.length} chars)` });
+            } else {
+              emit?.({ stage: "progress", msg: `Whisper long-file unavailable (${wlong.ok ? "empty" : wlong.error})` });
+            }
+          } catch (e) {
+            console.warn(`[process] whisper long-file failed enc=${id}: ${String(e).slice(0, 120)}`);
+          }
         }
       }
       if (ETA_ROUTER_ON() && !tooLongForRouter) {
@@ -659,6 +727,14 @@ export async function POST(
       try {
         if (nextStep === "translate") {
           await translateIfNeeded();
+          if (jobPending) {
+            // Long-file chunked job still running: release the lock (WITHOUT
+            // resetting attempts, so a stuck job still gives up at the cap) and
+            // self-chain to poll again next tick. Do not finalize the translate step.
+            await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
+            selfChain();
+            return;
+          }
           await guardTranscripts();
           await assessAndFlag();
           await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
