@@ -140,12 +140,16 @@ export async function POST(
     });
   }
 
-  if (!row.transcript_raw || row.transcript_raw.trim().length === 0) {
+  // Empty transcript_raw is NOT fatal when we still have the audio: the live
+  // transcript can be thin/empty (Deepgram dropped, Whisper froze, or a code-mixed
+  // encounter was decided "English" so the Sarvam transcript was discarded). The
+  // translate step below re-transcribes the SAVED AUDIO from scratch (eta-router /
+  // Whisper), so only give up when there is NEITHER a transcript NOR audio. This is
+  // what prevents a perfectly-good long recording from instantly failing.
+  const hasTranscript = !!row.transcript_raw && row.transcript_raw.trim().length > 0;
+  if (!hasTranscript && !row.audio_object_key) {
     await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`;
-    return respondError(
-      "PIPELINE_FAILED",
-      "no_transcript_to_process",
-    );
+    return respondError("PIPELINE_FAILED", "no_transcript_no_audio");
   }
 
   // For a non-English encounter, replace the (placeholder/code-mixed) canonical
@@ -182,6 +186,11 @@ export async function POST(
     const origRaw = (row.transcript_original ?? "").trim();
     const origHasIndic = /[\u0900-\u0DFF]/.test(origRaw);
     const work = (row.transcript_raw ?? "").trim();
+    // Rescue mode: no usable live transcript but we DO have audio. The language
+    // decision was made on empty/thin live data so we can't trust it — prefer the
+    // per-segment eta-router (handles English AND code-mix) over the English-only
+    // Whisper pass, re-transcribing the whole file from audio.
+    const rescue = work.length === 0 && !!row.audio_object_key;
     const asciiRatio = work.length ? (work.match(/[a-zA-Z]/g) ?? []).length / work.length : 0;
     const workLooksEnglish = work.length > 30 && asciiRatio > 0.5;
     const misdetectedEnglish = langNonEn && !hasIndic && !origHasIndic && origRaw.length < 20 && workLooksEnglish;
@@ -190,7 +199,7 @@ export async function POST(
       try { await sql`UPDATE encounter SET detected_language = 'en-IN' WHERE id = ${id}`; row.detected_language = "en-IN"; } catch { /* best-effort */ }
       console.warn(`[process] misdetection-guard enc=${id}: tagged Indic, no native script, work looks English -> English`);
     }
-    if ((!langNonEn && !hasIndic) || misdetectedEnglish) {
+    if (((!langNonEn && !hasIndic) || misdetectedEnglish) && !(rescue && ETA_ROUTER_ON())) {
       // ENGLISH path: refine the canonical transcript with a full-file Whisper pass
       // FORCED to English. The live transcript can be thin/garbled (especially when
       // the language was mis-detected upstream); a whole-file Whisper run with
