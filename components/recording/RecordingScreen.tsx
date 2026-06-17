@@ -50,6 +50,9 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // Browsing or when storage is disabled/full, where putChunk silently fails.
   // Submit falls back to this buffer so audio is never lost mid-session.
   const chunksMemRef = React.useRef<{ encounterId: string | null; chunks: Blob[] }>({ encounterId: null, chunks: [] });
+  // The WebM header lives only in recorder chunk 0; keep it so submit can repair a
+  // concatenation that dropped it (prevents a headerless/undecodable saved file).
+  const headerChunkRef = React.useRef<Blob | null>(null);
 
   // 1. Create draft encounter row only after preflight gate clears.
   //    B11 Part A: read the patient label HomeShell stashed in sessionStorage
@@ -221,11 +224,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       const mem = chunksMemRef.current;
       return mem.encounterId === (encounter?.id ?? null) ? mem.chunks : [];
     },
+    getHeaderChunk: () => headerChunkRef.current,
   });
 
   // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
   const onChunk = React.useCallback(
     (chunk: Blob, _idx: number) => {
+      if (_idx === 0 && chunk.size > 0) headerChunkRef.current = chunk; // WebM header (init segment)
       chunksRef.current += 1;
       lastChunkAtRef.current = Date.now();
       setChunksCount((c) => c + 1);

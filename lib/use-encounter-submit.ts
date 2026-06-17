@@ -6,6 +6,8 @@ import {
   markEncounterSubmitted,
   purgeEncounter,
 } from "@/lib/chunk-store";
+import { blobStartsWithEbml } from "@/lib/webm-header";
+import { HEADER_GUARD } from "@/lib/live-flags";
 
 /**
  * useEncounterSubmit — orchestrates the audio submit flow:
@@ -56,6 +58,9 @@ type Options = {
   /** Failsafe: in-memory chunks kept by RecordingScreen this session, used when
    *  IndexedDB is unavailable (iOS Safari Private Browsing / storage disabled). */
   getFallbackChunks?: () => Blob[];
+  /** The WebM header chunk (recorder chunk 0). Used to repair a concatenation
+   *  that dropped the header so the saved file isn't an undecodable headerless WebM. */
+  getHeaderChunk?: () => Blob | null;
 };
 
 const STAGE_WEIGHTS: Record<SubmitStage, number> = {
@@ -124,10 +129,31 @@ export function useEncounterSubmit(opts: Options) {
         return { ok: false, error: err };
       }
       const mime = chunks[0].type || "audio/webm";
-      const blob = new Blob(chunks, { type: mime });
+      let blob = new Blob(chunks, { type: mime });
       if (chunkSource === "memory") {
         // eslint-disable-next-line no-console
         console.warn("submit_used_memory_fallback", { chunks: chunks.length, bytes: blob.size });
+      }
+
+      // Capture-integrity guard: a WebM recording MUST start with the EBML header
+      // (carried only in chunk 0). If the concatenation dropped it, prepend the
+      // retained header chunk; if it's still headerless, refuse to upload an
+      // undecodable file (the enc_hndp7k6d4u corruption — caught here, not after
+      // a finished consult).
+      if (HEADER_GUARD && mime.includes("webm")) {
+        if (!(await blobStartsWithEbml(blob))) {
+          const hdr = o.getHeaderChunk?.() ?? null;
+          if (hdr && (await blobStartsWithEbml(hdr))) {
+            blob = new Blob([hdr, ...chunks], { type: mime });
+            // eslint-disable-next-line no-console
+            console.warn("submit_prepended_missing_webm_header", { bytes: blob.size });
+          }
+          if (!(await blobStartsWithEbml(blob))) {
+            const err = "recording_header_missing";
+            setState((s) => ({ ...s, stage: "error", error: err }));
+            return { ok: false, error: err };
+          }
+        }
       }
 
       // 2. Request URL

@@ -70,3 +70,11 @@ export const AUDIO_WATCHDOG =
 // configured. Kill-switch NEXT_PUBLIC_ETA_LIVE_FLASH=0 + redeploy.
 export const LIVE_FLASH =
   process.env.NEXT_PUBLIC_ETA_LIVE_FLASH !== "0";
+
+// Capture-integrity: verify a WebM recording carries its EBML header before
+// upload; prepend the retained header chunk if the concatenation dropped it,
+// and refuse to upload an unfixable headerless (undecodable) file. Prevents the
+// silently-corrupt-recording class (enc_hndp7k6d4u). ON by default; kill-switch
+// NEXT_PUBLIC_ETA_HEADER_GUARD=0 + redeploy.
+export const HEADER_GUARD =
+  process.env.NEXT_PUBLIC_ETA_HEADER_GUARD !== "0";
