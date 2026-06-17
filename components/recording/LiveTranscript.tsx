@@ -1,69 +1,85 @@
 "use client";
 
 import * as React from "react";
+import { useFlashTranslate } from "@/lib/use-flash-translate";
 
 /**
- * LiveTranscript — renders accumulated final utterances + the currently
- * in-flight interim utterance. Finals are dark + solid; interim is
- * lighter gray + italic so the doctor can see what's not yet committed.
+ * LiveTranscript — the primary live panel for non-English encounters.
  *
- * Auto-scrolls to bottom as new content arrives.
+ * Default view is "As spoken": the code-mixed/native transcript AS SPOKEN (no
+ * translation to mangle) — the honest, accurate live view. A toggle switches to
+ * "English (AI)", a Gemini-Flash translation of the accumulated text (coherent,
+ * full-context) — replacing the old per-window Sarvam translation that produced
+ * gibberish. Display-only; the note is built from the fused transcript at submit.
  */
-export function LiveTranscript({
-  finals,
-  interim,
-  empty,
-  cleanedById,
-}: {
-  finals: { id: string; text: string }[];
-  interim: string;
-  empty?: string;
-  /**
-   * Optional map of utterance_id → cleaned text (post-llama3.1:8b).
-   * When present, the cleaned version is shown instead of the raw one.
-   * Raw is the fallback while cleanup is still in flight.
-   */
-  cleanedById?: Record<string, string>;
-}) {
-  const ref = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [finals, interim]);
+const LANG_NAMES: Record<string, string> = {
+  "kn-IN": "Kannada", "hi-IN": "Hindi", "ta-IN": "Tamil", "te-IN": "Telugu",
+  "ml-IN": "Malayalam", "mr-IN": "Marathi", "bn-IN": "Bengali", "gu-IN": "Gujarati",
+  "pa-IN": "Punjabi", "od-IN": "Odia", "ur-IN": "Urdu", "en-IN": "English",
+};
 
-  if (finals.length === 0 && !interim) {
-    return (
-      <div className="rounded-md border border-dashed border-even-ink-200 bg-even-ink-50/30 p-6 text-body text-even-ink-400 italic text-center">
-        {empty ?? "Say something — your words will appear here as you speak."}
-      </div>
-    );
-  }
+type Props = {
+  slug: string;
+  nativeText: string;
+  language: string | null;
+  error: string | null;
+  engine?: string;
+  heading?: string;
+  flashEnabled?: boolean;
+};
+
+export function LiveTranscript({
+  slug, nativeText, language, error, engine = "Sarvam", heading = "Live transcript", flashEnabled = true,
+}: Props) {
+  const [view, setView] = React.useState<"native" | "english">("native");
+  const showEnglish = view === "english";
+  const flash = useFlashTranslate({ slug, text: nativeText, enabled: flashEnabled && showEnglish, intervalMs: 6000 });
+
+  if (!nativeText && !error) return null;
+  const langLabel = language ? (LANG_NAMES[language] ?? language) : null;
+  const body = showEnglish ? flash.english : nativeText;
 
   return (
-    <div
-      ref={ref}
-      className="overflow-y-auto rounded-md border border-even-ink-100 bg-even-ink-50/40 p-4 text-body max-h-[40vh]"
-      aria-live="polite"
-      aria-atomic="false"
-      role="log"
-    >
-      {finals.map((u) => {
-        const text = cleanedById?.[u.id] ?? u.text;
-        const isClean = cleanedById?.[u.id] !== undefined;
-        return (
-          <p
-            key={u.id}
-            className={`mb-2 leading-relaxed ${isClean ? "text-even-ink-800" : "text-even-ink-700"}`}
-            title={isClean && text !== u.text ? `raw: ${u.text}` : undefined}
-          >
-            {text}
-          </p>
-        );
-      })}
-      {interim ? (
-        <p className="text-even-ink-400 italic mb-0 leading-relaxed">
-          {interim}
+    <div className="rounded-2xl border border-even-blue-200 bg-even-blue-50 p-3.5">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="text-caption font-medium text-even-navy-800">
+          {showEnglish ? `${heading} · English (AI)` : `${heading}${langLabel ? ` · ${langLabel}` : ""}`}
+        </span>
+        <div className="flex items-center gap-2">
+          {flashEnabled ? (
+            <div className="flex overflow-hidden rounded-full border border-even-ink-200 bg-even-white text-[11px]">
+              <button
+                type="button"
+                onClick={() => setView("native")}
+                className={`px-2 py-0.5 ${!showEnglish ? "bg-even-blue-600 text-white" : "text-even-ink-500"}`}
+              >
+                As spoken
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("english")}
+                className={`px-2 py-0.5 ${showEnglish ? "bg-even-blue-600 text-white" : "text-even-ink-500"}`}
+              >
+                English
+              </button>
+            </div>
+          ) : null}
+          <span className="text-caption text-even-ink-400">
+            {showEnglish ? (flash.loading ? "Gemini…" : "Gemini") : engine}
+          </span>
+        </div>
+      </div>
+      {body ? (
+        <p className="text-body text-even-ink-800 whitespace-pre-wrap leading-relaxed">{body}</p>
+      ) : showEnglish ? (
+        <p className="text-caption text-even-ink-400 italic">
+          {flash.off ? "Live English translation unavailable." : "Translating…"}
         </p>
+      ) : (
+        <p className="text-caption text-even-ink-400 italic">Listening…</p>
+      )}
+      {error && !showEnglish ? (
+        <p className="text-caption text-danger-700 mt-1">{engine}: {error}</p>
       ) : null}
     </div>
   );

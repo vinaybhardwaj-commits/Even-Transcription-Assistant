@@ -8,6 +8,7 @@ import { useMediaRecorder } from "@/lib/use-media-recorder";
 import { useDeepgramLive, type LiveUtterance } from "@/lib/use-deepgram-live";
 import { useWhisperRolling } from "@/lib/use-whisper-rolling";
 import { SarvamTranscript } from "@/components/recording/SarvamTranscript";
+import { LiveTranscript } from "@/components/recording/LiveTranscript";
 import { useSarvamRolling } from "@/lib/use-sarvam-rolling";
 import { useSarvamStreaming } from "@/lib/use-sarvam-streaming";
 import { useIndicRolling } from "@/lib/use-indic-rolling";
@@ -18,7 +19,7 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 import { detectIOS, detectDesktopSafari } from "@/lib/platform";
-import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING, LANG_ROUTER, AUDIO_WATCHDOG } from "@/lib/live-flags";
+import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING, LANG_ROUTER, AUDIO_WATCHDOG, LIVE_FLASH } from "@/lib/live-flags";
 import { useLanguageRouter } from "@/lib/use-language-router";
 
 type Props = { slug: string; doctorName: string };
@@ -593,11 +594,13 @@ export function RecordingScreen({ slug, doctorName }: Props) {
               heading="Live transcript"
             />
           ) : (
-            <SarvamTranscript
-              text={sv.text}
+            <LiveTranscript
+              slug={slug}
+              nativeText={sv.text}
               language={sv.language}
-              latencyMs={sv.latest?.latency_ms ?? null}
               error={sv.error}
+              engine="Sarvam"
+              flashEnabled={LIVE_FLASH}
             />
           )}
         </div>

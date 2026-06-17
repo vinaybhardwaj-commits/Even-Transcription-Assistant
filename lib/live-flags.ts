@@ -61,3 +61,12 @@ export const MIC_PREFLIGHT =
 // path untouched). ON by default; kill-switch NEXT_PUBLIC_ETA_AUDIO_WATCHDOG=0.
 export const AUDIO_WATCHDOG =
   process.env.NEXT_PUBLIC_ETA_AUDIO_WATCHDOG !== "0";
+
+// LIVE English toggle powered by Gemini Flash. On a non-English encounter the
+// primary live panel defaults to the native/as-spoken text (no mangling) and
+// offers an "English (AI)" toggle that rolls the accumulated text through Gemini
+// Flash for a coherent live translation — replacing the old per-window Sarvam
+// translation that produced gibberish. ON by default; only acts when Gemini is
+// configured. Kill-switch NEXT_PUBLIC_ETA_LIVE_FLASH=0 + redeploy.
+export const LIVE_FLASH =
+  process.env.NEXT_PUBLIC_ETA_LIVE_FLASH !== "0";
