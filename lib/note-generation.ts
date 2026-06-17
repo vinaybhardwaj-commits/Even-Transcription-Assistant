@@ -1,5 +1,4 @@
 /**
-import { routedChat } from "@/lib/llm/gemini";
  * Medical Encounter Note generation per PRD §4.10.
  *
  * Input: cleaned transcript text (Whisper-preferred, Deepgram fallback).
@@ -13,6 +12,8 @@ import { routedChat } from "@/lib/llm/gemini";
  * can be re-triggered, OR the page surfaces the error and leaves the
  * row in failed state. Never blocks the rest of the app.
  */
+
+import { routedChat } from "@/lib/llm/gemini";
 
 
 export type NoteEvent =
