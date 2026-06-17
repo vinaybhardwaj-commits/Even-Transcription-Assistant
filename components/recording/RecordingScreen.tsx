@@ -18,7 +18,7 @@ import { useUtteranceCleanup } from "@/lib/use-utterance-cleanup";
 import { Button } from "@/components/ui/Button";
 import { PreflightCheck } from "@/components/recording/PreflightCheck";
 import { detectIOS, detectDesktopSafari } from "@/lib/platform";
-import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING, LANG_ROUTER } from "@/lib/live-flags";
+import { SAFARI_STREAMING_GUARD, INDIC_LIVE_BOX, BACKGROUND_PROCESSING, LANG_ROUTER, AUDIO_WATCHDOG } from "@/lib/live-flags";
 import { useLanguageRouter } from "@/lib/use-language-router";
 
 type Props = { slug: string; doctorName: string };
@@ -36,6 +36,11 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   const [chunksCount, setChunksCount] = React.useState(0);
   const [bytesEmitted, setBytesEmitted] = React.useState(0);
   const [finals, setFinals] = React.useState<FinalRow[]>([]);
+  // Live audio watchdog (AUDIO_WATCHDOG): raise a loud banner if no audio is
+  // actually being captured (0 chunks, or chunks stop, or the mic track mutes).
+  const [noAudio, setNoAudio] = React.useState(false);
+  const chunksRef = React.useRef(0);
+  const lastChunkAtRef = React.useRef<number | null>(null);
   // duration_seconds at stop — captured when the user taps Submit
   const recordStartedAtRef = React.useRef<number | null>(null);
   const [recordedSeconds, setRecordedSeconds] = React.useState<number | null>(null);
@@ -220,6 +225,8 @@ export function RecordingScreen({ slug, doctorName }: Props) {
   // 3. MediaRecorder — emit 250ms chunks; route to Deepgram + Whisper + counter
   const onChunk = React.useCallback(
     (chunk: Blob, _idx: number) => {
+      chunksRef.current += 1;
+      lastChunkAtRef.current = Date.now();
       setChunksCount((c) => c + 1);
       setBytesEmitted((b) => b + chunk.size);
       dg.sendChunk(chunk);
@@ -257,6 +264,41 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       recordStartedAtRef.current = Date.now();
     }
   }, [rec.state]);
+
+  // Live audio WATCHDOG: while recording, if no chunks have arrived (dead/muted
+  // mic) for ~8s, or chunks stop flowing for >7s mid-session, raise a loud
+  // banner so the doctor isn't talking into a dead mic for minutes. Reset the
+  // baseline on (re)entry to recording so a pause/resume doesn't false-trigger.
+  React.useEffect(() => {
+    if (!AUDIO_WATCHDOG) return;
+    if (rec.state !== "recording") { setNoAudio(false); return; }
+    lastChunkAtRef.current = Date.now();
+    const iv = window.setInterval(() => {
+      const startedAt = recordStartedAtRef.current;
+      if (startedAt === null) return;
+      if (Date.now() - startedAt < 8000) return; // startup grace
+      const noChunks = chunksRef.current === 0;
+      const stalled =
+        lastChunkAtRef.current !== null && Date.now() - lastChunkAtRef.current > 7000;
+      setNoAudio(noChunks || stalled);
+    }, 1500);
+    return () => window.clearInterval(iv);
+  }, [rec.state]);
+
+  // Instant alert if the mic track mutes or ends mid-session (call comes in,
+  // Bluetooth switch, OS revokes the mic).
+  React.useEffect(() => {
+    if (!AUDIO_WATCHDOG || !micStream) return;
+    const tr = micStream.getAudioTracks()[0];
+    if (!tr) return;
+    const onMute = () => setNoAudio(true);
+    tr.addEventListener("mute", onMute);
+    tr.addEventListener("ended", onMute);
+    return () => {
+      tr.removeEventListener("mute", onMute);
+      tr.removeEventListener("ended", onMute);
+    };
+  }, [micStream]);
 
   // 4. Auto-start recording once we have an encounter id + Deepgram open-ish
   const autoStartedRef = React.useRef(false);
@@ -377,6 +419,17 @@ export function RecordingScreen({ slug, doctorName }: Props) {
           <div className="w-full max-w-md rounded-md border border-warning-500 bg-warning-100/40 px-4 py-2 text-center" role="status">
             <p className="text-label text-warning-700">Recording paused</p>
             <p className="text-caption text-even-ink-500">Resume to keep capturing audio.</p>
+          </div>
+        ) : null}
+
+        {AUDIO_WATCHDOG && noAudio && (rec.state === "recording" || rec.state === "paused") ? (
+          <div className="w-full max-w-md rounded-md border border-danger-500 bg-danger-100/50 px-4 py-3 text-center" role="alert">
+            <p className="text-label text-danger-700">No audio is being captured</p>
+            <p className="text-caption text-even-ink-600">
+              We&apos;re not receiving sound from your microphone. Check it isn&apos;t muted,
+              disconnect Bluetooth/AirPods, or stop and reload. Don&apos;t continue the consult
+              until this clears.
+            </p>
           </div>
         ) : null}
 

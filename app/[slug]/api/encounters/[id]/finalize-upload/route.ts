@@ -68,9 +68,15 @@ export async function POST(
   // internal header authenticates the server-to-server call; the response
   // stream is drained so the function stays alive until processing completes.
   // The stuck-'processing' reaper is the safety net if this ever dies.
+  // Gate: only kick the background pipeline once the upload is fully validated
+  // (non-empty audio, owned, draft) and the row is flipped to 'processing'. Set
+  // true right before the success response below, so an empty/invalid upload
+  // never spawns a doomed pipeline.
+  let kickProcessing = false;
   if (BACKGROUND_PROCESSING && process.env.MIGRATION_SECRET) {
     const origin = req.nextUrl.origin;
     after(async () => {
+      if (!kickProcessing) return;
       try {
         // Kick the resumable STEP MACHINE: each invocation runs ONE pipeline
         // step (translate → native → note → CDS → diarize) then self-chains the
@@ -125,8 +131,14 @@ export async function POST(
       `r2_object_missing: ${body.key}`,
     );
   }
-  if (head.size === 0) {
-    return respondError("VALIDATION_FAILED", "uploaded_object_is_empty");
+  // A real recording is many KB even for a second of speech. A tiny object means
+  // the mic captured no audio (e.g. a dead/muted mic produced only a container
+  // header — the 5-byte-file failure). Reject CLEARLY here so the doctor sees
+  // "no audio captured" at submit instead of a mystery "failed" minutes later,
+  // and so we never spawn a doomed processing pipeline on silence.
+  const MIN_AUDIO_BYTES = 1024;
+  if (head.size < MIN_AUDIO_BYTES) {
+    return respondError("VALIDATION_FAILED", "no_audio_captured");
   }
 
   const durationSeconds =
@@ -280,6 +292,7 @@ export async function POST(
   // 60 MB by the route's MAX_BUFFER_BYTES guard).
   void deleteObject(whisperBufferKey(id));
 
+  kickProcessing = true; // upload validated + row set to processing
   return respondOk({
     encounter: { id, status: "processing" as const },
     audio: { key: body.key, bytes: head.size, content_type: head.content_type },

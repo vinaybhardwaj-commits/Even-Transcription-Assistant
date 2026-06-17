@@ -44,3 +44,20 @@ export const BACKGROUND_PROCESSING =
 // NEXT_PUBLIC_ETA_LANG_ROUTER=0 + redeploy.
 export const LANG_ROUTER =
   process.env.NEXT_PUBLIC_ETA_LANG_ROUTER !== "0";
+
+// Pre-flight MICROPHONE gate: before a recording can start, open the mic and
+// require detected audio energy (the doctor sees their voice move a live meter).
+// A dead/muted/silent mic blocks "Proceed" with troubleshooting + a "Record
+// anyway" escape (so a clinician is never hard-locked out of documenting).
+// PREVENTS the "recorded 5 minutes of silence" failure. ON by default;
+// kill-switch NEXT_PUBLIC_ETA_MIC_PREFLIGHT=0 + redeploy.
+export const MIC_PREFLIGHT =
+  process.env.NEXT_PUBLIC_ETA_MIC_PREFLIGHT !== "0";
+
+// Live audio WATCHDOG during recording: if no audio chunks arrive (or chunks
+// stop) for ~8s, or the mic track mutes/ends mid-session, raise a loud banner
+// so the doctor isn't talking into a dead mic for minutes. Chunk-count + track
+// events only (no analyser on the recorder's stream — keeps the iOS capture
+// path untouched). ON by default; kill-switch NEXT_PUBLIC_ETA_AUDIO_WATCHDOG=0.
+export const AUDIO_WATCHDOG =
+  process.env.NEXT_PUBLIC_ETA_AUDIO_WATCHDOG !== "0";
