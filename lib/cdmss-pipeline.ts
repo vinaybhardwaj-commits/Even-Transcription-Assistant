@@ -26,6 +26,7 @@ import { expandQuery } from "@/lib/hyde";
 import { retrieve } from "@/lib/kb-retrieve";
 import type { KbChunkHit } from "@/lib/kb-db";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
+import { routedChat } from "@/lib/llm/gemini";
 
 export type CdmssPipelineEvent =
   | { stage: "seed"; state: "done"; ms: number; seed_chars: number }
@@ -132,57 +133,26 @@ async function callJson<T>(
   user: string,
   opts: { signal?: AbortSignal; temperature?: number } = {},
 ): Promise<{ ok: true; data: T; latency_ms: number; raw: string } | { ok: false; error: string; latency_ms: number }> {
-  const base = process.env.OLLAMA_BASE_URL;
-  if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
-  const url = `${base.replace(/\/+$/, "")}/chat/completions`;
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), timeoutMs);
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-  const t0 = Date.now();
+  // CDS reasoning passes (draft/critique/revise) run on Gemini (cds surface, pro
+  // tier) when GEMINI_ALL/GEMINI_CDS=1 + Vertex configured; otherwise local llama/
+  // qwen. Soft-fails to the local model on any error.
+  const rc = await routedChat({
+    surface: "cds", tier: "pro", ollamaModel: model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: opts.temperature ?? 0, responseJson: true, timeoutMs, signal: opts.signal,
+  });
+  const latency_ms = rc.latency_ms;
+  if (!rc.ok) return { ok: false, error: rc.error ?? "llm_failed", latency_ms };
+  const content = rc.content;
+  if (!content) return { ok: false, error: "empty_response", latency_ms };
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        temperature: opts.temperature ?? 0,
-        response_format: { type: "json_object" },
-        stream: false,
-      }),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    clearTimeout(tid);
-    const latency_ms = Date.now() - t0;
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      return { ok: false, error: `http_${res.status}: ${t.slice(0, 120)}`, latency_ms };
-    }
-    const j = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = (j.choices?.[0]?.message?.content ?? "").trim();
-    if (!content) return { ok: false, error: "empty_response", latency_ms };
-    try {
-      return { ok: true, data: JSON.parse(content) as T, latency_ms, raw: content };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: `json_parse_failed: ${msg.slice(0, 80)}`, latency_ms };
-    }
+    return { ok: true, data: JSON.parse(content) as T, latency_ms, raw: content };
   } catch (e) {
-    clearTimeout(tid);
-    const latency_ms = Date.now() - t0;
-    if (controller.signal.aborted) return { ok: false, error: `timeout_${timeoutMs}ms`, latency_ms };
     const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg.slice(0, 200), latency_ms };
+    return { ok: false, error: `json_parse_failed: ${msg.slice(0, 80)}`, latency_ms };
   }
 }
 

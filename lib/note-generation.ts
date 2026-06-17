@@ -1,4 +1,5 @@
 /**
+import { routedChat } from "@/lib/llm/gemini";
  * Medical Encounter Note generation per PRD §4.10.
  *
  * Input: cleaned transcript text (Whisper-preferred, Deepgram fallback).
@@ -422,14 +423,6 @@ export async function generateNote(
     return { ok: false, error: "empty_transcript", latency_ms: 0 };
   }
 
-  const url = `${base.replace(/\/+$/, "")}/chat/completions`;
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), NOTE_TIMEOUT_MS);
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-
   const system =
     opts.noteType === "general_medical" ? SYSTEM_GENERAL :
     opts.noteType === "operative_procedure" ? SYSTEM_OPERATIVE :
@@ -437,41 +430,29 @@ export async function generateNote(
     opts.noteType === "physiotherapy" ? SYSTEM_PHYSIO :
     SYSTEM;
 
+  const userContent =
+    (opts.nativeReference && opts.nativeReference.trim().length > 0)
+      ? `Transcript (English, primary):\n\n${cleanTranscript}\n\n---\nOriginal-language transcript (REFERENCE ONLY — the English above is primary; consult this to resolve ambiguous wording, drug names, doses, and negations):\n${opts.nativeReference.trim().slice(0, 9000)}`
+      : `Transcript:\n\n${cleanTranscript}`;
+
   const t0 = Date.now();
   opts.onEvent?.({ stage: "note", state: "start" });
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}`,
-      },
-      body: JSON.stringify({
-        model: NOTE_MODEL,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content:
-            (opts.nativeReference && opts.nativeReference.trim().length > 0)
-              ? `Transcript (English, primary):\n\n${cleanTranscript}\n\n---\nOriginal-language transcript (REFERENCE ONLY — the English above is primary; consult this to resolve ambiguous wording, drug names, doses, and negations):\n${opts.nativeReference.trim().slice(0, 9000)}`
-              : `Transcript:\n\n${cleanTranscript}` },
-        ],
-        temperature: NOTE_TEMPERATURE,
-        response_format: { type: "json_object" },
-        stream: false,
-      }),
-      signal: controller.signal,
-      cache: "no-store",
+    // Note generation: Gemini (note surface, flash tier) when GEMINI_ALL/GEMINI_NOTE=1
+    // + Vertex configured; otherwise local qwen. Soft-fails to qwen on any error.
+    const rc = await routedChat({
+      surface: "note", tier: "flash", ollamaModel: NOTE_MODEL,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userContent },
+      ],
+      temperature: NOTE_TEMPERATURE, responseJson: true, timeoutMs: NOTE_TIMEOUT_MS, signal: opts.signal,
     });
-    clearTimeout(tid);
-    const latency_ms = Date.now() - t0;
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      return { ok: false, error: `http_${res.status}: ${text.slice(0, 150)}`, latency_ms };
+    const latency_ms = rc.latency_ms;
+    if (!rc.ok) {
+      return { ok: false, error: rc.error ?? "llm_failed", latency_ms };
     }
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = (json.choices?.[0]?.message?.content ?? "").trim();
+    const content = rc.content;
     if (!content) {
       return { ok: false, error: "empty_response", latency_ms };
     }
@@ -630,12 +611,9 @@ export async function generateNote(
     opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: noteHeadline(note, opts.noteType) });
     return { ok: true, note, latency_ms, model: NOTE_MODEL, raw_response: content };
   } catch (e: unknown) {
-    clearTimeout(tid);
     const latency_ms = Date.now() - t0;
     const err =
-      controller.signal.aborted
-        ? `timeout_${NOTE_TIMEOUT_MS}ms`
-        : e instanceof Error
+      e instanceof Error
         ? e.message.slice(0, 200)
         : String(e).slice(0, 200);
     opts.onEvent?.({ stage: "note", state: "error", message: err, ms: latency_ms });
