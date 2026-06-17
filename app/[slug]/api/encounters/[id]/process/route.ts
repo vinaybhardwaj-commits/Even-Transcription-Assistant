@@ -36,6 +36,7 @@ import { sarvamBatchTranslate, isNonEnglish, SARVAM_MEDICAL_PROMPT } from "@/lib
 import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assist";
 import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-comprehension";
 import { routeTranscribe, ETA_ROUTER_ON } from "@/lib/stt/eta-router";
+import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "@/lib/stt/fuse-transcript";
 import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
@@ -233,6 +234,12 @@ export async function POST(
         emit?.({ stage: "progress", msg: "Audio unavailable for batch translate; using live transcript" });
         return;
       }
+      // ENSEMBLE: collect EVERY engine's output (English + native script), preserve
+      // them, then fuse into the single best English transcript with Gemini Pro.
+      const fuseCands: TranscriptCandidate[] = [];
+      let fuseNative: string | null = (row.transcript_original ?? "").trim() || null;
+      let fuseLang: string | null = row.detected_language;
+      let fuseTimeline: unknown = null;
       // PRIMARY (Indic / code-mixed): the Mac-Mini eta-router does per-segment
       // language detection + best-engine routing (whisper EN / IndicConformer native)
       // + qwen English translation, returning a faithful native transcript AND clean
@@ -258,7 +265,11 @@ export async function POST(
                             language_timeline = ${JSON.stringify(rr.language_timeline ?? null)}::jsonb
                       WHERE id = ${id}`;
             emit?.({ stage: "progress", msg: `eta-router transcript ready (${eng.length} chars, ${rr.dominant_language ?? "?"})` });
-            return; // router is canonical; skip Sarvam
+            fuseCands.push({ engine: "eta-router", english: eng, native: native || null, language: rr.dominant_language ?? null });
+            if (native) fuseNative = native;
+            if (rr.dominant_language) fuseLang = rr.dominant_language;
+            fuseTimeline = rr.language_timeline ?? null;
+            // NO early return: we also run Sarvam for the ensemble, then fuse below.
           }
           emit?.({ stage: "progress", msg: `eta-router unavailable (${rr.ok ? "empty" : rr.error}); falling back to Sarvam` });
         } catch (e) {
@@ -277,6 +288,7 @@ export async function POST(
         row.translated = true;
         await sql`UPDATE encounter SET transcript_raw = ${bt.transcript}, translated = true WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: `Full-conversation translation ready (${bt.transcript.length} chars)` });
+        fuseCands.push({ engine: "sarvam", english: bt.transcript.trim(), native: null, language: row.detected_language });
         // Optional submit-time parallel pick-best: run IndicConformer on the SAME
         // audio and keep whichever English transcript is the better note basis.
         // Flag-gated (ETA_NOTE_PARALLEL_INDIC) + soft-fail: defaults to Sarvam.
@@ -296,6 +308,39 @@ export async function POST(
         }
       } else {
         emit?.({ stage: "progress", msg: `Batch translate unavailable (${bt.ok ? "empty" : bt.error}); using live transcript` });
+      }
+
+      // FUSION: reconcile all engine candidates (English + native script) into the
+      // single best English transcript with Gemini Pro. Soft-fail -> keep whatever
+      // the engines already wrote to transcript_raw (router/sarvam), so behaviour
+      // never regresses when fusion is off or errors.
+      {
+        const liveWork = (row.transcript_raw ?? "").trim();
+        if (liveWork.length > 0 && !fuseCands.some((c) => c.english.trim() === liveWork)) {
+          fuseCands.push({ engine: "live", english: liveWork, native: fuseNative, language: fuseLang });
+        }
+        if (TRANSCRIPT_FUSION_ON() && fuseCands.length >= 1) {
+          emit?.({ stage: "progress", msg: `Synthesizing best transcript from ${fuseCands.length} engines (Gemini)…` });
+          try {
+            const fused = await fuseTranscript(fuseCands, { languageTimeline: fuseTimeline, durationSeconds: row.duration_seconds ?? null });
+            if (fused.ok && fused.english.trim().length > 0) {
+              row.transcript_raw = fused.english.trim();
+              row.translated = true;
+              if (fuseNative) row.transcript_original = fuseNative;
+              if (fuseLang) row.detected_language = fuseLang;
+              await sql`UPDATE encounter
+                          SET transcript_raw = ${fused.english.trim()},
+                              transcript_original = ${fuseNative || row.transcript_original || null},
+                              translated = true,
+                              translation_engine = 'fusion',
+                              detected_language = ${fuseLang ?? row.detected_language}
+                        WHERE id = ${id}`;
+              emit?.({ stage: "progress", msg: `Fused transcript ready (${fused.english.trim().length} chars from ${fused.engines} engines)` });
+            }
+          } catch (e) {
+            console.warn(`[process] transcript fusion failed enc=${id}: ${String(e).slice(0, 120)}`);
+          }
+        }
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
