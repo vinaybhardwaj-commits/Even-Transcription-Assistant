@@ -11,7 +11,19 @@ describe("decideEncounterLanguage — corroborated, English-biased fork", () => 
       sarvamText: "patient presents with fever and cough for three days",
     });
     expect(d.nonEnglish).toBe(false);
-    expect(d.reason).toBe("whisper_en_no_script");
+    expect(d.reason).toBe("whisper_en");
+  });
+
+  it("Dr. Chandrika: English operative dictation that Sarvam TRANSLITERATED into Tamil script stays English (Whisper=en trumps Sarvam script)", () => {
+    const d = decideEncounterLanguage({
+      whisperLang: "en",
+      sarvamLang: "ta-IN",
+      whisperText: "Performed right inguinal hernia surgery, incision, skin opened in layers, mesh placed",
+      // Sarvam wrote the English dictation phonetically in Tamil script:
+      sarvamText: "\u0baa\u0b83\u0baa \u0b87\u0ba9\u0bcd \u0b95\u0bb5\u0bbe\u0baf\u0bb2\u0bcd \u0b9a\u0bb0\u0bcd\u0b9c\u0bb0\u0bbf\u0bb2\u0bcd",
+    });
+    expect(d.nonEnglish).toBe(false);
+    expect(d.reason).toBe("whisper_en");
   });
 
   it("genuine Bengali (native script present) is non-English", () => {

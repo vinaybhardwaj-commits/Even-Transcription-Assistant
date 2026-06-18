@@ -13,7 +13,7 @@
  * (tests/unit/language-route.test.ts). Default state = English.
  */
 import * as React from "react";
-import { decideEncounterLanguage } from "./language-route";
+import { decideEncounterLanguage, isKnownNonEnglish, hasIndicScript } from "./language-route";
 
 export type RouterState = {
   current: "en" | "non-en";   // the committed language class (default English)
@@ -74,6 +74,10 @@ export function useLanguageRouter(opts: {
   sarvamText: string | null | undefined;
   intervalMs?: number;
   flipAfter?: number;
+  /** Dictation note types (operative/dietetic/physio) are ~always an English
+   *  monologue. When set, only flip to non-English if WHISPER itself says so —
+   *  never on Sarvam's transliterated script. */
+  englishPrior?: boolean;
 }): LanguageRouter {
   const { enabled, intervalMs = 3000, flipAfter = 2 } = opts;
   const [state, setState] = React.useState<RouterState>(INITIAL_ROUTER);
@@ -87,12 +91,19 @@ export function useLanguageRouter(opts: {
     if (!enabled) return;
     const iv = window.setInterval(() => {
       const s = sigRef.current;
-      const obs = decideEncounterLanguage({
+      let obs = decideEncounterLanguage({
         whisperLang: s.whisperLang,
         sarvamLang: s.sarvamLang,
         whisperText: s.whisperText,
         sarvamText: s.sarvamText,
       });
+      // Dictation English prior: a non-English flip on a dictation note requires
+      // Whisper's OWN evidence (a non-English label or native script). Sarvam's
+      // transliteration alone (the Dr. Chandrika operative-note case) can't flip it.
+      if (s.englishPrior && obs.nonEnglish) {
+        const wOwnNonEn = isKnownNonEnglish(s.whisperLang) || hasIndicScript(s.whisperText);
+        if (!wOwnNonEn) obs = { nonEnglish: false, language: "en", reason: "english_prior" };
+      }
       setState((prev) => advanceRouter(prev, obs, flipAfter));
       setWindows((w) => (w.length > 600 ? w : [...w, { t: Date.now(), lang: obs.language, nonEnglish: obs.nonEnglish }]));
     }, intervalMs);

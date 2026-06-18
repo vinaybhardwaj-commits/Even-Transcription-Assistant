@@ -31,6 +31,8 @@ type FinalRow = { id: string; text: string };
 export function RecordingScreen({ slug, doctorName }: Props) {
   const router = useRouter();
   const [preflightPassed, setPreflightPassed] = React.useState(false);
+  // Note type (operative/dietetic/physio = dictation -> English prior for the live router)
+  const [noteType, setNoteType] = React.useState<string | null>(null);
   const [preflightCancelled, setPreflightCancelled] = React.useState(false);
   const [encounter, setEncounter] = React.useState<EncounterDraft | null>(null);
   const [createError, setCreateError] = React.useState<string | null>(null);
@@ -77,7 +79,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
       if (
         nt === "general_medical" || nt === "clinic_encounter" ||
         nt === "operative_procedure" || nt === "dietetic_consult" || nt === "physiotherapy"
-      ) pendingNoteType = nt;
+      ) { pendingNoteType = nt; setNoteType(nt); }
       sessionStorage.removeItem("eta:pending_note_type");
     } catch {
       /* private mode / storage disabled — silently skip */
@@ -191,6 +193,7 @@ export function RecordingScreen({ slug, doctorName }: Props) {
     sarvamLang: sv.language,
     whisperText: wh.latest?.text,
     sarvamText: sv.text,
+    englishPrior: noteType === "operative_procedure" || noteType === "dietetic_consult" || noteType === "physiotherapy",
   });
   const routerEnglish = LANG_ROUTER ? langRouter.isEnglish : false;
 

@@ -53,26 +53,35 @@ export type LangDecision = {
  * A Sarvam label alone, when Whisper says English (or text is Latin), is IGNORED.
  */
 export function decideEncounterLanguage(sig: LangSignals): LangDecision {
-  const indic = hasIndicScript(sig.sarvamText) || hasIndicScript(sig.whisperText);
+  const indicWhisper = hasIndicScript(sig.whisperText); // Whisper's OWN script = reliable
+  const indicSarvam = hasIndicScript(sig.sarvamText);   // Sarvam transliterates → UNRELIABLE
   const wNon = isKnownNonEnglish(sig.whisperLang);
   const wEn = isEnglishCode(sig.whisperLang);
   const sNon = isKnownNonEnglish(sig.sarvamLang);
 
-  // The accented-English-as-Bengali fix: Whisper says English and there is no
-  // Indic script → English, no matter what Sarvam claims.
-  if (wEn && !indic) {
-    return { nonEnglish: false, language: sig.whisperLang ?? "en", reason: "whisper_en_no_script" };
+  // Whisper LID is the trusted detector. If it says English, it's English — EVEN
+  // IF Sarvam emitted native script. Once Sarvam (mis)picks an Indian language it
+  // transliterates English dictation into that script (Dr. Chandrika's operative
+  // note: Whisper=en, Sarvam wrote her English as Tamil). Sarvam's script is
+  // downstream of Sarvam's own (wrong) call, so it must NOT override Whisper.
+  // Whisper's own text is never Indic when it labels English, so this is safe.
+  if (wEn) {
+    return { nonEnglish: false, language: sig.whisperLang ?? "en", reason: "whisper_en" };
   }
 
-  const nonEnglish = indic || wNon || (!sig.whisperLang && sNon);
-  if (nonEnglish) {
-    const language = wNon
-      ? sig.whisperLang!
-      : (sNon ? sig.sarvamLang! : (sig.whisperLang ?? sig.sarvamLang ?? null));
-    return { nonEnglish: true, language, reason: indic ? "indic_script" : (wNon ? "whisper_non_en" : "sarvam_non_en_whisper_silent") };
+  // Whisper says a known non-English language, or Whisper's OWN text is native script.
+  if (wNon || indicWhisper) {
+    const language = wNon ? sig.whisperLang! : (sNon ? sig.sarvamLang! : (sig.sarvamLang ?? null));
+    return { nonEnglish: true, language, reason: wNon ? "whisper_non_en" : "whisper_script" };
   }
 
-  // Ambiguous → English (default; ~93% of consults).
+  // Whisper SILENT (no LID yet): fall back to Sarvam ONLY with real native SCRIPT
+  // corroboration — a lone Sarvam label is too unreliable to flip on.
+  if (!sig.whisperLang && indicSarvam) {
+    return { nonEnglish: true, language: sig.sarvamLang ?? null, reason: "indic_script" };
+  }
+
+  // Ambiguous (incl. Sarvam label-only, no script) → English (default; ~93%).
   return { nonEnglish: false, language: sig.whisperLang ?? "en", reason: "default_english" };
 }
 
