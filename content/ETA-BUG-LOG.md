@@ -718,3 +718,17 @@ The v3 cache-miss fix wasn't the whole story. Opening an encounter still in `pro
 - `components/encounter/EncounterDetailClient.tsx`: on a `/process` stream error that is a **network drop** (not a user Cancel), **auto-retry once** (idempotent `/process` returns the persisted note if the server already finished); if it drops again, show a calm, accurate message — *"Connection interrupted — your note may still be processing. Tap Retry to check."* — instead of the raw `Load failed`. Bounded to exactly one auto-retry per user attempt (`netRetriedRef`).
 
 **Verified:** build green, live `f669150`, `npm run smoke` 9/9, served `/sw.js` is **v4** with the non-GET bypass, CI green. **PENDING-V (Dr Ankit, must reload ONCE for SW v4):** open a processing encounter on weak signal → it should auto-retry and either show the note or a calm "connection interrupted" message, never the `FetchEvent.respondWith` error.
+
+---
+
+## 18 Jun 2026 session — Gemini hybrid, capture-integrity, fusion, long-file, language misfire
+
+HEAD `f9da77f`, migrations →0036, smoke 9/9.
+
+- **B23** Gemini import inside a JSDoc block → build ERROR (`641ae9b`) → moved below the comment (`a893a3d`).
+- **B24** Dead mic recorded silence + saved/failed (5-byte audio, 0 chunks, ws_close_1011) → preflight mic gate + live watchdog + finalize backstop (`8b3c6c5`).
+- **B25** Long recording silently "Failed" with good audio → `/process` no longer instant-fails on empty transcript; re-transcribes saved audio from scratch (`4cd538f`).
+- **B26** Single-shot transcription can't handle long files (router timeout, batch/whisper reject 18MB) → Mini chunked job wired into /process (`4852567`, migration 0036) + whisper-280s fallback (`1ab9ed2`).
+- **B27** enc_hndp7k6d4u UNRECOVERABLE — headerless/corrupt WebM (no EBML magic; chunk-0 dropped from submit concat). Prevention: WebM header-integrity guard (`1c3e1be`).
+- **B28** Dr. Chandrika English operative dictation displayed as Tamil — Sarvam transliterates English→Indic script, defeating the English guard → Whisper-English now trumps Sarvam script + dictation English prior (`f9da77f`).
+- Features: Gemini/Vertex hybrid backend + `/api/admin/llm-selftest`; ensemble + Gemini-Pro fusion (`20e8637`); live native + Flash-English toggle (`0e12c25`).
