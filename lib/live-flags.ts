@@ -82,7 +82,7 @@ export const HEADER_GUARD =
 // NoteGen — typed-note (text) authoring surface: the MedNoteGen live editor
 // ported into EvenScribe. When ON, the post-PIN home offers "Type" alongside
 // "Record"; the typed text becomes the encounter transcript and runs the same
-// generate -> CDMSS -> review -> email pipeline as audio. Dark by default until
-// device-tested. Enable: NEXT_PUBLIC_ETA_NOTEGEN=1 in Vercel + redeploy.
+// generate -> CDMSS -> review -> email pipeline as audio. GO-LIVE 19 Jun 2026:
+// default ON. Kill-switch: set NEXT_PUBLIC_ETA_NOTEGEN=0 in Vercel + redeploy.
 export const NOTEGEN =
-  process.env.NEXT_PUBLIC_ETA_NOTEGEN === "1";
+  process.env.NEXT_PUBLIC_ETA_NOTEGEN !== "0";
