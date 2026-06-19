@@ -10,7 +10,7 @@
  * component tree. Future polish can swap in @react-email/components.
  */
 
-import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, PhysiotherapyNote, AnyNote } from "@/lib/note-generation";
+import type { EncounterNote, GeneralMedicalNote, OperativeProcedureNote, DieteticConsultNote, PhysiotherapyNote, DischargeSummaryNote, PrescriptionNote, AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
 import type { CdmssRich, CdmssSource } from "@/lib/cdmss-pipeline";
 
@@ -92,11 +92,15 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   const isOp = opts.noteType === "operative_procedure";
   const isDt = opts.noteType === "dietetic_consult";
   const isPt = opts.noteType === "physiotherapy";
+  const isDisch = opts.noteType === "discharge_summary";
+  const isRx = opts.noteType === "opd_prescription";
   const gm = note as GeneralMedicalNote;
   const cn = note as EncounterNote;
   const op = note as OperativeProcedureNote;
   const dt = note as DieteticConsultNote;
   const pt = note as PhysiotherapyNote;
+  const dsn = note as DischargeSummaryNote;
+  const rxn = note as PrescriptionNote;
   const planSub = (t: string) =>
     `<p style="margin:8px 0 4px 0;font-family:Inter,Arial,sans-serif;font-size:11px;color:${C.ink500};font-weight:600;">${t}</p>`;
   const ddmmyyyy = recordedAt.toLocaleDateString("en-IN", {
@@ -107,8 +111,8 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
   });
 
   // ---- Subject (O4: note type at start) ----
-  const typeLabel = isOp ? "Operative Note" : isDt ? "Dietetic Consult" : isPt ? "Physiotherapy" : isGM ? "General Medical" : "Clinic Encounter";
-  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isDt ? dt.reason_for_consult : isPt ? pt.reason_for_consult : isGM ? gm.reason_for_visit : cn.chief_complaint;
+  const typeLabel = isOp ? "Operative Note" : isDt ? "Dietetic Consult" : isPt ? "Physiotherapy" : isDisch ? "Discharge Summary" : isRx ? "Prescription" : isGM ? "General Medical" : "Clinic Encounter";
+  const headline = isOp ? (op.procedure_performed?.[0] || op.post_op_diagnosis) : isDt ? dt.reason_for_consult : isPt ? pt.reason_for_consult : isDisch ? (dsn.diagnosis || dsn.reason_for_admission) : isRx ? rxn.diagnosis : isGM ? gm.reason_for_visit : cn.chief_complaint;
   const ccBit = headline
     ? ` · ${headline.slice(0, 60)}${headline.length > 60 ? "…" : ""}`
     : "";
@@ -228,7 +232,30 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
       pt.follow_up ? `${sectionHeading("Follow-up")}${paragraph(pt.follow_up)}` : "",
     ];
   };
-  const noteSections = (isOp ? opSections() : isDt ? dietSections() : isPt ? physioSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
+  const dischargeSections = () => [
+    dsn.reason_for_admission ? `${sectionHeading("Reason for admission")}${paragraph(dsn.reason_for_admission)}` : "",
+    dsn.significant_findings ? `${sectionHeading("Significant findings")}${paragraph(dsn.significant_findings)}` : "",
+    dsn.diagnosis ? `${sectionHeading("Diagnosis")}${paragraph(dsn.diagnosis)}` : "",
+    dsn.hospital_course ? `${sectionHeading("Hospital course")}${paragraph(dsn.hospital_course)}` : "",
+    dsn.investigations.length ? `${sectionHeading("Investigations")}${bulletList(dsn.investigations)}` : "",
+    dsn.procedures_performed.length ? `${sectionHeading("Procedures performed")}${bulletList(dsn.procedures_performed)}` : "",
+    dsn.medications_administered.length ? `${sectionHeading("Medications administered")}${bulletList(dsn.medications_administered)}` : "",
+    dsn.condition_at_discharge ? `${sectionHeading("Condition at discharge")}${paragraph(dsn.condition_at_discharge)}` : "",
+    dsn.discharge_medications.length ? `${sectionHeading("Discharge medications")}${bulletList(dsn.discharge_medications)}` : "",
+    dsn.follow_up_advice ? `${sectionHeading("Follow-up advice")}${paragraph(dsn.follow_up_advice)}` : "",
+    dsn.patient_instructions.length ? `${sectionHeading("Patient instructions")}${bulletList(dsn.patient_instructions)}` : "",
+    dsn.urgent_care_instructions ? `${sectionHeading("When to seek urgent care")}${paragraph(dsn.urgent_care_instructions)}` : "",
+    dsn.outcome ? `${sectionHeading("Outcome")}${paragraph(dsn.outcome)}` : "",
+  ];
+  const rxSections = () => [
+    rxn.diagnosis ? `${sectionHeading("Diagnosis / indication")}${paragraph(rxn.diagnosis)}` : "",
+    rxn.allergies.length ? `${sectionHeading("Allergies")}${bulletList(rxn.allergies)}` : "",
+    rxn.medications.length ? `${sectionHeading("Medications")}${bulletList(rxn.medications)}` : "",
+    rxn.investigations_advised.length ? `${sectionHeading("Investigations advised")}${bulletList(rxn.investigations_advised)}` : "",
+    rxn.general_advice.length ? `${sectionHeading("Advice")}${bulletList(rxn.general_advice)}` : "",
+    rxn.follow_up ? `${sectionHeading("Follow-up")}${paragraph(rxn.follow_up)}` : "",
+  ];
+  const noteSections = (isOp ? opSections() : isDt ? dietSections() : isPt ? physioSections() : isDisch ? dischargeSections() : isRx ? rxSections() : isGM ? gmSections() : clinicSections()).filter(Boolean).join("");
 
   // B10 defensive fallback (28 May 2026): if every clinical section is
   // empty, surface that explicitly instead of silently sending an email
@@ -419,6 +446,27 @@ export function renderNoteEmail(opts: RenderOpts): { subject: string; html: stri
     if (tpl.sessions_per_week != null) textLines.push(`Sessions/week: ${tpl.sessions_per_week}`);
     if (tpl.expected_duration_weeks != null) textLines.push(`Duration: ${tpl.expected_duration_weeks} weeks`);
     if (pt.follow_up) textLines.push("", `Follow-up: ${pt.follow_up}`);
+  } else if (isDisch) {
+    if (dsn.reason_for_admission) textLines.push(`Reason for admission: ${dsn.reason_for_admission}`, "");
+    if (dsn.diagnosis) textLines.push(`Diagnosis: ${dsn.diagnosis}`);
+    if (dsn.significant_findings) textLines.push(`Significant findings: ${dsn.significant_findings}`);
+    if (dsn.hospital_course) textLines.push("", `Hospital course:`, dsn.hospital_course);
+    if (dsn.investigations.length) textLines.push(`Investigations: ${dsn.investigations.join("; ")}`);
+    if (dsn.procedures_performed.length) textLines.push(`Procedures: ${dsn.procedures_performed.join("; ")}`);
+    if (dsn.medications_administered.length) textLines.push(`Medications administered: ${dsn.medications_administered.join("; ")}`);
+    if (dsn.condition_at_discharge) textLines.push("", `Condition at discharge: ${dsn.condition_at_discharge}`);
+    if (dsn.discharge_medications.length) textLines.push(`Discharge medications: ${dsn.discharge_medications.join("; ")}`);
+    if (dsn.follow_up_advice) textLines.push(`Follow-up advice: ${dsn.follow_up_advice}`);
+    if (dsn.patient_instructions.length) textLines.push(`Patient instructions: ${dsn.patient_instructions.join("; ")}`);
+    if (dsn.urgent_care_instructions) textLines.push(`Urgent care: ${dsn.urgent_care_instructions}`);
+    if (dsn.outcome) textLines.push(`Outcome: ${dsn.outcome}`);
+  } else if (isRx) {
+    if (rxn.diagnosis) textLines.push(`Diagnosis/indication: ${rxn.diagnosis}`, "");
+    if (rxn.allergies.length) textLines.push(`Allergies: ${rxn.allergies.join("; ")}`);
+    if (rxn.medications.length) textLines.push("", `Medications:`, ...rxn.medications.map((m) => `  - ${m}`));
+    if (rxn.investigations_advised.length) textLines.push("", `Investigations advised: ${rxn.investigations_advised.join("; ")}`);
+    if (rxn.general_advice.length) textLines.push(`Advice: ${rxn.general_advice.join("; ")}`);
+    if (rxn.follow_up) textLines.push(`Follow-up: ${rxn.follow_up}`);
   } else if (isGM) {
     if (gm.reason_for_visit) textLines.push(`Reason for visit: ${gm.reason_for_visit}`, "");
     if (gm.active_problems.length) textLines.push(`Active problems: ${gm.active_problems.join("; ")}`, "");

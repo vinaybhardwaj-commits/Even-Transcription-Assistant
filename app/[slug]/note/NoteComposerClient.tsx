@@ -13,6 +13,8 @@ const NOTE_TYPES = [
   { key: "clinic_encounter", label: "Consult" },
   { key: "general_medical", label: "Ward" },
   { key: "operative_procedure", label: "Op note" },
+  { key: "discharge_summary", label: "Discharge" },
+  { key: "opd_prescription", label: "OPD Rx" },
   { key: "dietetic_consult", label: "Dietetics" },
   { key: "physiotherapy", label: "Physio" },
 ];

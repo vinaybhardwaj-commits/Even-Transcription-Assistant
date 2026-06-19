@@ -199,6 +199,41 @@ Style rules:
 - Use the physiotherapist's wording for special tests
 - Do not invent findings or a treatment plan that was not described`;
 
+// Discharge Summary (NoteGen, V2.S6) — NABH 6th-ed AAC.14 discharge summary. CDMSS OFF.
+const SYSTEM_DISCHARGE = `You are converting a clinician's typed or dictated input into a structured Hospital Discharge Summary. The input may be in English, an Indian language, or code-mixed — ALWAYS write the summary in clear clinical English, translating faithfully. Use ONLY information explicitly stated — never invent diagnoses, medications, doses, dates, investigation results, or findings. If a section was not provided, return an empty string or empty array.
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence):
+
+{
+  "reason_for_admission": string,
+  "significant_findings": string,
+  "diagnosis": string,
+  "hospital_course": string,
+  "investigations": [string, ...],
+  "procedures_performed": [string, ...],
+  "medications_administered": [string, ...],
+  "condition_at_discharge": string,
+  "discharge_medications": [string, ...],
+  "follow_up_advice": string,
+  "patient_instructions": [string, ...],
+  "urgent_care_instructions": string,
+  "outcome": string
+}`;
+
+// OPD Prescription (NoteGen, V2.S7) — NABH 6th-ed MOM.4 prescription. CDMSS OFF.
+const SYSTEM_RX = `You are converting a clinician's typed or dictated input into a structured OPD Prescription. The input may be in English, an Indian language, or code-mixed — ALWAYS write it in clear clinical English, translating faithfully. Use ONLY information explicitly stated — never invent a drug, dose, route, frequency, duration, diagnosis, or instruction. If a section was not provided, return an empty string or empty array. For each medication include the drug name, dose, route, frequency and duration when stated.
+
+Return ONLY a JSON object matching exactly this schema (no preamble, no markdown fence):
+
+{
+  "diagnosis": string,
+  "allergies": [string, ...],
+  "medications": [string, ...],
+  "investigations_advised": [string, ...],
+  "follow_up": string,
+  "general_advice": [string, ...]
+}`;
+
 export type EncounterNote = {
   chief_complaint: string;
   history_present_illness: string;
@@ -318,7 +353,34 @@ export type PhysiotherapyNote = {
   follow_up: string;
 };
 
-export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote | DieteticConsultNote | PhysiotherapyNote;
+// DischargeSummaryNote (NoteGen) — NABH AAC.14. CDMSS OFF.
+export type DischargeSummaryNote = {
+  reason_for_admission: string;
+  significant_findings: string;
+  diagnosis: string;
+  hospital_course: string;
+  investigations: string[];
+  procedures_performed: string[];
+  medications_administered: string[];
+  condition_at_discharge: string;
+  discharge_medications: string[];
+  follow_up_advice: string;
+  patient_instructions: string[];
+  urgent_care_instructions: string;
+  outcome: string;
+};
+
+// PrescriptionNote (NoteGen) — NABH MOM.4 OPD prescription. CDMSS OFF.
+export type PrescriptionNote = {
+  diagnosis: string;
+  allergies: string[];
+  medications: string[];
+  investigations_advised: string[];
+  follow_up: string;
+  general_advice: string[];
+};
+
+export type AnyNote = EncounterNote | GeneralMedicalNote | OperativeProcedureNote | DieteticConsultNote | PhysiotherapyNote | DischargeSummaryNote | PrescriptionNote;
 
 /** Note types that get the CDMSS pipeline (clinic + general medical only). */
 export function noteTypeHasCdmss(noteType?: string): boolean {
@@ -335,6 +397,8 @@ export function noteHeadline(note: AnyNote | null | undefined, noteType?: string
   }
   if (noteType === "dietetic_consult") return (note as DieteticConsultNote).reason_for_consult ?? "";
   if (noteType === "physiotherapy") return (note as PhysiotherapyNote).reason_for_consult ?? "";
+  if (noteType === "discharge_summary") return (note as DischargeSummaryNote).diagnosis || (note as DischargeSummaryNote).reason_for_admission || "";
+  if (noteType === "opd_prescription") return (note as PrescriptionNote).diagnosis ?? "";
   return (note as EncounterNote).chief_complaint ?? "";
 }
 
@@ -394,6 +458,28 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
       (op.surgeon ?? "").trim().length > 0
     );
   }
+  if (noteType === "discharge_summary") {
+    const ds = note as DischargeSummaryNote;
+    return (
+      (ds.diagnosis ?? "").trim().length > 0 ||
+      (ds.reason_for_admission ?? "").trim().length > 0 ||
+      (ds.hospital_course ?? "").trim().length > 0 ||
+      (ds.condition_at_discharge ?? "").trim().length > 0 ||
+      (ds.discharge_medications?.length ?? 0) > 0 ||
+      (ds.medications_administered?.length ?? 0) > 0 ||
+      (ds.investigations?.length ?? 0) > 0 ||
+      (ds.follow_up_advice ?? "").trim().length > 0
+    );
+  }
+  if (noteType === "opd_prescription") {
+    const rx = note as PrescriptionNote;
+    return (
+      (rx.medications?.length ?? 0) > 0 ||
+      (rx.diagnosis ?? "").trim().length > 0 ||
+      (rx.investigations_advised?.length ?? 0) > 0 ||
+      (rx.follow_up ?? "").trim().length > 0
+    );
+  }
   const c = note as EncounterNote;
   return (
     (c.chief_complaint ?? "").trim().length > 0 ||
@@ -429,6 +515,8 @@ export async function generateNote(
     opts.noteType === "operative_procedure" ? SYSTEM_OPERATIVE :
     opts.noteType === "dietetic_consult" ? SYSTEM_DIETETIC :
     opts.noteType === "physiotherapy" ? SYSTEM_PHYSIO :
+    opts.noteType === "discharge_summary" ? SYSTEM_DISCHARGE :
+    opts.noteType === "opd_prescription" ? SYSTEM_RX :
     SYSTEM;
 
   const userContent =
@@ -592,6 +680,31 @@ export async function generateNote(
           expected_duration_weeks: N(tp.expected_duration_weeks),
         },
         follow_up: S(parsedRaw.follow_up),
+      };
+    } else if (opts.noteType === "discharge_summary") {
+      note = {
+        reason_for_admission: S(parsedRaw.reason_for_admission),
+        significant_findings: S(parsedRaw.significant_findings),
+        diagnosis: S(parsedRaw.diagnosis),
+        hospital_course: S(parsedRaw.hospital_course),
+        investigations: A(parsedRaw.investigations),
+        procedures_performed: A(parsedRaw.procedures_performed),
+        medications_administered: A(parsedRaw.medications_administered),
+        condition_at_discharge: S(parsedRaw.condition_at_discharge),
+        discharge_medications: A(parsedRaw.discharge_medications),
+        follow_up_advice: S(parsedRaw.follow_up_advice),
+        patient_instructions: A(parsedRaw.patient_instructions),
+        urgent_care_instructions: S(parsedRaw.urgent_care_instructions),
+        outcome: S(parsedRaw.outcome),
+      };
+    } else if (opts.noteType === "opd_prescription") {
+      note = {
+        diagnosis: S(parsedRaw.diagnosis),
+        allergies: A(parsedRaw.allergies),
+        medications: A(parsedRaw.medications),
+        investigations_advised: A(parsedRaw.investigations_advised),
+        follow_up: S(parsedRaw.follow_up),
+        general_advice: A(parsedRaw.general_advice),
       };
     } else {
       note = {
