@@ -107,7 +107,7 @@ export async function geminiChatIfOn(
  */
 export async function routedChat(p: {
   surface: string; tier?: "pro" | "flash"; ollamaModel: string; messages: Msg[];
-  temperature?: number; responseJson?: boolean; timeoutMs?: number; signal?: AbortSignal;
+  temperature?: number; responseJson?: boolean; timeoutMs?: number; signal?: AbortSignal; maxTokens?: number;
 }): Promise<{ ok: boolean; content: string; error?: string; latency_ms: number; provider: string }> {
   const t0 = Date.now();
   const gModel = pickGemini(p.surface, p.tier ?? "pro");
@@ -117,7 +117,7 @@ export async function routedChat(p: {
       const r = await openaiChat({
         url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
         messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-        maxTokens: 8192, timeoutMs: p.timeoutMs, signal: p.signal,
+        maxTokens: p.maxTokens ?? 8192, timeoutMs: p.timeoutMs, signal: p.signal,
       });
       if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
       console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> ollama fallback`);
@@ -130,7 +130,7 @@ export async function routedChat(p: {
   const r = await openaiChat({
     url: base, authToken: process.env.LLM_API_KEY ?? "ollama", model: p.ollamaModel,
     messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-    timeoutMs: p.timeoutMs, signal: p.signal,
+    maxTokens: p.maxTokens, timeoutMs: p.timeoutMs, signal: p.signal,
   });
   return { ok: r.ok, content: r.content, error: r.error, latency_ms: Date.now() - t0, provider: "ollama" };
 }
