@@ -78,3 +78,11 @@ export const LIVE_FLASH =
 // NEXT_PUBLIC_ETA_HEADER_GUARD=0 + redeploy.
 export const HEADER_GUARD =
   process.env.NEXT_PUBLIC_ETA_HEADER_GUARD !== "0";
+
+// NoteGen — typed-note (text) authoring surface: the MedNoteGen live editor
+// ported into EvenScribe. When ON, the post-PIN home offers "Type" alongside
+// "Record"; the typed text becomes the encounter transcript and runs the same
+// generate -> CDMSS -> review -> email pipeline as audio. Dark by default until
+// device-tested. Enable: NEXT_PUBLIC_ETA_NOTEGEN=1 in Vercel + redeploy.
+export const NOTEGEN =
+  process.env.NEXT_PUBLIC_ETA_NOTEGEN === "1";
