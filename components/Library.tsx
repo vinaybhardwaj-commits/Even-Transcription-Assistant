@@ -15,6 +15,7 @@ type Row = {
   send_status: SendStatus;
   processing_pct: number | null;
   note_type: string | null;
+  input_mode?: string | null;
   chief_complaint: string | null;
   transcript_flag?: string | null;
 };
@@ -153,6 +154,7 @@ export function Library({ slug }: Props) {
               </div>
               <p className="text-caption text-even-ink-500 flex items-center gap-2">
                 <span>{formatDate(r.recorded_at)}</span>
+                {r.input_mode === "text" ? (<><span>·</span><span className="inline-flex items-center rounded bg-even-blue-50 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-even-blue-700">Typed</span></>) : null}
                 {r.duration_seconds ? (
                   <>
                     <span>·</span>

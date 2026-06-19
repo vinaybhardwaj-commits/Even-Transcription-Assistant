@@ -28,6 +28,7 @@ type InitialState = {
   note: AnyNote | null;
   noteType?: string;
   cdmss: CdmssOutput | null;
+  inputMode?: string;
   transcript: string | null;
   transcriptOriginal: string | null;
   detectedLanguage: string | null;
@@ -732,7 +733,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
         {initial.transcript ? (
           <details className="rounded-2xl border border-even-ink-100 bg-even-white">
             <summary className="cursor-pointer select-none px-3 py-2 text-caption text-even-ink-500">
-              {initial.transcriptOriginal ? "English translation" : "Transcript"} ({(initial.transcript.length / 1024).toFixed(1)} KB)
+              {initial.transcriptOriginal ? "English translation" : initial.inputMode === "text" ? "Your typed text" : "Transcript"} ({(initial.transcript.length / 1024).toFixed(1)} KB)
             </summary>
             <p className="px-3 pb-3 text-body text-even-ink-700 whitespace-pre-wrap leading-relaxed">
               {initial.transcript}

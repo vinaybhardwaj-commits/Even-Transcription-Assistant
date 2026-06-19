@@ -112,6 +112,7 @@ export async function GET(
     recorded_at: string | Date;
     duration_seconds: number | null;
     patient_label_raw: string | null;
+    input_mode: string | null;
     status: "draft" | "processing" | "complete" | "failed";
     send_status: "pending" | "sent" | "failed";
     processing_pct: number | null;
@@ -126,6 +127,7 @@ export async function GET(
              recorded_at,
              duration_seconds,
              patient_label_raw,
+             input_mode,
              note_type,
              status,
              send_status,
@@ -153,6 +155,7 @@ export async function GET(
             : new Date(r.recorded_at).toISOString(),
         duration_seconds: r.duration_seconds,
         patient_label: r.patient_label_raw,
+        input_mode: r.input_mode,
         status: r.status,
         send_status: r.send_status,
         processing_pct: r.processing_pct,

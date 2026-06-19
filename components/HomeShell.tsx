@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/Input";
 import { RecoveryModal } from "@/components/RecoveryModal";
 import { Library } from "@/components/Library";
+import { NOTEGEN } from "@/lib/live-flags";
 
 type Props = { slug: string; doctorName: string; voiceEnrolled?: boolean; clinicianType?: string };
 
@@ -15,6 +16,15 @@ function MicIcon({ className }: { className?: string }) {
       <path d="M5 10a7 7 0 0 0 14 0" />
       <path d="M8 21h8" />
       <path d="M12 17v4" />
+    </svg>
+  );
+}
+
+function PenIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5z" />
+      <path d="M13.5 6.5l4 4" />
     </svg>
   );
 }
@@ -35,6 +45,14 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianTyp
     }
     try { sessionStorage.setItem("eta:pending_note_type", noteType); } catch { /* private mode */ }
     router.push(`/${slug}/record`);
+  }, [router, slug, patientLabel, noteType]);
+
+  const goType = React.useCallback(() => {
+    if (patientLabel.trim()) {
+      try { sessionStorage.setItem("eta:pending_patient_label", patientLabel.trim()); } catch { /* private mode */ }
+    }
+    try { sessionStorage.setItem("eta:pending_note_type", noteType); } catch { /* private mode */ }
+    router.push(`/${slug}/note`);
   }, [router, slug, patientLabel, noteType]);
 
   const cleanName = doctorName.replace(/^Dr\.?\s+/i, "");
@@ -97,6 +115,16 @@ export function HomeShell({ slug, doctorName, voiceEnrolled = true, clinicianTyp
                 Tap to begin. We&rsquo;ll ask for microphone permission on the next screen.
               </p>
             </div>
+
+            {NOTEGEN ? (
+              <div className="mt-6 border-t border-even-ink-100 pt-5">
+                <button type="button" onClick={goType}
+                  className="flex w-full items-center justify-center gap-2 rounded-2xl border border-even-blue-200 bg-even-blue-50 px-4 py-3 text-label text-even-blue-700 hover:bg-even-blue-100">
+                  <PenIcon className="h-5 w-5" /> Type the note instead
+                </button>
+                <p className="mt-2 text-center text-caption text-even-ink-400">Compose by typing &mdash; same NABH checks, same review &amp; send.</p>
+              </div>
+            ) : null}
           </div>
 
           <p className="mt-6 text-center text-caption text-even-ink-500">

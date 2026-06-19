@@ -66,6 +66,18 @@ export default function NoteComposerClient({ slug }: { slug: string }) {
     [slug],
   );
 
+  // Prefill note type + patient from the home-screen choice (Record|Type entry).
+  useEffect(() => {
+    try {
+      const nt = sessionStorage.getItem("eta:pending_note_type");
+      if (nt && NOTE_TYPES.some((n) => n.key === nt)) { setNoteType(nt); noteTypeRef.current = nt; }
+      sessionStorage.removeItem("eta:pending_note_type");
+      const pl = sessionStorage.getItem("eta:pending_patient_label");
+      if (pl) { setPatient(pl); patientRef.current = pl; }
+      sessionStorage.removeItem("eta:pending_patient_label");
+    } catch { /* private mode */ }
+  }, []);
+
   // Load the NABH floor for the chosen note type (drives the coverage stream).
   useEffect(() => {
     let cancelled = false;
