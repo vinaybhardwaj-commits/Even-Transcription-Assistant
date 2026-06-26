@@ -103,10 +103,15 @@ export async function POST(
 
   let force = false;
   let stepRequested = false;
+  let syncRequested = false;
   try {
-    const body = (await req.json().catch(() => ({}))) as { force?: boolean; step?: boolean };
+    const body = (await req.json().catch(() => ({}))) as { force?: boolean; step?: boolean; sync?: boolean };
     force = body.force === true;
     stepRequested = body.step === true;
+    // sync step mode: run the ONE step IN-REQUEST (function stays alive) instead of in
+    // after(). Vercel after() does not reliably execute the heavy translate step on
+    // fire-and-forget invocations, so the resume cron / manual recovery drive synchronously.
+    syncRequested = body.sync === true;
   } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
 
   // Load row
@@ -730,19 +735,19 @@ export async function POST(
       return respondOk({ step: nextStep, skipped: "locked" });
     }
 
-    // ACK immediately; perform the one step in after(); self-chain on progress.
-    after(async () => {
+    // Run exactly ONE step. Returns whether it progressed, plus a jobPending sentinel for
+    // the long-file chunked-transcription poll (which releases the lock to re-poll, without
+    // resetting the attempt budget). Used by BOTH the sync (in-request) and after() paths.
+    const runOneStep = async (): Promise<{ progressed: boolean; jobPending: boolean }> => {
       let progressed = false;
       try {
         if (nextStep === "translate") {
           await translateIfNeeded();
           if (jobPending) {
-            // Long-file chunked job still running: release the lock (WITHOUT
-            // resetting attempts, so a stuck job still gives up at the cap) and
-            // self-chain to poll again next tick. Do not finalize the translate step.
+            // Long-file chunked job still running: release the lock (WITHOUT resetting
+            // attempts, so a stuck job still gives up at the cap) and re-poll next tick.
             await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
-            selfChain();
-            return;
+            return { progressed: false, jobPending: true };
           }
           await guardTranscripts();
           await assessAndFlag();
@@ -794,9 +799,29 @@ export async function POST(
       } catch (e) {
         console.warn(`[process:step] enc=${id} step=${nextStep} err=${e instanceof Error ? e.message : String(e)}`);
       }
-      if (progressed) {
+      return { progressed, jobPending: false };
+    };
+
+    const releaseAndReset = () =>
+      sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id}`.catch(() => { /* best-effort */ });
+
+    // SYNC MODE — run the step IN-REQUEST so the function stays alive while the heavy work
+    // (R2 download + Whisper) executes. The caller (resume cron / manual recovery) loops these
+    // calls to drain the encounter. Does NOT self-chain (the caller's loop drives the next step).
+    if (syncRequested) {
+      const r = await runOneStep();
+      if (r.jobPending) return respondOk({ step: nextStep, jobPending: true });
+      if (r.progressed) await releaseAndReset();
+      return respondOk({ step: nextStep, progressed: r.progressed, done: false });
+    }
+
+    // ASYNC MODE — ACK immediately; perform the one step in after(); self-chain on progress.
+    after(async () => {
+      const r = await runOneStep();
+      if (r.jobPending) { selfChain(); return; }
+      if (r.progressed) {
         // release lock + reset attempts so the next step can claim immediately
-        await sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id}`.catch(() => { /* best-effort */ });
+        await releaseAndReset();
         selfChain();
       }
       // if NOT progressed: keep the lock until its 5-min TTL → natural backoff before retry

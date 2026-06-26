@@ -20,15 +20,31 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 async function resumeOne(origin: string, slug: string, id: string): Promise<boolean> {
+  // Drive the step machine SYNCHRONOUSLY: each call runs ONE step IN-REQUEST (the /process
+  // function stays alive while the heavy translate/CDS work executes — Vercel after() does
+  // NOT reliably run the heavy translate step on fire-and-forget invocations). We loop the
+  // sync calls here, within this route's own 300s budget, to drain the encounter to
+  // completion. With note-first, the encounter reaches 'complete' after translate→note→
+  // finalize; CDS+diarize enrichment follows if budget remains.
+  const deadline = Date.now() + 250_000;
+  let guard = 0;
   try {
-    // Kick the resumable step machine (ONE step per invocation; self-chaining).
-    const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
-      body: JSON.stringify({ step: true }),
-      cache: "no-store",
-    });
-    await res.text().catch(() => {});
+    while (Date.now() < deadline && guard++ < 30) {
+      const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
+        body: JSON.stringify({ step: true, sync: true }),
+        cache: "no-store",
+      });
+      const j = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> } & Record<string, unknown>;
+      const d = (j && typeof j.data === "object" && j.data) ? j.data : j;
+      const step = d?.step as string | undefined;
+      if (step === "done") return true;
+      if (d?.jobPending) { await new Promise((r) => setTimeout(r, 6000)); continue; } // long-file chunked job: poll
+      if (d?.skipped === "locked") { await new Promise((r) => setTimeout(r, 2000)); continue; } // another worker holds the lock
+      if (d?.progressed === true) continue; // drive the next step immediately
+      break; // not progressed / error / unknown → stop; TTL + next tick + reaper handle it
+    }
     return true;
   } catch { return false; }
 }
