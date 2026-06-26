@@ -82,14 +82,6 @@ export async function POST(
 ) {
   const { slug, id } = await params;
 
-  // TEMP DEBUG (one encounter only): write markers into audit_log so we can see exactly where
-  // the background translate after() stops — Vercel does not surface console output from after().
-  const DBG_ID = "enc_t24wyzk4z5";
-  const dbg = async (m: string) => {
-    if (id !== DBG_ID) return;
-    try { await sql`INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json) VALUES ('system','translate-dbg','debug.translate','encounter',${id},${JSON.stringify({ m, t: Date.now() })}::jsonb)`; } catch { /* best-effort */ }
-  };
-
   // Internal background trigger (finalize-upload via after()): a trusted
   // server-to-server call carrying the migration secret, so the pipeline can
   // run detached from any doctor client. Skips the cookie/slug checks.
@@ -220,19 +212,14 @@ export async function POST(
       // usually the cleanest English transcript. Soft-fail + adopt-only-if-better, so
       // it can never make the note worse than the live transcript. (Poornima fix.)
       try {
-        await dbg("e1:pre-head");
         const head = await headObject(row.audio_object_key);
-        await dbg(`e2:post-head size=${head.size}`);
         const bytes = await getObjectBytes(row.audio_object_key);
-        await dbg(`e3:post-get bytes=${bytes ? bytes.length : "null"}`);
-        if (!bytes) { await dbg("e3b:no-bytes-return"); return; }
+        if (!bytes) return;
         emit?.({ stage: "progress", msg: "Refining English transcript (full-file Whisper)\u2026" });
-        await dbg("e4:pre-whisper");
         // Bounded: an untimed Whisper refine can hang indefinitely when the Mac Mini is busy,
         // which freezes the whole translate step (the after() is killed at 300s before it can set
         // translated=true) and strands the encounter. 90s cap -> soft-fail keeps the live transcript.
         const wr = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en", timeoutMs: 90_000 });
-        await dbg(`e5:post-whisper ok=${wr.ok}`);
         if (wr.ok) {
           const cur = (row.transcript_raw ?? "").trim();
           if (wr.transcript.length > cur.length * 1.1 || cur.length < 40) {
@@ -242,10 +229,8 @@ export async function POST(
           }
         }
       } catch (e) {
-        await dbg(`e-catch:${String(e).slice(0, 60)}`);
         console.warn(`[process] english whisper refine failed enc=${id}: ${String(e).slice(0, 100)}`);
       }
-      await dbg("e6:english-return");
       return;
     }
     emit?.({ stage: "progress", msg: "Translating full conversation (Sarvam)\u2026" });
@@ -750,9 +735,7 @@ export async function POST(
       let progressed = false;
       try {
         if (nextStep === "translate") {
-          await dbg("s0:after-start");
           await translateIfNeeded();
-          await dbg(`s1:post-translateIfNeeded jobPending=${jobPending}`);
           if (jobPending) {
             // Long-file chunked job still running: release the lock (WITHOUT
             // resetting attempts, so a stuck job still gives up at the cap) and
@@ -762,11 +745,8 @@ export async function POST(
             return;
           }
           await guardTranscripts();
-          await dbg("s2:post-guard");
           await assessAndFlag();
-          await dbg("s3:post-assess");
           await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
-          await dbg("s4:set-translated-progressed");
           progressed = true;
         } else if (nextStep === "native") {
           try {
