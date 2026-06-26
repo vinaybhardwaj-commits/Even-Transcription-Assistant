@@ -216,7 +216,10 @@ export async function POST(
         const bytes = await getObjectBytes(row.audio_object_key);
         if (!bytes) return;
         emit?.({ stage: "progress", msg: "Refining English transcript (full-file Whisper)\u2026" });
-        const wr = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en" });
+        // Bounded: an untimed Whisper refine can hang indefinitely when the Mac Mini is busy,
+        // which freezes the whole translate step (the after() is killed at 300s before it can set
+        // translated=true) and strands the encounter. 90s cap -> soft-fail keeps the live transcript.
+        const wr = await transcribeWithWhisper(bytes, head.content_type || "audio/webm", { language: "en", timeoutMs: 90_000 });
         if (wr.ok) {
           const cur = (row.transcript_raw ?? "").trim();
           if (wr.transcript.length > cur.length * 1.1 || cur.length < 40) {
