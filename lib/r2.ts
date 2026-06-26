@@ -39,6 +39,13 @@ function client(): S3Client {
   return _client;
 }
 
+// Hard bound on a single R2 request. The S3 client has no default request/connection
+// timeout, so a stalled connection can hang getObjectBytes/headObject indefinitely —
+// which freezes the background translate/diarize step's after() until it is reclaimed
+// (silently, no error). AbortSignal.timeout() fails the request fast so the step's
+// soft-fallbacks take over and the pipeline progresses. (Node 18+/24 has AbortSignal.timeout.)
+const R2_OP_TIMEOUT_MS = 45_000;
+
 export function bucket(): string {
   const b = process.env.R2_BUCKET;
   if (!b) throw new Error("R2_BUCKET not set");
@@ -106,6 +113,7 @@ export async function headObject(key: string): Promise<{
   try {
     const res = await client().send(
       new HeadObjectCommand({ Bucket: bucket(), Key: key }),
+      { abortSignal: AbortSignal.timeout(R2_OP_TIMEOUT_MS) },
     );
     return {
       size: typeof res.ContentLength === "number" ? res.ContentLength : null,
@@ -125,6 +133,7 @@ export async function getObjectBytes(key: string): Promise<Uint8Array | null> {
   try {
     const res = await client().send(
       new GetObjectCommand({ Bucket: bucket(), Key: key }),
+      { abortSignal: AbortSignal.timeout(R2_OP_TIMEOUT_MS) },
     );
     if (!res.Body) return null;
     // SDK v3 Body is a Smithy stream that exposes transformToByteArray()
