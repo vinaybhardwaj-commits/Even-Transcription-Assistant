@@ -142,7 +142,13 @@ export async function getObjectBytes(key: string): Promise<Uint8Array | null> {
     type ByteStream = { transformToByteArray: () => Promise<Uint8Array> };
     const stream = res.Body as unknown as ByteStream;
     if (typeof stream.transformToByteArray === "function") {
-      return await stream.transformToByteArray();
+      // Bound the BODY-stream read too: the send() abortSignal covers getting the response,
+      // but a stalled body stream (R2 sends headers then hangs) can still block transformToByteArray
+      // indefinitely and freeze the translate step. Race it against a hard timeout.
+      return await Promise.race([
+        stream.transformToByteArray(),
+        new Promise<Uint8Array>((_, rej) => setTimeout(() => rej(new Error("r2_body_read_timeout")), R2_OP_TIMEOUT_MS)),
+      ]);
     }
     const chunks: Buffer[] = [];
     for await (const chunk of res.Body as unknown as AsyncIterable<Buffer>) {
