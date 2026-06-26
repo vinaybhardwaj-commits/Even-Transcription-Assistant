@@ -176,6 +176,9 @@ export function Library({ slug }: Props) {
                   <span className="text-caption tabular-nums text-even-ink-500">{Math.max(0, Math.min(100, r.processing_pct ?? 0))}%</span>
                 </div>
               ) : null}
+              {r.status === "processing" && r.recorded_at && Date.now() - new Date(r.recorded_at).getTime() > 5 * 60 * 1000 ? (
+                <p className="mt-1 text-caption text-even-ink-400">Taking longer than usual — open to retry</p>
+              ) : null}
               {r.status !== "processing" && r.transcript_flag ? (
                 <p className="mt-2 inline-flex items-center gap-1 rounded-full bg-warning-100 px-2.5 py-0.5 text-caption text-warning-700">
                   <span aria-hidden>\u26a0</span> Transcription may be incomplete \u2014 review

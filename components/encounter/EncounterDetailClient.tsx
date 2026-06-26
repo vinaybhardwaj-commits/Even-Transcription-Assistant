@@ -24,6 +24,7 @@ type TaggedTurn = { text: string; speaker_idx: number | null; name: string; type
 
 type InitialState = {
   id: string;
+  recordedAt?: string | null;
   status: Status;
   note: AnyNote | null;
   noteType?: string;
@@ -516,6 +517,12 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
                 </li>
               ))}
             </ul>
+            {initial.recordedAt && Date.now() - new Date(initial.recordedAt).getTime() > 5 * 60 * 1000 ? (
+              <div className="pt-3 mt-1 border-t border-even-blue-100 space-y-2">
+                <p className="text-caption text-even-ink-600">This is taking longer than usual. It may still be finishing in the background — you can keep waiting, or retry if it seems stuck.</p>
+                <Button variant="secondary" size="sm" onClick={() => void runProcess(true)}>Retry processing</Button>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

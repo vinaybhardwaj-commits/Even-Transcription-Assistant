@@ -677,16 +677,21 @@ export async function POST(
     const needTranslate = !!row.audio_object_key && !row.translated;
     const needNative = INDIC_COMPREHENSION_ON() && isIndic && !row.native_analysis;
     const needNote = !row.note_json;
+    // NOTE-FIRST: the note is the clinical deliverable, so finalize (status='complete')
+    // runs as soon as the note exists — BEFORE CDS. CDS then runs as a non-critical
+    // enrichment on an already-complete encounter (like diarization), so a slow/failed
+    // CDS can never strand the encounter in 'processing'. The per-encounter claim below
+    // preserves 'complete' so these post-completion steps don't revert the status.
+    const needFinalize = !!row.note_json && row.status !== "complete";
     const needCdms = !!row.note_json && hasCdms && !row.cdmss_json;
-    const needFinalize = !!row.note_json && (!!row.cdmss_json || !hasCdms) && row.status !== "complete";
     const needDiarize = !!row.audio_object_key && !["complete", "skipped", "failed"].includes(row.diarize_status ?? "");
 
     const nextStep =
       needTranslate ? "translate" :
       needNative ? "native" :
       needNote ? "note" :
-      needCdms ? "cdms" :
       needFinalize ? "finalize" :
+      needCdms ? "cdms" :
       needDiarize ? "diarize" : "done";
 
     if (nextStep === "done") {
@@ -711,7 +716,8 @@ export async function POST(
     // encounter concurrently (which thrashes the Mac Mini and times both out).
     const claim = (await sql`
       UPDATE encounter
-         SET processing_step_at = now(), process_attempts = process_attempts + 1, status = 'processing'
+         SET processing_step_at = now(), process_attempts = process_attempts + 1,
+             status = CASE WHEN status = 'complete' THEN 'complete' ELSE 'processing' END
        WHERE id = ${id}
          AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
        RETURNING id
@@ -764,7 +770,7 @@ export async function POST(
           }
           // note failure: leave row as-is (do NOT mark progressed) → bounded retry (lock held to TTL)
         } else if (nextStep === "cdms") {
-          const pres = await runCdmssPipeline(row!.note_json as EncounterNote, { noteType: row!.note_type ?? undefined, onEvent: stepEmit });
+          const pres = await runCdmssPipeline(row!.note_json as EncounterNote, { noteType: row!.note_type ?? undefined, budgetMs: 240_000, onEvent: stepEmit });
           const store = pres.ok
             ? pres.cdmss
             : (pres.fallback ?? { differentials_to_consider: [], red_flags: [], evidence_based_suggestions: [], follow_up_considerations: [] });

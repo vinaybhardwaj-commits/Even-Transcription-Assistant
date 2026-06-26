@@ -50,9 +50,13 @@ export type CdmssPipelineEvent =
 const DRAFT_MODEL = process.env.CDS_DRAFT_MODEL || "qwen2.5:14b";
 const CRITIQUE_MODEL = process.env.CDS_CRITIQUE_MODEL || "llama3.1:8b";
 const REVISE_MODEL = process.env.CDS_REVISE_MODEL || "qwen2.5:14b";
-const DRAFT_TIMEOUT_MS = 120_000;
+const DRAFT_TIMEOUT_MS = 100_000;
 const CRITIQUE_TIMEOUT_MS = 30_000;
-const REVISE_TIMEOUT_MS = 90_000;
+const REVISE_TIMEOUT_MS = 75_000;
+// Overall wall-clock budget for the whole CDS pipeline. The step machine runs CDS as ONE
+// ~300s serverless step; each LLM call's timeout is clamped to the REMAINING budget so the
+// pipeline can never exceed it and get killed mid-step (which would strand the encounter).
+const CDS_BUDGET_MS_DEFAULT = 210_000;
 
 export type CdmssSource = {
   index: number; // 1-based, citation marker
@@ -300,10 +304,14 @@ type RawCritique = {
 
 export async function runCdmssPipeline(
   note: AnyNote,
-  opts: { signal?: AbortSignal; topK?: number; noteType?: string; onEvent?: (e: CdmssPipelineEvent) => void } = {},
+  opts: { signal?: AbortSignal; topK?: number; noteType?: string; budgetMs?: number; onEvent?: (e: CdmssPipelineEvent) => void } = {},
 ): Promise<CdmssPipelineResult> {
   const totalT0 = Date.now();
   const topK = opts.topK ?? 8;
+  const budgetMs = opts.budgetMs ?? CDS_BUDGET_MS_DEFAULT;
+  // Remaining budget, floored at 2s so a clamped timeout is never <=0 (a 2s call just fails
+  // fast and the existing soft-fallbacks take over). Bounds total LLM wall-time to ~budgetMs.
+  const remainingMs = () => Math.max(2_000, budgetMs - (Date.now() - totalT0));
 
   // 1. Seed
   const seedT0 = Date.now();
@@ -367,7 +375,7 @@ export async function runCdmssPipeline(
   opts.onEvent?.({ stage: "draft", state: "start", model: DRAFT_MODEL });
   const draftRes = await callJson<RawDraft>(
     DRAFT_MODEL,
-    DRAFT_TIMEOUT_MS,
+    Math.min(DRAFT_TIMEOUT_MS, remainingMs()),
     DRAFT_SYSTEM,
     buildDraftUser(seed, numbered),
     { signal: opts.signal, temperature: 0.1 },
@@ -388,7 +396,7 @@ export async function runCdmssPipeline(
   opts.onEvent?.({ stage: "critique", state: "start", model: CRITIQUE_MODEL });
   const critiqueRes = await callJson<RawCritique>(
     CRITIQUE_MODEL,
-    CRITIQUE_TIMEOUT_MS,
+    Math.min(CRITIQUE_TIMEOUT_MS, remainingMs()),
     CRITIQUE_SYSTEM,
     buildCritiqueUser(draftRaw, numbered),
     { signal: opts.signal, temperature: 0 },
@@ -415,12 +423,13 @@ export async function runCdmssPipeline(
     typeof critiqueRes.data.overall_quality === "string" &&
     critiqueRes.data.overall_quality === "needs_revision" &&
     Array.isArray(critiqueRes.data.unsupported_items) &&
-    critiqueRes.data.unsupported_items.length > 0
+    critiqueRes.data.unsupported_items.length > 0 &&
+    remainingMs() > 25_000  // only attempt the revise pass if there is real budget left
   ) {
     opts.onEvent?.({ stage: "revise", state: "start", model: REVISE_MODEL });
     const reviseRes = await callJson<RawDraft>(
       REVISE_MODEL,
-      REVISE_TIMEOUT_MS,
+      Math.min(REVISE_TIMEOUT_MS, remainingMs()),
       REVISE_SYSTEM,
       buildReviseUser(seed, numbered, draftRaw, critiqueRes.raw),
       { signal: opts.signal, temperature: 0.05 },
