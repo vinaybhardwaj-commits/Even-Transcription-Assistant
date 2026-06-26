@@ -735,7 +735,9 @@ export async function POST(
       let progressed = false;
       try {
         if (nextStep === "translate") {
+          console.warn(`[translate-dbg] enc=${id} after() START`);
           await translateIfNeeded();
+          console.warn(`[translate-dbg] enc=${id} translateIfNeeded DONE jobPending=${jobPending} translated_local=${row!.translated}`);
           if (jobPending) {
             // Long-file chunked job still running: release the lock (WITHOUT
             // resetting attempts, so a stuck job still gives up at the cap) and
@@ -747,6 +749,7 @@ export async function POST(
           await guardTranscripts();
           await assessAndFlag();
           await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
+          console.warn(`[translate-dbg] enc=${id} SET translated=true, progressed`);
           progressed = true;
         } else if (nextStep === "native") {
           try {
