@@ -775,6 +775,11 @@ export async function POST(
           progressed = true;
         } else if (nextStep === "diarize") {
           await diarizeStore();
+          // Diarization is the LAST step and non-critical: by the time it runs, the encounter
+          // is already clinically complete (note + CDS done before this). The per-step claim
+          // above set status='processing'; flip back to terminal HERE so a dropped self-chain
+          // (after() not firing) can't strand a fully-processed encounter in 'processing' forever.
+          await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND note_json IS NOT NULL`.catch(() => { /* best-effort terminal flip */ });
           progressed = true;
         }
       } catch (e) {

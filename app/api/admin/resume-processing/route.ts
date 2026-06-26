@@ -34,8 +34,12 @@ async function resumeOne(origin: string, slug: string, id: string): Promise<bool
 }
 
 export async function GET(req: NextRequest) {
-  const isCron = !!req.headers.get("x-vercel-cron");
   const auth = req.headers.get("authorization");
+  // Vercel cron auth: when CRON_SECRET is set, Vercel sends "Authorization: Bearer <CRON_SECRET>"
+  // on every scheduled invocation. The legacy x-vercel-cron header is NOT reliably present on this
+  // project (it 401'd every cron run, so nothing was ever resumed). Accept either signal.
+  const cronSecret = process.env.CRON_SECRET;
+  const isCron = !!req.headers.get("x-vercel-cron") || (!!cronSecret && auth === `Bearer ${cronSecret}`);
   const secretOk = !!process.env.MIGRATION_SECRET && auth === `Bearer ${process.env.MIGRATION_SECRET}`;
   if (!isCron && !secretOk) return respondError("AUTH_REQUIRED", "cron or migration secret required");
   if (!process.env.MIGRATION_SECRET) return respondError("PIPELINE_FAILED", "MIGRATION_SECRET not set");

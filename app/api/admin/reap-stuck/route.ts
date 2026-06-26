@@ -56,6 +56,7 @@ type ReapResult = {
   minutes: number;
   stuck_count: number;
   stuck?: Array<{ id: string; has_note: boolean; recorded_at: string }>;
+  reaped_complete: string[];
   reaped_partial: string[];
   reaped_failed: string[];
 };
@@ -75,11 +76,26 @@ async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
   `) as Array<{ id: string; has_note: boolean; recorded_at: string }>;
 
   if (dryRun || candidates.length === 0) {
-    return { dry_run: dryRun, minutes, stuck_count: candidates.length, stuck: candidates, reaped_partial: [], reaped_failed: [] };
+    return { dry_run: dryRun, minutes, stuck_count: candidates.length, stuck: candidates, reaped_complete: [], reaped_partial: [], reaped_failed: [] };
   }
 
   // Flip to recoverable terminal states. Two scoped UPDATEs with the SAME
   // staleness predicate so we never touch a row that has since progressed.
+  // Fully complete: a note exists AND clinical decision support is present OR not applicable
+  // for this note type (operative/dietetic/physio carry no CDS). These encounters finished
+  // every step but were stranded in 'processing' (e.g. a dropped self-chain after the
+  // non-critical diarize step). The correct terminal state is 'complete' ("Ready to send"),
+  // NOT draft_partial. Runs FIRST so these rows drop out of the draft_partial sweep below.
+  const reapedComplete = ((await sql`
+    UPDATE encounter SET status = 'complete', processing_pct = 100, updated_at = NOW()
+     WHERE status = 'processing' AND deleted_at IS NULL
+       AND recorded_at < NOW() - make_interval(mins => ${minutes})
+       AND note_json IS NOT NULL
+       AND (cdmss_json IS NOT NULL OR note_type IN ('operative_procedure','dietetic_consult','physiotherapy'))
+    RETURNING id
+  `) as Array<{ id: string }>).map((r) => r.id);
+
+  // Note present but CDS expected and still missing -> usable partial (doctor reviews/sends).
   const reapedPartial = ((await sql`
     UPDATE encounter SET status = 'draft_partial', updated_at = NOW()
      WHERE status = 'processing' AND deleted_at IS NULL
@@ -88,6 +104,7 @@ async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
     RETURNING id
   `) as Array<{ id: string }>).map((r) => r.id);
 
+  // No note at all -> failed.
   const reapedFailed = ((await sql`
     UPDATE encounter SET status = 'failed', updated_at = NOW()
      WHERE status = 'processing' AND deleted_at IS NULL
@@ -96,18 +113,18 @@ async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
     RETURNING id
   `) as Array<{ id: string }>).map((r) => r.id);
 
-  const total = reapedPartial.length + reapedFailed.length;
+  const total = reapedComplete.length + reapedPartial.length + reapedFailed.length;
   if (total > 0) {
     await sql`
       INSERT INTO audit_log
         (actor_type, actor_id, action, target_type, target_id, metadata_json)
       VALUES
         ('system', 'reaper', 'encounter.reap_stuck', 'encounter', NULL,
-         ${JSON.stringify({ minutes, reaped_partial: reapedPartial, reaped_failed: reapedFailed })}::jsonb)
+         ${JSON.stringify({ minutes, reaped_complete: reapedComplete, reaped_partial: reapedPartial, reaped_failed: reapedFailed })}::jsonb)
     `.catch(() => { /* intentional: best-effort audit write */ });
   }
 
-  return { dry_run: false, minutes, stuck_count: total, reaped_partial: reapedPartial, reaped_failed: reapedFailed };
+  return { dry_run: false, minutes, stuck_count: total, reaped_complete: reapedComplete, reaped_partial: reapedPartial, reaped_failed: reapedFailed };
 }
 
 function clampMinutes(v: unknown): number {
