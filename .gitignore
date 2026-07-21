@@ -37,3 +37,6 @@ secrets.env
 *.tsbuildinfo
 next-env.d.ts
 tests/e2e/.auth/
+
+# Room Bench PRD/mockup — local-only docs (public repo)
+docs/room-bench/

@@ -42,6 +42,12 @@ export default async function RetentionPage() {
             <dt className="text-caption text-even-ink-500">Storage backend</dt>
             <dd className="text-even-navy-800 font-mono">Cloudflare R2 · eta-audio</dd>
           </dl>
+          <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 px-4 py-3 text-body text-even-navy-800">
+            <b>Bench / Room recordings:</b> everything under the{" "}
+            <code className="font-mono">bench/</code> prefix is a permanent
+            archive — exempt from retention policy and from doctor self-delete
+            (Room-Bench PRD D6). No code path deletes or rewrites these objects.
+          </div>
           <p className="text-caption text-even-ink-500">
             Editing the policy is deferred to v2 (would require backfill of
             existing audio + cron infrastructure + admin policy review).

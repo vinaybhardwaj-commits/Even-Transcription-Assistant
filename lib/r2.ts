@@ -66,6 +66,36 @@ export function whisperBufferKey(encounterId: string): string {
   return `whisper-buffer/${encounterId}.webm`;
 }
 
+/**
+ * Room-Bench chunk key (Room-Bench PRD §3.2).
+ * `bench/{room_slug}/{YYYY-MM-DD}/{session_id}/chunk_{idx padded 5}.webm`
+ * Everything under the `bench/` prefix is immutable by convention: no code
+ * path deletes or overwrites under it (PRD D6).
+ */
+export function benchChunkKey(
+  roomSlug: string,
+  dateYmd: string,
+  sessionId: string,
+  idx: number,
+): string {
+  return `bench/${roomSlug}/${dateYmd}/${sessionId}/chunk_${String(idx).padStart(5, "0")}.webm`;
+}
+
+/**
+ * Presigned HEAD URL — lets the browser verify a bench chunk landed in R2
+ * (existence + size) after its presigned PUT, per Room-Bench D8. The bucket
+ * CORS policy already allows HEAD (see r2-cors-fix).
+ */
+export async function signHeadUrl(opts: {
+  key: string;
+  expiresInSeconds?: number;
+}): Promise<string> {
+  const cmd = new HeadObjectCommand({ Bucket: bucket(), Key: opts.key });
+  return getSignedUrl(client(), cmd, {
+    expiresIn: opts.expiresInSeconds ?? 600, // 10 min, matches PUT
+  });
+}
+
 export async function signPutUrl(opts: {
   key: string;
   contentType: string;
