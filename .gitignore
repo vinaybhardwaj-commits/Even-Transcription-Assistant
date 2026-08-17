@@ -40,3 +40,8 @@ tests/e2e/.auth/
 
 # Room Bench PRD/mockup — local-only docs (public repo)
 docs/room-bench/
+docs/brain/
+
+# Ambient Brain (brain/) — standalone Cloud Run service, own node_modules + tsc output
+brain/node_modules/
+brain/dist/
