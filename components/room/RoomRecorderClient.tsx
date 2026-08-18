@@ -13,12 +13,58 @@
  * then flips the session to `ended`.
  *
  * Capture + upload only — no transcription, no vendor connections.
+ *
+ * Kickoff B (Ambient Brain PRD §9), behind NEXT_PUBLIC_ETA_LIVE_SINK only: the
+ * live-sink probe mounts as a child (second MediaRecorder on the same stream,
+ * logged/stubbed slices, ≤1/min heartbeat via /api/bench/brain-proxy), and the
+ * kiosk gains the listening-state chip (recording / brain unsure / brain down)
+ * plus a counters debug line. Flag off = nothing mounts, UI byte-identical.
+ * Start-of-day notice copy is unchanged (consent copy is not this build's).
  */
 
 import * as React from "react";
-import { useRoomRecorder } from "@/lib/use-room-recorder";
+import { useRoomRecorder, type ArchiveSeamEvent } from "@/lib/use-room-recorder";
+import { LIVE_SINK } from "@/lib/live-flags";
+import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
 
 type Props = { slug: string; roomName: string };
+
+type LiveHandlers = {
+  onSeam?: (s: ArchiveSeamEvent) => void;
+  onRecorderError?: (message: string) => void;
+};
+
+/**
+ * Mounted ONLY when LIVE_SINK is on. Runs the live sink hook, hands the
+ * archive-side callbacks up through `handlersRef`, and lifts counters to the
+ * kiosk (which renders the chip + debug line). Renders nothing itself.
+ */
+function LiveSinkProbe(props: {
+  active: boolean;
+  sessionId: string | null;
+  mimeType: string | undefined;
+  getStream: () => MediaStream | null;
+  handlersRef: React.MutableRefObject<LiveHandlers>;
+  onCounters: (c: LiveSinkCounters) => void;
+}) {
+  const { active, sessionId, mimeType, getStream, handlersRef, onCounters } = props;
+  const { counters, reportArchiveSeam, reportArchiveError } = useLiveSink({
+    enabled: active,
+    getStream,
+    sessionId,
+    mimeType,
+  });
+  React.useEffect(() => {
+    handlersRef.current = { onSeam: reportArchiveSeam, onRecorderError: reportArchiveError };
+    return () => {
+      handlersRef.current = {};
+    };
+  }, [handlersRef, reportArchiveSeam, reportArchiveError]);
+  React.useEffect(() => {
+    onCounters(counters);
+  }, [counters, onCounters]);
+  return null;
+}
 
 function fmtClock(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -43,7 +89,19 @@ function fmtTimeOfDay(t: number): string {
 }
 
 export function RoomRecorderClient({ slug, roomName }: Props) {
-  const { status, startDay, pauseDay, resumeDay, endDay, markEnded } = useRoomRecorder();
+  // Kickoff B: archive-side signals reach the live sink through this ref; with the
+  // flag off nothing ever assigns it, so the callbacks are no-ops.
+  const liveHandlersRef = React.useRef<LiveHandlers>({});
+  const recorderOpts = React.useMemo(
+    () => ({
+      onSeam: (s: ArchiveSeamEvent) => liveHandlersRef.current.onSeam?.(s),
+      onRecorderError: (m: string) => liveHandlersRef.current.onRecorderError?.(m),
+    }),
+    [],
+  );
+  const { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream } =
+    useRoomRecorder(recorderOpts);
+  const [live, setLive] = React.useState<LiveSinkCounters | null>(null);
 
   const [label, setLabel] = React.useState("");
   const [mics, setMics] = React.useState<Array<{ deviceId: string; label: string }>>([]);
@@ -243,6 +301,29 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const headerSub =
     idle || !label.trim() ? longDate : `${shortDate} · ${label.trim()}`;
 
+  // Kickoff B listening-state chip — flag on, while capturing only. Three states
+  // (designer §2.1): recording / brain unsure / brain down, from the heartbeat
+  // proxy's success/failure. NO visit graph, NO identities on the kiosk.
+  const brainChip =
+    LIVE_SINK && live && (status.state === "recording" || status.state === "ending") ? (
+      live.brain === "recording" ? (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-meta font-semibold bg-success-100 text-success-700">
+          <span className="w-1.5 h-1.5 rounded-full bg-success-700" aria-hidden="true" />
+          Brain · recording
+        </span>
+      ) : live.brain === "unsure" ? (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-meta font-semibold bg-warning-100 text-warning-700">
+          <span className="w-1.5 h-1.5 rounded-full bg-warning-700" aria-hidden="true" />
+          Brain · unsure
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-meta font-semibold bg-even-ink-100 text-even-ink-500">
+          <span className="w-1.5 h-1.5 rounded-full bg-even-ink-400" aria-hidden="true" />
+          Brain · down
+        </span>
+      )
+    ) : null;
+
   const levelBars = (
     <span aria-hidden="true" className="tracking-tighter">
       {["▂", "▄", "▆", "▅", "▃"]
@@ -260,8 +341,25 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             <p className="text-heading font-bold text-even-navy-800">{roomName}</p>
             <p className="text-caption text-even-ink-400">{headerSub}</p>
           </div>
-          {pill}
+          {LIVE_SINK ? (
+            <div className="flex flex-col items-end gap-1.5">
+              {pill}
+              {brainChip}
+            </div>
+          ) : (
+            pill
+          )}
         </div>
+        {LIVE_SINK && (
+          <LiveSinkProbe
+            active={status.state === "recording"}
+            sessionId={sessionId}
+            mimeType={status.mimeType}
+            getStream={getStream}
+            handlersRef={liveHandlersRef}
+            onCounters={setLive}
+          />
+        )}
 
         <div className="px-6 py-6">
           {/* recovery banner */}
@@ -426,6 +524,23 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 Do not close this tab. If the machine restarts, sign in again — unfinished uploads
                 resume automatically.
               </p>
+              {LIVE_SINK && live && (
+                <p
+                  className="mt-3 text-center font-mono text-[10px] leading-relaxed text-even-ink-400 break-words"
+                  data-testid="live-sink-debug"
+                >
+                  live-sink {live.state}
+                  {live.stop_reason ? ` (${live.stop_reason})` : ""} · slices {live.slices_received}
+                  {" "}· late {live.slices_late} · drop~{live.slices_dropped_est} · empty{" "}
+                  {live.slices_empty} · ema {Math.round(live.interval_ema_ms)}ms · max{" "}
+                  {live.interval_max_ms}ms · win {live.window_slices}/
+                  {Math.round(live.window_bytes / 1024)}KB · stalls {live.stalls} · err L
+                  {live.live_recorder_errors}/A{live.archive_recorder_errors} · seam{" "}
+                  {live.archive_seams} last {live.archive_seam_last_ms ?? "–"}ms max{" "}
+                  {live.archive_seam_max_ms ?? "–"}ms · hb {live.heartbeats_ok}/
+                  {live.heartbeats_sent} {live.brain}
+                </p>
+              )}
             </>
           )}
 

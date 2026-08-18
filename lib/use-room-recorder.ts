@@ -25,9 +25,16 @@
  *
  * The room surface makes NO transcription/vendor connections — capture and
  * upload only (PRD §3.3).
+ *
+ * Kickoff B (Ambient Brain PRD §9) additions — instrumentation + hookup only,
+ * the chunk cycle above is unchanged: `getStream()` lets the flag-gated live
+ * sink (lib/use-live-sink) attach a second MediaRecorder to the same stream;
+ * `onSeam` / `onRecorderError` report rotation seam timing and archive
+ * recorder errors; `[bench-seam]` is logged on every rotation (flag on or off).
  */
 
 import * as React from "react";
+import { LIVE_SINK } from "@/lib/live-flags";
 
 const CHUNK_MS = 5 * 60 * 1000; // D1: 5-minute chunks
 const BACKOFF_MIN_MS = 5_000;
@@ -182,7 +189,21 @@ export type RoomRecorderStatus = {
 
 type QueueItem = BenchChunkRecord;
 
-export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
+/**
+ * Archive chunk seam (Kickoff B instrumentation): the recorder restart gap at a
+ * 5-minute rotation — `seam_ms` = next rec.start() − previous rec.stop() call;
+ * `stop_latency_ms` = how long stop() took to deliver the blob. Logged as
+ * `[bench-seam]` on every rotation (flag on OR off — the go/no-go compares both).
+ */
+export type ArchiveSeamEvent = { idx: number; seam_ms: number; stop_latency_ms: number };
+
+export function useRoomRecorder(opts?: {
+  onError?: (e: Error) => void;
+  /** Kickoff B: per-rotation seam timing (live-sink instrumentation). */
+  onSeam?: (s: ArchiveSeamEvent) => void;
+  /** Kickoff B: archive MediaRecorder error (the live sink sacrifices itself on it). */
+  onRecorderError?: (message: string) => void;
+}) {
   const [state, setState] = React.useState<RoomRecorderState>("idle");
   const [error, setError] = React.useState<string | null>(null);
   const [mimeType, setMimeType] = React.useState<string | undefined>(undefined);
@@ -206,6 +227,7 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
   const chunkStartedAtRef = React.useRef<number>(0);
   const lastChunkEndedAtRef = React.useRef<number | null>(null);
   const rotateTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopCalledAtRef = React.useRef<number>(0); // seam instrumentation only
   const wakeLockRef = React.useRef<{ release: () => Promise<void> } | null>(null);
   const stateRef = React.useRef<RoomRecorderState>("idle");
   const optsRef = React.useRef(opts);
@@ -442,6 +464,7 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
         if (e.data && e.data.size > 0) blob = e.data;
       };
       rec.onstop = () => resolve(blob);
+      stopCalledAtRef.current = Date.now();
       try {
         rec.stop();
       } catch {
@@ -460,6 +483,12 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
       const msg =
         (ev as unknown as { error?: { message?: string } }).error?.message ?? "recorder_error";
       emitError(msg);
+      console.warn("[bench-sink] archive recorder_error", JSON.stringify({ idx: idxRef.current, message: msg }));
+      try {
+        optsRef.current?.onRecorderError?.(msg);
+      } catch {
+        /* noop */
+      }
     };
     recRef.current = rec;
     rec.start(); // NO timeslice — one blob on stop (D1)
@@ -504,6 +533,22 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
         if (stateRef.current !== "recording") return;
         startRecorderSegment();
         scheduleRotate();
+        // Seam instrumentation (Kickoff B go/no-go): measured on every rotation,
+        // flag on or off, so the two can be compared. Log-only — no behavior change.
+        const stopAt = stopCalledAtRef.current;
+        if (stopAt > 0) {
+          const seam: ArchiveSeamEvent = {
+            idx: Math.max(0, idxRef.current - 1),
+            seam_ms: Math.max(0, chunkStartedAtRef.current - stopAt),
+            stop_latency_ms: Math.max(0, (lastChunkEndedAtRef.current ?? stopAt) - stopAt),
+          };
+          console.info("[bench-seam]", JSON.stringify({ ...seam, live_sink_flag: LIVE_SINK }));
+          try {
+            optsRef.current?.onSeam?.(seam);
+          } catch {
+            /* noop */
+          }
+        }
       })();
     }, CHUNK_MS);
   }, [finalizeIntoQueue, startRecorderSegment]);
@@ -616,6 +661,9 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
     };
   }, []);
 
+  /** Kickoff B: read-only access to the day's stream for the live sink (flag on only). */
+  const getStream = React.useCallback((): MediaStream | null => streamRef.current, []);
+
   const now = Date.now();
   void tick; // tick only exists to drive re-render
   const status: RoomRecorderStatus = {
@@ -638,5 +686,5 @@ export function useRoomRecorder(opts?: { onError?: (e: Error) => void }) {
     storageBlocked,
   };
 
-  return { status, startDay, pauseDay, resumeDay, endDay, markEnded };
+  return { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream };
 }

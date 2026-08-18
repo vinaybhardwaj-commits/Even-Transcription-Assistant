@@ -79,6 +79,16 @@ export const LIVE_FLASH =
 export const HEADER_GUARD =
   process.env.NEXT_PUBLIC_ETA_HEADER_GUARD !== "0";
 
+// Room Bench dual-sink probe (Ambient Brain Kickoff B, PRD §9): alongside the
+// 5-minute archive recorder, run a SECOND ~250ms-timeslice MediaRecorder on the
+// same stream. Live slices are logged/stubbed only (rolling in-memory window,
+// counters on the kiosk debug line, ≤1/min heartbeat cue via the room-cookie
+// proxy) — no STT, no embeddings, no raw audio leaves the browser. The archive
+// sink is the P0: the live sink is sacrificial and stops itself rather than
+// contend. OFF by default — flag off = today's Bench, byte-for-byte. V flips
+// NEXT_PUBLIC_ETA_LIVE_SINK=1 for the probe day only.
+export const LIVE_SINK = process.env.NEXT_PUBLIC_ETA_LIVE_SINK === "1";
+
 // NoteGen — typed-note (text) authoring surface: the MedNoteGen live editor
 // ported into EvenScribe. When ON, the post-PIN home offers "Type" alongside
 // "Record"; the typed text becomes the encounter transcript and runs the same
