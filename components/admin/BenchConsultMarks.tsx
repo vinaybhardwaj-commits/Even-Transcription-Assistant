@@ -4,19 +4,14 @@
  * the chunk strip: heading "Consult marks (n)", one row per bench_event of
  * kind 'consult_mark' — HH:MM:SS (IST) + delivery status. No actions.
  *
- * SQL INFERRED (no live DB in the sandbox) against migration 0043; fail-safe:
- * on any query error (e.g. 0043 not applied yet) the block renders nothing.
+ * Query: lib/bench listBenchConsultMarks (shared with the timeline.md generator,
+ * Kickoff D). Fail-safe: on any query error (e.g. 0043 not applied yet) the
+ * block renders nothing.
  * Snapshot at page render — reload to refresh (the chunk strip above polls;
  * this block does not).
  */
 
-import { sql } from "@/lib/db";
-
-type MarkRow = {
-  id: string;
-  at: string | Date;
-  brain_status: string;
-};
+import { listBenchConsultMarks, type BenchConsultMarkRow as MarkRow } from "@/lib/bench";
 
 function fmtIstHms(t: string | Date): string {
   return new Date(t).toLocaleTimeString("en-GB", {
@@ -30,13 +25,7 @@ function fmtIstHms(t: string | Date): string {
 export async function BenchConsultMarks({ sessionId }: { sessionId: string }) {
   let rows: MarkRow[];
   try {
-    rows = (await sql`
-      SELECT id, at, brain_status
-        FROM bench_event
-       WHERE session_id = ${sessionId} AND kind = 'consult_mark'
-       ORDER BY at ASC
-       LIMIT 500
-    `) as MarkRow[];
+    rows = await listBenchConsultMarks(sessionId);
   } catch {
     return null;
   }

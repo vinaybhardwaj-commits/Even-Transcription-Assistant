@@ -160,6 +160,12 @@ export function BenchSessionDetailClient({ sessionId }: { sessionId: string }) {
             manifest.json
           </a>
           <a
+            href={`/api/bench/sessions/${session.id}/timeline`}
+            className="eta-btn-secondary px-4 py-2 text-label"
+          >
+            Download timeline.md
+          </a>
+          <a
             href={`/api/bench/sessions/${session.id}/download`}
             className="eta-btn-primary px-4 py-2 text-label"
           >

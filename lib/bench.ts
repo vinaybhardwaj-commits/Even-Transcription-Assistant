@@ -146,6 +146,27 @@ export async function listBenchChunks(sessionId: string): Promise<BenchChunkRow[
   }
 }
 
+export type BenchConsultMarkRow = {
+  id: string;
+  at: string | Date;
+  brain_status: string;
+};
+
+/**
+ * Consult marks for a session (bench_event kind 'consult_mark', migration 0043;
+ * Kickoff C/D). Oldest first. Throws on DB error — callers decide the fail-safe
+ * (the admin block renders nothing; the timeline degrades to a note).
+ */
+export async function listBenchConsultMarks(sessionId: string): Promise<BenchConsultMarkRow[]> {
+  return (await sql`
+    SELECT id, at, brain_status
+      FROM bench_event
+     WHERE session_id = ${sessionId} AND kind = 'consult_mark'
+     ORDER BY at ASC
+     LIMIT 500
+  `) as BenchConsultMarkRow[];
+}
+
 // ---------------------------------------------------------------------------
 // CRC-32 (standard polynomial 0xEDB88320) + STORE-only ZIP writer (D7)
 // ---------------------------------------------------------------------------

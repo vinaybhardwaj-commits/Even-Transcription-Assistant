@@ -11,6 +11,10 @@
  * and streamed out as they are read. A mid-stream R2 read failure aborts
  * the stream — a truncated download is loud, never silently incomplete.
  * Nothing under bench/ is ever written or deleted here (D6).
+ *
+ * Kickoff D (decision D2): the zip also carries timeline.md next to manifest.json,
+ * from the same generator as /timeline. Generated in-request; a generator failure
+ * skips that entry (logged) and never breaks the zip.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { respondError } from "@/lib/respond";
@@ -21,6 +25,7 @@ import {
   StoreZipWriter,
 } from "@/lib/bench";
 import { getObjectBytes } from "@/lib/r2";
+import { renderBenchTimeline } from "@/lib/bench-timeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,6 +112,14 @@ export async function GET(
         }
         const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
         controller.enqueue(zip.entry("manifest.json", manifestBytes, now));
+        // D2: timeline.md — same generator as /timeline; renderBenchTimeline never throws,
+        // but a defensive catch keeps the zip whole regardless.
+        try {
+          const { markdown } = await renderBenchTimeline(session.id, session);
+          controller.enqueue(zip.entry("timeline.md", new TextEncoder().encode(markdown), now));
+        } catch (e) {
+          console.warn("[bench-download] timeline.md skipped", String((e as Error)?.message ?? e).slice(0, 200));
+        }
         controller.enqueue(zip.finish());
         controller.close();
       } catch (e) {
