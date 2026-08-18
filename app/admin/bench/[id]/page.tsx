@@ -3,10 +3,12 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { BenchSessionDetailClient } from "@/components/admin/BenchSessionDetailClient";
+import { BenchConsultMarks } from "@/components/admin/BenchConsultMarks";
 
 /**
  * Admin · Bench session detail — chunk timeline, totals, day download
- * (Room-Bench PRD §3.5; mockup screen 5).
+ * (Room-Bench PRD §3.5; mockup screen 5). Kickoff C adds the read-only
+ * "Consult marks" block under the chunk strip (decision C4).
  */
 
 export const dynamic = "force-dynamic";
@@ -33,6 +35,7 @@ export default async function AdminBenchSessionPage({
       breadcrumb="Bench / session detail"
     >
       <BenchSessionDetailClient sessionId={id} />
+      <BenchConsultMarks sessionId={id} />
     </AdminShell>
   );
 }

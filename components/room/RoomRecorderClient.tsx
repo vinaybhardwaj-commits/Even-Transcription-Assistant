@@ -29,6 +29,18 @@ import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
 
 type Props = { slug: string; roomName: string };
 
+const MARK_LATCH_MS = 15_000; // C5
+const MARK_TIMEOUT_MS = 10_000; // proxy caps its brain hop at 3s; DB write on top
+
+/** IST wall clock HH:MM for the "Marked HH:MM" latch label. */
+function fmtIstHm(t: number): string {
+  return new Date(t).toLocaleTimeString("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 type LiveHandlers = {
   onSeam?: (s: ArchiveSeamEvent) => void;
   onRecorderError?: (message: string) => void;
@@ -267,6 +279,53 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       setEndingUpload(false);
     })();
   }, [endingUpload, status.state, status.queuedCount, patchSession, markEnded]);
+
+  // ---- Kickoff C: "Mark consult" (decisions C3/C5/C6) ----
+  // A press posts a consult_mark to the room-cookie proxy (durable-first there);
+  // it never touches the recorders, the archive cycle, or the live sink. Latch 15s
+  // on ok; on a failed POST no latch, quiet "Not saved — tap again", re-press allowed.
+  const [mark, setMark] = React.useState<
+    | { kind: "idle" }
+    | { kind: "sending" }
+    | { kind: "latched"; at: number }
+    | { kind: "failed" }
+  >({ kind: "idle" });
+  const markTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => {
+    return () => {
+      if (markTimerRef.current) clearTimeout(markTimerRef.current);
+    };
+  }, []);
+
+  const onMarkConsult = React.useCallback(async () => {
+    if (mark.kind === "sending" || mark.kind === "latched") return;
+    const pressedAt = Date.now();
+    setMark({ kind: "sending" });
+    let ok = false;
+    try {
+      const res = await fetch("/api/bench/brain-proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "consult_mark",
+          at: new Date(pressedAt).toISOString(),
+          session_id: sessionId,
+        }),
+        signal: AbortSignal.timeout(MARK_TIMEOUT_MS),
+      });
+      const j = (await res.json().catch(() => null)) as { ok?: boolean } | null;
+      ok = res.ok && j?.ok === true;
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      setMark({ kind: "failed" });
+      return;
+    }
+    setMark({ kind: "latched", at: pressedAt });
+    if (markTimerRef.current) clearTimeout(markTimerRef.current);
+    markTimerRef.current = setTimeout(() => setMark({ kind: "idle" }), MARK_LATCH_MS);
+  }, [mark.kind, sessionId]);
 
   // ---- shared bits ----
   const today = new Date();
@@ -518,7 +577,32 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                   >
                     End day
                   </button>
+                  {/* Kickoff C — Mark consult: outline, subordinate to the day pill; visible only
+                      while actively recording (C3). Latches "Marked HH:MM" 15s on success (C5). */}
+                  <button
+                    type="button"
+                    onClick={onMarkConsult}
+                    disabled={mark.kind === "sending" || mark.kind === "latched"}
+                    aria-live="polite"
+                    data-testid="mark-consult"
+                    className={`flex-1 py-3.5 rounded-2xl font-medium border transition ${
+                      mark.kind === "latched"
+                        ? "border-even-ink-200 text-even-ink-500 bg-even-ink-50 cursor-default"
+                        : "border-even-ink-300 text-even-navy-800 bg-even-white hover:bg-even-ink-50 disabled:opacity-60"
+                    }`}
+                  >
+                    {mark.kind === "latched"
+                      ? `✓ Marked ${fmtIstHm(mark.at)}`
+                      : mark.kind === "sending"
+                        ? "⚑ Marking…"
+                        : "⚑ Mark consult"}
+                  </button>
                 </div>
+              )}
+              {status.state === "recording" && mark.kind === "failed" && (
+                <p className="mt-2 text-right text-[13px] text-even-ink-500" role="status">
+                  Not saved — tap again
+                </p>
               )}
               <p className="mt-4 text-center text-meta text-even-ink-400 leading-relaxed">
                 Do not close this tab. If the machine restarts, sign in again — unfinished uploads

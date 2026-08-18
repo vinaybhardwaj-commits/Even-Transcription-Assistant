@@ -32,6 +32,10 @@ export function newSessionId(): string {
 export function newChunkId(): string {
   return `bc_${benchId()}`;
 }
+/** bench_event id (migration 0043, Kickoff C). */
+export function newEventId(): string {
+  return `be_${benchId()}`;
+}
 
 /** 'OPD 3' → base 'opd-3'; full slug 'opd-3-k4hz'. */
 export function buildRoomSlug(name: string): { base: string; token: string; full: string } {
