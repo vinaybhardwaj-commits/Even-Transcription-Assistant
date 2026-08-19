@@ -96,6 +96,15 @@ export const SQL_CLUSTERS_FOR_DAY =
   "SELECT id, kind, visit_id, first_seen_at, last_seen_at, (centroid IS NOT NULL) AS has_centroid " +
   "FROM speaker_cluster WHERE room_day_id = $1 ORDER BY first_seen_at ASC, id ASC";
 
+/**
+ * Operator MCP S1 (GET /api/brain/rooms/:id/cues + scribe_list_cues): cues for a room_day,
+ * newest first, optional `since` (at > $2) and `type` (= $3) filters, LIMIT $4. Read-only.
+ */
+export const SQL_CUES_FOR_DAY =
+  "SELECT id, type, at, created_at, payload FROM cue " +
+  "WHERE room_day_id = $1 AND ($2::timestamptz IS NULL OR at > $2::timestamptz) AND ($3::text IS NULL OR type = $3::text) " +
+  "ORDER BY at DESC, id DESC LIMIT $4::int";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -238,6 +247,77 @@ export async function readGraph(q: Queryable, roomId: string, date: string, room
   }));
 
   return { room_id: roomId, room_day_id: roomDayId, ist_date: date, visits, active_visit_id: active?.id ?? null, clusters, confidence: null, as_of };
+}
+
+// ---------------------------------------------------------------------------
+// Cue list (Operator MCP S1) — read-only, brain pool. Never creates a day.
+// ---------------------------------------------------------------------------
+
+export const CUES_DEFAULT_LIMIT = 50;
+export const CUES_MAX_LIMIT = 200;
+const CUE_SUMMARY_CHARS = 80;
+
+type CueRow = { id: string; type: string; at: Date; created_at: Date; payload: unknown };
+
+export type CueListItem = {
+  id: string;
+  type: string;
+  at: string;
+  created_at: string;
+  /** first 80 chars of the payload JSON (null when payload is null) */
+  summary: string | null;
+  /** only present when include_payload=true */
+  payload?: unknown;
+};
+
+export type CueListResult = {
+  room_id: string;
+  room_day_id: string | null;
+  ist_date: string;
+  cues: CueListItem[];
+  as_of: string;
+};
+
+/**
+ * List cues for (room, IST date), newest first. `since` filters at > since; `type` exact.
+ * Payload is summarised to 80 chars unless includePayload. Throws on brain error (callers
+ * classify / degrade).
+ */
+export async function listCuesForDay(
+  roomId: string,
+  date: string,
+  opts: { since?: Date | null; type?: string | null; limit?: number; includePayload?: boolean } = {},
+): Promise<CueListResult> {
+  const as_of = new Date().toISOString();
+  const day = await findRoomDay(roomId, date);
+  if (!day) return { room_id: roomId, room_day_id: null, ist_date: date, cues: [], as_of };
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? CUES_DEFAULT_LIMIT) || CUES_DEFAULT_LIMIT, 1), CUES_MAX_LIMIT);
+  const r = await query<CueRow>(SQL_CUES_FOR_DAY, [
+    day.id,
+    opts.since ? opts.since.toISOString() : null,
+    opts.type ?? null,
+    limit,
+  ]);
+  const cues: CueListItem[] = r.rows.map((row) => {
+    let summary: string | null = null;
+    if (row.payload !== null && row.payload !== undefined) {
+      try {
+        summary = JSON.stringify(row.payload).slice(0, CUE_SUMMARY_CHARS);
+      } catch {
+        summary = null;
+      }
+    }
+    const item: CueListItem = {
+      id: row.id,
+      type: row.type,
+      at: iso(row.at) ?? as_of,
+      created_at: iso(row.created_at) ?? as_of,
+      summary,
+    };
+    if (opts.includePayload) item.payload = row.payload ?? null;
+    return item;
+  });
+  return { room_id: roomId, room_day_id: day.id, ist_date: date, cues, as_of };
 }
 
 // ---------------------------------------------------------------------------

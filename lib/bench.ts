@@ -156,6 +156,90 @@ export const splitChunksBySource = (chunks: BenchChunkRow[]) => ({
   backup: chunks.filter((c) => c.source === "backup"),
 });
 
+export type BenchSessionListFilters = {
+  room_id?: string | null;
+  room_slug?: string | null;
+  /** IST calendar date (YYYY-MM-DD) of session start (Asia/Kolkata) */
+  ist_date?: string | null;
+  status?: string | null;
+  /** 1..200, default 200 (the pre-filter behaviour) */
+  limit?: number | null;
+};
+
+export type BenchSessionRollupRow = {
+  id: string;
+  room_id: string;
+  label: string | null;
+  mic_label: string | null;
+  started_at: string | Date;
+  ended_at: string | Date | null;
+  status: string;
+  notes: string | null;
+  room_name: string;
+  room_slug: string;
+  chunk_count: number;
+  verified_count: number;
+  total_bytes: string | number | null;
+  gap_ms: string | number | null;
+  gap_count: number;
+  last_chunk_at: string | Date | null;
+  /** K-A: newest chunk across BOTH sources — the stalled badge's clock (last_chunk_at is primary-only). */
+  last_any_chunk_at: string | Date | null;
+  /** K-B: backup-stream chunks and primary-mic loss events */
+  backup_chunk_count: number;
+  backup_verified_count: number;
+  primary_lost_count: number;
+  primary_restored_count: number;
+};
+
+const SESSIONS_DEFAULT_LIMIT = 200;
+
+/**
+ * Sessions + chunk rollups (drives GET /api/bench/sessions and scribe_list_sessions).
+ * Rollup = main's K-A/K-B shape (primary-only counts, last_any_chunk_at, backup counts,
+ * mic events); filters are NULL-guarded in SQL so the no-filter result set is exactly
+ * the route's query (last 200 by started_at DESC). Throws on DB error — callers fail-safe.
+ */
+export async function listBenchSessions(f: BenchSessionListFilters = {}): Promise<BenchSessionRollupRow[]> {
+  const roomId = f.room_id ?? null;
+  const roomSlug = f.room_slug ?? null;
+  const istDate = f.ist_date ?? null;
+  const status = f.status ?? null;
+  const limit = Math.min(Math.max(Math.trunc(f.limit ?? SESSIONS_DEFAULT_LIMIT) || SESSIONS_DEFAULT_LIMIT, 1), SESSIONS_DEFAULT_LIMIT);
+  return (await sql`
+    SELECT s.id, s.room_id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
+           r.name AS room_name, r.slug AS room_slug,
+           COUNT(c.id) FILTER (WHERE c.source = 'primary')::int AS chunk_count,
+           COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.upload_state = 'verified')::int AS verified_count,
+           COALESCE(SUM(c.size_bytes), 0)::bigint AS total_bytes,
+           COALESCE(SUM(c.gap_before_ms) FILTER (WHERE c.source = 'primary'), 0)::bigint AS gap_ms,
+           COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.gap_before_ms >= 2000)::int AS gap_count,
+           MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_chunk_at,
+           MAX(c.created_at) AS last_any_chunk_at,
+           COUNT(c.id) FILTER (WHERE c.source = 'backup')::int AS backup_chunk_count,
+           COUNT(c.id) FILTER (WHERE c.source = 'backup' AND c.upload_state = 'verified')::int AS backup_verified_count,
+           COALESCE(ev.primary_lost_count, 0)::int AS primary_lost_count,
+           COALESCE(ev.primary_restored_count, 0)::int AS primary_restored_count
+      FROM bench_session s
+      JOIN room r ON r.id = s.room_id
+      LEFT JOIN bench_chunk c ON c.session_id = s.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) FILTER (WHERE e.kind = 'mic_primary_lost') AS primary_lost_count,
+               COUNT(*) FILTER (WHERE e.kind = 'mic_primary_restored') AS primary_restored_count
+          FROM bench_event e
+         WHERE e.session_id = s.id
+      ) ev ON true
+     WHERE (${roomId}::text IS NULL OR s.room_id = ${roomId}::text)
+       AND (${roomSlug}::text IS NULL OR r.slug = ${roomSlug}::text)
+       AND (${istDate}::text IS NULL OR (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date)
+       AND (${status}::text IS NULL OR s.status = ${status}::text)
+     GROUP BY s.id, s.room_id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
+              r.name, r.slug, ev.primary_lost_count, ev.primary_restored_count
+     ORDER BY s.started_at DESC
+     LIMIT ${limit}::int
+  `) as BenchSessionRollupRow[];
+}
+
 export type BenchConsultMarkRow = {
   id: string;
   at: string | Date;

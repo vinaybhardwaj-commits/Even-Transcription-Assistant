@@ -17,7 +17,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { benchAdminGuard, newSessionId } from "@/lib/bench";
+import { benchAdminGuard, listBenchSessions, newSessionId, type BenchSessionListFilters } from "@/lib/bench";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,64 +48,34 @@ export async function POST(req: NextRequest) {
   return respondOk({ session: { id, room_id: claims.room_id, label, mic_label: micLabel, status: "recording" } });
 }
 
-type SessionRollupRow = {
-  id: string;
-  label: string | null;
-  mic_label: string | null;
-  started_at: string | Date;
-  ended_at: string | Date | null;
-  status: string;
-  notes: string | null;
-  room_name: string;
-  room_slug: string;
-  chunk_count: number;
-  verified_count: number;
-  total_bytes: string | number | null;
-  gap_ms: string | number | null;
-  gap_count: number;
-  last_chunk_at: string | Date | null;
-  /** K-A: newest chunk across BOTH sources — the stalled badge's clock (last_chunk_at is primary-only). */
-  last_any_chunk_at: string | Date | null;
-  /** K-B: backup-stream chunks and primary-mic loss events */
-  backup_chunk_count: number;
-  backup_verified_count: number;
-  primary_lost_count: number;
-  primary_restored_count: number;
-};
-
-export async function GET() {
+/**
+ * Operator MCP S1 (additive): optional query filters `room_id`, `room_slug`, `ist_date`
+ * (IST calendar date of session start), `status`, `limit` (1..200). With NO params the
+ * response is byte-identical to the pre-MCP route (same query via lib/bench
+ * listBenchSessions — K-A/K-B rollup — last 200 by started_at DESC).
+ */
+export async function GET(req: NextRequest) {
   const g = await benchAdminGuard();
   if (!g.ok) return respondError(g.code, g.msg);
 
+  const sp = req.nextUrl.searchParams;
+  const str = (k: string): string | null => {
+    const v = sp.get(k);
+    return v && v.length > 0 && v.length <= 128 ? v : null;
+  };
+  const istDate = str("ist_date");
+  const rawLimit = sp.get("limit");
+  const parsedLimit = rawLimit === null ? null : Number(rawLimit);
+  const filters: BenchSessionListFilters = {
+    room_id: str("room_id"),
+    room_slug: str("room_slug"),
+    ist_date: istDate && /^\d{4}-\d{2}-\d{2}$/.test(istDate) ? istDate : null,
+    status: str("status"),
+    limit: parsedLimit !== null && Number.isFinite(parsedLimit) ? parsedLimit : null,
+  };
+
   try {
-    const rows = (await sql`
-      SELECT s.id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
-             r.name AS room_name, r.slug AS room_slug,
-             COUNT(c.id) FILTER (WHERE c.source = 'primary')::int AS chunk_count,
-             COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.upload_state = 'verified')::int AS verified_count,
-             COALESCE(SUM(c.size_bytes), 0)::bigint AS total_bytes,
-             COALESCE(SUM(c.gap_before_ms) FILTER (WHERE c.source = 'primary'), 0)::bigint AS gap_ms,
-             COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.gap_before_ms >= 2000)::int AS gap_count,
-             MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_chunk_at,
-             MAX(c.created_at) AS last_any_chunk_at,
-             COUNT(c.id) FILTER (WHERE c.source = 'backup')::int AS backup_chunk_count,
-             COUNT(c.id) FILTER (WHERE c.source = 'backup' AND c.upload_state = 'verified')::int AS backup_verified_count,
-             COALESCE(ev.primary_lost_count, 0)::int AS primary_lost_count,
-             COALESCE(ev.primary_restored_count, 0)::int AS primary_restored_count
-        FROM bench_session s
-        JOIN room r ON r.id = s.room_id
-        LEFT JOIN bench_chunk c ON c.session_id = s.id
-        LEFT JOIN LATERAL (
-          SELECT COUNT(*) FILTER (WHERE e.kind = 'mic_primary_lost') AS primary_lost_count,
-                 COUNT(*) FILTER (WHERE e.kind = 'mic_primary_restored') AS primary_restored_count
-            FROM bench_event e
-           WHERE e.session_id = s.id
-        ) ev ON true
-       GROUP BY s.id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
-                r.name, r.slug, ev.primary_lost_count, ev.primary_restored_count
-       ORDER BY s.started_at DESC
-       LIMIT 200
-    `) as SessionRollupRow[];
+    const rows = await listBenchSessions(filters);
     return respondOk({
       sessions: rows.map((r) => ({
         id: r.id,

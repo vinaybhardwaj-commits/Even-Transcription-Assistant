@@ -7,13 +7,15 @@
  *   after the final chunk upload is verified (the kiosk blocks on that).
  * GET (admin-gated): session detail — chunk manifest, gaps, totals; K-B: `chunks` is
  *   the primary stream, `backup_chunks` the second-mic stream, `events` the
- *   bench_event rows (consult marks + mic_primary_lost / restored …).
+ *   bench_event rows (consult marks + mic_primary_lost / restored …); Operator MCP S1
+ *   (additive): `marks` = the consult marks { id, kind, at, brain_status } — no payload
+ *   text. Marks query failure (e.g. pre-0043) degrades to [] + marks_degraded:true.
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { benchAdminGuard, findBenchSession, listBenchChunks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
+import { benchAdminGuard, findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,6 +96,18 @@ export async function GET(
   } catch {
     events = [];
   }
+  let marks: Array<{ id: string; kind: string; at: string; brain_status: string }> = [];
+  let marksDegraded = false;
+  try {
+    marks = (await listBenchConsultMarks(id)).map((m) => ({
+      id: m.id,
+      kind: "consult_mark",
+      at: new Date(m.at).toISOString(),
+      brain_status: m.brain_status,
+    }));
+  } catch {
+    marksDegraded = true;
+  }
 
   const verified = chunks.filter((c) => c.upload_state === "verified");
   const totalBytes = all.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0);
@@ -139,5 +153,7 @@ export async function GET(
     chunks: chunks.map(chunkOut), // primary stream (unchanged shape + source)
     backup_chunks: backupChunks.map(chunkOut), // K-B second-mic stream
     events, // K-B: bench_event rows (consult marks + mic story), oldest first
+    marks, // Operator MCP S1: consult marks only (id, kind, at, brain_status)
+    ...(marksDegraded ? { marks_degraded: true } : {}),
   });
 }
