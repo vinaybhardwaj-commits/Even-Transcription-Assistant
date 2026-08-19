@@ -10,6 +10,9 @@
  *   - https://evenscribe.app
  *   - https://www.evenscribe.app
  *   - https://eta.llmvinayminihome.uk
+ *   - https://even-transcription-as-git-d808a3-vinaybhardwaj-commits-projects.vercel.app
+ *     (feat/operator-mcp branch-preview alias — kiosk uploads from the preview are
+ *     CORS-blocked without it)
  *
  * Methods: GET PUT POST DELETE HEAD
  * Headers: * (echo all)
@@ -34,6 +37,8 @@ const ALLOWED_ORIGINS = [
   "https://evenscribe.app",
   "https://www.evenscribe.app",
   "https://eta.llmvinayminihome.uk",
+  // feat/operator-mcp branch-preview alias (kiosk PUT/HEAD to R2 from the preview)
+  "https://even-transcription-as-git-d808a3-vinaybhardwaj-commits-projects.vercel.app",
 ];
 
 export async function POST() {
