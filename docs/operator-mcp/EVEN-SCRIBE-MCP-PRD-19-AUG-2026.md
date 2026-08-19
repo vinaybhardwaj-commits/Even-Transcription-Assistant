@@ -3,10 +3,10 @@
 
 | | |
 |---|---|
-| Status | Draft for engineering review |
-| Date | 19 August 2026 (rev 3c — parallel branch while Bench tests run) |
+| Status | Draft for the builder orchestrator |
+| Date | 19 August 2026 (rev 3d — orchestrator + coder loop) |
 | Author | Scribe Designer |
-| Audience | Scribe builder. Pulse is a read-only neighbour. |
+| Audience | Builder **orchestrator**. Not a ticket list for the coder. Pulse is a read-only neighbour. |
 | Why now | We debug Scribe by signing a desktop into `/admin` and clicking. The product already has Pyannote, several STT engines, two Neons, R2, Bench, encounters, traces, and a new brain. The operator connector must reach **all of it**, including start/stop of a live Bench tape and cues that do not wait on the kiosk. |
 
 This PRD is **the operator door**. It is not a new brain, not a new recorder, and not a chatbot.
@@ -29,6 +29,52 @@ Why: the listener (1–2s poll + start/stop from MCP) is the first change that c
 
 After the day: merge only when Vinay says the tapes are safe. If a hotfix is needed for the live kiosk, it goes to `main` first; rebase the MCP branch.
 
+---
+
+## 1b. Who this is for (builder is two seats)
+
+This PRD is **design + locks for the orchestrator**. It is not coder tickets and it is not a kickoff. The designer does not implement, does not launch coding agents, and does not open implementation PRs unless Vinay explicitly asks.
+
+The builder is a team of two.
+
+| Seat | Job |
+|---|---|
+| **Orchestrator** | Reads this PRD and the inventory. Knows the Scribe repo *and* the Pulse monorepo (read-only / fetch-only). Turns the locks into concrete coder instructions: files, routes, migrations, acceptance checks, what not to touch. Does not wait on the designer for a line-by-line patch list. |
+| **Coder** | Builds what the orchestrator scoped, on `feat/operator-mcp`. Reports done / blocked back to the orchestrator. Does not merge. Does not treat this PRD as a ticket dump. |
+
+### The loop
+
+1. **Designer** (this chat) writes or revises the PRD + inventory. Design only.
+2. **Orchestrator** reads `docs/operator-mcp/`. Uses the real trees — Scribe at `vinaybhardwaj-commits/Even-Transcription-Assistant`, Pulse at `code.evenhc.in` (fetch/pull allowed, **never push**) — to write coder instructions.
+3. **Coder** builds on `feat/operator-mcp`. Preview deploy is fine. Production `main` / Room Bench stay the already-shipped kiosk.
+4. **Coder → orchestrator** when a slice is done or blocked.
+5. **Orchestrator → designer** (this chat). Designer reviews against the locks and §18. Next PRD rev if a lock was wrong or missing.
+
+This loop is the intended one. It works.
+
+### What the orchestrator must not do
+
+- Re-open locked product decisions. Second fuse, Pulse writes, Slack writes, start-without-listener, silent `visit` UPDATE, warehouse auto-start — those are closed.
+- Ask the designer for file-by-file edits. That is the orchestrator’s job, using the inventory and the two trees.
+- Ship the kiosk command-bus poll, or run a new prod migration, while the 19 Aug clinic day is live.
+- Write Pulse, post Slack, or put this door in the Pulse monorepo.
+
+### What a coder brief from the orchestrator should contain
+
+- The slice (e.g. “command bus + kiosk poll” or “GET cues + `scribe_post_cue`”).
+- The real files to touch (from the inventory, not invented).
+- The acceptance row(s) from §18 that close the slice.
+- What is out of the slice (especially `RoomRecorderClient` on production, Pulse, Slack).
+- How to prove it on the preview, not on `www.evenscribe.app`.
+
+### What comes back to the designer
+
+- What shipped on the branch (commit + preview URL).
+- Which §18 rows pass / fail.
+- Where the inventory was wrong (cite the real file).
+- Open questions that need a **product lock**, not a code guess.
+
+---
 
 ## 2. Problem
 
@@ -525,6 +571,8 @@ Closed by this rev: start-from-here is in; pause/end from here are in; brain wri
 | Term | Meaning |
 |---|---|
 | Operator MCP | This PRD. The door. |
+| Orchestrator | Builder seat that turns this PRD into coder instructions. Reports back here. |
+| Coder | Builder seat that implements on `feat/operator-mcp`. Reports to the orchestrator. |
 | Listener | Room Bench tab, signed in, polling `bench_command` |
 | Command bus | Durable start/stop/pause/resume queue. Not brain-proxy. |
 | Independent cue | MCP → `/api/brain/cues`. No kiosk. |
@@ -549,3 +597,5 @@ Closed by this rev: start-from-here is in; pause/end from here are in; brain wri
 - Pilot addendum: `SCRIBE-POC-PILOT-ADDENDUM-18-AUG-2026.md`
 - Far-field tape: `bs_zcfegzwn`
 - Stack inventory (HEAD `b907bc50`): `SCRIBE-MCP-STACK-INVENTORY-19-AUG-2026.md`
+- Draft PR (docs only, do not merge): https://github.com/vinaybhardwaj-commits/Even-Transcription-Assistant/pull/1
+- Builder note (start here): `docs/operator-mcp/README.md`
