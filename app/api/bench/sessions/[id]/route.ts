@@ -5,13 +5,15 @@
  *   { action: "pause" | "resume" | "end", notes? } — states are
  *   recording | paused | ended only. End Day is called by the client only
  *   after the final chunk upload is verified (the kiosk blocks on that).
- * GET (admin-gated): session detail — chunk manifest, gaps, totals.
+ * GET (admin-gated): session detail — chunk manifest, gaps, totals; K-B: `chunks` is
+ *   the primary stream, `backup_chunks` the second-mic stream, `events` the
+ *   bench_event rows (consult marks + mic_primary_lost / restored …).
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { benchAdminGuard, findBenchSession, listBenchChunks } from "@/lib/bench";
+import { benchAdminGuard, findBenchSession, listBenchChunks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,11 +86,31 @@ export async function GET(
 
   const session = await findBenchSession(id);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
-  const chunks = await listBenchChunks(id);
+  const all = await listBenchChunks(id);
+  const { primary: chunks, backup: backupChunks } = splitChunksBySource(all);
+  let events: Array<{ id: string; kind: string; at: string; brain_status: string; payload: unknown }> = [];
+  try {
+    events = (await listBenchEvents(id)).map((e) => ({ id: e.id, kind: e.kind, at: new Date(e.at).toISOString(), brain_status: e.brain_status, payload: e.payload ?? null }));
+  } catch {
+    events = [];
+  }
 
   const verified = chunks.filter((c) => c.upload_state === "verified");
-  const totalBytes = chunks.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0);
+  const totalBytes = all.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0);
   const gapMs = chunks.reduce((a, c) => a + (c.gap_before_ms ?? 0), 0);
+  const chunkOut = (c: (typeof all)[number]) => ({
+    id: c.id,
+    idx: c.idx,
+    source: c.source ?? "primary",
+    r2_key: c.r2_key,
+    content_type: c.content_type,
+    started_at: new Date(c.started_at).toISOString(),
+    ended_at: new Date(c.ended_at).toISOString(),
+    duration_ms: c.duration_ms,
+    size_bytes: c.size_bytes === null ? null : Number(c.size_bytes),
+    upload_state: c.upload_state,
+    gap_before_ms: c.gap_before_ms,
+  });
 
   return respondOk({
     session: {
@@ -108,18 +130,14 @@ export async function GET(
       verified_count: verified.length,
       total_bytes: totalBytes,
       gap_ms: gapMs,
+      // K-B
+      backup_chunk_count: backupChunks.length,
+      backup_verified_count: backupChunks.filter((c) => c.upload_state === "verified").length,
+      primary_lost_count: events.filter((e) => e.kind === "mic_primary_lost").length,
+      primary_restored_count: events.filter((e) => e.kind === "mic_primary_restored").length,
     },
-    chunks: chunks.map((c) => ({
-      id: c.id,
-      idx: c.idx,
-      r2_key: c.r2_key,
-      content_type: c.content_type,
-      started_at: new Date(c.started_at).toISOString(),
-      ended_at: new Date(c.ended_at).toISOString(),
-      duration_ms: c.duration_ms,
-      size_bytes: c.size_bytes === null ? null : Number(c.size_bytes),
-      upload_state: c.upload_state,
-      gap_before_ms: c.gap_before_ms,
-    })),
+    chunks: chunks.map(chunkOut), // primary stream (unchanged shape + source)
+    backup_chunks: backupChunks.map(chunkOut), // K-B second-mic stream
+    events, // K-B: bench_event rows (consult marks + mic story), oldest first
   });
 }

@@ -24,6 +24,12 @@ type SessionRow = {
   gap_ms: number;
   gap_count: number;
   last_chunk_at: string | null;
+  /** K-B (R10): backup stream + mic badge */
+  backup_chunk_count?: number;
+  backup_verified_count?: number;
+  primary_lost_count?: number;
+  primary_restored_count?: number;
+  mic_status?: "on_backup" | "backup_covered" | "lost_no_backup" | null;
 };
 
 type RoomRow = {
@@ -227,6 +233,29 @@ export function BenchClient() {
                     {fmtMb(s.total_bytes)}
                   </td>
                   <td className="py-2.5 px-2.5 whitespace-nowrap">
+                    {/* K-B R10 mic badge: red = main mic lost with no backup tape; amber = ran on backup */}
+                    {s.mic_status === "lost_no_backup" ? (
+                      <span
+                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"
+                        title={`main mic lost ${s.primary_lost_count ?? 0}× — no backup chunks`}
+                      >
+                        mic lost · no backup
+                      </span>
+                    ) : s.mic_status === "on_backup" ? (
+                      <span
+                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
+                        title={`main mic lost ${s.primary_lost_count ?? 0}× · ${s.backup_chunk_count ?? 0} backup chunks`}
+                      >
+                        on backup mic
+                      </span>
+                    ) : s.mic_status === "backup_covered" ? (
+                      <span
+                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
+                        title={`main mic lost ${s.primary_lost_count ?? 0}× and restored · ${s.backup_chunk_count ?? 0} backup chunks`}
+                      >
+                        backup used
+                      </span>
+                    ) : null}
                     {isLive(s) ? (
                       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-even-pink-50 text-even-pink-700">
                         <span className="w-1.5 h-1.5 rounded-full bg-even-pink-600 animate-pulse" />

@@ -120,6 +120,8 @@ export async function findBenchSession(sessionId: string): Promise<BenchSessionR
 export type BenchChunkRow = {
   id: string;
   idx: number;
+  /** K-B (0045): 'primary' (USB mic) | 'backup' (second mic) */
+  source: "primary" | "backup";
   r2_key: string;
   content_type: string;
   started_at: string | Date;
@@ -131,20 +133,28 @@ export type BenchChunkRow = {
   created_at: string | Date;
 };
 
-/** All chunk rows for a session in idx order; [] on error (fail-safe). */
+/**
+ * All chunk rows for a session, primary stream first then backup, each in idx order;
+ * [] on error (fail-safe). K-B: `source` column from migration 0045.
+ */
 export async function listBenchChunks(sessionId: string): Promise<BenchChunkRow[]> {
   try {
     return (await sql`
-      SELECT id, idx, r2_key, content_type, started_at, ended_at, duration_ms,
+      SELECT id, idx, source, r2_key, content_type, started_at, ended_at, duration_ms,
              size_bytes, upload_state, gap_before_ms, created_at
         FROM bench_chunk
        WHERE session_id = ${sessionId}
-       ORDER BY idx
+       ORDER BY (source = 'backup'), idx
     `) as BenchChunkRow[];
   } catch {
     return [];
   }
 }
+
+export const splitChunksBySource = (chunks: BenchChunkRow[]) => ({
+  primary: chunks.filter((c) => c.source !== "backup"),
+  backup: chunks.filter((c) => c.source === "backup"),
+});
 
 export type BenchConsultMarkRow = {
   id: string;
@@ -165,6 +175,28 @@ export async function listBenchConsultMarks(sessionId: string): Promise<BenchCon
      ORDER BY at ASC
      LIMIT 500
   `) as BenchConsultMarkRow[];
+}
+
+export type BenchEventRow = {
+  id: string;
+  kind: string;
+  at: string | Date;
+  brain_status: string;
+  payload: unknown;
+};
+
+/**
+ * All bench_event rows for a session (any kind — consult marks AND the K-B mic story),
+ * oldest first. Throws on DB error — callers fail-safe.
+ */
+export async function listBenchEvents(sessionId: string): Promise<BenchEventRow[]> {
+  return (await sql`
+    SELECT id, kind, at, brain_status, payload
+      FROM bench_event
+     WHERE session_id = ${sessionId}
+     ORDER BY at ASC
+     LIMIT 2000
+  `) as BenchEventRow[];
 }
 
 // ---------------------------------------------------------------------------

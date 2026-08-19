@@ -17,13 +17,16 @@
  *                 already prod-validated in Kickoff A2). Same Neon database, different role
  *                 (decision B8) — the app role is not assumed to have grants on brain tables.
  *
+ * K-B (R9): bench_event mic_* rows render as "(mic)" lines — "main mic lost · on backup
+ * mic", "main mic back …" — so timeline.md tells the mic story of the day.
+ *
  * Degradation (D4 + rules): no visits → "*picture not run*"; no marks → "*no consult marks*";
  * brain unreachable / not configured → marks-only + "*picture unavailable*"; marks query
  * failing → visits-only + "*consult marks unavailable*". A day with nothing still yields a
  * valid file that says so. `renderBenchTimeline` never throws.
  */
 
-import { findBenchSession, listBenchConsultMarks, type BenchSessionRow } from "@/lib/bench";
+import { findBenchSession, listBenchConsultMarks, listBenchEvents, type BenchSessionRow } from "@/lib/bench";
 import { query } from "@/lib/brain/db";
 import { findRoomDay, istDate, SQL_CLUSTERS_FOR_DAY, SQL_VISITS_FOR_DAY } from "@/lib/brain/state";
 
@@ -32,6 +35,9 @@ import { findRoomDay, istDate, SQL_CLUSTERS_FOR_DAY, SQL_VISITS_FOR_DAY } from "
 // ---------------------------------------------------------------------------
 
 export type TimelineMark = { at: Date };
+
+/** K-B (R9): the mic story — bench_event kinds mic_primary_lost / restored / mic_backup_*. */
+export type TimelineMicEvent = { at: Date; kind: string; reason?: string | null };
 
 export type TimelineVisit = {
   id: string;
@@ -48,6 +54,16 @@ export type TimelineInput = {
   session: Pick<BenchSessionRow, "id" | "room_name" | "started_at">;
   marks: TimelineMark[] | "unavailable";
   visits: TimelineVisit[] | "unavailable";
+  /** K-B: optional; omitted/empty = no mic events that day */
+  mic_events?: TimelineMicEvent[];
+};
+
+const MIC_LABEL: Record<string, string> = {
+  mic_primary_lost: "main mic lost · on backup mic",
+  mic_primary_restored: "main mic back · recording on it again",
+  mic_backup_unavailable: "no backup mic",
+  mic_backup_error: "backup mic error · retrying",
+  mic_backup_restored: "backup mic back",
 };
 
 const IST_HM = new Intl.DateTimeFormat("en-GB", {
@@ -106,6 +122,11 @@ export function buildBenchTimeline(input: TimelineInput): string {
   }
   if (input.visits !== "unavailable") {
     for (const v of input.visits) lines.push(visitLine(v));
+  }
+  for (const e of input.mic_events ?? []) {
+    const label = MIC_LABEL[e.kind] ?? e.kind;
+    const reason = e.reason ? ` · ${e.reason}` : "";
+    lines.push({ at: e.at.getTime(), rank: 0, text: `- ${fmtIstHm(e.at)}  ${label}${reason} (mic)` });
   }
   // D5: stable sort by time; a mark outranks a brain row at the same instant.
   lines.sort((a, b) => a.at - b.at || a.rank - b.rank);
@@ -194,6 +215,20 @@ export async function renderBenchTimeline(
     marks = "unavailable";
   }
 
+  // K-B: the mic story (fail-soft — a missing story is just an empty list)
+  let micEvents: TimelineMicEvent[] = [];
+  try {
+    micEvents = (await listBenchEvents(session.id))
+      .filter((e) => e.kind.startsWith("mic_"))
+      .map((e) => {
+        const p = (typeof e.payload === "object" && e.payload !== null ? e.payload : {}) as { reason?: unknown };
+        return { at: new Date(e.at), kind: e.kind, reason: typeof p.reason === "string" ? p.reason : null };
+      });
+  } catch (e) {
+    console.warn("[bench-timeline] mic events query failed", String((e as Error)?.message ?? e).slice(0, 200));
+    micEvents = [];
+  }
+
   let visits: TimelineInput["visits"];
   try {
     visits = await loadBrainVisits(session.room_id, startedAt);
@@ -204,7 +239,7 @@ export async function renderBenchTimeline(
   }
 
   try {
-    return { markdown: buildBenchTimeline({ session, marks, visits }), session };
+    return { markdown: buildBenchTimeline({ session, marks, visits, mic_events: micEvents }), session };
   } catch (e) {
     console.warn("[bench-timeline] render failed", String((e as Error)?.message ?? e).slice(0, 200));
     return {

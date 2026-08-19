@@ -31,14 +31,44 @@
  * sink (lib/use-live-sink) attach a second MediaRecorder to the same stream;
  * `onSeam` / `onRecorderError` report rotation seam timing and archive
  * recorder errors; `[bench-seam]` is logged on every rotation (flag on or off).
+ *
+ * Kickoff K-B — dual-mic capture + primary failsafe:
+ *   - TWO lanes share ONE chunk/durability/upload machinery. The PRIMARY lane is
+ *     today's USB-mic path, byte-identical on the wire (no `source` field sent,
+ *     same IndexedDB keys, same R2 names). The BACKUP lane (`source:'backup'`,
+ *     second getUserMedia on an explicit deviceId — built-in mic by default) runs
+ *     in LOCKSTEP with start/pause/resume/end and every 5-min rotation (R7), in
+ *     its own try/catch domain with its own recorder/stream refs: a backup
+ *     failure is an event + retry-with-backoff and is structurally incapable of
+ *     touching the primary (R4/R8/R12).
+ *   - PRIMARY FAILSAFE (R5): track `ended` + `devicechange` listeners + a
+ *     lightweight silence watchdog (RMS≈0 for ~60 s). On trip: flush the current
+ *     primary segment, `mic_primary_lost` event (via onEvent → POST
+ *     /api/bench/events), status.primaryMic = 'lost' (or 'silent' when the device
+ *     is still present), re-acquire loop with backoff. On recovery: same session,
+ *     primary resumes at the next idx (gap_before_ms records the dead time),
+ *     `mic_primary_restored`. The session id never changes.
  */
 
 import * as React from "react";
 import { LIVE_SINK } from "@/lib/live-flags";
+import {
+  idbChunkKey,
+  pickDefaultBackupDevice,
+  rmsOfBytes,
+  runLockstep,
+  SilenceWatchdog,
+  uploadBodies,
+  type BenchMicEventKind,
+  type ChunkSource,
+} from "@/lib/bench-dual";
 
 const CHUNK_MS = 5 * 60 * 1000; // D1: 5-minute chunks
 const BACKOFF_MIN_MS = 5_000;
 const BACKOFF_MAX_MS = 60_000;
+const REACQUIRE_MIN_MS = 5_000; // primary/backup device re-acquire loop
+const REACQUIRE_MAX_MS = 30_000;
+const WATCHDOG_TICK_MS = 1_000;
 
 const MIME_CANDIDATES = [
   "audio/webm;codecs=opus",
@@ -55,18 +85,30 @@ function pickMime(): string | undefined {
   return undefined;
 }
 
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  channelCount: { ideal: 1 },
+  sampleRate: { ideal: 16000 },
+};
+
 // ---------------------------------------------------------------------------
-// IndexedDB store — db `eta-bench`, store `chunks`, key `{session_id}:{idx}`
+// IndexedDB — db `eta-bench`; store `chunks` (key `{session_id}:{idx}`, backup
+// `{session_id}:backup:{idx}`); store `settings` (K-B: persisted device choices)
 // ---------------------------------------------------------------------------
 
 const DB_NAME = "eta-bench";
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2 (K-B): adds the `settings` store; `chunks` untouched
 const STORE = "chunks";
+const SETTINGS_STORE = "settings";
 
 export type BenchChunkRecord = {
-  key: string; // `${session_id}:${idx}`
+  key: string; // `${session_id}:${idx}` (primary) | `${session_id}:backup:${idx}`
   session_id: string;
   idx: number;
+  /** K-B: absent on records written before dual-mic → primary */
+  source?: ChunkSource;
   blob: Blob;
   content_type: string;
   started_at: number; // ms epoch
@@ -75,10 +117,6 @@ export type BenchChunkRecord = {
   gap_before_ms: number;
   ts: number;
 };
-
-function chunkKey(sessionId: string, idx: number): string {
-  return `${sessionId}:${idx}`;
-}
 
 function isClient(): boolean {
   return typeof window !== "undefined" && typeof indexedDB !== "undefined";
@@ -95,6 +133,9 @@ function openDb(): Promise<IDBDatabase> {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
+        db.createObjectStore(SETTINGS_STORE, { keyPath: "key" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -156,17 +197,59 @@ async function idbListAll(): Promise<BenchChunkRecord[]> {
   }
 }
 
+/** K-B: persisted kiosk settings (e.g. the chosen backup device). Fail-safe: null on error. */
+export async function loadBenchSetting<T = unknown>(key: string): Promise<T | null> {
+  try {
+    const db = await openDb();
+    try {
+      return await new Promise<T | null>((resolve, reject) => {
+        const tx = db.transaction(SETTINGS_STORE, "readonly");
+        const req = tx.objectStore(SETTINGS_STORE).get(key);
+        req.onsuccess = () => resolve((req.result as { value?: T } | undefined)?.value ?? null);
+        req.onerror = () => reject(req.error ?? new Error("get_failed"));
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+export async function saveBenchSetting(key: string, value: unknown): Promise<void> {
+  try {
+    const db = await openDb();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(SETTINGS_STORE, "readwrite");
+        const req = tx.objectStore(SETTINGS_STORE).put({ key, value, ts: Date.now() });
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error ?? new Error("put_failed"));
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* settings are a convenience — never fatal */
+  }
+}
+
+export const BACKUP_DEVICE_SETTING = "backup_device_id";
+export { pickDefaultBackupDevice };
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
 export type RoomRecorderState = "idle" | "recording" | "paused" | "ending" | "ended" | "error";
+export type PrimaryMicState = "active" | "lost" | "silent";
+export type BackupMicState = "off" | "acquiring" | "active" | "error";
 
 export type RoomRecorderStatus = {
   state: RoomRecorderState;
   error: string | null;
   mimeType: string | undefined;
-  /** 0-based index of the chunk currently being recorded. */
+  /** 0-based index of the chunk currently being recorded (primary lane). */
   currentIdx: number;
   /** ms into the current chunk. */
   chunkElapsedMs: number;
@@ -174,10 +257,10 @@ export type RoomRecorderStatus = {
   dayElapsedMs: number;
   dayStartedAt: number | null;
   pausedAt: number | null;
-  /** chunks verified in R2 (this browser session, incl. recovered). */
+  /** primary chunks verified in R2 (this browser session, incl. recovered). */
   archivedCount: number;
   archivedBytes: number;
-  /** chunks held locally awaiting verified upload. */
+  /** chunks (both lanes) held locally awaiting verified upload. */
   queuedCount: number;
   lastVerifiedAt: number | null;
   /** unverified chunks found in IndexedDB from a previous session. */
@@ -185,6 +268,15 @@ export type RoomRecorderStatus = {
   offline: boolean;
   micLost: boolean;
   storageBlocked: boolean;
+  // ---- K-B ----
+  primaryMic: PrimaryMicState;
+  primaryLostAt: number | null;
+  primaryLostReason: string | null;
+  backupMic: BackupMicState;
+  backupError: string | null;
+  backupIdx: number;
+  backupArchivedCount: number;
+  backupArchivedBytes: number;
 };
 
 type QueueItem = BenchChunkRecord;
@@ -197,12 +289,47 @@ type QueueItem = BenchChunkRecord;
  */
 export type ArchiveSeamEvent = { idx: number; seam_ms: number; stop_latency_ms: number };
 
+export type BenchMicEvent = { kind: BenchMicEventKind; at: number; payload: Record<string, unknown> };
+
+type Lane = {
+  source: ChunkSource;
+  stream: MediaStream | null;
+  rec: MediaRecorder | null;
+  idx: number;
+  chunkStartedAt: number;
+  lastChunkEndedAt: number | null;
+  stopCalledAt: number;
+  /** requested device (null = browser default) */
+  deviceId: string | null;
+};
+
+const newLane = (source: ChunkSource): Lane => ({
+  source,
+  stream: null,
+  rec: null,
+  idx: 0,
+  chunkStartedAt: 0,
+  lastChunkEndedAt: null,
+  stopCalledAt: 0,
+  deviceId: null,
+});
+
+function stopTracks(stream: MediaStream | null) {
+  try {
+    stream?.getTracks().forEach((t) => t.stop());
+  } catch {
+    /* noop */
+  }
+}
+
 export function useRoomRecorder(opts?: {
   onError?: (e: Error) => void;
   /** Kickoff B: per-rotation seam timing (live-sink instrumentation). */
   onSeam?: (s: ArchiveSeamEvent) => void;
   /** Kickoff B: archive MediaRecorder error (the live sink sacrifices itself on it). */
   onRecorderError?: (message: string) => void;
+  /** K-B: mic-story events (mic_primary_lost / restored, mic_backup_*) — the kiosk posts them. */
+  onEvent?: (e: BenchMicEvent) => void;
 }) {
   const [state, setState] = React.useState<RoomRecorderState>("idle");
   const [error, setError] = React.useState<string | null>(null);
@@ -219,15 +346,20 @@ export function useRoomRecorder(opts?: {
   const [currentIdx, setCurrentIdx] = React.useState(0);
   const [dayStartedAt, setDayStartedAt] = React.useState<number | null>(null);
   const [pausedAt, setPausedAt] = React.useState<number | null>(null);
+  // K-B
+  const [primaryMic, setPrimaryMic] = React.useState<PrimaryMicState>("active");
+  const [primaryLostAt, setPrimaryLostAt] = React.useState<number | null>(null);
+  const [primaryLostReason, setPrimaryLostReason] = React.useState<string | null>(null);
+  const [backupMic, setBackupMic] = React.useState<BackupMicState>("off");
+  const [backupError, setBackupError] = React.useState<string | null>(null);
+  const [backupIdx, setBackupIdx] = React.useState(0);
+  const [backupArchivedCount, setBackupArchivedCount] = React.useState(0);
+  const [backupArchivedBytes, setBackupArchivedBytes] = React.useState(0);
 
   const sessionIdRef = React.useRef<string | null>(null);
-  const streamRef = React.useRef<MediaStream | null>(null);
-  const recRef = React.useRef<MediaRecorder | null>(null);
-  const idxRef = React.useRef(0);
-  const chunkStartedAtRef = React.useRef<number>(0);
-  const lastChunkEndedAtRef = React.useRef<number | null>(null);
+  const primaryRef = React.useRef<Lane>(newLane("primary"));
+  const backupRef = React.useRef<Lane>(newLane("backup"));
   const rotateTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stopCalledAtRef = React.useRef<number>(0); // seam instrumentation only
   const wakeLockRef = React.useRef<{ release: () => Promise<void> } | null>(null);
   const stateRef = React.useRef<RoomRecorderState>("idle");
   const optsRef = React.useRef(opts);
@@ -237,6 +369,20 @@ export function useRoomRecorder(opts?: {
   React.useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // K-B failsafe machinery (primary)
+  const primaryLostRef = React.useRef(false); // device gone — lane torn down, re-acquire loop running
+  const primarySilentRef = React.useRef(false); // watchdog tripped, device still present
+  const reacquireTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reacquireBackoffRef = React.useRef(REACQUIRE_MIN_MS);
+  const watchdogRef = React.useRef<SilenceWatchdog>(new SilenceWatchdog());
+  const watchdogCtxRef = React.useRef<AudioContext | null>(null);
+  const watchdogTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  // K-B backup lane
+  const backupWantedRef = React.useRef(false); // a backup device was chosen for this day
+  const backupErroredRef = React.useRef(false); // an error event was emitted; next success → restored
+  const backupRetryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backupBackoffRef = React.useRef(REACQUIRE_MIN_MS);
 
   // Upload queue — memory copies; IndexedDB is the crash-durable twin.
   const queueRef = React.useRef<QueueItem[]>([]);
@@ -250,6 +396,20 @@ export function useRoomRecorder(opts?: {
       optsRef.current?.onError?.(new Error(msg));
     } catch {
       /* noop */
+    }
+  }, []);
+
+  const emitEvent = React.useCallback((kind: BenchMicEventKind, payload: Record<string, unknown> = {}) => {
+    const e: BenchMicEvent = { kind, at: Date.now(), payload };
+    try {
+      console.info("[bench-mic]", kind, JSON.stringify(payload));
+    } catch {
+      /* noop */
+    }
+    try {
+      optsRef.current?.onEvent?.(e);
+    } catch {
+      /* an event sink must never hurt capture */
     }
   }, []);
 
@@ -301,13 +461,18 @@ export function useRoomRecorder(opts?: {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [requestWakeLock]);
 
-  // ---- upload pipeline ----
+  // ---- upload pipeline (shared by both lanes) ----
 
   const verifyDone = React.useCallback((item: QueueItem) => {
     queueRef.current = queueRef.current.filter((q) => q.key !== item.key);
     setQueuedCount(queueRef.current.length);
-    setArchivedCount((n) => n + 1);
-    setArchivedBytes((b) => b + item.blob.size);
+    if (item.source === "backup") {
+      setBackupArchivedCount((n) => n + 1);
+      setBackupArchivedBytes((b) => b + item.blob.size);
+    } else {
+      setArchivedCount((n) => n + 1);
+      setArchivedBytes((b) => b + item.blob.size);
+    }
     setLastVerifiedAt(Date.now());
     if (recoveredKeysRef.current.delete(item.key)) {
       setRecoveredPending((n) => (n > 0 ? n - 1 : 0));
@@ -321,16 +486,24 @@ export function useRoomRecorder(opts?: {
    * Upload one chunk: presign → (HEAD-skip) → PUT → HEAD-verify → POST
    * /api/bench/chunks (server re-verifies size against R2 before writing the
    * verified row). Throws on any failure — caller retries with backoff.
+   * Primary bodies carry NO `source` (today's wire format); backup adds source:'backup'.
    */
   const uploadOne = React.useCallback(async (item: QueueItem): Promise<void> => {
+    const bodies = uploadBodies({
+      session_id: item.session_id,
+      idx: item.idx,
+      source: item.source ?? "primary",
+      content_type: item.content_type,
+      started_at: item.started_at,
+      ended_at: item.ended_at,
+      duration_ms: item.duration_ms,
+      gap_before_ms: item.gap_before_ms,
+      size_bytes: item.blob.size,
+    });
     const presignRes = await fetch("/api/bench/upload-url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: item.session_id,
-        idx: item.idx,
-        content_type: item.content_type,
-      }),
+      body: JSON.stringify(bodies.presign),
     });
     if (!presignRes.ok) throw new Error(`presign_failed_${presignRes.status}`);
     const presign = (await presignRes.json()) as {
@@ -376,16 +549,7 @@ export function useRoomRecorder(opts?: {
     const rowRes = await fetch("/api/bench/chunks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: item.session_id,
-        idx: item.idx,
-        content_type: item.content_type,
-        started_at: new Date(item.started_at).toISOString(),
-        ended_at: new Date(item.ended_at).toISOString(),
-        duration_ms: item.duration_ms,
-        size_bytes: item.blob.size,
-        gap_before_ms: item.gap_before_ms,
-      }),
+      body: JSON.stringify(bodies.row),
     });
     if (!rowRes.ok) throw new Error(`chunk_row_failed_${rowRes.status}`);
   }, []);
@@ -447,16 +611,16 @@ export function useRoomRecorder(opts?: {
     };
   }, [drain]);
 
-  // ---- recorder cycle ----
+  // ---- recorder cycle (per lane) ----
 
   /**
-   * Stop the active MediaRecorder and resolve with its single consolidated
+   * Stop the lane's active MediaRecorder and resolve with its single consolidated
    * blob (recorder started without timeslice → dataavailable fires once,
    * at stop, with a self-contained playable file).
    */
-  const finalizeRecorder = React.useCallback((): Promise<Blob | null> => {
-    const rec = recRef.current;
-    recRef.current = null;
+  const finalizeRecorder = React.useCallback((lane: Lane): Promise<Blob | null> => {
+    const rec = lane.rec;
+    lane.rec = null;
     if (!rec || rec.state === "inactive") return Promise.resolve(null);
     return new Promise((resolve) => {
       let blob: Blob | null = null;
@@ -464,7 +628,7 @@ export function useRoomRecorder(opts?: {
         if (e.data && e.data.size > 0) blob = e.data;
       };
       rec.onstop = () => resolve(blob);
-      stopCalledAtRef.current = Date.now();
+      lane.stopCalledAt = Date.now();
       try {
         rec.stop();
       } catch {
@@ -473,120 +637,416 @@ export function useRoomRecorder(opts?: {
     });
   }, []);
 
-  const startRecorderSegment = React.useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream) return;
-    const mt = pickMime();
-    setMimeType(mt);
-    const rec = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
-    rec.onerror = (ev: Event) => {
-      const msg =
-        (ev as unknown as { error?: { message?: string } }).error?.message ?? "recorder_error";
-      emitError(msg);
-      console.warn("[bench-sink] archive recorder_error", JSON.stringify({ idx: idxRef.current, message: msg }));
+  // forward decl for the backup error handler used inside startRecorderSegment
+  const backupFailureRef = React.useRef<(stage: string, message: string) => void>(() => undefined);
+
+  const startRecorderSegment = React.useCallback(
+    (lane: Lane) => {
+      const stream = lane.stream;
+      if (!stream) return;
+      const mt = pickMime();
+      if (lane.source === "primary") setMimeType(mt);
+      const rec = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
+      rec.onerror = (ev: Event) => {
+        const msg =
+          (ev as unknown as { error?: { message?: string } }).error?.message ?? "recorder_error";
+        if (lane.source === "primary") {
+          emitError(msg);
+          console.warn("[bench-sink] archive recorder_error", JSON.stringify({ idx: lane.idx, message: msg }));
+          try {
+            optsRef.current?.onRecorderError?.(msg);
+          } catch {
+            /* noop */
+          }
+        } else {
+          // Backup lane errors never reach emitError / onRecorderError (R4/R8/R12).
+          backupFailureRef.current("recorder", msg);
+        }
+      };
+      lane.rec = rec;
+      rec.start(); // NO timeslice — one blob on stop (D1)
+      lane.chunkStartedAt = Date.now();
+    },
+    [emitError],
+  );
+
+  /** Finalize the lane's current segment into the queue; gap vs previous chunk end. */
+  const finalizeIntoQueue = React.useCallback(
+    async (lane: Lane): Promise<void> => {
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return;
+      const startedAt = lane.chunkStartedAt;
+      const blob = await finalizeRecorder(lane);
+      const endedAt = Date.now();
+      if (!blob || blob.size === 0) return; // nothing captured (e.g. instant end)
+      const idx = lane.idx;
+      lane.idx = idx + 1;
+      if (lane.source === "primary") setCurrentIdx(lane.idx);
+      else setBackupIdx(lane.idx);
+      const prevEnd = lane.lastChunkEndedAt;
+      const gapBeforeMs = prevEnd === null ? 0 : Math.max(0, startedAt - prevEnd);
+      lane.lastChunkEndedAt = endedAt;
+      enqueue({
+        key: idbChunkKey(sessionId, idx, lane.source),
+        session_id: sessionId,
+        idx,
+        ...(lane.source === "backup" ? { source: "backup" as const } : {}),
+        blob,
+        content_type: blob.type || mimeType || "audio/webm",
+        started_at: startedAt,
+        ended_at: endedAt,
+        duration_ms: endedAt - startedAt,
+        gap_before_ms: gapBeforeMs,
+        ts: startedAt,
+      });
+    },
+    [enqueue, finalizeRecorder, mimeType],
+  );
+
+  // ---- K-B backup lane ----
+
+  const clearBackupRetry = () => {
+    if (backupRetryTimerRef.current) clearTimeout(backupRetryTimerRef.current);
+    backupRetryTimerRef.current = null;
+  };
+
+  /** Acquire (or re-acquire) the backup stream and, if the day is recording, start its segment. */
+  const acquireBackup = React.useCallback(
+    async (reason: string): Promise<void> => {
+      const lane = backupRef.current;
+      if (!backupWantedRef.current || !lane.deviceId) return;
+      if (stateRef.current !== "recording" && stateRef.current !== "paused") return;
+      setBackupMic("acquiring");
       try {
-        optsRef.current?.onRecorderError?.(msg);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: lane.deviceId }, ...AUDIO_CONSTRAINTS },
+        });
+        stopTracks(lane.stream);
+        lane.stream = stream;
+        const track = stream.getAudioTracks()[0];
+        if (track) {
+          track.onended = () => backupFailureRef.current("track_ended", "backup_track_ended");
+        }
+        if (stateRef.current === "recording") startRecorderSegment(lane);
+        backupBackoffRef.current = REACQUIRE_MIN_MS;
+        setBackupMic("active");
+        setBackupError(null);
+        if (backupErroredRef.current) {
+          backupErroredRef.current = false;
+          emitEvent("mic_backup_restored", { reason, idx: lane.idx });
+        }
+      } catch (e) {
+        const name = (e as { name?: string })?.name;
+        const msg = e instanceof Error ? e.message : String(e);
+        backupFailureRef.current("acquire", `${name ?? "error"}:${msg}`.slice(0, 160));
+      }
+    },
+    [emitEvent, startRecorderSegment],
+  );
+
+  // Backup failure = event + retry with backoff. Separate try/catch domain; no primary refs touched.
+  backupFailureRef.current = (stage: string, message: string) => {
+    const lane = backupRef.current;
+    try {
+      // Flush whatever the backup recorder had, then drop the dead stream.
+      void finalizeIntoQueue(lane).catch(() => undefined);
+      stopTracks(lane.stream);
+      lane.stream = null;
+    } catch {
+      /* noop */
+    }
+    setBackupMic("error");
+    setBackupError(`${stage}: ${message}`);
+    if (!backupErroredRef.current) {
+      backupErroredRef.current = true;
+      emitEvent("mic_backup_error", { stage, message, idx: lane.idx });
+    }
+    if (stateRef.current !== "recording" && stateRef.current !== "paused") return;
+    clearBackupRetry();
+    const wait = backupBackoffRef.current;
+    backupBackoffRef.current = Math.min(backupBackoffRef.current * 2, REACQUIRE_MAX_MS);
+    backupRetryTimerRef.current = setTimeout(() => void acquireBackup("retry"), wait);
+  };
+
+  // ---- K-B primary failsafe ----
+
+  const watchdogSrcRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
+
+  /** Stop sampling (keeps the day's AudioContext — it was created under the Start click). */
+  const stopWatchdog = React.useCallback(() => {
+    if (watchdogTimerRef.current) clearInterval(watchdogTimerRef.current);
+    watchdogTimerRef.current = null;
+    try {
+      watchdogSrcRef.current?.disconnect();
+    } catch {
+      /* noop */
+    }
+    watchdogSrcRef.current = null;
+    watchdogRef.current.reset();
+  }, []);
+
+  /** End of day / unmount: also release the AudioContext. */
+  const closeWatchdog = React.useCallback(() => {
+    stopWatchdog();
+    void watchdogCtxRef.current?.close().catch(() => undefined);
+    watchdogCtxRef.current = null;
+  }, [stopWatchdog]);
+
+  const clearReacquire = () => {
+    if (reacquireTimerRef.current) clearTimeout(reacquireTimerRef.current);
+    reacquireTimerRef.current = null;
+  };
+
+  // forward decls so the watchdog / listeners can call into the loop
+  const onPrimaryLostRef = React.useRef<(reason: string) => void>(() => undefined);
+  const reacquirePrimaryRef = React.useRef<(reason: string) => Promise<void>>(async () => undefined);
+
+  const startWatchdog = React.useCallback(
+    (stream: MediaStream) => {
+      stopWatchdog();
+      try {
+        // ONE AudioContext per day, created under the Start click (autoplay policy); a
+        // re-acquired primary just gets a new source node. Never sample a non-running
+        // context — a suspended context reads flat 128 and would fake a silence trip.
+        let ctx = watchdogCtxRef.current;
+        if (!ctx || ctx.state === "closed") {
+          const Ctx =
+            window.AudioContext ??
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          ctx = new Ctx();
+          watchdogCtxRef.current = ctx;
+        }
+        if (ctx.state === "suspended") void ctx.resume().catch(() => undefined);
+        const src = ctx.createMediaStreamSource(stream);
+        watchdogSrcRef.current = src;
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        src.connect(analyser);
+        const buf = new Uint8Array(analyser.fftSize);
+        watchdogRef.current.reset();
+        const liveCtx = ctx;
+        watchdogTimerRef.current = setInterval(() => {
+          if (stateRef.current !== "recording") return; // paused = silence is expected
+          if (liveCtx.state !== "running") {
+            if (liveCtx.state === "suspended") void liveCtx.resume().catch(() => undefined);
+            return;
+          }
+          try {
+            analyser.getByteTimeDomainData(buf);
+            const ev = watchdogRef.current.feed(rmsOfBytes(buf), Date.now());
+            if (ev === "trip") {
+              void (async () => {
+                // Is the device still present? If it vanished without an `ended`, treat as lost.
+                const lane = primaryRef.current;
+                let present = true;
+                if (lane.deviceId) {
+                  try {
+                    const devs = await navigator.mediaDevices.enumerateDevices();
+                    present = devs.some((d) => d.kind === "audioinput" && d.deviceId === lane.deviceId);
+                  } catch {
+                    present = true;
+                  }
+                }
+                if (!present) {
+                  onPrimaryLostRef.current("silence_device_missing");
+                } else if (!primarySilentRef.current) {
+                  primarySilentRef.current = true;
+                  setPrimaryMic("silent");
+                  setPrimaryLostAt(Date.now());
+                  setPrimaryLostReason("silence");
+                  emitEvent("mic_primary_lost", { reason: "silence", idx: lane.idx });
+                }
+              })();
+            } else if (ev === "clear" && primarySilentRef.current) {
+              primarySilentRef.current = false;
+              setPrimaryMic("active");
+              setPrimaryLostAt(null);
+              setPrimaryLostReason(null);
+              emitEvent("mic_primary_restored", { reason: "audio_resumed", idx: primaryRef.current.idx });
+            }
+          } catch {
+            /* analyser hiccup — never fatal */
+          }
+        }, WATCHDOG_TICK_MS);
       } catch {
-        /* noop */
+        // No AudioContext — the track-ended listener still covers the yank case.
+      }
+    },
+    [emitEvent, stopWatchdog],
+  );
+
+  const attachPrimaryListeners = React.useCallback((stream: MediaStream) => {
+    const track = stream.getAudioTracks()[0];
+    if (!track) return;
+    track.onended = () => {
+      setMicLost(true);
+      onPrimaryLostRef.current("track_ended");
+    };
+    track.onmute = () => setMicLost(true);
+    track.onunmute = () => setMicLost(false);
+  }, []);
+
+  /** Primary device gone: flush the current segment, tear the lane down, start the re-acquire loop. */
+  onPrimaryLostRef.current = (reason: string) => {
+    if (primaryLostRef.current) return;
+    primaryLostRef.current = true;
+    const lane = primaryRef.current;
+    setPrimaryMic("lost");
+    setPrimaryLostAt(Date.now());
+    setPrimaryLostReason(reason);
+    setMicLost(true);
+    if (!primarySilentRef.current) emitEvent("mic_primary_lost", { reason, idx: lane.idx, backup: backupWantedRef.current ? backupMic : "off" });
+    primarySilentRef.current = false;
+    stopWatchdog();
+    void finalizeIntoQueue(lane).catch(() => undefined);
+    stopTracks(lane.stream);
+    lane.stream = null;
+    clearReacquire();
+    reacquireBackoffRef.current = REACQUIRE_MIN_MS;
+    reacquireTimerRef.current = setTimeout(() => void reacquirePrimaryRef.current("retry"), 1_000);
+  };
+
+  reacquirePrimaryRef.current = async (reason: string) => {
+    if (!primaryLostRef.current) return;
+    if (stateRef.current !== "recording" && stateRef.current !== "paused") return;
+    const lane = primaryRef.current;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { ...(lane.deviceId ? { deviceId: { exact: lane.deviceId } } : {}), ...AUDIO_CONSTRAINTS },
+      });
+      lane.stream = stream;
+      attachPrimaryListeners(stream);
+      primaryLostRef.current = false;
+      primarySilentRef.current = false;
+      setMicLost(false);
+      if (stateRef.current === "recording") startRecorderSegment(lane);
+      startWatchdog(stream);
+      setPrimaryMic("active");
+      setPrimaryLostAt(null);
+      setPrimaryLostReason(null);
+      emitEvent("mic_primary_restored", { reason, idx: lane.idx });
+    } catch {
+      clearReacquire();
+      const wait = reacquireBackoffRef.current;
+      reacquireBackoffRef.current = Math.min(reacquireBackoffRef.current * 2, REACQUIRE_MAX_MS);
+      reacquireTimerRef.current = setTimeout(() => void reacquirePrimaryRef.current("retry"), wait);
+    }
+  };
+
+  // devicechange: a re-plugged USB mic / a returning backup device → try now.
+  React.useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.addEventListener) return;
+    const onChange = () => {
+      if (primaryLostRef.current) {
+        clearReacquire();
+        void reacquirePrimaryRef.current("devicechange");
+      }
+      if (backupWantedRef.current && backupRef.current.stream === null) {
+        clearBackupRetry();
+        void acquireBackup("devicechange");
       }
     };
-    recRef.current = rec;
-    rec.start(); // NO timeslice — one blob on stop (D1)
-    chunkStartedAtRef.current = Date.now();
-  }, [emitError]);
+    navigator.mediaDevices.addEventListener("devicechange", onChange);
+    return () => navigator.mediaDevices.removeEventListener("devicechange", onChange);
+  }, [acquireBackup]);
 
-  /** Finalize the current segment into the queue; gap vs previous chunk end. */
-  const finalizeIntoQueue = React.useCallback(async (): Promise<void> => {
-    const sessionId = sessionIdRef.current;
-    if (!sessionId) return;
-    const startedAt = chunkStartedAtRef.current;
-    const blob = await finalizeRecorder();
-    const endedAt = Date.now();
-    if (!blob || blob.size === 0) return; // nothing captured (e.g. instant end)
-    const idx = idxRef.current;
-    idxRef.current = idx + 1;
-    setCurrentIdx(idxRef.current);
-    const prevEnd = lastChunkEndedAtRef.current;
-    const gapBeforeMs = prevEnd === null ? 0 : Math.max(0, startedAt - prevEnd);
-    lastChunkEndedAtRef.current = endedAt;
-    enqueue({
-      key: chunkKey(sessionId, idx),
-      session_id: sessionId,
-      idx,
-      blob,
-      content_type: blob.type || mimeType || "audio/webm",
-      started_at: startedAt,
-      ended_at: endedAt,
-      duration_ms: endedAt - startedAt,
-      gap_before_ms: gapBeforeMs,
-      ts: startedAt,
-    });
-  }, [enqueue, finalizeRecorder, mimeType]);
+  // ---- rotation (lockstep, R7) ----
 
   const scheduleRotate = React.useCallback(() => {
     if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
     rotateTimerRef.current = setTimeout(() => {
       void (async () => {
         if (stateRef.current !== "recording") return;
-        // Seam: finalize then restart immediately on the SAME stream.
-        await finalizeIntoQueue();
-        if (stateRef.current !== "recording") return;
-        startRecorderSegment();
-        scheduleRotate();
-        // Seam instrumentation (Kickoff B go/no-go): measured on every rotation,
-        // flag on or off, so the two can be compared. Log-only — no behavior change.
-        const stopAt = stopCalledAtRef.current;
-        if (stopAt > 0) {
-          const seam: ArchiveSeamEvent = {
-            idx: Math.max(0, idxRef.current - 1),
-            seam_ms: Math.max(0, chunkStartedAtRef.current - stopAt),
-            stop_latency_ms: Math.max(0, (lastChunkEndedAtRef.current ?? stopAt) - stopAt),
-          };
-          console.info("[bench-seam]", JSON.stringify({ ...seam, live_sink_flag: LIVE_SINK }));
-          try {
-            optsRef.current?.onSeam?.(seam);
-          } catch {
-            /* noop */
-          }
+        const P = primaryRef.current;
+        const B = backupRef.current;
+        try {
+          await runLockstep(
+            "rotate",
+            {
+              primary: async () => {
+                if (!P.stream) return; // lane is down (lost) — the re-acquire loop owns it
+                // Seam: finalize then restart immediately on the SAME stream.
+                await finalizeIntoQueue(P);
+                if (stateRef.current !== "recording") return;
+                startRecorderSegment(P);
+                // Seam instrumentation (Kickoff B go/no-go): measured on every rotation,
+                // flag on or off, so the two can be compared. Log-only — no behavior change.
+                const stopAt = P.stopCalledAt;
+                if (stopAt > 0) {
+                  const seam: ArchiveSeamEvent = {
+                    idx: Math.max(0, P.idx - 1),
+                    seam_ms: Math.max(0, P.chunkStartedAt - stopAt),
+                    stop_latency_ms: Math.max(0, (P.lastChunkEndedAt ?? stopAt) - stopAt),
+                  };
+                  console.info("[bench-seam]", JSON.stringify({ ...seam, live_sink_flag: LIVE_SINK }));
+                  try {
+                    optsRef.current?.onSeam?.(seam);
+                  } catch {
+                    /* noop */
+                  }
+                }
+              },
+              backup: B.stream
+                ? async () => {
+                    await finalizeIntoQueue(B);
+                    if (stateRef.current !== "recording") return;
+                    startRecorderSegment(B);
+                  }
+                : null,
+            },
+            (verb, err) => backupFailureRef.current(verb, err),
+          );
+        } catch (e) {
+          emitError(e instanceof Error ? e.message : String(e));
         }
+        if (stateRef.current === "recording") scheduleRotate();
       })();
     }, CHUNK_MS);
-  }, [finalizeIntoQueue, startRecorderSegment]);
+  }, [emitError, finalizeIntoQueue, startRecorderSegment]);
+
+  // ---- session verbs ----
 
   const startDay = React.useCallback(
-    async (sessionId: string, deviceId?: string): Promise<void> => {
+    async (sessionId: string, deviceId?: string, backupDeviceId?: string | null): Promise<void> => {
       if (stateRef.current === "recording" || stateRef.current === "paused") return;
       setError(null);
+      const P = primaryRef.current;
+      const B = backupRef.current;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: { ideal: 1 },
-            sampleRate: { ideal: 16000 },
+            ...AUDIO_CONSTRAINTS,
           },
         });
-        streamRef.current = stream;
-        const track = stream.getAudioTracks()[0];
-        if (track) {
-          track.onended = () => setMicLost(true);
-          track.onmute = () => setMicLost(true);
-          track.onunmute = () => setMicLost(false);
-        }
+        P.stream = stream;
+        P.deviceId = deviceId ?? null;
+        attachPrimaryListeners(stream);
         sessionIdRef.current = sessionId;
-        idxRef.current = 0;
+        P.idx = 0;
+        P.lastChunkEndedAt = null;
+        P.stopCalledAt = 0;
         setCurrentIdx(0);
-        lastChunkEndedAtRef.current = null;
+        B.idx = 0;
+        B.lastChunkEndedAt = null;
+        B.rec = null;
+        setBackupIdx(0);
+        setBackupArchivedCount(0);
+        setBackupArchivedBytes(0);
         setDayStartedAt(Date.now());
         setPausedAt(null);
         setMicLost(false);
+        primaryLostRef.current = false;
+        primarySilentRef.current = false;
+        setPrimaryMic("active");
+        setPrimaryLostAt(null);
+        setPrimaryLostReason(null);
         setState("recording");
         stateRef.current = "recording";
-        startRecorderSegment();
+        startRecorderSegment(P);
         scheduleRotate();
         void requestWakeLock();
+        startWatchdog(stream);
       } catch (e: unknown) {
         const name = (e as { name?: string })?.name;
         const msg =
@@ -600,18 +1060,42 @@ export function useRoomRecorder(opts?: {
         emitError(msg);
         throw new Error(msg);
       }
+      // Backup lane — AFTER the primary is live; its own try/catch domain (never throws up).
+      backupErroredRef.current = false;
+      backupBackoffRef.current = REACQUIRE_MIN_MS;
+      if (backupDeviceId && backupDeviceId !== deviceId) {
+        backupWantedRef.current = true;
+        B.deviceId = backupDeviceId;
+        void acquireBackup("start");
+      } else {
+        backupWantedRef.current = false;
+        B.deviceId = null;
+        setBackupMic("off");
+        emitEvent("mic_backup_unavailable", { reason: backupDeviceId ? "same_as_primary" : "no_device" });
+      }
     },
-    [emitError, requestWakeLock, scheduleRotate, startRecorderSegment],
+    [acquireBackup, attachPrimaryListeners, emitError, emitEvent, requestWakeLock, scheduleRotate, startRecorderSegment, startWatchdog],
   );
 
-  /** IRB pause: recorder stopped (a real capture gap), partial chunk uploaded. */
+  /** IRB pause: recorders stopped (a real capture gap), partial chunks uploaded — BOTH lanes. */
   const pauseDay = React.useCallback(async (): Promise<void> => {
     if (stateRef.current !== "recording") return;
     if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
     setState("paused");
     stateRef.current = "paused";
     setPausedAt(Date.now());
-    await finalizeIntoQueue();
+    const P = primaryRef.current;
+    const B = backupRef.current;
+    await runLockstep(
+      "pause",
+      {
+        primary: async () => {
+          if (P.stream) await finalizeIntoQueue(P);
+        },
+        backup: B.stream ? async () => finalizeIntoQueue(B) : null,
+      },
+      (verb, err) => backupFailureRef.current(verb, err),
+    ).catch(() => undefined);
   }, [finalizeIntoQueue]);
 
   const resumeDay = React.useCallback((): void => {
@@ -619,30 +1103,61 @@ export function useRoomRecorder(opts?: {
     setState("recording");
     stateRef.current = "recording";
     setPausedAt(null);
-    startRecorderSegment(); // next chunk's gap_before_ms = pause length
+    watchdogRef.current.reset(); // silence during a pause is expected, not a trip
+    const P = primaryRef.current;
+    const B = backupRef.current;
+    void runLockstep(
+      "resume",
+      {
+        primary: async () => {
+          if (P.stream) startRecorderSegment(P); // next chunk's gap_before_ms = pause length
+        },
+        backup: backupWantedRef.current
+          ? async () => {
+              if (B.stream) startRecorderSegment(B);
+              else await acquireBackup("resume");
+            }
+          : null,
+      },
+      (verb, err) => backupFailureRef.current(verb, err),
+    ).catch(() => undefined);
     scheduleRotate();
-  }, [scheduleRotate, startRecorderSegment]);
+  }, [acquireBackup, scheduleRotate, startRecorderSegment]);
 
-  /** End Day: final partial chunk into the queue; stream torn down. */
+  /** End Day: final partial chunks into the queue; both streams torn down. */
   const endDay = React.useCallback(async (): Promise<void> => {
     if (stateRef.current !== "recording" && stateRef.current !== "paused") return;
     if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
     setState("ending");
     stateRef.current = "ending";
-    await finalizeIntoQueue();
-    try {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-    } catch {
-      /* noop */
-    }
-    streamRef.current = null;
+    clearReacquire();
+    clearBackupRetry();
+    closeWatchdog();
+    const P = primaryRef.current;
+    const B = backupRef.current;
+    await runLockstep(
+      "end",
+      {
+        primary: async () => {
+          if (P.stream) await finalizeIntoQueue(P);
+        },
+        backup: B.stream ? async () => finalizeIntoQueue(B) : null,
+      },
+      (verb, err) => backupFailureRef.current(verb, err),
+    ).catch(() => undefined);
+    stopTracks(P.stream);
+    P.stream = null;
+    stopTracks(B.stream);
+    B.stream = null;
+    backupWantedRef.current = false;
+    setBackupMic("off");
     try {
       await wakeLockRef.current?.release();
     } catch {
       /* noop */
     }
     wakeLockRef.current = null;
-  }, [finalizeIntoQueue]);
+  }, [closeWatchdog, finalizeIntoQueue]);
 
   /** Called by the client once the queue is fully drained after endDay. */
   const markEnded = React.useCallback(() => {
@@ -653,16 +1168,16 @@ export function useRoomRecorder(opts?: {
   React.useEffect(() => {
     return () => {
       if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
-      try {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-      } catch {
-        /* noop */
-      }
+      clearReacquire();
+      clearBackupRetry();
+      closeWatchdog();
+      stopTracks(primaryRef.current.stream);
+      stopTracks(backupRef.current.stream);
     };
-  }, []);
+  }, [closeWatchdog]);
 
-  /** Kickoff B: read-only access to the day's stream for the live sink (flag on only). */
-  const getStream = React.useCallback((): MediaStream | null => streamRef.current, []);
+  /** Kickoff B: read-only access to the day's primary stream for the live sink (flag on only). */
+  const getStream = React.useCallback((): MediaStream | null => primaryRef.current.stream, []);
 
   const now = Date.now();
   void tick; // tick only exists to drive re-render
@@ -672,7 +1187,7 @@ export function useRoomRecorder(opts?: {
     mimeType,
     currentIdx,
     chunkElapsedMs:
-      state === "recording" ? Math.max(0, now - chunkStartedAtRef.current) : 0,
+      state === "recording" ? Math.max(0, now - primaryRef.current.chunkStartedAt) : 0,
     dayElapsedMs: dayStartedAt ? Math.max(0, now - dayStartedAt) : 0,
     dayStartedAt,
     pausedAt,
@@ -684,6 +1199,14 @@ export function useRoomRecorder(opts?: {
     offline,
     micLost,
     storageBlocked,
+    primaryMic,
+    primaryLostAt,
+    primaryLostReason,
+    backupMic,
+    backupError,
+    backupIdx,
+    backupArchivedCount,
+    backupArchivedBytes,
   };
 
   return { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream };

@@ -1,6 +1,8 @@
 /**
  * GET /api/bench/sessions/{id}/download — D7 day download: a streaming
  * ZIP of all chunks in idx order plus manifest.json. Admin-gated.
+ * K-B: the zip carries BOTH streams — chunk_{idx}.webm (primary) then
+ * backup_chunk_{idx}.webm (second mic) — and the manifest lists them separately.
  *
  * Hand-rolled STORE-only zip (method 0 — WebM is already compressed; no new
  * npm deps): local file headers + central directory + EOCD via
@@ -22,9 +24,12 @@ import {
   benchAdminGuard,
   findBenchSession,
   listBenchChunks,
+  listBenchEvents,
+  splitChunksBySource,
   StoreZipWriter,
 } from "@/lib/bench";
 import { getObjectBytes } from "@/lib/r2";
+import { chunkBasename } from "@/lib/bench-dual";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 
 export const runtime = "nodejs";
@@ -44,12 +49,19 @@ export async function GET(
 
   const session = await findBenchSession(id);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
-  const chunks = await listBenchChunks(id);
-  if (chunks.length === 0) {
+  const all = await listBenchChunks(id); // primary first, then backup (K-B) — zip carries both
+  const { primary: chunks, backup: backupChunks } = splitChunksBySource(all);
+  if (all.length === 0) {
     return respondError("NOT_FOUND", "no_chunks_for_session");
   }
+  let events: Array<{ id: string; kind: string; at: string; brain_status: string; payload: unknown }> = [];
+  try {
+    events = (await listBenchEvents(id)).map((e) => ({ id: e.id, kind: e.kind, at: new Date(e.at).toISOString(), brain_status: e.brain_status, payload: e.payload ?? null }));
+  } catch {
+    events = [];
+  }
 
-  const totalBytes = chunks.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0);
+  const totalBytes = all.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0);
   if (totalBytes >= FOUR_GB) {
     return NextResponse.json(
       {
@@ -78,7 +90,8 @@ export async function GET(
     },
     chunks: chunks.map((c) => ({
       idx: c.idx,
-      zip_entry: `chunk_${String(c.idx).padStart(5, "0")}.webm`,
+      source: "primary",
+      zip_entry: chunkBasename(c.idx, "primary"),
       r2_key: c.r2_key,
       content_type: c.content_type,
       started_at: new Date(c.started_at).toISOString(),
@@ -91,6 +104,24 @@ export async function GET(
     gaps: chunks
       .filter((c) => c.gap_before_ms >= 2000)
       .map((c) => ({ before_idx: c.idx, gap_ms: c.gap_before_ms })),
+    // K-B: second-mic stream (backup_chunk_{idx}.webm) + the mic story
+    backup_chunks: backupChunks.map((c) => ({
+      idx: c.idx,
+      source: "backup",
+      zip_entry: chunkBasename(c.idx, "backup"),
+      r2_key: c.r2_key,
+      content_type: c.content_type,
+      started_at: new Date(c.started_at).toISOString(),
+      ended_at: new Date(c.ended_at).toISOString(),
+      duration_ms: c.duration_ms,
+      size_bytes: c.size_bytes === null ? null : Number(c.size_bytes),
+      upload_state: c.upload_state,
+      gap_before_ms: c.gap_before_ms,
+    })),
+    backup_gaps: backupChunks
+      .filter((c) => c.gap_before_ms >= 2000)
+      .map((c) => ({ before_idx: c.idx, gap_ms: c.gap_before_ms })),
+    events,
   };
 
   const zip = new StoreZipWriter();
@@ -99,7 +130,7 @@ export async function GET(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for (const c of chunks) {
+        for (const c of all) {
           const bytes = await getObjectBytes(c.r2_key);
           if (bytes === null) {
             // Object missing in R2 — abort loudly rather than emit a zip that
@@ -107,7 +138,7 @@ export async function GET(
             controller.error(new Error(`bench_chunk_missing_in_r2:${c.r2_key}`));
             return;
           }
-          const entryName = `chunk_${String(c.idx).padStart(5, "0")}.webm`;
+          const entryName = chunkBasename(c.idx, c.source ?? "primary");
           controller.enqueue(zip.entry(entryName, bytes, new Date(c.started_at)));
         }
         const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));

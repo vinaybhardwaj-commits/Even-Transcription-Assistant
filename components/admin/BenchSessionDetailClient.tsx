@@ -12,6 +12,7 @@ import * as React from "react";
 type Chunk = {
   id: string;
   idx: number;
+  source?: "primary" | "backup";
   r2_key: string;
   content_type: string;
   started_at: string;
@@ -39,8 +40,15 @@ type Detail = {
     verified_count: number;
     total_bytes: number;
     gap_ms: number;
+    backup_chunk_count?: number;
+    backup_verified_count?: number;
+    primary_lost_count?: number;
+    primary_restored_count?: number;
   };
   chunks: Chunk[];
+  /** K-B: second-mic stream + mic story */
+  backup_chunks?: Chunk[];
+  events?: Array<{ id: string; kind: string; at: string; brain_status: string; payload: unknown }>;
 };
 
 const GAP_VISIBLE_MS = 2000; // seams are <500ms; ≥2s is a real gap/pause
@@ -192,6 +200,17 @@ export function BenchSessionDetailClient({ sessionId }: { sessionId: string }) {
             {totals.chunk_count} total · {totals.verified_count} verified
             {queued > 0 ? ` · ${queued} queued on device` : ""}
           </dd>
+          <dt className="text-even-ink-400">Backup mic</dt>
+          <dd className="text-even-ink-800 font-medium">
+            {(totals.backup_chunk_count ?? 0) === 0
+              ? "no backup stream"
+              : `${totals.backup_chunk_count} chunks · ${totals.backup_verified_count ?? 0} verified`}
+            {(totals.primary_lost_count ?? 0) > 0 ? (
+              <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700">
+                main mic lost {totals.primary_lost_count}× · restored {totals.primary_restored_count ?? 0}×
+              </span>
+            ) : null}
+          </dd>
           <dt className="text-even-ink-400">Capture gaps</dt>
           <dd className="text-even-ink-800 font-medium">
             {visibleGaps.length === 0
@@ -266,6 +285,64 @@ export function BenchSessionDetailClient({ sessionId }: { sessionId: string }) {
           link.
         </p>
       </section>
+
+      {/* K-B: backup (second mic) stream — its own strip, same idioms */}
+      {(detail.backup_chunks?.length ?? 0) > 0 && (
+        <section className="eta-card p-5">
+          <p className="text-label font-semibold text-even-navy-800 mb-1">
+            Backup mic timeline · {detail.backup_chunks!.length} chunk
+            {detail.backup_chunks!.length === 1 ? "" : "s"}
+          </p>
+          <div className="flex gap-[2px] h-6 items-stretch rounded-lg overflow-hidden">
+            {detail.backup_chunks!.map((c) => (
+              <div
+                key={c.id}
+                className={`flex-1 rounded-[2px] opacity-85 ${
+                  c.upload_state === "verified" ? "bg-even-blue-400" : "bg-even-ink-300"
+                }`}
+                title={`backup chunk ${c.idx} · ${fmtTime(c.started_at)}–${fmtTime(c.ended_at)} · ${
+                  c.size_bytes !== null ? fmtMb(c.size_bytes) : "size unknown"
+                } · ${c.r2_key}`}
+              />
+            ))}
+          </div>
+          <p className="mt-1.5 text-caption text-even-ink-400">
+            Second microphone, recorded in lockstep. Download via the manifest / day zip
+            (backup_chunk_*.webm).
+          </p>
+        </section>
+      )}
+
+      {/* K-B: mic story */}
+      {(detail.events?.filter((e) => e.kind.startsWith("mic_")).length ?? 0) > 0 && (
+        <section className="eta-card p-5">
+          <p className="text-label font-semibold text-even-navy-800 mb-2">Mic story</p>
+          <ul className="divide-y divide-even-ink-100">
+            {detail
+              .events!.filter((e) => e.kind.startsWith("mic_"))
+              .map((e) => {
+                const p = (typeof e.payload === "object" && e.payload !== null ? e.payload : {}) as { reason?: string };
+                return (
+                  <li key={e.id} className="flex items-baseline gap-4 py-1.5 text-body">
+                    <span className="font-mono tabular-nums text-even-ink-800">{fmtTime(e.at)}</span>
+                    <span
+                      className={
+                        e.kind === "mic_primary_lost" || e.kind === "mic_backup_error"
+                          ? "text-danger-700"
+                          : e.kind === "mic_primary_restored" || e.kind === "mic_backup_restored"
+                            ? "text-success-700"
+                            : "text-even-ink-500"
+                      }
+                    >
+                      {e.kind.replace(/_/g, " ")}
+                      {p.reason ? ` · ${p.reason}` : ""}
+                    </span>
+                  </li>
+                );
+              })}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }

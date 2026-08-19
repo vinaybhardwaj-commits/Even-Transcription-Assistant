@@ -9,7 +9,9 @@
  * data. Idempotent: retries hit ON CONFLICT (session_id, idx).
  *
  * Body: { session_id, idx, content_type, started_at, ended_at,
- *         duration_ms, size_bytes, gap_before_ms }
+ *         duration_ms, size_bytes, gap_before_ms, source? }
+ * source (K-B, 0045): 'primary' (default — absent = today's behaviour) | 'backup'.
+ * Uniqueness is (session_id, source, idx).
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
@@ -34,6 +36,7 @@ export async function POST(req: NextRequest) {
     duration_ms?: unknown;
     size_bytes?: unknown;
     gap_before_ms?: unknown;
+    source?: unknown;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -75,6 +78,10 @@ export async function POST(req: NextRequest) {
   ) {
     return respondError("VALIDATION_FAILED", "chunk_fields_required");
   }
+  if (body.source !== undefined && body.source !== "primary" && body.source !== "backup") {
+    return respondError("VALIDATION_FAILED", "bad_source");
+  }
+  const source: "primary" | "backup" = body.source === "backup" ? "backup" : "primary";
 
   const session = await findBenchSession(sessionId);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
@@ -89,6 +96,7 @@ export async function POST(req: NextRequest) {
     ymdUtc(new Date(session.started_at)),
     sessionId,
     idx,
+    source,
   );
   const head = await headObject(key);
   if (head.size === null) {
@@ -102,14 +110,14 @@ export async function POST(req: NextRequest) {
   try {
     await sql`
       INSERT INTO bench_chunk (
-        id, session_id, idx, r2_key, content_type, started_at, ended_at,
+        id, session_id, idx, source, r2_key, content_type, started_at, ended_at,
         duration_ms, size_bytes, upload_state, gap_before_ms
       ) VALUES (
-        ${id}, ${sessionId}, ${idx}, ${key}, ${contentType},
+        ${id}, ${sessionId}, ${idx}, ${source}, ${key}, ${contentType},
         ${startedAt.toISOString()}, ${endedAt.toISOString()},
         ${durationMs}, ${sizeBytes}, 'verified', ${gapBeforeMs}
       )
-      ON CONFLICT (session_id, idx) DO UPDATE SET
+      ON CONFLICT (session_id, source, idx) DO UPDATE SET
         upload_state = 'verified',
         size_bytes = EXCLUDED.size_bytes
     `;

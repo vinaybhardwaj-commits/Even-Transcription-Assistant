@@ -20,10 +20,24 @@
  * kiosk gains the listening-state chip (recording / brain unsure / brain down)
  * plus a counters debug line. Flag off = nothing mounts, UI byte-identical.
  * Start-of-day notice copy is unchanged (consent copy is not this build's).
+ *
+ * Kickoff K-B — dual-mic: a second "Backup microphone" picker on the start screen
+ * (persisted in the kiosk's IndexedDB settings; default = the built-in mic), the hook
+ * records both lanes in lockstep, and the primary failsafe surfaces here: a big
+ * persistent "ON BACKUP MIC" banner while the USB mic is lost/silent, a backup status
+ * line, and mic-story events posted to /api/bench/events (durable-first, kiosk source).
  */
 
 import * as React from "react";
-import { useRoomRecorder, type ArchiveSeamEvent } from "@/lib/use-room-recorder";
+import {
+  useRoomRecorder,
+  loadBenchSetting,
+  saveBenchSetting,
+  pickDefaultBackupDevice,
+  BACKUP_DEVICE_SETTING,
+  type ArchiveSeamEvent,
+  type BenchMicEvent,
+} from "@/lib/use-room-recorder";
 import { LIVE_SINK } from "@/lib/live-flags";
 import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
 
@@ -104,12 +118,30 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   // Kickoff B: archive-side signals reach the live sink through this ref; with the
   // flag off nothing ever assigns it, so the callbacks are no-ops.
   const liveHandlersRef = React.useRef<LiveHandlers>({});
+  // K-B: mic-story events → POST /api/bench/events (durable-first; fail-silent here).
+  const sessionIdForEventsRef = React.useRef<string | null>(null);
+  const postMicEvent = React.useCallback((e: BenchMicEvent) => {
+    void fetch("/api/bench/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: e.kind,
+        at: new Date(e.at).toISOString(),
+        session_id: sessionIdForEventsRef.current,
+        payload: e.payload,
+      }),
+      keepalive: true,
+    }).catch(() => {
+      /* the console line from the hook is the fallback record */
+    });
+  }, []);
   const recorderOpts = React.useMemo(
     () => ({
       onSeam: (s: ArchiveSeamEvent) => liveHandlersRef.current.onSeam?.(s),
       onRecorderError: (m: string) => liveHandlersRef.current.onRecorderError?.(m),
+      onEvent: postMicEvent,
     }),
-    [],
+    [postMicEvent],
   );
   const { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream } =
     useRoomRecorder(recorderOpts);
@@ -118,6 +150,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const [label, setLabel] = React.useState("");
   const [mics, setMics] = React.useState<Array<{ deviceId: string; label: string }>>([]);
   const [micId, setMicId] = React.useState<string>("");
+  // K-B: backup (second) microphone — persisted choice; "" = none
+  const [backupMicId, setBackupMicId] = React.useState<string>("");
+  const backupChoiceLoadedRef = React.useRef(false);
   const [micLevel, setMicLevel] = React.useState(0); // 0..1 rolling
   const [speechSeen, setSpeechSeen] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
@@ -147,11 +182,21 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         meterStreamRef.current = stream;
         const devices = await navigator.mediaDevices.enumerateDevices();
         if (!cancelled) {
-          setMics(
-            devices
-              .filter((d) => d.kind === "audioinput")
-              .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` })),
-          );
+          const inputs = devices
+            .filter((d) => d.kind === "audioinput")
+            .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` }));
+          setMics(inputs);
+          // K-B: backup mic = persisted choice if still present, else the built-in mic.
+          if (!backupChoiceLoadedRef.current) {
+            backupChoiceLoadedRef.current = true;
+            const saved = await loadBenchSetting<string>(BACKUP_DEVICE_SETTING);
+            const primary = micId || inputs[0]?.deviceId || null;
+            const pick =
+              saved && inputs.some((d) => d.deviceId === saved) && saved !== primary
+                ? saved
+                : pickDefaultBackupDevice(inputs, primary);
+            if (!cancelled) setBackupMicId(pick ?? "");
+          }
         }
         const Ctx =
           window.AudioContext ??
@@ -227,7 +272,8 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       } catch {
         /* noop */
       }
-      await startDay(sid, micId || undefined);
+      sessionIdForEventsRef.current = sid;
+      await startDay(sid, micId || undefined, backupMicId || null);
     } catch (e) {
       setStartError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -461,6 +507,29 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 </select>
               </div>
               <div className="mb-4">
+                <label className="block text-caption font-semibold text-even-navy-800 mb-1.5">
+                  Backup microphone <span className="font-normal text-even-ink-400">(records alongside; used if the main mic drops)</span>
+                </label>
+                <select
+                  value={backupMicId}
+                  onChange={(e) => {
+                    setBackupMicId(e.target.value);
+                    void saveBenchSetting(BACKUP_DEVICE_SETTING, e.target.value);
+                  }}
+                  data-testid="backup-mic"
+                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-body text-even-ink-800"
+                >
+                  <option value="">No backup microphone</option>
+                  {mics
+                    .filter((m) => m.deviceId !== (micId || mics[0]?.deviceId))
+                    .map((m) => (
+                      <option key={m.deviceId} value={m.deviceId}>
+                        {m.label}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="mb-4">
                 <p className="text-caption font-semibold text-even-navy-800 mb-1.5">Mic check</p>
                 <div
                   className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-body font-semibold ${
@@ -507,6 +576,36 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 {status.dayStartedAt ? `since ${fmtTimeOfDay(status.dayStartedAt)} · ` : ""}
                 chunk {status.currentIdx + 1} in progress ({fmtMinSec(status.chunkElapsedMs)} /
                 5:00)
+              </p>
+              {/* K-B primary failsafe — as loud as the recording pill, persistent until restored */}
+              {status.primaryMic !== "active" && (
+                <div
+                  className="mb-4 rounded-2xl bg-danger-100 border-2 border-danger-700 px-4 py-4 text-center"
+                  role="alert"
+                  data-testid="on-backup-banner"
+                >
+                  <p className="text-heading font-bold text-danger-700 tracking-wide">
+                    {status.backupMic === "active"
+                      ? "ON BACKUP MIC"
+                      : status.backupMic === "off"
+                        ? "MAIN MIC LOST — NO BACKUP"
+                        : "MAIN MIC LOST — BACKUP NOT READY"}
+                  </p>
+                  <p className="mt-1 text-caption font-semibold text-danger-700">
+                    {status.primaryMic === "silent" ? "Main microphone is silent" : "Main microphone disconnected"}
+                    {status.primaryLostAt ? ` since ${fmtTimeOfDay(status.primaryLostAt)}` : ""} · check the USB
+                    mic — recording resumes on it automatically when it is back
+                  </p>
+                </div>
+              )}
+              <p className="text-center text-meta text-even-ink-400 mb-4" data-testid="backup-line">
+                {status.backupMic === "active"
+                  ? `Backup mic recording · ${status.backupArchivedCount} backup chunk${status.backupArchivedCount === 1 ? "" : "s"} archived`
+                  : status.backupMic === "acquiring"
+                    ? "Backup mic connecting…"
+                    : status.backupMic === "error"
+                      ? `Backup mic error — retrying (${status.backupError ?? "unknown"})`
+                      : "No backup microphone"}
               </p>
               <div className="grid grid-cols-3 gap-2.5 mb-4">
                 <div className="rounded-xl bg-even-ink-50 border border-even-ink-100 px-2 py-3 text-center">
@@ -665,7 +764,8 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             <div className="text-center py-8">
               <p className="text-heading font-bold text-even-navy-800 mb-2">Day ended</p>
               <p className="text-body text-even-ink-500 mb-6">
-                {status.archivedCount} chunk{status.archivedCount === 1 ? "" : "s"} archived (
+                {status.archivedCount} chunk{status.archivedCount === 1 ? "" : "s"} archived
+                {status.backupArchivedCount > 0 ? ` + ${status.backupArchivedCount} backup` : ""} (
                 {fmtMb(status.archivedBytes)}) — all uploads verified.
               </p>
               <button
