@@ -8,12 +8,21 @@
  *                     GET /api/brain/rooms/:id/cues). Summary (80 chars) by default; full
  *                     payload only with include_payload=true.
  * Rooms may be addressed by room_id OR room_slug. IST day = server clock (istDate()).
+ *
+ * S3 WRITES (PRD §9, §11.1 Pin, §11.4 source tags; scope write):
+ * scribe_post_cue  — independent brain write: POST same-origin /api/brain/cues with the
+ *                    server-injected BRAIN_SERVICE_TOKEN (the MCP is a CLIENT of the brain — no
+ *                    direct cue SQL; BRAIN_BASE_URL override honoured exactly like brain-proxy).
+ *                    `source` (mcp|warehouse|replay, default mcp) is FORCED into the payload.
+ *                    Needs no active tape.
+ * scribe_pin_visit — cue type operator_pin {visit_id?|individual_uid?, phase, source:"mcp"}.
+ *                    NEVER touches the `visit` table — evidence for the future fuse (§11.3).
  */
 
 import { sql } from "@/lib/db";
-import { getPool } from "@/lib/brain/db";
+import { getPool, TOKEN_ENV } from "@/lib/brain/db";
 import { CUES_DEFAULT_LIMIT, CUES_MAX_LIMIT, findRoomDay, isIstDateString, istDate, listCuesForDay, readGraph, roomExists } from "@/lib/brain/state";
-import { argBool, argDate, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { argBool, argDate, argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 export type RoomRef = { id: string; slug: string; name: string; enabled: boolean };
 
@@ -152,4 +161,151 @@ const listCues: McpTool = {
     }),
 };
 
-export const BRAIN_TOOLS: McpTool[] = [listRooms, getState, listCues];
+// ---------------------------------------------------------------------------
+// S3 — the single brain write door, as a client (same-origin HTTP + server token)
+// ---------------------------------------------------------------------------
+
+const BRAIN_TIMEOUT_MS = 5_000;
+export const CUE_SOURCES = ["mcp", "warehouse", "replay"] as const;
+export type CueSource = (typeof CUE_SOURCES)[number];
+
+function brainCuesUrl(origin: string): string {
+  const base = process.env.BRAIN_BASE_URL?.trim();
+  if (base) return new URL("/api/brain/cues", base.endsWith("/") ? base : `${base}/`).toString();
+  return new URL("/api/brain/cues", origin).toString();
+}
+
+export type PostCueResult =
+  | { ok: true; cue_id: string; cue_at: string; brain_status: number; state_summary: string }
+  | { ok: false; error: string; brain_status: number | null; detail?: string };
+
+/**
+ * POST /api/brain/cues with Bearer BRAIN_SERVICE_TOKEN (server-side env). `source` is forced
+ * into the payload by the caller's policy (never trusted from args). Never throws.
+ */
+export async function postBrainCue(
+  origin: string,
+  body: { room_id: string; type: string; at?: string; payload: Record<string, unknown> },
+): Promise<PostCueResult> {
+  const token = process.env[TOKEN_ENV];
+  if (!token) return { ok: false, error: "service_token_not_configured", brain_status: null };
+  try {
+    const res = await fetch(brainCuesUrl(origin), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(BRAIN_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    const j = (await res.json().catch(() => null)) as { ok?: boolean; cue_id?: string; cue_at?: string; error?: string; state?: unknown } | null;
+    if (!res.ok || !j?.ok) {
+      return { ok: false, error: j?.error ?? `brain_${res.status}`, brain_status: res.status };
+    }
+    let summary = "";
+    try {
+      summary = JSON.stringify(j.state ?? {}).slice(0, 80);
+    } catch {
+      summary = "";
+    }
+    return { ok: true, cue_id: String(j.cue_id ?? ""), cue_at: String(j.cue_at ?? ""), brain_status: res.status, state_summary: summary };
+  } catch (e) {
+    const name = (e as Error)?.name;
+    return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "brain_timeout" : "brain_unreachable", brain_status: null, detail: String((e as Error)?.message ?? e).slice(0, 160) };
+  }
+}
+
+async function resolveRoomForWrite(args: ToolArgs): Promise<{ room: RoomRef } | { error: Record<string, unknown> }> {
+  try {
+    const room = await resolveRoom(args);
+    if (!room) return { error: { ok: false, error: "unknown_room" } };
+    return { room };
+  } catch (e) {
+    if (e instanceof AmbiguousRoomError) return { error: { ok: false, error: "ambiguous_room", matches: e.matches.map((m) => ({ id: m.id, slug: m.slug, name: m.name })) } };
+    return { error: { ok: false, error: "room_lookup_failed", degraded: true, detail: String((e as Error)?.message ?? e).slice(0, 160) } };
+  }
+}
+
+function parseAtArg(args: ToolArgs): { at?: string } | { error: string } {
+  if (args.at === undefined || args.at === null || args.at === "") return {};
+  const d = argDate(args, "at");
+  return d ? { at: d.toISOString() } : { error: "invalid_at" };
+}
+
+const WRITE_ROOM_ARGS = {
+  room: { type: "string", description: "room id, slug, or exact name" },
+  room_id: { type: "string" },
+  room_slug: { type: "string" },
+};
+
+const postCue: McpTool = {
+  name: "scribe_post_cue",
+  description: "Independent operator cue into the brain (PRD §9): POST /api/brain/cues as a client with the server-side token. type is an open set (≤64 chars). payload is any JSON object; `source` (mcp|warehouse|replay, default mcp) is FORCED into it. Does not need an active tape. Returns { ok, cue_id, cue_at, state_summary (80 chars) }.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...WRITE_ROOM_ARGS,
+      type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | stt_turn | warehouse_event | pulse_note | test" },
+      at: { type: "string", description: "ISO timestamp; default now (server)" },
+      payload: { type: "object", description: "any JSON object; source is overwritten" },
+      source: { type: "string", enum: ["mcp", "warehouse", "replay"], default: "mcp" },
+    },
+    required: ["type"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    const r = await resolveRoomForWrite(args);
+    if ("error" in r) return r.error;
+    const type = argStr(args, "type", 64);
+    if (!type) return { ok: false, error: "type_required" };
+    const at = parseAtArg(args);
+    if ("error" in at) return { ok: false, error: at.error };
+    const srcRaw = argStr(args, "source", 16) ?? "mcp";
+    if (!(CUE_SOURCES as readonly string[]).includes(srcRaw)) return { ok: false, error: "source_not_allowed", allowed: CUE_SOURCES };
+    const source = srcRaw as CueSource;
+    const rawPayload = args.payload;
+    if (rawPayload !== undefined && (typeof rawPayload !== "object" || rawPayload === null || Array.isArray(rawPayload))) {
+      return { ok: false, error: "payload_must_be_object" };
+    }
+    const payload = { ...((rawPayload as Record<string, unknown>) ?? {}), source }; // forced
+    const out = await postBrainCue(ctx.origin, { room_id: r.room.id, type, ...(at.at ? { at: at.at } : {}), payload });
+    return { room: { id: r.room.id, slug: r.room.slug, name: r.room.name }, type, source, ...out };
+  },
+};
+
+const VISIT_PHASES = ["called", "in_chair", "at_diagnostics", "ended", "unknown"] as const;
+
+const pinVisit: McpTool = {
+  name: "scribe_pin_visit",
+  description: "Operator pin (PRD §11.1): cue type operator_pin with { visit_id? | individual_uid?, phase ∈ called|in_chair|at_diagnostics|ended|unknown, source:'mcp' }. Evidence for the future fuse — NEVER writes or updates the visit table.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...WRITE_ROOM_ARGS,
+      at: { type: "string", description: "ISO timestamp; default now" },
+      visit_id: { type: "string" },
+      individual_uid: { type: "string" },
+      phase: { type: "string", enum: [...VISIT_PHASES] },
+    },
+    required: ["phase"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    const r = await resolveRoomForWrite(args);
+    if ("error" in r) return r.error;
+    const phase = argStr(args, "phase", 32);
+    if (!phase || !(VISIT_PHASES as readonly string[]).includes(phase)) return { ok: false, error: "invalid_phase", allowed: VISIT_PHASES };
+    const at = parseAtArg(args);
+    if ("error" in at) return { ok: false, error: at.error };
+    const visitId = argStr(args, "visit_id", 128);
+    const individualUid = argStr(args, "individual_uid", 128);
+    const payload: Record<string, unknown> = { phase, source: "mcp" };
+    if (visitId) payload.visit_id = visitId;
+    if (individualUid) payload.individual_uid = individualUid;
+    const out = await postBrainCue(ctx.origin, { room_id: r.room.id, type: "operator_pin", ...(at.at ? { at: at.at } : {}), payload });
+    return { room: { id: r.room.id, slug: r.room.slug, name: r.room.name }, type: "operator_pin", phase, ...out, visit_table_touched: false };
+  },
+};
+
+export const BRAIN_TOOLS: McpTool[] = [listRooms, getState, listCues, postCue, pinVisit];

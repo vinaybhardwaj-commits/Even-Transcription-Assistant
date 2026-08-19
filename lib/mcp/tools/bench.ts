@@ -18,11 +18,26 @@
  * live session, no second tape; paused → room_paused unless override_pause, which is audited)
  * → INSERT bench_command → wait up to 8 s for the kiosk's ack → return it verbatim. Bus not
  * migrated / down → error bus_not_migrated / bus_down (never a 500).
+ *
+ * S3:
+ * scribe_mark_consult (write)    — durable-first mirror of the kiosk consult mark: room's active
+ *                                  session → INSERT bench_event consult_mark {source:"mcp"} 'failed'
+ *                                  → cue via postBrainCue → UPDATE 'sent'. No active session → the
+ *                                  cue still lands, event_row:"no_active_session" (PRD §9).
+ * scribe_extract_audio (invoke)  — clock window (HH:MM[:SS] IST or ISO) → one covering chunk →
+ *                                  short presigned GET + offsets; spanning → multi_chunk_not_supported_v1
+ *                                  listing every covering chunk + presigns; none → no_audio_in_range.
+ * scribe_transcribe_range (invoke)— same resolution → download that chunk → Mini Whisper (lib/whisper)
+ *                                  → text for the WHOLE chunk (trimming is v1.1), never inline bytes.
+ * scribe_list_commands (read)    — the bus queue (bench_command), newest first.
  */
 
-import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, splitChunksBySource } from "@/lib/bench";
+import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
-import { signGetUrl } from "@/lib/r2";
+import { getObjectBytes, signGetUrl } from "@/lib/r2";
+import { sql } from "@/lib/db";
+import { transcribeWithWhisper } from "@/lib/whisper";
+import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
 import {
   ACK_WAIT_MS,
   BusError,
@@ -32,12 +47,13 @@ import {
   getListener,
   insertCommand,
   isListening,
+  listCommands,
   waitForAck,
   type CommandKind,
   type ListenerRow,
 } from "@/lib/bench-commands";
-import { argBool, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs } from "../registry";
-import { AmbiguousRoomError, resolveRoom, type RoomRef } from "./brain";
+import { argBool, argDate, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+import { AmbiguousRoomError, postBrainCue, resolveRoom, type RoomRef } from "./brain";
 
 const PRESIGN_SECONDS = 3600; // 1 h family (matches manifest route)
 
@@ -452,4 +468,285 @@ const stopRecording = simpleVerb(
   "End the room's day via the kiosk (command end_day): the kiosk flushes the last chunk, ends the session, then acks. Requires a listener. May answer ack_timeout if the flush outlasts the 8 s wait — check scribe_get_session.",
 );
 
-export const BENCH_TOOLS: McpTool[] = [listSessions, getSession, getRecording, startRecording, pauseRecording, resumeRecording, stopRecording];
+// ---------------------------------------------------------------------------
+// S3 — consult mark from the operator (write, durable-first)
+// ---------------------------------------------------------------------------
+
+const markConsult: McpTool = {
+  name: "scribe_mark_consult",
+  description: "Operator consult mark (PRD §9): durable-first like the kiosk — INSERT bench_event kind consult_mark {source:'mcp', note?} on the room's active session, then post the cue, then flip the row to 'sent'. With NO active session the cue still lands and event_row is 'no_active_session' (never a blocking 409).",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...ROOM_WRITE_ARGS,
+      at: { type: "string", description: "ISO timestamp of the mark; default now" },
+      note: { type: "string", maxLength: 500, description: "optional operator note stored on the event row + cue payload" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    const r = await resolveForWrite(args);
+    if ("error" in r) return r.error;
+    const room = r.room;
+    let at = new Date();
+    if (args.at !== undefined && args.at !== null && args.at !== "") {
+      const d = argDate(args, "at");
+      if (!d) return { ok: false, error: "invalid_at" };
+      at = d;
+    }
+    const note = argStr(args, "note", 500);
+    const payload: Record<string, unknown> = { source: "mcp", ...(note ? { note } : {}) };
+
+    // 1. durable row first (only when there is a live tape to hang it on)
+    let session: { id: string; status: string } | null = null;
+    let sessionLookupError: string | null = null;
+    try {
+      session = await findActiveSession(room.id);
+    } catch (e) {
+      sessionLookupError = String((e as Error)?.message ?? e).slice(0, 160);
+    }
+    let eventId: string | null = null;
+    let eventRow: "inserted" | "no_active_session" | "write_failed" = "no_active_session";
+    if (session) {
+      eventId = newEventId();
+      try {
+        await sql`
+          INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+          VALUES (${eventId}, ${session.id}, 'consult_mark', ${at.toISOString()}, 'failed', ${JSON.stringify(payload)}::jsonb)
+        `;
+        eventRow = "inserted";
+      } catch (e) {
+        eventRow = "write_failed";
+        sessionLookupError = String((e as Error)?.message ?? e).slice(0, 160);
+        eventId = null;
+      }
+    }
+
+    // 2. the cue — always attempted (the operator is a first-class cue source)
+    const cue = await postBrainCue(ctx.origin, { room_id: room.id, type: "consult_mark", at: at.toISOString(), payload });
+
+    // 3. flip the row on brain 2xx
+    if (cue.ok && eventId) {
+      try {
+        await sql`UPDATE bench_event SET brain_status = 'sent' WHERE id = ${eventId}`;
+      } catch {
+        /* row stays 'failed' — the cue did land */
+      }
+    }
+    return {
+      ok: cue.ok || eventRow === "inserted",
+      room: { id: room.id, slug: room.slug, name: room.name },
+      at: at.toISOString(),
+      session_id: session?.id ?? null,
+      event_row: eventRow,
+      event_id: eventId,
+      cue,
+      ...(sessionLookupError ? { detail: sessionLookupError } : {}),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// S3 — audio by clock time (invoke)
+// ---------------------------------------------------------------------------
+
+const EXTRACT_PRESIGN_SECONDS = 900; // short-lived (§16): 15 min, admin presign family
+
+type RangeArgsOk = { session: NonNullable<Awaited<ReturnType<typeof findBenchSession>>>; chunks: BenchChunkRow[]; startMs: number; endMs: number; source: "primary" | "backup"; istDay: string };
+
+/** Shared arg resolution for extract/transcribe: session (by id or room+ist_date), window, source. */
+async function resolveRangeArgs(args: ToolArgs): Promise<RangeArgsOk | { error: Record<string, unknown> }> {
+  const sourceRaw = argStr(args, "source", 16) ?? "primary";
+  if (sourceRaw !== "primary" && sourceRaw !== "backup") return { error: { ok: false, error: "bad_source" } };
+  const source = sourceRaw;
+  let session: Awaited<ReturnType<typeof findBenchSession>> = null;
+  const sid = argStr(args, "session_id", 64);
+  if (sid) {
+    if (!sid.startsWith("bs_")) return { error: { ok: false, error: "bad_session_id" } };
+    session = await findBenchSession(sid);
+    if (!session) return { error: { ok: false, error: "session_not_found" } };
+  } else {
+    const r = await resolveForWrite(args);
+    if ("error" in r) return { error: r.error };
+    const d = argStr(args, "ist_date", 10);
+    if (d && !IST_DATE_RE.test(d)) return { error: { ok: false, error: "invalid_ist_date" } };
+    const wanted = d ?? istDate(new Date());
+    const rows = await listBenchSessions({ room_id: r.room.id, ist_date: wanted, limit: 5 });
+    if (rows.length === 0) return { error: { ok: false, error: "no_session_for_room_day", room: { id: r.room.id, slug: r.room.slug }, ist_date: wanted } };
+    const picked = rows[0]!; // newest that day
+    session = await findBenchSession(picked.id);
+    if (!session) return { error: { ok: false, error: "session_not_found" } };
+    if (rows.length > 1) (session as unknown as { _others?: string[] })._others = rows.slice(1).map((x) => x.id);
+  }
+  const istDay = istDate(new Date(session.started_at));
+  const start = parseOperatorTime(args.start, istDay);
+  const end = parseOperatorTime(args.end, istDay);
+  if (!start) return { error: { ok: false, error: "invalid_start", hint: "HH:MM[:SS] IST or ISO" } };
+  if (!end) return { error: { ok: false, error: "invalid_end", hint: "HH:MM[:SS] IST or ISO" } };
+  if (!(end.ms > start.ms)) return { error: { ok: false, error: "end_before_start" } };
+  const chunks = await listBenchChunks(session.id);
+  return { session, chunks, startMs: start.ms, endMs: end.ms, source, istDay };
+}
+
+async function presignCovering(c: CoveringChunk<BenchChunkRow>) {
+  let url: string | null = null;
+  try {
+    url = await signGetUrl({ key: c.chunk.r2_key, expiresInSeconds: EXTRACT_PRESIGN_SECONDS, contentType: c.chunk.content_type });
+  } catch {
+    url = null;
+  }
+  return {
+    chunk_idx: c.chunk.idx,
+    source: c.chunk.source ?? "primary",
+    r2_key: c.chunk.r2_key,
+    content_type: c.chunk.content_type,
+    upload_state: c.chunk.upload_state,
+    chunk_bounds: c.chunk_bounds,
+    offset_in_chunk_s: c.offset_in_chunk_s,
+    duration_s: c.duration_s,
+    presigned_get: url,
+    expires_in_seconds: url ? EXTRACT_PRESIGN_SECONDS : null,
+  };
+}
+
+const RANGE_ARGS = {
+  session_id: { type: "string", description: "bs_… (or give room + ist_date)" },
+  room: { type: "string" },
+  room_id: { type: "string" },
+  room_slug: { type: "string" },
+  ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata) when addressing by room; default today" },
+  start: { type: "string", description: "HH:MM[:SS] IST clock on the session's day, or ISO" },
+  end: { type: "string", description: "HH:MM[:SS] IST clock on the session's day, or ISO" },
+  source: { type: "string", enum: ["primary", "backup"], default: "primary" },
+};
+
+const extractAudio: McpTool = {
+  name: "scribe_extract_audio",
+  description: "Audio by clock time (PRD §10, v1): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → error multi_chunk_not_supported_v1 listing every covering chunk with presigns (stitching is v1.1). None → no_audio_in_range. Never inline bytes.",
+  scope: "invoke",
+  inputSchema: { type: "object", properties: RANGE_ARGS, required: ["start", "end"], additionalProperties: false },
+  handler: async (args: ToolArgs) => {
+    const r = await resolveRangeArgs(args);
+    if ("error" in r) return r.error;
+    const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
+    const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
+    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested };
+    if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base, chunks_on_session: r.chunks.filter((c) => (c.source ?? "primary") === r.source).length };
+    if (res.kind === "multi") {
+      const covering = await Promise.all(res.covering.map(presignCovering));
+      return { ok: false, error: "multi_chunk_not_supported_v1", ...base, covering_chunks: covering, hint: "window spans chunks — fetch the listed presigns; server/Mini stitching is v1.1" };
+    }
+    const clip = await presignCovering(res.covering);
+    return { ok: true, ...base, ...clip, note: "presigned GET is the whole chunk; play from offset_in_chunk_s for duration_s" };
+  },
+};
+
+const transcribeRange: McpTool = {
+  name: "scribe_transcribe_range",
+  description: "Hear the tape (PRD §11.1): resolve the window to its single covering chunk (same rule as scribe_extract_audio), download it server-side, run Mini Whisper (/inference), return { text, chunk_bounds, requested_range, note }. v1: engine=whisper only; the text covers the WHOLE 5-min chunk (trimming is v1.1). Text only, never bytes.",
+  scope: "invoke",
+  inputSchema: { type: "object", properties: { ...RANGE_ARGS, engine: { type: "string", enum: ["whisper"], default: "whisper" }, language: { type: "string", description: "optional Whisper language hint, e.g. en" } }, required: ["start", "end"], additionalProperties: false },
+  handler: async (args: ToolArgs) => {
+    const engine = argStr(args, "engine", 32) ?? "whisper";
+    if (engine !== "whisper") return { ok: false, error: "engine_not_supported_v1", engine, allowed: ["whisper"] };
+    const r = await resolveRangeArgs(args);
+    if ("error" in r) return r.error;
+    const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
+    const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
+    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine };
+    if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base };
+    if (res.kind === "multi") {
+      const covering = await Promise.all(res.covering.map(presignCovering));
+      return { ok: false, error: "multi_chunk_not_supported_v1", ...base, covering_chunks: covering, hint: "transcribe one covering chunk at a time — narrow the window to a single chunk_bounds" };
+    }
+    const c = res.covering;
+    const t0 = Date.now();
+    let bytes: Uint8Array | null = null;
+    try {
+      bytes = await getObjectBytes(c.chunk.r2_key);
+    } catch (e) {
+      return { ok: false, error: "chunk_download_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: String((e as Error)?.message ?? e).slice(0, 160) };
+    }
+    if (!bytes) return { ok: false, error: "chunk_missing_in_r2", ...base, chunk_idx: c.chunk.idx, r2_key: c.chunk.r2_key };
+    const language = argStr(args, "language", 8) ?? undefined;
+    const w = await transcribeWithWhisper(bytes, c.chunk.content_type || "audio/webm", { language });
+    if (!w.ok) return { ok: false, error: "whisper_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: w.error, latency_ms: w.latency_ms };
+    return {
+      ok: true,
+      ...base,
+      chunk_idx: c.chunk.idx,
+      chunk_bounds: c.chunk_bounds,
+      offset_in_chunk_s: c.offset_in_chunk_s,
+      duration_s: c.duration_s,
+      text: w.transcript,
+      language: w.language ?? null,
+      audio_seconds: w.duration_seconds ?? null,
+      whisper_latency_ms: w.latency_ms,
+      total_ms: Date.now() - t0,
+      note: `text covers the WHOLE chunk ${c.chunk.idx} (${c.chunk_bounds.started_at} → ${c.chunk_bounds.ended_at}), not the trimmed window ${requested.start_ist}–${requested.end_ist} IST; trimming is v1.1`,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// S3 — bus observability (read)
+// ---------------------------------------------------------------------------
+
+const listCommandsTool: McpTool = {
+  name: "scribe_list_commands",
+  description: "The operator command queue (bench_command): id, room, kind, status (pending|acked|failed|expired), source, created_at, acked_at, error. Filters: room (id/slug/name), status, limit (default 50, max 200). Newest first.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...ROOM_WRITE_ARGS,
+      status: { type: "string", enum: ["pending", "acked", "failed", "expired"] },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) => {
+    let roomId: string | null = null;
+    if (argStr(args, "room", 128) || argStr(args, "room_id", 128) || argStr(args, "room_slug", 128)) {
+      const r = await resolveForWrite(args);
+      if ("error" in r) return { commands: [], ...r.error };
+      roomId = r.room.id;
+    }
+    try {
+      const rows = await listCommands({ roomId, status: argStr(args, "status", 16), limit: argInt(args, "limit", 50, 1, 200) });
+      return {
+        commands: rows.map((c) => ({
+          id: c.id,
+          room_id: c.room_id,
+          room_slug: c.room_slug,
+          room_name: c.room_name,
+          kind: c.kind,
+          status: c.status,
+          source: c.source,
+          args: c.args ?? null,
+          result: c.result ?? null,
+          error: c.error,
+          created_at: new Date(c.created_at).toISOString(),
+          acked_at: c.acked_at ? new Date(c.acked_at).toISOString() : null,
+        })),
+      };
+    } catch (e) {
+      return busErrorResult(e, { commands: [] });
+    }
+  },
+};
+
+export const BENCH_TOOLS: McpTool[] = [
+  listSessions,
+  getSession,
+  getRecording,
+  startRecording,
+  pauseRecording,
+  resumeRecording,
+  stopRecording,
+  markConsult,
+  extractAudio,
+  transcribeRange,
+  listCommandsTool,
+];

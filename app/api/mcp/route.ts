@@ -12,6 +12,8 @@
  * params -32602 · internal -32603. tools/call on a tool that is not registered in this slice
  * or outside the token's scopes → HTTP 403 + JSON-RPC error -32001 scope_or_tool_unavailable.
  * S2 adds the four remote-tape WRITE tools (scope write; the v1 token carries it).
+ * S3 adds scribe_post_cue / scribe_mark_consult / scribe_pin_visit (write), scribe_extract_audio /
+ * scribe_transcribe_range (invoke), scribe_list_commands (read).
  *
  * Every tools/call writes one audit_log row (lib/mcp/audit — ids only, never payloads).
  * Tool handlers are fail-safe (degraded:true, not 500) — only auth is hard.
@@ -19,7 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkMcpBearer, type McpPrincipal } from "@/lib/mcp/auth";
 import { auditToolCall } from "@/lib/mcp/audit";
-import type { McpTool, ToolArgs } from "@/lib/mcp/registry";
+import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { HEALTH_TOOLS } from "@/lib/mcp/tools/health";
 import { BRAIN_TOOLS } from "@/lib/mcp/tools/brain";
 import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";
@@ -30,13 +32,14 @@ import { STORE_TOOLS } from "@/lib/mcp/tools/stores";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 120; // S3: scribe_transcribe_range = chunk download + Mini Whisper (90 s)
 
 const SERVER_NAME = "even-scribe-mcp";
-const SLICE = "S2";
+const SLICE = "S3";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
 const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0];
 const TOOL_TIMEOUT_MS = 55_000;
+const INVOKE_TOOL_TIMEOUT_MS = 115_000; // invoke tools (extract/transcribe) may wait on the Mini
 const MAX_BODY_BYTES = 256 * 1024;
 
 // Registry (PRD §12): S1 read tools + S2 remote-tape write tools. Names are the contract.
@@ -64,6 +67,13 @@ class HttpStatusError extends Error {
 
 function version(): string {
   return process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? "local";
+}
+
+/** Same-origin base for in-app hops (brain cues): forwarded host/proto first, nextUrl fallback. */
+function requestOrigin(req: NextRequest): string {
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "");
+  return host ? `${proto}://${host}` : req.nextUrl.origin;
 }
 
 function clientIp(req: NextRequest): string | null {
@@ -207,10 +217,12 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const t0 = Date.now();
   let result: unknown;
   let isError = false;
+  const ctx: ToolContext = { origin: requestOrigin(req) };
+  const timeoutMs = tool.scope === "invoke" ? INVOKE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
   try {
     result = await Promise.race([
-      tool.handler(args),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`tool_timeout_${TOOL_TIMEOUT_MS}ms`)), TOOL_TIMEOUT_MS)),
+      tool.handler(args, ctx),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`tool_timeout_${timeoutMs}ms`)), timeoutMs)),
     ]);
   } catch (e) {
     isError = true;

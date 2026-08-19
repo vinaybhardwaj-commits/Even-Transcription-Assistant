@@ -22,6 +22,7 @@ const SAFE_ARG_KEYS = new Set([
   "bucket", "window", "surface", "note_type", "doctor_id", "topK", "top_k",
   "include_payload", "include_text", "include_prompts", "include_identity", "include_urls",
   "room", "override_pause", "kind", "command_id",
+  "start", "end", "source", "engine", "phase", "visit_id", "event_id", "cue_id",
 ]);
 const MAX_SAFE_STRING = 128;
 

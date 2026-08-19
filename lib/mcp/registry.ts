@@ -21,12 +21,15 @@ export type JsonSchema = {
 
 export type ToolArgs = Record<string, unknown>;
 
+/** Per-call context the door hands every handler (S3): the request origin for same-origin hops. */
+export type ToolContext = { origin: string };
+
 export type McpTool = {
   name: string;
   description: string;
   scope: McpScope;
   inputSchema: JsonSchema;
-  handler: (args: ToolArgs) => Promise<unknown>;
+  handler: (args: ToolArgs, ctx: ToolContext) => Promise<unknown>;
 };
 
 export type ToolResult = Record<string, unknown>;

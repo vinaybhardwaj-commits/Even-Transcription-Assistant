@@ -240,6 +240,30 @@ export async function getCommand(id: string): Promise<CommandRow | null> {
   });
 }
 
+export type CommandListRow = CommandRow & { room_slug: string; room_name: string };
+
+/**
+ * Operator view of the bus (S3 scribe_list_commands): newest first, optional room / status
+ * filters, limit 1..200 (default 50). INFERRED against 0044 + 0041.
+ */
+export async function listCommands(f: { roomId?: string | null; status?: string | null; limit?: number | null } = {}): Promise<CommandListRow[]> {
+  return guarded(async () => {
+    const roomId = f.roomId ?? null;
+    const status = f.status ?? null;
+    const limit = Math.min(Math.max(Math.trunc(f.limit ?? 50) || 50, 1), 200);
+    return (await sql`
+      SELECT c.id, c.room_id, c.kind, c.args, c.status, c.source, c.result, c.error, c.created_at, c.acked_at,
+             r.slug AS room_slug, r.name AS room_name
+        FROM bench_command c
+        JOIN room r ON r.id = c.room_id
+       WHERE (${roomId}::text IS NULL OR c.room_id = ${roomId}::text)
+         AND (${status}::text IS NULL OR c.status = ${status}::text)
+       ORDER BY c.created_at DESC
+       LIMIT ${limit}::int
+    `) as CommandListRow[];
+  });
+}
+
 /** Poll the command row until acked/failed/expired or timeout (null). */
 export async function waitForAck(
   id: string,
