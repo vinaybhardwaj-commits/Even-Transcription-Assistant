@@ -20,7 +20,7 @@
  * migrated / down → error bus_not_migrated / bus_down (never a 500).
  */
 
-import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchSessions } from "@/lib/bench";
+import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, splitChunksBySource } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { signGetUrl } from "@/lib/r2";
 import {
@@ -85,6 +85,20 @@ const listSessions: McpTool = {
           gap_ms: Number(r.gap_ms ?? 0),
           gap_count: r.gap_count,
           last_chunk_at: r.last_chunk_at ? new Date(r.last_chunk_at).toISOString() : null,
+          // K-A / K-B (main): newest chunk across both mics, backup stream counts, mic story counts
+          last_any_chunk_at: r.last_any_chunk_at ? new Date(r.last_any_chunk_at).toISOString() : null,
+          backup_chunk_count: r.backup_chunk_count,
+          backup_verified_count: r.backup_verified_count,
+          primary_lost_count: r.primary_lost_count,
+          primary_restored_count: r.primary_restored_count,
+          mic_status:
+            r.primary_lost_count > 0
+              ? r.backup_chunk_count > 0
+                ? r.primary_lost_count > r.primary_restored_count
+                  ? "on_backup"
+                  : "backup_covered"
+                : "lost_no_backup"
+              : null,
         })),
       };
     }),
@@ -93,7 +107,14 @@ const listSessions: McpTool = {
 async function loadSessionBundle(sessionId: string) {
   const session = await findBenchSession(sessionId);
   if (!session) return null;
-  const chunks = await listBenchChunks(sessionId);
+  const all = await listBenchChunks(sessionId); // K-B: both streams (primary first, then backup)
+  const { primary: chunks, backup: backupChunks } = splitChunksBySource(all);
+  let events: Array<{ id: string; kind: string; at: string; brain_status: string; payload: unknown }> = [];
+  try {
+    events = (await listBenchEvents(sessionId)).map((e) => ({ id: e.id, kind: e.kind, at: new Date(e.at).toISOString(), brain_status: e.brain_status, payload: e.payload ?? null }));
+  } catch {
+    events = [];
+  }
   let marks: Array<{ id: string; kind: string; at: string; brain_status: string }> = [];
   let marksDegraded = false;
   try {
@@ -123,12 +144,17 @@ async function loadSessionBundle(sessionId: string) {
     totals: {
       chunk_count: chunks.length,
       verified_count: verified.length,
-      total_bytes: chunks.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0),
+      total_bytes: all.reduce((a, c) => a + Number(c.size_bytes ?? 0), 0),
       gap_ms: chunks.reduce((a, c) => a + (c.gap_before_ms ?? 0), 0),
+      backup_chunk_count: backupChunks.length,
+      backup_verified_count: backupChunks.filter((c) => c.upload_state === "verified").length,
+      primary_lost_count: events.filter((e) => e.kind === "mic_primary_lost").length,
+      primary_restored_count: events.filter((e) => e.kind === "mic_primary_restored").length,
     },
     chunks: chunks.map((c) => ({
       id: c.id,
       idx: c.idx,
+      source: "primary" as const,
       r2_key: c.r2_key,
       content_type: c.content_type,
       started_at: new Date(c.started_at).toISOString(),
@@ -138,9 +164,24 @@ async function loadSessionBundle(sessionId: string) {
       upload_state: c.upload_state,
       gap_before_ms: c.gap_before_ms,
     })),
+    // K-B: second-mic stream (backup_chunk_{idx}.webm) + the mic story (bench_event mic_*)
+    backup_chunks: backupChunks.map((c) => ({
+      id: c.id,
+      idx: c.idx,
+      source: "backup" as const,
+      r2_key: c.r2_key,
+      content_type: c.content_type,
+      started_at: new Date(c.started_at).toISOString(),
+      ended_at: new Date(c.ended_at).toISOString(),
+      duration_ms: c.duration_ms,
+      size_bytes: c.size_bytes === null ? null : Number(c.size_bytes),
+      upload_state: c.upload_state,
+      gap_before_ms: c.gap_before_ms,
+    })),
+    events,
     marks,
     ...(marksDegraded ? { marks_degraded: true } : {}),
-    _raw: { session, chunks },
+    _raw: { session, chunks, backupChunks, all },
   };
 }
 
@@ -176,6 +217,7 @@ const getRecording: McpTool = {
       session_id: { type: "string" },
       mode: { type: "string", enum: ["manifest", "timeline", "chunk", "zip"], default: "manifest" },
       chunk_idx: { type: "integer", minimum: 0, description: "required for mode=chunk" },
+      source: { type: "string", enum: ["primary", "backup"], default: "primary", description: "mode=chunk: which mic stream (K-B)" },
     },
     required: ["session_id"],
     additionalProperties: false,
@@ -189,7 +231,7 @@ const getRecording: McpTool = {
       const mode = modeRaw as "manifest" | "timeline" | "chunk" | "zip";
       const b = await loadSessionBundle(id);
       if (!b) return { mode, error: "session_not_found" };
-      const { session, chunks } = b._raw;
+      const { session, chunks, backupChunks } = b._raw;
 
       if (mode === "timeline") {
         const { markdown } = await renderBenchTimeline(session.id, session);
@@ -209,8 +251,9 @@ const getRecording: McpTool = {
       if (mode === "chunk") {
         const idx = argInt(args, "chunk_idx", -1, 0, 1_000_000);
         if (idx < 0 || args.chunk_idx === undefined) return { mode, error: "chunk_idx_required" };
-        const c = chunks.find((x) => x.idx === idx);
-        if (!c) return { mode, error: "chunk_not_found" };
+        const src = argStr(args, "source", 16) === "backup" ? "backup" : "primary";
+        const c = (src === "backup" ? backupChunks : chunks).find((x) => x.idx === idx);
+        if (!c) return { mode, error: "chunk_not_found", source: src };
         let url: string | null = null;
         try {
           url = await signGetUrl({ key: c.r2_key, expiresInSeconds: PRESIGN_SECONDS, contentType: c.content_type });
@@ -220,14 +263,14 @@ const getRecording: McpTool = {
         return {
           mode,
           session_id: session.id,
-          chunk: { idx: c.idx, r2_key: c.r2_key, content_type: c.content_type, started_at: new Date(c.started_at).toISOString(), ended_at: new Date(c.ended_at).toISOString(), duration_ms: c.duration_ms, upload_state: c.upload_state, size_bytes: c.size_bytes === null ? null : Number(c.size_bytes) },
+          chunk: { idx: c.idx, source: src, r2_key: c.r2_key, content_type: c.content_type, started_at: new Date(c.started_at).toISOString(), ended_at: new Date(c.ended_at).toISOString(), duration_ms: c.duration_ms, upload_state: c.upload_state, size_bytes: c.size_bytes === null ? null : Number(c.size_bytes) },
           presigned_get: url,
           expires_in_seconds: url ? PRESIGN_SECONDS : null,
         };
       }
-      // manifest — same shape as GET /api/bench/sessions/{id}/manifest
-      const withUrls = await Promise.all(
-        chunks.map(async (c) => {
+      // manifest — same shape as GET /api/bench/sessions/{id}/manifest (K-B: both streams)
+      const presignAll = (rows: typeof chunks) => Promise.all(
+        rows.map(async (c) => {
           let url: string | null = null;
           try {
             url = await signGetUrl({ key: c.r2_key, expiresInSeconds: PRESIGN_SECONDS, contentType: c.content_type });
@@ -244,19 +287,23 @@ const getRecording: McpTool = {
             size_bytes: c.size_bytes === null ? null : Number(c.size_bytes),
             upload_state: c.upload_state,
             gap_before_ms: c.gap_before_ms,
+            source: c.source ?? "primary",
             presigned_get: url,
           };
         }),
       );
+      const [withUrls, backupWithUrls] = await Promise.all([presignAll(chunks), presignAll(backupChunks)]);
       return {
         mode,
         generated_at: new Date().toISOString(),
         session: b.session,
         totals: b.totals,
         marks: b.marks,
+        events: b.events,
         chunks: withUrls,
+        backup_chunks: backupWithUrls,
         expires_in_seconds: PRESIGN_SECONDS,
-        note: "R2 bench keys use the UTC date of session start.",
+        note: "R2 bench keys use the UTC date of session start; backup stream = backup_chunk_{idx}.webm.",
       };
     }),
 };
