@@ -17,20 +17,38 @@ import { argBool, argDate, argInt, argStr, failSafe, type McpTool, type ToolArgs
 
 export type RoomRef = { id: string; slug: string; name: string; enabled: boolean };
 
-/** Resolve a room by id or slug (app DB). Null when neither matches. Throws on DB error. */
+export class AmbiguousRoomError extends Error {
+  constructor(public matches: RoomRef[]) {
+    super("ambiguous_room");
+  }
+}
+
+/**
+ * Resolve a room (app DB). Accepts room_id, room_slug, or `room` = id | slug | name
+ * (case-insensitive exact name; PRD §8.3). Null when nothing matches; throws
+ * AmbiguousRoomError listing the matches when a name matches more than one room.
+ */
 export async function resolveRoom(args: ToolArgs): Promise<RoomRef | null> {
   const id = argStr(args, "room_id", 128);
   const slug = argStr(args, "room_slug", 128);
-  if (!id && !slug) return null;
+  const free = argStr(args, "room", 128);
+  if (!id && !slug && !free) return null;
   const rows = (await sql`
     SELECT id, slug, name, disabled_at
       FROM room
      WHERE (${id}::text IS NOT NULL AND id = ${id}::text)
         OR (${slug}::text IS NOT NULL AND slug = ${slug}::text)
-     LIMIT 1
+        OR (${free}::text IS NOT NULL AND (id = ${free}::text OR slug = ${free}::text OR lower(name) = lower(${free}::text)))
+     ORDER BY created_at
+     LIMIT 10
   `) as Array<{ id: string; slug: string; name: string; disabled_at: string | Date | null }>;
-  const r = rows[0];
-  return r ? { id: r.id, slug: r.slug, name: r.name, enabled: r.disabled_at === null } : null;
+  const refs = rows.map((r) => ({ id: r.id, slug: r.slug, name: r.name, enabled: r.disabled_at === null }));
+  if (refs.length === 0) return null;
+  if (refs.length === 1) return refs[0]!;
+  // An id/slug hit is unique by definition; only a free-text name can fan out.
+  const exact = refs.find((r) => r.id === (id ?? free) || r.slug === (slug ?? free));
+  if (exact) return exact;
+  throw new AmbiguousRoomError(refs);
 }
 
 export function pickIstDate(args: ToolArgs): { date: string } | { error: string } {
@@ -40,8 +58,9 @@ export function pickIstDate(args: ToolArgs): { date: string } | { error: string 
 }
 
 const ROOM_ARGS = {
-  room_id: { type: "string", description: "room_… id (or give room_slug)" },
+  room_id: { type: "string", description: "room_… id (or give room_slug / room)" },
   room_slug: { type: "string", description: "e.g. opd-test-a7q9" },
+  room: { type: "string", description: "id, slug, or exact room name (case-insensitive)" },
   ist_date: { type: "string", description: "YYYY-MM-DD in Asia/Kolkata; default today (server clock)" },
 };
 

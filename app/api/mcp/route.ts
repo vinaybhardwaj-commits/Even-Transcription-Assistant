@@ -11,6 +11,7 @@
  * tools/call. Errors: parse -32700 · invalid request -32600 · unknown method -32601 · invalid
  * params -32602 · internal -32603. tools/call on a tool that is not registered in this slice
  * or outside the token's scopes → HTTP 403 + JSON-RPC error -32001 scope_or_tool_unavailable.
+ * S2 adds the four remote-tape WRITE tools (scope write; the v1 token carries it).
  *
  * Every tools/call writes one audit_log row (lib/mcp/audit — ids only, never payloads).
  * Tool handlers are fail-safe (degraded:true, not 500) — only auth is hard.
@@ -32,13 +33,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const SERVER_NAME = "even-scribe-mcp";
-const SLICE = "S1";
+const SLICE = "S2";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
 const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0];
 const TOOL_TIMEOUT_MS = 55_000;
 const MAX_BODY_BYTES = 256 * 1024;
 
-// S1 registry: read tools only (PRD §12). Names are the contract.
+// Registry (PRD §12): S1 read tools + S2 remote-tape write tools. Names are the contract.
 const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS];
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
@@ -166,7 +167,7 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: SERVER_NAME, version: version() },
         instructions:
-          "Even Scribe operator door, slice S1: read-only tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly. Write/invoke tools arrive in later slices.",
+          "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores; plus remote tape control (scribe_start/pause/resume/stop_recording) through the room kiosk's listener — start needs a listening kiosk, is idempotent, and refuses a consent-paused room unless override_pause. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
       });
     }
     case "ping":

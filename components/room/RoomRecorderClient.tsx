@@ -26,6 +26,12 @@
  * records both lanes in lockstep, and the primary failsafe surfaces here: a big
  * persistent "ON BACKUP MIC" banner while the USB mic is lost/silent, a backup status
  * line, and mic-story events posted to /api/bench/events (durable-first, kiosk source).
+ *
+ * Operator MCP S2 (branch feat/operator-mcp): the kiosk is also an operator LISTENER —
+ * lib/use-command-poll polls GET /api/bench/commands (1.5 s) whenever the page is signed in
+ * and runs the SAME start / pause / resume / end flows the buttons run (startDayFlow,
+ * onPause, onResume, endDayFlow — no second recorder). Remote actions and link state show
+ * on the "Operator" chip under the day pill. Fail-open: bus down = chip only, buttons work.
  */
 
 import * as React from "react";
@@ -40,6 +46,7 @@ import {
 } from "@/lib/use-room-recorder";
 import { LIVE_SINK } from "@/lib/live-flags";
 import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
+import { useCommandPoll, type CommandActions } from "@/lib/use-command-poll";
 
 type Props = { slug: string; roomName: string };
 
@@ -246,40 +253,47 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   }, [mics, micId]);
 
   // ---- start of day ----
+  // Shared by the button (onStart) and the operator listener (start_day): create the
+  // bench_session row, free the meter stream, start the recorder. Throws on failure.
+  const startDayFlow = React.useCallback(async (): Promise<{ session_id: string }> => {
+    const res = await fetch("/api/bench/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: label.trim() || null,
+        mic_label: micLabelText,
+      }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => null);
+      throw new Error(j?.error?.message ?? `session_create_failed_${res.status}`);
+    }
+    const j = (await res.json()) as { session?: { id?: string } };
+    const sid = j.session?.id;
+    if (!sid) throw new Error("session_create_malformed");
+    setSessionId(sid);
+    // Free the meter stream before the recorder opens the device.
+    try {
+      meterStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {
+      /* noop */
+    }
+    sessionIdForEventsRef.current = sid; // K-B: mic-story events carry the session
+    await startDay(sid, micId || undefined, backupMicId || null); // K-B: backup lane
+    return { session_id: sid };
+  }, [label, micLabelText, micId, backupMicId, startDay]);
+
   const onStart = React.useCallback(async () => {
     setStarting(true);
     setStartError(null);
     try {
-      const res = await fetch("/api/bench/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          label: label.trim() || null,
-          mic_label: micLabelText,
-        }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => null);
-        throw new Error(j?.error?.message ?? `session_create_failed_${res.status}`);
-      }
-      const j = (await res.json()) as { session?: { id?: string } };
-      const sid = j.session?.id;
-      if (!sid) throw new Error("session_create_malformed");
-      setSessionId(sid);
-      // Free the meter stream before the recorder opens the device.
-      try {
-        meterStreamRef.current?.getTracks().forEach((t) => t.stop());
-      } catch {
-        /* noop */
-      }
-      sessionIdForEventsRef.current = sid;
-      await startDay(sid, micId || undefined, backupMicId || null);
+      await startDayFlow();
     } catch (e) {
       setStartError(e instanceof Error ? e.message : String(e));
     } finally {
       setStarting(false);
     }
-  }, [label, micLabelText, micId, startDay]);
+  }, [startDayFlow]);
 
   const patchSession = React.useCallback(
     async (action: "pause" | "resume" | "end") => {
@@ -315,6 +329,16 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     await endDay();
   }, [endDay]);
 
+  // Operator listener (S2): end_day must ack only after the flush + PATCH end — these
+  // resolvers fire from the same effect that flips the session to ended.
+  const endWaitersRef = React.useRef<Array<() => void>>([]);
+  const endDayFlow = React.useCallback((): Promise<void> => {
+    return new Promise<void>((resolve) => {
+      endWaitersRef.current.push(resolve);
+      void onEndDay();
+    });
+  }, [onEndDay]);
+
   React.useEffect(() => {
     if (!endingUpload) return;
     if (status.state !== "ending") return;
@@ -323,6 +347,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       await patchSession("end");
       markEnded();
       setEndingUpload(false);
+      const waiters = endWaitersRef.current;
+      endWaitersRef.current = [];
+      for (const w of waiters) w();
     })();
   }, [endingUpload, status.state, status.queuedCount, patchSession, markEnded]);
 
@@ -372,6 +399,27 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     if (markTimerRef.current) clearTimeout(markTimerRef.current);
     markTimerRef.current = setTimeout(() => setMark({ kind: "idle" }), MARK_LATCH_MS);
   }, [mark.kind, sessionId]);
+
+  // ---- Operator MCP S2: command listener ----
+  // Snapshot via refs so the poll never sees a stale closure; actions are the SAME flows
+  // the buttons run. Mounted whenever this (signed-in) page is open — idle or recording.
+  const stateRef = React.useRef(status.state);
+  stateRef.current = status.state;
+  const sessionIdRef = React.useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const commandActions = React.useMemo<CommandActions>(
+    () => ({
+      getSnapshot: () => ({ state: stateRef.current, sessionId: sessionIdRef.current }),
+      start: startDayFlow,
+      pause: onPause,
+      resume: async () => {
+        onResume();
+      },
+      end: endDayFlow,
+    }),
+    [startDayFlow, onPause, onResume, endDayFlow],
+  );
+  const operator = useCommandPoll({ enabled: true, actions: commandActions });
 
   // ---- shared bits ----
   const today = new Date();
@@ -429,6 +477,62 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       )
     ) : null;
 
+  // Operator chip (S2): remote actions are as visible as a finger on the button; link
+  // state otherwise. Pause remains the consent off-switch — this chip only reports.
+  const operatorChip = (() => {
+    const base = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-meta font-semibold";
+    const act = operator.last_action;
+    if (act) {
+      return act.ok ? (
+        <span className={`${base} bg-even-blue-50 text-even-blue-700`} data-testid="operator-chip" title={`tab ${operator.tab_id}`}>
+          <span className="w-1.5 h-1.5 rounded-full bg-even-blue-600" aria-hidden="true" />
+          {act.label} · {fmtTimeOfDay(act.at)}
+        </span>
+      ) : (
+        <span className={`${base} bg-warning-100 text-warning-700`} data-testid="operator-chip">
+          <span className="w-1.5 h-1.5 rounded-full bg-warning-700" aria-hidden="true" />
+          {act.label}
+        </span>
+      );
+    }
+    switch (operator.link) {
+      case "listening":
+        return (
+          <span className={`${base} bg-even-ink-50 text-even-ink-500`} data-testid="operator-chip" title={`tab ${operator.tab_id}`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-success-500" aria-hidden="true" />
+            Operator link · listening
+          </span>
+        );
+      case "superseded":
+        return (
+          <span className={`${base} bg-warning-100 text-warning-700`} data-testid="operator-chip">
+            Another tab took over
+          </span>
+        );
+      case "down":
+        return (
+          <span className={`${base} bg-even-ink-100 text-even-ink-500`} data-testid="operator-chip" title={operator.last_error ?? ""}>
+            <span className="w-1.5 h-1.5 rounded-full bg-even-ink-400" aria-hidden="true" />
+            Operator link down
+          </span>
+        );
+      case "not_migrated":
+        return (
+          <span className={`${base} bg-even-ink-100 text-even-ink-500`} data-testid="operator-chip">
+            Operator link · not enabled
+          </span>
+        );
+      case "connecting":
+        return (
+          <span className={`${base} bg-even-ink-50 text-even-ink-400`} data-testid="operator-chip">
+            Operator link · connecting…
+          </span>
+        );
+      default:
+        return null;
+    }
+  })();
+
   const levelBars = (
     <span aria-hidden="true" className="tracking-tighter">
       {["▂", "▄", "▆", "▅", "▃"]
@@ -446,14 +550,11 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             <p className="text-heading font-bold text-even-navy-800">{roomName}</p>
             <p className="text-caption text-even-ink-400">{headerSub}</p>
           </div>
-          {LIVE_SINK ? (
-            <div className="flex flex-col items-end gap-1.5">
-              {pill}
-              {brainChip}
-            </div>
-          ) : (
-            pill
-          )}
+          <div className="flex flex-col items-end gap-1.5">
+            {pill}
+            {LIVE_SINK && brainChip}
+            {operatorChip}
+          </div>
         </div>
         {LIVE_SINK && (
           <LiveSinkProbe

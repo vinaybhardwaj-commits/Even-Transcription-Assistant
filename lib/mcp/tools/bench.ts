@@ -9,12 +9,35 @@
  *                        presign family) for chunks; timeline is the generated markdown; the day
  *                        zip is streamed by the admin route and cannot be presigned → pointer.
  *                        Never bytes. R2 bench keys carry the UTC date of session start.
+ *
+ * S2 WRITE tools (PRD §8, §11.1 consent-aware/safe start; scope write):
+ * scribe_start_recording / scribe_pause_recording / scribe_resume_recording /
+ * scribe_stop_recording — resolve room (id/slug/name; ambiguous → error listing matches) →
+ * listener check (bench_listener.last_poll_at within 10 s else kiosk_not_listening — no
+ * command row is written to a dark room) → start pre-checks (already recording → return the
+ * live session, no second tape; paused → room_paused unless override_pause, which is audited)
+ * → INSERT bench_command → wait up to 8 s for the kiosk's ack → return it verbatim. Bus not
+ * migrated / down → error bus_not_migrated / bus_down (never a 500).
  */
 
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchSessions } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { signGetUrl } from "@/lib/r2";
-import { argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs } from "../registry";
+import {
+  ACK_WAIT_MS,
+  BusError,
+  classifyBusError,
+  decideStart,
+  findActiveSession,
+  getListener,
+  insertCommand,
+  isListening,
+  waitForAck,
+  type CommandKind,
+  type ListenerRow,
+} from "@/lib/bench-commands";
+import { argBool, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs } from "../registry";
+import { AmbiguousRoomError, resolveRoom, type RoomRef } from "./brain";
 
 const PRESIGN_SECONDS = 3600; // 1 h family (matches manifest route)
 
@@ -238,4 +261,148 @@ const getRecording: McpTool = {
     }),
 };
 
-export const BENCH_TOOLS: McpTool[] = [listSessions, getSession, getRecording];
+// ---------------------------------------------------------------------------
+// S2 — remote tape control (write)
+// ---------------------------------------------------------------------------
+
+const ROOM_WRITE_ARGS = {
+  room: { type: "string", description: "room id, slug (opd-test-a7q9), or exact name (OPD Test)" },
+  room_id: { type: "string" },
+  room_slug: { type: "string" },
+};
+
+type ResolveOutcome = { room: RoomRef } | { error: Record<string, unknown> };
+
+async function resolveForWrite(args: ToolArgs): Promise<ResolveOutcome> {
+  try {
+    const room = await resolveRoom(args);
+    if (!room) return { error: { error: "unknown_room" } };
+    if (!room.enabled) return { error: { error: "room_disabled", room: { id: room.id, slug: room.slug, name: room.name } } };
+    return { room };
+  } catch (e) {
+    if (e instanceof AmbiguousRoomError) {
+      return { error: { error: "ambiguous_room", matches: e.matches.map((m) => ({ id: m.id, slug: m.slug, name: m.name })) } };
+    }
+    return { error: { error: "room_lookup_failed", detail: String((e as Error)?.message ?? e).slice(0, 160), degraded: true } };
+  }
+}
+
+function listenerView(l: ListenerRow | null, now: Date) {
+  if (!l) return null;
+  return {
+    tab_id: l.tab_id,
+    last_poll_at: new Date(l.last_poll_at).toISOString(),
+    age_ms: now.getTime() - new Date(l.last_poll_at).getTime(),
+    recording_session_id: l.recording_session_id,
+    paused: l.paused,
+    listening: isListening(l, now),
+  };
+}
+
+function busErrorResult(e: unknown, extra: Record<string, unknown> = {}) {
+  const b = e instanceof BusError ? e : classifyBusError(e);
+  return { ok: false, error: b.code, ...(b.cause_message ? { detail: b.cause_message } : {}), ...extra };
+}
+
+/** Insert the command and wait for the kiosk's ack; return the kiosk's result verbatim. */
+async function sendAndWait(room: RoomRef, kind: CommandKind, args: unknown, listener: ListenerRow | null) {
+  const insertedAt = Date.now();
+  const commandId = await insertCommand({ roomId: room.id, kind, args, source: "mcp" });
+  const row = await waitForAck(commandId, { timeoutMs: ACK_WAIT_MS });
+  const base = { room: { id: room.id, slug: room.slug, name: room.name }, kind, command_id: commandId };
+  if (!row) {
+    // No ack in 8 s. Was it ever delivered? (a poll AFTER the insert means the kiosk has it —
+    // e.g. end_day still flushing). Never delivered → kiosk_not_listening; the 15 s lazy expiry
+    // will mark the row.
+    let delivered = false;
+    try {
+      const l = await getListener(room.id);
+      // a poll at/after the insert (1 s clock-skew tolerance) means the kiosk fetched the row
+      delivered = !!l && !!listener && new Date(l.last_poll_at).getTime() >= insertedAt - 1_000;
+    } catch {
+      /* fall through */
+    }
+    return delivered
+      ? { ok: false, error: "ack_timeout", ...base, hint: "kiosk received the command but has not acked within 8 s (a stop may still be flushing) — check scribe_get_session" }
+      : { ok: false, error: "kiosk_not_listening", ...base };
+  }
+  const result = (typeof row.result === "object" && row.result !== null ? row.result : {}) as Record<string, unknown>;
+  return {
+    ok: row.status === "acked",
+    status: row.status,
+    ...base,
+    result,
+    ...(row.error ? { error: row.error } : {}),
+    acked_at: row.acked_at ? new Date(row.acked_at).toISOString() : null,
+  };
+}
+
+const startRecording: McpTool = {
+  name: "scribe_start_recording",
+  description: "Start the Bench tape in a room via its listening kiosk (command start_day). Requires a listener (kiosk polled within 10 s) else kiosk_not_listening — no session row is faked. Idempotent: already recording → { already_recording:true, session_id }. Paused-for-consent → room_paused unless override_pause:true (audited). Waits up to 8 s for the kiosk ack.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: { ...ROOM_WRITE_ARGS, override_pause: { type: "boolean", default: false, description: "resume over a consent pause — rare, audited" } },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) => {
+    const r = await resolveForWrite(args);
+    if ("error" in r) return r.error;
+    const room = r.room;
+    const now = new Date();
+    try {
+      const [listener, active] = await Promise.all([getListener(room.id), findActiveSession(room.id)]);
+      const overridePause = argBool(args, "override_pause");
+      const d = decideStart({ listener, activeSession: active, overridePause, now });
+      const ctx = { room: { id: room.id, slug: room.slug, name: room.name }, listener: listenerView(listener, now), active_session: active };
+      if (d.action === "reject") return { ok: false, error: d.error, ...ctx };
+      if (d.action === "already_recording") return { ok: true, already_recording: true, session_id: d.session_id, ...ctx };
+      const out = await sendAndWait(room, "start_day", d.args, listener);
+      return { ...out, ...(d.args?.override_pause ? { override_pause: true } : {}) };
+    } catch (e) {
+      return busErrorResult(e, { room: { id: room.id, slug: room.slug, name: room.name } });
+    }
+  },
+};
+
+function simpleVerb(name: string, kind: CommandKind, description: string): McpTool {
+  return {
+    name,
+    description,
+    scope: "write",
+    inputSchema: { type: "object", properties: ROOM_WRITE_ARGS, additionalProperties: false },
+    handler: async (args: ToolArgs) => {
+      const r = await resolveForWrite(args);
+      if ("error" in r) return r.error;
+      const room = r.room;
+      const now = new Date();
+      try {
+        const listener = await getListener(room.id);
+        const ctx = { room: { id: room.id, slug: room.slug, name: room.name }, listener: listenerView(listener, now) };
+        if (!isListening(listener, now)) return { ok: false, error: "kiosk_not_listening", ...ctx };
+        return await sendAndWait(room, kind, null, listener);
+      } catch (e) {
+        return busErrorResult(e, { room: { id: room.id, slug: room.slug, name: room.name } });
+      }
+    },
+  };
+}
+
+const pauseRecording = simpleVerb(
+  "scribe_pause_recording",
+  "pause_day",
+  "Pause the room's tape via the kiosk (command pause_day; the kiosk runs its own Pause). Requires a listener. Kiosk answers not_recording if nothing is recording.",
+);
+const resumeRecording = simpleVerb(
+  "scribe_resume_recording",
+  "resume_day",
+  "Resume a paused tape via the kiosk (command resume_day). Requires a listener. Kiosk answers not_paused if the room is not paused.",
+);
+const stopRecording = simpleVerb(
+  "scribe_stop_recording",
+  "end_day",
+  "End the room's day via the kiosk (command end_day): the kiosk flushes the last chunk, ends the session, then acks. Requires a listener. May answer ack_timeout if the flush outlasts the 8 s wait — check scribe_get_session.",
+);
+
+export const BENCH_TOOLS: McpTool[] = [listSessions, getSession, getRecording, startRecording, pauseRecording, resumeRecording, stopRecording];
