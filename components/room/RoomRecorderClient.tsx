@@ -32,6 +32,14 @@
  * and runs the SAME start / pause / resume / end flows the buttons run (startDayFlow,
  * onPause, onResume, endDayFlow — no second recorder). Remote actions and link state show
  * on the "Operator" chip under the day pill. Fail-open: bus down = chip only, buttons work.
+ *
+ * Remount resume (ETA-REMOUNT-RESUME PRD v1.0, MCP PRD §8.5 rev 3e): on mount, before the
+ * start screen renders, the kiosk asks GET /api/bench/sessions/active whether this room has
+ * a session to rejoin — the SERVER decides. Resumable → resumeSession (chunk counters seeded
+ * from the server + the local unsent queue, D2), the D6 banner, and one durable
+ * kiosk_remount_resumed gap event (D4). Not resumable, or any fault → the start screen,
+ * exactly as before. A superseded tab (D3) stops recording, flushes + uploads its segment,
+ * shows the takeover message, and never PATCHes end.
  */
 
 import * as React from "react";
@@ -150,7 +158,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     }),
     [postMicEvent],
   );
-  const { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream } =
+  const { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream } =
     useRoomRecorder(recorderOpts);
   const [live, setLive] = React.useState<LiveSinkCounters | null>(null);
 
@@ -166,6 +174,11 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const [startError, setStartError] = React.useState<string | null>(null);
   const [endingUpload, setEndingUpload] = React.useState(false);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
+  // Remount resume: hold the start screen until the server has answered (§3.1);
+  // `resumed` drives the D6 banner; `takenOver` is the D3 superseded-tab message.
+  const [boot, setBoot] = React.useState<"checking" | "ready">("checking");
+  const [resumed, setResumed] = React.useState<null | { status: "recording" | "paused" }>(null);
+  const [takenOver, setTakenOver] = React.useState(false);
 
   const meterStreamRef = React.useRef<MediaStream | null>(null);
   const meterCtxRef = React.useRef<AudioContext | null>(null);
@@ -295,6 +308,76 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     }
   }, [startDayFlow]);
 
+  // ---- Remount resume (ETA-REMOUNT-RESUME §3.1): ask the server ONCE, on mount, whether
+  // this room has a session to rejoin — before the start screen renders. The server decides
+  // (GET /api/bench/sessions/active → decideResume); the kiosk only obeys. Any fault, here
+  // or there, degrades to the start screen: today's behaviour.
+  const bootRanRef = React.useRef(false);
+  React.useEffect(() => {
+    if (bootRanRef.current) return;
+    bootRanRef.current = true;
+    void (async () => {
+      let rejoining = false;
+      try {
+        const res = await fetch("/api/bench/sessions/active", {
+          cache: "no-store",
+          signal: AbortSignal.timeout(8_000),
+        });
+        const j = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          resumable?: boolean;
+          session?: {
+            id?: string;
+            status?: string;
+            started_at?: string;
+            last_any_chunk_at?: string | null;
+          } | null;
+          next_idx?: { primary?: number; backup?: number } | null;
+        } | null;
+        if (!res.ok || !j?.ok || !j.resumable || !j.session) return;
+        const s = j.session;
+        const sid = s.id;
+        if (!sid || (s.status !== "recording" && s.status !== "paused")) return;
+        const startedMs = s.started_at ? Date.parse(s.started_at) : NaN;
+        const lastAudioIso = s.last_any_chunk_at ?? s.started_at ?? null;
+        const lastAudioMs = lastAudioIso ? Date.parse(lastAudioIso) : NaN;
+        const backupDevice = await loadBenchSetting<string>(BACKUP_DEVICE_SETTING);
+        setSessionId(sid);
+        sessionIdForEventsRef.current = sid; // mic-story events during the rejoin carry the session
+        rejoining = true;
+        const seeded = await resumeSession(sid, {
+          nextPrimaryIdx: j.next_idx?.primary ?? 0,
+          nextBackupIdx: j.next_idx?.backup ?? 0,
+          paused: s.status === "paused",
+          dayStartedAt: Number.isFinite(startedMs) ? startedMs : null,
+          backupDeviceId: backupDevice || null,
+        });
+        setResumed({ status: s.status });
+        // §3.4 gap record — fire-and-forget: a lost record must not disturb the rejoin.
+        const silenceSeconds = Number.isFinite(lastAudioMs)
+          ? Math.max(0, Math.round((Date.now() - lastAudioMs) / 1000))
+          : 0;
+        void fetch("/api/bench/sessions/active", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sid,
+            silence_seconds: silenceSeconds,
+            next_idx: { primary: seeded.primaryStartIdx, backup: seeded.backupStartIdx },
+          }),
+          keepalive: true,
+        }).catch(() => undefined);
+      } catch (e) {
+        // A failed rejoin (e.g. mic permission) surfaces like a failed Start; a failed
+        // lookup surfaces as nothing at all — the start screen.
+        if (rejoining) setStartError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBoot("ready");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const patchSession = React.useCallback(
     async (action: "pause" | "resume" | "end") => {
       if (!sessionId) return;
@@ -407,6 +490,16 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   stateRef.current = status.state;
   const sessionIdRef = React.useRef(sessionId);
   sessionIdRef.current = sessionId;
+  // Remount-resume D3: a newer tab took the room. Stop both streams and flush the current
+  // segment to disk + upload (endDay does exactly that) — but NEVER PATCH end: endingUpload
+  // stays false, so the drained-queue effect never fires and the new tab keeps the session.
+  const onTakeover = React.useCallback(async () => {
+    setTakenOver(true);
+    const st = stateRef.current;
+    if (st === "recording" || st === "paused") {
+      await endDay();
+    }
+  }, [endDay]);
   const commandActions = React.useMemo<CommandActions>(
     () => ({
       getSnapshot: () => ({ state: stateRef.current, sessionId: sessionIdRef.current }),
@@ -416,8 +509,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         onResume();
       },
       end: endDayFlow,
+      takeover: onTakeover,
     }),
-    [startDayFlow, onPause, onResume, endDayFlow],
+    [startDayFlow, onPause, onResume, endDayFlow, onTakeover],
   );
   const operator = useCommandPoll({ enabled: true, actions: commandActions });
 
@@ -568,16 +662,58 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         )}
 
         <div className="px-6 py-6">
+          {/* ============ TAKEN OVER (remount-resume D3) ============ */}
+          {takenOver && (
+            <div className="text-center py-8" role="alert" data-testid="takeover-message">
+              <p className="text-heading font-bold text-even-navy-800 mb-2">
+                Another tab has taken over this room
+              </p>
+              <p className="text-body text-even-ink-500">
+                This tab has stopped recording. Today&apos;s session continues in the new tab.
+                {status.queuedCount > 0
+                  ? ` Finishing ${status.queuedCount} queued upload${status.queuedCount === 1 ? "" : "s"} — keep this tab open until it clears.`
+                  : ""}
+              </p>
+            </div>
+          )}
+
           {/* recovery banner */}
-          {status.recoveredPending > 0 && (
+          {!takenOver && status.recoveredPending > 0 && (
             <div className="mb-4 flex items-center gap-2 rounded-xl bg-warning-100 px-4 py-2.5 text-caption font-semibold text-warning-700">
               ⟳ Recovering {status.recoveredPending} unfinished upload
               {status.recoveredPending === 1 ? "" : "s"} from a previous session…
             </div>
           )}
 
+          {/* remount-resume banner (D6) */}
+          {!takenOver && resumed && status.state !== "idle" && status.state !== "error" && (
+            <div
+              className="mb-4 flex items-center gap-2 rounded-xl bg-even-blue-50 px-4 py-2.5 text-caption font-semibold text-even-blue-700"
+              data-testid="resume-banner"
+            >
+              ↻{" "}
+              {resumed.status === "paused"
+                ? "Rejoined today's session — still paused"
+                : "Rejoined today's session — recording continues on the same tape"}
+            </div>
+          )}
+
+          {/* ============ CHECKING (before the start screen may render, §3.1) ============ */}
+          {!takenOver && boot === "checking" && idle && (
+            <div
+              className="flex items-center justify-center gap-3 py-10 text-body font-semibold text-even-ink-500"
+              data-testid="resume-check"
+            >
+              <span
+                className="w-4 h-4 rounded-full border-2 border-even-blue-600 border-t-transparent animate-spin"
+                aria-hidden="true"
+              />
+              Checking for today&apos;s session…
+            </div>
+          )}
+
           {/* ============ START OF DAY ============ */}
-          {idle && (
+          {!takenOver && boot === "ready" && idle && (
             <>
               <div className="mb-4">
                 <label className="block text-caption font-semibold text-even-navy-800 mb-1.5">
@@ -668,7 +804,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           )}
 
           {/* ============ RECORDING / ENDING ============ */}
-          {(status.state === "recording" || status.state === "ending") && (
+          {!takenOver && (status.state === "recording" || status.state === "ending") && (
             <>
               <p className="text-center text-[52px] leading-none font-bold text-even-navy-800 tabular-nums tracking-wide my-4">
                 {fmtClock(status.dayElapsedMs)}
@@ -829,7 +965,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           )}
 
           {/* ============ PAUSED ============ */}
-          {status.state === "paused" && (
+          {!takenOver && status.state === "paused" && (
             <>
               <p className="text-center text-[52px] leading-none font-bold text-even-ink-300 tabular-nums tracking-wide my-4">
                 {fmtClock(status.dayElapsedMs)}
@@ -861,7 +997,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           )}
 
           {/* ============ ENDED ============ */}
-          {status.state === "ended" && (
+          {!takenOver && status.state === "ended" && (
             <div className="text-center py-8">
               <p className="text-heading font-bold text-even-navy-800 mb-2">Day ended</p>
               <p className="text-body text-even-ink-500 mb-6">

@@ -4,7 +4,7 @@
 | | |
 |---|---|
 | Status | Draft for the builder orchestrator |
-| Date | 19 August 2026 (rev 3d — orchestrator + coder loop) |
+| Date | 19 August 2026 (rev 3e — remount lock + S1–S3 accepted) |
 | Author | Scribe Designer |
 | Audience | Builder **orchestrator**. Not a ticket list for the coder. Pulse is a read-only neighbour. |
 | Why now | We debug Scribe by signing a desktop into `/admin` and clicking. The product already has Pyannote, several STT engines, two Neons, R2, Bench, encounters, traces, and a new brain. The operator connector must reach **all of it**, including start/stop of a live Bench tape and cues that do not wait on the kiosk. |
@@ -272,6 +272,29 @@ Expiry: pending > 15 s without a poll → `expired`. The MCP tool then says `kio
 
 Remote start/stop must be as visible as a finger on the button. The listening chip already exists. Show “Started from operator” / “Stopped from operator” on the same chip. Do not hide remote control. Consent stays: Pause is still the off-switch, including when we started the tape.
 
+### 8.5 Remount (locked 19 Aug, after S2)
+
+If the kiosk page reloads while a session is live or paused, **do not** end it and start a new one just because the tab remounted.
+
+| Situation | Rule |
+|---|---|
+| Tab remounts, this room still owns a `recording` or `paused` session, last chunk is **inside** the stall window (not yet the 10 min red `stalled` chip) | **Resume.** Same `session_id`, same tape, keep appending chunks (primary + backup). Restore pause UI if paused. Do not POST a new session row. |
+| Session is `stalled` or `ended`, or last chunk is older than the stall window | **Do not resume.** Janitor ends the zombie if it is still marked recording. The next Start (kiosk or MCP) is a new session. |
+| Tab is gone (crash / close) | Listener drops. MCP start → `kiosk_not_listening` until a tab is back. When the tab returns, apply the two rows above. |
+| MCP start while already recording on a listening room | Still **idempotent**: return the live session, no second tape. |
+
+Why: F5 must not split the day tape. A 5-hour crash today left a zombie “recording” row — resuming that would hide the gap. K-A janitor (30 min / day-rollover, red chip at 10 min) is the stall clock; remount uses the same window.
+
+Two §18 rows still owed a clean re-run on preview: idempotent start, clean stop (first attempt spoiled by a tab reload under the old crash-recovery behaviour).
+
+### 8.6 Poll cost (note, not a v1 change)
+
+1–2 s kiosk polling is ~43–86k function invocations/day/room. Fine at two rooms. A bill at ten. Do not change the interval in v1. Revisit when a third room is standing.
+
+### 8.7 `scribe_mark_consult` response
+
+When the cue lands, the tool **echoes `cue_id`**. Durable `bench_event` first (Kickoff C). Missing `cue_id` on a successful mark is a defect.
+
 ---
 
 ## 9. Independent brain write (new)
@@ -459,7 +482,7 @@ Brain writes from the operator **do not** go kiosk → `brain-proxy` → brain. 
 
 ## 14. Phases
 
-Purnima / Ankit capture today does **not** wait on this. The listener is how we drive those rooms from here afterwards.
+19 Aug two-room capture is on tape (~13 h, Ankit OPD 7 `opd-7-y74w` / `bs_xvntaugh`, Dibyendu Cardiology OPD). The listener is how we drive those rooms from here afterwards. Do not merge this branch onto that kiosk until Vinay says the tapes are safe.
 
 ### v1 — Door + listener + independent cues + supervisor eyes
 
@@ -555,14 +578,20 @@ From this assistant, after one connect, no Chrome:
 
 ## 19. Open questions
 
-1. Per-operator tokens vs one full-access token (v1 can be one).
-2. Multi-chunk extract on Vercel vs Mini ffmpeg. Prefer Mini if the clip can be tens of minutes.
-3. Cross-room `scribe_get_visit(individual_uid, ist_date)` when fluid consults land.
-4. Whether a second tab in the same room is an error or last-poll-wins (default last-poll-wins).
-5. Watch delivery: standing routine poll vs signed webhook first. Default poll, because Slack cannot be the bell.
-6. Replay: separate scratch graph vs `source:replay` on the live `room_day`. Default dry-run + scratch until we have seen one real day.
+All six from rev 3 were ratified 19 Aug with the written defaults (orchestrator decisions log D1–D10):
 
-Closed by this rev: start-from-here is in; pause/end from here are in; brain write does not wait on the kiosk; the operator is a supervisor, not a second fuse.
+1. One full-access token in v1.
+2. Mini ffmpeg for multi-chunk extract in v1.1.
+3. `scribe_get_visit` in v1.1.
+4. Last-poll-wins on a second tab.
+5. Watch by standing poll (Slack cannot be the bell).
+6. Replay dry-run + scratch until a real day is seen. **19 Aug is that day.** First fuse run is scratch against this corpus.
+
+Closed this rev: remount = resume inside the stall window; mark echoes `cue_id`; poll cost noted not changed; `/api/admin/r2-cors-fix` is infra (token lacks bucket-settings), not this PRD.
+
+S1–S3 on `feat/operator-mcp` accepted against §18 except the two remount-spoiled rows (re-run). Dual-mic (K-B, 0045) and session janitor (K-A) shipped to `main` during the pilot (V-ratified R1–R12). The MCP branch is rebased onto that. Treat them as inventory.
+
+Do not merge until Vinay says the tapes are safe.
 
 ---
 

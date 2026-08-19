@@ -15,8 +15,10 @@
  *
  * Fail-open for the doctor: 503 bus_down / bus_not_migrated or a network failure only changes
  * the chip ("operator link down") and backs the poll off (5 s → 30 s cap); the buttons keep
- * working. `superseded` (another tab polled this room more recently — D4) stops the poll and
- * says so on the chip. Remote actions are surfaced on the chip ("Started from operator" …).
+ * working. `superseded` (another tab polled this room more recently — D4) stops the poll,
+ * says so on the chip, and (remount-resume D3) runs the kiosk's takeover action: stop both
+ * streams, flush + upload the current segment, show the message — never PATCH end. Remote
+ * actions are surfaced on the chip ("Started from operator" …).
  */
 
 import * as React from "react";
@@ -39,6 +41,12 @@ export type CommandActions = {
   resume: () => Promise<void>;
   /** existing end-day flow; resolves once the final chunk is flushed and the session is ended */
   end: () => Promise<void>;
+  /**
+   * Remount-resume D3: this tab lost the room to a newer tab. Stop both streams, finish the
+   * current segment (save to disk, upload it), show the takeover message — and do NOT send
+   * PATCH end: the new tab owns the session.
+   */
+  takeover: () => Promise<void>;
 };
 
 export type OperatorLinkState = "connecting" | "listening" | "down" | "not_migrated" | "superseded" | "off";
@@ -229,6 +237,9 @@ export function useCommandPoll(opts: { enabled: boolean; actions: CommandActions
           log("superseded", { tab_id: tabId });
           patch({ link: "superseded", last_poll_at: Date.now() });
           busy = false;
+          // D3: stop recording too — flush the segment to disk + upload, never PATCH end.
+          // Queued after any in-flight command; its failure must not resurrect the poll.
+          chain = chain.then(() => actionsRef.current.takeover()).catch(() => undefined);
           return; // stop polling for good — the other tab owns the room
         }
         prevPollAt = j.now ?? new Date().toISOString();

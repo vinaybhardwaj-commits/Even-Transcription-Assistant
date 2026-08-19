@@ -1077,6 +1077,126 @@ export function useRoomRecorder(opts?: {
     [acquireBackup, attachPrimaryListeners, emitError, emitEvent, requestWakeLock, scheduleRotate, startRecorderSegment, startWatchdog],
   );
 
+  /**
+   * Remount resume (ETA-REMOUNT-RESUME PRD §3.3/§3.4, D2/D4): rejoin an EXISTING session
+   * instead of starting a new one. Chunk counters are SEEDED, never reset — per stream the
+   * starting number is the higher of the server's next_idx and one more than the highest
+   * number in this kiosk's own unsent IndexedDB queue for the session (the table is unique
+   * on session/source/idx and the upload route overwrites on conflict, so counting from
+   * zero would write over the tape being joined). Does NOT wait for the recovered queue to
+   * drain — the recovery effect uploads it in parallel. The reload gap is recorded by the
+   * kiosk_remount_resumed event, not gap_before_ms (D4: lastChunkEndedAt starts null).
+   * `paused: true` rejoins in the paused state (stream open, no recorder — the exact shape
+   * pauseDay leaves behind, so the existing Resume button works unchanged).
+   */
+  const resumeSession = React.useCallback(
+    async (
+      sessionId: string,
+      opts: {
+        nextPrimaryIdx: number;
+        nextBackupIdx: number;
+        paused: boolean;
+        /** session started_at (ms) so the elapsed clock stays honest across the reload */
+        dayStartedAt?: number | null;
+        deviceId?: string;
+        backupDeviceId?: string | null;
+      },
+    ): Promise<{ primaryStartIdx: number; backupStartIdx: number }> => {
+      if (stateRef.current === "recording" || stateRef.current === "paused") {
+        return { primaryStartIdx: opts.nextPrimaryIdx, backupStartIdx: opts.nextBackupIdx };
+      }
+      setError(null);
+      // Highest number in the kiosk's own unsent queue, per stream, for THIS session.
+      let localPrimary = -1;
+      let localBackup = -1;
+      try {
+        const rows = await idbListAll();
+        for (const r of rows) {
+          if (r.session_id !== sessionId) continue;
+          if ((r.source ?? "primary") === "backup") localBackup = Math.max(localBackup, r.idx);
+          else localPrimary = Math.max(localPrimary, r.idx);
+        }
+      } catch {
+        setStorageBlocked(true); // server numbers alone still protect stored audio
+      }
+      const primaryStartIdx = Math.max(opts.nextPrimaryIdx, localPrimary + 1);
+      const backupStartIdx = Math.max(opts.nextBackupIdx, localBackup + 1);
+
+      const P = primaryRef.current;
+      const B = backupRef.current;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            ...(opts.deviceId ? { deviceId: { exact: opts.deviceId } } : {}),
+            ...AUDIO_CONSTRAINTS,
+          },
+        });
+        P.stream = stream;
+        P.deviceId = opts.deviceId ?? null;
+        attachPrimaryListeners(stream);
+        sessionIdRef.current = sessionId;
+        P.idx = primaryStartIdx;
+        P.lastChunkEndedAt = null;
+        P.stopCalledAt = 0;
+        setCurrentIdx(primaryStartIdx);
+        B.idx = backupStartIdx;
+        B.lastChunkEndedAt = null;
+        B.rec = null;
+        setBackupIdx(backupStartIdx);
+        setBackupArchivedCount(0);
+        setBackupArchivedBytes(0);
+        setDayStartedAt(opts.dayStartedAt ?? Date.now());
+        setMicLost(false);
+        primaryLostRef.current = false;
+        primarySilentRef.current = false;
+        setPrimaryMic("active");
+        setPrimaryLostAt(null);
+        setPrimaryLostReason(null);
+        if (opts.paused) {
+          setState("paused");
+          stateRef.current = "paused";
+          setPausedAt(null); // the original pause time did not survive the reload
+        } else {
+          setState("recording");
+          stateRef.current = "recording";
+          setPausedAt(null);
+          startRecorderSegment(P);
+          scheduleRotate();
+        }
+        void requestWakeLock();
+        startWatchdog(stream); // no-ops while paused, same as after pauseDay
+      } catch (e: unknown) {
+        const name = (e as { name?: string })?.name;
+        const msg =
+          name === "NotAllowedError" || name === "PermissionDeniedError"
+            ? "microphone_permission_denied"
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        setState("error");
+        stateRef.current = "error";
+        emitError(msg);
+        throw new Error(msg);
+      }
+      // Backup lane — AFTER the primary is live; its own try/catch domain (never throws up).
+      backupErroredRef.current = false;
+      backupBackoffRef.current = REACQUIRE_MIN_MS;
+      const backupDeviceId = opts.backupDeviceId ?? null;
+      if (backupDeviceId && backupDeviceId !== (opts.deviceId ?? null)) {
+        backupWantedRef.current = true;
+        B.deviceId = backupDeviceId;
+        void acquireBackup("remount_resume");
+      } else {
+        backupWantedRef.current = false;
+        B.deviceId = null;
+        setBackupMic("off");
+        emitEvent("mic_backup_unavailable", { reason: backupDeviceId ? "same_as_primary" : "no_device" });
+      }
+      return { primaryStartIdx, backupStartIdx };
+    },
+    [acquireBackup, attachPrimaryListeners, emitError, emitEvent, requestWakeLock, scheduleRotate, startRecorderSegment, startWatchdog],
+  );
+
   /** IRB pause: recorders stopped (a real capture gap), partial chunks uploaded — BOTH lanes. */
   const pauseDay = React.useCallback(async (): Promise<void> => {
     if (stateRef.current !== "recording") return;
@@ -1209,5 +1329,5 @@ export function useRoomRecorder(opts?: {
     backupArchivedBytes,
   };
 
-  return { status, startDay, pauseDay, resumeDay, endDay, markEnded, getStream };
+  return { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream };
 }

@@ -541,6 +541,8 @@ const markConsult: McpTool = {
       session_id: session?.id ?? null,
       event_row: eventRow,
       event_id: eventId,
+      // Remount-resume §3.6: echo the cue id at the top level when the cue lands.
+      ...(cue.ok ? { cue_id: cue.cue_id } : {}),
       cue,
       ...(sessionLookupError ? { detail: sessionLookupError } : {}),
     };
