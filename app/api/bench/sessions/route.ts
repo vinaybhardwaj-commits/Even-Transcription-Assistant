@@ -7,6 +7,8 @@
  *        K-B: counts are PRIMARY-stream; plus backup_chunk_count,
  *        backup_verified_count, primary_lost/restored_count and mic_status
  *        (on_backup | backup_covered | lost_no_backup | null) for the R10 badge.
+ *        K-A: last_any_chunk_at (newest chunk across both sources) for the
+ *        time-based `stalled` chip.
  *
  * All queries INFERRED; GET fail-safes to an empty list (never breaks the
  * admin page), POST returns a retryable error rather than fake success.
@@ -62,6 +64,8 @@ type SessionRollupRow = {
   gap_ms: string | number | null;
   gap_count: number;
   last_chunk_at: string | Date | null;
+  /** K-A: newest chunk across BOTH sources — the stalled badge's clock (last_chunk_at is primary-only). */
+  last_any_chunk_at: string | Date | null;
   /** K-B: backup-stream chunks and primary-mic loss events */
   backup_chunk_count: number;
   backup_verified_count: number;
@@ -83,6 +87,7 @@ export async function GET() {
              COALESCE(SUM(c.gap_before_ms) FILTER (WHERE c.source = 'primary'), 0)::bigint AS gap_ms,
              COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.gap_before_ms >= 2000)::int AS gap_count,
              MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_chunk_at,
+             MAX(c.created_at) AS last_any_chunk_at,
              COUNT(c.id) FILTER (WHERE c.source = 'backup')::int AS backup_chunk_count,
              COUNT(c.id) FILTER (WHERE c.source = 'backup' AND c.upload_state = 'verified')::int AS backup_verified_count,
              COALESCE(ev.primary_lost_count, 0)::int AS primary_lost_count,
@@ -118,6 +123,9 @@ export async function GET() {
         gap_ms: Number(r.gap_ms ?? 0),
         gap_count: r.gap_count,
         last_chunk_at: r.last_chunk_at ? new Date(r.last_chunk_at).toISOString() : null,
+        // K-A (R10 time-based case): newest chunk across BOTH sources; the admin list derives the
+        // red `stalled` chip from it (> 10 min on a 'recording' session). Additive.
+        last_any_chunk_at: r.last_any_chunk_at ? new Date(r.last_any_chunk_at).toISOString() : null,
         backup_chunk_count: r.backup_chunk_count,
         backup_verified_count: r.backup_verified_count,
         primary_lost_count: r.primary_lost_count,

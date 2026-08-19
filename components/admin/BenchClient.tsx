@@ -8,6 +8,7 @@
  */
 
 import * as React from "react";
+import { isBenchStalled } from "@/lib/bench-reaper-core";
 import Link from "next/link";
 
 type SessionRow = {
@@ -24,6 +25,8 @@ type SessionRow = {
   gap_ms: number;
   gap_count: number;
   last_chunk_at: string | null;
+  /** K-A: newest chunk across both sources — the `stalled` chip's clock */
+  last_any_chunk_at?: string | null;
   /** K-B (R10): backup stream + mic badge */
   backup_chunk_count?: number;
   backup_verified_count?: number;
@@ -62,6 +65,12 @@ function fmtGap(ms: number, count: number): string {
 function isLive(s: SessionRow): boolean {
   if (s.status !== "recording" || !s.last_chunk_at) return false;
   return Date.now() - new Date(s.last_chunk_at).getTime() < 7 * 60_000;
+}
+
+/** K-A (R10, the time-based case): a 'recording' session whose newest chunk across BOTH sources is
+ *  > 10 min old reads `stalled` (red). K-B's mic badges render first and take visual precedence. */
+function isStalled(s: SessionRow): boolean {
+  return isBenchStalled({ status: s.status, last_any_chunk_at: s.last_any_chunk_at ?? s.last_chunk_at, started_at: s.started_at }, Date.now());
 }
 
 export function BenchClient() {
@@ -256,7 +265,14 @@ export function BenchClient() {
                         backup used
                       </span>
                     ) : null}
-                    {isLive(s) ? (
+                    {isStalled(s) ? (
+                      <span
+                        className="inline-block px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"
+                        title="still marked recording but no chunk from either mic for over 10 minutes — the hourly reaper ends it after 30"
+                      >
+                        stalled
+                      </span>
+                    ) : isLive(s) ? (
                       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-even-pink-50 text-even-pink-700">
                         <span className="w-1.5 h-1.5 rounded-full bg-even-pink-600 animate-pulse" />
                         recording

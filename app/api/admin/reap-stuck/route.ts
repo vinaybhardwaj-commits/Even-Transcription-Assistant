@@ -18,12 +18,14 @@
  *        live reap with the default window.
  *
  * Additive — nothing in the doctor recording/submit path changes.
+ * K-A (19 Aug 2026): also sweeps Room Bench sessions (lib/bench-reaper.ts) after the encounter reap.
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { reapBenchSessions, type BenchReapResult } from "@/lib/bench-reaper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,6 +61,8 @@ type ReapResult = {
   reaped_complete: string[];
   reaped_partial: string[];
   reaped_failed: string[];
+  /** K-A (19 Aug 2026): the Room Bench session sweep that runs after the encounter sweep. */
+  bench?: BenchReapResult;
 };
 
 async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
@@ -131,6 +135,25 @@ function clampMinutes(v: unknown): number {
   return Math.min(Math.max(Number(v) || 30, 5), 24 * 60);
 }
 
+/**
+ * K-A v2 (ETA-BENCH-RESILIENCE, 19 Aug 2026) — the Room Bench session sweep runs AFTER the encounter
+ * sweep, same auth, same cron. Rule 1: a 'recording' session whose newest chunk across BOTH mic
+ * sources is > 30 min old (zero chunks: started_at > 30 min) → ended at the honest last-audio time.
+ * Rule 2: any non-ended session whose started_at IST date is before today → same honest ending.
+ * One audit_log row per reaped session. The sweep degrades to a no-op on any error — it can never
+ * make this cron 500 (the bench sweep's own errors ride the `bench.error` field).
+ */
+async function reapWithBench(minutes: number, dryRun: boolean): Promise<ReapResult> {
+  const result = await reap(minutes, dryRun);
+  try {
+    result.bench = await reapBenchSessions({ dryRun });
+  } catch (e) {
+    console.error("[reap-stuck] bench sweep failed — no-op", (e as Error)?.message ?? e);
+    result.bench = { dry_run: dryRun, candidates: 0, reaped: [], error: String((e as Error)?.message ?? e).slice(0, 150) };
+  }
+  return result;
+}
+
 export async function POST(req: NextRequest) {
   if (!(await adminOrSecret(req))) {
     return respondError("AUTH_REQUIRED", "admin or migration secret required");
@@ -138,7 +161,7 @@ export async function POST(req: NextRequest) {
   let body: { minutes?: number; dryRun?: boolean } = {};
   try { body = (await req.json()) as typeof body; } catch { /* empty body ok */ }
   try {
-    return respondOk(await reap(clampMinutes(body.minutes), body.dryRun === true));
+    return respondOk(await reapWithBench(clampMinutes(body.minutes), body.dryRun === true));
   } catch (e) {
     return respondError("PIPELINE_FAILED", (e instanceof Error ? e.message : String(e)).slice(0, 150));
   }
@@ -149,7 +172,7 @@ export async function GET(req: NextRequest) {
     return respondError("AUTH_REQUIRED", "cron only");
   }
   try {
-    return respondOk(await reap(30, false));
+    return respondOk(await reapWithBench(30, false));
   } catch (e) {
     return respondError("PIPELINE_FAILED", (e instanceof Error ? e.message : String(e)).slice(0, 150));
   }
