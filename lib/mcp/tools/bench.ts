@@ -31,6 +31,14 @@
  *                                  → text for the WHOLE chunk (trimming is v1.1), never inline bytes.
  * scribe_list_commands (read)    — the bus queue (bench_command), newest first.
  *
+ * U2 (ETA-MCP-UPGRADE PRD §5 + addendum 1 — hear a consultation, not a piece):
+ * a window that crosses pieces is JOINED into one clip by the joining service
+ * (D14, Cloudflare Containers — services/audio-join) and returned as one link plus the
+ * window that was asked for. Over 30 minutes is refused (D2); joining is refused while
+ * any room is recording (D15); an unreachable or refusing service degrades to exactly
+ * today's multi-piece answer (D10). scribe_transcribe_range then runs Whisper on the
+ * joined clip, so its text covers the window and not a five-minute slab (D9).
+ *
  * U3 (ETA-MCP-UPGRADE PRD §4, read only):
  * scribe_day_report — one room, one IST day: sessions in start order, tape_ended_at from the
  *                     last piece on EITHER mic (the tape clock governs; stored ended_at shown
@@ -47,6 +55,17 @@ import { getObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
+// U2: the joining half — the 30-minute limit, the recording guard, the clip key/provenance and
+// the client of the joining service (D2, D14, D15, D3/D4, D10).
+import {
+  buildJoinRequest,
+  callJoinService,
+  CLIP_PRESIGN_SECONDS,
+  refuseIfTooLong,
+  roomsRecordingNow,
+  whisperTimeoutForClip,
+  type JoinOutcome,
+} from "@/lib/bench-join";
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay } from "@/lib/brain/state";
@@ -636,9 +655,77 @@ const RANGE_ARGS = {
   source: { type: "string", enum: ["primary", "backup"], default: "primary" },
 };
 
+// ---------------------------------------------------------------------------
+// U2 — joining a window that crosses pieces (PRD §5, addendum 1)
+//
+// The order below is the kickoff's, and it matters: a window is measured before anything is
+// asked of the database, the room is asked before anything is asked of the joining service, and
+// the joining service is only reached once both are satisfied. Every step that says no says so
+// by name, and NO step ends in an error page — the covering pieces are listed either way, which
+// is exactly what the door answered before this slice existed (D10).
+// ---------------------------------------------------------------------------
+
+type JoinAttempt =
+  /** The app itself said no, by name — over 30 minutes (D2) or a room is recording (D15). */
+  | { kind: "refused"; body: Record<string, unknown> }
+  /** One clip, written and kept. */
+  | { kind: "clip"; key: string; bytes: number; duration_ms: number; guard_degraded?: string }
+  /** The joining service is unreachable or refused → today's multi-piece answer (D10). */
+  | { kind: "fallback"; join_error: string; join_detail?: string; guard_degraded?: string };
+
+async function attemptJoin(
+  sessionId: string,
+  covering: ReadonlyArray<CoveringChunk<BenchChunkRow>>,
+  startMs: number,
+  endMs: number,
+  source: "primary" | "backup",
+): Promise<JoinAttempt> {
+  // 1. D2 — over 30 minutes, naming the limit.
+  const tooLong = refuseIfTooLong(startMs, endMs);
+  if (tooLong) {
+    return { kind: "refused", body: { ok: false, ...tooLong, hint: `joining is capped at ${tooLong.limit_minutes} minutes — ask for a shorter window, or fetch the covering pieces below` } };
+  }
+
+  // 2. D15 — never compete with a live tape.
+  const recording = await roomsRecordingNow();
+  if (recording.known && recording.rooms.length > 0) {
+    return {
+      kind: "refused",
+      body: {
+        ok: false,
+        error: "room_recording",
+        recording_rooms: recording.rooms,
+        hint: "joining is refused while any room is recording (D15) — try again once the day has ended; the covering pieces below are available now",
+      },
+    };
+  }
+  // The bus could not be read. That is not evidence of a live tape, so it does not refuse — but
+  // it is carried into the answer rather than swallowed.
+  const guardDegraded = recording.known ? undefined : recording.reason;
+
+  // 3. Ask the joining service.
+  const req = buildJoinRequest(sessionId, covering, startMs, endMs, source);
+  const out: JoinOutcome = await callJoinService(req);
+  if (!out.ok) {
+    return { kind: "fallback", join_error: out.error, ...(out.detail ? { join_detail: out.detail } : {}), ...(guardDegraded ? { guard_degraded: guardDegraded } : {}) };
+  }
+  return { kind: "clip", key: out.key, bytes: out.bytes, duration_ms: out.duration_ms, ...(guardDegraded ? { guard_degraded: guardDegraded } : {}) };
+}
+
+/** Today's answer, unchanged: the multi-piece response listing every covering piece with its own
+ *  link. This is the ONLY thing a caller sees when joining is unavailable (D10). */
+async function multiPieceAnswer(
+  covering: ReadonlyArray<CoveringChunk<BenchChunkRow>>,
+  base: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+) {
+  const covering_chunks = await Promise.all(covering.map(presignCovering));
+  return { ok: false, error: "multi_chunk_not_supported_v1", ...base, covering_chunks, ...extra };
+}
+
 const extractAudio: McpTool = {
   name: "scribe_extract_audio",
-  description: "Audio by clock time (PRD §10, v1): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → error multi_chunk_not_supported_v1 listing every covering chunk with presigns (stitching is v1.1). None → no_audio_in_range. Never inline bytes.",
+  description: "Audio by clock time (PRD §10 + U2): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → the pieces are JOINED into one kept clip and answered with a single 1 h link plus the window asked for. Refused by name over 30 minutes (window_too_long) and while any room is recording (room_recording). If the joining service is unreachable or refuses, the answer degrades to the multi-piece response listing every covering piece with its own link — never an error page. None → no_audio_in_range. Never inline bytes.",
   scope: "invoke",
   inputSchema: { type: "object", properties: RANGE_ARGS, required: ["start", "end"], additionalProperties: false },
   handler: async (args: ToolArgs) => {
@@ -649,8 +736,41 @@ const extractAudio: McpTool = {
     const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested };
     if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base, chunks_on_session: r.chunks.filter((c) => (c.source ?? "primary") === r.source).length };
     if (res.kind === "multi") {
-      const covering = await Promise.all(res.covering.map(presignCovering));
-      return { ok: false, error: "multi_chunk_not_supported_v1", ...base, covering_chunks: covering, hint: "window spans chunks — fetch the listed presigns; server/Mini stitching is v1.1" };
+      const attempt = await attemptJoin(r.session.id, res.covering, r.startMs, r.endMs, r.source);
+      if (attempt.kind === "refused") {
+        // Named refusal first — and still the covering pieces, so no answer is a dead end.
+        const covering_chunks = await Promise.all(res.covering.map(presignCovering));
+        return { ...attempt.body, ...base, covering_chunks };
+      }
+      if (attempt.kind === "fallback") {
+        return multiPieceAnswer(res.covering, base, {
+          join_error: attempt.join_error,
+          ...(attempt.join_detail ? { join_detail: attempt.join_detail } : {}),
+          hint: "joining is unavailable — fetch the listed presigns in order; the window spans them",
+        });
+      }
+      let url: string | null = null;
+      try {
+        url = await signGetUrl({ key: attempt.key, expiresInSeconds: CLIP_PRESIGN_SECONDS, contentType: "audio/webm" });
+      } catch {
+        url = null; // the clip is written and kept; only the link failed
+      }
+      return {
+        ok: true,
+        joined: true,
+        ...base,
+        clip: {
+          r2_key: attempt.key,
+          content_type: "audio/webm",
+          bytes: attempt.bytes,
+          duration_ms: attempt.duration_ms,
+          presigned_get: url,
+          expires_in_seconds: url ? CLIP_PRESIGN_SECONDS : null,
+        },
+        pieces: res.covering.map((c) => ({ chunk_idx: c.chunk.idx, source: c.chunk.source ?? "primary", r2_key: c.chunk.r2_key, chunk_bounds: c.chunk_bounds, offset_in_chunk_s: c.offset_in_chunk_s, duration_s: c.duration_s })),
+        ...(attempt.guard_degraded ? { degraded: [attempt.guard_degraded] } : {}),
+        note: "one clip covering the requested window, joined from the pieces listed and kept under clips/ with its session, window, microphone and creation time on the object; the link expires in 1 h, the clip does not",
+      };
     }
     const clip = await presignCovering(res.covering);
     return { ok: true, ...base, ...clip, note: "presigned GET is the whole chunk; play from offset_in_chunk_s for duration_s" };
@@ -659,7 +779,7 @@ const extractAudio: McpTool = {
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1): resolve the window to its single covering chunk (same rule as scribe_extract_audio), download it server-side, run Mini Whisper (/inference), return { text, chunk_bounds, requested_range, note }. v1: engine=whisper only; the text covers the WHOLE 5-min chunk (trimming is v1.1). Text only, never bytes.",
+  description: "Hear the tape (PRD §11.1 + U2): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. Text only, never bytes. v1: engine=whisper only.",
   scope: "invoke",
   inputSchema: { type: "object", properties: { ...RANGE_ARGS, engine: { type: "string", enum: ["whisper"], default: "whisper" }, language: { type: "string", description: "optional Whisper language hint, e.g. en" } }, required: ["start", "end"], additionalProperties: false },
   handler: async (args: ToolArgs) => {
@@ -670,10 +790,46 @@ const transcribeRange: McpTool = {
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
     const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine };
+    const language = argStr(args, "language", 8) ?? undefined;
     if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base };
     if (res.kind === "multi") {
-      const covering = await Promise.all(res.covering.map(presignCovering));
-      return { ok: false, error: "multi_chunk_not_supported_v1", ...base, covering_chunks: covering, hint: "transcribe one covering chunk at a time — narrow the window to a single chunk_bounds" };
+      // D9 — transcription runs on the JOINED clip, not on whole pieces trimmed afterwards.
+      const t0 = Date.now();
+      const attempt = await attemptJoin(r.session.id, res.covering, r.startMs, r.endMs, r.source);
+      if (attempt.kind === "refused") {
+        const covering_chunks = await Promise.all(res.covering.map(presignCovering));
+        return { ...attempt.body, ...base, covering_chunks };
+      }
+      if (attempt.kind === "fallback") {
+        return multiPieceAnswer(res.covering, base, {
+          join_error: attempt.join_error,
+          ...(attempt.join_detail ? { join_detail: attempt.join_detail } : {}),
+          hint: "joining is unavailable — transcribe one covering chunk at a time by narrowing the window to a single chunk_bounds",
+        });
+      }
+      let clipBytes: Uint8Array | null = null;
+      try {
+        clipBytes = await getObjectBytes(attempt.key);
+      } catch (e) {
+        return { ok: false, error: "clip_download_failed", degraded: true, ...base, r2_key: attempt.key, detail: String((e as Error)?.message ?? e).slice(0, 160) };
+      }
+      if (!clipBytes) return { ok: false, error: "clip_missing_in_r2", ...base, r2_key: attempt.key };
+      const wj = await transcribeWithWhisper(clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms) });
+      if (!wj.ok) return { ok: false, error: "whisper_failed", degraded: true, ...base, r2_key: attempt.key, detail: wj.error, latency_ms: wj.latency_ms };
+      return {
+        ok: true,
+        joined: true,
+        ...base,
+        clip: { r2_key: attempt.key, bytes: attempt.bytes, duration_ms: attempt.duration_ms },
+        pieces: res.covering.map((c) => ({ chunk_idx: c.chunk.idx, source: c.chunk.source ?? "primary", chunk_bounds: c.chunk_bounds, offset_in_chunk_s: c.offset_in_chunk_s, duration_s: c.duration_s })),
+        text: wj.transcript,
+        language: wj.language ?? null,
+        audio_seconds: wj.duration_seconds ?? null,
+        whisper_latency_ms: wj.latency_ms,
+        total_ms: Date.now() - t0,
+        ...(attempt.guard_degraded ? { degraded: [attempt.guard_degraded] } : {}),
+        note: `text covers the requested window ${requested.start_ist}–${requested.end_ist} IST, transcribed from the joined clip of ${res.covering.length} pieces`,
+      };
     }
     const c = res.covering;
     const t0 = Date.now();
@@ -684,7 +840,6 @@ const transcribeRange: McpTool = {
       return { ok: false, error: "chunk_download_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: String((e as Error)?.message ?? e).slice(0, 160) };
     }
     if (!bytes) return { ok: false, error: "chunk_missing_in_r2", ...base, chunk_idx: c.chunk.idx, r2_key: c.chunk.r2_key };
-    const language = argStr(args, "language", 8) ?? undefined;
     const w = await transcribeWithWhisper(bytes, c.chunk.content_type || "audio/webm", { language });
     if (!w.ok) return { ok: false, error: "whisper_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: w.error, latency_ms: w.latency_ms };
     return {

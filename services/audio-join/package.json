@@ -1,0 +1,19 @@
+{
+  "name": "eta-audio-join",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "U2 joining service — joins Bench tape pieces into one consultation clip on Cloudflare Containers (D14). Deployed separately from the Next.js app; this package.json is NOT the app's.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "docker:build": "docker build --platform linux/amd64 -t eta-audio-join ./container"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.2.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

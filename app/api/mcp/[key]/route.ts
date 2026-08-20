@@ -27,7 +27,7 @@ import { handleMcpRpc, mcpAuthFailureResponse, mcpBannerResponse } from "@/lib/m
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 120; // same ceiling as the header form
+export const maxDuration = 300; // same ceiling as the header form (raised for U2 joining)
 
 const CORS = {
   "access-control-allow-origin": "*",

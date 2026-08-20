@@ -1,0 +1,60 @@
+{
+  // services/audio-join — the U2 joining service (D14: joining runs on Cloudflare Containers).
+  //
+  // Deploy from THIS directory:  npx wrangler deploy
+  // Secret:                      npx wrangler secret put JOIN_TOKEN
+  //
+  // Requires the Workers paid plan ($5/month). Containers are not on the free plan.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "eta-audio-join",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-08-20",
+
+  "containers": [
+    {
+      "class_name": "Joiner",
+      "image": "./container",
+      // One box. "One join at a time" is enforced in the Durable Object; this makes the
+      // platform agree rather than quietly starting a second instance.
+      "max_instances": 1,
+      // 1/2 vCPU, 4 GiB, 8 GB disk. A 30-minute Opus re-encode is seconds of CPU and tens of
+      // MB of scratch; `basic` (1/4 vCPU, 1 GiB) also fits, `standard-1` leaves headroom so a
+      // long window never trips the disk.
+      "instance_type": "standard-1",
+      // D16 — placement pins to Asia Pacific, not India; Cloudflare offers no India region.
+      // V has accepted that. The tape already lives in an APAC R2 bucket, so this keeps the
+      // join next to the data rather than moving it.
+      "constraints": {
+        "regions": ["APAC"]
+      }
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "JOINER",
+        "class_name": "Joiner"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Joiner"]
+    }
+  ],
+
+  // The ONLY way this service touches audio. No S3 key pair exists anywhere in it.
+  "r2_buckets": [
+    {
+      "binding": "AUDIO",
+      "bucket_name": "eta-audio"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

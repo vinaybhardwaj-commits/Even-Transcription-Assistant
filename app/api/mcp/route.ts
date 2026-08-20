@@ -14,7 +14,10 @@ import { handleMcpRpc, mcpAuthFailureResponse, mcpBannerResponse } from "@/lib/m
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 120; // S3: scribe_transcribe_range = chunk download + Mini Whisper (90 s)
+// U2 raised this from 120 s. A crossing window is now join (a cold container wakes in 1–3 s,
+// then seconds of ffmpeg) + clip download + Mini Whisper on the whole window — three legs where
+// S3 had one, and 120 s could not hold them. 300 s is Vercel's ceiling on every plan.
+export const maxDuration = 300;
 
 export async function GET() {
   return mcpBannerResponse();
