@@ -62,7 +62,7 @@ import {
   type BenchMicEventKind,
   type ChunkSource,
 } from "@/lib/bench-dual";
-import { seedStartIdx } from "@/lib/bench-resume-core";
+import { primaryFallbackEvents, seedStartIdx } from "@/lib/bench-resume-core";
 
 const CHUNK_MS = 5 * 60 * 1000; // D1: 5-minute chunks
 const BACKOFF_MIN_MS = 5_000;
@@ -1245,7 +1245,9 @@ export function useRoomRecorder(opts?: {
         throw new Error(msg);
       }
       if (primaryFellBack) {
-        emitEvent("mic_primary_lost", { reason: "device_missing_on_resume", device_id: opts.deviceId });
+        // S4-3: a PAIR — lost (the stored device is absent) then restored (the default is
+        // recording), so the admin mic badge does not read on-backup for the rest of the day.
+        for (const e of primaryFallbackEvents(opts.deviceId ?? null)) emitEvent(e.kind, e.payload);
       }
       // Backup lane — AFTER the primary is live; its own try/catch domain (never throws up).
       backupErroredRef.current = false;

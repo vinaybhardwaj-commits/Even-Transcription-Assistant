@@ -24,8 +24,10 @@
 import * as React from "react";
 import type { RoomRecorderState } from "@/lib/use-room-recorder";
 
-const POLL_VISIBLE_MS = 1_500;
-const POLL_HIDDEN_MS = 5_000;
+// S4-2: the poll cadence lives in the pure lib/bench-bus-constants.ts (values unchanged) so
+// the handover probe derives from the hidden round; re-exported here so callers keep working.
+export { POLL_VISIBLE_MS, POLL_HIDDEN_MS } from "@/lib/bench-bus-constants";
+import { POLL_VISIBLE_MS, POLL_HIDDEN_MS } from "@/lib/bench-bus-constants";
 const BACKOFF_MIN_MS = 5_000;
 const BACKOFF_MAX_MS = 30_000;
 const ACK_RETRIES = 3;

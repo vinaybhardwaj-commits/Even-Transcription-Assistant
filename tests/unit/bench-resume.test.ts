@@ -10,14 +10,16 @@
  */
 import { describe, it, expect } from "vitest";
 import { STALLED_BADGE_MINUTES } from "../../lib/bench-reaper-core";
-import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "../../lib/bench-bus-constants";
+import { ACK_WAIT_MS, LISTENER_FRESH_MS, POLL_HIDDEN_MS } from "../../lib/bench-bus-constants";
 import {
   decideHandoverPending,
   decideHandoverWait,
   decideResume,
   HANDOVER_PROBE_MS,
   hasHandoverEventSince,
+  isListenerTabGone,
   nextIdxFromMax,
+  primaryFallbackEvents,
   seedStartIdx,
 } from "../../lib/bench-resume-core";
 import { micEventLabel } from "../../lib/bench-timeline";
@@ -123,36 +125,70 @@ describe("FU2d — hasHandoverEventSince: an event at or after `since`", () => {
   });
 });
 
-describe("FU2c + S3-1c — decideHandoverWait: proof of life, then the real wait, never a hang", () => {
+describe("S4-2 — isListenerTabGone: an exact tab_id match, not a time comparison", () => {
+  it("the newest gone-event naming the listener's current tab → true", () => {
+    expect(isListenerTabGone({ tab_id: "tab_old" }, "tab_old")).toBe(true);
+  });
+  it("a stale gone-event from an OLDER tab does not count; junk payloads never count", () => {
+    expect(isListenerTabGone({ tab_id: "tab_older" }, "tab_old")).toBe(false);
+    expect(isListenerTabGone(null, "tab_old")).toBe(false);
+    expect(isListenerTabGone({}, "tab_old")).toBe(false);
+    expect(isListenerTabGone({ tab_id: "" }, "tab_old")).toBe(false);
+    expect(isListenerTabGone({ tab_id: 42 }, "tab_old")).toBe(false);
+    expect(isListenerTabGone({ tab_id: "tab_old" }, null)).toBe(false);
+    expect(isListenerTabGone({ tab_id: "tab_old" }, "")).toBe(false);
+  });
+});
+
+describe("FU2c + S3-1c + S4-2 — decideHandoverWait: fast path, proof of life, then the real wait", () => {
   it("no live handover, or a completed one → start at once", () => {
-    expect(decideHandoverWait({ handoverPending: false, handoverStarted: false, handoverComplete: false, waitedMs: 0 })).toBe("start");
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: true, waitedMs: 0 })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: false, tabGone: false, handoverStarted: false, handoverComplete: false, waitedMs: 0 })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: true, handoverComplete: true, waitedMs: 0 })).toBe("start");
   });
-  it("stage one: no start event inside the probe → start at once, and it is NOT a timeout (no event recorded)", () => {
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS - 1 })).toBe("wait");
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("start");
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS * 10 })).toBe("start");
+  it("S4-2 fast path: tab_gone → start at once — no probe, no wait, and NOT a timeout (no event recorded)", () => {
+    expect(decideHandoverWait({ handoverPending: true, tabGone: true, handoverStarted: false, handoverComplete: false, waitedMs: 0 })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS * 10 })).toBe("start");
   });
-  it("stage two: the start event arrived → wait for the completion event up to ACK_WAIT_MS", () => {
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("wait");
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS - 1 })).toBe("wait");
+  it("stage one (not gone): no start event inside the probe → start after the probe, bounded, NOT a timeout", () => {
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS - 1 })).toBe("wait");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS * 10 })).toBe("start");
+  });
+  it("stage two (not gone): the start event arrived → wait for the completion event up to ACK_WAIT_MS", () => {
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: true, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("wait");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS - 1 })).toBe("wait");
   });
   it("stage two timeout: started but never completed → start after the full wait, WITH the timeout recorded", () => {
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS })).toBe("timeout_start");
-    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS * 10 })).toBe("timeout_start");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS })).toBe("timeout_start");
+    expect(decideHandoverWait({ handoverPending: true, tabGone: false, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS * 10 })).toBe("timeout_start");
   });
   it("every input yields a decision that is not an unbounded wait once waitedMs reaches the ack window", () => {
     for (const handoverPending of [true, false]) {
-      for (const handoverStarted of [true, false]) {
-        for (const handoverComplete of [true, false]) {
-          expect(decideHandoverWait({ handoverPending, handoverStarted, handoverComplete, waitedMs: ACK_WAIT_MS })).not.toBe("wait");
+      for (const tabGone of [true, false]) {
+        for (const handoverStarted of [true, false]) {
+          for (const handoverComplete of [true, false]) {
+            expect(decideHandoverWait({ handoverPending, tabGone, handoverStarted, handoverComplete, waitedMs: ACK_WAIT_MS })).not.toBe("wait");
+          }
         }
       }
     }
   });
-  it("the probe is a probe, not a second stall window: strictly shorter than the ack wait", () => {
-    expect(HANDOVER_PROBE_MS).toBe(2_500);
+  it("S4-2: the probe is DERIVED from POLL_HIDDEN_MS (one hidden round + margin) — a change to that constant moves the probe — and stays a probe, shorter than the ack wait", () => {
+    expect(HANDOVER_PROBE_MS).toBe(POLL_HIDDEN_MS + 1_500);
+    expect(HANDOVER_PROBE_MS).toBe(6_500);
     expect(HANDOVER_PROBE_MS).toBeLessThan(ACK_WAIT_MS);
+  });
+});
+
+describe("S4-3 — a failed stored device followed by a working default writes a PAIR", () => {
+  it("lost (device_missing_on_resume) then restored (default_on_resume), in that order", () => {
+    expect(primaryFallbackEvents("usb-mic-1")).toEqual([
+      { kind: "mic_primary_lost", payload: { reason: "device_missing_on_resume", device_id: "usb-mic-1" } },
+      { kind: "mic_primary_restored", payload: { reason: "default_on_resume" } },
+    ]);
+    // the badge math this protects: lost count minus restored count nets to zero
+    const kinds = primaryFallbackEvents(null).map((e) => e.kind);
+    expect(kinds.filter((k) => k === "mic_primary_lost").length).toBe(kinds.filter((k) => k === "mic_primary_restored").length);
   });
 });
 

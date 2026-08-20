@@ -10,3 +10,8 @@ export const COMMAND_EXPIRY_SECONDS = 15; // pending > 15 s without a poll → e
 export const LISTENER_FRESH_MS = 10_000; // last_poll_at within 10 s = listening (kickoff)
 export const ACK_WAIT_MS = 8_000; // MCP tools wait this long for the kiosk ack (PRD §8.2)
 export const ACK_POLL_MS = 400;
+// S4-2: the kiosk poll cadence, moved here UNCHANGED from lib/use-command-poll.ts (which
+// re-exports them) so the handover probe can be DERIVED from the hidden round instead of a
+// number typed twice.
+export const POLL_VISIBLE_MS = 1_500;
+export const POLL_HIDDEN_MS = 5_000;

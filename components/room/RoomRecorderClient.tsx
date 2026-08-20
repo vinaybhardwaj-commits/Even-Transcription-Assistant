@@ -341,6 +341,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       } | null;
       next_idx?: { primary?: number; backup?: number } | null;
       handover_pending?: boolean;
+      tab_gone?: boolean;
       handover_started?: boolean | null;
       handover_complete?: boolean | null;
     };
@@ -374,11 +375,14 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         const sid = s.id;
         if (!sid || (s.status !== "recording" && s.status !== "paused")) return;
 
-        // FU2c + S3-1c — ordered handover, proof of life not freshness: probe for the losing
-        // tab's kiosk_handover_started announce (a dead tab never announces — start at once,
-        // no timeout recorded), then wait for its kiosk_handover_complete, then re-read.
+        // FU2c + S3-1c + S4-2 — ordered handover, proof of life not freshness. tab_gone (the
+        // dying tab's pagehide beacon named the listener's tab) is the ordinary reload: start
+        // at once, no probe, no wait, no timeout event. Otherwise probe for the losing tab's
+        // kiosk_handover_started announce (a crashed tab never announces — start after one
+        // bounded probe, no timeout recorded), then wait for its kiosk_handover_complete,
+        // then re-read.
         let handoverTimedOut = false;
-        if (first.handover_pending === true) {
+        if (first.handover_pending === true && first.tab_gone !== true) {
           setHandingOver(true);
           const since = new Date().toISOString();
           let stageT0 = Date.now(); // stage clock: reset when the announce is first seen
@@ -397,6 +401,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             }
             const d = decideHandoverWait({
               handoverPending: true,
+              // mid-wait, the listener row already holds THIS tab, so the exact-match
+              // tab_gone can no longer fire — the fast path was decided on the first answer
+              tabGone: false,
               handoverStarted: startedSeen,
               handoverComplete: complete,
               waitedMs: Date.now() - stageT0,
@@ -642,6 +649,30 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   // FU2: the poll waits for the first /active look (pollEnabled) — see the mount effect.
   const operator = useCommandPoll({ enabled: pollEnabled, actions: commandActions });
   operatorTabIdRef.current = operator.tab_id;
+
+  // S4-1: a dying tab announces. pagehide fires on reload, navigation away and tab close —
+  // all three mean this tab will not be handing anything over. sendBeacon survives the
+  // unloading page where a fetch would not; a failed beacon must never block the unload.
+  // event.persisted = the page is going into the back-forward cache and may come back: not gone.
+  React.useEffect(() => {
+    const onPageHide = (ev: PageTransitionEvent) => {
+      if (ev.persisted) return;
+      const st = stateRef.current;
+      const sid = sessionIdRef.current;
+      if (!sid || (st !== "recording" && st !== "paused")) return;
+      try {
+        const body = new Blob(
+          [JSON.stringify({ kind: "kiosk_tab_gone", session_id: sid, tab_id: operatorTabIdRef.current })],
+          { type: "application/json" },
+        );
+        navigator.sendBeacon("/api/bench/sessions/active", body);
+      } catch {
+        /* never block the unload */
+      }
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
 
   // ---- shared bits ----
   const today = new Date();

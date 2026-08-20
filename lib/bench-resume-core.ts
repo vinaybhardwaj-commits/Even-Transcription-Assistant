@@ -27,15 +27,19 @@ import {
 } from "./bench-reaper-core";
 // S3-2: the pure constants module, NOT bench-commands — this core is imported by the kiosk,
 // and bench-commands carries the database module graph.
-import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "./bench-bus-constants";
+import { ACK_WAIT_MS, LISTENER_FRESH_MS, POLL_HIDDEN_MS } from "./bench-bus-constants";
 
 /**
- * S3-1c — the proof-of-life probe: how long the rejoining tab waits for the losing tab's
- * kiosk_handover_started announce before concluding nobody is alive to hand over. One
- * VISIBLE poll round is 1,500 ms; this leaves margin for one missed round. It is a probe,
- * not a second stall window — do not apply it anywhere else.
+ * S3-1c / S4-2 — the proof-of-life probe: how long the rejoining tab waits for the losing
+ * tab's kiosk_handover_started announce before concluding nobody is alive to hand over.
+ * The displaced tab is the one that just LOST focus, so it polls hidden: one hidden poll
+ * round is POLL_HIDDEN_MS (5,000 ms), and this leaves margin for one late round. Derived,
+ * never typed twice. An ordinary reload does not pay this — the dying tab's pagehide beacon
+ * sets tab_gone and the new tab starts at once. Only a CRASHED tab (no beacon, no announce)
+ * pays the full probe and then starts: rare, and bounded. It is a probe, not a second stall
+ * window — do not apply it anywhere else.
  */
-export const HANDOVER_PROBE_MS = 2_500;
+export const HANDOVER_PROBE_MS = POLL_HIDDEN_MS + 1_500;
 
 /** Same row shape the reaper's sweep SELECT returns (newest chunk per source, null when none). */
 export type BenchResumeCandidate = BenchReapCandidate;
@@ -132,6 +136,23 @@ export function decideHandoverPending(
   return nowMs - polled <= LISTENER_FRESH_MS;
 }
 
+/**
+ * S4-2 — has the tab named in the listener row announced its own death? An EXACT tab_id
+ * match between the newest kiosk_tab_gone event's payload and the listener's current tab_id,
+ * never a time comparison. A stale gone-event from an older tab does not count, and a
+ * missing/malformed payload counts as "not gone" (fail safe: the caller then probes).
+ */
+export function isListenerTabGone(
+  goneEventPayload: unknown,
+  listenerTabId: string | null | undefined,
+): boolean {
+  if (!listenerTabId) return false;
+  const p = (typeof goneEventPayload === "object" && goneEventPayload !== null
+    ? goneEventPayload
+    : {}) as { tab_id?: unknown };
+  return typeof p.tab_id === "string" && p.tab_id.length > 0 && p.tab_id === listenerTabId;
+}
+
 /** FU2d — does a handover event (started or complete) exist at or after `since`? */
 export function hasHandoverEventSince(
   latestEventAt: string | Date | null | undefined,
@@ -144,11 +165,14 @@ export function hasHandoverEventSince(
 export type HandoverWaitDecision = "start" | "wait" | "timeout_start";
 
 /**
- * FU2c + S3-1c — one wait-loop step, two stages, proof of life not freshness. Never hangs:
+ * FU2c + S3-1c + S4-2 — one wait-loop step. Never hangs:
  *
+ *   Fast path (tabGone): the tab named in the listener announced its own death (pagehide
+ *   beacon) — the ordinary reload. Start at once: no probe, no wait, no timeout event.
  *   Stage one (no kiosk_handover_started seen): a live losing tab announces BEFORE it
  *   works; if nothing announces within HANDOVER_PROBE_MS, nobody is alive to hand over —
- *   start at once, and record NO timeout.
+ *   start at once, and record NO timeout. Only a crashed tab (no beacon, no announce)
+ *   lands here, and it pays exactly one bounded probe.
  *   Stage two (the announce arrived): wait up to ACK_WAIT_MS (the command bus's own ack
  *   window, imported) for kiosk_handover_complete; past it, start anyway with the timeout
  *   recorded — a room that is not recording is worse than a number that might clash.
@@ -158,11 +182,30 @@ export type HandoverWaitDecision = "start" | "wait" | "timeout_start";
  */
 export function decideHandoverWait(i: {
   handoverPending: boolean;
+  tabGone: boolean;
   handoverStarted: boolean;
   handoverComplete: boolean;
   waitedMs: number;
 }): HandoverWaitDecision {
-  if (!i.handoverPending || i.handoverComplete) return "start";
+  if (!i.handoverPending || i.tabGone || i.handoverComplete) return "start";
   if (!i.handoverStarted) return i.waitedMs >= HANDOVER_PROBE_MS ? "start" : "wait";
   return i.waitedMs >= ACK_WAIT_MS ? "timeout_start" : "wait";
+}
+
+/**
+ * S4-3 — the mic story a resume fallback writes, as a PAIR. The stored primary did not
+ * open (absent) and the default did: a lost with no restored after it would leave the
+ * admin mic badge reading on-backup for the rest of the day while the default microphone
+ * records perfectly well. Both kinds are already in BENCH_EVENT_KINDS.
+ */
+export function primaryFallbackEvents(
+  deviceId: string | null | undefined,
+): Array<{ kind: "mic_primary_lost" | "mic_primary_restored"; payload: Record<string, unknown> }> {
+  return [
+    {
+      kind: "mic_primary_lost",
+      payload: { reason: "device_missing_on_resume", ...(deviceId ? { device_id: deviceId } : {}) },
+    },
+    { kind: "mic_primary_restored", payload: { reason: "default_on_resume" } },
+  ];
 }

@@ -25,15 +25,20 @@
  * true only when BOTH hold: the bench_listener row carries a DIFFERENT live tab (last poll
  * within the command bus's own LISTENER_FRESH_MS) AND that listener's recording_session_id
  * equals the session being rejoined (a tab that polls but holds no session cannot block
- * anybody). With `since` (ISO) the GET also answers `handover_started` / `handover_complete`
- * — whether those events exist for the session at or after that time; the waiting tab probes
- * for the announce (HANDOVER_PROBE_MS) before committing to the ACK_WAIT_MS wait, so a dead
- * tab costs one short probe, never the full window. Everything fails safe to "no wait".
+ * anybody). S4-2: `tab_gone` — the tab named in the listener row wrote a kiosk_tab_gone
+ * beacon (newest event, EXACT tab_id match): the ordinary reload's fast path, start at once,
+ * no probe. With `since` (ISO) the GET also answers `handover_started` / `handover_complete`
+ * — whether those events exist for the session at or after that time; a not-gone tab is
+ * probed for the announce (HANDOVER_PROBE_MS, one hidden poll round + margin) before the
+ * ACK_WAIT_MS wait, so a crashed tab costs one bounded probe, never the full window.
+ * Everything fails safe to "no wait".
  *
- * POST — the kiosk's three remount event rows: 'kiosk_handover_started' (S3-1a, the losing
- * tab's proof of life, before its flush), 'kiosk_handover_complete' (FU2b, after its last
- * segment is uploaded), and 'kiosk_remount_resumed' (§3.4 gap record, after a successful
- * rejoin; payload may carry handover_timed_out). They live HERE (not POST /api/bench/events)
+ * POST — the kiosk's four remount event rows: 'kiosk_tab_gone' (S4-1, the pagehide beacon —
+ * reload, navigation, close all mean this tab hands nothing over), 'kiosk_handover_started'
+ * (S3-1a, the losing tab's proof of life, before its flush), 'kiosk_handover_complete'
+ * (FU2b, after its last segment is uploaded), and 'kiosk_remount_resumed' (§3.4 gap record,
+ * after a successful rejoin; payload may carry handover_timed_out). They live HERE (not
+ * POST /api/bench/events)
  * for two ratified reasons: that route whitelists kinds via locked lib/bench-dual.ts, and it
  * forwards a best-effort cue to the brain — a remount must not reach the brain as a live
  * cue. brain_status is 'none' (FU1a): no brain hop is ever attempted, and 'failed' means
@@ -53,6 +58,7 @@ import {
   decideHandoverPending,
   decideResume,
   hasHandoverEventSince,
+  isListenerTabGone,
   nextIdxFromMax,
   type BenchResumeCandidate,
   type ResumeReason,
@@ -74,6 +80,7 @@ const notResumable = (reason: ResumeReason | "lookup_failed") =>
     next_idx: null,
     reason,
     handover_pending: false,
+    tab_gone: false,
     handover_started: null,
     handover_complete: null,
   });
@@ -112,12 +119,27 @@ export async function GET(req: NextRequest) {
     // FU2a + S3-1b — is a LIVE different tab holding THIS session? (A tab that polls but
     // holds no session, or another one, cannot block anybody.) Fail-safe false: bus not
     // migrated (0044) or bus down means no wait, which is the pre-handover behaviour.
+    // S4-2 — tab_gone: the tab named in the listener row announced its own death via the
+    // pagehide beacon (newest kiosk_tab_gone event, EXACT tab_id match, no time test).
+    // True = the ordinary reload: the caller starts at once, no probe. Fail-safe false:
+    // the caller then probes, which is bounded.
     let handoverPending = false;
+    let tabGone = false;
     try {
       const listener = await getListener(claims.room_id);
       handoverPending = decideHandoverPending(listener, callerTabId, row.id, Date.now());
+      if (listener?.tab_id) {
+        const gone = (await sql`
+          SELECT payload FROM bench_event
+           WHERE session_id = ${row.id} AND kind = 'kiosk_tab_gone'
+           ORDER BY at DESC
+           LIMIT 1
+        `) as Array<{ payload: unknown }>;
+        tabGone = isListenerTabGone(gone?.[0]?.payload ?? null, listener.tab_id);
+      }
     } catch {
       handoverPending = false;
+      tabGone = false;
     }
 
     // FU2d + S3-1c — has the displaced tab announced (started) and finished (complete)?
@@ -162,6 +184,7 @@ export async function GET(req: NextRequest) {
       },
       reason: null,
       handover_pending: handoverPending,
+      tab_gone: tabGone,
       handover_started: handoverStarted,
       handover_complete: handoverComplete,
     });
@@ -186,13 +209,14 @@ export async function POST(req: NextRequest) {
       next_idx?: { primary?: unknown; backup?: unknown } | null;
       handover_timed_out?: unknown;
       last_idx?: { primary?: unknown; backup?: unknown } | null;
+      tab_id?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
     } catch {
       return respondError("VALIDATION_FAILED", "body_not_json");
     }
-    // Three kiosk-remount kinds only; absent = the original remount body (pre-FU2 kiosks).
+    // Four kiosk-remount kinds only; absent = the original remount body (pre-FU2 kiosks).
     const kind =
       body.kind === undefined || body.kind === "kiosk_remount_resumed"
         ? ("kiosk_remount_resumed" as const)
@@ -200,7 +224,9 @@ export async function POST(req: NextRequest) {
           ? ("kiosk_handover_complete" as const)
           : body.kind === "kiosk_handover_started"
             ? ("kiosk_handover_started" as const)
-            : null;
+            : body.kind === "kiosk_tab_gone"
+              ? ("kiosk_tab_gone" as const)
+              : null;
     if (!kind) return respondError("VALIDATION_FAILED", "kind_not_allowed");
 
     const sessionId = typeof body.session_id === "string" ? body.session_id : "";
@@ -241,9 +267,15 @@ export async function POST(req: NextRequest) {
         session_id: sessionId,
         last_idx: { primary: lastPrimary, backup: lastBackup },
       };
-    } else {
-      // kiosk_handover_started (S3-1a): the proof of life, written before the flush.
+    } else if (kind === "kiosk_handover_started") {
+      // S3-1a: the proof of life, written before the flush.
       payload = { source: "kiosk", session_id: sessionId };
+    } else {
+      // kiosk_tab_gone (S4-1): the pagehide beacon — this tab will not be handing anything
+      // over. The tab_id is what GET's tab_gone exact-matches against the listener row.
+      const tabId = typeof body.tab_id === "string" && body.tab_id.length > 0 && body.tab_id.length <= 64 ? body.tab_id : null;
+      if (!tabId) return respondError("VALIDATION_FAILED", "tab_gone_fields_required");
+      payload = { source: "kiosk", session_id: sessionId, tab_id: tabId };
     }
 
     // The session must belong to the cookie's room and still be open.
