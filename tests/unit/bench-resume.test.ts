@@ -10,15 +10,17 @@
  */
 import { describe, it, expect } from "vitest";
 import { STALLED_BADGE_MINUTES } from "../../lib/bench-reaper-core";
-import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "../../lib/bench-commands";
+import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "../../lib/bench-bus-constants";
 import {
   decideHandoverPending,
   decideHandoverWait,
   decideResume,
-  hasHandoverCompleted,
+  HANDOVER_PROBE_MS,
+  hasHandoverEventSince,
   nextIdxFromMax,
   seedStartIdx,
 } from "../../lib/bench-resume-core";
+import { micEventLabel } from "../../lib/bench-timeline";
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");   // 17:30 IST, 20 Aug
 const min = (n: number) => n * 60_000;
@@ -89,48 +91,80 @@ describe("decideResume — no second window", () => {
   });
 });
 
-describe("FU2a — decideHandoverPending: wait only for a LIVE different tab", () => {
-  it("a different tab whose poll is within LISTENER_FRESH_MS → true", () => {
-    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS + 1_000) }, "tab_new", NOW)).toBe(true);
-    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS) }, "tab_new", NOW)).toBe(true); // exactly at the window is still fresh
+describe("FU2a + S3-1b — decideHandoverPending: a LIVE different tab holding THIS session", () => {
+  const SID = "bs_live";
+  it("a different tab, fresh poll, holding the session being rejoined → true", () => {
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS + 1_000), recording_session_id: SID }, "tab_new", SID, NOW)).toBe(true);
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS), recording_session_id: SID }, "tab_new", SID, NOW)).toBe(true); // exactly at the window is still fresh
   });
   it("a stale tab → false (a crashed tab stops polling and never asks anyone to wait)", () => {
-    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS - 1_000) }, "tab_new", NOW)).toBe(false);
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - LISTENER_FRESH_MS - 1_000), recording_session_id: SID }, "tab_new", SID, NOW)).toBe(false);
   });
-  it("the same tab → false; no listener → false; junk poll time → false", () => {
-    expect(decideHandoverPending({ tab_id: "tab_new", last_poll_at: iso(NOW - 1_000) }, "tab_new", NOW)).toBe(false);
-    expect(decideHandoverPending(null, "tab_new", NOW)).toBe(false);
-    expect(decideHandoverPending(undefined, "tab_new", NOW)).toBe(false);
-    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: "junk" }, "tab_new", NOW)).toBe(false);
+  it("S3-1b condition 2: a fresh listener holding a DIFFERENT session, or NO session, → false", () => {
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - 1_000), recording_session_id: "bs_other" }, "tab_new", SID, NOW)).toBe(false);
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - 1_000), recording_session_id: null }, "tab_new", SID, NOW)).toBe(false);
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: iso(NOW - 1_000) }, "tab_new", SID, NOW)).toBe(false);
   });
-});
-
-describe("FU2d — hasHandoverCompleted: the wait ends at or after `since`", () => {
-  it("an event at `since` or later ends the wait; earlier or absent does not", () => {
-    expect(hasHandoverCompleted(iso(NOW), NOW)).toBe(true);
-    expect(hasHandoverCompleted(iso(NOW + 3_000), NOW)).toBe(true);
-    expect(hasHandoverCompleted(iso(NOW - 1), NOW)).toBe(false);
-    expect(hasHandoverCompleted(null, NOW)).toBe(false);
-    expect(hasHandoverCompleted("junk", NOW)).toBe(false);
+  it("the requesting tab's own id → false; no listener → false; junk poll time → false", () => {
+    expect(decideHandoverPending({ tab_id: "tab_new", last_poll_at: iso(NOW - 1_000), recording_session_id: SID }, "tab_new", SID, NOW)).toBe(false);
+    expect(decideHandoverPending(null, "tab_new", SID, NOW)).toBe(false);
+    expect(decideHandoverPending(undefined, "tab_new", SID, NOW)).toBe(false);
+    expect(decideHandoverPending({ tab_id: "tab_old", last_poll_at: "junk", recording_session_id: SID }, "tab_new", SID, NOW)).toBe(false);
   });
 });
 
-describe("FU2c — decideHandoverWait: a start decision, never a hang", () => {
+describe("FU2d — hasHandoverEventSince: an event at or after `since`", () => {
+  it("at `since` or later → true; earlier, absent or junk → false", () => {
+    expect(hasHandoverEventSince(iso(NOW), NOW)).toBe(true);
+    expect(hasHandoverEventSince(iso(NOW + 3_000), NOW)).toBe(true);
+    expect(hasHandoverEventSince(iso(NOW - 1), NOW)).toBe(false);
+    expect(hasHandoverEventSince(null, NOW)).toBe(false);
+    expect(hasHandoverEventSince("junk", NOW)).toBe(false);
+  });
+});
+
+describe("FU2c + S3-1c — decideHandoverWait: proof of life, then the real wait, never a hang", () => {
   it("no live handover, or a completed one → start at once", () => {
-    expect(decideHandoverWait({ handoverPending: false, handoverComplete: false, waitedMs: 0 })).toBe("start");
-    expect(decideHandoverWait({ handoverPending: true, handoverComplete: true, waitedMs: 0 })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: false, handoverStarted: false, handoverComplete: false, waitedMs: 0 })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: true, waitedMs: 0 })).toBe("start");
   });
-  it("pending and incomplete → wait, but never past ACK_WAIT_MS (the bus's own window, imported)", () => {
-    expect(decideHandoverWait({ handoverPending: true, handoverComplete: false, waitedMs: ACK_WAIT_MS - 1 })).toBe("wait");
-    expect(decideHandoverWait({ handoverPending: true, handoverComplete: false, waitedMs: ACK_WAIT_MS })).toBe("timeout_start");
-    expect(decideHandoverWait({ handoverPending: true, handoverComplete: false, waitedMs: ACK_WAIT_MS * 10 })).toBe("timeout_start");
+  it("stage one: no start event inside the probe → start at once, and it is NOT a timeout (no event recorded)", () => {
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS - 1 })).toBe("wait");
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("start");
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: false, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS * 10 })).toBe("start");
   });
-  it("every input yields a decision that is not an unbounded wait once waitedMs reaches the cap", () => {
+  it("stage two: the start event arrived → wait for the completion event up to ACK_WAIT_MS", () => {
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: HANDOVER_PROBE_MS })).toBe("wait");
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS - 1 })).toBe("wait");
+  });
+  it("stage two timeout: started but never completed → start after the full wait, WITH the timeout recorded", () => {
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS })).toBe("timeout_start");
+    expect(decideHandoverWait({ handoverPending: true, handoverStarted: true, handoverComplete: false, waitedMs: ACK_WAIT_MS * 10 })).toBe("timeout_start");
+  });
+  it("every input yields a decision that is not an unbounded wait once waitedMs reaches the ack window", () => {
     for (const handoverPending of [true, false]) {
-      for (const handoverComplete of [true, false]) {
-        expect(decideHandoverWait({ handoverPending, handoverComplete, waitedMs: ACK_WAIT_MS })).not.toBe("wait");
+      for (const handoverStarted of [true, false]) {
+        for (const handoverComplete of [true, false]) {
+          expect(decideHandoverWait({ handoverPending, handoverStarted, handoverComplete, waitedMs: ACK_WAIT_MS })).not.toBe("wait");
+        }
       }
     }
+  });
+  it("the probe is a probe, not a second stall window: strictly shorter than the ack wait", () => {
+    expect(HANDOVER_PROBE_MS).toBe(2_500);
+    expect(HANDOVER_PROBE_MS).toBeLessThan(ACK_WAIT_MS);
+  });
+});
+
+describe("S3-4 — the timeline label splits mic_backup_unavailable on the reason", () => {
+  it("watchdog_suspended → 'mic monitoring not armed', reason folded into the label", () => {
+    expect(micEventLabel("mic_backup_unavailable", "watchdog_suspended")).toEqual({ label: "mic monitoring not armed", detail: null });
+  });
+  it("every other reason for that kind keeps today's label, reason appended as before", () => {
+    expect(micEventLabel("mic_backup_unavailable", "no_device")).toEqual({ label: "no backup mic", detail: "no_device" });
+    expect(micEventLabel("mic_backup_unavailable", null)).toEqual({ label: "no backup mic", detail: null });
+    expect(micEventLabel("mic_primary_lost", "watchdog_suspended")).toEqual({ label: "main mic lost · on backup mic", detail: "watchdog_suspended" });
+    expect(micEventLabel("kiosk_remount_resumed", "78 s silence")).toEqual({ label: "rejoined after reload", detail: "78 s silence" });
   });
 });
 

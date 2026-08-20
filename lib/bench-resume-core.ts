@@ -25,7 +25,17 @@ import {
   STALLED_BADGE_MINUTES,
   type BenchReapCandidate,
 } from "./bench-reaper-core";
-import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "./bench-commands";
+// S3-2: the pure constants module, NOT bench-commands — this core is imported by the kiosk,
+// and bench-commands carries the database module graph.
+import { ACK_WAIT_MS, LISTENER_FRESH_MS } from "./bench-bus-constants";
+
+/**
+ * S3-1c — the proof-of-life probe: how long the rejoining tab waits for the losing tab's
+ * kiosk_handover_started announce before concluding nobody is alive to hand over. One
+ * VISIBLE poll round is 1,500 ms; this leaves margin for one missed round. It is a probe,
+ * not a second stall window — do not apply it anywhere else.
+ */
+export const HANDOVER_PROBE_MS = 2_500;
 
 /** Same row shape the reaper's sweep SELECT returns (newest chunk per source, null when none). */
 export type BenchResumeCandidate = BenchReapCandidate;
@@ -98,45 +108,61 @@ export function seedStartIdx(serverNextIdx: number, localMaxIdx: number): number
 // ---------------------------------------------------------------------------
 
 /**
- * FU2a — a wait is needed only when a LIVE different tab holds the room: the listener row
- * carries another tab_id whose last poll is within LISTENER_FRESH_MS (the command bus's own
- * freshness window, imported — never a second number). A crashed tab stops polling, goes
- * stale, and never asks anyone to wait.
+ * FU2a + S3-1b — a wait is needed only when a LIVE different tab holds THIS session. Both
+ * must hold: the listener row carries another tab_id whose last poll is within
+ * LISTENER_FRESH_MS (the command bus's own freshness window, imported — never a second
+ * number), AND that listener's recording_session_id equals the session being rejoined. A
+ * crashed tab stops polling and goes stale; a tab that polls but holds no session — or a
+ * different one — cannot block anybody.
  */
 export function decideHandoverPending(
-  listener: { tab_id: string; last_poll_at: string | Date } | null | undefined,
+  listener:
+    | { tab_id: string; last_poll_at: string | Date; recording_session_id?: string | null }
+    | null
+    | undefined,
   callerTabId: string | null | undefined,
+  sessionId: string,
   nowMs: number,
 ): boolean {
   if (!listener || typeof listener.tab_id !== "string" || !listener.tab_id) return false;
   if (callerTabId && listener.tab_id === callerTabId) return false;
+  if (!sessionId || listener.recording_session_id !== sessionId) return false;
   const polled = msOf(listener.last_poll_at);
   if (polled == null) return false;
   return nowMs - polled <= LISTENER_FRESH_MS;
 }
 
-/** FU2d — the wait is over once a kiosk_handover_complete event exists at or after `since`. */
-export function hasHandoverCompleted(
-  latestHandoverAt: string | Date | null | undefined,
+/** FU2d — does a handover event (started or complete) exist at or after `since`? */
+export function hasHandoverEventSince(
+  latestEventAt: string | Date | null | undefined,
   sinceMs: number,
 ): boolean {
-  const t = msOf(latestHandoverAt);
+  const t = msOf(latestEventAt);
   return t !== null && t >= sinceMs;
 }
 
 export type HandoverWaitDecision = "start" | "wait" | "timeout_start";
 
 /**
- * FU2c — one wait-loop step. Never hangs: no live handover or a completed one starts at
- * once; a wait longer than ACK_WAIT_MS (the command bus's own ack window, imported) starts
- * anyway — a room that is not recording is worse than a number that might clash.
+ * FU2c + S3-1c — one wait-loop step, two stages, proof of life not freshness. Never hangs:
+ *
+ *   Stage one (no kiosk_handover_started seen): a live losing tab announces BEFORE it
+ *   works; if nothing announces within HANDOVER_PROBE_MS, nobody is alive to hand over —
+ *   start at once, and record NO timeout.
+ *   Stage two (the announce arrived): wait up to ACK_WAIT_MS (the command bus's own ack
+ *   window, imported) for kiosk_handover_complete; past it, start anyway with the timeout
+ *   recorded — a room that is not recording is worse than a number that might clash.
+ *
+ * `waitedMs` is the caller's stage clock: ms since the wait began while in stage one, reset
+ * to ms since the announce was first seen once in stage two.
  */
 export function decideHandoverWait(i: {
   handoverPending: boolean;
+  handoverStarted: boolean;
   handoverComplete: boolean;
   waitedMs: number;
 }): HandoverWaitDecision {
   if (!i.handoverPending || i.handoverComplete) return "start";
-  if (i.waitedMs >= ACK_WAIT_MS) return "timeout_start";
-  return "wait";
+  if (!i.handoverStarted) return i.waitedMs >= HANDOVER_PROBE_MS ? "start" : "wait";
+  return i.waitedMs >= ACK_WAIT_MS ? "timeout_start" : "wait";
 }

@@ -1178,15 +1178,26 @@ export function useRoomRecorder(opts?: {
 
       const P = primaryRef.current;
       const B = backupRef.current;
+      // S3-3: ask the microphone, do not survey the room. A device that opens is present;
+      // a device that does not open is absent — no enumeration, no third "blank" answer.
+      let primaryFellBack = false;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            ...(opts.deviceId ? { deviceId: { exact: opts.deviceId } } : {}),
-            ...AUDIO_CONSTRAINTS,
-          },
-        });
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              ...(opts.deviceId ? { deviceId: { exact: opts.deviceId } } : {}),
+              ...AUDIO_CONSTRAINTS,
+            },
+          });
+        } catch (e) {
+          if (!opts.deviceId) throw e;
+          // The stored primary did not open — absent. The tape must not die for it.
+          primaryFellBack = true;
+          stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
+        }
         P.stream = stream;
-        P.deviceId = opts.deviceId ?? null;
+        P.deviceId = primaryFellBack ? null : (opts.deviceId ?? null);
         attachPrimaryListeners(stream);
         sessionIdRef.current = sessionId;
         P.idx = primaryStartIdx;
@@ -1232,6 +1243,9 @@ export function useRoomRecorder(opts?: {
         stateRef.current = "error";
         emitError(msg);
         throw new Error(msg);
+      }
+      if (primaryFellBack) {
+        emitEvent("mic_primary_lost", { reason: "device_missing_on_resume", device_id: opts.deviceId });
       }
       // Backup lane — AFTER the primary is live; its own try/catch domain (never throws up).
       backupErroredRef.current = false;

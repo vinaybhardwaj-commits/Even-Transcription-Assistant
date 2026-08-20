@@ -83,6 +83,22 @@ const IST_LONG_DATE = new Intl.DateTimeFormat("en-GB", {
 export const fmtIstHm = (d: Date): string => IST_HM.format(d);
 export const fmtIstLongDate = (d: Date): string => IST_LONG_DATE.format(d);
 
+/**
+ * S3-4 (addendum 3): say what is actually wrong. mic_backup_unavailable with reason
+ * watchdog_suspended is not a backup-mic story — it means the silence failsafe never armed
+ * after an untouched rejoin. That one case gets its own label (and the reason, now inside
+ * the label's meaning, is not repeated); every other kind/reason keeps today's rendering.
+ */
+export function micEventLabel(
+  kind: string,
+  reason: string | null,
+): { label: string; detail: string | null } {
+  if (kind === "mic_backup_unavailable" && reason === "watchdog_suspended") {
+    return { label: "mic monitoring not armed", detail: null };
+  }
+  return { label: MIC_LABEL[kind] ?? kind, detail: reason };
+}
+
 const STATE_LABEL: Record<string, string> = {
   called: "called",
   in_chair: "in chair",
@@ -126,8 +142,8 @@ export function buildBenchTimeline(input: TimelineInput): string {
     for (const v of input.visits) lines.push(visitLine(v));
   }
   for (const e of input.mic_events ?? []) {
-    const label = MIC_LABEL[e.kind] ?? e.kind;
-    const reason = e.reason ? ` · ${e.reason}` : "";
+    const { label, detail } = micEventLabel(e.kind, e.reason ?? null);
+    const reason = detail ? ` · ${detail}` : "";
     const tag = e.kind.startsWith("mic_") ? "mic" : "kiosk";
     lines.push({ at: e.at.getTime(), rank: 0, text: `- ${fmtIstHm(e.at)}  ${label}${reason} (${tag})` });
   }

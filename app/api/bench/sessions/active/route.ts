@@ -21,20 +21,24 @@
  * resumable:false with reason "lookup_failed" and the kiosk shows the start screen (today's
  * behaviour, which loses nothing that is not already lost).
  *
- * FU2 (addendum 2, ordered handover): GET also answers `handover_pending` — true only when
- * the bench_listener row holds a DIFFERENT live tab (last poll within the command bus's own
- * LISTENER_FRESH_MS); a crashed tab goes stale and never asks anyone to wait — and, when the
- * caller passes `since` (ISO), `handover_complete` — whether a kiosk_handover_complete event
- * exists for the session at or after that time. Both fail safe to "no wait".
+ * FU2 (addendum 2) + S3-1 (addendum 3, proof of life): GET also answers `handover_pending` —
+ * true only when BOTH hold: the bench_listener row carries a DIFFERENT live tab (last poll
+ * within the command bus's own LISTENER_FRESH_MS) AND that listener's recording_session_id
+ * equals the session being rejoined (a tab that polls but holds no session cannot block
+ * anybody). With `since` (ISO) the GET also answers `handover_started` / `handover_complete`
+ * — whether those events exist for the session at or after that time; the waiting tab probes
+ * for the announce (HANDOVER_PROBE_MS) before committing to the ACK_WAIT_MS wait, so a dead
+ * tab costs one short probe, never the full window. Everything fails safe to "no wait".
  *
- * POST — the kiosk's two remount event rows, kinds 'kiosk_remount_resumed' (§3.4 gap record,
- * after a successful rejoin; payload may carry handover_timed_out) and
- * 'kiosk_handover_complete' (FU2b, the losing tab after its last segment is uploaded). They
- * live HERE (not POST /api/bench/events) for two ratified reasons: that route whitelists
- * kinds via locked lib/bench-dual.ts, and it forwards a best-effort cue to the brain — a
- * remount must not reach the brain as a live cue. brain_status is 'none' (FU1a): no brain
- * hop is ever attempted, and 'failed' means "attempted, not yet succeeded" everywhere else.
- * The kind set in the table is open (0043), no migration.
+ * POST — the kiosk's three remount event rows: 'kiosk_handover_started' (S3-1a, the losing
+ * tab's proof of life, before its flush), 'kiosk_handover_complete' (FU2b, after its last
+ * segment is uploaded), and 'kiosk_remount_resumed' (§3.4 gap record, after a successful
+ * rejoin; payload may carry handover_timed_out). They live HERE (not POST /api/bench/events)
+ * for two ratified reasons: that route whitelists kinds via locked lib/bench-dual.ts, and it
+ * forwards a best-effort cue to the brain — a remount must not reach the brain as a live
+ * cue. brain_status is 'none' (FU1a): no brain hop is ever attempted, and 'failed' means
+ * "attempted, not yet succeeded" everywhere else. The kind set in the table is open (0043),
+ * no migration.
  *
  * SQL — INFERRED against 0041 / 0043 / 0045 (no live DB in the sandbox).
  */
@@ -48,7 +52,7 @@ import { getListener } from "@/lib/bench-commands";
 import {
   decideHandoverPending,
   decideResume,
-  hasHandoverCompleted,
+  hasHandoverEventSince,
   nextIdxFromMax,
   type BenchResumeCandidate,
   type ResumeReason,
@@ -70,6 +74,7 @@ const notResumable = (reason: ResumeReason | "lookup_failed") =>
     next_idx: null,
     reason,
     handover_pending: false,
+    handover_started: null,
     handover_complete: null,
   });
 
@@ -104,29 +109,39 @@ export async function GET(req: NextRequest) {
       return notResumable(decision.reason === "ok" ? "none" : decision.reason);
     }
 
-    // FU2a — is a LIVE different tab holding the room? Fail-safe false: bus not migrated
-    // (0044) or bus down means no wait, which is the pre-handover behaviour.
+    // FU2a + S3-1b — is a LIVE different tab holding THIS session? (A tab that polls but
+    // holds no session, or another one, cannot block anybody.) Fail-safe false: bus not
+    // migrated (0044) or bus down means no wait, which is the pre-handover behaviour.
     let handoverPending = false;
     try {
       const listener = await getListener(claims.room_id);
-      handoverPending = decideHandoverPending(listener, callerTabId, Date.now());
+      handoverPending = decideHandoverPending(listener, callerTabId, row.id, Date.now());
     } catch {
       handoverPending = false;
     }
 
-    // FU2d — has the displaced tab finished? Only asked when the caller passes `since`.
-    // Fail-safe false: the waiting tab then times out and starts anyway (bounded).
+    // FU2d + S3-1c — has the displaced tab announced (started) and finished (complete)?
+    // Only asked when the caller passes `since`. Fail-safe false on either: the waiting
+    // tab then falls through the probe or the ack window and starts anyway (bounded).
+    let handoverStarted: boolean | null = null;
     let handoverComplete: boolean | null = null;
     if (Number.isFinite(sinceMs)) {
+      handoverStarted = false;
+      handoverComplete = false;
       try {
         const ev = (await sql`
-          SELECT at FROM bench_event
-           WHERE session_id = ${row.id} AND kind = 'kiosk_handover_complete'
-           ORDER BY at DESC
-           LIMIT 1
-        `) as Array<{ at: string | Date }>;
-        handoverComplete = hasHandoverCompleted(ev?.[0]?.at ?? null, sinceMs);
+          SELECT kind, MAX(at) AS at
+            FROM bench_event
+           WHERE session_id = ${row.id}
+             AND kind IN ('kiosk_handover_started', 'kiosk_handover_complete')
+           GROUP BY kind
+        `) as Array<{ kind: string; at: string | Date }>;
+        for (const e of ev ?? []) {
+          if (e.kind === "kiosk_handover_started") handoverStarted = hasHandoverEventSince(e.at, sinceMs);
+          if (e.kind === "kiosk_handover_complete") handoverComplete = hasHandoverEventSince(e.at, sinceMs);
+        }
       } catch {
+        handoverStarted = false;
         handoverComplete = false;
       }
     }
@@ -147,6 +162,7 @@ export async function GET(req: NextRequest) {
       },
       reason: null,
       handover_pending: handoverPending,
+      handover_started: handoverStarted,
       handover_complete: handoverComplete,
     });
   } catch (e) {
@@ -176,13 +192,15 @@ export async function POST(req: NextRequest) {
     } catch {
       return respondError("VALIDATION_FAILED", "body_not_json");
     }
-    // Two kiosk-remount kinds only; absent = the original remount body (pre-FU2 kiosks).
+    // Three kiosk-remount kinds only; absent = the original remount body (pre-FU2 kiosks).
     const kind =
       body.kind === undefined || body.kind === "kiosk_remount_resumed"
         ? ("kiosk_remount_resumed" as const)
         : body.kind === "kiosk_handover_complete"
           ? ("kiosk_handover_complete" as const)
-          : null;
+          : body.kind === "kiosk_handover_started"
+            ? ("kiosk_handover_started" as const)
+            : null;
     if (!kind) return respondError("VALIDATION_FAILED", "kind_not_allowed");
 
     const sessionId = typeof body.session_id === "string" ? body.session_id : "";
@@ -210,9 +228,9 @@ export async function POST(req: NextRequest) {
         next_idx: { primary: primaryIdx, backup: backupIdx },
         ...(body.handover_timed_out === true ? { handover_timed_out: true } : {}),
       };
-    } else {
-      // kiosk_handover_complete (FU2b): the last number the losing tab used per stream
-      // (-1 = the stream never produced a chunk in that tab's life).
+    } else if (kind === "kiosk_handover_complete") {
+      // FU2b: the last number the losing tab used per stream (-1 = the stream never
+      // produced a chunk in that tab's life).
       const lastPrimary = idxOf(body.last_idx?.primary, -1);
       const lastBackup = idxOf(body.last_idx?.backup, -1);
       if (lastPrimary === null || lastBackup === null) {
@@ -223,6 +241,9 @@ export async function POST(req: NextRequest) {
         session_id: sessionId,
         last_idx: { primary: lastPrimary, backup: lastBackup },
       };
+    } else {
+      // kiosk_handover_started (S3-1a): the proof of life, written before the flush.
+      payload = { source: "kiosk", session_id: sessionId };
     }
 
     // The session must belong to the cookie's room and still be open.

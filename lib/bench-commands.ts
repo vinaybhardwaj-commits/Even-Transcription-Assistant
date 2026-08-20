@@ -20,10 +20,10 @@ import { customAlphabet } from "nanoid";
 
 export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
-export const COMMAND_EXPIRY_SECONDS = 15; // pending > 15 s without a poll → expired (PRD §8.2)
-export const LISTENER_FRESH_MS = 10_000; // last_poll_at within 10 s = listening (kickoff)
-export const ACK_WAIT_MS = 8_000; // MCP tools wait this long for the kiosk ack (PRD §8.2)
-export const ACK_POLL_MS = 400;
+// S3-2: the timing constants live in the pure lib/bench-bus-constants.ts (kiosk-bundle safe);
+// re-exported here so every existing caller keeps working unchanged.
+export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
+import { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
 
 const cmdId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
 export const newCommandId = (): string => `cmd_${cmdId()}`;

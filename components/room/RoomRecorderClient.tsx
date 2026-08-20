@@ -53,7 +53,9 @@ import {
   type ArchiveSeamEvent,
   type BenchMicEvent,
 } from "@/lib/use-room-recorder";
-import { ACK_POLL_MS, ACK_WAIT_MS } from "@/lib/bench-commands";
+// S3-2: the pure constants module — never bench-commands, whose module graph carries the
+// database driver and has no business in a kiosk bundle.
+import { ACK_POLL_MS } from "@/lib/bench-bus-constants";
 import { decideHandoverWait } from "@/lib/bench-resume-core";
 import { LIVE_SINK } from "@/lib/live-flags";
 import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
@@ -339,6 +341,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       } | null;
       next_idx?: { primary?: number; backup?: number } | null;
       handover_pending?: boolean;
+      handover_started?: boolean | null;
       handover_complete?: boolean | null;
     };
     const getActive = async (since?: string): Promise<ActiveAnswer | null> => {
@@ -371,24 +374,32 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         const sid = s.id;
         if (!sid || (s.status !== "recording" && s.status !== "paused")) return;
 
-        // FU2c — ordered handover: wait for the losing tab's last segment, then re-read.
+        // FU2c + S3-1c — ordered handover, proof of life not freshness: probe for the losing
+        // tab's kiosk_handover_started announce (a dead tab never announces — start at once,
+        // no timeout recorded), then wait for its kiosk_handover_complete, then re-read.
         let handoverTimedOut = false;
         if (first.handover_pending === true) {
           setHandingOver(true);
           const since = new Date().toISOString();
-          const t0 = Date.now();
+          let stageT0 = Date.now(); // stage clock: reset when the announce is first seen
+          let startedSeen = false;
           for (;;) {
             let complete = false;
             try {
               const p = await getActive(since);
+              if (p?.handover_started === true && !startedSeen) {
+                startedSeen = true;
+                stageT0 = Date.now(); // stage two begins — the ack window runs from here
+              }
               complete = p?.handover_complete === true;
             } catch {
               complete = false;
             }
             const d = decideHandoverWait({
               handoverPending: true,
+              handoverStarted: startedSeen,
               handoverComplete: complete,
-              waitedMs: Date.now() - t0,
+              waitedMs: Date.now() - stageT0,
             });
             if (d === "start") break;
             if (d === "timeout_start") {
@@ -411,43 +422,25 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         }
         const finalStatus: "recording" | "paused" = s.status === "paused" ? "paused" : "recording";
 
-        // FU3 — the room's chosen primary mic, if it is still plugged in.
+        // FU3 + S3-3 — the room's chosen primary mic, asked directly: the hook opens the
+        // stored id and, if it does not open, falls back to the default and writes the
+        // mic_primary_lost(device_missing_on_resume) event itself. No enumeration — a
+        // device that opens is present, a device that does not open is absent.
         const storedPrimary = await loadBenchSetting<string>(PRIMARY_DEVICE_SETTING);
         const storedBackup = await loadBenchSetting<string>(BACKUP_DEVICE_SETTING);
-        let primaryDeviceId: string | undefined;
-        let primaryMissingOnResume = false;
-        if (storedPrimary) {
-          try {
-            const devs = await navigator.mediaDevices.enumerateDevices();
-            if (devs.some((d) => d.kind === "audioinput" && d.deviceId === storedPrimary)) {
-              primaryDeviceId = storedPrimary;
-            } else {
-              primaryMissingOnResume = true;
-            }
-          } catch {
-            primaryDeviceId = undefined; // cannot check — the default is the safe open
-          }
-        }
 
         const startedMs = s.started_at ? Date.parse(s.started_at) : NaN;
         const lastAudioIso = s.last_any_chunk_at ?? s.started_at ?? null;
         const lastAudioMs = lastAudioIso ? Date.parse(lastAudioIso) : NaN;
         setSessionId(sid);
         sessionIdForEventsRef.current = sid; // mic-story events during the rejoin carry the session
-        if (primaryMissingOnResume) {
-          postMicEvent({
-            kind: "mic_primary_lost",
-            at: Date.now(),
-            payload: { reason: "device_missing_on_resume", device_id: storedPrimary },
-          });
-        }
         rejoining = true;
         const seeded = await resumeSession(sid, {
           nextPrimaryIdx: next?.primary ?? 0,
           nextBackupIdx: next?.backup ?? 0,
           paused: finalStatus === "paused",
           dayStartedAt: Number.isFinite(startedMs) ? startedMs : null,
-          deviceId: primaryDeviceId,
+          deviceId: storedPrimary || undefined,
           backupDeviceId: storedBackup || null,
         });
         setResumed({ status: finalStatus });
@@ -613,13 +606,23 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   stateRef.current = status.state;
   const sessionIdRef = React.useRef(sessionId);
   sessionIdRef.current = sessionId;
-  // Remount-resume D3: a newer tab took the room. Stop both streams and flush the current
+  // Remount-resume D3: a newer tab took the room. S3-1a — announce FIRST (the proof of
+  // life the new tab's probe is watching for), then stop both streams and flush the current
   // segment to disk + upload (endDay does exactly that) — but NEVER PATCH end: endingUpload
   // stays false, so the drained-queue effect never fires and the new tab keeps the session.
   const onTakeover = React.useCallback(async () => {
     setTakenOver(true);
     const st = stateRef.current;
     if (st === "recording" || st === "paused") {
+      const sid = sessionIdRef.current;
+      if (sid) {
+        void fetch("/api/bench/sessions/active", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "kiosk_handover_started", session_id: sid }),
+          keepalive: true,
+        }).catch(() => undefined);
+      }
       await endDay();
     }
   }, [endDay]);
