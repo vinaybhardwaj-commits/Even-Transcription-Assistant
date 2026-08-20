@@ -47,6 +47,14 @@
  * scribe_diff_room  — the now-picture across enabled rooms: page open (LISTENER_FRESH_MS),
  *                     recording, last cue, last piece, flags kiosk_not_listening / stalled /
  *                     tape_without_cues / ended_at_lies (all windows imported — D11).
+ *
+ * U1 (ETA-MCP-UPGRADE PRD §6, read only — DRY RUN, THE ONLY MODE):
+ * scribe_replay_session — a finished day turned back into the stream of cues it would have
+ *                     produced live. It WRITES NOTHING: no cue posted, no row inserted, no day
+ *                     created, not behind a flag and not commented out. There is no write path
+ *                     in this build; a future slice that wants to post replay output adds the
+ *                     write then, with its own decision behind it. Input to the fuse work, not
+ *                     a feature for the clinic.
  */
 
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
@@ -85,7 +93,7 @@ import {
   type ListenerRow,
 } from "@/lib/bench-commands";
 import { argBool, argDate, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
-import { AmbiguousRoomError, postBrainCue, resolveRoom, type RoomRef } from "./brain";
+import { AmbiguousRoomError, postBrainCue, resolveRoom, type CueSource, type RoomRef } from "./brain";
 
 const PRESIGN_SECONDS = 3600; // 1 h family (matches manifest route)
 
@@ -943,6 +951,19 @@ export function tapeEndMs(chunks: ReadonlyArray<{ ended_at: string | Date }>): n
   return max;
 }
 
+/** The tape's start: the oldest chunk started_at across BOTH microphones. Null when no piece.
+ *  U1 pairs it with tapeEndMs for the replay window — the FIRST and LAST piece recorded, which
+ *  is the only honest session window (started_at can precede the first piece, and the stored
+ *  ended_at is not the end of the recording at all). */
+export function tapeStartMs(chunks: ReadonlyArray<{ started_at: string | Date }>): number | null {
+  let min: number | null = null;
+  for (const c of chunks) {
+    const t = msOfLoose(c.started_at);
+    if (t !== null && (min === null || t < min)) min = t;
+  }
+  return min;
+}
+
 /** U3 day report: stored end vs tape end differ by MORE than the reaper's badge window
  *  (either direction — a stored end far before the last piece is just as untrue). */
 export function endTimeDisagrees(storedEndMs: number | null, tapeMs: number | null): boolean {
@@ -1199,6 +1220,188 @@ const diffRoom: McpTool = {
     }),
 };
 
+// ---------------------------------------------------------------------------
+// U1 — replay a finished day (read; ETA-MCP-UPGRADE PRD §6)
+//
+// THERE IS NO WRITE PATH IN THIS BUILD. Dry run is the only mode. Everything below
+// reads (findBenchSession / listBenchChunks / listBenchEvents — three SELECTs already
+// in lib/bench) and shapes; nothing posts a cue, inserts a row, creates a day or leaves
+// a scratch object. A write path that exists can be triggered by accident, and the thing
+// it would overwrite is a real clinic day.
+//
+// DETERMINISM: two runs on the same session must be byte-identical, so nothing here reads
+// the clock (no generated_at) and the order is total — time, then kind, then row id, so
+// ties never shuffle. The natural key for whoever later builds the writer is
+// (session_id, type, at); it is stated in the tool description so that contract is
+// inherited rather than reinvented.
+// ---------------------------------------------------------------------------
+
+/** The seven event kinds a day replays as cues (PRD §6).
+ *  NOT here, deliberately: speech turns (transcribing a whole day is a different job with a
+ *  different cost, and it is not settled) and kiosk_handover_complete / kiosk_tab_gone
+ *  (they describe the kiosk's own plumbing, not the day). */
+export const REPLAY_KINDS = [
+  "consult_mark",
+  "mic_primary_lost",
+  "mic_primary_restored",
+  "mic_backup_unavailable",
+  "mic_backup_error",
+  "mic_backup_restored",
+  "kiosk_remount_resumed",
+] as const;
+
+const REPLAY_KIND_SET: ReadonlySet<string> = new Set<string>(REPLAY_KINDS);
+
+/**
+ * Payload fields dropped before a cue leaves this tool. bench_event.payload is an open jsonb
+ * written from kiosk and operator input, so it is filtered by name, not trusted: `note` is the
+ * operator's free text on a consult mark (scribe_mark_consult), `message` is free text off a
+ * browser error, and `label` / `mic_label` / `notes` / `device_label` are the human-readable
+ * names of a session or a microphone. Every one of them can carry a clinician or patient name.
+ * Operational fields (reason, idx, source, silence_seconds, next_idx, …) pass through unchanged.
+ */
+export const REPLAY_DROPPED_PAYLOAD_FIELDS = ["device_label", "label", "message", "mic_label", "note", "notes"] as const;
+
+const REPLAY_DROP_SET: ReadonlySet<string> = new Set<string>(REPLAY_DROPPED_PAYLOAD_FIELDS);
+
+export const REPLAY_DEFAULT_LIMIT = 500;
+export const REPLAY_MAX_LIMIT = 1000;
+
+/** Typed against the brain's own cue sources, so a replay cue is a legal cue by construction. */
+const REPLAY_SOURCE: CueSource = "replay";
+
+export type ReplayCue = {
+  type: string;
+  at: string;
+  payload: Record<string, unknown>;
+  source: CueSource;
+  event_id: string;
+};
+
+/** Identity filter + stable key order (so the serialised cue cannot shuffle between runs). */
+export function replayPayload(payload: unknown): { payload: Record<string, unknown>; dropped: string[] } {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return { payload: {}, dropped: [] };
+  const src = payload as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const k of Object.keys(src).sort()) {
+    if (REPLAY_DROP_SET.has(k)) dropped.push(k);
+    else out[k] = src[k];
+  }
+  return { payload: out, dropped };
+}
+
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+type ReplayEventRow = Pick<BenchEventRow, "id" | "kind" | "at" | "payload">;
+
+/**
+ * PURE — event rows → the cue list. Only REPLAY_KINDS survive; the order is total (time, kind,
+ * row id); over `limit` the FIRST `limit` in time order are returned and `truncated` says so
+ * with the true total. Never silently truncates, never writes.
+ */
+export function buildReplayCues(
+  events: ReadonlyArray<ReplayEventRow>,
+  limit: number = REPLAY_DEFAULT_LIMIT,
+): { cues: ReplayCue[]; emitted: number; total: number; truncated: boolean; dropped_payload_fields: string[] } {
+  const eligible = events.filter((e) => REPLAY_KIND_SET.has(e.kind));
+  const ordered = [...eligible].sort(
+    (a, b) => (msOfLoose(a.at) ?? 0) - (msOfLoose(b.at) ?? 0) || cmp(a.kind, b.kind) || cmp(a.id, b.id),
+  );
+  const total = ordered.length;
+  const kept = ordered.slice(0, Math.max(0, limit));
+  const dropped = new Set<string>();
+  const cues = kept.map((e) => {
+    const p = replayPayload(e.payload);
+    for (const f of p.dropped) dropped.add(f);
+    return {
+      type: e.kind,
+      at: new Date(e.at).toISOString(),
+      payload: p.payload,
+      source: REPLAY_SOURCE,
+      event_id: e.id,
+    };
+  });
+  return {
+    cues,
+    emitted: cues.length,
+    total,
+    truncated: total > cues.length,
+    dropped_payload_fields: [...dropped].sort(),
+  };
+}
+
+const replaySession: McpTool = {
+  name: "scribe_replay_session",
+  description:
+    "DRY RUN, THE ONLY MODE — replay a finished session as the cue list it would have produced live, and WRITE NOTHING (no cue posted, no row inserted, no day created). Cues in time order, each { type, at (the event's own recorded time, the client's wall clock), payload, source:'replay', event_id (the bench_event row it came from) }, plus a header with the session, room, IST day, the count emitted and the session window taken from the FIRST and LAST piece recorded (never the stored ended_at). Kinds replayed: consult_mark, mic_primary_lost, mic_primary_restored, mic_backup_unavailable, mic_backup_error, mic_backup_restored, kiosk_remount_resumed — no speech turns, no kiosk handover/tab-gone plumbing. Deterministic: ordered by time, then kind, then row id, so two runs on one session are identical. The natural key for a later writer is (session_id, type, at). limit default 500, max 1000; over the limit the first `limit` come back with truncated:true and the true total. No labels, no notes, no identity.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_id: { type: "string", description: "bs_… id" },
+      limit: { type: "integer", minimum: 1, maximum: REPLAY_MAX_LIMIT, default: REPLAY_DEFAULT_LIMIT },
+    },
+    required: ["session_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ cues: [] as unknown[] }, async () => {
+      const id = argStr(args, "session_id", 64);
+      if (!id || !id.startsWith("bs_")) return { cues: [], error: "bad_session_id" };
+      const session = await findBenchSession(id);
+      if (!session) return { cues: [], error: "session_not_found" };
+      const limit = argInt(args, "limit", REPLAY_DEFAULT_LIMIT, 1, REPLAY_MAX_LIMIT);
+
+      const degraded: string[] = [];
+      // The window: the first and last piece recorded on EITHER microphone.
+      let chunks: BenchChunkRow[] = [];
+      try {
+        chunks = await listBenchChunks(session.id); // fail-safe [] inside — keep the guard
+      } catch {
+        degraded.push("chunks_read_failed");
+      }
+      const fromMs = tapeStartMs(chunks);
+      const toMs = tapeEndMs(chunks);
+
+      let events: BenchEventRow[] = [];
+      try {
+        events = await listBenchEvents(session.id);
+      } catch {
+        degraded.push("events_read_failed");
+      }
+      // listBenchEvents reads at most 2000 rows; at exactly that many the total below is a
+      // floor, not the count. Say so rather than report a number that could be short.
+      if (events.length >= 2000) degraded.push("event_read_cap_2000_reached");
+
+      const built = buildReplayCues(events, limit);
+      return {
+        session_id: session.id,
+        room: { id: session.room_id, slug: session.room_slug, name: session.room_name },
+        ist_date: istDate(new Date(session.started_at)),
+        session_window: {
+          from: fromMs !== null ? new Date(fromMs).toISOString() : null,
+          to: toMs !== null ? new Date(toMs).toISOString() : null,
+        },
+        emitted: built.emitted,
+        total: built.total,
+        truncated: built.truncated,
+        ...(built.truncated
+          ? { truncation_note: `list cut short at limit ${limit}: the first ${built.emitted} cues in time order, of ${built.total} replayable events on this session` }
+          : {}),
+        source: REPLAY_SOURCE,
+        kinds: REPLAY_KINDS,
+        natural_key: ["session_id", "type", "at"],
+        dry_run: true,
+        wrote: "nothing",
+        ...(built.dropped_payload_fields.length ? { dropped_payload_fields: built.dropped_payload_fields } : {}),
+        note: "dry run — nothing was written. The window is the first and last piece recorded on either microphone, not the stored ended_at. Order is time, then kind, then row id; the natural key for a writer is (session_id, type, at).",
+        cues: built.cues,
+        ...(degraded.length ? { degraded_reads: degraded } : {}),
+      };
+    }),
+};
+
 export const BENCH_TOOLS: McpTool[] = [
   listSessions,
   getSession,
@@ -1213,4 +1416,5 @@ export const BENCH_TOOLS: McpTool[] = [
   listCommandsTool,
   dayReport,
   diffRoom,
+  replaySession,
 ];
