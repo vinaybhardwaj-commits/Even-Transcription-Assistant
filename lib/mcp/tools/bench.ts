@@ -48,6 +48,14 @@
  *                     recording, last cue, last piece, flags kiosk_not_listening / stalled /
  *                     tape_without_cues / ended_at_lies (all windows imported — D11).
  *
+ * U4 (ETA-MCP-UPGRADE PRD §7 — use the backup microphone when the primary was lost):
+ * with NO microphone named, scribe_extract_audio / scribe_transcribe_range build the periods the
+ * primary was recorded as lost from the session's own mic events (lib/bench-source, D1 — nothing
+ * listens to the audio) and answer an overlapping window from the backup, saying so with the
+ * reason and the overlap. A microphone named explicitly always wins, either way. Where no backup
+ * pieces exist the range resolver finds none and today's no_audio_in_range stands (never silence,
+ * never invented audio).
+ *
  * U1 (ETA-MCP-UPGRADE PRD §6, read only — DRY RUN, THE ONLY MODE):
  * scribe_replay_session — a finished day turned back into the stream of cues it would have
  *                     produced live. It WRITES NOTHING: no cue posted, no row inserted, no day
@@ -74,6 +82,8 @@ import {
   whisperTimeoutForClip,
   type JoinOutcome,
 } from "@/lib/bench-join";
+// U4: which microphone answers a window — the recording's own events decide (D1, D13).
+import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from "@/lib/bench-source";
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay } from "@/lib/brain/state";
@@ -595,13 +605,26 @@ const markConsult: McpTool = {
 
 const EXTRACT_PRESIGN_SECONDS = 900; // short-lived (§16): 15 min, admin presign family
 
-type RangeArgsOk = { session: NonNullable<Awaited<ReturnType<typeof findBenchSession>>>; chunks: BenchChunkRow[]; startMs: number; endMs: number; source: "primary" | "backup"; istDay: string };
+type RangeArgsOk = {
+  session: NonNullable<Awaited<ReturnType<typeof findBenchSession>>>;
+  chunks: BenchChunkRow[];
+  startMs: number;
+  endMs: number;
+  source: MicSource;
+  istDay: string;
+  /** U4 — which microphone answers, and why (lib/bench-source). */
+  decision: SourceDecision;
+  /** U4 — set when the mic story could not be read, so the primary was kept for want of evidence. */
+  micDegraded: string | null;
+};
 
 /** Shared arg resolution for extract/transcribe: session (by id or room+ist_date), window, source. */
 async function resolveRangeArgs(args: ToolArgs): Promise<RangeArgsOk | { error: Record<string, unknown> }> {
-  const sourceRaw = argStr(args, "source", 16) ?? "primary";
-  if (sourceRaw !== "primary" && sourceRaw !== "backup") return { error: { ok: false, error: "bad_source" } };
-  const source = sourceRaw;
+  // U4: "not named" and "named primary" are different answers, so the absence is kept, not
+  // defaulted away. Only an explicit name reaches `requested`.
+  const sourceRaw = argStr(args, "source", 16);
+  if (sourceRaw !== null && sourceRaw !== "primary" && sourceRaw !== "backup") return { error: { ok: false, error: "bad_source" } };
+  const requested: MicSource | null = sourceRaw;
   let session: Awaited<ReturnType<typeof findBenchSession>> = null;
   const sid = argStr(args, "session_id", 64);
   if (sid) {
@@ -628,7 +651,25 @@ async function resolveRangeArgs(args: ToolArgs): Promise<RangeArgsOk | { error: 
   if (!end) return { error: { ok: false, error: "invalid_end", hint: "HH:MM[:SS] IST or ISO" } };
   if (!(end.ms > start.ms)) return { error: { ok: false, error: "end_before_start" } };
   const chunks = await listBenchChunks(session.id);
-  return { session, chunks, startMs: start.ms, endMs: end.ms, source, istDay };
+
+  // U4 — with a microphone named, the events are not consulted at all: a stated choice is never
+  // overridden, so there is nothing for them to decide and nothing to ask the database for. With
+  // none named, the recording's own mic story decides (D1) against the tape clock, which is the
+  // end of the last piece recorded on EITHER microphone — so an unpaired loss is held open to the
+  // real end of the recording rather than tidied away.
+  let micEvents: BenchEventRow[] = [];
+  let micDegraded: string | null = null;
+  if (requested === null) {
+    try {
+      micEvents = await listBenchEvents(session.id);
+    } catch (e) {
+      // Unreadable events are not evidence the primary was lost. The primary is kept and the
+      // caller is told the story could not be read, rather than being quietly switched or lied to.
+      micDegraded = `mic_events_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`;
+    }
+  }
+  const decision = decideSource({ requested, events: micEvents, tapeEndMs: tapeEndMs(chunks), startMs: start.ms, endMs: end.ms });
+  return { session, chunks, startMs: start.ms, endMs: end.ms, source: decision.source, istDay, decision, micDegraded };
 }
 
 async function presignCovering(c: CoveringChunk<BenchChunkRow>) {
@@ -660,7 +701,9 @@ const RANGE_ARGS = {
   ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata) when addressing by room; default today" },
   start: { type: "string", description: "HH:MM[:SS] IST clock on the session's day, or ISO" },
   end: { type: "string", description: "HH:MM[:SS] IST clock on the session's day, or ISO" },
-  source: { type: "string", enum: ["primary", "backup"], default: "primary" },
+  // U4: NO default. Omitted means "let the recording's own mic events decide"; naming one always
+  // wins. The two are different questions and a default would erase one of them.
+  source: { type: "string", enum: ["primary", "backup"], description: "omit to let the session's mic events choose (backup over a period the primary was recorded as lost); naming one always wins" },
 };
 
 // ---------------------------------------------------------------------------
@@ -734,7 +777,7 @@ async function multiPieceAnswer(
 
 const extractAudio: McpTool = {
   name: "scribe_extract_audio",
-  description: "Audio by clock time (PRD §10 + U2): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → the pieces are JOINED into one kept clip and answered with a single 1 h link plus the window asked for. Refused by name over 30 minutes (window_too_long) and while any room is recording (room_recording). If the joining service is unreachable or refuses, the answer degrades to the multi-piece response listing every covering piece with its own link — never an error page. None → no_audio_in_range. Never inline bytes.",
+  description: "Audio by clock time (PRD §10 + U2 + U4): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → the pieces are JOINED into one kept clip and answered with a single 1 h link plus the window asked for. Refused by name over 30 minutes (window_too_long) and while any room is recording (room_recording). If the joining service is unreachable or refuses, the answer degrades to the multi-piece response listing every covering piece with its own link — never an error page. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is answered from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins, silence and all. Nothing listens to the audio to judge silence. Where no backup piece covers the window → no_audio_in_range; audio is never invented. Never inline bytes.",
   scope: "invoke",
   inputSchema: { type: "object", properties: RANGE_ARGS, required: ["start", "end"], additionalProperties: false },
   handler: async (args: ToolArgs) => {
@@ -742,7 +785,11 @@ const extractAudio: McpTool = {
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
-    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested };
+    // U4: source_used / source_requested ride on EVERY answer, including the failures, so the
+    // microphone a caller got is never something it has to discover afterwards.
+    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, ...sourceAnswer(r.decision), ...(r.micDegraded ? { degraded_reads: [r.micDegraded] } : {}) };
+    // No backup piece where the primary was lost is exactly today's answer (§7): the window is
+    // named, the reason is named, and no audio is invented to fill it.
     if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base, chunks_on_session: r.chunks.filter((c) => (c.source ?? "primary") === r.source).length };
     if (res.kind === "multi") {
       const attempt = await attemptJoin(r.session.id, res.covering, r.startMs, r.endMs, r.source);
@@ -789,7 +836,7 @@ const extractAudio: McpTool = {
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1 + U2): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. Text only, never bytes. v1: engine=whisper only.",
+  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only.",
   scope: "invoke",
   inputSchema: { type: "object", properties: { ...RANGE_ARGS, engine: { type: "string", enum: ["whisper"], default: "whisper" }, language: { type: "string", description: "optional Whisper language hint, e.g. en" } }, required: ["start", "end"], additionalProperties: false },
   handler: async (args: ToolArgs) => {
@@ -799,7 +846,8 @@ const transcribeRange: McpTool = {
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
-    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine };
+    // U4: same disclosure as extract — which microphone answered, and why, on every branch.
+    const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine, ...sourceAnswer(r.decision), ...(r.micDegraded ? { degraded_reads: [r.micDegraded] } : {}) };
     const language = argStr(args, "language", 8) ?? undefined;
     if (res.kind === "none") return { ok: false, error: "no_audio_in_range", ...base };
     if (res.kind === "multi") {
