@@ -64,6 +64,8 @@ const MIC_LABEL: Record<string, string> = {
   mic_backup_unavailable: "no backup mic",
   mic_backup_error: "backup mic error · retrying",
   mic_backup_restored: "backup mic back",
+  // Remount resume FU1b: the reload gap must be visible where the day is read.
+  kiosk_remount_resumed: "rejoined after reload",
 };
 
 const IST_HM = new Intl.DateTimeFormat("en-GB", {
@@ -126,7 +128,8 @@ export function buildBenchTimeline(input: TimelineInput): string {
   for (const e of input.mic_events ?? []) {
     const label = MIC_LABEL[e.kind] ?? e.kind;
     const reason = e.reason ? ` · ${e.reason}` : "";
-    lines.push({ at: e.at.getTime(), rank: 0, text: `- ${fmtIstHm(e.at)}  ${label}${reason} (mic)` });
+    const tag = e.kind.startsWith("mic_") ? "mic" : "kiosk";
+    lines.push({ at: e.at.getTime(), rank: 0, text: `- ${fmtIstHm(e.at)}  ${label}${reason} (${tag})` });
   }
   // D5: stable sort by time; a mark outranks a brain row at the same instant.
   lines.sort((a, b) => a.at - b.at || a.rank - b.rank);
@@ -215,14 +218,26 @@ export async function renderBenchTimeline(
     marks = "unavailable";
   }
 
-  // K-B: the mic story (fail-soft — a missing story is just an empty list)
+  // K-B: the mic story (fail-soft — a missing story is just an empty list).
+  // FU1b: kiosk_remount_resumed renders too, its silence length as the reason text.
   let micEvents: TimelineMicEvent[] = [];
   try {
     micEvents = (await listBenchEvents(session.id))
-      .filter((e) => e.kind.startsWith("mic_"))
+      .filter((e) => e.kind.startsWith("mic_") || e.kind === "kiosk_remount_resumed")
       .map((e) => {
-        const p = (typeof e.payload === "object" && e.payload !== null ? e.payload : {}) as { reason?: unknown };
-        return { at: new Date(e.at), kind: e.kind, reason: typeof p.reason === "string" ? p.reason : null };
+        const p = (typeof e.payload === "object" && e.payload !== null ? e.payload : {}) as {
+          reason?: unknown;
+          silence_seconds?: unknown;
+        };
+        const reason =
+          e.kind === "kiosk_remount_resumed"
+            ? typeof p.silence_seconds === "number" && Number.isFinite(p.silence_seconds)
+              ? `${Math.max(0, Math.round(p.silence_seconds))} s silence`
+              : null
+            : typeof p.reason === "string"
+              ? p.reason
+              : null;
+        return { at: new Date(e.at), kind: e.kind, reason };
       });
   } catch (e) {
     console.warn("[bench-timeline] mic events query failed", String((e as Error)?.message ?? e).slice(0, 200));

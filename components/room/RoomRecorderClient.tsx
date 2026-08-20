@@ -49,9 +49,12 @@ import {
   saveBenchSetting,
   pickDefaultBackupDevice,
   BACKUP_DEVICE_SETTING,
+  PRIMARY_DEVICE_SETTING,
   type ArchiveSeamEvent,
   type BenchMicEvent,
 } from "@/lib/use-room-recorder";
+import { ACK_POLL_MS, ACK_WAIT_MS } from "@/lib/bench-commands";
+import { decideHandoverWait } from "@/lib/bench-resume-core";
 import { LIVE_SINK } from "@/lib/live-flags";
 import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
 import { useCommandPoll, type CommandActions } from "@/lib/use-command-poll";
@@ -176,9 +179,15 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   // Remount resume: hold the start screen until the server has answered (§3.1);
   // `resumed` drives the D6 banner; `takenOver` is the D3 superseded-tab message.
+  // FU2: the operator poll starts only after the first /active look (`pollEnabled`), so
+  // this tab's own poll cannot overwrite the listener row before handover_pending reads it;
+  // `handingOver` shows the short wait line.
   const [boot, setBoot] = React.useState<"checking" | "ready">("checking");
   const [resumed, setResumed] = React.useState<null | { status: "recording" | "paused" }>(null);
   const [takenOver, setTakenOver] = React.useState(false);
+  const [pollEnabled, setPollEnabled] = React.useState(false);
+  const [handingOver, setHandingOver] = React.useState(false);
+  const operatorTabIdRef = React.useRef("");
 
   const meterStreamRef = React.useRef<MediaStream | null>(null);
   const meterCtxRef = React.useRef<AudioContext | null>(null);
@@ -308,51 +317,140 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     }
   }, [startDayFlow]);
 
-  // ---- Remount resume (ETA-REMOUNT-RESUME §3.1): ask the server ONCE, on mount, whether
-  // this room has a session to rejoin — before the start screen renders. The server decides
-  // (GET /api/bench/sessions/active → decideResume); the kiosk only obeys. Any fault, here
-  // or there, degrades to the start screen: today's behaviour.
+  // ---- Remount resume (ETA-REMOUNT-RESUME §3.1 + addendum 2): ask the server ONCE, on
+  // mount, whether this room has a session to rejoin — before the start screen renders.
+  // The server decides (GET /api/bench/sessions/active → decideResume); the kiosk only
+  // obeys. FU2: when a LIVE tab still holds the room (handover_pending) the kiosk waits —
+  // bounded by ACK_WAIT_MS — for that tab's kiosk_handover_complete event, then takes its
+  // numbers from a FRESH answer, so two tabs are never issued the same chunk number.
+  // Any fault, here or there, degrades to the start screen: today's behaviour.
   const bootRanRef = React.useRef(false);
   React.useEffect(() => {
     if (bootRanRef.current) return;
     bootRanRef.current = true;
+    type ActiveAnswer = {
+      ok?: boolean;
+      resumable?: boolean;
+      session?: {
+        id?: string;
+        status?: string;
+        started_at?: string;
+        last_any_chunk_at?: string | null;
+      } | null;
+      next_idx?: { primary?: number; backup?: number } | null;
+      handover_pending?: boolean;
+      handover_complete?: boolean | null;
+    };
+    const getActive = async (since?: string): Promise<ActiveAnswer | null> => {
+      const qs = new URLSearchParams();
+      if (operatorTabIdRef.current) qs.set("tab_id", operatorTabIdRef.current);
+      if (since) qs.set("since", since);
+      const res = await fetch(`/api/bench/sessions/active?${qs.toString()}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(8_000),
+      });
+      const j = (await res.json().catch(() => null)) as ActiveAnswer | null;
+      return res.ok ? j : null;
+    };
     void (async () => {
       let rejoining = false;
       try {
-        const res = await fetch("/api/bench/sessions/active", {
-          cache: "no-store",
-          signal: AbortSignal.timeout(8_000),
-        });
-        const j = (await res.json().catch(() => null)) as {
-          ok?: boolean;
-          resumable?: boolean;
-          session?: {
-            id?: string;
-            status?: string;
-            started_at?: string;
-            last_any_chunk_at?: string | null;
-          } | null;
-          next_idx?: { primary?: number; backup?: number } | null;
-        } | null;
-        if (!res.ok || !j?.ok || !j.resumable || !j.session) return;
-        const s = j.session;
+        let first: ActiveAnswer | null = null;
+        try {
+          first = await getActive();
+        } catch {
+          first = null;
+        }
+        // The operator listener starts only AFTER the first look at the listener row —
+        // this tab's own poll would otherwise overwrite the row before handover_pending
+        // could see the tab being displaced.
+        setPollEnabled(true);
+        if (!first?.ok || !first.resumable || !first.session) return;
+        let s = first.session;
+        let next = first.next_idx;
         const sid = s.id;
         if (!sid || (s.status !== "recording" && s.status !== "paused")) return;
+
+        // FU2c — ordered handover: wait for the losing tab's last segment, then re-read.
+        let handoverTimedOut = false;
+        if (first.handover_pending === true) {
+          setHandingOver(true);
+          const since = new Date().toISOString();
+          const t0 = Date.now();
+          for (;;) {
+            let complete = false;
+            try {
+              const p = await getActive(since);
+              complete = p?.handover_complete === true;
+            } catch {
+              complete = false;
+            }
+            const d = decideHandoverWait({
+              handoverPending: true,
+              handoverComplete: complete,
+              waitedMs: Date.now() - t0,
+            });
+            if (d === "start") break;
+            if (d === "timeout_start") {
+              handoverTimedOut = true;
+              break;
+            }
+            await new Promise((r) => setTimeout(r, ACK_POLL_MS));
+          }
+          setHandingOver(false);
+          try {
+            const fresh = await getActive();
+            if (fresh?.ok && fresh.resumable === false) return; // no longer rejoinable — start screen
+            if (fresh?.ok && fresh.resumable && fresh.session?.id === sid) {
+              s = fresh.session;
+              next = fresh.next_idx;
+            }
+          } catch {
+            /* keep the first answer — the seeded counters still protect stored audio */
+          }
+        }
+        const finalStatus: "recording" | "paused" = s.status === "paused" ? "paused" : "recording";
+
+        // FU3 — the room's chosen primary mic, if it is still plugged in.
+        const storedPrimary = await loadBenchSetting<string>(PRIMARY_DEVICE_SETTING);
+        const storedBackup = await loadBenchSetting<string>(BACKUP_DEVICE_SETTING);
+        let primaryDeviceId: string | undefined;
+        let primaryMissingOnResume = false;
+        if (storedPrimary) {
+          try {
+            const devs = await navigator.mediaDevices.enumerateDevices();
+            if (devs.some((d) => d.kind === "audioinput" && d.deviceId === storedPrimary)) {
+              primaryDeviceId = storedPrimary;
+            } else {
+              primaryMissingOnResume = true;
+            }
+          } catch {
+            primaryDeviceId = undefined; // cannot check — the default is the safe open
+          }
+        }
+
         const startedMs = s.started_at ? Date.parse(s.started_at) : NaN;
         const lastAudioIso = s.last_any_chunk_at ?? s.started_at ?? null;
         const lastAudioMs = lastAudioIso ? Date.parse(lastAudioIso) : NaN;
-        const backupDevice = await loadBenchSetting<string>(BACKUP_DEVICE_SETTING);
         setSessionId(sid);
         sessionIdForEventsRef.current = sid; // mic-story events during the rejoin carry the session
+        if (primaryMissingOnResume) {
+          postMicEvent({
+            kind: "mic_primary_lost",
+            at: Date.now(),
+            payload: { reason: "device_missing_on_resume", device_id: storedPrimary },
+          });
+        }
         rejoining = true;
         const seeded = await resumeSession(sid, {
-          nextPrimaryIdx: j.next_idx?.primary ?? 0,
-          nextBackupIdx: j.next_idx?.backup ?? 0,
-          paused: s.status === "paused",
+          nextPrimaryIdx: next?.primary ?? 0,
+          nextBackupIdx: next?.backup ?? 0,
+          paused: finalStatus === "paused",
           dayStartedAt: Number.isFinite(startedMs) ? startedMs : null,
-          backupDeviceId: backupDevice || null,
+          deviceId: primaryDeviceId,
+          backupDeviceId: storedBackup || null,
         });
-        setResumed({ status: s.status });
+        setResumed({ status: finalStatus });
         // §3.4 gap record — fire-and-forget: a lost record must not disturb the rejoin.
         const silenceSeconds = Number.isFinite(lastAudioMs)
           ? Math.max(0, Math.round((Date.now() - lastAudioMs) / 1000))
@@ -361,9 +459,11 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            kind: "kiosk_remount_resumed",
             session_id: sid,
             silence_seconds: silenceSeconds,
             next_idx: { primary: seeded.primaryStartIdx, backup: seeded.backupStartIdx },
+            ...(handoverTimedOut ? { handover_timed_out: true } : {}),
           }),
           keepalive: true,
         }).catch(() => undefined);
@@ -372,6 +472,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         // lookup surfaces as nothing at all — the start screen.
         if (rejoining) setStartError(e instanceof Error ? e.message : String(e));
       } finally {
+        setHandingOver(false);
         setBoot("ready");
       }
     })();
@@ -435,6 +536,28 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       for (const w of waiters) w();
     })();
   }, [endingUpload, status.state, status.queuedCount, patchSession, markEnded]);
+
+  // FU2b — the losing tab signals the handover once its last segment is uploaded: one
+  // kiosk_handover_complete event carrying the last number it used per stream (-1 = the
+  // stream never produced a chunk in this tab's life). Still never PATCH end — the new
+  // tab owns the session and is waiting on exactly this event.
+  const handoverPostedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!takenOver || handoverPostedRef.current) return;
+    if (status.state !== "ending" || status.queuedCount > 0) return;
+    if (!sessionId) return;
+    handoverPostedRef.current = true;
+    void fetch("/api/bench/sessions/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "kiosk_handover_complete",
+        session_id: sessionId,
+        last_idx: { primary: status.currentIdx - 1, backup: status.backupIdx - 1 },
+      }),
+      keepalive: true,
+    }).catch(() => undefined);
+  }, [takenOver, sessionId, status.state, status.queuedCount, status.currentIdx, status.backupIdx]);
 
   // ---- Kickoff C: "Mark consult" (decisions C3/C5/C6) ----
   // A press posts a consult_mark to the room-cookie proxy (durable-first there);
@@ -513,7 +636,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     }),
     [startDayFlow, onPause, onResume, endDayFlow, onTakeover],
   );
-  const operator = useCommandPoll({ enabled: true, actions: commandActions });
+  // FU2: the poll waits for the first /active look (pollEnabled) — see the mount effect.
+  const operator = useCommandPoll({ enabled: pollEnabled, actions: commandActions });
+  operatorTabIdRef.current = operator.tab_id;
 
   // ---- shared bits ----
   const today = new Date();
@@ -648,6 +773,16 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             {pill}
             {LIVE_SINK && brainChip}
             {operatorChip}
+            {/* FU4: the silence failsafe is not armed — the rejoin had no tap. */}
+            {status.watchdogSuspended && (
+              <span
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-meta font-semibold bg-warning-100 text-warning-700"
+                data-testid="watchdog-chip"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-warning-700" aria-hidden="true" />
+                Tap the screen to arm mic monitoring
+              </span>
+            )}
           </div>
         </div>
         {LIVE_SINK && (
@@ -708,7 +843,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 className="w-4 h-4 rounded-full border-2 border-even-blue-600 border-t-transparent animate-spin"
                 aria-hidden="true"
               />
-              Checking for today&apos;s session…
+              {handingOver ? "Handing over from another tab…" : "Checking for today's session…"}
             </div>
           )}
 
@@ -732,7 +867,11 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 </label>
                 <select
                   value={micId}
-                  onChange={(e) => setMicId(e.target.value)}
+                  onChange={(e) => {
+                    setMicId(e.target.value);
+                    // FU3: a rejoined tape must reopen this choice, not the browser default.
+                    void saveBenchSetting(PRIMARY_DEVICE_SETTING, e.target.value);
+                  }}
                   className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-body text-even-ink-800"
                 >
                   {mics.length === 0 && <option value="">Default microphone</option>}

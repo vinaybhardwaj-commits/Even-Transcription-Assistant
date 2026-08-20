@@ -62,6 +62,7 @@ import {
   type BenchMicEventKind,
   type ChunkSource,
 } from "@/lib/bench-dual";
+import { seedStartIdx } from "@/lib/bench-resume-core";
 
 const CHUNK_MS = 5 * 60 * 1000; // D1: 5-minute chunks
 const BACKOFF_MIN_MS = 5_000;
@@ -69,6 +70,10 @@ const BACKOFF_MAX_MS = 60_000;
 const REACQUIRE_MIN_MS = 5_000; // primary/backup device re-acquire loop
 const REACQUIRE_MAX_MS = 30_000;
 const WATCHDOG_TICK_MS = 1_000;
+// FU4: a rejoined session has no tap, so the watchdog's AudioContext can stay suspended and
+// the silence failsafe would be silently dead. If it is still not running this long after
+// the rejoin, say so (event + kiosk chip) instead of monitoring nothing.
+const WATCHDOG_ARM_CHECK_MS = 10_000;
 
 const MIME_CANDIDATES = [
   "audio/webm;codecs=opus",
@@ -235,6 +240,9 @@ export async function saveBenchSetting(key: string, value: unknown): Promise<voi
 }
 
 export const BACKUP_DEVICE_SETTING = "backup_device_id";
+/** FU3: the chosen primary mic, persisted by the start screen's select — a rejoined tape
+ *  must reopen the room's microphone, not the browser default. */
+export const PRIMARY_DEVICE_SETTING = "primary_device_id";
 export { pickDefaultBackupDevice };
 
 // ---------------------------------------------------------------------------
@@ -277,6 +285,9 @@ export type RoomRecorderStatus = {
   backupIdx: number;
   backupArchivedCount: number;
   backupArchivedBytes: number;
+  /** FU4: the silence watchdog's AudioContext never started running after a rejoin —
+   *  mic monitoring is NOT armed until someone taps the screen. */
+  watchdogSuspended: boolean;
 };
 
 type QueueItem = BenchChunkRecord;
@@ -355,6 +366,7 @@ export function useRoomRecorder(opts?: {
   const [backupIdx, setBackupIdx] = React.useState(0);
   const [backupArchivedCount, setBackupArchivedCount] = React.useState(0);
   const [backupArchivedBytes, setBackupArchivedBytes] = React.useState(0);
+  const [watchdogSuspended, setWatchdogSuspended] = React.useState(false);
 
   const sessionIdRef = React.useRef<string | null>(null);
   const primaryRef = React.useRef<Lane>(newLane("primary"));
@@ -792,6 +804,48 @@ export function useRoomRecorder(opts?: {
     watchdogCtxRef.current = null;
   }, [stopWatchdog]);
 
+  // ---- FU4: a deaf watchdog must say so (rejoin only) ----
+  // The AudioContext on a rejoin is created with no user gesture, so it can stay suspended
+  // and the tick — correctly — skips every sample (a suspended context reads flat and would
+  // fake a silence trip). The tick logic is untouched: this only DETECTS the dead state,
+  // reports it once, and arms the context on the first tap.
+  const armTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const armTapRef = React.useRef<(() => void) | null>(null);
+
+  const clearArmCheck = React.useCallback(() => {
+    if (armTimerRef.current) clearTimeout(armTimerRef.current);
+    armTimerRef.current = null;
+    if (armPollRef.current) clearInterval(armPollRef.current);
+    armPollRef.current = null;
+    if (armTapRef.current && typeof document !== "undefined") {
+      document.removeEventListener("pointerdown", armTapRef.current);
+      armTapRef.current = null;
+    }
+    setWatchdogSuspended(false);
+  }, []);
+
+  const startArmCheck = React.useCallback(() => {
+    clearArmCheck();
+    armTimerRef.current = setTimeout(() => {
+      const ctx = watchdogCtxRef.current;
+      if (ctx && ctx.state === "running") return; // armed itself — nothing to say
+      setWatchdogSuspended(true);
+      emitEvent("mic_backup_unavailable", { reason: "watchdog_suspended" });
+      if (typeof document !== "undefined") {
+        const tap = () => {
+          void watchdogCtxRef.current?.resume().catch(() => undefined);
+        };
+        armTapRef.current = tap;
+        document.addEventListener("pointerdown", tap);
+      }
+      armPollRef.current = setInterval(() => {
+        const c = watchdogCtxRef.current;
+        if (c && c.state === "running") clearArmCheck(); // chip clears once the context runs
+      }, WATCHDOG_TICK_MS);
+    }, WATCHDOG_ARM_CHECK_MS);
+  }, [clearArmCheck, emitEvent]);
+
   const clearReacquire = () => {
     if (reacquireTimerRef.current) clearTimeout(reacquireTimerRef.current);
     reacquireTimerRef.current = null;
@@ -1119,8 +1173,8 @@ export function useRoomRecorder(opts?: {
       } catch {
         setStorageBlocked(true); // server numbers alone still protect stored audio
       }
-      const primaryStartIdx = Math.max(opts.nextPrimaryIdx, localPrimary + 1);
-      const backupStartIdx = Math.max(opts.nextBackupIdx, localBackup + 1);
+      const primaryStartIdx = seedStartIdx(opts.nextPrimaryIdx, localPrimary);
+      const backupStartIdx = seedStartIdx(opts.nextBackupIdx, localBackup);
 
       const P = primaryRef.current;
       const B = backupRef.current;
@@ -1165,6 +1219,7 @@ export function useRoomRecorder(opts?: {
         }
         void requestWakeLock();
         startWatchdog(stream); // no-ops while paused, same as after pauseDay
+        startArmCheck(); // FU4: no tap happened — verify the watchdog context actually runs
       } catch (e: unknown) {
         const name = (e as { name?: string })?.name;
         const msg =
@@ -1194,7 +1249,7 @@ export function useRoomRecorder(opts?: {
       }
       return { primaryStartIdx, backupStartIdx };
     },
-    [acquireBackup, attachPrimaryListeners, emitError, emitEvent, requestWakeLock, scheduleRotate, startRecorderSegment, startWatchdog],
+    [acquireBackup, attachPrimaryListeners, emitError, emitEvent, requestWakeLock, scheduleRotate, startArmCheck, startRecorderSegment, startWatchdog],
   );
 
   /** IRB pause: recorders stopped (a real capture gap), partial chunks uploaded — BOTH lanes. */
@@ -1252,6 +1307,7 @@ export function useRoomRecorder(opts?: {
     stateRef.current = "ending";
     clearReacquire();
     clearBackupRetry();
+    clearArmCheck();
     closeWatchdog();
     const P = primaryRef.current;
     const B = backupRef.current;
@@ -1277,7 +1333,7 @@ export function useRoomRecorder(opts?: {
       /* noop */
     }
     wakeLockRef.current = null;
-  }, [closeWatchdog, finalizeIntoQueue]);
+  }, [clearArmCheck, closeWatchdog, finalizeIntoQueue]);
 
   /** Called by the client once the queue is fully drained after endDay. */
   const markEnded = React.useCallback(() => {
@@ -1290,11 +1346,12 @@ export function useRoomRecorder(opts?: {
       if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
       clearReacquire();
       clearBackupRetry();
+      clearArmCheck();
       closeWatchdog();
       stopTracks(primaryRef.current.stream);
       stopTracks(backupRef.current.stream);
     };
-  }, [closeWatchdog]);
+  }, [clearArmCheck, closeWatchdog]);
 
   /** Kickoff B: read-only access to the day's primary stream for the live sink (flag on only). */
   const getStream = React.useCallback((): MediaStream | null => primaryRef.current.stream, []);
@@ -1327,6 +1384,7 @@ export function useRoomRecorder(opts?: {
     backupIdx,
     backupArchivedCount,
     backupArchivedBytes,
+    watchdogSuspended,
   };
 
   return { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream };
