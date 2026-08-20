@@ -13,7 +13,7 @@
   "containers": [
     {
       "class_name": "Joiner",
-      "image": "./container",
+      "image": "./container/Dockerfile",
       // One box. "One join at a time" is enforced in the Durable Object; this makes the
       // platform agree rather than quietly starting a second instance.
       "max_instances": 1,
