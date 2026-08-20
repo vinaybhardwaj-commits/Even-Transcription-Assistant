@@ -63,6 +63,15 @@
  *                     in this build; a future slice that wants to post replay output adds the
  *                     write then, with its own decision behind it. Input to the fuse work, not
  *                     a feature for the clinic.
+ *
+ * FUSE SLICE 2 (write) — that future slice is here, and it is a SEPARATE tool:
+ * scribe_replay_write — the same cue list, written into a SCRATCH graph: a scratch room
+ *                     derived from the session's real room, a scratch room_day for the
+ *                     session's own IST date, and every write naming that day so the cue
+ *                     route's guard refuses anything that is not a scratch day. Idempotent on
+ *                     (session_id, type, at). scribe_replay_session is not touched by it —
+ *                     dry run stays the default because writing is a different tool, not an
+ *                     option on this one.
  */
 
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
@@ -87,6 +96,8 @@ import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from 
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay } from "@/lib/brain/state";
+// Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
+import { resolveScratchGraph } from "@/lib/brain/scratch";
 import {
   ACK_WAIT_MS,
   BusError,
@@ -1450,6 +1461,150 @@ const replaySession: McpTool = {
     }),
 };
 
+// ---------------------------------------------------------------------------
+// Fuse slice 2 — write the replay into a SCRATCH graph (write scope)
+//
+// scribe_replay_session above is untouched: still read scope, still dry_run:true, still
+// writes nothing. Writing is a SEPARATE tool at write scope (F10), so "dry run is the
+// default" holds by construction rather than by an option someone can pass.
+//
+// Where the cues go: NEVER a live room-day. A scratch room is derived from the session's
+// real room and a scratch room_day from the session's own IST date (lib/brain/scratch), and
+// every write names that day explicitly so POST /api/brain/cues applies its scratch guard
+// inside the lock. The cue list is the one slice 1 produces — same buildReplayCues, same
+// order, same filtered payloads.
+//
+// Idempotency, not atomicity (F11). Each cue is its own request, as today. The natural key
+// (session_id, type, at) is a partial unique index over replay cues only, so a re-run writes
+// only what is missing and a run that stopped half way is resumed by running it again.
+// ---------------------------------------------------------------------------
+
+export const REPLAY_WRITE_DEFAULT_LIMIT = 200;
+export const REPLAY_WRITE_MAX_LIMIT = 500;
+
+/**
+ * Stop writing and report it rather than be killed mid-run. Each cue is its own request, and
+ * lib/mcp/handler.ts gives a write tool 55 s before it cuts the call off — a run that is cut
+ * off returns nothing, so the operator cannot tell what landed. This budget sits below that,
+ * so the tool always gets to say what it wrote and what is left. A re-run resumes.
+ */
+const REPLAY_WRITE_BUDGET_MS = 45_000;
+/** A brain that is refusing every write will refuse the next 200 too. Stop, and say so. */
+const REPLAY_WRITE_MAX_CONSECUTIVE_FAILURES = 3;
+
+const replayWrite: McpTool = {
+  name: "scribe_replay_write",
+  description:
+    "WRITES — replay a finished session into a SCRATCH graph, so the fuse has something to run against without touching a real clinic day. The cue list is exactly the one scribe_replay_session shows (same kinds, same time order, same filtered payloads); it is written to a scratch room-day derived from the session's room and its own IST date, never to a live room-day — every write names that day and the cue route refuses any day whose scratch flag is not true. Idempotent on the natural key (session_id, type, at): running it twice writes nothing the second time, and a run that stopped half way is resumed by running it again. Each cue is one request, so limit defaults to 200 and caps at 500; over the limit the first `limit` in time order are written and truncated says so with the true total. Refuses outright when BRAIN_BASE_URL is set (that points cue writes at the separate Cloud Run brain, which this build does not change). Returns { room_day_id, written, already_existed, failed, truncated, natural_key }.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_id: { type: "string", description: "bs_… id" },
+      limit: { type: "integer", minimum: 1, maximum: REPLAY_WRITE_MAX_LIMIT, default: REPLAY_WRITE_DEFAULT_LIMIT },
+    },
+    required: ["session_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
+    failSafe({ written: 0, already_existed: 0, failed: 0 }, async () => {
+      // F12 — the separate Cloud Run brain owns its own database and is not part of this
+      // build. Refuse before reading anything.
+      if (process.env.BRAIN_BASE_URL?.trim()) {
+        return { ok: false, error: "brain_base_url_set", written: 0, already_existed: 0, failed: 0, note: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
+      }
+
+      const id = argStr(args, "session_id", 64);
+      if (!id || !id.startsWith("bs_")) return { ok: false, error: "bad_session_id", written: 0, already_existed: 0, failed: 0 };
+      const session = await findBenchSession(id);
+      if (!session) return { ok: false, error: "session_not_found", written: 0, already_existed: 0, failed: 0 };
+      const limit = argInt(args, "limit", REPLAY_WRITE_DEFAULT_LIMIT, 1, REPLAY_WRITE_MAX_LIMIT);
+
+      let events: BenchEventRow[] = [];
+      try {
+        events = await listBenchEvents(session.id);
+      } catch (e) {
+        return { ok: false, error: "events_read_failed", written: 0, already_existed: 0, failed: 0, detail: String((e as Error)?.message ?? e).slice(0, 160) };
+      }
+      const built = buildReplayCues(events, limit);
+
+      // The day is the session's own IST date — never the server clock.
+      const ist = istDate(new Date(session.started_at));
+      const scratch = await resolveScratchGraph({ id: session.room_id, slug: session.room_slug, name: session.room_name }, ist);
+      if (!scratch.ok) {
+        return { ok: false, error: scratch.error, written: 0, already_existed: 0, failed: 0, ...(scratch.detail ? { detail: scratch.detail } : {}) };
+      }
+      // Belt and braces: the route's guard is authoritative, but there is no reason to send
+      // 200 requests at a day this side already knows is not scratch.
+      if (scratch.day.scratch !== true) {
+        return { ok: false, error: "not_a_scratch_day", written: 0, already_existed: 0, failed: 0, room_day_id: scratch.day.id };
+      }
+
+      const t0 = Date.now();
+      let written = 0;
+      let alreadyExisted = 0;
+      let failed = 0;
+      let consecutiveFailures = 0;
+      const failures: Array<{ type: string; at: string; error: string }> = []; // first 5, for the report
+      let stoppedEarly: string | null = null;
+
+      for (const cue of built.cues) {
+        if (Date.now() - t0 > REPLAY_WRITE_BUDGET_MS) {
+          stoppedEarly = "time_budget";
+          break;
+        }
+        const out = await postBrainCue(ctx.origin, {
+          room_id: scratch.room.id,
+          type: cue.type,
+          at: cue.at, // the event's own recorded time, never the clock
+          payload: cue.payload, // exactly what the dry run shows — nothing added, nothing forced
+          room_day_id: scratch.day.id,
+          session_id: session.id,
+          source: cue.source, // 'replay' — the column, which is what the natural key keys on
+        });
+        if (out.ok) {
+          consecutiveFailures = 0;
+          if (out.already_existed) alreadyExisted += 1;
+          else written += 1;
+        } else {
+          failed += 1;
+          consecutiveFailures += 1;
+          if (failures.length < 5) failures.push({ type: cue.type, at: cue.at, error: out.error });
+          if (consecutiveFailures >= REPLAY_WRITE_MAX_CONSECUTIVE_FAILURES) {
+            stoppedEarly = "consecutive_failures";
+            break;
+          }
+        }
+      }
+
+      const attempted = written + alreadyExisted + failed;
+      return {
+        ok: failed === 0 && stoppedEarly === null,
+        session_id: session.id,
+        room: { id: session.room_id, slug: session.room_slug, name: session.room_name },
+        scratch_room: { id: scratch.room.id, created: scratch.room.created },
+        room_day_id: scratch.day.id,
+        scratch_room_day_created: scratch.day.created,
+        ist_date: ist,
+        written,
+        already_existed: alreadyExisted,
+        failed,
+        attempted,
+        emitted: built.emitted,
+        total: built.total,
+        truncated: built.truncated,
+        ...(built.truncated
+          ? { truncation_note: `write cut short at limit ${limit}: the first ${built.emitted} cues in time order, of ${built.total} replayable events on this session. Raise limit or run again — a re-run writes only what is missing.` }
+          : {}),
+        ...(stoppedEarly ? { stopped_early: stoppedEarly, stopped_after: attempted } : {}),
+        ...(failures.length ? { failures } : {}),
+        source: REPLAY_SOURCE,
+        natural_key: ["session_id", "type", "at"],
+        note: "written to a scratch room-day, never a live one. Idempotent on (session_id, type, at) for source='replay': run it again to resume, and nothing already written is written twice.",
+      };
+    }),
+};
+
 export const BENCH_TOOLS: McpTool[] = [
   listSessions,
   getSession,
@@ -1465,4 +1620,5 @@ export const BENCH_TOOLS: McpTool[] = [
   dayReport,
   diffRoom,
   replaySession,
+  replayWrite,
 ];

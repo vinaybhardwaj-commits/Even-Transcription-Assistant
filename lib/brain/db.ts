@@ -115,5 +115,9 @@ export function classifyBrainError(e: unknown): { status: number; code: string; 
   const pgCode = typeof err?.code === "string" ? err.code : undefined;
   if (pgCode === "23503") return { status: 404, code: "unknown_room", log: false }; // FK: room vanished between check and insert
   if (pgCode === "42P01") return { status: 503, code: "brain_tables_missing", hint: "run migration 0042 via /api/run-migrations", log: true };
+  // Fuse slice 2: the scratch path reads room_day.scratch and writes cue.session_id / cue.source.
+  // Between the deploy and migration 0046 those columns do not exist yet; say which migration is
+  // missing rather than hide it inside brain_unavailable. The live path touches no new column.
+  if (pgCode === "42703") return { status: 503, code: "brain_columns_missing", hint: "run migration 0046 via /api/run-migrations", log: true };
   return { status: 503, code: "brain_unavailable", log: true };
 }

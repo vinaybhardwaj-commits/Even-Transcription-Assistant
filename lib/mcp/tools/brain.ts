@@ -176,16 +176,21 @@ function brainCuesUrl(origin: string): string {
 }
 
 export type PostCueResult =
-  | { ok: true; cue_id: string; cue_at: string; brain_status: number; state_summary: string }
+  | { ok: true; cue_id: string | null; cue_at: string; brain_status: number; state_summary: string; already_existed: boolean }
   | { ok: false; error: string; brain_status: number | null; detail?: string };
 
 /**
  * POST /api/brain/cues with Bearer BRAIN_SERVICE_TOKEN (server-side env). `source` is forced
  * into the payload by the caller's policy (never trusted from args). Never throws.
+ *
+ * Fuse slice 2: the body may also carry `room_day_id` (write to THAT day — the route then
+ * applies the scratch guard), plus `session_id` and `source` for the two 0046 columns. Every
+ * live caller omits all three and gets exactly today's behaviour. When the route reports the
+ * cue already existed, that is ok:true with already_existed:true and a null cue_id.
  */
 export async function postBrainCue(
   origin: string,
-  body: { room_id: string; type: string; at?: string; payload: Record<string, unknown> },
+  body: { room_id: string; type: string; at?: string; payload: Record<string, unknown>; room_day_id?: string; session_id?: string; source?: string },
 ): Promise<PostCueResult> {
   const token = process.env[TOKEN_ENV];
   if (!token) return { ok: false, error: "service_token_not_configured", brain_status: null };
@@ -197,7 +202,7 @@ export async function postBrainCue(
       signal: AbortSignal.timeout(BRAIN_TIMEOUT_MS),
       cache: "no-store",
     });
-    const j = (await res.json().catch(() => null)) as { ok?: boolean; cue_id?: string; cue_at?: string; error?: string; state?: unknown } | null;
+    const j = (await res.json().catch(() => null)) as { ok?: boolean; cue_id?: string | null; cue_at?: string; error?: string; state?: unknown; already_existed?: boolean } | null;
     if (!res.ok || !j?.ok) {
       return { ok: false, error: j?.error ?? `brain_${res.status}`, brain_status: res.status };
     }
@@ -207,7 +212,14 @@ export async function postBrainCue(
     } catch {
       summary = "";
     }
-    return { ok: true, cue_id: String(j.cue_id ?? ""), cue_at: String(j.cue_at ?? ""), brain_status: res.status, state_summary: summary };
+    return {
+      ok: true,
+      cue_id: j.cue_id == null ? null : String(j.cue_id),
+      cue_at: String(j.cue_at ?? ""),
+      brain_status: res.status,
+      state_summary: summary,
+      already_existed: j.already_existed === true,
+    };
   } catch (e) {
     const name = (e as Error)?.name;
     return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "brain_timeout" : "brain_unreachable", brain_status: null, detail: String((e as Error)?.message ?? e).slice(0, 160) };

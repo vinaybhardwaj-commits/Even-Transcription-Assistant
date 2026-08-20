@@ -88,6 +88,25 @@ export const SQL_ROOM_DAY_UPSERT =
 export const SQL_CUE_INSERT =
   "INSERT INTO cue (id, room_day_id, type, payload, at) VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz) RETURNING id, at, created_at";
 
+// --- Fuse slice 2 (scratch graph, migration 0046) ---------------------------
+// SEPARATE constants. SQL_CUE_INSERT above is shared by every live caller and is
+// not touched; the two below run ONLY on the explicit room_day_id path.
+
+/** The day by its own id, including the 0046 scratch flag. Read INSIDE the lock. */
+export const SQL_ROOM_DAY_BY_ID =
+  "SELECT id, room_id, doctor_id, ist_date::text AS ist_date, started_at, ended_at, scratch FROM room_day WHERE id = $1";
+
+/**
+ * The scratch write. Adds the two 0046 columns and takes ON CONFLICT DO NOTHING against
+ * cue_replay_natural_key — the PARTIAL unique index on (session_id, type, at) WHERE
+ * source = 'replay'. A live cue carries a NULL source, so it is not in that index and can
+ * never conflict here. A conflict returns NO ROW: that is "already exists", not a failure.
+ */
+export const SQL_CUE_INSERT_SCRATCH =
+  "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source) " +
+  "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text) " +
+  "ON CONFLICT DO NOTHING RETURNING id, at, created_at";
+
 export const SQL_VISITS_FOR_DAY =
   "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at " +
   "FROM visit WHERE room_day_id = $1 ORDER BY updated_at ASC, id ASC";
@@ -326,6 +345,19 @@ export async function listCuesForDay(
 
 export type CueInput = { type: string; at: Date; payload: unknown };
 
+/** A room_day read by id, carrying the 0046 scratch flag the write guard tests. */
+export type RoomDayByIdRow = RoomDayRow & { scratch: boolean };
+
+/**
+ * Fuse slice 2 — the day by id, read inside the locked transaction so the guard tests the
+ * flag as it is at write time, not as it was when the caller chose the day. Null when the
+ * id names nothing.
+ */
+export async function findRoomDayById(client: Queryable, roomDayId: string): Promise<RoomDayByIdRow | null> {
+  const r = await client.query<RoomDayByIdRow>(SQL_ROOM_DAY_BY_ID, [roomDayId]);
+  return r.rows[0] ?? null;
+}
+
 /** Insert one cue row. `payload` is stored as given (jsonb; null allowed). */
 export async function insertCue(client: Queryable, roomDayId: string, cue: CueInput): Promise<{ id: string; at: string; created_at: string }> {
   const id = newCueId();
@@ -334,4 +366,32 @@ export async function insertCue(client: Queryable, roomDayId: string, cue: CueIn
   const row = r.rows[0];
   if (!row) throw new Error("cue insert returned no row");
   return { id: row.id, at: iso(row.at) ?? cue.at.toISOString(), created_at: iso(row.created_at) ?? new Date().toISOString() };
+}
+
+export type ScratchCueInput = CueInput & { session_id: string | null; source: string | null };
+
+/**
+ * Fuse slice 2 — insert one cue on the SCRATCH path (0046 columns, ON CONFLICT DO NOTHING).
+ * A conflict on the replay natural key returns no row; that is reported as already_existed,
+ * never as a failure, so a half-finished run is resumable by re-running it.
+ */
+export async function insertScratchCue(
+  client: Queryable,
+  roomDayId: string,
+  cue: ScratchCueInput,
+): Promise<{ id: string | null; at: string; created_at: string | null; already_existed: boolean }> {
+  const id = newCueId();
+  const payloadJson = cue.payload === undefined ? null : JSON.stringify(cue.payload);
+  const r = await client.query<{ id: string; at: Date; created_at: Date }>(SQL_CUE_INSERT_SCRATCH, [
+    id,
+    roomDayId,
+    cue.type,
+    payloadJson,
+    cue.at.toISOString(),
+    cue.session_id,
+    cue.source,
+  ]);
+  const row = r.rows[0];
+  if (!row) return { id: null, at: cue.at.toISOString(), created_at: null, already_existed: true };
+  return { id: row.id, at: iso(row.at) ?? cue.at.toISOString(), created_at: iso(row.created_at), already_existed: false };
 }

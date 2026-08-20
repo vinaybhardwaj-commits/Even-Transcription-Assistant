@@ -13,12 +13,29 @@
  * NO fuse, NO state transitions — the skeleton records evidence and echoes the picture.
  * Faults never 500 on this path: config → 503 <code>, DB → 503 brain_unavailable. Payloads are
  * never logged.
+ *
+ * FUSE SLICE 2 (F9) — one optional field, `room_day_id`, and one extra door behind it:
+ *
+ *   ABSENT — the live path, and the ONLY path six live callers take (kiosk heartbeat,
+ *     mark-consult press, mic-story events, scribe_post_cue, scribe_pin_visit,
+ *     scribe_mark_consult). Byte-for-byte what it has always been: resolve TODAY's day from
+ *     the server clock, insert through the shared SQL_CUE_INSERT. NO scratch check of any
+ *     kind runs on this path — if it ever did, live cue writing would stop.
+ *
+ *   PRESENT — the scratch path. The day is taken by id, the lock is taken on it, and the
+ *     `scratch` flag is re-read INSIDE the locked transaction: not true → nothing is written
+ *     and the request fails by name with not_a_scratch_day; unknown id → room_day_not_found.
+ *     Only this path writes the 0046 columns (session_id, source) and only this path takes
+ *     ON CONFLICT DO NOTHING, so re-running a replay writes nothing that already exists.
+ *
+ * There is still exactly ONE write door for cues, which is what keeps the MCP layer free of
+ * cue SQL (tests/unit/mcp-s3.test.ts).
  */
 import { NextResponse } from "next/server";
 import { checkBearer } from "@/lib/brain/auth";
 import { brainLog, classifyBrainError } from "@/lib/brain/db";
 import { withRoomDayLock } from "@/lib/brain/lock";
-import { insertCue, istDate, readGraph, resolveRoomDay, roomExists } from "@/lib/brain/state";
+import { findRoomDayById, insertCue, insertScratchCue, istDate, readGraph, resolveRoomDay, roomExists } from "@/lib/brain/state";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,6 +68,12 @@ function requireIdString(v: unknown, code: string, max: number): string {
   return v;
 }
 
+/** Optional string field: absent/null/"" → null, otherwise validated like an id. */
+function optionalIdString(v: unknown, code: string, max: number): string | null {
+  if (v === undefined || v === null || v === "") return null;
+  return requireIdString(v, code, max);
+}
+
 export async function POST(req: Request) {
   const t0 = Date.now();
   let status = 200;
@@ -74,8 +97,47 @@ export async function POST(req: Request) {
     const at = parseAt(b.at);
     const payload = b.payload; // any JSON; undefined → SQL NULL
 
+    // Slice 2 (F9). All three are absent on every live call, so everything below this line
+    // that depends on them is unreachable from the live path.
+    const roomDayId = optionalIdString(b.room_day_id, "invalid_room_day_id", MAX_ID_LEN);
+    const sessionId = optionalIdString(b.session_id, "invalid_session_id", MAX_ID_LEN);
+    const source = optionalIdString(b.source, "invalid_source", MAX_TYPE_LEN);
+    // The two new columns are written by the scratch statement only — SQL_CUE_INSERT is shared
+    // with the live path and is not touched. Refuse rather than accept-and-drop them: a caller
+    // that sent session_id and got a 200 would believe it was stored.
+    if (!roomDayId && sessionId !== null) throw new HttpError(400, "session_id_requires_room_day_id");
+    if (!roomDayId && source !== null) throw new HttpError(400, "source_requires_room_day_id");
+
     if (!(await roomExists(roomId))) throw new HttpError(404, "unknown_room");
 
+    // ---- scratch path (F9): the day is named, and it must be a scratch day --------------
+    if (roomDayId) {
+      const out = await withRoomDayLock(roomDayId, async (client) => {
+        // Re-read INSIDE the lock: the guard tests the flag as it is at write time.
+        const day = await findRoomDayById(client, roomDayId);
+        if (!day) throw new HttpError(404, "room_day_not_found");
+        if (day.scratch !== true) throw new HttpError(409, "not_a_scratch_day");
+        const cue = await insertScratchCue(client, day.id, { type, at, payload, session_id: sessionId, source });
+        // The day itself says which room and which date this is — not the body, not the clock.
+        const state = await readGraph(client, day.room_id, day.ist_date, day.id);
+        return { cue, state };
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          cue_id: out.cue.id,
+          cue_at: out.cue.at,
+          already_existed: out.cue.already_existed,
+          room_day_id: roomDayId,
+          scratch: true,
+          state: out.state,
+        },
+        { headers: { "cache-control": "no-store" } }
+      );
+    }
+
+    // ---- live path: unchanged ------------------------------------------------------------
     // "Today" is the server's IST date (Asia/Kolkata), not the cue's `at`.
     const date = istDate();
     const day = await resolveRoomDay(roomId, date);
