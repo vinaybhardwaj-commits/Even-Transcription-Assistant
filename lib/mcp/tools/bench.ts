@@ -30,14 +30,26 @@
  * scribe_transcribe_range (invoke)— same resolution → download that chunk → Mini Whisper (lib/whisper)
  *                                  → text for the WHOLE chunk (trimming is v1.1), never inline bytes.
  * scribe_list_commands (read)    — the bus queue (bench_command), newest first.
+ *
+ * U3 (ETA-MCP-UPGRADE PRD §4, read only):
+ * scribe_day_report — one room, one IST day: sessions in start order, tape_ended_at from the
+ *                     last piece on EITHER mic (the tape clock governs; stored ended_at shown
+ *                     only when it differs), per-mic counts, gaps, consult marks, mic story,
+ *                     remount events. No labels/notes (they can carry clinician names).
+ * scribe_diff_room  — the now-picture across enabled rooms: page open (LISTENER_FRESH_MS),
+ *                     recording, last cue, last piece, flags kiosk_not_listening / stalled /
+ *                     tape_without_cues / ended_at_lies (all windows imported — D11).
  */
 
-import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow } from "@/lib/bench";
+import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
+// U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
+import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { listCuesForDay } from "@/lib/brain/state";
 import {
   ACK_WAIT_MS,
   BusError,
@@ -47,6 +59,7 @@ import {
   getListener,
   insertCommand,
   isListening,
+  LISTENER_FRESH_MS,
   listCommands,
   waitForAck,
   type CommandKind,
@@ -739,6 +752,295 @@ const listCommandsTool: McpTool = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// U3 — one day picture (read; ETA-MCP-UPGRADE PRD §4, D11)
+//
+// THE TAPE CLOCK GOVERNS: the end of a recording is the end of the last piece
+// recorded on EITHER microphone (chunk ended_at — the recorder's clock), never
+// the stored bench_session.ended_at, which can be a manual close hours later
+// (bs_j9wgfa33, 19 Aug). Where the two disagree, both are shown and the
+// disagreement is named. Every window below is the reaper's own
+// STALLED_BADGE_MINUTES / the bus's own LISTENER_FRESH_MS — imported, never a
+// second number. Read-only, no identity (labels and notes can carry clinician
+// names, so neither tool returns them), fail-safe throughout.
+// ---------------------------------------------------------------------------
+
+const msOfLoose = (v: string | Date | null | undefined): number | null => {
+  if (v == null || v === "") return null;
+  const t = v instanceof Date ? v.getTime() : Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
+};
+
+/** Gaps shorter than this are rotation seams, not silence — the same 2 s line the
+ *  session rollup's gap_count draws (listBenchSessions: gap_before_ms >= 2000). */
+export const DAY_GAP_MIN_MS = 2_000;
+
+/** The tape's end: the newest chunk ended_at across BOTH microphones. Null when no piece. */
+export function tapeEndMs(chunks: ReadonlyArray<{ ended_at: string | Date }>): number | null {
+  let max: number | null = null;
+  for (const c of chunks) {
+    const t = msOfLoose(c.ended_at);
+    if (t !== null && (max === null || t > max)) max = t;
+  }
+  return max;
+}
+
+/** U3 day report: stored end vs tape end differ by MORE than the reaper's badge window
+ *  (either direction — a stored end far before the last piece is just as untrue). */
+export function endTimeDisagrees(storedEndMs: number | null, tapeMs: number | null): boolean {
+  if (storedEndMs == null || tapeMs == null) return false;
+  return Math.abs(storedEndMs - tapeMs) > STALLED_BADGE_MINUTES * 60_000;
+}
+
+/** U3 diff flag: the stored end time is LATER than the last piece by more than the same
+ *  window — the session claims tape that was never recorded (PRD: `ended_at_lies`). */
+export function endedAtLies(storedEndMs: number | null, tapeMs: number | null): boolean {
+  if (storedEndMs == null || tapeMs == null) return false;
+  return storedEndMs - tapeMs > STALLED_BADGE_MINUTES * 60_000;
+}
+
+/** Periods with no piece on EITHER microphone: merge every chunk interval across both
+ *  streams, report the holes ≥ minGapMs. A hole covered by the backup is not a gap. */
+export function coverageGaps(
+  chunks: ReadonlyArray<{ started_at: string | Date; ended_at: string | Date }>,
+  minGapMs: number = DAY_GAP_MIN_MS,
+): Array<{ from: string; to: string; seconds: number }> {
+  const spans = chunks
+    .map((c) => ({ s: msOfLoose(c.started_at), e: msOfLoose(c.ended_at) }))
+    .filter((x): x is { s: number; e: number } => x.s !== null && x.e !== null && x.e > x.s)
+    .sort((a, b) => a.s - b.s);
+  const gaps: Array<{ from: string; to: string; seconds: number }> = [];
+  let coveredTo: number | null = null;
+  for (const sp of spans) {
+    if (coveredTo !== null && sp.s - coveredTo >= minGapMs) {
+      gaps.push({ from: new Date(coveredTo).toISOString(), to: new Date(sp.s).toISOString(), seconds: Math.round((sp.s - coveredTo) / 1000) });
+    }
+    coveredTo = coveredTo === null ? sp.e : Math.max(coveredTo, sp.e);
+  }
+  return gaps;
+}
+
+type DaySessionRow = Pick<BenchSessionRollupRow, "id" | "status" | "started_at" | "ended_at">;
+type DayEventRow = Pick<BenchEventRow, "id" | "kind" | "at" | "brain_status" | "payload">;
+
+/** PURE — one session of the day report, shaped from rows already read. */
+export function buildDaySession(
+  s: DaySessionRow,
+  chunks: ReadonlyArray<Pick<BenchChunkRow, "source" | "started_at" | "ended_at" | "upload_state">>,
+  events: ReadonlyArray<DayEventRow>,
+): Record<string, unknown> {
+  const primary = chunks.filter((c) => c.source !== "backup");
+  const backup = chunks.filter((c) => c.source === "backup");
+  const tapeMs = tapeEndMs(chunks);
+  const storedMs = msOfLoose(s.ended_at);
+  const tapeIso = tapeMs !== null ? new Date(tapeMs).toISOString() : null;
+  const storedIso = storedMs !== null ? new Date(storedMs).toISOString() : null;
+  const payloadOf = (e: DayEventRow): Record<string, unknown> =>
+    typeof e.payload === "object" && e.payload !== null ? (e.payload as Record<string, unknown>) : {};
+  const atIso = (e: DayEventRow) => new Date(e.at).toISOString();
+  const byAt = (a: DayEventRow, b: DayEventRow) => msOfLoose(a.at)! - msOfLoose(b.at)!;
+  return {
+    session_id: s.id,
+    status: s.status,
+    started_at: new Date(s.started_at).toISOString(),
+    // THE TAPE CLOCK: the last piece recorded, either microphone. Never the stored end.
+    tape_ended_at: tapeIso,
+    ...(storedIso !== null && storedIso !== tapeIso ? { ended_at: storedIso } : {}),
+    end_time_disagrees: endTimeDisagrees(storedMs, tapeMs),
+    chunks: {
+      primary: { count: primary.length, verified: primary.filter((c) => c.upload_state === "verified").length },
+      backup: { count: backup.length, verified: backup.filter((c) => c.upload_state === "verified").length },
+    },
+    gaps: coverageGaps(chunks),
+    consult_marks: events
+      .filter((e) => e.kind === "consult_mark")
+      .sort(byAt)
+      .map((e) => ({ id: e.id, at: atIso(e), reached_brain: e.brain_status === "sent" })),
+    mic_events: events
+      .filter((e) => e.kind.startsWith("mic_"))
+      .sort(byAt)
+      .map((e) => {
+        const p = payloadOf(e);
+        return { kind: e.kind, at: atIso(e), ...(typeof p.reason === "string" ? { reason: p.reason } : {}) };
+      }),
+    remount_events: events
+      .filter((e) => e.kind === "kiosk_remount_resumed")
+      .sort(byAt)
+      .map((e) => {
+        const p = payloadOf(e);
+        return {
+          at: atIso(e),
+          silence_seconds: typeof p.silence_seconds === "number" ? p.silence_seconds : null,
+          ...(typeof p.handover_timed_out === "boolean" ? { handover_timed_out: p.handover_timed_out } : {}),
+        };
+      }),
+  };
+}
+
+const dayReport: McpTool = {
+  name: "scribe_day_report",
+  description:
+    "One room, one IST calendar day (default today): every session in start order with tape_ended_at (the last piece recorded on EITHER microphone — the tape clock governs; the stored ended_at is shown only when it differs, and end_time_disagrees names a gap wider than the stall window), per-mic chunk counts, coverage gaps, consult marks (with whether each reached the brain), the mic story, and remount/rejoin events with their recorded silence. Read-only; no labels, no notes, no identity.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room: { type: "string", description: "room id, slug, or exact name" },
+      room_id: { type: "string" },
+      room_slug: { type: "string" },
+      ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ sessions: [] as unknown[] }, async () => {
+      let room: RoomRef | null;
+      try {
+        room = await resolveRoom(args);
+      } catch (e) {
+        if (e instanceof AmbiguousRoomError) {
+          return { sessions: [], error: "ambiguous_room", matches: e.matches.map((m) => ({ id: m.id, slug: m.slug, name: m.name })) };
+        }
+        throw e;
+      }
+      if (!room) return { sessions: [], error: "unknown_room" };
+      const d = argStr(args, "ist_date", 10);
+      if (d && !IST_DATE_RE.test(d)) return { sessions: [], error: "invalid_ist_date" };
+      const day = d ?? istDate(new Date());
+      const rows = await listBenchSessions({ room_id: room.id, ist_date: day });
+      const ordered = [...rows].sort((a, b) => (msOfLoose(a.started_at) ?? 0) - (msOfLoose(b.started_at) ?? 0));
+      const degraded: string[] = [];
+      const sessions = await Promise.all(
+        ordered.map(async (s) => {
+          let chunks: BenchChunkRow[] = [];
+          try {
+            chunks = await listBenchChunks(s.id); // fail-safe [] inside — but keep the guard
+          } catch {
+            degraded.push(`${s.id}:chunks_read_failed`);
+          }
+          let events: BenchEventRow[] = [];
+          try {
+            events = await listBenchEvents(s.id);
+          } catch {
+            degraded.push(`${s.id}:events_read_failed`);
+          }
+          return buildDaySession(s, chunks, events);
+        }),
+      );
+      return {
+        room: { id: room.id, slug: room.slug, name: room.name },
+        ist_date: day,
+        note: "tape_ended_at is the last piece recorded (either microphone) — the stored ended_at is not the end of the recording and is shown only where it differs",
+        sessions,
+        ...(degraded.length ? { degraded_reads: degraded } : {}),
+      };
+    }),
+};
+
+const diffRoom: McpTool = {
+  name: "scribe_diff_room",
+  description:
+    "The now-picture across enabled rooms (or one room): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room: { type: "string", description: "optional: one room by id, slug, or exact name" },
+      room_id: { type: "string" },
+      room_slug: { type: "string" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ rooms: [] as unknown[] }, async () => {
+      const now = new Date();
+      const today = istDate(now);
+      let targets: RoomRef[] = [];
+      if (argStr(args, "room", 128) || argStr(args, "room_id", 128) || argStr(args, "room_slug", 128)) {
+        try {
+          const one = await resolveRoom(args);
+          if (!one) return { rooms: [], error: "unknown_room" };
+          targets = [one];
+        } catch (e) {
+          if (e instanceof AmbiguousRoomError) {
+            return { rooms: [], error: "ambiguous_room", matches: e.matches.map((m) => ({ id: m.id, slug: m.slug, name: m.name })) };
+          }
+          throw e;
+        }
+      } else {
+        const rows = (await sql`
+          SELECT id, slug, name FROM room WHERE disabled_at IS NULL ORDER BY created_at
+        `) as Array<{ id: string; slug: string; name: string }>;
+        targets = rows.map((r) => ({ id: r.id, slug: r.slug, name: r.name, enabled: true }));
+      }
+
+      const rooms = await Promise.all(
+        targets.map(async (room) => {
+          const reasons: string[] = [];
+          // Page open now? The bus's own freshness rule (LISTENER_FRESH_MS, imported).
+          let listener: ListenerRow | null = null;
+          let pageOpen: boolean | null = null;
+          try {
+            listener = await getListener(room.id);
+            pageOpen = isListening(listener, now);
+          } catch (e) {
+            const b = e instanceof BusError ? e : classifyBusError(e);
+            reasons.push(`listener_unavailable:${b.code}`);
+          }
+          // Today's sessions (rollup: status, last_any_chunk_at, ended_at — the badge's own inputs).
+          let sessions: BenchSessionRollupRow[] = [];
+          try {
+            sessions = await listBenchSessions({ room_id: room.id, ist_date: today });
+          } catch {
+            reasons.push("sessions_unavailable");
+          }
+          const recordingSession = sessions.find((s) => s.status === "recording") ?? null;
+          const lastPieceMs = sessions.reduce<number | null>((acc, s) => {
+            const t = msOfLoose(s.last_any_chunk_at);
+            return t !== null && (acc === null || t > acc) ? t : acc;
+          }, null);
+          const anyTapeToday = sessions.some((s) => s.chunk_count + s.backup_chunk_count > 0);
+          const stalled = sessions.some((s) => isBenchStalled(s, now.getTime()));
+          const liars = sessions.filter((s) => endedAtLies(msOfLoose(s.ended_at), msOfLoose(s.last_any_chunk_at) ?? msOfLoose(s.started_at)));
+          // The last cue on the room's brain day. A brain fault is UNKNOWN, never a flag.
+          let lastCue: { id: string; type: string; at: string } | null = null;
+          let cueCountKnown = false;
+          try {
+            const c = await listCuesForDay(room.id, today, { limit: 1 });
+            cueCountKnown = true;
+            const newest = c.cues[0] ?? null;
+            if (newest) lastCue = { id: newest.id, type: newest.type, at: newest.at };
+          } catch (e) {
+            reasons.push(`cues_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+          }
+          return {
+            room: { id: room.id, slug: room.slug, name: room.name },
+            page_open: pageOpen,
+            listener_age_ms: listener ? now.getTime() - new Date(listener.last_poll_at).getTime() : null,
+            recording: recordingSession !== null,
+            recording_session_id: recordingSession?.id ?? null,
+            last_piece_at: lastPieceMs !== null ? new Date(lastPieceMs).toISOString() : null,
+            last_cue: lastCue,
+            flags: {
+              kiosk_not_listening: pageOpen === null ? null : !pageOpen,
+              stalled,
+              tape_without_cues: cueCountKnown ? anyTapeToday && lastCue === null : null,
+              ended_at_lies: liars.length > 0,
+            },
+            ...(liars.length ? { ended_at_lies_sessions: liars.map((s) => s.id) } : {}),
+            ...(reasons.length ? { degraded: reasons } : {}),
+          };
+        }),
+      );
+      return {
+        ist_date: today,
+        freshness_window_ms: LISTENER_FRESH_MS,
+        stall_window_minutes: STALLED_BADGE_MINUTES,
+        rooms,
+      };
+    }),
+};
+
 export const BENCH_TOOLS: McpTool[] = [
   listSessions,
   getSession,
@@ -751,4 +1053,6 @@ export const BENCH_TOOLS: McpTool[] = [
   extractAudio,
   transcribeRange,
   listCommandsTool,
+  dayReport,
+  diffRoom,
 ];
