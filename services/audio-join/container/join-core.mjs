@@ -145,6 +145,25 @@ export function framePiecePrefix(byteLength) {
   return out;
 }
 
+/**
+ * How many bytes `frameJob` WOULD produce for this header and these piece sizes. PURE.
+ *
+ * The Worker must declare the exact length before it has read a byte of audio — its body is a
+ * `FixedLengthStream`, which the container hop requires and which is unforgiving in both
+ * directions: one byte over is "Attempt to write too many bytes through a FixedLengthStream",
+ * one byte under is "FixedLengthStream did not see all expected bytes before close()". Both are
+ * measured, not assumed — see the round-trip test.
+ *
+ * It lives HERE, beside the two functions that write the frame, so the layout is stated once. A
+ * copy of this arithmetic in the Worker would be a second place to get it wrong, and getting it
+ * wrong fails the whole join.
+ */
+export function frameWireLength(header, pieceSizes) {
+  let total = frameHeader(header).byteLength;
+  for (const size of pieceSizes) total += PIECE_PREFIX_BYTES + size;
+  return total;
+}
+
 /** Frame a job header + the piece bodies, in the order given, into one buffer. PURE. */
 export function frameJob(header, pieceBodies) {
   const parts = [frameHeader(header)];

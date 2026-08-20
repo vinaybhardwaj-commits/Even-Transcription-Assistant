@@ -30,6 +30,7 @@ import {
   OUT_CONTENT_TYPE,
   frameHeader,
   framePiecePrefix,
+  frameWireLength,
   validateJoinRequest,
 } from "../container/join-core.mjs";
 
@@ -105,21 +106,45 @@ export class Joiner extends Container {
     //    memory rather than the whole 30.
     const header = { trim: job.trim, pieces: sized.map((p) => ({ key: p.key, idx: p.idx })) };
     const env = this.env;
-    // IdentityTransformStream + an awaited writer, NOT a ReadableStream `start()`: `start` runs
-    // to completion regardless of the consumer, so it would queue all 30 MB in the Worker after
-    // all. `writer.write()` resolves only when the container has taken the last chunk, which is
-    // what keeps one piece in flight instead of every piece.
-    const { readable, writable } = new IdentityTransformStream();
+
+    // The header block and the 8-byte prefixes are bytes on the wire too, so the declared length
+    // must count them. `frameWireLength` states that arithmetic once, next to the functions that
+    // write the frame — this file does not carry a second copy of the layout. Both are tiny; the
+    // piece BODIES are still streamed one at a time below.
+    const headerFrame = frameHeader(header);
+    const piecePrefixes = sized.map((p) => framePiecePrefix(p.size));
+    const wireBytes = frameWireLength(header, sized.map((p) => p.size));
+
+    // FixedLengthStream, NOT IdentityTransformStream: the container hop rejects a body of unknown
+    // length ("Provided readable stream must have a known length …") because any other
+    // ReadableStream makes the runtime reach for chunked encoding, which this hop does not take.
+    // The length is already known — step 1 head()s every piece — so it is declared up front.
+    //
+    // Backpressure is unchanged. FixedLengthStream is an identity TransformStream that merely
+    // caps the byte count, so `writer.write()` still resolves only when the container has taken
+    // the chunk. That is why the pump is an awaited writer rather than a ReadableStream `start()`:
+    // `start` runs to completion regardless of the consumer, and would queue all 30 MB in the
+    // Worker. One piece is in flight at a time, ~5 MB, not the whole window.
+    const { readable, writable } = new FixedLengthStream(wireBytes);
     let pumpError = null;
     const pump = (async () => {
       const writer = writable.getWriter();
       try {
-        await writer.write(frameHeader(header));
-        for (const p of sized) {
+        await writer.write(headerFrame);
+        for (let i = 0; i < sized.length; i++) {
+          const p = sized[i];
           const obj = await env.AUDIO.get(p.key);
           if (!obj) throw new Error(`piece_vanished:${p.key}`);
-          await writer.write(framePiecePrefix(p.size));
-          for await (const chunk of obj.body) await writer.write(chunk);
+          await writer.write(piecePrefixes[i]);
+          // A declared length must be met exactly, so a piece that is no longer the size head()
+          // reported is now fatal rather than merely odd. Count it and say so by name — the
+          // alternative is an opaque stream error with nothing in it to act on.
+          let written = 0;
+          for await (const chunk of obj.body) {
+            written += chunk.byteLength;
+            await writer.write(chunk);
+          }
+          if (written !== p.size) throw new Error(`piece_size_changed:${p.key}:${written}!=${p.size}`);
         }
         await writer.close();
       } catch (e) {
@@ -153,6 +178,15 @@ export class Joiner extends Container {
       return json(named.ok === false ? named : { ok: false, error: "container_refused" });
     }
     if (!res.ok || !res.body) return json({ ok: false, error: "container_failed", status: res.status });
+
+    // The RETURN hop needs no FixedLengthStream: `server.mjs` writes an explicit content-length on
+    // every response it sends — the audio and both JSON shapes — so the body arrives here already
+    // length-aware and R2 `put()` takes it as a stream. That is load-bearing, not incidental: an
+    // unsized body would fail with the very same "known length" error, one layer further down. If
+    // the header ever goes missing, say so by name instead of buffering the window to invent one.
+    if (res.headers.get("content-length") === null) {
+      return json({ ok: false, error: "container_response_unsized" });
+    }
 
     // 3. Stream the clip straight back into the bucket, with its own origin on the object (D4).
     //    put() returns the stored object, so the byte count is R2's, not a guess.

@@ -56,6 +56,15 @@ Nothing is buffered whole: R2 `head()` gives each piece's length, so the Worker 
 frame's length prefix and pipe the body straight through. A 30-minute job costs about 5 MB of
 Worker memory instead of 30.
 
+Those `head()` sizes do a second job. The container hop refuses a request body of unknown length
+("Provided readable stream must have a known length …"), so the body is a **`FixedLengthStream`**
+whose total — header block, 8-byte prefixes and audio — is declared before a byte is read, by
+`frameWireLength()`. It is an identity transform that only caps the byte count, so backpressure is
+unchanged: one piece is in flight at a time. The count must be exact in both directions, which is
+why a piece that is no longer the size `head()` reported fails by name (`piece_size_changed`)
+rather than as an opaque stream error. The return hop needs none of this — `server.mjs` sets an
+explicit `content-length` on every response, so the clip arrives length-aware for `put()`.
+
 ---
 
 ## Contract

@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 // @ts-expect-error — plain ESM shipped inside the container image; no types, by design.
-import { buildFfmpegArgs, buildFilterGraph, CLIPS_PREFIX, frameJob, MAX_JOIN_MS, MAX_PIECES, unframeJob, validateJoinRequest } from "../../services/audio-join/container/join-core.mjs";
+import { buildFfmpegArgs, buildFilterGraph, CLIPS_PREFIX, frameHeader, frameJob, framePiecePrefix, frameWireLength, MAX_JOIN_MS, MAX_PIECES, unframeJob, validateJoinRequest } from "../../services/audio-join/container/join-core.mjs";
 
 const KEY = (i: number) => `bench/opd-7/2026-08-19/bs_xvntaugh/chunk_${String(i).padStart(5, "0")}.webm`;
 
@@ -105,5 +105,50 @@ describe("guard rails", () => {
     const v = validateJoinRequest(job({ meta: { session_id: "bs_a", nested: { a: 1 }, dropped: null, n: 7 } }));
     expect(v.ok).toBe(true);
     expect(v.job.meta).toEqual({ session_id: "bs_a", nested: '{"a":1}', n: "7" });
+  });
+});
+
+/**
+ * The Worker's body is a FixedLengthStream, because the container hop refuses one of unknown
+ * length ("Provided readable stream must have a known length …"). That means the Worker declares
+ * the byte count from R2's head() sizes BEFORE it reads any audio, and workerd holds it to that
+ * number exactly: one byte over is "Attempt to write too many bytes through a FixedLengthStream",
+ * one byte under is "FixedLengthStream did not see all expected bytes before close()". Both
+ * measured in workerd, neither recoverable — so the arithmetic is pinned here to the frame the
+ * container actually parses, rather than trusted.
+ */
+describe("the declared wire length", () => {
+  const hdr = (n: number) => ({ trim: { start_ms: 164_497, end_ms: 884_496 }, pieces: Array.from({ length: n }, (_, i) => ({ key: KEY(i), idx: 29 + i })) });
+  const body = (size: number, tag: number) => { const u = new Uint8Array(size); u.fill(tag); return u; };
+
+  it("equals the bytes the frame actually occupies, for every shape the door can produce", () => {
+    // one piece; the real bs_xvntaugh 12-minute window (4 pieces); the 30-minute worst case (7);
+    // an empty piece; and the MAX_PIECES ceiling.
+    for (const sizes of [[4_900_000], [4_900_000, 4_900_000, 4_900_000, 2_100_000], Array(7).fill(4_900_000), [0, 12, 0], Array(MAX_PIECES).fill(1_024)]) {
+      const header = hdr(sizes.length);
+      const framed = frameJob(header, sizes.map((s, i) => body(s, i + 1)));
+      expect(frameWireLength(header, sizes)).toBe(framed.length);
+    }
+  });
+
+  it("counts the header block and the 8-byte prefixes, not just the audio", () => {
+    const header = hdr(3);
+    const sizes = [100, 200, 300];
+    // 3 prefixes × 8 B + the header block, above the 600 B of payload.
+    expect(frameWireLength(header, sizes)).toBe(600 + 3 * 8 + (4 + JSON.stringify(header).length));
+  });
+
+  it("a piece that is not the size head() reported would break the frame — which is why the Worker counts bytes and names it", () => {
+    const header = hdr(2);
+    const declared = frameWireLength(header, [10, 10]);
+    // What the pump would actually put on the wire if an object shrank between head() and get():
+    // the PREFIX still says 10 — it was written from head() — but only 9 bytes follow it.
+    const parts = [frameHeader(header), framePiecePrefix(10), body(10, 1), framePiecePrefix(10), body(9, 2)];
+    const onWire = new Uint8Array(parts.reduce((a, p) => a + p.length, 0));
+    let off = 0;
+    for (const p of parts) { onWire.set(p, off); off += p.length; }
+
+    expect(onWire.length).toBe(declared - 1); // one byte short of what was promised
+    expect(() => unframeJob(onWire)).toThrow(/frame_truncated/);
   });
 });
