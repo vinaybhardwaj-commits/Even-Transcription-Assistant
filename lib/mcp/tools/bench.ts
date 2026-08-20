@@ -670,8 +670,9 @@ type JoinAttempt =
   | { kind: "refused"; body: Record<string, unknown> }
   /** One clip, written and kept. */
   | { kind: "clip"; key: string; bytes: number; duration_ms: number; guard_degraded?: string }
-  /** The joining service is unreachable or refused → today's multi-piece answer (D10). */
-  | { kind: "fallback"; join_error: string; join_detail?: string; guard_degraded?: string };
+  /** The joining service is unreachable or refused → today's multi-piece answer (D10).
+   *  `join_hop` names which of the service's three transfers broke, when one did. */
+  | { kind: "fallback"; join_error: string; join_detail?: string; join_hop?: string; guard_degraded?: string };
 
 async function attemptJoin(
   sessionId: string,
@@ -707,7 +708,7 @@ async function attemptJoin(
   const req = buildJoinRequest(sessionId, covering, startMs, endMs, source);
   const out: JoinOutcome = await callJoinService(req);
   if (!out.ok) {
-    return { kind: "fallback", join_error: out.error, ...(out.detail ? { join_detail: out.detail } : {}), ...(guardDegraded ? { guard_degraded: guardDegraded } : {}) };
+    return { kind: "fallback", join_error: out.error, ...(out.detail ? { join_detail: out.detail } : {}), ...(out.hop ? { join_hop: out.hop } : {}), ...(guardDegraded ? { guard_degraded: guardDegraded } : {}) };
   }
   return { kind: "clip", key: out.key, bytes: out.bytes, duration_ms: out.duration_ms, ...(guardDegraded ? { guard_degraded: guardDegraded } : {}) };
 }
@@ -746,6 +747,7 @@ const extractAudio: McpTool = {
         return multiPieceAnswer(res.covering, base, {
           join_error: attempt.join_error,
           ...(attempt.join_detail ? { join_detail: attempt.join_detail } : {}),
+          ...(attempt.join_hop ? { join_hop: attempt.join_hop } : {}),
           hint: "joining is unavailable — fetch the listed presigns in order; the window spans them",
         });
       }
@@ -804,6 +806,7 @@ const transcribeRange: McpTool = {
         return multiPieceAnswer(res.covering, base, {
           join_error: attempt.join_error,
           ...(attempt.join_detail ? { join_detail: attempt.join_detail } : {}),
+          ...(attempt.join_hop ? { join_hop: attempt.join_hop } : {}),
           hint: "joining is unavailable — transcribe one covering chunk at a time by narrowing the window to a single chunk_bounds",
         });
       }

@@ -196,7 +196,10 @@ export type JoinRequest = {
 
 export type JoinOutcome =
   | { ok: true; key: string; bytes: number; duration_ms: number }
-  | { ok: false; error: string; detail?: string };
+  /** `hop` names WHICH of the joining service's three transfers failed — worker_to_do,
+   *  do_to_container or clip_to_r2. Absent when the failure was not a transfer (a refusal, a
+   *  timeout, an unreachable box). */
+  | { ok: false; error: string; detail?: string; hop?: string };
 
 /**
  * PURE — the request body for a window that spans pieces.
@@ -240,12 +243,27 @@ export async function callJoinService(req: JoinRequest, opts: { timeoutMs?: numb
   const token = process.env.AUDIO_JOIN_TOKEN;
   if (!token) return { ok: false, error: "join_token_not_configured" };
 
+  // ONE id per caller request, logged by both layers of the service.
+  //
+  // A Worker and the Durable Object it calls each emit their own invocation log, so a single POST
+  // from here appears in `wrangler tail` as TWO "POST /join" lines. This id is what tells that
+  // pair apart from a genuine retry: the same id twice is one request seen at two layers; two ids
+  // is something calling twice. Nothing in this file retries — one fetch, no retry wrapper — and
+  // the service's own mutex answers `join_already_running` to a second job anyway, so a duplicate
+  // could never make the container do the work twice. The id is here so that is provable rather
+  // than argued.
+  const rid = `j_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? JOIN_TIMEOUT_MS);
   try {
     const res = await fetch(`${base.replace(/\/+$/, "")}/join`, {
       method: "POST",
-      headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${token}`,
+        "x-join-request-id": rid,
+      },
       body: JSON.stringify(req),
       signal: controller.signal,
     });
@@ -263,6 +281,8 @@ export async function callJoinService(req: JoinRequest, opts: { timeoutMs?: numb
       ok: false,
       error: typeof b.error === "string" ? b.error : `join_http_${res.status}`,
       ...(typeof b.detail === "string" ? { detail: b.detail } : {}),
+      // Carried out to the MCP answer so a failure names its own hop there too.
+      ...(typeof b.hop === "string" ? { hop: b.hop } : {}),
     };
   } catch (e) {
     const aborted = (e as Error)?.name === "AbortError";
