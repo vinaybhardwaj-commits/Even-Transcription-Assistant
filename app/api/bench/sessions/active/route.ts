@@ -204,6 +204,7 @@ export async function POST(req: NextRequest) {
 
     let body: {
       kind?: unknown;
+      at?: unknown;
       session_id?: unknown;
       silence_seconds?: unknown;
       next_idx?: { primary?: unknown; backup?: unknown } | null;
@@ -286,12 +287,20 @@ export async function POST(req: NextRequest) {
     `) as Array<{ id: string }>;
     if (!owned[0]) return respondError("NOT_FOUND", "session_not_found");
 
+    // P5-2 (D21): `at` is the CLIENT's stamp, taken at the moment the thing happened —
+    // 0043 documents the column as "wall-clock of the press (client), not arrival", and
+    // both handover writes are fire and forget, so arrival order must not set the
+    // timeline. Same fallback as /api/bench/events' parseAt: absent or junk → arrival
+    // time (pre-P5 kiosks keep working).
+    const atMs = typeof body.at === "string" || typeof body.at === "number" ? new Date(body.at).getTime() : NaN;
+    const at = Number.isFinite(atMs) ? new Date(atMs).toISOString() : new Date().toISOString();
+
     const eventId = newEventId();
     // brain_status 'none' (FU1a): no brain hop is ever attempted for these rows — 'failed'
     // is every other writer's "attempted, not yet succeeded" and would read as a lie.
     await sql`
       INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
-      VALUES (${eventId}, ${sessionId}, ${kind}, ${new Date().toISOString()}, 'none', ${JSON.stringify(payload)}::jsonb)
+      VALUES (${eventId}, ${sessionId}, ${kind}, ${at}, 'none', ${JSON.stringify(payload)}::jsonb)
     `;
     console.info("[bench-resume]", JSON.stringify({ event_id: eventId, kind, ...payload }));
     return respondOk({ ok: true, event_id: eventId });

@@ -56,7 +56,13 @@ import {
 // S3-2: the pure constants module — never bench-commands, whose module graph carries the
 // database driver and has no business in a kiosk bundle.
 import { ACK_POLL_MS } from "@/lib/bench-bus-constants";
-import { decideHandoverWait } from "@/lib/bench-resume-core";
+import {
+  decideHandoverWait,
+  resumeEventBody,
+  takeHandoffMarker,
+  writeHandoffMarker,
+  type HandoffMarker,
+} from "@/lib/bench-resume-core";
 import { LIVE_SINK } from "@/lib/live-flags";
 import { useLiveSink, type LiveSinkCounters } from "@/lib/use-live-sink";
 import { useCommandPoll, type CommandActions } from "@/lib/use-command-poll";
@@ -180,12 +186,14 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const [endingUpload, setEndingUpload] = React.useState(false);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   // Remount resume: hold the start screen until the server has answered (§3.1);
-  // `resumed` drives the D6 banner; `takenOver` is the D3 superseded-tab message.
+  // `resumed` drives the D6 banner (its TEXT reads the LIVE state — P5-3a: a banner
+  // frozen on the rejoin-time state said "still paused" beside a Recording chip);
+  // `takenOver` is the D3 superseded-tab message.
   // FU2: the operator poll starts only after the first /active look (`pollEnabled`), so
   // this tab's own poll cannot overwrite the listener row before handover_pending reads it;
   // `handingOver` shows the short wait line.
   const [boot, setBoot] = React.useState<"checking" | "ready">("checking");
-  const [resumed, setResumed] = React.useState<null | { status: "recording" | "paused" }>(null);
+  const [resumed, setResumed] = React.useState(false);
   const [takenOver, setTakenOver] = React.useState(false);
   const [pollEnabled, setPollEnabled] = React.useState(false);
   const [handingOver, setHandingOver] = React.useState(false);
@@ -359,6 +367,23 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     void (async () => {
       let rejoining = false;
       try {
+        // P5-1 (D20): the same-browser hand-off marker, read (and deleted) BEFORE the
+        // first /active call. The dying tab wrote it synchronously during pagehide, so
+        // unlike the beacon it cannot lose a race with this page load. Honoured only when
+        // it names this room, is under fifteen seconds old, and carries another tab's id;
+        // deleted on first read either way, so it can never be honoured twice. Fail-safe:
+        // a failed marker read must never stop the kiosk starting.
+        let marker: HandoffMarker | null = null;
+        try {
+          marker = takeHandoffMarker(
+            window.localStorage,
+            slug,
+            operatorTabIdRef.current,
+            Date.now(),
+          );
+        } catch {
+          marker = null;
+        }
         let first: ActiveAnswer | null = null;
         try {
           first = await getActive();
@@ -375,14 +400,23 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
         const sid = s.id;
         if (!sid || (s.status !== "recording" && s.status !== "paused")) return;
 
-        // FU2c + S3-1c + S4-2 — ordered handover, proof of life not freshness. tab_gone (the
-        // dying tab's pagehide beacon named the listener's tab) is the ordinary reload: start
-        // at once, no probe, no wait, no timeout event. Otherwise probe for the losing tab's
-        // kiosk_handover_started announce (a crashed tab never announces — start after one
-        // bounded probe, no timeout recorded), then wait for its kiosk_handover_complete,
-        // then re-read.
+        // FU2c + S3-1c + S4-2 + P5-1 — ordered handover, proof of life not freshness. The
+        // hand-off marker (same browser, synchronous, race-proof) or tab_gone (the dying
+        // tab's pagehide beacon named the listener's tab — a closed tab, or another
+        // machine) is the ordinary reload: start at once, no probe, no wait, no timeout
+        // event. Otherwise probe for the losing tab's kiosk_handover_started announce (a
+        // crashed tab never announces — start after one bounded probe, no timeout
+        // recorded), then wait for its kiosk_handover_complete, then re-read.
         let handoverTimedOut = false;
-        if (first.handover_pending === true && first.tab_gone !== true) {
+        const firstDecision = decideHandoverWait({
+          handoverPending: first.handover_pending === true,
+          tabGone: first.tab_gone === true,
+          markerHeld: marker !== null,
+          handoverStarted: false,
+          handoverComplete: false,
+          waitedMs: 0,
+        });
+        if (firstDecision !== "start") {
           setHandingOver(true);
           const since = new Date().toISOString();
           let stageT0 = Date.now(); // stage clock: reset when the announce is first seen
@@ -450,21 +484,23 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           deviceId: storedPrimary || undefined,
           backupDeviceId: storedBackup || null,
         });
-        setResumed({ status: finalStatus });
+        setResumed(true);
         // §3.4 gap record — fire-and-forget: a lost record must not disturb the rejoin.
+        // P5-2 (D21): `at` is stamped HERE, the moment the rejoin happened, not on arrival.
+        const resumedAtMs = Date.now();
         const silenceSeconds = Number.isFinite(lastAudioMs)
-          ? Math.max(0, Math.round((Date.now() - lastAudioMs) / 1000))
+          ? Math.max(0, Math.round((resumedAtMs - lastAudioMs) / 1000))
           : 0;
         void fetch("/api/bench/sessions/active", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: "kiosk_remount_resumed",
-            session_id: sid,
-            silence_seconds: silenceSeconds,
-            next_idx: { primary: seeded.primaryStartIdx, backup: seeded.backupStartIdx },
-            ...(handoverTimedOut ? { handover_timed_out: true } : {}),
-          }),
+          body: JSON.stringify(
+            resumeEventBody("kiosk_remount_resumed", sid, resumedAtMs, {
+              silence_seconds: silenceSeconds,
+              next_idx: { primary: seeded.primaryStartIdx, backup: seeded.backupStartIdx },
+              ...(handoverTimedOut ? { handover_timed_out: true } : {}),
+            }),
+          ),
           keepalive: true,
         }).catch(() => undefined);
       } catch (e) {
@@ -547,14 +583,16 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     if (status.state !== "ending" || status.queuedCount > 0) return;
     if (!sessionId) return;
     handoverPostedRef.current = true;
+    // P5-2 (D21): stamped now — the moment the flush finished — so the timeline keeps
+    // started before complete even when the fire-and-forget writes arrive out of order.
     void fetch("/api/bench/sessions/active", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        kind: "kiosk_handover_complete",
-        session_id: sessionId,
-        last_idx: { primary: status.currentIdx - 1, backup: status.backupIdx - 1 },
-      }),
+      body: JSON.stringify(
+        resumeEventBody("kiosk_handover_complete", sessionId, Date.now(), {
+          last_idx: { primary: status.currentIdx - 1, backup: status.backupIdx - 1 },
+        }),
+      ),
       keepalive: true,
     }).catch(() => undefined);
   }, [takenOver, sessionId, status.state, status.queuedCount, status.currentIdx, status.backupIdx]);
@@ -623,10 +661,11 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     if (st === "recording" || st === "paused") {
       const sid = sessionIdRef.current;
       if (sid) {
+        // P5-2 (D21): stamped at the announce itself, not on arrival.
         void fetch("/api/bench/sessions/active", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ kind: "kiosk_handover_started", session_id: sid }),
+          body: JSON.stringify(resumeEventBody("kiosk_handover_started", sid, Date.now())),
           keepalive: true,
         }).catch(() => undefined);
       }
@@ -650,9 +689,12 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const operator = useCommandPoll({ enabled: pollEnabled, actions: commandActions });
   operatorTabIdRef.current = operator.tab_id;
 
-  // S4-1: a dying tab announces. pagehide fires on reload, navigation away and tab close —
-  // all three mean this tab will not be handing anything over. sendBeacon survives the
-  // unloading page where a fetch would not; a failed beacon must never block the unload.
+  // S4-1 + P5-1: a dying tab announces. pagehide fires on reload, navigation away and tab
+  // close — all three mean this tab will not be handing anything over.
+  // The marker is the fast path; the beacon is not and cannot be — it is a network round
+  // trip racing a page load, kept for a closed tab and for a tab on another machine.
+  // sendBeacon survives the unloading page where a fetch would not; a failed beacon must
+  // never block the unload.
   // event.persisted = the page is going into the back-forward cache and may come back: not gone.
   React.useEffect(() => {
     const onPageHide = (ev: PageTransitionEvent) => {
@@ -660,9 +702,25 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       const st = stateRef.current;
       const sid = sessionIdRef.current;
       if (!sid || (st !== "recording" && st !== "paused")) return;
+      const atMs = Date.now(); // P5-2 (D21): the client's stamp, taken at the moment itself
+      // P5-1 (D20): the bench path deliberately keeps no browser storage; this ONE key is
+      // a considered exception. It is a hand-off marker with a fifteen-second life, not
+      // session state; it is written synchronously during unload, where nothing else can
+      // be (localStorage completes before the page unloads — IndexedDB does not); and it
+      // is deleted on first read. Do not extend it to hold anything else.
+      try {
+        writeHandoffMarker(window.localStorage, {
+          room: slug,
+          session_id: sid,
+          tab_id: operatorTabIdRef.current,
+          at: atMs,
+        });
+      } catch {
+        /* the beacon below still stands behind this */
+      }
       try {
         const body = new Blob(
-          [JSON.stringify({ kind: "kiosk_tab_gone", session_id: sid, tab_id: operatorTabIdRef.current })],
+          [JSON.stringify(resumeEventBody("kiosk_tab_gone", sid, atMs, { tab_id: operatorTabIdRef.current }))],
           { type: "application/json" },
         );
         navigator.sendBeacon("/api/bench/sessions/active", body);
@@ -672,7 +730,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, []);
+  }, [slug]);
 
   // ---- shared bits ----
   const today = new Date();
@@ -688,8 +746,17 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     month: "short",
   });
 
-  const pill =
-    status.state === "recording" || status.state === "ending" ? (
+  // P5-3b: a tab that has lost a takeover flushes through the "ending" state, which the
+  // chip used to read as Recording — in pink, beside "This tab has stopped recording".
+  // The chip must say it has stopped.
+  const pill = takenOver ? (
+    <span
+      className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-caption font-semibold bg-even-ink-100 text-even-ink-500"
+      data-testid="stopped-pill"
+    >
+      ■ Stopped
+    </span>
+  ) : status.state === "recording" || status.state === "ending" ? (
       <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-caption font-semibold bg-even-pink-50 text-even-pink-700">
         <span className="w-2 h-2 rounded-full bg-even-pink-600 animate-pulse" aria-hidden="true" />
         Recording
@@ -854,18 +921,24 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
             </div>
           )}
 
-          {/* remount-resume banner (D6) */}
-          {!takenOver && resumed && status.state !== "idle" && status.state !== "error" && (
-            <div
-              className="mb-4 flex items-center gap-2 rounded-xl bg-even-blue-50 px-4 py-2.5 text-caption font-semibold text-even-blue-700"
-              data-testid="resume-banner"
-            >
-              ↻{" "}
-              {resumed.status === "paused"
-                ? "Rejoined today's session — still paused"
-                : "Rejoined today's session — recording continues on the same tape"}
-            </div>
-          )}
+          {/* remount-resume banner (D6). P5-3a: the text follows the LIVE state — a banner
+              frozen on the rejoin-time state kept saying "still paused" after Resume, beside
+              a chip reading Recording. Hidden once the day ends: nothing continues then. */}
+          {!takenOver &&
+            resumed &&
+            status.state !== "idle" &&
+            status.state !== "error" &&
+            status.state !== "ended" && (
+              <div
+                className="mb-4 flex items-center gap-2 rounded-xl bg-even-blue-50 px-4 py-2.5 text-caption font-semibold text-even-blue-700"
+                data-testid="resume-banner"
+              >
+                ↻{" "}
+                {status.state === "paused"
+                  ? "Rejoined today's session — still paused"
+                  : "Rejoined today's session — recording continues on the same tape"}
+              </div>
+            )}
 
           {/* ============ CHECKING (before the start screen may render, §3.1) ============ */}
           {!takenOver && boot === "checking" && idle && (

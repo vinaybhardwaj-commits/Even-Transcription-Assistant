@@ -7,6 +7,10 @@
  * the command bus's own LISTENER_FRESH_MS, hasHandoverCompleted against `since`,
  * decideHandoverWait bounded by ACK_WAIT_MS, and the number-disjointness proof through
  * nextIdxFromMax + seedStartIdx (the same functions the route and the kiosk run).
+ *
+ * Addendum 5 (P5): the same-browser hand-off marker (write/take, room-scoped, 15 s TTL,
+ * deleted on first read — D20) and client-stamped event bodies whose `at` keeps started
+ * before complete whatever the arrival order (D21).
  */
 import { describe, it, expect } from "vitest";
 import { STALLED_BADGE_MINUTES } from "../../lib/bench-reaper-core";
@@ -15,12 +19,18 @@ import {
   decideHandoverPending,
   decideHandoverWait,
   decideResume,
+  HANDOFF_MARKER_TTL_MS,
+  handoffMarkerKey,
   HANDOVER_PROBE_MS,
   hasHandoverEventSince,
   isListenerTabGone,
   nextIdxFromMax,
   primaryFallbackEvents,
+  resumeEventBody,
   seedStartIdx,
+  takeHandoffMarker,
+  writeHandoffMarker,
+  type MarkerStorage,
 } from "../../lib/bench-resume-core";
 import { micEventLabel } from "../../lib/bench-timeline";
 
@@ -201,6 +211,133 @@ describe("S3-4 — the timeline label splits mic_backup_unavailable on the reaso
     expect(micEventLabel("mic_backup_unavailable", null)).toEqual({ label: "no backup mic", detail: null });
     expect(micEventLabel("mic_primary_lost", "watchdog_suspended")).toEqual({ label: "main mic lost · on backup mic", detail: "watchdog_suspended" });
     expect(micEventLabel("kiosk_remount_resumed", "78 s silence")).toEqual({ label: "rejoined after reload", detail: "78 s silence" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P5-1 (D20) — the same-browser hand-off marker: written synchronously during
+// pagehide, honoured only when it names this room, is under 15 s old and comes
+// from another tab; deleted on first read so it can never be honoured twice.
+// ---------------------------------------------------------------------------
+
+const memStorage = (): MarkerStorage & { size: () => number } => {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k) => m.get(k) ?? null,
+    setItem: (k, v) => void m.set(k, v),
+    removeItem: (k) => void m.delete(k),
+    size: () => m.size,
+  };
+};
+
+const ROOM = "room-7";
+const freshMarker = (over: Partial<{ room: string; session_id: string; tab_id: string; at: number }> = {}) => ({
+  room: ROOM,
+  session_id: "bs_live",
+  tab_id: "tab_old",
+  at: NOW - 1_000,
+  ...over,
+});
+
+describe("P5-1 — takeHandoffMarker: the marker that cannot lose a race", () => {
+  it("a fresh marker for this room, from another tab → returned, and the wait decision is start at once (no probe)", () => {
+    const s = memStorage();
+    writeHandoffMarker(s, freshMarker());
+    const m = takeHandoffMarker(s, ROOM, "tab_new", NOW);
+    expect(m).toEqual(freshMarker());
+    expect(
+      decideHandoverWait({
+        handoverPending: true,
+        tabGone: false,
+        markerHeld: true,
+        handoverStarted: false,
+        handoverComplete: false,
+        waitedMs: 0,
+      }),
+    ).toBe("start");
+  });
+  it("a marker older than 15 seconds is ignored — exactly 15 s is already too old, TTL is the exported constant", () => {
+    const s = memStorage();
+    writeHandoffMarker(s, freshMarker({ at: NOW - HANDOFF_MARKER_TTL_MS }));
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+    const s2 = memStorage();
+    writeHandoffMarker(s2, freshMarker({ at: NOW - HANDOFF_MARKER_TTL_MS + 1 }));
+    expect(takeHandoffMarker(s2, ROOM, "tab_new", NOW)).not.toBeNull();
+    expect(HANDOFF_MARKER_TTL_MS).toBe(15_000);
+  });
+  it("a marker naming a different room is ignored — by key scoping AND by the value's own room field", () => {
+    const s = memStorage();
+    writeHandoffMarker(s, freshMarker({ room: "room-other" })); // lands under room-other's key
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+    // a mismatched value smuggled under this room's key is still refused
+    const s2 = memStorage();
+    s2.setItem(handoffMarkerKey(ROOM), JSON.stringify(freshMarker({ room: "room-other" })));
+    expect(takeHandoffMarker(s2, ROOM, "tab_new", NOW)).toBeNull();
+  });
+  it("a marker naming this tab's own id is ignored", () => {
+    const s = memStorage();
+    writeHandoffMarker(s, freshMarker({ tab_id: "tab_new" }));
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+  });
+  it("the marker is deleted after one read, whether or not it was honoured — a second mount never honours it", () => {
+    const s = memStorage();
+    writeHandoffMarker(s, freshMarker());
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).not.toBeNull();
+    expect(s.size()).toBe(0); // gone from storage, not just refused
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+    // an IGNORED marker is deleted too — it can never be honoured later either
+    const s2 = memStorage();
+    writeHandoffMarker(s2, freshMarker({ at: NOW - HANDOFF_MARKER_TTL_MS - 1 }));
+    expect(takeHandoffMarker(s2, ROOM, "tab_new", NOW)).toBeNull();
+    expect(s2.size()).toBe(0);
+  });
+  it("junk degrades to null, never a throw — a failed marker read must never stop the kiosk starting", () => {
+    const s = memStorage();
+    s.setItem(handoffMarkerKey(ROOM), "not json");
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+    s.setItem(handoffMarkerKey(ROOM), JSON.stringify({ room: ROOM }));
+    expect(takeHandoffMarker(s, ROOM, "tab_new", NOW)).toBeNull();
+    expect(takeHandoffMarker(null, ROOM, "tab_new", NOW)).toBeNull();
+    const throwing: MarkerStorage = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+      removeItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(takeHandoffMarker(throwing, ROOM, "tab_new", NOW)).toBeNull();
+    expect(() => writeHandoffMarker(throwing, freshMarker())).not.toThrow();
+  });
+});
+
+describe("P5-2 (D21) — client-stamped events keep started before complete, whatever the arrival order", () => {
+  it("a pair stamped at the moments they happened sorts started-first even when complete arrives ~700 ms earlier", () => {
+    const startedAt = NOW;
+    const completeAt = NOW + 3_000;
+    const started = resumeEventBody("kiosk_handover_started", "bs_live", startedAt);
+    const complete = resumeEventBody("kiosk_handover_complete", "bs_live", completeAt, {
+      last_idx: { primary: 87, backup: 12 },
+    });
+    // arrival order reversed — the preview's observed failure — then ordered by `at`,
+    // exactly how the timeline reads the table
+    const arrived = [complete, started];
+    const ordered = [...arrived].sort(
+      (a, b) => Date.parse(String(a.at)) - Date.parse(String(b.at)),
+    );
+    expect(ordered.map((e) => e.kind)).toEqual(["kiosk_handover_started", "kiosk_handover_complete"]);
+    expect(Date.parse(String(started.at))).toBeLessThan(Date.parse(String(complete.at)));
+  });
+  it("the body carries the stamp and the payload fields the route validates", () => {
+    expect(resumeEventBody("kiosk_tab_gone", "bs_live", NOW, { tab_id: "tab_old" })).toEqual({
+      kind: "kiosk_tab_gone",
+      session_id: "bs_live",
+      at: iso(NOW),
+      tab_id: "tab_old",
+    });
   });
 });
 

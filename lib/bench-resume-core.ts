@@ -165,10 +165,14 @@ export function hasHandoverEventSince(
 export type HandoverWaitDecision = "start" | "wait" | "timeout_start";
 
 /**
- * FU2c + S3-1c + S4-2 — one wait-loop step. Never hangs:
+ * FU2c + S3-1c + S4-2 + P5-1 — one wait-loop step. Never hangs:
  *
+ *   Fastest path (markerHeld): the dying tab left the same-browser hand-off marker in
+ *   localStorage during pagehide (D20). Written synchronously, it cannot lose a race the
+ *   way the beacon does — a network round trip racing a page load. Start at once.
  *   Fast path (tabGone): the tab named in the listener announced its own death (pagehide
- *   beacon) — the ordinary reload. Start at once: no probe, no wait, no timeout event.
+ *   beacon) — a closed tab, or a tab on another machine. Start at once: no probe, no wait,
+ *   no timeout event.
  *   Stage one (no kiosk_handover_started seen): a live losing tab announces BEFORE it
  *   works; if nothing announces within HANDOVER_PROBE_MS, nobody is alive to hand over —
  *   start at once, and record NO timeout. Only a crashed tab (no beacon, no announce)
@@ -183,13 +187,139 @@ export type HandoverWaitDecision = "start" | "wait" | "timeout_start";
 export function decideHandoverWait(i: {
   handoverPending: boolean;
   tabGone: boolean;
+  /** P5-1: the same-browser hand-off marker was read fresh on this mount. */
+  markerHeld?: boolean;
   handoverStarted: boolean;
   handoverComplete: boolean;
   waitedMs: number;
 }): HandoverWaitDecision {
-  if (!i.handoverPending || i.tabGone || i.handoverComplete) return "start";
+  if (!i.handoverPending || i.tabGone || i.markerHeld === true || i.handoverComplete) return "start";
   if (!i.handoverStarted) return i.waitedMs >= HANDOVER_PROBE_MS ? "start" : "wait";
   return i.waitedMs >= ACK_WAIT_MS ? "timeout_start" : "wait";
+}
+
+// ---------------------------------------------------------------------------
+// P5-1 — the same-browser hand-off marker (D20). The pagehide beacon is kept for
+// a closed tab and a tab on another machine, but it is a network round trip
+// racing a page load and loses that race on every reload observed. A reload's
+// dying tab and new tab share one browser, so the hand-off travels in
+// localStorage instead: written SYNCHRONOUSLY during pagehide (the only write
+// that completes before the page unloads — IndexedDB does not), scoped to the
+// room, honoured only under HANDOFF_MARKER_TTL_MS, and deleted on first read so
+// it can never be honoured twice.
+// ---------------------------------------------------------------------------
+
+export const HANDOFF_MARKER_TTL_MS = 15_000;
+
+export const handoffMarkerKey = (roomSlug: string): string => `eta-bench-handoff:${roomSlug}`;
+
+export interface HandoffMarker {
+  room: string;
+  session_id: string;
+  tab_id: string;
+  /** ms epoch on the dying tab's clock — same browser, same clock. */
+  at: number;
+}
+
+/** The minimal storage surface, injectable so the tests never need a browser. */
+export type MarkerStorage = {
+  getItem: (key: string) => string | null;
+  setItem: (key: string, value: string) => void;
+  removeItem: (key: string) => void;
+};
+
+/** Serialize + write the marker. Fail-safe: a full or blocked storage never throws. */
+export function writeHandoffMarker(
+  storage: MarkerStorage | null | undefined,
+  marker: HandoffMarker,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(handoffMarkerKey(marker.room), JSON.stringify(marker));
+  } catch {
+    /* the beacon and the probe still stand behind this */
+  }
+}
+
+/** Parse a stored marker; null on any junk, never a throw. */
+export function parseHandoffMarker(raw: unknown): HandoffMarker | null {
+  if (typeof raw !== "string" || !raw) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const m = (typeof v === "object" && v !== null ? v : {}) as Partial<HandoffMarker>;
+  if (typeof m.room !== "string" || !m.room) return null;
+  if (typeof m.session_id !== "string" || !m.session_id) return null;
+  if (typeof m.tab_id !== "string" || !m.tab_id) return null;
+  if (typeof m.at !== "number" || !Number.isFinite(m.at)) return null;
+  return { room: m.room, session_id: m.session_id, tab_id: m.tab_id, at: m.at };
+}
+
+/**
+ * Read-and-delete the room's hand-off marker. The marker is proof the previous
+ * tab is gone ONLY when all three hold: it names this room, its timestamp is
+ * under HANDOFF_MARKER_TTL_MS old, and its tab_id is not this tab's own.
+ * The key is deleted immediately after reading, whether or not it was honoured,
+ * so it can never be honoured twice. Fail-safe: any storage fault returns null —
+ * a failed marker read must never stop the kiosk starting.
+ */
+export function takeHandoffMarker(
+  storage: MarkerStorage | null | undefined,
+  roomSlug: string,
+  ownTabId: string | null | undefined,
+  nowMs: number,
+): HandoffMarker | null {
+  if (!storage || !roomSlug) return null;
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(handoffMarkerKey(roomSlug));
+  } catch {
+    return null;
+  }
+  try {
+    storage.removeItem(handoffMarkerKey(roomSlug));
+  } catch {
+    /* an undeletable marker still expires by TTL */
+  }
+  const m = parseHandoffMarker(raw);
+  if (!m) return null;
+  if (m.room !== roomSlug) return null;
+  if (!(nowMs - m.at < HANDOFF_MARKER_TTL_MS) || m.at > nowMs + HANDOFF_MARKER_TTL_MS) return null;
+  if (ownTabId && m.tab_id === ownTabId) return null;
+  if (!ownTabId) return null; // no own id to compare against — cannot prove it was another tab
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// P5-2 (D21) — the four kiosk remount events are stamped by the CLIENT at the
+// moment the thing happens. Both handover writes are fire and forget, so
+// arrival order set the times and the timeline read backwards (complete ~700 ms
+// before started, on the preview). The table already documents `at` as the
+// client's wall clock (0043), so this restores the existing rule.
+// ---------------------------------------------------------------------------
+
+export type ResumeEventKind =
+  | "kiosk_tab_gone"
+  | "kiosk_handover_started"
+  | "kiosk_handover_complete"
+  | "kiosk_remount_resumed";
+
+/** The POST /api/bench/sessions/active body, `at` stamped from the caller's clock. */
+export function resumeEventBody(
+  kind: ResumeEventKind,
+  sessionId: string,
+  atMs: number,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    kind,
+    session_id: sessionId,
+    at: new Date(atMs).toISOString(),
+    ...(extra ?? {}),
+  };
 }
 
 /**

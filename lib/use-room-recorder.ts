@@ -265,7 +265,8 @@ export type RoomRecorderStatus = {
   dayElapsedMs: number;
   dayStartedAt: number | null;
   pausedAt: number | null;
-  /** primary chunks verified in R2 (this browser session, incl. recovered). */
+  /** primary chunks verified in R2 (this browser session, incl. recovered; a rejoin
+   *  seeds it with the count the server already holds — P5-3c). */
   archivedCount: number;
   archivedBytes: number;
   /** chunks (both lanes) held locally awaiting verified upload. */
@@ -1208,7 +1209,13 @@ export function useRoomRecorder(opts?: {
         B.lastChunkEndedAt = null;
         B.rec = null;
         setBackupIdx(backupStartIdx);
-        setBackupArchivedCount(0);
+        // P5-3c: the session already holds chunks — a rejoined kiosk reading "Chunks
+        // archived 0" says something untrue. Seed each counter from the SERVER's next
+        // number (a 0-based tape holds exactly next_idx chunks), not the seeded start,
+        // whose local-queue part is still unverified and counts up as it uploads. Bytes
+        // stay unseeded — the resume answer does not carry them.
+        setArchivedCount(Number.isFinite(opts.nextPrimaryIdx) ? Math.max(0, Math.trunc(opts.nextPrimaryIdx)) : 0);
+        setBackupArchivedCount(Number.isFinite(opts.nextBackupIdx) ? Math.max(0, Math.trunc(opts.nextBackupIdx)) : 0);
         setBackupArchivedBytes(0);
         setDayStartedAt(opts.dayStartedAt ?? Date.now());
         setMicLost(false);
