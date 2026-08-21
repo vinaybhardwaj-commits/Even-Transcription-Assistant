@@ -25,8 +25,14 @@
  *   PRESENT — the scratch path. The day is taken by id, the lock is taken on it, and the
  *     `scratch` flag is re-read INSIDE the locked transaction: not true → nothing is written
  *     and the request fails by name with not_a_scratch_day; unknown id → room_day_not_found.
- *     Only this path writes the 0046 columns (session_id, source) and only this path takes
- *     ON CONFLICT DO NOTHING, so re-running a replay writes nothing that already exists.
+ *     Only this path writes the 0046 columns (session_id, source) and 0047's source_ref, and
+ *     only this path takes ON CONFLICT DO NOTHING, so re-running a replay — or the warehouse
+ *     loader — writes nothing that already exists.
+ *
+ * FUSE SLICE 3 (0047) — one more optional field, `source_ref`, the id of the warehouse row a
+ * cue came from. It follows session_id and source exactly: scratch-only, and sending it
+ * without room_day_id is refused by name (source_ref_requires_room_day_id) rather than
+ * silently dropped. The live path does not read it and touches no new column.
  *
  * There is still exactly ONE write door for cues, which is what keeps the MCP layer free of
  * cue SQL (tests/unit/mcp-s3.test.ts).
@@ -102,11 +108,15 @@ export async function POST(req: Request) {
     const roomDayId = optionalIdString(b.room_day_id, "invalid_room_day_id", MAX_ID_LEN);
     const sessionId = optionalIdString(b.session_id, "invalid_session_id", MAX_ID_LEN);
     const source = optionalIdString(b.source, "invalid_source", MAX_TYPE_LEN);
-    // The two new columns are written by the scratch statement only — SQL_CUE_INSERT is shared
+    // Slice 3 (0047): the warehouse row this cue came from. Exactly the same shape as the two
+    // above — optional, scratch-only, and refused rather than dropped.
+    const sourceRef = optionalIdString(b.source_ref, "invalid_source_ref", MAX_ID_LEN);
+    // The three new columns are written by the scratch statement only — SQL_CUE_INSERT is shared
     // with the live path and is not touched. Refuse rather than accept-and-drop them: a caller
     // that sent session_id and got a 200 would believe it was stored.
     if (!roomDayId && sessionId !== null) throw new HttpError(400, "session_id_requires_room_day_id");
     if (!roomDayId && source !== null) throw new HttpError(400, "source_requires_room_day_id");
+    if (!roomDayId && sourceRef !== null) throw new HttpError(400, "source_ref_requires_room_day_id");
 
     if (!(await roomExists(roomId))) throw new HttpError(404, "unknown_room");
 
@@ -117,7 +127,7 @@ export async function POST(req: Request) {
         const day = await findRoomDayById(client, roomDayId);
         if (!day) throw new HttpError(404, "room_day_not_found");
         if (day.scratch !== true) throw new HttpError(409, "not_a_scratch_day");
-        const cue = await insertScratchCue(client, day.id, { type, at, payload, session_id: sessionId, source });
+        const cue = await insertScratchCue(client, day.id, { type, at, payload, session_id: sessionId, source, source_ref: sourceRef });
         // The day itself says which room and which date this is — not the body, not the clock.
         const state = await readGraph(client, day.room_id, day.ist_date, day.id);
         return { cue, state };

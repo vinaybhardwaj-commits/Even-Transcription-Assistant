@@ -5,6 +5,14 @@
  *                      encounters, stt_engine enabled, bench_event marks) and the brain pool
  *                      (cues today = cue rows on today's IST room_days). Each count is its own
  *                      fail-safe query: a failing table yields null + degraded, never a 500.
+ *
+ *                      Fuse slice 3: the brain counts are SPLIT. cues_today and room_days_today
+ *                      are LIVE days only; the fuse's scratch days are reported beside them as
+ *                      scratch_cues_today / scratch_room_days_today. Before this, loading a
+ *                      warehouse fixture inflated the live numbers and there was nothing in the
+ *                      answer to say so — a scratch cue would have read as clinic traffic. The
+ *                      scratch numbers stay VISIBLE rather than filtered away: the point is to
+ *                      be able to see the fixture land.
  * scribe_kb_probe    — lib/kb-retrieve retrieve(): default { ok, latency } up/down only;
  *                      hits (with 200-char text previews, like /api/kb/probe) ONLY with
  *                      include_text=true. Never logs the query text (audit stores q_len only).
@@ -29,9 +37,35 @@ const num = (rows: unknown, key = "n"): number => {
   return Number(r?.[key] ?? 0);
 };
 
+// --- Fuse slice 3: live vs scratch, one query each (named so the report can quote them) ---
+
+/** Today's cues, split by the day's 0046 scratch flag. */
+export const SQL_CUES_TODAY_SPLIT =
+  "SELECT COUNT(*) FILTER (WHERE d.scratch IS NOT TRUE)::int AS live_n, " +
+  "COUNT(*) FILTER (WHERE d.scratch IS TRUE)::int AS scratch_n " +
+  "FROM cue c JOIN room_day d ON d.id = c.room_day_id WHERE d.ist_date = $1::date";
+
+/** Today's room_days, split the same way. */
+export const SQL_ROOM_DAYS_TODAY_SPLIT =
+  "SELECT COUNT(*) FILTER (WHERE scratch IS NOT TRUE)::int AS live_n, " +
+  "COUNT(*) FILTER (WHERE scratch IS TRUE)::int AS scratch_n " +
+  "FROM room_day WHERE ist_date = $1::date";
+
+type SplitRow = { live_n: number; scratch_n: number };
+
+/** count(), for the two-number queries. Same fail-safe contract: a throw yields nulls. */
+async function split(fn: () => Promise<SplitRow | null>): Promise<{ live: number | null; scratch: number | null; error?: string }> {
+  try {
+    const r = await fn();
+    return { live: Number(r?.live_n ?? 0), scratch: Number(r?.scratch_n ?? 0) };
+  } catch (e) {
+    return { live: null, scratch: null, error: String((e as Error)?.message ?? e).slice(0, 120) };
+  }
+}
+
 const storeStats: McpTool = {
   name: "scribe_store_stats",
-  description: "Store counts: bench sessions (by status), bench chunks (by upload_state), consult marks, encounters (total + today), STT engines enabled, brain cues today (IST). Per-count fail-safe.",
+  description: "Store counts: bench sessions (by status), bench chunks (by upload_state), consult marks, encounters (total + today), STT engines enabled, brain cues + room-days today (IST). The brain counts separate LIVE days (cues_today, room_days_today) from the fuse's SCRATCH days (scratch_cues_today, scratch_room_days_today) — a replayed or warehouse-loaded day never inflates the live numbers. Per-count fail-safe.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => {
@@ -58,13 +92,17 @@ const storeStats: McpTool = {
       count(async () => num(await sql`SELECT COUNT(*)::int AS n FROM encounter`)),
       count(async () => num(await sql`SELECT COUNT(*)::int AS n FROM encounter WHERE (recorded_at AT TIME ZONE 'Asia/Kolkata')::date = ${today}::date`)),
       count(async () => num(await sql`SELECT COUNT(*)::int AS n FROM stt_engine WHERE enabled`)),
-      count(async () => {
-        const r = await query<{ n: number }>("SELECT COUNT(*)::int AS n FROM cue c JOIN room_day d ON d.id = c.room_day_id WHERE d.ist_date = $1::date", [today]);
-        return Number(r.rows[0]?.n ?? 0);
+      // Two queries, not four: one FILTER pair each. `scratch IS NOT TRUE` rather than
+      // `= false` so a NULL — which 0046's NOT NULL DEFAULT false makes impossible today, but
+      // which a future ALTER could reintroduce — counts as live rather than vanishing from
+      // both sides. Every day is in exactly one of the two columns.
+      split(async () => {
+        const r = await query<SplitRow>(SQL_CUES_TODAY_SPLIT, [today]);
+        return r.rows[0] ?? null;
       }),
-      count(async () => {
-        const r = await query<{ n: number }>("SELECT COUNT(*)::int AS n FROM room_day WHERE ist_date = $1::date", [today]);
-        return Number(r.rows[0]?.n ?? 0);
+      split(async () => {
+        const r = await query<SplitRow>(SQL_ROOM_DAYS_TODAY_SPLIT, [today]);
+        return r.rows[0] ?? null;
       }),
     ]);
     const parts = { sessions, sessionsByStatus, chunksByState, marks, encounters, encountersToday, enginesEnabled, cuesToday, roomDaysToday };
@@ -74,7 +112,12 @@ const storeStats: McpTool = {
       bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value },
       encounters: { total: encounters.value, today_ist: encountersToday.value },
       stt: { engines_enabled: enginesEnabled.value },
-      brain: { room_days_today: roomDaysToday.value, cues_today: cuesToday.value },
+      brain: {
+        room_days_today: roomDaysToday.live,
+        cues_today: cuesToday.live,
+        scratch_room_days_today: roomDaysToday.scratch,
+        scratch_cues_today: cuesToday.scratch,
+      },
       ...(errors.length ? { degraded: true, errors } : {}),
     };
   },

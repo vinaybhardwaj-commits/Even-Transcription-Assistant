@@ -185,7 +185,15 @@ const listCues: McpTool = {
 // ---------------------------------------------------------------------------
 
 const BRAIN_TIMEOUT_MS = 5_000;
-export const CUE_SOURCES = ["mcp", "warehouse", "replay"] as const;
+/**
+ * The sources `scribe_post_cue` will stamp on a cue. `warehouse` was removed in fuse slice 3:
+ * nothing produces a warehouse cue by hand any more. A warehouse cue now comes only from
+ * scripts/load-warehouse-fixture.ts, which writes it into the SCRATCH graph with a source_ref
+ * so 0047's natural key can absorb a re-run. Letting an operator stamp `warehouse` on a cue
+ * with no source_ref would put an un-keyed row in the same namespace — and, on this tool,
+ * onto a LIVE room-day, which is the one thing slice 3 must not do.
+ */
+export const CUE_SOURCES = ["mcp", "replay"] as const;
 export type CueSource = (typeof CUE_SOURCES)[number];
 
 function brainCuesUrl(origin: string): string {
@@ -203,13 +211,14 @@ export type PostCueResult =
  * into the payload by the caller's policy (never trusted from args). Never throws.
  *
  * Fuse slice 2: the body may also carry `room_day_id` (write to THAT day — the route then
- * applies the scratch guard), plus `session_id` and `source` for the two 0046 columns. Every
- * live caller omits all three and gets exactly today's behaviour. When the route reports the
- * cue already existed, that is ok:true with already_existed:true and a null cue_id.
+ * applies the scratch guard), plus `session_id` and `source` for the two 0046 columns. Slice 3
+ * adds `source_ref` (0047), the warehouse row's own id. Every live caller omits all four and
+ * gets exactly today's behaviour. When the route reports the cue already existed, that is
+ * ok:true with already_existed:true and a null cue_id.
  */
 export async function postBrainCue(
   origin: string,
-  body: { room_id: string; type: string; at?: string; payload: Record<string, unknown>; room_day_id?: string; session_id?: string; source?: string },
+  body: { room_id: string; type: string; at?: string; payload: Record<string, unknown>; room_day_id?: string; session_id?: string; source?: string; source_ref?: string },
 ): Promise<PostCueResult> {
   const token = process.env[TOKEN_ENV];
   if (!token) return { ok: false, error: "service_token_not_configured", brain_status: null };
@@ -270,7 +279,7 @@ const WRITE_ROOM_ARGS = {
 
 const postCue: McpTool = {
   name: "scribe_post_cue",
-  description: "Independent operator cue into the brain (PRD §9): POST /api/brain/cues as a client with the server-side token. type is an open set (≤64 chars). payload is any JSON object; `source` (mcp|warehouse|replay, default mcp) is FORCED into it. Does not need an active tape. Returns { ok, cue_id, cue_at, state_summary (80 chars) }.",
+  description: "Independent operator cue into the brain (PRD §9): POST /api/brain/cues as a client with the server-side token, onto the room's LIVE day. type is an open set (≤64 chars). payload is any JSON object; `source` (mcp|replay, default mcp) is FORCED into it. `warehouse` is NOT accepted here — a warehouse cue carries the id of the warehouse row it came from and belongs in the scratch graph, which is scripts/load-warehouse-fixture.ts's job, not this tool's. Does not need an active tape. Returns { ok, cue_id, cue_at, state_summary (80 chars) }.",
   scope: "write",
   inputSchema: {
     type: "object",
@@ -279,7 +288,7 @@ const postCue: McpTool = {
       type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | stt_turn | warehouse_event | pulse_note | test" },
       at: { type: "string", description: "ISO timestamp; default now (server)" },
       payload: { type: "object", description: "any JSON object; source is overwritten" },
-      source: { type: "string", enum: ["mcp", "warehouse", "replay"], default: "mcp" },
+      source: { type: "string", enum: ["mcp", "replay"], default: "mcp" },
     },
     required: ["type"],
     additionalProperties: false,

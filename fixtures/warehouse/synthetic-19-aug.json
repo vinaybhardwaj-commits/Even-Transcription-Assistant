@@ -1,0 +1,114 @@
+{
+  "note": "SYNTHETIC. Every uid here is fake and matches nothing in any warehouse. This is the only fixture in this directory that is committed; fixtures/warehouse/*.json is otherwise gitignored, because a real extract holds real individual_uids. Shapes follow Brain PRD 17-Aug-2026 section 6. 19 August 2026, IST.",
+  "ist_date": "2026-08-19",
+  "rooms": ["opd-7", "cardiology"],
+  "events": [
+    {
+      "room": "opd-7",
+      "type": "pqm_called",
+      "at": "2026-08-19T03:32:04.000Z",
+      "source_ref": "qts_9f8e7d6c",
+      "payload": {
+        "signal": "queue_token_steps.called_at",
+        "station": "CONSULTATION",
+        "token_uid": "tok_9f8e7d6c",
+        "individual_uid": "ind_fake_0001",
+        "called_at": "2026-08-19T03:32:04.000Z"
+      }
+    },
+    {
+      "room": "opd-7",
+      "type": "consult_start",
+      "at": "2026-08-19T03:32:10.000Z",
+      "source_ref": "svc_a1b2c3d4",
+      "payload": {
+        "signal": "chart_financial_reporting__services.prescription_start_time",
+        "category": "CONSULTATION",
+        "service_uid": "svc_a1b2c3d4",
+        "calendar_uid": "cal_fake_7781",
+        "individual_uid": "ind_fake_0001",
+        "prescription_start_time": "2026-08-19T03:32:10.000Z"
+      }
+    },
+    {
+      "room": "cardiology",
+      "type": "consult_start",
+      "at": "2026-08-19T04:05:00.000Z",
+      "source_ref": "svc_c9d8e7f6",
+      "payload": {
+        "signal": "chart_financial_reporting__services.prescription_start_time",
+        "category": "CONSULTATION",
+        "service_uid": "svc_c9d8e7f6",
+        "calendar_uid": "cal_fake_7782",
+        "individual_uid": "ind_fake_0002",
+        "prescription_start_time": "2026-08-19T04:05:00.000Z"
+      }
+    },
+    {
+      "room": "opd-7",
+      "type": "dx_event",
+      "at": "2026-08-19T05:10:45.000Z",
+      "source_ref": "svc_dx_4411ab",
+      "payload": {
+        "signal": "COALESCE(check_in_time, sample_collection_time, scan_in_time)",
+        "category": "LAB",
+        "service_uid": "svc_dx_4411ab",
+        "individual_uid": "ind_fake_0001",
+        "clock_used": "sample_collection_time",
+        "note": "the diagnostics hole: same individual_uid, same IST day, after prescription_start_time, no second consult start"
+      }
+    },
+    {
+      "room": "cardiology",
+      "type": "dx_event",
+      "at": "2026-08-19T05:48:12.000Z",
+      "source_ref": "svc_dx_bb2299",
+      "payload": {
+        "signal": "COALESCE(check_in_time, sample_collection_time, scan_in_time)",
+        "category": "CARDIOLOGY",
+        "service_uid": "svc_dx_bb2299",
+        "individual_uid": "ind_fake_0002",
+        "clock_used": "check_in_time"
+      }
+    },
+    {
+      "room": "opd-7",
+      "type": "pulse_note",
+      "at": "2026-08-19T06:02:33.000Z",
+      "source_ref": "pn_77c1d0e9",
+      "payload": {
+        "signal": "pulse note uploaded_at",
+        "note_uid": "pn_77c1d0e9",
+        "individual_uid": "ind_fake_0001",
+        "uploaded_at": "2026-08-19T06:02:33.000Z"
+      }
+    },
+    {
+      "room": "opd-7",
+      "type": "pqm_called",
+      "at": "2026-08-19T07:15:22.000Z",
+      "source_ref": "qts_2b3c4d5e",
+      "payload": {
+        "signal": "queue_token_steps.called_at",
+        "station": "CONSULTATION",
+        "token_uid": "tok_2b3c4d5e",
+        "individual_uid": "ind_fake_0003",
+        "called_at": "2026-08-19T07:15:22.000Z"
+      }
+    },
+    {
+      "room": "opd-7",
+      "type": "pqm_called",
+      "at": "2026-08-19T03:32:04.000Z",
+      "source_ref": "qts_9f8e7d6c",
+      "payload": {
+        "signal": "queue_token_steps.called_at",
+        "station": "CONSULTATION",
+        "token_uid": "tok_9f8e7d6c",
+        "individual_uid": "ind_fake_0001",
+        "called_at": "2026-08-19T03:32:04.000Z",
+        "duplicate_of": "event 0 — DELIBERATE. Same (source_ref, type, at), so 0047's partial unique index absorbs it: the first run writes 7 and reports 1 already-existed."
+      }
+    }
+  ]
+}

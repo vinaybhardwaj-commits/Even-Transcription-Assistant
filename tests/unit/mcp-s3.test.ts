@@ -140,12 +140,23 @@ describe("scribe_post_cue — client of the brain door, source forced", () => {
   });
   it("honours BRAIN_BASE_URL like brain-proxy; rejects a disallowed source; no cue SQL is ever issued", async () => {
     process.env.BRAIN_BASE_URL = "https://brain.example/";
-    await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "warehouse" }, ctx);
+    await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "replay" }, ctx);
     expect(fetchCalls[0]!.url).toBe("https://brain.example/api/brain/cues");
-    expect(fetchCalls[0]!.body.payload).toEqual({ source: "warehouse" });
+    expect(fetchCalls[0]!.body.payload).toEqual({ source: "replay" });
     const bad = (await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "kiosk" }, ctx)) as Row;
     expect(bad.error).toBe("source_not_allowed");
     expect(calls.some((c) => /INSERT INTO cue/i.test(c.text))).toBe(false);
+  });
+
+  // Fuse slice 3: `warehouse` used to be one of the three sources this tool would stamp. It is
+  // gone, and this is the caller that changed with it. A warehouse cue needs a source_ref to
+  // carry 0047's natural key, and this tool writes to the room's LIVE day — the two things a
+  // warehouse cue must never be.
+  it("no longer accepts source 'warehouse' — it is refused by name, and nothing is posted", async () => {
+    const out = (await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "warehouse" }, ctx)) as Row;
+    expect(out).toMatchObject({ ok: false, error: "source_not_allowed" });
+    expect(out.allowed).toEqual(["mcp", "replay"]);
+    expect(fetchCalls).toHaveLength(0);
   });
   it("missing token → service_token_not_configured (no throw)", async () => {
     delete process.env.BRAIN_SERVICE_TOKEN;

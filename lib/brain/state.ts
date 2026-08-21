@@ -97,14 +97,20 @@ export const SQL_ROOM_DAY_BY_ID =
   "SELECT id, room_id, doctor_id, ist_date::text AS ist_date, started_at, ended_at, scratch FROM room_day WHERE id = $1";
 
 /**
- * The scratch write. Adds the two 0046 columns and takes ON CONFLICT DO NOTHING against
- * cue_replay_natural_key — the PARTIAL unique index on (session_id, type, at) WHERE
- * source = 'replay'. A live cue carries a NULL source, so it is not in that index and can
- * never conflict here. A conflict returns NO ROW: that is "already exists", not a failure.
+ * The scratch write. Adds the two 0046 columns plus 0047's source_ref, and takes an
+ * UNQUALIFIED ON CONFLICT DO NOTHING, which covers BOTH partial unique indexes:
+ *
+ *   cue_replay_natural_key     (session_id, type, at) WHERE source = 'replay'
+ *   cue_warehouse_natural_key  (source_ref, type, at) WHERE source = 'warehouse'
+ *
+ * The predicates are disjoint, so a replay cue is only ever in the first and a warehouse
+ * cue only ever in the second, and neither can collide with the other. A live cue carries
+ * a NULL source and is in neither. A conflict returns NO ROW: that is "already exists",
+ * not a failure, which is what makes both the replay and the loader re-runnable.
  */
 export const SQL_CUE_INSERT_SCRATCH =
-  "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source) " +
-  "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text) " +
+  "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source, source_ref) " +
+  "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text, $8::text) " +
   "ON CONFLICT DO NOTHING RETURNING id, at, created_at";
 
 export const SQL_VISITS_FOR_DAY =
@@ -368,12 +374,13 @@ export async function insertCue(client: Queryable, roomDayId: string, cue: CueIn
   return { id: row.id, at: iso(row.at) ?? cue.at.toISOString(), created_at: iso(row.created_at) ?? new Date().toISOString() };
 }
 
-export type ScratchCueInput = CueInput & { session_id: string | null; source: string | null };
+export type ScratchCueInput = CueInput & { session_id: string | null; source: string | null; source_ref: string | null };
 
 /**
- * Fuse slice 2 — insert one cue on the SCRATCH path (0046 columns, ON CONFLICT DO NOTHING).
- * A conflict on the replay natural key returns no row; that is reported as already_existed,
- * never as a failure, so a half-finished run is resumable by re-running it.
+ * Fuse slice 2 — insert one cue on the SCRATCH path (0046 columns + 0047's source_ref, ON
+ * CONFLICT DO NOTHING). A conflict on either natural key — the replay's or the warehouse's —
+ * returns no row; that is reported as already_existed, never as a failure, so a half-finished
+ * run is resumable by re-running it.
  */
 export async function insertScratchCue(
   client: Queryable,
@@ -390,6 +397,7 @@ export async function insertScratchCue(
     cue.at.toISOString(),
     cue.session_id,
     cue.source,
+    cue.source_ref,
   ]);
   const row = r.rows[0];
   if (!row) return { id: null, at: cue.at.toISOString(), created_at: null, already_existed: true };
