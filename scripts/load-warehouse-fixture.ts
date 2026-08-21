@@ -74,7 +74,7 @@ export function scratchRoomIdForDay(roomDayId: string): string | null {
 export type WarehouseEvent = {
   /** map key — the real room this event belongs to, e.g. 'opd-7'. Never a room id. */
   room: string;
-  /** cue type: pqm_called | consult_start | dx_event | pulse_note (open set — not enforced). */
+  /** cue type: pqm_called | pstart | dx_event | pulse_note (open set — not enforced). */
   type: string;
   /** ISO timestamp, the warehouse's own clock. */
   at: string;
@@ -89,7 +89,7 @@ export type WarehouseEvent = {
  * CHECK), so refusing an unknown type here would be this script inventing a constraint the
  * database does not have. A typo shows up instead as its own line in the by-type counts.
  */
-export const WAREHOUSE_CUE_TYPES = ["pqm_called", "consult_start", "dx_event", "pulse_note"] as const;
+export const WAREHOUSE_CUE_TYPES = ["pqm_called", "pstart", "dx_event", "pulse_note"] as const;
 
 export type LoaderArgs = { fixture: string; baseUrl: string; map: Record<string, string> };
 export type Refusal = { error: string; detail?: string };

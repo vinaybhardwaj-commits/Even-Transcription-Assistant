@@ -18,7 +18,7 @@
     },
     {
       "room": "opd-7",
-      "type": "consult_start",
+      "type": "pstart",
       "at": "2026-08-19T03:32:10.000Z",
       "source_ref": "svc_a1b2c3d4",
       "payload": {
@@ -32,7 +32,7 @@
     },
     {
       "room": "cardiology",
-      "type": "consult_start",
+      "type": "pstart",
       "at": "2026-08-19T04:05:00.000Z",
       "source_ref": "svc_c9d8e7f6",
       "payload": {

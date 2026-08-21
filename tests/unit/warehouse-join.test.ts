@@ -261,7 +261,7 @@ describe("2 — each of the four types is written once, with source 'warehouse' 
   it("writes 7 of 8, absorbs the duplicate, and every row carries the key 0047 indexes", async () => {
     const r = await load();
     expect(r).toMatchObject({ ok: true, total: 8, written: 7, already_existed: 1, failed: 0 });
-    expect(r.by_type).toEqual({ pqm_called: 3, consult_start: 2, dx_event: 2, pulse_note: 1 });
+    expect(r.by_type).toEqual({ pqm_called: 3, pstart: 2, dx_event: 2, pulse_note: 1 });
 
     // every request named a scratch day, its scratch room, the warehouse source and a source_ref
     expect(posted).toHaveLength(8);
