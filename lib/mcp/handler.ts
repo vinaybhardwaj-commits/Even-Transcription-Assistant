@@ -35,6 +35,7 @@ import { ENCOUNTER_TOOLS } from "@/lib/mcp/tools/encounters";
 import { STORE_TOOLS } from "@/lib/mcp/tools/stores";
 import { LLM_TOOLS } from "./tools/llm";
 import { FUSE_TOOLS } from "./tools/fuse";
+import { FUSE_REPORT_TOOLS } from "./tools/fuse-report";
 
 const SERVER_NAME = "even-scribe-mcp";
 const SLICE = "S3";
@@ -45,7 +46,7 @@ const INVOKE_TOOL_TIMEOUT_MS = 115_000; // invoke tools (extract/transcribe) may
 const MAX_BODY_BYTES = 256 * 1024;
 
 // Registry (PRD §12): S1 read tools + S2 remote-tape write tools. Names are the contract.
-const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS];
+const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS, ...FUSE_REPORT_TOOLS];
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 type JsonRpcId = string | number | null;

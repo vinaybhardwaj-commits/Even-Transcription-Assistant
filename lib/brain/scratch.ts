@@ -31,7 +31,7 @@ import { query } from "./db";
 // Derived identity — obviously scratch to a human reading a list
 // ---------------------------------------------------------------------------
 
-const ROOM_PREFIX = "room_";
+export const ROOM_PREFIX = "room_";
 export const SCRATCH_ROOM_PREFIX = "room_scratch_";
 export const SCRATCH_ROOM_DAY_PREFIX = "rd_scratch_";
 export const SCRATCH_SLUG_PREFIX = "scratch-";
@@ -49,6 +49,20 @@ const suffixOf = (roomId: string): string => (roomId.startsWith(ROOM_PREFIX) ? r
 
 /** `room_abcd1234` → `room_scratch_abcd1234`. Deterministic: a second run finds it. */
 export const scratchRoomIdFor = (roomId: string): string => `${SCRATCH_ROOM_PREFIX}${suffixOf(roomId)}`;
+
+/**
+ * The INVERSE of scratchRoomIdFor: `room_scratch_abcd1234` → `room_abcd1234`. Null when the id
+ * is not a scratch room id at all, so a caller cannot accidentally "recover" a real room from
+ * one that never had a scratch twin.
+ *
+ * Slice 5 needs this because a scratch room has NO TAPE — bench_session rows belong to the real
+ * room — so the report has to walk back from the scratch day to the room that actually
+ * recorded. It lives here, next to the forward function and built from the same two constants,
+ * so the pair cannot drift; the alternative was string surgery on a hardcoded prefix at the
+ * call site, which is exactly what the slice 5 PRD forbids.
+ */
+export const realRoomIdFor = (scratchRoomId: string): string | null =>
+  scratchRoomId.startsWith(SCRATCH_ROOM_PREFIX) ? `${ROOM_PREFIX}${scratchRoomId.slice(SCRATCH_ROOM_PREFIX.length)}` : null;
 
 /** `opd-7-k4hz` → `scratch-opd-7-k4hz`. `room.slug` is UNIQUE, so this must be derived too. */
 export const scratchSlugFor = (slug: string): string => `${SCRATCH_SLUG_PREFIX}${slug}`;
