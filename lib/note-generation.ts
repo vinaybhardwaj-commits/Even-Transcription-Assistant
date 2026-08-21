@@ -495,19 +495,30 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
   );
 }
 
+/**
+ * `provider` is routedChat's verbatim answer — 'gemini:<model>' | 'ollama' | 'none' — and it
+ * is on BOTH branches because a failed note still ran somewhere, and which somewhere is
+ * exactly what a trace needs to record. `unknown` when nothing ran (bad config, empty
+ * transcript) or when the call threw: never a guess, and never a default that looks like a
+ * real model name.
+ *
+ * `model` is the LOCAL model name and is kept only for backwards compatibility with existing
+ * readers. It is NOT the provider and never was — it is a constant. Read `provider`.
+ */
 export type NoteResult =
-  | { ok: true; note: AnyNote; latency_ms: number; model: string; raw_response: string }
-  | { ok: false; error: string; latency_ms: number; raw_response?: string };
+  | { ok: true; note: AnyNote; latency_ms: number; model: string; provider: string; raw_response: string }
+  | { ok: false; error: string; latency_ms: number; provider: string; raw_response?: string };
 
 export async function generateNote(
   transcript: string,
   opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string; nativeReference?: string } = {},
 ): Promise<NoteResult> {
   const base = process.env.OLLAMA_BASE_URL;
-  if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
+  // Nothing has run yet, so there is no provider to report. 'unknown' is the honest answer.
+  if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0, provider: "unknown" };
   const cleanTranscript = (transcript ?? "").trim();
   if (cleanTranscript.length === 0) {
-    return { ok: false, error: "empty_transcript", latency_ms: 0 };
+    return { ok: false, error: "empty_transcript", latency_ms: 0, provider: "unknown" };
   }
 
   const system =
@@ -526,6 +537,9 @@ export async function generateNote(
 
   const t0 = Date.now();
   opts.onEvent?.({ stage: "note", state: "start" });
+  // Set the moment routedChat answers, so every return below — including the catch — reports
+  // the provider that actually served rather than a literal.
+  let provider = "unknown";
   try {
     // Note generation: Gemini (note surface, flash tier) when GEMINI_ALL/GEMINI_NOTE=1
     // + Vertex configured; otherwise local qwen. Soft-fails to qwen on any error.
@@ -538,12 +552,13 @@ export async function generateNote(
       temperature: NOTE_TEMPERATURE, responseJson: true, timeoutMs: NOTE_TIMEOUT_MS, signal: opts.signal,
     });
     const latency_ms = rc.latency_ms;
+    provider = rc.provider;
     if (!rc.ok) {
-      return { ok: false, error: rc.error ?? "llm_failed", latency_ms };
+      return { ok: false, error: rc.error ?? "llm_failed", latency_ms, provider };
     }
     const content = rc.content;
     if (!content) {
-      return { ok: false, error: "empty_response", latency_ms };
+      return { ok: false, error: "empty_response", latency_ms, provider };
     }
     let parsedRaw: Record<string, unknown>;
     try {
@@ -554,6 +569,7 @@ export async function generateNote(
         ok: false,
         error: `json_parse_failed: ${msg.slice(0, 100)}`,
         latency_ms,
+        provider,
         raw_response: content.slice(0, 400),
       };
     }
@@ -723,7 +739,7 @@ export async function generateNote(
       };
     }
     opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: noteHeadline(note, opts.noteType) });
-    return { ok: true, note, latency_ms, model: NOTE_MODEL, raw_response: content };
+    return { ok: true, note, latency_ms, model: NOTE_MODEL, provider, raw_response: content };
   } catch (e: unknown) {
     const latency_ms = Date.now() - t0;
     const err =
@@ -731,6 +747,6 @@ export async function generateNote(
         ? e.message.slice(0, 200)
         : String(e).slice(0, 200);
     opts.onEvent?.({ stage: "note", state: "error", message: err, ms: latency_ms });
-    return { ok: false, error: err, latency_ms };
+    return { ok: false, error: err, latency_ms, provider };
   }
 }

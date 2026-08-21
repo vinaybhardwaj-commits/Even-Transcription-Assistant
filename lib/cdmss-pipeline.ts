@@ -94,9 +94,16 @@ export type CdmssRich = {
   };
 };
 
+/**
+ * One entry per LLM pass that actually ran, in the order it ran, each naming the provider
+ * routedChat reported for THAT pass. This is what the trace records; the route does not
+ * invent, default or relabel anything in it.
+ */
+export type CdmssLlmCall = { stage: "draft" | "critique" | "revise"; provider: string; latency_ms: number };
+
 export type CdmssPipelineResult =
-  | { ok: true; cdmss: CdmssRich; latency_ms: number }
-  | { ok: false; error: string; latency_ms: number; fallback?: CdmssOutput };
+  | { ok: true; cdmss: CdmssRich; latency_ms: number; llm_calls: CdmssLlmCall[] }
+  | { ok: false; error: string; latency_ms: number; fallback?: CdmssOutput; llm_calls: CdmssLlmCall[] };
 
 // ---------- helpers ----------
 
@@ -136,7 +143,7 @@ async function callJson<T>(
   system: string,
   user: string,
   opts: { signal?: AbortSignal; temperature?: number } = {},
-): Promise<{ ok: true; data: T; latency_ms: number; raw: string } | { ok: false; error: string; latency_ms: number }> {
+): Promise<{ ok: true; data: T; latency_ms: number; raw: string; provider: string } | { ok: false; error: string; latency_ms: number; provider: string }> {
   // CDS reasoning passes (draft/critique/revise) run on Gemini (cds surface, pro
   // tier) when GEMINI_ALL/GEMINI_CDS=1 + Vertex configured; otherwise local llama/
   // qwen. Soft-fails to the local model on any error.
@@ -149,14 +156,17 @@ async function callJson<T>(
     temperature: opts.temperature ?? 0, responseJson: true, timeoutMs, signal: opts.signal,
   });
   const latency_ms = rc.latency_ms;
-  if (!rc.ok) return { ok: false, error: rc.error ?? "llm_failed", latency_ms };
+  // Verbatim, per call. Each pass routes independently, so draft can be served by Gemini and
+  // critique by Ollama in the same run — one label for the whole pipeline would hide that.
+  const provider = rc.provider;
+  if (!rc.ok) return { ok: false, error: rc.error ?? "llm_failed", latency_ms, provider };
   const content = rc.content;
-  if (!content) return { ok: false, error: "empty_response", latency_ms };
+  if (!content) return { ok: false, error: "empty_response", latency_ms, provider };
   try {
-    return { ok: true, data: JSON.parse(content) as T, latency_ms, raw: content };
+    return { ok: true, data: JSON.parse(content) as T, latency_ms, raw: content, provider };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: `json_parse_failed: ${msg.slice(0, 80)}`, latency_ms };
+    return { ok: false, error: `json_parse_failed: ${msg.slice(0, 80)}`, latency_ms, provider };
   }
 }
 
@@ -313,11 +323,16 @@ export async function runCdmssPipeline(
   // fast and the existing soft-fallbacks take over). Bounds total LLM wall-time to ~budgetMs.
   const remainingMs = () => Math.max(2_000, budgetMs - (Date.now() - totalT0));
 
+  // One entry per LLM pass that actually ran, appended as it happens. Every return below
+  // carries it — including the failure paths, where knowing WHICH provider failed is the
+  // whole point. Empty on the paths that return before any pass runs.
+  const llmCalls: CdmssLlmCall[] = [];
+
   // 1. Seed
   const seedT0 = Date.now();
   const seed = noteToSeedQuery(note, opts.noteType);
   if (!seed.trim()) {
-    return { ok: false, error: "note_too_empty_for_seed", latency_ms: Date.now() - totalT0 };
+    return { ok: false, error: "note_too_empty_for_seed", latency_ms: Date.now() - totalT0, llm_calls: llmCalls };
   }
   opts.onEvent?.({ stage: "seed", state: "done", ms: Date.now() - seedT0, seed_chars: seed.length });
 
@@ -346,6 +361,7 @@ export async function runCdmssPipeline(
       error: `kb_retrieve_failed: ${r.error}`,
       latency_ms: Date.now() - totalT0,
       fallback: stub.ok ? stub.cdmss : undefined,
+      llm_calls: llmCalls,
     };
   }
   if (r.hits.length === 0) {
@@ -358,6 +374,7 @@ export async function runCdmssPipeline(
       error: "kb_no_hits",
       latency_ms: Date.now() - totalT0,
       fallback: stub.ok ? stub.cdmss : undefined,
+      llm_calls: llmCalls,
     };
   }
   opts.onEvent?.({
@@ -380,12 +397,14 @@ export async function runCdmssPipeline(
     buildDraftUser(seed, numbered),
     { signal: opts.signal, temperature: 0.1 },
   );
+  llmCalls.push({ stage: "draft", provider: draftRes.provider, latency_ms: draftRes.latency_ms });
   if (!draftRes.ok) {
     opts.onEvent?.({ stage: "draft", state: "error", ms: draftRes.latency_ms, message: draftRes.error });
     return {
       ok: false,
       error: `draft_failed: ${draftRes.error}`,
       latency_ms: Date.now() - totalT0,
+      llm_calls: llmCalls,
     };
   }
   opts.onEvent?.({ stage: "draft", state: "done", ms: draftRes.latency_ms });
@@ -401,6 +420,7 @@ export async function runCdmssPipeline(
     buildCritiqueUser(draftRaw, numbered),
     { signal: opts.signal, temperature: 0 },
   );
+  llmCalls.push({ stage: "critique", provider: critiqueRes.provider, latency_ms: critiqueRes.latency_ms });
   if (critiqueRes.ok) {
     const needs = critiqueRes.data.overall_quality === "needs_revision";
     const unsupportedCount = Array.isArray(critiqueRes.data.unsupported_items)
@@ -434,6 +454,7 @@ export async function runCdmssPipeline(
       buildReviseUser(seed, numbered, draftRaw, critiqueRes.raw),
       { signal: opts.signal, temperature: 0.05 },
     );
+    llmCalls.push({ stage: "revise", provider: reviseRes.provider, latency_ms: reviseRes.latency_ms });
     if (reviseRes.ok) {
       finalRaw = reviseRes.raw;
       finalParsed = reviseRes.data;
@@ -482,5 +503,5 @@ export async function runCdmssPipeline(
     },
   };
 
-  return { ok: true, cdmss, latency_ms: Date.now() - totalT0 };
+  return { ok: true, cdmss, latency_ms: Date.now() - totalT0, llm_calls: llmCalls };
 }

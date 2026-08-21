@@ -1,8 +1,9 @@
 /**
  * POST /{slug}/api/encounters/{id}/process
  *
- * Runs Medical Encounter Note generation (qwen2.5:14b) and Clinical
- * Decision Support (llama3.1:8b) sequentially, persists both JSONs to
+ * Runs Medical Encounter Note generation and Clinical Decision Support
+ * sequentially (each routed per lib/llm/gemini — Gemini when flagged and
+ * configured, local Ollama otherwise), persists both JSONs to
  * the encounter row, flips status to "complete" (or "failed" on error).
  *
  * Idempotent: if both note_json and cdmss_json already exist, returns
@@ -954,9 +955,13 @@ export async function POST(
           await noteTrace.finalise({
             status: "completed",
             result_summary: { chief_complaint: noteHeadline(noteRes.note, row.note_type ?? undefined) || null },
+            // The provider that ACTUALLY served, straight from generateNote (which takes it
+            // verbatim from routedChat). No literal here: this block used to say
+            // a fixed local model name whatever answered, which is why no stored trace
+            // before today can say which model wrote a note.
             model_calls: [
               {
-                model: "qwen2.5:14b",
+                model: noteRes.provider || "unknown",
                 latency_ms: noteRes.latency_ms,
               },
             ],
@@ -1033,10 +1038,14 @@ export async function POST(
               result_summary: pipelineRes.ok
                 ? { citations_count: (cdmssToStore as { citations?: unknown[] }).citations?.length ?? 0 }
                 : null,
-              model_calls: [
-                { model: "llama3.1:8b",  latency_ms: pipelineRes.latency_ms ?? 0 },
-                { model: "qwen2.5:14b", latency_ms: pipelineRes.latency_ms ?? 0 },
-              ],
+              // One row per pass the pipeline actually ran — draft, critique, revise — each
+              // naming its own provider and its own latency. The old block was two literals
+              // that both carried the WHOLE pipeline's latency, so it was wrong about which
+              // model ran, how many ran, and how long each took.
+              model_calls: pipelineRes.llm_calls.map((c) => ({
+                model: c.provider || "unknown",
+                latency_ms: c.latency_ms,
+              })),
             });
             cdmssTrace = null;
 
