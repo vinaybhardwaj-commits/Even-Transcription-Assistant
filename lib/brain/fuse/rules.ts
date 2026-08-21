@@ -96,13 +96,27 @@ const CONFIRM_BONUS = 0.05;
  */
 export const LAST_MARK_WINDOW_MS = 45 * 60 * 1000;
 
-/** What a visit's end_reason may say. Written ONLY when state === 'ended' (A6). */
+/**
+ * What a visit's end_reason may say. Written ONLY when state === 'ended' (A6), and a CLOSED
+ * SET — 0042 declares the column open, but arm A's vocabulary is not, so slice 5 can count
+ * these tokens against ALL_END_REASONS rather than against free strings.
+ */
 export const END_REASONS = {
   /** the individual's Pulse note landed: this visit is finished */
   PULSE_NOTE: "pulse_note",
   /** still open when the day was fused: closed by the day boundary, per 0042 */
   DAY_ROLLOVER: "day_rollover",
+  /**
+   * At the day boundary this visit was AT DIAGNOSTICS — the patient was sent out and the
+   * warehouse never recorded them coming back. That is the diagnostics hole, and it is not
+   * the same event as a visit that simply never closed. Before this token the two were
+   * indistinguishable in the row, and the hole — the hard join the Brain PRD spends a page
+   * on — vanished at the moment the day was fused.
+   */
+  DAY_ROLLOVER_AT_DIAGNOSTICS: "day_rollover_at_diagnostics",
 } as const;
+
+export const ALL_END_REASONS: readonly string[] = Object.values(END_REASONS);
 
 // --- payload access: everything is optional and an absent key is ABSENT ------
 // A null in a payload means the warehouse gave a null; it is not the same as the key being
@@ -261,18 +275,28 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       continue;
     }
     // The note belongs to the latest visit that had already OPENED by the time it landed;
-    // failing that, the latest open one; failing that, the latest of any. Deterministic at
-    // every step — no clock, no first-match-wins on an unsorted list.
+    // failing that, the latest STILL-OPEN one; failing that, NOTHING.
+    //
+    // There is deliberately no third fallback. An earlier build fell back to "the latest of
+    // any", which meant a second note for the same person found the visit the FIRST note had
+    // already closed, bumped its confidence, and vanished — reported neither as a close nor
+    // as unbound. A note must never touch a visit that is already ended, so a note with no
+    // open target does nothing at all and says so in `unbound`.
     const atMs = ms(c.at);
     const open = candidates.filter((v) => OPEN_STATES.includes(v.state));
     const started = open.filter((v) => v._openedAtMs <= atMs);
-    const pool = started.length > 0 ? started : open.length > 0 ? open : candidates;
-    const target = pool[pool.length - 1]!;
-    target.confidence = clamp(target.confidence + CONFIRM_BONUS);
-    if (OPEN_STATES.includes(target.state)) {
-      target.state = "ended";
-      target.end_reason = END_REASONS.PULSE_NOTE;
+    const pool = started.length > 0 ? started : open;
+    if (pool.length === 0) {
+      unbound.push({ cue_id: c.id, type: c.type, reason: RULES_REASONS.PULSE_NOTE_WITHOUT_VISIT });
+      continue;
     }
+    const target = pool[pool.length - 1]!;
+    // `target` is open by construction, so its end_reason is null and this cannot overwrite
+    // one. The guard is belt to that braces: a set end_reason is never rewritten.
+    if (target.end_reason !== null) continue;
+    target.confidence = clamp(target.confidence + CONFIRM_BONUS);
+    target.state = "ended";
+    target.end_reason = END_REASONS.PULSE_NOTE;
   }
 
   // -- 5. the kiosk mark: its window binds warehouse clocks, or it stands alone -
@@ -311,10 +335,13 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
   // consult happened and finished. After this pass a fully fused day has no in_chair at all,
   // which is why active_visit_id comes back null.
   for (const v of visits) {
-    if (OPEN_STATES.includes(v.state)) {
-      v.state = "ended";
-      v.end_reason = END_REASONS.DAY_ROLLOVER;
-    }
+    if (!OPEN_STATES.includes(v.state)) continue;
+    // WHAT it was doing when the day ended is the finding, not just THAT it was open: a visit
+    // sent to diagnostics and never seen again is a different event from one that merely never
+    // closed, and the row has to say which.
+    const wasAtDiagnostics = v.state === "at_diagnostics";
+    v.state = "ended";
+    v.end_reason = wasAtDiagnostics ? END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS : END_REASONS.DAY_ROLLOVER;
   }
 
   // -- 7. finalise: strip bookkeeping, clamp, and order deterministically -----

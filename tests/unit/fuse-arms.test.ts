@@ -52,7 +52,7 @@ vi.mock("@/lib/llm/gemini", () => ({
   GEMINI_FLASH_MODEL: "gemini-3.7-flash",
 }));
 
-import { runRulesArm, RULES_REASONS, ALL_RULES_REASONS, LAST_MARK_WINDOW_MS, END_REASONS, ambiguityOf } from "@/lib/brain/fuse/rules";
+import { runRulesArm, RULES_REASONS, ALL_RULES_REASONS, ALL_END_REASONS, LAST_MARK_WINDOW_MS, END_REASONS, ambiguityOf } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm } from "@/lib/brain/fuse/gemini-arms";
 import { FUSE_TOOLS } from "@/lib/mcp/tools/fuse";
 import { DEFAULT_ARM, SQL_VISIT_INSERT, SQL_VISITS_FOR_DAY, readGraph } from "@/lib/brain/state";
@@ -138,9 +138,11 @@ describe("3 — a dx_event opens a hole, never a visit", () => {
     ]);
     expect(visits).toHaveLength(1);
     expect(visits[0]!.opened_by).toBe("svc_1"); // still opened by the pstart, not the dx
-    // the hole opened at_diagnostics and, with nothing closing it, day_rollover did
+    // the hole opened at_diagnostics and the boundary closed it — naming what it was doing,
+    // so a patient sent to diagnostics and never seen again is not confused with one that
+    // merely never closed
     expect(visits[0]!.state).toBe("ended");
-    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
   });
 
   it("a dx_event for a person with no visit mints nothing and is reported as unbound", () => {
@@ -339,8 +341,13 @@ describe("8c — A7: day_rollover closes the open states and leaves `unknown` al
     expect(open).toHaveLength(0);
     for (const v of visits.filter((x) => x.opened_by_kind !== "mark")) {
       expect(v.state).toBe("ended");
-      expect(v.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+      // both boundary tokens are day_rollover closes; which one depends on what the visit was
+      // doing at the moment the day ended
+      expect([END_REASONS.DAY_ROLLOVER, END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS]).toContain(v.end_reason);
     }
+    // and precisely: the diagnostics visit is distinguishable from the call that never started
+    expect(visits.find((v) => v.opened_by === "svc_1")!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
+    expect(visits.find((v) => v.opened_by === "qts_9")!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.state).toBe("unknown");
     expect(orphan.end_reason).toBeNull();
@@ -373,6 +380,153 @@ describe("8d — A6: end_reason answers why it ENDED; ambiguity answers why we a
     expect(idx.every((i) => i >= 0)).toBe(true);
     expect([...idx].sort((a, b) => a - b)).toEqual(idx);
     expect(ambiguityOf([])).toBeNull();
+  });
+});
+
+describe("8e — the pulse_note has no third fallback: it closes an OPEN visit or nothing", () => {
+  const started = wh("pstart", T("03:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" });
+
+  it("a note whose only visit is already ENDED closes nothing and lands in unbound", () => {
+    const { visits, unbound } = runRulesArm([
+      started,
+      wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }), // closes it
+      wh("pulse_note", T("06:00"), "pn_2", { individual_uid: "ind_1", attribution: "direct" }), // finds nothing open
+    ]);
+    expect(visits).toHaveLength(1);
+    expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
+    // the SECOND note found no open target: it did nothing and said so
+    expect(unbound).toHaveLength(1);
+    expect(unbound[0]).toMatchObject({ type: "pulse_note", reason: RULES_REASONS.PULSE_NOTE_WITHOUT_VISIT });
+  });
+
+  it("a note never overwrites an end_reason that is already set", () => {
+    const once = runRulesArm([started, wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })]);
+    const twice = runRulesArm([
+      started,
+      wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pulse_note", T("06:00"), "pn_2", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pulse_note", T("07:00"), "pn_3", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    // the extra notes change NOTHING about the visit — not the reason, not the confidence
+    expect(twice.visits).toEqual(once.visits);
+  });
+
+  it("a note with a visit open AT its timestamp closes that one", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("pstart", T("09:00"), "svc_2", { individual_uid: "ind_1", calendar_uid: "cal_2", attribution: "direct" }),
+      wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    const first = visits.find((v) => v.opened_by === "svc_1")!;
+    const second = visits.find((v) => v.opened_by === "svc_2")!;
+    expect(first.end_reason).toBe(END_REASONS.PULSE_NOTE);      // open at 05:00
+    expect(second.end_reason).toBe(END_REASONS.DAY_ROLLOVER);   // had not opened yet
+  });
+
+  it("a note with nothing open at its timestamp closes the still-open LATER visit", () => {
+    const { visits, unbound } = runRulesArm([
+      wh("pstart", T("09:00"), "svc_2", { individual_uid: "ind_1", calendar_uid: "cal_2", attribution: "direct" }),
+      wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }), // before it opened
+    ]);
+    expect(visits).toHaveLength(1);
+    expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
+    expect(unbound).toHaveLength(0);
+  });
+});
+
+describe("8f — the day boundary says WHAT the visit was doing when it ended", () => {
+  it("at_diagnostics at the boundary closes day_rollover_at_diagnostics", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct", category: "LAB" }),
+    ]);
+    expect(visits).toHaveLength(1);
+    expect(visits[0]!.state).toBe("ended");
+    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
+    expect(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS).toBe("day_rollover_at_diagnostics");
+  });
+
+  it("in_chair at the boundary still closes plain day_rollover", () => {
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })]);
+    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+  });
+
+  it("a diagnostics visit CLOSED by a note keeps pulse_note — the boundary never reaches it", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
+  });
+
+  it("an `unknown` visit is closed by NEITHER pass — end_reason stays null", () => {
+    const { visits } = runRulesArm([
+      mark(T("14:00")),
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("pulse_note", T("15:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
+    expect(orphan.state).toBe("unknown");
+    expect(orphan.end_reason).toBeNull();
+  });
+
+  it("every end_reason arm A emits is in the closed set", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pstart", T("06:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
+      wh("pulse_note", T("07:00"), "pn_2", { individual_uid: "ind_2", attribution: "direct" }),
+      mark(T("20:00")),
+    ]);
+    expect(ALL_END_REASONS).toEqual(["pulse_note", "day_rollover", "day_rollover_at_diagnostics"]);
+    for (const v of visits) {
+      if (v.end_reason === null) expect(v.state).not.toBe("ended");
+      else expect(ALL_END_REASONS).toContain(v.end_reason);
+    }
+    // all three tokens are reachable from one day
+    expect(new Set(visits.map((v) => v.end_reason))).toEqual(new Set([END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS, END_REASONS.PULSE_NOTE, null]));
+  });
+});
+
+describe("8g — confirmations: behaviour the designer and orchestrator already believed", () => {
+  it("two DIFFERENT uids inside one mark window → two visits, and the mark is consumed", () => {
+    // OPD 7's 04:31:53 / 04:36:59 pair, inside the 04:02:29.995 mark's window
+    const { visits } = runRulesArm([
+      cue("consult_mark", "2026-08-19T04:02:29.995Z", { source: "kiosk" }, "replay", null),
+      wh("pqm_called", "2026-08-19T04:31:53.000Z", "qts_A", { individual_uid: "ind_A", attribution: "direct" }),
+      wh("pqm_called", "2026-08-19T04:36:59.000Z", "qts_B", { individual_uid: "ind_B", attribution: "direct" }),
+    ]);
+    expect(visits).toHaveLength(2);
+    expect(visits.filter((v) => v.state === "unknown")).toHaveLength(0);   // no extra row
+    expect(visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(0);
+    expect(visits.map((v) => v.individual_uid).sort()).toEqual(["ind_A", "ind_B"]);
+  });
+
+  it("same uid, pqm_called then pstart in one window → ONE visit, opened by the pstart", () => {
+    // Cardiology's 06:54:32 / 06:54:33 pair, inside the 06:08:12 mark's window
+    const { visits } = runRulesArm([
+      cue("consult_mark", "2026-08-19T06:08:12.436Z", { source: "kiosk" }, "replay", null),
+      cue("consult_mark", "2026-08-19T09:34:23.931Z", { source: "kiosk" }, "replay", null),
+      wh("pqm_called", "2026-08-19T06:54:32.000Z", "qts_C", { individual_uid: "ind_C", attribution: "direct" }),
+      wh("pstart", "2026-08-19T06:54:33.000Z", "svc_C", { individual_uid: "ind_C", calendar_uid: "cal_C", attribution: "direct" }),
+    ]);
+    const forC = visits.filter((v) => v.individual_uid === "ind_C");
+    expect(forC).toHaveLength(1);                       // the call did not mint a second row
+    expect(forC[0]!.opened_by).toBe("svc_C");           // pstart is the stronger opener
+    expect(forC[0]!.opened_by_kind).toBe("pstart");
+  });
+
+  it("arm A is still deterministic across both changes", () => {
+    const cues = [
+      cue("consult_mark", "2026-08-19T06:08:12.436Z", { source: "kiosk" }, "replay", null),
+      wh("pstart", T("06:20"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("dx_event", T("07:00"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pulse_note", T("08:00"), "pn_1", { individual_uid: "ind_2", attribution: "direct" }),
+      mark(T("20:00")),
+    ];
+    expect(runRulesArm(cues)).toEqual(runRulesArm(cues));
+    expect(runRulesArm([...cues].reverse())).toEqual(runRulesArm(cues));
   });
 });
 
