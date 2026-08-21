@@ -144,10 +144,14 @@ export function buildCuePayload(e: WarehouseEvent): Record<string, unknown> {
   put(payload, "attribution", e.attribution);
   put(payload, "in_tape_window", e.in_tape_window);
   const meta = e.meta ?? {};
-  // Only these three, and only when the type in hand actually carries them.
+  // Only these four, and only when the type in hand actually carries them.
   put(payload, "doctor_uid", meta.doctor_uid);
   put(payload, "category", meta.category);
   put(payload, "at_source", meta.at_source);
+  // calendar_uid (slice 4 follow-up, A3): it is on every pstart in the extract and reached no
+  // cue, which is why §10.3 — a second booking for the same person on the same day is a SECOND
+  // visit — could not be tested at all. Same omit-never-null rule as the rest.
+  put(payload, "calendar_uid", meta.calendar_uid);
   return payload;
 }
 

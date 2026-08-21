@@ -52,7 +52,7 @@ vi.mock("@/lib/llm/gemini", () => ({
   GEMINI_FLASH_MODEL: "gemini-3.7-flash",
 }));
 
-import { runRulesArm, RULES_REASONS, ALL_RULES_REASONS, MARK_BIND_WINDOW_MS } from "@/lib/brain/fuse/rules";
+import { runRulesArm, RULES_REASONS, ALL_RULES_REASONS, LAST_MARK_WINDOW_MS, END_REASONS, ambiguityOf } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm } from "@/lib/brain/fuse/gemini-arms";
 import { FUSE_TOOLS } from "@/lib/mcp/tools/fuse";
 import { DEFAULT_ARM, SQL_VISIT_INSERT, SQL_VISITS_FOR_DAY, readGraph } from "@/lib/brain/state";
@@ -117,13 +117,16 @@ describe("1 — arm A is deterministic", () => {
 });
 
 describe("2 — a pstart with no mark still mints a visit", () => {
-  it("official start, strong identity, state in_chair", () => {
+  it("official start, strong identity, opened by the pstart — and a fused day has closed it", () => {
     const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })]);
     expect(visits).toHaveLength(1);
     expect(visits[0]).toMatchObject({
-      individual_uid: "ind_1", state: "in_chair", opened_by: "svc_1", opened_by_kind: "pstart", pstart_at: T("03:35"), reasons: [],
+      individual_uid: "ind_1", opened_by: "svc_1", opened_by_kind: "pstart", pstart_at: T("03:35"), reasons: [],
     });
     expect(visits[0]!.confidence).toBeGreaterThan(0.8);
+    // it opened in_chair and the day-rollover pass closed it: nothing stays open in a fused day
+    expect(visits[0]!.state).toBe("ended");
+    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
   });
 });
 
@@ -134,8 +137,10 @@ describe("3 — a dx_event opens a hole, never a visit", () => {
       wh("dx_event", T("05:10"), "svc_dx_1", { individual_uid: "ind_1", attribution: "direct", category: "LAB" }),
     ]);
     expect(visits).toHaveLength(1);
-    expect(visits[0]!.state).toBe("at_diagnostics");
-    expect(visits[0]!.opened_by).toBe("svc_1"); // still opened by the pstart
+    expect(visits[0]!.opened_by).toBe("svc_1"); // still opened by the pstart, not the dx
+    // the hole opened at_diagnostics and, with nothing closing it, day_rollover did
+    expect(visits[0]!.state).toBe("ended");
+    expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
   });
 
   it("a dx_event for a person with no visit mints nothing and is reported as unbound", () => {
@@ -187,49 +192,187 @@ describe("6 — in_tape_window is not read at all", () => {
   });
 });
 
-describe("7 — a pulse_note never opens a visit", () => {
-  it("a note with no visit mints nothing; a note with a visit only raises confidence", () => {
+describe("7/8 — a pulse_note never OPENS a visit, and closes only its own", () => {
+  it("a note with no visit mints nothing", () => {
     const alone = runRulesArm([wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })]);
     expect(alone.visits).toHaveLength(0);
     expect(alone.unbound[0]!.reason).toBe(RULES_REASONS.PULSE_NOTE_WITHOUT_VISIT);
+  });
 
-    const start = wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" });
-    const without = runRulesArm([start]);
-    const withNote = runRulesArm([start, wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })]);
-    expect(withNote.visits).toHaveLength(1);
-    expect(withNote.visits[0]!.state).toBe(without.visits[0]!.state); // no state change
-    expect(withNote.visits[0]!.confidence).toBeGreaterThan(without.visits[0]!.confidence);
+  it("A5 — it closes THAT individual's visit with end_reason pulse_note, and nobody else's", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("pstart", T("04:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
+      wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    const one = visits.find((v) => v.individual_uid === "ind_1")!;
+    const two = visits.find((v) => v.individual_uid === "ind_2")!;
+    expect(one.state).toBe("ended");
+    expect(one.end_reason).toBe(END_REASONS.PULSE_NOTE);
+    // the other person's visit is closed too — but by the day boundary, not by this note
+    expect(two.state).toBe("ended");
+    expect(two.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+  });
+
+  it("a note cannot close a mark-only visit — it has no individual_uid to match", () => {
+    const { visits } = runRulesArm([
+      mark(T("11:00")),
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+      wh("pulse_note", T("12:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
+    ]);
+    const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
+    expect(orphan.state).toBe("unknown");
+    expect(orphan.end_reason).toBeNull();
   });
 });
 
-describe("8 — arm A says it cannot tell", () => {
-  it("a kiosk mark in an evidence gap becomes a low-confidence, identity-less visit with a named reason", () => {
-    // the six-hour stretch of tape with no warehouse activity, in miniature
+describe("8 — arm A says it cannot tell, and the mark windows say when", () => {
+  it("A4 — a mark with a later mark uses [this, next); the LAST mark uses [this, this + 45 min)", () => {
+    const m1 = T("04:00");
+    const m2 = T("06:00");
+    // inside window 1 ([04:00, 06:00)), inside window 2 ([06:00, 06:45)), and past both
+    const insideW1 = wh("pstart", T("05:59"), "svc_a", { individual_uid: "ind_a", calendar_uid: "cal_a", attribution: "direct" });
+    const insideW2 = wh("pstart", T("06:44"), "svc_b", { individual_uid: "ind_b", calendar_uid: "cal_b", attribution: "direct" });
+    const outside = wh("pstart", T("06:46"), "svc_c", { individual_uid: "ind_c", calendar_uid: "cal_c", attribution: "direct" });
+
+    const { visits } = runRulesArm([mark(m1), mark(m2), insideW1, insideW2, outside]);
+    // both marks bound something, so NEITHER mints; the three pstarts are the three visits
+    expect(visits).toHaveLength(3);
+    expect(visits.every((v) => v.opened_by_kind === "pstart")).toBe(true);
+    expect(visits.map((v) => v.opened_by).sort()).toEqual(["svc_a", "svc_b", "svc_c"]);
+
+    // the 45-minute prior is exactly the boundary, and it is exclusive at the top
+    const justInside = new Date(Date.parse(m2) + LAST_MARK_WINDOW_MS - 1000).toISOString();
+    const justOutside = new Date(Date.parse(m2) + LAST_MARK_WINDOW_MS).toISOString();
+    const a = runRulesArm([mark(m2), wh("pstart", justInside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })]);
+    expect(a.visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(0); // bound
+    const b = runRulesArm([mark(m2), wh("pstart", justOutside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })]);
+    expect(b.visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(1); // window empty
+  });
+
+  it("a warehouse clock INSIDE a mark window makes ONE visit, not two", () => {
+    const { visits } = runRulesArm([
+      mark(T("04:00")),
+      wh("pqm_called", T("04:10"), "qts_1", { individual_uid: "ind_1", attribution: "direct" }),
+      wh("pstart", T("04:11"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+    ]);
+    // one call + one start + one mark, all the same consult
+    expect(visits).toHaveLength(1);
+    expect(visits[0]!.opened_by).toBe("svc_1");
+    expect(visits[0]!.individual_uid).toBe("ind_1"); // identity from the warehouse, not the mark
+  });
+
+  it("a warehouse clock OUTSIDE every mark window still mints its own visit — the OPD 7 afternoon", () => {
+    const { visits } = runRulesArm([
+      mark(T("04:02")),
+      wh("pstart", T("10:39"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+    ]);
+    expect(visits).toHaveLength(2);
+    expect(visits.some((v) => v.opened_by === "svc_1" && v.opened_by_kind === "pstart")).toBe(true);
+    const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
+    expect(orphan.state).toBe("unknown");
+    expect(orphan.confidence).toBe(0.3);
+  });
+
+  it("a mark whose window contains nothing stays unknown at 0.3, with a named reason", () => {
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       mark(T("11:00")),
     ]);
-    expect(visits).toHaveLength(2);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.individual_uid).toBeNull();
     expect(orphan.state).toBe("unknown");
-    expect(orphan.confidence).toBeLessThanOrEqual(0.5);
+    expect(orphan.confidence).toBe(0.3);
     expect(orphan.reasons).toContain(RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
   });
 
-  it("a mark inside the bind window corroborates instead of minting", () => {
-    const start = wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" });
-    const within = new Date(Date.parse(T("03:35")) + MARK_BIND_WINDOW_MS - 1000).toISOString();
-    const { visits } = runRulesArm([start, cue("consult_mark", within, { source: "kiosk" }, "replay", null)]);
-    expect(visits).toHaveLength(1);
-    expect(visits[0]!.opened_by_kind).toBe("pstart");
-  });
-
-  it("a call that never started is a `called` visit that says why", () => {
+  it("a call that never started still says why, and closes by the day boundary", () => {
     const { visits } = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" })]);
-    expect(visits[0]).toMatchObject({ state: "called", opened_by: "qts_9", opened_by_kind: "pqm_called" });
+    expect(visits[0]).toMatchObject({ opened_by: "qts_9", opened_by_kind: "pqm_called", state: "ended", end_reason: END_REASONS.DAY_ROLLOVER });
     expect(visits[0]!.reasons).toContain(RULES_REASONS.PQM_CALLED_WITHOUT_PSTART);
     expect(visits[0]!.confidence).toBeLessThanOrEqual(0.5);
+  });
+});
+
+describe("8b — the worked expectations from the kickoff, verbatim", () => {
+  it("Cardiology: three marks, one pstart, one call → THREE visits, not four", () => {
+    const cues = [
+      cue("consult_mark", "2026-08-19T04:41:30.468Z", { source: "kiosk" }, "replay", null),
+      cue("consult_mark", "2026-08-19T06:08:12.436Z", { source: "kiosk" }, "replay", null),
+      cue("consult_mark", "2026-08-19T09:34:23.931Z", { source: "kiosk" }, "replay", null),
+      wh("pqm_called", "2026-08-19T06:54:32.000Z", "qts_c1", { individual_uid: "ind_2", attribution: "direct" }),
+      wh("pstart", "2026-08-19T06:54:33.000Z", "svc_c1", { individual_uid: "ind_2", calendar_uid: "cal_c1", attribution: "direct" }),
+    ];
+    const { visits } = runRulesArm(cues);
+    expect(visits).toHaveLength(3);
+    // mark 1 [04:41, 06:08) empty, mark 3 [09:34, 10:19) empty, mark 2 bound both clocks
+    expect(visits.filter((v) => v.state === "unknown" && v.confidence === 0.3)).toHaveLength(2);
+    const bound = visits.find((v) => v.individual_uid === "ind_2")!;
+    expect(bound.opened_by).toBe("svc_c1");
+  });
+
+  it("OPD 7: one morning mark must not swallow the 10:39Z starts — the gap stays a gap", () => {
+    const cues: FuseCue[] = [cue("consult_mark", "2026-08-19T04:02:29.995Z", { source: "kiosk" }, "replay", null)];
+    for (let i = 0; i < 9; i++) {
+      cues.push(wh("pstart", `2026-08-19T10:${String(39 + i).padStart(2, "0")}:36.000Z`, `svc_${i}`, { individual_uid: `ind_${i}`, calendar_uid: `cal_${i}`, attribution: "direct" }));
+      cues.push(wh("pqm_called", `2026-08-19T10:${String(39 + i).padStart(2, "0")}:00.000Z`, `qts_${i}`, { individual_uid: `ind_${i}`, attribution: "direct" }));
+    }
+    for (let i = 9; i < 13; i++) cues.push(wh("pqm_called", `2026-08-19T11:${String(i).padStart(2, "0")}:00.000Z`, `qts_${i}`, { individual_uid: `ind_${i}`, attribution: "direct" }));
+
+    const { visits } = runRulesArm(cues);
+    expect(visits).toHaveLength(14);
+    const kinds = visits.reduce((a: Record<string, number>, v) => ((a[v.opened_by_kind] = (a[v.opened_by_kind] ?? 0) + 1), a), {});
+    expect(kinds).toEqual({ pstart: 9, pqm_called: 4, mark: 1 });
+    expect(visits.filter((v) => v.state === "unknown")).toHaveLength(1);
+  });
+});
+
+describe("8c — A7: day_rollover closes the open states and leaves `unknown` alone", () => {
+  it("called, in_chair and at_diagnostics all close; unknown does not", () => {
+    const { visits } = runRulesArm([
+      wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),       // in_chair
+      wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),                            // at_diagnostics
+      wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" }),                           // called
+      mark(T("14:00")),                                                                                                    // unknown
+    ]);
+    const open = visits.filter((v) => ["called", "in_chair", "at_diagnostics"].includes(v.state));
+    expect(open).toHaveLength(0);
+    for (const v of visits.filter((x) => x.opened_by_kind !== "mark")) {
+      expect(v.state).toBe("ended");
+      expect(v.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+    }
+    const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
+    expect(orphan.state).toBe("unknown");
+    expect(orphan.end_reason).toBeNull();
+    expect(orphan.confidence).toBe(0.3);
+  });
+});
+
+describe("8d — A6: end_reason answers why it ENDED; ambiguity answers why we are UNSURE", () => {
+  it("end_reason is null unless state is ended, and reasons never touch it", () => {
+    const { visits } = runRulesArm([
+      wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "inferred" }),
+      mark(T("14:00")),
+    ]);
+    for (const v of visits) {
+      if (v.state !== "ended") expect(v.end_reason).toBeNull();
+      else expect([END_REASONS.PULSE_NOTE, END_REASONS.DAY_ROLLOVER]).toContain(v.end_reason);
+      // an ambiguity reason is never smuggled into end_reason
+      for (const r of v.reasons) expect(v.end_reason).not.toBe(r);
+    }
+  });
+
+  it("several reasons join in CLOSED-SET order, comma separated, never prose", () => {
+    const many = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "inferred" })]);
+    const v = many.visits[0]!;
+    expect(v.reasons.length).toBeGreaterThan(1);
+    const joined = ambiguityOf(v.reasons)!;
+    expect(joined).toBe(v.reasons.join(","));
+    // closed-set order: every token is in the set, and the sequence follows the declaration
+    const idx = joined.split(",").map((r) => ALL_RULES_REASONS.indexOf(r));
+    expect(idx.every((i) => i >= 0)).toBe(true);
+    expect([...idx].sort((a, b) => a - b)).toEqual(idx);
+    expect(ambiguityOf([])).toBeNull();
   });
 });
 
@@ -262,10 +405,11 @@ const seedDb = () => {
       return CUES.map((c) => ({ id: c.id, type: c.type, at: new Date(c.at), created_at: new Date(c.at), payload: c.payload, source: c.source, source_ref: c.source_ref }));
     }
     if (/^INSERT INTO visit/.test(text)) {
-      const [id, roomDayId, uid, consultUid, state, pstartAt, conf, endReason, arm, openedBy, kind] = values as unknown[];
+      // column order follows SQL_VISIT_INSERT exactly; 0049 inserted `ambiguity` at $9
+      const [id, roomDayId, uid, consultUid, state, pstartAt, conf, endReason, ambiguity, arm, openedBy, kind] = values as unknown[];
       const key = `${String(arm)}|${String(openedBy)}`; // 0048's partial unique index
       if (arm !== null && openedBy !== null && visitRows.has(key)) return []; // ON CONFLICT DO NOTHING
-      visitRows.set(key, { id, room_day_id: roomDayId, individual_uid: uid, consult_uid: consultUid, state, pstart_at: pstartAt, confidence: conf, end_reason: endReason, arm, opened_by: openedBy, opened_by_kind: kind, updated_at: new Date() });
+      visitRows.set(key, { id, room_day_id: roomDayId, individual_uid: uid, consult_uid: consultUid, state, pstart_at: pstartAt, confidence: conf, end_reason: endReason, ambiguity, arm, opened_by: openedBy, opened_by_kind: kind, updated_at: new Date() });
       return [{ id }];
     }
     if (/FROM visit WHERE room_day_id = \$1 AND COALESCE\(arm, 'rules'\)/.test(text)) {
@@ -407,7 +551,7 @@ describe("13 — readGraph is arm-scoped, and NULL reads as rules", () => {
     rcImpl = () => ({ ok: true, provider: "gemini:gemini-3.1-pro-preview", latency_ms: 5, content: JSON.stringify({ decisions: [] }) });
     await call({ room_day_id: DAY, arm: "hybrid", dry_run: false });
     // a legacy row with no arm at all
-    visitRows.set("|legacy", { id: "vis_legacy", room_day_id: DAY, individual_uid: null, consult_uid: null, state: "unknown", pstart_at: null, confidence: 0.1, end_reason: null, arm: null, opened_by: null, opened_by_kind: null, updated_at: new Date() });
+    visitRows.set("|legacy", { id: "vis_legacy", room_day_id: DAY, individual_uid: null, consult_uid: null, state: "unknown", pstart_at: null, confidence: 0.1, end_reason: null, ambiguity: null, arm: null, opened_by: null, opened_by_kind: null, updated_at: new Date() });
 
     const pool = (await import("@/lib/brain/db")).getPool();
     const dflt = await readGraph(pool as never, "room_scratch_q", "2026-08-19", DAY);
@@ -422,16 +566,54 @@ describe("13 — readGraph is arm-scoped, and NULL reads as rules", () => {
     expect(hy.visits.some((v) => v.id === "vis_legacy")).toBe(false);
   });
 
-  it("active_visit_id is derived within the selected arm only", async () => {
+  it("after a full fuse, active_visit_id is NULL — nothing is left in the chair", async () => {
     await call({ room_day_id: DAY, arm: "rules", dry_run: false });
     const pool = (await import("@/lib/brain/db")).getPool();
     const g = await readGraph(pool as never, "room_scratch_q", "2026-08-19", DAY);
-    const ids = new Set(g.visits.map((v) => v.id));
-    if (g.active_visit_id) expect(ids.has(g.active_visit_id)).toBe(true);
+    expect(g.visits.length).toBeGreaterThan(0);
+    expect(g.visits.some((v) => v.state === "in_chair")).toBe(false);
+    expect(g.active_visit_id).toBeNull();
+  });
+
+  it("the state envelope carries ambiguity, and end_reason only where the visit ended", async () => {
+    await call({ room_day_id: DAY, arm: "rules", dry_run: false });
+    const pool = (await import("@/lib/brain/db")).getPool();
+    const g = await readGraph(pool as never, "room_scratch_q", "2026-08-19", DAY);
+    for (const v of g.visits) {
+      expect(v).toHaveProperty("ambiguity");
+      if (v.state !== "ended") expect(v.end_reason).toBeNull();
+      if (v.ambiguity !== null) for (const r of String(v.ambiguity).split(",")) expect(ALL_RULES_REASONS).toContain(r);
+    }
+    // the mark-only visit is the one that stays unknown, and it carries its reason in ambiguity
+    const orphan = g.visits.find((v) => v.state === "unknown")!;
+    expect(orphan.ambiguity).toBe(RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
+    expect(orphan.end_reason).toBeNull();
   });
 });
 
 describe("14 — the SQL, the migration, and the duplicate", () => {
+  it("the invented 30-minute bind constant is gone", () => {
+    const src = readFileSync("lib/brain/fuse/rules.ts", "utf8");
+    expect(src).not.toMatch(/MARK_BIND_WINDOW_MS/);
+    expect(src).toMatch(/LAST_MARK_WINDOW_MS = 45 \* 60 \* 1000/);
+  });
+
+  it("0049 records itself and adds one nullable column, nothing else", () => {
+    const sql = readFileSync("db/migrations/0049_visit_ambiguity.sql", "utf8");
+    expect(sql).toMatch(/VALUES \(49, '0049_visit_ambiguity'\)/);
+    expect(sql).toMatch(/ON CONFLICT DO NOTHING;/);
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS ambiguity text/);
+    // no CHECK, no index, nothing touched — asserted against the STATEMENTS, since the
+    // header comment names visit_arm_opened_by_key precisely to say it is left alone
+    const statements = sql.split("\n").filter((l) => !l.trim().startsWith("--") && l.trim()).join("\n");
+    expect(statements).not.toMatch(/CHECK\s*\(/);
+    expect(statements).not.toMatch(/CREATE (UNIQUE )?INDEX/);
+    expect(statements).not.toMatch(/visit_arm_opened_by_key/);
+    expect(statements).not.toMatch(/^\s*(DROP|ALTER INDEX|TRUNCATE|DELETE|UPDATE)\b/im);
+    // exactly one ALTER TABLE, and it is the additive one
+    expect(statements.match(/ALTER TABLE/g)).toHaveLength(1);
+  });
+
   it("0048 records itself and is additive + partial", () => {
     const sql = readFileSync("db/migrations/0048_visit_arm.sql", "utf8");
     expect(sql).toMatch(/VALUES \(48, '0048_visit_arm'\)/);
@@ -460,10 +642,13 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
     expect(a).toBe(b);
     expect(a).toContain("COALESCE(arm, 'rules') = $2::text");
     expect(a).toContain("arm, opened_by, opened_by_kind");
+    expect(a).toContain("ambiguity"); // 0049 projected in BOTH copies
   });
 
   it("the visit insert is idempotent on the arm key and names every 0048 column", () => {
     expect(SQL_VISIT_INSERT).toContain("arm, opened_by, opened_by_kind");
+    expect(SQL_VISIT_INSERT).toContain("end_reason, ambiguity");
+    expect(SQL_VISIT_INSERT).toContain("$12::text");
     expect(SQL_VISIT_INSERT).toContain("ON CONFLICT DO NOTHING");
     expect(SQL_VISITS_FOR_DAY).toContain("COALESCE(arm, 'rules')");
   });

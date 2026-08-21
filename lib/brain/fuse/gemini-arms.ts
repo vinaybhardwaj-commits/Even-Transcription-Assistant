@@ -231,6 +231,9 @@ export async function runFlashArm(cues: FuseCue[]): Promise<ArmResult> {
       opened_by,
       opened_by_kind: kind,
       reasons: Array.isArray(o.reasons) ? (o.reasons as unknown[]).map(asStr).filter((x): x is string => x !== null).slice(0, 8) : [],
+      // Arm C is disqualified and not re-run (A1); this field exists so the shared DraftVisit
+      // type still compiles. A model's answer never sets an end_reason.
+      end_reason: null,
     });
   }
 

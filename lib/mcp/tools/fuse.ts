@@ -21,7 +21,7 @@
 
 import { getPool, query } from "@/lib/brain/db";
 import { newVisitId, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_VISIT_INSERT, type RoomDayByIdRow } from "@/lib/brain/state";
-import { runRulesArm } from "@/lib/brain/fuse/rules";
+import { ambiguityOf, runRulesArm } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm, type ArmResult } from "@/lib/brain/fuse/gemini-arms";
 import { ARMS, VISIT_STATES, type Arm, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
 import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
@@ -72,9 +72,11 @@ export async function writeVisits(roomDayId: string, arm: Arm, visits: DraftVisi
           v.state,
           v.pstart_at,
           v.confidence,
-          // §6.3 offers end_reason as the place to name an ambiguity, and 0042 declares the
-          // column open. A confident visit stores null rather than an empty string.
-          v.reasons.length > 0 ? v.reasons[0]! : null,
+          // A6: end_reason answers "why did it END" and is written ONLY when the visit ended.
+          // The ambiguity reasons go in their own 0049 column, comma-joined in closed-set
+          // order — the two questions are different and used to share one field.
+          v.state === "ended" ? v.end_reason : null,
+          ambiguityOf(v.reasons),
           arm,
           v.opened_by,
           v.opened_by_kind,
@@ -149,6 +151,8 @@ const fuseRun: McpTool = {
         opened_by_kind: v.opened_by_kind,
         pstart_at: v.pstart_at,
         reasons: v.reasons,
+        ambiguity: ambiguityOf(v.reasons),
+        end_reason: v.state === "ended" ? v.end_reason : null,
       }));
 
       const base = {

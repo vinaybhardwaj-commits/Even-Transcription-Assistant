@@ -1,7 +1,10 @@
 {
   "note": "SYNTHETIC. Every uid here is fake and matches nothing in any warehouse. This is the only fixture in this directory that is committed; fixtures/warehouse/*.json is otherwise gitignored, because a real extract holds real individual_uids. Event shape follows the extract: top-level type/at/individual_uid/source_ref/room/attribution/in_tape_window/meta, and NO payload key — the cue payload is built by buildCuePayload() in the loader. meta varies by type; no key may be assumed present.",
   "ist_date": "2026-08-19",
-  "rooms": ["opd-7", "cardiology"],
+  "rooms": [
+    "opd-7",
+    "cardiology"
+  ],
   "events": [
     {
       "room": "opd-7",
@@ -118,6 +121,42 @@
         "service_request_uid": "sr_fake_5502",
         "tenant_uid": "ten_fake_ehrc"
       }
+    },
+    {
+      "room": "opd-7",
+      "type": "pstart",
+      "at": "2026-08-19T08:41:00.000Z",
+      "individual_uid": "ind_fake_0001",
+      "source_ref": "svc_e5f6a7b8",
+      "attribution": "direct",
+      "in_tape_window": false,
+      "meta": {
+        "category": "CONSULTATION",
+        "calendar_uid": "cal_fake_7783",
+        "service_uid": "svc_e5f6a7b8",
+        "consult_type": "IN_PERSON",
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
+      },
+      "note": "SECOND BOOKING for ind_fake_0001 on the same day, DIFFERENT calendar_uid from svc_a1b2c3d4 — this is the section 10.3 row: two visits for one person on one day."
+    },
+    {
+      "room": "opd-7",
+      "type": "pstart",
+      "at": "2026-08-19T08:41:30.000Z",
+      "individual_uid": "ind_fake_0001",
+      "source_ref": "svc_e5f6a7b8b",
+      "attribution": "direct",
+      "in_tape_window": false,
+      "meta": {
+        "category": "CONSULTATION",
+        "calendar_uid": "cal_fake_7783",
+        "service_uid": "svc_e5f6a7b8b",
+        "consult_type": "IN_PERSON",
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
+      },
+      "note": "SAME calendar_uid as svc_e5f6a7b8 — one booking reported twice by the warehouse, which must collapse to ONE visit, not two."
     },
     {
       "room": "opd-7",

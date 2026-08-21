@@ -22,6 +22,17 @@ export type FuseCue = {
 export const VISIT_STATES = ["called", "in_chair", "at_diagnostics", "ended", "unknown"] as const;
 export type VisitState = (typeof VISIT_STATES)[number];
 
+/**
+ * The states that imply a patient is PRESENT and the visit is still running. These are what
+ * day_rollover closes at the end of a fused day.
+ *
+ * `unknown` is deliberately NOT here (A7): it is not an open visit, it is a visit we never
+ * established — a kiosk mark whose window held no warehouse evidence at all. Rolling it to
+ * `ended` would claim we knew a consult happened and finished, when the whole point of the row
+ * is that we could not tell. The six-hour gap stays a gap.
+ */
+export const OPEN_STATES: readonly VisitState[] = ["called", "in_chair", "at_diagnostics"];
+
 export const ARMS = ["rules", "hybrid", "flash"] as const;
 export type Arm = (typeof ARMS)[number];
 
@@ -37,8 +48,11 @@ export type DraftVisit = {
   /** the opening evidence — 0048's half of the unique key. Never empty. */
   opened_by: string;
   opened_by_kind: OpenedByKind;
-  /** why this visit is uncertain, in the order the rules noticed. Empty = confident. */
+  /** why this visit is uncertain, in closed-set order. Empty = confident. Stored in
+   *  visit.ambiguity (0049), comma-joined — NEVER in end_reason. */
   reasons: string[];
+  /** why this visit ENDED. Set ONLY when state === 'ended' (A6): 'pulse_note' | 'day_rollover'. */
+  end_reason: string | null;
 };
 
 /** Evidence that bound to nothing. Not a visit, not a failure — a finding. */

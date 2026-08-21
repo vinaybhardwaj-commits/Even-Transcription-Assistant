@@ -139,7 +139,7 @@ export const DEFAULT_ARM = "rules";
  * ever differ again — the only form of unification available across two independent builds.
  */
 export const SQL_VISITS_FOR_DAY =
-  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at, arm, opened_by, opened_by_kind " +
+  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, updated_at, arm, opened_by, opened_by_kind " +
   "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY updated_at ASC, id ASC";
 
 /**
@@ -153,8 +153,8 @@ export const SQL_VISITS_FOR_DAY =
  * than quietly duplicating it on the next run.
  */
 export const SQL_VISIT_INSERT =
-  "INSERT INTO visit (id, room_day_id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, arm, opened_by, opened_by_kind) " +
-  "VALUES ($1, $2, $3::text, $4::text, $5, $6::timestamptz, $7::real, $8::text, $9::text, $10::text, $11::text) " +
+  "INSERT INTO visit (id, room_day_id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, arm, opened_by, opened_by_kind) " +
+  "VALUES ($1, $2, $3::text, $4::text, $5, $6::timestamptz, $7::real, $8::text, $9::text, $10::text, $11::text, $12::text) " +
   "ON CONFLICT DO NOTHING RETURNING id";
 
 /** Cues for a room_day BY ID, oldest first — the fuse reads a day in evidence order. */
@@ -200,6 +200,7 @@ type VisitRow = {
   arm: string | null;
   opened_by: string | null;
   opened_by_kind: string | null;
+  ambiguity: string | null;
 };
 
 type ClusterRow = {
@@ -224,6 +225,8 @@ export type Graph = {
     pstart_at: string | null;
     confidence: number | null;
     end_reason: string | null;
+    /** slice 4 follow-up (0049): closed-set reasons, comma-joined. NEVER prose. */
+    ambiguity: string | null;
     speaker_cluster_ids: string[];
     updated_at: string;
     /** slice 4: which arm wrote this row. A stored NULL reads back as DEFAULT_ARM. */
@@ -306,6 +309,7 @@ export async function readGraph(q: Queryable, roomId: string, date: string, room
     pstart_at: iso(row.pstart_at),
     confidence: row.confidence,
     end_reason: row.end_reason,
+    ambiguity: row.ambiguity,
     speaker_cluster_ids: clusterIdsByVisit.get(row.id) ?? [],
     updated_at: iso(row.updated_at) ?? as_of,
     arm: row.arm ?? DEFAULT_ARM,

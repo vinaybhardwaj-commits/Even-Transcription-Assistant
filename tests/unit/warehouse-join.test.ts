@@ -234,11 +234,11 @@ const tool = (name: string) => {
 
 describe("1 — the fixture is what slice 3 says it is", () => {
   it("8 events, all four warehouse types, both rooms, and exactly one duplicate natural key", () => {
-    expect(EVENTS).toHaveLength(8);
+    expect(EVENTS).toHaveLength(10);
     expect([...new Set(EVENTS.map((e) => e.type))].sort()).toEqual([...WAREHOUSE_CUE_TYPES].sort());
     expect([...new Set(EVENTS.map((e) => e.room))].sort()).toEqual(["cardiology", "opd-7"]);
     const keys = EVENTS.map((e) => `${e.source_ref}|${e.type}|${e.at}`);
-    expect(new Set(keys).size).toBe(7); // one deliberate duplicate
+    expect(new Set(keys).size).toBe(9); // one deliberate duplicate
     expect(EVENTS.every((e) => typeof e.source_ref === "string" && e.source_ref.length > 0)).toBe(true);
     expect(EVENTS.every((e) => typeof e.individual_uid === "string" && e.individual_uid.length > 0)).toBe(true);
     // the extract has NO payload key — the cue payload is built, not passed through
@@ -265,11 +265,11 @@ describe("1 — the fixture is what slice 3 says it is", () => {
 describe("2 — each of the four types is written once, with source 'warehouse' and its source_ref", () => {
   it("writes 7 of 8, absorbs the duplicate, and every row carries the key 0047 indexes", async () => {
     const r = await load();
-    expect(r).toMatchObject({ ok: true, total: 8, written: 7, already_existed: 1, failed: 0 });
-    expect(r.by_type).toEqual({ pqm_called: 3, pstart: 2, dx_event: 2, pulse_note: 1 });
+    expect(r).toMatchObject({ ok: true, total: 10, written: 9, already_existed: 1, failed: 0 });
+    expect(r.by_type).toEqual({ pqm_called: 3, pstart: 4, dx_event: 2, pulse_note: 1 });
 
     // every request named a scratch day, its scratch room, the warehouse source and a source_ref
-    expect(posted).toHaveLength(8);
+    expect(posted).toHaveLength(10);
     for (const p of posted) {
       expect(p.source).toBe("warehouse");
       expect(String(p.source_ref).length).toBeGreaterThan(0);
@@ -283,12 +283,12 @@ describe("2 — each of the four types is written once, with source 'warehouse' 
     expect([...times].sort((a, b) => a - b)).toEqual(times);
 
     // the write used the SCRATCH statement — the shared live one never ran
-    expect(cueInserts()).toHaveLength(8);
+    expect(cueInserts()).toHaveLength(10);
     expect(cueInserts().every((c) => c.text === SQL_CUE_INSERT_SCRATCH)).toBe(true);
     expect(cueInserts().some((c) => c.text === SQL_CUE_INSERT)).toBe(false);
 
     // 7 distinct rows, one per natural key, one of each type present
-    expect(cues.size).toBe(7);
+    expect(cues.size).toBe(9);
     const stored = [...cues.values()];
     for (const t of WAREHOUSE_CUE_TYPES) expect(stored.some((c) => c.type === t)).toBe(true);
     for (const c of stored) {
@@ -332,14 +332,14 @@ describe("2 — each of the four types is written once, with source 'warehouse' 
 describe("3 — re-running writes nothing", () => {
   it("second run reports all 8 already-existed and issues no new row", async () => {
     const first = await load();
-    expect(first.written).toBe(7);
+    expect(first.written).toBe(9);
     const sizeAfterFirst = cues.size;
 
     posted.length = 0;
     const second = await load();
-    expect(second).toMatchObject({ ok: true, total: 8, written: 0, already_existed: 8, failed: 0 });
+    expect(second).toMatchObject({ ok: true, total: 10, written: 0, already_existed: 10, failed: 0 });
     expect(cues.size).toBe(sizeAfterFirst); // not one new row
-    expect(posted).toHaveLength(8); // it still asks; the index is what refuses
+    expect(posted).toHaveLength(10); // it still asks; the index is what refuses
   });
 
   it("a run that died half way is finished by running it again", async () => {
@@ -353,8 +353,8 @@ describe("3 — re-running writes nothing", () => {
     const second = await load();
     expect(second.failed).toBe(0);
     expect(second.written).toBe(1); // only the one that never landed
-    expect(second.already_existed).toBe(7);
-    expect(cues.size).toBe(7);
+    expect(second.already_existed).toBe(9);
+    expect(cues.size).toBe(9);
   });
 });
 
@@ -448,7 +448,7 @@ describe("9 — scribe_store_stats separates live and scratch", () => {
       room_days_today: 2,        // the two unflagged days, including the scratch-NAMED one
       cues_today: 0,             // and not one warehouse cue counted as clinic traffic
       scratch_room_days_today: 2,
-      scratch_cues_today: 7,
+      scratch_cues_today: 9,
     });
   });
 
@@ -548,7 +548,7 @@ describe("11 — the CLI refuses before the first request, and prints no uid", (
     const code = await run({ events: EVENTS });
     expect(code).toBe(0);
     const printed = [...logs, ...errs].join("\n");
-    expect(printed).toContain("written 7  already-existed 1  failed 0  of 8");
+    expect(printed).toContain("written 9  already-existed 1  failed 0  of 10");
     expect(printed).toContain("pqm_called=3");
     // the rule that matters: no uid, no payload, no token ever reaches the console
     expect(printed).not.toMatch(/ind_fake_/);
@@ -592,7 +592,12 @@ describe("12 — the cue payload is built from the event", () => {
     expect(p.category).toBe("CONSULTATION");
     expect("doctor_uid" in p).toBe(false);
     expect("at_source" in p).toBe(false);
-    expect("calendar_uid" in p).toBe(false); // narrow payload, not the whole meta block
+    expect(p.calendar_uid).toBe("cal_fake_7781"); // A3 — added deliberately; §10.3 needs it
+    // still a NARROW payload: the rest of the meta block does not come along
+    expect("service_uid" in p).toBe(false);
+    expect("consult_type" in p).toBe(false);
+    expect("booked_status" in p).toBe(false);
+    expect("hospital_uid" in p).toBe(false);
   });
 
   it("a pulse_note event carries at_source, and no category", async () => {
@@ -602,6 +607,30 @@ describe("12 — the cue payload is built from the event", () => {
     expect("category" in p).toBe(false);
     expect("doctor_uid" in p).toBe(false);
     expect("presc_type" in p).toBe(false);
+  });
+
+  it("A3 — calendar_uid reaches the payload when present, and is OMITTED when absent", async () => {
+    await load();
+    // every pstart in the extract carries one, and until A3 it reached no cue at all — which
+    // is why §10.3 (two bookings, one person, one day) could not be tested
+    const pstart = bodyFor("svc_a1b2c3d4");
+    expect(pstart.calendar_uid).toBe("cal_fake_7781");
+    // and no other type has one, so no other payload may carry the key at all
+    for (const ref of ["qts_9f8e7d6c", "svc_dx_4411ab", "pn_77c1d0e9"]) {
+      expect("calendar_uid" in bodyFor(ref), `${ref} must not carry calendar_uid`).toBe(false);
+    }
+    // never null — absent means absent
+    for (const req of posted) expect((req.payload as Record<string, unknown>).calendar_uid).not.toBeNull();
+  });
+
+  it("the fixture holds both §10.3 shapes: same person, different booking, and the same booking twice", async () => {
+    await load();
+    const pstarts = posted.filter((p) => p.type === "pstart").map((p) => p.payload as Record<string, unknown>);
+    const forOne = pstarts.filter((p) => p.individual_uid === "ind_fake_0001");
+    expect(forOne.length).toBeGreaterThanOrEqual(3);
+    const cals = forOne.map((p) => p.calendar_uid);
+    expect(new Set(cals).size).toBeGreaterThanOrEqual(2);           // a genuinely different booking
+    expect(cals.length).toBeGreaterThan(new Set(cals).size);        // and the same booking twice
   });
 
   it("a dx_event carries both category and at_source, and no doctor_uid", async () => {
@@ -614,7 +643,7 @@ describe("12 — the cue payload is built from the event", () => {
 
   it("every payload carries source, individual_uid, source_ref, attribution and in_tape_window", async () => {
     await load();
-    expect(posted).toHaveLength(8);
+    expect(posted).toHaveLength(10);
     for (const req of posted) {
       const p = req.payload as Record<string, unknown>;
       expect(p.source).toBe("warehouse");
@@ -695,8 +724,8 @@ describe("13 — a uid is in the payload now, so the console must stay clean", (
     expect(code).toBe(0);
 
     const printed = out.join("\n");
-    expect(printed).toContain("written 7  already-existed 1  failed 0  of 8");
-    expect(printed).toContain("pstart=2");
+    expect(printed).toContain("written 9  already-existed 1  failed 0  of 10");
+    expect(printed).toContain("pstart=4");
 
     // the uids that are now IN the payload must not be in the output
     expect(printed).not.toMatch(/ind_fake_/);

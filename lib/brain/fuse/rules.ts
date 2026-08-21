@@ -27,7 +27,7 @@
  *     loses that row however plausible its output.
  */
 
-import type { ArmOutput, DraftVisit, FuseCue, OpenedByKind, UnboundEvidence, VisitState } from "./types";
+import { OPEN_STATES, type ArmOutput, type DraftVisit, type FuseCue, type OpenedByKind, type UnboundEvidence, type VisitState } from "./types";
 
 /**
  * THE CLOSED SET of ambiguity reasons arm A can emit. Closed on purpose: slice 5 scores these,
@@ -55,6 +55,21 @@ export const RULES_REASONS = {
 
 export const ALL_RULES_REASONS: readonly string[] = Object.values(RULES_REASONS);
 
+/**
+ * The value that goes into visit.ambiguity (0049). Reasons are emitted in CLOSED-SET ORDER —
+ * the declaration order of RULES_REASONS above, not alphabetical and not the order the rules
+ * happened to notice them — and joined with a comma. Slice 5 can therefore split on "," and
+ * count exact tokens. Null when the visit is confident. NEVER prose.
+ */
+export function ambiguityOf(reasons: readonly string[]): string | null {
+  if (reasons.length === 0) return null;
+  const order = (r: string) => {
+    const i = ALL_RULES_REASONS.indexOf(r);
+    return i < 0 ? ALL_RULES_REASONS.length : i;
+  };
+  return [...new Set(reasons)].sort((a, b) => order(a) - order(b) || (a < b ? -1 : 1)).join(",");
+}
+
 // --- the numbers, all in one place so slice 5 can argue with them ------------
 // None of these is 0.78, and none is derived from a voice score. Voice is a prior in this
 // system, never a binder, and this slice attaches no speaker_cluster at all (X5).
@@ -69,11 +84,25 @@ const CONF_MAX = 0.95;
 const CONFIRM_BONUS = 0.05;
 
 /**
- * The ONE number arm A invents: how close a kiosk mark must be to an official start before the
- * rules will call them the same consult. Nothing in the corpus or the PRD fixes it, so it is
- * named here rather than buried, and slice 5 should score it rather than inherit it.
+ * How long the LAST mark of a room-day stays open (A4).
+ *
+ * Every other mark's window is defined by the marks themselves — [this mark, the next mark) —
+ * and invents nothing. The last mark of the day has no next mark, so it needs one number, and
+ * this is it: 45 minutes, because Pulse often opens after the talking has stopped, so a
+ * consult's warehouse clock can land well after the mark that recorded it.
+ *
+ * It is a NAMED PRIOR, not a measurement. It replaces the 30-minute constant arm A invented in
+ * slice 4, which applied to every mark; this one applies to at most one mark per day.
  */
-export const MARK_BIND_WINDOW_MS = 30 * 60 * 1000;
+export const LAST_MARK_WINDOW_MS = 45 * 60 * 1000;
+
+/** What a visit's end_reason may say. Written ONLY when state === 'ended' (A6). */
+export const END_REASONS = {
+  /** the individual's Pulse note landed: this visit is finished */
+  PULSE_NOTE: "pulse_note",
+  /** still open when the day was fused: closed by the day boundary, per 0042 */
+  DAY_ROLLOVER: "day_rollover",
+} as const;
 
 // --- payload access: everything is optional and an absent key is ABSENT ------
 // A null in a payload means the warehouse gave a null; it is not the same as the key being
@@ -105,6 +134,19 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
   const of = (type: string) => sorted.filter((c) => c.type === type);
   const visits: Working[] = [];
   const unbound: UnboundEvidence[] = [];
+  /** opener cue id → the visit it produced (or was folded into). Used by the mark pass. */
+  const visitByOpenerCue = new Map<string, Working>();
+
+  // -- 0. the mark windows, which are defined BY THE MARKS (A4) --------------
+  // [this mark, the next mark) for every mark but the last; [last, last + 45 min) for the
+  // last. Nothing here is invented except LAST_MARK_WINDOW_MS, which is named above.
+  const markCues = sorted.filter((c) => c.type === "consult_mark");
+  const markWindows = markCues.map((c, i) => {
+    const from = ms(c.at);
+    const next = markCues[i + 1];
+    return { cue: c, from, to: next ? ms(next.at) : from + LAST_MARK_WINDOW_MS };
+  });
+  const windowFor = (atMs: number) => markWindows.find((w) => atMs >= w.from && atMs < w.to) ?? null;
 
   const mint = (c: FuseCue, kind: OpenedByKind, state: VisitState, confidence: number, pstartAt: string | null): Working => {
     const v: Working = {
@@ -118,6 +160,7 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       opened_by: c.source_ref ?? str(c.payload, "source_ref") ?? c.id,
       opened_by_kind: kind,
       reasons: [],
+      end_reason: null,
       _calendar_uid: str(c.payload, "calendar_uid"),
       _openedAtMs: ms(c.at),
     };
@@ -129,16 +172,27 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
   // The §10.3 row lives here: the key is (individual_uid, calendar_uid), so a SECOND pstart
   // with a DIFFERENT calendar_uid is a second visit for the same person on the same day.
   // Identical (uid, calendar_uid) twice is one booking reported twice, not two visits.
-  const seenBooking = new Set<string>();
+  const seenBooking = new Map<string, Working>();
   for (const c of of("pstart")) {
     const uid = str(c.payload, "individual_uid");
     const cal = str(c.payload, "calendar_uid");
     const ref = c.source_ref ?? str(c.payload, "source_ref") ?? c.id;
+    // §10.3 lives on this key. A DIFFERENT calendar_uid for the same person on the same day is
+    // a second booking and therefore a second visit; the SAME calendar_uid twice is one booking
+    // the warehouse reported twice. calendar_uid reaches the payload from A3 onward — before
+    // that it reached no cue at all, which is why this row was untestable.
     const bookingKey = `${uid ?? "∅"}|${cal ?? ref}`;
-    if (seenBooking.has(bookingKey)) continue;
-    seenBooking.add(bookingKey);
+    const already = seenBooking.get(bookingKey);
+    if (already) {
+      // Same booking, reported twice. Not a visit — but the duplicate row is still evidence a
+      // mark can bind to, so it points at the visit the first report opened.
+      visitByOpenerCue.set(c.id, already);
+      continue;
+    }
     const inferred = str(c.payload, "attribution") === "inferred";
     const v = mint(c, "pstart", "in_chair", inferred ? CONF_PSTART_INFERRED : CONF_PSTART_DIRECT, c.at);
+    seenBooking.set(bookingKey, v);
+    visitByOpenerCue.set(c.id, v);
     if (inferred) addReason(v, RULES_REASONS.INFERRED_ATTRIBUTION_ONLY);
     // Without a calendar_uid a repeat booking is indistinguishable from a duplicate row, so
     // this visit's very existence is uncertain — say so rather than pick.
@@ -155,10 +209,12 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       // The call belongs to a start that already exists. Corroboration, not a new visit.
       const target = started[0]!;
       target.confidence = clamp(target.confidence + CONFIRM_BONUS);
+      visitByOpenerCue.set(c.id, target);
       continue;
     }
     const inferred = str(c.payload, "attribution") === "inferred";
     const v = mint(c, "pqm_called", "called", inferred ? CONF_CALLED_INFERRED : CONF_CALLED_DIRECT, null);
+    visitByOpenerCue.set(c.id, v);
     // Called, never started: a real and interesting state, and an uncertain one.
     addReason(v, RULES_REASONS.PQM_CALLED_WITHOUT_PSTART);
     if (inferred) addReason(v, RULES_REASONS.INFERRED_ATTRIBUTION_ONLY);
@@ -193,10 +249,10 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
     if (inferred) addReason(target, RULES_REASONS.INFERRED_ATTRIBUTION_ONLY);
   }
 
-  // -- 4. pulse_note is a LATER LOCK: it confirms, it never opens or closes ---
-  // It deliberately does NOT change state. 0042 lists pulse_note among end_reason's values,
-  // but nothing in the §5 grammar says a note ends a visit, and inventing a close would be a
-  // guess dressed as a rule.
+  // -- 4. pulse_note is a LATER LOCK: it CLOSES, and it never opens (A5) -----
+  // It closes THAT INDIVIDUAL'S open visit and nobody else's — the match is on
+  // individual_uid, so a mark-only visit (uid null) can never be closed by a note, which is
+  // exactly right: we never established who that consult was.
   for (const c of of("pulse_note")) {
     const uid = str(c.payload, "individual_uid");
     const candidates = uid ? visits.filter((v) => v.individual_uid === uid) : [];
@@ -204,31 +260,64 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       unbound.push({ cue_id: c.id, type: c.type, reason: RULES_REASONS.PULSE_NOTE_WITHOUT_VISIT });
       continue;
     }
-    const target = candidates[candidates.length - 1]!;
+    // The note belongs to the latest visit that had already OPENED by the time it landed;
+    // failing that, the latest open one; failing that, the latest of any. Deterministic at
+    // every step — no clock, no first-match-wins on an unsorted list.
+    const atMs = ms(c.at);
+    const open = candidates.filter((v) => OPEN_STATES.includes(v.state));
+    const started = open.filter((v) => v._openedAtMs <= atMs);
+    const pool = started.length > 0 ? started : open.length > 0 ? open : candidates;
+    const target = pool[pool.length - 1]!;
     target.confidence = clamp(target.confidence + CONFIRM_BONUS);
+    if (OPEN_STATES.includes(target.state)) {
+      target.state = "ended";
+      target.end_reason = END_REASONS.PULSE_NOTE;
+    }
   }
 
-  // -- 5. the kiosk mark: tape-side corroboration, or a visit with no identity -
+  // -- 5. the kiosk mark: its window binds warehouse clocks, or it stands alone -
   // Room-to-doctor is already baked into the corpus — every warehouse cue on a scratch day
   // belongs to this room's doctor — so a mark is bound by CLOCK alone. Nothing is re-queried
   // and nothing is re-derived (§7).
-  for (const c of of("consult_mark")) {
-    const atMs = ms(c.at);
-    const near = visits
-      .filter((v) => v.pstart_at !== null && Math.abs(ms(v.pstart_at) - atMs) <= MARK_BIND_WINDOW_MS)
-      .sort((a, b) => Math.abs(ms(a.pstart_at!) - atMs) - Math.abs(ms(b.pstart_at!) - atMs));
-    if (near.length > 0) {
-      near[0]!.confidence = clamp(near[0]!.confidence + CONFIRM_BONUS);
+  for (const w of markWindows) {
+    // Which warehouse clocks fell inside THIS mark's window? Openers only — a dx_event or a
+    // pulse_note inside a window is not a consult starting, and must not stop the mark from
+    // reporting an empty window.
+    const inside = sorted.filter(
+      (c) => (c.type === "pstart" || c.type === "pqm_called") && ms(c.at) >= w.from && ms(c.at) < w.to,
+    );
+    if (inside.length > 0) {
+      // Bound: ONE visit, and its identity comes from the warehouse clock, not from the mark.
+      // The mark corroborates what the warehouse already opened and mints no second row.
+      const bound = new Set<Working>();
+      for (const c of inside) {
+        const v = visitByOpenerCue.get(c.id);
+        if (v) bound.add(v);
+      }
+      for (const v of bound) v.confidence = clamp(v.confidence + CONFIRM_BONUS);
       continue;
     }
-    // A consult happened on the tape and the warehouse says nothing about it. This is the
-    // six-hour gap, and it is a visit — with no identity and low confidence, saying so.
-    const v = mint(c, "mark", "unknown", CONF_MARK_ONLY, null);
+    // An EMPTY window: a consult happened on the tape and the warehouse says nothing about it
+    // anywhere near it. That is a visit — with no identity, at 0.3, saying so. This is the
+    // OPD 7 six-hour gap, and it stays a gap.
+    const v = mint(w.cue, "mark", "unknown", CONF_MARK_ONLY, null);
     v.individual_uid = null;
     addReason(v, RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
   }
 
-  // -- 6. finalise: strip bookkeeping, clamp, and order deterministically -----
+  // -- 6. day_rollover: a fused day has nothing still running (A7) -----------
+  // Every state that implies a patient is PRESENT closes. `unknown` is untouched — it is not
+  // an open visit, it is one we never established, and rolling it would claim we knew a
+  // consult happened and finished. After this pass a fully fused day has no in_chair at all,
+  // which is why active_visit_id comes back null.
+  for (const v of visits) {
+    if (OPEN_STATES.includes(v.state)) {
+      v.state = "ended";
+      v.end_reason = END_REASONS.DAY_ROLLOVER;
+    }
+  }
+
+  // -- 7. finalise: strip bookkeeping, clamp, and order deterministically -----
   const out: DraftVisit[] = visits
     .map((v) => ({
       individual_uid: v.individual_uid,
@@ -238,7 +327,11 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       confidence: clamp(v.confidence),
       opened_by: v.opened_by,
       opened_by_kind: v.opened_by_kind,
-      reasons: [...v.reasons].sort(),
+      // closed-set order, not alphabetical — the same order ambiguityOf() joins them in
+      reasons: (ambiguityOf(v.reasons) ?? "").split(",").filter((r) => r.length > 0),
+      // A6: end_reason answers "why did it END", so it is null unless it ended. The ambiguity
+      // reasons above never come near this field again.
+      end_reason: v.state === "ended" ? v.end_reason : null,
     }))
     .sort((a, b) => {
       // Visits with a start come first, in start order; then by opening evidence, which is

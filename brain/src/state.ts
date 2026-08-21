@@ -99,7 +99,7 @@ export const DEFAULT_ARM = "rules";
  * if they diverge again. If you change one, change the other in the same commit.
  */
 export const SQL_VISITS_FOR_DAY =
-  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at, arm, opened_by, opened_by_kind " +
+  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, updated_at, arm, opened_by, opened_by_kind " +
   "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY updated_at ASC, id ASC";
 
 export const SQL_CLUSTERS_FOR_DAY =
@@ -131,6 +131,7 @@ type VisitRow = {
   arm: string | null;
   opened_by: string | null;
   opened_by_kind: string | null;
+  ambiguity: string | null;
 };
 
 type ClusterRow = {
