@@ -79,7 +79,7 @@ const overlaps = (spans: TapeSpan[], from: number, to: number): boolean => spans
 const fuseReport: McpTool = {
   name: "scribe_fuse_report",
   description:
-    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
+    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -228,21 +228,43 @@ const fuseReport: McpTool = {
       }
 
       // ---- the silence, from the CUE TIMELINE and never from visits (S6) --------
-      // Consecutive warehouse events only. A gap wider than the threshold is a silence, and
-      // the tape spans say whether anything was being recorded across it. No visit is
-      // consulted, and none is invented to carry it.
+      // A gap wider than the threshold, between the warehouse and either the next warehouse
+      // event or the EDGE OF THE TAPE. No visit is consulted, and none is invented to carry it.
+      //
+      // The edges are the point. An earlier build measured only the intervals BETWEEN
+      // consecutive warehouse events, which meant the two loudest findings on this corpus were
+      // invisible: a day with 5h 53m of tape whose warehouse knows about one hour of it
+      // reported no silence, and a day with seven hours of tape and NO warehouse record at all
+      // reported no silence either. Silence at the edge of a day is still silence.
+      //
+      // ONE threshold for all four kinds, deliberately — a second constant would be a second
+      // thing to tune and a second thing to disagree about.
       const silence: Array<Record<string, unknown>> = [];
-      for (let i = 1; i < whCues.length; i++) {
-        const from = ms(whCues[i - 1]!.at);
-        const to = ms(whCues[i]!.at);
-        const duration = to - from;
-        if (duration <= SILENCE_THRESHOLD_MS) continue;
+      const hasTape = firstPieceMs !== null && lastPieceMs !== null;
+      const push = (edge: string, from: number, to: number) => {
+        // A negative or zero interval is not a silence. That is not a guard against bad data:
+        // on scratch OPD 7 the first warehouse event PRECEDES the tape and the last FOLLOWS
+        // it, so both edges are genuinely negative and neither is a finding.
+        if (to - from <= SILENCE_THRESHOLD_MS) return;
         silence.push({
+          edge,
           from: new Date(from).toISOString(),
           to: new Date(to).toISOString(),
-          duration_ms: duration,
+          duration_ms: to - from,
           tape_running: overlaps(spans, from, to),
         });
+      };
+
+      if (hasTape) {
+        if (whCues.length === 0) {
+          // No warehouse record for the whole recorded day. Never emitted alongside the other
+          // kinds — there are no other kinds when there is nothing to sit between.
+          push("whole_day", firstPieceMs!, lastPieceMs!);
+        } else {
+          push("leading", firstPieceMs!, ms(whCues[0]!.at));
+          for (let i = 1; i < whCues.length; i++) push("between", ms(whCues[i - 1]!.at), ms(whCues[i]!.at));
+          push("trailing", ms(whCues[whCues.length - 1]!.at), lastPieceMs!);
+        }
       }
 
       // ---- reconciliation --------------------------------------------------------

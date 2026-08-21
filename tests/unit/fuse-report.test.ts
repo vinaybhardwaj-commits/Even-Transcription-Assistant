@@ -178,7 +178,11 @@ describe("3 — the silence, from the cue timeline and never from a visit", () =
     expect(silence[0]!.tape_running).toBe(false);
   });
 
-  it("a gap shorter than the threshold is not a silence", async () => {
+  it("a 59-minute interior gap is still not a silence", async () => {
+    // the tape is bounded to the cues so this isolates the INTERIOR gap: an unbounded tape
+    // would now (correctly) produce a trailing silence and hide what is under test
+    SESSIONS = [{ ...SESSIONS[0]!, started_at: new Date(`${IST}T04:00:00Z`), ended_at: new Date(`${IST}T04:59:00Z`) }];
+    CHUNKS = [{ ...CHUNKS[0]!, started_at: new Date(`${IST}T04:00:00Z`), ended_at: new Date(`${IST}T04:59:00Z`) }];
     CUES = [wh("pqm_called", `${IST}T04:00:00Z`, "q1"), wh("pstart", `${IST}T04:59:00Z`, "s1")];
     const silence = ((await run({ room_day_id: DAY })).reconciliation as Row).silence as Row[];
     expect(silence).toEqual([]);
@@ -194,6 +198,104 @@ describe("3 — the silence, from the cue timeline and never from a visit", () =
     const silence = ((await run({ room_day_id: DAY })).reconciliation as Row).silence as Row[];
     expect(silence).toHaveLength(1);
     expect(silence[0]!.from).toBe("2026-08-19T04:36:59.000Z");
+  });
+});
+
+describe("3b — the silence includes the EDGES", () => {
+  /** tape from → to, and the warehouse cues to sit inside it */
+  const setup = (tape: [string, string] | null, cues: Row[]) => {
+    if (tape) {
+      SESSIONS = [{ ...SESSIONS[0]!, started_at: new Date(tape[0]), ended_at: new Date(tape[1]) }];
+      CHUNKS = [{ ...CHUNKS[0]!, started_at: new Date(tape[0]), ended_at: new Date(tape[1]) }];
+    } else {
+      SESSIONS = [];
+      CHUNKS = [];
+    }
+    CUES = cues;
+  };
+  const silenceOf = async () => ((await run({ room_day_id: DAY })).reconciliation as Row).silence as Row[];
+
+  it("1 — a leading gap longer than the threshold is reported as edge 'leading'", async () => {
+    // Cardiology's real shape: 2h 14m of tape before the warehouse says anything at all
+    setup([`${IST}T04:40:18.757Z`, `${IST}T11:13:47.465Z`], [
+      wh("pqm_called", `${IST}T06:54:32Z`, "q1"), wh("pulse_note", `${IST}T07:53:53Z`, "p1"),
+    ]);
+    const sil = await silenceOf();
+    const leading = sil.find((x) => x.edge === "leading")!;
+    expect(leading).toMatchObject({ from: `${IST}T04:40:18.757Z`, to: `${IST}T06:54:32.000Z`, tape_running: true });
+    expect(leading.duration_ms).toBe(8_053_243); // ~2h 14m
+  });
+
+  it("2 — a trailing gap likewise, and the 59m interior gap between them is not one", async () => {
+    setup([`${IST}T04:40:18.757Z`, `${IST}T11:13:47.465Z`], [
+      wh("pqm_called", `${IST}T06:54:32Z`, "q1"), wh("pulse_note", `${IST}T07:53:53Z`, "p1"),
+    ]);
+    const sil = await silenceOf();
+    expect(sil.map((x) => x.edge)).toEqual(["leading", "trailing"]); // in time order, no 'between'
+    const trailing = sil.find((x) => x.edge === "trailing")!;
+    expect(trailing).toMatchObject({ from: `${IST}T07:53:53.000Z`, to: `${IST}T11:13:47.465Z`, tape_running: true });
+    expect(trailing.duration_ms).toBe(11_994_465); // ~3h 20m
+    // 06:54:32 → 07:53:53 is 59m 21s and stays below the threshold
+    expect(Date.parse(`${IST}T07:53:53Z`) - Date.parse(`${IST}T06:54:32Z`)).toBeLessThan(SILENCE_THRESHOLD_MS);
+  });
+
+  it("3/4 — a first event BEFORE the tape and a last event AFTER it produce no edge silence", async () => {
+    // scratch OPD 7: the warehouse starts before the tape and ends after it, so BOTH edges
+    // are negative intervals and neither is a finding
+    setup([`${IST}T04:01:40Z`, `${IST}T11:12:38Z`], [
+      wh("pqm_called", `${IST}T03:45:49Z`, "q1"),   // before tape start
+      wh("pstart", `${IST}T04:36:59Z`, "s1"),
+      wh("pstart", `${IST}T10:39:35Z`, "s2"),
+      // the real day carries 39 warehouse cues and its tail is DENSE. A sparse stand-in would
+      // invent a second `between` silence after 10:39 that production does not have.
+      ...Array.from({ length: 8 }, (_, i) => wh("pulse_note", `${IST}T${String(11 + Math.floor(i / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}:00Z`, `p${i}`)),
+      wh("pulse_note", `${IST}T14:12:39Z`, "pz"),   // after tape end
+    ]);
+    const sil = await silenceOf();
+    expect(sil.some((x) => x.edge === "leading")).toBe(false);
+    expect(sil.some((x) => x.edge === "trailing")).toBe(false);
+    // and the one real finding is untouched
+    expect(sil).toHaveLength(1);
+    expect(sil[0]).toMatchObject({ edge: "between", from: `${IST}T04:36:59.000Z`, to: `${IST}T10:39:35.000Z`, duration_ms: 21_756_000, tape_running: true });
+  });
+
+  it("5 — zero warehouse events over a long tape is exactly ONE whole_day entry", async () => {
+    // live OPD 7: seven hours of recording and no warehouse record whatsoever
+    setup([`${IST}T04:01:40.024Z`, `${IST}T11:12:38.498Z`], []);
+    const sil = await silenceOf();
+    expect(sil).toHaveLength(1);
+    expect(sil[0]).toMatchObject({ edge: "whole_day", from: `${IST}T04:01:40.024Z`, to: `${IST}T11:12:38.498Z`, tape_running: true });
+    expect(sil[0]!.duration_ms).toBe(25_858_474); // ~7h 11m
+    // never alongside the other kinds
+    expect(sil.some((x) => x.edge !== "whole_day")).toBe(false);
+  });
+
+  it("6 — zero warehouse events over a SHORT tape produces none", async () => {
+    setup([`${IST}T04:00:00Z`, `${IST}T04:30:00Z`], []);
+    expect(await silenceOf()).toEqual([]);
+  });
+
+  it("7 — no tape at all produces none, whatever the warehouse holds", async () => {
+    setup(null, [wh("pqm_called", `${IST}T04:00:00Z`, "q1"), wh("pstart", `${IST}T14:00:00Z`, "s1")]);
+    expect(await silenceOf()).toEqual([]);
+    setup(null, []);
+    expect(await silenceOf()).toEqual([]);
+  });
+
+  it("9 — every entry carries edge and tape_running, and one threshold governs all four", async () => {
+    setup([`${IST}T04:00:00Z`, `${IST}T20:00:00Z`], [
+      wh("pqm_called", `${IST}T06:00:00Z`, "q1"), wh("pstart", `${IST}T12:00:00Z`, "s1"),
+    ]);
+    const sil = await silenceOf();
+    expect(sil.map((x) => x.edge)).toEqual(["leading", "between", "trailing"]);
+    for (const x of sil) {
+      expect(["leading", "between", "trailing", "whole_day"]).toContain(x.edge);
+      expect(typeof x.tape_running).toBe("boolean");
+      expect(Number(x.duration_ms)).toBeGreaterThan(SILENCE_THRESHOLD_MS);
+    }
+    // and there is still exactly ONE threshold constant governing them
+    const p = (await run({ room_day_id: DAY })).parameters as Row;
+    expect(Object.keys(p).filter((k) => /threshold/.test(k))).toEqual(["silence_threshold_ms"]);
   });
 });
 
