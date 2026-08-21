@@ -82,6 +82,8 @@ const SESSION = {
   started_at: "2026-08-19T05:00:00Z", ended_at: null, status: "ended", notes: null,
   room_slug: ROOM.slug, room_name: ROOM.name,
 };
+/** H1 — the status the fake bench_session row reports; reset to 'ended' by seed(). */
+let sessionStatus: "recording" | "paused" | "ended" = "ended";
 
 const T0 = Date.parse("2026-08-19T05:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -106,6 +108,7 @@ let failWrites: Set<string>;
 const replayKey = (sessionId: unknown, type: unknown, at: unknown) => `${String(sessionId)}|${String(type)}|${new Date(String(at)).toISOString()}`;
 
 function seed() {
+  sessionStatus = "ended";
   rooms = new Map([[ROOM.id, { ...ROOM, disabled_at: null }]]);
   days = new Map();
   cues = new Map();
@@ -117,7 +120,7 @@ function seed() {
 appResponder = () => [];
 
 function appDb(text: string, values: unknown[]): Row[] {
-  if (/FROM bench_session s/.test(text)) return String(values[0]) === SESSION_ID ? [SESSION] : [];
+  if (/FROM bench_session s/.test(text)) return String(values[0]) === SESSION_ID ? [{ ...SESSION, status: sessionStatus }] : [];
   if (/FROM bench_event/.test(text)) return EVENTS;
   if (/^SELECT id, slug, name, disabled_at FROM room WHERE id =/.test(text)) {
     const r = rooms.get(String(values[0]));
@@ -460,5 +463,78 @@ describe("the limit — honest truncation, and a resumable run", () => {
     expect(await call("scribe_replay_write", { session_id: "nope" })).toMatchObject({ error: "bad_session_id" });
     expect(await call("scribe_replay_write", { session_id: "bs_missing" })).toMatchObject({ error: "session_not_found" });
     expect(posted).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
+// H1 — a session that is not `ended` is refused by scribe_replay_write
+// ===========================================================================
+
+describe("9 — the writer refuses a session that is not finished (H1)", () => {
+  it.each(["recording", "paused"] as const)(
+    "a %s session is refused by name, carries the real status, and writes NOTHING",
+    async (status) => {
+      sessionStatus = status;
+      const out = await call("scribe_replay_write", { session_id: SESSION_ID });
+
+      expect(out).toMatchObject({
+        ok: false,
+        error: "session_not_ended",
+        status,
+        session_id: SESSION_ID,
+        written: 0,
+        already_existed: 0,
+        failed: 0,
+      });
+
+      // nothing was read past the session row, and nothing at all was created
+      expect(posted).toHaveLength(0);
+      expect(cues.size).toBe(0);
+      expect(days.size).toBe(0);
+      expect(rooms.size).toBe(1); // no scratch room was even derived
+      expect(appCalls.some((c) => /FROM bench_event/.test(c.text))).toBe(false);
+      expect(appCalls.some((c) => /^INSERT INTO room \(/.test(c.text))).toBe(false);
+      expect(brainCalls).toHaveLength(0);
+    },
+  );
+
+  it("the refusal happens before the events are read — the status check is the first gate after the session", async () => {
+    sessionStatus = "recording";
+    await call("scribe_replay_write", { session_id: SESSION_ID });
+    // exactly one app query: the session lookup itself
+    expect(appCalls).toHaveLength(1);
+    expect(appCalls[0]!.text).toMatch(/FROM bench_session s/);
+  });
+
+  it("an `ended` session still writes, exactly as before", async () => {
+    sessionStatus = "ended";
+    const out = await call("scribe_replay_write", { session_id: SESSION_ID });
+    expect(out).toMatchObject({ ok: true, written: REPLAYABLE, already_existed: 0, failed: 0, room_day_id: SCRATCH_DAY_ID });
+    expect(out.error).toBeUndefined();
+    expect(cues.size).toBe(REPLAYABLE);
+  });
+
+  it("a refusal is not sticky: the same session, once ended, writes on the next call", async () => {
+    sessionStatus = "paused";
+    expect(await call("scribe_replay_write", { session_id: SESSION_ID })).toMatchObject({ error: "session_not_ended", status: "paused" });
+    sessionStatus = "ended";
+    expect(await call("scribe_replay_write", { session_id: SESSION_ID })).toMatchObject({ ok: true, written: REPLAYABLE });
+  });
+
+  it("the tool's description states the rule rather than implying it", () => {
+    const d = tool("scribe_replay_write").description;
+    expect(d).toMatch(/session_not_ended/);
+    expect(d).toMatch(/'ended'/);
+  });
+
+  it("scribe_replay_session — the DRY RUN — is NOT changed: it still reads an open session", async () => {
+    for (const status of ["recording", "paused", "ended"] as const) {
+      sessionStatus = status;
+      const out = await call("scribe_replay_session", { session_id: SESSION_ID });
+      expect(out).toMatchObject({ dry_run: true, wrote: "nothing", emitted: REPLAYABLE, total: REPLAYABLE });
+      expect(out.error).toBeUndefined();
+    }
+    expect(posted).toHaveLength(0);
+    expect(cues.size).toBe(0);
   });
 });

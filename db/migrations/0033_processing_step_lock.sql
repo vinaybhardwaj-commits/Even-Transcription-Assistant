@@ -4,3 +4,7 @@
 -- Mac Mini and times both jobs out). Lock auto-releases after 5 min if a worker
 -- dies mid-step.
 ALTER TABLE encounter ADD COLUMN IF NOT EXISTS processing_step_at timestamptz;
+
+INSERT INTO schema_migrations (version, name)
+VALUES (33, '0033_processing_step_lock')
+ON CONFLICT DO NOTHING;

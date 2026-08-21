@@ -69,9 +69,11 @@
  *                     derived from the session's real room, a scratch room_day for the
  *                     session's own IST date, and every write naming that day so the cue
  *                     route's guard refuses anything that is not a scratch day. Idempotent on
- *                     (session_id, type, at). scribe_replay_session is not touched by it —
- *                     dry run stays the default because writing is a different tool, not an
- *                     option on this one.
+ *                     (session_id, type, at). Refuses any session whose status is not
+ *                     'ended' (session_not_ended) — a live tape written into scratch is a
+ *                     partial day that reads as a complete one. scribe_replay_session is not
+ *                     touched by it — dry run stays the default because writing is a different
+ *                     tool, not an option on this one, and a dry run of an open tape is safe.
  */
 
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
@@ -97,7 +99,7 @@ import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from 
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay } from "@/lib/brain/state";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
-import { resolveScratchGraph } from "@/lib/brain/scratch";
+import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import {
   ACK_WAIT_MS,
   BusError,
@@ -1178,7 +1180,7 @@ const dayReport: McpTool = {
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
   description:
-    "The now-picture across enabled rooms (or one room): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity.",
+    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -1206,8 +1208,16 @@ const diffRoom: McpTool = {
           throw e;
         }
       } else {
+        // The all-rooms sweep excludes scratch rooms (fuse slice 2): they have no kiosk, no
+        // tape and no listener, so every one of them would raise kiosk_not_listening for ever.
+        // `_` is a single-character wildcard in LIKE, so the prefix is matched with
+        // left()/length() rather than a pattern. Naming one explicitly still resolves — the
+        // resolveRoom branch above is deliberately not filtered.
         const rows = (await sql`
-          SELECT id, slug, name FROM room WHERE disabled_at IS NULL ORDER BY created_at
+          SELECT id, slug, name FROM room
+           WHERE disabled_at IS NULL
+             AND left(id, length(${SCRATCH_ROOM_PREFIX}::text)) <> ${SCRATCH_ROOM_PREFIX}::text
+           ORDER BY created_at
         `) as Array<{ id: string; slug: string; name: string }>;
         targets = rows.map((r) => ({ id: r.id, slug: r.slug, name: r.name, enabled: true }));
       }
@@ -1495,7 +1505,7 @@ const REPLAY_WRITE_MAX_CONSECUTIVE_FAILURES = 3;
 const replayWrite: McpTool = {
   name: "scribe_replay_write",
   description:
-    "WRITES — replay a finished session into a SCRATCH graph, so the fuse has something to run against without touching a real clinic day. The cue list is exactly the one scribe_replay_session shows (same kinds, same time order, same filtered payloads); it is written to a scratch room-day derived from the session's room and its own IST date, never to a live room-day — every write names that day and the cue route refuses any day whose scratch flag is not true. Idempotent on the natural key (session_id, type, at): running it twice writes nothing the second time, and a run that stopped half way is resumed by running it again. Each cue is one request, so limit defaults to 200 and caps at 500; over the limit the first `limit` in time order are written and truncated says so with the true total. Refuses outright when BRAIN_BASE_URL is set (that points cue writes at the separate Cloud Run brain, which this build does not change). Returns { room_day_id, written, already_existed, failed, truncated, natural_key }.",
+    "WRITES — replay a FINISHED session into a SCRATCH graph, so the fuse has something to run against without touching a real clinic day. The session's status must be 'ended': a session that is still recording, or paused, is refused by name with session_not_ended (the answer carries the actual status) and nothing at all is written, because a live tape would land in scratch as a partial day that looks complete. The cue list is exactly the one scribe_replay_session shows (same kinds, same time order, same filtered payloads); it is written to a scratch room-day derived from the session's room and its own IST date, never to a live room-day — every write names that day and the cue route refuses any day whose scratch flag is not true. Idempotent on the natural key (session_id, type, at): running it twice writes nothing the second time, and a run that stopped half way is resumed by running it again. Each cue is one request, so limit defaults to 200 and caps at 500; over the limit the first `limit` in time order are written and truncated says so with the true total. Refuses outright when BRAIN_BASE_URL is set (that points cue writes at the separate Cloud Run brain, which this build does not change). Returns { room_day_id, written, already_existed, failed, truncated, natural_key }.",
   scope: "write",
   inputSchema: {
     type: "object",
@@ -1518,6 +1528,25 @@ const replayWrite: McpTool = {
       if (!id || !id.startsWith("bs_")) return { ok: false, error: "bad_session_id", written: 0, already_existed: 0, failed: 0 };
       const session = await findBenchSession(id);
       if (!session) return { ok: false, error: "session_not_found", written: 0, already_existed: 0, failed: 0 };
+
+      // H1 — a session that is not `ended` is refused, recording and paused alike. A live tape
+      // is still growing, so the cue list is a PREFIX of the day; written into scratch it would
+      // sit there looking like a complete day and there is nothing in the rows to say it is not.
+      // Refuse before reading or writing anything. (scribe_replay_session, the dry run, is
+      // unchanged: reading an open session harmlessly is fine.)
+      if (session.status !== "ended") {
+        return {
+          ok: false,
+          error: "session_not_ended",
+          status: session.status,
+          session_id: session.id,
+          written: 0,
+          already_existed: 0,
+          failed: 0,
+          note: "replay is written only from a finished session — stop the recording first, or use scribe_replay_session for a dry run of the tape so far.",
+        };
+      }
+
       const limit = argInt(args, "limit", REPLAY_WRITE_DEFAULT_LIMIT, 1, REPLAY_WRITE_MAX_LIMIT);
 
       let events: BenchEventRow[] = [];

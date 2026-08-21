@@ -14,6 +14,7 @@ import bcrypt from "bcryptjs";
 import { randomInt } from "crypto";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
+import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { benchAdminGuard, buildRoomSlug, newRoomId } from "@/lib/bench";
 
 export const runtime = "nodejs";
@@ -38,6 +39,10 @@ export async function GET() {
   if (!g.ok) return respondError(g.code, g.msg);
 
   try {
+    // Scratch rooms (fuse slice 2) never appear on the admin Bench page — they are the
+    // replay's write target, not a room anyone books or logs in to. `_` is a single-character
+    // wildcard in LIKE, so the prefix is matched with left()/length() instead of a pattern.
+    // Only this listing is filtered; the POST/PATCH paths below are untouched.
     const rows = (await sql`
       SELECT r.id, r.slug, r.name, r.created_at, r.disabled_at,
              ls.started_at AS last_session_at, ls.status AS last_session_status
@@ -49,6 +54,7 @@ export async function GET() {
            ORDER BY started_at DESC
            LIMIT 1
         ) ls ON true
+       WHERE left(r.id, length(${SCRATCH_ROOM_PREFIX}::text)) <> ${SCRATCH_ROOM_PREFIX}::text
        ORDER BY r.created_at
     `) as RoomListRow[];
     return respondOk({

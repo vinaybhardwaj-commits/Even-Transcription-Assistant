@@ -7,3 +7,7 @@
 -- Additive + idempotent. Nothing in the doctor path changes.
 -- =====================================================================
 ALTER TABLE stt_fanout_job ADD COLUMN IF NOT EXISTS started_at timestamptz;
+
+INSERT INTO schema_migrations (version, name)
+VALUES (25, '0025_stt_fanout_started_at')
+ON CONFLICT DO NOTHING;

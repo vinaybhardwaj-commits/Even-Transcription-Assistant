@@ -2,6 +2,10 @@
  * lib/mcp/tools/brain.ts — brain read tools (Operator MCP S1, PRD §12 11.2).
  *
  * scribe_list_rooms — `room` table via the app DB (id, slug, name, enabled; NO pin_hash).
+ *                     Scratch rooms (SCRATCH_ROOM_PREFIX, fuse slice 2) are hidden unless
+ *                     include_scratch:true. resolveRoom below is deliberately NOT filtered —
+ *                     every room-addressed tool must still be able to reach a scratch room by
+ *                     id or slug, which is how the fuse's scratch day is read back.
  * scribe_get_state  — the picture: lib/brain/state readGraph over the brain pool (same as
  *                     GET /api/brain/rooms/:id/state).
  * scribe_list_cues  — lib/brain/state listCuesForDay (the same lib fn behind the new
@@ -21,6 +25,7 @@
 
 import { sql } from "@/lib/db";
 import { getPool, TOKEN_ENV } from "@/lib/brain/db";
+import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { CUES_DEFAULT_LIMIT, CUES_MAX_LIMIT, findRoomDay, isIstDateString, istDate, listCuesForDay, readGraph, roomExists } from "@/lib/brain/state";
 import { argBool, argDate, argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
@@ -75,12 +80,23 @@ const ROOM_ARGS = {
 
 const listRooms: McpTool = {
   name: "scribe_list_rooms",
-  description: "Bench rooms (room table): id, slug, name, enabled, created_at, last session. No PIN, no pin_hash.",
+  description:
+    "Bench rooms (room table): id, slug, name, enabled, created_at, last session. No PIN, no pin_hash. Scratch rooms (id room_scratch_…, the fuse's replay targets) are HIDDEN by default; pass include_scratch:true to list them too.",
   scope: "read",
-  inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  handler: async () =>
+  inputSchema: {
+    type: "object",
+    properties: {
+      include_scratch: { type: "boolean", description: "also list the fuse's scratch rooms (room_scratch_…); default false", default: false },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
     failSafe({ rooms: [] as unknown[] }, async () => {
-      // Same query as GET /api/bench/rooms (app/api/bench/rooms/route.ts).
+      const includeScratch = argBool(args, "include_scratch");
+      // Same query as GET /api/bench/rooms (app/api/bench/rooms/route.ts), plus the scratch
+      // filter. `_` is a single-character wildcard in LIKE, so the prefix is matched with
+      // left()/length() rather than a pattern — no ESCAPE clause to get wrong, and the
+      // prefix comes from the one exported constant so it cannot drift.
       const rows = (await sql`
         SELECT r.id, r.slug, r.name, r.created_at, r.disabled_at,
                ls.started_at AS last_session_at, ls.status AS last_session_status
@@ -92,9 +108,12 @@ const listRooms: McpTool = {
              ORDER BY started_at DESC
              LIMIT 1
           ) ls ON true
+         WHERE ${includeScratch}::boolean
+            OR left(r.id, length(${SCRATCH_ROOM_PREFIX}::text)) <> ${SCRATCH_ROOM_PREFIX}::text
          ORDER BY r.created_at
       `) as Array<{ id: string; slug: string; name: string; created_at: string | Date; disabled_at: string | Date | null; last_session_at: string | Date | null; last_session_status: string | null }>;
       return {
+        include_scratch: includeScratch,
         rooms: rows.map((r) => ({
           id: r.id,
           slug: r.slug,

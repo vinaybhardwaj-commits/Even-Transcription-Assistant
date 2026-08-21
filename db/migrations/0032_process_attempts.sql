@@ -3,3 +3,7 @@
 -- permanently-failing step gives up (status='failed') instead of looping forever.
 -- Reset to 0 whenever a step makes progress.
 ALTER TABLE encounter ADD COLUMN IF NOT EXISTS process_attempts integer NOT NULL DEFAULT 0;
+
+INSERT INTO schema_migrations (version, name)
+VALUES (32, '0032_process_attempts')
+ON CONFLICT DO NOTHING;

@@ -3,5 +3,5 @@
 ALTER TABLE encounter ADD COLUMN IF NOT EXISTS tagged_transcript jsonb;
 
 INSERT INTO schema_migrations (version, name)
-VALUES ('0009', 'tagged_transcript')
+VALUES (9, '0009_tagged_transcript')
 ON CONFLICT (version) DO NOTHING;
