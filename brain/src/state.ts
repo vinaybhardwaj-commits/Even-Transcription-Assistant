@@ -84,9 +84,23 @@ export const SQL_ROOM_DAY_UPSERT =
 export const SQL_CUE_INSERT =
   "INSERT INTO cue (id, room_day_id, type, payload, at) VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz) RETURNING id, at, created_at";
 
+// --- Fuse slice 4 (the arms, migration 0048) --------------------------------
+
+/** The default arm on read (X3). Must match lib/brain/state.ts. */
+export const DEFAULT_ARM = "rules";
+
+/**
+ * Visits for a room_day, WITHIN ONE ARM.
+ *
+ * THIS EXACT STRING IS DUPLICATED IN lib/brain/state.ts and MUST STAY IDENTICAL. This service
+ * is a separate build (own tsconfig, NodeNext specifiers, own container) and cannot import
+ * from lib/, so the string is the shared artefact rather than the module. The two copies had
+ * already drifted before slice 4; tests/unit/fuse-arms.test.ts now reads both files and fails
+ * if they diverge again. If you change one, change the other in the same commit.
+ */
 export const SQL_VISITS_FOR_DAY =
-  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at " +
-  "FROM visit WHERE room_day_id = $1 ORDER BY updated_at ASC, id ASC";
+  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at, arm, opened_by, opened_by_kind " +
+  "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY updated_at ASC, id ASC";
 
 export const SQL_CLUSTERS_FOR_DAY =
   "SELECT id, kind, visit_id, first_seen_at, last_seen_at, (centroid IS NOT NULL) AS has_centroid " +
@@ -114,6 +128,9 @@ type VisitRow = {
   confidence: number | null;
   end_reason: string | null;
   updated_at: Date;
+  arm: string | null;
+  opened_by: string | null;
+  opened_by_kind: string | null;
 };
 
 type ClusterRow = {
@@ -188,13 +205,13 @@ export async function resolveRoomDay(roomId: string, date: string): Promise<Room
  * Read the graph for a room_day. `q` may be a locked txn client (POST /cues —
  * so the echo is consistent with the write) or the pool (GET state).
  */
-export async function readGraph(q: Queryable, roomId: string, date: string, roomDayId: string | null): Promise<Graph> {
+export async function readGraph(q: Queryable, roomId: string, date: string, roomDayId: string | null, arm: string = DEFAULT_ARM): Promise<Graph> {
   const as_of = new Date().toISOString();
   if (!roomDayId) {
     return { room_id: roomId, room_day_id: null, ist_date: date, visits: [], active_visit_id: null, clusters: [], confidence: null, as_of };
   }
   const [v, c] = await Promise.all([
-    q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId]),
+    q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId, arm]),
     q.query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [roomDayId]),
   ]);
 

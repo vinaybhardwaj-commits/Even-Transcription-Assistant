@@ -41,6 +41,8 @@ function shortId(): string {
 
 export const newRoomDayId = (): string => `rd_${shortId()}`;
 export const newCueId = (): string => `cue_${shortId()}`;
+/** Fuse slice 4. The 'vis_' prefix existed only as a comment in 0042 until today. */
+export const newVisitId = (): string => `vis_${shortId()}`;
 
 // ---------------------------------------------------------------------------
 // Day boundary (PRD §15A): room_day is per calendar date in Asia/Kolkata.
@@ -113,9 +115,52 @@ export const SQL_CUE_INSERT_SCRATCH =
   "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text, $8::text) " +
   "ON CONFLICT DO NOTHING RETURNING id, at, created_at";
 
+// --- Fuse slice 4 (the arms, migration 0048) --------------------------------
+
+/**
+ * The default arm on read (X3). NOT flash, NOT the most recently updated row, NOT the
+ * lexicographically smallest id — an explicit, boring default, so that adding a fourth arm
+ * can never silently change what `scribe_get_state` shows a human.
+ */
+export const DEFAULT_ARM = "rules";
+
+/**
+ * Visits for a room_day, WITHIN ONE ARM.
+ *
+ * COALESCE(arm, DEFAULT) rather than `arm = $2`: a writer that sets no arm — anything
+ * predating 0048, or a future caller that forgets — still reads as 'rules' instead of
+ * vanishing from every listing. Vanishing is the worse failure: an empty graph looks like
+ * "nothing happened" rather than "you asked the wrong question".
+ *
+ * THIS EXACT STRING IS DUPLICATED IN brain/src/state.ts. The two files are separate builds
+ * (that one is a standalone Cloud Run service with its own tsconfig and NodeNext specifiers,
+ * so it cannot import from lib/), and they had already drifted before today. They are now
+ * byte-identical here, and tests/unit/fuse-arms.test.ts reads BOTH files and fails if they
+ * ever differ again — the only form of unification available across two independent builds.
+ */
 export const SQL_VISITS_FOR_DAY =
-  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at " +
-  "FROM visit WHERE room_day_id = $1 ORDER BY updated_at ASC, id ASC";
+  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, updated_at, arm, opened_by, opened_by_kind " +
+  "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY updated_at ASC, id ASC";
+
+/**
+ * The fuse write. ON CONFLICT DO NOTHING against visit_arm_opened_by_key — the PARTIAL unique
+ * index on (arm, opened_by) WHERE both are NOT NULL — so re-running an arm writes nothing that
+ * already exists. A conflict returns NO ROW: that is "already exists", not a failure, exactly
+ * as the cue writers behave.
+ *
+ * A visit with a NULL opened_by is not in that index and so is NOT idempotent; the fuse never
+ * emits one (every draft carries opening evidence), and the runner refuses to write one rather
+ * than quietly duplicating it on the next run.
+ */
+export const SQL_VISIT_INSERT =
+  "INSERT INTO visit (id, room_day_id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, arm, opened_by, opened_by_kind) " +
+  "VALUES ($1, $2, $3::text, $4::text, $5, $6::timestamptz, $7::real, $8::text, $9::text, $10::text, $11::text) " +
+  "ON CONFLICT DO NOTHING RETURNING id";
+
+/** Cues for a room_day BY ID, oldest first — the fuse reads a day in evidence order. */
+export const SQL_CUES_FOR_ROOM_DAY =
+  "SELECT id, type, at, created_at, payload, source, source_ref FROM cue " +
+  "WHERE room_day_id = $1 ORDER BY at ASC, id ASC";
 
 export const SQL_CLUSTERS_FOR_DAY =
   "SELECT id, kind, visit_id, first_seen_at, last_seen_at, (centroid IS NOT NULL) AS has_centroid " +
@@ -152,6 +197,9 @@ type VisitRow = {
   confidence: number | null;
   end_reason: string | null;
   updated_at: Date;
+  arm: string | null;
+  opened_by: string | null;
+  opened_by_kind: string | null;
 };
 
 type ClusterRow = {
@@ -178,8 +226,14 @@ export type Graph = {
     end_reason: string | null;
     speaker_cluster_ids: string[];
     updated_at: string;
+    /** slice 4: which arm wrote this row. A stored NULL reads back as DEFAULT_ARM. */
+    arm: string;
+    opened_by: string | null;
+    opened_by_kind: string | null;
   }>;
   active_visit_id: string | null;
+  /** the arm this picture was read at — always stated, never left for the reader to assume */
+  arm: string;
   clusters: Array<{
     id: string;
     kind: string;
@@ -226,13 +280,13 @@ export async function resolveRoomDay(roomId: string, date: string): Promise<Room
  * Read the graph for a room_day. `q` may be a locked txn client (POST /cues —
  * so the echo is consistent with the write) or the pool (GET state).
  */
-export async function readGraph(q: Queryable, roomId: string, date: string, roomDayId: string | null): Promise<Graph> {
+export async function readGraph(q: Queryable, roomId: string, date: string, roomDayId: string | null, arm: string = DEFAULT_ARM): Promise<Graph> {
   const as_of = new Date().toISOString();
   if (!roomDayId) {
-    return { room_id: roomId, room_day_id: null, ist_date: date, visits: [], active_visit_id: null, clusters: [], confidence: null, as_of };
+    return { room_id: roomId, room_day_id: null, ist_date: date, visits: [], active_visit_id: null, clusters: [], confidence: null, as_of, arm };
   }
   const [v, c] = await Promise.all([
-    q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId]),
+    q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId, arm]),
     q.query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [roomDayId]),
   ]);
 
@@ -254,11 +308,16 @@ export async function readGraph(q: Queryable, roomId: string, date: string, room
     end_reason: row.end_reason,
     speaker_cluster_ids: clusterIdsByVisit.get(row.id) ?? [],
     updated_at: iso(row.updated_at) ?? as_of,
+    arm: row.arm ?? DEFAULT_ARM,
+    opened_by: row.opened_by,
+    opened_by_kind: row.opened_by_kind,
   }));
 
   // Derivation, not inference: "in the chair" is whichever visit is currently
-  // in_chair (most recently updated wins if the data ever disagrees). Empty
-  // in the skeleton because nothing writes visits yet.
+  // in_chair (most recently updated wins if the data ever disagrees). WITHIN THE
+  // SELECTED ARM ONLY — the rows are already filtered to one arm, so the
+  // updated_at/id tiebreak is a tiebreak again rather than a race between three
+  // algorithms that all wrote the same day.
   const inChair = v.rows.filter((r) => r.state === "in_chair");
   const active = inChair.length ? inChair[inChair.length - 1]! : null;
 
@@ -271,7 +330,7 @@ export async function readGraph(q: Queryable, roomId: string, date: string, room
     has_centroid: row.has_centroid,
   }));
 
-  return { room_id: roomId, room_day_id: roomDayId, ist_date: date, visits, active_visit_id: active?.id ?? null, clusters, confidence: null, as_of };
+  return { room_id: roomId, room_day_id: roomDayId, ist_date: date, visits, active_visit_id: active?.id ?? null, clusters, confidence: null, as_of, arm };
 }
 
 // ---------------------------------------------------------------------------
