@@ -65,6 +65,7 @@ import { SCRATCH_ROOM_PREFIX, SCRATCH_ROOM_DAY_PREFIX, scratchRoomDayIdFor, scra
 import { BRAIN_TOOLS, CUE_SOURCES } from "@/lib/mcp/tools/brain";
 import { STORE_TOOLS } from "@/lib/mcp/tools/stores";
 import {
+  buildCuePayload,
   loadWarehouseFixture,
   main,
   parseArgs,
@@ -239,6 +240,10 @@ describe("1 — the fixture is what slice 3 says it is", () => {
     const keys = EVENTS.map((e) => `${e.source_ref}|${e.type}|${e.at}`);
     expect(new Set(keys).size).toBe(7); // one deliberate duplicate
     expect(EVENTS.every((e) => typeof e.source_ref === "string" && e.source_ref.length > 0)).toBe(true);
+    expect(EVENTS.every((e) => typeof e.individual_uid === "string" && e.individual_uid.length > 0)).toBe(true);
+    // the extract has NO payload key — the cue payload is built, not passed through
+    expect(EVENTS.some((e) => "payload" in e)).toBe(false);
+    expect(EVENTS.every((e) => typeof e.meta === "object" && e.meta !== null)).toBe(true);
     // the uids are fake, and the fixture says so
     expect(JSON.stringify(EVENTS)).not.toMatch(/ind_(?!fake_)/);
   });
@@ -355,7 +360,7 @@ describe("3 — re-running writes nothing", () => {
 
 describe("4 — a room absent from the map is refused before anything is written", () => {
   it("validateFixture names the room, and nothing is posted", () => {
-    const bad = [...EVENTS, { room: "dermatology", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x" }];
+    const bad = [...EVENTS, { room: "dermatology", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x", individual_uid: "ind_fake_9999" }];
     expect(validateFixture(bad, MAP)).toEqual({ error: "room_not_in_map", detail: "dermatology" });
     expect(posted).toHaveLength(0);
   });
@@ -369,9 +374,9 @@ describe("4 — a room absent from the map is refused before anything is written
 
 describe("5 — an event with no source_ref is refused", () => {
   it("refused by name — without a key, a re-run would write it twice", () => {
-    const noRef = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at }] as unknown as WarehouseEvent[];
+    const noRef = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999" }] as unknown as WarehouseEvent[];
     expect(validateFixture(noRef, MAP)).toMatchObject({ error: "event_source_ref_required" });
-    const emptyRef = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "" }];
+    const emptyRef = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999", source_ref: "" }];
     expect(validateFixture(emptyRef, MAP)).toMatchObject({ error: "event_source_ref_required" });
     expect(posted).toHaveLength(0);
   });
@@ -512,14 +517,14 @@ describe("11 — the CLI refuses before the first request, and prints no uid", (
   };
 
   it("an unmapped room stops the run at exit 2, with zero requests issued", async () => {
-    const code = await run({ events: [{ room: "dermatology", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x" }] });
+    const code = await run({ events: [{ room: "dermatology", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x", individual_uid: "ind_fake_9999" }] });
     expect(code).toBe(2);
     expect(errs.join("\n")).toContain("room_not_in_map");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("a missing source_ref stops the run at exit 2, with zero requests issued", async () => {
-    const code = await run({ events: [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at }] });
+    const code = await run({ events: [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999" }] });
     expect(code).toBe(2);
     expect(errs.join("\n")).toContain("event_source_ref_required");
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -549,5 +554,168 @@ describe("11 — the CLI refuses before the first request, and prints no uid", (
     expect(printed).not.toMatch(/ind_fake_/);
     expect(printed).not.toMatch(/individual_uid/);
     expect(printed).not.toMatch(/\btok\b/);
+  });
+});
+
+// ===========================================================================
+// 12 — the cue payload is BUILT from the event, not passed through
+//
+// An earlier build read `e.payload ?? {}`. The extract has no payload key, so every cue
+// landed with `{}` and slice 4 could not bind a visit to a person. These tests assert the
+// payload on the REQUEST BODY the route actually received, not on a helper's return value,
+// so a regression in the wiring fails here too.
+// ===========================================================================
+
+describe("12 — the cue payload is built from the event", () => {
+  /** the body posted for the one event with this source_ref */
+  const bodyFor = (sourceRef: string) => {
+    const hit = posted.find((p) => p.source_ref === sourceRef);
+    if (!hit) throw new Error(`nothing posted for ${sourceRef}`);
+    return hit.payload as Record<string, unknown>;
+  };
+
+  it("a pqm_called event carries doctor_uid, and neither category nor at_source", async () => {
+    await load();
+    const p = bodyFor("qts_9f8e7d6c");
+    expect(p.doctor_uid).toBe("doc_fake_aa01");
+    expect("category" in p).toBe(false);
+    expect("at_source" in p).toBe(false);
+    // and none of the meta keys outside the narrow three came along for the ride
+    expect("station" in p).toBe(false);
+    expect("tenant_uid" in p).toBe(false);
+    expect("service_request_uid" in p).toBe(false);
+  });
+
+  it("a pstart event carries category, and no doctor_uid", async () => {
+    await load();
+    const p = bodyFor("svc_a1b2c3d4");
+    expect(p.category).toBe("CONSULTATION");
+    expect("doctor_uid" in p).toBe(false);
+    expect("at_source" in p).toBe(false);
+    expect("calendar_uid" in p).toBe(false); // narrow payload, not the whole meta block
+  });
+
+  it("a pulse_note event carries at_source, and no category", async () => {
+    await load();
+    const p = bodyFor("pn_77c1d0e9");
+    expect(p.at_source).toBe("uploaded_at");
+    expect("category" in p).toBe(false);
+    expect("doctor_uid" in p).toBe(false);
+    expect("presc_type" in p).toBe(false);
+  });
+
+  it("a dx_event carries both category and at_source, and no doctor_uid", async () => {
+    await load();
+    const p = bodyFor("svc_dx_4411ab");
+    expect(p.category).toBe("LAB");
+    expect(p.at_source).toBe("sample_collection_time");
+    expect("doctor_uid" in p).toBe(false);
+  });
+
+  it("every payload carries source, individual_uid, source_ref, attribution and in_tape_window", async () => {
+    await load();
+    expect(posted).toHaveLength(8);
+    for (const req of posted) {
+      const p = req.payload as Record<string, unknown>;
+      expect(p.source).toBe("warehouse");
+      expect(typeof p.individual_uid).toBe("string");
+      expect(String(p.individual_uid).length).toBeGreaterThan(0);
+      expect(p.source_ref).toBe(req.source_ref); // deliberately redundant with the 0047 column
+      expect(["direct", "inferred"]).toContain(p.attribution);
+      expect(typeof p.in_tape_window).toBe("boolean");
+      // the payload is never the empty object the earlier build wrote
+      expect(Object.keys(p).length).toBeGreaterThan(3);
+    }
+    // in_tape_window:false is a VALUE and must survive — not be dropped as falsy
+    const falsey = posted.map((r) => (r.payload as Record<string, unknown>).in_tape_window);
+    expect(falsey).toContain(false);
+    expect(falsey).toContain(true);
+  });
+
+  it("no absent key is ever written as null", async () => {
+    await load();
+    for (const req of posted) {
+      for (const [k, v] of Object.entries(req.payload as Record<string, unknown>)) {
+        expect(v, `payload.${k} is null`).not.toBeNull();
+      }
+    }
+    // and directly, on the sparsest event the builder can be handed: an empty meta block and
+    // no attribution or window at all. Absent means ABSENT, never a null placeholder.
+    const bare = buildCuePayload({ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999", source_ref: "qts_bare", meta: {} });
+    expect(bare).toEqual({ source: "warehouse", individual_uid: "ind_fake_9999", source_ref: "qts_bare" });
+    expect(Object.values(bare).some((v) => v === null)).toBe(false);
+    // meta missing entirely is the same answer, not a crash
+    const noMeta = buildCuePayload({ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999", source_ref: "qts_bare" });
+    expect(noMeta).toEqual(bare);
+    // an explicit null in meta is dropped rather than copied through
+    const nulled = buildCuePayload({ room: "opd-7", type: "dx_event", at: EVENTS[0]!.at, individual_uid: "ind_fake_9999", source_ref: "svc_x", meta: { category: null, at_source: "check_in_time" } });
+    expect("category" in nulled).toBe(false);
+    expect(nulled.at_source).toBe("check_in_time");
+  });
+
+  it("an event with no individual_uid is refused by name, and nothing is written", async () => {
+    const noUid = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x" }] as unknown as WarehouseEvent[];
+    expect(validateFixture(noUid, MAP)).toMatchObject({ error: "event_individual_uid_required" });
+    const emptyUid = [{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x", individual_uid: "" }];
+    expect(validateFixture(emptyUid, MAP)).toMatchObject({ error: "event_individual_uid_required" });
+    // one bad event refuses the WHOLE fixture — 7 good ones must not land first
+    expect(validateFixture([...EVENTS, ...noUid], MAP)).toMatchObject({ error: "event_individual_uid_required" });
+    expect(posted).toHaveLength(0);
+  });
+
+  it("the refusal names the room and type only — never the uid", () => {
+    const r = validateFixture([{ room: "opd-7", type: "pqm_called", at: EVENTS[0]!.at, source_ref: "qts_x", individual_uid: "" }], MAP);
+    expect(JSON.stringify(r)).not.toMatch(/ind_/);
+    expect(r!.detail).toContain("opd-7");
+    expect(r!.detail).toContain("pqm_called");
+  });
+});
+
+describe("13 — a uid is in the payload now, so the console must stay clean", () => {
+  let dir: string;
+  let out: string[];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "wh-uid-"));
+    out = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    vi.stubGlobal("fetch", (u: string, i: { method: string; headers: Record<string, string>; body: string }) => fetchImpl(u, i));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("a full successful run prints counts and types, and not one uid or meta value", async () => {
+    const p = join(dir, "f.json");
+    writeFileSync(p, JSON.stringify({ events: EVENTS }));
+    const code = await main(["--fixture", p, "--base-url", "https://preview.example", "--map", `opd-7=${OPD7_DAY},cardiology=${CARD_DAY}`]);
+    expect(code).toBe(0);
+
+    const printed = out.join("\n");
+    expect(printed).toContain("written 7  already-existed 1  failed 0  of 8");
+    expect(printed).toContain("pstart=2");
+
+    // the uids that are now IN the payload must not be in the output
+    expect(printed).not.toMatch(/ind_fake_/);
+    expect(printed).not.toMatch(/individual_uid/);
+    expect(printed).not.toMatch(/doc_fake_/);
+    // nor any other meta value, nor the token
+    expect(printed).not.toMatch(/tenant_uid|service_request_uid|calendar_uid|hospital_uid/);
+    expect(printed).not.toMatch(/\btok\b/);
+    // the payload was genuinely built, so this is not a vacuous pass
+    expect(posted.every((r) => String((r.payload as Record<string, unknown>).individual_uid).startsWith("ind_fake_"))).toBe(true);
+  });
+
+  it("a refusal on a real-shaped fixture prints no uid either", async () => {
+    const p = join(dir, "bad.json");
+    writeFileSync(p, JSON.stringify({ events: [{ ...EVENTS[0], room: "dermatology" }] }));
+    const code = await main(["--fixture", p, "--base-url", "https://preview.example", "--map", `opd-7=${OPD7_DAY}`]);
+    expect(code).toBe(2);
+    const printed = out.join("\n");
+    expect(printed).toContain("room_not_in_map");
+    expect(printed).not.toMatch(/ind_fake_/);
   });
 });

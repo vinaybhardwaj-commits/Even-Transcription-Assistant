@@ -1,5 +1,5 @@
 {
-  "note": "SYNTHETIC. Every uid here is fake and matches nothing in any warehouse. This is the only fixture in this directory that is committed; fixtures/warehouse/*.json is otherwise gitignored, because a real extract holds real individual_uids. Shapes follow Brain PRD 17-Aug-2026 section 6. 19 August 2026, IST.",
+  "note": "SYNTHETIC. Every uid here is fake and matches nothing in any warehouse. This is the only fixture in this directory that is committed; fixtures/warehouse/*.json is otherwise gitignored, because a real extract holds real individual_uids. Event shape follows the extract: top-level type/at/individual_uid/source_ref/room/attribution/in_tape_window/meta, and NO payload key — the cue payload is built by buildCuePayload() in the loader. meta varies by type; no key may be assumed present.",
   "ist_date": "2026-08-19",
   "rooms": ["opd-7", "cardiology"],
   "events": [
@@ -7,107 +7,134 @@
       "room": "opd-7",
       "type": "pqm_called",
       "at": "2026-08-19T03:32:04.000Z",
+      "individual_uid": "ind_fake_0001",
       "source_ref": "qts_9f8e7d6c",
-      "payload": {
-        "signal": "queue_token_steps.called_at",
+      "attribution": "direct",
+      "in_tape_window": true,
+      "meta": {
+        "doctor_uid": "doc_fake_aa01",
         "station": "CONSULTATION",
-        "token_uid": "tok_9f8e7d6c",
-        "individual_uid": "ind_fake_0001",
-        "called_at": "2026-08-19T03:32:04.000Z"
+        "status": "CALLED",
+        "arrival_kind": "WALK_IN",
+        "service_request_uid": "sr_fake_5501",
+        "tenant_uid": "ten_fake_ehrc"
       }
     },
     {
       "room": "opd-7",
       "type": "pstart",
       "at": "2026-08-19T03:32:10.000Z",
+      "individual_uid": "ind_fake_0001",
       "source_ref": "svc_a1b2c3d4",
-      "payload": {
-        "signal": "chart_financial_reporting__services.prescription_start_time",
+      "attribution": "direct",
+      "in_tape_window": true,
+      "meta": {
         "category": "CONSULTATION",
-        "service_uid": "svc_a1b2c3d4",
         "calendar_uid": "cal_fake_7781",
-        "individual_uid": "ind_fake_0001",
-        "prescription_start_time": "2026-08-19T03:32:10.000Z"
+        "service_uid": "svc_a1b2c3d4",
+        "consult_type": "IN_PERSON",
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
       }
     },
     {
       "room": "cardiology",
       "type": "pstart",
       "at": "2026-08-19T04:05:00.000Z",
+      "individual_uid": "ind_fake_0002",
       "source_ref": "svc_c9d8e7f6",
-      "payload": {
-        "signal": "chart_financial_reporting__services.prescription_start_time",
+      "attribution": "inferred",
+      "in_tape_window": false,
+      "meta": {
         "category": "CONSULTATION",
-        "service_uid": "svc_c9d8e7f6",
         "calendar_uid": "cal_fake_7782",
-        "individual_uid": "ind_fake_0002",
-        "prescription_start_time": "2026-08-19T04:05:00.000Z"
+        "service_uid": "svc_c9d8e7f6",
+        "consult_type": "IN_PERSON",
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
       }
     },
     {
       "room": "opd-7",
       "type": "dx_event",
       "at": "2026-08-19T05:10:45.000Z",
+      "individual_uid": "ind_fake_0001",
       "source_ref": "svc_dx_4411ab",
-      "payload": {
-        "signal": "COALESCE(check_in_time, sample_collection_time, scan_in_time)",
+      "attribution": "inferred",
+      "in_tape_window": false,
+      "meta": {
         "category": "LAB",
+        "at_source": "sample_collection_time",
         "service_uid": "svc_dx_4411ab",
-        "individual_uid": "ind_fake_0001",
-        "clock_used": "sample_collection_time",
-        "note": "the diagnostics hole: same individual_uid, same IST day, after prescription_start_time, no second consult start"
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
       }
     },
     {
       "room": "cardiology",
       "type": "dx_event",
       "at": "2026-08-19T05:48:12.000Z",
+      "individual_uid": "ind_fake_0002",
       "source_ref": "svc_dx_bb2299",
-      "payload": {
-        "signal": "COALESCE(check_in_time, sample_collection_time, scan_in_time)",
+      "attribution": "direct",
+      "in_tape_window": true,
+      "meta": {
         "category": "CARDIOLOGY",
+        "at_source": "check_in_time",
         "service_uid": "svc_dx_bb2299",
-        "individual_uid": "ind_fake_0002",
-        "clock_used": "check_in_time"
+        "booked_status": "BOOKED",
+        "hospital_uid": "hos_fake_ehrc"
       }
     },
     {
       "room": "opd-7",
       "type": "pulse_note",
       "at": "2026-08-19T06:02:33.000Z",
+      "individual_uid": "ind_fake_0001",
       "source_ref": "pn_77c1d0e9",
-      "payload": {
-        "signal": "pulse note uploaded_at",
-        "note_uid": "pn_77c1d0e9",
-        "individual_uid": "ind_fake_0001",
-        "uploaded_at": "2026-08-19T06:02:33.000Z"
+      "attribution": "direct",
+      "in_tape_window": false,
+      "meta": {
+        "at_source": "uploaded_at",
+        "presc_type": "CONSULTATION",
+        "presc_is_draft": false,
+        "status": "UPLOADED",
+        "doctor_type": "CONSULTANT"
       }
     },
     {
       "room": "opd-7",
       "type": "pqm_called",
       "at": "2026-08-19T07:15:22.000Z",
+      "individual_uid": "ind_fake_0003",
       "source_ref": "qts_2b3c4d5e",
-      "payload": {
-        "signal": "queue_token_steps.called_at",
+      "attribution": "direct",
+      "in_tape_window": true,
+      "meta": {
+        "doctor_uid": "doc_fake_aa01",
         "station": "CONSULTATION",
-        "token_uid": "tok_2b3c4d5e",
-        "individual_uid": "ind_fake_0003",
-        "called_at": "2026-08-19T07:15:22.000Z"
+        "status": "CALLED",
+        "arrival_kind": "APPOINTMENT",
+        "service_request_uid": "sr_fake_5502",
+        "tenant_uid": "ten_fake_ehrc"
       }
     },
     {
       "room": "opd-7",
       "type": "pqm_called",
       "at": "2026-08-19T03:32:04.000Z",
+      "individual_uid": "ind_fake_0001",
       "source_ref": "qts_9f8e7d6c",
-      "payload": {
-        "signal": "queue_token_steps.called_at",
+      "attribution": "direct",
+      "in_tape_window": true,
+      "duplicate_of": "event 0 — DELIBERATE. Same (source_ref, type, at), so 0047's partial unique index absorbs it: the first run writes 7 and reports 1 already-existed.",
+      "meta": {
+        "doctor_uid": "doc_fake_aa01",
         "station": "CONSULTATION",
-        "token_uid": "tok_9f8e7d6c",
-        "individual_uid": "ind_fake_0001",
-        "called_at": "2026-08-19T03:32:04.000Z",
-        "duplicate_of": "event 0 — DELIBERATE. Same (source_ref, type, at), so 0047's partial unique index absorbs it: the first run writes 7 and reports 1 already-existed."
+        "status": "CALLED",
+        "arrival_kind": "WALK_IN",
+        "service_request_uid": "sr_fake_5501",
+        "tenant_uid": "ten_fake_ehrc"
       }
     }
   ]

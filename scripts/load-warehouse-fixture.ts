@@ -13,6 +13,9 @@
  *     POST <base-url>/api/brain/cues
  *       { room_id, room_day_id, type, at, payload, source: 'warehouse', source_ref }
  *
+ * The payload is BUILT from the event by buildCuePayload() — the extract has no `payload` key
+ * to pass through, and assuming it did is how an earlier build wrote `{}` into every cue.
+ *
  * It is a client of the ONE cue door, exactly like scribe_replay_write is. It issues no SQL,
  * holds no pool, and knows nothing about the schema beyond the shape of that body. Everything
  * that protects a clinic day is on the other side of the door and is not restated here:
@@ -42,7 +45,9 @@
  *
  * It prints COUNTS ONLY. No individual_uid, no payload, no token, ever reaches stdout or
  * stderr — the per-event line names the type and the source_ref and nothing else, and
- * source_ref is a warehouse row id, not a person.
+ * source_ref is a warehouse row id, not a person. This matters MORE since the payload started
+ * carrying individual_uid: every refusal detail below names a room and a type, never a uid,
+ * and the test asserts it against the captured console text rather than by reading the code.
  */
 
 import { readFile } from "node:fs/promises";
@@ -71,6 +76,11 @@ export function scratchRoomIdForDay(roomDayId: string): string | null {
 // The fixture
 // ---------------------------------------------------------------------------
 
+/**
+ * One row of the extract. These are the top-level keys the extract actually carries — there is
+ * NO `payload` key on an event, and there never was: the cue's payload is BUILT from the event
+ * by buildCuePayload() below.
+ */
 export type WarehouseEvent = {
   /** map key — the real room this event belongs to, e.g. 'opd-7'. Never a room id. */
   room: string;
@@ -78,9 +88,17 @@ export type WarehouseEvent = {
   type: string;
   /** ISO timestamp, the warehouse's own clock. */
   at: string;
+  /** the Pulse person. The spine slice 4 binds a visit on — required, see validateFixture. */
+  individual_uid: string;
   /** the warehouse row's id — 0047's natural key, and what makes a re-run a no-op. */
   source_ref: string;
-  payload?: Record<string, unknown>;
+  attribution?: string;
+  in_tape_window?: boolean;
+  /**
+   * Varies BY TYPE, and no key may be assumed to exist: doctor_uid is only on pqm_called,
+   * category only on pstart and dx_event, at_source only on dx_event and pulse_note.
+   */
+  meta?: Record<string, unknown>;
 };
 
 /**
@@ -90,6 +108,48 @@ export type WarehouseEvent = {
  * database does not have. A typo shows up instead as its own line in the by-type counts.
  */
 export const WAREHOUSE_CUE_TYPES = ["pqm_called", "pstart", "dx_event", "pulse_note"] as const;
+
+/**
+ * Set `key` only when the value is really there. undefined and null are both dropped, so an
+ * absent source never becomes a null placeholder in the cue — a reader can then tell "the
+ * warehouse did not say" from "the warehouse said nothing", which a null would erase.
+ *
+ * `false` and `0` and `""` are VALUES and are kept: in_tape_window:false is a fact.
+ */
+function put(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (value === undefined || value === null) return;
+  target[key] = value;
+}
+
+/**
+ * The cue payload, BUILT from the event (W12). The extract has no `payload` key to pass
+ * through — an earlier build of this script assumed it did and wrote `{}` into every cue,
+ * which is silently useless rather than loudly wrong, because slice 4 cannot bind a visit to a
+ * person without individual_uid.
+ *
+ * NARROW on purpose (V, 21 Aug): three keys off `meta` and nothing else. The whole meta block
+ * is deliberately NOT spread in — the extract carries far more than the fuse needs, and a cue
+ * payload is kept for 30 days before §15A nulls it.
+ *
+ * source_ref is written here AND held in its own column (0047). The duplication is deliberate:
+ * the column is the key the index enforces, the payload field is what a human reading a cue
+ * sees without joining anything.
+ */
+export function buildCuePayload(e: WarehouseEvent): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    source: "warehouse",
+    individual_uid: e.individual_uid,
+    source_ref: e.source_ref,
+  };
+  put(payload, "attribution", e.attribution);
+  put(payload, "in_tape_window", e.in_tape_window);
+  const meta = e.meta ?? {};
+  // Only these three, and only when the type in hand actually carries them.
+  put(payload, "doctor_uid", meta.doctor_uid);
+  put(payload, "category", meta.category);
+  put(payload, "at_source", meta.at_source);
+  return payload;
+}
 
 export type LoaderArgs = { fixture: string; baseUrl: string; map: Record<string, string> };
 export type Refusal = { error: string; detail?: string };
@@ -160,9 +220,16 @@ export function validateFixture(events: WarehouseEvent[], map: Record<string, st
     if (typeof e.at !== "string" || Number.isNaN(Date.parse(e.at))) return { error: "event_at_invalid", detail: where };
     // No source_ref means no natural key, which means a re-run would double-write it.
     if (typeof e.source_ref !== "string" || !e.source_ref) return { error: "event_source_ref_required", detail: `${where} (${e.room}/${e.type})` };
+    // No individual_uid means the cue cannot be bound to a person. It is the spine slice 4
+    // binds on, and such a cue is silently useless rather than loudly wrong — which is exactly
+    // the failure this guard exists to make loud. Refused before any request, like source_ref.
+    // NOTE the detail names the room and type only: a uid must never reach the console.
+    if (typeof e.individual_uid !== "string" || !e.individual_uid) {
+      return { error: "event_individual_uid_required", detail: `${where} (${e.room}/${e.type})` };
+    }
     if (!map[e.room]) return { error: "room_not_in_map", detail: e.room };
-    if (e.payload !== undefined && (typeof e.payload !== "object" || e.payload === null || Array.isArray(e.payload))) {
-      return { error: "event_payload_must_be_object", detail: where };
+    if (e.meta !== undefined && (typeof e.meta !== "object" || e.meta === null || Array.isArray(e.meta))) {
+      return { error: "event_meta_must_be_object", detail: where };
     }
   }
   return null;
@@ -241,7 +308,7 @@ export async function loadWarehouseFixture(opts: {
       room_day_id: roomDayId,
       type: e.type,
       at: new Date(e.at).toISOString(),
-      payload: e.payload ?? {},
+      payload: buildCuePayload(e),
       source: "warehouse",
       source_ref: e.source_ref,
     };
