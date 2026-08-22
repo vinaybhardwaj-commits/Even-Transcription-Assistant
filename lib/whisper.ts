@@ -14,12 +14,43 @@
  * accepts multipart/form-data with a `file` part. Returns JSON like:
  *   { "text": "...", "language": "en", "duration": 2.34, "segments": [...] }
  *
+ * SEGMENTS (speech turns, slice A). This client used to ask for `json` and read
+ * only `text`, so the segment timings the model had already produced were thrown
+ * away at the parse and every caller got one undifferentiated slab. It now asks
+ * for `verbose_json` and keeps them: a turn is a segment placed on the clock, and
+ * a transcript with no timings can never become one.
+ *
+ * The segment times are SECONDS FROM THE START OF THE CLIP, not wall clock. Only
+ * the caller knows what instant its clip began at, so nothing here is converted
+ * to epoch time — that mapping belongs to whoever built the clip.
+ *
+ * Tolerant on the wire, strict in the type: whisper.cpp has shipped segment
+ * bounds as numbers, as numeric strings and as "HH:MM:SS.mmm" (and with a comma
+ * for the decimal). All are read; a segment whose bounds cannot be read at all is
+ * dropped on its own rather than failing the transcript, and `text` is unchanged
+ * either way. An older server that ignores verbose_json and answers plain json
+ * still works — it returns no segments, so `segments` is empty and the transcript
+ * is exactly what it always was.
+ *
  * Env vars:
  *   - WHISPER_BASE_URL  e.g. https://whisper.llmvinayminihome.uk
  *
  * Same shape as TranscribeResult from ./transcribe so the comparison
  * orchestrator can treat both engines uniformly.
  */
+
+/**
+ * One segment of the transcript, in SECONDS FROM THE START OF THE CLIP that was sent.
+ * Never wall-clock: the caller owns that mapping because only the caller knows the clip's
+ * true start.
+ */
+export type WhisperSegment = {
+  start_s: number;
+  end_s: number;
+  text: string;
+  /** whisper.cpp's own no-speech probability, when it sends one. Reported, never acted on here. */
+  no_speech_prob?: number;
+};
 
 export type WhisperResult =
   | {
@@ -28,8 +59,51 @@ export type WhisperResult =
       language?: string;
       duration_seconds?: number;
       latency_ms: number;
+      /** Always present, possibly empty — a server that sent none is not an error. */
+      segments: WhisperSegment[];
     }
   | { ok: false; error: string; latency_ms: number };
+
+const TIMESTAMP_RE = /^(\d{1,2}):([0-5]?\d):([0-5]?\d)(?:[.,](\d{1,3}))?$/;
+
+/**
+ * Seconds out of whatever the server sent: a number, a numeric string, or "HH:MM:SS[.,]mmm".
+ * Null when it is none of those — the segment is then dropped, not guessed at.
+ */
+export function parseSegmentSeconds(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (s === "") return null;
+  const m = TIMESTAMP_RE.exec(s);
+  if (m) {
+    const ms = Number((m[4] ?? "0").padEnd(3, "0"));
+    return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + ms / 1000;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * PURE — the raw `segments` field → the segments that survive. A segment survives when both
+ * bounds read as seconds and the interval is not negative; its text is trimmed but NOT judged,
+ * because "is this blank" is the caller's window rule, not the transcriber's.
+ */
+export function parseWhisperSegments(raw: unknown): WhisperSegment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WhisperSegment[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    const start = parseSegmentSeconds(o.start);
+    const end = parseSegmentSeconds(o.end);
+    if (start === null || end === null || end < start) continue;
+    const text = typeof o.text === "string" ? o.text.trim() : "";
+    const nsp = typeof o.no_speech_prob === "number" && Number.isFinite(o.no_speech_prob) ? o.no_speech_prob : undefined;
+    out.push({ start_s: start, end_s: end, text, ...(nsp === undefined ? {} : { no_speech_prob: nsp }) });
+  }
+  return out;
+}
 
 export async function transcribeWithWhisper(
   audio: Buffer | Uint8Array,
@@ -59,7 +133,9 @@ export async function transcribeWithWhisper(
   // Wrap Buffer as Blob so undici FormData treats it as a file
   const blob = new Blob([audio], { type: contentType });
   form.append('file', blob, `audio.${ext}`);
-  form.append('response_format', 'json');
+  // verbose_json, not json: `json` returns the text alone and the segment timings — which the
+  // model has already computed — are lost at the wire, not at the parse.
+  form.append('response_format', 'verbose_json');
   form.append('temperature', '0.0');
   // Language: by default let whisper auto-detect (good for code-switching). BUT
   // whisper.cpp picks ONE language for the whole file from its first window, so a
@@ -98,9 +174,14 @@ export async function transcribeWithWhisper(
       text?: string;
       language?: string;
       duration?: number;
+      segments?: unknown;
     };
 
-    const transcript = (json.text ?? '').trim();
+    const segments = parseWhisperSegments(json.segments);
+    // The transcript is still the server's own `text` when it sent one. Only when it did not —
+    // some builds answer verbose_json with segments and no top-level text — is it rebuilt from
+    // the segments, so widening the request cannot narrow the answer.
+    const transcript = ((json.text ?? '').trim() || segments.map((s) => s.text).filter(Boolean).join(' ')).trim();
     if (!transcript) {
       return { ok: false, error: 'empty_transcript', latency_ms };
     }
@@ -111,6 +192,7 @@ export async function transcribeWithWhisper(
       language: json.language,
       duration_seconds: json.duration,
       latency_ms,
+      segments,
     };
   } catch (e: unknown) {
     clearTimeout(tid);
