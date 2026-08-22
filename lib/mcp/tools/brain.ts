@@ -196,6 +196,37 @@ const BRAIN_TIMEOUT_MS = 5_000;
 export const CUE_SOURCES = ["mcp", "replay"] as const;
 export type CueSource = (typeof CUE_SOURCES)[number];
 
+/**
+ * Cue types this tool REFUSES, by name, before anything is posted.
+ *
+ * Every one of them is a MACHINE type: it belongs to a pipeline that owns its own natural key
+ * and writes into the SCRATCH graph, never onto a room's live day, which is the only day this
+ * tool can reach. The hazard is not an untidy row — it is a keyless one:
+ *
+ *   · stt_turn / stt_silence / speaker_match — the speech-turn writer keys on
+ *     cue.source_ref = "{session_id}|{start_ms}|{end_ms}|{speaker}" and leans on 0050's partial
+ *     unique index to absorb a re-run. A turn stamped by hand carries no source_ref, so it is in
+ *     no index, and every re-run of the operator's hand would add another copy of it.
+ *   · pqm_called / pstart / dx_event / pulse_note — the warehouse types (0047). Same shape, same
+ *     reason: the loader carries the warehouse row's own id in source_ref, and a hand-stamped
+ *     one would sit un-keyed in the same namespace. `warehouse` was already removed from
+ *     CUE_SOURCES for exactly this reason; the type is the other half of that door.
+ *
+ * An open `type` set is still the design (0042, 0046) — consult_mark, operator_pin, a test cue
+ * and anything a human invents keep working. This is a named blocklist, not a new closed set.
+ */
+export const POST_CUE_BLOCKED_TYPES = [
+  "stt_turn",
+  "stt_silence",
+  "speaker_match",
+  "pqm_called",
+  "pstart",
+  "dx_event",
+  "pulse_note",
+] as const;
+
+const POST_CUE_BLOCKED_SET: ReadonlySet<string> = new Set<string>(POST_CUE_BLOCKED_TYPES);
+
 function brainCuesUrl(origin: string): string {
   const base = process.env.BRAIN_BASE_URL?.trim();
   if (base) return new URL("/api/brain/cues", base.endsWith("/") ? base : `${base}/`).toString();
@@ -279,13 +310,13 @@ const WRITE_ROOM_ARGS = {
 
 const postCue: McpTool = {
   name: "scribe_post_cue",
-  description: "Independent operator cue into the brain (PRD §9): POST /api/brain/cues as a client with the server-side token, onto the room's LIVE day. type is an open set (≤64 chars). payload is any JSON object; `source` (mcp|replay, default mcp) is FORCED into it. `warehouse` is NOT accepted here — a warehouse cue carries the id of the warehouse row it came from and belongs in the scratch graph, which is scripts/load-warehouse-fixture.ts's job, not this tool's. Does not need an active tape. Returns { ok, cue_id, cue_at, state_summary (80 chars) }.",
+  description: "Independent operator cue into the brain (PRD §9): POST /api/brain/cues as a client with the server-side token, onto the room's LIVE day. type is an open set (≤64 chars) MINUS a named blocklist: stt_turn, stt_silence, speaker_match, pqm_called, pstart, dx_event and pulse_note are refused by name (type_not_allowed) because each belongs to a pipeline that keys its cues on source_ref and writes them into the SCRATCH graph — stamped by hand here they would land keyless on a LIVE day and duplicate on every re-run. payload is any JSON object; `source` (mcp|replay, default mcp) is FORCED into it. `warehouse` is NOT accepted here — a warehouse cue carries the id of the warehouse row it came from and belongs in the scratch graph, which is scripts/load-warehouse-fixture.ts's job, not this tool's. Does not need an active tape. Returns { ok, cue_id, cue_at, state_summary (80 chars) }.",
   scope: "write",
   inputSchema: {
     type: "object",
     properties: {
       ...WRITE_ROOM_ARGS,
-      type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | stt_turn | warehouse_event | pulse_note | test" },
+      type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | operator_note | test — the machine types (stt_turn, stt_silence, speaker_match, pqm_called, pstart, dx_event, pulse_note) are refused" },
       at: { type: "string", description: "ISO timestamp; default now (server)" },
       payload: { type: "object", description: "any JSON object; source is overwritten" },
       source: { type: "string", enum: ["mcp", "replay"], default: "mcp" },
@@ -298,6 +329,18 @@ const postCue: McpTool = {
     if ("error" in r) return r.error;
     const type = argStr(args, "type", 64);
     if (!type) return { ok: false, error: "type_required" };
+    // The blocklist, before the room is used for anything and long before a cue is posted. A
+    // machine type stamped by hand carries no source_ref, so no partial unique index holds it
+    // and a second press writes a second copy — onto a LIVE day.
+    if (POST_CUE_BLOCKED_SET.has(type)) {
+      return {
+        ok: false,
+        error: "type_not_allowed",
+        type,
+        blocked: POST_CUE_BLOCKED_TYPES,
+        note: "this type belongs to a pipeline that keys its cues on source_ref and writes them into the scratch graph — it is never stamped by hand onto a live day.",
+      };
+    }
     const at = parseAtArg(args);
     if ("error" in at) return { ok: false, error: at.error };
     const srcRaw = argStr(args, "source", 16) ?? "mcp";
