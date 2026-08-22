@@ -935,6 +935,12 @@ export type TurnBuild = {
  * straddles the boundary was still spoken partly inside it, and its true bounds are what go in
  * the key — clamping them would invent a turn that nobody said. A zero-length segment is not a
  * turn and is dropped with the rest.
+ *
+ * A DELIBERATE DEVIATION FROM PRD D10, kept by K2: D10 said to drop a segment by its START.
+ * Doing that loses speech at every window edge, and it buys nothing, because source_ref carries
+ * the segment's OWN start and end — so the identical turn recovered from the adjacent window
+ * produces the identical key and 0050's index absorbs it. Acceptance item 7 is rewritten to
+ * match: a window emits no segment that fails to overlap it.
  */
 export function buildTurns(opts: {
   sessionId: string;
@@ -944,9 +950,22 @@ export function buildTurns(opts: {
   segments: readonly WhisperSegment[];
   language?: string | null;
   speaker?: string;
+  /** U4's answer for this window: 'primary' | 'backup'. Absent → null, i.e. unreported. */
+  sourceUsed?: string | null;
 }): TurnBuild {
   const speaker = opts.speaker ?? TURN_SPEAKER_UNKNOWN;
   const language = opts.language ?? null;
+  const sourceUsed = opts.sourceUsed ?? null;
+  // THE WINDOW ASKED FOR, on every cue this call emits — K2 correction 4. PRD §10's day
+  // counters (minutes asked, minutes with words, minutes silent, windows on the backup mic,
+  // the language whisper.cpp reported) are all rollups over `payload.window` and
+  // `payload.source_used`, and none of them is derivable from a turn's own bounds: a turn is
+  // as long as the phrase, not as long as the tape somebody asked about. FLOORED like every
+  // other millisecond in this file, and IDENTICAL on every cue of the window so the rollup can
+  // group by it.
+  const windowStartMs = Math.floor(opts.windowStartMs);
+  const windowEndMs = Math.floor(opts.windowEndMs);
+  const asked = { start_ms: windowStartMs, end_ms: windowEndMs };
   // FAIL SAFE at the boundary: a transcriber that sent no segments at all — an older Whisper
   // build, a stub, a future engine — is a SILENT window, not a crash. The whole point of this
   // function is that the answer is always a cue list.
@@ -987,6 +1006,8 @@ export function buildTurns(opts: {
         engine: "whisper",
         language,
         session_id: opts.sessionId,
+        window: asked,
+        source_used: sourceUsed,
         ...(seg.no_speech_prob === undefined ? {} : { no_speech_prob: seg.no_speech_prob }),
       },
     });
@@ -999,8 +1020,8 @@ export function buildTurns(opts: {
 
   // 4. nothing survived → ONE silence over the whole window asked for, keyed the same way, so a
   //    re-run of the same window writes the same single row rather than a second one.
-  const startMs = Math.floor(opts.windowStartMs);
-  const endMs = Math.floor(opts.windowEndMs);
+  const startMs = windowStartMs;
+  const endMs = windowEndMs;
   const silence: TurnDraft = {
     type: SILENCE_CUE_TYPE,
     at: new Date(startMs).toISOString(),
@@ -1016,6 +1037,10 @@ export function buildTurns(opts: {
       engine: "whisper",
       language,
       session_id: opts.sessionId,
+      // The same two fields, on the silence too. A window that produced no words is still a
+      // window that was ASKED, and it is the entire population of "minutes silent".
+      window: asked,
+      source_used: sourceUsed,
       segments_considered: considered,
       dropped_outside_window: droppedOutside,
       dropped_blank: droppedBlank,
@@ -1040,15 +1065,24 @@ export type TurnWriteCounts = {
  * ALREADY EXISTED (0050's index absorbed it), and an error is DROPPED — and a drop is a bug, not
  * a mode of operation, which is why every one of them is named in the answer.
  *
- * `session_id` is deliberately NOT sent. The session is already the first field of source_ref,
- * and a cue carrying both would enter 0046's (session_id, type, at) index as well as 0050's —
- * two keys over one row, deduplicated by whichever fired first rather than by the key that
- * describes it. NULL keeps it out, because NULLs are distinct in a unique index.
+ * That third count only became reachable in K2. The cue route's scratch insert used to swallow
+ * EVERY unique violation (an unqualified ON CONFLICT DO NOTHING), so anything that was not
+ * 0050's key came back as already_existed and `dropped` could not be non-zero however wrong the
+ * write was. SQL_CUE_INSERT_TURN names the arbiter, so exactly one index absorbs a re-run and
+ * everything else throws its way here.
+ *
+ * `session_id` IS sent (K2, correction 2). Slice A left it NULL because a turn carrying it would
+ * have entered 0046's (session_id, type, at) index as well as 0050's — two keys over one row,
+ * deduplicated by whichever arbiter fired first rather than by the key that describes it. 0051
+ * narrows 0046's predicate to exclude the three turn types, so the collision is gone and the
+ * reason for omitting it with it. A turn row must be queryable BY SESSION without parsing a
+ * string out of source_ref, which is what NULL made everyone do.
  */
 async function writeTurnCues(
   origin: string,
   roomId: string,
   roomDayId: string,
+  sessionId: string,
   drafts: readonly TurnDraft[],
 ): Promise<TurnWriteCounts> {
   const t0 = Date.now();
@@ -1070,6 +1104,7 @@ async function writeTurnCues(
       at: d.at,
       payload: d.payload,
       room_day_id: roomDayId,
+      session_id: sessionId,
       source: TURN_CUE_SOURCE,
       source_ref: d.source_ref,
     });
@@ -1154,7 +1189,7 @@ async function turnsAnswer(
     return { ...base, written: 0, already_existed: 0, dropped: 0, turn_write_error: "not_a_scratch_day", room_day_id: scratch.day.id };
   }
 
-  const counts = await writeTurnCues(ctx.origin, scratch.room.id, scratch.day.id, build.turns);
+  const counts = await writeTurnCues(ctx.origin, scratch.room.id, scratch.day.id, session.id, build.turns);
   return {
     ...base,
     room_day_id: scratch.day.id,
@@ -1166,13 +1201,13 @@ async function turnsAnswer(
     // source_requested), and two different questions must not share a key.
     turn_cue_source: TURN_CUE_SOURCE,
     natural_key: ["source_ref", "type"],
-    note_turns: "written to a scratch room-day, never a live one. Idempotent on source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} for the three turn types: re-transcribing the same window writes nothing twice.",
+    note_turns: "written to a scratch room-day, never a live one. Idempotent on source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} for the three turn types: re-transcribing the same window writes nothing twice. Each row also carries session_id (0051 narrowed the replay key so a turn no longer collides there), and payload.window / payload.source_used, which are what the day's tape counters roll up.",
   };
 }
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, filtered to the window asked for, blank text dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050). Returns written / already_existed / dropped; a drop is a bug, not a mode. Refuses to write when BRAIN_BASE_URL is set. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
+  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. Refuses to write when BRAIN_BASE_URL is set. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
   scope: "invoke",
   inputSchema: {
     type: "object",
@@ -1232,7 +1267,7 @@ const transcribeRange: McpTool = {
       // window the operator asked for — a window that starts before the first covering piece
       // trims to zero and the clip starts at the piece instead.
       const joinedClipStartMs = Date.parse(res.covering[0]!.chunk_bounds.started_at) + Math.round(res.covering[0]!.offset_in_chunk_s * 1000);
-      const jBuild = buildTurns({ sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null });
+      const jBuild = buildTurns({ sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
       const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun);
       return {
         ok: true,
@@ -1266,7 +1301,7 @@ const transcribeRange: McpTool = {
     // the chunk's own start — not the window, which is why the turns below are then filtered to
     // the window while the `text` above still covers the whole chunk.
     const chunkStartMs = Date.parse(c.chunk_bounds.started_at);
-    const sBuild = buildTurns({ sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null });
+    const sBuild = buildTurns({ sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
     const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun);
     return {
       ok: true,

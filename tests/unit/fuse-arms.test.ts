@@ -681,6 +681,23 @@ describe("11 — re-running an arm writes nothing that exists", () => {
     expect(visitRows.size).toBe(0);
     expect(brainCalls.some((c) => /^INSERT INTO visit/.test(c.text))).toBe(false);
   });
+
+  // K2 correction 5. This read `args.dry_run === undefined ? true : argBool(...)`, which made
+  // every value argBool does not recognise mean WRITE — the wrong way round for the one flag
+  // standing between a fuse run and visit rows. Same shape as scribe_transcribe_range now.
+  it("FAILS DRY: a typo, a string, a null or an object stays dry — only an explicit false writes", async () => {
+    for (const v of ["yes-please", "no", null, 1, {}, "FALSE", "0"]) {
+      seedDb();
+      const out = await call({ room_day_id: DAY, arm: "rules", dry_run: v });
+      expect(out.dry_run, `dry_run:${JSON.stringify(v)} must stay dry`).toBe(true);
+      expect(visitRows.size, `dry_run:${JSON.stringify(v)} must write nothing`).toBe(0);
+    }
+    for (const v of [false, "false", 0]) {
+      seedDb();
+      await call({ room_day_id: DAY, arm: "rules", dry_run: v });
+      expect(visitRows.size, `dry_run:${JSON.stringify(v)} must write`).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("12 — a non-scratch room-day is refused by name, before any read", () => {

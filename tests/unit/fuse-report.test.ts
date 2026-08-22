@@ -641,3 +641,116 @@ describe("the four turn counters", () => {
     expect((out.parameters as Row).turn_cue_types).toEqual(["stt_turn", "stt_silence", "speaker_match"]);
   });
 });
+
+// ===========================================================================
+// Speech turns, K2 correction 4 — the tape that was LISTENED TO
+// ===========================================================================
+
+describe("turn_tape — PRD §10's counters, rolled up from payload.window", () => {
+  const MIN = 60_000;
+  const W = (fromMin: number, toMin: number) => ({ start_ms: Date.parse(`${IST}T05:00:00Z`) + fromMin * MIN, end_ms: Date.parse(`${IST}T05:00:00Z`) + toMin * MIN });
+  /** One turn cue in a given window. `window` and `source_used` are what the rollup reads. */
+  const turn = (type: string, w: Row, source_used: string | null, language: string | null = "en") =>
+    cue(type, new Date(w.start_ms as number).toISOString(), { text: "x", start_ms: w.start_ms, end_ms: w.end_ms, window: w, source_used, language, session_id: "bs_1" });
+
+  it("minutes asked, with words and silent — a partition, exact in ms", async () => {
+    const spoken = W(0, 2);   // 2 minutes, words
+    const quiet = W(10, 13);  // 3 minutes, silent
+    CUES = [...CUES, turn("stt_turn", spoken, "primary"), turn("stt_turn", spoken, "primary"), turn("stt_silence", quiet, "primary")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_total: 2, windows_with_words: 1, windows_silent: 1 });
+    expect(t.ms_asked).toBe(5 * MIN);
+    expect(t.ms_with_words).toBe(2 * MIN);
+    expect(t.ms_silent).toBe(3 * MIN);
+    // the identity holds on the MS, which is why the ms are reported at all
+    expect(Number(t.ms_with_words) + Number(t.ms_silent)).toBe(t.ms_asked);
+    expect(t).toMatchObject({ minutes_asked: 5, minutes_with_words: 2, minutes_silent: 3 });
+  });
+
+  it("a window is counted ONCE however many cues it produced", async () => {
+    const w = W(0, 4);
+    CUES = [...CUES, ...Array.from({ length: 40 }, () => turn("stt_turn", w, "primary"))];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.windows_total).toBe(1);
+    expect(t.ms_asked).toBe(4 * MIN);
+  });
+
+  it("counts the windows the BACKUP microphone answered", async () => {
+    CUES = [...CUES, turn("stt_turn", W(0, 1), "backup"), turn("stt_turn", W(5, 6), "primary"), turn("stt_silence", W(9, 10), "backup")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.windows_backup_mic).toBe(2);
+    expect(t.windows_total).toBe(3);
+  });
+
+  it("a window read from BOTH microphones is one window, and it counts as backup", async () => {
+    const w = W(0, 2);
+    CUES = [...CUES, turn("stt_silence", w, "primary"), turn("stt_turn", w, "backup")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.windows_total).toBe(1);
+    expect(t.windows_backup_mic).toBe(1);
+    // and somebody DID speak in it — a second read that heard nothing does not undo that
+    expect(t.windows_with_words).toBe(1);
+    expect(t.ms_silent).toBe(0);
+  });
+
+  it("reports the language whisper.cpp gave, by window, with `unreported` its own bucket", async () => {
+    CUES = [...CUES, turn("stt_turn", W(0, 1), "primary", "en"), turn("stt_turn", W(2, 3), "primary", "hi"), turn("stt_turn", W(4, 5), "primary", "en"), turn("stt_turn", W(6, 7), "primary", null)];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.languages).toEqual([
+      { language: "en", windows: 2 },
+      { language: "hi", windows: 1 },
+      { language: "unreported", windows: 1 },
+    ]);
+  });
+
+  it("overlapping asks are two windows and SAY SO rather than being silently merged", async () => {
+    CUES = [...CUES, turn("stt_turn", W(0, 3), "primary"), turn("stt_turn", W(2, 5), "primary")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.windows_total).toBe(2);
+    expect(t.ms_asked).toBe(6 * MIN); // 3 + 3, not the 5 minutes of wall clock they cover
+    expect(t.windows_overlap).toBe(true);
+  });
+
+  it("windows that do NOT overlap raise no flag", async () => {
+    CUES = [...CUES, turn("stt_turn", W(0, 2), "primary"), turn("stt_turn", W(2, 4), "primary")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.windows_overlap).toBeUndefined();
+  });
+
+  it("a turn cue with no window is COUNTED AND NAMED, not assumed to be zero minutes", async () => {
+    CUES = [...CUES, cue("stt_turn", `${IST}T05:00:00Z`, { text: "written before K2" }), turn("stt_turn", W(0, 1), "primary")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t.turn_cues_without_window).toBe(1);
+    expect(t.windows_total).toBe(1);
+    expect(t.ms_asked).toBe(1 * MIN);
+  });
+
+  it("a day with no turn cues reports zeros over zero windows, not absences", async () => {
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_total: 0, ms_asked: 0, ms_with_words: 0, ms_silent: 0, minutes_asked: 0, windows_backup_mic: 0 });
+    expect(t.languages).toEqual([]);
+    expect(t.turn_cues_without_window).toBeUndefined();
+  });
+
+  it("the four counters keep their OWN aggregate — turn_tape is derived from the cue list", async () => {
+    TURN_COUNTS = [{ type: "stt_turn", n: 412 }];
+    CUES = [...CUES, turn("stt_turn", W(0, 2), "primary")];
+    const out = await run({ room_day_id: DAY });
+    expect((out.reconciliation as Row).turns_total).toBe(412); // the aggregate, not the list
+    expect((out.turn_tape as Row).windows_total).toBe(1);      // the list, not the aggregate
+  });
+
+  it("a failed cue read degrades to an empty rollup and the read is already named", async () => {
+    brainResponder = (text, values) => {
+      if (/FROM room_day WHERE id = \$1/.test(text)) return dayRow ? [dayRow] : [];
+      if (/COUNT\(\*\)::int AS n FROM cue/.test(text.replace(/\s+/g, " "))) return TURN_COUNTS;
+      if (/FROM cue\s+WHERE room_day_id/.test(text.replace(/\s+/g, " "))) throw new Error("relation cue does not exist");
+      if (/FROM visit WHERE room_day_id = \$1 AND COALESCE\(arm, 'rules'\)/.test(text)) return VISITS.filter((v) => (v.arm ?? "rules") === values[1]);
+      return [];
+    };
+    const out = await run({ room_day_id: DAY });
+    expect(out.ok).toBe(true);
+    expect((out.turn_tape as Row).windows_total).toBe(0);
+    expect((out.degraded_reads as string[]).some((d) => d.startsWith("cues_read_failed"))).toBe(true);
+  });
+});

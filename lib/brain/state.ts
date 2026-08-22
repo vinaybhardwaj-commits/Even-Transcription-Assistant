@@ -182,6 +182,42 @@ export const TURN_CUE_TYPES = ["stt_turn", "stt_silence", "speaker_match"] as co
  * a day of turns is thousands of rows whose payloads carry the transcript, and the counts then
  * survive a failure of that larger read instead of vanishing with it.
  */
+/**
+ * The turn writer's own insert (K2, correction 3). SEPARATE from SQL_CUE_INSERT_SCRATCH, which
+ * is NOT touched: that statement is shared with the marks and with the warehouse loader, and its
+ * UNQUALIFIED `ON CONFLICT DO NOTHING` is the right contract for both.
+ *
+ * The difference is one clause, and it is the whole reason this constant exists — the conflict
+ * target is NAMED, and the index predicate is repeated verbatim as Postgres requires to infer a
+ * PARTIAL index:
+ *
+ *     ON CONFLICT (source_ref, type)
+ *       WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'speaker_match')
+ *       DO NOTHING
+ *
+ * WHY IT MATTERS. With an unqualified target, EVERY unique violation on the row is swallowed —
+ * so `dropped` can never be non-zero and the three counts collapse into two. With the target
+ * named, exactly one index absorbs a re-run and everything else throws:
+ *
+ *     a returned row      → WRITTEN
+ *     no row, no error    → ALREADY EXISTED   (0050's index absorbed it)
+ *     a thrown error      → DROPPED, and a drop is a BUG, not a duplicate
+ *
+ * That third line is the one that could not be evidenced before, and it is why two rounds of
+ * design went into the key.
+ *
+ * The predicate is 0050's index predicate and 0051's exclusion list, character for character.
+ * TURN_CUE_TYPES above is the same closed set in TypeScript; the string is spelled out rather
+ * than interpolated because an inference predicate that drifts silently stops matching the index
+ * and every turn write starts throwing.
+ */
+export const SQL_CUE_INSERT_TURN =
+  "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source, source_ref) " +
+  "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text, $8::text) " +
+  "ON CONFLICT (source_ref, type) " +
+  "WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'speaker_match') " +
+  "DO NOTHING RETURNING id, at, created_at";
+
 export const SQL_TURN_CUE_COUNTS =
   "SELECT type, COUNT(*)::int AS n FROM cue " +
   "WHERE room_day_id = $1 AND type IN ('stt_turn', 'stt_silence', 'speaker_match') " +
@@ -465,10 +501,33 @@ export async function insertCue(client: Queryable, roomDayId: string, cue: CueIn
 export type ScratchCueInput = CueInput & { session_id: string | null; source: string | null; source_ref: string | null };
 
 /**
+ * True for a cue that 0050's index covers: source 'replay' AND one of the three turn types.
+ * EXACTLY the index predicate, and exactly SQL_CUE_INSERT_TURN's inference predicate — the
+ * three have to agree or the named arbiter stops matching and every turn write throws.
+ *
+ * Both halves are required. A turn-typed cue with some OTHER source is not in 0050's index, and
+ * naming that arbiter for it would turn a conflict on the warehouse key into an exception
+ * instead of the DO NOTHING the loader relies on.
+ */
+export const isTurnCue = (source: string | null, type: string): boolean =>
+  source === "replay" && (TURN_CUE_TYPES as readonly string[]).includes(type);
+
+/**
  * Fuse slice 2 — insert one cue on the SCRATCH path (0046 columns + 0047's source_ref, ON
  * CONFLICT DO NOTHING). A conflict on either natural key — the replay's or the warehouse's —
  * returns no row; that is reported as already_existed, never as a failure, so a half-finished
  * run is resumable by re-running it.
+ *
+ * SPEECH TURNS (K2, correction 3): a turn cue takes the OTHER statement — same columns, same
+ * parameters, same order, and a NAMED conflict target. Nothing about the caller changes; the
+ * route sends one body and this function picks the arbiter from the row it is about to write,
+ * which is the only place that can know. The counts the caller reports are only honest with the
+ * target named: with an unqualified one, every unique violation is swallowed and `dropped` can
+ * never be non-zero.
+ *
+ * Both statements return NO ROW on the conflict they arbitrate, so `already_existed` means the
+ * same thing on both paths. The difference is what happens to everything else: the shared
+ * statement swallows it, the turn statement THROWS, and the caller counts that as a drop.
  */
 export async function insertScratchCue(
   client: Queryable,
@@ -477,7 +536,8 @@ export async function insertScratchCue(
 ): Promise<{ id: string | null; at: string; created_at: string | null; already_existed: boolean }> {
   const id = newCueId();
   const payloadJson = cue.payload === undefined ? null : JSON.stringify(cue.payload);
-  const r = await client.query<{ id: string; at: Date; created_at: Date }>(SQL_CUE_INSERT_SCRATCH, [
+  const stmt = isTurnCue(cue.source, cue.type) ? SQL_CUE_INSERT_TURN : SQL_CUE_INSERT_SCRATCH;
+  const r = await client.query<{ id: string; at: Date; created_at: Date }>(stmt, [
     id,
     roomDayId,
     cue.type,

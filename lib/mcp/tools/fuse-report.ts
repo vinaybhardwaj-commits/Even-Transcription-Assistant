@@ -87,7 +87,7 @@ const overlaps = (spans: TapeSpan[], from: number, to: number): boolean => spans
 const fuseReport: McpTool = {
   name: "scribe_fuse_report",
   description:
-    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. Every warehouse event is attributed to exactly one of warehouse_opened_a_visit / closed / moved / unbound, and the four sum to warehouse_total. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. SPEECH TURNS (slice A): four more counters — turns_total, turn_silences, speaker_matches and turn_cues_total, the three types partitioning the day's turn cues so they sum to the total. They come from their own aggregate, so they survive a failure of the full cue read; speaker_matches is legitimately 0 until slice B, and a reported zero is not a missing count. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
+    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. Every warehouse event is attributed to exactly one of warehouse_opened_a_visit / closed / moved / unbound, and the four sum to warehouse_total. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. SPEECH TURNS (slice A): four more counters — turns_total, turn_silences, speaker_matches and turn_cues_total, the three types partitioning the day's turn cues so they sum to the total. They come from their own aggregate, so they survive a failure of the full cue read; speaker_matches is legitimately 0 until slice B, and a reported zero is not a missing count. Also `turn_tape`: how much tape was actually listened to, rolled up from payload.window and payload.source_used on the day's turn cues — windows asked, minutes asked / with words / silent (a partition, exact in ms and rounded in minutes), how many windows the BACKUP microphone answered, and the language whisper.cpp reported per window. Windows are counted once each, so overlapping asks add their minutes twice and say so with windows_overlap. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -210,6 +210,97 @@ const fuseReport: McpTool = {
         degraded.push(`turn_cue_counts_failed: ${String((e as Error)?.message ?? e).slice(0, 80)}`);
       }
       const turnCuesTotal = TURN_CUE_TYPES.reduce((a, t) => a + (turnCounts[t] ?? 0), 0);
+
+      // ---- the tape the turns came from (slice A, K2 correction 4) --------------
+      // PRD §10 asked for five more numbers, and every one of them is a rollup over the WINDOW
+      // a turn cue was produced for — payload.window and payload.source_used, written by
+      // buildTurns on every turn and every silence. None is derivable from a turn's own bounds:
+      // a turn is as long as the phrase, not as long as the tape somebody asked about, and a
+      // silent window has no turn at all.
+      //
+      // Derived from the cue list this report ALREADY read, not from a second aggregate. The
+      // four counters above have their own aggregate because they must survive a failure of
+      // that read; these cannot — a window is a payload field, so there is nothing to roll up
+      // if the payloads did not arrive. When the read failed, `cues_read_failed` is already in
+      // `degraded` and this section reports zeros over zero windows rather than a wrong number.
+      type TurnWindow = { from: number; to: number; words: number; silences: number; mics: Set<string>; langs: Set<string> };
+      const windows = new Map<string, TurnWindow>();
+      let turnCuesWithoutWindow = 0;
+      for (const c of inOrder) {
+        if (!(TURN_CUE_TYPES as readonly string[]).includes(c.type)) continue;
+        const pay = c.payload && typeof c.payload === "object" && !Array.isArray(c.payload) ? (c.payload as Record<string, unknown>) : null;
+        const w = pay?.window && typeof pay.window === "object" && !Array.isArray(pay.window) ? (pay.window as Record<string, unknown>) : null;
+        const from = typeof w?.start_ms === "number" ? w.start_ms : NaN;
+        const to = typeof w?.end_ms === "number" ? w.end_ms : NaN;
+        // A cue written before K2 carries no window. COUNTED AND NAMED rather than assumed to
+        // be zero minutes: the day's minutes are then understated, and the reader has to be
+        // told that rather than shown a total that looks complete.
+        if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+          turnCuesWithoutWindow++;
+          continue;
+        }
+        const key = `${from}|${to}`;
+        let entry = windows.get(key);
+        if (!entry) {
+          entry = { from, to, words: 0, silences: 0, mics: new Set(), langs: new Set() };
+          windows.set(key, entry);
+        }
+        if (c.type === "stt_turn") entry.words++;
+        else if (c.type === "stt_silence") entry.silences++;
+        entry.mics.add(typeof pay?.source_used === "string" ? pay.source_used : "unreported");
+        entry.langs.add(typeof pay?.language === "string" ? pay.language : "unreported");
+      }
+      const windowList = [...windows.values()].sort((a, b) => a.from - b.from || a.to - b.to);
+      let msAsked = 0;
+      let msWithWords = 0;
+      let windowsBackup = 0;
+      const langWindows: Record<string, number> = {};
+      for (const w of windowList) {
+        const span = w.to - w.from;
+        msAsked += span;
+        // WITH WORDS means the window produced at least one stt_turn — on ANY read of it. A
+        // window re-transcribed from the other microphone is the same window asked once, and
+        // "somebody spoke in it" is not undone by a second read that heard nothing.
+        if (w.words > 0) msWithWords += span;
+        if (w.mics.has("backup")) windowsBackup++;
+        for (const l of w.langs) langWindows[l] = (langWindows[l] ?? 0) + 1;
+      }
+      const msSilent = msAsked - msWithWords;
+      const windowsWithWords = windowList.filter((w) => w.words > 0).length;
+      // Windows are counted once each, so two overlapping asks are two windows and their minutes
+      // are added twice. Said out loud rather than silently merged: merging would make the three
+      // minute figures stop partitioning, and a reader who sees this flag knows to read the total
+      // as "minutes asked for", not "minutes of tape covered".
+      let windowsOverlap = false;
+      for (let i = 1; i < windowList.length; i++) {
+        if (windowList[i]!.from < windowList[i - 1]!.to) { windowsOverlap = true; break; }
+      }
+      const minutes = (msValue: number) => Math.round(msValue / 6000) / 10;
+      const turnTape = {
+        windows_total: windowList.length,
+        windows_with_words: windowsWithWords,
+        windows_silent: windowList.length - windowsWithWords,
+        // The exact partition, in the unit it was measured in: asked = with_words + silent, to
+        // the millisecond. The minutes below are the same three numbers for a human, and are
+        // rounded independently — so check the identity on the ms, never on the minutes.
+        ms_asked: msAsked,
+        ms_with_words: msWithWords,
+        ms_silent: msSilent,
+        minutes_asked: minutes(msAsked),
+        minutes_with_words: minutes(msWithWords),
+        minutes_silent: minutes(msSilent),
+        // U4's answer, per window. NOT a partition with a primary count: one window read twice
+        // can name both microphones, and it is counted here if EITHER read used the backup.
+        windows_backup_mic: windowsBackup,
+        // What whisper.cpp reported, by how many windows reported it. A day is usually one
+        // language; two is a real answer, not an error, and 'unreported' is its own bucket
+        // rather than being folded into any language.
+        languages: Object.entries(langWindows)
+          .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+          .map(([language, w]) => ({ language, windows: w })),
+        ...(windowsOverlap ? { windows_overlap: true } : {}),
+        ...(turnCuesWithoutWindow ? { turn_cues_without_window: turnCuesWithoutWindow } : {}),
+      };
 
       // ---- marks and their windows ---------------------------------------------
       // The SAME rule arm A binds by: [this mark, the next mark), and the last mark of the day
@@ -393,6 +484,12 @@ const fuseReport: McpTool = {
           last_piece_at: lastPieceMs === null ? null : new Date(lastPieceMs).toISOString(),
           total_recorded_ms: totalRecordedMs,
         },
+        // The tape that was LISTENED TO, which is a different question from the tape that was
+        // recorded above: `tape` is what the microphones produced, `turn_tape` is how much of it
+        // anybody asked scribe_transcribe_range about and what came back. Its own section rather
+        // than four more lines in `reconciliation` — reconciliation is where sources that should
+        // agree are checked against each other, and there is nothing here to disagree with yet.
+        turn_tape: turnTape,
         marks,
         warehouse: {
           by_type: byType,

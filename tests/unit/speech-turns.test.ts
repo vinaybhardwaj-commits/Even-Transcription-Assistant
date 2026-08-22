@@ -169,6 +169,10 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
     expect(t.speaker).toBe("-");
     expect(t.source_ref).toBe(`${SESSION_ID}|${t.start_ms}|${t.end_ms}|-`);
     expect(t.payload).toMatchObject({ text: "hello there", start_ms: t.start_ms, end_ms: t.end_ms, speaker: "-", engine: "whisper", language: "en", session_id: SESSION_ID });
+    // K2 correction 4 — the WINDOW asked for and the microphone that answered it, on every cue.
+    // Neither is derivable from the turn: a turn is as long as the phrase, not as long as the
+    // tape somebody asked about.
+    expect(t.payload).toMatchObject({ window: { start_ms: WIN_FROM, end_ms: WIN_TO }, source_used: null });
   });
 
   it("the clip start is what moves the day: the same segments on a joined clip land elsewhere", () => {
@@ -221,6 +225,8 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
     expect(s.text).toBe("");
     expect(s.source_ref).toBe(`${SESSION_ID}|${WIN_FROM}|${WIN_TO}|-`);
     expect(s.payload).toMatchObject({ segments_considered: 2, dropped_outside_window: 1, dropped_blank: 1 });
+    // the silence carries the window too — it IS the entire population of "minutes silent"
+    expect(s.payload).toMatchObject({ window: { start_ms: WIN_FROM, end_ms: WIN_TO } });
   });
 
   it("no segments at all is a silence, not a crash — and neither is a transcriber that sent none", () => {
@@ -296,7 +302,7 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     expect(out.text).toBe("hello there and later"); // the text answer is unchanged
   });
 
-  it("dry_run:false posts one cue per turn — scratch day, source replay, source_ref, and NO session_id", async () => {
+  it("dry_run:false posts one cue per turn — scratch day, source replay, source_ref, AND session_id (K2)", async () => {
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
     expect(out.ok).toBe(true);
     expect(out.dry_run).toBe(false);
@@ -310,8 +316,10 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
       expect(c.body.source).toBe("replay");
       expect(c.body.type).toBe("stt_turn");
       expect(String(c.body.source_ref).split("|")).toHaveLength(4);
-      // 0046's index is (session_id, type, at); a turn must be in 0050's key ONLY
-      expect(c.body.session_id).toBeUndefined();
+      // K2 correction 2: 0051 narrowed 0046's predicate to exclude the turn types, so the
+      // session goes back ON THE ROW. A turn must be queryable by session without anyone
+      // parsing a string out of source_ref.
+      expect(c.body.session_id).toBe("bs_a");
     }
     expect(out).toMatchObject({ written: 2, already_existed: 0, dropped: 0, attempted: 2 });
     expect(out.natural_key).toEqual(["source_ref", "type"]);
@@ -369,6 +377,38 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     expect(out.stopped_early).toBe("consecutive_failures");
     expect(fetchCalls).toHaveLength(3); // stopped, not all five
     expect((out.failures as Row[])[0]).toMatchObject({ type: "stt_turn" });
+  });
+
+  it("K2 — every posted cue carries the window asked for and the microphone that answered it", async () => {
+    await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx);
+    const WIN_FROM = Date.parse("2026-08-19T05:06:00Z");
+    const WIN_TO = Date.parse("2026-08-19T05:08:00Z");
+    expect(fetchCalls).toHaveLength(2);
+    for (const c of fetchCalls) {
+      // the SAME window on both cues of the window — the day's rollup groups by it
+      expect((c.body.payload as Row).window).toEqual({ start_ms: WIN_FROM, end_ms: WIN_TO });
+      expect((c.body.payload as Row).source_used).toBe("primary");
+      // a turn's own bounds are NOT the window, which is the whole reason the field exists
+      expect((c.body.payload as Row).start_ms).not.toBe(WIN_FROM + 1);
+    }
+  });
+
+  it("K2 — the backup microphone is named in the payload, not only in the answer", () => {
+    const b = buildTurns({
+      sessionId: "bs_a", clipStartMs: 1000, windowStartMs: 1000, windowEndMs: 5000,
+      segments: [{ start_s: 0, end_s: 1, text: "hello" }], language: "en", sourceUsed: "backup",
+    });
+    expect((b.turns[0]!.payload as Row).source_used).toBe("backup");
+    const silent = buildTurns({ sessionId: "bs_a", clipStartMs: 1000, windowStartMs: 1000, windowEndMs: 5000, segments: [], sourceUsed: "backup" });
+    expect((silent.turns[0]!.payload as Row).source_used).toBe("backup");
+  });
+
+  it("K2 — the window does NOT change the key: adding it re-writes nothing", async () => {
+    const first = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
+    const refs = (first.turns as Row[]).map((t) => t.source_ref);
+    // source_ref is the four fields and nothing else, whatever the payload grew
+    expect(refs[0]).toBe(`bs_a|${Date.parse("2026-08-19T05:06:00Z")}|${Date.parse("2026-08-19T05:06:04.320Z")}|-`);
+    for (const r of refs) expect(String(r).split("|")).toHaveLength(4);
   });
 
   it("FAILS DRY: only an explicit false writes — a typo, a string or a null stays dry", async () => {

@@ -24,7 +24,7 @@ import { newVisitId, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_VISIT_INSERT
 import { ambiguityOf, runRulesArm } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm, type ArmResult } from "@/lib/brain/fuse/gemini-arms";
 import { ARMS, VISIT_STATES, type Arm, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
-import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
 type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
 
@@ -102,14 +102,14 @@ async function runArm(arm: Arm, cues: FuseCue[]): Promise<ArmResult> {
 const fuseRun: McpTool = {
   name: "scribe_fuse_run",
   description:
-    "WRITES — run one fuse arm over one SCRATCH room-day and write its visits. arm ∈ rules | hybrid | flash. `rules` is a pure function over the cue list (no model, provider 'none'); `hybrid` runs rules then asks Gemini only about the cases rules could not settle; `flash` asks Gemini to produce the visits. Arms hybrid and flash FAIL CLOSED: if the provider that answers is not gemini:… they write nothing at all and return error 'provider_not_gemini' with the provider they actually got — a fuse served by a local model cannot be scored as Flash. Refuses any room-day whose scratch flag is not true (not_a_scratch_day) before reading anything: no arm ever writes a live clinic day. dry_run defaults TRUE and returns the visits it would write without writing them. Re-running the same arm on the same day writes nothing that exists — the visits are keyed (arm, opened_by). Returns { arm, provider, written, already_existed, failed, visits[] }.",
+    "WRITES — run one fuse arm over one SCRATCH room-day and write its visits. arm ∈ rules | hybrid | flash. `rules` is a pure function over the cue list (no model, provider 'none'); `hybrid` runs rules then asks Gemini only about the cases rules could not settle; `flash` asks Gemini to produce the visits. Arms hybrid and flash FAIL CLOSED: if the provider that answers is not gemini:… they write nothing at all and return error 'provider_not_gemini' with the provider they actually got — a fuse served by a local model cannot be scored as Flash. Refuses any room-day whose scratch flag is not true (not_a_scratch_day) before reading anything: no arm ever writes a live clinic day. dry_run defaults TRUE and FAILS DRY — only an explicit false (or the string 'false') writes; anything else returns the visits it would write without writing them. Re-running the same arm on the same day writes nothing that exists — the visits are keyed (arm, opened_by). Returns { arm, provider, written, already_existed, failed, visits[] }.",
   scope: "write",
   inputSchema: {
     type: "object",
     properties: {
       room_day_id: { type: "string", description: "rd_scratch_… — must be a scratch day" },
       arm: { type: "string", enum: [...ARMS], description: "rules | hybrid | flash" },
-      dry_run: { type: "boolean", default: true, description: "default TRUE — return the visits without writing them" },
+      dry_run: { type: "boolean", default: true, description: "default TRUE and fails dry — only an explicit false writes; anything unrecognised returns the visits without writing them" },
     },
     required: ["room_day_id", "arm"],
     additionalProperties: false,
@@ -123,9 +123,13 @@ const fuseRun: McpTool = {
         return { ok: false, error: "unknown_arm", allowed: ARMS, visits: [], written: 0, already_existed: 0, failed: 0 };
       }
       const arm = armRaw as Arm;
-      // `dry_run` defaults TRUE: absent means dry. argBool returns false when absent, so the
-      // default is applied here explicitly rather than inherited from the helper.
-      const dryRun = args.dry_run === undefined ? true : argBool(args, "dry_run");
+      // `dry_run` defaults TRUE, and it FAILS DRY (K2, correction 5): only an explicit false
+      // turns writing on. This used to read `args.dry_run === undefined ? true : argBool(...)`,
+      // which made every value argBool does not recognise — a typo, a string, a null from a
+      // client that serialises absent fields — mean WRITE. That is the wrong way round for the
+      // one flag standing between a fuse run and visit rows. Same shape as
+      // scribe_transcribe_range, deliberately: two write tools, one rule.
+      const dryRun = !(args.dry_run === false || args.dry_run === "false" || args.dry_run === 0);
 
       // ---- the guard, before a single cue is read -----------------------------
       const dayRes = await query<RoomDayByIdRow>(SQL_ROOM_DAY_BY_ID, [roomDayId]);
