@@ -370,6 +370,100 @@ describe("6/7 — ambiguity and end_reason counts", () => {
   });
 });
 
+describe("6b — every warehouse event lands in exactly ONE bucket", () => {
+  /** the identity that is the entire point of the split */
+  const sums = (rec: Row) => {
+    const four = [rec.warehouse_opened_a_visit, rec.warehouse_closed_a_visit, rec.warehouse_moved_a_visit, rec.warehouse_unbound].map(Number);
+    expect(four.every((n) => Number.isInteger(n) && n >= 0)).toBe(true);
+    expect(four.reduce((a, b) => a + b, 0)).toBe(Number(rec.warehouse_total));
+    return { opened: four[0]!, closed: four[1]!, moved: four[2]!, unbound: four[3]! };
+  };
+  const recOf = async (args: Row = {}) => ((await run({ room_day_id: DAY, ...args })).reconciliation as Row);
+
+  it("1 — the four sum to warehouse_total on the seed fixture, in both identity modes", async () => {
+    expect(sums(await recOf())).toEqual({ opened: 2, closed: 1, moved: 0, unbound: 0 });
+    // the attribution matches on individual_uid INTERNALLY, so it cannot move with include_identity
+    expect(sums(await recOf({ include_identity: true }))).toEqual({ opened: 2, closed: 1, moved: 0, unbound: 0 });
+    // and on the other arm's visits too
+    sums(await recOf({ arm: "hybrid" }));
+  });
+
+  it("2 — a pulse_note that closed a visit counts as CLOSED, not unbound", async () => {
+    const rec = await recOf();
+    expect(rec.warehouse_closed_a_visit).toBe(1);
+    // the note is the only closer here, and it is not sitting in unbound
+    expect(rec.warehouse_unbound).toBe(0);
+    // remove the close from the visit and the same note becomes unbound
+    VISITS = VISITS.map((v) => (v.id === "vis_a" ? { ...v, end_reason: "day_rollover" } : v));
+    const after = await recOf();
+    expect(after.warehouse_closed_a_visit).toBe(0);
+    expect(after.warehouse_unbound).toBe(1);
+    sums(after);
+  });
+
+  it("3 — a dx_event that moved a visit counts as MOVED, not unbound", async () => {
+    CUES = [
+      wh("pstart", `${IST}T05:00:00Z`, "svc_1", { calendar_uid: "c" }),
+      wh("dx_event", `${IST}T06:00:00Z`, "dx_1"),
+    ];
+    VISITS = [{ id: "vis_a", individual_uid: "ind_secret_0001", state: "ended", confidence: 0.9, end_reason: "day_rollover_at_diagnostics", ambiguity: null, arm: "rules", opened_by: "svc_1", opened_by_kind: "pstart" }];
+    const rec = await recOf();
+    expect(sums(rec)).toEqual({ opened: 1, closed: 0, moved: 1, unbound: 0 });
+  });
+
+  it("4 — an event that both opened and later moved is counted ONCE, as opened", async () => {
+    // precedence is opened → closed → moved
+    CUES = [wh("dx_event", `${IST}T06:00:00Z`, "dx_1")];
+    VISITS = [{ id: "vis_a", individual_uid: "ind_secret_0001", state: "ended", confidence: 0.5, end_reason: "day_rollover_at_diagnostics", ambiguity: null, arm: "rules", opened_by: "dx_1", opened_by_kind: "pstart" }];
+    const rec = await recOf();
+    expect(sums(rec)).toEqual({ opened: 1, closed: 0, moved: 0, unbound: 0 });
+  });
+
+  it("5 — a pulse_note that found no target counts as unbound", async () => {
+    // two notes for one person, and only one visit was closed by a note: the second is unbound
+    CUES = [
+      wh("pstart", `${IST}T05:00:00Z`, "svc_1", { calendar_uid: "c" }),
+      wh("pulse_note", `${IST}T06:00:00Z`, "pn_1"),
+      wh("pulse_note", `${IST}T07:00:00Z`, "pn_2"),
+    ];
+    VISITS = [{ id: "vis_a", individual_uid: "ind_secret_0001", state: "ended", confidence: 0.9, end_reason: "pulse_note", ambiguity: null, arm: "rules", opened_by: "svc_1", opened_by_kind: "pstart" }];
+    expect(sums(await recOf())).toEqual({ opened: 1, closed: 1, moved: 0, unbound: 1 });
+  });
+
+  it("6 — a day with no visits puts EVERY warehouse event in unbound", async () => {
+    VISITS = [];
+    const rec = await recOf();
+    expect(sums(rec)).toEqual({ opened: 0, closed: 0, moved: 0, unbound: Number(rec.warehouse_total) });
+    expect(rec.warehouse_total).toBe(3);
+  });
+
+  it("7 — a day with no warehouse events reports four zeros", async () => {
+    CUES = [mark(`${IST}T04:02:29.995Z`)];
+    const rec = await recOf();
+    expect(sums(rec)).toEqual({ opened: 0, closed: 0, moved: 0, unbound: 0 });
+    expect(rec.warehouse_total).toBe(0);
+    expect(rec.marks_total).toBe(1); // marks are unaffected by the split
+  });
+
+  it("the old single count is gone", async () => {
+    const rec = await recOf();
+    expect(rec).not.toHaveProperty("warehouse_bound_to_visit");
+    expect(rec).toHaveProperty("warehouse_opened_a_visit");
+  });
+
+  it("the OPD 7 and Cardiology shapes reproduce the worked expectations", async () => {
+    // Cardiology: one call that corroborated (not an opener), one start, one dx, one note
+    CUES = [
+      wh("pqm_called", `${IST}T06:54:32Z`, "qts_C"),
+      wh("pstart", `${IST}T06:54:33Z`, "svc_C", { calendar_uid: "cal_C" }),
+      wh("dx_event", `${IST}T07:30:00Z`, "dx_C"),
+      wh("pulse_note", `${IST}T07:53:00Z`, "pn_C"),
+    ];
+    VISITS = [{ id: "vis_c1", individual_uid: "ind_secret_0001", state: "ended", confidence: 0.95, end_reason: "pulse_note", ambiguity: null, arm: "rules", opened_by: "svc_C", opened_by_kind: "pstart" }];
+    expect(sums(await recOf())).toEqual({ opened: 1, closed: 1, moved: 1, unbound: 1 });
+  });
+});
+
 describe("8 — identity is off by default", () => {
   it("no individual_uid anywhere in the serialised output", async () => {
     const s = JSON.stringify(await run({ room_day_id: DAY }));

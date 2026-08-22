@@ -50,6 +50,14 @@ export const LOW_CONFIDENCE_BELOW = 0.6;
 
 /** The cue types that come from the warehouse. `consult_mark` is tape-side and is not one. */
 export const WAREHOUSE_CUE_TYPES = ["pqm_called", "pstart", "dx_event", "pulse_note"] as const;
+
+/**
+ * Warehouse events that change a visit's STATE without opening or closing it. Arm A's only one
+ * is the dx_event, which moves a visit to at_diagnostics; this is that arm's vocabulary written
+ * down, not a rule of its own, and it is named here so the reconciliation can say "moved"
+ * rather than lumping those events in with the ones that did nothing.
+ */
+export const STATE_MOVING_CUE_TYPES = ["dx_event"] as const;
 const MARK_CUE_TYPE = "consult_mark";
 
 /**
@@ -79,7 +87,7 @@ const overlaps = (spans: TapeSpan[], from: number, to: number): boolean => spans
 const fuseReport: McpTool = {
   name: "scribe_fuse_report",
   description:
-    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
+    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. Every warehouse event is attributed to exactly one of warehouse_opened_a_visit / closed / moved / unbound, and the four sum to warehouse_total. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -211,7 +219,6 @@ const fuseReport: McpTool = {
       let storedInTape = 0;
       let storedOutsideTape = 0;
       const inTapeDisagreements: Array<Record<string, unknown>> = [];
-      let warehouseBound = 0;
       for (const w of whCues) {
         byType[w.type] = (byType[w.type] ?? 0) + 1;
         const p = payloadOf(w.payload);
@@ -224,7 +231,56 @@ const fuseReport: McpTool = {
         if (stored !== null && stored !== observed) {
           inTapeDisagreements.push({ cue_id: w.id, type: w.type, at: iso(w.at), stored_in_tape_window: stored, observed_in_tape: observed });
         }
-        if (visitByOpenedBy.has(w.source_ref ?? w.id)) warehouseBound++;
+      }
+
+      // ---- how each warehouse event actually bound ------------------------------
+      // One count said "bound to a visit", and it only ever meant OPENED one, so a day where
+      // twelve notes closed a visit and four dx_events moved one to at_diagnostics reported 26
+      // events as having done nothing. They did. Four buckets now, and EVERY event lands in
+      // exactly one of them: the four sum to warehouse_total, which a test asserts, because
+      // that identity is the entire point of the split.
+      //
+      // The visit row does not record WHICH note closed it, so the close is attributed rather
+      // than looked up: each visit whose end_reason names a cue kind consumes one event of that
+      // kind for the same person, earliest first. On this corpus that gives twelve closing
+      // notes and one that found nothing, which is what happened.
+      //
+      // Precedence is opened → closed → moved, so an event that opened a visit is counted as an
+      // opener even if it later moved the same one.
+      const visitsByUid = new Map<string, VisitRow[]>();
+      for (const v of visitRows) {
+        if (!v.individual_uid) continue;
+        const list = visitsByUid.get(v.individual_uid) ?? [];
+        list.push(v);
+        visitsByUid.set(v.individual_uid, list);
+      }
+      // (individual_uid, end_reason) → how many visits that pair closed. `end_reason` is the
+      // arm's own vocabulary and 'pulse_note' is also a cue type, which is exactly how a close
+      // is traced back to the event that caused it; 'day_rollover' names no cue and so matches
+      // nothing, correctly.
+      const closeBudget = new Map<string, number>();
+      for (const v of visitRows) {
+        if (!v.individual_uid || !v.end_reason) continue;
+        const k = `${v.individual_uid}|${v.end_reason}`;
+        closeBudget.set(k, (closeBudget.get(k) ?? 0) + 1);
+      }
+
+      let whOpened = 0;
+      let whClosed = 0;
+      let whMoved = 0;
+      let whUnbound = 0;
+      for (const w of whCues) {
+        if (visitByOpenedBy.has(w.source_ref ?? w.id)) { whOpened++; continue; }
+        const uid = typeof payloadOf(w.payload).individual_uid === "string" ? (payloadOf(w.payload).individual_uid as string) : null;
+        if (!uid) { whUnbound++; continue; }
+        const budgetKey = `${uid}|${w.type}`;
+        const remaining = closeBudget.get(budgetKey) ?? 0;
+        if (remaining > 0) { closeBudget.set(budgetKey, remaining - 1); whClosed++; continue; }
+        // A MOVER changed a visit's state without opening or closing it. Arm A's only mover is
+        // the dx_event, and its rule is exactly this: with no visit for the person it binds to
+        // nothing, with one it opens the hole.
+        if ((STATE_MOVING_CUE_TYPES as readonly string[]).includes(w.type) && visitsByUid.has(uid)) { whMoved++; continue; }
+        whUnbound++;
       }
 
       // ---- the silence, from the CUE TIMELINE and never from visits (S6) --------
@@ -338,8 +394,10 @@ const fuseReport: McpTool = {
           marks_bound: marks.length - marksUnaccounted,
           marks_unaccounted: marksUnaccounted,
           warehouse_total: whCues.length,
-          warehouse_bound_to_visit: warehouseBound,
-          warehouse_unbound: whCues.length - warehouseBound,
+          warehouse_opened_a_visit: whOpened,
+          warehouse_closed_a_visit: whClosed,
+          warehouse_moved_a_visit: whMoved,
+          warehouse_unbound: whUnbound,
           visits_total: visitRows.length,
           visits_by_state: visitsByState,
           visits_unknown: visitsByState.unknown ?? 0,
