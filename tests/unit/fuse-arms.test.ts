@@ -94,11 +94,11 @@ describe("1 — arm A is deterministic", () => {
       wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
       mark(T("03:36")),
     ];
-    const a = runRulesArm(cues);
-    const b = runRulesArm(cues);
+    const a = runRulesArm(cues, { day_complete: true });
+    const b = runRulesArm(cues, { day_complete: true });
     expect(a).toEqual(b);
     // and shuffling the input does not change the output: the arm sorts by clock, then id
-    const c = runRulesArm([...cues].reverse());
+    const c = runRulesArm([...cues].reverse(), { day_complete: true });
     expect(c).toEqual(a);
   });
 
@@ -108,7 +108,7 @@ describe("1 — arm A is deterministic", () => {
       wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" }),
       mark(T("12:00")),
     ];
-    const { visits } = runRulesArm(cues);
+    const { visits } = runRulesArm(cues, { day_complete: true });
     for (const v of visits) {
       expect(v.confidence).not.toBe(0.78);
       for (const r of v.reasons) expect(ALL_RULES_REASONS).toContain(r);
@@ -119,7 +119,7 @@ describe("1 — arm A is deterministic", () => {
 
 describe("2 — a pstart with no mark still mints a visit", () => {
   it("official start, strong identity, opened by the pstart — and a fused day has closed it", () => {
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })]);
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true });
     expect(visits).toHaveLength(1);
     expect(visits[0]).toMatchObject({
       individual_uid: "ind_1", opened_by: "svc_1", opened_by_kind: "pstart", pstart_at: T("03:35"), reasons: [],
@@ -136,7 +136,7 @@ describe("3 — a dx_event opens a hole, never a visit", () => {
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("dx_event", T("05:10"), "svc_dx_1", { individual_uid: "ind_1", attribution: "direct", category: "LAB" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.opened_by).toBe("svc_1"); // still opened by the pstart, not the dx
     // the hole opened at_diagnostics and the boundary closed it — naming what it was doing,
@@ -147,7 +147,7 @@ describe("3 — a dx_event opens a hole, never a visit", () => {
   });
 
   it("a dx_event for a person with no visit mints nothing and is reported as unbound", () => {
-    const { visits, unbound } = runRulesArm([wh("dx_event", T("05:10"), "svc_dx_9", { individual_uid: "ind_9", attribution: "direct" })]);
+    const { visits, unbound } = runRulesArm([wh("dx_event", T("05:10"), "svc_dx_9", { individual_uid: "ind_9", attribution: "direct" })], { day_complete: true });
     expect(visits).toHaveLength(0);
     expect(unbound).toEqual([{ cue_id: expect.any(String), type: "dx_event", reason: RULES_REASONS.DX_EVENT_WITHOUT_VISIT }]);
   });
@@ -158,7 +158,7 @@ describe("4 — §10.3: a second pstart with a different calendar_uid is a SECON
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pstart", T("09:20"), "svc_2", { individual_uid: "ind_1", calendar_uid: "cal_2", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(2);
     expect(visits.map((v) => v.individual_uid)).toEqual(["ind_1", "ind_1"]);
     expect(visits.map((v) => v.opened_by)).toEqual(["svc_1", "svc_2"]);
@@ -170,14 +170,14 @@ describe("4 — §10.3: a second pstart with a different calendar_uid is a SECON
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pstart", T("03:36"), "svc_1b", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(1);
   });
 });
 
 describe("5 — an inferred dx_event alone never mints identity", () => {
   it("no visit, and the reason names the inference", () => {
-    const { visits, unbound } = runRulesArm([wh("dx_event", T("05:10"), "svc_dx_1", { individual_uid: "ind_1", attribution: "inferred" })]);
+    const { visits, unbound } = runRulesArm([wh("dx_event", T("05:10"), "svc_dx_1", { individual_uid: "ind_1", attribution: "inferred" })], { day_complete: true });
     expect(visits).toHaveLength(0);
     expect(unbound[0]!.reason).toBe(RULES_REASONS.INFERRED_ATTRIBUTION_ONLY);
   });
@@ -185,8 +185,8 @@ describe("5 — an inferred dx_event alone never mints identity", () => {
 
 describe("6 — in_tape_window is not read at all", () => {
   it("false neither drops the visit nor attaches tape", () => {
-    const on = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct", in_tape_window: true })]);
-    const off = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct", in_tape_window: false })]);
+    const on = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct", in_tape_window: true })], { day_complete: true });
+    const off = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct", in_tape_window: false })], { day_complete: true });
     expect(off.visits).toHaveLength(1);
     expect(off).toEqual(on); // byte-for-byte the same answer
     // K2 gives every visit a session_id FIELD, but in_tape_window still does not fill it:
@@ -201,7 +201,7 @@ describe("6 — in_tape_window is not read at all", () => {
 
 describe("7/8 — a pulse_note never OPENS a visit, and closes only its own", () => {
   it("a note with no visit mints nothing", () => {
-    const alone = runRulesArm([wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })]);
+    const alone = runRulesArm([wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })], { day_complete: true });
     expect(alone.visits).toHaveLength(0);
     expect(alone.unbound[0]!.reason).toBe(RULES_REASONS.PULSE_NOTE_WITHOUT_VISIT);
   });
@@ -211,7 +211,7 @@ describe("7/8 — a pulse_note never OPENS a visit, and closes only its own", ()
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pstart", T("04:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
       wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     const one = visits.find((v) => v.individual_uid === "ind_1")!;
     const two = visits.find((v) => v.individual_uid === "ind_2")!;
     expect(one.state).toBe("ended");
@@ -226,7 +226,7 @@ describe("7/8 — a pulse_note never OPENS a visit, and closes only its own", ()
       mark(T("11:00")),
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pulse_note", T("12:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     // The claim under test is unchanged and still holds: the NOTE did not close it. K2 closes
     // it by its own mark window instead, which is a different closer with a different token —
@@ -246,7 +246,7 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
     const insideW2 = wh("pstart", T("06:44"), "svc_b", { individual_uid: "ind_b", calendar_uid: "cal_b", attribution: "direct" });
     const outside = wh("pstart", T("06:46"), "svc_c", { individual_uid: "ind_c", calendar_uid: "cal_c", attribution: "direct" });
 
-    const { visits } = runRulesArm([mark(m1), mark(m2), insideW1, insideW2, outside]);
+    const { visits } = runRulesArm([mark(m1), mark(m2), insideW1, insideW2, outside], { day_complete: true });
     // both marks bound something, so NEITHER mints; the three pstarts are the three visits
     expect(visits).toHaveLength(3);
     expect(visits.every((v) => v.opened_by_kind === "pstart")).toBe(true);
@@ -255,9 +255,9 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
     // the 45-minute prior is exactly the boundary, and it is exclusive at the top
     const justInside = new Date(Date.parse(m2) + LAST_MARK_WINDOW_MS - 1000).toISOString();
     const justOutside = new Date(Date.parse(m2) + LAST_MARK_WINDOW_MS).toISOString();
-    const a = runRulesArm([mark(m2), wh("pstart", justInside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })]);
+    const a = runRulesArm([mark(m2), wh("pstart", justInside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })], { day_complete: true });
     expect(a.visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(0); // bound
-    const b = runRulesArm([mark(m2), wh("pstart", justOutside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })]);
+    const b = runRulesArm([mark(m2), wh("pstart", justOutside, "svc_x", { individual_uid: "ind_x", calendar_uid: "cal_x", attribution: "direct" })], { day_complete: true });
     expect(b.visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(1); // window empty
   });
 
@@ -266,7 +266,7 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
       mark(T("04:00")),
       wh("pqm_called", T("04:10"), "qts_1", { individual_uid: "ind_1", attribution: "direct" }),
       wh("pstart", T("04:11"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     // one call + one start + one mark, all the same consult
     expect(visits).toHaveLength(1);
     expect(visits[0]!.opened_by).toBe("svc_1");
@@ -277,7 +277,7 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
     const { visits } = runRulesArm([
       mark(T("04:02")),
       wh("pstart", T("10:39"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(2);
     expect(visits.some((v) => v.opened_by === "svc_1" && v.opened_by_kind === "pstart")).toBe(true);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
@@ -294,7 +294,7 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       mark(T("11:00")),
-    ]);
+    ], { day_complete: true });
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.individual_uid).toBeNull();
     expect(orphan.confidence).toBe(0.3);
@@ -306,7 +306,7 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
   });
 
   it("a call that never started still says why, and closes by the day boundary", () => {
-    const { visits } = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" })]);
+    const { visits } = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" })], { day_complete: true });
     expect(visits[0]).toMatchObject({ opened_by: "qts_9", opened_by_kind: "pqm_called", state: "ended", end_reason: END_REASONS.DAY_ROLLOVER });
     expect(visits[0]!.reasons).toContain(RULES_REASONS.PQM_CALLED_WITHOUT_PSTART);
     expect(visits[0]!.confidence).toBeLessThanOrEqual(0.5);
@@ -322,7 +322,7 @@ describe("8b — the worked expectations from the kickoff, verbatim", () => {
       wh("pqm_called", "2026-08-19T06:54:32.000Z", "qts_c1", { individual_uid: "ind_2", attribution: "direct" }),
       wh("pstart", "2026-08-19T06:54:33.000Z", "svc_c1", { individual_uid: "ind_2", calendar_uid: "cal_c1", attribution: "direct" }),
     ];
-    const { visits } = runRulesArm(cues);
+    const { visits } = runRulesArm(cues, { day_complete: true });
     expect(visits).toHaveLength(3);
     // mark 1 [04:41, 06:08) empty, mark 3 [09:34, 10:19) empty, mark 2 bound both clocks.
     // K2: both empty-window visits still mint at 0.3 — they now CLOSE rather than stay
@@ -340,7 +340,7 @@ describe("8b — the worked expectations from the kickoff, verbatim", () => {
     }
     for (let i = 9; i < 13; i++) cues.push(wh("pqm_called", `2026-08-19T11:${String(i).padStart(2, "0")}:00.000Z`, `qts_${i}`, { individual_uid: `ind_${i}`, attribution: "direct" }));
 
-    const { visits } = runRulesArm(cues);
+    const { visits } = runRulesArm(cues, { day_complete: true });
     expect(visits).toHaveLength(14);
     const kinds = visits.reduce((a: Record<string, number>, v) => ((a[v.opened_by_kind] = (a[v.opened_by_kind] ?? 0) + 1), a), {});
     expect(kinds).toEqual({ pstart: 9, pqm_called: 4, mark: 1 });
@@ -360,7 +360,7 @@ describe("8c — K2 B3: the boundary now closes `unknown` too, under its own tok
       wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),                            // at_diagnostics
       wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" }),                           // called
       mark(T("14:00")),                                                                                                    // unknown
-    ]);
+    ], { day_complete: true });
     // NOTHING is left open, and that now includes the mark-only visit. Before K2 the mark at
     // 14:00 closed by nothing at all and sat open for ever; that was the unrecorded-care case
     // being unrepresentable, not a nicety.
@@ -386,9 +386,7 @@ describe("8c — K2 B3: the boundary now closes `unknown` too, under its own tok
     const rolloverAt = T("18:30");
 
     const inChair = runRulesArm(
-      [wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })],
-      { rolloverAt },
-    ).visits[0]!;
+      [wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true, rolloverAt },).visits[0]!;
     expect(inChair.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
     expect(inChair.ended_at).toBe(rolloverAt);
 
@@ -396,20 +394,18 @@ describe("8c — K2 B3: the boundary now closes `unknown` too, under its own tok
       [
         wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
-      ],
-      { rolloverAt },
-    ).visits[0]!;
+      ], { day_complete: true, rolloverAt },).visits[0]!;
     expect(atDx.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
 
     // A mark pressed inside the last 45 minutes: its window runs PAST the boundary, so it did
     // not elapse and the day closes it instead. This is the only route to day_rollover_unknown,
     // since every `unknown` visit is mark-opened and B2 would otherwise take them all.
-    const late = runRulesArm([mark(T("18:00"))], { rolloverAt }).visits[0]!;
+    const late = runRulesArm([mark(T("18:00"))], { day_complete: true, rolloverAt }).visits[0]!;
     expect(late.end_reason).toBe(END_REASONS.DAY_ROLLOVER_UNKNOWN);
     expect(late.ended_at).toBe(rolloverAt);
 
     // …and a mark pressed early enough for its window to finish still gets B2.
-    const early = runRulesArm([mark(T("10:00"))], { rolloverAt }).visits[0]!;
+    const early = runRulesArm([mark(T("10:00"))], { day_complete: true, rolloverAt }).visits[0]!;
     expect(early.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
   });
 });
@@ -419,7 +415,7 @@ describe("8d — A6: end_reason answers why it ENDED; ambiguity answers why we a
     const { visits } = runRulesArm([
       wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "inferred" }),
       mark(T("14:00")),
-    ]);
+    ], { day_complete: true });
     for (const v of visits) {
       if (v.state !== "ended") expect(v.end_reason).toBeNull();
       else expect(ALL_END_REASONS).toContain(v.end_reason);
@@ -429,7 +425,7 @@ describe("8d — A6: end_reason answers why it ENDED; ambiguity answers why we a
   });
 
   it("several reasons join in CLOSED-SET order, comma separated, never prose", () => {
-    const many = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "inferred" })]);
+    const many = runRulesArm([wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "inferred" })], { day_complete: true });
     const v = many.visits[0]!;
     expect(v.reasons.length).toBeGreaterThan(1);
     const joined = ambiguityOf(v.reasons)!;
@@ -450,7 +446,7 @@ describe("8e — the pulse_note has no third fallback: it closes an OPEN visit o
       started,
       wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }), // closes it
       wh("pulse_note", T("06:00"), "pn_2", { individual_uid: "ind_1", attribution: "direct" }), // finds nothing open
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
     // the SECOND note found no open target: it did nothing and said so
@@ -459,13 +455,13 @@ describe("8e — the pulse_note has no third fallback: it closes an OPEN visit o
   });
 
   it("a note never overwrites an end_reason that is already set", () => {
-    const once = runRulesArm([started, wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })]);
+    const once = runRulesArm([started, wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" })], { day_complete: true });
     const twice = runRulesArm([
       started,
       wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
       wh("pulse_note", T("06:00"), "pn_2", { individual_uid: "ind_1", attribution: "direct" }),
       wh("pulse_note", T("07:00"), "pn_3", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     // the extra notes change NOTHING about the visit — not the reason, not the confidence
     expect(twice.visits).toEqual(once.visits);
   });
@@ -475,7 +471,7 @@ describe("8e — the pulse_note has no third fallback: it closes an OPEN visit o
       wh("pstart", T("03:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pstart", T("09:00"), "svc_2", { individual_uid: "ind_1", calendar_uid: "cal_2", attribution: "direct" }),
       wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     const first = visits.find((v) => v.opened_by === "svc_1")!;
     const second = visits.find((v) => v.opened_by === "svc_2")!;
     expect(first.end_reason).toBe(END_REASONS.PULSE_NOTE);      // open at 05:00
@@ -486,7 +482,7 @@ describe("8e — the pulse_note has no third fallback: it closes an OPEN visit o
     const { visits, unbound } = runRulesArm([
       wh("pstart", T("09:00"), "svc_2", { individual_uid: "ind_1", calendar_uid: "cal_2", attribution: "direct" }),
       wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }), // before it opened
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
     expect(unbound).toHaveLength(0);
@@ -498,7 +494,7 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct", category: "LAB" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.state).toBe("ended");
     expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
@@ -506,7 +502,7 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
   });
 
   it("in_chair at the boundary still closes plain day_rollover", () => {
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })]);
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true });
     expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
   });
 
@@ -515,7 +511,7 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
       wh("pulse_note", T("06:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
   });
 
@@ -524,7 +520,7 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
       mark(T("14:00")),
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pulse_note", T("15:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.state).toBe("ended");
     // Not pulse_note: the 15:00 note belongs to ind_1 and can never reach a visit with no
@@ -540,7 +536,7 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
       wh("pstart", T("06:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
       wh("pulse_note", T("07:00"), "pn_2", { individual_uid: "ind_2", attribution: "direct" }),
       mark(T("20:00")),
-    ]);
+    ], { day_complete: true });
     expect(ALL_END_REASONS).toEqual([
       "pulse_note",
       "day_rollover",
@@ -570,7 +566,7 @@ describe("8g — confirmations: behaviour the designer and orchestrator already 
       cue("consult_mark", "2026-08-19T04:02:29.995Z", { source: "kiosk" }, "replay", null),
       wh("pqm_called", "2026-08-19T04:31:53.000Z", "qts_A", { individual_uid: "ind_A", attribution: "direct" }),
       wh("pqm_called", "2026-08-19T04:36:59.000Z", "qts_B", { individual_uid: "ind_B", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     expect(visits).toHaveLength(2);
     expect(visits.filter((v) => v.state === "unknown")).toHaveLength(0);   // no extra row
     expect(visits.filter((v) => v.opened_by_kind === "mark")).toHaveLength(0);
@@ -584,7 +580,7 @@ describe("8g — confirmations: behaviour the designer and orchestrator already 
       cue("consult_mark", "2026-08-19T09:34:23.931Z", { source: "kiosk" }, "replay", null),
       wh("pqm_called", "2026-08-19T06:54:32.000Z", "qts_C", { individual_uid: "ind_C", attribution: "direct" }),
       wh("pstart", "2026-08-19T06:54:33.000Z", "svc_C", { individual_uid: "ind_C", calendar_uid: "cal_C", attribution: "direct" }),
-    ]);
+    ], { day_complete: true });
     const forC = visits.filter((v) => v.individual_uid === "ind_C");
     expect(forC).toHaveLength(1);                       // the call did not mint a second row
     expect(forC[0]!.opened_by).toBe("svc_C");           // pstart is the stronger opener
@@ -599,8 +595,8 @@ describe("8g — confirmations: behaviour the designer and orchestrator already 
       wh("pulse_note", T("08:00"), "pn_1", { individual_uid: "ind_2", attribution: "direct" }),
       mark(T("20:00")),
     ];
-    expect(runRulesArm(cues)).toEqual(runRulesArm(cues));
-    expect(runRulesArm([...cues].reverse())).toEqual(runRulesArm(cues));
+    expect(runRulesArm(cues, { day_complete: true })).toEqual(runRulesArm(cues, { day_complete: true }));
+    expect(runRulesArm([...cues].reverse(), { day_complete: true })).toEqual(runRulesArm(cues, { day_complete: true }));
   });
 });
 

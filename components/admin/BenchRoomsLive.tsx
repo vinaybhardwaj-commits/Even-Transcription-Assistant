@@ -295,6 +295,12 @@ export function BenchRoomsLive() {
   const [, setTick] = React.useState(0);
   /** Stop is two clicks: the first arms this, the second sends. */
   const [confirmStop, setConfirmStop] = React.useState<string | null>(null);
+  /**
+   * K5 A2 — the orphan repair's own arm, deliberately NOT shared with confirmStop. They look
+   * similar and mean opposite things: stop ends a live tape, this closes a dead one. A shared
+   * arming flag would let a mis-tap on one become a confirm on the other.
+   */
+  const [confirmOrphan, setConfirmOrphan] = React.useState<string | null>(null);
   const [note, setNote] = React.useState<string | null>(null);
 
   const fetchListeners = React.useCallback(async () => {
@@ -351,6 +357,13 @@ export function BenchRoomsLive() {
     return () => globalThis.clearTimeout(t);
   }, [confirmStop]);
 
+  // …and so does the repair. Same reason, same window.
+  React.useEffect(() => {
+    if (!confirmOrphan) return;
+    const t = globalThis.setTimeout(() => setConfirmOrphan(null), CONFIRM_STOP_MS);
+    return () => globalThis.clearTimeout(t);
+  }, [confirmOrphan]);
+
   const nowMs = Date.now();
   const listenerMap = React.useMemo(() => {
     const m = new Map<string, ListenerRowView>();
@@ -369,6 +382,38 @@ export function BenchRoomsLive() {
     const rec = rooms.find((r) => r.recording);
     if (rec) selectedRoom.suggest(rec.room.id);
   }, [rooms]);
+
+  /**
+   * K5 A2 — the repair. Its own sender, not `send`, because the answer shape is different: it
+   * returns the closed session and the chunk counts either side, and those are what the
+   * operator needs to see. A refusal is reported by NAME, never as a generic failure.
+   */
+  const closeOrphan = React.useCallback(async (roomId: string) => {
+    setNote(null);
+    try {
+      const res = await fetch("/api/admin/bench/command", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ room_id: roomId, kind: "close_orphan" }),
+      });
+      const j = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || j.ok !== true) {
+        setNote(`close abandoned session: ${String(j.error ?? `http_${res.status}`)}${j.hint ? ` — ${String(j.hint)}` : ""}`);
+      } else {
+        const kept = j.chunks_before === j.chunks_after;
+        setNote(
+          `closed ${String(j.session_id)} — ${String(j.chunks_before)} chunk${j.chunks_before === 1 ? "" : "s"} ${kept ? "kept, untouched" : "CHANGED — investigate"}. The room can record again.`,
+        );
+      }
+    } catch (e) {
+      setNote(`close abandoned session: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setConfirmOrphan(null);
+      void fetchListeners();
+      void fetchRollup();
+    }
+  }, [fetchListeners, fetchRollup]);
 
   const send = React.useCallback(async (roomId: string, kind: string, overridePause = false) => {
     setNote(null);
@@ -460,6 +505,11 @@ export function BenchRoomsLive() {
             : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.backup_reads_no_chunks || r.marks_not_sent > 0
               ? "amber"
               : st.level === "unknown" ? "unknown" : "ok";
+          // K5 A2 — the deadlock condition, computed from the two facts the page already has.
+          // A kiosk "claims" this session only if it is polling FRESH and naming THIS session;
+          // null, a different id, or a stale poll all mean the session has been abandoned.
+          const kioskClaimsThis = Boolean(l && l.listening && l.recording_session_id === r.session_id);
+          const orphaned = listenersKnown && (r.recording || r.paused_session) && !kioskClaimsThis;
           const isSelected = selectedId === r.room.id;
           return (
             // B3 — this WAS a <button> with five more <button>s inside it, which is invalid
@@ -636,6 +686,47 @@ export function BenchRoomsLive() {
                 <p className="mt-2 text-caption text-danger-700 leading-snug">
                   Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
                 </p>
+              ) : null}
+
+              {/* K5 A2 — THE REPAIR. Shown ONLY on a room whose session is open while no kiosk
+                  claims it: the room is deadlocked, because end_day has no kiosk to act on and
+                  start_day is refused by the open session. On a healthy room this control is
+                  not rendered at all, and the server refuses it as well (A4) — the UI decides
+                  what to OFFER, the server decides what is allowed. */}
+              {orphaned ? (
+                <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50 p-3" onClick={(e) => e.stopPropagation()}>
+                  <p className="text-caption text-even-navy-800 leading-snug">
+                    <span className="font-semibold">This room is stuck.</span> Its session is still open but no
+                    kiosk page is recording it, so stop has nothing to act on and start is refused. Closing the
+                    abandoned session lets the room record again.
+                  </p>
+                  <p className="text-caption text-even-ink-500 leading-snug mt-1">
+                    Every chunk already uploaded is kept — this only ends the session row.
+                    {l ? ` The room page last polled ${fmtAge(l.age_ms)} ago.` : " No kiosk page has ever polled this room."}
+                  </p>
+                  {confirmOrphan === r.room.id ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void closeOrphan(r.room.id)}
+                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-warning-500 text-even-navy-800 ring-2 ring-warning-700 ring-offset-1 hover:bg-warning-700 hover:text-even-white"
+                      >
+                        confirm — close abandoned session
+                      </button>
+                      <p className="mt-1 text-caption text-warning-700">
+                        Disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
+                      </p>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmOrphan(r.room.id)}
+                      className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label bg-even-white border border-warning-200 hover:bg-warning-100"
+                    >
+                      Close abandoned session
+                    </button>
+                  )}
+                </div>
               ) : null}
             </div>
           );

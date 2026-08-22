@@ -34,6 +34,7 @@ import {
   insertCommand,
   type CommandKind,
 } from "@/lib/bench-commands";
+import { closeOrphanedSession, CLOSE_ORPHAN_KIND } from "@/lib/bench-orphan";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,7 +60,7 @@ const fail = (status: number, error: string, extra: Record<string, unknown> = {}
 async function auditCommand(
   adminId: string,
   roomId: string,
-  kind: CommandKind,
+  kind: CommandKind | typeof CLOSE_ORPHAN_KIND,
   overridePause: boolean,
   outcome: Record<string, unknown>,
 ) {
@@ -85,9 +86,41 @@ export async function POST(req: Request) {
   }
   const roomId = typeof body.room_id === "string" && body.room_id.length > 0 && body.room_id.length <= 128 ? body.room_id : null;
   if (!roomId) return fail(400, "room_id_required");
-  const kind = body.kind as CommandKind;
-  if (!(COMMAND_KINDS as readonly string[]).includes(kind)) return fail(400, "unknown_kind", { allowed: COMMAND_KINDS });
+  const kind = body.kind as CommandKind | typeof CLOSE_ORPHAN_KIND;
+  if (!(COMMAND_KINDS as readonly string[]).includes(kind) && kind !== CLOSE_ORPHAN_KIND) {
+    return fail(400, "unknown_kind", { allowed: [...COMMAND_KINDS, CLOSE_ORPHAN_KIND] });
+  }
   const overridePause = body.override_pause === true;
+
+  // ---- K5 A2: close_orphan — a REPAIR, and the one kind that is never queued ---------------
+  //
+  // Every other kind here is an instruction FOR A KIOSK, put on the bus for it to poll. This
+  // one exists precisely because there is no kiosk to instruct: the tab that owned the session
+  // is gone, so a queued command has nobody to execute it. It runs SERVER-SIDE and returns.
+  //
+  // It is deliberately NOT in COMMAND_KINDS. That list is the kiosk's vocabulary — pollCommands
+  // hands those to a browser — and a kind the kiosk cannot execute has no business in it.
+  if (kind === CLOSE_ORPHAN_KIND) {
+    const out = await closeOrphanedSession({ roomId, actorType: "admin", actorId: adminId });
+    if (!out.ok) {
+      return fail(out.error === "db_error" ? 503 : 409, out.error, {
+        session_id: out.session_id,
+        ...(out.evidence ? { listener_evidence: out.evidence } : {}),
+        hint:
+          out.error === "kiosk_attached"
+            ? "a kiosk is polling and claims this session — it is alive. Use stop to end the day."
+            : out.error === "no_open_session"
+              ? "this room has no session left open; nothing to repair"
+              : undefined,
+      });
+    }
+    await auditCommand(adminId, roomId, kind, overridePause, {
+      queued: false,
+      closed_session_id: out.session_id,
+      chunks_preserved: out.chunks_before === out.chunks_after,
+    });
+    return NextResponse.json({ ...out, queued: false }, noStore);
+  }
 
   try {
     // START is the only kind with a pre-check, and the pre-check is NOT ours. decideStart owns

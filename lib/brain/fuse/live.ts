@@ -72,6 +72,8 @@ const debounce = new Map<string, DebounceEntry>();
 export type LiveFuseResult = {
   ok: boolean;
   room_day_id: string;
+  /** B3 — which branch the runner chose for this day. Observable, not inferred. */
+  day_complete?: boolean;
   skipped?: "flag_off" | "debounced";
   cues_read?: number;
   drafts?: number;
@@ -111,6 +113,11 @@ const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() :
  * arm A's existing "a fused day has nothing still running" rule meeting a day that has not
  * finished, and K2 does not change the rule.
  */
+/** The IST calendar date of an instant — the same rule istDate() uses, applied to a given ISO. */
+function istDate0(iso: string): string {
+  return new Date(new Date(iso).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export function istDayRolloverAt(istDate: string): string {
   const startOfDay = new Date(`${istDate}T00:00:00.000+05:30`);
   return new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000).toISOString();
@@ -216,7 +223,23 @@ async function fuseNow(roomId: string, roomDayId: string, istDate: string): Prom
   }));
 
   // ---- COMPUTE, NO LOCK, PURE (D4) --------------------------------------------------------
-  const { visits: drafts } = runRulesArm(cues, { rolloverAt: istDayRolloverAt(istDate), sessions });
+  //
+  // K5 B3 — IS THIS DAY OVER? The runner knows; the arm must not guess.
+  //
+  //   today          → NO. The boundary is hours away, so rolling over to it would write every
+  //                    visit already-ended at an instant that has not happened. `asOf` is now:
+  //                    the only instant actually known to have passed, which is what a mark's
+  //                    45-minute window is measured against.
+  //   a PAST IST day → YES. Nothing more is coming; the boundary is real and behind us.
+  //
+  // This is the one clock read in the fuse, and it is HERE, in the runner, not in rules.ts.
+  const nowIso = new Date().toISOString();
+  const dayComplete = istDate < istDate0(nowIso);
+  const { visits: drafts } = runRulesArm(cues, {
+    day_complete: dayComplete,
+    ...(dayComplete ? { rolloverAt: istDayRolloverAt(istDate) } : { asOf: nowIso }),
+    sessions,
+  });
   // (arm, opened_by) is the unique key, so opened_by is how a draft finds the row it already wrote.
   const existing = new Map<string, VisitRow>();
   for (const v of visitRes.rows) if (v.opened_by) existing.set(v.opened_by, v);
@@ -275,7 +298,7 @@ async function fuseNow(roomId: string, roomDayId: string, istDate: string): Prom
   });
   const lock_ms = lockAcquiredAt > 0 ? Date.now() - lockAcquiredAt : 0;
 
-  return { ok: true, room_day_id: roomDayId, cues_read: cues.length, drafts: drafts.length, ...counts, lock_ms, compute_ms };
+  return { ok: true, room_day_id: roomDayId, day_complete: dayComplete, cues_read: cues.length, drafts: drafts.length, ...counts, lock_ms, compute_ms };
 }
 
 function insertParams(roomDayId: string, arm: string, d: DraftVisit): unknown[] {

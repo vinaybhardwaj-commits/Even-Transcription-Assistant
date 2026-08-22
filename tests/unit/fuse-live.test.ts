@@ -51,9 +51,7 @@ describe("U1 — the closer's own instant is recorded, not the arm's clock", () 
       [
         wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         wh("pulse_note", noteAt, "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     expect(visits).toHaveLength(1);
     expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
     expect(visits[0]!.ended_at).toBe(noteAt);
@@ -66,9 +64,7 @@ describe("U1 — the closer's own instant is recorded, not the arm's clock", () 
       [
         wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         mark(T("09:00")),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     for (const v of visits) {
       if (v.state !== "ended") expect(v.ended_at).toBeNull();
       else expect(v.end_reason).not.toBeNull();
@@ -81,7 +77,7 @@ describe("U1 — the closer's own instant is recorded, not the arm's clock", () 
 // =========================================================================================
 describe("U2 — the mark-only visit closes; before K2 it was closed by nothing, ever", () => {
   it("route 1 — next_opener: the next visit opening ends it, at that instant", () => {
-    const { visits } = runRulesArm([mark(T("04:00")), wh("pstart", T("10:39"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], {
+    const { visits } = runRulesArm([mark(T("04:00")), wh("pstart", T("10:39"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true,
       rolloverAt: ROLLOVER,
     });
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
@@ -93,7 +89,7 @@ describe("U2 — the mark-only visit closes; before K2 it was closed by nothing,
   });
 
   it("route 2 — mark_window_elapsed: no next opener, so its own 45-minute window ends it", () => {
-    const { visits } = runRulesArm([mark(T("10:00"))], { rolloverAt: ROLLOVER });
+    const { visits } = runRulesArm([mark(T("10:00"))], { day_complete: true, rolloverAt: ROLLOVER });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.state).toBe("ended");
     expect(visits[0]!.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
@@ -103,7 +99,7 @@ describe("U2 — the mark-only visit closes; before K2 it was closed by nothing,
     // A mark pressed inside the last 45 minutes of the day. Its window never elapsed, so
     // claiming mark_window_elapsed would assert an interval that did not finish.
     const lateMark = new Date(Date.parse(ROLLOVER) - 10 * 60 * 1000).toISOString();
-    const { visits } = runRulesArm([mark(lateMark)], { rolloverAt: ROLLOVER });
+    const { visits } = runRulesArm([mark(lateMark)], { day_complete: true, rolloverAt: ROLLOVER });
     expect(visits[0]!.state).toBe("ended");
     expect(visits[0]!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_UNKNOWN);
     expect(visits[0]!.ended_at).toBe(ROLLOVER);
@@ -129,7 +125,7 @@ describe("U2 — the mark-only visit closes; before K2 it was closed by nothing,
 describe("U3 — the mark window is exactly LAST_MARK_WINDOW_MS, to the millisecond", () => {
   it("ended_at is mark time + 45 minutes, and 45 minutes is what the constant says", () => {
     const at = T("10:00");
-    const { visits } = runRulesArm([mark(at)], { rolloverAt: ROLLOVER });
+    const { visits } = runRulesArm([mark(at)], { day_complete: true, rolloverAt: ROLLOVER });
     expect(visits[0]!.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
     expect(Date.parse(visits[0]!.ended_at!) - Date.parse(at)).toBe(LAST_MARK_WINDOW_MS);
     expect(LAST_MARK_WINDOW_MS).toBe(45 * 60 * 1000);
@@ -148,9 +144,7 @@ describe("U4 — B5 precedence: the FIRST eligible closer wins and the rest are 
         wh("pstart", T("03:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         wh("pulse_note", T("04:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
         wh("pstart", T("05:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     const first = visits.find((v) => v.opened_by === "svc_1")!;
     expect(first.end_reason).toBe(END_REASONS.PULSE_NOTE);
     expect(first.ended_at).toBe(T("04:00"));
@@ -162,9 +156,7 @@ describe("U4 — B5 precedence: the FIRST eligible closer wins and the rest are 
     // are eligible and mark_window_elapsed is the EARLIER instant — B1 still wins, because the
     // chain is ordered by precedence and not by which clock reads lower.
     const { visits } = runRulesArm(
-      [mark(T("10:00")), wh("pstart", T("11:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })],
-      { rolloverAt: ROLLOVER },
-    );
+      [mark(T("10:00")), wh("pstart", T("11:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true, rolloverAt: ROLLOVER },);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.end_reason).toBe(END_REASONS.NEXT_OPENER);
     expect(orphan.ended_at).toBe(T("11:00"));
@@ -172,7 +164,7 @@ describe("U4 — B5 precedence: the FIRST eligible closer wins and the rest are 
   });
 
   it("mark_window_elapsed beats day_rollover_unknown", () => {
-    const { visits } = runRulesArm([mark(T("10:00"))], { rolloverAt: ROLLOVER });
+    const { visits } = runRulesArm([mark(T("10:00"))], { day_complete: true, rolloverAt: ROLLOVER });
     expect(visits[0]!.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
     expect(visits[0]!.end_reason).not.toBe(END_REASONS.DAY_ROLLOVER_UNKNOWN);
   });
@@ -182,9 +174,7 @@ describe("U4 — B5 precedence: the FIRST eligible closer wins and the rest are 
       [
         wh("pstart", T("03:00"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         wh("pstart", T("05:00"), "svc_2", { individual_uid: "ind_2", calendar_uid: "cal_2", attribution: "direct" }),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     expect(visits.find((v) => v.opened_by === "svc_1")!.end_reason).toBe(END_REASONS.NEXT_OPENER);
     // only the LAST visit reaches the boundary
     expect(visits.find((v) => v.opened_by === "svc_2")!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
@@ -196,7 +186,7 @@ describe("U4 — B5 precedence: the FIRST eligible closer wins and the rest are 
 // =========================================================================================
 describe("U5 — a visit with no tape coverage is still emitted, with a NULL binding", () => {
   it("no sessions at all → null session_id and null bounds, and the visit survives", () => {
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], {
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true,
       rolloverAt: ROLLOVER,
     });
     expect(visits).toHaveLength(1);
@@ -208,7 +198,7 @@ describe("U5 — a visit with no tape coverage is still emitted, with a NULL bin
 
   it("a session that does NOT cover the visit is not forced onto it", () => {
     const sessions: TapeSession[] = [{ id: "bs_x", started_at: T("14:00"), ended_at: T("16:00") }];
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], {
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true,
       rolloverAt: ROLLOVER,
       sessions,
     });
@@ -221,9 +211,7 @@ describe("U5 — a visit with no tape coverage is still emitted, with a NULL bin
       [
         wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
         wh("pulse_note", T("05:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
-      ],
-      { rolloverAt: ROLLOVER, sessions },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER, sessions },);
     const v = visits[0]!;
     expect(v.session_id).toBe("bs_x");
     // visit [03:35, 05:00) ∩ tape [03:00, 04:00) = [03:35, 04:00)
@@ -235,7 +223,7 @@ describe("U5 — a visit with no tape coverage is still emitted, with a NULL bin
   it("a still-running tape and a still-open visit give a start with a NULL end, which 0056 allows", () => {
     const sessions: TapeSession[] = [{ id: "bs_live", started_at: T("03:00"), ended_at: null }];
     // No rolloverAt supplied → the boundary close has no instant, so ended_at stays null.
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], {
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true,
       sessions,
     });
     const v = visits[0]!;
@@ -248,7 +236,7 @@ describe("U5 — a visit with no tape coverage is still emitted, with a NULL bin
 describe("U6 — a tape window with no warehouse evidence still yields a visit, with no identity", () => {
   it("the mark-only visit binds to the tape and keeps a null individual_uid", () => {
     const sessions: TapeSession[] = [{ id: "bs_x", started_at: T("09:00"), ended_at: T("12:00") }];
-    const { visits } = runRulesArm([mark(T("10:00"))], { rolloverAt: ROLLOVER, sessions });
+    const { visits } = runRulesArm([mark(T("10:00"))], { day_complete: true, rolloverAt: ROLLOVER, sessions });
     expect(visits).toHaveLength(1);
     const v = visits[0]!;
     expect(v.individual_uid).toBeNull();
@@ -272,21 +260,21 @@ describe("U7 — runRulesArm is still a pure function", () => {
   const sessions: TapeSession[] = [{ id: "bs_x", started_at: T("03:00"), ended_at: T("12:00") }];
 
   it("same input, same output, twice — with the new options in play", () => {
-    const a = runRulesArm(cues, { rolloverAt: ROLLOVER, sessions });
-    const b = runRulesArm(cues, { rolloverAt: ROLLOVER, sessions });
+    const a = runRulesArm(cues, { day_complete: true, rolloverAt: ROLLOVER, sessions });
+    const b = runRulesArm(cues, { day_complete: true, rolloverAt: ROLLOVER, sessions });
     expect(a).toEqual(b);
   });
 
   it("input order does not change the answer", () => {
-    const a = runRulesArm(cues, { rolloverAt: ROLLOVER, sessions });
-    const b = runRulesArm([...cues].reverse(), { rolloverAt: ROLLOVER, sessions });
+    const a = runRulesArm(cues, { day_complete: true, rolloverAt: ROLLOVER, sessions });
+    const b = runRulesArm([...cues].reverse(), { day_complete: true, rolloverAt: ROLLOVER, sessions });
     expect(b).toEqual(a);
   });
 
   it("it does not mutate its arguments", () => {
     const cuesCopy = JSON.parse(JSON.stringify(cues));
     const sessCopy = JSON.parse(JSON.stringify(sessions));
-    runRulesArm(cues, { rolloverAt: ROLLOVER, sessions });
+    runRulesArm(cues, { day_complete: true, rolloverAt: ROLLOVER, sessions });
     expect(cues).toEqual(cuesCopy);
     expect(sessions).toEqual(sessCopy);
   });
@@ -306,7 +294,7 @@ describe("U7 — runRulesArm is still a pure function", () => {
 // =========================================================================================
 describe("U8 — the clinician is DERIVED, and only 'mark' | 'operator' | 'unknown' can appear", () => {
   it("nothing said → 'unknown' with a null id, which is a terminal answer and not an error", () => {
-    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], {
+    const { visits } = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })], { day_complete: true,
       rolloverAt: ROLLOVER,
     });
     expect(visits[0]!.clinician_source).toBe("unknown");
@@ -315,7 +303,7 @@ describe("U8 — the clinician is DERIVED, and only 'mark' | 'operator' | 'unkno
   });
 
   it("a consult_mark carrying clinician_id derives source 'mark'", () => {
-    const { visits } = runRulesArm([mark(T("10:00"), { source: "kiosk", clinician_id: "doc_abc" })], { rolloverAt: ROLLOVER });
+    const { visits } = runRulesArm([mark(T("10:00"), { source: "kiosk", clinician_id: "doc_abc" })], { day_complete: true, rolloverAt: ROLLOVER });
     expect(visits[0]!.clinician_id).toBe("doc_abc");
     expect(visits[0]!.clinician_source).toBe("mark");
     expect(visits[0]!.clinician_confidence).toBeGreaterThan(0);
@@ -326,9 +314,7 @@ describe("U8 — the clinician is DERIVED, and only 'mark' | 'operator' | 'unkno
       [
         mark(T("10:00"), { source: "kiosk", clinician_id: "doc_from_mark" }),
         cue("operator_pin", T("10:05"), { source: "mcp", clinician_id: "doc_from_operator" }),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     const v = visits.find((x) => x.opened_by_kind === "mark")!;
     expect(v.clinician_source).toBe("operator");
     expect(v.clinician_id).toBe("doc_from_operator");
@@ -336,9 +322,7 @@ describe("U8 — the clinician is DERIVED, and only 'mark' | 'operator' | 'unkno
 
   it("a payload that TYPES clinician_source is ignored — the field is never read", () => {
     const { visits } = runRulesArm(
-      [mark(T("10:00"), { source: "kiosk", clinician_id: "doc_abc", clinician_source: "roster", clinician_confidence: 0.99 })],
-      { rolloverAt: ROLLOVER },
-    );
+      [mark(T("10:00"), { source: "kiosk", clinician_id: "doc_abc", clinician_source: "roster", clinician_confidence: 0.99 })], { day_complete: true, rolloverAt: ROLLOVER },);
     // the cue TYPE decided the label, not the payload's claim about itself
     expect(visits[0]!.clinician_source).toBe("mark");
     expect(visits[0]!.clinician_source).not.toBe("roster");
@@ -355,9 +339,7 @@ describe("U8 — the clinician is DERIVED, and only 'mark' | 'operator' | 'unkno
         cue("speaker_match", T("04:00"), { clinician_id: "doc_v", clinician_source: "voice" }),
         mark(T("10:00"), { source: "kiosk", clinician_id: "doc_m" }),
         cue("operator_pin", T("11:00"), { source: "mcp", clinician_id: "doc_o" }),
-      ],
-      { rolloverAt: ROLLOVER },
-    );
+      ], { day_complete: true, rolloverAt: ROLLOVER },);
     for (const v of visits) {
       expect(v.clinician_source).not.toBe("roster");
       expect(v.clinician_source).not.toBe("voice");
@@ -496,6 +478,90 @@ describe("FUSE_LIVE_ENABLED — off by default, per-room, and never global", () 
     // the call sits inside the `if`, and the scratch guard is untouched
     expect(src).toMatch(/if \(isFuseLiveEnabled\(roomId\)\) \{\s*\n\s*const fused = await scheduleLiveFuse\(/);
     expect(src).toContain('if (day.scratch !== true) throw new HttpError(409, "not_a_scratch_day");');
+  });
+});
+
+// =========================================================================================
+// K5 B1 — day_complete. The rollover pass must not close a day that is not over.
+// =========================================================================================
+describe("K5 B1 — day_complete:false leaves an unfinished day open", () => {
+  const openers: FuseCue[] = [
+    wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+    wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
+    wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" }),
+  ];
+
+  it("B-a — open visits STAY OPEN, and nothing carries an ended_at at all", () => {
+    const { visits } = runRulesArm(openers, { day_complete: false, asOf: T("09:00") });
+    // the last visit has no next opener and no rollover to close it
+    const last = visits.find((v) => v.opened_by === "qts_9")!;
+    expect(last.state).toBe("called");
+    expect(last.end_reason).toBeNull();
+    expect(last.ended_at).toBeNull();
+  });
+
+  it("B-a — NO visit is written with an ended_at in the future", () => {
+    // A mark pressed four minutes before `asOf`: its 45-minute window has NOT elapsed, so
+    // closing it at mark+45 would stamp an instant that has not happened. Same class of bug as
+    // the rollover, and the reason `asOf` exists.
+    const asOf = T("10:04");
+    const { visits } = runRulesArm([...openers, mark(T("10:00"))], { day_complete: false, asOf });
+    const asOfMs = Date.parse(asOf);
+    for (const v of visits) {
+      if (v.ended_at !== null) expect(Date.parse(v.ended_at)).toBeLessThanOrEqual(asOfMs);
+    }
+    const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
+    expect(orphan.state).toBe("unknown");
+    expect(orphan.ended_at).toBeNull();
+  });
+
+  it("a mark whose window HAS elapsed by asOf still closes — the horizon is a fact, not a mood", () => {
+    const { visits } = runRulesArm([mark(T("10:00"))], { day_complete: false, asOf: T("11:00") });
+    expect(visits[0]!.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
+    expect(Date.parse(visits[0]!.ended_at!)).toBe(Date.parse(T("10:00")) + LAST_MARK_WINDOW_MS);
+  });
+
+  it("none of the three rollover reasons is reachable when the day is not complete", () => {
+    const { visits } = runRulesArm([...openers, mark(T("23:50"))], { day_complete: false, asOf: T("23:55") });
+    const rollovers = [END_REASONS.DAY_ROLLOVER, END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS, END_REASONS.DAY_ROLLOVER_UNKNOWN];
+    for (const v of visits) expect(rollovers).not.toContain(v.end_reason);
+  });
+
+  it("B-b — the same cues with day_complete:true close exactly as before", () => {
+    const { visits } = runRulesArm(openers, { day_complete: true, rolloverAt: ROLLOVER });
+    const last = visits.find((v) => v.opened_by === "qts_9")!;
+    expect(last.state).toBe("ended");
+    expect(last.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+    expect(last.ended_at).toBe(ROLLOVER);
+  });
+
+  it("the DEFAULT is false — the safe answer to 'may I close every open visit' is no", () => {
+    const { visits } = runRulesArm(openers);
+    expect(visits.every((v) => v.end_reason !== END_REASONS.DAY_ROLLOVER)).toBe(true);
+    expect(visits.find((v) => v.opened_by === "qts_9")!.state).toBe("called");
+  });
+
+  it("B-c — still pure with the new parameter, and still reads no clock", () => {
+    const o = { day_complete: false as const, asOf: T("09:00") };
+    expect(runRulesArm(openers, o)).toEqual(runRulesArm(openers, o));
+    expect(runRulesArm([...openers].reverse(), o)).toEqual(runRulesArm(openers, o));
+    const src = readFileSync("lib/brain/fuse/rules.ts", "utf8");
+    expect(src).not.toMatch(/\bDate\.now\(\)/);
+    expect(src).not.toMatch(/\bnew Date\(\s*\)/);
+    expect(src).not.toMatch(/\bMath\.random\b/);
+    expect(src).not.toMatch(/newVisitId|nanoid|randomUUID|crypto\./);
+    // and it does NOT decide day-completeness for itself
+    expect(src).not.toMatch(/istDate\(|isToday|dayIsOver/);
+  });
+
+  it("B3 — the three callers each state it, and rules.ts never infers it", () => {
+    const fuseRun = readFileSync("lib/mcp/tools/fuse.ts", "utf8");
+    expect(fuseRun).toContain("runRulesArm(cues, { day_complete: true })");
+    const live = readFileSync("lib/brain/fuse/live.ts", "utf8");
+    // today -> false with asOf; a past IST day -> true with the real boundary
+    expect(live).toContain("day_complete: dayComplete");
+    expect(live).toMatch(/dayComplete \? \{ rolloverAt: istDayRolloverAt\(istDate\) \} : \{ asOf: nowIso \}/);
+    expect(live).toContain("istDate < istDate0(nowIso)");
   });
 });
 

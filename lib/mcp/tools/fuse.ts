@@ -104,7 +104,10 @@ export async function writeVisits(roomDayId: string, arm: Arm, visits: DraftVisi
 }
 
 async function runArm(arm: Arm, cues: FuseCue[]): Promise<ArmResult> {
-  if (arm === "rules") return { ok: true, provider: "none", output: runRulesArm(cues) };
+  // B3 — scribe_fuse_run is scratch-only and runs over a day that is DONE (0046's scratch days
+  // are replays of finished sessions), so the rollover pass applies. Stated here rather than
+  // inferred inside rules.ts, which must not decide this for itself.
+  if (arm === "rules") return { ok: true, provider: "none", output: runRulesArm(cues, { day_complete: true }) };
   if (arm === "hybrid") return runHybridArm(cues);
   return runFlashArm(cues);
 }

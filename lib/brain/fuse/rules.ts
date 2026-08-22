@@ -182,7 +182,36 @@ export type TapeSession = { id: string; started_at: string; ended_at: string | n
  * two arguments returns deeply equal output, which is what U7 asserts.
  */
 export type RulesArmOptions = {
+  /**
+   * B1 — IS THE DAY OVER? The day-rollover pass runs only when this is true.
+   *
+   * DEFAULTS TO FALSE, because the safe answer to "may I close every open visit" is no. On a
+   * live day the boundary is in the FUTURE, and rolling over to it wrote every visit
+   * already-ended at an instant that had not happened — which made the update path in
+   * visit-update.ts unreachable (every K2 live run reported `frozen: 5` and exercised it zero
+   * times) and is where the timestamptz/Date precision bug sat unnoticed.
+   *
+   * The ARM DOES NOT DECIDE THIS. It cannot: knowing whether a day is over means reading a
+   * clock, and this file reads none. The caller knows and says so.
+   */
+  day_complete?: boolean;
+  /** the IST day boundary, ISO — the instant a rollover close is stamped with */
   rolloverAt?: string | null;
+  /**
+   * The latest instant the arm may treat as HAVING PASSED. Supplied separately from
+   * `rolloverAt` because on a live day those are different instants and conflating them is
+   * exactly the bug B1 fixes: the boundary is hours away, while "now" is what has actually
+   * elapsed.
+   *
+   * It governs ONE thing — whether a mark's LAST_MARK_WINDOW_MS window has finished (B2). A
+   * mark pressed four minutes ago has not had its 45 minutes yet, and closing its visit at
+   * mark+45 would stamp an ended_at in the future just as surely as the rollover did.
+   *
+   * Absent, it falls back to `rolloverAt`; absent both, a COMPLETE day treats every window as
+   * elapsed (the day is over, so they all are) and an INCOMPLETE one treats none as elapsed
+   * (nothing is known to have passed, so nothing may be closed on the strength of it).
+   */
+  asOf?: string | null;
   sessions?: readonly TapeSession[];
 };
 
@@ -431,7 +460,19 @@ export function runRulesArm(cues: FuseCue[], opts: RulesArmOptions = {}): ArmOut
   // gap, and one turn inside it spanned 668 seconds carrying six words. There is no bimodality
   // and therefore no threshold to pick. Deriving silence from turn timing would mint the end of
   // a clinical record out of a heuristic, so it is not done, here or anywhere.
+  const dayComplete = opts.day_complete === true;
   const rolloverAtMs = opts.rolloverAt ? ms(opts.rolloverAt) : null;
+  /**
+   * The elapsed horizon for B2. See RulesArmOptions.asOf — a complete day with no instant
+   * given means "everything has elapsed"; an incomplete one means "nothing is known to have".
+   */
+  const horizonMs: number | null = opts.asOf
+    ? ms(opts.asOf)
+    : rolloverAtMs !== null
+      ? rolloverAtMs
+      : dayComplete
+        ? Number.POSITIVE_INFINITY
+        : null;
 
   /** Close a visit once. A visit already `ended` is never re-closed and its reason never rewritten. */
   const close = (v: Working, reason: string, atMs: number | null): void => {
@@ -466,14 +507,20 @@ export function runRulesArm(cues: FuseCue[], opts: RulesArmOptions = {}): ArmOut
     // this test B2 would swallow all of them and B3's token could never be produced.
     if (v.opened_by_kind === "mark") {
       const windowEnds = v._openedAtMs + LAST_MARK_WINDOW_MS;
-      if (rolloverAtMs === null || windowEnds <= rolloverAtMs) {
+      if (horizonMs !== null && windowEnds <= horizonMs) {
         close(v, END_REASONS.MARK_WINDOW_ELAPSED, windowEnds);
         continue;
       }
     }
 
-    // B3 — the boundary. WHAT it was doing when the day ended is the finding, not just THAT it
-    // was open, so the three tokens stay distinct and the scoreboard can still tell them apart.
+    // B3 — the boundary. K5 B1: ONLY when the caller says the day is over. On a live day this
+    // does not run at all, and a visit that reaches here simply stays open in whatever state it
+    // is in — which is the truth, and which is what finally makes the "while open" update path
+    // reachable on a real room.
+    if (!dayComplete) continue;
+
+    // WHAT it was doing when the day ended is the finding, not just THAT it was open, so the
+    // three tokens stay distinct and the scoreboard can still tell them apart.
     const reason =
       v.state === "unknown"
         ? END_REASONS.DAY_ROLLOVER_UNKNOWN

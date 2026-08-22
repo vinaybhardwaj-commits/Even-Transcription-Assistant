@@ -95,6 +95,7 @@ import {
 } from "@/lib/bench-join";
 // U4: which microphone answers a window — the recording's own events decide (D1, D13).
 import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from "@/lib/bench-source";
+import { closeOrphanedSession } from "@/lib/bench-orphan";
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay, WINDOW_CUE_TYPE } from "@/lib/brain/state";
@@ -540,8 +541,40 @@ const resumeRecording = simpleVerb(
 const stopRecording = simpleVerb(
   "scribe_stop_recording",
   "end_day",
-  "End the room's day via the kiosk (command end_day): the kiosk flushes the last chunk, ends the session, then acks. Requires a listener. May answer ack_timeout if the flush outlasts the 8 s wait — check scribe_get_session.",
+  "End the room's day via the kiosk (command end_day): the kiosk flushes the last chunk, ends the session, then acks. Requires a listener. May answer ack_timeout if the flush outlasts the 8 s wait — check scribe_get_session. DOES NOTHING to a session whose kiosk is GONE — the kiosk ends its OWN session and a replacement tab holds none; use scribe_close_orphaned_session for that.",
 );
+
+/**
+ * K5 A2 — the second door onto the orphan repair. Deliberately NOT a simpleVerb: every one of
+ * those queues a command for a kiosk to execute, and this exists because there is no kiosk.
+ */
+const closeOrphaned: McpTool = {
+  name: "scribe_close_orphaned_session",
+  description:
+    "REPAIR, NOT A STOP — close a session whose kiosk is GONE, server-side, so the room can record again. THE DEADLOCK IT BREAKS (seen on Home Office, 22 Aug): a kiosk tab dies mid-recording; end_day is a no-op because the kiosk ends its OWN session and the replacement tab holds none; start_day is refused because the room still has a session that is not 'ended'. The room is then unrecordable until the 30-minute reaper fires. REFUSES BY NAME when a kiosk is polling within 10 s AND claims that very session (kiosk_attached) — this can never stop a healthy recording, and stopping a live room is still end_day's job. Sets status='ended' and ended_at=NOW() on ONE row; NEVER touches bench_chunk, and returns the chunk count before and after so you can check that. Writes a bench.close_orphaned_session audit row carrying the session, the room, the actor and the listener evidence (tab, last poll, age, what it claimed). Returns { ok, session_id, ended_at, chunks_before, chunks_after, evidence }.",
+  scope: "write",
+  inputSchema: { type: "object", properties: ROOM_WRITE_ARGS, additionalProperties: false },
+  handler: async (args: ToolArgs) => {
+    const r = await resolveForWrite(args);
+    if ("error" in r) return r.error;
+    const room = r.room;
+    const out = await closeOrphanedSession({ roomId: room.id, actorType: "system", actorId: "mcp" });
+    const ctx = { room: { id: room.id, slug: room.slug, name: room.name } };
+    if (!out.ok) {
+      return {
+        ...out,
+        ...ctx,
+        hint:
+          out.error === "kiosk_attached"
+            ? "a kiosk is polling and claims this session — it is alive. Use scribe_stop_recording."
+            : out.error === "no_open_session"
+              ? "this room has no session left open; nothing to repair"
+              : undefined,
+      };
+    }
+    return { ...out, ...ctx };
+  },
+};
 
 // ---------------------------------------------------------------------------
 // S3 — consult mark from the operator (write, durable-first)
@@ -2556,6 +2589,7 @@ const replayWrite: McpTool = {
 };
 
 export const BENCH_TOOLS: McpTool[] = [
+  closeOrphaned,
   listSessions,
   getSession,
   getRecording,
