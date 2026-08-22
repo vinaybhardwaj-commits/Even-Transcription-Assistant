@@ -4,6 +4,7 @@ import { verifyAdminJwt } from "@/lib/auth";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { BenchClient } from "@/components/admin/BenchClient";
 import { BenchRoomsLive } from "@/components/admin/BenchRoomsLive";
+import { WakeLockBadge } from "@/components/admin/WakeLockBadge";
 
 /**
  * Admin · Bench — room recording sessions + Rooms card (Room-Bench PRD §3.5;
@@ -23,7 +24,14 @@ export default async function AdminBenchPage() {
     redirect("/admin");
   }
   return (
-    <AdminShell adminEmail={email} active="bench" pageTitle="Bench — room recording sessions">
+    <AdminShell
+      adminEmail={email}
+      active="bench"
+      pageTitle="Bench — room recording sessions"
+      // A5 — the wake-lock state lives in the header, where the operator can see whether the
+      // screen is actually being held awake rather than assuming it.
+      headerRight={<WakeLockBadge />}
+    >
       {/* The live monitor sits ABOVE the session table: on a clinic day the question is always
           "what is wrong right now", and the day's history is what you read afterwards. */}
       <BenchRoomsLive />

@@ -16,7 +16,9 @@
 .notegen-root .mng-seg { flex: none; border: 1px solid var(--mng-border); background: transparent; padding: 8px 12px; font-size: 14px; color: var(--mng-muted); border-radius: 999px; cursor: pointer; white-space: nowrap; }
 .notegen-root .mng-seg.on { background: var(--mng-accent-weak); color: var(--mng-accent-text); border-color: transparent; font-weight: 500; }
 .notegen-root .mng-patient { padding: 6px 16px 0; }
-.notegen-root .mng-patient input { width: 100%; border: 1px solid var(--mng-border); border-radius: var(--mng-radius); padding: 9px 12px; font-size: 15px; }
+/* 16px, not 15: below 16 iOS Safari zooms the page on focus, and K3 A2 removed the viewport
+   lock that used to hide that. */
+.notegen-root .mng-patient input { width: 100%; border: 1px solid var(--mng-border); border-radius: var(--mng-radius); padding: 9px 12px; font-size: 16px; }
 .notegen-root .mng-patient input:focus { outline: none; border-color: var(--mng-accent); }
 .notegen-root .mng-editorwrap { flex: 1; padding: 6px 16px 14px; }
 .notegen-root .mng-editor-label { font-size: 12px; color: var(--mng-muted); margin: 6px 0 8px; }

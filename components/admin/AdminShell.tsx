@@ -13,6 +13,24 @@
  * in either, but the avatar/Sign out + Change password buttons want client
  * interactivity. Keeping the whole shell client keeps render boundaries
  * obvious.
+ *
+ * ─── K3 A1: THE SIDEBAR COLLAPSES BELOW `lg` ─────────────────────────────────────────────
+ *
+ * This file wraps EVERY page under app/admin, so it is the riskiest thing in the K3 build and
+ * the change is deliberately shaped to be inert on a desktop.
+ *
+ * The sidebar used to be `sticky top-0 h-screen w-56 shrink-0` with no breakpoint at all: a
+ * fixed 224px, always, which on a 768px portrait iPad left 544px for the page. Below `lg` it is
+ * now an off-canvas drawer behind a menu button in the header; at `lg` and above it is the same
+ * sticky column it always was, the button is `lg:hidden`, and `lg:translate-x-0` means the
+ * drawer's open/closed state cannot affect a desktop even if it is somehow left open.
+ *
+ * The Tailwind order matters: base `fixed inset-y-0 left-0 z-50` is overridden at the breakpoint
+ * by `lg:sticky lg:inset-y-auto lg:z-auto`, because Tailwind emits responsive variants after
+ * their base utilities. Verified in the built CSS, not assumed.
+ *
+ * The drawer closes on: a nav tap, the backdrop, and Escape. It does NOT lock body scroll —
+ * the backdrop covers the page and a scroll lock is one more thing to leak onto a desktop.
  */
 
 import * as React from "react";
@@ -75,6 +93,18 @@ export function AdminShell({
   children,
 }: Props) {
   const [changingPw, setChangingPw] = React.useState(false);
+  /** A1 — the drawer, below `lg` only. At `lg` the sidebar ignores this entirely. */
+  const [navOpen, setNavOpen] = React.useState(false);
+  const closeNav = React.useCallback(() => setNavOpen(false), []);
+
+  // Escape closes the drawer. Bound only while it is open, so a desktop never carries a
+  // key listener it has no use for.
+  React.useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setNavOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
 
   const onLogout = React.useCallback(async () => {
     await fetch("/api/admin/logout", { method: "POST" });
@@ -119,6 +149,7 @@ export function AdminShell({
                     : "text-even-navy-800/80 hover:bg-even-white/60 hover:text-even-navy-800"
                 }`}
                 aria-current={isActive ? "page" : undefined}
+                onClick={closeNav}
               >
                 <span aria-hidden="true" className="w-4 text-center">
                   {n.icon}
@@ -144,8 +175,24 @@ export function AdminShell({
 
   return (
     <div className="min-h-screen flex bg-even-ink-50">
-      {/* Sidebar — sticky, navy. */}
-      <aside className="sticky top-0 h-screen w-56 shrink-0 bg-even-ink-100/80 border-r border-even-ink-200 flex flex-col">
+      {/* A1 — the backdrop. Below `lg` and only while open; `lg:hidden` so it can never appear
+          on a desktop even if the drawer state is somehow true. */}
+      {navOpen ? (
+        <div
+          className="fixed inset-0 z-40 bg-even-navy-800/40 lg:hidden"
+          onClick={closeNav}
+          aria-hidden="true"
+        />
+      ) : null}
+
+      {/* Sidebar — a drawer below `lg`, the original sticky column at `lg` and above. */}
+      <aside
+        id="admin-nav"
+        className={`fixed inset-y-0 left-0 z-50 h-screen w-56 shrink-0 bg-even-ink-100/80 border-r border-even-ink-200 flex flex-col transition-transform duration-200 ease-out ${
+          navOpen ? "translate-x-0" : "-translate-x-full"
+        } lg:sticky lg:top-0 lg:inset-y-auto lg:z-auto lg:translate-x-0 lg:transition-none`}
+        aria-hidden={undefined}
+      >
         <div className="px-4 pt-5 pb-6">
           <p className="text-label font-semibold text-even-navy-800 leading-tight">
             Even <span className="text-even-blue-600">ETA</span>
@@ -171,18 +218,21 @@ export function AdminShell({
               <p className="text-caption text-even-navy-800 truncate">{adminEmail}</p>
             </div>
           </div>
-          <div className="flex items-center justify-between gap-2">
+          {/* A3 — 11px text in a ~14px-tall box was the smallest hit area in the admin. The
+              TEXT grows to caption and the PADDING carries the rest to 44px; the label is not
+              shrunk to make room, which is the whole point of the rule. */}
+          <div className="flex items-center justify-between gap-1">
             <button
               type="button"
               onClick={() => setChangingPw(true)}
-              className="text-[11px] text-even-blue-600 hover:underline"
+              className="min-h-11 px-2 py-2 rounded-lg text-caption text-even-blue-600 hover:bg-even-white/70 hover:underline"
             >
               Change password
             </button>
             <button
               type="button"
               onClick={onLogout}
-              className="text-[11px] text-even-blue-600 hover:underline"
+              className="min-h-11 px-2 py-2 rounded-lg text-caption text-even-blue-600 hover:bg-even-white/70 hover:underline"
             >
               Sign out
             </button>
@@ -192,8 +242,20 @@ export function AdminShell({
 
       {/* Main column */}
       <div className="flex-1 min-w-0">
-        <header className="bg-even-white border-b border-even-ink-100 px-6 py-4 flex items-start justify-between gap-4">
-          <div className="min-w-0">
+        <header className="bg-even-white border-b border-even-ink-100 px-4 sm:px-6 py-3 sm:py-4 flex items-start justify-between gap-3">
+          {/* A1 — the menu button. 44x44 minimum, `lg:hidden`, and the ONLY way to reach the
+              nav below `lg`. */}
+          <button
+            type="button"
+            onClick={() => setNavOpen((v) => !v)}
+            aria-expanded={navOpen}
+            aria-controls="admin-nav"
+            aria-label={navOpen ? "Close navigation" : "Open navigation"}
+            className="lg:hidden shrink-0 -ml-1 h-11 w-11 inline-flex items-center justify-center rounded-xl border border-even-ink-200 bg-even-white text-even-navy-800 active:bg-even-ink-100"
+          >
+            <span aria-hidden="true" className="text-heading leading-none">{navOpen ? "✕" : "☰"}</span>
+          </button>
+          <div className="min-w-0 flex-1">
             {breadcrumb ? (
               <p className="text-caption text-even-ink-500 mb-1 truncate">
                 {breadcrumb}
@@ -206,7 +268,7 @@ export function AdminShell({
           ) : null}
         </header>
 
-        <main className="px-6 py-6 max-w-7xl">{children}</main>
+        <main className="px-4 sm:px-6 py-4 sm:py-6 max-w-7xl">{children}</main>
       </div>
 
       {changingPw ? (

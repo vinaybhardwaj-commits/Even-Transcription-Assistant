@@ -965,7 +965,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder={`${roomName} · clinic`}
-                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-body text-even-ink-800"
+                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-base text-even-ink-800"
                 />
               </div>
               <div className="mb-4">
@@ -979,7 +979,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                     // FU3: a rejoined tape must reopen this choice, not the browser default.
                     void saveBenchSetting(PRIMARY_DEVICE_SETTING, e.target.value);
                   }}
-                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-body text-even-ink-800"
+                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-base text-even-ink-800"
                 >
                   {mics.length === 0 && <option value="">Default microphone</option>}
                   {mics.map((m) => (
@@ -1000,7 +1000,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                     void saveBenchSetting(BACKUP_DEVICE_SETTING, e.target.value);
                   }}
                   data-testid="backup-mic"
-                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-body text-even-ink-800"
+                  className="w-full rounded-xl border border-even-ink-200 bg-even-white px-3 py-2.5 text-base text-even-ink-800"
                 >
                   <option value="">No backup microphone</option>
                   {mics

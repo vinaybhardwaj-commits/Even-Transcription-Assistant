@@ -93,7 +93,9 @@ export function BenchSessionDetailClient({ sessionId }: { sessionId: string }) {
 
   React.useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 60_000);
+    // B1 — the same hidden-tab guard as the other polls. A detail page left open in a pocket
+    // was refetching a whole session every minute.
+    const t = setInterval(() => { if (!document.hidden) void load(); }, 60_000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -183,7 +185,7 @@ export function BenchSessionDetailClient({ sessionId }: { sessionId: string }) {
       </div>
 
       <section className="eta-card p-5">
-        <dl className="grid grid-cols-[150px,1fr] gap-x-3 gap-y-1.5 text-body">
+        <dl className="grid grid-cols-1 sm:grid-cols-[150px,1fr] gap-x-3 gap-y-1.5 text-body">
           <dt className="text-even-ink-400">Room</dt>
           <dd className="text-even-ink-800 font-medium">
             {session.room_name} ({session.room_slug})

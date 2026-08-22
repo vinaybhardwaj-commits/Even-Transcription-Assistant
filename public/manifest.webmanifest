@@ -4,7 +4,7 @@
   "description": "Mobile-first encounter recording for Even Hospital clinicians",
   "start_url": "/",
   "display": "standalone",
-  "orientation": "portrait",
+  "orientation": "any",
   "background_color": "#FCFCFC",
   "theme_color": "#0055FF",
   "icons": [

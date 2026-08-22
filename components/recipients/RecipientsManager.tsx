@@ -152,7 +152,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
                 value={addName}
                 onChange={(e) => setAddName(e.target.value)}
                 placeholder="e.g. Records desk"
-                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
+                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-even-blue-200"
               />
             </div>
             <div>
@@ -164,7 +164,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
                 onChange={(e) => setAddEmail(e.target.value)}
                 placeholder="records@even.in"
                 autoComplete="off"
-                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
+                className="w-full rounded-xl border border-even-ink-200 px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-even-blue-200"
               />
             </div>
           </div>
@@ -174,7 +174,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
               id="rn-role"
               value={addRole}
               onChange={(e) => setAddRole(e.target.value as Role)}
-              className="rounded-xl border border-even-ink-200 px-3 py-2 text-body focus:outline-none focus:ring-2 focus:ring-even-blue-200"
+              className="rounded-xl border border-even-ink-200 px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-even-blue-200"
             >
               {ROLE_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -217,7 +217,7 @@ export function RecipientsManager({ slug }: { slug: string }) {
                       <select
                         value={r.role}
                         onChange={(e) => void onChangeRole(r, e.target.value as Role)}
-                        className="text-caption rounded-md border border-even-ink-200 px-2 py-1"
+                        className="text-base rounded-md border border-even-ink-200 px-2 py-2 min-h-11"
                       >
                         {ROLE_OPTIONS.map((o) => (
                           <option key={o.value} value={o.value}>

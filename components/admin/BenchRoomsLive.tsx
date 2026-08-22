@@ -127,6 +127,44 @@ const LISTENER_POLL_MS = 3_000;
 const ROLLUP_POLL_MS = 20_000;
 const TICK_MS = 1_000;
 
+/**
+ * B4 — how long an armed Stop stays armed.
+ *
+ * Stop is two taps because ending a day is not undoable from here. Until K3 the first tap armed
+ * it FOR EVER: an operator who tapped once, got distracted and pocketed the tablet was carrying
+ * a live clinic day one stray tap from ending. Ten seconds is longer than a deliberate second
+ * tap and far shorter than a walk down a corridor.
+ */
+const CONFIRM_STOP_MS = 10_000;
+
+/**
+ * A4 — WHY START IS OFF, as a sentence the operator can read without a mouse.
+ *
+ * iOS Safari never renders a `title`, and this was the only place the rule was written down, so
+ * on a tablet a disabled Start button simply looked broken. Each branch names the CAUSE and the
+ * FIX, because "not ready" alone sends someone to the wrong room.
+ *
+ * Returns null when start IS available — the caller renders nothing at all then.
+ */
+export function startBlockedReason(state: RoomState): string | null {
+  switch (state) {
+    case "ready":
+      return null;
+    case "recording":
+      return "Start is off because this room is already recording. Use stop to end the day first.";
+    case "paused":
+      return "Start is off because this room is paused for consent. Use resume, not start.";
+    case "dropped":
+      return "Start is off because the kiosk page stopped responding. Reopen the room page on the clinic Mac.";
+    case "offline":
+      return "Start is off because no kiosk page is open in this room. Open the room page on the clinic Mac.";
+    case "cant_tell":
+      return "Start is off because the kiosk state could not be read just now. It will offer itself when the next poll succeeds.";
+    default:
+      return "Start is off until the kiosk is listening and the room is neither recording nor paused.";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Presentation helpers — pure
 // ---------------------------------------------------------------------------
@@ -149,6 +187,13 @@ const ageMs = (iso: string | null, nowMs: number): number | null => {
 
 /** BenchClient's classes, reused verbatim so the two tables read as one surface. */
 const PILL = "inline-block px-2 py-0.5 rounded-full text-caption font-semibold";
+
+/**
+ * A3 — one class for every room-card control, so a sixth button cannot be added at 20px.
+ * min-h-11/min-w-11 is 2.75rem = 44px, the iOS/WCAG touch minimum, in BOTH directions.
+ */
+const CTRL_BTN =
+  "min-h-11 min-w-11 px-4 py-2 rounded-lg text-label bg-even-ink-100 hover:bg-even-ink-200 active:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed";
 const LEVEL_CLASS: Record<Level, string> = {
   ok: "bg-success-100 text-success-700",
   amber: "bg-warning-100 text-warning-700",
@@ -299,6 +344,13 @@ export function BenchRoomsLive() {
     return () => globalThis.clearInterval(i);
   }, []);
 
+  // B4 — an armed Stop disarms itself. Re-armed by a second tap; cleared on unmount.
+  React.useEffect(() => {
+    if (!confirmStop) return;
+    const t = globalThis.setTimeout(() => setConfirmStop(null), CONFIRM_STOP_MS);
+    return () => globalThis.clearTimeout(t);
+  }, [confirmStop]);
+
   const nowMs = Date.now();
   const listenerMap = React.useMemo(() => {
     const m = new Map<string, ListenerRowView>();
@@ -359,7 +411,8 @@ export function BenchRoomsLive() {
           <button
             type="button"
             onClick={() => { void fetchListeners(); void fetchRollup(); }}
-            className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200"
+            aria-label="Refresh now"
+            className="h-11 w-11 inline-flex items-center justify-center rounded-lg text-heading bg-even-ink-100 hover:bg-even-ink-200 active:bg-even-ink-200"
           >
             ↻
           </button>
@@ -409,12 +462,25 @@ export function BenchRoomsLive() {
               : st.level === "unknown" ? "unknown" : "ok";
           const isSelected = selectedId === r.room.id;
           return (
-            <button
+            // B3 — this WAS a <button> with five more <button>s inside it, which is invalid
+            // HTML: browsers reparent nested interactive content, so the controls were living
+            // outside the card in the real DOM and only a stopPropagation on a wrapping div was
+            // holding the behaviour together. It is a div now, with an explicit role, a tab
+            // stop and Enter/Space, so selection is still fully keyboard-reachable.
+            <div
               key={r.room.id}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => selectedRoom.choose(r.room.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  selectedRoom.choose(r.room.id);
+                }
+              }}
               aria-pressed={isSelected}
-              className={`text-left rounded-xl border p-4 transition ${CARD_EDGE[worst]} ${isSelected ? "ring-2 ring-even-blue-400" : "hover:bg-even-ink-50"}`}
+              aria-label={`Select ${r.room.name}`}
+              className={`text-left rounded-xl border p-4 transition cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-even-blue-400 ${CARD_EDGE[worst]} ${isSelected ? "ring-2 ring-even-blue-400" : "hover:bg-even-ink-50"}`}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -429,7 +495,9 @@ export function BenchRoomsLive() {
 
               <dl className="mt-3 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <dt className="text-caption text-even-ink-500">Mic</dt>
+                  {/* A4 — "on the UPLOAD clock, 0–5 min is healthy" used to live only in the
+                      pill's title, which iOS never renders, so the number had no units. */}
+                  <dt className="text-caption text-even-ink-500">Mic <span className="text-even-ink-400">· newest piece, 0–5 min is healthy</span></dt>
                   <dd>
                     {/* READY CLAIMS NOTHING ABOUT THE MICROPHONES. Before a session starts there
                         are no chunks, so mic health is unknown by construction — the mockup's
@@ -459,6 +527,16 @@ export function BenchRoomsLive() {
                     )}
                   </dd>
                 </div>
+                {/* A4 — THE MISREADING THIS PREVENTS is the one that turned a busy morning into
+                    an apparent six-hour blackout on 19 August. It lived only in a `title`, which
+                    is exactly nowhere on the iPad this screen is now built for. Shown only when
+                    the vital is actually complaining, so a healthy card stays short. */}
+                {r.doctor_clock_level === "amber" || r.doctor_clock_level === "red" ? (
+                  <p className="text-caption text-even-ink-500 leading-snug">
+                    A gap here means the labelled doctor has not clocked — not that the room is
+                    empty. Another doctor may be in it seeing patients.
+                  </p>
+                ) : null}
 
                 <div className="flex items-center justify-between gap-2">
                   <dt className="text-caption text-even-ink-500">Marks</dt>
@@ -474,6 +552,11 @@ export function BenchRoomsLive() {
                     <dd><Pill level="amber" title="the second microphone has recorded nothing at all this session">reads no chunks</Pill></dd>
                   </div>
                 ) : null}
+                {r.backup_reads_no_chunks ? (
+                  <p className="text-caption text-even-ink-500 leading-snug">
+                    The second microphone has recorded nothing at all this session.
+                  </p>
+                ) : null}
 
                 {r.last_window_complete === false ? (
                   <div className="flex items-center justify-between gap-2">
@@ -481,16 +564,24 @@ export function BenchRoomsLive() {
                     <dd><Pill level="amber" title="the turns were rolled back — re-run this window">window did not finish</Pill></dd>
                   </div>
                 ) : null}
+                {r.last_window_complete === false ? (
+                  <p className="text-caption text-even-ink-500 leading-snug">
+                    The turns were rolled back, so that window holds nothing. Re-run it.
+                  </p>
+                ) : null}
               </dl>
 
-              {/* Controls live inside the card but are not part of its click target. */}
-              <div className="mt-3 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
+              {/* Controls live inside the card but are not part of its click target.
+                  A3 — every one of these was `px-2 py-0.5 text-caption`, about 20px tall, which
+                  is under half the 44pt minimum and unhittable while walking. The TEXT grew from
+                  caption to label and the PADDING carries the rest; nothing was shrunk. */}
+              <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
                 <button
                   type="button"
                   disabled={st.state !== "ready"}
-                  title={st.state === "ready" ? "queue start_day" : "start is offered only when it will succeed — the kiosk must be listening, and the room neither recording nor paused"}
+                  title={st.state === "ready" ? "queue start_day" : startBlockedReason(st.state) ?? undefined}
                   onClick={() => void send(r.room.id, "start_day")}
-                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className={CTRL_BTN}
                 >
                   start
                 </button>
@@ -498,7 +589,7 @@ export function BenchRoomsLive() {
                   type="button"
                   disabled={!r.recording}
                   onClick={() => void send(r.room.id, "pause_day")}
-                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className={CTRL_BTN}
                 >
                   pause
                 </button>
@@ -506,16 +597,18 @@ export function BenchRoomsLive() {
                   type="button"
                   disabled={st.state !== "paused"}
                   onClick={() => void send(r.room.id, "resume_day")}
-                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className={CTRL_BTN}
                 >
                   resume
                 </button>
-                {/* TWO CLICKS. Ending a day is not undoable from here. */}
+                {/* TWO TAPS. Ending a day is not undoable from here — and since K3 the armed
+                    state also EXPIRES (B4), so a tablet in a pocket is not one stray tap from
+                    ending a clinic. Armed is solid danger, not a tint, so it is unmistakable. */}
                 {confirmStop === r.room.id ? (
                   <button
                     type="button"
                     onClick={() => void send(r.room.id, "end_day")}
-                    className="px-2 py-0.5 rounded-md text-caption font-semibold bg-danger-100 text-danger-700 hover:bg-danger-200"
+                    className="min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white ring-2 ring-danger-700 ring-offset-1 hover:bg-danger-700"
                   >
                     confirm stop
                   </button>
@@ -524,13 +617,27 @@ export function BenchRoomsLive() {
                     type="button"
                     disabled={!r.recording && !r.paused_session}
                     onClick={() => setConfirmStop(r.room.id)}
-                    className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className={CTRL_BTN}
                   >
                     stop
                   </button>
                 )}
               </div>
-            </button>
+
+              {/* A4 — THE LOAD-BEARING SENTENCE. This is the only place that says why Start is
+                  disabled, and it used to be a `title`, which iOS Safari never renders: on the
+                  iPad this screen now targets, a greyed Start had no explanation anywhere at
+                  all. It names the cause and the fix, and it is only rendered when Start is
+                  actually off. */}
+              {startBlockedReason(st.state) ? (
+                <p className="mt-2 text-caption text-even-ink-600 leading-snug">{startBlockedReason(st.state)}</p>
+              ) : null}
+              {confirmStop === r.room.id ? (
+                <p className="mt-2 text-caption text-danger-700 leading-snug">
+                  Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
+                </p>
+              ) : null}
+            </div>
           );
         })}
         {rooms.length === 0 ? (

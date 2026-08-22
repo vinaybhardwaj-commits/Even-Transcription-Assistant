@@ -82,8 +82,14 @@ const config: Config = {
           700: "#6D28D9",
         },
         success: { 100: "#D1FAE5", 500: "#10B981", 700: "#047857" },
-        warning: { 100: "#FEF3C7", 500: "#F59E0B", 700: "#B45309" },
-        danger:  { 100: "#FEE2E2", 500: "#EF4444", 700: "#B91C1C" },
+        // 50 and 200 exist because CARD_EDGE in BenchRoomsLive has always asked for them and
+        // never got them: `border-warning-200 bg-warning-50` generated NOTHING, so the room
+        // card's whole "the worst condition promotes the card" signal — the thing that finds
+        // the operator's eye before they read a word — has been invisible since it shipped.
+        // Tailwind drops unknown classes silently, which is why a missing shade looks like a
+        // design choice rather than a bug. Added, not worked around.
+        warning: { 50: "#FFFBEB", 100: "#FEF3C7", 200: "#FDE68A", 500: "#F59E0B", 700: "#B45309" },
+        danger:  { 50: "#FEF2F2", 100: "#FEE2E2", 200: "#FECACA", 500: "#EF4444", 700: "#B91C1C" },
       },
       fontFamily: {
         sans: ["Inter", "system-ui", "-apple-system", "sans-serif"],

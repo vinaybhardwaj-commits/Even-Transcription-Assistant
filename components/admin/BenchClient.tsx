@@ -12,6 +12,13 @@ import { isBenchStalled } from "@/lib/bench-reaper-core";
 import Link from "next/link";
 import { selectedRoom, useSelectedRoom } from "@/components/admin/BenchRoomsLive";
 
+/**
+ * A3 — one class for the in-table actions. min-h-11 is 44px; the horizontal padding takes the
+ * width past 44 for every label used here. The text does NOT shrink to pay for the padding.
+ */
+const ROW_BTN =
+  "min-h-11 px-3 py-2 rounded-lg text-label text-even-blue-700 hover:bg-even-ink-50 active:bg-even-ink-100";
+
 type SessionRow = {
   id: string;
   label: string | null;
@@ -110,7 +117,9 @@ export function BenchClient() {
 
   React.useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 60_000);
+    // B1 — skip the poll while the tab is hidden, matching BenchRoomsLive's two polls. A tablet
+    // in a pocket was refetching the whole session and room list every minute, all day.
+    const t = setInterval(() => { if (!document.hidden) void load(); }, 60_000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -233,7 +242,13 @@ export function BenchClient() {
         </p>
       )}
 
-      {/* ===== Recordings, for the SELECTED room (E4) ===== */}
+      {/* ===== Recordings, for the SELECTED room (E4) =====
+          PART C — an 8-column table is not readable while walking an OPD, and it is not
+          deletable either: it is the day's history and the desk needs it. So below `lg` it is
+          folded behind a tapped summary and starts closed; at `lg` it is open and nothing has
+          moved. <details> does the work — no state, no JS, and it stays open once the operator
+          opens it. */}
+      <Disclosure summary={selectedRoomRow ? `${selectedRoomRow.name} recordings` : "Recordings"} count={selectedRoomRow ? `${roomSessions.length} session${roomSessions.length === 1 ? "" : "s"}` : null}>
       <section className="eta-card p-5 overflow-x-auto">
         <div className="flex items-baseline justify-between gap-3 mb-3">
           <h2 className="text-heading text-even-navy-800">
@@ -317,21 +332,21 @@ export function BenchClient() {
                         className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"
                         title={`main mic lost ${s.primary_lost_count ?? 0}× — no backup chunks`}
                       >
-                        mic lost · no backup
+                        mic lost {s.primary_lost_count ?? 0}× · no backup
                       </span>
                     ) : s.mic_status === "on_backup" ? (
                       <span
                         className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
                         title={`main mic lost ${s.primary_lost_count ?? 0}× · ${s.backup_chunk_count ?? 0} backup chunks`}
                       >
-                        on backup mic
+                        on backup mic · {s.backup_chunk_count ?? 0} chunks
                       </span>
                     ) : s.mic_status === "backup_covered" ? (
                       <span
                         className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
                         title={`main mic lost ${s.primary_lost_count ?? 0}× and restored · ${s.backup_chunk_count ?? 0} backup chunks`}
                       >
-                        backup used
+                        backup used {s.backup_chunk_count ?? 0}× · mic restored
                       </span>
                     ) : null}
                     {isStalled(s) ? (
@@ -339,7 +354,7 @@ export function BenchClient() {
                         className="inline-block px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"
                         title="still marked recording but no chunk from either mic for over 10 minutes — the hourly reaper ends it after 30"
                       >
-                        stalled
+                        stalled · no chunk 10 min+
                       </span>
                     ) : isLive(s) ? (
                       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-even-pink-50 text-even-pink-700">
@@ -362,15 +377,21 @@ export function BenchClient() {
           </tbody>
         </table>
       </section>
+      </Disclosure>
 
-      {/* ===== Rooms card (D5: managed here, never on Clinicians) ===== */}
-      <section className="eta-card p-5">
+      {/* ===== Rooms card (D5: managed here, never on Clinicians) =====
+          B2 — this section had NO overflow-x-auto while the recordings section next to it did,
+          so its 5-column table pushed the whole PAGE wide instead of scrolling inside its own
+          box. Room creation, rename and PIN reset live in here: desk work, folded away on a
+          tablet with the table (Part C). */}
+      <Disclosure summary="Rooms" count={rooms ? `${rooms.length}` : null}>
+      <section className="eta-card p-5 overflow-x-auto">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-heading text-even-navy-800">Rooms</h2>
           <button
             type="button"
             onClick={() => setShowCreate((v) => !v)}
-            className="eta-btn-primary px-4 py-2 text-label"
+            className="eta-btn-primary min-h-11 px-4 py-2 text-label"
           >
             + New room
           </button>
@@ -382,13 +403,13 @@ export function BenchClient() {
               value={newRoomName}
               onChange={(e) => setNewRoomName(e.target.value)}
               placeholder="Room name, e.g. OPD 3"
-              className="flex-1 rounded-xl border border-even-ink-200 bg-even-white px-3 py-2 text-body"
+              className="flex-1 min-h-11 rounded-xl border border-even-ink-200 bg-even-white px-3 py-2 text-base"
             />
             <button
               type="button"
               onClick={onCreateRoom}
               disabled={creating || newRoomName.trim().length < 2}
-              className="eta-btn-primary px-4 py-2 text-label"
+              className="eta-btn-primary min-h-11 px-4 py-2 text-label"
             >
               {creating ? "Creating…" : "Create"}
             </button>
@@ -403,7 +424,7 @@ export function BenchClient() {
             <button
               type="button"
               onClick={() => setCreatedRoom(null)}
-              className="ml-3 text-even-blue-700 underline text-caption"
+              className={`${ROW_BTN} ml-2`}
             >
               dismiss
             </button>
@@ -416,7 +437,7 @@ export function BenchClient() {
             <button
               type="button"
               onClick={() => setResetPin(null)}
-              className="ml-3 text-even-blue-700 underline text-caption"
+              className={`${ROW_BTN} ml-2`}
             >
               dismiss
             </button>
@@ -464,20 +485,20 @@ export function BenchClient() {
                             if (e.key === "Enter") void onRename(r.id, renaming.draft);
                             if (e.key === "Escape") { setRenaming(null); setRenameError(null); }
                           }}
-                          className="rounded-lg border border-even-ink-200 bg-even-white px-2 py-1 text-body"
+                          className="min-h-11 rounded-lg border border-even-ink-200 bg-even-white px-3 py-2 text-base"
                         />
                         <button
                           type="button"
                           onClick={() => void onRename(r.id, renaming.draft)}
                           disabled={renaming.draft.trim().length < 2}
-                          className="text-even-blue-700 text-caption hover:underline disabled:opacity-40"
+                          className={`${ROW_BTN} disabled:opacity-40`}
                         >
                           Save
                         </button>
                         <button
                           type="button"
                           onClick={() => { setRenaming(null); setRenameError(null); }}
-                          className="text-even-ink-500 text-caption hover:underline"
+                          className={`${ROW_BTN} text-even-ink-600`}
                         >
                           Cancel
                         </button>
@@ -510,27 +531,32 @@ export function BenchClient() {
                     {/* Rename lives HERE, beside Reset PIN and Disable — one place, not two.
                         It changes `name` and nothing else: the login URL is built from `slug`,
                         so no PIN changes and nobody has to sign in again. */}
-                    <button
-                      type="button"
-                      onClick={() => { setRenaming({ id: r.id, draft: r.name }); setRenameError(null); }}
-                      className="text-even-blue-700 text-caption hover:underline"
-                    >
-                      Rename
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onResetPin(r)}
-                      className="ml-3 text-even-blue-700 text-caption hover:underline"
-                    >
-                      Reset PIN
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onToggleDisabled(r)}
-                      className="ml-3 text-even-ink-500 text-caption hover:underline"
-                    >
-                      {r.disabled ? "Enable" : "Disable"}
-                    </button>
+                    {/* A3 — three bare text links, ~16px tall, separated only by ml-3: three
+                        adjacent mis-taps waiting to happen, one of which resets a room's PIN.
+                        Now real buttons with a 44pt hit area and a gap between them. */}
+                    <span className="inline-flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setRenaming({ id: r.id, draft: r.name }); setRenameError(null); }}
+                        className={ROW_BTN}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onResetPin(r)}
+                        className={ROW_BTN}
+                      >
+                        Reset PIN
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onToggleDisabled(r)}
+                        className={`${ROW_BTN} text-even-ink-600`}
+                      >
+                        {r.disabled ? "Enable" : "Disable"}
+                      </button>
+                    </span>
                   </td>
                 </tr>
               ))
@@ -543,6 +569,45 @@ export function BenchClient() {
           display name — the login URL uses the slug, so PINs and sign-ins are unaffected.
         </p>
       </section>
+      </Disclosure>
+    </div>
+  );
+}
+
+/**
+ * PART C — the desk-work fold.
+ *
+ * Below `lg` the children are behind a tapped summary and CLOSED by default; at `lg` and above
+ * the summary is hidden and the children are simply rendered, so a desktop sees exactly what it
+ * saw before — no <details>, no marker, no extra chrome.
+ *
+ * `open` is set from the breakpoint at mount rather than tracked live: a tablet that is rotated
+ * mid-day should not have its fold snap shut under the operator's hand. The `lg:hidden` summary
+ * and the `lg:block` content mean the desktop rendering does not depend on that state at all.
+ */
+function Disclosure({ summary, count, children }: { summary: string; count?: string | null; children: React.ReactNode }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div>
+      {/* The tapped summary row. `lg:hidden`, so a desktop never sees it. 44pt minimum. */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="lg:hidden w-full eta-card px-4 min-h-11 flex items-center justify-between gap-3 text-left active:bg-even-ink-50"
+      >
+        <span className="text-heading text-even-navy-800">{summary}</span>
+        <span className="flex items-center gap-2 text-caption text-even-ink-400">
+          {count ? <span>{count}</span> : null}
+          <span aria-hidden="true" className="text-heading leading-none">{open ? "−" : "＋"}</span>
+        </span>
+      </button>
+
+      {/* THE BREAKPOINT IS THE CLASS, not the state. Closed reads `hidden lg:block`: gone below
+          `lg`, present at `lg` and above — so a desktop is expanded WITHOUT this component ever
+          measuring a viewport, and there is no first-paint flash and no resize handler to get
+          wrong. Open reads `block`, which is visible at every width. */}
+      <div className={`${open ? "block" : "hidden lg:block"} mt-3 lg:mt-0`}>{children}</div>
     </div>
   );
 }
