@@ -1162,7 +1162,9 @@ async function turnsAnswer(
     scratch_room_day_created: scratch.day.created,
     ist_date: ist,
     ...counts,
-    source: TURN_CUE_SOURCE,
+    // NOT `source` — that word is already the microphone in this tool's answer (source_used /
+    // source_requested), and two different questions must not share a key.
+    turn_cue_source: TURN_CUE_SOURCE,
     natural_key: ["source_ref", "type"],
     note_turns: "written to a scratch room-day, never a live one. Idempotent on source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} for the three turn types: re-transcribing the same window writes nothing twice.",
   };

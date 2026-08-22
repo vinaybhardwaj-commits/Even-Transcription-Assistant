@@ -315,6 +315,9 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     }
     expect(out).toMatchObject({ written: 2, already_existed: 0, dropped: 0, attempted: 2 });
     expect(out.natural_key).toEqual(["source_ref", "type"]);
+    // the cue's source does not collide with the MICROPHONE's — two questions, two keys
+    expect(out.turn_cue_source).toBe("replay");
+    expect(out.source_used).toBe("primary");
   });
 
   it("a re-run writes nothing twice: no row and no error is already_existed, never a failure", async () => {
