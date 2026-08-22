@@ -250,8 +250,11 @@ const setVisitClinician: McpTool = {
           ok: false,
           error: "stale_write",
           visit_id: visitId,
-          expected_updated_at: typeof expected === "string" ? expected : new Date(expected).toISOString(),
-          current_updated_at: now ? new Date(now.updated_at).toISOString() : null,
+          expected_updated_at: String(expected),
+          // The CURRENT value, verbatim and with its microseconds intact, so a retry with it
+          // actually matches. Handing back a millisecond-truncated Date here would make every
+          // retry fail too, which is a worse failure than the one being reported.
+          current_updated_at: now ? String(now.updated_at) : null,
           note: "the visit moved since you read it; re-read and re-apply, or drop the write if the newer state already says this",
         };
       }

@@ -500,6 +500,43 @@ describe("FUSE_LIVE_ENABLED — off by default, per-room, and never global", () 
 });
 
 // =========================================================================================
+// C3 — the microsecond trap. This was a REAL BUG, found on the first live run.
+// =========================================================================================
+describe("C3 — optimistic concurrency survives Postgres microseconds", () => {
+  it("every read that feeds the guard returns updated_at as ::text", () => {
+    const src = readFileSync("lib/brain/state.ts", "utf8");
+    // Postgres timestamptz is microseconds; a JS Date is milliseconds. If the value the guard
+    // compares has been through a Date, the last three digits are gone and
+    // `WHERE updated_at = $2::timestamptz` matches NOTHING — so every write loses and the
+    // guard stops meaning "you are stale". These casts are what keep it exact.
+    expect(src).toContain("updated_at::text AS updated_at, clinician_id"); // SQL_VISIT_BY_ID
+    expect(src).toContain("SQL_VISITS_FOR_FUSE");
+    const forFuse = src.slice(src.indexOf("export const SQL_VISITS_FOR_FUSE"));
+    expect(forFuse.slice(0, 400)).toContain("updated_at::text AS updated_at");
+    // and both UPDATEs hand the new value back at full precision, so a caller can chain
+    expect(src.match(/RETURNING id, updated_at::text AS updated_at/g) ?? []).toHaveLength(2);
+  });
+
+  it("the guard parameter is never re-parsed through a Date", () => {
+    const src = readFileSync("lib/brain/fuse/visit-update.ts", "utf8");
+    // a string must pass through verbatim
+    expect(src).toContain('typeof d === "string" ? d : d.toISOString()');
+    expect(src).not.toMatch(/new Date\(d\)\.toISOString\(\)/);
+  });
+
+  it("a microsecond-bearing timestamp survives the helper unchanged", async () => {
+    const mod = await import("@/lib/brain/fuse/visit-update");
+    // drive the real statement builder through a fake client and read the parameter back
+    const seen: unknown[][] = [];
+    const client = { query: async (_t: string, p: unknown[]) => (seen.push(p), { rows: [], rowCount: 0 }) };
+    const precise = "2026-08-22 14:22:08.547683+00";
+    await mod.updateVisitClinician(client as never, "vis_x", precise, { id: "doc_1", source: "operator", confidence: 0.95 });
+    expect(seen[0]![1]).toBe(precise); // NOT "2026-08-22T14:22:08.547Z"
+    expect(String(seen[0]![1])).toContain("547683");
+  });
+});
+
+// =========================================================================================
 // Part E — the cursor
 // =========================================================================================
 describe("E1 — the cue cursor is the ORDER BY key, so paging cannot skip or repeat", () => {

@@ -186,7 +186,7 @@ export const SQL_VISIT_UPDATE_OPEN =
   "ambiguity = $7::text, session_id = $8::text, tape_start_ms = $9::bigint, tape_end_ms = $10::bigint, " +
   "clinician_id = $11::text, clinician_source = $12::text, clinician_confidence = $13::real, updated_at = now() " +
   "WHERE id = $1 AND updated_at = $2::timestamptz AND state <> 'ended' " +
-  "RETURNING id, updated_at";
+  "RETURNING id, updated_at::text AS updated_at";
 
 /**
  * A visit that has ENDED: only who was in the room may change, and nothing else.
@@ -199,12 +199,34 @@ export const SQL_VISIT_UPDATE_OPEN =
 export const SQL_VISIT_UPDATE_CLINICIAN =
   "UPDATE visit SET clinician_id = $3::text, clinician_source = $4::text, clinician_confidence = $5::real, updated_at = now() " +
   "WHERE id = $1 AND updated_at = $2::timestamptz " +
-  "RETURNING id, updated_at";
+  "RETURNING id, updated_at::text AS updated_at";
 
-/** One visit as the update path reads it, before deciding what it may change. */
+/**
+ * One visit as the update path reads it, before deciding what it may change.
+ *
+ * `updated_at::text` IS NOT COSMETIC AND MUST NOT BE "TIDIED" BACK TO A PLAIN COLUMN.
+ * Postgres timestamptz holds MICROSECONDS (…:08.547683+00); a JavaScript Date holds
+ * MILLISECONDS. Any value that round-trips through `new Date()` loses the last three digits,
+ * so `WHERE updated_at = $2::timestamptz` can then never match the row it was read from — and
+ * the optimistic-concurrency guard stops meaning "you are stale" and starts meaning "everyone
+ * always loses". The update path silently becomes a no-op that reports itself as a lost race.
+ *
+ * That is exactly what happened on the first live run of K2: the guard was written against a
+ * Date and every single write lost. Returning the value as TEXT keeps the microseconds intact
+ * all the way out and back, and the comparison is exact again.
+ */
 export const SQL_VISIT_BY_ID =
-  "SELECT id, room_day_id, state, updated_at, clinician_id, clinician_source, clinician_confidence, " +
+  "SELECT id, room_day_id, state, updated_at::text AS updated_at, clinician_id, clinician_source, clinician_confidence, " +
   "end_reason, ended_at, arm, opened_by FROM visit WHERE id = $1";
+
+/**
+ * What the LIVE fuse reads before it writes. Separate from SQL_VISITS_FOR_DAY on purpose: this
+ * one needs `updated_at` as TEXT for the reason above, and SQL_VISITS_FOR_DAY feeds readGraph,
+ * whose shape is part of an API response and is not changed for the fuse's convenience.
+ */
+export const SQL_VISITS_FOR_FUSE =
+  "SELECT id, state, updated_at::text AS updated_at, opened_by, clinician_id, clinician_source, clinician_confidence " +
+  "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY id ASC";
 
 /** Cues for a room_day BY ID, oldest first — the fuse reads a day in evidence order. */
 export const SQL_CUES_FOR_ROOM_DAY =

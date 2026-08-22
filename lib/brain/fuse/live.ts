@@ -50,7 +50,7 @@ import {
   newVisitId,
   SQL_CUES_FOR_ROOM_DAY,
   SQL_VISIT_INSERT,
-  SQL_VISITS_FOR_DAY,
+  SQL_VISITS_FOR_FUSE,
   DEFAULT_ARM,
 } from "@/lib/brain/state";
 import { ambiguityOf, runRulesArm, type TapeSession } from "./rules";
@@ -92,7 +92,8 @@ type CueRow = { id: string; type: string; at: Date | string; payload: unknown; s
 type VisitRow = {
   id: string;
   state: string;
-  updated_at: Date | string;
+  /** TEXT, not Date — see SQL_VISITS_FOR_FUSE. Microseconds must survive the round trip. */
+  updated_at: string;
   opened_by: string | null;
   clinician_id: string | null;
   clinician_source: string | null;
@@ -202,7 +203,7 @@ async function fuseNow(roomId: string, roomDayId: string, istDate: string): Prom
   const pool = getPool();
   const [cueRes, visitRes, sessions] = await Promise.all([
     pool.query<CueRow>(SQL_CUES_FOR_ROOM_DAY, [roomDayId]),
-    pool.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId, arm]),
+    pool.query<VisitRow>(SQL_VISITS_FOR_FUSE, [roomDayId, arm]),
     readSessionsForDay(roomId, istDate),
   ]);
   const cues: FuseCue[] = cueRes.rows.map((c) => ({

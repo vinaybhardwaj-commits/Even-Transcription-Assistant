@@ -61,7 +61,19 @@ export type VisitRowForUpdate = {
   opened_by: string | null;
 };
 
-const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
+/**
+ * The value that goes into `WHERE updated_at = $2::timestamptz`.
+ *
+ * A STRING IS PASSED THROUGH VERBATIM AND MUST STAY THAT WAY. Postgres timestamptz carries
+ * microseconds and a JS Date carries milliseconds, so re-parsing a string through `new Date()`
+ * silently drops the last three digits and the guard can then never match the row it was read
+ * from — every write loses, for ever, and reports itself as a lost race. Reads hand this value
+ * out as ::text precisely so it can come back unmodified.
+ *
+ * A Date argument is still accepted, and is exactly as lossy as a Date always was; callers on
+ * the precise path (the live fuse, the operator tool) pass the text through.
+ */
+const asTimestampParam = (d: Date | string): string => (typeof d === "string" ? d : d.toISOString());
 
 /** True once a visit is closed — the point after which only the clinician columns may move. */
 export const isClosed = (state: string): boolean => state === "ended";
@@ -101,9 +113,9 @@ export async function updateOpenVisit(
   expectedUpdatedAt: Date | string,
   patch: OpenVisitPatch,
 ): Promise<UpdateOutcome> {
-  const r = await client.query<{ id: string; updated_at: Date }>(SQL_VISIT_UPDATE_OPEN, [
+  const r = await client.query<{ id: string; updated_at: string }>(SQL_VISIT_UPDATE_OPEN, [
     id,
-    iso(expectedUpdatedAt),
+    asTimestampParam(expectedUpdatedAt),
     patch.state,
     patch.ended_at,
     patch.confidence,
@@ -117,7 +129,7 @@ export async function updateOpenVisit(
     patch.clinician_confidence,
   ]);
   const row = r.rows[0];
-  return { won: (r.rowCount ?? 0) > 0, updated_at: row ? iso(row.updated_at) : null };
+  return { won: (r.rowCount ?? 0) > 0, updated_at: row ? String(row.updated_at) : null };
 }
 
 /**
@@ -137,15 +149,15 @@ export async function updateVisitClinician(
   if (!(CLINICIAN_SOURCES as readonly string[]).includes(clinician.source)) {
     throw new Error(`invalid_clinician_source:${clinician.source}`);
   }
-  const r = await client.query<{ id: string; updated_at: Date }>(SQL_VISIT_UPDATE_CLINICIAN, [
+  const r = await client.query<{ id: string; updated_at: string }>(SQL_VISIT_UPDATE_CLINICIAN, [
     id,
-    iso(expectedUpdatedAt),
+    asTimestampParam(expectedUpdatedAt),
     clinician.id,
     clinician.source,
     clinician.confidence,
   ]);
   const row = r.rows[0];
-  return { won: (r.rowCount ?? 0) > 0, updated_at: row ? iso(row.updated_at) : null };
+  return { won: (r.rowCount ?? 0) > 0, updated_at: row ? String(row.updated_at) : null };
 }
 
 /**
