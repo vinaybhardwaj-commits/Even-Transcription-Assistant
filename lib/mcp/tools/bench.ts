@@ -108,6 +108,7 @@ import {
   istDayRangeUtc,
   listenerState as listenerStateOf,
   markerComplete,
+  roomState,
 } from "@/lib/admin/rooms-live";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -2083,7 +2084,7 @@ async function liveMonitorExtras(
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
   description:
-    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused.",
+    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -2188,6 +2189,16 @@ const diffRoom: McpTool = {
             last_cue: lastCue,
             // --- additive from here; every field above is untouched --------------------------
             listener_state: listenerStateOf(listener, pageOpen === null, now.getTime()),
+            // K2 §6 — the SAME function the admin page calls, so the door and the screen cannot
+            // disagree about a room. Six states, one precedence order, one place.
+            room_state: roomState({
+              listenerReadFailed: pageOpen === null,
+              listener: listener ? { last_poll_at: listener.last_poll_at, paused: Boolean(listener.paused) } : null,
+              pausedSession,
+              recording: recordingSession !== null,
+              recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
+              nowMs: now.getTime(),
+            }),
             paused_listener: pausedListener,
             paused_session: pausedSession,
             // Named rather than resolved: the kiosk and the tape are two witnesses, and when they

@@ -27,6 +27,48 @@
  */
 
 import * as React from "react";
+// From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
+// lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
+import { roomState, type RoomState } from "@/lib/bench-bus-constants";
+
+// ---------------------------------------------------------------------------
+// The selected room — shared with BenchClient, which renders that room's sessions
+// ---------------------------------------------------------------------------
+//
+// A module-level store rather than lifted state, because the two components are SIBLINGS under a
+// server component (app/admin/bench/page.tsx) that cannot hold client state. This is the smallest
+// thing that works without a context provider in the page.
+//
+// The `source` field is the part that matters. A selection made by a PERSON is never overwritten;
+// a `default` one may be replaced when better information arrives — the recording room outranks
+// "most recent session", and the two components learn those facts from different polls. Without
+// it, either the default would fight the user's click, or the first component to load would win.
+
+export type Selection = { roomId: string; source: "default" | "user" } | null;
+
+let selection: Selection = null;
+const storeSubs = new Set<() => void>();
+const emit = () => { for (const l of storeSubs) l(); };
+
+export const selectedRoom = {
+  get: (): Selection => selection,
+  subscribe: (fn: () => void) => { storeSubs.add(fn); return () => { storeSubs.delete(fn); }; },
+  /** A person clicked. This wins over anything, for ever. */
+  choose: (roomId: string) => { selection = { roomId, source: "user" }; emit(); },
+  /** A component worked out a default. Never overrides a person, never overrides itself pointlessly. */
+  suggest: (roomId: string) => {
+    if (selection?.source === "user") return;
+    if (selection?.roomId === roomId) return;
+    selection = { roomId, source: "default" };
+    emit();
+  },
+  /** Tests only — the store outlives a component, which is the point of it. */
+  reset: () => { selection = null; emit(); },
+};
+
+export function useSelectedRoom(): Selection {
+  return React.useSyncExternalStore(selectedRoom.subscribe, selectedRoom.get, () => null);
+}
 
 // ---------------------------------------------------------------------------
 // Wire shapes (mirrors of the two routes)
@@ -117,6 +159,24 @@ const LEVEL_CLASS: Record<Level, string> = {
 function Pill({ level, children, title }: { level: Level; children: React.ReactNode; title?: string }) {
   return <span className={`${PILL} ${LEVEL_CLASS[level]}`} title={title}>{children}</span>;
 }
+
+/** The card's edge carries the WORST condition on it, so trouble is found before it is read. */
+const CARD_EDGE: Record<Level, string> = {
+  ok: "border-even-ink-200 bg-even-white",
+  amber: "border-warning-200 bg-warning-50",
+  red: "border-danger-200 bg-danger-50",
+  unknown: "border-even-ink-200 bg-even-ink-50",
+};
+
+/** The chip word for each state. The full sentence is roomState()'s `label`. */
+const STATE_WORD: Record<RoomState, string> = {
+  cant_tell: "can't tell",
+  paused: "paused",
+  recording: "recording",
+  ready: "ready",
+  dropped: "dropped",
+  offline: "offline",
+};
 
 // ---------------------------------------------------------------------------
 // The attention list — pure, and tested
@@ -248,6 +308,15 @@ export function BenchRoomsLive() {
   const listenersKnown = Boolean(listeners) && !(listeners?.degraded?.length);
   const rooms = rollup?.rooms ?? [];
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
+  const selectedId = useSelectedRoom()?.roomId ?? null;
+
+  // DEFAULT SELECTION, first rule: the room that is RECORDING. `suggest` never overrides a click,
+  // so this cannot fight the operator, and it outranks BenchClient's "most recent session" default
+  // because the two components learn their facts from different polls and this one is better.
+  React.useEffect(() => {
+    const rec = rooms.find((r) => r.recording);
+    if (rec) selectedRoom.suggest(rec.room.id);
+  }, [rooms]);
 
   const send = React.useCallback(async (roomId: string, kind: string, overridePause = false) => {
     setNote(null);
@@ -319,169 +388,154 @@ export function BenchRoomsLive() {
         <p className="text-caption text-success-700">Nothing needs attention.</p>
       ) : null}
 
-      <div className="overflow-x-auto rounded-lg border border-even-ink-200">
-        <table className="w-full text-body">
-          <thead className="bg-even-ink-50 text-caption uppercase tracking-wide text-even-ink-500">
-            <tr>
-              <th className="text-left py-2 px-2.5">Room</th>
-              <th className="text-left py-2 px-2.5">Kiosk</th>
-              <th className="text-left py-2 px-2.5">Tape</th>
-              <th className="text-left py-2 px-2.5">Mic</th>
-              <th className="text-left py-2 px-2.5" title="Pulse clocks from the LABELLED doctor only. The warehouse holds no room.">This doctor</th>
-              <th className="text-left py-2 px-2.5">Marks</th>
-              <th className="text-left py-2 px-2.5">Transcription</th>
-              <th className="text-left py-2 px-2.5">Controls</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-even-ink-100">
-            {rooms.map((r) => {
-              const l = listenerMap.get(r.room.id);
-              const state = !listenersKnown ? "unknown" : !l ? "never" : l.listening ? "listening" : "stale";
-              const pausedDisagrees = Boolean(l) && l!.paused !== r.paused_session;
-              return (
-                <tr key={r.room.id} className="align-top">
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    <p className="font-semibold text-even-navy-800">{r.room.name}</p>
-                    <p className="text-caption text-even-ink-400">{r.room.slug}</p>
-                  </td>
+      {/* CARDS, not rows (E1). A table is for comparing rooms; the operator is not comparing,
+          they are scanning for trouble — so the worst condition promotes the whole card and finds
+          the eye without being read. Selecting a card reveals that room's recordings below. */}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {rooms.map((r) => {
+          const l = listenerMap.get(r.room.id);
+          const st = roomState({
+            listenerReadFailed: !listenersKnown,
+            listener: l ? { last_poll_at: l.last_poll_at, paused: l.paused } : null,
+            pausedSession: r.paused_session,
+            recording: r.recording,
+            recordingSince: r.session_started_at,
+            nowMs,
+          });
+          const worst: Level = r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red"
+            ? "red"
+            : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.backup_reads_no_chunks || r.marks_not_sent > 0
+              ? "amber"
+              : st.level === "unknown" ? "unknown" : "ok";
+          const isSelected = selectedId === r.room.id;
+          return (
+            <button
+              key={r.room.id}
+              type="button"
+              onClick={() => selectedRoom.choose(r.room.id)}
+              aria-pressed={isSelected}
+              className={`text-left rounded-xl border p-4 transition ${CARD_EDGE[worst]} ${isSelected ? "ring-2 ring-even-blue-400" : "hover:bg-even-ink-50"}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold text-even-navy-800 truncate">{r.room.name}</p>
+                  <p className="text-caption text-even-ink-400 truncate">{r.room.slug}</p>
+                </div>
+                <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
+              </div>
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    {state === "listening" ? <Pill level="ok" title={`polled ${fmtAge(l!.age_ms)} ago`}>page open</Pill>
-                      : state === "stale" ? <Pill level="red" title={`last poll ${fmtAge(l!.age_ms)} ago`}>page stale · {fmtAge(l!.age_ms)}</Pill>
-                      : state === "never" ? <Pill level="red" title="no kiosk tab has ever polled this room">no page</Pill>
-                      : <Pill level="unknown" title="the bus read failed — this is not the same as no kiosk">kiosk unknown</Pill>}
-                    {l?.paused ? <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`}>kiosk paused</span> : null}
-                  </td>
+              <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
+              {st.hint ? <p className="text-caption text-even-ink-500">{st.hint}</p> : null}
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    {r.stalled ? (
-                      <span className={`${PILL} ${LEVEL_CLASS.red}`} title={`no piece from either mic for ${fmtAge(r.stalled_age_ms)} — the hourly reaper ends it after 30 min`}>
-                        stalled · {fmtAge(r.stalled_age_ms)}
-                      </span>
-                    ) : r.recording ? (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-even-pink-50 text-even-pink-700">
-                        <span className="w-1.5 h-1.5 rounded-full bg-even-pink-600 animate-pulse" />
-                        recording
-                      </span>
-                    ) : r.paused_session ? (
-                      <span className={`${PILL} ${LEVEL_CLASS.amber}`}>paused</span>
+              <dl className="mt-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-caption text-even-ink-500">Mic</dt>
+                  <dd>
+                    {/* READY CLAIMS NOTHING ABOUT THE MICROPHONES. Before a session starts there
+                        are no chunks, so mic health is unknown by construction — the mockup's
+                        "both mics seen" was not buildable and is not built. */}
+                    {st.state === "ready" || (!r.recording && r.last_piece_at === null) ? (
+                      <span className="text-caption text-even-ink-400">no tape yet</span>
                     ) : (
-                      <span className={`${PILL} ${LEVEL_CLASS.unknown}`}>idle</span>
+                      <Pill level={r.mic_level} title="newest piece on either mic, on the UPLOAD clock — a healthy mic cycles 0–5 min">
+                        {r.last_piece_at ? fmtAge(ageMs(r.last_piece_at, nowMs)) : r.recording ? "no piece yet" : "—"}
+                      </Pill>
                     )}
-                    {/* Pause has no paused_at, so this is a STATE and never a duration. */}
-                    {pausedDisagrees ? (
-                      <p className="text-caption text-warning-700 mt-1" title="bench_listener.paused and bench_session.status disagree">
-                        pause disagrees: kiosk {l!.paused ? "paused" : "not paused"} · tape {r.paused_session ? "paused" : "not paused"}
-                      </p>
-                    ) : null}
-                  </td>
+                  </dd>
+                </div>
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    <Pill level={r.mic_level} title="freshness of the newest piece on either mic, on the UPLOAD clock — a healthy mic cycles 0–5 min">
-                      {r.last_piece_at ? fmtAge(ageMs(r.last_piece_at, nowMs)) : r.recording ? "no piece yet" : "—"}
-                    </Pill>
-                    {r.backup_reads_no_chunks ? (
-                      <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`} title="the backup microphone has recorded nothing at all this session">
-                        backup reads no chunks
-                      </span>
-                    ) : r.backup_chunks_today > 0 ? (
-                      <span className="text-caption text-even-ink-400 ml-1.5">{r.backup_chunks_today} backup</span>
-                    ) : null}
-                  </td>
-
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-caption text-even-ink-500" title="Pulse clocks from the LABELLED doctor only. The warehouse holds no room.">This doctor</dt>
+                  <dd>
                     {r.doctor_clock_silent_ms === null ? (
-                      <span className="text-caption text-even-ink-400" title="counted only while recording and not paused">—</span>
+                      <span className="text-caption text-even-ink-400">—</span>
                     ) : (
                       <Pill
                         level={r.doctor_clock_level}
-                        title="Pulse clocks from the LABELLED doctor only. Another doctor may be in this room seeing patients — the warehouse holds no room, so this cannot tell you the room is empty."
+                        title="Pulse clocks from the LABELLED doctor only. Another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty."
                       >
                         {fmtAge(r.doctor_clock_silent_ms)}
                       </Pill>
                     )}
-                  </td>
+                  </dd>
+                </div>
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    <span className="text-body text-even-navy-800">{r.marks_today}</span>
-                    {r.last_mark_at ? <span className="text-caption text-even-ink-400 ml-1.5">last {fmtAge(ageMs(r.last_mark_at, nowMs))}</span> : null}
-                    {r.marks_not_sent > 0 ? (
-                      <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`} title="the kiosk recorded the press but the cue never reached the brain">
-                        {r.marks_not_sent} not sent
-                      </span>
-                    ) : null}
-                  </td>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-caption text-even-ink-500">Marks</dt>
+                  <dd className="text-caption text-even-navy-800">
+                    {r.marks_today}
+                    {r.marks_not_sent > 0 ? <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`}>{r.marks_not_sent} not sent</span> : null}
+                  </dd>
+                </div>
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    {r.last_window_asked_at === null ? (
-                      <span className="text-caption text-even-ink-400">not asked</span>
-                    ) : r.last_window_complete === true ? (
-                      <Pill level="ok" title={`window finished, asked ${fmtAge(ageMs(r.last_window_asked_at, nowMs))} ago`}>finished</Pill>
-                    ) : r.last_window_complete === false ? (
-                      <Pill level="amber" title="the turns were rolled back — re-run this window">did not finish</Pill>
-                    ) : (
-                      // A marker that never says `complete` is UNKNOWN. Reading that silence as
-                      // false would invent a failure nothing reported.
-                      <Pill level="unknown" title="a marker exists but does not say whether the window finished">unknown</Pill>
-                    )}
-                  </td>
+                {r.backup_reads_no_chunks ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <dt className="text-caption text-even-ink-500">Backup mic</dt>
+                    <dd><Pill level="amber" title="the second microphone has recorded nothing at all this session">reads no chunks</Pill></dd>
+                  </div>
+                ) : null}
 
-                  <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    <div className="flex flex-wrap gap-1.5">
-                      <button
-                        type="button"
-                        disabled={state !== "listening" || r.recording}
-                        title={state !== "listening" ? "no kiosk page is open in this room — a queued start would expire unseen" : r.recording ? "already recording" : "queue start_day"}
-                        onClick={() => void send(r.room.id, "start_day")}
-                        className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        start
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!r.recording}
-                        onClick={() => void send(r.room.id, "pause_day")}
-                        className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        pause
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!r.paused_session}
-                        onClick={() => void send(r.room.id, "resume_day")}
-                        className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        resume
-                      </button>
-                      {/* TWO CLICKS. Ending a day is not undoable from here. */}
-                      {confirmStop === r.room.id ? (
-                        <button
-                          type="button"
-                          onClick={() => void send(r.room.id, "end_day")}
-                          className="px-2 py-0.5 rounded-md text-caption font-semibold bg-danger-100 text-danger-700 hover:bg-danger-200"
-                        >
-                          confirm stop
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={!r.recording && !r.paused_session}
-                          onClick={() => setConfirmStop(r.room.id)}
-                          className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          stop
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {rooms.length === 0 ? (
-              <tr><td colSpan={8} className="py-4 px-2.5 text-caption text-even-ink-400">{rollup ? "no enabled rooms" : "loading…"}</td></tr>
-            ) : null}
-          </tbody>
-        </table>
+                {r.last_window_complete === false ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <dt className="text-caption text-even-ink-500">Transcription</dt>
+                    <dd><Pill level="amber" title="the turns were rolled back — re-run this window">window did not finish</Pill></dd>
+                  </div>
+                ) : null}
+              </dl>
+
+              {/* Controls live inside the card but are not part of its click target. */}
+              <div className="mt-3 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  disabled={st.state !== "ready"}
+                  title={st.state === "ready" ? "queue start_day" : "start is offered only when it will succeed — the kiosk must be listening, and the room neither recording nor paused"}
+                  onClick={() => void send(r.room.id, "start_day")}
+                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  start
+                </button>
+                <button
+                  type="button"
+                  disabled={!r.recording}
+                  onClick={() => void send(r.room.id, "pause_day")}
+                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  pause
+                </button>
+                <button
+                  type="button"
+                  disabled={st.state !== "paused"}
+                  onClick={() => void send(r.room.id, "resume_day")}
+                  className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  resume
+                </button>
+                {/* TWO CLICKS. Ending a day is not undoable from here. */}
+                {confirmStop === r.room.id ? (
+                  <button
+                    type="button"
+                    onClick={() => void send(r.room.id, "end_day")}
+                    className="px-2 py-0.5 rounded-md text-caption font-semibold bg-danger-100 text-danger-700 hover:bg-danger-200"
+                  >
+                    confirm stop
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!r.recording && !r.paused_session}
+                    onClick={() => setConfirmStop(r.room.id)}
+                    className="px-2 py-0.5 rounded-md text-caption bg-even-ink-100 hover:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    stop
+                  </button>
+                )}
+              </div>
+            </button>
+          );
+        })}
+        {rooms.length === 0 ? (
+          <p className="text-caption text-even-ink-400">{rollup ? "no enabled rooms" : "loading…"}</p>
+        ) : null}
       </div>
 
       <p className="text-caption text-even-ink-400">

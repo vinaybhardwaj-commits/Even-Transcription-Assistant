@@ -364,3 +364,171 @@ describe("0054 — the indexes the 3 s poll depends on", () => {
     expect(body).not.toContain("stt_window");
   });
 });
+
+// ===========================================================================
+// 9. the six room states (K2 §1) — operator language, one precedence order
+// ===========================================================================
+
+// From the pure constants module. bench-commands re-exports LISTENER_FRESH_MS but NOT this one —
+// deliberately left alone, since lib/bench-commands.ts is outside this slice's file contract.
+import { LISTENER_OFFLINE_MS, roomState, fmtCoarse, fmtDayIst } from "@/lib/bench-bus-constants";
+
+const T = Date.parse("2026-08-24T06:00:00Z");
+const kiosk = (agoMs: number, paused = false) => ({ last_poll_at: new Date(T - agoMs).toISOString(), paused });
+const st = (over: Partial<Parameters<typeof roomState>[0]> = {}) =>
+  roomState({ listenerReadFailed: false, listener: kiosk(1_000), pausedSession: false, recording: false, recordingSince: null, nowMs: T, ...over });
+
+describe("the six states", () => {
+  it("1 — a FAILED listener read is Can't tell, never Offline", () => {
+    const r = st({ listenerReadFailed: true, listener: null });
+    expect(r.state).toBe("cant_tell");
+    expect(r.label).toBe("Can't tell — cannot reach the command bus");
+    // saying offline here would send somebody walking to a room that is perfectly fine
+    expect(r.label).not.toMatch(/offline/i);
+  });
+
+  it("2 — PAUSED OUTRANKS RECORDING: consent withdrawn is the fact to act on", () => {
+    const both = st({ recording: true, recordingSince: new Date(T - 2 * 3_600_000).toISOString(), pausedSession: true });
+    expect(both.state).toBe("paused");
+    expect(both.label).toBe("Paused for consent");
+    // and either witness alone is enough
+    expect(st({ listener: kiosk(1_000, true) }).state).toBe("paused");
+    expect(st({ pausedSession: true }).state).toBe("paused");
+  });
+
+  it("3 — Recording carries how long", () => {
+    const r = st({ recording: true, recordingSince: new Date(T - (2 * 3_600_000 + 14 * 60_000)).toISOString() });
+    expect(r.state).toBe("recording");
+    expect(r.label).toBe("Recording · 2h 14m");
+  });
+
+  it("4 — Ready is listening, not recording, not paused — and claims NOTHING else", () => {
+    const r = st();
+    expect(r.state).toBe("ready");
+    expect(r.label).toBe("Ready");
+    // the mockup's "both mics seen" was not buildable: before a session there are no chunks
+    expect(r.label).not.toMatch(/mic/i);
+    expect(r.hint).toBeNull();
+  });
+
+  it("5 — 9 minutes stale is Dropped, and it says to wait", () => {
+    const r = st({ listener: kiosk(9 * 60_000) });
+    expect(r.state).toBe("dropped");
+    expect(r.label).toBe("Kiosk dropped 9m ago");
+    expect(r.hint).toMatch(/wait/i);
+  });
+
+  it("6 — 11 minutes is Offline, and it says WHAT TO DO", () => {
+    const r = st({ listener: kiosk(11 * 60_000) });
+    expect(r.state).toBe("offline");
+    expect(r.label).toMatch(/^Offline · no kiosk since /);
+    expect(r.hint).toBe("open the room page on the Mini");
+  });
+
+  it("the Dropped/Offline boundary is LISTENER_OFFLINE_MS exactly", () => {
+    expect(LISTENER_OFFLINE_MS).toBe(10 * 60_000);
+    expect(st({ listener: kiosk(LISTENER_OFFLINE_MS - 1) }).state).toBe("dropped");
+    expect(st({ listener: kiosk(LISTENER_OFFLINE_MS) }).state).toBe("offline");
+  });
+
+  it("6b — no row at all is Offline · never opened (OPD 7 today)", () => {
+    const r = st({ listener: null });
+    expect(r.state).toBe("offline");
+    expect(r.label).toBe("Offline · never opened");
+    expect(r.hint).toBe("open the room page on the Mini");
+  });
+
+  it("a 52-hour-stale kiosk names the DAY, not a duration — `page stale · 52h 27m` is gone", () => {
+    const r = st({ listener: kiosk(52 * 3_600_000) });
+    expect(r.label).toBe("Offline · no kiosk since 22 Aug");
+    expect(r.label).not.toMatch(/stale/i);
+    expect(r.label).not.toMatch(/52h/);
+  });
+
+  it("`page stale` appears nowhere in the monitor any more", () => {
+    const ui = readFileSync(join(process.cwd(), "components", "admin", "BenchRoomsLive.tsx"), "utf8");
+    expect(ui).not.toMatch(/page stale/i);
+  });
+});
+
+describe("the state formatters are deterministic", () => {
+  it("fmtDayIst is arithmetic IST, so server and browser agree", () => {
+    // 18:29 UTC is still the 23rd in IST; 18:30 UTC is the 24th
+    expect(fmtDayIst("2026-08-23T18:29:00Z")).toBe("23 Aug");
+    expect(fmtDayIst("2026-08-23T18:30:00Z")).toBe("24 Aug");
+    expect(fmtDayIst(null)).toBeNull();
+  });
+  it("fmtCoarse never shows seconds — these are not stopwatches", () => {
+    expect(fmtCoarse(30_000)).toBe("just now");
+    expect(fmtCoarse(3 * 60_000)).toBe("3m");
+    expect(fmtCoarse(2 * 3_600_000 + 14 * 60_000)).toBe("2h 14m");
+    expect(fmtCoarse(50 * 3_600_000)).toBe("2d");
+  });
+});
+
+// ===========================================================================
+// 10. the selection store — it must survive a poll
+// ===========================================================================
+
+import { selectedRoom } from "@/components/admin/BenchRoomsLive";
+
+describe("the selected room", () => {
+  beforeEach(() => selectedRoom.reset());
+
+  it("a person's choice is NEVER overridden by a later default", () => {
+    selectedRoom.choose("room_b");
+    selectedRoom.suggest("room_a");           // the monitor finds a recording room
+    selectedRoom.suggest("room_c");           // and again on the next poll
+    expect(selectedRoom.get()).toEqual({ roomId: "room_b", source: "user" });
+  });
+
+  it("SURVIVES A POLL: repeated identical suggestions do not churn the selection", () => {
+    selectedRoom.suggest("room_a");
+    const first = selectedRoom.get();
+    selectedRoom.suggest("room_a");
+    selectedRoom.suggest("room_a");
+    expect(selectedRoom.get()).toBe(first);   // same object — nothing was re-set
+  });
+
+  it("a default may be replaced by a better default, which is how recording outranks recency", () => {
+    selectedRoom.suggest("room_recent");
+    selectedRoom.suggest("room_recording");
+    expect(selectedRoom.get()).toEqual({ roomId: "room_recording", source: "default" });
+  });
+
+  it("notifies subscribers, and stops when they leave", () => {
+    let hits = 0;
+    const off = selectedRoom.subscribe(() => { hits++; });
+    selectedRoom.choose("room_a");
+    expect(hits).toBe(1);
+    off();
+    selectedRoom.choose("room_b");
+    expect(hits).toBe(1);
+  });
+});
+
+// ===========================================================================
+// 11. the client bundle boundary — the build caught this once
+// ===========================================================================
+
+describe("the state rules stay importable from a browser bundle", () => {
+  it("lib/bench-bus-constants.ts imports NOTHING — a Postgres driver must never reach the browser", () => {
+    const src = readFileSync(join(process.cwd(), "lib", "bench-bus-constants.ts"), "utf8");
+    // The module's own contract, and the reason roomState lives here rather than in
+    // lib/admin/rooms-live.ts (which imports lib/db and lib/brain/db).
+    expect(src).not.toMatch(/^\s*import\s/m);
+    expect(src).toContain("export function roomState");
+  });
+
+  it("the monitor component does not import the server-side aggregation", () => {
+    const ui = readFileSync(join(process.cwd(), "components", "admin", "BenchRoomsLive.tsx"), "utf8");
+    expect(ui).not.toMatch(/from "@\/lib\/admin\/rooms-live"/);
+    expect(ui).toMatch(/from "@\/lib\/bench-bus-constants"/);
+  });
+
+  it("and the server side still reaches roomState by one import path", async () => {
+    const fromLib = await import("@/lib/admin/rooms-live");
+    const fromPure = await import("@/lib/bench-bus-constants");
+    expect(fromLib.roomState).toBe(fromPure.roomState);
+  });
+});

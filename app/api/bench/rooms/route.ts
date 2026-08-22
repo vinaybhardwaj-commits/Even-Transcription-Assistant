@@ -4,7 +4,7 @@
  *
  * GET   — list rooms + last-session info (admin)
  * POST  — create room: { name, pin? } → slug + PIN shown once (admin)
- * PATCH — { room_id, action: "reset_pin" | "disable" | "enable" } (admin)
+ * PATCH — { room_id, action: "reset_pin" | "disable" | "enable" | "rename" } (admin)
  *
  * All queries INFERRED (no live DB in the build sandbox — see report);
  * fail-safe: list errors degrade to an empty list.
@@ -116,7 +116,7 @@ export async function PATCH(req: NextRequest) {
   const g = await benchAdminGuard();
   if (!g.ok) return respondError(g.code, g.msg);
 
-  let body: { room_id?: string; action?: string };
+  let body: { room_id?: string; action?: string; name?: string };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -167,6 +167,43 @@ export async function PATCH(req: NextRequest) {
       return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
     }
     return respondOk({ ok: true });
+  }
+
+  if (action === "rename") {
+    // WHY THIS IS SAFE, so no guard is added that it does not need: the login URL is built from
+    // `slug` (/room/opd-7-y74w), never from `name`, so no PIN changes and nobody re-logs-in. The
+    // scratch graph derives from room.id. Historical sessions reference room_id. The only
+    // consequence of a rename is that resolveRoom BY EXACT NAME now needs the new name.
+    const name = String((body as { name?: string }).name ?? "").trim();
+    if (name.length < 2) return respondError("VALIDATION_FAILED", "room_name_required");
+    if (name.length > 64) return respondError("VALIDATION_FAILED", "room_name_too_long");
+
+    try {
+      // room.name has NO unique constraint, and two rooms sharing one makes resolveRoom
+      // ambiguous. That degrades safely through AmbiguousRoomError, but there is no reason to
+      // create the ambiguity deliberately — so it is refused BY NAME, case-insensitively, and
+      // only against rooms that are still in play. A disabled room may keep its old name.
+      const clash = (await sql`
+        SELECT id FROM room
+         WHERE lower(name) = lower(${name})
+           AND id <> ${roomId}
+           AND disabled_at IS NULL
+         LIMIT 1
+      `) as Array<{ id: string }>;
+      if (clash.length > 0) return respondError("VALIDATION_FAILED", "room_name_already_exists");
+
+      // The whole write. NOTHING else: not slug, not pin_hash, not disabled_at, not
+      // failed_attempts, not locked_until. A rename is a label change and must stay one.
+      const updated = (await sql`
+        UPDATE room SET name = ${name} WHERE id = ${roomId}
+        RETURNING id, slug, name
+      `) as Array<{ id: string; slug: string; name: string }>;
+      const row = updated[0];
+      if (!row) return respondError("VALIDATION_FAILED", "unknown_room");
+      return respondOk({ ok: true, room: { id: row.id, slug: row.slug, name: row.name } });
+    } catch (e) {
+      return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
+    }
   }
 
   return respondError("VALIDATION_FAILED", "unknown_action");

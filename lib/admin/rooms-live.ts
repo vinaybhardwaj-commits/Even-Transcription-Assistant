@@ -101,6 +101,19 @@ export function listenerState(listener: ListenerRow | null, readFailed: boolean,
   return Number.isFinite(age) && age <= LISTENER_FRESH_MS ? "listening" : "stale";
 }
 
+// The six room states (K2 §1) live in lib/bench-bus-constants.ts — the PURE module that is safe
+// to pull into a browser bundle. THIS file imports lib/db and lib/brain/db, so a client component
+// importing roomState from here would drag a Postgres driver into the browser and fail the build.
+// Re-exported so every server-side caller keeps one import path.
+export {
+  LISTENER_OFFLINE_MS,
+  roomState,
+  fmtCoarse,
+  fmtDayIst,
+  type RoomState,
+  type RoomStateView,
+} from "@/lib/bench-bus-constants";
+
 /** PURE. IST is UTC+05:30 with no DST, so the day boundary is arithmetic and needs no Intl data.
  *  HALF-OPEN [from, to) so the range is sargable and bench_session_room_started_idx is usable —
  *  the reason the monitor writes its own session query instead of reusing listBenchSessions,

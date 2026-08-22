@@ -10,6 +10,7 @@
 import * as React from "react";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
 import Link from "next/link";
+import { selectedRoom, useSelectedRoom } from "@/components/admin/BenchRoomsLive";
 
 type SessionRow = {
   id: string;
@@ -86,6 +87,9 @@ export function BenchClient() {
     pin: string;
   } | null>(null);
   const [resetPin, setResetPin] = React.useState<{ name: string; pin: string } | null>(null);
+  /** Which room's card is open for rename, and the draft in its box. */
+  const [renaming, setRenaming] = React.useState<{ id: string; draft: string } | null>(null);
+  const [renameError, setRenameError] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     try {
@@ -168,6 +172,59 @@ export function BenchClient() {
     [load],
   );
 
+  const onRename = React.useCallback(
+    async (roomId: string, raw: string) => {
+      const name = raw.trim();
+      setRenameError(null);
+      if (name.length < 2) { setRenameError("room_name_required"); return; }
+      if (name.length > 64) { setRenameError("room_name_too_long"); return; }
+      try {
+        const res = await fetch("/api/bench/rooms", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ room_id: roomId, action: "rename", name }),
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j?.error?.message ?? "rename_failed");
+        setRenaming(null);
+        void load();
+      } catch (e) {
+        // Named, not swallowed: room_name_already_exists is the one an operator will hit, and
+        // "rename failed" would leave them guessing which of two rooms already has the name.
+        setRenameError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [load],
+  );
+
+  // ---- Recordings BY ROOM (E4) ----------------------------------------------------------
+  // The flat all-rooms table is gone. Sessions are shown for ONE room, chosen on the monitor's
+  // cards above, and the selection survives every poll because it lives outside this component.
+  const selectedId = useSelectedRoom()?.roomId ?? null;
+  const roomById = React.useMemo(() => new Map((rooms ?? []).map((r) => [r.id, r])), [rooms]);
+
+  // DEFAULT, second and third rules: the room with the most recent session, else the first room.
+  // (The first rule — the room that is RECORDING — is suggested by the monitor, which is the
+  // component that knows. `suggest` never overrides a click, so neither can fight the operator.)
+  React.useEffect(() => {
+    if (selectedId || !rooms || rooms.length === 0 || sessions === null) return;
+    let bestRoom: string | null = null;
+    let bestAt = -Infinity;
+    for (const sess of sessions) {
+      const room = (rooms ?? []).find((r) => r.slug === sess.room_slug);
+      if (!room) continue;
+      const t = new Date(sess.started_at).getTime();
+      if (Number.isFinite(t) && t > bestAt) { bestAt = t; bestRoom = room.id; }
+    }
+    selectedRoom.suggest(bestRoom ?? rooms[0]!.id);
+  }, [selectedId, rooms, sessions]);
+
+  const selectedRoomRow = selectedId ? roomById.get(selectedId) ?? null : null;
+  const roomSessions = React.useMemo(
+    () => (selectedRoomRow && sessions ? sessions.filter((x) => x.room_slug === selectedRoomRow.slug) : []),
+    [sessions, selectedRoomRow],
+  );
+
   return (
     <div className="space-y-6">
       {error && (
@@ -176,12 +233,24 @@ export function BenchClient() {
         </p>
       )}
 
-      {/* ===== Sessions ===== */}
+      {/* ===== Recordings, for the SELECTED room (E4) ===== */}
       <section className="eta-card p-5 overflow-x-auto">
+        <div className="flex items-baseline justify-between gap-3 mb-3">
+          <h2 className="text-heading text-even-navy-800">
+            {selectedRoomRow ? `${selectedRoomRow.name} recordings` : "Recordings"}
+            <span className="ml-2 text-caption font-normal text-even-ink-400">
+              {selectedRoomRow ? `· ${roomSessions.length} session${roomSessions.length === 1 ? "" : "s"}` : null}
+            </span>
+          </h2>
+          {rooms && rooms.length > 1 ? (
+            <p className="text-caption text-even-ink-400">select a room card above to switch</p>
+          ) : null}
+        </div>
         <table className="w-full text-body">
           <thead>
             <tr className="text-left border-b border-even-ink-100">
-              {["Room", "Session", "Date", "Duration", "Chunks", "Verified", "Gaps", "Size", "Status"].map(
+              {/* No Room column: every row is the same room now, and repeating it is noise. */}
+              {["Session", "Date", "Duration", "Chunks", "Verified", "Gaps", "Size", "Status"].map(
                 (h) => (
                   <th
                     key={h}
@@ -196,21 +265,21 @@ export function BenchClient() {
           <tbody>
             {sessions === null ? (
               <tr>
-                <td colSpan={9} className="py-6 px-2.5 text-caption text-even-ink-400">
+                <td colSpan={8} className="py-6 px-2.5 text-caption text-even-ink-400">
                   Loading…
                 </td>
               </tr>
-            ) : sessions.length === 0 ? (
+            ) : roomSessions.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-6 px-2.5 text-caption text-even-ink-400">
-                  No bench sessions yet. Create a room below, sign in at its /room URL and start a
-                  recording day.
+                <td colSpan={8} className="py-6 px-2.5 text-caption text-even-ink-400">
+                  {selectedRoomRow
+                    ? `No recordings yet for ${selectedRoomRow.name}. Sign in at /room/${selectedRoomRow.slug} on the Mini and start a recording day.`
+                    : "No bench sessions yet. Create a room below, sign in at its /room URL and start a recording day."}
                 </td>
               </tr>
             ) : (
-              sessions.map((s) => (
+              roomSessions.map((s) => (
                 <tr key={s.id} className="border-b border-even-ink-50 hover:bg-even-ink-50">
-                  <td className="py-2.5 px-2.5 font-semibold text-even-navy-800">{s.room_name}</td>
                   <td className="py-2.5 px-2.5">
                     <Link href={`/admin/bench/${s.id}`} className="text-even-blue-700 hover:underline">
                       {s.label ?? s.id}
@@ -383,7 +452,43 @@ export function BenchClient() {
             ) : (
               rooms.map((r) => (
                 <tr key={r.id} className="border-b border-even-ink-50">
-                  <td className="py-2.5 px-2.5 font-semibold text-even-navy-800">{r.name}</td>
+                  <td className="py-2.5 px-2.5 font-semibold text-even-navy-800">
+                    {renaming?.id === r.id ? (
+                      <span className="flex items-center gap-1.5">
+                        <input
+                          value={renaming.draft}
+                          autoFocus
+                          maxLength={64}
+                          onChange={(e) => setRenaming({ id: r.id, draft: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void onRename(r.id, renaming.draft);
+                            if (e.key === "Escape") { setRenaming(null); setRenameError(null); }
+                          }}
+                          className="rounded-lg border border-even-ink-200 bg-even-white px-2 py-1 text-body"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void onRename(r.id, renaming.draft)}
+                          disabled={renaming.draft.trim().length < 2}
+                          className="text-even-blue-700 text-caption hover:underline disabled:opacity-40"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setRenaming(null); setRenameError(null); }}
+                          className="text-even-ink-500 text-caption hover:underline"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      r.name
+                    )}
+                    {renaming?.id === r.id && renameError ? (
+                      <p className="mt-1 text-caption text-danger-700 font-normal">{renameError}</p>
+                    ) : null}
+                  </td>
                   <td className="py-2.5 px-2.5 font-mono text-caption">/room/{r.slug}</td>
                   <td className="py-2.5 px-2.5">
                     {r.disabled ? (
@@ -402,10 +507,20 @@ export function BenchClient() {
                       : "—"}
                   </td>
                   <td className="py-2.5 px-2.5 text-right whitespace-nowrap">
+                    {/* Rename lives HERE, beside Reset PIN and Disable — one place, not two.
+                        It changes `name` and nothing else: the login URL is built from `slug`,
+                        so no PIN changes and nobody has to sign in again. */}
+                    <button
+                      type="button"
+                      onClick={() => { setRenaming({ id: r.id, draft: r.name }); setRenameError(null); }}
+                      className="text-even-blue-700 text-caption hover:underline"
+                    >
+                      Rename
+                    </button>
                     <button
                       type="button"
                       onClick={() => onResetPin(r)}
-                      className="text-even-blue-700 text-caption hover:underline"
+                      className="ml-3 text-even-blue-700 text-caption hover:underline"
                     >
                       Reset PIN
                     </button>
@@ -424,7 +539,8 @@ export function BenchClient() {
         </table>
         <p className="mt-3 text-caption text-even-ink-400">
           Creating a room shows its PIN once (like admin-created doctor PINs). Rooms have no voice
-          enrollment and never appear on the Clinicians page.
+          enrollment and never appear on the Clinicians page. Renaming a room changes only its
+          display name — the login URL uses the slug, so PINs and sign-ins are unaffected.
         </p>
       </section>
     </div>
