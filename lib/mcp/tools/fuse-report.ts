@@ -30,7 +30,7 @@ import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/be
 import { endTimeDisagrees, tapeEndMs } from "./bench";
 import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
-import { DEFAULT_ARM, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_TURN_CUE_COUNTS, SQL_VISITS_FOR_DAY, TURN_CUE_TYPES, type RoomDayByIdRow } from "@/lib/brain/state";
+import { DEFAULT_ARM, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_TURN_CUE_COUNTS, SQL_VISITS_FOR_DAY, TURN_CUE_TYPES, WINDOW_CUE_TYPE, type RoomDayByIdRow } from "@/lib/brain/state";
 import { ALL_RULES_REASONS, LAST_MARK_WINDOW_MS } from "@/lib/brain/fuse/rules";
 import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
@@ -87,7 +87,7 @@ const overlaps = (spans: TapeSpan[], from: number, to: number): boolean => spans
 const fuseReport: McpTool = {
   name: "scribe_fuse_report",
   description:
-    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. Every warehouse event is attributed to exactly one of warehouse_opened_a_visit / closed / moved / unbound, and the four sum to warehouse_total. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. SPEECH TURNS (slice A): four more counters — turns_total, turn_silences, speaker_matches and turn_cues_total, the three types partitioning the day's turn cues so they sum to the total. They come from their own aggregate, so they survive a failure of the full cue read; speaker_matches is legitimately 0 until slice B, and a reported zero is not a missing count. Also `turn_tape`: how much tape was actually listened to, rolled up from payload.window and payload.source_used on the day's turn cues — windows asked, minutes asked / with words / silent (a partition, exact in ms and rounded in minutes), how many windows the BACKUP microphone answered, and the language whisper.cpp reported per window. Windows are counted once each, so overlapping asks add their minutes twice and say so with windows_overlap. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
+    "The fuse scoreboard for ONE room-day (PRD §11.5): marks vs warehouse vs visits vs tape, and every place they disagree. Names the arm (default rules). A SCRATCH room-day reads the REAL room's tape, because a scratch room has none of its own. `silence` walks the WAREHOUSE CUE timeline — never the visits — and reports every gap longer than the reported threshold with whether tape was running across it; that is how the OPD 7 six-hour hole is visible at all, since no visit represents it. Each entry names its `edge`: leading (tape start → first warehouse event), between, trailing (last event → tape end), or whole_day when the warehouse recorded NOTHING across a whole day of tape. One threshold for all four. Every warehouse event is attributed to exactly one of warehouse_opened_a_visit / closed / moved / unbound, and the four sum to warehouse_total. `marks_unaccounted` counts kiosk taps whose window holds no warehouse clock — consultations the warehouse has no trace of. SPEECH TURNS (slice A): four more counters — turns_total, turn_silences, speaker_matches and turn_cues_total, the three types partitioning the day's turn cues so they sum to the total. They come from their own aggregate, so they survive a failure of the full cue read; speaker_matches is legitimately 0 until slice B, and a reported zero is not a missing count. Also `turn_tape`: how much tape was actually listened to, rolled up from payload.window and payload.source_used on the day's turn cues — windows asked, minutes asked / with words / silent (a partition, exact in ms and rounded in minutes), how many windows the BACKUP microphone answered, and the language whisper.cpp reported per window. Windows are counted once each, so overlapping asks add their minutes twice and say so with windows_overlap. COMPLETENESS (K3): every asked window carries one `stt_window` cue saying whether it finished, and turn_tape reports windows_complete / windows_incomplete / windows_without_marker plus an `incomplete` list naming each unfinished window and why it stopped. An incomplete window has ZERO turns by construction — the writer rolls the partial back rather than committing 71 rows of 162 — so its emptiness is an unfinished read, never silence. stt_window is deliberately NOT one of the three evidence counters: it says a window was finished, never that anything was heard. Stored in_tape_window is REPORTED, never recomputed; a disagreement with the tape actually read is named rather than corrected. Read-only: writes nothing. individual_uid is omitted unless include_identity:true. Every constant that shaped the result is in `parameters`.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -223,11 +223,17 @@ const fuseReport: McpTool = {
       // that read; these cannot — a window is a payload field, so there is nothing to roll up
       // if the payloads did not arrive. When the read failed, `cues_read_failed` is already in
       // `degraded` and this section reports zeros over zero windows rather than a wrong number.
-      type TurnWindow = { from: number; to: number; words: number; silences: number; mics: Set<string>; langs: Set<string> };
+      // K3: stt_window joins the walk. It is NOT evidence — it never says anything was heard —
+      // so it stays out of the three-way evidence partition above and is counted here instead,
+      // where the question is "what did we ask for and did we finish it". It is also the ONLY
+      // authority on the second half of that question: a window with no turns and no marker was
+      // never asked, while a window with a complete:false marker was asked and could not finish.
+      type TurnWindow = { from: number; to: number; words: number; silences: number; markers: number; complete: boolean | null; stoppedEarly: string | null; segmentCount: number | null; mics: Set<string>; langs: Set<string> };
       const windows = new Map<string, TurnWindow>();
       let turnCuesWithoutWindow = 0;
+      const ROLLUP_TYPES: readonly string[] = [...TURN_CUE_TYPES, WINDOW_CUE_TYPE];
       for (const c of inOrder) {
-        if (!(TURN_CUE_TYPES as readonly string[]).includes(c.type)) continue;
+        if (!ROLLUP_TYPES.includes(c.type)) continue;
         const pay = c.payload && typeof c.payload === "object" && !Array.isArray(c.payload) ? (c.payload as Record<string, unknown>) : null;
         const w = pay?.window && typeof pay.window === "object" && !Array.isArray(pay.window) ? (pay.window as Record<string, unknown>) : null;
         const from = typeof w?.start_ms === "number" ? w.start_ms : NaN;
@@ -242,11 +248,25 @@ const fuseReport: McpTool = {
         const key = `${from}|${to}`;
         let entry = windows.get(key);
         if (!entry) {
-          entry = { from, to, words: 0, silences: 0, mics: new Set(), langs: new Set() };
+          entry = { from, to, words: 0, silences: 0, markers: 0, complete: null, stoppedEarly: null, segmentCount: null, mics: new Set(), langs: new Set() };
           windows.set(key, entry);
         }
         if (c.type === "stt_turn") entry.words++;
         else if (c.type === "stt_silence") entry.silences++;
+        else if (c.type === WINDOW_CUE_TYPE) {
+          entry.markers++;
+          // Only a marker that actually SAYS so moves this off null. A marker whose payload
+          // carries no `complete` field is a marker that did not answer the question, and
+          // reading its silence as `false` would invent a failure that nothing reported.
+          if (typeof pay?.complete === "boolean") {
+            // Two markers for one window should be impossible — delete-then-insert replaces the
+            // pair. If it ever happens the PESSIMISTIC reading wins: a complete marker never
+            // overwrites an incomplete one, because the unfinished read is the one worth acting on.
+            entry.complete = entry.complete === false ? false : pay.complete;
+          }
+          if (pay?.complete === false && typeof pay?.stopped_early === "string") entry.stoppedEarly = pay.stopped_early;
+          if (typeof pay?.segment_count === "number") entry.segmentCount = pay.segment_count;
+        }
         entry.mics.add(typeof pay?.source_used === "string" ? pay.source_used : "unreported");
         entry.langs.add(typeof pay?.language === "string" ? pay.language : "unreported");
       }
@@ -267,6 +287,15 @@ const fuseReport: McpTool = {
       }
       const msSilent = msAsked - msWithWords;
       const windowsWithWords = windowList.filter((w) => w.words > 0).length;
+      // K3 §3 — completeness, which is a different question from "was anything said".
+      //   complete === true   the window finished; its turns are the whole window
+      //   complete === false  the window was ASKED and could not finish; its turns were rolled
+      //                       back, so zero stt_turn rows exist for it and the absence is not
+      //                       silence — it is an unfinished read
+      //   complete === null   no marker at all: written before K3, or by something else
+      const windowsComplete = windowList.filter((w) => w.complete === true).length;
+      const incompleteWindows = windowList.filter((w) => w.complete === false);
+      const windowsNoMarker = windowList.filter((w) => w.complete === null).length;
       // Windows are counted once each, so two overlapping asks are two windows and their minutes
       // are added twice. Said out loud rather than silently merged: merging would make the three
       // minute figures stop partitioning, and a reader who sees this flag knows to read the total
@@ -298,6 +327,25 @@ const fuseReport: McpTool = {
         languages: Object.entries(langWindows)
           .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
           .map(([language, w]) => ({ language, windows: w })),
+        windows_complete: windowsComplete,
+        windows_incomplete: incompleteWindows.length,
+        // A window with no USABLE marker is NOT reported as complete — neither one written
+        // before K3, nor one whose payload never answered. Saying nothing is the honest answer.
+        windows_without_marker: windowsNoMarker,
+        // Named, not just counted: an unfinished window is a piece of tape nobody has read, and a
+        // bare count would leave the reader unable to go back and re-ask for it.
+        ...(incompleteWindows.length
+          ? {
+              incomplete: incompleteWindows.map((w) => ({
+                from: new Date(w.from).toISOString(),
+                to: new Date(w.to).toISOString(),
+                start_ms: w.from,
+                end_ms: w.to,
+                stopped_early: w.stoppedEarly,
+                segment_count: w.segmentCount,
+              })),
+            }
+          : {}),
         ...(windowsOverlap ? { windows_overlap: true } : {}),
         ...(turnCuesWithoutWindow ? { turn_cues_without_window: turnCuesWithoutWindow } : {}),
       };
@@ -476,6 +524,7 @@ const fuseReport: McpTool = {
           warehouse_cue_types: WAREHOUSE_CUE_TYPES,
           mark_cue_type: MARK_CUE_TYPE,
           turn_cue_types: TURN_CUE_TYPES,
+          window_cue_type: WINDOW_CUE_TYPE,
           default_arm: DEFAULT_ARM,
         },
         tape: {

@@ -33,6 +33,9 @@ vi.mock("@/lib/brain/db", () => ({ TOKEN_ENV: "BRAIN_SERVICE_TOKEN", getPool: ()
 vi.mock("@/lib/brain/state", () => ({
   CUES_DEFAULT_LIMIT: 50, CUES_MAX_LIMIT: 200, findRoomDay: async () => null, isIstDateString: (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s),
   istDate: () => "2026-08-19", listCuesForDay: async () => ({ cues: [] }), readGraph: async () => ({}), roomExists: async () => true,
+  // K3: the turn writer's completeness cue type. A constant, not a function — the mock has to
+  // carry it or buildWindowCue reads undefined off the mocked module.
+  WINDOW_CUE_TYPE: "stt_window",
 }));
 
 import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";

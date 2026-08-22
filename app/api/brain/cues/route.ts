@@ -41,7 +41,18 @@ import { NextResponse } from "next/server";
 import { checkBearer } from "@/lib/brain/auth";
 import { brainLog, classifyBrainError } from "@/lib/brain/db";
 import { withRoomDayLock } from "@/lib/brain/lock";
-import { findRoomDayById, insertCue, insertScratchCue, istDate, readGraph, resolveRoomDay, roomExists } from "@/lib/brain/state";
+import {
+  deleteWindowCues,
+  findRoomDayById,
+  insertCue,
+  insertScratchCue,
+  insertScratchCuesBatch,
+  istDate,
+  readGraph,
+  resolveRoomDay,
+  roomExists,
+  type ScratchCueInput,
+} from "@/lib/brain/state";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,6 +61,15 @@ export const maxDuration = 30;
 const MAX_BODY_BYTES = 1_000_000; // 1 MB — cues are small; transcript turns are text
 const MAX_ID_LEN = 128;
 const MAX_TYPE_LEN = 64;
+
+/**
+ * K3 §2 — the batch path's own ceiling. A 30-minute window (the ask cap) at Whisper's observed
+ * density is a few hundred segments; 2000 is far above anything real and far below the point
+ * where the one INSERT would approach Postgres's 65535-parameter limit at 8 params per row.
+ * Refused BY NAME rather than truncated: a silently shortened batch would commit a partial
+ * window, which is the exact failure K3 §4 exists to prevent.
+ */
+const MAX_BATCH_CUES = 2000;
 
 type Json = Record<string, unknown>;
 
@@ -80,6 +100,53 @@ function optionalIdString(v: unknown, code: string, max: number): string | null 
   return requireIdString(v, code, max);
 }
 
+/**
+ * K3 §2 — validate the batch. Every cue is checked BEFORE the lock is taken, so a malformed
+ * batch is a 400 that touched nothing rather than a rollback halfway down a transaction.
+ *
+ * `session_id` and `source` come from the TOP LEVEL and are stamped onto every row: a batch is
+ * one window of one session from one source by construction, and letting a row carry its own
+ * would let a caller mix sessions inside a single replace. Each row brings only what actually
+ * varies — type, at, payload, source_ref.
+ *
+ * Returns null when the body has no `cues` at all (the single-cue paths), which is how the
+ * caller selects the branch.
+ */
+function parseBatch(v: unknown, top: { sessionId: string | null; source: string | null }): ScratchCueInput[] | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v)) throw new HttpError(400, "invalid_cues");
+  if (v.length > MAX_BATCH_CUES) throw new HttpError(413, "too_many_cues");
+  const out: ScratchCueInput[] = [];
+  for (const item of v) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) throw new HttpError(400, "invalid_cue_in_batch");
+    const c = item as Json;
+    out.push({
+      type: requireIdString(c.type, "type_required", MAX_TYPE_LEN),
+      at: parseAt(c.at),
+      payload: c.payload,
+      session_id: top.sessionId,
+      source: top.source,
+      source_ref: optionalIdString(c.source_ref, "invalid_source_ref", MAX_ID_LEN),
+    });
+  }
+  return out;
+}
+
+/** K3 §1 — the window to clear. All three fields required together or the object is refused. */
+function parseReplaceWindow(v: unknown): { session_id: string; start_ms: number; end_ms: number } | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "object" || Array.isArray(v)) throw new HttpError(400, "invalid_replace_window");
+  const w = v as Json;
+  const sid = requireIdString(w.session_id, "invalid_replace_window", MAX_ID_LEN);
+  const start = w.start_ms;
+  const end = w.end_ms;
+  // Integers only. The delete casts these to bigint against a jsonb number, so a float or a
+  // numeric string would silently match nothing and the replace would become an append.
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) throw new HttpError(400, "invalid_replace_window");
+  if ((end as number) <= (start as number)) throw new HttpError(400, "invalid_replace_window");
+  return { session_id: sid, start_ms: start as number, end_ms: end as number };
+}
+
 export async function POST(req: Request) {
   const t0 = Date.now();
   let status = 200;
@@ -99,8 +166,11 @@ export async function POST(req: Request) {
     const b = body as Json;
 
     const roomId = requireIdString(b.room_id, "room_id_required", MAX_ID_LEN);
-    const type = requireIdString(b.type, "type_required", MAX_TYPE_LEN);
-    const at = parseAt(b.at);
+    // On the batch path each cue carries its own type, so the top-level one is neither required
+    // nor read. It is still required on both single-cue paths, live and scratch, unchanged.
+    const isBatchBody = Array.isArray(b.cues);
+    const type = isBatchBody ? "" : requireIdString(b.type, "type_required", MAX_TYPE_LEN);
+    const at = isBatchBody ? new Date() : parseAt(b.at);
     const payload = b.payload; // any JSON; undefined → SQL NULL
 
     // Slice 2 (F9). All three are absent on every live call, so everything below this line
@@ -114,11 +184,70 @@ export async function POST(req: Request) {
     // The three new columns are written by the scratch statement only — SQL_CUE_INSERT is shared
     // with the live path and is not touched. Refuse rather than accept-and-drop them: a caller
     // that sent session_id and got a 200 would believe it was stored.
+    // Checked FIRST, so a batch missing its day is told what is actually wrong with it rather
+    // than being caught by whichever of the three field rules below happens to fire first.
+    if (isBatchBody && !roomDayId) throw new HttpError(400, "cues_requires_room_day_id");
     if (!roomDayId && sessionId !== null) throw new HttpError(400, "session_id_requires_room_day_id");
     if (!roomDayId && source !== null) throw new HttpError(400, "source_requires_room_day_id");
     if (!roomDayId && sourceRef !== null) throw new HttpError(400, "source_ref_requires_room_day_id");
 
+    // Slice A / K3 (§2). Two more optional fields, and the same rule as the four above: absent on
+    // every live call, so nothing below is reachable from the live path.
+    //
+    //   cues[]         — the batch. Its presence is what selects the batch branch.
+    //   replace_window — the window to clear first. SEPARATE from `cues` on purpose: an EMPTY
+    //                    cues array with a replace_window is a legitimate DELETE-ONLY call, and
+    //                    it is how K3 §7's cleanup is done without a new tool on the door.
+    const batch = parseBatch(b.cues, { sessionId, source });
+    const replaceWindow = parseReplaceWindow(b.replace_window);
+    if (batch === null && replaceWindow !== null) throw new HttpError(400, "replace_window_requires_cues");
+    // `cues` and the single-cue fields are two different calls, not one call with options. A body
+    // carrying both is ambiguous about which `type` was meant, so it is refused rather than
+    // resolved by precedence.
+    if (batch !== null && (b.type !== undefined || b.payload !== undefined || b.source_ref !== undefined)) {
+      throw new HttpError(400, "cues_and_single_cue_are_exclusive");
+    }
+
     if (!(await roomExists(roomId))) throw new HttpError(404, "unknown_room");
+
+    // ---- batch path (K3 §2): one transaction, one lock, one replace --------------------
+    // Reached ONLY when the body carries `cues`. Everything the single-cue scratch path
+    // guarantees is reused verbatim below — withRoomDayLock, the re-read of `scratch` INSIDE
+    // the lock, and the 409 not_a_scratch_day — because duplicating the guard is how a live day
+    // eventually gets written to. This branch adds no guard of its own; it adds a delete.
+    if (batch) {
+      if (!roomDayId) throw new HttpError(400, "cues_requires_room_day_id");
+      const out = await withRoomDayLock(roomDayId, async (client) => {
+        const day = await findRoomDayById(client, roomDayId);
+        if (!day) throw new HttpError(404, "room_day_not_found");
+        if (day.scratch !== true) throw new HttpError(409, "not_a_scratch_day");
+        // The replace, in this order and inside this one transaction. A throw anywhere below
+        // rolls the delete back too, so a failed write leaves the PREVIOUS window intact rather
+        // than leaving the day empty — K3 §4's "never leave 71 of 162" in its strongest form.
+        const deleted = replaceWindow
+          ? await deleteWindowCues(client, day.id, { sessionId: replaceWindow.session_id, startMs: replaceWindow.start_ms, endMs: replaceWindow.end_ms })
+          : 0;
+        const ins = await insertScratchCuesBatch(client, day.id, batch);
+        const state = await readGraph(client, day.room_id, day.ist_date, day.id);
+        return { deleted, ins, state };
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          batch: true,
+          room_day_id: roomDayId,
+          scratch: true,
+          deleted: out.deleted,
+          written: out.ins.written,
+          already_existed: out.ins.already_existed,
+          attempted: out.ins.attempted,
+          cue_ids: out.ins.ids,
+          state: out.state,
+        },
+        { headers: { "cache-control": "no-store" } }
+      );
+    }
 
     // ---- scratch path (F9): the day is named, and it must be a scratch day --------------
     if (roomDayId) {

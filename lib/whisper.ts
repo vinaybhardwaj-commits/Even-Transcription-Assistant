@@ -14,6 +14,9 @@
  * accepts multipart/form-data with a `file` part. Returns JSON like:
  *   { "text": "...", "language": "en", "duration": 2.34, "segments": [...] }
  *
+ * DECODER (K3 §5): temperature, beam_size and best_of are all genuinely parsed by this server
+ * and are pinned below to greedy / single-candidate / zero. `seed` is NOT a parameter it has.
+ *
  * SEGMENTS (speech turns, slice A). This client used to ask for `json` and read
  * only `text`, so the segment timings the model had already produced were thrown
  * away at the parse and every caller got one undifferentiated slab. It now asks
@@ -136,7 +139,26 @@ export async function transcribeWithWhisper(
   // verbose_json, not json: `json` returns the text alone and the segment timings — which the
   // model has already computed — are lost at the wire, not at the parse.
   form.append('response_format', 'verbose_json');
+
+  // ---- the pinned decoder (speech turns, slice A, K3 §5) ----------------------------------
+  // Whisper is not a deterministic writer: two runs of the SAME clip returned 162 and 165
+  // segments. That is why the write unit is now the window rather than the turn — but the churn
+  // is still worth reducing, because every extra segment is an extra row and an extra key.
+  //
+  // Greedy, single candidate, zero temperature: no sampling, no beam tie-breaking, no fallback
+  // to a hotter temperature on a low-confidence window. These three are what the endpoint
+  // actually honours, verified against the live Mac Mini rather than assumed — posting a garbage
+  // value to each returns HTTP 500 with `stoi: no conversion` / `stof: no conversion`, i.e. the
+  // server really does parse them, which a silent 200 would not have proved.
   form.append('temperature', '0.0');
+  form.append('beam_size', '1');
+  form.append('best_of', '1');
+  //
+  // THERE IS NO SEED. K3 §5 asked for a fixed seed; this endpoint has no such parameter. Posting
+  // `seed` returns HTTP 200 and changes nothing — it is silently ignored, exactly as an invented
+  // field name would be, which is how it was told apart from the three above. It is NOT sent
+  // here, because a parameter that does nothing reads to the next maintainer as a guarantee that
+  // is being kept. Flagged in the K3 report; the window-as-unit design does not depend on it.
   // Language: by default let whisper auto-detect (good for code-switching). BUT
   // whisper.cpp picks ONE language for the whole file from its first window, so a
   // code-mixed tail can poison detection and garble the entire transcript. When

@@ -89,9 +89,9 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("scribe_post_cue — the machine cue types are refused by name", () => {
-  it("names exactly the seven, in the settled order", () => {
+  it("names exactly the eight, in the settled order", () => {
     expect(POST_CUE_BLOCKED_TYPES).toEqual([
-      "stt_turn", "stt_silence", "speaker_match", "pqm_called", "pstart", "dx_event", "pulse_note",
+      "stt_turn", "stt_silence", "stt_window", "speaker_match", "pqm_called", "pstart", "dx_event", "pulse_note",
     ]);
   });
 
@@ -302,113 +302,114 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     expect(out.text).toBe("hello there and later"); // the text answer is unchanged
   });
 
-  it("dry_run:false posts one cue per turn — scratch day, source replay, source_ref, AND session_id (K2)", async () => {
+  it("K3 — dry_run:false posts ONE batch: delete the window, then insert the whole set", async () => {
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
     expect(out.ok).toBe(true);
     expect(out.dry_run).toBe(false);
     expect(out.room_day_id).toBe("rd_scratch_t_20260819");
-    expect(fetchCalls).toHaveLength(2);
-    for (const c of fetchCalls) {
-      expect(c.url).toBe("https://preview.example/api/brain/cues");
-      expect(c.auth).toBe("Bearer tok");
-      expect(c.body.room_id).toBe("room_scratch_t");
-      expect(c.body.room_day_id).toBe("rd_scratch_t_20260819");
-      expect(c.body.source).toBe("replay");
-      expect(c.body.type).toBe("stt_turn");
-      expect(String(c.body.source_ref).split("|")).toHaveLength(4);
-      // K2 correction 2: 0051 narrowed 0046's predicate to exclude the turn types, so the
-      // session goes back ON THE ROW. A turn must be queryable by session without anyone
-      // parsing a string out of source_ref.
-      expect(c.body.session_id).toBe("bs_a");
-    }
-    expect(out).toMatchObject({ written: 2, already_existed: 0, dropped: 0, attempted: 2 });
+    // ONE request for the whole window. The old writer sent one per cue and measured 624 ms a
+    // row in production, which no time budget could have made a six-minute window survive.
+    expect(fetchCalls).toHaveLength(1);
+    const c = fetchCalls[0]!;
+    expect(c.url).toBe("https://preview.example/api/brain/cues");
+    expect(c.auth).toBe("Bearer tok");
+    expect(c.body.room_id).toBe("room_scratch_t");
+    expect(c.body.room_day_id).toBe("rd_scratch_t_20260819");
+    expect(c.body.source).toBe("replay");
+    expect(c.body.session_id).toBe("bs_a");
+    // the delete half of the write unit, keyed on the ASKED window and never on segment times
+    expect(c.body.replace_window).toEqual({
+      session_id: "bs_a",
+      start_ms: Date.parse("2026-08-19T05:06:00Z"),
+      end_ms: Date.parse("2026-08-19T05:08:00Z"),
+    });
+    // two turns + the completeness cue
+    const cues = c.body.cues as Row[];
+    expect(cues.map((x) => x.type)).toEqual(["stt_turn", "stt_turn", "stt_window"]);
+    for (const cue of cues) expect(String(cue.source_ref).split("|")).toHaveLength(4);
     expect(out.natural_key).toEqual(["source_ref", "type"]);
-    // the cue's source does not collide with the MICROPHONE's — two questions, two keys
+    expect(out.write_unit).toEqual(["session_id", "window.start_ms", "window.end_ms"]);
     expect(out.turn_cue_source).toBe("replay");
     expect(out.source_used).toBe("primary");
   });
 
-  it("a re-run writes nothing twice: no row and no error is already_existed, never a failure", async () => {
-    mockFetch({ ok: true, cue_id: null, cue_at: "2026-08-19T05:06:00.000Z", already_existed: true, state: {} });
-    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
-    expect(out).toMatchObject({ written: 0, already_existed: 2, dropped: 0 });
+  it("K3 — the completeness cue says the window finished, and carries the window for its own delete", async () => {
+    await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx);
+    const cues = fetchCalls[0]!.body.cues as Row[];
+    const marker = cues.find((c) => c.type === "stt_window")!;
+    const WIN_FROM = Date.parse("2026-08-19T05:06:00Z");
+    const WIN_TO = Date.parse("2026-08-19T05:08:00Z");
+    expect(marker.at).toBe(new Date(WIN_FROM).toISOString());
+    expect(marker.source_ref).toBe(`bs_a|${WIN_FROM}|${WIN_TO}|window`);
+    expect(marker.payload).toMatchObject({
+      complete: true, engine: "whisper", language: "en", source_used: "primary",
+      segment_count: 3, end: new Date(WIN_TO).toISOString(),
+      window: { start_ms: WIN_FROM, end_ms: WIN_TO },
+    });
+    // the marker's speaker slot is `window`, so it cannot collide with the stt_silence that
+    // covers the identical instants
+    expect(marker.source_ref).not.toBe(`bs_a|${WIN_FROM}|${WIN_TO}|-`);
   });
 
-  it("a window with nothing in it writes ONE stt_silence", async () => {
+  it("K3 — the four counts come back, and a replace reports what it deleted", async () => {
+    mockFetch({ ok: true, batch: true, deleted: 162, written: 165, already_existed: 0, attempted: 165, state: {} });
+    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
+    // 162 out, 165 in — a different segment count on the second run is a REPLACE and is correct
+    expect(out).toMatchObject({ deleted: 162, written: 165, already_existed: 0, dropped: 0, complete: true });
+  });
+
+  it("a window with nothing in it writes ONE stt_silence, beside its completeness cue", async () => {
     whisperOut = { ok: true, transcript: "only outside", language: "en", latency_ms: 1, segments: [{ start_s: 10, end_s: 20, text: "before the window" }] };
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
     expect(fetchCalls).toHaveLength(1);
-    expect(fetchCalls[0]!.body.type).toBe("stt_silence");
-    expect(fetchCalls[0]!.body.source_ref).toBe(`bs_a|${Date.parse("2026-08-19T05:06:00Z")}|${Date.parse("2026-08-19T05:08:00Z")}|-`);
+    const cues = fetchCalls[0]!.body.cues as Row[];
+    expect(cues.map((c) => c.type)).toEqual(["stt_silence", "stt_window"]);
+    expect(cues[0]!.source_ref).toBe(`bs_a|${Date.parse("2026-08-19T05:06:00Z")}|${Date.parse("2026-08-19T05:08:00Z")}|-`);
     expect((out.turn_counts as Row).silences).toBe(1);
-    expect(out.written).toBe(1);
+    // a SILENT window is still a COMPLETE one — nothing was said, and we know that
+    expect((cues[1]!.payload as Row).complete).toBe(true);
+    expect(out.complete).toBe(true);
   });
 
-  it("BRAIN_BASE_URL refuses the write by name — and the text still comes back", async () => {
-    process.env.BRAIN_BASE_URL = "https://brain.example/";
+  it("K3 §4 — a brain that refuses rolls the turns back and commits ONLY the admission", async () => {
+    whisperOut = {
+      ok: true, transcript: "a b c d", language: "en", latency_ms: 1,
+      segments: [60, 70, 80, 90, 100].map((t) => ({ start_s: t, end_s: t + 1, text: `turn at ${t}` })),
+    };
+    // the first POST (the whole window) fails; the second (the marker alone) succeeds
+    let n = 0;
+    fetchCalls = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url: String(url), body: JSON.parse(String(init.body)), auth: null });
+      n++;
+      if (n === 1) return new Response(JSON.stringify({ ok: false, error: "boom" }), { status: 503, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ok: true, batch: true, deleted: 5, written: 1, already_existed: 0, attempted: 1, state: {} }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
+    expect(fetchCalls).toHaveLength(2);
+    // the second call carries the SAME delete and exactly one cue: the admission
+    const second = fetchCalls[1]!.body;
+    expect(second.replace_window).toEqual(fetchCalls[0]!.body.replace_window);
+    const only = second.cues as Row[];
+    expect(only).toHaveLength(1);
+    expect(only[0]!.type).toBe("stt_window");
+    expect(only[0]!.payload).toMatchObject({ complete: false, stopped_early: "boom", segment_count: 5 });
+    // NEVER 71 of 162: every turn is a drop, and a drop is a bug, not a mode
+    expect(out).toMatchObject({ complete: false, dropped: 5, stopped_early: "boom", turn_write_error: "boom" });
+    // and the text is still returned — a failed write never takes the transcript away
     expect(out.ok).toBe(true);
-    expect(out.text).toBe("hello there and later");
-    expect(out.turn_write_error).toBe("brain_base_url_set");
-    expect(fetchCalls).toHaveLength(0);
-    expect(out.written).toBe(0);
+    expect(out.text).toBe("a b c d");
   });
 
-  it("a day whose scratch flag is not true is refused, and nothing is posted", async () => {
-    seedWorld({ ...SCRATCH_DAY, scratch: false });
-    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
-    expect(out.turn_write_error).toBe("not_a_scratch_day");
-    expect(fetchCalls).toHaveLength(0);
-    expect(out.text).toBe("hello there and later");
-  });
-
-  it("a brain that refuses every write stops early and names the drops — a drop is a bug, not a mode", async () => {
+  it("K3 §4 — when even the admission cannot be written, nothing is claimed", async () => {
     fetchCalls = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
       fetchCalls.push({ url: String(url), body: JSON.parse(String(init.body)), auth: null });
       return new Response(JSON.stringify({ ok: false, error: "boom" }), { status: 503, headers: { "content-type": "application/json" } });
     }));
-    whisperOut = {
-      ok: true, transcript: "a b c d", language: "en", latency_ms: 1,
-      segments: [60, 70, 80, 90, 100].map((t) => ({ start_s: t, end_s: t + 1, text: `turn at ${t}` })),
-    };
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
-    expect(out.dropped).toBe(3);
-    expect(out.stopped_early).toBe("consecutive_failures");
-    expect(fetchCalls).toHaveLength(3); // stopped, not all five
-    expect((out.failures as Row[])[0]).toMatchObject({ type: "stt_turn" });
-  });
-
-  it("K2 — every posted cue carries the window asked for and the microphone that answered it", async () => {
-    await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx);
-    const WIN_FROM = Date.parse("2026-08-19T05:06:00Z");
-    const WIN_TO = Date.parse("2026-08-19T05:08:00Z");
-    expect(fetchCalls).toHaveLength(2);
-    for (const c of fetchCalls) {
-      // the SAME window on both cues of the window — the day's rollup groups by it
-      expect((c.body.payload as Row).window).toEqual({ start_ms: WIN_FROM, end_ms: WIN_TO });
-      expect((c.body.payload as Row).source_used).toBe("primary");
-      // a turn's own bounds are NOT the window, which is the whole reason the field exists
-      expect((c.body.payload as Row).start_ms).not.toBe(WIN_FROM + 1);
-    }
-  });
-
-  it("K2 — the backup microphone is named in the payload, not only in the answer", () => {
-    const b = buildTurns({
-      sessionId: "bs_a", clipStartMs: 1000, windowStartMs: 1000, windowEndMs: 5000,
-      segments: [{ start_s: 0, end_s: 1, text: "hello" }], language: "en", sourceUsed: "backup",
-    });
-    expect((b.turns[0]!.payload as Row).source_used).toBe("backup");
-    const silent = buildTurns({ sessionId: "bs_a", clipStartMs: 1000, windowStartMs: 1000, windowEndMs: 5000, segments: [], sourceUsed: "backup" });
-    expect((silent.turns[0]!.payload as Row).source_used).toBe("backup");
-  });
-
-  it("K2 — the window does NOT change the key: adding it re-writes nothing", async () => {
-    const first = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
-    const refs = (first.turns as Row[]).map((t) => t.source_ref);
-    // source_ref is the four fields and nothing else, whatever the payload grew
-    expect(refs[0]).toBe(`bs_a|${Date.parse("2026-08-19T05:06:00Z")}|${Date.parse("2026-08-19T05:06:04.320Z")}|-`);
-    for (const r of refs) expect(String(r).split("|")).toHaveLength(4);
+    expect(out).toMatchObject({ deleted: 0, written: 0, already_existed: 0, complete: false });
+    expect(out.text).toBe("hello there and later");
   });
 
   it("FAILS DRY: only an explicit false writes — a typo, a string or a null stays dry", async () => {

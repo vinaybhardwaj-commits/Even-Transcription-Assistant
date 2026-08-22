@@ -175,6 +175,35 @@ export const SQL_CUES_FOR_ROOM_DAY =
 export const TURN_CUE_TYPES = ["stt_turn", "stt_silence", "speaker_match"] as const;
 
 /**
+ * The four types the TURN NATURAL KEY covers — 0052's index predicate, in its order.
+ *
+ * DELIBERATELY a different list from TURN_CUE_TYPES above, and the difference is the whole
+ * design: `stt_window` is keyed like a turn but is NOT evidence. It says whether a window was
+ * finished; it does not say anything was heard. Folding it into TURN_CUE_TYPES would break the
+ * scoreboard identity that the three evidence types PARTITION the day's turn cues and sum to
+ * their total — a window marker would be counted as if somebody had spoken.
+ *
+ * So: TURN_CUE_TYPES is what is COUNTED as evidence, TURN_KEYED_TYPES is what is KEYED. Both
+ * appear in migrations, and tests read the .sql files to hold each to its own predicate.
+ */
+export const TURN_KEYED_TYPES = ["stt_turn", "stt_silence", "stt_window", "speaker_match"] as const;
+
+/**
+ * The completeness cue (K3 §3). One row per asked window, in the same transaction as that
+ * window's turns, saying whether the window finished. `complete: false` carries `stopped_early`
+ * and the segment count Whisper returned, and NO stt_turn row for that window exists — which is
+ * how a reader tells "we asked and could not finish" from "we never asked".
+ */
+export const WINDOW_CUE_TYPE = "stt_window";
+
+/**
+ * The types the window writer OWNS and therefore replaces wholesale. `speaker_match` is NOT one:
+ * slice B writes it from a different pass over the same window, and a turn re-run must not
+ * silently delete a diarisation result it did not produce.
+ */
+export const WINDOW_OWNED_TYPES = ["stt_turn", "stt_silence", "stt_window"] as const;
+
+/**
  * How many turn cues a room-day holds, by type. INFERRED SQL — there is no live database in the
  * build sandbox — and listed verbatim in the slice report for validation.
  *
@@ -215,8 +244,78 @@ export const SQL_CUE_INSERT_TURN =
   "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source, source_ref) " +
   "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text, $8::text) " +
   "ON CONFLICT (source_ref, type) " +
-  "WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'speaker_match') " +
+  "WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'stt_window', 'speaker_match') " +
   "DO NOTHING RETURNING id, at, created_at";
+
+/**
+ * THE WINDOW DELETE (K3 §1). Half of the write unit: a window's rows are removed and re-inserted
+ * as a set, in ONE transaction, so a re-run REPLACES Whisper's opinion instead of accumulating
+ * alongside it.
+ *
+ * MATCHED ON THE ASKED WINDOW IN THE PAYLOAD, never on Whisper's segment times. That is the
+ * entire point: the segment times are what moved between runs (162 segments one run, 165 the
+ * next), so keying the delete on them would leave the 162 behind. `payload.window` is what the
+ * OPERATOR asked for, it is identical on every cue of the window, and it is stable across runs.
+ *
+ * ->> then ::bigint rather than a jsonb numeric comparison: the payload holds these as JSON
+ * numbers, and comparing them as text would make 1755576000000 and 1.755576e12 different windows.
+ * A row whose payload has no window at all yields NULL from ->>, and NULL = $3 is never true, so
+ * such a row is left alone rather than swept up — a cue written before K2 is not this window's.
+ *
+ * `speaker_match` is deliberately NOT in the type list (WINDOW_OWNED_TYPES): slice B writes it
+ * from its own pass, and re-transcribing must not delete a diarisation result it did not produce.
+ *
+ * RETURNING id so the caller can report `deleted` as a real count rather than a rowCount that
+ * some drivers narrow away.
+ */
+export const SQL_CUE_DELETE_WINDOW =
+  "DELETE FROM cue " +
+  "WHERE room_day_id = $1 " +
+  "AND session_id = $2 " +
+  "AND source = 'replay' " +
+  "AND type IN ('stt_turn', 'stt_silence', 'stt_window') " +
+  "AND (payload->'window'->>'start_ms')::bigint = $3 " +
+  "AND (payload->'window'->>'end_ms')::bigint = $4 " +
+  "RETURNING id";
+
+/**
+ * THE BATCH INSERT (K3 §2), built for exactly `n` rows.
+ *
+ * A FUNCTION rather than a constant because the VALUES list has to be as long as the batch. It
+ * is the SAME statement as SQL_CUE_INSERT_TURN in every other respect — same eight columns, same
+ * order, same casts, same NAMED conflict target repeating 0052's predicate — so the two cannot
+ * drift on anything that matters. A test asserts buildTurnBatchInsert(1) is SQL_CUE_INSERT_TURN
+ * with one tuple.
+ *
+ * WHY IT EXISTS. The old path posted one cue per HTTP request. Measured in production on the
+ * Cardiology window: 71 rows took 44.3 s of `created_at` spread, 624 ms per row. At that rate a
+ * 165-segment window costs 103 s of inserts alone against a 115 s tool cap — so no time budget
+ * could make a six-minute window finish, and only batching can. One statement, one round trip.
+ *
+ * ON CONFLICT DO NOTHING is still correct for a multi-row insert: two rows sharing (source_ref,
+ * type) inside ONE statement conflict with each other and the later is skipped. That is the
+ * WITHIN-WRITE key doing its job — Whisper emitting the same span twice in one pass is a
+ * duplicate, not a second turn. (DO NOTHING has no "cannot affect row a second time" hazard;
+ * that error is specific to DO UPDATE.)
+ *
+ * `written` is what RETURNING gives back; `already_existed` is the shortfall. After a delete the
+ * shortfall should be zero, and a non-zero one means Whisper said the same thing twice.
+ */
+export function buildTurnBatchInsert(n: number): string {
+  if (!Number.isInteger(n) || n < 1) throw new Error(`buildTurnBatchInsert: n must be a positive integer, got ${n}`);
+  const tuples: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const b = i * 8;
+    tuples.push(`($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}::jsonb, $${b + 5}::timestamptz, $${b + 6}::text, $${b + 7}::text, $${b + 8}::text)`);
+  }
+  return (
+    "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source, source_ref) " +
+    `VALUES ${tuples.join(", ")} ` +
+    "ON CONFLICT (source_ref, type) " +
+    "WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'stt_window', 'speaker_match') " +
+    "DO NOTHING RETURNING id, at, created_at"
+  );
+}
 
 export const SQL_TURN_CUE_COUNTS =
   "SELECT type, COUNT(*)::int AS n FROM cue " +
@@ -501,7 +600,8 @@ export async function insertCue(client: Queryable, roomDayId: string, cue: CueIn
 export type ScratchCueInput = CueInput & { session_id: string | null; source: string | null; source_ref: string | null };
 
 /**
- * True for a cue that 0050's index covers: source 'replay' AND one of the three turn types.
+ * True for a cue that the turn natural key covers: source 'replay' AND one of the FOUR keyed
+ * types (0050, widened by 0052 to admit stt_window).
  * EXACTLY the index predicate, and exactly SQL_CUE_INSERT_TURN's inference predicate — the
  * three have to agree or the named arbiter stops matching and every turn write throws.
  *
@@ -510,7 +610,7 @@ export type ScratchCueInput = CueInput & { session_id: string | null; source: st
  * instead of the DO NOTHING the loader relies on.
  */
 export const isTurnCue = (source: string | null, type: string): boolean =>
-  source === "replay" && (TURN_CUE_TYPES as readonly string[]).includes(type);
+  source === "replay" && (TURN_KEYED_TYPES as readonly string[]).includes(type);
 
 /**
  * Fuse slice 2 — insert one cue on the SCRATCH path (0046 columns + 0047's source_ref, ON
@@ -550,4 +650,51 @@ export async function insertScratchCue(
   const row = r.rows[0];
   if (!row) return { id: null, at: cue.at.toISOString(), created_at: null, already_existed: true };
   return { id: row.id, at: iso(row.at) ?? cue.at.toISOString(), created_at: iso(row.created_at), already_existed: false };
+}
+
+export type WindowRef = { sessionId: string; startMs: number; endMs: number };
+
+/**
+ * K3 §1, first half — delete every row this writer owns for one asked window.
+ *
+ * Runs INSIDE the caller's transaction and lock: the delete and the insert that follows it are
+ * one atomic replace, so a reader never sees a window with the old set removed and the new set
+ * not yet written.
+ */
+export async function deleteWindowCues(client: Queryable, roomDayId: string, w: WindowRef): Promise<number> {
+  const r = await client.query<{ id: string }>(SQL_CUE_DELETE_WINDOW, [roomDayId, w.sessionId, w.startMs, w.endMs]);
+  return r.rows.length;
+}
+
+/**
+ * K3 §2, second half — insert the whole set in ONE statement.
+ *
+ * An empty batch is a legitimate call and does no work: it is how a DELETE-ONLY replace is
+ * expressed (K3 §7's cleanup path), and issuing `VALUES ()` for it would be a syntax error.
+ *
+ * Ids are minted here, one per row, exactly as the single-row path mints one. A row that loses
+ * the within-write conflict keeps its id unused, which costs nothing — ids are not a sequence.
+ */
+export async function insertScratchCuesBatch(
+  client: Queryable,
+  roomDayId: string,
+  cues: readonly ScratchCueInput[],
+): Promise<{ written: number; already_existed: number; attempted: number; ids: string[] }> {
+  if (cues.length === 0) return { written: 0, already_existed: 0, attempted: 0, ids: [] };
+  const params: unknown[] = [];
+  for (const c of cues) {
+    params.push(
+      newCueId(),
+      roomDayId,
+      c.type,
+      c.payload === undefined ? null : JSON.stringify(c.payload),
+      c.at.toISOString(),
+      c.session_id,
+      c.source,
+      c.source_ref,
+    );
+  }
+  const r = await client.query<{ id: string }>(buildTurnBatchInsert(cues.length), params);
+  const written = r.rows.length;
+  return { written, already_existed: cues.length - written, attempted: cues.length, ids: r.rows.map((x) => x.id) };
 }

@@ -203,10 +203,14 @@ export type CueSource = (typeof CUE_SOURCES)[number];
  * and writes into the SCRATCH graph, never onto a room's live day, which is the only day this
  * tool can reach. The hazard is not an untidy row — it is a keyless one:
  *
- *   · stt_turn / stt_silence / speaker_match — the speech-turn writer keys on
+ *   · stt_turn / stt_silence / stt_window / speaker_match — the speech-turn writer keys on
  *     cue.source_ref = "{session_id}|{start_ms}|{end_ms}|{speaker}" and leans on 0050's partial
  *     unique index to absorb a re-run. A turn stamped by hand carries no source_ref, so it is in
  *     no index, and every re-run of the operator's hand would add another copy of it.
+ *     stt_window (K3) is refused for a second reason on top of that one: it is the WINDOW'S
+ *     COMPLETENESS RECORD, and a hand-stamped `complete: true` would assert that a window was
+ *     finished when nothing had read the tape at all. Only the writer that did the work may say
+ *     whether the work finished.
  *   · pqm_called / pstart / dx_event / pulse_note — the warehouse types (0047). Same shape, same
  *     reason: the loader carries the warehouse row's own id in source_ref, and a hand-stamped
  *     one would sit un-keyed in the same namespace. `warehouse` was already removed from
@@ -218,6 +222,7 @@ export type CueSource = (typeof CUE_SOURCES)[number];
 export const POST_CUE_BLOCKED_TYPES = [
   "stt_turn",
   "stt_silence",
+  "stt_window",
   "speaker_match",
   "pqm_called",
   "pstart",
@@ -316,7 +321,7 @@ const postCue: McpTool = {
     type: "object",
     properties: {
       ...WRITE_ROOM_ARGS,
-      type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | operator_note | test — the machine types (stt_turn, stt_silence, speaker_match, pqm_called, pstart, dx_event, pulse_note) are refused" },
+      type: { type: "string", maxLength: 64, description: "cue type, e.g. consult_mark | operator_note | test — the machine types (stt_turn, stt_silence, stt_window, speaker_match, pqm_called, pstart, dx_event, pulse_note) are refused" },
       at: { type: "string", description: "ISO timestamp; default now (server)" },
       payload: { type: "object", description: "any JSON object; source is overwritten" },
       source: { type: "string", enum: ["mcp", "replay"], default: "mcp" },

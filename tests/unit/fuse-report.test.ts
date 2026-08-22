@@ -740,6 +740,63 @@ describe("turn_tape — PRD §10's counters, rolled up from payload.window", () 
     expect((out.turn_tape as Row).windows_total).toBe(1);      // the list, not the aggregate
   });
 
+  // --- K3 §3: completeness is a different question from "was anything said" -------------
+  it("a complete window is reported complete, and its marker is NOT counted as evidence", async () => {
+    const w = W(0, 2);
+    CUES = [...CUES, turn("stt_turn", w, "primary"), cue("stt_window", new Date(w.start_ms as number).toISOString(), { window: w, complete: true, segment_count: 1, session_id: "bs_1" })];
+    const out = await run({ room_day_id: DAY });
+    const t = out.turn_tape as Row;
+    expect(t).toMatchObject({ windows_total: 1, windows_complete: 1, windows_incomplete: 0, windows_without_marker: 0 });
+    expect(t.incomplete).toBeUndefined();
+    // the marker is not a turn and not a silence — the evidence partition is untouched by it
+    expect(t.windows_with_words).toBe(1);
+  });
+
+  it("an INCOMPLETE window is named, with why it stopped and what Whisper had returned", async () => {
+    const w = W(10, 16);
+    CUES = [...CUES, cue("stt_window", new Date(w.start_ms as number).toISOString(), {
+      window: w, complete: false, stopped_early: "brain_timeout", segment_count: 162, session_id: "bs_1", language: "en", source_used: "primary",
+    })];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_total: 1, windows_complete: 0, windows_incomplete: 1 });
+    expect((t.incomplete as Row[])[0]).toMatchObject({
+      start_ms: w.start_ms, end_ms: w.end_ms, stopped_early: "brain_timeout", segment_count: 162,
+    });
+    // an unfinished window has NO turns by construction, so its emptiness is not silence —
+    // it is counted as silent minutes only because nothing was heard, and the marker is what
+    // stops a reader believing the tape was quiet
+    expect(t.windows_with_words).toBe(0);
+  });
+
+  it("a window with NO marker is not reported as complete — saying nothing is the honest answer", async () => {
+    CUES = [...CUES, turn("stt_turn", W(0, 1), "primary")];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_complete: 0, windows_incomplete: 0, windows_without_marker: 1 });
+  });
+
+  it("a marker that never SAYS complete is unknown, not failed — silence is not a reported failure", async () => {
+    const w = W(0, 2);
+    CUES = [...CUES, cue("stt_window", new Date(w.start_ms as number).toISOString(), { window: w, segment_count: 3 })];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_complete: 0, windows_incomplete: 0, windows_without_marker: 1 });
+    expect(t.incomplete).toBeUndefined();
+  });
+
+  it("if a window somehow holds two markers, the PESSIMISTIC one wins", async () => {
+    const w = W(0, 2);
+    CUES = [
+      ...CUES,
+      cue("stt_window", new Date(w.start_ms as number).toISOString(), { window: w, complete: false, stopped_early: "boom", segment_count: 5 }),
+      cue("stt_window", new Date(w.start_ms as number).toISOString(), { window: w, complete: true, segment_count: 5 }),
+    ];
+    const t = (await run({ room_day_id: DAY })).turn_tape as Row;
+    expect(t).toMatchObject({ windows_complete: 0, windows_incomplete: 1 });
+  });
+
+  it("the window cue type is reported in parameters, from the one place it is named", async () => {
+    expect((await run({ room_day_id: DAY })).parameters).toMatchObject({ window_cue_type: "stt_window" });
+  });
+
   it("a failed cue read degrades to an empty rollup and the read is already named", async () => {
     brainResponder = (text, values) => {
       if (/FROM room_day WHERE id = \$1/.test(text)) return dayRow ? [dayRow] : [];

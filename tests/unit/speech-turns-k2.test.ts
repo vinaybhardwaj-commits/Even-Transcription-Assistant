@@ -26,6 +26,7 @@ import {
   SQL_CUE_INSERT_SCRATCH,
   SQL_CUE_INSERT_TURN,
   TURN_CUE_TYPES,
+  TURN_KEYED_TYPES,
   insertScratchCue,
   isTurnCue,
 } from "@/lib/brain/state";
@@ -85,21 +86,33 @@ describe("0051 — the replay key is narrowed, and only the replay key", () => {
 describe("SQL_CUE_INSERT_TURN — the arbiter is NAMED, and its predicate is the index's", () => {
   it("names (source_ref, type) and repeats the partial index predicate verbatim", () => {
     expect(squash(SQL_CUE_INSERT_TURN)).toContain(
-      "ON CONFLICT (source_ref, type) WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'speaker_match') DO NOTHING",
+      "ON CONFLICT (source_ref, type) WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'stt_window', 'speaker_match') DO NOTHING",
     );
   });
 
-  it("its predicate is CHARACTER FOR CHARACTER 0050's index predicate", () => {
-    const fromIndex = squash(migration("0050_turn_cue_keys.sql").replace(/^--.*$/gm, ""))
+  // K3 widened the family to four. The assertion is NOT relaxed — it is re-pointed at the
+  // migration that now owns the predicate, and still demands character-for-character equality.
+  it("its predicate is CHARACTER FOR CHARACTER the LIVE turn index predicate (0052)", () => {
+    const fromIndex = squash(migration("0052_stt_window_type.sql").replace(/^--.*$/gm, ""))
       .match(/cue_turn_natural_key ON cue \(source_ref, type\) (WHERE .*?);/)![1]!;
     expect(squash(SQL_CUE_INSERT_TURN)).toContain(fromIndex);
-    // and the same three names 0051 excludes from the replay key
-    expect(squash(migration("0051_narrow_replay_key.sql"))).toContain("('stt_turn', 'stt_silence', 'speaker_match')");
+    // and the same four names 0052 EXCLUDES from the replay key — one list, opposite senses
+    const excluded = squash(migration("0052_stt_window_type.sql").replace(/^--.*$/gm, ""))
+      .match(/cue_replay_natural_key ON cue \(session_id, type, at\) WHERE source = 'replay' AND type NOT IN \((.*?)\);/)![1]!;
+    const included = fromIndex.match(/type IN \((.*?)\)/)![1]!;
+    expect(excluded).toBe(included);
   });
 
-  it("TURN_CUE_TYPES is the same closed set, in the same order", () => {
+  it("TURN_KEYED_TYPES is the same closed set, in the same order", () => {
+    expect([...TURN_KEYED_TYPES]).toEqual(["stt_turn", "stt_silence", "stt_window", "speaker_match"]);
+    expect(squash(SQL_CUE_INSERT_TURN)).toContain(TURN_KEYED_TYPES.map((t) => `'${t}'`).join(", "));
+  });
+
+  // The distinction K3 turns on: what is KEYED is not what is COUNTED as evidence.
+  it("TURN_CUE_TYPES stays the THREE evidence types — stt_window is keyed, not counted", () => {
     expect([...TURN_CUE_TYPES]).toEqual(["stt_turn", "stt_silence", "speaker_match"]);
-    expect(squash(SQL_CUE_INSERT_TURN)).toContain(TURN_CUE_TYPES.map((t) => `'${t}'`).join(", "));
+    expect(TURN_CUE_TYPES as readonly string[]).not.toContain("stt_window");
+    expect(TURN_KEYED_TYPES as readonly string[]).toContain("stt_window");
   });
 
   it("writes the same eight columns in the same order as the shared statement — only the conflict clause differs", () => {
@@ -131,7 +144,7 @@ describe("SQL_CUE_INSERT_TURN — the arbiter is NAMED, and its predicate is the
 // ---------------------------------------------------------------------------
 
 describe("isTurnCue — BOTH halves of the predicate, never one", () => {
-  it.each(TURN_CUE_TYPES.map((t) => [t] as const))("a replay %s is a turn cue", (type) => {
+  it.each(TURN_KEYED_TYPES.map((t) => [t] as const))("a replay %s is a turn cue", (type) => {
     expect(isTurnCue("replay", type)).toBe(true);
   });
 

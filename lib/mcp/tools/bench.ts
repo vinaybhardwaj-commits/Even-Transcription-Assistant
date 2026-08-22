@@ -97,7 +97,7 @@ import {
 import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from "@/lib/bench-source";
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
 import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
-import { listCuesForDay } from "@/lib/brain/state";
+import { listCuesForDay, WINDOW_CUE_TYPE } from "@/lib/brain/state";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import {
@@ -875,6 +875,23 @@ export const TURN_CUE_TYPE = "stt_turn";
 export const SILENCE_CUE_TYPE = "stt_silence";
 
 /**
+ * K3 §3 — the completeness cue's speaker slot. `window` rather than `-`, so the window's own row
+ * can never collide with the stt_silence that covers the same instants: both are one row over the
+ * whole window, so without a different slot they would share a source_ref and the within-write
+ * key would drop one of them.
+ */
+export const WINDOW_SPEAKER_SLOT = "window";
+
+/**
+ * K3 §2 — how long the ONE batch write may take. Deliberately not BRAIN_TIMEOUT_MS (5 s, sized
+ * for a single cue): this request carries a whole window, and the transaction behind it takes the
+ * day lock, deletes the old set, inserts the new one and reads the graph back. The lock's own
+ * SET LOCAL statement_timeout ('10s' in lib/brain/lock.ts) is the real ceiling on any one
+ * statement inside it; this is the ceiling on the round trip around all of them.
+ */
+const TURN_BATCH_TIMEOUT_MS = 30_000;
+
+/**
  * The speaker slot in slice A, on every turn and on every silence, for ever. Slice B puts an
  * integer there; the literal `-` is what makes an anonymous turn and a diarised one different
  * rows rather than a collision.
@@ -884,9 +901,14 @@ export const TURN_SPEAKER_UNKNOWN = "-";
 /** Turns and silences are written as replay cues — the same `source` column the replay uses. */
 const TURN_CUE_SOURCE: CueSource = "replay";
 
-/** A brain refusing every write will refuse the next hundred. Same numbers as the replay writer. */
-const TURN_WRITE_BUDGET_MS = 45_000;
-const TURN_WRITE_MAX_CONSECUTIVE_FAILURES = 3;
+// K3 §2 removed the per-row budget and the consecutive-failure cut-out that used to live here.
+// Both existed because the writer posted one HTTP request per cue: measured in production on the
+// Cardiology window, 71 rows spread `created_at` over 44.3 s — 624 ms a row. A 165-segment window
+// would have cost 103 s of inserts alone against this tool's 115 s cap, so no budget could have
+// made a six-minute window finish. There is now ONE request for the whole window, and its ceiling
+// is TURN_BATCH_TIMEOUT_MS. A partial no longer needs guarding against by counting failures,
+// because a partial can no longer be committed: the transaction either takes the window or none
+// of it (§4).
 
 /**
  * The key, and the only definition of it in this codebase:
@@ -905,7 +927,7 @@ export function turnSourceRef(sessionId: string, startMs: number, endMs: number,
 }
 
 export type TurnDraft = {
-  type: typeof TURN_CUE_TYPE | typeof SILENCE_CUE_TYPE;
+  type: typeof TURN_CUE_TYPE | typeof SILENCE_CUE_TYPE | typeof WINDOW_CUE_TYPE;
   at: string;
   start_ms: number;
   end_ms: number;
@@ -1049,87 +1071,203 @@ export function buildTurns(opts: {
   return { turns: [silence], silence: true, segments_considered: considered, dropped_outside_window: droppedOutside, dropped_blank: droppedBlank };
 }
 
+/**
+ * K3 §3 — the completeness cue for one asked window. PURE, like buildTurns.
+ *
+ * ONE row per asked window, saying whether the window was FINISHED. It is not evidence and it
+ * never claims anything was heard; it is the difference between "we asked and could not finish"
+ * and "we never asked", which no absence of turns can express on its own.
+ *
+ * `payload.window` is present here for the same reason it is on every turn, and it is REQUIRED
+ * rather than decorative: SQL_CUE_DELETE_WINDOW matches on it, so a window cue without one could
+ * never be replaced and would accumulate one row per run — the exact failure K3 exists to fix.
+ * (K3 §3 lists the payload fields without naming `window`; §1 and §3's own "delete-then-insert
+ * applies to stt_window, exactly as for turns" require it. Included, and flagged in the report.)
+ */
+export function buildWindowCue(opts: {
+  sessionId: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  complete: boolean;
+  segmentCount: number;
+  language?: string | null;
+  sourceUsed?: string | null;
+  stoppedEarly?: string | null;
+}): TurnDraft {
+  const startMs = Math.floor(opts.windowStartMs);
+  const endMs = Math.floor(opts.windowEndMs);
+  const asked = { start_ms: startMs, end_ms: endMs };
+  return {
+    type: WINDOW_CUE_TYPE,
+    at: new Date(startMs).toISOString(),
+    start_ms: startMs,
+    end_ms: endMs,
+    speaker: WINDOW_SPEAKER_SLOT,
+    text: "",
+    source_ref: turnSourceRef(opts.sessionId, startMs, endMs, WINDOW_SPEAKER_SLOT),
+    payload: {
+      // `end` as the kickoff names it, ISO, beside the ms the delete and the rollup read.
+      end: new Date(endMs).toISOString(),
+      engine: "whisper",
+      source_used: opts.sourceUsed ?? null,
+      complete: opts.complete,
+      segment_count: opts.segmentCount,
+      language: opts.language ?? null,
+      session_id: opts.sessionId,
+      window: asked,
+      start_ms: startMs,
+      end_ms: endMs,
+      ...(opts.stoppedEarly ? { stopped_early: opts.stoppedEarly } : {}),
+    },
+  };
+}
+
 export type TurnWriteCounts = {
+  deleted: number;
   written: number;
   already_existed: number;
   dropped: number;
   attempted: number;
+  complete: boolean;
   stopped_early?: string;
-  failures?: Array<{ type: string; source_ref: string; error: string }>;
+  turn_write_error?: string;
+  detail?: string;
 };
 
+type BatchPost =
+  | { ok: true; deleted: number; written: number; already_existed: number; attempted: number }
+  | { ok: false; error: string; detail?: string };
+
 /**
- * Write the drafts as cues through the ONE cue door, onto a SCRATCH day.
+ * K3 §2 — POST one window as ONE request. Never throws.
  *
- * The three counts are the kickoff's, exactly: a returned row is WRITTEN, no row and no error is
- * ALREADY EXISTED (0050's index absorbed it), and an error is DROPPED — and a drop is a bug, not
- * a mode of operation, which is why every one of them is named in the answer.
- *
- * That third count only became reachable in K2. The cue route's scratch insert used to swallow
- * EVERY unique violation (an unqualified ON CONFLICT DO NOTHING), so anything that was not
- * 0050's key came back as already_existed and `dropped` could not be non-zero however wrong the
- * write was. SQL_CUE_INSERT_TURN names the arbiter, so exactly one index absorbs a re-run and
- * everything else throws its way here.
- *
- * `session_id` IS sent (K2, correction 2). Slice A left it NULL because a turn carrying it would
- * have entered 0046's (session_id, type, at) index as well as 0050's — two keys over one row,
- * deduplicated by whichever arbiter fired first rather than by the key that describes it. 0051
- * narrows 0046's predicate to exclude the three turn types, so the collision is gone and the
- * reason for omitting it with it. A turn row must be queryable BY SESSION without parsing a
- * string out of source_ref, which is what NULL made everyone do.
+ * Goes straight at this app's own origin rather than through postBrainCue: that helper carries
+ * the BRAIN_BASE_URL branch, and this writer has already REFUSED by name when that variable is
+ * set (turnsAnswer, below) precisely because the separate Cloud Run brain owns a different
+ * database and knows nothing about batches. One door, and it is this app's.
  */
-async function writeTurnCues(
+async function postTurnBatch(
+  origin: string,
+  body: {
+    room_id: string;
+    room_day_id: string;
+    session_id: string;
+    source: string;
+    replace_window: { session_id: string; start_ms: number; end_ms: number };
+    cues: Array<{ type: string; at: string; payload: Record<string, unknown>; source_ref: string }>;
+  },
+): Promise<BatchPost> {
+  const token = process.env.BRAIN_SERVICE_TOKEN;
+  if (!token) return { ok: false, error: "service_token_not_configured" };
+  try {
+    const res = await fetch(new URL("/api/brain/cues", origin).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TURN_BATCH_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    const j = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!res.ok || j?.ok !== true) {
+      return { ok: false, error: String(j?.error ?? `brain_${res.status}`) };
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    return { ok: true, deleted: num(j.deleted), written: num(j.written), already_existed: num(j.already_existed), attempted: num(j.attempted) };
+  } catch (e) {
+    const name = (e as Error)?.name;
+    return {
+      ok: false,
+      error: name === "TimeoutError" || name === "AbortError" ? "brain_timeout" : "brain_unreachable",
+      detail: String((e as Error)?.message ?? e).slice(0, 160),
+    };
+  }
+}
+
+const asBatchCue = (d: TurnDraft) => ({ type: d.type, at: d.at, payload: d.payload, source_ref: d.source_ref });
+
+/**
+ * K3 §1 + §4 — write ONE window as a set: delete what was there, insert what there is now.
+ *
+ * WHY REPLACE AND NOT MERGE. Whisper is not a deterministic writer — two runs of the same clip
+ * returned 162 and 165 segments. source_ref is built from segment boundaries, so a second run's
+ * keys mostly MISS the first run's and an insert-only writer accumulates two disagreeing
+ * opinions of the same window instead of deduplicating. Segmentation is Whisper's opinion about
+ * a window, and an opinion is replaced.
+ *
+ * source_ref is still the WITHIN-WRITE key: two turns that share a start both land, which 0051
+ * proved in production. It is simply not the cross-run key any more; the asked window is.
+ *
+ * THE ATTEMPT, and the fallback (§4 — a silent partial is worse than a refusal):
+ *
+ *   1. delete the window's rows + insert the turns + the stt_window saying complete:true, all in
+ *      ONE transaction under ONE lock. Any failure rolls the delete back with it, so the
+ *      PREVIOUS set survives intact rather than the day being left empty.
+ *   2. if that fails, a second call deletes the window's rows and commits ONLY the stt_window
+ *      with complete:false, stopped_early and the segment count Whisper returned. ZERO stt_turn
+ *      rows then exist for the window, which is what makes "we could not finish" legible.
+ *      The delete must be repeated because step 1's rollback undid its own.
+ *
+ * If even the marker cannot be written, nothing is claimed: the counts come back with the error
+ * named and complete:false, and the transcript still goes back to the caller.
+ */
+async function writeWindowCues(
   origin: string,
   roomId: string,
   roomDayId: string,
   sessionId: string,
-  drafts: readonly TurnDraft[],
+  window: { startMs: number; endMs: number },
+  turns: readonly TurnDraft[],
+  windowCueFor: (complete: boolean, stoppedEarly: string | null) => TurnDraft,
 ): Promise<TurnWriteCounts> {
-  const t0 = Date.now();
-  let written = 0;
-  let alreadyExisted = 0;
-  let dropped = 0;
-  let consecutiveFailures = 0;
-  let stoppedEarly: string | null = null;
-  const failures: Array<{ type: string; source_ref: string; error: string }> = [];
+  const replace_window = { session_id: sessionId, start_ms: Math.floor(window.startMs), end_ms: Math.floor(window.endMs) };
+  const common = { room_id: roomId, room_day_id: roomDayId, session_id: sessionId, source: TURN_CUE_SOURCE, replace_window };
 
-  for (const d of drafts) {
-    if (Date.now() - t0 > TURN_WRITE_BUDGET_MS) {
-      stoppedEarly = "time_budget";
-      break;
-    }
-    const out = await postBrainCue(origin, {
-      room_id: roomId,
-      type: d.type,
-      at: d.at,
-      payload: d.payload,
-      room_day_id: roomDayId,
-      session_id: sessionId,
-      source: TURN_CUE_SOURCE,
-      source_ref: d.source_ref,
-    });
-    if (out.ok) {
-      consecutiveFailures = 0;
-      if (out.already_existed) alreadyExisted += 1;
-      else written += 1;
-    } else {
-      dropped += 1;
-      consecutiveFailures += 1;
-      if (failures.length < 5) failures.push({ type: d.type, source_ref: d.source_ref, error: out.error });
-      if (consecutiveFailures >= TURN_WRITE_MAX_CONSECUTIVE_FAILURES) {
-        stoppedEarly = "consecutive_failures";
-        break;
-      }
-    }
+  const whole = await postTurnBatch(origin, {
+    ...common,
+    cues: [...turns, windowCueFor(true, null)].map(asBatchCue),
+  });
+  if (whole.ok) {
+    return {
+      deleted: whole.deleted,
+      written: whole.written,
+      already_existed: whole.already_existed,
+      dropped: 0,
+      attempted: whole.attempted,
+      complete: true,
+    };
   }
 
+  // ---- §4: refuse the partial, and SAY so in the graph -------------------------------
+  const marker = await postTurnBatch(origin, {
+    ...common,
+    cues: [windowCueFor(false, whole.error)].map(asBatchCue),
+  });
+  if (marker.ok) {
+    return {
+      deleted: marker.deleted,
+      written: marker.written,
+      already_existed: marker.already_existed,
+      // Every turn of the window was rolled back. A drop is a bug, not a mode — and this is the
+      // count that says how much evidence the failure cost.
+      dropped: turns.length,
+      attempted: turns.length + marker.attempted,
+      complete: false,
+      stopped_early: whole.error,
+      turn_write_error: whole.error,
+      ...(whole.detail ? { detail: whole.detail } : {}),
+    };
+  }
+  // Nothing was committed at all — not even the admission. Claim nothing.
   return {
-    written,
-    already_existed: alreadyExisted,
-    dropped,
-    attempted: written + alreadyExisted + dropped,
-    ...(stoppedEarly ? { stopped_early: stoppedEarly } : {}),
-    ...(failures.length ? { failures } : {}),
+    deleted: 0,
+    written: 0,
+    already_existed: 0,
+    dropped: turns.length,
+    attempted: turns.length,
+    complete: false,
+    stopped_early: whole.error,
+    turn_write_error: marker.error,
+    ...(marker.detail ? { detail: marker.detail } : {}),
   };
 }
 
@@ -1149,7 +1287,24 @@ async function turnsAnswer(
   session: { id: string; room_id: string; room_slug: string; room_name: string; started_at: string | Date },
   build: TurnBuild,
   dryRun: boolean,
+  win: { startMs: number; endMs: number; language: string | null; sourceUsed: string | null },
 ): Promise<TurnAnswer> {
+  // The completeness cue for THIS window, complete or not. Built here rather than by the caller
+  // so both the success and the refusal shape it identically — the only difference between them
+  // is the two fields the writer sets.
+  const windowCueFor = (complete: boolean, stoppedEarly: string | null) =>
+    buildWindowCue({
+      sessionId: session.id,
+      windowStartMs: win.startMs,
+      windowEndMs: win.endMs,
+      complete,
+      // What Whisper actually returned for the window, which is the number that moved between
+      // runs and the reason the write unit changed.
+      segmentCount: build.segments_considered,
+      language: win.language,
+      sourceUsed: win.sourceUsed,
+      stoppedEarly,
+    });
   const base = {
     turns: shownTurns(build),
     turn_counts: {
@@ -1161,14 +1316,22 @@ async function turnsAnswer(
     },
     dry_run: dryRun,
   };
+  // Every refusal below returns the SAME four counts as a write, so a caller never has to ask
+  // whether a missing field meant zero or meant "this shape does not have that field".
+  const noWrite = { deleted: 0, written: 0, already_existed: 0, dropped: 0, attempted: 0, complete: false };
   if (dryRun) {
-    return { ...base, written: 0, already_existed: 0, dropped: 0, note_turns: "dry run — nothing written; pass dry_run:false to write these into the scratch graph" };
+    return {
+      ...base,
+      ...noWrite,
+      window_cue: shownTurns({ ...build, turns: [windowCueFor(true, null)] })[0],
+      note_turns: "dry run — nothing written; pass dry_run:false to write this window into the scratch graph. A write REPLACES the window: every stt_turn, stt_silence and stt_window already recorded for this session and this asked window is deleted first, in the same transaction.",
+    };
   }
 
   // F12, copied from the replay writer: the separate Cloud Run brain owns its own database and
   // is not part of this build. Refuse before deriving a day or posting anything.
   if (process.env.BRAIN_BASE_URL?.trim()) {
-    return { ...base, written: 0, already_existed: 0, dropped: 0, turn_write_error: "brain_base_url_set", note_turns: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
+    return { ...base, ...noWrite, turn_write_error: "brain_base_url_set", note_turns: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
   }
 
   // The day is the session's own IST date — never the server clock. Same derivation as
@@ -1178,18 +1341,21 @@ async function turnsAnswer(
   try {
     scratch = await resolveScratchGraph({ id: session.room_id, slug: session.room_slug, name: session.room_name }, ist);
   } catch (e) {
-    return { ...base, written: 0, already_existed: 0, dropped: 0, turn_write_error: "scratch_graph_failed", detail: String((e as Error)?.message ?? e).slice(0, 160) };
+    return { ...base, ...noWrite, turn_write_error: "scratch_graph_failed", detail: String((e as Error)?.message ?? e).slice(0, 160) };
   }
   if (!scratch.ok) {
-    return { ...base, written: 0, already_existed: 0, dropped: 0, turn_write_error: scratch.error, ...(scratch.detail ? { detail: scratch.detail } : {}) };
+    return { ...base, ...noWrite, turn_write_error: scratch.error, ...(scratch.detail ? { detail: scratch.detail } : {}) };
   }
   // Belt and braces: the cue route's guard is authoritative and re-reads the flag inside its
   // lock, but there is no reason to send N requests at a day this side already knows is live.
   if (scratch.day.scratch !== true) {
-    return { ...base, written: 0, already_existed: 0, dropped: 0, turn_write_error: "not_a_scratch_day", room_day_id: scratch.day.id };
+    return { ...base, ...noWrite, turn_write_error: "not_a_scratch_day", room_day_id: scratch.day.id };
   }
 
-  const counts = await writeTurnCues(ctx.origin, scratch.room.id, scratch.day.id, session.id, build.turns);
+  const counts = await writeWindowCues(
+    ctx.origin, scratch.room.id, scratch.day.id, session.id,
+    { startMs: win.startMs, endMs: win.endMs }, build.turns, windowCueFor,
+  );
   return {
     ...base,
     room_day_id: scratch.day.id,
@@ -1201,7 +1367,8 @@ async function turnsAnswer(
     // source_requested), and two different questions must not share a key.
     turn_cue_source: TURN_CUE_SOURCE,
     natural_key: ["source_ref", "type"],
-    note_turns: "written to a scratch room-day, never a live one. Idempotent on source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} for the three turn types: re-transcribing the same window writes nothing twice. Each row also carries session_id (0051 narrowed the replay key so a turn no longer collides there), and payload.window / payload.source_used, which are what the day's tape counters roll up.",
+    write_unit: ["session_id", "window.start_ms", "window.end_ms"],
+    note_turns: "written to a scratch room-day, never a live one. The WRITE UNIT IS THE WINDOW, not the turn: every stt_turn, stt_silence and stt_window already recorded for this session and this asked window is DELETED and the new set inserted, in one transaction. Re-running a window therefore REPLACES it — a different segment count on the second run is a replace and is correct, not a failure. source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} remains the WITHIN-write key, so two turns sharing a start both land. An stt_window row records whether the window finished; complete:false means the turns were rolled back and none was kept.",
   };
 }
 
@@ -1268,7 +1435,7 @@ const transcribeRange: McpTool = {
       // trims to zero and the clip starts at the piece instead.
       const joinedClipStartMs = Date.parse(res.covering[0]!.chunk_bounds.started_at) + Math.round(res.covering[0]!.offset_in_chunk_s * 1000);
       const jBuild = buildTurns({ sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
-      const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun);
+      const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: wj.language ?? null, sourceUsed: r.decision.source });
       return {
         ok: true,
         joined: true,
@@ -1302,7 +1469,7 @@ const transcribeRange: McpTool = {
     // the window while the `text` above still covers the whole chunk.
     const chunkStartMs = Date.parse(c.chunk_bounds.started_at);
     const sBuild = buildTurns({ sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
-    const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun);
+    const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: w.language ?? null, sourceUsed: r.decision.source });
     return {
       ok: true,
       ...base,
