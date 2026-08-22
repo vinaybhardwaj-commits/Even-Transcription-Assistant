@@ -72,6 +72,7 @@ const wh = (type: string, at: string, ref: string, extra: Row = {}) =>
 const mark = (at: string) => cue("consult_mark", at, { source: "kiosk" });
 
 let CUES: Row[];
+let TURN_COUNTS: Row[];
 let VISITS: Row[];
 let SESSIONS: Row[];
 let CHUNKS: Row[];
@@ -85,6 +86,7 @@ function seed() {
   // tape 04:00 → 11:30, one session
   SESSIONS = [{ id: "bs_1", room_id: REAL_ROOM.id, started_at: new Date(`${IST}T04:00:00Z`), ended_at: new Date(`${IST}T11:00:00Z`), status: "ended", label: null, mic_label: null, notes: null, room_name: REAL_ROOM.name, room_slug: REAL_ROOM.slug }];
   CHUNKS = [{ id: "bc_1", idx: 0, source: "primary", started_at: new Date(`${IST}T04:00:00Z`), ended_at: new Date(`${IST}T11:30:00Z`), duration_ms: 1, size_bytes: 1, upload_state: "verified", gap_before_ms: 0, created_at: new Date(`${IST}T11:30:00Z`), r2_key: "k", content_type: "audio/webm" }];
+  TURN_COUNTS = [];
   CUES = [
     mark(`${IST}T04:02:29.995Z`),
     wh("pqm_called", `${IST}T04:36:59.000Z`, "qts_1"),
@@ -107,6 +109,8 @@ function seed() {
   };
   brainResponder = (text, values) => {
     if (/FROM room_day WHERE id = \$1/.test(text)) return dayRow ? [dayRow] : [];
+    // slice A's own aggregate, before the general cue read — it is a different question
+    if (/COUNT\(\*\)::int AS n FROM cue/.test(text.replace(/\s+/g, " "))) return TURN_COUNTS;
     if (/FROM cue\s+WHERE room_day_id/.test(text.replace(/\s+/g, " "))) return CUES;
     if (/FROM visit WHERE room_day_id = \$1 AND COALESCE\(arm, 'rules'\)/.test(text)) {
       return VISITS.filter((v) => (v.arm ?? "rules") === values[1]);
@@ -577,5 +581,63 @@ describe("11/12 — parameters, and writing nothing at all", () => {
     expect(String((out.degraded_reads as string[]).join())).toContain("visits_read_failed");
     // and the finding survives the visit table being gone entirely
     expect(((out.reconciliation as Row).silence as Row[])).toHaveLength(1);
+  });
+});
+
+
+// ===========================================================================
+// Speech turns, slice A — the four counters
+// ===========================================================================
+
+describe("the four turn counters", () => {
+  it("reports the three types and their total, and the three sum to it", async () => {
+    TURN_COUNTS = [{ type: "stt_turn", n: 412 }, { type: "stt_silence", n: 7 }];
+    const out = await run({ room_day_id: DAY });
+    const rec = out.reconciliation as Row;
+    expect(rec.turns_total).toBe(412);
+    expect(rec.turn_silences).toBe(7);
+    expect(rec.speaker_matches).toBe(0); // slice B writes these; a reported zero is not a missing count
+    expect(rec.turn_cues_total).toBe(419);
+    expect(Number(rec.turns_total) + Number(rec.turn_silences) + Number(rec.speaker_matches)).toBe(rec.turn_cues_total);
+  });
+
+  it("a day with no turns reports four zeros, not four absences", async () => {
+    TURN_COUNTS = [];
+    const rec = (await run({ room_day_id: DAY })).reconciliation as Row;
+    expect(rec).toMatchObject({ turns_total: 0, turn_silences: 0, speaker_matches: 0, turn_cues_total: 0 });
+  });
+
+  it("slice B's type is already counted — the report does not need changing to see it", async () => {
+    TURN_COUNTS = [{ type: "stt_turn", n: 2 }, { type: "speaker_match", n: 5 }];
+    const rec = (await run({ room_day_id: DAY })).reconciliation as Row;
+    expect(rec).toMatchObject({ turns_total: 2, speaker_matches: 5, turn_cues_total: 7 });
+  });
+
+  it("counts arrive as strings from a driver that does not narrow bigint — still numbers here", async () => {
+    TURN_COUNTS = [{ type: "stt_turn", n: "412" }];
+    const rec = (await run({ room_day_id: DAY })).reconciliation as Row;
+    expect(rec.turns_total).toBe(412);
+    expect(rec.turn_cues_total).toBe(412);
+  });
+
+  it("a failed count degrades to zeros and a NAMED degraded read — never a throw, never a wrong number", async () => {
+    brainResponder = (text, values) => {
+      if (/COUNT\(\*\)::int AS n FROM cue/.test(text.replace(/\s+/g, " "))) throw new Error("relation cue does not exist");
+      if (/FROM room_day WHERE id = \$1/.test(text)) return dayRow ? [dayRow] : [];
+      if (/FROM cue\s+WHERE room_day_id/.test(text.replace(/\s+/g, " "))) return CUES;
+      if (/FROM visit WHERE room_day_id = \$1 AND COALESCE\(arm, 'rules'\)/.test(text)) return VISITS.filter((v) => (v.arm ?? "rules") === values[1]);
+      return [];
+    };
+    const out = await run({ room_day_id: DAY });
+    expect(out.ok).toBe(true);
+    expect((out.reconciliation as Row).turn_cues_total).toBe(0);
+    expect((out.degraded_reads as string[]).some((d) => d.startsWith("turn_cue_counts_failed"))).toBe(true);
+    // and the rest of the report is unharmed
+    expect((out.reconciliation as Row).marks_total).toBe(1);
+  });
+
+  it("the turn cue types are reported in parameters, from the one place they are named", async () => {
+    const out = await run({ room_day_id: DAY });
+    expect((out.parameters as Row).turn_cue_types).toEqual(["stt_turn", "stt_silence", "speaker_match"]);
   });
 });

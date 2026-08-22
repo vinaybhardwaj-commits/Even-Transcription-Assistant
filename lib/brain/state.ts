@@ -162,6 +162,31 @@ export const SQL_CUES_FOR_ROOM_DAY =
   "SELECT id, type, at, created_at, payload, source, source_ref FROM cue " +
   "WHERE room_day_id = $1 ORDER BY at ASC, id ASC";
 
+// --- Speech turns, slice A (migration 0050) ---------------------------------
+
+/**
+ * The three cue types the speech-turn pipeline writes. Named ONCE, here, because the same three
+ * appear in 0050's index predicate and in the writer's conflict target, and a fourth place for
+ * them to drift apart is exactly what the warehouse loader taught us not to build.
+ *
+ * `speaker_match` is written by slice B; in slice A its count is legitimately zero, and a zero
+ * that is reported is a different thing from a count that does not exist.
+ */
+export const TURN_CUE_TYPES = ["stt_turn", "stt_silence", "speaker_match"] as const;
+
+/**
+ * How many turn cues a room-day holds, by type. INFERRED SQL — there is no live database in the
+ * build sandbox — and listed verbatim in the slice report for validation.
+ *
+ * An aggregate rather than a count over the cue list the report already reads, for two reasons:
+ * a day of turns is thousands of rows whose payloads carry the transcript, and the counts then
+ * survive a failure of that larger read instead of vanishing with it.
+ */
+export const SQL_TURN_CUE_COUNTS =
+  "SELECT type, COUNT(*)::int AS n FROM cue " +
+  "WHERE room_day_id = $1 AND type IN ('stt_turn', 'stt_silence', 'speaker_match') " +
+  "GROUP BY type";
+
 export const SQL_CLUSTERS_FOR_DAY =
   "SELECT id, kind, visit_id, first_seen_at, last_seen_at, (centroid IS NOT NULL) AS has_centroid " +
   "FROM speaker_cluster WHERE room_day_id = $1 ORDER BY first_seen_at ASC, id ASC";
