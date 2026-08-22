@@ -23,8 +23,10 @@ export default async function RetentionPage() {
           <header>
             <h2 className="text-heading text-even-navy-800">Audio retention policy</h2>
             <p className="text-caption text-even-ink-500 mt-1">
-              PRD §4.17 lock (Q13, 26 May 2026): keep audio indefinitely with
-              default-yes doctor delete privilege. Read-only in v1.
+              PRD §4.17 lock (Q13, 26 May 2026): keep audio indefinitely.
+              Read-only in v1. The PRD also locks a default-yes doctor delete
+              privilege; no doctor-facing delete route is built, so the page no
+              longer reports it as a live setting.
             </p>
           </header>
           <dl className="rounded-xl border border-even-ink-100 bg-even-white p-5 grid grid-cols-[180px,1fr] gap-y-3 text-body">
@@ -32,8 +34,6 @@ export default async function RetentionPage() {
             <dd className="text-even-navy-800">Keep indefinitely</dd>
             <dt className="text-caption text-even-ink-500">Auto-purge cron</dt>
             <dd className="text-even-navy-800">Not scheduled</dd>
-            <dt className="text-caption text-even-ink-500">Doctor self-delete</dt>
-            <dd className="text-even-navy-800">Enabled (default-yes)</dd>
             <dt className="text-caption text-even-ink-500">Soft-delete behavior</dt>
             <dd className="text-even-navy-800">
               encounter row + audio object retained in R2; JSONs nulled.
@@ -45,8 +45,8 @@ export default async function RetentionPage() {
           <div className="rounded-xl border border-even-blue-100 bg-even-blue-50 px-4 py-3 text-body text-even-navy-800">
             <b>Bench / Room recordings:</b> everything under the{" "}
             <code className="font-mono">bench/</code> prefix is a permanent
-            archive — exempt from retention policy and from doctor self-delete
-            (Room-Bench PRD D6). No code path deletes or rewrites these objects.
+            archive — exempt from retention policy (Room-Bench PRD D6). No code
+            path deletes or rewrites these objects.
           </div>
           <p className="text-caption text-even-ink-500">
             Editing the policy is deferred to v2 (would require backfill of

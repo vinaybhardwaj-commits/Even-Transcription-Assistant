@@ -151,6 +151,15 @@ export async function POST(req: NextRequest) {
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
+  // Audit: who created this clinician, and with what. Never the PIN, hashed or
+  // plaintext — the row records that a doctor was created, not the credential.
+  await sql`
+    INSERT INTO audit_log
+      (actor_type, actor_id, action, target_type, target_id, metadata_json)
+    VALUES
+      ('admin', ${g.claims.admin_id}, 'doctor.create', 'doctor', ${id},
+       ${JSON.stringify({ full_name: fullName, email, clinician_type: clinicianType, url_slug: slug })}::jsonb)
+  `.catch(() => { /* intentional: best-effort audit write, never fails the create */ });
 
   const appUrl = canonicalAppUrl();
   return respondOk({

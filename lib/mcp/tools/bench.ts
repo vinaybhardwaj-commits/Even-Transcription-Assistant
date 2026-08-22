@@ -1171,10 +1171,9 @@ export function failureReason(error: string): "permission" | "transport" | "inco
 /**
  * K3 §2 — POST one window as ONE request. Never throws.
  *
- * Goes straight at this app's own origin rather than through postBrainCue: that helper carries
- * the BRAIN_BASE_URL branch, and this writer has already REFUSED by name when that variable is
- * set (turnsAnswer, below) precisely because the separate Cloud Run brain owns a different
- * database and knows nothing about batches. One door, and it is this app's.
+ * Goes straight at this app's own origin rather than through postBrainCue: the batch shape is
+ * this route's own and there is exactly one brain now (lib/brain, in this deployment). One
+ * door, and it is this app's.
  */
 async function postTurnBatch(
   origin: string,
@@ -1437,12 +1436,6 @@ async function turnsAnswer(
     };
   }
 
-  // F12, copied from the replay writer: the separate Cloud Run brain owns its own database and
-  // is not part of this build. Refuse before deriving a day or posting anything.
-  if (process.env.BRAIN_BASE_URL?.trim()) {
-    return { ...base, ...noWrite, turn_write_error: "brain_base_url_set", note_turns: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
-  }
-
   const target = await resolveScratchTarget(session);
   if (!target.ok) {
     return {
@@ -1573,9 +1566,6 @@ async function whisperNotOkAnswer(
   if (dryRun) {
     return { ...failedBase, window_recorded: false, window_cue: shownTurns({ turns: [markerFor()], silence: false, segments_considered: 0, dropped_outside_window: 0, dropped_blank: 0 })[0], note_turns: "dry run — nothing written. A write would record one stt_window with complete:false for this window." };
   }
-  if (process.env.BRAIN_BASE_URL?.trim()) {
-    return { ...failedBase, window_recorded: false, turn_write_error: "brain_base_url_set" };
-  }
   const target = await resolveScratchTarget(session);
   if (!target.ok) {
     return { ...failedBase, window_recorded: false, turn_write_error: target.error, ...(target.detail ? { detail_write: target.detail } : {}), ...(target.room_day_id ? { room_day_id: target.room_day_id } : {}) };
@@ -1606,7 +1596,7 @@ async function whisperNotOkAnswer(
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. SILENCE (K5): that now includes a window Whisper returns NO transcript for. An empty transcript on a 200 is a successful reading of a quiet room, so it answers ok:true with silent_window:true, one stt_silence, and a completeness marker saying complete:true with segment_count 0 — the ask finished. It is never counted as `failed` and no speech is inferred. Every OTHER Whisper error (http_*, timeout, malformed) is a FAILED ask: no silence and no turns, because what the window held is unknown, and one stt_window with complete:false naming the cause. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. Refuses to write when BRAIN_BASE_URL is set. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
+  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. SILENCE (K5): that now includes a window Whisper returns NO transcript for. An empty transcript on a 200 is a successful reading of a quiet room, so it answers ok:true with silent_window:true, one stt_silence, and a completeness marker saying complete:true with segment_count 0 — the ask finished. It is never counted as `failed` and no speech is inferred. Every OTHER Whisper error (http_*, timeout, malformed) is a FAILED ask: no silence and no turns, because what the window held is unknown, and one stt_window with complete:false naming the cause. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
   scope: "invoke",
   inputSchema: {
     type: "object",
@@ -2442,7 +2432,7 @@ const REPLAY_WRITE_MAX_CONSECUTIVE_FAILURES = 3;
 const replayWrite: McpTool = {
   name: "scribe_replay_write",
   description:
-    "WRITES — replay a FINISHED session into a SCRATCH graph, so the fuse has something to run against without touching a real clinic day. The session's status must be 'ended': a session that is still recording, or paused, is refused by name with session_not_ended (the answer carries the actual status) and nothing at all is written, because a live tape would land in scratch as a partial day that looks complete. The cue list is exactly the one scribe_replay_session shows (same kinds, same time order, same filtered payloads); it is written to a scratch room-day derived from the session's room and its own IST date, never to a live room-day — every write names that day and the cue route refuses any day whose scratch flag is not true. Idempotent on the natural key (session_id, type, at): running it twice writes nothing the second time, and a run that stopped half way is resumed by running it again. Each cue is one request, so limit defaults to 200 and caps at 500; over the limit the first `limit` in time order are written and truncated says so with the true total. Refuses outright when BRAIN_BASE_URL is set (that points cue writes at the separate Cloud Run brain, which this build does not change). Returns { room_day_id, written, already_existed, failed, truncated, natural_key }.",
+    "WRITES — replay a FINISHED session into a SCRATCH graph, so the fuse has something to run against without touching a real clinic day. The session's status must be 'ended': a session that is still recording, or paused, is refused by name with session_not_ended (the answer carries the actual status) and nothing at all is written, because a live tape would land in scratch as a partial day that looks complete. The cue list is exactly the one scribe_replay_session shows (same kinds, same time order, same filtered payloads); it is written to a scratch room-day derived from the session's room and its own IST date, never to a live room-day — every write names that day and the cue route refuses any day whose scratch flag is not true. Idempotent on the natural key (session_id, type, at): running it twice writes nothing the second time, and a run that stopped half way is resumed by running it again. Each cue is one request, so limit defaults to 200 and caps at 500; over the limit the first `limit` in time order are written and truncated says so with the true total. Returns { room_day_id, written, already_existed, failed, truncated, natural_key }.",
   scope: "write",
   inputSchema: {
     type: "object",
@@ -2455,12 +2445,6 @@ const replayWrite: McpTool = {
   },
   handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ written: 0, already_existed: 0, failed: 0 }, async () => {
-      // F12 — the separate Cloud Run brain owns its own database and is not part of this
-      // build. Refuse before reading anything.
-      if (process.env.BRAIN_BASE_URL?.trim()) {
-        return { ok: false, error: "brain_base_url_set", written: 0, already_existed: 0, failed: 0, note: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
-      }
-
       const id = argStr(args, "session_id", 64);
       if (!id || !id.startsWith("bs_")) return { ok: false, error: "bad_session_id", written: 0, already_existed: 0, failed: 0 };
       const session = await findBenchSession(id);

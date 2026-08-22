@@ -166,7 +166,13 @@ export async function getLaunchReadiness(): Promise<LaunchReadinessBundle> {
       target: "100%",
       current: "all mutating admin routes",
       status: "info",
-      detail: "Architectural assertion: PATCH /api/admin/doctors/[id], reset-pin, rotate-url, email-url, encounter resend + soft-delete, password change all write audit_log. Verified across Sprints 3-11.",
+      // Until 22 Aug 2026 this line asserted seven audited actions and only four of them
+      // were: rotate-url, email-url, encounter resend and encounter soft-delete. Doctor
+      // create, PIN reset, doctor edit and admin password change wrote nothing at all —
+      // the assertion had been true when written and had quietly stopped being true. The
+      // four missing rows were added rather than the claim narrowed, and the bench command
+      // bus and the day-download ZIP were audited at the same time.
+      detail: "Verified 22 Aug 2026 by reading each route, not by assertion: doctor create (doctor.create), PIN reset (doctor.reset_pin), doctor edit (doctor.edit), rotate-url (doctor.rotate_url_token), email-url, encounter resend + soft-delete, admin password change (admin.change_password), bench command bus (bench.command), bench day download (bench.session_download) all write audit_log.",
       doc_anchor: "§10.1 row 7",
     },
     {

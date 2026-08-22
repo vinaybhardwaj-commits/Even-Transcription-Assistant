@@ -100,7 +100,9 @@ export const clinician = pgTable("clinician", {
   byStatusActive: index("idx_clinician_status_active").on(t.status, t.lastActiveAt),
 }));
 
-// pin_attempt (PRD §6.1 — 90d TTL via cron)
+// pin_attempt (PRD §6.1). Rows are kept indefinitely: the PRD's 90-day TTL was
+// never built — there is no cron, no route and no job that deletes from this
+// table. Do not re-add the claim without the job.
 export const pinAttempt = pgTable("pin_attempt", {
   id:         uuid("id").defaultRandom().primaryKey(),
   doctorId:   text("doctor_id").notNull().references(() => doctor.id),
@@ -338,10 +340,14 @@ export const sttRouting = pgTable("stt_routing", {
   pk: primaryKey({ columns: [t.stage, t.languageBucket] }),
 }));
 
-// voice_print (migration 0007) — one ECAPA centroid per enrolled clinician (doctor).
-// FK references doctor for now (renamed to clinician in v2.0).
+// voice_print (migration 0007) — one ECAPA centroid per enrolled clinician.
+// The COLUMN is still named doctor_id, but the FK has referenced clinician since
+// 0014_repoint_fks, and the doctor table itself was dropped by 0015_drop_doctor.
+// This declaration said `doctor.id` until 22 Aug 2026 — a reference to a table
+// that has not existed for fifteen migrations. Renaming the column is a separate,
+// non-additive change and is NOT done here; the primary key stays single-column.
 export const voicePrint = pgTable("voice_print", {
-  doctorId:               text("doctor_id").primaryKey().references(() => doctor.id, { onDelete: "cascade" }),
+  doctorId:               text("doctor_id").primaryKey().references(() => clinician.id, { onDelete: "cascade" }),
   centroid:               bytea("centroid").notNull(),
   sampleCount:            integer("sample_count").notNull().default(0),
   samplesJson:            jsonb("samples_json").notNull().default(sql`'[]'::jsonb`),

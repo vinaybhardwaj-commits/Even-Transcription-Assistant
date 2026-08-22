@@ -80,7 +80,6 @@ beforeEach(() => {
   responder = (text) => (/FROM room/.test(text) ? [ROOM] : []);
   brainResponder = () => [];
   process.env.BRAIN_SERVICE_TOKEN = "tok";
-  delete process.env.BRAIN_BASE_URL;
   mockFetch();
 });
 

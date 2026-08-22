@@ -193,7 +193,6 @@ beforeEach(() => {
   appResponder = appDb;
   brainResponder = brainDb;
   process.env.BRAIN_SERVICE_TOKEN = "tok";
-  delete process.env.BRAIN_BASE_URL;
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
     posted.push(JSON.parse(String(init.body)) as Row);
     return POST(new Request(String(url), { method: "POST", headers: init.headers as HeadersInit, body: String(init.body) }));
@@ -426,19 +425,6 @@ describe("7 — PRODUCTION SAFETY: no room_day_id means the live path, with no s
     expect(b.status).toBe(400);
     expect(await b.json()).toMatchObject({ error: "source_requires_room_day_id" });
     expect(cueInserts()).toHaveLength(0);
-  });
-});
-
-describe("8 — the writer refuses by name when BRAIN_BASE_URL is set", () => {
-  it("nothing is read, nothing is posted, nothing is created", async () => {
-    process.env.BRAIN_BASE_URL = "https://brain.example/";
-    const out = await call("scribe_replay_write", { session_id: SESSION_ID });
-    expect(out).toMatchObject({ ok: false, error: "brain_base_url_set", written: 0, already_existed: 0, failed: 0 });
-    expect(posted).toHaveLength(0);
-    expect(appCalls).toHaveLength(0);
-    expect(brainCalls).toHaveLength(0);
-    expect(rooms.size).toBe(1);
-    expect(days.size).toBe(0);
   });
 });
 

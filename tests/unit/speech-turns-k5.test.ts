@@ -96,7 +96,6 @@ beforeEach(() => {
     : [];
   brainResponder = (text) => (/FROM room_day WHERE room_id/.test(text) ? [SCRATCH_DAY] : []);
   process.env.BRAIN_SERVICE_TOKEN = "tok";
-  delete process.env.BRAIN_BASE_URL;
   whisperOut = { ok: false, error: "empty_transcript", latency_ms: 1914 };
   mockFetch();
 });

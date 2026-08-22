@@ -12,7 +12,8 @@
  * rejected per-person unique key would have made impossible.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 type Row = Record<string, unknown>;
 
@@ -801,19 +802,34 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
     expect(sql).not.toMatch(/^\s*(DROP|ALTER INDEX|TRUNCATE|DELETE|UPDATE)\b/im);
   });
 
-  it("SQL_VISITS_FOR_DAY is byte-identical in lib/brain/state.ts and brain/src/state.ts", () => {
-    const grab = (path: string) => {
-      const src = readFileSync(path, "utf8");
-      const m = /export const SQL_VISITS_FOR_DAY =\s*([\s\S]*?);\n/.exec(src);
-      if (!m) throw new Error(`SQL_VISITS_FOR_DAY not found in ${path}`);
-      return m[1]!.replace(/\s+/g, " ").trim();
-    };
-    const a = grab("lib/brain/state.ts");
-    const b = grab("brain/src/state.ts");
-    expect(a).toBe(b);
+  // This used to assert that SQL_VISITS_FOR_DAY was byte-identical in lib/brain/state.ts and
+  // brain/src/state.ts. On 22 Aug 2026 the standalone Cloud Run brain (brain/) was deleted —
+  // lib/brain is the only brain — so there is no second copy left to disagree with. The
+  // assertion is inverted rather than dropped: what needs guarding now is that the duplicate
+  // does not come BACK, because a second copy drifting out of step with this one is exactly
+  // the failure the original test existed to catch.
+  it("there is exactly ONE SQL_VISITS_FOR_DAY in the repo, and it is lib/brain's", () => {
+    const found = execFileSync(
+      "git",
+      // ':!tests' excludes this file, which names the symbol in the regex just below.
+      ["grep", "-l", "export const SQL_VISITS_FOR_DAY", "--", "*.ts", ":!tests"],
+      { encoding: "utf8" },
+    )
+      .split("\n")
+      .filter(Boolean);
+    expect(found).toEqual(["lib/brain/state.ts"]);
+
+    const src = readFileSync("lib/brain/state.ts", "utf8");
+    const m = /export const SQL_VISITS_FOR_DAY =\s*([\s\S]*?);\n/.exec(src);
+    if (!m) throw new Error("SQL_VISITS_FOR_DAY not found in lib/brain/state.ts");
+    const a = m[1]!.replace(/\s+/g, " ").trim();
     expect(a).toContain("COALESCE(arm, 'rules') = $2::text");
     expect(a).toContain("arm, opened_by, opened_by_kind");
-    expect(a).toContain("ambiguity"); // 0049 projected in BOTH copies
+    expect(a).toContain("ambiguity"); // 0049 still projected
+  });
+
+  it("the deleted standalone brain has not come back", () => {
+    expect(existsSync("brain")).toBe(false);
   });
 
   it("the visit insert is idempotent on the arm key and names every 0048 column", () => {

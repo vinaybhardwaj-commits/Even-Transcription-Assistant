@@ -58,7 +58,6 @@ beforeEach(() => {
   calls.length = 0;
   responder = (text) => (/FROM room/.test(text) ? [ROOM] : []);
   process.env.BRAIN_SERVICE_TOKEN = "tok";
-  delete process.env.BRAIN_BASE_URL;
   mockFetch();
 });
 
@@ -141,10 +140,11 @@ describe("scribe_post_cue — client of the brain door, source forced", () => {
     expect(fetchCalls[0]!.auth).toBe("Bearer tok");
     expect(fetchCalls[0]!.body).toMatchObject({ room_id: "room_t", type: "test", payload: { x: 1, source: "mcp" } }); // caller's "kiosk" overwritten
   });
-  it("honours BRAIN_BASE_URL like brain-proxy; rejects a disallowed source; no cue SQL is ever issued", async () => {
-    process.env.BRAIN_BASE_URL = "https://brain.example/";
+  // The standalone Cloud Run brain is retired: there is no base-URL override env any more, so
+  // every cue this tool posts goes at THIS app's origin. That is now an invariant, not a default.
+  it("always posts same-origin; rejects a disallowed source; no cue SQL is ever issued", async () => {
     await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "replay" }, ctx);
-    expect(fetchCalls[0]!.url).toBe("https://brain.example/api/brain/cues");
+    expect(fetchCalls[0]!.url).toBe("https://preview.example/api/brain/cues");
     expect(fetchCalls[0]!.body.payload).toEqual({ source: "replay" });
     const bad = (await tool("scribe_post_cue").handler({ room: "opd-test-a7q9", type: "t", source: "kiosk" }, ctx)) as Row;
     expect(bad.error).toBe("source_not_allowed");

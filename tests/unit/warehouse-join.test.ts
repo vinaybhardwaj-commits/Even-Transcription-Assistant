@@ -210,7 +210,6 @@ beforeEach(() => {
   appResponder = appDb;
   brainResponder = brainDb;
   process.env.BRAIN_SERVICE_TOKEN = "tok";
-  delete process.env.BRAIN_BASE_URL;
 });
 
 const load = (events: WarehouseEvent[] = EVENTS) =>

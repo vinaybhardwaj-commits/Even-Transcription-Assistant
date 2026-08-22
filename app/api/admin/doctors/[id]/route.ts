@@ -25,8 +25,10 @@ export async function PATCH(
   const { id } = await params;
   const cookie = await readAdminCookie();
   if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  let adminId = "";
   try {
-    await verifyAdminJwt(cookie);
+    const claims = await verifyAdminJwt(cookie);
+    adminId = String(claims.admin_id ?? "");
   } catch {
     return respondError("AUTH_EXPIRED", "Session invalid");
   }
@@ -49,21 +51,39 @@ export async function PATCH(
 
   // Build the update piecewise. Neon HTTP template-tag doesn't support
   // dynamic column lists nicely, so we use simple guarded branches.
+  // Which branches actually ran. The audit row names the fields that were WRITTEN,
+  // not the fields that were sent: a body carrying an invalid status or a one-char
+  // name changes nothing, and a row claiming otherwise would be worse than no row.
+  const changed: Record<string, unknown> = {};
   try {
     if (body.deleted === true) {
       await sql`UPDATE clinician SET deleted_at = NOW(), status='disabled', updated_at = NOW() WHERE id = ${id}`;
+      changed.deleted = true;
     }
     if (typeof body.status === "string" && ALLOWED_STATUS.has(body.status)) {
       await sql`UPDATE clinician SET status = ${body.status}::doctor_status, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      changed.status = body.status;
     }
     if (typeof body.full_name === "string" && body.full_name.trim().length >= 2) {
       await sql`UPDATE clinician SET full_name = ${body.full_name.trim()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      changed.full_name = body.full_name.trim();
     }
     if (typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
       await sql`UPDATE clinician SET email = ${body.email.trim().toLowerCase()}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      changed.email = body.email.trim().toLowerCase();
     }
     if (typeof body.phone === "string") {
       await sql`UPDATE clinician SET phone = ${body.phone.trim() || null}, updated_at = NOW() WHERE id = ${id} AND deleted_at IS NULL`;
+      changed.phone = body.phone.trim() || null;
+    }
+    if (Object.keys(changed).length > 0) {
+      await sql`
+        INSERT INTO audit_log
+          (actor_type, actor_id, action, target_type, target_id, metadata_json)
+        VALUES
+          ('admin', ${adminId}, 'doctor.edit', 'doctor', ${id},
+           ${JSON.stringify({ changed })}::jsonb)
+      `.catch(() => { /* intentional: best-effort audit write */ });
     }
     const rows = (await sql`
       SELECT id, full_name, email, phone, url_slug, status, deleted_at

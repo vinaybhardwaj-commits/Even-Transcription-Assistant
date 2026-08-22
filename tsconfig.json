@@ -38,7 +38,6 @@
   ],
   "exclude": [
     "node_modules",
-    "brain",
     "tests",
     "vitest.config.ts",
     "playwright.config.ts"

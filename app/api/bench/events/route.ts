@@ -33,8 +33,7 @@ const reply = (body: Record<string, unknown>, status = 200) =>
   NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 
 function brainCuesUrl(req: NextRequest): string {
-  const base = process.env.BRAIN_BASE_URL?.trim();
-  if (base) return new URL("/api/brain/cues", base.endsWith("/") ? base : `${base}/`).toString();
+  // Always same-origin: lib/brain is the only brain (the Cloud Run service is retired).
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
   const proto = req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "");
   const origin = host ? `${proto}://${host}` : req.nextUrl.origin;

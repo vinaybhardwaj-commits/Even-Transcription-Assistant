@@ -16,7 +16,7 @@
  * S3 WRITES (PRD §9, §11.1 Pin, §11.4 source tags; scope write):
  * scribe_post_cue  — independent brain write: POST same-origin /api/brain/cues with the
  *                    server-injected BRAIN_SERVICE_TOKEN (the MCP is a CLIENT of the brain — no
- *                    direct cue SQL; BRAIN_BASE_URL override honoured exactly like brain-proxy).
+ *                    direct cue SQL; always same-origin, exactly like brain-proxy).
  *                    `source` (mcp|warehouse|replay, default mcp) is FORCED into the payload.
  *                    Needs no active tape.
  * scribe_pin_visit — cue type operator_pin {visit_id?|individual_uid?, phase, source:"mcp"}.
@@ -233,8 +233,7 @@ export const POST_CUE_BLOCKED_TYPES = [
 const POST_CUE_BLOCKED_SET: ReadonlySet<string> = new Set<string>(POST_CUE_BLOCKED_TYPES);
 
 function brainCuesUrl(origin: string): string {
-  const base = process.env.BRAIN_BASE_URL?.trim();
-  if (base) return new URL("/api/brain/cues", base.endsWith("/") ? base : `${base}/`).toString();
+  // Always this app's own origin — lib/brain is the only brain.
   return new URL("/api/brain/cues", origin).toString();
 }
 

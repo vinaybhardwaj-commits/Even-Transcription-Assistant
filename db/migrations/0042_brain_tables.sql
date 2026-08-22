@@ -11,7 +11,15 @@
 --   visit           — one OPD thread for a person that day, incl. the
 --                     diagnostics hole. end_reason exists from day one (§6).
 --   speaker_cluster — same-IST-day voice slots. centroid = 192-dim ECAPA
---                     float32 (768 bytes, bytea). Dies at rollover (§2.7).
+--                     float32 (768 bytes, bytea).
+--                     COMMENT AMENDED 22 Aug 2026 — this line used to read "Dies at
+--                     rollover (§2.7)". It does not. No rollover job exists, nothing
+--                     deletes a centroid, and V ruled on 22 Aug 2026 that non-clinician
+--                     voiceprints are STORED AND KEPT (ETA-V2-PRD §20.9.1/§20.9.3). A
+--                     centroid written here persists until something explicitly removes
+--                     it. THE TABLE IS UNCHANGED by this amendment: no column, index,
+--                     constraint or row is touched, and 0042 remains applied exactly as
+--                     it was. Only the claim about the table has been corrected.
 --   cue             — evidence log. type is an OPEN SET — deliberately NO
 --                     CHECK constraint (PRD §3.5 "infinite cues, finite
 --                     state"). payload nullable: §15A nulls it after 30 days

@@ -16,9 +16,14 @@
  * route that demanded a magic word would only be a worse version of the same idea.
  *
  * Admin-gated by benchAdminGuard. Every failure is a named JSON error, never a 500.
+ *
+ * AUDITED (22 Aug 2026): every command that reaches the bus writes one `bench.command`
+ * audit_log row against the room, carrying the kind, the outcome, and override_pause —
+ * see auditCommand below for why that flag is recorded even when it is false.
  */
 import { NextResponse } from "next/server";
 import { benchAdminGuard } from "@/lib/bench";
+import { sql } from "@/lib/db";
 import {
   COMMAND_KINDS,
   BusError,
@@ -37,9 +42,40 @@ const noStore = { headers: { "cache-control": "no-store" } };
 const fail = (status: number, error: string, extra: Record<string, unknown> = {}) =>
   NextResponse.json({ ok: false, error, ...extra }, { status, ...noStore });
 
+/**
+ * The monitor's only write is also the only admin action that can start, pause or STOP a
+ * live clinic recording, and until 22 Aug 2026 it left no trace at all. The row is written
+ * for every outcome that reached the bus — queued, and the idempotent already_recording —
+ * because "who stopped OPD-3, and when" is a question the audit log has to be able to answer.
+ *
+ * override_pause is recorded EXPLICITLY, and on every command rather than only on start.
+ * It is the flag that overrides a CONSENT pause: a start that ran with it is a materially
+ * different act from one that did not, and a metadata blob that omitted it when false would
+ * make the two indistinguishable after the fact.
+ *
+ * Best-effort, like every other audit write in the app: a failed audit insert must never
+ * turn a working stop button into a 503 in the middle of a recording day.
+ */
+async function auditCommand(
+  adminId: string,
+  roomId: string,
+  kind: CommandKind,
+  overridePause: boolean,
+  outcome: Record<string, unknown>,
+) {
+  await sql`
+    INSERT INTO audit_log
+      (actor_type, actor_id, action, target_type, target_id, metadata_json)
+    VALUES
+      ('admin', ${adminId}, 'bench.command', 'room', ${roomId},
+       ${JSON.stringify({ kind, override_pause: overridePause, ...outcome })}::jsonb)
+  `.catch(() => { /* intentional: best-effort audit write */ });
+}
+
 export async function POST(req: Request) {
   const guard = await benchAdminGuard();
   if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, ...noStore });
+  const adminId = String(guard.claims.admin_id ?? "");
 
   let body: Record<string, unknown>;
   try {
@@ -70,15 +106,18 @@ export async function POST(req: Request) {
       }
       if (decision.action === "already_recording") {
         // Idempotent by design: the live tape is returned rather than a second one begun.
+        await auditCommand(adminId, roomId, kind, overridePause, { queued: false, already_recording: true, session_id: decision.session_id });
         return NextResponse.json({ ok: true, already_recording: true, session_id: decision.session_id }, noStore);
       }
       const id = await insertCommand({ roomId, kind, args: decision.args ?? undefined, source: "admin" });
+      await auditCommand(adminId, roomId, kind, overridePause, { queued: true, command_id: id });
       return NextResponse.json({ ok: true, command_id: id, kind, room_id: roomId, queued: true }, noStore);
     }
 
     // pause / resume / end carry no pre-check: the kiosk is the authority on its own tape, and
     // queuing a no-op is harmless — the command expires if nothing picks it up.
     const id = await insertCommand({ roomId, kind, source: "admin" });
+    await auditCommand(adminId, roomId, kind, overridePause, { queued: true, command_id: id });
     return NextResponse.json({ ok: true, command_id: id, kind, room_id: roomId, queued: true }, noStore);
   } catch (e) {
     const b = e instanceof BusError ? e : classifyBusError(e);

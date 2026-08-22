@@ -43,8 +43,10 @@ export async function POST(
   const { id } = await params;
   const cookie = await readAdminCookie();
   if (!cookie) return respondError("AUTH_REQUIRED", "Sign in required");
+  let adminId = "";
   try {
-    await verifyAdminJwt(cookie);
+    const claims = await verifyAdminJwt(cookie);
+    adminId = String(claims.admin_id ?? "");
   } catch {
     return respondError("AUTH_EXPIRED", "Session invalid");
   }
@@ -77,6 +79,16 @@ export async function POST(
     if (rows.length === 0) {
       return respondError("NOT_FOUND", "doctor_not_found");
     }
+    // Audit: a PIN was reset, by whom, for whom. The PIN itself is never logged —
+    // only whether the admin chose it or the server generated one.
+    await sql`
+      INSERT INTO audit_log
+        (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES
+        ('admin', ${adminId}, 'doctor.reset_pin', 'doctor', ${id},
+         ${JSON.stringify({ pin_source: body.pin && /^[0-9]{4}$/.test(body.pin) ? "admin_supplied" : "generated", unlocked: true })}::jsonb)
+    `.catch(() => { /* intentional: best-effort audit write */ });
+
     const appUrl = canonicalAppUrl();
     return respondOk({
       doctor: { id: rows[0].id, url_slug: rows[0].url_slug },

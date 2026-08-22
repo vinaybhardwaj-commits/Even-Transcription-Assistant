@@ -318,7 +318,7 @@ Open set. Producers in this repo:
 
 - Token env name: **`BRAIN_SERVICE_TOKEN`** (`lib/brain/db.ts` `TOKEN_ENV`).
 - Kiosk never sees it. Proxy injects the bearer server-side.
-- Optional `BRAIN_BASE_URL` overrides where the proxy POSTs (same-origin `/api/brain/cues` by default). Used for fail-open proof / future container.
+- ~~Optional `BRAIN_BASE_URL` overrides where the proxy POSTs.~~ **RETIRED 22 Aug 2026** — the standalone Cloud Run brain (`brain/`) was deleted and the variable was removed from the code. The proxy now always POSTs same-origin `/api/brain/cues`.
 
 ---
 
@@ -421,7 +421,7 @@ There is **no** `SCRIBE_MCP_TOKEN` yet (MCP PRD proposes it).
 
 ### 7.2 URLs / roles / stores
 
-`DATABASE_URL`, `APP_DATABASE_URL`, `APP_DATABASE_URL_UNPOOLED`, `BRAIN_DATABASE_URL`, `KB_DATABASE_URL`, `OLLAMA_BASE_URL`, `LLM_BASE_URL`, `WHISPER_BASE_URL`, `INDICCONFORMER_BASE_URL`, `DIARIZE_BASE_URL`, `BRAIN_BASE_URL`, `NEXT_PUBLIC_STT_RELAY_URL`, `STT_RELAY_URL`, `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET`, `APP_URL`, `ADMIN_BASE_PATH`, `RESEND_FROM_EMAIL`.
+`DATABASE_URL`, `APP_DATABASE_URL`, `APP_DATABASE_URL_UNPOOLED`, `BRAIN_DATABASE_URL`, `KB_DATABASE_URL`, `OLLAMA_BASE_URL`, `LLM_BASE_URL`, `WHISPER_BASE_URL`, `INDICCONFORMER_BASE_URL`, `DIARIZE_BASE_URL`, ~~`BRAIN_BASE_URL`~~ (retired 22 Aug 2026), `NEXT_PUBLIC_STT_RELAY_URL`, `STT_RELAY_URL`, `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET`, `APP_URL`, `ADMIN_BASE_PATH`, `RESEND_FROM_EMAIL`.
 
 ### 7.3 Models / flags (client `NEXT_PUBLIC_*` inlined at build)
 

@@ -77,5 +77,15 @@ export async function POST(req: NextRequest) {
     return respondError("PIPELINE_FAILED", msg.slice(0, 150));
   }
 
+  // Audit: an admin changed their own password. Neither password is ever logged —
+  // the fact and the actor are the whole point of the row.
+  await sql`
+    INSERT INTO audit_log
+      (actor_type, actor_id, action, target_type, target_id, metadata_json)
+    VALUES
+      ('admin', ${claims.admin_id}, 'admin.change_password', 'admin_user', ${String(claims.admin_id)},
+       ${JSON.stringify({ self_service: true })}::jsonb)
+  `.catch(() => { /* intentional: best-effort audit write */ });
+
   return respondOk({ ok: true });
 }

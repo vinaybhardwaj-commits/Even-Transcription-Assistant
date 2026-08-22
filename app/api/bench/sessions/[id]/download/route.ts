@@ -17,6 +17,17 @@
  * Kickoff D (decision D2): the zip also carries timeline.md next to manifest.json,
  * from the same generator as /timeline. Generated in-request; a generator failure
  * skips that entry (logged) and never breaks the zip.
+ *
+ * AUDITED (22 Aug 2026): this route hands over the audio of an ENTIRE RECORDED CLINIC
+ * DAY — every chunk from both microphones, plus the manifest and the timeline — and until
+ * now it wrote no audit row, while the single-encounter audio route next door has been
+ * audited as `encounter.audio_access` all along. The larger disclosure was the unlogged
+ * one. It now writes `bench.session_download` before the stream opens.
+ *
+ * The row is written at the point the download is AUTHORISED, not when it completes: the
+ * body is a ReadableStream that may be aborted half way, and an audit that only recorded
+ * finished downloads would miss exactly the accesses most worth recording. `bytes` is
+ * therefore the size offered, not the size delivered, and the row says so.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { respondError } from "@/lib/respond";
@@ -29,6 +40,7 @@ import {
   StoreZipWriter,
 } from "@/lib/bench";
 import { getObjectBytes } from "@/lib/r2";
+import { sql } from "@/lib/db";
 import { chunkBasename } from "@/lib/bench-dual";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 
@@ -123,6 +135,22 @@ export async function GET(
       .map((c) => ({ before_idx: c.idx, gap_ms: c.gap_before_ms })),
     events,
   };
+
+  // Audit BEFORE the stream opens — see the header note on why completion is not the trigger.
+  await sql`
+    INSERT INTO audit_log
+      (actor_type, actor_id, action, target_type, target_id, metadata_json)
+    VALUES
+      ('admin', ${String(g.claims.admin_id ?? "")}, 'bench.session_download', 'bench_session', ${id},
+       ${JSON.stringify({
+         room_slug: session.room_slug,
+         room_name: session.room_name,
+         chunks: chunks.length,
+         backup_chunks: backupChunks.length,
+         bytes_offered: totalBytes,
+         session_status: session.status,
+       })}::jsonb)
+  `.catch(() => { /* intentional: best-effort audit write, never blocks the download */ });
 
   const zip = new StoreZipWriter();
   const now = new Date();

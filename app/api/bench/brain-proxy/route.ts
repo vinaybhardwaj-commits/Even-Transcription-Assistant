@@ -12,9 +12,9 @@
  *     misconfigured, slow or unknown never surfaces as an error to the kiosk, and the
  *     archive path does not depend on it at all (fail-open, PRD §9).
  *
- * Brain base URL: same origin by default (decision B10 — /api/brain/cues lives in this
- * deployment). BRAIN_BASE_URL (env, optional) overrides it — used for the future container
- * and for the fail-open proof (point it at an unreachable host).
+ * Brain base URL: ALWAYS same origin (decision B10 — /api/brain/cues lives in this
+ * deployment, and lib/brain is now the only brain). There is no override env any more: the
+ * standalone Cloud Run service is retired, code and all.
  *
  * Response { ok:true, brain:"recording", brain_status }         brain answered 2xx
  *          { ok:false, brain:"unsure", brain_status, reason }   brain answered non-2xx, or
@@ -58,8 +58,6 @@ const reply = (body: Record<string, unknown>) =>
   NextResponse.json(body, { status: 200, headers: { "cache-control": "no-store" } });
 
 function brainCuesUrl(req: NextRequest): string {
-  const base = process.env.BRAIN_BASE_URL?.trim();
-  if (base) return new URL("/api/brain/cues", base.endsWith("/") ? base : `${base}/`).toString();
   // Same origin (B10): prefer the forwarded host/proto Vercel sets, fall back to nextUrl.
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
   const proto = req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "");

@@ -92,7 +92,7 @@ Decisions taken to scope v2.1. Full design in §20.
 |---|---|---|---|
 | D1 | Architecture | **Build C** — Deepgram diarize=true on the live WebSocket + Mac Mini pyannote.audio + SpeechBrain ECAPA-TDNN reconciliation at submit. Canonical labeled transcript saved post-submit. | Live UX wins from showing labels from second one; pyannote at submit produces a higher-accuracy canonical record that drives note generation, email, and downstream analysis. Reuses the B7 R2 audio buffer as the pyannote input. |
 | D2 | Clinician enrollment | **Onboarding wizard + passive accumulation.** First login (or first login after v2.1 deploy for existing clinicians): 6-sentence read aloud, ~90 sec. Embedding centroid stored. After that, the first 30 sec of every subsequent recording silently refreshes the print. | One-time friction at enrollment, zero per-session friction. Passive refresh keeps the print robust to colds, mic placement, mic upgrades, voice aging. |
-| D3 | Role scope | **Patient: numbered (singular per encounter).** **Attender: numbered (Attender 1, 2…).** **Nurse: detected-but-unnamed (singular role label "Nurse").** Only clinicians get named identification. | Patient + attender voice prints are PHI we don't want to retain. Naming 50+ nurses adds enrollment cost without commensurate value — "Nurse" as a role tag is enough context for the note. |
+| D3 | Role scope | **Patient: numbered (singular per encounter).** **Attender: numbered (Attender 1, 2…).** **Nurse: detected-but-unnamed (singular role label "Nurse").** Only clinicians get named identification. | ~~Patient + attender voice prints are PHI we don't want to retain.~~ (Retention reversed by V on 22 Aug 2026 — see §20.9.1; the decision to leave non-clinicians UNNAMED stands, but it no longer rests on non-retention.) Naming 50+ nurses adds enrollment cost without commensurate value — "Nurse" as a role tag is enough context for the note. |
 | D4 | Sprint placement | **v2.1 as a clean follow-on release.** v2.0 ships multi-clinician + multi-note-type without diarization. Voice prints captured at enrollment during v2.1 rollout, then live diarization activates once enrollment is complete for the pilot cohort. | Avoids stacking two big mental-model changes on pilots simultaneously. Lets us measure v2.0 quality independent of diarization quality. |
 | D5 | Consultation quality scoring scope | **Collect speaker-time aggregates in v2.1; defer rubric + dashboard to v2.2.** v2.1 stores per-encounter clinician/patient/attender/nurse seconds, utterance counts, and average utterance length on the encounter row. No clinician-facing scoring, no dashboard. v2.2 designs the rubric with clinical input and builds the per-clinician dashboard on top of pilot data already collected. | Quality scoring needs proper rubric design + clinical validation that doesn't fit inside V2.SD. Pilot data accumulation must start from day 1 of v2.1 so v2.2 has months of real data to validate against. |
 
@@ -1420,11 +1420,18 @@ Per HIPAA's expanded definition (and India's DPDP Act 2023 sensitive-data catego
 - Voice prints encrypted at rest (Postgres column-level encryption via pgcrypto, or Neon's automatic encryption — V to confirm Neon's defaults cover BYTEA columns; if not we add pgcrypto wrappers).
 - Voice prints never leave the system — no API exposes the centroid bytes, only match results.
 - Voice prints deleted on clinician account deletion (already enforced by `ON DELETE CASCADE`).
-- Only clinician's own voice prints stored. Patient/attender/nurse voices are NOT enrolled and their embeddings are not retained post-session (computed in-memory by pyannote during diarization, discarded).
+- Only clinicians are ENROLLED — patient, attender and nurse voices are never enrolled and never named.
+- **Non-clinician voiceprints ARE stored and ARE kept. (V, 22 Aug 2026 — reverses the original rule below.)** The patient/attender/nurse embeddings computed by pyannote during diarization are persisted alongside the encounter rather than discarded at end of session. Enrollment and retention are now separate questions, and only the first is answered "clinicians only".
+  - ~~Only clinician's own voice prints stored. Patient/attender/nurse voices are NOT enrolled and their embeddings are not retained post-session (computed in-memory by pyannote during diarization, discarded).~~ **SUPERSEDED 22 Aug 2026.**
+  - Everything else in this section still binds these embeddings: encrypted at rest, never exposed through any API (match results only), and deleted with the record they belong to. Being retained does not make them less sensitive — it makes the rules above apply to more rows.
 
 #### 20.9.2 Patient consent disclosure
 
-The doctor app's recording screen gains a one-time disclosure card on first launch post-v2.1: "Recordings may identify different speakers in the room (you, the patient, family members). Speaker labels are kept with the encounter record. Patient and family voice samples are not stored separately." Acknowledged once per clinician account; not per recording.
+The doctor app's recording screen gains a one-time disclosure card on first launch post-v2.1: "Recordings may identify different speakers in the room (you, the patient, family members). Speaker labels are kept with the encounter record."
+
+> **AMENDED 22 Aug 2026 (V).** The card previously ended "Patient and family voice samples are not stored separately." That sentence must NOT ship: non-clinician voiceprints are now stored and kept (§20.9.1), and a disclosure that says otherwise would be a false statement made to a patient. The replacement wording is a drafting task for whoever builds the card, and it has to say plainly that voice characteristics of everyone in the room are retained with the record.
+
+Acknowledged once per clinician account; not per recording.
 
 For the recipient-side email body, the "Transcribed from voice" banner gets extended language: "Speaker attribution provided where identifiable. Manual review recommended for clinically critical statements."
 
@@ -1432,7 +1439,8 @@ For the recipient-side email body, the "Transcribed from voice" banner gets exte
 
 - `voice_print` rows persist for the lifetime of the clinician account.
 - `encounter.speakers` + `encounter.transcript_segments` follow the existing encounter retention policy (PRD v1 §4.17).
-- No long-term storage of patient/attender voice embeddings — they exist only in the pyannote in-memory pipeline run.
+- **Patient/attender/nurse voice embeddings are retained** (V, 22 Aug 2026), on the same retention footing as the encounter they came from — not in-memory-only, and not separately expirable.
+  - ~~No long-term storage of patient/attender voice embeddings — they exist only in the pyannote in-memory pipeline run.~~ **SUPERSEDED 22 Aug 2026.**
 
 ### 20.10 Sprint Plan — V2.SD
 
