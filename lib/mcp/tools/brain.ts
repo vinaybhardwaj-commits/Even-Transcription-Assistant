@@ -26,7 +26,7 @@
 import { sql } from "@/lib/db";
 import { getPool, TOKEN_ENV } from "@/lib/brain/db";
 import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
-import { CUES_DEFAULT_LIMIT, CUES_MAX_LIMIT, findRoomDay, isIstDateString, istDate, listCuesForDay, readGraph, roomExists } from "@/lib/brain/state";
+import { CUES_DEFAULT_LIMIT, CUES_MAX_LIMIT, decodeCueCursor, findRoomDay, isIstDateString, istDate, listCuesForDay, readGraph, roomExists } from "@/lib/brain/state";
 import { argBool, argDate, argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 export type RoomRef = { id: string; slug: string; name: string; enabled: boolean };
@@ -147,13 +147,15 @@ const getState: McpTool = {
 
 const listCues: McpTool = {
   name: "scribe_list_cues",
-  description: "Cues for a room-day, newest first: { id, type, at, created_at, summary }. summary = first 80 chars of the payload JSON; full payload ONLY with include_payload=true. Filters: since (ISO, at > since), type (exact), limit (default 50, max 200).",
+  description: "Cues for a room-day, newest first: { id, type, at, created_at, summary }. summary = first 80 chars of the payload JSON; full payload ONLY with include_payload=true. Filters: since (ISO, at > since), until (ISO, at < until), type (exact), limit (default 50, max 200). PAGING (K2 E1): the answer carries next_cursor; pass it back as `cursor` to read the next OLDER page, and repeat until next_cursor is null. Before this a full clinic day could not be read at all — the cap is 200 per call and `since` trims the OLD end of a newest-first list, so 19 August's 2,030-turn room-day was reachable only 200 rows deep. The cap is unchanged; the day is now reachable by paging. Read-only: nothing about what a cue is or how it is written changes.",
   scope: "read",
   inputSchema: {
     type: "object",
     properties: {
       ...ROOM_ARGS,
-      since: { type: "string", description: "ISO timestamp; cues with at > since" },
+      since: { type: "string", description: "ISO timestamp; cues with at > since (trims the OLD end)" },
+      until: { type: "string", description: "ISO timestamp; cues with at < until (trims the NEW end)" },
+      cursor: { type: "string", maxLength: 128, description: "next_cursor from a previous page; reads strictly older than that position" },
       type: { type: "string", maxLength: 64 },
       limit: { type: "integer", minimum: 1, maximum: CUES_MAX_LIMIT, default: CUES_DEFAULT_LIMIT },
       include_payload: { type: "boolean", default: false },
@@ -168,10 +170,19 @@ const listCues: McpTool = {
       if ("error" in d) return { cues: [], error: d.error };
       const since = argDate(args, "since");
       if (args.since !== undefined && since === null) return { cues: [], error: "invalid_since" };
+      const until = argDate(args, "until");
+      if (args.until !== undefined && until === null) return { cues: [], error: "invalid_until" };
+      const cursorRaw = argStr(args, "cursor", 128);
+      // A cursor that does not parse is refused BY NAME. Silently ignoring it would return the
+      // FIRST page again, and a caller paging a 2,030-row day would loop over page one for ever
+      // while believing it was making progress.
+      if (cursorRaw && !decodeCueCursor(cursorRaw)) return { cues: [], error: "invalid_cursor" };
       const type = argStr(args, "type", 64);
       if (!(await roomExists(room.id))) return { cues: [], error: "unknown_room" };
       const out = await listCuesForDay(room.id, d.date, {
         since,
+        until,
+        cursor: cursorRaw,
         type,
         limit: argInt(args, "limit", CUES_DEFAULT_LIMIT, 1, CUES_MAX_LIMIT),
         includePayload: argBool(args, "include_payload"),

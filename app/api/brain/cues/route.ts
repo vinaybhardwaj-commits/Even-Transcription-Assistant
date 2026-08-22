@@ -36,11 +36,20 @@
  *
  * There is still exactly ONE write door for cues, which is what keeps the MCP layer free of
  * cue SQL (tests/unit/mcp-s3.test.ts).
+ *
+ * K2 PART D — the live fuse, behind FUSE_LIVE_ENABLED (per-room, default OFF). The ONLY thing
+ * this route gained is a flag-guarded call at the very end of the LIVE branch, after the cue is
+ * committed and the response is already decided. Flag off for a room → that call is not made
+ * and this route behaves exactly as it did at 8b6e548. The scratch guard below is untouched:
+ * an explicit room_day_id whose `scratch` is not true is still refused INSIDE the lock, and the
+ * live fuse is a separate path beside that check rather than a hole in it.
  */
 import { NextResponse } from "next/server";
 import { checkBearer } from "@/lib/brain/auth";
 import { brainLog, classifyBrainError } from "@/lib/brain/db";
 import { withRoomDayLock } from "@/lib/brain/lock";
+import { isFuseLiveEnabled } from "@/lib/brain/fuse/live-flag";
+import { scheduleLiveFuse } from "@/lib/brain/fuse/live";
 import {
   deleteWindowCues,
   findRoomDayById,
@@ -319,6 +328,26 @@ export async function POST(req: Request) {
       const state = await readGraph(client, roomId, date, day.id);
       return { cue, state };
     });
+
+    // ---- K2 D1/D2/D3: the live fuse, and the ONE place it is reached from -----------------
+    //
+    // READ THIS BEFORE CHANGING ANYTHING ABOVE IT. Everything that decides the response body is
+    // already done: the cue is committed, the lock is released, `out` holds the state that will
+    // be returned. This block cannot alter any of it.
+    //
+    // WITH THE FLAG OFF FOR THIS ROOM — which is the default, and which is the state every
+    // clinic room is in for Monday 24 August — `isFuseLiveEnabled` returns false, the body
+    // never executes, and this path is byte-for-byte the path at 8b6e548. That is provable by
+    // reading these six lines: there is no other branch, no module-scope side effect (the flag
+    // is read at the point of use), and no import of lib/brain/fuse/live that runs anything.
+    //
+    // WITH THE FLAG ON, scheduleLiveFuse debounces and then reads/computes OUTSIDE the room_day
+    // lock, taking it only to write (D4). It never throws: a fuse failure must not turn a
+    // successful cue write into an error, because the cue is the durable record.
+    if (isFuseLiveEnabled(roomId)) {
+      const fused = await scheduleLiveFuse(roomId, day.id, date);
+      brainLog("info", "fuse_live", { room_id: roomId, ...fused });
+    }
 
     return NextResponse.json(
       { ok: true, cue_id: out.cue.id, cue_at: out.cue.at, state: out.state },

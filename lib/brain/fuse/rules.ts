@@ -27,7 +27,7 @@
  *     loses that row however plausible its output.
  */
 
-import { OPEN_STATES, type ArmOutput, type DraftVisit, type FuseCue, type OpenedByKind, type UnboundEvidence, type VisitState } from "./types";
+import { OPEN_STATES, type ArmOutput, type ClinicianSource, type DraftVisit, type FuseCue, type OpenedByKind, type UnboundEvidence, type VisitState } from "./types";
 
 /**
  * THE CLOSED SET of ambiguity reasons arm A can emit. Closed on purpose: slice 5 scores these,
@@ -114,6 +114,33 @@ export const END_REASONS = {
    * on — vanished at the moment the day was fused.
    */
   DAY_ROLLOVER_AT_DIAGNOSTICS: "day_rollover_at_diagnostics",
+  /**
+   * K2 B1 — the next visit in this room OPENED. One room cannot hold two consults at once, so
+   * the arrival of the next opening evidence is itself the end of the previous visit, and its
+   * instant is that opening instant.
+   *
+   * CONSEQUENCE, stated because it is easy to miss: this outranks day_rollover in the B5
+   * precedence, so DAY_ROLLOVER and DAY_ROLLOVER_AT_DIAGNOSTICS are now reachable only by a
+   * visit with NO later opener — in practice the last visit of the day. The diagnostics hole
+   * is still nameable, but on the last visit only.
+   */
+  NEXT_OPENER: "next_opener",
+  /**
+   * K2 B2 — a visit opened by a kiosk mark, with no next opener, closes LAST_MARK_WINDOW_MS
+   * after the mark. This reuses the prior that already exists for the last mark of a day; it
+   * invents nothing and defines no second constant.
+   */
+  MARK_WINDOW_ELAPSED: "mark_window_elapsed",
+  /**
+   * K2 B3 — closed by the day boundary while still `unknown`.
+   *
+   * Kept DISTINCT from DAY_ROLLOVER on purpose. A visit that rolls over from in_chair is one
+   * we established and watched fail to close; one that rolls over from `unknown` is a kiosk
+   * mark whose window held no warehouse evidence at all — the unrecorded-care case. Before K2
+   * the second kind closed by NOTHING, ever, and sat open for all time. It closes now, and the
+   * token is what stops that being mistaken for the first kind.
+   */
+  DAY_ROLLOVER_UNKNOWN: "day_rollover_unknown",
 } as const;
 
 export const ALL_END_REASONS: readonly string[] = Object.values(END_REASONS);
@@ -134,6 +161,44 @@ const ms = (iso: string): number => {
 /** Deterministic evidence order: the clock, then the cue id. Never insertion order. */
 const byAtThenId = (a: FuseCue, b: FuseCue): number => ms(a.at) - ms(b.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
+/**
+ * One bench session, as the arm sees it. The RUNNER reads these; the arm only intersects them
+ * with spans it already computed. Passing them IN is what keeps this file free of I/O.
+ */
+export type TapeSession = { id: string; started_at: string; ended_at: string | null };
+
+/**
+ * Everything the arm needs that it must not go and fetch. Both fields are OPTIONAL and their
+ * absence is a legitimate, tested state, not a degraded one:
+ *
+ *   rolloverAt  the IST day boundary, ISO. Absent → a day_rollover close still happens and
+ *               ended_at is null, because the arm genuinely does not know the instant. It
+ *               will NOT read a clock to find out; that is the whole point of this parameter.
+ *   sessions    the tape. Absent or non-overlapping → session_id and both tape bounds are
+ *               null and the visit is still emitted. A visit the warehouse knows about that
+ *               the tape missed is a FINDING, not an error, and is never forced into a tape.
+ *
+ * Purity is preserved because these are INPUTS: runRulesArm(cues, opts) twice with the same
+ * two arguments returns deeply equal output, which is what U7 asserts.
+ */
+export type RulesArmOptions = {
+  rolloverAt?: string | null;
+  sessions?: readonly TapeSession[];
+};
+
+/**
+ * The cue payload key that can carry a clinician, and the two cue types allowed to carry it.
+ *
+ * DERIVATION, NOT DECLARATION. The SOURCE label is decided by WHICH CUE TYPE the id arrived
+ * on — never by a `clinician_source` field in a payload. A caller that stamps
+ * clinician_source:'roster' into a cue gets no roster attribution out of this arm; the field
+ * is not read, anywhere, at all. That is A3's "never accept a typed clinician_source", and it
+ * is why the mapping lives here as code rather than as a lookup on the payload.
+ */
+const CLINICIAN_ID_KEY = "clinician_id";
+const OPERATOR_CUE_TYPE = "operator_pin";
+const MARK_CUE_TYPE = "consult_mark";
+
 type Working = DraftVisit & { _calendar_uid: string | null; _openedAtMs: number };
 
 const clamp = (n: number): number => Math.max(0, Math.min(CONF_MAX, Math.round(n * 1000) / 1000));
@@ -143,7 +208,7 @@ function addReason(v: Working, reason: string): void {
   v.confidence = Math.min(v.confidence, CONF_AMBIGUOUS_CAP);
 }
 
-export function runRulesArm(cues: FuseCue[]): ArmOutput {
+export function runRulesArm(cues: FuseCue[], opts: RulesArmOptions = {}): ArmOutput {
   const sorted = [...cues].sort(byAtThenId);
   const of = (type: string) => sorted.filter((c) => c.type === type);
   const visits: Working[] = [];
@@ -175,6 +240,17 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       opened_by_kind: kind,
       reasons: [],
       end_reason: null,
+      // The seven K2 fields start empty and are filled by the passes below — the closers set
+      // ended_at, and the last pass sets the tape binding and the clinician. A visit that
+      // reaches the end of the arm with these still null is a visit nothing could say more
+      // about, which is a legitimate row.
+      ended_at: null,
+      session_id: null,
+      tape_start_ms: null,
+      tape_end_ms: null,
+      clinician_id: null,
+      clinician_source: null,
+      clinician_confidence: null,
       _calendar_uid: str(c.payload, "calendar_uid"),
       _openedAtMs: ms(c.at),
     };
@@ -297,6 +373,9 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
     target.confidence = clamp(target.confidence + CONFIRM_BONUS);
     target.state = "ended";
     target.end_reason = END_REASONS.PULSE_NOTE;
+    // A1 — the arm always knew this instant and used to throw it away. The note's own clock is
+    // when the visit ended; not the arm's clock, and not the cue's arrival time.
+    target.ended_at = c.at;
   }
 
   // -- 5. the kiosk mark: its window binds warehouse clocks, or it stands alone -
@@ -329,19 +408,166 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
     addReason(v, RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
   }
 
-  // -- 6. day_rollover: a fused day has nothing still running (A7) -----------
-  // Every state that implies a patient is PRESENT closes. `unknown` is untouched — it is not
-  // an open visit, it is one we never established, and rolling it would claim we knew a
-  // consult happened and finished. After this pass a fully fused day has no in_chair at all,
-  // which is why active_visit_id comes back null.
-  for (const v of visits) {
-    if (!OPEN_STATES.includes(v.state)) continue;
-    // WHAT it was doing when the day ended is the finding, not just THAT it was open: a visit
-    // sent to diagnostics and never seen again is a different event from one that merely never
-    // closed, and the row has to say which.
-    const wasAtDiagnostics = v.state === "at_diagnostics";
+  // -- 6. THE CLOSERS, in B5 precedence order (K2 Part B) ---------------------
+  //
+  // Before K2 a visit closed on a pulse_note or at day rollover, and the rollover pass skipped
+  // `unknown`. The consequence was not a rough edge, it was a hole: a visit opened by a kiosk
+  // mark with no warehouse evidence — the unrecorded-care case, which is the whole product —
+  // was closed by NOTHING, EVER. It could only ever be found still open.
+  //
+  // The precedence below is a chain, not a set: the FIRST closer that fires wins and the rest
+  // are not consulted for that visit.
+  //
+  //   pulse_note  (pass 4, already applied)   the individual's own note landed
+  //   next_opener                             the next visit in this room opened
+  //   mark_window_elapsed                     a mark-opened visit, LAST_MARK_WINDOW_MS on
+  //   day_rollover / _at_diagnostics /        the day boundary, saying which state it was in
+  //     _unknown
+  //
+  // WHAT IS DELIBERATELY NOT HERE: a silence-gap closer. It was measured against the 19 August
+  // OPD 7 tape and removed. 73% of inter-turn gaps are exactly ZERO because whisper.cpp emits
+  // contiguous segments — one turn's end_ms IS the next turn's start_ms — so an inter-turn gap
+  // is structurally blind to silence. A proven-dead 15-minute window showed a 20 ms internal
+  // gap, and one turn inside it spanned 668 seconds carrying six words. There is no bimodality
+  // and therefore no threshold to pick. Deriving silence from turn timing would mint the end of
+  // a clinical record out of a heuristic, so it is not done, here or anywhere.
+  const rolloverAtMs = opts.rolloverAt ? ms(opts.rolloverAt) : null;
+
+  /** Close a visit once. A visit already `ended` is never re-closed and its reason never rewritten. */
+  const close = (v: Working, reason: string, atMs: number | null): void => {
+    if (v.state === "ended") return;
     v.state = "ended";
-    v.end_reason = wasAtDiagnostics ? END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS : END_REASONS.DAY_ROLLOVER;
+    v.end_reason = reason;
+    v.ended_at = atMs === null ? null : new Date(atMs).toISOString();
+  };
+
+  // Every opening instant on this room-day, ascending. "The next visit" is by the CLOCK, not by
+  // array position — the visits array is in mint order, which is pass order, not time order.
+  const openings = visits.map((v) => v._openedAtMs).sort((a, b) => a - b);
+
+  for (const v of visits) {
+    if (v.state === "ended") continue; // pulse_note (pass 4) already closed this one
+
+    // B1 — strictly AFTER, so two visits opening on the same instant do not close each other.
+    const nextOpening = openings.find((t) => t > v._openedAtMs);
+    if (nextOpening !== undefined) {
+      close(v, END_REASONS.NEXT_OPENER, nextOpening);
+      continue;
+    }
+
+    // B2 — the last visit of the day, opened by a mark. Reuses the existing named prior; this
+    // build defines no second constant, and LAST_MARK_WINDOW_MS is still the only invented one.
+    //
+    // THE WINDOW MUST ACTUALLY HAVE ELAPSED. A mark pressed inside the last 45 minutes of the
+    // day has a window that runs past the boundary, so it did NOT elapse — the day ended
+    // first, and saying `mark_window_elapsed` would assert an interval that never finished.
+    // That case falls through to B3 and closes as `day_rollover_unknown`, which is the only
+    // reason that token is reachable at all: every `unknown` visit is mark-opened, so without
+    // this test B2 would swallow all of them and B3's token could never be produced.
+    if (v.opened_by_kind === "mark") {
+      const windowEnds = v._openedAtMs + LAST_MARK_WINDOW_MS;
+      if (rolloverAtMs === null || windowEnds <= rolloverAtMs) {
+        close(v, END_REASONS.MARK_WINDOW_ELAPSED, windowEnds);
+        continue;
+      }
+    }
+
+    // B3 — the boundary. WHAT it was doing when the day ended is the finding, not just THAT it
+    // was open, so the three tokens stay distinct and the scoreboard can still tell them apart.
+    const reason =
+      v.state === "unknown"
+        ? END_REASONS.DAY_ROLLOVER_UNKNOWN
+        : v.state === "at_diagnostics"
+          ? END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS
+          : END_REASONS.DAY_ROLLOVER;
+    close(v, reason, rolloverAtMs);
+  }
+
+  // -- 7. the tape binding (A2) ----------------------------------------------
+  // A visit's span is [opened, ended); the tape's is [started, ended). Where they overlap, the
+  // visit is bound to that session and carries the overlap in epoch ms.
+  //
+  // NEITHER MISS IS AN ERROR, and neither is forced:
+  //   · a visit the warehouse knows about that no session covers keeps its warehouse truth and
+  //     gets a NULL binding — 35 of the 43 warehouse events on the reference day fall outside
+  //     every tape window, and pretending otherwise would invent tape that does not exist;
+  //   · a tape window with no warehouse evidence keeps its binding and has no individual_uid,
+  //     which is the mark-only visit and is exactly the row worth having.
+  const sessions = [...(opts.sessions ?? [])].sort(
+    (a, b) => ms(a.started_at) - ms(b.started_at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  for (const v of visits) {
+    const startMs = v._openedAtMs;
+    const endMs = v.ended_at ? ms(v.ended_at) : null;
+    // The session running at the moment the visit OPENED. Deterministic: sessions are sorted,
+    // and the first cover wins rather than the longest or the closest.
+    const cover = sessions.find((sess) => {
+      const sStart = ms(sess.started_at);
+      const sEnd = sess.ended_at ? ms(sess.ended_at) : null;
+      return sStart <= startMs && (sEnd === null || startMs < sEnd);
+    });
+    if (!cover) continue; // null session_id, null bounds — a finding, left as one
+    const sStart = ms(cover.started_at);
+    const sEnd = cover.ended_at ? ms(cover.ended_at) : null;
+    const tapeStart = Math.max(sStart, startMs);
+    // The earlier of the two ends. Both open (a live visit on a running tape) → null, which
+    // 0056's CHECK explicitly allows: tape_end_ms IS NULL is legal beside a set tape_start_ms.
+    let tapeEnd: number | null =
+      endMs !== null && sEnd !== null ? Math.min(endMs, sEnd) : endMs !== null ? endMs : sEnd;
+    // 0056 CHECKs tape_end_ms > tape_start_ms. A non-positive overlap is not a zero-length
+    // visit, it is no overlap at all — drop the end rather than write a row the CHECK refuses.
+    if (tapeEnd !== null && tapeEnd <= tapeStart) tapeEnd = null;
+    v.session_id = cover.id;
+    v.tape_start_ms = tapeStart;
+    v.tape_end_ms = tapeEnd;
+  }
+
+  // -- 8. the clinician (A3) -------------------------------------------------
+  // DERIVED, never declared. The id may arrive on exactly two cue types and the type it arrived
+  // on IS the source label:
+  //   operator_pin  → 'operator'   a human named them
+  //   consult_mark  → 'mark'       the kiosk press carried it
+  // 'roster' has no source system in this build and 'voice' is slice B, so neither can be
+  // produced here — asserted by U8, not merely intended. A payload that spells out
+  // clinician_source is ignored: that field is never read, which is what stops a caller
+  // laundering a guess into a roster attribution.
+  //
+  // Nothing found → 'unknown' with a null id and a null confidence. That is a FIRST-CLASS
+  // TERMINAL ANSWER: the arm looked and could not tell. It is never upgraded to a guess to
+  // avoid the word.
+  const clinicianCues = sorted.filter(
+    (c) => (c.type === OPERATOR_CUE_TYPE || c.type === MARK_CUE_TYPE) && str(c.payload, CLINICIAN_ID_KEY) !== null,
+  );
+  for (const v of visits) {
+    const startMs = v._openedAtMs;
+    const endMs = v.ended_at ? ms(v.ended_at) : null;
+    const own = clinicianCues.filter((c) => {
+      // The cue that OPENED this visit always belongs to it, whatever the clock says.
+      if ((c.source_ref ?? str(c.payload, "source_ref") ?? c.id) === v.opened_by) return true;
+      // An operator naming a person names THAT person's visit, wherever it sits on the clock.
+      const cUid = str(c.payload, "individual_uid");
+      if (cUid !== null && v.individual_uid !== null && cUid === v.individual_uid) return true;
+      // Otherwise: did it land inside this visit's own span?
+      const at = ms(c.at);
+      return at >= startMs && (endMs === null || at < endMs);
+    });
+    if (own.length === 0) {
+      v.clinician_source = "unknown";
+      continue;
+    }
+    // Operator outranks mark; within a rank the LATEST statement wins, because a human
+    // correcting themselves an hour later meant the correction. `sorted` is (at, id), so the
+    // last match in it is the latest deterministically, ties included.
+    const operators = own.filter((c) => c.type === OPERATOR_CUE_TYPE);
+    const pool = operators.length > 0 ? operators : own;
+    const chosen = pool[pool.length - 1]!;
+    const source: ClinicianSource = chosen.type === OPERATOR_CUE_TYPE ? "operator" : "mark";
+    v.clinician_id = str(chosen.payload, CLINICIAN_ID_KEY);
+    v.clinician_source = source;
+    // REUSED, not invented — both are constants this file already had. A human naming the
+    // clinician is as sure as this system gets (CONF_MAX); a mark carrying the id is the same
+    // weight arm A already gives direct, non-inferred warehouse evidence (CONF_PSTART_DIRECT).
+    v.clinician_confidence = source === "operator" ? CONF_MAX : CONF_PSTART_DIRECT;
   }
 
   // -- 7. finalise: strip bookkeeping, clamp, and order deterministically -----
@@ -359,6 +585,16 @@ export function runRulesArm(cues: FuseCue[]): ArmOutput {
       // A6: end_reason answers "why did it END", so it is null unless it ended. The ambiguity
       // reasons above never come near this field again.
       end_reason: v.state === "ended" ? v.end_reason : null,
+      // ended_at travels with end_reason and by the same rule: a visit that is not ended has
+      // no end instant, and one that IS ended may still legitimately have none (a rollover the
+      // arm was given no boundary for).
+      ended_at: v.state === "ended" ? v.ended_at : null,
+      session_id: v.session_id,
+      tape_start_ms: v.tape_start_ms,
+      tape_end_ms: v.tape_end_ms,
+      clinician_id: v.clinician_id,
+      clinician_source: v.clinician_source,
+      clinician_confidence: v.clinician_confidence,
     }))
     .sort((a, b) => {
       // Visits with a start come first, in start order; then by opening evidence, which is

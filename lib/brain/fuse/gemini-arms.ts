@@ -231,9 +231,17 @@ export async function runFlashArm(cues: FuseCue[]): Promise<ArmResult> {
       opened_by,
       opened_by_kind: kind,
       reasons: Array.isArray(o.reasons) ? (o.reasons as unknown[]).map(asStr).filter((x): x is string => x !== null).slice(0, 8) : [],
-      // Arm C is disqualified and not re-run (A1); this field exists so the shared DraftVisit
-      // type still compiles. A model's answer never sets an end_reason.
+      // Arm C is disqualified and not re-run (A1); these fields exist so the shared DraftVisit
+      // type still compiles. A model's answer never sets an end_reason, and K2's seven fields
+      // are computed by arm A's own passes — a disqualified arm produces none of them.
       end_reason: null,
+      ended_at: null,
+      session_id: null,
+      tape_start_ms: null,
+      tape_end_ms: null,
+      clinician_id: null,
+      clinician_source: null,
+      clinician_confidence: null,
     });
   }
 

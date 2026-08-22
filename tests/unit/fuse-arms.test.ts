@@ -189,8 +189,12 @@ describe("6 — in_tape_window is not read at all", () => {
     const off = runRulesArm([wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct", in_tape_window: false })]);
     expect(off.visits).toHaveLength(1);
     expect(off).toEqual(on); // byte-for-byte the same answer
-    // nothing tape-shaped is on the visit at all
-    expect(Object.keys(off.visits[0]!)).not.toContain("session_id");
+    // K2 gives every visit a session_id FIELD, but in_tape_window still does not fill it:
+    // with no sessions passed to the arm there is no tape to bind to, and the payload flag is
+    // not a substitute for one.
+    expect(off.visits[0]!.session_id).toBeNull();
+    expect(off.visits[0]!.tape_start_ms).toBeNull();
+    expect(off.visits[0]!.tape_end_ms).toBeNull();
     expect(readFileSync("lib/brain/fuse/rules.ts", "utf8")).not.toMatch(/payload.*in_tape_window|"in_tape_window"/);
   });
 });
@@ -224,8 +228,12 @@ describe("7/8 — a pulse_note never OPENS a visit, and closes only its own", ()
       wh("pulse_note", T("12:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
     ]);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
-    expect(orphan.state).toBe("unknown");
-    expect(orphan.end_reason).toBeNull();
+    // The claim under test is unchanged and still holds: the NOTE did not close it. K2 closes
+    // it by its own mark window instead, which is a different closer with a different token —
+    // a note still cannot reach a visit that has no individual_uid to match.
+    expect(orphan.end_reason).not.toBe(END_REASONS.PULSE_NOTE);
+    expect(orphan.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
+    expect(orphan.individual_uid).toBeNull();
   });
 });
 
@@ -273,20 +281,28 @@ describe("8 — arm A says it cannot tell, and the mark windows say when", () =>
     expect(visits).toHaveLength(2);
     expect(visits.some((v) => v.opened_by === "svc_1" && v.opened_by_kind === "pstart")).toBe(true);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
-    expect(orphan.state).toBe("unknown");
     expect(orphan.confidence).toBe(0.3);
+    // K2 B1: the 10:39 pstart is the NEXT opener, so the morning mark's visit now closes there
+    // instead of staying open for ever. It still minted, and it still carries no identity.
+    expect(orphan.state).toBe("ended");
+    expect(orphan.end_reason).toBe(END_REASONS.NEXT_OPENER);
+    expect(orphan.ended_at).toBe("2026-08-19T10:39:00.000Z");
+    expect(orphan.individual_uid).toBeNull();
   });
 
-  it("a mark whose window contains nothing stays unknown at 0.3, with a named reason", () => {
+  it("a mark whose window contains nothing is minted at 0.3 with a named reason, and closes", () => {
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       mark(T("11:00")),
     ]);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
     expect(orphan.individual_uid).toBeNull();
-    expect(orphan.state).toBe("unknown");
     expect(orphan.confidence).toBe(0.3);
     expect(orphan.reasons).toContain(RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
+    // K2 B2: no next opener after 11:00, so the mark's own 45-minute window closes it.
+    expect(orphan.state).toBe("ended");
+    expect(orphan.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
+    expect(Date.parse(orphan.ended_at!) - Date.parse(T("11:00"))).toBe(LAST_MARK_WINDOW_MS);
   });
 
   it("a call that never started still says why, and closes by the day boundary", () => {
@@ -308,8 +324,10 @@ describe("8b — the worked expectations from the kickoff, verbatim", () => {
     ];
     const { visits } = runRulesArm(cues);
     expect(visits).toHaveLength(3);
-    // mark 1 [04:41, 06:08) empty, mark 3 [09:34, 10:19) empty, mark 2 bound both clocks
-    expect(visits.filter((v) => v.state === "unknown" && v.confidence === 0.3)).toHaveLength(2);
+    // mark 1 [04:41, 06:08) empty, mark 3 [09:34, 10:19) empty, mark 2 bound both clocks.
+    // K2: both empty-window visits still mint at 0.3 — they now CLOSE rather than stay
+    // `unknown`, so the count is on the opening evidence, which is what identified them.
+    expect(visits.filter((v) => v.opened_by_kind === "mark" && v.confidence === 0.3)).toHaveLength(2);
     const bound = visits.find((v) => v.individual_uid === "ind_2")!;
     expect(bound.opened_by).toBe("svc_c1");
   });
@@ -326,33 +344,73 @@ describe("8b — the worked expectations from the kickoff, verbatim", () => {
     expect(visits).toHaveLength(14);
     const kinds = visits.reduce((a: Record<string, number>, v) => ((a[v.opened_by_kind] = (a[v.opened_by_kind] ?? 0) + 1), a), {});
     expect(kinds).toEqual({ pstart: 9, pqm_called: 4, mark: 1 });
-    expect(visits.filter((v) => v.state === "unknown")).toHaveLength(1);
+    // The gap is still a gap: the morning mark mints its OWN visit and swallows nothing. K2
+    // closes it at the 10:39 opener rather than leaving it open, which does not merge it.
+    const gap = visits.filter((v) => v.opened_by_kind === "mark");
+    expect(gap).toHaveLength(1);
+    expect(gap[0]!.individual_uid).toBeNull();
+    expect(gap[0]!.end_reason).toBe(END_REASONS.NEXT_OPENER);
   });
 });
 
-describe("8c — A7: day_rollover closes the open states and leaves `unknown` alone", () => {
-  it("called, in_chair and at_diagnostics all close; unknown does not", () => {
+describe("8c — K2 B3: the boundary now closes `unknown` too, under its own token", () => {
+  it("called, in_chair, at_diagnostics AND unknown all close — nothing is left running", () => {
     const { visits } = runRulesArm([
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),       // in_chair
       wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),                            // at_diagnostics
       wh("pqm_called", T("07:00"), "qts_9", { individual_uid: "ind_9", attribution: "direct" }),                           // called
       mark(T("14:00")),                                                                                                    // unknown
     ]);
-    const open = visits.filter((v) => ["called", "in_chair", "at_diagnostics"].includes(v.state));
-    expect(open).toHaveLength(0);
-    for (const v of visits.filter((x) => x.opened_by_kind !== "mark")) {
-      expect(v.state).toBe("ended");
-      // both boundary tokens are day_rollover closes; which one depends on what the visit was
-      // doing at the moment the day ended
-      expect([END_REASONS.DAY_ROLLOVER, END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS]).toContain(v.end_reason);
-    }
-    // and precisely: the diagnostics visit is distinguishable from the call that never started
-    expect(visits.find((v) => v.opened_by === "svc_1")!.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
-    expect(visits.find((v) => v.opened_by === "qts_9")!.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+    // NOTHING is left open, and that now includes the mark-only visit. Before K2 the mark at
+    // 14:00 closed by nothing at all and sat open for ever; that was the unrecorded-care case
+    // being unrepresentable, not a nicety.
+    expect(visits.filter((v) => v.state !== "ended")).toHaveLength(0);
+
+    // B5 precedence in one fixture: each visit but the last is closed by the NEXT one opening,
+    // which outranks the boundary. svc_1 (03:35) → qts_9 (07:00) → the 14:00 mark.
+    expect(visits.find((v) => v.opened_by === "svc_1")!.end_reason).toBe(END_REASONS.NEXT_OPENER);
+    expect(visits.find((v) => v.opened_by === "svc_1")!.ended_at).toBe(T("07:00"));
+    expect(visits.find((v) => v.opened_by === "qts_9")!.end_reason).toBe(END_REASONS.NEXT_OPENER);
+    expect(visits.find((v) => v.opened_by === "qts_9")!.ended_at).toBe(T("14:00"));
+
+    // The last visit has no next opener, so its own closer applies. It is mark-opened and its
+    // 45-minute window ends at 14:45, well before any boundary — mark_window_elapsed.
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
-    expect(orphan.state).toBe("unknown");
-    expect(orphan.end_reason).toBeNull();
+    expect(orphan.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
     expect(orphan.confidence).toBe(0.3);
+  });
+
+  // The three boundary tokens are only reachable by a visit with NO later opener, because B1
+  // outranks B3. Each is exercised on its own one-visit day, which is the shape that reaches it.
+  it("the boundary still names WHAT the last visit was doing: in_chair, at_diagnostics, unknown", () => {
+    const rolloverAt = T("18:30");
+
+    const inChair = runRulesArm(
+      [wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" })],
+      { rolloverAt },
+    ).visits[0]!;
+    expect(inChair.end_reason).toBe(END_REASONS.DAY_ROLLOVER);
+    expect(inChair.ended_at).toBe(rolloverAt);
+
+    const atDx = runRulesArm(
+      [
+        wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
+        wh("dx_event", T("05:10"), "svc_dx", { individual_uid: "ind_1", attribution: "direct" }),
+      ],
+      { rolloverAt },
+    ).visits[0]!;
+    expect(atDx.end_reason).toBe(END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS);
+
+    // A mark pressed inside the last 45 minutes: its window runs PAST the boundary, so it did
+    // not elapse and the day closes it instead. This is the only route to day_rollover_unknown,
+    // since every `unknown` visit is mark-opened and B2 would otherwise take them all.
+    const late = runRulesArm([mark(T("18:00"))], { rolloverAt }).visits[0]!;
+    expect(late.end_reason).toBe(END_REASONS.DAY_ROLLOVER_UNKNOWN);
+    expect(late.ended_at).toBe(rolloverAt);
+
+    // …and a mark pressed early enough for its window to finish still gets B2.
+    const early = runRulesArm([mark(T("10:00"))], { rolloverAt }).visits[0]!;
+    expect(early.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
   });
 });
 
@@ -364,7 +422,7 @@ describe("8d — A6: end_reason answers why it ENDED; ambiguity answers why we a
     ]);
     for (const v of visits) {
       if (v.state !== "ended") expect(v.end_reason).toBeNull();
-      else expect([END_REASONS.PULSE_NOTE, END_REASONS.DAY_ROLLOVER]).toContain(v.end_reason);
+      else expect(ALL_END_REASONS).toContain(v.end_reason);
       // an ambiguity reason is never smuggled into end_reason
       for (const r of v.reasons) expect(v.end_reason).not.toBe(r);
     }
@@ -461,15 +519,18 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
     expect(visits[0]!.end_reason).toBe(END_REASONS.PULSE_NOTE);
   });
 
-  it("an `unknown` visit is closed by NEITHER pass — end_reason stays null", () => {
+  it("K2 B2 — an `unknown` visit is no longer closed by NOTHING: the mark window closes it", () => {
     const { visits } = runRulesArm([
       mark(T("14:00")),
       wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
       wh("pulse_note", T("15:00"), "pn_1", { individual_uid: "ind_1", attribution: "direct" }),
     ]);
     const orphan = visits.find((v) => v.opened_by_kind === "mark")!;
-    expect(orphan.state).toBe("unknown");
-    expect(orphan.end_reason).toBeNull();
+    expect(orphan.state).toBe("ended");
+    // Not pulse_note: the 15:00 note belongs to ind_1 and can never reach a visit with no
+    // identity. The mark's own window is what closes it, 45 minutes after the press.
+    expect(orphan.end_reason).toBe(END_REASONS.MARK_WINDOW_ELAPSED);
+    expect(Date.parse(orphan.ended_at!) - Date.parse(T("14:00"))).toBe(LAST_MARK_WINDOW_MS);
   });
 
   it("every end_reason arm A emits is in the closed set", () => {
@@ -480,13 +541,25 @@ describe("8f — the day boundary says WHAT the visit was doing when it ended", 
       wh("pulse_note", T("07:00"), "pn_2", { individual_uid: "ind_2", attribution: "direct" }),
       mark(T("20:00")),
     ]);
-    expect(ALL_END_REASONS).toEqual(["pulse_note", "day_rollover", "day_rollover_at_diagnostics"]);
+    expect(ALL_END_REASONS).toEqual([
+      "pulse_note",
+      "day_rollover",
+      "day_rollover_at_diagnostics",
+      "next_opener",
+      "mark_window_elapsed",
+      "day_rollover_unknown",
+    ]);
     for (const v of visits) {
       if (v.end_reason === null) expect(v.state).not.toBe("ended");
       else expect(ALL_END_REASONS).toContain(v.end_reason);
     }
-    // all three tokens are reachable from one day
-    expect(new Set(visits.map((v) => v.end_reason))).toEqual(new Set([END_REASONS.DAY_ROLLOVER_AT_DIAGNOSTICS, END_REASONS.PULSE_NOTE, null]));
+    // With K2's closers nothing on a fused day is left open, so `null` is no longer among the
+    // reasons. svc_1 (at_diagnostics) is closed by svc_2 opening; svc_2 by its note; the 20:00
+    // mark is last, so its own window closes it.
+    expect(visits.every((v) => v.state === "ended")).toBe(true);
+    expect(new Set(visits.map((v) => v.end_reason))).toEqual(
+      new Set([END_REASONS.NEXT_OPENER, END_REASONS.PULSE_NOTE, END_REASONS.MARK_WINDOW_ELAPSED]),
+    );
   });
 });
 
@@ -756,10 +829,11 @@ describe("13 — readGraph is arm-scoped, and NULL reads as rules", () => {
       if (v.state !== "ended") expect(v.end_reason).toBeNull();
       if (v.ambiguity !== null) for (const r of String(v.ambiguity).split(",")) expect(ALL_RULES_REASONS).toContain(r);
     }
-    // the mark-only visit is the one that stays unknown, and it carries its reason in ambiguity
-    const orphan = g.visits.find((v) => v.state === "unknown")!;
-    expect(orphan.ambiguity).toBe(RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE);
-    expect(orphan.end_reason).toBeNull();
+    // The mark-only visit still carries its reason in ambiguity. K2 closes it, so it is found
+    // by its ambiguity rather than by a state that no longer survives the fuse.
+    const orphan = g.visits.find((v) => v.ambiguity === RULES_REASONS.MARK_WITHOUT_WAREHOUSE_EVIDENCE)!;
+    expect(orphan).toBeDefined();
+    expect(orphan.state).toBe("ended");
   });
 });
 

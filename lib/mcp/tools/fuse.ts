@@ -23,7 +23,8 @@ import { getPool, query } from "@/lib/brain/db";
 import { newVisitId, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_VISIT_INSERT, type RoomDayByIdRow } from "@/lib/brain/state";
 import { ambiguityOf, runRulesArm } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm, type ArmResult } from "@/lib/brain/fuse/gemini-arms";
-import { ARMS, VISIT_STATES, type Arm, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
+import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
+import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
 import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
 type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
@@ -80,6 +81,15 @@ export async function writeVisits(roomDayId: string, arm: Arm, visits: DraftVisi
           arm,
           v.opened_by,
           v.opened_by_kind,
+          // K2 — the seven 0056 columns. ended_at travels with end_reason by the same rule:
+          // a visit that is not ended has no end instant, whatever the draft happens to hold.
+          v.state === "ended" ? v.ended_at : null,
+          v.session_id,
+          v.tape_start_ms,
+          v.tape_end_ms,
+          v.clinician_id,
+          v.clinician_source,
+          v.clinician_confidence,
         ]);
         if ((r.rowCount ?? 0) > 0) counts.written++;
         else counts.already_existed++; // the partial unique index absorbed it
@@ -178,4 +188,109 @@ const fuseRun: McpTool = {
     }),
 };
 
-export const FUSE_TOOLS: McpTool[] = [fuseRun];
+/**
+ * K2 Part C — the operator's door onto the first UPDATE visit path.
+ *
+ * This is the case Part C exists for: a human naming the clinician on a visit that has already
+ * closed, days later, because that is when a roster lands or someone remembers. Everything else
+ * about a closed visit stays frozen, and the freeze is in the SQL, not here.
+ *
+ * `source` is FORCED to 'operator'. The tool takes no source argument at all — a caller cannot
+ * stamp 'roster' or 'voice' through this door, which is A3's "never accept a typed
+ * clinician_source" applied to the one surface a human can type into.
+ */
+const setVisitClinician: McpTool = {
+  name: "scribe_set_visit_clinician",
+  description:
+    "WRITES — name the clinician on ONE visit. The only change a CLOSED visit accepts: state, ended_at, tape binding, confidence and end_reason are frozen once state='ended', and no tool anywhere can move them. On an OPEN visit it is the same three columns. `source` is always 'operator' and is NOT an argument — a caller cannot claim 'roster' or 'voice' through this door. OPTIMISTIC CONCURRENCY: pass the `updated_at` you read (expected_updated_at) and a stale write LOSES rather than overwriting — ok:false with error 'stale_write' and the current updated_at, which you re-read and re-apply. Omitting it reads the row and uses its current value, which races by design and is fine for a human at a keyboard. Every post-close change writes an audit_log row (visit.set_clinician) carrying before and after. Pass clinician_id null to clear an attribution back to unknown. Returns { ok, visit_id, state, post_close, before, after, updated_at }.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      visit_id: { type: "string", description: "vis_… id" },
+      clinician_id: { type: ["string", "null"], maxLength: 128, description: "the clinician; null clears the attribution to 'unknown'" },
+      confidence: { type: ["number", "null"], minimum: 0, maximum: 1, description: "optional; omitted → 0.95 for a named clinician, null when clearing" },
+      expected_updated_at: { type: "string", description: "the updated_at you read; a stale value loses rather than overwrites" },
+      note: { type: "string", maxLength: 500, description: "optional, stored on the audit row" },
+    },
+    required: ["visit_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ok: false as boolean }, async () => {
+      const visitId = argStr(args, "visit_id", 128);
+      if (!visitId || !visitId.startsWith("vis_")) return { ok: false, error: "bad_visit_id" };
+
+      const before = await readVisit(visitId);
+      if (!before) return { ok: false, error: "visit_not_found", visit_id: visitId };
+
+      const expectedRaw = argStr(args, "expected_updated_at", 64);
+      const expected = expectedRaw ?? before.updated_at;
+      const clinicianId = args.clinician_id === null ? null : argStr(args, "clinician_id", 128);
+      // Clearing an attribution is 'unknown', not null: null source means nothing ever looked,
+      // and something has now looked. The two are different facts and 0056 keeps both sayable.
+      const source: ClinicianSource = clinicianId ? "operator" : "unknown";
+      const confidence =
+        args.confidence === null ? null : typeof args.confidence === "number" ? args.confidence : clinicianId ? 0.95 : null;
+
+      const pool = getPool();
+      const client = await pool.connect();
+      let outcome: { won: boolean; updated_at: string | null };
+      try {
+        outcome = await updateVisitClinician(client, visitId, expected, { id: clinicianId, source, confidence });
+      } finally {
+        client.release();
+      }
+
+      if (!outcome.won) {
+        // Either the row moved under us or the id vanished. Re-read so the caller is told the
+        // CURRENT updated_at to retry with rather than being left to guess.
+        const now = await readVisit(visitId);
+        return {
+          ok: false,
+          error: "stale_write",
+          visit_id: visitId,
+          expected_updated_at: typeof expected === "string" ? expected : new Date(expected).toISOString(),
+          current_updated_at: now ? new Date(now.updated_at).toISOString() : null,
+          note: "the visit moved since you read it; re-read and re-apply, or drop the write if the newer state already says this",
+        };
+      }
+
+      const after = { clinician_id: clinicianId, clinician_source: source, clinician_confidence: confidence };
+      const postClose = isClosed(before.state);
+      // C2 — every POST-CLOSE change is audited. Best-effort; never fails the write.
+      if (postClose) {
+        await auditVisitClinicianChange({
+          visitId,
+          roomDayId: before.room_day_id,
+          actorType: "system",
+          actorId: "mcp",
+          before: {
+            clinician_id: before.clinician_id,
+            clinician_source: before.clinician_source,
+            clinician_confidence: before.clinician_confidence,
+          },
+          after,
+          visitState: before.state,
+          note: argStr(args, "note", 500),
+        });
+      }
+
+      return {
+        ok: true,
+        visit_id: visitId,
+        state: before.state,
+        post_close: postClose,
+        audited: postClose,
+        before: {
+          clinician_id: before.clinician_id,
+          clinician_source: before.clinician_source,
+          clinician_confidence: before.clinician_confidence,
+        },
+        after,
+        updated_at: outcome.updated_at,
+      };
+    }),
+};
+
+export const FUSE_TOOLS: McpTool[] = [fuseRun, setVisitClinician];

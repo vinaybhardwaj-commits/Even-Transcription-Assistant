@@ -132,14 +132,16 @@ export const DEFAULT_ARM = "rules";
  * vanishing from every listing. Vanishing is the worse failure: an empty graph looks like
  * "nothing happened" rather than "you asked the wrong question".
  *
- * THIS EXACT STRING IS DUPLICATED IN brain/src/state.ts. The two files are separate builds
- * (that one is a standalone Cloud Run service with its own tsconfig and NodeNext specifiers,
- * so it cannot import from lib/), and they had already drifted before today. They are now
- * byte-identical here, and tests/unit/fuse-arms.test.ts reads BOTH files and fails if they
- * ever differ again — the only form of unification available across two independent builds.
+ * This string USED to be duplicated in brain/src/state.ts, and the two copies had drifted.
+ * K1 deleted that standalone Cloud Run service, so there is exactly one copy now and
+ * tests/unit/fuse-arms.test.ts guards that the duplicate does not come back.
+ *
+ * K2 adds the seven 0056 columns to the projection. They are read by the live fuse's update
+ * path, which has to know a visit's CURRENT state and updated_at before it may change it.
  */
 export const SQL_VISITS_FOR_DAY =
-  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, updated_at, arm, opened_by, opened_by_kind " +
+  "SELECT id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, updated_at, arm, opened_by, opened_by_kind, " +
+  "ended_at, session_id, tape_start_ms, tape_end_ms, clinician_id, clinician_source, clinician_confidence " +
   "FROM visit WHERE room_day_id = $1 AND COALESCE(arm, 'rules') = $2::text ORDER BY updated_at ASC, id ASC";
 
 /**
@@ -153,9 +155,56 @@ export const SQL_VISITS_FOR_DAY =
  * than quietly duplicating it on the next run.
  */
 export const SQL_VISIT_INSERT =
-  "INSERT INTO visit (id, room_day_id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, arm, opened_by, opened_by_kind) " +
-  "VALUES ($1, $2, $3::text, $4::text, $5, $6::timestamptz, $7::real, $8::text, $9::text, $10::text, $11::text, $12::text) " +
+  "INSERT INTO visit (id, room_day_id, individual_uid, consult_uid, state, pstart_at, confidence, end_reason, ambiguity, arm, opened_by, opened_by_kind, " +
+  "ended_at, session_id, tape_start_ms, tape_end_ms, clinician_id, clinician_source, clinician_confidence) " +
+  "VALUES ($1, $2, $3::text, $4::text, $5, $6::timestamptz, $7::real, $8::text, $9::text, $10::text, $11::text, $12::text, " +
+  "$13::timestamptz, $14::text, $15::bigint, $16::bigint, $17::text, $18::text, $19::real) " +
   "ON CONFLICT DO NOTHING RETURNING id";
+
+// --- K2 Part C: the first UPDATE visit path in this codebase --------------------------------
+//
+// TWO statements, not one with a mode flag, because the two cases have DIFFERENT COLUMN SETS
+// and the difference is the safety property. A single parameterised update would put the
+// frozen-field rule in application code, where a later caller can forget it; here the rule is
+// the shape of the SQL and cannot be forgotten by a caller that does not name those columns.
+//
+// BOTH take optimistic concurrency on updated_at (C3): the UPDATE names the value the caller
+// READ, so a computation that started before someone else's write lands cannot overwrite it.
+// A losing write returns NO ROW. That is not an error — it means the caller's inputs are stale
+// and the answer is to re-read and re-apply, or to drop the write when the newer state already
+// says the same thing. Silently winning would be the bug.
+
+/**
+ * A visit that is still OPEN: everything the fuse can recompute may change.
+ *
+ * `WHERE state <> 'ended'` is the freeze, in the statement rather than in a branch above it.
+ * A visit that closed between the caller's read and this write fails the predicate and returns
+ * no row — the same outcome as losing the updated_at race, and the same remedy.
+ */
+export const SQL_VISIT_UPDATE_OPEN =
+  "UPDATE visit SET state = $3, ended_at = $4::timestamptz, confidence = $5::real, end_reason = $6::text, " +
+  "ambiguity = $7::text, session_id = $8::text, tape_start_ms = $9::bigint, tape_end_ms = $10::bigint, " +
+  "clinician_id = $11::text, clinician_source = $12::text, clinician_confidence = $13::real, updated_at = now() " +
+  "WHERE id = $1 AND updated_at = $2::timestamptz AND state <> 'ended' " +
+  "RETURNING id, updated_at";
+
+/**
+ * A visit that has ENDED: only who was in the room may change, and nothing else.
+ *
+ * This is the case Part C exists for — a roster or an operator naming a clinician days after
+ * the visit closed. Late-arriving knowledge about PEOPLE must be able to land; late-arriving
+ * opinions about what happened must not. There is deliberately no statement anywhere that can
+ * move a closed visit's state, ended_at or tape binding.
+ */
+export const SQL_VISIT_UPDATE_CLINICIAN =
+  "UPDATE visit SET clinician_id = $3::text, clinician_source = $4::text, clinician_confidence = $5::real, updated_at = now() " +
+  "WHERE id = $1 AND updated_at = $2::timestamptz " +
+  "RETURNING id, updated_at";
+
+/** One visit as the update path reads it, before deciding what it may change. */
+export const SQL_VISIT_BY_ID =
+  "SELECT id, room_day_id, state, updated_at, clinician_id, clinician_source, clinician_confidence, " +
+  "end_reason, ended_at, arm, opened_by FROM visit WHERE id = $1";
 
 /** Cues for a room_day BY ID, oldest first — the fuse reads a day in evidence order. */
 export const SQL_CUES_FOR_ROOM_DAY =
@@ -377,11 +426,30 @@ export const SQL_CLUSTERS_FOR_DAY =
 
 /**
  * Operator MCP S1 (GET /api/brain/rooms/:id/cues + scribe_list_cues): cues for a room_day,
- * newest first, optional `since` (at > $2) and `type` (= $3) filters, LIMIT $4. Read-only.
+ * newest first. Read-only, and K2 Part E changes nothing about what a cue IS or how it is
+ * written — only how much of a day can be read back.
+ *
+ * THE CEILING THIS RAISES. The listing is newest-first with a 200-row cap, and its only time
+ * filter was `since` (at > $2), which trims the OLD end — the wrong end for a newest-first
+ * list. With no `until` and no cursor there was no way to ask for the NEXT page, so a full
+ * clinic day could not be read at all: 19 August put 2,030 stt_turn cues on one room_day and
+ * an analysis could reach 200 of them, 9.9%. That blocked measurement work, which is how a
+ * silence-gap closer nearly got built on 9.9% of a day.
+ *
+ *   $5 until   at < $5 — trims the NEW end, the complement of `since`
+ *   $6/$7 cursor  (at, id) < ($6, $7) — row-tuple compare, the exact ORDER BY key, so paging
+ *                 is stable across cues that share a timestamp to the millisecond. An OFFSET
+ *                 would drift under concurrent writes; a cursor on `at` alone would skip or
+ *                 repeat rows whenever two cues landed in the same millisecond, which on a
+ *                 turn batch is the normal case rather than the edge one.
+ *
+ * The 200-per-call cap STAYS. This makes a day reachable by paging, not by one huge read.
  */
 export const SQL_CUES_FOR_DAY =
   "SELECT id, type, at, created_at, payload FROM cue " +
   "WHERE room_day_id = $1 AND ($2::timestamptz IS NULL OR at > $2::timestamptz) AND ($3::text IS NULL OR type = $3::text) " +
+  "AND ($5::timestamptz IS NULL OR at < $5::timestamptz) " +
+  "AND ($6::timestamptz IS NULL OR (at, id) < ($6::timestamptz, $7::text)) " +
   "ORDER BY at DESC, id DESC LIMIT $4::int";
 
 // ---------------------------------------------------------------------------
@@ -458,7 +526,7 @@ export type Graph = {
   as_of: string;
 };
 
-type Queryable = Pick<PoolClient, "query">;
+export type Queryable = Pick<PoolClient, "query">;
 
 const iso = (d: Date | null | undefined): string | null => (d ? new Date(d).toISOString() : null);
 
@@ -573,7 +641,29 @@ export type CueListResult = {
   ist_date: string;
   cues: CueListItem[];
   as_of: string;
+  /**
+   * Pass back as `cursor` to get the next (older) page. NULL means this page was not full, so
+   * there is nothing older left under the current filters — an explicit end-of-list rather
+   * than an empty page the caller has to discover by asking again.
+   */
+  next_cursor?: string | null;
 };
+
+/**
+ * The paging key, opaque to callers by contract and readable on purpose for debugging:
+ * "<at ISO>|<cue id>". It is the ORDER BY key, so it can only ever mean one position.
+ */
+export const encodeCueCursor = (at: string, id: string): string => `${at}|${id}`;
+
+export function decodeCueCursor(cursor: string | null | undefined): { at: string; id: string } | null {
+  if (!cursor) return null;
+  const i = cursor.lastIndexOf("|");
+  if (i <= 0 || i === cursor.length - 1) return null;
+  const at = cursor.slice(0, i);
+  const id = cursor.slice(i + 1);
+  if (!Number.isFinite(Date.parse(at))) return null;
+  return { at, id };
+}
 
 /**
  * List cues for (room, IST date), newest first. `since` filters at > since; `type` exact.
@@ -583,17 +673,30 @@ export type CueListResult = {
 export async function listCuesForDay(
   roomId: string,
   date: string,
-  opts: { since?: Date | null; type?: string | null; limit?: number; includePayload?: boolean } = {},
+  opts: {
+    since?: Date | null;
+    /** K2 E1 — at < until. The complement of `since`, trimming the NEW end. */
+    until?: Date | null;
+    /** K2 E1 — a next_cursor from a previous page. Reads strictly older than that position. */
+    cursor?: string | null;
+    type?: string | null;
+    limit?: number;
+    includePayload?: boolean;
+  } = {},
 ): Promise<CueListResult> {
   const as_of = new Date().toISOString();
   const day = await findRoomDay(roomId, date);
-  if (!day) return { room_id: roomId, room_day_id: null, ist_date: date, cues: [], as_of };
+  if (!day) return { room_id: roomId, room_day_id: null, ist_date: date, cues: [], as_of, next_cursor: null };
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? CUES_DEFAULT_LIMIT) || CUES_DEFAULT_LIMIT, 1), CUES_MAX_LIMIT);
+  const cur = decodeCueCursor(opts.cursor);
   const r = await query<CueRow>(SQL_CUES_FOR_DAY, [
     day.id,
     opts.since ? opts.since.toISOString() : null,
     opts.type ?? null,
     limit,
+    opts.until ? opts.until.toISOString() : null,
+    cur ? cur.at : null,
+    cur ? cur.id : null,
   ]);
   const cues: CueListItem[] = r.rows.map((row) => {
     let summary: string | null = null;
@@ -614,7 +717,18 @@ export async function listCuesForDay(
     if (opts.includePayload) item.payload = row.payload ?? null;
     return item;
   });
-  return { room_id: roomId, room_day_id: day.id, ist_date: date, cues, as_of };
+  // A SHORT page is the end of the list; a FULL page might not be, so it gets a cursor. This
+  // can hand back one cursor that turns out to have nothing behind it — which is cheap, and the
+  // alternative (a look-ahead row on every call) costs every caller to save the last one.
+  const last = cues.length === limit ? cues[cues.length - 1] : undefined;
+  return {
+    room_id: roomId,
+    room_day_id: day.id,
+    ist_date: date,
+    cues,
+    as_of,
+    next_cursor: last ? encodeCueCursor(last.at, last.id) : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
