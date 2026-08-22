@@ -197,11 +197,24 @@ export const TURN_KEYED_TYPES = ["stt_turn", "stt_silence", "stt_window", "speak
 export const WINDOW_CUE_TYPE = "stt_window";
 
 /**
- * The types the window writer OWNS and therefore replaces wholesale. `speaker_match` is NOT one:
- * slice B writes it from a different pass over the same window, and a turn re-run must not
- * silently delete a diarisation result it did not produce.
+ * The types the window DELETE removes. TWO, and the third one's absence is the whole of K4.
+ *
+ * `stt_window` was here until K4 and is not any more. While the marker was deleted-and-reinserted
+ * like a turn, writing it REQUIRED THE DELETE VERB — so when the hole window failed on a missing
+ * `DELETE ON cue` grant, the fallback marker that was supposed to record the failure died of the
+ * identical cause. The guarantee "a reader can tell we asked and failed from we never asked" was
+ * never actually implemented, because its own implementation depended on the thing that broke.
+ * The marker must not inherit the verbs the turn write needs; it is an UPSERT now
+ * (SQL_CUE_UPSERT_WINDOW), and an upsert needs only INSERT and UPDATE.
+ *
+ * `speaker_match` is not here either, and for the unchanged reason: slice B writes it from a
+ * separate pass, and a turn re-run must not destroy a diarisation result it did not produce.
+ *
+ * THIS LIST IS NOT THE INDEX PREDICATE. `stt_window` stays in TURN_KEYED_TYPES and in 0052's
+ * predicates — that index is the arbiter the marker's upsert infers on, and removing it there
+ * would break the marker entirely. Two different lists, and only this one lost a name.
  */
-export const WINDOW_OWNED_TYPES = ["stt_turn", "stt_silence", "stt_window"] as const;
+export const WINDOW_DELETED_TYPES = ["stt_turn", "stt_silence"] as const;
 
 /**
  * How many turn cues a room-day holds, by type. INFERRED SQL — there is no live database in the
@@ -262,8 +275,10 @@ export const SQL_CUE_INSERT_TURN =
  * A row whose payload has no window at all yields NULL from ->>, and NULL = $3 is never true, so
  * such a row is left alone rather than swept up — a cue written before K2 is not this window's.
  *
- * `speaker_match` is deliberately NOT in the type list (WINDOW_OWNED_TYPES): slice B writes it
+ * TWO TYPES ONLY (WINDOW_DELETED_TYPES). `speaker_match` is deliberately out: slice B writes it
  * from its own pass, and re-transcribing must not delete a diarisation result it did not produce.
+ * `stt_window` is deliberately out as of K4: the completeness marker is upserted, never deleted,
+ * so that recording a FAILED window cannot require the same verb the failed window needed.
  *
  * RETURNING id so the caller can report `deleted` as a real count rather than a rowCount that
  * some drivers narrow away.
@@ -273,7 +288,7 @@ export const SQL_CUE_DELETE_WINDOW =
   "WHERE room_day_id = $1 " +
   "AND session_id = $2 " +
   "AND source = 'replay' " +
-  "AND type IN ('stt_turn', 'stt_silence', 'stt_window') " +
+  "AND type IN ('stt_turn', 'stt_silence') " +
   "AND (payload->'window'->>'start_ms')::bigint = $3 " +
   "AND (payload->'window'->>'end_ms')::bigint = $4 " +
   "RETURNING id";
@@ -301,6 +316,40 @@ export const SQL_CUE_DELETE_WINDOW =
  * `written` is what RETURNING gives back; `already_existed` is the shortfall. After a delete the
  * shortfall should be zero, and a non-zero one means Whisper said the same thing twice.
  */
+/**
+ * THE MARKER UPSERT (K4 §2). The completeness cue is written INSERT … ON CONFLICT DO UPDATE, and
+ * is never deleted.
+ *
+ * WHY NOT DELETE-AND-REINSERT, like a turn. Because the marker's whole job is to record that a
+ * window FAILED, and until K4 it was written with the same replace_window — hence the same DELETE
+ * — as the turns it was reporting on. When the hole window died on a missing DELETE grant, so did
+ * the record of it dying. A marker that shares a failure mode with the thing it reports is not a
+ * record, it is a coincidence. An upsert needs INSERT and UPDATE only.
+ *
+ * The arbiter is 0052's cue_turn_natural_key, whose predicate is repeated below character for
+ * character as Postgres requires for a partial index — the SAME four types as the turn insert,
+ * because `stt_window` never left that index. Only the DELETE's list lost it.
+ *
+ * `SET payload` AND NOTHING ELSE:
+ *   · `at` is the asked window start, and source_ref already contains it, so for a given key
+ *     neither can drift — updating them could only ever introduce a disagreement.
+ *   · `created_at` is left alone deliberately: it keeps the FIRST ask. "When did we first look at
+ *     this window" is a real question and the honest answer is the earliest one, not the latest.
+ *   · `session_id` and `source` are in the key's own string and in the predicate respectively.
+ *
+ * It is a SEPARATE STATEMENT from buildTurnBatchInsert and must stay one: the turns take
+ * DO NOTHING (a duplicate turn is absorbed) and the marker takes DO UPDATE (a second opinion about
+ * a window REPLACES the first). Two conflict actions cannot share one statement, and folding them
+ * together would silently give one of them the other's semantics.
+ */
+export const SQL_CUE_UPSERT_WINDOW =
+  "INSERT INTO cue (id, room_day_id, type, payload, at, session_id, source, source_ref) " +
+  "VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::text, $7::text, $8::text) " +
+  "ON CONFLICT (source_ref, type) " +
+  "WHERE source = 'replay' AND type IN ('stt_turn', 'stt_silence', 'stt_window', 'speaker_match') " +
+  "DO UPDATE SET payload = EXCLUDED.payload " +
+  "RETURNING id, at, created_at";
+
 export function buildTurnBatchInsert(n: number): string {
   if (!Number.isInteger(n) || n < 1) throw new Error(`buildTurnBatchInsert: n must be a positive integer, got ${n}`);
   const tuples: string[] = [];
@@ -697,4 +746,37 @@ export async function insertScratchCuesBatch(
   const r = await client.query<{ id: string }>(buildTurnBatchInsert(cues.length), params);
   const written = r.rows.length;
   return { written, already_existed: cues.length - written, attempted: cues.length, ids: r.rows.map((x) => x.id) };
+}
+
+/**
+ * K4 §2 — upsert ONE completeness marker. Runs inside the caller's transaction and lock, like
+ * every other write on this path.
+ *
+ * DO UPDATE always returns a row, so unlike the turn batch there is no "absorbed silently" case:
+ * the marker is either newly inserted or its payload is replaced, and both are a success. Which
+ * of the two it was is reported through `created_at` — a row whose created_at predates this
+ * request was already there, and that is a fact worth having rather than inferring.
+ */
+export async function upsertWindowCue(
+  client: Queryable,
+  roomDayId: string,
+  cue: ScratchCueInput,
+): Promise<{ id: string; at: string; created_at: string | null }> {
+  const id = newCueId();
+  const payloadJson = cue.payload === undefined ? null : JSON.stringify(cue.payload);
+  const r = await client.query<{ id: string; at: Date; created_at: Date }>(SQL_CUE_UPSERT_WINDOW, [
+    id,
+    roomDayId,
+    cue.type,
+    payloadJson,
+    cue.at.toISOString(),
+    cue.session_id,
+    cue.source,
+    cue.source_ref,
+  ]);
+  const row = r.rows[0];
+  // DO UPDATE returns a row on both paths. No row at all means the arbiter did not match — a
+  // predicate that has drifted from the index — and that is a fault, not an "already existed".
+  if (!row) throw new Error("window cue upsert returned no row");
+  return { id: row.id, at: iso(row.at) ?? cue.at.toISOString(), created_at: iso(row.created_at) };
 }

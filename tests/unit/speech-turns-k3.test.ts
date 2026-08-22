@@ -59,7 +59,7 @@ import {
   SQL_CUE_DELETE_WINDOW,
   SQL_CUE_INSERT_TURN,
   WINDOW_CUE_TYPE,
-  WINDOW_OWNED_TYPES,
+  WINDOW_DELETED_TYPES,
   buildTurnBatchInsert,
 } from "@/lib/brain/state";
 
@@ -159,10 +159,14 @@ describe("SQL_CUE_DELETE_WINDOW — the asked window, never Whisper's segment ti
     expect(s).toContain("source = 'replay'");
   });
 
-  it("deletes only the three types this writer OWNS, and never speaker_match", () => {
-    expect(s).toContain("type IN ('stt_turn', 'stt_silence', 'stt_window')");
+  // K4 removed stt_window from this list. See speech-turns-k4.test.ts for why that is the whole
+  // slice: while the marker was deleted like a turn, recording a FAILED window needed the same
+  // DELETE verb the failed window had just died on.
+  it("deletes TWO types — never speaker_match, and never the marker", () => {
+    expect(s).toContain("type IN ('stt_turn', 'stt_silence')");
     expect(s).not.toContain("speaker_match");
-    expect([...WINDOW_OWNED_TYPES]).toEqual(["stt_turn", "stt_silence", "stt_window"]);
+    expect(s).not.toContain("stt_window");
+    expect([...WINDOW_DELETED_TYPES]).toEqual(["stt_turn", "stt_silence"]);
   });
 });
 
@@ -328,10 +332,12 @@ describe("the batch path — delete then insert, one lock, one transaction", () 
       { type: "stt_turn", at: new Date(at).toISOString(), payload: { window: WIN }, source_ref: `${SESSION_ID}|${at}|${at + 1000}|-` },
       // SAME start, different end → a different key → both land (0051 proved this in production)
       { type: "stt_turn", at: new Date(at).toISOString(), payload: { window: WIN }, source_ref: `${SESSION_ID}|${at}|${at + 2000}|-` },
-      // an exact repeat of the first → the same key → absorbed, and counted as already_existed
+      // an exact repeat of the first → the same key → absorbed. K4: that is a WITHIN-WRITE
+      // conflict and is counted as `dropped`, not `already_existed`. After a delete nothing of
+      // ours can pre-exist, so a shortfall the batch itself explains is the batch's own bug.
       { type: "stt_turn", at: new Date(at).toISOString(), payload: { window: WIN }, source_ref: `${SESSION_ID}|${at}|${at + 1000}|-` },
     ]));
-    expect(await res.json()).toMatchObject({ written: 2, already_existed: 1, attempted: 3 });
+    expect(await res.json()).toMatchObject({ written: 2, dropped: 1, already_existed: 0, attempted: 3 });
   });
 
   it("A FAILED INSERT ROLLS THE DELETE BACK — the previous window survives, never 71 of 162", async () => {

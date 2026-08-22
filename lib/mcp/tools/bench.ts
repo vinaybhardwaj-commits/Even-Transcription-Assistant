@@ -1126,17 +1126,35 @@ export type TurnWriteCounts = {
   deleted: number;
   written: number;
   already_existed: number;
+  /** K4 §4 — WITHIN-WRITE key conflicts only. A bug, and never a turn count on a failure path. */
   dropped: number;
+  /** K4 §4 — turns that could not be written at all, with `failed_reason` naming the cause. */
+  failed: number;
+  failed_reason?: string;
   attempted: number;
   complete: boolean;
+  /** True only when the day itself holds a record of this ask. False → this answer is the record. */
+  window_recorded: boolean;
   stopped_early?: string;
   turn_write_error?: string;
   detail?: string;
 };
 
 type BatchPost =
-  | { ok: true; deleted: number; written: number; already_existed: number; attempted: number }
+  | { ok: true; deleted: number; written: number; already_existed: number; dropped: number; attempted: number }
   | { ok: false; error: string; detail?: string };
+
+/**
+ * K4 §4 — why the turns could not be written, in the three kinds that call for different action.
+ *
+ * `dropped` used to absorb this and it lied: reporting 144 drops for a permission error invited
+ * reading it as 144 key collisions, which is a data problem, when it was one missing GRANT.
+ */
+export function failureReason(error: string): "permission" | "transport" | "incomplete_write" {
+  if (error === "brain_permission_denied") return "permission";
+  if (error === "brain_timeout" || error === "brain_unreachable" || error === "service_token_not_configured") return "transport";
+  return "incomplete_write";
+}
 
 /**
  * K3 §2 — POST one window as ONE request. Never throws.
@@ -1153,7 +1171,9 @@ async function postTurnBatch(
     room_day_id: string;
     session_id: string;
     source: string;
-    replace_window: { session_id: string; start_ms: number; end_ms: number };
+    /** OPTIONAL (K4 §3). Absent → the route issues NO DELETE, which is what lets the marker-only
+     *  request record a failure without needing the verb the failed write needed. */
+    replace_window?: { session_id: string; start_ms: number; end_ms: number };
     cues: Array<{ type: string; at: string; payload: Record<string, unknown>; source_ref: string }>;
   },
 ): Promise<BatchPost> {
@@ -1172,7 +1192,7 @@ async function postTurnBatch(
       return { ok: false, error: String(j?.error ?? `brain_${res.status}`) };
     }
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-    return { ok: true, deleted: num(j.deleted), written: num(j.written), already_existed: num(j.already_existed), attempted: num(j.attempted) };
+    return { ok: true, deleted: num(j.deleted), written: num(j.written), already_existed: num(j.already_existed), dropped: num(j.dropped), attempted: num(j.attempted) };
   } catch (e) {
     const name = (e as Error)?.name;
     return {
@@ -1186,29 +1206,26 @@ async function postTurnBatch(
 const asBatchCue = (d: TurnDraft) => ({ type: d.type, at: d.at, payload: d.payload, source_ref: d.source_ref });
 
 /**
- * K3 §1 + §4 — write ONE window as a set: delete what was there, insert what there is now.
+ * K3 §1 + §4, amended by K4 — write ONE window as a set: delete what was there, insert what there
+ * is now, and record whether it finished.
  *
  * WHY REPLACE AND NOT MERGE. Whisper is not a deterministic writer — two runs of the same clip
  * returned 162 and 165 segments. source_ref is built from segment boundaries, so a second run's
- * keys mostly MISS the first run's and an insert-only writer accumulates two disagreeing
- * opinions of the same window instead of deduplicating. Segmentation is Whisper's opinion about
- * a window, and an opinion is replaced.
+ * keys mostly MISS the first run's and an insert-only writer accumulates two disagreeing opinions
+ * of one window. Segmentation is Whisper's opinion about a window, and an opinion is replaced.
  *
- * source_ref is still the WITHIN-WRITE key: two turns that share a start both land, which 0051
- * proved in production. It is simply not the cross-run key any more; the asked window is.
+ * THE MARKER DOES NOT SHARE THE TURNS' VERBS (K4). It used to: the fallback marker carried the
+ * same `replace_window`, so it needed the same DELETE, so when the hole window died on a missing
+ * DELETE grant the record of that death died with it. A marker that fails whenever the thing it
+ * reports on fails is not a record. Now:
  *
- * THE ATTEMPT, and the fallback (§4 — a silent partial is worse than a refusal):
- *
- *   1. delete the window's rows + insert the turns + the stt_window saying complete:true, all in
- *      ONE transaction under ONE lock. Any failure rolls the delete back with it, so the
- *      PREVIOUS set survives intact rather than the day being left empty.
- *   2. if that fails, a second call deletes the window's rows and commits ONLY the stt_window
- *      with complete:false, stopped_early and the segment count Whisper returned. ZERO stt_turn
- *      rows then exist for the window, which is what makes "we could not finish" legible.
- *      The delete must be repeated because step 1's rollback undid its own.
- *
- * If even the marker cannot be written, nothing is claimed: the counts come back with the error
- * named and complete:false, and the transcript still goes back to the caller.
+ *   SUCCESS  one request: delete stt_turn/stt_silence for the pair → batch-insert the turns
+ *            (DO NOTHING) → upsert the marker complete:true (DO UPDATE). One transaction.
+ *   FAILURE  a second request carrying NO replace_window and ONE stt_window cue with
+ *            complete:false, stopped_early and segment_count. It issues no DELETE at all, so it
+ *            needs only INSERT and UPDATE — the verbs that were never in question.
+ *   NEITHER  if the marker request also fails, the day holds NO record of this ask and the
+ *            answer says exactly that. It does not imply otherwise (K4 §3).
  */
 async function writeWindowCues(
   origin: string,
@@ -1220,10 +1237,11 @@ async function writeWindowCues(
   windowCueFor: (complete: boolean, stoppedEarly: string | null) => TurnDraft,
 ): Promise<TurnWriteCounts> {
   const replace_window = { session_id: sessionId, start_ms: Math.floor(window.startMs), end_ms: Math.floor(window.endMs) };
-  const common = { room_id: roomId, room_day_id: roomDayId, session_id: sessionId, source: TURN_CUE_SOURCE, replace_window };
+  const common = { room_id: roomId, room_day_id: roomDayId, session_id: sessionId, source: TURN_CUE_SOURCE };
 
   const whole = await postTurnBatch(origin, {
     ...common,
+    replace_window,
     cues: [...turns, windowCueFor(true, null)].map(asBatchCue),
   });
   if (whole.ok) {
@@ -1231,27 +1249,35 @@ async function writeWindowCues(
       deleted: whole.deleted,
       written: whole.written,
       already_existed: whole.already_existed,
-      dropped: 0,
+      // A within-write conflict is the ONLY thing this counts, and after a delete it should be 0.
+      dropped: whole.dropped,
+      failed: 0,
       attempted: whole.attempted,
       complete: true,
+      window_recorded: true,
     };
   }
 
-  // ---- §4: refuse the partial, and SAY so in the graph -------------------------------
+  // ---- §3/§4: the turns rolled back. Record the ask anyway, with no DELETE. -----------
   const marker = await postTurnBatch(origin, {
     ...common,
+    // NO replace_window. This is the point of K4: the route skips the delete entirely, so this
+    // request cannot fail for the reason the request above just failed.
     cues: [windowCueFor(false, whole.error)].map(asBatchCue),
   });
+  const reason = failureReason(whole.error);
   if (marker.ok) {
     return {
       deleted: marker.deleted,
       written: marker.written,
       already_existed: marker.already_existed,
-      // Every turn of the window was rolled back. A drop is a bug, not a mode — and this is the
-      // count that says how much evidence the failure cost.
-      dropped: turns.length,
+      // NOT the turn count. Nothing collided; the write never happened.
+      dropped: marker.dropped,
+      failed: turns.length,
+      failed_reason: reason,
       attempted: turns.length + marker.attempted,
       complete: false,
+      window_recorded: true,
       stopped_early: whole.error,
       turn_write_error: whole.error,
       ...(whole.detail ? { detail: whole.detail } : {}),
@@ -1262,9 +1288,12 @@ async function writeWindowCues(
     deleted: 0,
     written: 0,
     already_existed: 0,
-    dropped: turns.length,
+    dropped: 0,
+    failed: turns.length,
+    failed_reason: reason,
     attempted: turns.length,
     complete: false,
+    window_recorded: false,
     stopped_early: whole.error,
     turn_write_error: marker.error,
     ...(marker.detail ? { detail: marker.detail } : {}),
@@ -1318,7 +1347,7 @@ async function turnsAnswer(
   };
   // Every refusal below returns the SAME four counts as a write, so a caller never has to ask
   // whether a missing field meant zero or meant "this shape does not have that field".
-  const noWrite = { deleted: 0, written: 0, already_existed: 0, dropped: 0, attempted: 0, complete: false };
+  const noWrite = { deleted: 0, written: 0, already_existed: 0, dropped: 0, failed: 0, attempted: 0, complete: false, window_recorded: false };
   if (dryRun) {
     return {
       ...base,
@@ -1356,8 +1385,18 @@ async function turnsAnswer(
     ctx.origin, scratch.room.id, scratch.day.id, session.id,
     { startMs: win.startMs, endMs: win.endMs }, build.turns, windowCueFor,
   );
+  // K4 §3 — when even the marker could not be written, the day holds NOTHING about this ask and
+  // the answer must not read as though it does. Said in a field and in words, because the counts
+  // alone (all zero) look identical to a window nobody asked about.
+  const record = counts.window_recorded
+    ? {}
+    : {
+        window_record: "none" as const,
+        note_window_record: "NOT RECORDED IN THE GRAPH. The turns were rolled back and the completeness marker could not be written either, so the room-day holds no trace of this ask — this response is the only record that it happened. Re-run the window once the cause named in turn_write_error is fixed.",
+      };
   return {
     ...base,
+    ...record,
     room_day_id: scratch.day.id,
     scratch_room: { id: scratch.room.id, created: scratch.room.created },
     scratch_room_day_created: scratch.day.created,

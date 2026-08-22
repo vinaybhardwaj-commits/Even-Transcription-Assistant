@@ -387,15 +387,18 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     }));
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
     expect(fetchCalls).toHaveLength(2);
-    // the second call carries the SAME delete and exactly one cue: the admission
+    // K4: the second call carries NO replace_window and exactly one cue, the admission. That is
+    // the whole slice — the marker must not need the DELETE the primary write just died on.
     const second = fetchCalls[1]!.body;
-    expect(second.replace_window).toEqual(fetchCalls[0]!.body.replace_window);
+    expect(second.replace_window).toBeUndefined();
+    expect(fetchCalls[0]!.body.replace_window).toBeDefined();
     const only = second.cues as Row[];
     expect(only).toHaveLength(1);
     expect(only[0]!.type).toBe("stt_window");
     expect(only[0]!.payload).toMatchObject({ complete: false, stopped_early: "boom", segment_count: 5 });
-    // NEVER 71 of 162: every turn is a drop, and a drop is a bug, not a mode
-    expect(out).toMatchObject({ complete: false, dropped: 5, stopped_early: "boom", turn_write_error: "boom" });
+    // NEVER 71 of 162. K4: the turns are FAILED, not dropped — nothing collided, the write never
+    // happened, and calling five turns "dropped" reads as five key conflicts.
+    expect(out).toMatchObject({ complete: false, failed: 5, dropped: 0, failed_reason: "incomplete_write", stopped_early: "boom", turn_write_error: "boom", window_recorded: true });
     // and the text is still returned — a failed write never takes the transcript away
     expect(out.ok).toBe(true);
     expect(out.text).toBe("a b c d");
@@ -408,7 +411,12 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
       return new Response(JSON.stringify({ ok: false, error: "boom" }), { status: 503, headers: { "content-type": "application/json" } });
     }));
     const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW, dry_run: false }, ctx)) as Row;
-    expect(out).toMatchObject({ deleted: 0, written: 0, already_existed: 0, complete: false });
+    expect(out).toMatchObject({ deleted: 0, written: 0, already_existed: 0, dropped: 0, complete: false });
+    // K4 §3 — the day holds NO record, and the answer says so rather than letting four zeros
+    // read like a window nobody asked about.
+    expect(out.window_recorded).toBe(false);
+    expect(out.window_record).toBe("none");
+    expect(String(out.note_window_record)).toMatch(/only record/);
     expect(out.text).toBe("hello there and later");
   });
 

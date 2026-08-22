@@ -51,6 +51,8 @@ import {
   readGraph,
   resolveRoomDay,
   roomExists,
+  upsertWindowCue,
+  WINDOW_CUE_TYPE,
   type ScratchCueInput,
 } from "@/lib/brain/state";
 
@@ -217,6 +219,20 @@ export async function POST(req: Request) {
     // eventually gets written to. This branch adds no guard of its own; it adds a delete.
     if (batch) {
       if (!roomDayId) throw new HttpError(400, "cues_requires_room_day_id");
+      const turnCues = batch.filter((c) => c.type !== WINDOW_CUE_TYPE);
+      const markerCues = batch.filter((c) => c.type === WINDOW_CUE_TYPE);
+      // K4 §4 — a WITHIN-WRITE conflict is a duplicate key inside this very batch, and it is a
+      // bug: the delete has just cleared the window, so nothing of ours should still be there.
+      // Counted HERE, from the batch itself, because the database cannot tell the caller which
+      // of the absorbed rows collided with a sibling and which with a survivor — it only reports
+      // a shortfall. Anything the shortfall leaves over really did pre-exist.
+      const seenKeys = new Set<string>();
+      let withinWriteDuplicates = 0;
+      for (const c of turnCues) {
+        const k = `${c.source_ref ?? ""}\u0000${c.type}`;
+        if (seenKeys.has(k)) withinWriteDuplicates++;
+        else seenKeys.add(k);
+      }
       const out = await withRoomDayLock(roomDayId, async (client) => {
         const day = await findRoomDayById(client, roomDayId);
         if (!day) throw new HttpError(404, "room_day_not_found");
@@ -227,9 +243,19 @@ export async function POST(req: Request) {
         const deleted = replaceWindow
           ? await deleteWindowCues(client, day.id, { sessionId: replaceWindow.session_id, startMs: replaceWindow.start_ms, endMs: replaceWindow.end_ms })
           : 0;
-        const ins = await insertScratchCuesBatch(client, day.id, batch);
+        // K4 §2/§3 — TWO conflict actions, so two statements, both inside this one transaction.
+        // The turns take DO NOTHING (a duplicate turn is absorbed); the marker takes DO UPDATE
+        // (a second opinion about a window REPLACES the first). Folding them into one statement
+        // would silently give one of them the other's semantics, which is why the marker is
+        // partitioned out here rather than in buildTurnBatchInsert.
+        const ins = await insertScratchCuesBatch(client, day.id, turnCues);
+        let markersUpserted = 0;
+        for (const m of markerCues) {
+          await upsertWindowCue(client, day.id, m);
+          markersUpserted++;
+        }
         const state = await readGraph(client, day.room_id, day.ist_date, day.id);
-        return { deleted, ins, state };
+        return { deleted, ins, markersUpserted, state };
       });
 
       return NextResponse.json(
@@ -239,9 +265,16 @@ export async function POST(req: Request) {
           room_day_id: roomDayId,
           scratch: true,
           deleted: out.deleted,
-          written: out.ins.written,
-          already_existed: out.ins.already_existed,
-          attempted: out.ins.attempted,
+          // Everything this transaction committed: the turn rows the insert returned, plus the
+          // markers, which DO UPDATE guarantees a row for on both the insert and the update path.
+          written: out.ins.written + out.markersUpserted,
+          // The shortfall the batch left over ONCE the within-write duplicates are accounted for.
+          // After a delete this should be 0; a non-zero value means a row survived that the
+          // delete's predicate did not match, which is worth seeing rather than rounding away.
+          already_existed: Math.max(0, out.ins.attempted - out.ins.written - withinWriteDuplicates),
+          dropped: Math.min(withinWriteDuplicates, out.ins.attempted - out.ins.written),
+          attempted: out.ins.attempted + out.markersUpserted,
+          markers_upserted: out.markersUpserted,
           cue_ids: out.ins.ids,
           state: out.state,
         },
