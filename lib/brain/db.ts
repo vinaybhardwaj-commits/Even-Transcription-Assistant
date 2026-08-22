@@ -119,5 +119,20 @@ export function classifyBrainError(e: unknown): { status: number; code: string; 
   // Between the deploy and migration 0046 those columns do not exist yet; say which migration is
   // missing rather than hide it inside brain_unavailable. The live path touches no new column.
   if (pgCode === "42703") return { status: 503, code: "brain_columns_missing", hint: "run migration 0046 via /api/run-migrations", log: true };
+  // K3 follow-up: the third "you forgot part of the schema" case, and the one that cost an hour.
+  // The brain role is granted its verbs OUT OF BAND, so a statement using a verb no previous
+  // statement used fails at runtime with a code the server already knew and the caller never saw.
+  // That is exactly what happened when K3's batch path issued the first DELETE FROM cue ever
+  // written here: 503 brain_unavailable at the door, `permission denied for table cue` visible
+  // only in the log. A privilege gap is not an outage — it is a missing GRANT, and the answer
+  // fits in the hint.
+  if (pgCode === "42501") {
+    return {
+      status: 503,
+      code: "brain_permission_denied",
+      hint: "the brain role is missing a table privilege (e.g. DELETE on cue) — run migration 0053 via /api/run-migrations, which grants them",
+      log: true,
+    };
+  }
   return { status: 503, code: "brain_unavailable", log: true };
 }

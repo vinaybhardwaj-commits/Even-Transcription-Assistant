@@ -453,3 +453,68 @@ describe("the Whisper decoder is pinned (K3 §5)", () => {
     expect(f.get("seed")).toBeNull();
   });
 });
+
+// ===========================================================================
+// 5. the error the server already knew (K3 follow-up)
+// ===========================================================================
+
+describe("classifyBrainError — a missing GRANT is not an outage", () => {
+  it("names 42501 with the grant to run, instead of hiding it in brain_unavailable", async () => {
+    const { classifyBrainError } = await vi.importActual<typeof import("@/lib/brain/db")>("@/lib/brain/db");
+    const out = classifyBrainError(Object.assign(new Error("permission denied for table cue"), { code: "42501" }));
+    expect(out.code).toBe("brain_permission_denied");
+    expect(out.status).toBe(503);
+    expect(out.hint).toMatch(/privilege/);
+    expect(out.hint).toMatch(/0053/);
+    expect(out.log).toBe(true);
+  });
+
+  it("the two migration cases and the catch-all are unchanged", async () => {
+    const { classifyBrainError } = await vi.importActual<typeof import("@/lib/brain/db")>("@/lib/brain/db");
+    const code = (c: string) => classifyBrainError(Object.assign(new Error("x"), { code: c }));
+    expect(code("42P01").code).toBe("brain_tables_missing");
+    expect(code("42703").code).toBe("brain_columns_missing");
+    expect(code("23503").code).toBe("unknown_room");
+    expect(code("08006").code).toBe("brain_unavailable");
+    expect(classifyBrainError(new Error("no pg code")).code).toBe("brain_unavailable");
+  });
+});
+
+// ===========================================================================
+// 6. migration 0053 — the grants, recorded rather than rediscovered
+// ===========================================================================
+
+describe("0053 — the brain role's privileges are in the repo now", () => {
+  const sql = migration("0053_brain_role_grants.sql");
+  const body = squash(sql.replace(/^--.*$/gm, ""));
+
+  it("grants DELETE on every brain-graph table the writer touches", () => {
+    for (const t of ["cue", "room_day", "visit", "speaker_cluster"]) {
+      expect(body).toContain(`GRANT DELETE ON TABLE ${t} TO brain_svc;`);
+    }
+  });
+
+  it("leaves `room` SELECT-only — the brain has never written a room", () => {
+    expect(body).toContain("GRANT SELECT ON TABLE room TO brain_svc;");
+    expect(body).not.toMatch(/GRANT[^;]*(INSERT|UPDATE|DELETE)[^;]*ON TABLE room TO/);
+  });
+
+  it("REVOKES nothing — it can only add, so it can never narrow a live privilege", () => {
+    expect(body).not.toMatch(/REVOKE/i);
+  });
+
+  it("is guarded on the role existing, so a database without brain_svc is not blocked", () => {
+    expect(body).toMatch(/IF NOT EXISTS \(SELECT 1 FROM pg_roles WHERE rolname = 'brain_svc'\) THEN/);
+    expect(body).toMatch(/RAISE NOTICE/);
+    // and it still records itself on that database — "considered" is the fact worth keeping
+    expect(squash(sql)).toContain("VALUES (53, '0053_brain_role_grants')");
+  });
+
+  it("survives the migration runner's splitter as TWO statements, the DO block kept whole", () => {
+    // the runner splits on `;`, and the DO body is full of them — dollar-quote awareness is the
+    // only thing standing between this file and eight fragments that are each a syntax error
+    const dollarOpens = (sql.match(/\$\$/g) ?? []).length;
+    expect(dollarOpens).toBe(2);
+    expect(body.indexOf("DO $$")).toBeLessThan(body.indexOf("INSERT INTO schema_migrations"));
+  });
+});
