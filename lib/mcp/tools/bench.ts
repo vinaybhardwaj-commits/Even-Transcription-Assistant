@@ -1300,6 +1300,74 @@ async function writeWindowCues(
   };
 }
 
+/**
+ * K5 — the one Whisper error that is not a failure.
+ *
+ * lib/whisper.ts returns `empty_transcript` ONLY on a 200 whose text and segment text are both
+ * empty (a non-200 exits earlier as `http_<status>`). That is a SUCCESSFUL transcription of a
+ * quiet room, mislabelled — and it is exactly the case stt_silence exists for, which until now
+ * was the one case it could not handle, because the tool aborted on ok:false before ever
+ * reaching the segment filter that emits the silence.
+ *
+ * The client is NOT changed. The same signal means opposite things in two places: on the
+ * encounter pipeline an empty transcript really is a failure, because no note can be made from
+ * silence. Only the caller knows what it asked for, so only the caller may decide.
+ */
+export const EMPTY_TRANSCRIPT = "empty_transcript";
+
+type ScratchTarget =
+  | { ok: true; ist: string; roomId: string; dayId: string; roomCreated: boolean; dayCreated: boolean }
+  | { ok: false; error: string; detail?: string; room_day_id?: string };
+
+/**
+ * The scratch room-day this session's windows are written to. Shared by every write path so that
+ * a speech window, a silent window and a failed ask all land on ONE day and all refuse by the
+ * same names.
+ *
+ * The day is the session's own IST date, never the server clock — the same derivation as
+ * scribe_replay_write, so a replayed day and its turns cannot end up on two different days.
+ */
+async function resolveScratchTarget(
+  session: { id: string; room_id: string; room_slug: string; room_name: string; started_at: string | Date },
+): Promise<ScratchTarget> {
+  const ist = istDate(new Date(session.started_at));
+  let scratch: Awaited<ReturnType<typeof resolveScratchGraph>>;
+  try {
+    scratch = await resolveScratchGraph({ id: session.room_id, slug: session.room_slug, name: session.room_name }, ist);
+  } catch (e) {
+    return { ok: false, error: "scratch_graph_failed", detail: String((e as Error)?.message ?? e).slice(0, 160) };
+  }
+  if (!scratch.ok) return { ok: false, error: scratch.error, ...(scratch.detail ? { detail: scratch.detail } : {}) };
+  // Belt and braces: the cue route's guard is authoritative and re-reads the flag inside its
+  // lock, but there is no reason to send a request at a day this side already knows is live.
+  if (scratch.day.scratch !== true) return { ok: false, error: "not_a_scratch_day", room_day_id: scratch.day.id };
+  return { ok: true, ist, roomId: scratch.room.id, dayId: scratch.day.id, roomCreated: scratch.room.created, dayCreated: scratch.day.created };
+}
+
+/**
+ * K5 — write ONLY the completeness marker, for an ask that never produced a transcript.
+ *
+ * NO replace_window, for K4's reason and one of its own: the request issues no DELETE, so it
+ * cannot fail for a verb it does not need — and a failed ask has nothing to replace the window
+ * WITH. Deleting a previous run's real turns because a later ask timed out would destroy evidence
+ * to record a failure, which is the wrong way round.
+ */
+async function writeWindowMarkerOnly(
+  origin: string,
+  roomId: string,
+  roomDayId: string,
+  sessionId: string,
+  cue: TurnDraft,
+): Promise<{ ok: true; deleted: number; written: number; already_existed: number; dropped: number; attempted: number } | { ok: false; error: string; detail?: string }> {
+  return postTurnBatch(origin, {
+    room_id: roomId,
+    room_day_id: roomDayId,
+    session_id: sessionId,
+    source: TURN_CUE_SOURCE,
+    cues: [asBatchCue(cue)],
+  });
+}
+
 /** What a dry run reports, and what a write reports before its counts. */
 const shownTurns = (b: TurnBuild) =>
   b.turns.map((t) => ({ type: t.type, at: t.at, start_ms: t.start_ms, end_ms: t.end_ms, speaker: t.speaker, text: t.text, source_ref: t.source_ref }));
@@ -1353,7 +1421,7 @@ async function turnsAnswer(
       ...base,
       ...noWrite,
       window_cue: shownTurns({ ...build, turns: [windowCueFor(true, null)] })[0],
-      note_turns: "dry run — nothing written; pass dry_run:false to write this window into the scratch graph. A write REPLACES the window: every stt_turn, stt_silence and stt_window already recorded for this session and this asked window is deleted first, in the same transaction.",
+      note_turns: "dry run — nothing written; pass dry_run:false to write this window into the scratch graph. A write REPLACES the window: every stt_turn and stt_silence already recorded for this session and this asked window is deleted first, in the same transaction. The stt_window marker is NOT deleted — it is upserted, so that recording a FAILED window never needs the DELETE the failed window died on.",
     };
   }
 
@@ -1363,26 +1431,18 @@ async function turnsAnswer(
     return { ...base, ...noWrite, turn_write_error: "brain_base_url_set", note_turns: "BRAIN_BASE_URL points cue writes at the separate Cloud Run brain service (brain/src). This tool writes only through this app's own cue route." };
   }
 
-  // The day is the session's own IST date — never the server clock. Same derivation as
-  // scribe_replay_write, so a replayed day and its turns land on ONE scratch day.
-  const ist = istDate(new Date(session.started_at));
-  let scratch: Awaited<ReturnType<typeof resolveScratchGraph>>;
-  try {
-    scratch = await resolveScratchGraph({ id: session.room_id, slug: session.room_slug, name: session.room_name }, ist);
-  } catch (e) {
-    return { ...base, ...noWrite, turn_write_error: "scratch_graph_failed", detail: String((e as Error)?.message ?? e).slice(0, 160) };
-  }
-  if (!scratch.ok) {
-    return { ...base, ...noWrite, turn_write_error: scratch.error, ...(scratch.detail ? { detail: scratch.detail } : {}) };
-  }
-  // Belt and braces: the cue route's guard is authoritative and re-reads the flag inside its
-  // lock, but there is no reason to send N requests at a day this side already knows is live.
-  if (scratch.day.scratch !== true) {
-    return { ...base, ...noWrite, turn_write_error: "not_a_scratch_day", room_day_id: scratch.day.id };
+  const target = await resolveScratchTarget(session);
+  if (!target.ok) {
+    return {
+      ...base, ...noWrite,
+      turn_write_error: target.error,
+      ...(target.detail ? { detail: target.detail } : {}),
+      ...(target.room_day_id ? { room_day_id: target.room_day_id } : {}),
+    };
   }
 
   const counts = await writeWindowCues(
-    ctx.origin, scratch.room.id, scratch.day.id, session.id,
+    ctx.origin, target.roomId, target.dayId, session.id,
     { startMs: win.startMs, endMs: win.endMs }, build.turns, windowCueFor,
   );
   // K4 §3 — when even the marker could not be written, the day holds NOTHING about this ask and
@@ -1397,23 +1457,144 @@ async function turnsAnswer(
   return {
     ...base,
     ...record,
-    room_day_id: scratch.day.id,
-    scratch_room: { id: scratch.room.id, created: scratch.room.created },
-    scratch_room_day_created: scratch.day.created,
-    ist_date: ist,
+    room_day_id: target.dayId,
+    scratch_room: { id: target.roomId, created: target.roomCreated },
+    scratch_room_day_created: target.dayCreated,
+    ist_date: target.ist,
     ...counts,
     // NOT `source` — that word is already the microphone in this tool's answer (source_used /
     // source_requested), and two different questions must not share a key.
     turn_cue_source: TURN_CUE_SOURCE,
     natural_key: ["source_ref", "type"],
     write_unit: ["session_id", "window.start_ms", "window.end_ms"],
-    note_turns: "written to a scratch room-day, never a live one. The WRITE UNIT IS THE WINDOW, not the turn: every stt_turn, stt_silence and stt_window already recorded for this session and this asked window is DELETED and the new set inserted, in one transaction. Re-running a window therefore REPLACES it — a different segment count on the second run is a replace and is correct, not a failure. source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} remains the WITHIN-write key, so two turns sharing a start both land. An stt_window row records whether the window finished; complete:false means the turns were rolled back and none was kept.",
+    note_turns: "written to a scratch room-day, never a live one. The WRITE UNIT IS THE WINDOW, not the turn: every stt_turn and stt_silence already recorded for this session and this asked window is DELETED and the new set inserted, in one transaction. The stt_window marker is UPSERTED rather than deleted, so that recording a failed window never needs the verb the failed window died on. Re-running a window therefore REPLACES it — a different segment count on the second run is a replace and is correct, not a failure. source_ref = {session_id}|{start_ms}|{end_ms}|{speaker} remains the WITHIN-write key, so two turns sharing a start both land. An stt_window row records whether the window finished; complete:false means the turns were rolled back and none was kept.",
+  };
+}
+
+/**
+ * K5 — what to do when Whisper returns ok:false, which is now TWO different situations.
+ *
+ *   empty_transcript  A quiet room, transcribed successfully. The window gets ONE stt_silence and
+ *                     a marker saying complete:true with segment_count 0, because this WAS an ask
+ *                     that finished. Zero turns. It is never counted as `failed`, and no speech is
+ *                     invented. The answer is ok:true — nothing went wrong.
+ *
+ *   anything else     A failed ask: http_*, a timeout, a malformed body. No silence and no turns,
+ *                     because we do not know what was in the window. One marker, complete:false,
+ *                     with stopped_early naming the error. If even that cannot be written the
+ *                     answer says the day holds no record — it never implies one.
+ *
+ * The silence path runs through the SAME buildTurns/turnsAnswer machinery as a speech window, so
+ * the window delete, the scratch guard, the lock, the room-day derivation and the dry-run rule are
+ * all exactly what they are for speech. A silent window replaces whatever the same
+ * (session_id, window) held before, like any other.
+ */
+async function whisperNotOkAnswer(
+  ctx: ToolContext,
+  session: { id: string; room_id: string; room_slug: string; room_name: string; started_at: string | Date },
+  w: { error: string; latency_ms: number },
+  dryRun: boolean,
+  win: { startMs: number; endMs: number; sourceUsed: string | null },
+  base: Record<string, unknown>,
+  extra: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  // ---- the quiet room ------------------------------------------------------------------
+  if (w.error === EMPTY_TRANSCRIPT) {
+    // Zero segments in, and buildTurns' own rule does the rest: a window that survives nothing is
+    // ONE stt_silence covering exactly what was asked for. Nothing special-cased, so a silent
+    // window and a window whose every segment was blank produce the identical row.
+    const build = buildTurns({
+      sessionId: session.id,
+      clipStartMs: win.startMs,
+      windowStartMs: win.startMs,
+      windowEndMs: win.endMs,
+      segments: [],
+      language: null,
+      sourceUsed: win.sourceUsed,
+    });
+    const written = await turnsAnswer(ctx, session, build, dryRun, { startMs: win.startMs, endMs: win.endMs, language: null, sourceUsed: win.sourceUsed });
+    return {
+      ok: true,
+      ...base,
+      ...extra,
+      silent_window: true,
+      text: "",
+      language: null,
+      whisper_latency_ms: w.latency_ms,
+      ...written,
+      note: "SILENT WINDOW. Whisper transcribed this window successfully and it contained no speech; the client reports that as `empty_transcript`, which on this path is a fact about the room and not a failure. One stt_silence covers the window and the completeness marker says complete:true with segment_count 0 — the ask finished. No turn was written and no speech was inferred.",
+    };
+  }
+
+  // ---- a failed ask --------------------------------------------------------------------
+  const failedBase = {
+    ok: false as const,
+    error: "whisper_failed",
+    degraded: true,
+    ...base,
+    ...extra,
+    detail: w.error,
+    latency_ms: w.latency_ms,
+    // The five counts, in the same shape a write returns, so a reader never has to wonder
+    // whether an absent field meant zero.
+    deleted: 0,
+    written: 0,
+    already_existed: 0,
+    dropped: 0,
+    failed: 0,
+    attempted: 0,
+    complete: false,
+  };
+  const markerFor = () =>
+    buildWindowCue({
+      sessionId: session.id,
+      windowStartMs: win.startMs,
+      windowEndMs: win.endMs,
+      complete: false,
+      // Whisper returned no segments at all — saying 0 here is the truth, not a default.
+      segmentCount: 0,
+      language: null,
+      sourceUsed: win.sourceUsed,
+      stoppedEarly: w.error,
+    });
+
+  if (dryRun) {
+    return { ...failedBase, window_recorded: false, window_cue: shownTurns({ turns: [markerFor()], silence: false, segments_considered: 0, dropped_outside_window: 0, dropped_blank: 0 })[0], note_turns: "dry run — nothing written. A write would record one stt_window with complete:false for this window." };
+  }
+  if (process.env.BRAIN_BASE_URL?.trim()) {
+    return { ...failedBase, window_recorded: false, turn_write_error: "brain_base_url_set" };
+  }
+  const target = await resolveScratchTarget(session);
+  if (!target.ok) {
+    return { ...failedBase, window_recorded: false, turn_write_error: target.error, ...(target.detail ? { detail_write: target.detail } : {}), ...(target.room_day_id ? { room_day_id: target.room_day_id } : {}) };
+  }
+  const marker = await writeWindowMarkerOnly(ctx.origin, target.roomId, target.dayId, session.id, markerFor());
+  if (!marker.ok) {
+    return {
+      ...failedBase,
+      window_recorded: false,
+      room_day_id: target.dayId,
+      turn_write_error: marker.error,
+      window_record: "none" as const,
+      note_window_record: "NOT RECORDED IN THE GRAPH. The transcription failed and the completeness marker could not be written either, so the room-day holds no trace of this ask — this response is the only record that it happened. Re-run the window once the causes named in detail and turn_write_error are fixed.",
+    };
+  }
+  return {
+    ...failedBase,
+    written: marker.written,
+    already_existed: marker.already_existed,
+    attempted: marker.attempted,
+    window_recorded: true,
+    room_day_id: target.dayId,
+    ist_date: target.ist,
+    stopped_early: w.error,
+    note_turns: "The ask FAILED: no turn and no stt_silence was written, because what the window contained is unknown. One stt_window records complete:false with stopped_early naming the cause. Any turns a previous run wrote for this window are left untouched — a failed ask has nothing to replace them with.",
   };
 }
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. Refuses to write when BRAIN_BASE_URL is set. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
+  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. SILENCE (K5): that now includes a window Whisper returns NO transcript for. An empty transcript on a 200 is a successful reading of a quiet room, so it answers ok:true with silent_window:true, one stt_silence, and a completeness marker saying complete:true with segment_count 0 — the ask finished. It is never counted as `failed` and no speech is inferred. Every OTHER Whisper error (http_*, timeout, malformed) is a FAILED ask: no silence and no turns, because what the window held is unknown, and one stt_window with complete:false naming the cause. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. Refuses to write when BRAIN_BASE_URL is set. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
   scope: "invoke",
   inputSchema: {
     type: "object",
@@ -1467,7 +1648,16 @@ const transcribeRange: McpTool = {
       }
       if (!clipBytes) return { ok: false, error: "clip_missing_in_r2", ...base, r2_key: attempt.key };
       const wj = await transcribeWithWhisper(clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms) });
-      if (!wj.ok) return { ok: false, error: "whisper_failed", degraded: true, ...base, r2_key: attempt.key, detail: wj.error, latency_ms: wj.latency_ms };
+      // K5 — empty_transcript is a SILENT window, not a failure; every other error is a failed
+      // ask. Both are answered here, and both now leave a record of having been asked.
+      if (!wj.ok) {
+        return await whisperNotOkAnswer(
+          ctx, r.session, wj, dryRun,
+          { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source },
+          base,
+          { joined: true, r2_key: attempt.key, clip: { r2_key: attempt.key, bytes: attempt.bytes, duration_ms: attempt.duration_ms }, total_ms: Date.now() - t0 },
+        );
+      }
       // THE CLIP'S TRUE START on this branch: the joining service trimmed the first piece by
       // exactly offset_in_chunk_s (buildJoinRequest), so the clip begins there and NOT at the
       // window the operator asked for — a window that starts before the first covering piece
@@ -1502,7 +1692,15 @@ const transcribeRange: McpTool = {
     }
     if (!bytes) return { ok: false, error: "chunk_missing_in_r2", ...base, chunk_idx: c.chunk.idx, r2_key: c.chunk.r2_key };
     const w = await transcribeWithWhisper(bytes, c.chunk.content_type || "audio/webm", { language });
-    if (!w.ok) return { ok: false, error: "whisper_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: w.error, latency_ms: w.latency_ms };
+    // K5 — same two situations on the single-piece branch.
+    if (!w.ok) {
+      return await whisperNotOkAnswer(
+        ctx, r.session, w, dryRun,
+        { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source },
+        base,
+        { chunk_idx: c.chunk.idx, chunk_bounds: c.chunk_bounds, r2_key: c.chunk.r2_key, total_ms: Date.now() - t0 },
+      );
+    }
     // THE CLIP'S TRUE START on this branch: the WHOLE chunk was sent, so segment second zero is
     // the chunk's own start — not the window, which is why the turns below are then filtered to
     // the window while the `text` above still covers the whole chunk.
