@@ -3,6 +3,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { BenchClient } from "@/components/admin/BenchClient";
+import { BenchRoomsLive } from "@/components/admin/BenchRoomsLive";
 
 /**
  * Admin · Bench — room recording sessions + Rooms card (Room-Bench PRD §3.5;
@@ -23,6 +24,9 @@ export default async function AdminBenchPage() {
   }
   return (
     <AdminShell adminEmail={email} active="bench" pageTitle="Bench — room recording sessions">
+      {/* The live monitor sits ABOVE the session table: on a clinic day the question is always
+          "what is wrong right now", and the day's history is what you read afterwards. */}
+      <BenchRoomsLive />
       <BenchClient />
     </AdminShell>
   );
