@@ -285,3 +285,88 @@ midnight needs a day for *both* IST dates, and start-of-session only makes the f
 **Nothing drains automatically.** There is no cron on the drain — the chunk route enqueues and a
 human runs the pass (`app/api/admin/bench/drain/route.ts`: "MANUAL ONLY"). Transcript ON causes
 windows to be *enqueued* as they close; it does not cause them to be transcribed.
+
+---
+
+## The alarm, captured on a real card
+
+Run on **Cardiology OPD** (`room_bh6jtq4t`) — the last room with no day record today, both
+switches on, Sunday, room not in use. Session `bs_qw8bvk7c`.
+
+**Starting on the boundary is harder than it sounds.** Aimed at 09:44:50Z to sit a few seconds
+ahead of the 09:45 grid line; the session row was written at **09:45:03.237Z**, 3.2 s late,
+because it is created after `getUserMedia` returns rather than on the click. `coverageOf` has no
+tolerance — deliberately, and its header says why — so the 09:45–10:00 slot could never be
+covered and was lost. The first closable slot became 10:00–10:15, which cost fifteen minutes.
+Worth knowing for anyone timing this again: **start ~10 s early, not on the second.**
+
+### BEFORE — the alarm, 10:16:00Z (15:46 IST), room still recording
+
+```
+Tape        Recording · 31m · 6 pieces
+Transcript  1 piece recorded, no day record yet          [amber]
+            Press Mark consult once in the room and everything recorded today
+            will be picked up.
+Visits      On, nothing to do
+```
+
+`has_room_day_today: false`, `marks_today: 0`, `transcript_counts: { done 0, waiting 0,
+no_day 1, in_progress 0, failed 0 }`.
+
+The lane does **not** say "waiting" and does **not** say "can be processed later".
+
+Attention list, at the same moment, carrying the same instruction:
+
+> **Cardiology OPD — no day record yet — nothing can be transcribed**
+> 1 piece of audio recorded and safe, but this room has no day record for today, so none of it
+> can be turned into words yet. Press Mark consult once in the room and everything recorded
+> today will be picked up.
+
+And directly above it, on the same screen, the OLD copy for a room that is genuinely queued:
+
+> **OPD 7 — transcript behind — the audio is safe**
+> 4 pieces of audio waiting to be turned into words. Nothing is lost: the audio is saved and can
+> be processed later.
+
+Those two rows sitting together is the whole point of the build. Before this, Cardiology's row
+would have read like OPD 7's.
+
+### AFTER — one Mark consult, and it clears itself
+
+Mark pressed on the kiosk at **10:17:53Z**; the cue landed at 10:17:48.246Z and created
+`rd_3tqdsbkc`. Nothing else was done.
+
+```
+10:17:48   consult_mark → room_day rd_3tqdsbkc created
+10:20:03   chunk 8 closes; its after() hook re-runs the window evaluator
+10:20:37   observed clear
+```
+
+```
+Transcript  0 done, 1 waiting        no_day 0 → the window bound
+Visits      1 today · 1 open
+has_room_day_today  false → true      marks_today  0 → 1
+```
+
+**The alarm cleared 2 min 15 s after the mark**, and the bound is the chunk rotation, not the
+alarm: the backfill runs in the evaluation pass on the next chunk's arrival. Nothing was
+re-drained, no window was re-created — `no_day` moved to `waiting` and the lane returned to
+ordinary counts.
+
+Recording ended cleanly: **8 chunks + 8 backup (34 MB), all uploads verified.**
+
+### Width
+
+Captured at **768 px** — a genuine narrow render, not a desktop one relabelled. The card's lane
+block, the note under Transcript and the attention list all wrap and remain legible.
+
+### Found on the way, and NOT touched
+
+**OPD 7 has an orphaned session.** `bs_sanc6g5f`, started 08:38:51Z — after my own OPD 7 run
+ended cleanly at 08:33:17Z — status `recording`, `ended_at` null, 11 chunks, last chunk
+09:33:54Z, and no kiosk polling since. The monitor is correctly showing it as
+"recording with no kiosk page open" and "no audio arriving — audio is being lost".
+
+Not mine and not touched, per the brief. **It needs clearing before Monday**: while that session
+is open, start is refused on OPD 7. The card already offers the repair — *Close abandoned
+session* on the OPD 7 card, which keeps every uploaded chunk and only ends the session row.
