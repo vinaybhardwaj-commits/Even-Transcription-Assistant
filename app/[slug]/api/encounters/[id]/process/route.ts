@@ -781,6 +781,11 @@ export async function POST(
     // the slowest step and auto-releases if a worker dies. This stops the
     // self-chain and the resume cron from running qwen/llama on the SAME
     // encounter concurrently (which thrashes the Mac Mini and times both out).
+    // The catch here USED TO BE SILENT, and it cost an hour. A claim that throws and a claim
+    // that finds the row already held are indistinguishable to the caller — both surface as
+    // "locked", both make the resume loop sleep and retry, and the loop can do that thirty times
+    // against an error that will never clear. A lock that is not held is not a lock; say so.
+    let claimError: string | null = null;
     const claim = (await sql`
       UPDATE encounter
          SET processing_step_at = now(), process_attempts = process_attempts + 1,
@@ -788,7 +793,11 @@ export async function POST(
        WHERE id = ${id}
          AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
        RETURNING id
-    `.catch(() => [] as Array<{ id: string }>)) as Array<{ id: string }>;
+    `.catch((e: unknown) => {
+      claimError = String((e as Error)?.message ?? e).slice(0, 300);
+      console.warn(`[process:step] enc=${id} claim FAILED (not a held lock): ${claimError}`);
+      return [] as Array<{ id: string }>;
+    })) as Array<{ id: string }>;
     if (claim.length === 0) {
       // Another invocation holds the lock; it will self-chain. No-op.
       //
@@ -802,7 +811,7 @@ export async function POST(
                process_attempts, status
           FROM encounter WHERE id = ${id}
       `.catch(() => [] as Array<Record<string, unknown>>)) as Array<{ processing_step_at: string | null; held_s: number | null; process_attempts: number | null; status: string }>;
-      return respondOk({ step: nextStep, skipped: "locked", lock: held[0] ?? null });
+      return respondOk({ step: nextStep, skipped: "locked", lock: held[0] ?? null, claim_error: claimError });
     }
 
     // Run exactly ONE step. Returns whether it progressed, plus a jobPending sentinel for
