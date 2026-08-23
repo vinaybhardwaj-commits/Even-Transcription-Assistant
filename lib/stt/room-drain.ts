@@ -215,7 +215,7 @@ async function recordFailure(windowId: string, step: DrainStep, detail: string):
  * Drain ONE window, end to end. Never throws — every failure is a named step, so a caller can
  * report what happened rather than a stack trace.
  */
-export async function drainRoomWindow(windowId: string, origin: string): Promise<DrainOutcome> {
+export async function drainRoomWindow(windowId: string, origin: string, opts: { force?: boolean } = {}): Promise<DrainOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found" };
   try {
     const wr = (await sql`
@@ -231,7 +231,14 @@ export async function drainRoomWindow(windowId: string, origin: string): Promise
     // is safe to call directly and cannot be reached with the flag off by a future caller.
     if (!isRoomDrainEnabled(w.room_id)) return { ...out, step: "flag_off" };
 
-    if (w.state !== "closed" && w.state !== "transcribing") {
+    // `force` is how a window is RE-transcribed (T6). Without it a settled window is left
+    // alone, so a queue pass can never redo work that is already done and already paid for.
+    // With it, the window goes round again and the window-as-unit replace does the rest: the
+    // previous run's turns are deleted before the new ones land, never merged with them.
+    const drainable = opts.force
+      ? ["closed", "transcribing", "transcribed", "failed"]
+      : ["closed", "transcribing"];
+    if (!drainable.includes(w.state)) {
       return { ...out, step: "wrong_state", detail: w.state };
     }
     if (!w.grid_aligned) return { ...out, step: "wrong_state", detail: "not_grid_aligned" };
@@ -251,7 +258,7 @@ export async function drainRoomWindow(windowId: string, origin: string): Promise
     // Claim it. Guarded so two drains cannot both take the same window.
     const claimed = (await sql`
       UPDATE bench_window SET state = 'transcribing'
-       WHERE id = ${windowId} AND state IN ('closed', 'transcribing') RETURNING id
+       WHERE id = ${windowId} AND state = ANY(${drainable}::text[]) RETURNING id
     `) as Array<{ id: string }>;
     if (claimed.length === 0) return { ...out, step: "wrong_state", detail: "claim_lost" };
     await sql`
@@ -350,6 +357,10 @@ export async function drainRoomWindow(windowId: string, origin: string): Promise
     const activity = describeWindowActivity(segments.length, endMs - startMs, segments.map((s) => s.text));
     out.segment_count = segments.length;
     out.activity = activity;
+    // A re-transcription REPLACES the previous run for this subject, exactly as the turns are
+    // replaced. Two runs for one window would make "the window's transcript" ambiguous, and the
+    // STT lab groups on (subject_type, subject_id).
+    await sql`DELETE FROM transcription_run WHERE subject_type = 'bench_window' AND subject_id = ${windowId}`;
     const id = runId();
     await sql`
       INSERT INTO transcription_run

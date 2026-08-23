@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const adminId = await guard();
   if (adminId === null) return respondError("AUTH_REQUIRED", "Sign in required");
-  let body: { window_id?: unknown; session_id?: unknown; limit?: unknown };
+  let body: { window_id?: unknown; session_id?: unknown; limit?: unknown; force?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
   const origin = new URL(req.url).origin;
 
   if (typeof body.window_id === "string" && body.window_id.startsWith("bw_")) {
-    const out = await drainRoomWindow(body.window_id, origin);
+    const out = await drainRoomWindow(body.window_id, origin, { force: body.force === true });
     return respondOk({ drained: [out] });
   }
 
