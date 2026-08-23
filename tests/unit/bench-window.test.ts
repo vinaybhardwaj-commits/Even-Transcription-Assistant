@@ -6,6 +6,8 @@
  * line: the SPAN must be covered, not merely "the chunks present are verified".
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { subjectLabel } from "@/lib/stt/subject";
 import {
   WINDOW_MS,
   slotStartFor,
@@ -274,5 +276,34 @@ describe("the span comes from the chunks, never from session.ended_at", () => {
     // and the source file must not even mention reading that column
     // (asserted in the reader test below rather than by grepping here)
     expect(ws.length).toBeGreaterThanOrEqual(36);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// K4a C3 — the subject label must not become a back door onto the patient label.
+// ─────────────────────────────────────────────────────────────────────────────────────────
+describe("C3 — subjectLabel is identity-gated by its CALLER, and says so", () => {
+  it("given a patient label it uses it — which is why an un-identified caller must not pass one", () => {
+    expect(subjectLabel({ subject_type: "encounter", subject_id: "enc_1", patient_label_raw: "Mrs A" })).toBe("Mrs A");
+    // …and with it withheld it falls back to the id, never to "undefined"
+    expect(subjectLabel({ subject_type: "encounter", subject_id: "enc_1" })).toBe("enc_1");
+    expect(subjectLabel({ subject_type: "encounter", subject_id: "enc_1", patient_label_raw: undefined })).toBe("enc_1");
+  });
+
+  it("a blank or whitespace label is treated as absent, not rendered", () => {
+    expect(subjectLabel({ subject_type: "encounter", subject_id: "enc_1", patient_label_raw: "   " })).toBe("enc_1");
+  });
+
+  it("a room window names its clock and mic, and has no patient label to leak", () => {
+    const s = 1787414400000; // an IST quarter hour
+    const label = subjectLabel({ subject_type: "bench_window", subject_id: "bw_x", window_start_ms: s, window_end_ms: s + 900_000 });
+    expect(label).toMatch(/^\d\d:\d\d–\d\d:\d\d IST$/);
+    expect(subjectLabel({ subject_type: "bench_window", subject_id: "bw_x", window_start_ms: s, window_end_ms: s + 900_000, window_source_mic: "backup" })).toContain("backup mic");
+  });
+
+  it("the MCP tools build the label WITHOUT the patient label unless include_identity", () => {
+    const src = readFileSync("lib/mcp/tools/stt.ts", "utf8");
+    expect(src).toContain("patient_label_raw: includeIdentity ? patient_label_raw : undefined");
+    expect((src.match(/includeIdentity \? patient_label_raw : undefined/g) ?? []).length).toBe(2);
   });
 });

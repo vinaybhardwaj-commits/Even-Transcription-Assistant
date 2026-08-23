@@ -146,10 +146,12 @@ const listSttRuns: McpTool = {
          LIMIT ${limit}
       `) as Array<Record<string, unknown>>;
       const runs = rows.map((r) => {
-        // C3 — the subject block is ALWAYS present; include_identity governs only the patient
-        // label, exactly as before. A room window has no patient label to govern.
-        const subject = subjectOf(r as SubjectRowish);
+        // C3 — the subject block is ALWAYS present, but it must not become a BACK DOOR onto the
+        // patient label. subjectLabel() prefers patient_label_raw for an encounter, so without
+        // include_identity the label is built WITHOUT it and falls back to the id. Caught by
+        // R5: the first version leaked the label into `subject.label` on an un-identified call.
         const { patient_label_raw, ...rest } = r;
+        const subject = subjectOf({ ...(r as SubjectRowish), patient_label_raw: includeIdentity ? patient_label_raw : undefined });
         return includeIdentity ? { ...rest, subject, patient_label_raw } : { ...rest, subject };
       });
       return { runs };
@@ -195,7 +197,9 @@ const getSttRun: McpTool = {
       const subject = subjectOf({
         subject_type: subjectType,
         subject_id: id,
-        patient_label_raw,
+        // Same gate as the list: the label must not smuggle the patient label past
+        // include_identity. A room window has no patient label to gate in the first place.
+        patient_label_raw: includeIdentity ? patient_label_raw : undefined,
         window_start_ms: win[0]?.start_ms,
         window_end_ms: win[0]?.end_ms,
         window_source_mic: win[0]?.source_mic,
