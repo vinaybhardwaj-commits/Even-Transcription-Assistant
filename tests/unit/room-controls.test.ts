@@ -224,3 +224,34 @@ describe("U3 — the switch is a 44-point target", () => {
     expect(sw).toMatch(/aria-checked=\{on\}/);
   });
 });
+
+describe("every colour class this screen asks for actually exists", () => {
+  /**
+   * TAILWIND DROPS UNKNOWN CLASSES SILENTLY, which is why a missing shade looks like a design
+   * choice rather than a bug. This screen has been bitten twice now: `border-warning-200
+   * bg-warning-50` generated nothing for the room card's whole worst-condition signal, and then
+   * `bg-danger-600` generated nothing for the STOP ALL PROCESSING button — white text on a pink
+   * card, the most important control on the page nearly invisible, caught only by looking at a
+   * screenshot. A comment in tailwind.config.ts warns about exactly this; the warning was not
+   * enough, so here is the check.
+   */
+  const cfg = readFileSync("tailwind.config.ts", "utf8");
+  const avail: Record<string, Set<string>> = {};
+  for (const m of cfg.matchAll(/(\w[\w-]*):\s*\{([^}]*)\}/g)) {
+    const shades = [...m[2]!.matchAll(/(\d+):/g)].map((x) => x[1]!);
+    if (shades.length) (avail[m[1]!] ??= new Set()).add(...([] as string[])), shades.forEach((sh) => avail[m[1]!]!.add(sh));
+  }
+  for (const nested of ["blue", "ink", "navy", "pink"]) if (avail[nested]) avail[`even-${nested}`] = avail[nested]!;
+
+  it.each([
+    "components/admin/BenchRoomsLive.tsx",
+    "components/room/RoomRecorderClient.tsx",
+  ])("%s uses no shade the palette does not define", (file) => {
+    const bad: string[] = [];
+    for (const m of readFileSync(file, "utf8").matchAll(/\b(?:bg|text|border|ring|from|to)-([a-z]+(?:-[a-z]+)*)-(\d{2,3})\b/g)) {
+      const pal = m[1]!, shade = m[2]!;
+      if (avail[pal] && !avail[pal]!.has(shade)) bad.push(`${pal}-${shade}`);
+    }
+    expect([...new Set(bad)]).toEqual([]);
+  });
+});

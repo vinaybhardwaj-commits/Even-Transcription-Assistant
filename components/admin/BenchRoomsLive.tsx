@@ -253,9 +253,9 @@ const STATE_WORD: Record<RoomState, string> = {
 // end up in every conversation about this system from now on.
 
 const LED: Record<LaneLevel, string> = {
-  ok: "bg-success-600",
+  ok: "bg-success-500",
   amber: "bg-warning-500",
-  red: "bg-danger-600",
+  red: "bg-danger-500",
   off: "bg-even-ink-200",
 };
 
@@ -275,7 +275,7 @@ function LaneSwitch({ on, busy, label, onToggle }: { on: boolean; busy: boolean;
       onClick={(e) => { e.stopPropagation(); onToggle(); }}
       className="flex items-center justify-center h-11 min-w-11 px-0 shrink-0 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-even-blue-400 rounded-lg"
     >
-      <span className={`relative block w-[52px] h-[30px] rounded-full transition-colors ${on ? "bg-success-600" : "bg-even-ink-200"}`}>
+      <span className={`relative block w-[52px] h-[30px] rounded-full transition-colors ${on ? "bg-success-500" : "bg-even-ink-200"}`}>
         <span className={`absolute top-[3px] w-6 h-6 rounded-full bg-even-white shadow transition-all ${on ? "left-[25px]" : "left-[3px]"}`} />
       </span>
     </button>
@@ -673,7 +673,7 @@ export function BenchRoomsLive() {
           THE COPY IS THE SAFETY FEATURE. "Recording carries on and no audio is lost" is on the
           card itself, because that sentence is what makes this pressable by somebody frightened.
           There is no single-tap undo: turning things back on is per-room and deliberate. */}
-      <div className="mb-3 rounded-xl border border-danger-300 bg-danger-100 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="mb-3 rounded-xl border border-danger-200 bg-danger-100 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-3">
         <div className="flex-1 min-w-0">
           <p className="font-semibold text-danger-700">Stop all processing</p>
           <p className="text-caption text-even-ink-600 leading-snug max-w-[56ch]">
@@ -693,7 +693,7 @@ export function BenchRoomsLive() {
             <button
               type="button"
               onClick={() => void stopAllProcessing()}
-              className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-600 text-even-white hover:bg-danger-700"
+              className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700"
             >
               Yes — stop all processing
             </button>
@@ -703,7 +703,7 @@ export function BenchRoomsLive() {
             type="button"
             data-testid="stop-all-processing"
             onClick={() => setConfirmStopAll(true)}
-            className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-600 text-even-white hover:bg-danger-700 shrink-0"
+            className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700 shrink-0"
           >
             Stop all processing
           </button>
@@ -976,7 +976,7 @@ export function BenchRoomsLive() {
                   is already stored, and the kiosk has already been told to stop on its next chunk.
                   What is needed is a person in the room pressing start, which is what it says. */}
               {r.ended_disagrees ? (
-                <div className="mt-3 rounded-lg border border-danger-300 bg-danger-100 p-3" data-testid="ended-disagrees">
+                <div className="mt-3 rounded-lg border border-danger-200 bg-danger-100 p-3" data-testid="ended-disagrees">
                   <p className="text-caption text-danger-700 leading-snug">
                     <span className="font-semibold">{ENDED_DISAGREES_TITLE}.</span>{" "}
                     {r.ended_disagrees_chunks} piece{r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was

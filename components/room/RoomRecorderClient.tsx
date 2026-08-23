@@ -1309,7 +1309,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 <>
                   <div
                     data-testid="closed-by-server"
-                    className="mx-auto mb-5 max-w-md rounded-2xl border-2 border-danger-300 bg-danger-100 px-5 py-4 text-left"
+                    className="mx-auto mb-5 max-w-md rounded-2xl border-2 border-danger-200 bg-danger-100 px-5 py-4 text-left"
                   >
                     <p className="text-heading font-bold text-danger-700 mb-1">
                       {ENDED_DISAGREES_KIOSK_TITLE}
