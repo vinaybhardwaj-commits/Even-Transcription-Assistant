@@ -226,3 +226,62 @@ the next screen goes out.
    Deliberate, to keep U8 true. If V wants the mockup's pill, it is a small, separate change.
 3. **`scribe_diff_room` does not report the two switches.** The MCP door and the screen now know
    different things about a room. Out of this build's scope; worth closing.
+
+---
+
+## A room-day is not created by recording — and that is a Monday hazard
+
+Established after B1, because B1's failure exposed it.
+
+**Only one production path creates a `room_day`:** `POST /api/brain/cues` →
+`resolveRoomDay(room_id, date)`. Any cue of any type does it. (`lib/brain/scratch.ts` is the only
+other writer and it makes `scratch: true` replay days exclusively.)
+
+**Recording creates none of it.** A session writes `bench_session`, `bench_chunk`,
+`bench_window`, `bench_event` — none of which touch `room_day`. `lib/bench-window.ts` *reads*
+`room_day` and binds `room_day_id` when a day exists; it never creates one. And the drain refuses
+by design — `lib/stt/room-drain.ts:271`, "This build does not create room_days."
+
+Every real room-day in production was created by a consult mark:
+
+| day | room | first cue |
+|---|---|---|
+| 22 Aug | Home Office | `consult_mark` |
+| 19 Aug | Cardiology OPD | `consult_mark` |
+| 19 Aug | OPD 7 | `consult_mark` |
+| 19 Aug | OPD Test | `consult_mark` |
+| 20 Aug | OPD Test | `consult_mark` |
+
+The rest are our own named test probes. **Not one was created by recording.**
+
+**So a room that records all day with no marks and no other cues gets no room-day, and every
+window fails `no_room_day`.** Worse than silent — *mislabelled*: those windows stay at `closed`,
+which the Transcript lane counts as "waiting", so the card reads "N pieces of audio waiting to be
+turned into words… can be processed later." They are not waiting. They cannot be processed at
+all. `no_room_day` also returns before the claim, so no attempt is recorded and the window never
+reaches `failed`.
+
+### The fix
+
+**Monday, no deploy: one Mark consult per room, at any point in the day.** More forgiving than an
+"at 9am" rule, because `lib/bench-window.ts:316` re-runs
+`UPDATE bench_window SET room_day_id = … WHERE room_day_id IS NULL` on *every* evaluation pass,
+and evaluation runs on every chunk arrival. A mark at 11am **retro-binds every window recorded
+since 9am** on the next chunk.
+
+**The real fix: the drain creates the day itself, for the window's own IST date.** Today's refusal
+is deliberate and its reason is sound — the cue route resolves against *today's* date, and a
+historical window must not land on the wrong day — but `resolveRoomDay(roomId, date)` already
+takes a date. It is the only option that survives a **midnight rollover**, which is exactly what
+bit `bs_g3dwud4p`.
+
+Posting a cue when the kiosk starts a session was considered and rejected: a tape running past
+midnight needs a day for *both* IST dates, and start-of-session only makes the first.
+
+**Not built. It is a change to the drain, which every brief so far has ruled out.**
+
+### One more operational fact
+
+**Nothing drains automatically.** There is no cron on the drain — the chunk route enqueues and a
+human runs the pass (`app/api/admin/bench/drain/route.ts`: "MANUAL ONLY"). Transcript ON causes
+windows to be *enqueued* as they close; it does not cause them to be transcribed.
