@@ -48,6 +48,7 @@ import { NextResponse } from "next/server";
 import { checkBearer } from "@/lib/brain/auth";
 import { brainLog, classifyBrainError } from "@/lib/brain/db";
 import { withRoomDayLock } from "@/lib/brain/lock";
+import { isRoomDrainEnabled } from "@/lib/stt/room-drain-flag";
 import { isFuseLiveEnabled } from "@/lib/brain/fuse/live-flag";
 import { scheduleLiveFuse } from "@/lib/brain/fuse/live";
 import {
@@ -245,7 +246,28 @@ export async function POST(req: Request) {
       const out = await withRoomDayLock(roomDayId, async (client) => {
         const day = await findRoomDayById(client, roomDayId);
         if (!day) throw new HttpError(404, "room_day_not_found");
-        if (day.scratch !== true) throw new HttpError(409, "not_a_scratch_day");
+        // ─── THE SCRATCH GUARD, AND THE ONE HOLE IN IT (K4b A3) ──────────────────────────
+        // The rule is unchanged for every room on earth: a machine cue may only be written onto
+        // a SCRATCH day. The comment above this branch is right — duplicating the guard is how a
+        // live day eventually gets written to — so this is the ONLY place the rule bends, and it
+        // bends for exactly one reason.
+        //
+        // The room STT drain's whole purpose is to put a room's own turns onto that room's own
+        // day. There is no scratch day for a live tape, and a turn written somewhere else is not
+        // the room's transcript. So a room NAMED IN ROOM_STT_DRAIN_ENABLED may write its live
+        // day, and no other room may.
+        //
+        // WHAT KEEPS THIS SAFE:
+        //   · the flag holds a LIST OF ROOM IDS and refuses "1"/"true"/"*" by name, so there is
+        //     no value of it that opens every room at once;
+        //   · it is read HERE, inside the lock, per request — turning the flag off restores the
+        //     guard on the very next call, with no deploy and no cache to wait out;
+        //   · with the flag unset (the default, and every clinic room) this line is exactly the
+        //     `day.scratch !== true` test it replaced.
+        // The single-cue path below is NOT given this hole; it does not need one.
+        if (day.scratch !== true && !isRoomDrainEnabled(day.room_id)) {
+          throw new HttpError(409, "not_a_scratch_day");
+        }
         // The replace, in this order and inside this one transaction. A throw anywhere below
         // rolls the delete back too, so a failed write leaves the PREVIOUS window intact rather
         // than leaving the day empty — K3 §4's "never leave 71 of 162" in its strongest form.

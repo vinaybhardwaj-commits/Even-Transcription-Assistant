@@ -168,6 +168,13 @@ export type DrainOutcome = {
   activity?: WindowActivity;
   turns_written?: number;
   turns_deleted?: number;
+  /** K4b — WHY the cues did not land. `turns_written: 0` on its own is indistinguishable from a
+   *  window that legitimately produced nothing, and the first live run of this drain wrote 506
+   *  segments to nowhere while still reporting ok. These make that impossible to miss again. */
+  turns_failed?: number;
+  turns_failed_reason?: string;
+  turn_write_error?: string;
+  window_recorded?: boolean;
   run_id?: string | null;
   attempts?: number;
   sarvam_ms?: number | null;
@@ -400,6 +407,18 @@ export async function drainRoomWindow(windowId: string, origin: string): Promise
     );
     out.turns_written = counts.written;
     out.turns_deleted = counts.deleted;
+    out.turns_failed = counts.failed;
+    out.window_recorded = counts.window_recorded;
+    if (counts.failed_reason) out.turns_failed_reason = counts.failed_reason;
+    if (counts.turn_write_error) out.turn_write_error = counts.turn_write_error;
+
+    // A window whose turns did not land is NOT transcribed. Saying otherwise would park a
+    // silent hole in the day: the run exists, the clip exists, and the transcript is nowhere a
+    // reader looks. Fall through to the failure path so the attempt is counted and retried.
+    if (counts.written === 0 && build.turns.length > 0) {
+      const attempts = await recordFailure(windowId, "engine_failed", `turns_not_written: ${counts.failed_reason ?? counts.turn_write_error ?? "unknown"}`);
+      return { ...out, step: "engine_failed", detail: "turns_not_written", attempts };
+    }
 
     // --- C7. STATE --------------------------------------------------------------------------
     await sql`UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'`;

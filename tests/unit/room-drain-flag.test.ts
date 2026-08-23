@@ -107,7 +107,7 @@ describe("A1 — the hazard comment names EVERY call site", () => {
       return statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") || p.endsWith(".tsx") ? [p] : [];
     });
 
-  it("there are exactly FOUR, in the three files the comment names", () => {
+  it("there are exactly FIVE, in the four files the comment names", () => {
     const sites = [...walk("lib"), ...walk("app")]
       .filter((f) => !f.endsWith("room-drain-flag.ts"))
       .flatMap((f) =>
@@ -116,10 +116,43 @@ describe("A1 — the hazard comment names EVERY call site", () => {
           .filter((l) => l.includes("isRoomDrainEnabled(") && !l.trimStart().startsWith("import"))
           .map(() => f),
       );
-    expect(sites).toHaveLength(4);
+    expect(sites).toHaveLength(5);
     expect(sites.filter((f) => f.endsWith("lib/bench-window.ts"))).toHaveLength(1);
     expect(sites.filter((f) => f.endsWith("lib/stt/room-drain.ts"))).toHaveLength(2);
-    // The fourth is a REPORT, not a guard — it answers the admin GET and gates no work.
+    // The fourth gates the brain's scratch-day guard — the one hole, scoped to this flag.
+    expect(sites.filter((f) => f.endsWith("app/api/brain/cues/route.ts"))).toHaveLength(1);
+    // The fifth is a REPORT, not a guard — it answers the admin GET and gates no work.
     expect(sites.filter((f) => f.endsWith("app/api/admin/bench/drain/route.ts"))).toHaveLength(1);
+  });
+});
+
+/**
+ * A3 — the hole in the scratch guard is scoped to the flag, and to nothing else.
+ *
+ * These read the route's source rather than exercising it, because the guard lives inside a
+ * database transaction. What they protect is the SHAPE: that the flag is the only thing that
+ * widens the rule, that the widening is on the batch path alone, and that the single-cue path
+ * was not quietly given the same hole.
+ */
+describe("A3 — the scratch-day exception", () => {
+  const src = readFileSync("app/api/brain/cues/route.ts", "utf8");
+
+  it("the batch guard is `not scratch AND not drain-enabled`, never `or`", () => {
+    expect(src).toContain('if (day.scratch !== true && !isRoomDrainEnabled(day.room_id)) {');
+  });
+
+  it("the single-cue path keeps the ORIGINAL guard, unweakened", () => {
+    const plain = src.match(/if \(day\.scratch !== true\) throw new HttpError\(409, "not_a_scratch_day"\);/g) ?? [];
+    expect(plain).toHaveLength(1);
+  });
+
+  it("the flag is read inside the request, not hoisted to module scope", () => {
+    expect(src).not.toMatch(/^const\s+\w+\s*=\s*isRoomDrainEnabled/m);
+  });
+
+  it("the room asked about is the DAY's room, not the caller's claimed room_id", () => {
+    // A caller could name any room_id in the body; the day's own room is the one that decides.
+    expect(src).toContain("isRoomDrainEnabled(day.room_id)");
+    expect(src).not.toContain("isRoomDrainEnabled(roomId)");
   });
 });

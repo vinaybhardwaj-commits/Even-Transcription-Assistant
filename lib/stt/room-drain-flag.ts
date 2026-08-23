@@ -42,18 +42,26 @@
  *   3. lib/stt/room-drain.ts, drainQueuedRoomWindows — checked per job, so one enabled room's
  *      queue can never carry a disabled room's window through on the same pass.
  *
+ * ONE GATE ON A PROTECTIVE GUARD, and the most dangerous entry in this list:
+ *   4. app/api/brain/cues/route.ts, the BATCH path inside withRoomDayLock — the ONE hole in the
+ *      scratch-day rule. A room named in this flag may write cues onto its own LIVE room_day;
+ *      every other room still gets 409 not_a_scratch_day. Read inside the lock, per request, so
+ *      turning the flag off restores the guard on the next call with no deploy. This is the
+ *      authorisation K4b A3 grants, and it is scoped to the flag and to nothing else.
+ *
  * ONE REPORT, which guards nothing and must not be mistaken for a guard:
- *   4. app/api/admin/bench/drain/route.ts, GET — answers "is this room enabled right now" so
+ *   5. app/api/admin/bench/drain/route.ts, GET — answers "is this room enabled right now" so
  *      F1/F2 can be OBSERVED rather than argued. It gates no work: the POST does not consult it,
  *      because the guard belongs inside drainRoomWindow where no future caller can route around
  *      it. A read here that returned the wrong answer would mislead a report; it could not
  *      transcribe anything.
  *
- * That is the whole list: FOUR call sites plus the definition below. The count is asserted by
- * tests/unit/room-drain-flag.test.ts, not trusted from this paragraph — and it has already
- * earned its keep: this comment said THREE until the admin route was written, and the test
- * failed on the next run. That is exactly what CCB_ENABLED's comment does not do, which is why
- * it claims eight call sites while guarding eleven.
+ * That is the whole list: FIVE call sites plus the definition below. The count is asserted by
+ * tests/unit/room-drain-flag.test.ts, not trusted from this paragraph — and it has now earned
+ * its keep TWICE: this comment said THREE until the admin route was written, and FOUR until the
+ * brain's scratch guard was gated. Both times the test failed on the next run. That is exactly
+ * what CCB_ENABLED's comment does not do, which is why it claims eight call sites while
+ * guarding eleven.
  */
 
 /** The env var. Comma- or space-separated room ids: "room_2qe955hy,room_abc123". */
