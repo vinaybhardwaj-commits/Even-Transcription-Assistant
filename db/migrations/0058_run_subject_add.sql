@@ -38,6 +38,20 @@
 -- The trigger is scaffolding for the transition and is expected to be dropped in
 -- a later step, once every writer names the pair explicitly.
 --
+-- COMMENT AMENDED 23 Aug 2026 (K4a C4) — THE EXACT CONDITION FOR REMOVAL, written down so it
+-- is not guessed at. Do NOT drop this trigger until ALL FIVE of these name subject_type and
+-- subject_id in their INSERT column list:
+--
+--   app/[slug]/api/encounters/[id]/finalize-upload/route.ts   (the DOCTOR RECORDING PATH)
+--   lib/stt/fanout.ts  x3   (asr, even_pipeline, scribe)
+--   lib/stt/translate-bakeoff.ts  x1
+--
+-- Four of the five swallow insert errors into a warnings array, so dropping the trigger while
+-- any of them still omits the column would break them SILENTLY: no exception, no failed
+-- request, just runs that quietly stop being written. K4a moved every READER onto subject_id,
+-- which makes the trigger REDUNDANT — but redundant is not unused, and fixing the writers is
+-- its own build. Tracked in ETA-BACKLOG-SCOPED.md.
+--
 -- IDEMPOTENT THROUGHOUT: ADD COLUMN IF NOT EXISTS, an UPDATE that only touches
 -- NULLs, SET NOT NULL (a no-op when already set), CREATE OR REPLACE FUNCTION,
 -- DROP TRIGGER IF EXISTS before CREATE TRIGGER, and the DO wrapper that gives

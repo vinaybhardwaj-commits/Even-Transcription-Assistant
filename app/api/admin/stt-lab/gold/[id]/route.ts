@@ -24,7 +24,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const runs = (await sql`
     SELECT engine, transcript_english, transcript_original, wer, cer, med_term_recall, error
       FROM transcription_run
-     WHERE encounter_id = ${id} AND mode = 'batch' AND tier = 'asr'
+     WHERE subject_type = 'encounter' AND subject_id = ${id} AND mode = 'batch' AND tier = 'asr'
      ORDER BY engine
   `) as unknown[];
 

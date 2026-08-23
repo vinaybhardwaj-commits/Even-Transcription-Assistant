@@ -36,24 +36,40 @@ function estimateCostUsd(engine: EngineRow, durationSeconds: number | null, adap
 }
 
 /** Enqueue a fan-out job for one encounter (no-op if a job already exists). */
-export async function enqueueFanout(encounterId: string): Promise<void> {
+/**
+ * K4a Part B — the queue is stt_subject_job now.
+ *
+ * stt_fanout_job is LEFT IN PLACE AND UNUSED, not dropped: it is the way back if this move
+ * misbehaves. Retire it only once a FULL encounter fan-out has been observed running end to
+ * end on the new table in production (0061 says the same, next to the table).
+ *
+ * The exported names are unchanged on purpose — `enqueueFanout` is called from two places on
+ * the doctor path and this build has no business editing those call sites to rename a
+ * function.
+ */
+export async function enqueueFanout(encounterId: string, tier = "asr"): Promise<void> {
+  await enqueueSubject("encounter", encounterId, tier);
+}
+
+/** The general form. K4b will call this with ('bench_window', windowId). */
+export async function enqueueSubject(subjectType: string, subjectId: string, tier = "asr"): Promise<void> {
   await sql`
-    INSERT INTO stt_fanout_job (encounter_id, status)
-    VALUES (${encounterId}, 'pending')
-    ON CONFLICT (encounter_id) DO NOTHING
+    INSERT INTO stt_subject_job (subject_type, subject_id, tier, state)
+    VALUES (${subjectType}, ${subjectId}, ${tier}, 'queued')
+    ON CONFLICT (subject_type, subject_id, tier) DO NOTHING
   `;
 }
 
 /** Enqueue every encounter that has audio and no job yet. Returns count enqueued. */
 export async function enqueueBackfill(): Promise<number> {
   const r = (await sql`
-    INSERT INTO stt_fanout_job (encounter_id, status)
-    SELECT e.id, 'pending'
+    INSERT INTO stt_subject_job (subject_type, subject_id, tier, state)
+    SELECT 'encounter', e.id, 'asr', 'queued'
       FROM encounter e
      WHERE e.audio_object_key IS NOT NULL
-    ON CONFLICT (encounter_id) DO NOTHING
-    RETURNING encounter_id
-  `) as Array<{ encounter_id: string }>;
+    ON CONFLICT (subject_type, subject_id, tier) DO NOTHING
+    RETURNING subject_id
+  `) as Array<{ subject_id: string }>;
   return r.length;
 }
 
@@ -88,7 +104,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   // Which engines already have a batch run for this encounter? (idempotent)
   const existing = (await sql`
     SELECT engine FROM transcription_run
-     WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND error IS NULL
+     WHERE subject_type = 'encounter' AND subject_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND error IS NULL
   `) as Array<{ engine: string }>;
   const done = new Set(existing.map((r) => r.engine));
   const todo = engines.filter((e) => !done.has(e.id));
@@ -109,7 +125,7 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   // Drop any prior errored batch rows for the engines we are re-running (so a
   // retry replaces the failure rather than duplicating it).
   for (const e of todo) {
-    await sql`DELETE FROM transcription_run WHERE encounter_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND engine = ${e.id} AND error IS NOT NULL`;
+    await sql`DELETE FROM transcription_run WHERE subject_type = 'encounter' AND subject_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND engine = ${e.id} AND error IS NOT NULL`;
   }
 
   const errors: string[] = [];
@@ -177,8 +193,8 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
   // started_at and is left alone, so we don't yank a job another drain is
   // actively processing (the old blanket reset caused double-processing).
   await sql`
-    UPDATE stt_fanout_job SET status = 'pending'
-     WHERE status = 'running'
+    UPDATE stt_subject_job SET state = 'queued'
+     WHERE state = 'running'
        AND (started_at IS NULL OR started_at < NOW() - INTERVAL '5 minutes')
   `;
 
@@ -186,16 +202,23 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
   // statement, locking the chosen rows with FOR UPDATE SKIP LOCKED so two
   // concurrent drains never grab the same encounter. RETURNING gives us exactly
   // the rows this call owns.
+  // The claim is keyed on the FULL primary key now, so two subjects that happen to share an
+  // id across kinds can never claim each other. `tier` is in the key because ASR and scribe
+  // are separate work for one subject and must fail independently.
+  //
+  // This drain still runs ENCOUNTER work only — runFanoutForEncounter is the only executor
+  // that exists, and K4b owns the bench_window one — so the claim is filtered to encounters
+  // rather than picking up a window it could not process and marking it failed.
   const claim = (await sql`
-    UPDATE stt_fanout_job SET status = 'running', attempts = attempts + 1, started_at = NOW()
-     WHERE encounter_id IN (
-       SELECT encounter_id FROM stt_fanout_job
-        WHERE status IN ('pending', 'failed')
-        ORDER BY enqueued_at ASC
+    UPDATE stt_subject_job SET state = 'running', attempts = attempts + 1, started_at = NOW()
+     WHERE (subject_type, subject_id, tier) IN (
+       SELECT subject_type, subject_id, tier FROM stt_subject_job
+        WHERE state IN ('queued', 'failed') AND subject_type = 'encounter' AND tier = 'asr'
+        ORDER BY queued_at ASC
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
      )
-    RETURNING encounter_id
+    RETURNING subject_id AS encounter_id
   `) as Array<{ encounter_id: string }>;
 
   const jobs: FanoutResult[] = [];
@@ -205,13 +228,13 @@ export async function drainFanout(limit = 5): Promise<DrainResult> {
       jobs.push(res);
       const hardErr = res.errors.length > 0 && res.inserted === 0 && !res.no_audio;
       await sql`
-        UPDATE stt_fanout_job
-           SET status = ${hardErr ? "failed" : "done"}, completed_at = NOW(),
-               error = ${res.errors.length ? res.errors.join("; ").slice(0, 300) : null}
-         WHERE encounter_id = ${j.encounter_id}
+        UPDATE stt_subject_job
+           SET state = ${hardErr ? "failed" : "done"}, finished_at = NOW(),
+               last_error = ${res.errors.length ? res.errors.join("; ").slice(0, 300) : null}
+         WHERE subject_type = 'encounter' AND subject_id = ${j.encounter_id} AND tier = 'asr'
       `;
     } catch (e) {
-      await sql`UPDATE stt_fanout_job SET status = 'failed', error = ${String(e).slice(0, 300)} WHERE encounter_id = ${j.encounter_id}`;
+      await sql`UPDATE stt_subject_job SET state = 'failed', last_error = ${String(e).slice(0, 300)} WHERE subject_type = 'encounter' AND subject_id = ${j.encounter_id} AND tier = 'asr'`;
       jobs.push({ encounter_id: j.encounter_id, inserted: 0, skipped: 0, errors: [String(e).slice(0, 150)] });
     }
   }
@@ -229,7 +252,7 @@ export type FanoutStatus = {
 
 /** Fast queue + batch-run summary (no processing). */
 export async function fanoutStatus(): Promise<FanoutStatus> {
-  const js = (await sql`SELECT status, COUNT(*)::int AS n FROM stt_fanout_job GROUP BY status`) as Array<{ status: string; n: number }>;
+  const js = (await sql`SELECT state AS status, COUNT(*)::int AS n FROM stt_subject_job GROUP BY state`) as Array<{ status: string; n: number }>;
   const tot = (await sql`SELECT COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok, COUNT(*) FILTER (WHERE agreement_score IS NOT NULL)::int AS scored FROM transcription_run WHERE mode='batch' AND tier='asr'`) as Array<{ runs: number; ok: number; scored: number }>;
   const pe = (await sql`
     SELECT engine, COUNT(*)::int AS runs, COUNT(*) FILTER (WHERE error IS NULL)::int AS ok,
@@ -248,7 +271,7 @@ export async function fanoutStatus(): Promise<FanoutStatus> {
 
 /** Reset every job to pending (idempotent re-run: successful engines are skipped). */
 export async function resetAllJobs(): Promise<number> {
-  const r = (await sql`UPDATE stt_fanout_job SET status = 'pending', error = NULL WHERE status <> 'pending' RETURNING encounter_id`) as Array<{ encounter_id: string }>;
+  const r = (await sql`UPDATE stt_subject_job SET state = 'queued', last_error = NULL WHERE state <> 'queued' RETURNING subject_id`) as Array<{ subject_id: string }>;
   return r.length;
 }
 

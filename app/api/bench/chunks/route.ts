@@ -12,13 +12,18 @@
  *         duration_ms, size_bytes, gap_before_ms, source? }
  * source (K-B, 0045): 'primary' (default — absent = today's behaviour) | 'backup'.
  * Uniqueness is (session_id, source, idx).
+ *
+ * K4a: on success this ALSO schedules a bench_window evaluation in an after() hook. Nothing
+ * about the request path changes — no extra query runs before the response — and the window
+ * write is derived from chunk rows that are already committed by the time it runs.
  */
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
 import { findBenchSession, newChunkId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
+import { evaluateAndWriteWindows } from "@/lib/bench-window";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -124,6 +129,23 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     return respondError("UPSTREAM_UNAVAILABLE", String(e).slice(0, 150));
   }
+
+  // ---- K4a A4: bench_window evaluation, AFTER the response ------------------------------
+  //
+  // THIS IS NOT IN THE REQUEST PATH AND MUST NEVER MOVE INTO IT. Everything above decides the
+  // response; `after()` runs once that response is on its way, exactly as the encounter
+  // finalize path schedules its fan-out. A kiosk waiting to hear that its upload landed is on
+  // the recording critical path, and this build adds not one query in front of it.
+  //
+  // It never throws: a window is a derived view of chunks that are already durably written,
+  // so a failure here costs a re-evaluation on the next chunk, not a chunk.
+  after(async () => {
+    try {
+      await evaluateAndWriteWindows(sessionId);
+    } catch {
+      /* non-critical: the next chunk re-evaluates the whole session */
+    }
+  });
 
   return respondOk({ ok: true, key, upload_state: "verified" });
 }

@@ -53,9 +53,16 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
            COUNT(*) FILTER (WHERE tr.is_winner)::int AS wins,
            MAX(eng.cost_per_min_usd)::float8 AS cost_per_min
       FROM transcription_run tr
-      JOIN encounter e ON e.id = tr.encounter_id
+      -- K4a C1 — LEFT, not INNER. An inner join here would silently DROP every run whose
+      -- subject is not an encounter: not wrong numbers, ABSENT ones, which is the failure
+      -- nobody notices. With no bench_window runs in existence the totals are identical to
+      -- before, and R2 checks exactly that.
+      LEFT JOIN encounter e ON e.id = tr.encounter_id
       LEFT JOIN stt_engine eng ON eng.id = tr.engine
      WHERE tr.mode = 'batch' AND tr.tier = ${tier}
+       -- The language buckets are an ENCOUNTER property. A room window has no detected
+       -- language, so it belongs to 'all' and to neither of the two language buckets — it is
+       -- excluded from them explicitly rather than by a NULL comparison quietly being false.
        AND ( ${bucket} = 'all'
              OR (${bucket} = 'english' AND e.detected_language ILIKE 'en%')
              OR (${bucket} = 'indic' AND e.detected_language IS NOT NULL AND e.detected_language NOT ILIKE 'en%') )

@@ -47,5 +47,27 @@ Commit `1857130` (build green, HEAD live, smoke 9/9, scanner clean).
 ## ✅ BACKLOG COMPLETE (2 Jun 2026) — all 20 non-security items shipped
 Tier 1 `0f40743` · Tier 2 `53039a8`/`78a5eb6`/`d60222a` · Tier 3 `f9ecb18`/`b9fde47`/`595d16c` (+ reaper cron `4390fdd`) · Tier 4 (flag-gated) `9dab463` · Tier 5 `1857130`. HEAD `1857130` live on evenscribe.app, every commit built green, smoke 9/9 throughout, migrations 0024+0025 applied. **Remaining open work (not in this backlog):** the 3 security P0s + admin-login lockout (PARKED by V); device-test + activate the Tier-4 flags (see `ETA-TIER4-FLAGS-DEVICE-TEST.md`); first CI run of the mic-denied e2e spec (#8) — nightly 02:00 UTC or manual dispatch.
 
+## Owed — opened by later builds (not part of the 2 Jun backlog)
+
+- **Name `subject_id` in the five transcription_run writers, then drop the 0058 trigger.** K4a
+  moved every READER onto `(subject_type, subject_id)`, which makes
+  `transcription_run_fill_subject_trg` redundant — but not unused. Five insert paths still omit
+  the column: `finalize-upload/route.ts` (the DOCTOR RECORDING PATH), `lib/stt/fanout.ts` ×3,
+  `lib/stt/translate-bakeoff.ts` ×1. **Four of the five swallow insert errors into a warnings
+  array**, so dropping the trigger first would break them silently — no exception, no failed
+  request, just runs that stop being written. Do the writers, observe an encounter fan-out and a
+  finalize end to end, *then* drop. Effort S · Risk med (recording path) · The condition is also
+  written on the trigger itself in `db/migrations/0058_run_subject_add.sql`.
+- **Retire `stt_fanout_job`.** K4a moved the queue to `stt_subject_job` (0061) and left the old
+  table in place, unused and undropped, as the way back. Drop it only once a FULL encounter
+  fan-out has been observed running end to end on the new table in production. Effort XS ·
+  Risk low.
+- **Tell the kiosk when its session has been reaped.** On 22 Aug the day-rollover reaper ended
+  `bs_g3dwud4p` while its kiosk kept recording into it for six more hours; no audio was lost but
+  `ended_at` now precedes the session's own last chunk by six hours. K5 gave Rule 2 a liveness
+  condition so it can no longer end a session that is still producing chunks, but nothing yet
+  tells a kiosk its session was closed underneath it, and nothing repairs an `ended_at` that
+  ended up earlier than the last chunk. Effort M · Risk low (no clinical path).
+
 ## Parked (security — deferred by V, tracked in B19)
 - seed-team unauth super-admin creation; missing admin RBAC role gates; finalize-upload key-binding. **Plus** admin-login has no lockout/rate-limit (`admin/login/route.ts`) — security-adjacent, parked here too unless reprioritized.

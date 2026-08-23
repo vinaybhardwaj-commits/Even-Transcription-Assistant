@@ -10,8 +10,23 @@
  *     and backup) is older than 30 min (zero chunks: started_at older than 30 min) → ended, with
  *     ended_at = the honest last-audio time (newest chunk, else started_at), NEVER now(). A session
  *     whose backup stream is still landing chunks is ALIVE — never reaped (the mic badges cover it).
- *   Rule 2 (R2) — DAY ROLLOVER: status <> 'ended' (recording OR paused) and started_at's IST date
- *     is before today's IST date → the same honest ending. The only rule that touches paused.
+ *   Rule 2 (R2) — DAY ROLLOVER: status <> 'ended' (recording OR paused), started_at's IST date is
+ *     before today's IST date, AND no chunk from either source inside STALL_MINUTES → the same
+ *     honest ending. The only rule that touches paused.
+ *
+ *     THE LIVENESS CONDITION IS NOT DECORATION. Until 23 Aug 2026 this rule was a CALENDAR TEST
+ *     ALONE, and on the night of 22 August it ended bs_g3dwud4p — a deliberate overnight run on
+ *     Home Office — at the IST midnight boundary while the kiosk was still recording. It stamped
+ *     ended_at 19:00:36Z; the tape went on to write chunks until 00:58:46Z, six hours later, into
+ *     a session the database considered finished. No audio was lost (108/108 primary and 108/108
+ *     backup verified) but the row now claims a three-hour session holding nine hours of audio,
+ *     and the operator monitor showed the room as NOT RECORDING while it was still capturing.
+ *
+ *     Rule 2 exists for a kiosk that CRASHED and left a session open across a night. A crashed
+ *     kiosk stops producing chunks, so the liveness test costs that case nothing — it is reaped
+ *     STALL_MINUTES after it goes quiet, exactly as before. What it can no longer do is end a
+ *     session that is still writing audio. A clinic day sits inside one IST date and never met
+ *     this rule either way; an overnight run does, and was the only thing it could harm.
  *   Badge (R10) — STALLED: a 'recording' session whose newest chunk across both sources is older
  *     than 10 min (zero chunks: started_at). K-B's mic badges take visual precedence.
  */
@@ -87,9 +102,11 @@ export function decideBenchReaps(rows: readonly BenchReapCandidate[], now: Date 
       out.push({ id: r.id, rule: "stall", note: NOTE_STALL, ended_at: endedAt });
       continue;
     }
-    // Rule 2 — day rollover (recording OR paused): started on an earlier IST date
+    // Rule 2 — day rollover (recording OR paused): started on an earlier IST date AND has
+    // gone quiet. The liveness half was added 23 Aug 2026 after it stamped a session as
+    // finished while it was still recording — see below.
     const startedDay = istDate(r.started_at);
-    if (startedDay && startedDay < today) {
+    if (startedDay && startedDay < today && nowMs - last > STALL_MINUTES * 60_000) {
       out.push({ id: r.id, rule: "rollover", note: NOTE_ROLLOVER, ended_at: endedAt });
     }
   }

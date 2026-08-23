@@ -402,9 +402,13 @@ function LeaderboardTab() {
 }
 
 // ---- Runs tab (L4) ---------------------------------------------------------
-type RunListItem = { id: string; patient_label_raw: string | null; recorded_at: string | null; detected_language: string | null; note_type: string | null; engines: number; errored: number; winner: string | null; has_gold: boolean; avg_judge: number | null };
+/** K4a C2 — every subject says WHICH KIND it is. A list that mixes encounters and room windows
+ *  without labelling them is a trap: their per-run numbers do not mean the same thing. */
+type Subject = { type: string; id: string | null; kind_label: string; label: string };
+type RunListItem = { id: string; subject?: Subject; patient_label_raw: string | null; recorded_at: string | null; detected_language: string | null; note_type: string | null; engines: number; errored: number; winner: string | null; has_gold: boolean; avg_judge: number | null };
 type RunDetailRow = { engine: string; tier?: string; transcript_english: string | null; transcript_original: string | null; note_text?: string | null; latency_ms: number | null; error: string | null; judge_score: number | null; agreement_score: number | null; wer: number | null; cer: number | null; med_term_recall: number | null; is_winner: boolean };
-type RunDetail = { encounter: { id: string; patient_label_raw: string | null; detected_language: string | null }; runs: RunDetailRow[]; gold: { reference_english: string | null; reference_original: string | null } | null };
+// `encounter` is NULL for a room window (C1) — nothing may dereference it unguarded.
+type RunDetail = { subject?: Subject; encounter: { id: string; patient_label_raw: string | null; detected_language: string | null } | null; window?: { id: string; session_id: string; source_mic: string; state: string } | null; runs: RunDetailRow[]; gold: { reference_english: string | null; reference_original: string | null } | null };
 
 function diffWords(text: string, goldWords: Set<string> | null) {
   if (!goldWords) return <>{text}</>;
@@ -431,13 +435,21 @@ function RunsTab() {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[280px,1fr] gap-5">
       <section className="rounded-2xl border border-even-ink-100 bg-even-white p-4 max-h-[640px] overflow-y-auto">
-        <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Encounters ({list?.length ?? 0})</h4>
+        <h4 className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-2">Subjects ({list?.length ?? 0})</h4>
         <ul className="space-y-1">
           {list?.map((r) => (
             <li key={r.id}>
               <button onClick={() => void open(r.id)} className={`w-full text-left px-2 py-1.5 rounded-md text-caption ${sel === r.id ? "bg-even-blue-100 text-even-navy-800" : "hover:bg-even-ink-50"}`}>
-                <div className="truncate">{r.patient_label_raw || r.id}</div>
-                <div className="text-even-ink-400">{r.detected_language || "?"} · {r.engines} eng{r.has_gold ? " · gold" : ""}{r.winner ? ` · ${r.winner}` : ""}</div>
+                <div className="truncate">{r.subject?.label || r.patient_label_raw || r.id}</div>
+                <div className="text-even-ink-400">
+                  {/* C2 — the kind, always, and never "undefined": a room window has no language,
+                      so the language slot is simply omitted for it rather than rendered "?" */}
+                  {r.subject && r.subject.type !== "encounter" ? (
+                    <span className="inline-block mr-1 px-1 rounded bg-even-ink-100 text-even-ink-600">{r.subject.kind_label}</span>
+                  ) : null}
+                  {r.subject?.type === "bench_window" ? null : <>{r.detected_language || "?"} · </>}
+                  {r.engines} eng{r.has_gold ? " · gold" : ""}{r.winner ? ` · ${r.winner}` : ""}
+                </div>
               </button>
             </li>
           ))}
@@ -446,10 +458,18 @@ function RunsTab() {
 
       <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5">
         {!sel || !detail ? (
-          <p className="text-body text-even-ink-400">Select an encounter to see the engine comparison.</p>
+          <p className="text-body text-even-ink-400">Select a subject to see the engine comparison.</p>
         ) : (
           <div className="space-y-4">
-            <h3 className="text-label text-even-navy-800">{detail.encounter.patient_label_raw || detail.encounter.id} <span className="text-caption text-even-ink-400">{detail.encounter.detected_language}</span></h3>
+            <h3 className="text-label text-even-navy-800">
+              {detail.subject?.label || detail.encounter?.patient_label_raw || detail.encounter?.id || sel}
+              {detail.subject && detail.subject.type !== "encounter" ? (
+                <span className="ml-2 text-caption px-1 rounded bg-even-ink-100 text-even-ink-600">{detail.subject.kind_label}</span>
+              ) : null}
+              {detail.encounter?.detected_language ? (
+                <span className="ml-2 text-caption text-even-ink-400">{detail.encounter.detected_language}</span>
+              ) : null}
+            </h3>
             {detail.gold && (
               <div className="rounded-md border border-success-500/40 bg-success-100/20 p-3">
                 <div className="text-[10px] uppercase tracking-[0.14em] text-even-ink-500 mb-1">Gold reference</div>

@@ -24,7 +24,11 @@ export async function GET(_req: NextRequest) {
     SELECT e.id, e.patient_label_raw, e.recorded_at, e.detected_language,
            COUNT(DISTINCT tr.engine)::int AS engines
       FROM encounter e
-      JOIN transcription_run tr ON tr.encounter_id = e.id AND tr.mode = 'batch' AND tr.tier = 'asr' AND tr.error IS NULL
+      -- K4a C1 — keyed on the subject now, and pinned to encounter subjects: gold is a
+      -- reference transcript for a consultation, and stt_gold is keyed on encounter_id, so a
+      -- room window can never be a candidate. Stated as a filter rather than left to the join.
+      JOIN transcription_run tr ON tr.subject_type = 'encounter' AND tr.subject_id = e.id
+                               AND tr.mode = 'batch' AND tr.tier = 'asr' AND tr.error IS NULL
      WHERE e.id NOT IN (SELECT encounter_id FROM stt_gold)
      GROUP BY e.id, e.patient_label_raw, e.recorded_at, e.detected_language
      ORDER BY e.recorded_at DESC NULLS LAST

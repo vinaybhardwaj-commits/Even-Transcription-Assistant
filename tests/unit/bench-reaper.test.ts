@@ -69,11 +69,65 @@ describe("Rule 2 — day rollover (R2, IST)", () => {
     expect(decideBenchReaps([{ id: "b1", status: "paused", started_at: "2026-08-18T18:29:59.000Z" }], NOW).map((x) => x.id)).toEqual(["b1"]);
     expect(decideBenchReaps([{ id: "b2", status: "paused", started_at: "2026-08-18T18:30:00.000Z" }], NOW)).toEqual([]);
   });
-  it("a yesterday recording session that is ALSO silent > 30 min carries the stall note (Rule 1 wins the note); a yesterday recording session still landing chunks rolls over", () => {
+  it("a yesterday recording session that is ALSO silent > 30 min carries the stall note (Rule 1 wins the note)", () => {
     const both = decideBenchReaps([{ id: "r", status: "recording", started_at: "2026-08-18T04:30:00.000Z", last_backup_at: "2026-08-18T11:00:00.000Z" }], NOW);
     expect(both[0].rule).toBe("stall");
-    const live = decideBenchReaps([{ id: "l", status: "recording", started_at: "2026-08-18T04:30:00.000Z", last_primary_at: iso(NOW - min(1)) }], NOW);
-    expect(live).toEqual([{ id: "l", rule: "rollover", note: NOTE_ROLLOVER, ended_at: iso(NOW - min(1)) }]);
+  });
+
+  // ── 23 Aug 2026: Rule 2 gains a liveness condition ───────────────────────────────────────
+  //
+  // This block previously asserted the OPPOSITE — that "a yesterday recording session still
+  // landing chunks rolls over". That was the bug, not the contract. On the night of 22 August
+  // it ended bs_g3dwud4p, a deliberate overnight run, at the IST midnight boundary while the
+  // kiosk was still recording: ended_at stamped 19:00:36Z against a last chunk at 00:58:46Z,
+  // six hours later. The old assertion is inverted below rather than deleted, so the change of
+  // mind is visible to whoever reads this next.
+  it("ACCEPTANCE — a session started yesterday IST whose newest chunk is 2 minutes old is NOT reaped", () => {
+    const live = decideBenchReaps(
+      [{ id: "overnight", status: "recording", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(2)) }],
+      NOW,
+    );
+    expect(live).toEqual([]);
+  });
+
+  it("ACCEPTANCE — the SAME session with a chunk 45 minutes old IS reaped", () => {
+    const dead = decideBenchReaps(
+      [{ id: "overnight", status: "recording", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(45)) }],
+      NOW,
+    );
+    // Rule 1 owns a silent RECORDING session and wins the note; the session is ended either way,
+    // at the honest last-audio time. A crashed kiosk is still cleaned up.
+    expect(dead).toHaveLength(1);
+    expect(dead[0]!.ended_at).toBe(iso(NOW - min(45)));
+    expect(["stall", "rollover"]).toContain(dead[0]!.rule);
+  });
+
+  it("a PAUSED session from yesterday still rolls over once quiet — Rule 1 never touches paused", () => {
+    const quiet = decideBenchReaps(
+      [{ id: "p", status: "paused", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(45)) }],
+      NOW,
+    );
+    expect(quiet).toEqual([{ id: "p", rule: "rollover", note: NOTE_ROLLOVER, ended_at: iso(NOW - min(45)) }]);
+    // …and a paused session from yesterday that is somehow STILL landing chunks is left alone
+    const live = decideBenchReaps(
+      [{ id: "p2", status: "paused", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(2)) }],
+      NOW,
+    );
+    expect(live).toEqual([]);
+  });
+
+  it("STALL_MINUTES is unchanged, and it is the same window both rules use", () => {
+    expect(STALL_MINUTES).toBe(30);
+    const justInside = decideBenchReaps(
+      [{ id: "a", status: "paused", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(30)) }],
+      NOW,
+    );
+    expect(justInside).toEqual([]);           // exactly 30 min is not yet "> 30 min"
+    const justOutside = decideBenchReaps(
+      [{ id: "b", status: "paused", started_at: "2026-08-18T18:00:00.000Z", last_primary_at: iso(NOW - min(31)) }],
+      NOW,
+    );
+    expect(justOutside).toHaveLength(1);
   });
   it("cap: at most REAP_CAP decisions per run", () => {
     const rows = Array.from({ length: 80 }, (_, i) => ({ id: `bs_${i}`, status: "recording", started_at: iso(NOW - min(60)) }));
