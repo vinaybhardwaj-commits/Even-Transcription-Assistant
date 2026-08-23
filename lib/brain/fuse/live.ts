@@ -1,5 +1,5 @@
 /**
- * lib/brain/fuse/live.ts — the fuse runs by itself, behind FUSE_LIVE_ENABLED (K2 Part D).
+ * lib/brain/fuse/live.ts — the fuse runs by itself, behind the room's Visits switch (K2 Part D).
  *
  * Until now the fuse was an operator tool: scribe_fuse_run, scratch-only, dry-run by default.
  * ZERO visit rows existed on any live clinic day. This module is the first thing that writes a
@@ -7,7 +7,7 @@
  * live OPD recording day.
  *
  * ─── THE FLAG IS THE WHOLE SAFETY STORY ──────────────────────────────────────────────────
- * `isFuseLiveEnabled(roomId)` is per-room and defaults off (see live-flag.ts, which carries the
+ * `isVisitsEnabled(roomId)` is per-room and defaults off (see lib/room-switches.ts, which carries the
  * hazard list of every call site). With the flag off for a room, NOTHING in this file executes
  * for that room: the cue route's call is inside an `if`, and runLiveFuse re-checks on entry so
  * the entry point is safe to call directly. The cue write path for a flag-off room is therefore
@@ -55,7 +55,7 @@ import {
 } from "@/lib/brain/state";
 import { ambiguityOf, runRulesArm, type TapeSession } from "./rules";
 import { VISIT_STATES, type DraftVisit, type FuseCue } from "./types";
-import { isFuseLiveEnabled } from "./live-flag";
+import { isVisitsEnabled } from "@/lib/room-switches";
 import { updateOpenVisit } from "./visit-update";
 
 /**
@@ -146,13 +146,13 @@ export async function readSessionsForDay(roomId: string, istDate: string): Promi
 }
 
 /**
- * Run the fuse for one LIVE room_day. Re-checks the flag on entry (hazard list call site 2).
+ * Run the fuse for one LIVE room_day. Re-checks the Visits switch on entry, so the runner is safe to call directly.
  *
  * Never throws: a fuse failure must not turn a successful cue write into an error, because the
  * cue is the durable record and the fuse is a derived view of it.
  */
 export async function runLiveFuse(roomId: string, roomDayId: string, istDate: string): Promise<LiveFuseResult> {
-  if (!isFuseLiveEnabled(roomId)) return { ok: true, room_day_id: roomDayId, skipped: "flag_off" };
+  if (!(await isVisitsEnabled(roomId))) return { ok: true, room_day_id: roomDayId, skipped: "flag_off" };
   try {
     return await fuseNow(roomId, roomDayId, istDate);
   } catch (e) {
@@ -166,7 +166,7 @@ export async function runLiveFuse(roomId: string, roomDayId: string, istDate: st
  * follows a burst with exactly one trailing run so nothing is left unfused.
  */
 export async function scheduleLiveFuse(roomId: string, roomDayId: string, istDate: string): Promise<LiveFuseResult> {
-  if (!isFuseLiveEnabled(roomId)) return { ok: true, room_day_id: roomDayId, skipped: "flag_off" };
+  if (!(await isVisitsEnabled(roomId))) return { ok: true, room_day_id: roomDayId, skipped: "flag_off" };
 
   const now = Date.now();
   const entry = debounce.get(roomDayId) ?? { running: false, dirty: false, lastStartedAt: 0 };

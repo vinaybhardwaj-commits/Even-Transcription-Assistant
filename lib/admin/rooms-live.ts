@@ -26,7 +26,7 @@ import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 import { LISTENER_FRESH_MS, type ListenerRow } from "@/lib/bench-commands";
 import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
-import { ENDED_DISAGREES_SKEW_GRACE_MS } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse } from "@/lib/bench-bus-constants";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
  *  same literal, and tests hold the two in agreement with 0054's index predicate. */
@@ -109,7 +109,6 @@ export function listenerState(listener: ListenerRow | null, readFailed: boolean,
 export {
   LISTENER_OFFLINE_MS,
   roomState,
-  fmtCoarse,
   fmtDayIst,
   ENDED_DISAGREES,
   ENDED_DISAGREES_TITLE,
@@ -124,6 +123,8 @@ export {
  *  HALF-OPEN [from, to) so the range is sargable and bench_session_room_started_idx is usable —
  *  the reason the monitor writes its own session query instead of reusing listBenchSessions,
  *  whose AT TIME ZONE filter defeats any index on started_at. */
+export { fmtCoarse };
+
 export function istDayRangeUtc(istDate: string): { fromIso: string; toIso: string } {
   const from = Date.parse(`${istDate}T00:00:00.000+05:30`);
   return { fromIso: new Date(from).toISOString(), toIso: new Date(from + 86_400_000).toISOString() };
@@ -187,6 +188,13 @@ export type RoomLive = {
    * the chunk after this build shipped, whereas the chunks are the durable evidence and were
    * there all along. The event is the timeline record; this is the live read.
    */
+  /** The two switches, as stored. Null-free: a room row always has them after 0065. */
+  transcript_enabled: boolean;
+  visits_enabled: boolean;
+  transcript_counts: TranscriptCounts;
+  visit_counts: VisitCounts;
+  /** Ready-made lane rows — one place decides the words, so the screen and the MCP agree. */
+  lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
   ended_disagrees: boolean;
   ended_disagrees_session_id: string | null;
   /** When the row says the session ended — the start of the disagreement, not of the session. */
@@ -206,10 +214,25 @@ export type RoomLive = {
   degraded: string[];
 };
 
+/**
+ * Today, all rooms — the four numbers in the mockup's day card.
+ *
+ * MINUTES OF AUDIO, NEVER MONEY (R11). A rupee figure on a clinical monitor invites the wrong
+ * conversation in front of the wrong person, and there is deliberately no field here that could
+ * carry one.
+ */
+export type DaySummary = {
+  audio_recorded_ms: number;
+  turned_into_words_ms: number;
+  gave_up: number;
+  visits_built: number;
+};
+
 export type RoomsLiveResult = {
   ist_date: string;
   now: string;
   rooms: RoomLive[];
+  day: DaySummary;
   thresholds: {
     mic_amber_ms: number;
     mic_red_ms: number;
@@ -253,6 +276,18 @@ export const SQL_ROOM_DAY_ROLLUP =
  * stt_turn rows the backward scan can read a long way before it meets an stt_window. It is on the
  * 20 s poll, never the 3 s one, and the fix if it ever bites is a fifth partial index.
  */
+/**
+ * The Visits lane: visits built on today's room-day, and how many are still open.
+ * 'ended' is the only closed state in visit.state's CHECK, so open is everything else.
+ * visit_room_day_idx (0042) serves the join.
+ */
+export const SQL_VISITS_TODAY =
+  "SELECT rd.room_id, COUNT(v.id)::int AS built, " +
+  "COUNT(v.id) FILTER (WHERE v.state <> 'ended')::int AS open " +
+  "FROM room_day rd JOIN visit v ON v.room_day_id = rd.id " +
+  "WHERE rd.ist_date = $1::date AND rd.room_id = ANY($2::text[]) " +
+  "GROUP BY rd.room_id";
+
 export const SQL_LAST_WINDOW_MARKER =
   "SELECT DISTINCT ON (rd.room_id) rd.room_id, c.at, c.payload " +
   "FROM room_day rd JOIN cue c ON c.room_day_id = rd.id " +
@@ -263,7 +298,73 @@ export const SQL_LAST_WINDOW_MARKER =
 // The aggregation
 // ---------------------------------------------------------------------------
 
-type RoomRow = { id: string; slug: string; name: string };
+type RoomRow = { id: string; slug: string; name: string; transcript_enabled: boolean; visits_enabled: boolean };
+
+/**
+ * The three lanes the card shows, in the operator's words (PRD R4). The interface never says
+ * drain, fuse, window or subject — those are ours. `level` follows R6: GREEN MEANS WORKING. A
+ * lane that is on with nothing to do is grey and says so, because "on" showing green while
+ * nothing happens is the state that hid a nine-hour fault.
+ */
+/** The four lamp colours the mockup draws: green working, amber acting-needed, red audio at
+ *  risk, grey off-or-idle. Its own union rather than `Level` — `Level` has "unknown", which a
+ *  lane never is, and lacks "off", which is half of what a lane says. */
+export type LaneLevel = "ok" | "amber" | "red" | "off";
+export type LaneView = { level: LaneLevel; state: string; enabled: boolean | null };
+
+/** Counts behind the Transcript lane, for one room, today. Derived from bench_window state. */
+export type TranscriptCounts = { done: number; waiting: number; in_progress: number; failed: number; words_ms: number };
+export type VisitCounts = { built: number; open: number };
+
+/**
+ * PURE — the three lanes, in plain words (PRD §7 and the approved mockup).
+ *
+ * THE RULE THAT MATTERS IS R6: GREEN MEANS WORKING. A lane that is switched on with nothing to
+ * do is GREY and says "On, nothing to do". It is not green. An "on" lamp glowing over a room
+ * where nothing is happening is precisely the display that let a nine-hour fault sit unnoticed
+ * on Friday night, and the whole point of putting three lanes on the card is to stop reading a
+ * switch position as evidence of work.
+ */
+export function tapeLane(r: {
+  recording: boolean; paused_session: boolean; stalled: boolean; stalled_age_ms: number | null;
+  session_started_at: string | null; primary_chunks: number; nowMs: number;
+}): LaneView {
+  if (r.stalled) {
+    return { level: "red", state: `Says recording, silent ${fmtCoarse(r.stalled_age_ms ?? 0)}`, enabled: null };
+  }
+  if (r.paused_session) return { level: "amber", state: "Paused for consent", enabled: null };
+  if (r.recording) {
+    const since = ms(r.session_started_at);
+    const dur = since === null ? null : r.nowMs - since;
+    const pieces = `${r.primary_chunks} piece${r.primary_chunks === 1 ? "" : "s"}`;
+    return { level: "ok", state: dur === null ? `Recording · ${pieces}` : `Recording · ${fmtCoarse(dur)} · ${pieces}`, enabled: null };
+  }
+  return { level: "off", state: "Not recording", enabled: null };
+}
+
+export function transcriptLane(enabled: boolean, c: TranscriptCounts): LaneView {
+  if (!enabled) return { level: "off", state: "Off", enabled: false };
+  const busy = c.done + c.waiting + c.in_progress + c.failed;
+  if (busy === 0) return { level: "off", state: "On, nothing to do", enabled: true };
+  const parts: string[] = [`${c.done} done`];
+  if (c.waiting > 0) parts.push(`${c.waiting} waiting`);
+  if (c.in_progress > 0) parts.push(`${c.in_progress} in progress`);
+  if (c.failed > 0) parts.push(`${c.failed} failed`);
+  // AMBER when anything is waiting or has given up — those are the two states a person can act
+  // on. Green only when the queue is empty and nothing failed, which is what "up to date" means.
+  const behind = c.waiting > 0 || c.failed > 0;
+  return {
+    level: behind ? "amber" : "ok",
+    state: behind ? parts.join(", ") : `${parts.join(", ")} · up to date`,
+    enabled: true,
+  };
+}
+
+export function visitsLane(enabled: boolean, v: VisitCounts): LaneView {
+  if (!enabled) return { level: "off", state: "Off", enabled: false };
+  if (v.built === 0) return { level: "off", state: "On, nothing to do", enabled: true };
+  return { level: "ok", state: `${v.built} today · ${v.open} open`, enabled: true };
+}
 
 /**
  * PURE — the per-room view, from rows already read. Every threshold decision happens here so it
@@ -272,6 +373,7 @@ type RoomRow = { id: string; slug: string; name: string };
 export function buildRoomLive(
   room: RoomRow,
   sessions: readonly LiveSession[],
+  counts: { transcript: TranscriptCounts; visits: VisitCounts },
   brain: {
     last_warehouse_at: string | null;
     marks_today: number;
@@ -343,8 +445,12 @@ export function buildRoomLive(
   const clockBase = ms(brain.last_warehouse_at) ?? ms(live?.started_at ?? null);
   const doctorClockSilentMs = recording && !pausedSession && clockBase !== null ? Math.max(0, nowMs - clockBase) : null;
 
+  const transcriptEnabled = Boolean(room.transcript_enabled);
+  const visitsEnabled = Boolean(room.visits_enabled);
+  const primaryChunks = sessions.reduce((a, sn) => a + (sn.primary_chunks || 0), 0);
+
   return {
-    room,
+    room: { id: room.id, slug: room.slug, name: room.name },
     recording: Boolean(recording),
     paused_session: Boolean(pausedSession),
     session_id: live?.id ?? null,
@@ -357,6 +463,19 @@ export function buildRoomLive(
     backup_reads_no_chunks: backupReadsNoChunks,
     stalled: stalledSession !== null,
     stalled_age_ms: stalledAge,
+    transcript_enabled: transcriptEnabled,
+    visits_enabled: visitsEnabled,
+    transcript_counts: counts.transcript,
+    visit_counts: counts.visits,
+    lanes: {
+      tape: tapeLane({
+        recording: Boolean(recording), paused_session: Boolean(pausedSession),
+        stalled: stalledSession !== null, stalled_age_ms: stalledAge,
+        session_started_at: live ? iso(live.started_at) : null, primary_chunks: primaryChunks, nowMs,
+      }),
+      transcript: transcriptLane(transcriptEnabled, counts.transcript),
+      visits: visitsLane(visitsEnabled, counts.visits),
+    },
     ended_disagrees: disagreeing !== null,
     ended_disagrees_session_id: disagreeing?.id ?? null,
     ended_disagrees_ended_at: disagreeing?.ended_at ?? null,
@@ -400,7 +519,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   let rooms: RoomRow[] = [];
   try {
     rooms = (await sql`
-      SELECT id, slug, name FROM room
+      SELECT id, slug, name, transcript_enabled, visits_enabled FROM room
        WHERE disabled_at IS NULL
          AND left(id, length('room_scratch_'::text)) <> 'room_scratch_'::text
        ORDER BY created_at
@@ -477,8 +596,59 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     }
   }
 
+  // ---- Transcript lane: bench_window state per room, today -------------------------------
+  //
+  // Windows are reached through their session, because bench_window carries session_id and the
+  // day is already scoped by session start above. 'open' is NOT counted: a window still being
+  // recorded into is not work waiting, and counting it would make every live room read "behind".
+  const transcriptByRoom = new Map<string, TranscriptCounts>();
+  if (sessionIds.length) {
+    try {
+      const rows = (await sql`
+        SELECT s.room_id,
+               COUNT(*) FILTER (WHERE w.state = 'transcribed')  ::int AS done,
+               COUNT(*) FILTER (WHERE w.state = 'closed')       ::int AS waiting,
+               COUNT(*) FILTER (WHERE w.state = 'transcribing') ::int AS in_progress,
+               COUNT(*) FILTER (WHERE w.state = 'failed')       ::int AS failed,
+               COALESCE(SUM(w.end_ms - w.start_ms) FILTER (WHERE w.state = 'transcribed'), 0)::bigint AS words_ms
+          FROM bench_window w
+          JOIN bench_session s ON s.id = w.session_id
+         WHERE w.session_id = ANY(${sessionIds}::text[])
+         GROUP BY s.room_id
+      `) as Array<{ room_id: string; done: number; waiting: number; in_progress: number; failed: number; words_ms: string | number }>;
+      for (const r of rows) {
+        transcriptByRoom.set(r.room_id, {
+          done: Number(r.done) || 0, waiting: Number(r.waiting) || 0,
+          in_progress: Number(r.in_progress) || 0, failed: Number(r.failed) || 0,
+          words_ms: Number(r.words_ms) || 0,
+        });
+      }
+    } catch (e) {
+      topDegraded.push(`transcript_counts_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+  }
+
+  // ---- audio recorded today, per room. PRIMARY ONLY -------------------------------------
+  // The backup lane records the same wall-clock in parallel, so summing both would report double
+  // the audio that exists. This is minutes of tape, not minutes of file.
+  const audioMsByRoom = new Map<string, number>();
+  if (sessionIds.length) {
+    try {
+      const rows = (await sql`
+        SELECT s.room_id, COALESCE(SUM(c.duration_ms), 0)::bigint AS audio_ms
+          FROM bench_chunk c JOIN bench_session s ON s.id = c.session_id
+         WHERE c.session_id = ANY(${sessionIds}::text[]) AND c.source = 'primary'
+         GROUP BY s.room_id
+      `) as Array<{ room_id: string; audio_ms: string | number }>;
+      for (const r of rows) audioMsByRoom.set(r.room_id, Number(r.audio_ms) || 0);
+    } catch (e) {
+      topDegraded.push(`audio_minutes_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+  }
+
   const brainByRoom = new Map<string, { last_warehouse_at: string | null; marks_today: number; last_mark_at: string | null; last_window_asked_at: string | null; last_window_complete: boolean | null }>();
   const brainDegraded: string[] = [];
+  const visitsByRoom = new Map<string, VisitCounts>();
   if (roomIds.length) {
     try {
       const r = await brainQuery<{ room_id: string; last_warehouse_at: Date | null; marks_today: number; last_mark_at: Date | null }>(SQL_ROOM_DAY_ROLLUP, [istDate, roomIds]);
@@ -495,6 +665,13 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       brainDegraded.push(`brain_rollup_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
     }
     try {
+      // Visits lane: what the fuse has built on today's room-day, and how many are still open.
+      const r = await brainQuery<{ room_id: string; built: number; open: number }>(SQL_VISITS_TODAY, [istDate, roomIds]);
+      for (const row of r.rows) visitsByRoom.set(row.room_id, { built: Number(row.built) || 0, open: Number(row.open) || 0 });
+    } catch (e) {
+      brainDegraded.push(`visits_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+    try {
       const r = await brainQuery<{ room_id: string; at: Date; payload: unknown }>(SQL_LAST_WINDOW_MARKER, [istDate, roomIds]);
       for (const row of r.rows) {
         const prev = brainByRoom.get(row.room_id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
@@ -505,17 +682,30 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     }
   }
 
+  const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, waiting: 0, in_progress: 0, failed: 0, words_ms: 0 };
   const out = rooms.map((room) => {
     const mine = byRoom.get(room.id) ?? [];
     const brain = brainByRoom.get(room.id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
     const marksNotSent = mine.reduce((a, s) => a + (notSent.get(s.id) ?? 0), 0);
-    return buildRoomLive(room, mine, brain, marksNotSent, nowMs, [...brainDegraded]);
+    const counts = {
+      transcript: transcriptByRoom.get(room.id) ?? ZERO_TRANSCRIPT,
+      visits: visitsByRoom.get(room.id) ?? { built: 0, open: 0 },
+    };
+    return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });
+
+  const day: DaySummary = {
+    audio_recorded_ms: [...audioMsByRoom.values()].reduce((a, b) => a + b, 0),
+    turned_into_words_ms: out.reduce((a, r) => a + r.transcript_counts.words_ms, 0),
+    gave_up: out.reduce((a, r) => a + r.transcript_counts.failed, 0),
+    visits_built: out.reduce((a, r) => a + r.visit_counts.built, 0),
+  };
 
   return {
     ist_date: istDate,
     now: now.toISOString(),
     rooms: out,
+    day,
     thresholds: {
       mic_amber_ms: MIC_AMBER_MS,
       mic_red_ms: MIC_RED_MS,

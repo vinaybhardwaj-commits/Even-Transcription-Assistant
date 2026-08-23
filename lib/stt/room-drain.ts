@@ -3,7 +3,7 @@
  *
  * A closed bench_window becomes: one joined clip, one language probe, one paid transcription,
  * one transcription_run, and one window's worth of turn cues. Nothing here runs for a room
- * unless ROOM_STT_DRAIN_ENABLED names that room.
+ * unless that room's Transcript switch is on (room.transcript_enabled).
  *
  * ─── WHY TWO ENGINES FOR ONE WINDOW ──────────────────────────────────────────────────────
  * Sarvam returns ONE untimed transcript for a fifteen-minute window. `buildTurns` needs timed
@@ -40,7 +40,7 @@ import { getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { resolveRange, type CoveringChunk, type RangeChunk } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService, refuseIfTooLong, clipKey, joinServiceConfigured } from "@/lib/bench-join";
-import { isRoomDrainEnabled } from "./room-drain-flag";
+import { isTranscriptEnabled } from "@/lib/room-switches";
 import { resolveRouting } from "./routing";
 import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
@@ -245,9 +245,11 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
     const w = wr[0];
     if (!w) return out;
 
-    // HAZARD call site 2 of 3 — see lib/stt/room-drain-flag.ts. Checked on entry so the runner
-    // is safe to call directly and cannot be reached with the flag off by a future caller.
-    if (!isRoomDrainEnabled(w.room_id)) return { ...out, step: "flag_off" };
+    // The switch, checked ON ENTRY so the runner is safe to call directly and cannot be reached
+    // with Transcript off by a future caller. Read from the room row (lib/room-switches), not
+    // from the environment: turning it off takes effect within ROOM_SWITCH_CACHE_MS and needs
+    // no deploy. `step: "flag_off"` keeps its wire name — callers and tests read it.
+    if (!(await isTranscriptEnabled(w.room_id))) return { ...out, step: "flag_off" };
 
     // `force` is how a window is RE-transcribed (T6). Without it a settled window is left
     // alone, so a queue pass can never redo work that is already done and already paid for.
@@ -490,7 +492,7 @@ export async function drainQueuedRoomWindows(origin: string, limit = 1): Promise
   `) as Array<{ subject_id: string; room_id: string }>;
   const out: DrainOutcome[] = [];
   for (const j of jobs) {
-    if (!isRoomDrainEnabled(j.room_id)) {
+    if (!(await isTranscriptEnabled(j.room_id))) {
       out.push({ window_id: j.subject_id, ok: false, step: "flag_off" });
       continue;
     }

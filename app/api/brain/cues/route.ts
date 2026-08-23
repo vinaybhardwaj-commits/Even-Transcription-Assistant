@@ -37,7 +37,7 @@
  * There is still exactly ONE write door for cues, which is what keeps the MCP layer free of
  * cue SQL (tests/unit/mcp-s3.test.ts).
  *
- * K2 PART D — the live fuse, behind FUSE_LIVE_ENABLED (per-room, default OFF). The ONLY thing
+ * K2 PART D — the live fuse, behind the room's Visits switch (per-room, default OFF). The ONLY thing
  * this route gained is a flag-guarded call at the very end of the LIVE branch, after the cue is
  * committed and the response is already decided. Flag off for a room → that call is not made
  * and this route behaves exactly as it did at 8b6e548. The scratch guard below is untouched:
@@ -48,8 +48,7 @@ import { NextResponse } from "next/server";
 import { checkBearer } from "@/lib/brain/auth";
 import { brainLog, classifyBrainError } from "@/lib/brain/db";
 import { withRoomDayLock } from "@/lib/brain/lock";
-import { isRoomDrainEnabled } from "@/lib/stt/room-drain-flag";
-import { isFuseLiveEnabled } from "@/lib/brain/fuse/live-flag";
+import { isTranscriptEnabled, isVisitsEnabled, ROOM_SWITCH_CACHE_MS } from "@/lib/room-switches";
 import { scheduleLiveFuse } from "@/lib/brain/fuse/live";
 import {
   deleteWindowCues,
@@ -254,18 +253,22 @@ export async function POST(req: Request) {
         //
         // The room STT drain's whole purpose is to put a room's own turns onto that room's own
         // day. There is no scratch day for a live tape, and a turn written somewhere else is not
-        // the room's transcript. So a room NAMED IN ROOM_STT_DRAIN_ENABLED may write its live
-        // day, and no other room may.
+        // the room's transcript. So a room whose Transcript switch is ON may write its live day,
+        // and no other room may.
         //
         // WHAT KEEPS THIS SAFE:
-        //   · the flag holds a LIST OF ROOM IDS and refuses "1"/"true"/"*" by name, so there is
-        //     no value of it that opens every room at once;
-        //   · it is read HERE, inside the lock, per request — turning the flag off restores the
-        //     guard on the very next call, with no deploy and no cache to wait out;
-        //   · with the flag unset (the default, and every clinic room) this line is exactly the
+        //   · the switch is PER ROOM, on that room's own row — there is no single value of
+        //     anything that opens every room at once, which is what the old comma-separated
+        //     environment variable had to refuse "1"/"true"/"*" by name to achieve;
+        //   · it is read HERE, per request — turning it off restores the guard within
+        //     ROOM_SWITCH_CACHE_MS, with no deploy;
+        //   · with the switch off (the default, and every room today) this line is exactly the
         //     `day.scratch !== true` test it replaced.
         // The single-cue path below is NOT given this hole; it does not need one.
-        if (day.scratch !== true && !isRoomDrainEnabled(day.room_id)) {
+        //
+        // The read is cached, so the common case adds no query inside this lock; a miss adds one
+        // app-handle round trip at most once per ROOM_SWITCH_CACHE_MS per room.
+        if (day.scratch !== true && !(await isTranscriptEnabled(day.room_id))) {
           throw new HttpError(409, "not_a_scratch_day");
         }
         // The replace, in this order and inside this one transaction. A throw anywhere below
@@ -357,16 +360,17 @@ export async function POST(req: Request) {
     // already done: the cue is committed, the lock is released, `out` holds the state that will
     // be returned. This block cannot alter any of it.
     //
-    // WITH THE FLAG OFF FOR THIS ROOM — which is the default, and which is the state every
-    // clinic room is in for Monday 24 August — `isFuseLiveEnabled` returns false, the body
-    // never executes, and this path is byte-for-byte the path at 8b6e548. That is provable by
-    // reading these six lines: there is no other branch, no module-scope side effect (the flag
-    // is read at the point of use), and no import of lib/brain/fuse/live that runs anything.
+    // WITH VISITS OFF FOR THIS ROOM — which is the default, and the state every room is in
+    // today — `isVisitsEnabled` returns false, the body never executes, and this path is
+    // byte-for-byte the path at 8b6e548. That is provable by reading these six lines: there is
+    // no other branch, no module-scope snapshot of the value (the row is read at the point of
+    // use, cached for at most ROOM_SWITCH_CACHE_MS), and no import of lib/brain/fuse/live that
+    // runs anything.
     //
-    // WITH THE FLAG ON, scheduleLiveFuse debounces and then reads/computes OUTSIDE the room_day
+    // WITH VISITS ON, scheduleLiveFuse debounces and then reads/computes OUTSIDE the room_day
     // lock, taking it only to write (D4). It never throws: a fuse failure must not turn a
     // successful cue write into an error, because the cue is the durable record.
-    if (isFuseLiveEnabled(roomId)) {
+    if (await isVisitsEnabled(roomId)) {
       const fused = await scheduleLiveFuse(roomId, day.id, date);
       brainLog("info", "fuse_live", { room_id: roomId, ...fused });
     }

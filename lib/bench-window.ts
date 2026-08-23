@@ -73,7 +73,7 @@
 
 import { sql } from "@/lib/db";
 import { decideSource, type MicEventRow, type MicSource } from "@/lib/bench-source";
-import { isRoomDrainEnabled } from "@/lib/stt/room-drain-flag";
+import { isTranscriptEnabled } from "@/lib/room-switches";
 import { enqueueSubject } from "@/lib/stt/fanout";
 
 /** The grid. 15 minutes, aligned to the IST hour. */
@@ -331,7 +331,7 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
           if (upd.length > 0) {
             base.closed++;
             // C1 — a window becoming CLOSED is the drain's trigger, and this is the only place
-            // that transition happens. HAZARD call site 1 of 3 (lib/stt/room-drain-flag.ts).
+            // that transition happens. Gated on the room's Transcript switch (lib/room-switches).
             //
             // Guarded three ways: the flag must name this room, the window must be grid-aligned,
             // and the enqueue only runs on the open→closed edge — `upd.length > 0` means THIS
@@ -341,7 +341,7 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
             // Enqueue only. No join, no engine call, no cue, and no money is spent here: this
             // runs inside the chunk route's after() hook, and a paid API call has no business on
             // the tail of a recording request.
-            if (roomId && v.source_mic && isRoomDrainEnabled(roomId)) {
+            if (roomId && v.source_mic && (await isTranscriptEnabled(roomId))) {
               try {
                 await enqueueSubject("bench_window", id, "asr");
                 base.enqueued = (base.enqueued ?? 0) + 1;

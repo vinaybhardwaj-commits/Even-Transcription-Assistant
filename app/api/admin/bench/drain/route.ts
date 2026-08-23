@@ -9,7 +9,7 @@
  * drains. A build that spends money on a paid engine does not get a background loop two days
  * before a live OPD day — the operator asks for each pass, and the answer says what it cost.
  *
- * The flag still decides. This route cannot drain a room ROOM_STT_DRAIN_ENABLED does not name;
+ * The switch still decides. This route cannot drain a room whose Transcript switch is off;
  * the guard is inside drainRoomWindow, not here, so no future caller can route around it.
  */
 import { NextRequest } from "next/server";
@@ -18,7 +18,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { drainRoomWindow, drainQueuedRoomWindows } from "@/lib/stt/room-drain";
-import { roomDrainFlagState, isRoomDrainEnabled } from "@/lib/stt/room-drain-flag";
+import { readRoomSwitches, ROOM_SWITCH_CACHE_MS } from "@/lib/room-switches";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,8 +63,12 @@ export async function GET(req: NextRequest) {
   return respondOk({
     session_id: sessionId,
     room_id: roomId,
-    // F1/F2 evidence: what the flag reads RIGHT NOW, for this room, from this process.
-    flag: { ...roomDrainFlagState(), enabled_for_this_room: roomId ? isRoomDrainEnabled(roomId) : false },
+    // Evidence: what this process reads for this room RIGHT NOW, from the room row. The old
+    // shape reported an environment variable's parse; there is no environment variable any
+    // more, so it reports the switches and the window inside which a change becomes visible.
+    switches: roomId
+      ? { ...(await readRoomSwitches(roomId)), source: "room_row", cache_ms: ROOM_SWITCH_CACHE_MS }
+      : { transcript_enabled: false, visits_enabled: false, source: "room_row", cache_ms: ROOM_SWITCH_CACHE_MS },
     windows: rows.map((r) => ({
       ...r,
       start_at: new Date(Number(r.start_ms)).toISOString(),

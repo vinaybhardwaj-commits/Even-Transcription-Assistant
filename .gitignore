@@ -49,3 +49,7 @@ docs/brain/
 fixtures/warehouse/*.json
 !fixtures/warehouse/synthetic-19-aug.json
 .env*
+
+# Vendored service dependencies — services/*/node_modules is install output, never source.
+# (One of these is a 134 MB workerd binary that GitHub refuses outright.)
+services/*/node_modules/

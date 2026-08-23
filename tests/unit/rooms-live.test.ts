@@ -167,18 +167,19 @@ describe("istDayRangeUtc", () => {
 // ===========================================================================
 
 const NOW = Date.parse("2026-08-24T06:00:00Z");
-const ROOM = { id: "room_a", slug: "opd-7-y74w", name: "OPD 7" };
+const ROOM = { id: "room_a", slug: "opd-7-y74w", name: "OPD 7", transcript_enabled: false, visits_enabled: false };
 const session = (over: Partial<LiveSession> = {}): LiveSession => ({
   id: "bs_1", room_id: ROOM.id, status: "recording",
   started_at: new Date(NOW - 60 * 60_000).toISOString(), ended_at: null,
   last_primary_at: new Date(NOW - 60_000).toISOString(), last_backup_at: null,
   backup_chunks: 0, primary_chunks: 12, ...over,
 });
+const NO_COUNTS = { transcript: { done: 0, waiting: 0, in_progress: 0, failed: 0, words_ms: 0 }, visits: { built: 0, open: 0 } };
 const NO_BRAIN = { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
 
 describe("buildRoomLive", () => {
   it("a healthy recording room is green on both clocks", () => {
-    const r = buildRoomLive(ROOM, [session()], { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 60_000).toISOString() }, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session()], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 60_000).toISOString() }, 0, NOW, []);
     expect(r.recording).toBe(true);
     expect(r.mic_level).toBe("ok");
     expect(r.doctor_clock_level).toBe("ok");
@@ -186,41 +187,41 @@ describe("buildRoomLive", () => {
   });
 
   it("the doctor clock is NULL when nothing is recording — an idle room is not late", () => {
-    const r = buildRoomLive(ROOM, [session({ status: "ended" })], { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session({ status: "ended" })], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }, 0, NOW, []);
     expect(r.recording).toBe(false);
     expect(r.doctor_clock_silent_ms).toBeNull();
     expect(r.doctor_clock_level).toBe("unknown");
   });
 
   it("the doctor clock is NULL while paused — a paused room is not failing to clock in", () => {
-    const r = buildRoomLive(ROOM, [session({ status: "paused" })], { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session({ status: "paused" })], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }, 0, NOW, []);
     expect(r.paused_session).toBe(true);
     expect(r.doctor_clock_silent_ms).toBeNull();
   });
 
   it("any warehouse-typed cue RESETS the clock", () => {
-    const stale = buildRoomLive(ROOM, [session()], { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 40 * 60_000).toISOString() }, 0, NOW, []);
+    const stale = buildRoomLive(ROOM, [session()], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 40 * 60_000).toISOString() }, 0, NOW, []);
     expect(stale.doctor_clock_level).toBe("red");
-    const fresh = buildRoomLive(ROOM, [session()], { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 60_000).toISOString() }, 0, NOW, []);
+    const fresh = buildRoomLive(ROOM, [session()], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 60_000).toISOString() }, 0, NOW, []);
     expect(fresh.doctor_clock_level).toBe("ok");
   });
 
   it("with no clock all day the gap runs from the tape's own start, not from zero", () => {
-    const r = buildRoomLive(ROOM, [session()], NO_BRAIN, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session()], NO_COUNTS, NO_BRAIN, 0, NOW, []);
     expect(r.doctor_clock_silent_ms).toBe(60 * 60_000);
     expect(r.doctor_clock_level).toBe("red");
   });
 
   it("a backup mic with zero chunks all session is flagged, and reads `no chunks`", () => {
-    const r = buildRoomLive(ROOM, [session({ backup_chunks: 0 })], NO_BRAIN, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session({ backup_chunks: 0 })], NO_COUNTS, NO_BRAIN, 0, NOW, []);
     expect(r.backup_reads_no_chunks).toBe(true);
     expect(r.backup_chunks_today).toBe(0);
     // and an idle room is not flagged: there is no second microphone to be silent
-    expect(buildRoomLive(ROOM, [session({ status: "ended" })], NO_BRAIN, 0, NOW, []).backup_reads_no_chunks).toBe(false);
+    expect(buildRoomLive(ROOM, [session({ status: "ended" })], NO_COUNTS, NO_BRAIN, 0, NOW, []).backup_reads_no_chunks).toBe(false);
   });
 
   it("stalled carries a real age beside the boolean", () => {
-    const r = buildRoomLive(ROOM, [session({ last_primary_at: new Date(NOW - 20 * 60_000).toISOString() })], NO_BRAIN, 0, NOW, []);
+    const r = buildRoomLive(ROOM, [session({ last_primary_at: new Date(NOW - 20 * 60_000).toISOString() })], NO_COUNTS, NO_BRAIN, 0, NOW, []);
     expect(r.stalled).toBe(true);
     expect(r.stalled_age_ms).toBe(20 * 60_000);
   });
@@ -229,7 +230,7 @@ describe("buildRoomLive", () => {
     const r = buildRoomLive(
       ROOM,
       [session({ last_primary_at: new Date(NOW - 12 * 60_000).toISOString(), last_backup_at: new Date(NOW - 60_000).toISOString(), backup_chunks: 3 })],
-      NO_BRAIN, 0, NOW, [],
+      NO_COUNTS, NO_BRAIN, 0, NOW, [],
     );
     // the backup is carrying the room, so the mic clock is green even though primary is old
     expect(r.mic_level).toBe("ok");
@@ -237,7 +238,7 @@ describe("buildRoomLive", () => {
   });
 
   it("marks and the not-sent count come through", () => {
-    const r = buildRoomLive(ROOM, [session()], { ...NO_BRAIN, marks_today: 7, last_mark_at: new Date(NOW - 5 * 60_000).toISOString() }, 2, NOW, []);
+    const r = buildRoomLive(ROOM, [session()], NO_COUNTS, { ...NO_BRAIN, marks_today: 7, last_mark_at: new Date(NOW - 5 * 60_000).toISOString() }, 2, NOW, []);
     expect(r.marks_today).toBe(7);
     expect(r.marks_not_sent).toBe(2);
   });

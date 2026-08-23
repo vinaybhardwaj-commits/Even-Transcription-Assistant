@@ -80,6 +80,10 @@ export function useSelectedRoom(): Selection {
 // ---------------------------------------------------------------------------
 
 type Level = "ok" | "amber" | "red" | "unknown";
+/** The four lamp colours from the approved mockup: working, act, audio-at-risk, off-or-idle. */
+type LaneLevel = "ok" | "amber" | "red" | "off";
+type LaneView = { level: LaneLevel; state: string; enabled: boolean | null };
+type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number };
 
 type ListenerRowView = {
   room_id: string;
@@ -109,6 +113,11 @@ type RoomLive = {
   backup_reads_no_chunks: boolean;
   stalled: boolean;
   stalled_age_ms: number | null;
+  transcript_enabled: boolean;
+  visits_enabled: boolean;
+  transcript_counts: { done: number; waiting: number; in_progress: number; failed: number; words_ms: number };
+  visit_counts: { built: number; open: number };
+  lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
   /** ENDED DISAGREES — the session row says over and pieces are still landing. */
   ended_disagrees: boolean;
   ended_disagrees_session_id: string | null;
@@ -129,6 +138,7 @@ type RoomLive = {
 type RoomsLiveResp = {
   ist_date: string;
   now: string;
+  day?: DaySummary;
   rooms: RoomLive[];
   thresholds?: { mic_amber_ms: number; mic_red_ms: number; doctor_clock_amber_ms: number; doctor_clock_red_ms: number; listener_fresh_ms: number; stall_minutes: number };
   degraded?: string[];
@@ -235,6 +245,72 @@ const STATE_WORD: Record<RoomState, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// The three lanes — Tape, Transcript, Visits (PRD R4)
+// ---------------------------------------------------------------------------
+//
+// THE INTERFACE NEVER SAYS DRAIN, FUSE, WINDOW OR SUBJECT. Those are our words. A clinic manager
+// reads this while walking between rooms, and the three words on this card are the ones that will
+// end up in every conversation about this system from now on.
+
+const LED: Record<LaneLevel, string> = {
+  ok: "bg-success-600",
+  amber: "bg-warning-500",
+  red: "bg-danger-600",
+  off: "bg-even-ink-200",
+};
+
+/**
+ * The switch. 52x30 as drawn in the approved mockup, inside a 44-point-tall tap target — the
+ * visual and the target are different things, and only one of them is a design decision. This is
+ * operated on a tablet by somebody walking.
+ */
+function LaneSwitch({ on, busy, label, onToggle }: { on: boolean; busy: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={busy}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className="flex items-center justify-center h-11 min-w-11 px-0 shrink-0 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-even-blue-400 rounded-lg"
+    >
+      <span className={`relative block w-[52px] h-[30px] rounded-full transition-colors ${on ? "bg-success-600" : "bg-even-ink-200"}`}>
+        <span className={`absolute top-[3px] w-6 h-6 rounded-full bg-even-white shadow transition-all ${on ? "left-[25px]" : "left-[3px]"}`} />
+      </span>
+    </button>
+  );
+}
+
+function Lane({ name, view, sw }: { name: string; view: LaneView; sw?: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2.5 py-1.5">
+      <i className={`w-2.5 h-2.5 rounded-full shrink-0 ${LED[view.level]}`} aria-hidden />
+      <span className="text-caption font-semibold text-even-navy-800 w-[74px] shrink-0">{name}</span>
+      <span className="text-caption text-even-ink-600 leading-snug flex-1 min-w-0">{view.state}</span>
+      {sw}
+    </div>
+  );
+}
+
+/**
+ * While a switch write is in flight the lamp must not keep claiming the old truth. An optimistic
+ * ON has nothing to show yet, so it reads "On, nothing to do" in grey — never green. Green means
+ * working, and nothing has worked yet.
+ */
+function laneWithPending(view: LaneView, pendingOn: boolean | undefined): LaneView {
+  if (pendingOn === undefined || pendingOn === view.enabled) return view;
+  return pendingOn ? { level: "off", state: "On, nothing to do", enabled: true } : { level: "off", state: "Off", enabled: false };
+}
+
+/** Minutes, never money (R11). There is deliberately no code path here that could render one. */
+function fmtMinutes(ms: number): string {
+  const m = Math.round((Number(ms) || 0) / 60_000);
+  if (m < 60) return `${m} m`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} m`;
+}
+
+// ---------------------------------------------------------------------------
 // The attention list — pure, and tested
 // ---------------------------------------------------------------------------
 
@@ -273,8 +349,18 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         detail: `${r.ended_disagrees_chunks} piece${r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was marked ended ${fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago — ${ENDED_DISAGREES_HINT}`,
       });
     }
+    // R10 — THE TWO EMERGENCIES ARE DIFFERENT AND MUST READ DIFFERENTLY.
+    // This one is the tape gone quiet: audio is BEING LOST, and the answer is to walk to the
+    // room. The processing rows below are the other kind, where the audio is already safe on
+    // disk and the only cost is delay. Reading one as the other is how somebody stops a
+    // recording to "fix" a transcription backlog.
     if (r.stalled) {
-      out.push({ room: name, severity: "red", title: "stalled", detail: `recording, but no piece from either mic for ${fmtAge(r.stalled_age_ms)}` });
+      out.push({
+        room: name,
+        severity: "red",
+        title: "no audio arriving — audio is being lost",
+        detail: `it says recording but no piece has arrived from either mic for ${fmtAge(r.stalled_age_ms)}. Go to the room and open the room page on that Mac.`,
+      });
     } else if (r.mic_level === "red" || r.mic_level === "amber") {
       out.push({
         room: name,
@@ -290,6 +376,19 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         title: `no clock from this doctor for ${fmtAge(r.doctor_clock_silent_ms)}`,
         // NEVER "warehouse silent". This vital cannot see the room.
         detail: "another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty",
+      });
+    }
+    // Processing behind. AUDIO IS SAFE, and the row says so first, because the instinct on
+    // seeing red is to stop the recording — which would be exactly wrong.
+    if (r.transcript_enabled && (r.transcript_counts.waiting > 0 || r.transcript_counts.failed > 0)) {
+      const bits: string[] = [];
+      if (r.transcript_counts.waiting > 0) bits.push(`${r.transcript_counts.waiting} piece${r.transcript_counts.waiting === 1 ? "" : "s"} of audio waiting to be turned into words`);
+      if (r.transcript_counts.failed > 0) bits.push(`${r.transcript_counts.failed} gave up`);
+      out.push({
+        room: name,
+        severity: "amber",
+        title: "transcript behind — the audio is safe",
+        detail: `${bits.join(", ")}. Nothing is lost: the audio is saved and can be processed later. Turn Transcript off if you want it to stop trying.`,
       });
     }
     if (r.backup_reads_no_chunks) {
@@ -318,6 +417,20 @@ export function BenchRoomsLive() {
   const [, setTick] = React.useState(0);
   /** Stop is two clicks: the first arms this, the second sends. */
   const [confirmStop, setConfirmStop] = React.useState<string | null>(null);
+  /**
+   * Switch state that is NOT the server's answer yet.
+   *
+   * `pending` is the optimistic position (PRD §6) — the switch may show its new place at once.
+   * `switchError` is what happens when the write fails: the switch goes BACK to its true position
+   * and says so. A switch that lies about the state of a clinical system is worse than a slow
+   * one, so the correction is not optional and it is not silent.
+   */
+  const [pending, setPending] = React.useState<Record<string, boolean>>({});
+  const [switchError, setSwitchError] = React.useState<{ key: string; message: string } | null>(null);
+  /** Turning Visits ON is the only thing on this screen that asks twice (R7). */
+  const [confirmVisits, setConfirmVisits] = React.useState<{ roomId: string; roomName: string } | null>(null);
+  const [confirmStopAll, setConfirmStopAll] = React.useState(false);
+  const [stopAllNote, setStopAllNote] = React.useState<string | null>(null);
   /**
    * K5 A2 — the orphan repair's own arm, deliberately NOT shared with confirmStop. They look
    * similar and mean opposite things: stop ends a live tape, this closes a dead one. A shared
@@ -407,6 +520,66 @@ export function BenchRoomsLive() {
   }, [rooms]);
 
   /**
+   * Set one lane on one room.
+   *
+   * OPTIMISTIC, WITH A CORRECTION THAT IS LOUD. The switch moves at once because a clinic
+   * operator should see their tap land. If the write fails, the switch goes back to the position
+   * the database actually holds — taken from the route's own RETURNING, not from what we asked
+   * for — and the failure is stated in words. The dangerous outcome here is not slowness, it is a
+   * switch that shows "off" over a room that is still processing.
+   */
+  const setLane = React.useCallback(async (roomId: string, lane: "transcript" | "visits", enabled: boolean) => {
+    const key = `${roomId}:${lane}`;
+    setSwitchError(null);
+    setPending((p) => ({ ...p, [key]: enabled }));
+    try {
+      const res = await fetch("/api/admin/bench/processing", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ room_id: roomId, lane, enabled }),
+      });
+      const j = (await res.json()) as { transcript_enabled?: boolean; visits_enabled?: boolean; error?: { message?: string; code?: string } };
+      if (!res.ok) throw new Error(j?.error?.message || j?.error?.code || `failed_${res.status}`);
+      // Believe the row, not the request.
+      const truth = lane === "transcript" ? Boolean(j.transcript_enabled) : Boolean(j.visits_enabled);
+      setPending((p) => ({ ...p, [key]: truth }));
+      void fetchRollup();
+    } catch (e) {
+      // Back to the true position, and say so.
+      setPending((p) => { const n = { ...p }; delete n[key]; return n; });
+      setSwitchError({
+        key,
+        message: `${lane === "transcript" ? "Transcript" : "Visits"} could not be changed — it is still ${enabled ? "off" : "on"}. ${String((e as Error)?.message ?? e).slice(0, 90)}`,
+      });
+      void fetchRollup();
+    }
+  }, [fetchRollup]);
+
+  const stopAllProcessing = React.useCallback(async () => {
+    setStopAllNote(null);
+    setSwitchError(null);
+    try {
+      const res = await fetch("/api/admin/bench/processing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ action: "stop_all" }),
+      });
+      const j = (await res.json()) as { stopped?: number; error?: { message?: string } };
+      if (!res.ok) throw new Error(j?.error?.message || `failed_${res.status}`);
+      setPending({});
+      setStopAllNote(`Processing stopped in ${j.stopped ?? 0} room${j.stopped === 1 ? "" : "s"}. Every recording is still running.`);
+      void fetchRollup();
+    } catch (e) {
+      setStopAllNote(`Could not stop processing — nothing changed. ${String((e as Error)?.message ?? e).slice(0, 90)}`);
+      void fetchRollup();
+    } finally {
+      setConfirmStopAll(false);
+    }
+  }, [fetchRollup]);
+
+  /**
    * K5 A2 — the repair. Its own sender, not `send`, because the answer shape is different: it
    * returns the closed session and the chunk counts either side, and those are what the
    * operator needs to see. A refusal is reported by NAME, never as a generic failure.
@@ -492,6 +665,52 @@ export function BenchRoomsLive() {
       {rollup?.degraded?.length ? <p className="text-caption text-warning-700">degraded: {rollup.degraded.join(" · ")}</p> : null}
       {listeners?.degraded?.length ? <p className="text-caption text-warning-700">kiosk state unknown: {listeners.degraded.join(" · ")}</p> : null}
 
+      {/* ── STOP ALL PROCESSING (PRD §8, R9) ────────────────────────────────────────────────
+          The move you want nine times out of ten, and it should not require thinking. Under
+          pressure the instinct is to stop everything, and stopping a recording is the only
+          irreversible act available — so the safer act is made the easier one.
+
+          THE COPY IS THE SAFETY FEATURE. "Recording carries on and no audio is lost" is on the
+          card itself, because that sentence is what makes this pressable by somebody frightened.
+          There is no single-tap undo: turning things back on is per-room and deliberate. */}
+      <div className="mb-3 rounded-xl border border-danger-300 bg-danger-100 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-danger-700">Stop all processing</p>
+          <p className="text-caption text-even-ink-600 leading-snug max-w-[56ch]">
+            Turns Transcript and Visits off in every room. Recording carries on and no audio is lost.
+            Use this first if something looks wrong.
+          </p>
+        </div>
+        {confirmStopAll ? (
+          <div className="flex gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setConfirmStopAll(false)}
+              className="min-h-11 px-4 py-2 rounded-lg text-label bg-even-white border border-even-ink-200 hover:bg-even-ink-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopAllProcessing()}
+              className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-600 text-even-white hover:bg-danger-700"
+            >
+              Yes — stop all processing
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-testid="stop-all-processing"
+            onClick={() => setConfirmStopAll(true)}
+            className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-600 text-even-white hover:bg-danger-700 shrink-0"
+          >
+            Stop all processing
+          </button>
+        )}
+      </div>
+      {stopAllNote ? <p className="mb-3 text-caption font-semibold text-even-navy-800">{stopAllNote}</p> : null}
+
       {attention.length > 0 ? (
         <div className="rounded-lg border border-even-ink-200 divide-y divide-even-ink-100">
           <p className="px-3 py-2 text-caption uppercase tracking-wide text-even-ink-500">Needs your attention</p>
@@ -565,6 +784,46 @@ export function BenchRoomsLive() {
 
               <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
               {st.hint ? <p className="text-caption text-even-ink-500">{st.hint}</p> : null}
+
+              {/* THE THREE LANES (PRD R4/R5/R6). Tape has no switch — recording is started and
+                  stopped by the buttons below, as it always was. Only the two processing lanes
+                  are switchable, because only those can be turned off without losing anything. */}
+              <div className="mt-3 border-t border-even-ink-100 pt-2" onClick={(e) => e.stopPropagation()}>
+                <Lane name="Tape" view={r.lanes.tape} />
+                <Lane
+                  name="Transcript"
+                  view={laneWithPending(r.lanes.transcript, pending[`${r.room.id}:transcript`])}
+                  sw={
+                    <LaneSwitch
+                      on={pending[`${r.room.id}:transcript`] ?? r.transcript_enabled}
+                      busy={false}
+                      label={`Transcript for ${r.room.name}`}
+                      onToggle={() => void setLane(r.room.id, "transcript", !(pending[`${r.room.id}:transcript`] ?? r.transcript_enabled))}
+                    />
+                  }
+                />
+                <Lane
+                  name="Visits"
+                  view={laneWithPending(r.lanes.visits, pending[`${r.room.id}:visits`])}
+                  sw={
+                    <LaneSwitch
+                      on={pending[`${r.room.id}:visits`] ?? r.visits_enabled}
+                      busy={false}
+                      label={`Visits for ${r.room.name}`}
+                      onToggle={() => {
+                        const now = pending[`${r.room.id}:visits`] ?? r.visits_enabled;
+                        // R7 — friction on the dangerous direction ONLY. Turning it OFF is
+                        // immediate; stopping must never take two taps in a clinic.
+                        if (now) void setLane(r.room.id, "visits", false);
+                        else setConfirmVisits({ roomId: r.room.id, roomName: r.room.name });
+                      }}
+                    />
+                  }
+                />
+                {switchError && switchError.key.startsWith(`${r.room.id}:`) ? (
+                  <p className="mt-1 text-caption font-semibold text-danger-700 leading-snug">{switchError.message}</p>
+                ) : null}
+              </div>
 
               <dl className="mt-3 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
@@ -775,6 +1034,69 @@ export function BenchRoomsLive() {
           <p className="text-caption text-even-ink-400">{rollup ? "no enabled rooms" : "loading…"}</p>
         ) : null}
       </div>
+
+      {/* ── TODAY, ALL ROOMS (PRD R11) ──────────────────────────────────────────────────────
+          A day summary exists so that "on" is visible as WORK DONE rather than as a switch
+          position — which is the same argument as the lane states, at the scale of a day.
+
+          MINUTES OF AUDIO, NEVER MONEY. A rupee figure on a clinical monitor invites the wrong
+          conversation in front of the wrong person. There is no field on DaySummary that could
+          carry one. */}
+      {rollup?.day ? (
+        <div className="rounded-xl border border-even-ink-200 bg-even-white p-4">
+          <p className="text-caption uppercase tracking-wide text-even-ink-500 mb-2">Today, all rooms</p>
+          <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="day-summary">
+            {[
+              [fmtMinutes(rollup.day.audio_recorded_ms), "audio recorded"],
+              [fmtMinutes(rollup.day.turned_into_words_ms), "turned into words"],
+              [String(rollup.day.gave_up), "gave up"],
+              [String(rollup.day.visits_built), "visits built"],
+            ].map(([v, k]) => (
+              <div key={k} className="rounded-lg bg-even-ink-50 px-3 py-2.5">
+                <dt className="sr-only">{k}</dt>
+                <dd className="text-heading font-bold text-even-navy-800 tabular-nums">{v}</dd>
+                <span className="text-caption text-even-ink-500">{k}</span>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ) : null}
+
+      {/* ── TURNING VISITS ON (PRD §6, mockup tab C) ────────────────────────────────────────
+          The one dialog on this screen. Turning Transcript on only costs money and load, both
+          recoverable. Turning Visits on starts writing to a room's PERMANENT RECORD of who was
+          seen, and the copy says that in plain terms rather than "enables the live fuse".
+          Turning it OFF has no dialog at all. */}
+      {confirmVisits ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-even-navy-800/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-2xl bg-even-white p-5 shadow-xl">
+            <h4 className="text-body font-bold text-even-navy-800 mb-2">Turn Visits on for {confirmVisits.roomName}?</h4>
+            <p className="text-caption text-even-ink-600 leading-snug mb-2">
+              From now on, this room will build its own record of who was seen and when, and that record is kept.
+              Transcript and Tape are not affected.
+            </p>
+            <p className="text-caption text-even-ink-500 leading-snug mb-4">
+              You can turn it off again at any time and it takes effect within seconds. Anything already written stays.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmVisits(null)}
+                className="flex-1 min-h-11 px-4 py-2 rounded-lg text-label bg-even-white border border-even-ink-200 hover:bg-even-ink-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => { const c = confirmVisits; setConfirmVisits(null); if (c) void setLane(c.roomId, "visits", true); }}
+                className="flex-1 min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-even-blue-600 text-even-white hover:bg-even-blue-700"
+              >
+                Turn it on
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <p className="text-caption text-even-ink-400">
         “This doctor” counts Pulse clocks from the labelled doctor only. The warehouse holds no room, so a gap there
