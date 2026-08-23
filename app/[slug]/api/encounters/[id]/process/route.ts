@@ -39,6 +39,7 @@ import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-
 import { routeTranscribe, ETA_ROUTER_ON, ROUTER_JOB_ON, submitRouteJob, pollRouteJob } from "@/lib/stt/eta-router";
 import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "@/lib/stt/fuse-transcript";
 import { runDiarize, reconcileTagged, applyRoleOverrides, diarizeTimingLine } from "@/lib/diarize";
+import { DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
@@ -49,6 +50,15 @@ import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+
+/** maxDuration in milliseconds, so the code that has to fit inside it can say so. */
+const FN_BUDGET_MS = maxDuration * 1_000;
+/**
+ * Reserved out of the invocation for the dispatched diarize call and the writes after it. The
+ * queue wait may consume what is left over and no more — a caller that spends the whole function
+ * waiting has reproduced the original bug on our side of the wire.
+ */
+const FN_DISPATCH_RESERVE_MS = 120_000;
 
 type Row = {
   id: string;
@@ -82,6 +92,7 @@ export async function POST(
   { params }: { params: Promise<{ slug: string; id: string }> },
 ) {
   const { slug, id } = await params;
+  const requestT0 = Date.now();
 
   // Internal background trigger (finalize-upload via after()): a trusted
   // server-to-server call carrying the migration secret, so the pipeline can
@@ -553,11 +564,21 @@ export async function POST(
         console.warn(`[process] voice_print load failed enc=${id}: ${e instanceof Error ? e.message : String(e)}`);
       }
 
+      // The queue wait must fit inside what is LEFT of this invocation, not inside its own
+      // default. maxDuration is 300 s and the R2 fetch above has already spent some of it;
+      // waiting past that point would burn the whole function without ever dispatching, which
+      // is the failure this build exists to stop — just relocated to our side of the wire.
+      // The dispatched call keeps its full configured budget: if the function dies under it,
+      // the step lock's TTL and the bounded retry are what handle that, not a shortened clock.
+      const spentMs = Date.now() - requestT0;
+      const queueWaitMs = Math.max(0, Math.min(DIARIZE_QUEUE_WAIT_MS(), FN_BUDGET_MS - spentMs - FN_DISPATCH_RESERVE_MS));
+
       const d = await runDiarize(bytes, head.content_type || "audio/webm", {
         encounterId: id,
         clinicianCentroids,
         manualRelabels: [],
         signal: pipeSignal,
+        queueWaitMs,
       });
       if (d.ok) {
         await sql`
@@ -770,7 +791,18 @@ export async function POST(
     `.catch(() => [] as Array<{ id: string }>)) as Array<{ id: string }>;
     if (claim.length === 0) {
       // Another invocation holds the lock; it will self-chain. No-op.
-      return respondOk({ step: nextStep, skipped: "locked" });
+      //
+      // SAY WHO AND SINCE WHEN. "locked" on its own is unfalsifiable from outside: a caller that
+      // gets it 30 times in a row cannot tell a live step from a lock nobody will ever release,
+      // and the resume loop just sleeps and retries either way. The holder's age is the one fact
+      // that separates them, and it costs one read on a path that is already doing nothing.
+      const held = (await sql`
+        SELECT processing_step_at,
+               EXTRACT(EPOCH FROM (now() - processing_step_at))::int AS held_s,
+               process_attempts, status
+          FROM encounter WHERE id = ${id}
+      `.catch(() => [] as Array<Record<string, unknown>>)) as Array<{ processing_step_at: string | null; held_s: number | null; process_attempts: number | null; status: string }>;
+      return respondOk({ step: nextStep, skipped: "locked", lock: held[0] ?? null });
     }
 
     // Run exactly ONE step. Returns whether it progressed, plus a jobPending sentinel for
