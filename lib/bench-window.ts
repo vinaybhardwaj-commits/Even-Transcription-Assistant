@@ -26,6 +26,24 @@
  * reached the end of the slot all leave it `open`, and the gap is reported rather than
  * absorbed.
  *
+ * ─── A ROTATION SEAM IS NOT A MISSING CHUNK ───────────────────────────────────────────────
+ * "Covered" is measured over MAXIMAL RUNS OF CONSECUTIVE CHUNK INDICES, not over raw
+ * intervals, and that distinction is the difference between this working and never working.
+ *
+ * The first run of this writer against bs_g3dwud4p — nine hours, 108 verified chunks, nothing
+ * wrong with it — left ALL THIRTY-SIX windows open. Each was short by 1 to 4 milliseconds out
+ * of 900 000: MediaRecorder does not resume at the exact microsecond it stopped, so every
+ * chunk rotation leaves a seam, and every 15-minute window contains two or three of them. A
+ * rule that demands millisecond-perfect coverage closes no window on any real tape, ever.
+ *
+ * The fix is not a tolerance — a "gaps under N ms don't count" threshold would be a number
+ * invented to make the test pass, and it would silently absorb a genuinely short chunk too.
+ * The fix is structural: chunk indices are consecutive integers, so a MISSING chunk is a
+ * MISSING INDEX. Within a run of consecutive indices there is nothing absent by definition,
+ * whatever the clock says between them, so the run is treated as one interval from the first
+ * chunk's start to the last chunk's end. A jump in the index sequence breaks the run and the
+ * hole is real. No threshold, no tuning, and a missing five-minute chunk is still caught.
+ *
  * That includes the trailing slot of an ENDED session, which will never be fully covered and
  * so stays open for ever. That is deliberate and it is the whole point: a 4-minute window
  * flying the flag of a 15-minute one is a lie that K4b would then transcribe and treat as
@@ -122,6 +140,34 @@ export function coverageOf(
   return { covered_ms: covered, gaps };
 }
 
+/**
+ * PURE — collapse chunks into maximal runs of CONSECUTIVE indices, one interval each.
+ *
+ * This is what makes a rotation seam invisible and a missing chunk visible. Inside a run of
+ * consecutive indices nothing is absent by definition, so the run spans first-start to
+ * last-end with no internal holes; a break in the index sequence ends the run and whatever gap
+ * follows is a real one. See the header note on bs_g3dwud4p for why a millisecond tolerance
+ * was the wrong answer to this.
+ */
+export function runIntervals(chunks: readonly WindowChunk[]): Array<{ from: number; to: number }> {
+  const sorted = [...chunks].sort((a, b) => a.idx - b.idx);
+  const out: Array<{ from: number; to: number }> = [];
+  let cur: { from: number; to: number; lastIdx: number } | null = null;
+  for (const c of sorted) {
+    const from = ms(c.started_at);
+    const to = ms(c.ended_at);
+    if (cur && c.idx === cur.lastIdx + 1) {
+      cur.to = Math.max(cur.to, to);
+      cur.lastIdx = c.idx;
+    } else {
+      if (cur) out.push({ from: cur.from, to: cur.to });
+      cur = { from, to, lastIdx: c.idx };
+    }
+  }
+  if (cur) out.push({ from: cur.from, to: cur.to });
+  return out;
+}
+
 export type WindowVerdict = GridSlot & {
   source_mic: MicSource;
   /** true → this slot may be `closed`; false → it stays `open` */
@@ -171,11 +217,7 @@ export function evaluateWindows(input: {
     const touching = mine.filter((c) => ms(c.ended_at) > slot.start_ms && ms(c.started_at) < slot.end_ms);
     const verified = touching.filter((c) => c.upload_state === "verified");
 
-    const { covered_ms, gaps } = coverageOf(
-      verified.map((c) => ({ from: ms(c.started_at), to: ms(c.ended_at) })),
-      slot.start_ms,
-      slot.end_ms,
-    );
+    const { covered_ms, gaps } = coverageOf(runIntervals(verified), slot.start_ms, slot.end_ms);
     out.push({
       ...slot,
       source_mic: decision.source,

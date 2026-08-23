@@ -11,6 +11,7 @@ import {
   slotStartFor,
   gridSlotsFor,
   coverageOf,
+  runIntervals,
   evaluateWindows,
   istDateOf,
   type WindowChunk,
@@ -145,6 +146,54 @@ describe("A2 — a window closes only when its whole span is verified", () => {
     expect(ws[0]!.complete).toBe(true);    // 10:00 slot is whole
     expect(ws[1]!.complete).toBe(false);   // 10:15 slot holds 4 minutes of 15 and says so
     expect(ws[1]!.covered_ms).toBe(240_000);
+  });
+});
+
+describe("a rotation seam is not a missing chunk — the bs_g3dwud4p lesson", () => {
+  const slotStart = IST("2026-08-22", "10:00");
+  const iso = (n: number) => new Date(n).toISOString();
+
+  /** Three chunks tiling the slot with a realistic 1–3 ms seam between rotations. */
+  const seamed = [
+    chunk({ idx: 0, started_at: iso(slotStart),               ended_at: iso(slotStart + 300_000) }),
+    chunk({ idx: 1, started_at: iso(slotStart + 300_002),     ended_at: iso(slotStart + 600_001) }),
+    chunk({ idx: 2, started_at: iso(slotStart + 600_004),     ended_at: iso(slotStart + 900_000) }),
+  ];
+
+  it("1–4 ms seams between CONSECUTIVE indices do not hold a window open", () => {
+    const [w] = evaluateWindows({ chunks: seamed, events: [], tapeEndMs: slotStart + WINDOW_MS });
+    expect(w!.complete).toBe(true);
+    expect(w!.gaps).toEqual([]);
+  });
+
+  it("…and this is exactly what the first real run got wrong: 899 998 of 900 000 held it open", () => {
+    // The raw-interval measurement the writer used first. Kept as the counter-example.
+    const raw = coverageOf(seamed.map((c) => ({ from: Date.parse(String(c.started_at)), to: Date.parse(String(c.ended_at)) })), slotStart, slotStart + WINDOW_MS);
+    expect(raw.gaps.length).toBeGreaterThan(0);
+    expect(raw.covered_ms).toBeLessThan(WINDOW_MS);
+    // …versus the run-merged measurement, which is whole.
+    expect(coverageOf(runIntervals(seamed), slotStart, slotStart + WINDOW_MS).gaps).toEqual([]);
+  });
+
+  it("a MISSING INDEX is still caught — this is not a tolerance", () => {
+    const missing = [seamed[0]!, seamed[2]!];   // idx 0 and 2; idx 1 never arrived
+    const [w] = evaluateWindows({ chunks: missing, events: [], tapeEndMs: slotStart + WINDOW_MS });
+    expect(w!.complete).toBe(false);
+    // the hole is the whole of the absent chunk, not a millisecond
+    expect(w!.gaps).toHaveLength(1);
+    expect(w!.gaps[0]!.to - w!.gaps[0]!.from).toBeGreaterThan(290_000);
+  });
+
+  it("a tape that STARTS mid-slot leaves a real head gap, and that window stays open", () => {
+    const late = [chunk({ idx: 0, started_at: iso(slotStart + 33_544), ended_at: iso(slotStart + 900_000) })];
+    const [w] = evaluateWindows({ chunks: late, events: [], tapeEndMs: slotStart + WINDOW_MS });
+    expect(w!.complete).toBe(false);
+    expect(w!.gaps[0]).toEqual({ from: slotStart, to: slotStart + 33_544 });
+  });
+
+  it("runIntervals merges a consecutive run and splits on a break", () => {
+    expect(runIntervals(seamed)).toEqual([{ from: slotStart, to: slotStart + 900_000 }]);
+    expect(runIntervals([seamed[0]!, seamed[2]!])).toHaveLength(2);
   });
 });
 
