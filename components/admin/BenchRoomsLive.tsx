@@ -33,6 +33,8 @@ import {
   roomState,
   ENDED_DISAGREES_TITLE,
   ENDED_DISAGREES_HINT,
+  NO_DAY_TITLE,
+  NO_DAY_FIX,
   type RoomState,
 } from "@/lib/bench-bus-constants";
 
@@ -82,7 +84,7 @@ export function useSelectedRoom(): Selection {
 type Level = "ok" | "amber" | "red" | "unknown";
 /** The four lamp colours from the approved mockup: working, act, audio-at-risk, off-or-idle. */
 type LaneLevel = "ok" | "amber" | "red" | "off";
-type LaneView = { level: LaneLevel; state: string; enabled: boolean | null };
+type LaneView = { level: LaneLevel; state: string; enabled: boolean | null; note?: string };
 type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number };
 
 type ListenerRowView = {
@@ -115,7 +117,8 @@ type RoomLive = {
   stalled_age_ms: number | null;
   transcript_enabled: boolean;
   visits_enabled: boolean;
-  transcript_counts: { done: number; waiting: number; in_progress: number; failed: number; words_ms: number };
+  transcript_counts: { done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: number };
+  has_room_day_today: boolean | null;
   visit_counts: { built: number; open: number };
   lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
   /** ENDED DISAGREES — the session row says over and pieces are still landing. */
@@ -284,11 +287,20 @@ function LaneSwitch({ on, busy, label, onToggle }: { on: boolean; busy: boolean;
 
 function Lane({ name, view, sw }: { name: string; view: LaneView; sw?: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2.5 py-1.5">
-      <i className={`w-2.5 h-2.5 rounded-full shrink-0 ${LED[view.level]}`} aria-hidden />
-      <span className="text-caption font-semibold text-even-navy-800 w-[74px] shrink-0">{name}</span>
-      <span className="text-caption text-even-ink-600 leading-snug flex-1 min-w-0">{view.state}</span>
-      {sw}
+    <div className="py-1.5">
+      <div className="flex items-center gap-2.5">
+        <i className={`w-2.5 h-2.5 rounded-full shrink-0 ${LED[view.level]}`} aria-hidden />
+        <span className="text-caption font-semibold text-even-navy-800 w-[74px] shrink-0">{name}</span>
+        <span className="text-caption text-even-ink-600 leading-snug flex-1 min-w-0">{view.state}</span>
+        {sw}
+      </div>
+      {/* WHAT TO DO, under the state that needs it. A lane only carries a note when there is an
+          action, so a healthy card stays as short as it was. */}
+      {view.note ? (
+        <p className="mt-1 ml-[22px] mr-[62px] text-caption font-semibold text-warning-700 leading-snug">
+          {view.note}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -376,6 +388,18 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         title: `no clock from this doctor for ${fmtAge(r.doctor_clock_silent_ms)}`,
         // NEVER "warehouse silent". This vital cannot see the room.
         detail: "another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty",
+      });
+    }
+    // RECORDED AND UNABLE TO BE TRANSCRIBED. Ranked ABOVE "behind" because behind clears itself
+    // and this does not: without a room_day the drain refuses before it claims, so the window
+    // never becomes `failed` and never leaves `closed`. One press fixes it, so the row says which.
+    if (r.transcript_enabled && r.transcript_counts.no_day > 0 && r.has_room_day_today === false) {
+      const n = r.transcript_counts.no_day;
+      out.push({
+        room: name,
+        severity: "amber",
+        title: NO_DAY_TITLE,
+        detail: `${n} piece${n === 1 ? "" : "s"} of audio recorded and safe, but this room has no day record for today, so none of it can be turned into words yet. ${NO_DAY_FIX}`,
       });
     }
     // Processing behind. AUDIO IS SAFE, and the row says so first, because the instinct on

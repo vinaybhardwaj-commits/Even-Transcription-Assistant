@@ -16,6 +16,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { tapeLane, transcriptLane, visitsLane } from "@/lib/admin/rooms-live";
+import { NO_DAY_TITLE, NO_DAY_FIX } from "@/lib/bench-bus-constants";
 import { attentionItems } from "@/components/admin/BenchRoomsLive";
 
 /**
@@ -32,7 +33,7 @@ function rendered(path: string): string {
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-const NONE = { done: 0, waiting: 0, in_progress: 0, failed: 0, words_ms: 0 };
+const NONE = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
 const NOW = Date.parse("2026-08-24T05:00:00.000Z");
 
 describe("R6 — green means working", () => {
@@ -253,5 +254,109 @@ describe("every colour class this screen asks for actually exists", () => {
       if (avail[pal] && !avail[pal]!.has(shade)) bad.push(`${pal}-${shade}`);
     }
     expect([...new Set(bad)]).toEqual([]);
+  });
+});
+
+describe("a window with no room-day is NOT waiting", () => {
+  /**
+   * THE LIE THIS REMOVES. A window that is `closed` with room_day_id NULL cannot be processed at
+   * all — room-drain.ts returns `no_room_day` BEFORE the claim, so it never reaches `failed` and
+   * sits at `closed` for ever. The lane used to count that as "waiting", so the card read
+   * "N pieces of audio waiting to be turned into words… can be processed later."
+   *
+   * That is a reassuring sentence about a stuck state, and it would have been on a clinic screen
+   * all day Monday. Only a cue creates a room_day; recording creates none.
+   */
+  const C = (over: Partial<{ done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: number }> = {}) =>
+    ({ done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0, ...over });
+
+  it("says what is wrong, and never the word waiting", () => {
+    const v = transcriptLane(true, C({ no_day: 3 }), false);
+    expect(v.level).toBe("amber");
+    expect(v.state).toBe("3 pieces recorded, no day record yet");
+    expect(v.state).not.toMatch(/waiting/i);
+    expect(v.note).toBe(NO_DAY_FIX);
+    expect(v.note).toMatch(/Mark consult/);
+  });
+
+  it("singular reads correctly — one piece, not 1 pieces", () => {
+    expect(transcriptLane(true, C({ no_day: 1 }), false).state).toBe("1 piece recorded, no day record yet");
+  });
+
+  it("outranks the ordinary counts — it is not appended to them", () => {
+    const v = transcriptLane(true, C({ done: 4, waiting: 2, failed: 1, no_day: 3 }), false);
+    expect(v.state).toBe("3 pieces recorded, no day record yet");
+    expect(v.state).not.toMatch(/done|failed/);
+  });
+
+  it("THE FALSE-ALARM GUARD: with a day present, unbound windows are just queued", () => {
+    // A window is bound to whatever day exists when it is written, so on an ordinary morning the
+    // first window is often written before the mark and binds on the very next evaluation pass.
+    // Firing on no_day alone would alarm every room every morning for one chunk cycle.
+    const v = transcriptLane(true, C({ done: 1, no_day: 2 }), true);
+    expect(v.level).toBe("amber");
+    expect(v.state).toBe("1 done, 2 waiting");
+    expect(v.note).toBeUndefined();
+  });
+
+  it("we could not tell (null) is never treated as no", () => {
+    const v = transcriptLane(true, C({ no_day: 5 }), null);
+    expect(v.state).not.toMatch(/no day record/);
+    expect(v.note).toBeUndefined();
+  });
+
+  it("no windows at all is still 'On, nothing to do', not an alarm", () => {
+    expect(transcriptLane(true, C(), false).state).toBe("On, nothing to do");
+  });
+
+  it("a missing count is 0, never NaN — NaN would render a stuck room as healthy", () => {
+    const v = transcriptLane(true, { done: 2 } as never, false);
+    expect(v.state).toBe("2 done · up to date");
+    expect(v.level).toBe("ok");
+  });
+});
+
+describe("the attention list carries it, with the same instruction", () => {
+  const mk = (over: Record<string, unknown>) => ({
+    room: { id: "room_a", slug: "s", name: "OPD 7" },
+    recording: true, paused_session: false, session_id: null, session_started_at: null,
+    last_primary_at: null, last_backup_at: null, last_piece_at: null, mic_level: "ok",
+    backup_chunks_today: 1, backup_reads_no_chunks: false, stalled: false, stalled_age_ms: null,
+    transcript_enabled: true, visits_enabled: false, has_room_day_today: false,
+    transcript_counts: { done: 0, waiting: 0, no_day: 4, in_progress: 0, failed: 0, words_ms: 0 },
+    visit_counts: { built: 0, open: 0 },
+    lanes: { tape: { level: "ok", state: "", enabled: null }, transcript: { level: "amber", state: "", enabled: true }, visits: { level: "off", state: "", enabled: false } },
+    ended_disagrees: false, ended_disagrees_session_id: null, ended_disagrees_ended_at: null,
+    ended_disagrees_last_piece_at: null, ended_disagrees_chunks: 0,
+    last_warehouse_at: null, doctor_clock_silent_ms: null, doctor_clock_level: "unknown",
+    marks_today: 0, last_mark_at: null, marks_not_sent: 0,
+    last_window_asked_at: null, last_window_complete: null, degraded: [],
+    ...over,
+  }) as never;
+
+  it("raises the row, names the fix, and says the audio is safe", () => {
+    const item = attentionItems([mk({})], new Map(), true, Date.now()).find((i) => i.title === NO_DAY_TITLE)!;
+    expect(item).toBeTruthy();
+    expect(item.severity).toBe("amber");
+    expect(item.detail).toMatch(/recorded and safe/);
+    expect(item.detail).toContain(NO_DAY_FIX);
+    expect(item.detail).not.toMatch(/\bwaiting\b/i);
+  });
+
+  it("does NOT also raise 'transcript behind' for the same windows", () => {
+    const items = attentionItems([mk({})], new Map(), true, Date.now());
+    expect(items.some((i) => i.title.includes("transcript behind"))).toBe(false);
+  });
+
+  it("stays quiet when the day exists, and when we could not tell", () => {
+    for (const flag of [true, null]) {
+      const items = attentionItems([mk({ has_room_day_today: flag })], new Map(), true, Date.now());
+      expect(items.some((i) => i.title === NO_DAY_TITLE), String(flag)).toBe(false);
+    }
+  });
+
+  it("stays quiet when Transcript is off — the room was told to stop", () => {
+    const items = attentionItems([mk({ transcript_enabled: false })], new Map(), true, Date.now());
+    expect(items.some((i) => i.title === NO_DAY_TITLE)).toBe(false);
   });
 });

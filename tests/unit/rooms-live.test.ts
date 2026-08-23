@@ -174,7 +174,7 @@ const session = (over: Partial<LiveSession> = {}): LiveSession => ({
   last_primary_at: new Date(NOW - 60_000).toISOString(), last_backup_at: null,
   backup_chunks: 0, primary_chunks: 12, ...over,
 });
-const NO_COUNTS = { transcript: { done: 0, waiting: 0, in_progress: 0, failed: 0, words_ms: 0 }, visits: { built: 0, open: 0 } };
+const NO_COUNTS = { transcript: { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 }, visits: { built: 0, open: 0 } };
 const NO_BRAIN = { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
 
 describe("buildRoomLive", () => {

@@ -26,7 +26,7 @@ import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 import { LISTENER_FRESH_MS, type ListenerRow } from "@/lib/bench-commands";
 import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
-import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse, NO_DAY_FIX, NO_DAY_LANE_STATE } from "@/lib/bench-bus-constants";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
  *  same literal, and tests hold the two in agreement with 0054's index predicate. */
@@ -115,6 +115,8 @@ export {
   ENDED_DISAGREES_HINT,
   ENDED_DISAGREES_SKEW_GRACE_MS,
   chunkDisagreesWithEnd,
+  NO_DAY_TITLE,
+  NO_DAY_FIX,
   type RoomState,
   type RoomStateView,
 } from "@/lib/bench-bus-constants";
@@ -193,6 +195,14 @@ export type RoomLive = {
   visits_enabled: boolean;
   transcript_counts: TranscriptCounts;
   visit_counts: VisitCounts;
+  /**
+   * Does a room_day exist for this room TODAY?
+   *
+   * NULL means we could not tell — the brain read failed — and null must never be read as
+   * "no". Telling an operator to press a button because a database was briefly unreachable is
+   * how a good alarm becomes one people learn to ignore.
+   */
+  has_room_day_today: boolean | null;
   /** Ready-made lane rows — one place decides the words, so the screen and the MCP agree. */
   lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
   ended_disagrees: boolean;
@@ -310,10 +320,27 @@ type RoomRow = { id: string; slug: string; name: string; transcript_enabled: boo
  *  risk, grey off-or-idle. Its own union rather than `Level` — `Level` has "unknown", which a
  *  lane never is, and lacks "off", which is half of what a lane says. */
 export type LaneLevel = "ok" | "amber" | "red" | "off";
-export type LaneView = { level: LaneLevel; state: string; enabled: boolean | null };
+export type LaneView = {
+  level: LaneLevel;
+  state: string;
+  enabled: boolean | null;
+  /** What to DO about it, when the state is one a person can act on. Rendered under the lane. */
+  note?: string;
+};
 
 /** Counts behind the Transcript lane, for one room, today. Derived from bench_window state. */
-export type TranscriptCounts = { done: number; waiting: number; in_progress: number; failed: number; words_ms: number };
+export type TranscriptCounts = {
+  done: number;
+  /** CLOSED and bound to a room_day — genuinely queued, and a drain pass will take it. */
+  waiting: number;
+  /** CLOSED with NO room_day. NOT waiting: the drain refuses these before it claims anything,
+   *  so they never reach `failed` and sit at `closed` for ever. Counted apart because calling
+   *  them "waiting" is a reassuring sentence about a stuck state. */
+  no_day: number;
+  in_progress: number;
+  failed: number;
+  words_ms: number;
+};
 export type VisitCounts = { built: number; open: number };
 
 /**
@@ -342,17 +369,41 @@ export function tapeLane(r: {
   return { level: "off", state: "Not recording", enabled: null };
 }
 
-export function transcriptLane(enabled: boolean, c: TranscriptCounts): LaneView {
+export function transcriptLane(enabled: boolean, c: TranscriptCounts, hasRoomDayToday: boolean | null = null): LaneView {
   if (!enabled) return { level: "off", state: "Off", enabled: false };
-  const busy = c.done + c.waiting + c.in_progress + c.failed;
+  // Tolerant of a missing count, like normaliseSessions: a absent number is 0, never NaN. NaN
+  // here would silently render a room as healthy — every comparison against it is false.
+  const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const noDay = n(c.no_day);
+
+  // ── THE STUCK STATE, FIRST, because it outranks every count below it ──────────────────────
+  //
+  // Windows recorded with no room_day cannot be processed at all. They are not queued and they
+  // never will be, so they are reported apart from `waiting` and they carry the fix.
+  //
+  // GUARDED ON THE DAY ACTUALLY BEING ABSENT, and this guard is not optional. A window is
+  // created bound to whatever day exists at that moment, so on an ordinary morning the first
+  // window of the day is often written before the mark is pressed and binds on the very next
+  // evaluation pass. Alarming on `no_day > 0` alone would therefore fire in every room every
+  // morning for one chunk cycle, and an alarm that cries wolf daily is one nobody reads by
+  // Wednesday. It fires only when there is genuinely NO day — the state that does not clear on
+  // its own. `null` (we could not tell) is never treated as "no".
+  if (noDay > 0 && hasRoomDayToday === false) {
+    return { level: "amber", state: NO_DAY_LANE_STATE(noDay), enabled: true, note: NO_DAY_FIX };
+  }
+
+  // Anything still unbound while a day DOES exist is transient — the writer backfills
+  // room_day_id on the next pass — so it is counted with the queue rather than alarmed about.
+  const waiting = n(c.waiting) + (hasRoomDayToday === false ? 0 : noDay);
+  const busy = n(c.done) + waiting + n(c.in_progress) + n(c.failed);
   if (busy === 0) return { level: "off", state: "On, nothing to do", enabled: true };
-  const parts: string[] = [`${c.done} done`];
-  if (c.waiting > 0) parts.push(`${c.waiting} waiting`);
-  if (c.in_progress > 0) parts.push(`${c.in_progress} in progress`);
-  if (c.failed > 0) parts.push(`${c.failed} failed`);
+  const parts: string[] = [`${n(c.done)} done`];
+  if (waiting > 0) parts.push(`${waiting} waiting`);
+  if (n(c.in_progress) > 0) parts.push(`${n(c.in_progress)} in progress`);
+  if (n(c.failed) > 0) parts.push(`${n(c.failed)} failed`);
   // AMBER when anything is waiting or has given up — those are the two states a person can act
   // on. Green only when the queue is empty and nothing failed, which is what "up to date" means.
-  const behind = c.waiting > 0 || c.failed > 0;
+  const behind = waiting > 0 || n(c.failed) > 0;
   return {
     level: behind ? "amber" : "ok",
     state: behind ? parts.join(", ") : `${parts.join(", ")} · up to date`,
@@ -373,7 +424,7 @@ export function visitsLane(enabled: boolean, v: VisitCounts): LaneView {
 export function buildRoomLive(
   room: RoomRow,
   sessions: readonly LiveSession[],
-  counts: { transcript: TranscriptCounts; visits: VisitCounts },
+  counts: { transcript: TranscriptCounts; visits: VisitCounts; has_room_day_today?: boolean | null },
   brain: {
     last_warehouse_at: string | null;
     marks_today: number;
@@ -445,6 +496,7 @@ export function buildRoomLive(
   const clockBase = ms(brain.last_warehouse_at) ?? ms(live?.started_at ?? null);
   const doctorClockSilentMs = recording && !pausedSession && clockBase !== null ? Math.max(0, nowMs - clockBase) : null;
 
+  const hasRoomDayToday = counts.has_room_day_today ?? null;
   const transcriptEnabled = Boolean(room.transcript_enabled);
   const visitsEnabled = Boolean(room.visits_enabled);
   const primaryChunks = sessions.reduce((a, sn) => a + (sn.primary_chunks || 0), 0);
@@ -467,13 +519,14 @@ export function buildRoomLive(
     visits_enabled: visitsEnabled,
     transcript_counts: counts.transcript,
     visit_counts: counts.visits,
+    has_room_day_today: hasRoomDayToday,
     lanes: {
       tape: tapeLane({
         recording: Boolean(recording), paused_session: Boolean(pausedSession),
         stalled: stalledSession !== null, stalled_age_ms: stalledAge,
         session_started_at: live ? iso(live.started_at) : null, primary_chunks: primaryChunks, nowMs,
       }),
-      transcript: transcriptLane(transcriptEnabled, counts.transcript),
+      transcript: transcriptLane(transcriptEnabled, counts.transcript, hasRoomDayToday),
       visits: visitsLane(visitsEnabled, counts.visits),
     },
     ended_disagrees: disagreeing !== null,
@@ -607,7 +660,12 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       const rows = (await sql`
         SELECT s.room_id,
                COUNT(*) FILTER (WHERE w.state = 'transcribed')  ::int AS done,
-               COUNT(*) FILTER (WHERE w.state = 'closed')       ::int AS waiting,
+               -- CLOSED splits in two, and the split is the whole point of this column pair.
+               -- A closed window with a room_day is queued. One without cannot be processed at
+               -- all: room-drain.ts returns no_room_day BEFORE the claim, so it never becomes
+               -- 'failed' and never leaves 'closed'.
+               COUNT(*) FILTER (WHERE w.state = 'closed' AND w.room_day_id IS NOT NULL)::int AS waiting,
+               COUNT(*) FILTER (WHERE w.state = 'closed' AND w.room_day_id IS NULL)    ::int AS no_day,
                COUNT(*) FILTER (WHERE w.state = 'transcribing') ::int AS in_progress,
                COUNT(*) FILTER (WHERE w.state = 'failed')       ::int AS failed,
                COALESCE(SUM(w.end_ms - w.start_ms) FILTER (WHERE w.state = 'transcribed'), 0)::bigint AS words_ms
@@ -615,10 +673,10 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
           JOIN bench_session s ON s.id = w.session_id
          WHERE w.session_id = ANY(${sessionIds}::text[])
          GROUP BY s.room_id
-      `) as Array<{ room_id: string; done: number; waiting: number; in_progress: number; failed: number; words_ms: string | number }>;
+      `) as Array<{ room_id: string; done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: string | number }>;
       for (const r of rows) {
         transcriptByRoom.set(r.room_id, {
-          done: Number(r.done) || 0, waiting: Number(r.waiting) || 0,
+          done: Number(r.done) || 0, waiting: Number(r.waiting) || 0, no_day: Number(r.no_day) || 0,
           in_progress: Number(r.in_progress) || 0, failed: Number(r.failed) || 0,
           words_ms: Number(r.words_ms) || 0,
         });
@@ -682,14 +740,19 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     }
   }
 
-  const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, waiting: 0, in_progress: 0, failed: 0, words_ms: 0 };
+  const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
   const out = rooms.map((room) => {
     const mine = byRoom.get(room.id) ?? [];
     const brain = brainByRoom.get(room.id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
     const marksNotSent = mine.reduce((a, s) => a + (notSent.get(s.id) ?? 0), 0);
+    // Does today's room_day exist for this room? SQL_ROOM_DAY_ROLLUP selects FROM room_day, so a
+    // room with no day yields no row and is absent from the map. If the brain read FAILED we
+    // cannot tell, and null is passed rather than false — see has_room_day_today.
+    const dayKnown = brainDegraded.length === 0;
     const counts = {
       transcript: transcriptByRoom.get(room.id) ?? ZERO_TRANSCRIPT,
       visits: visitsByRoom.get(room.id) ?? { built: 0, open: 0 },
+      has_room_day_today: dayKnown ? brainByRoom.has(room.id) : null,
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });

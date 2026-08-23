@@ -131,6 +131,37 @@ export const ENDED_DISAGREES_HINT =
   "the audio is safe and still being stored — the room page has been told to stop; go to the room and press start to open a fresh recording";
 
 // ---------------------------------------------------------------------------
+// NO DAY RECORD — recorded, and unable to be transcribed
+// ---------------------------------------------------------------------------
+
+/**
+ * A window that is CLOSED with no room_day cannot be processed at all, and the drain says so
+ * before it claims anything: `no_room_day` returns ahead of the claim, so the window never
+ * reaches `failed` and sits at `closed` for ever.
+ *
+ * THE LANE USED TO COUNT THAT AS "WAITING". A stuck state was rendered as normal progress —
+ * "N pieces of audio waiting to be turned into words… can be processed later" — which is a
+ * reassuring sentence about something that will never happen on its own. In a clinic, at a
+ * glance, that is worse than saying nothing.
+ *
+ * Only ONE production path creates a room_day: a cue. Recording creates none — a session writes
+ * bench_session, bench_chunk, bench_window and bench_event and touches room_day in none of them.
+ * So a room that records all day with nobody pressing Mark consult has no day, and every window
+ * it records is in this state.
+ *
+ * THE COPY NAMES THE FIX, because the fix is one press and the operator is the only one who can
+ * do it. It is also honest about scope: a mark at ANY point in the day is enough, since the
+ * window writer backfills room_day_id on every evaluation pass and evaluation runs on every
+ * chunk — so a mark at 11am retro-binds everything recorded since 9am.
+ */
+export const NO_DAY_TITLE = "no day record yet — nothing can be transcribed";
+export const NO_DAY_FIX =
+  "Press Mark consult once in the room and everything recorded today will be picked up.";
+/** The lane's own words. Deliberately NOT the word "waiting" — these are not queued. */
+export const NO_DAY_LANE_STATE = (n: number): string =>
+  `${n} piece${n === 1 ? "" : "s"} recorded, no day record yet`;
+
+// ---------------------------------------------------------------------------
 // The six room states (K2 §1) — operator language, and one precedence order
 // ---------------------------------------------------------------------------
 
