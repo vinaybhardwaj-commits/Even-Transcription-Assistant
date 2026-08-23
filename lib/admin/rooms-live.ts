@@ -110,6 +110,9 @@ export {
   roomState,
   fmtCoarse,
   fmtDayIst,
+  ENDED_DISAGREES,
+  ENDED_DISAGREES_TITLE,
+  ENDED_DISAGREES_HINT,
   type RoomState,
   type RoomStateView,
 } from "@/lib/bench-bus-constants";
@@ -147,6 +150,8 @@ export type LiveSession = {
   last_backup_at: string | null;
   backup_chunks: number;
   primary_chunks: number;
+  /** ENDED DISAGREES — pieces whose UPLOAD landed after this session's ended_at. */
+  chunks_after_end: number;
 };
 
 export type RoomLive = {
@@ -165,6 +170,27 @@ export type RoomLive = {
   backup_reads_no_chunks: boolean;
   stalled: boolean;
   stalled_age_ms: number | null;
+  /**
+   * ENDED DISAGREES — the session row says over and the tape says otherwise.
+   *
+   * Named beside the states, never folded into one: `roomState()` is a precedence chain where
+   * the first match wins, and this is orthogonal to all six. A room can read ready, dropped or
+   * offline AND still be taking chunks into an ended session — that is exactly what bs_g3dwud4p
+   * looked like for six hours, and a chain would have shown one fact and hidden the other.
+   * `paused_disagrees` sits beside the states for the same reason.
+   *
+   * DERIVED FROM THE CHUNK ROWS, not from the bench_event the chunk route writes. Same fact, two
+   * witnesses, and this is the one that cannot be missed: the event exists only if the route saw
+   * the chunk after this build shipped, whereas the chunks are the durable evidence and were
+   * there all along. The event is the timeline record; this is the live read.
+   */
+  ended_disagrees: boolean;
+  ended_disagrees_session_id: string | null;
+  /** When the row says the session ended — the start of the disagreement, not of the session. */
+  ended_disagrees_ended_at: string | null;
+  /** Newest piece that landed after that, on the upload clock. */
+  ended_disagrees_last_piece_at: string | null;
+  ended_disagrees_chunks: number;
   /** The doctor clock. Null unless recording and not paused. */
   last_warehouse_at: string | null;
   doctor_clock_silent_ms: number | null;
@@ -287,6 +313,27 @@ export function buildRoomLive(
     ? nowMs - (ms(stalledSession.last_primary_at) ?? ms(stalledSession.last_backup_at) ?? ms(stalledSession.started_at) ?? nowMs)
     : null;
 
+  // ENDED DISAGREES. No extra query and no extra join: `chunks_after_end` rides the same
+  // per-session aggregate that already counts pieces per microphone.
+  //
+  // A NORMAL end never trips this. The kiosk flushes its whole queue and only then PATCHes end,
+  // so on a clean day every chunk row's created_at precedes ended_at; a late retry of an
+  // already-verified chunk hits ON CONFLICT DO UPDATE, which does not touch created_at. What
+  // trips it is a session that was ended by somebody the kiosk was never told about.
+  //
+  // Worst first: if more than one session in the day disagrees, report the one still taking
+  // audio most recently, because that is the one somebody has to walk to.
+  const disagreeing = sessions
+    .filter((sn) => sn.status === "ended" && sn.ended_at !== null && sn.chunks_after_end > 0)
+    .sort((a, b) => {
+      const at = Math.max(ms(a.last_primary_at) ?? 0, ms(a.last_backup_at) ?? 0);
+      const bt = Math.max(ms(b.last_primary_at) ?? 0, ms(b.last_backup_at) ?? 0);
+      return bt - at;
+    })[0] ?? null;
+  const disagreeLastPiece = disagreeing
+    ? [ms(disagreeing.last_primary_at), ms(disagreeing.last_backup_at)].filter((x): x is number => x !== null).sort((a, b) => b - a)[0] ?? null
+    : null;
+
   // THE DOCTOR CLOCK. Only while recording AND not paused; reset by any warehouse-typed cue,
   // and started from the tape's own start when the day has seen none yet.
   const clockBase = ms(brain.last_warehouse_at) ?? ms(live?.started_at ?? null);
@@ -306,6 +353,11 @@ export function buildRoomLive(
     backup_reads_no_chunks: backupReadsNoChunks,
     stalled: stalledSession !== null,
     stalled_age_ms: stalledAge,
+    ended_disagrees: disagreeing !== null,
+    ended_disagrees_session_id: disagreeing?.id ?? null,
+    ended_disagrees_ended_at: disagreeing?.ended_at ?? null,
+    ended_disagrees_last_piece_at: disagreeLastPiece === null ? null : new Date(disagreeLastPiece).toISOString(),
+    ended_disagrees_chunks: disagreeing?.chunks_after_end ?? 0,
     last_warehouse_at: brain.last_warehouse_at,
     doctor_clock_silent_ms: doctorClockSilentMs,
     doctor_clock_level: doctorClockLevel(doctorClockSilentMs),
@@ -366,7 +418,11 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
              MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_primary_at,
              MAX(c.created_at) FILTER (WHERE c.source = 'backup')  AS last_backup_at,
              COUNT(c.id)       FILTER (WHERE c.source = 'backup')  AS backup_chunks,
-             COUNT(c.id)       FILTER (WHERE c.source = 'primary') AS primary_chunks
+             COUNT(c.id)       FILTER (WHERE c.source = 'primary') AS primary_chunks,
+             -- ENDED DISAGREES: pieces whose UPLOAD landed after the row said the session was
+             -- over. A FILTER on the aggregate that is already here — no extra query, no extra
+             -- join, and s.ended_at is in the GROUP BY so it is legal to reference.
+             COUNT(c.id)       FILTER (WHERE s.ended_at IS NOT NULL AND c.created_at > s.ended_at) AS chunks_after_end
         FROM bench_session s
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.started_at >= ${fromIso}::timestamptz
@@ -472,6 +528,7 @@ export function normaliseSessions(rows: readonly unknown[]): LiveSession[] {
       last_backup_at: iso(r.last_backup_at as string),
       backup_chunks: Number(r.backup_chunks) || 0,
       primary_chunks: Number(r.primary_chunks) || 0,
+      chunks_after_end: Number(r.chunks_after_end) || 0,
     });
   }
   return out;

@@ -52,6 +52,7 @@
 
 import * as React from "react";
 import { LIVE_SINK } from "@/lib/live-flags";
+import { CHUNK_DISAGREEMENT_FIELD, ENDED_DISAGREES } from "@/lib/bench-bus-constants";
 import {
   idbChunkKey,
   pickDefaultBackupDevice,
@@ -342,6 +343,16 @@ export function useRoomRecorder(opts?: {
   onRecorderError?: (message: string) => void;
   /** K-B: mic-story events (mic_primary_lost / restored, mic_backup_*) — the kiosk posts them. */
   onEvent?: (e: BenchMicEvent) => void;
+  /**
+   * ENDED DISAGREES — the server accepted the chunk and told us the SESSION is over.
+   *
+   * Fired at most ONCE per hook life, from the upload drain. The chunk upload is the only channel
+   * that reaches a tab which is not reloading, and a tab that never reloads holding the session id
+   * in its own memory is exactly what bs_g3dwud4p was: told nothing, it kept recording into an
+   * ended session for six hours. The caller is expected to flush and stop — never to start
+   * anything new.
+   */
+  onSessionEndedByServer?: (disagreement: string) => void;
 }) {
   const [state, setState] = React.useState<RoomRecorderState>("idle");
   const [error, setError] = React.useState<string | null>(null);
@@ -379,6 +390,9 @@ export function useRoomRecorder(opts?: {
   React.useEffect(() => {
     optsRef.current = opts;
   }, [opts]);
+  /** ENDED DISAGREES fires once. The queue keeps draining after it, and every remaining chunk
+   *  carries the same flag — the room needs telling once, not once per chunk. */
+  const endedByServerRef = React.useRef(false);
   React.useEffect(() => {
     stateRef.current = state;
   }, [state]);
@@ -565,6 +579,22 @@ export function useRoomRecorder(opts?: {
       body: JSON.stringify(bodies.row),
     });
     if (!rowRes.ok) throw new Error(`chunk_row_failed_${rowRes.status}`);
+
+    // The chunk landed. Now read what the server said about the SESSION.
+    //
+    // Deliberately AFTER the ok check and inside its own try: this is the last thing that happens
+    // to a chunk that is already durably stored, and a malformed body must never turn a verified
+    // upload into a retry. Silence here means "nothing unusual", which is the normal case.
+    try {
+      const j = (await rowRes.json()) as Record<string, unknown> | null;
+      const d = j?.[CHUNK_DISAGREEMENT_FIELD];
+      if (d === ENDED_DISAGREES && !endedByServerRef.current) {
+        endedByServerRef.current = true;
+        optsRef.current?.onSessionEndedByServer?.(ENDED_DISAGREES);
+      }
+    } catch {
+      /* body unreadable — the upload still succeeded, which is what this function is about */
+    }
   }, []);
 
   const drain = React.useCallback(() => {

@@ -29,7 +29,12 @@
 import * as React from "react";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
-import { roomState, type RoomState } from "@/lib/bench-bus-constants";
+import {
+  roomState,
+  ENDED_DISAGREES_TITLE,
+  ENDED_DISAGREES_HINT,
+  type RoomState,
+} from "@/lib/bench-bus-constants";
 
 // ---------------------------------------------------------------------------
 // The selected room — shared with BenchClient, which renders that room's sessions
@@ -104,6 +109,12 @@ type RoomLive = {
   backup_reads_no_chunks: boolean;
   stalled: boolean;
   stalled_age_ms: number | null;
+  /** ENDED DISAGREES — the session row says over and pieces are still landing. */
+  ended_disagrees: boolean;
+  ended_disagrees_session_id: string | null;
+  ended_disagrees_ended_at: string | null;
+  ended_disagrees_last_piece_at: string | null;
+  ended_disagrees_chunks: number;
   last_warehouse_at: string | null;
   doctor_clock_silent_ms: number | null;
   doctor_clock_level: Level;
@@ -248,6 +259,18 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         severity: "red",
         title: "recording with no kiosk page open",
         detail: l ? `the room page last polled ${fmtAge(l.age_ms)} ago` : "no kiosk tab has ever polled this room",
+      });
+    }
+    // ENDED DISAGREES — beside "recording with no kiosk page open" because it is the same
+    // family of fault: the room and the record do not agree about whether a tape is running.
+    // RED, and it says the audio is safe first, because that is the operator's first question and
+    // an alarm that does not answer it gets read as data loss. bs_g3dwud4p lost nothing.
+    if (r.ended_disagrees) {
+      out.push({
+        room: name,
+        severity: "red",
+        title: ENDED_DISAGREES_TITLE,
+        detail: `${r.ended_disagrees_chunks} piece${r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was marked ended ${fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago — ${ENDED_DISAGREES_HINT}`,
       });
     }
     if (r.stalled) {
@@ -500,7 +523,7 @@ export function BenchRoomsLive() {
             recordingSince: r.session_started_at,
             nowMs,
           });
-          const worst: Level = r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red"
+          const worst: Level = r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red"
             ? "red"
             : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.backup_reads_no_chunks || r.marks_not_sent > 0
               ? "amber"
@@ -686,6 +709,23 @@ export function BenchRoomsLive() {
                 <p className="mt-2 text-caption text-danger-700 leading-snug">
                   Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
                 </p>
+              ) : null}
+
+              {/* ENDED DISAGREES — on the card as well as in the attention list, because the card
+                  is what somebody is looking at when they click a room. No control: there is
+                  nothing safe for the monitor to DO here. The session is already ended, the audio
+                  is already stored, and the kiosk has already been told to stop on its next chunk.
+                  What is needed is a person in the room pressing start, which is what it says. */}
+              {r.ended_disagrees ? (
+                <div className="mt-3 rounded-lg border border-danger-300 bg-danger-100 p-3" data-testid="ended-disagrees">
+                  <p className="text-caption text-danger-700 leading-snug">
+                    <span className="font-semibold">{ENDED_DISAGREES_TITLE}.</span>{" "}
+                    {r.ended_disagrees_chunks} piece{r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was
+                    marked ended {fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago
+                    {r.ended_disagrees_last_piece_at ? `, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago` : ""}.
+                  </p>
+                  <p className="text-caption text-even-ink-500 leading-snug mt-1">{ENDED_DISAGREES_HINT}.</p>
+                </div>
               ) : null}
 
               {/* K5 A2 — THE REPAIR. Shown ONLY on a room whose session is open while no kiosk

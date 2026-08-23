@@ -30,6 +30,53 @@ export const POLL_VISIBLE_MS = 1_500;
 export const POLL_HIDDEN_MS = 5_000;
 
 // ---------------------------------------------------------------------------
+// ENDED DISAGREES — the session row says over, the tape says otherwise
+// ---------------------------------------------------------------------------
+
+/**
+ * A NAMED DISAGREEMENT, in the same shape as `paused_disagrees` and for the same reason: the
+ * kiosk and the tape are two witnesses, and when they disagree the answer is to SAY SO, not to
+ * pick one. `paused_disagrees` covers consent. This covers the other one we have actually seen.
+ *
+ * bs_g3dwud4p, Home Office, 22–23 August. The day-rollover reaper stamped `ended_at` at 19:00:36.
+ * The kiosk was never told, and carried on writing chunks into that session until 00:58:46 — six
+ * hours later. All 108 of them are present and verified. **No audio was lost.** What was lost was
+ * the truth: a three-hour session row holding nine hours of audio, and an operator monitor
+ * showing NOT RECORDING while the room was still capturing.
+ *
+ * K4a fixed the specific cause (the reaper no longer reaps a session that is still receiving
+ * chunks). This names the general one — THE ROOM IS NEVER TOLD — so that when it happens again
+ * by some route nobody has thought of, it is visible on the screen instead of six hours later in
+ * a chunk listing.
+ *
+ * NOT a seventh room state. The six in `roomState()` below are a precedence chain where the first
+ * match wins, and this is ORTHOGONAL to every one of them: a room can be ready, dropped or
+ * offline AND be taking chunks into an ended session, and folding it into that chain would hide
+ * one fact behind the other. `paused_disagrees` sits beside the states for the same reason.
+ */
+export const ENDED_DISAGREES = "ended_disagrees";
+
+/**
+ * What POST /api/bench/chunks returns ALONGSIDE its normal success when it accepts a chunk into
+ * an ended session. The upload succeeded — that is not in question and never is. The SESSION is
+ * what is wrong, and this is the field that says so.
+ *
+ * The chunk upload is the only channel that reaches a tab which is not reloading, and the kiosk
+ * is already talking to the server on every chunk. This needs no command bus.
+ */
+export const CHUNK_DISAGREEMENT_FIELD = "disagreement";
+
+/** What a person standing in that room reads. Said once, here, so the kiosk cannot drift. */
+export const ENDED_DISAGREES_KIOSK_TITLE = "This recording was closed by the system";
+export const ENDED_DISAGREES_KIOSK_BODY =
+  "The audio recorded so far is saved and verified — nothing was lost. Press start to begin a new recording.";
+
+/** What the operator on the monitor reads. Worst-first attention copy: what, then what to do. */
+export const ENDED_DISAGREES_TITLE = "chunks are still arriving for a session that is marked ended";
+export const ENDED_DISAGREES_HINT =
+  "the audio is safe and still being stored — the room page has been told to stop; go to the room and press start to open a fresh recording";
+
+// ---------------------------------------------------------------------------
 // The six room states (K2 §1) — operator language, and one precedence order
 // ---------------------------------------------------------------------------
 

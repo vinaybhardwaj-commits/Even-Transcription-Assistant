@@ -55,7 +55,11 @@ import {
 } from "@/lib/use-room-recorder";
 // S3-2: the pure constants module — never bench-commands, whose module graph carries the
 // database driver and has no business in a kiosk bundle.
-import { ACK_POLL_MS } from "@/lib/bench-bus-constants";
+import {
+  ACK_POLL_MS,
+  ENDED_DISAGREES_KIOSK_TITLE,
+  ENDED_DISAGREES_KIOSK_BODY,
+} from "@/lib/bench-bus-constants";
 import {
   decideHandoverWait,
   resumeEventBody,
@@ -161,11 +165,17 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       /* the console line from the hook is the fallback record */
     });
   }, []);
+  /**
+   * ENDED DISAGREES — filled in once endDay exists, below. Held in a ref for the same reason
+   * liveHandlersRef is: recorderOpts must not be rebuilt on every render.
+   */
+  const endedByServerRef = React.useRef<() => void>(() => {});
   const recorderOpts = React.useMemo(
     () => ({
       onSeam: (s: ArchiveSeamEvent) => liveHandlersRef.current.onSeam?.(s),
       onRecorderError: (m: string) => liveHandlersRef.current.onRecorderError?.(m),
       onEvent: postMicEvent,
+      onSessionEndedByServer: () => endedByServerRef.current(),
     }),
     [postMicEvent],
   );
@@ -184,6 +194,16 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
   const [starting, setStarting] = React.useState(false);
   const [startError, setStartError] = React.useState<string | null>(null);
   const [endingUpload, setEndingUpload] = React.useState(false);
+  /**
+   * ENDED DISAGREES — the server told us, on a chunk response, that this session is over.
+   *
+   * Set once and never cleared for the life of the tab. It does three things: it stops the
+   * recording (via the same flush the End-day button uses), it suppresses the PATCH end that
+   * would otherwise rewrite an ended_at written by somebody else, and it swaps the end-of-day
+   * copy for a message that says what happened and what to do. It deliberately does NOT start
+   * anything: see onSessionEndedByServer below.
+   */
+  const [closedByServer, setClosedByServer] = React.useState(false);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   // Remount resume: hold the start screen until the server has answered (§3.1);
   // `resumed` drives the D6 banner (its TEXT reads the LIVE state — P5-3a: a banner
@@ -549,6 +569,26 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     await endDay();
   }, [endDay]);
 
+  /**
+   * ENDED DISAGREES — the whole kiosk-side response (B1, B2, B3).
+   *
+   * STOP CLEANLY. `endDay()` is exactly the right verb and it is the one the End-day button uses:
+   * it finalises whatever each lane is holding into the upload queue, tears the streams down, and
+   * lets the existing flush effect wait for the queue to drain. The partial chunk in flight when
+   * the signal arrived is finished and uploaded like any other. Nothing is discarded.
+   *
+   * AND START NOTHING. The kiosk's own start path has no guard against creating a second open
+   * session, so "helpfully" opening a fresh one here is how a room ends up with several and
+   * nobody notices. There is a person watching a monitor on Monday; silent recovery hides the
+   * fault from exactly the people who need to see it. Stop, surface, let a human press start.
+   */
+  React.useEffect(() => {
+    endedByServerRef.current = () => {
+      setClosedByServer(true);
+      void onEndDay(); // sets endingUpload and flushes — the same path the End-day button takes
+    };
+  }, [onEndDay]);
+
   // Operator listener (S2): end_day must ack only after the flush + PATCH end — these
   // resolvers fire from the same effect that flips the session to ended.
   const endWaitersRef = React.useRef<Array<() => void>>([]);
@@ -564,14 +604,19 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     if (status.state !== "ending") return;
     if (status.queuedCount > 0) return;
     void (async () => {
-      await patchSession("end");
+      // NEVER PATCH end when the server is the one that ended it. The row is already 'ended' and
+      // its ended_at was written by whoever ended it — the reaper, an operator, the MCP. Stamping
+      // it again with the time this tab happened to finish flushing would overwrite the one piece
+      // of evidence that says when the disagreement began. bs_g3dwud4p's 19:00:36 is exactly that
+      // evidence, and it is why this is a condition and not a convenience.
+      if (!closedByServer) await patchSession("end");
       markEnded();
       setEndingUpload(false);
       const waiters = endWaitersRef.current;
       endWaitersRef.current = [];
       for (const w of waiters) w();
     })();
-  }, [endingUpload, status.state, status.queuedCount, patchSession, markEnded]);
+  }, [endingUpload, status.state, status.queuedCount, patchSession, markEnded, closedByServer]);
 
   // FU2b — the losing tab signals the handover once its last segment is uploaded: one
   // kiosk_handover_complete event carrying the last number it used per stream (-1 = the
@@ -1115,6 +1160,14 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
                 </div>
               </div>
 
+              {/* ENDED DISAGREES (B2) — plainest, loudest thing on the screen while the flush runs.
+                  It sits ABOVE the network/mic banners because it outranks them: those describe a
+                  recording that is continuing, and this one is not. */}
+              {closedByServer && (
+                <div className="mb-3 rounded-xl bg-danger-100 px-4 py-3 text-body font-semibold text-danger-700">
+                  ⚠&nbsp; {ENDED_DISAGREES_KIOSK_TITLE}. {ENDED_DISAGREES_KIOSK_BODY}
+                </div>
+              )}
               {status.offline ? (
                 <div className="mb-3 flex items-center gap-2 rounded-xl bg-warning-100 px-4 py-2.5 text-body font-semibold text-warning-700">
                   ⚠&nbsp; Network unreachable — {status.queuedCount} chunk
@@ -1145,7 +1198,9 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
               {status.state === "ending" ? (
                 <div className="flex items-center justify-center gap-3 rounded-2xl border border-even-ink-200 py-4 text-body font-semibold text-even-navy-800">
                   <span className="w-4 h-4 rounded-full border-2 border-even-blue-600 border-t-transparent animate-spin" />
-                  Finishing — uploading final chunk ({status.queuedCount} left)…
+                  {closedByServer
+                    ? `Closed by the system — saving the last chunk (${status.queuedCount} left)…`
+                    : `Finishing — uploading final chunk (${status.queuedCount} left)…`}
                 </div>
               ) : (
                 <div className="flex gap-2.5">
@@ -1245,18 +1300,44 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           {/* ============ ENDED ============ */}
           {!takenOver && status.state === "ended" && (
             <div className="text-center py-8">
-              <p className="text-heading font-bold text-even-navy-800 mb-2">Day ended</p>
-              <p className="text-body text-even-ink-500 mb-6">
-                {status.archivedCount} chunk{status.archivedCount === 1 ? "" : "s"} archived
-                {status.backupArchivedCount > 0 ? ` + ${status.backupArchivedCount} backup` : ""} (
-                {fmtMb(status.archivedBytes)}) — all uploads verified.
-              </p>
+              {/* ENDED DISAGREES (B2) — a person standing in this room must be able to read what
+                  happened and what to do without knowing anything about sessions or reapers. The
+                  first line says the recording stopped and it was not them; the second says the
+                  audio is safe, which is the question they will actually have; the button says
+                  what to press. No auto-start (B3) — a human decides. */}
+              {closedByServer ? (
+                <>
+                  <div
+                    data-testid="closed-by-server"
+                    className="mx-auto mb-5 max-w-md rounded-2xl border-2 border-danger-300 bg-danger-100 px-5 py-4 text-left"
+                  >
+                    <p className="text-heading font-bold text-danger-700 mb-1">
+                      {ENDED_DISAGREES_KIOSK_TITLE}
+                    </p>
+                    <p className="text-body text-danger-700">{ENDED_DISAGREES_KIOSK_BODY}</p>
+                  </div>
+                  <p className="text-body text-even-ink-500 mb-6">
+                    {status.archivedCount} chunk{status.archivedCount === 1 ? "" : "s"} archived
+                    {status.backupArchivedCount > 0 ? ` + ${status.backupArchivedCount} backup` : ""} (
+                    {fmtMb(status.archivedBytes)}) — all uploads verified.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-heading font-bold text-even-navy-800 mb-2">Day ended</p>
+                  <p className="text-body text-even-ink-500 mb-6">
+                    {status.archivedCount} chunk{status.archivedCount === 1 ? "" : "s"} archived
+                    {status.backupArchivedCount > 0 ? ` + ${status.backupArchivedCount} backup` : ""} (
+                    {fmtMb(status.archivedBytes)}) — all uploads verified.
+                  </p>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => window.location.reload()}
-                className="eta-btn-secondary px-6 py-3"
+                className={closedByServer ? "eta-btn-primary px-6 py-3" : "eta-btn-secondary px-6 py-3"}
               >
-                Start a new day
+                {closedByServer ? "Start a new recording" : "Start a new day"}
               </button>
             </div>
           )}

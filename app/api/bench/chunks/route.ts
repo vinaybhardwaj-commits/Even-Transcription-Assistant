@@ -16,14 +16,35 @@
  * K4a: on success this ALSO schedules a bench_window evaluation in an after() hook. Nothing
  * about the request path changes — no extra query runs before the response — and the window
  * write is derived from chunk rows that are already committed by the time it runs.
+ *
+ * ── ENDED DISAGREES (23 Aug 2026) ───────────────────────────────────────────────────────────
+ *
+ * A chunk can arrive for a session whose row says 'ended'. bs_g3dwud4p is the case: the
+ * day-rollover reaper stamped ended_at at 19:00:36, THE KIOSK WAS NEVER TOLD, and the tab — which
+ * never reloaded, and held the session id in its own memory — carried on writing chunks until
+ * 00:58:46. All 108 are present and verified.
+ *
+ * THE CHUNK IS ALWAYS ACCEPTED. Never refuse audio because a row says the session is over: those
+ * 108 chunks are exactly why. Refusing would have converted a bookkeeping fault into six hours of
+ * lost recording, which is a far worse failure than the one being fixed.
+ *
+ * What changes is that the disagreement is now (a) written once to bench_event, so it is in the
+ * timeline and not only in a log, and (b) RETURNED TO THE KIOSK. The chunk upload is the only
+ * channel that reaches a tab which is not reloading, and the kiosk is already talking to us on
+ * every chunk — so this needs no command bus. A reload was already safe (decideResume rejects an
+ * ended session); a tab that never reloads was not, and that is what this closes.
+ *
+ * Neither addition touches the request path. The status is read off the session row this route
+ * already loads, and the event write goes in the same after() hook as the window evaluation.
  */
 import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { findBenchSession, newChunkId, ymdUtc } from "@/lib/bench";
+import { findBenchSession, newChunkId, newEventId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
 import { evaluateAndWriteWindows } from "@/lib/bench-window";
+import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD } from "@/lib/bench-bus-constants";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,6 +115,10 @@ export async function POST(req: NextRequest) {
     return respondError("FORBIDDEN", "not_your_session");
   }
 
+  // The disagreement, read off the row we already have. NOT a guard — nothing below branches on
+  // it, and no chunk is ever refused for it. It only decides what we say afterwards.
+  const endedDisagrees = session.status === "ended";
+
   // Server-side authoritative verify (D8): the object must exist in R2 with
   // the exact claimed size before a 'verified' row is written.
   const key = benchChunkKey(
@@ -140,6 +165,36 @@ export async function POST(req: NextRequest) {
   // It never throws: a window is a derived view of chunks that are already durably written,
   // so a failure here costs a re-evaluation on the next chunk, not a chunk.
   after(async () => {
+    // ONE event per session, not one per chunk. A kiosk that was never told keeps uploading every
+    // five minutes for hours; 108 identical rows is a log, not a timeline. First-detection is
+    // decided by Postgres — ON CONFLICT DO NOTHING on 0064's partial unique index — rather than
+    // by a read-then-write that two concurrent after() hooks could both pass.
+    if (endedDisagrees) {
+      try {
+        await sql`
+          INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+          VALUES (
+            ${newEventId()}, ${sessionId}, ${ENDED_DISAGREES},
+            ${startedAt.toISOString()}, 'none',
+            ${JSON.stringify({
+              source: "server",
+              detected_on: { idx, chunk_source: source },
+              session_ended_at: session.ended_at ? new Date(session.ended_at).toISOString() : null,
+              chunk_started_at: startedAt.toISOString(),
+            })}::jsonb
+          )
+          ON CONFLICT DO NOTHING
+        `;
+        // Logged as well as written: a timeline row is for later, a log line is for now.
+        console.warn(
+          `[bench-chunks] ${ENDED_DISAGREES} session=${sessionId} idx=${idx} source=${source} — chunk ACCEPTED and stored; the kiosk has been told to stop`,
+        );
+      } catch (e) {
+        // The chunk is already durably written and the kiosk already has its signal. A lost
+        // timeline row must not cost anything else.
+        console.warn(`[bench-chunks] ${ENDED_DISAGREES} event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
+      }
+    }
     try {
       await evaluateAndWriteWindows(sessionId);
     } catch {
@@ -147,5 +202,12 @@ export async function POST(req: NextRequest) {
     }
   });
 
-  return respondOk({ ok: true, key, upload_state: "verified" });
+  // The upload SUCCEEDED and says so exactly as before. The extra field is about the session, not
+  // about this chunk, and it is absent on every normal upload.
+  return respondOk({
+    ok: true,
+    key,
+    upload_state: "verified",
+    ...(endedDisagrees ? { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES } : {}),
+  });
 }
