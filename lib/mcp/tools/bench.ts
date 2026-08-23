@@ -82,6 +82,8 @@ import { getObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { transcribeWithWhisper, type WhisperSegment } from "@/lib/whisper";
 import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
+// T3 — the operator path's transcriber, named by the adapter rather than typed into a payload.
+import { whisperAdapter } from "@/lib/stt/adapters/whisper";
 // U2: the joining half — the 30-minute limit, the recording guard, the clip key/provenance and
 // the client of the joining service (D2, D14, D15, D3/D4, D10).
 import {
@@ -1011,6 +1013,15 @@ export type TurnBuild = {
  */
 export function buildTurns(opts: {
   sessionId: string;
+  /**
+   * K4b T3 — THE ENGINE THAT PRODUCED THESE SEGMENTS. Required, and every caller passes an
+   * adapter's own `key` rather than a string. It used to be the literal "whisper" baked into
+   * the payload here, which was true only for as long as Whisper was the only transcriber; the
+   * room drain adds a second, and a cue that names the wrong engine is evidence of nothing.
+   * This system has shipped a typed provider label twice and both times it hid a wrong provider
+   * for months, so the type makes omitting it a compile error rather than a default.
+   */
+  engine: string;
   clipStartMs: number;
   windowStartMs: number;
   windowEndMs: number;
@@ -1070,7 +1081,7 @@ export function buildTurns(opts: {
         start_ms: startMs,
         end_ms: endMs,
         speaker,
-        engine: "whisper",
+        engine: opts.engine,
         language,
         session_id: opts.sessionId,
         window: asked,
@@ -1101,7 +1112,7 @@ export function buildTurns(opts: {
       start_ms: startMs,
       end_ms: endMs,
       speaker: TURN_SPEAKER_UNKNOWN,
-      engine: "whisper",
+      engine: opts.engine,
       language,
       session_id: opts.sessionId,
       // The same two fields, on the silence too. A window that produced no words is still a
@@ -1131,6 +1142,8 @@ export function buildTurns(opts: {
  */
 export function buildWindowCue(opts: {
   sessionId: string;
+  /** K4b T3 — as on buildTurns: the engine that produced the window, never typed. */
+  engine: string;
   windowStartMs: number;
   windowEndMs: number;
   complete: boolean;
@@ -1153,7 +1166,7 @@ export function buildWindowCue(opts: {
     payload: {
       // `end` as the kickoff names it, ISO, beside the ms the delete and the rollup read.
       end: new Date(endMs).toISOString(),
-      engine: "whisper",
+      engine: opts.engine,
       source_used: opts.sourceUsed ?? null,
       complete: opts.complete,
       segment_count: opts.segmentCount,
@@ -1208,7 +1221,7 @@ export function failureReason(error: string): "permission" | "transport" | "inco
  * this route's own and there is exactly one brain now (lib/brain, in this deployment). One
  * door, and it is this app's.
  */
-async function postTurnBatch(
+export async function postTurnBatch(
   origin: string,
   body: {
     room_id: string;
@@ -1271,7 +1284,7 @@ const asBatchCue = (d: TurnDraft) => ({ type: d.type, at: d.at, payload: d.paylo
  *   NEITHER  if the marker request also fails, the day holds NO record of this ask and the
  *            answer says exactly that. It does not imply otherwise (K4 §3).
  */
-async function writeWindowCues(
+export async function writeWindowCues(
   origin: string,
   roomId: string,
   roomDayId: string,
@@ -1435,6 +1448,7 @@ async function turnsAnswer(
   // is the two fields the writer sets.
   const windowCueFor = (complete: boolean, stoppedEarly: string | null) =>
     buildWindowCue({
+      engine: whisperAdapter.key,
       sessionId: session.id,
       windowStartMs: win.startMs,
       windowEndMs: win.endMs,
@@ -1542,6 +1556,7 @@ async function whisperNotOkAnswer(
     // ONE stt_silence covering exactly what was asked for. Nothing special-cased, so a silent
     // window and a window whose every segment was blank produce the identical row.
     const build = buildTurns({
+      engine: whisperAdapter.key,
       sessionId: session.id,
       clipStartMs: win.startMs,
       windowStartMs: win.startMs,
@@ -1585,6 +1600,7 @@ async function whisperNotOkAnswer(
   };
   const markerFor = () =>
     buildWindowCue({
+      engine: whisperAdapter.key,
       sessionId: session.id,
       windowStartMs: win.startMs,
       windowEndMs: win.endMs,
@@ -1698,7 +1714,7 @@ const transcribeRange: McpTool = {
       // window the operator asked for — a window that starts before the first covering piece
       // trims to zero and the clip starts at the piece instead.
       const joinedClipStartMs = Date.parse(res.covering[0]!.chunk_bounds.started_at) + Math.round(res.covering[0]!.offset_in_chunk_s * 1000);
-      const jBuild = buildTurns({ sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
+      const jBuild = buildTurns({ engine: whisperAdapter.key, sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
       const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: wj.language ?? null, sourceUsed: r.decision.source });
       return {
         ok: true,
@@ -1740,7 +1756,7 @@ const transcribeRange: McpTool = {
     // the chunk's own start — not the window, which is why the turns below are then filtered to
     // the window while the `text` above still covers the whole chunk.
     const chunkStartMs = Date.parse(c.chunk_bounds.started_at);
-    const sBuild = buildTurns({ sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
+    const sBuild = buildTurns({ engine: whisperAdapter.key, sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
     const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: w.language ?? null, sourceUsed: r.decision.source });
     return {
       ok: true,

@@ -8,7 +8,7 @@
 import { sql } from "@/lib/db";
 import { adapterFor } from "./registry";
 
-export type Stage = "live" | "note" | "diarize";
+export type Stage = "live" | "note" | "diarize" | "room";
 export type Bucket = "english" | "indic" | "default";
 
 export async function resolveRouting(stage: Stage, bucket: Bucket): Promise<string | null> {

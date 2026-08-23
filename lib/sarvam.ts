@@ -130,7 +130,12 @@ export type SarvamBatchResult =
   | { ok: true; transcript: string; languageCode: string | null; entries: SarvamDiarEntry[]; latencyMs: number }
   | { ok: false; error: string; latencyMs: number };
 
-type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; withDiarization?: boolean; numSpeakers?: number };
+type BatchOpts = { prompt?: string; signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; withDiarization?: boolean; numSpeakers?: number;
+  /** K4b C3 — force the source language instead of letting Sarvam auto-detect. Sarvam has
+   *  mislabelled accented English as an Indian language and then TRANSLITERATED the English
+   *  into that script (fix f9da77f). When the caller already has Whisper's language id, that
+   *  is the arbitrator, and Sarvam must not be left to re-decide. */
+  languageCode?: string | null };
 
 // Per-request timeouts so a hung Azure/Sarvam transfer can't stall /process to
 // its maxDuration. Combines an outer caller signal with a per-request deadline
@@ -160,10 +165,23 @@ async function tfetch(
   }
 }
 
-export async function sarvamBatchTranslate(
+/**
+ * K4b C4 — WHICH JOB FAMILY. Sarvam exposes the batch API twice: `/speech-to-text-translate`
+ * returns ENGLISH whatever went in, and `/speech-to-text` returns the source language. They are
+ * different products, not a flag, and the only thing that picks between them is this path.
+ *
+ * `sarvamBatchTranslate` keeps the translate family and its exact previous behaviour, because
+ * the encounter fan-out and the note path depend on it. The room drain wants the OTHER one.
+ */
+type SarvamJobConfig = { jobPath: string; model: string };
+const JOB_TRANSLATE: SarvamJobConfig = { jobPath: "speech-to-text-translate", model: "saaras:v2.5" };
+const JOB_TRANSCRIBE: SarvamJobConfig = { jobPath: "speech-to-text", model: process.env.SARVAM_STT_BATCH_MODEL || "saarika:v2.5" };
+
+async function sarvamBatchJob(
   audio: Buffer | Uint8Array,
   contentType = "audio/webm",
   opts: BatchOpts = {},
+  cfg: SarvamJobConfig = JOB_TRANSLATE,
 ): Promise<SarvamBatchResult> {
   const key = process.env.SARVAM_API_KEY;
   if (!key) return { ok: false, error: "sarvam_api_key_missing", latencyMs: 0 };
@@ -176,15 +194,15 @@ export async function sarvamBatchTranslate(
 
   try {
     // 1. init
-    const initRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1`, {
+    const initRes = await tfetch(`${SARVAM_BASE}/${cfg.jobPath}/job/v1`, {
       method: "POST", headers: H, cache: "no-store",
-      body: JSON.stringify({ job_parameters: { model: "saaras:v2.5", ...(opts.prompt ? { prompt: opts.prompt } : {}), ...(opts.withDiarization ? { with_diarization: true } : {}), ...(opts.numSpeakers ? { num_speakers: opts.numSpeakers } : {}) } }),
+      body: JSON.stringify({ job_parameters: { model: cfg.model, ...(opts.languageCode ? { language_code: opts.languageCode } : {}), ...(opts.prompt ? { prompt: opts.prompt } : {}), ...(opts.withDiarization ? { with_diarization: true } : {}), ...(opts.numSpeakers ? { num_speakers: opts.numSpeakers } : {}) } }),
     }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!initRes.ok) return { ok: false, error: `init_${initRes.status}: ${(await initRes.text()).slice(0, 120)}`, latencyMs: Date.now() - t0 };
     const jobId = (await initRes.json() as { job_id: string }).job_id;
 
     // 2. presigned upload URL
-    const upRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/upload-files`, {
+    const upRes = await tfetch(`${SARVAM_BASE}/${cfg.jobPath}/job/v1/upload-files`, {
       method: "POST", headers: H, cache: "no-store",
       body: JSON.stringify({ job_id: jobId, files: [fname] }),
     }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
@@ -203,7 +221,7 @@ export async function sarvamBatchTranslate(
     if (!putRes.ok) return { ok: false, error: `azure_put_${putRes.status}`, latencyMs: Date.now() - t0 };
 
     // 4. start
-    const startRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/start`, {
+    const startRes = await tfetch(`${SARVAM_BASE}/${cfg.jobPath}/job/v1/${jobId}/start`, {
       method: "POST", headers: H, cache: "no-store", body: "{}",
     }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
     if (!startRes.ok) return { ok: false, error: `start_${startRes.status}`, latencyMs: Date.now() - t0 };
@@ -216,7 +234,7 @@ export async function sarvamBatchTranslate(
       await new Promise((r) => setTimeout(r, pollMs));
       let stRes: Response;
       try {
-        stRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/${jobId}/status`, { headers: H, cache: "no-store" }, SARVAM_POLL_TIMEOUT_MS, opts.signal);
+        stRes = await tfetch(`${SARVAM_BASE}/${cfg.jobPath}/job/v1/${jobId}/status`, { headers: H, cache: "no-store" }, SARVAM_POLL_TIMEOUT_MS, opts.signal);
       } catch {
         continue; // a single slow/timed-out poll: retry within the maxWaitMs window
       }
@@ -233,7 +251,7 @@ export async function sarvamBatchTranslate(
     if (outputs.length === 0) return { ok: false, error: "no_outputs", latencyMs: Date.now() - t0 };
 
     // 6. download output(s) + concat transcripts
-    const dlRes = await tfetch(`${SARVAM_BASE}/speech-to-text-translate/job/v1/download-files`, {
+    const dlRes = await tfetch(`${SARVAM_BASE}/${cfg.jobPath}/job/v1/download-files`, {
       method: "POST", headers: H, cache: "no-store",
       body: JSON.stringify({ job_id: jobId, files: outputs }),
     }, SARVAM_CTRL_TIMEOUT_MS, opts.signal);
@@ -259,6 +277,26 @@ export async function sarvamBatchTranslate(
   } catch (e: unknown) {
     return { ok: false, error: `batch_exc: ${e instanceof Error ? e.message : String(e)}`, latencyMs: Date.now() - t0 };
   }
+}
+
+/** The translate job — English out, whatever went in. UNCHANGED behaviour: same path, same
+ *  model, same defaults as before this file was parameterised. */
+export function sarvamBatchTranslate(
+  audio: Buffer | Uint8Array,
+  contentType = "audio/webm",
+  opts: BatchOpts = {},
+): Promise<SarvamBatchResult> {
+  return sarvamBatchJob(audio, contentType, opts, JOB_TRANSLATE);
+}
+
+/** K4b — the TRANSCRIBE job: the source language back, not English. Used by the room drain,
+ *  which needs to know what was actually said rather than a translation of it. */
+export function sarvamBatchTranscribe(
+  audio: Buffer | Uint8Array,
+  contentType = "audio/webm",
+  opts: BatchOpts = {},
+): Promise<SarvamBatchResult> {
+  return sarvamBatchJob(audio, contentType, opts, JOB_TRANSCRIBE);
 }
 
 /** Medical-context prompt passed to Sarvam translate to nudge clinical accuracy. */

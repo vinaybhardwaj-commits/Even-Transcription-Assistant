@@ -73,6 +73,8 @@
 
 import { sql } from "@/lib/db";
 import { decideSource, type MicEventRow, type MicSource } from "@/lib/bench-source";
+import { isRoomDrainEnabled } from "@/lib/stt/room-drain-flag";
+import { enqueueSubject } from "@/lib/stt/fanout";
 
 /** The grid. 15 minutes, aligned to the IST hour. */
 export const WINDOW_MS = 15 * 60 * 1000;
@@ -238,6 +240,8 @@ export function istDateOf(atMs: number): string {
 }
 
 export type WriteWindowsResult = {
+  /** C1 — windows handed to the STT queue on this pass. Absent when the flag is off. */
+  enqueued?: number;
   session_id: string;
   slots: number;
   inserted: number;
@@ -324,8 +328,26 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
                AND source_mic = ${v.source_mic} AND state = 'open'
              RETURNING id
           `) as Array<{ id: string }>;
-          if (upd.length > 0) base.closed++;
-          else base.unchanged++;
+          if (upd.length > 0) {
+            base.closed++;
+            // C1 — a window becoming CLOSED is the drain's trigger, and this is the only place
+            // that transition happens. HAZARD call site 1 of 3 (lib/stt/room-drain-flag.ts).
+            //
+            // Guarded three ways: the flag must name this room, the window must be grid-aligned,
+            // and the enqueue only runs on the open→closed edge — `upd.length > 0` means THIS
+            // call closed it, so re-running the evaluator over a settled session enqueues
+            // nothing. The insert is ON CONFLICT DO NOTHING besides.
+            //
+            // Enqueue only. No join, no engine call, no cue, and no money is spent here: this
+            // runs inside the chunk route's after() hook, and a paid API call has no business on
+            // the tail of a recording request.
+            if (roomId && v.source_mic && isRoomDrainEnabled(roomId)) {
+              try {
+                await enqueueSubject("bench_window", id, "asr");
+                base.enqueued = (base.enqueued ?? 0) + 1;
+              } catch { /* the queue is not the tape; a failed enqueue never fails a chunk */ }
+            }
+          } else base.unchanged++;
         } else {
           base.still_open++;
         }

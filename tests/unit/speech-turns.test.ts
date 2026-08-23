@@ -124,6 +124,9 @@ describe("scribe_post_cue — the machine cue types are refused by name", () => 
 // 2. the time mapping — pure, and the part that is silently wrong or silently right
 // ---------------------------------------------------------------------------
 
+// K4b T3 — buildTurns names the engine that produced the segments; it is no longer
+// baked into the payload. These tests assert the payload CARRIES what it was given.
+const ENGINE = "whisper";
 const SESSION_ID = "bs_xvntaugh";
 
 describe("turnSourceRef — the key, exactly", () => {
@@ -155,6 +158,7 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
 
   it("offsets segment seconds onto the CLIP's true start with Math.floor on both ends", () => {
     const b = buildTurns({
+      engine: ENGINE,
       sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO,
       segments: [seg(60, 64.3209, "hello there")], language: "en",
     });
@@ -175,14 +179,15 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
   });
 
   it("the clip start is what moves the day: the same segments on a joined clip land elsewhere", () => {
-    const onChunk = buildTurns({ sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [seg(60, 90, "x")] });
-    const onClip = buildTurns({ sessionId: SESSION_ID, clipStartMs: WIN_FROM, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [seg(0, 30, "x")] });
+    const onChunk = buildTurns({ engine: ENGINE, sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [seg(60, 90, "x")] });
+    const onClip = buildTurns({ engine: ENGINE, sessionId: SESSION_ID, clipStartMs: WIN_FROM, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [seg(0, 30, "x")] });
     expect(onChunk.turns[0]!.start_ms).toBe(onClip.turns[0]!.start_ms);
     expect(onChunk.turns[0]!.source_ref).toBe(onClip.turns[0]!.source_ref);
   });
 
   it("filters to the window asked for — the whole chunk is transcribed, the window is what is kept", () => {
     const b = buildTurns({
+      engine: ENGINE,
       sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO,
       segments: [
         seg(0, 30, "before the window"),
@@ -201,6 +206,7 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
 
   it("drops blank text — a cue with no words is evidence of nothing", () => {
     const b = buildTurns({
+      engine: ENGINE,
       sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO,
       segments: [seg(60, 61, "   "), seg(62, 63, ""), seg(64, 65, "real")],
     });
@@ -211,6 +217,7 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
 
   it("a window that survived NOTHING is one stt_silence over the whole window", () => {
     const b = buildTurns({
+      engine: ENGINE,
       sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO,
       segments: [seg(0, 10, "before"), seg(61, 62, "  ")],
     });
@@ -229,9 +236,9 @@ describe("buildTurns — offset, filter, drop, and say so when nothing is left",
   });
 
   it("no segments at all is a silence, not a crash — and neither is a transcriber that sent none", () => {
-    expect(buildTurns({ sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [] }).silence).toBe(true);
+    expect(buildTurns({ engine: ENGINE, sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: [] }).silence).toBe(true);
     // an older engine, a stub, a future adapter: undefined where an array was expected
-    const b = buildTurns({ sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: undefined as unknown as [] });
+    const b = buildTurns({ engine: ENGINE, sessionId: SESSION_ID, clipStartMs: CLIP, windowStartMs: WIN_FROM, windowEndMs: WIN_TO, segments: undefined as unknown as [] });
     expect(b.silence).toBe(true);
     expect(b.turns).toHaveLength(1);
   });

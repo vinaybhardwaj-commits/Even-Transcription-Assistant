@@ -69,5 +69,11 @@ Tier 1 `0f40743` · Tier 2 `53039a8`/`78a5eb6`/`d60222a` · Tier 3 `f9ecb18`/`b9
   tells a kiosk its session was closed underneath it, and nothing repairs an `ended_at` that
   ended up earlier than the last chunk. Effort M · Risk low (no clinical path).
 
+- **K4b — a drained window's cues carry `source = "replay"`.** `CueSource` is a closed set of
+  two values in `lib/mcp/tools/brain.ts`, so the room drain reuses the operator door's source
+  rather than widening the brain's vocabulary two days before a live OPD day. Cost: a
+  `WHERE source = ...` cannot separate a drained window from a replayed one (payload `engine`
+  and the transcription_run still can). Fix when the source vocabulary is next opened.
+
 ## Parked (security — deferred by V, tracked in B19)
 - seed-team unauth super-admin creation; missing admin RBAC role gates; finalize-upload key-binding. **Plus** admin-login has no lockout/rate-limit (`admin/login/route.ts`) — security-adjacent, parked here too unless reprioritized.

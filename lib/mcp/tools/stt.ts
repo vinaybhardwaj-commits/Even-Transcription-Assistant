@@ -97,11 +97,11 @@ const sttRouting: McpTool = {
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () =>
-    failSafe({ routing: [] as unknown[], engines: [] as unknown[], stages: ["live", "note"], buckets: ["english", "indic"] }, async () => {
+    failSafe({ routing: [] as unknown[], engines: [] as unknown[], stages: ["live", "note", "room"], buckets: ["english", "indic"] }, async () => {
       // Copied verbatim from app/api/admin/stt-lab/routing/route.ts GET.
       const routing = (await sql`SELECT stage, language_bucket, engine_id, updated_at FROM stt_routing ORDER BY stage, language_bucket`) as unknown[];
       const engines = (await sql`SELECT id, display_name, enabled, capabilities_json FROM stt_engine ORDER BY sort_order, id`) as unknown[];
-      return { routing, engines, stages: ["live", "note"], buckets: ["english", "indic"] };
+      return { routing, engines, stages: ["live", "note", "room"], buckets: ["english", "indic"] };
     }),
 };
 

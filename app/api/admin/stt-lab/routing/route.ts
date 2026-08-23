@@ -7,7 +7,9 @@ import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
 
-const STAGES = ["live", "note"];
+// K4b B: 'room' is the room-tape drain's own stage, so changing the room engine cannot
+// change the engine a doctor sees live. Seeded by migration 0062.
+const STAGES = ["live", "note", "room"];
 const BUCKETS = ["english", "indic"];
 
 export async function GET(_req: NextRequest) {
