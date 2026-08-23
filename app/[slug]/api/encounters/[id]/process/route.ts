@@ -38,7 +38,7 @@ import { indicNoteAssist, INDIC_NOTE_ASSIST_ON } from "@/lib/stt/indic-note-assi
 import { INDIC_COMPREHENSION_ON, generateNativeAnalysis } from "@/lib/stt/indic-comprehension";
 import { routeTranscribe, ETA_ROUTER_ON, ROUTER_JOB_ON, submitRouteJob, pollRouteJob } from "@/lib/stt/eta-router";
 import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "@/lib/stt/fuse-transcript";
-import { runDiarize, reconcileTagged, applyRoleOverrides } from "@/lib/diarize";
+import { runDiarize, reconcileTagged, applyRoleOverrides, diarizeTimingLine } from "@/lib/diarize";
 import { capturePassiveSample } from "@/lib/voice-samples";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
@@ -105,10 +105,15 @@ export async function POST(
   let force = false;
   let stepRequested = false;
   let syncRequested = false;
+  let onlyStep: string | null = null;
   try {
-    const body = (await req.json().catch(() => ({}))) as { force?: boolean; step?: boolean; sync?: boolean };
+    const body = (await req.json().catch(() => ({}))) as { force?: boolean; step?: boolean; sync?: boolean; only?: string };
     force = body.force === true;
     stepRequested = body.step === true;
+    // only: run ONE named step and nothing else, or report done. Used by the diarize-only
+    // re-run (/api/admin/resume-processing?rediarize=1), which must not be able to regenerate
+    // a note or a native analysis on an encounter that is months old and already complete.
+    onlyStep = typeof body.only === "string" && body.only ? body.only : null;
     // sync step mode: run the ONE step IN-REQUEST (function stays alive) instead of in
     // after(). Vercel after() does not reliably execute the heavy translate step on
     // fire-and-forget invocations, so the resume cron / manual recovery drive synchronously.
@@ -504,12 +509,19 @@ export async function POST(
   // clinician centroids yet (enrollment = V2.SD.1) so roles are heuristic;
   // no manual_relabels yet (live relabel = V2.SD.2). Soft-fails to
   // diarize_status='failed' and the note/email behave as v2.0 (unlabeled).
-  const diarizeStore = async (emit?: (o: unknown) => void): Promise<void> => {
-    if (!row) return;
-    if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return; }
+  //
+  // Returns whether the step PROGRESSED. It returns false in exactly one case: the depth-1
+  // diarize slot (lib/diarize-gate.ts) was never acquired, so we never reached the service and
+  // there is nothing to record about it. That is not a failure — marking it 'failed' would be
+  // terminal (needDiarize excludes 'failed') and would strand the encounter over pure
+  // contention. Leaving the status at 'running' and not progressing hands it to the step
+  // machine's 5-minute lock TTL and bounded retry, which is the backoff that already exists.
+  const diarizeStore = async (emit?: (o: unknown) => void): Promise<boolean> => {
+    if (!row) return true;
+    if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return true; }
     if (!row.audio_object_key) {
       try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
-      return;
+      return true;
     }
     emit?.({ stage: "progress", msg: "Identifying speakers (diarization)\u2026" });
     try {
@@ -519,7 +531,7 @@ export async function POST(
       if (!bytes) {
         await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = 'audio_missing' WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: "Diarization skipped (audio unavailable)" });
-        return;
+        return true;
       }
       // Load the doctor's enrolled voiceprint (if any) so /diarize can NAME them
       // (otherwise speakers stay heuristic — Patient/Attender/Nurse).
@@ -556,7 +568,8 @@ export async function POST(
                  aggregates           = ${JSON.stringify(d.result.aggregates)}::jsonb,
                  diarize_status       = 'complete',
                  diarize_completed_at = NOW(),
-                 diarize_error        = NULL
+                 diarize_error        = NULL,
+                 diarize_timing       = ${JSON.stringify(d.timing)}::jsonb
            WHERE id = ${id}
         `;
         // Passive voiceprint capture (Voiceprint Retention Sprint B): if the
@@ -607,16 +620,30 @@ export async function POST(
         } catch (te) {
           console.warn(`[process] tag/role reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
         }
-        emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${d.latencyMs}ms)` });
+        emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${diarizeTimingLine(d.timing)})` });
+      } else if (d.retryable) {
+        // Never reached the service (no slot / caller aborted). Record the wait so the
+        // contention is visible, leave diarize_status alone, and let the retry handle it.
+        await sql`UPDATE encounter SET diarize_timing = ${JSON.stringify(d.timing)}::jsonb WHERE id = ${id}`
+          .catch(() => { /* intentional: best-effort side-write; main flow continues */ });
+        console.warn(`[process] diarize not dispatched enc=${id}: ${d.error} — will retry`);
+        emit?.({ stage: "progress", msg: `Diarization queued behind another call (${d.timing.queue_wait_ms}ms) — retrying` });
+        return false;
       } else {
-        await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${d.error.slice(0, 300)} WHERE id = ${id}`;
+        await sql`UPDATE encounter
+                     SET diarize_status = 'failed', diarize_completed_at = NOW(),
+                         diarize_error = ${d.error.slice(0, 300)},
+                         diarize_timing = ${JSON.stringify(d.timing)}::jsonb
+                   WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: `Diarization unavailable (${d.error.slice(0, 80)})` });
       }
+      return true;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       console.warn(`[process] diarize failed enc=${id}: ${m}`);
       try { await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)} WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
       emit?.({ stage: "progress", msg: "Diarization error (non-critical)" });
+      return true;
     }
   };
 
@@ -695,20 +722,30 @@ export async function POST(
     const needCdms = !!row.note_json && hasCdms && !row.cdmss_json;
     const needDiarize = !!row.audio_object_key && !["complete", "skipped", "failed"].includes(row.diarize_status ?? "");
 
-    const nextStep =
+    const naturalStep =
       needTranslate ? "translate" :
       needNative ? "native" :
       needNote ? "note" :
       needFinalize ? "finalize" :
       needCdms ? "cdms" :
       needDiarize ? "diarize" : "done";
+    // `only` narrows to a single step: run it if it is genuinely still needed, otherwise report
+    // done. It can never widen the work — every step still gates on its own need- predicate.
+    const stepNeeded: Record<string, boolean> = {
+      translate: needTranslate, native: needNative, note: needNote,
+      finalize: needFinalize, cdms: needCdms, diarize: needDiarize,
+    };
+    const nextStep = onlyStep ? (stepNeeded[onlyStep] ? onlyStep : "done") : naturalStep;
 
     if (nextStep === "done") {
       if (row.status !== "complete" && row.note_json) {
         await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`.catch(() => { /* best-effort */ });
       }
       // STT-lab fan-out once the clinical pipeline is finished (non-critical).
-      after(async () => { try { await enqueueFanout(id); await runFanoutForEncounter(id); } catch { /* non-critical */ } });
+      // Suppressed under `only`: a narrowed re-run must not schedule work the caller did not
+      // ask for — a diarize-only re-run that quietly fired ASR engines at the Mac Mini would
+      // both surprise the operator and contend with the very service it is re-running.
+      if (!onlyStep) after(async () => { try { await enqueueFanout(id); await runFanoutForEncounter(id); } catch { /* non-critical */ } });
       return respondOk({ step: "done", status: row.note_json ? "complete" : row.status });
     }
 
@@ -789,13 +826,15 @@ export async function POST(
           await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`;
           progressed = true;
         } else if (nextStep === "diarize") {
-          await diarizeStore();
+          const dispatched = await diarizeStore();
           // Diarization is the LAST step and non-critical: by the time it runs, the encounter
           // is already clinically complete (note + CDS done before this). The per-step claim
           // above set status='processing'; flip back to terminal HERE so a dropped self-chain
           // (after() not firing) can't strand a fully-processed encounter in 'processing' forever.
           await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND note_json IS NOT NULL`.catch(() => { /* best-effort terminal flip */ });
-          progressed = true;
+          // Not dispatched (queue full) => not progressed: hold the step lock to its TTL so the
+          // retry is paced, instead of self-chaining straight back into the same busy queue.
+          progressed = dispatched;
         }
       } catch (e) {
         console.warn(`[process:step] enc=${id} step=${nextStep} err=${e instanceof Error ? e.message : String(e)}`);

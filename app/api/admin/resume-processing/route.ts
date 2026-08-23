@@ -11,6 +11,13 @@
  * Auth: Vercel cron header (x-vercel-cron) or Bearer MIGRATION_SECRET.
  * Cron: pick the oldest encounter stuck in 'processing' > 4 min.
  * Manual recovery: ?id=enc_xxx resurrects that encounter (failed/processing) and resumes it.
+ *
+ * ?rediarize=1 (23 Aug 2026) — re-run DIARIZATION ONLY on one encounter.
+ * diarize_status='failed' is terminal by design (needDiarize excludes it), so a historically
+ * timed-out encounter can never be picked up again on its own. The only existing door was
+ * ?reset=1, which clears note_json and cdmss_json — regenerating months-old clinical content to
+ * fix a speaker label is not a trade anyone should make. This clears the diarization fields and
+ * nothing else, and drives /process with {only:"diarize"} so no other step can run.
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
@@ -19,7 +26,7 @@ import { respondOk, respondError } from "@/lib/respond";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-async function resumeOne(origin: string, slug: string, id: string): Promise<boolean> {
+async function resumeOne(origin: string, slug: string, id: string, only?: string): Promise<boolean> {
   // Drive the step machine SYNCHRONOUSLY: each call runs ONE step IN-REQUEST (the /process
   // function stays alive while the heavy translate/CDS work executes — Vercel after() does
   // NOT reliably run the heavy translate step on fire-and-forget invocations). We loop the
@@ -33,7 +40,7 @@ async function resumeOne(origin: string, slug: string, id: string): Promise<bool
       const res = await fetch(`${origin}/${slug}/api/encounters/${id}/process`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json", "x-eta-internal": process.env.MIGRATION_SECRET as string },
-        body: JSON.stringify({ step: true, sync: true }),
+        body: JSON.stringify({ step: true, sync: true, ...(only ? { only } : {}) }),
         cache: "no-store",
       });
       const j = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> } & Record<string, unknown>;
@@ -76,6 +83,24 @@ export async function GET(req: NextRequest) {
     // the current pipeline (incl. the English Whisper-refine + guardrail). Use to
     // recover encounters that completed with an empty/garbled note before the fixes.
     const reset = req.nextUrl.searchParams.get("reset") === "1";
+    const rediarize = req.nextUrl.searchParams.get("rediarize") === "1";
+    if (rediarize) {
+      // Diarization fields ONLY. status, note_json, cdmss_json, translated, transcripts and the
+      // flag are all left exactly as they are; the per-step claim preserves 'complete'.
+      await sql`UPDATE encounter SET diarize_status = NULL, diarize_error = NULL,
+                  process_attempts = 0, processing_step_at = NULL
+                WHERE id = ${manualId}`;
+      await resumeOne(origin, rows[0].slug, rows[0].id, "diarize");
+      // Report what actually happened rather than that the loop finished. A run that never got
+      // the depth-1 slot leaves diarize_status='running' on purpose (it is retryable, not
+      // failed), and the caller needs to be able to tell that apart from a success.
+      const stateAfter = (await sql`
+        SELECT diarize_status, diarize_error, diarize_timing,
+               jsonb_array_length(COALESCE(speakers, '[]'::jsonb)) AS speaker_count
+          FROM encounter WHERE id = ${manualId}
+      `) as Array<{ diarize_status: string | null; diarize_error: string | null; diarize_timing: unknown; speaker_count: number }>;
+      return respondOk({ encounter: manualId, mode: "rediarize", ...(stateAfter[0] ?? {}) });
+    }
     if (reset) {
       await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL,
                   translated = false, note_json = NULL, cdmss_json = NULL,

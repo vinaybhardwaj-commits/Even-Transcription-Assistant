@@ -6,12 +6,64 @@
  *
  * Non-critical: diarization never blocks an encounter. Callers soft-fail.
  *
+ * ── THE CLOCK STARTS AT DISPATCH (23 Aug 2026) ─────────────────────────────
+ *
+ * The 22 Aug timing probe (docs/ETA-DIARIZE-TIMING-PROBE-22-AUG-2026.md) found the service is
+ * LINEAR in audio length across a 10x range — service_ms = 46.42 x seconds + 148 — with a 148 ms
+ * intercept, so warm per-call overhead is negligible and a 403-second file is about 26 seconds of
+ * work. Length never was the problem. What is: the service is single-worker uvicorn (GIL + MPS),
+ * so it SERIALISES, and a request sent while another is running waits inside the service with our
+ * timeout already ticking. Wait long enough and 26 seconds of work breaches a 90-second budget.
+ * That is why a 288 s file failed on a day a 482 s file succeeded.
+ *
+ * So the queue moved to our side (lib/diarize-gate.ts, depth 1) and the timeout now covers ONLY
+ * the dispatched call. Time spent waiting for the slot is reported as queue wait and charged to
+ * nothing. The two numbers are separate because they mean different things: queue wait is
+ * contention, dispatch time is the model.
+ *
  * Env: DIARIZE_BASE_URL (e.g. https://diarize.llmvinayminihome.uk),
- *      DIARIZE_TIMEOUT_MS (default 90000).
+ *      DIARIZE_TIMEOUT_MS (see DIARIZE_TIMEOUT_MS_DEFAULT — read the provenance note),
+ *      DIARIZE_QUEUE_WAIT_MS (see lib/diarize-gate.ts).
  */
 
+import { acquireDiarizeSlot, DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
+
 const DIARIZE_BASE = process.env.DIARIZE_BASE_URL;
-const TIMEOUT_MS = Number(process.env.DIARIZE_TIMEOUT_MS || 90_000);
+
+/**
+ * Budget for ONE DISPATCHED /diarize call — it starts when the request is actually sent, never
+ * when it was queued.
+ *
+ * ⚠ PROVENANCE — READ BEFORE TRUSTING THIS NUMBER.
+ *
+ * 300 000 ms is the figure recommended by the 22 Aug 2026 timing probe (Q4), and that probe ran
+ * WHILE A NINE-HOUR RECORDING WAS LIVE ON THE SAME MAC MINI. It is therefore an UPPER BOUND
+ * measured under load, not a calibrated timeout. Nobody has re-measured on a quiet machine.
+ *
+ * What IS measured, on a contended Mini: 15 minutes of real room audio diarized in 58 367 ms
+ * wall / 41 915 ms service. 300 000 ms is roughly 5x that, and about 11x the fit's prediction for
+ * a 403-second encounter (~26 s wall). The headroom is deliberate — a timeout only binds on
+ * failure, so being generous costs nothing when calls succeed, and the old 90 000 ms was tight
+ * enough that one cold start (12–30 s of model load) plus a busy Mini could breach it.
+ *
+ * Re-measure on a quiet machine before anyone treats this as calibrated, and especially before
+ * anyone TIGHTENS it. It is configurable via DIARIZE_TIMEOUT_MS precisely so it need not be
+ * re-deployed to change.
+ */
+export const DIARIZE_TIMEOUT_MS_DEFAULT = 300_000;
+
+/** Machine-readable provenance, so anything that reports the timeout also reports what it is. */
+export const DIARIZE_TIMEOUT_MS_PROVENANCE =
+  "probe 22-Aug-2026 Q4, measured under load (nine-hour recording live on the same Mini) — upper bound, not calibrated; re-measure on a quiet machine";
+
+export const DIARIZE_TIMEOUT_MS = (): number =>
+  Number(process.env.DIARIZE_TIMEOUT_MS || DIARIZE_TIMEOUT_MS_DEFAULT);
+
+/**
+ * Lease headroom: the slot must outlive the dispatched call by enough that a lease can never
+ * expire under a request that is still legitimately in flight (which would admit a second one).
+ */
+const SLOT_TTL_HEADROOM_MS = 60_000;
 
 export type DiarizeSpeaker = {
   idx: number;
@@ -34,9 +86,42 @@ export type DiarizeResult = {
   latency_ms?: number;
   model_versions?: unknown;
 };
+/**
+ * Per-run timing. Transfer is separated from service time on purpose (B4): 16.5 s of the probe's
+ * 58 s 15-minute wall was UPLOAD — about 1.1 s per MB over the tunnel, 28% of the total. Folded
+ * together, a slow network reads as a slow model, and the next person measures the wrong thing.
+ */
+export type DiarizeTiming = {
+  /** Waiting for the depth-1 slot. Charged against nothing — see DIARIZE_TIMEOUT_MS. */
+  queue_wait_ms: number;
+  /** Dispatch → response body fully read. This, and only this, is what the timeout bounds. */
+  wall_ms: number;
+  /** The service's own reported latency_ms (its compute). Null when it did not answer. */
+  service_ms: number | null;
+  /** wall − service: upload over the tunnel + HTTP + response parse. Null when service_ms is. */
+  transfer_ms: number | null;
+  audio_bytes: number;
+  /** The budget actually in force for this call, so a stored row explains its own verdict. */
+  timeout_ms: number;
+  timed_out: boolean;
+  /** True when the gate admitted without a lease (migration 0063 not applied). */
+  ungated: boolean;
+  queued_at: string;
+  /** When the request was actually sent. Two calls' [dispatched_at, completed_at] never overlap. */
+  dispatched_at: string | null;
+  completed_at: string | null;
+};
+
 export type DiarizeOutcome =
-  | { ok: true; result: DiarizeResult; latencyMs: number }
-  | { ok: false; error: string; latencyMs: number };
+  | { ok: true; result: DiarizeResult; latencyMs: number; timing: DiarizeTiming }
+  | {
+      ok: false;
+      error: string;
+      latencyMs: number;
+      timing: DiarizeTiming;
+      /** True when we never reached the service (no slot). Retry later; do NOT mark failed. */
+      retryable?: boolean;
+    };
 
 export async function runDiarize(
   audio: Buffer | Uint8Array,
@@ -47,12 +132,53 @@ export async function runDiarize(
     manualRelabels?: unknown[];
     batchThreshold?: number;
     signal?: AbortSignal;
+    /** Override the queue-wait budget (the caller knows its own remaining function time). */
+    queueWaitMs?: number;
   },
 ): Promise<DiarizeOutcome> {
-  if (!DIARIZE_BASE) return { ok: false, error: "diarize_base_url_missing", latencyMs: 0 };
+  const timeoutMs = DIARIZE_TIMEOUT_MS();
+  const audioBytes = audio.byteLength;
+  const queuedAt = new Date();
+  const blank = (over: Partial<DiarizeTiming> = {}): DiarizeTiming => ({
+    queue_wait_ms: 0,
+    wall_ms: 0,
+    service_ms: null,
+    transfer_ms: null,
+    audio_bytes: audioBytes,
+    timeout_ms: timeoutMs,
+    timed_out: false,
+    ungated: false,
+    queued_at: queuedAt.toISOString(),
+    dispatched_at: null,
+    completed_at: null,
+    ...over,
+  });
+
+  if (!DIARIZE_BASE) return { ok: false, error: "diarize_base_url_missing", latencyMs: 0, timing: blank() };
   const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const ext = baseType.includes("webm") ? "webm" : baseType.includes("mp4") ? "mp4" : baseType.includes("wav") ? "wav" : "webm";
 
+  // ── QUEUE. Not clocked by the timeout. ───────────────────────────────────────────────────────
+  // The service serialises, so a second concurrent request buys nothing and costs the first one's
+  // runtime out of its own budget. Wait here instead, where waiting is visible and free.
+  const slot = await acquireDiarizeSlot({
+    label: opts.encounterId,
+    ttlMs: timeoutMs + SLOT_TTL_HEADROOM_MS,
+    waitMs: opts.queueWaitMs ?? DIARIZE_QUEUE_WAIT_MS(),
+    signal: opts.signal,
+  });
+  if (!slot.acquired) {
+    return {
+      ok: false,
+      error: `diarize_busy_${slot.reason}_${slot.queueWaitMs}ms`,
+      latencyMs: 0,
+      retryable: true,
+      timing: blank({ queue_wait_ms: slot.queueWaitMs }),
+    };
+  }
+  const { hold } = slot;
+
+  // ── DISPATCH. The clock starts HERE, and not one millisecond earlier. ────────────────────────
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: baseType }), `audio.${ext}`);
   form.append("encounter_id", opts.encounterId);
@@ -61,39 +187,84 @@ export async function runDiarize(
   if (typeof opts.batchThreshold === "number") form.append("batch_threshold", String(opts.batchThreshold));
 
   const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const tid = setTimeout(() => controller.abort(), timeoutMs);
+  const onOuterAbort = () => controller.abort();
   if (opts.signal) {
     if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    else opts.signal.addEventListener("abort", onOuterAbort, { once: true });
   }
   const t0 = Date.now();
+  const dispatchedAt = new Date();
+  const finish = (over: Partial<DiarizeTiming>): DiarizeTiming => {
+    const wall = Date.now() - t0;
+    const service = typeof over.service_ms === "number" ? over.service_ms : null;
+    return blank({
+      queue_wait_ms: hold.queueWaitMs,
+      wall_ms: wall,
+      service_ms: service,
+      transfer_ms: service == null ? null : Math.max(0, wall - service),
+      ungated: hold.ungated,
+      dispatched_at: dispatchedAt.toISOString(),
+      completed_at: new Date().toISOString(),
+      ...over,
+    });
+  };
+
   try {
     const res = await fetch(`${DIARIZE_BASE.replace(/\/+$/, "")}/diarize`, {
       method: "POST", body: form, signal: controller.signal, cache: "no-store",
     });
     clearTimeout(tid);
-    const latencyMs = Date.now() - t0;
     const text = await res.text().catch(() => "");
-    if (!res.ok) return { ok: false, error: `http_${res.status}: ${text.slice(0, 180)}`, latencyMs };
+    if (!res.ok) {
+      const timing = finish({});
+      return { ok: false, error: `http_${res.status}: ${text.slice(0, 180)}`, latencyMs: timing.wall_ms, timing };
+    }
     const j = JSON.parse(text) as Partial<DiarizeResult>;
+    const serviceMs = typeof j.latency_ms === "number" ? j.latency_ms : null;
+    const timing = finish({ service_ms: serviceMs });
     return {
       ok: true,
-      latencyMs,
+      latencyMs: timing.wall_ms,
+      timing,
       result: {
         speakers: Array.isArray(j.speakers) ? (j.speakers as DiarizeSpeaker[]) : [],
         transcript_segments: Array.isArray(j.transcript_segments) ? j.transcript_segments : [],
         overlap_windows: Array.isArray(j.overlap_windows) ? j.overlap_windows : [],
         aggregates: j.aggregates ?? {},
-        latency_ms: typeof j.latency_ms === "number" ? j.latency_ms : undefined,
+        latency_ms: serviceMs ?? undefined,
         model_versions: j.model_versions,
       },
     };
   } catch (e: unknown) {
     clearTimeout(tid);
-    const latencyMs = Date.now() - t0;
-    if (controller.signal.aborted) return { ok: false, error: `timeout_${TIMEOUT_MS}ms`, latencyMs };
-    return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs };
+    // Distinguish OUR timeout from the caller cancelling the whole pipeline: the error names the
+    // budget that was actually in force, so a stored `timeout_300000ms` is self-explaining.
+    const outerAborted = !!opts.signal?.aborted;
+    const timedOut = controller.signal.aborted && !outerAborted;
+    const timing = finish({ timed_out: timedOut });
+    if (timedOut) return { ok: false, error: `timeout_${timeoutMs}ms`, latencyMs: timing.wall_ms, timing };
+    if (outerAborted) return { ok: false, error: "aborted", latencyMs: timing.wall_ms, timing, retryable: true };
+    return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs: timing.wall_ms, timing };
+  } finally {
+    if (opts.signal) opts.signal.removeEventListener("abort", onOuterAbort);
+    // Release BEFORE returning to the caller, so the next waiter starts its dispatch immediately
+    // rather than sitting through the post-processing (tagging, role refinement) that follows.
+    await hold.release();
   }
+}
+
+/**
+ * One-line human summary of a run, for the progress stream and the logs. Always names queue,
+ * transfer and service separately — the whole point of recording them apart is that whoever
+ * reads the line can tell a slow tunnel from a slow model without opening the row.
+ */
+export function diarizeTimingLine(t: DiarizeTiming): string {
+  const parts = [`${t.wall_ms}ms wall`];
+  if (t.service_ms != null) parts.push(`${t.service_ms}ms service`);
+  if (t.transfer_ms != null) parts.push(`${t.transfer_ms}ms transfer`);
+  parts.push(`${t.queue_wait_ms}ms queued`);
+  return parts.join(", ");
 }
 
 // ---------------------------------------------------------------------------
