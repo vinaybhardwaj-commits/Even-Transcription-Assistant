@@ -82,18 +82,69 @@ The server was then read independently: `transcript_enabled: false`. Screen and 
 
 | # | Result |
 |---|---|
-| **B1** | Same closed window, drained twice. Transcript **OFF** → `step: "flag_off"`, refused at the switch. Transcript **ON** → `step: "no_room_day"` — it went **past** the switch and failed later for an unrelated reason. The switch is the gate and it opens; see the caveat below. |
+| **B1** | **CLOSED END TO END — see §B1 below.** Real window, real nine-hour tape, real room-day: `ok: true`, `step: "ok"`, 96.5 s, 514 segments, 515 turn cues written, window `transcribed`. Refusal half also proven: with Transcript OFF the same drain returns `step: "flag_off"`. |
 | **B2** | `consult_mark` cue posted to OPD Test with Visits **OFF** → cue accepted, **0 visit rows**. Same cue with Visits **ON** → **2 visit rows** (`vis_c62tucgv`, `vis_8rdq2xmv`, both `opened_by_kind: mark`). The fuse ran only when the switch was on. |
 | **B3** | Above. |
 | **B4** | Turning a switch off stops the *next* unit of work: the guard is re-checked on entry to `drainRoomWindow` and to `runLiveFuse`, so nothing in flight is interrupted. Observed as the `flag_off` refusal at the queue head, not as a cancellation. |
 | **B5** | One `audit_log` row per room per lane. One Stop-all produced **six** `room processing off` rows across three rooms, visible on the admin dashboard's Recent activity. |
 
-**B1's caveat, stated plainly.** The only closed window available on a room I was allowed to use
-belonged to `bs_5wytcjze`, a synthetic API probe session with 4 KB placeholder chunks and no
-`room_day`. So the drain got past the switch and stopped at `no_room_day`. **The full
-transcribe-and-write half of B1 was not run end to end** — the switch behaviour either side of it
-was, which is what the row exists to test, but somebody should watch one real window drain before
-Monday.
+### B1, closed end to end (added after the first report)
+
+Run on `bs_g3dwud4p` — the nine-hour Home Office tape, 216 verified chunk rows — with the
+Transcript switch turned on **by clicking it on the card**, and turned off again afterwards.
+
+**A correction to the premise first.** That session does not have "34 closed windows and a real
+room_day". It has 36 windows: 2 open, 9 already transcribed, **25 closed**. And Home Office had
+exactly **one** room-day, `2026-08-22`. Every one of the 9 already-drained windows sits on it;
+every one of the 25 remaining ones falls on **23 August IST**, because the tape ran to 06:28 IST.
+That day had never been created — no cue was ever posted to Home Office on the 23rd, because the
+switch was off. That is why all 25 returned `no_room_day`, and it is a real consequence of the
+flag having been off, not a fault in the drain.
+
+So the missing precondition was supplied, deliberately and in the open:
+
+1. One cue of a **named probe type**, `b1_room_day_probe`, posted to Home Office. This creates
+   today's room-day and nothing else. (Precedent in this same data: `k2_concurrency_probe`,
+   `k5_flag_off_probe`.) → `rd_3g4k2jtc`, ist_date `2026-08-23`.
+2. `POST /api/admin/bench/windows { session_id }` — the re-evaluation door, whose own header
+   names this exact session — to backfill `room_day_id`. 8.3 s. **`inserted: 0, closed: 0,
+   still_open: 2, unchanged: 34`**: it filled a NULL and changed nothing else, exactly as
+   `lib/bench-window.ts` says it will ("filling a NULL is not a change of mind").
+
+Then the drain, on `bw_g3dwud4p_1787423400000_primary` (22 Aug 18:30–18:45 UTC = 00:00–00:15 IST
+on the 23rd — the window immediately after the last one drained on Friday):
+
+```
+ok: true          step: "ok"          wall: 96 509 ms  (96.5 s for 900 s of audio)
+
+joined       clips/bs_g3dwud4p/20260822T183000Z-20260822T184500Z-primary.webm
+probed       30 s probe → "english"          full_language "english"
+sent         language_sent "en-IN"
+Sarvam       21 236 ms over 900 audio-seconds        engine "sarvam"
+             514 segments, activity "speech"
+run stored   tr_s7kmpvs5u1
+turns        turns_written 515   turns_deleted 0   turns_failed 0
+window       window_recorded true → state "transcribed"
+```
+
+Verified independently against the brain, not taken from the response:
+
+```
+cue rows on rd_3g4k2jtc   stt_turn 514 · stt_window 1 · b1_room_day_probe 1
+window marker             complete: true, segment_count 514, source_used "primary",
+                          language "english", session bs_g3dwud4p
+turn span                 18:30:00.00Z → 18:44:58.84Z  (the window's own 15 minutes, exactly)
+window states             open 2 · transcribed 10 · closed 24   (was 9 transcribed, 25 closed)
+```
+
+515 turns written against 514 segments is the 514 turns plus the one completeness marker — the
+window-as-unit write from K3, behaving as designed.
+
+**The refusal half is unchanged and still holds**: with Transcript OFF, the same drain endpoint
+against the same window returns `step: "flag_off"` in 464 ms, before any join, probe or paid call.
+
+**The switch was returned to OFF**, by clicking it on the card. Home Office reads
+`transcript_enabled: false`, `visits_enabled: false`.
 
 ### Interface
 
@@ -161,19 +212,16 @@ the next screen goes out.
 
 ## Limitations, said plainly
 
-- **Desktop width was not captured for U1/U8.** The browser tooling here cannot reach the
-  viewport: `resize_window` reports success and `window.innerWidth` stays where it is, and a root
-  `zoom` does not move `documentElement.clientWidth`. Everything attached is a genuine 820 px
-  iPad-portrait render. What can be said about desktop without a screenshot: at 820 px the grid is
-  already two-up, desktop adds a third column, and a desktop card column measures ~368 px — 
-  *narrower* than the ~380 px cards these screenshots show. The lanes are being exercised at
-  essentially desktop card width already. That is an argument, not a picture.
-- **B1's drain half was not run end to end** — see above.
+- **Desktop width was captured on the second pass** (1440 px), so U1/U8 now have both widths —
+  the earlier report's limitation is lifted. The switch measured **52 × 44** in the live DOM,
+  confirming U3 by measurement rather than by class name.
 - **The backup microphone is unchanged and still records near-silence.** Untouched by request.
 
 ## Follow-ups
 
-1. **Watch one real window drain** with Transcript on, before Monday.
+1. **24 closed windows on `bs_g3dwud4p` remain undrained**, all on 23 Aug IST and now bound to
+   `rd_3g4k2jtc`, so they would drain if asked. Left alone deliberately — each is a paid Sarvam
+   call and V decides.
 2. **The header pill still shows the six-state room word**, not the mockup's "Transcript behind".
    Deliberate, to keep U8 true. If V wants the mockup's pill, it is a small, separate change.
 3. **`scribe_diff_room` does not report the two switches.** The MCP door and the screen now know
