@@ -28,10 +28,28 @@ export type LeaderRow = {
   components: Record<string, number | null>;
 };
 
-export type LeaderFilters = { languageBucket?: "all" | "english" | "indic"; sinceDays?: number | null; tier?: "asr" | "scribe" };
+/**
+ * K4b — SUBJECT KIND IS A FILTER, NOT A BLEND.
+ *
+ * A transcription_run can now be a run over an ENCOUNTER (one consultation, a patient, a gold
+ * reference) or over a BENCH_WINDOW (fifteen minutes of a room, no patient, no gold). Averaging
+ * their latency, judge score and win rate into one composite produces a number that looks like a
+ * comparison and is not one — lib/stt/subject.ts says exactly this, and the first drained day
+ * proved it: sarvam's row read `runs=55`, being 46 consultations and 9 windows of a podcast.
+ *
+ * The default is 'encounter', which is what every row in this table meant before bench windows
+ * existed, so the leaderboard keeps the meaning it has always had. 'bench_window' is selectable.
+ * 'all' exists but is a deliberate opt-in to a mixed population, not a default anyone lands on.
+ */
+export type SubjectKindFilter = "encounter" | "bench_window" | "all";
 
-export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{ engines: LeaderRow[]; weights: typeof DEFAULT_WEIGHTS; total_runs: number }> {
+export type LeaderFilters = { languageBucket?: "all" | "english" | "indic"; sinceDays?: number | null; tier?: "asr" | "scribe"; subjectKind?: SubjectKindFilter };
+
+export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{ engines: LeaderRow[]; weights: typeof DEFAULT_WEIGHTS; total_runs: number; subject_kind: SubjectKindFilter }> {
   const bucket = filters.languageBucket ?? "all";
+  // Default ENCOUNTER, never "all": a caller that says nothing gets the population this
+  // leaderboard has always described, not a silently widened one.
+  const subjectKind: SubjectKindFilter = filters.subjectKind === "bench_window" || filters.subjectKind === "all" ? filters.subjectKind : "encounter";
   const since = filters.sinceDays && filters.sinceDays > 0 ? filters.sinceDays : null;
   const tier = filters.tier === "scribe" ? "scribe" : "asr";
 
@@ -60,6 +78,8 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
       LEFT JOIN encounter e ON e.id = tr.encounter_id
       LEFT JOIN stt_engine eng ON eng.id = tr.engine
      WHERE tr.mode = 'batch' AND tr.tier = ${tier}
+       -- One population per leaderboard. See SubjectKindFilter above.
+       AND ( ${subjectKind} = 'all' OR tr.subject_type = ${subjectKind} )
        -- The language buckets are an ENCOUNTER property. A room window has no detected
        -- language, so it belongs to 'all' and to neither of the two language buckets — it is
        -- excluded from them explicitly rather than by a NULL comparison quietly being false.
@@ -105,5 +125,6 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
 
   engines.sort((a, b) => (b.composite ?? -1) - (a.composite ?? -1));
   const total_runs = rows.reduce((s, r) => s + r.runs, 0);
-  return { engines, weights, total_runs };
+  // Echoed so a reader of the JSON can never mistake WHICH population these numbers describe.
+  return { engines, weights, total_runs, subject_kind: subjectKind };
 }

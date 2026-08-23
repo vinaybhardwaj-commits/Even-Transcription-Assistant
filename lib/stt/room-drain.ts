@@ -47,6 +47,24 @@ import { whisperAdapter } from "./adapters/whisper";
 import { isEnglishCode } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 
+/**
+ * PURE — did this window's turns actually land AS A SET?
+ *
+ * `written` IS NOT THE TEST, and getting that wrong is how the first live run of this drain
+ * reported success while posting nothing. writeWindowCues has three outcomes:
+ *
+ *   whole batch OK      complete:true,  written = turns + marker
+ *   turns REFUSED       complete:false, written = 1  ← the marker-only admission, and the trap:
+ *                       written is NON-ZERO while every turn was rolled back
+ *   nothing committed   complete:false, written = 0
+ *
+ * Only the first is a transcribed window. `complete` is the field that says so, and it is the
+ * only field that distinguishes the middle case from success.
+ */
+export function cueWriteFailed(counts: { complete?: boolean }): boolean {
+  return counts.complete !== true;
+}
+
 /** C7 — three attempts, then park with a reason. Never retried again by this module. */
 export const DRAIN_MAX_ATTEMPTS = 3;
 
@@ -151,7 +169,7 @@ export function bucketFor(lang: string | null): "english" | "indic" {
 export type DrainStep =
   | "flag_off" | "not_found" | "wrong_state" | "no_room_day" | "no_chunks"
   | "too_long" | "join_failed" | "clip_missing" | "probe_failed"
-  | "no_engine" | "engine_failed" | "attempts_exhausted" | "ok";
+  | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok";
 
 export type DrainOutcome = {
   window_id: string;
@@ -423,12 +441,15 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
     if (counts.failed_reason) out.turns_failed_reason = counts.failed_reason;
     if (counts.turn_write_error) out.turn_write_error = counts.turn_write_error;
 
-    // A window whose turns did not land is NOT transcribed. Saying otherwise would park a
-    // silent hole in the day: the run exists, the clip exists, and the transcript is nowhere a
-    // reader looks. Fall through to the failure path so the attempt is counted and retried.
-    if (counts.written === 0 && build.turns.length > 0) {
-      const attempts = await recordFailure(windowId, "engine_failed", `turns_not_written: ${counts.failed_reason ?? counts.turn_write_error ?? "unknown"}`);
-      return { ...out, step: "engine_failed", detail: "turns_not_written", attempts };
+    // A window whose turns did not land is NOT transcribed. Saying otherwise parks a silent
+    // hole in the day: the run exists, the clip exists, and the transcript is nowhere a reader
+    // looks. The engine is not at fault here and the step does not blame it — `cues_refused`
+    // names what happened, and the reason carries the brain's own error (not_a_scratch_day,
+    // brain_permission_denied, brain_timeout, …) rather than a generic failure.
+    if (cueWriteFailed(counts)) {
+      const why = counts.turn_write_error ?? counts.failed_reason ?? "unknown";
+      const attempts = await recordFailure(windowId, "cues_refused", why);
+      return { ...out, step: "cues_refused", detail: why, attempts };
     }
 
     // --- C7. STATE --------------------------------------------------------------------------

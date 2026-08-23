@@ -335,16 +335,22 @@ type LeaderRow = {
   gold_n: number; avg_wer: number | null; avg_cer: number | null; avg_term_recall: number | null;
   wins: number; cost_per_min: number | null; composite: number | null;
 };
-type LeaderBundle = { engines: LeaderRow[]; weights: Record<string, number>; total_runs: number };
+type LeaderBundle = { engines: LeaderRow[]; weights: Record<string, number>; total_runs: number; subject_kind?: string };
 
 function LeaderboardTab() {
   const [data, setData] = React.useState<LeaderBundle | null>(null);
   const [lang, setLang] = React.useState("all");
   const [since, setSince] = React.useState("");
   const [tier, setTier] = React.useState<"ASR" | "Scribe">("ASR");
+  // K4b — which POPULATION this board describes. Defaults to encounters, which is what these
+  // numbers meant before room windows existed. Mixing the two is an explicit choice, not a
+  // default: a composite averaged over consultations AND fifteen-minute room windows looks like
+  // a comparison and is not one.
+  const [subject, setSubject] = React.useState("encounter");
   const load = React.useCallback(async () => {
     const qs = new URLSearchParams(); if (lang !== "all") qs.set("lang", lang); if (since) qs.set("since", since);
     if (tier === "Scribe") qs.set("tier", "scribe");
+    if (subject !== "encounter") qs.set("subject", subject);
     const r = await fetch(`/api/admin/stt-lab/leaderboard?${qs}`, { cache: "no-store" });
     const j = await r.json(); if (r.ok) setData(j as LeaderBundle);
   }, [lang, since, tier]);
@@ -366,7 +372,17 @@ function LeaderboardTab() {
         <select value={since} onChange={(e) => setSince(e.target.value)} className="rounded-md border border-even-ink-200 px-2 py-1 text-caption">
           <option value="">All time</option><option value="30">Last 30 days</option><option value="7">Last 7 days</option>
         </select>
+        <select value={subject} onChange={(e) => setSubject(e.target.value)} className="rounded-md border border-even-ink-200 px-2 py-1 text-caption" title="Which subjects these numbers cover">
+          <option value="encounter">Encounters</option>
+          <option value="bench_window">Room windows</option>
+          <option value="all">Both (mixed)</option>
+        </select>
         <span className="text-caption text-even-ink-400">{data ? `${data.total_runs} runs` : ""}</span>
+        {subject === "all" && (
+          // Not decoration. A mixed board averages two populations whose per-run numbers mean
+          // different things, and the reader has to be told before they read a ranking off it.
+          <span className="text-caption text-warning-700">Mixed subjects — consultations and room windows are not comparable</span>
+        )}
       </div>
 
       {(

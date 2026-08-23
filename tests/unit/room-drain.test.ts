@@ -20,6 +20,7 @@ import {
   probeSlice,
   sarvamLanguageCode,
   bucketFor,
+  cueWriteFailed,
   PROBE_SECONDS,
   DRAIN_MAX_ATTEMPTS,
 } from "@/lib/stt/room-drain";
@@ -183,5 +184,113 @@ describe("the DO NOTs, held by the source itself", () => {
   it("bounds the session from chunks — session.ended_at is never read", () => {
     expect(src).not.toContain("ended_at FROM bench_session");
     expect(src).not.toMatch(/session\.ended_at/);
+  });
+});
+
+/**
+ * A refused cue post must FAIL the window.
+ *
+ * The first live run of this drain transcribed a 15-minute window, wrote a 506-segment run, and
+ * posted ZERO cues — because /api/brain/cues answered not_a_scratch_day — and still returned
+ * ok:true with the window marked 'transcribed'. These tests are about the exact shape that made
+ * that possible.
+ */
+describe("a refused cue post fails the window", () => {
+  it("the whole batch landing is the ONLY success", () => {
+    expect(cueWriteFailed({ complete: true })).toBe(false);
+  });
+
+  it("THE TRAP — a marker-only admission has written:1 and must still FAIL", () => {
+    // writeWindowCues' fallback records the ask with one stt_window cue while every turn was
+    // rolled back. Testing `written === 0` would call this a success, which is the bug.
+    const markerOnly = { complete: false, written: 1, failed: 506, deleted: 0,
+                         failed_reason: "permission", turn_write_error: "not_a_scratch_day" };
+    expect(markerOnly.written).toBeGreaterThan(0);
+    expect(cueWriteFailed(markerOnly)).toBe(true);
+  });
+
+  it("nothing committed at all also fails", () => {
+    expect(cueWriteFailed({ complete: false })).toBe(true);
+  });
+
+  it("a missing `complete` is a failure, not a pass — never assume success", () => {
+    expect(cueWriteFailed({})).toBe(true);
+    expect(cueWriteFailed({ complete: undefined })).toBe(true);
+  });
+
+  it("the drain tests `complete`, never `written`, at the cue gate", () => {
+    const src = codeOf("lib/stt/room-drain.ts");
+    expect(src).toContain("if (cueWriteFailed(counts)) {");
+    // the old, wrong test must not come back
+    expect(src).not.toContain("counts.written === 0");
+  });
+
+  it("the failure is NAMED cues_refused and does not blame the engine", () => {
+    const src = codeOf("lib/stt/room-drain.ts");
+    expect(src).toContain('recordFailure(windowId, "cues_refused", why)');
+    expect(src).toContain('step: "cues_refused"');
+  });
+
+  it("the reason carries the brain's OWN error, not a generic string", () => {
+    const src = codeOf("lib/stt/room-drain.ts");
+    expect(src).toContain("counts.turn_write_error ?? counts.failed_reason");
+  });
+
+  it("the gate runs BEFORE the window is marked transcribed", () => {
+    const src = codeOf("lib/stt/room-drain.ts");
+    const gate = src.indexOf("cueWriteFailed(counts)");
+    const mark = src.indexOf("state = 'transcribed'");
+    expect(gate).toBeGreaterThan(-1);
+    expect(mark).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(mark);
+  });
+});
+
+/**
+ * The leaderboard must not blend subject kinds.
+ *
+ * `sarvam runs=55` on the first drained day was 46 consultations and 9 windows of a podcast
+ * averaged into one composite — the exact failure lib/stt/subject.ts describes as "wrong in a
+ * way that looks like data".
+ */
+describe("the leaderboard filters by subject kind", () => {
+  const src = codeOf("lib/stt/leaderboard.ts");
+
+  it("the query filters on subject_type", () => {
+    expect(src).toContain("${subjectKind} = 'all' OR tr.subject_type = ${subjectKind}");
+  });
+
+  it("the DEFAULT is encounter — never 'all', never whatever was passed", () => {
+    expect(src).toContain('filters.subjectKind === "bench_window" || filters.subjectKind === "all" ? filters.subjectKind : "encounter"');
+  });
+
+  it("an unknown or absent value falls to encounter, not to a widened population", () => {
+    // The guard must be a whitelist, not a coalesce: `filters.subjectKind ?? "encounter"` would
+    // pass ANY string straight into the SQL, including "all", which is the blend we are removing.
+    const line = src.split("\n").find((l) => l.includes("const subjectKind"));
+    expect(line).toBeDefined();
+    expect(line).not.toContain("??");
+    expect(line).toContain('? filters.subjectKind : "encounter"');
+  });
+
+  it("the answer SAYS which population it describes", () => {
+    expect(src).toContain("subject_kind: subjectKind");
+  });
+
+  it("the route defaults the same way the library does", () => {
+    const route = codeOf("app/api/admin/stt-lab/leaderboard/route.ts");
+    expect(route).toContain('subjectParam === "bench_window" || subjectParam === "all" ? subjectParam : "encounter"');
+  });
+
+  it("the UI warns when a mixed board is selected", () => {
+    const ui = codeOf("components/admin/SttLabClient.tsx");
+    expect(ui).toContain('subject === "all" &&');
+    expect(ui).toContain("not comparable");
+  });
+
+  it("the mixed-board warning uses a colour the palette actually defines", () => {
+    // bg-danger-50 and friends were silently dropped for weeks because the shades did not exist.
+    const cfg = readFileSync("tailwind.config.ts", "utf8");
+    expect(cfg).toMatch(/warning:\s*\{[^}]*700:/);
   });
 });
