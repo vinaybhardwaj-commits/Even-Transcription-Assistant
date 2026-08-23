@@ -789,7 +789,11 @@ export async function POST(
     const claim = (await sql`
       UPDATE encounter
          SET processing_step_at = now(), process_attempts = process_attempts + 1,
-             status = CASE WHEN status = 'complete' THEN 'complete' ELSE 'processing' END
+             -- THEN status, not THEN 'complete': encounter.status is the encounter_status ENUM
+             -- (0001), and a CASE whose branches are both untyped literals resolves to TEXT,
+             -- which cannot be assigned to it. Naming the column in one branch types the whole
+             -- expression. See app/api/webhooks/resend/route.ts, which already does it this way.
+             status = CASE WHEN status = 'complete' THEN status ELSE 'processing' END
        WHERE id = ${id}
          AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
        RETURNING id
