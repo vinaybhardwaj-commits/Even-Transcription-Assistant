@@ -83,8 +83,10 @@ vi.mock("next/server", async (importOriginal) => {
 });
 
 const { POST } = await import("@/app/api/bench/chunks/route");
-const { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, ENDED_DISAGREES_KIOSK_TITLE, ENDED_DISAGREES_TITLE, ENDED_DISAGREES_HINT } =
-  await import("@/lib/bench-bus-constants");
+const {
+  ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, ENDED_DISAGREES_KIOSK_TITLE, ENDED_DISAGREES_TITLE,
+  ENDED_DISAGREES_HINT, ENDED_DISAGREES_SKEW_GRACE_MS, chunkDisagreesWithEnd,
+} = await import("@/lib/bench-bus-constants");
 
 const chunkBody = (over: Record<string, unknown> = {}) => ({
   session_id: "bs_t", idx: 7,
@@ -109,10 +111,55 @@ beforeEach(() => {
 
 // ------------------------------------------------------------------------------------------------
 
+describe("THE DISCRIMINATOR — ended alone is not the fault", () => {
+  // Learned from a live run on OPD Test, not from reasoning. The kiosk marks the session ended as
+  // soon as the recorder stops and only then finishes uploading its flush, so a chunk arriving
+  // for an ended session is what EVERY normal end of day looks like:
+  //
+  //     session bs_jmh9jxmx   ended_at   05:24:09.817
+  //     chunk   bc_744vkbng   started_at 05:23:51.705   ended_at 05:24:09.571
+  //
+  // The first version of this build flagged that, which would have fired in every room every
+  // evening. What separates the two is the CAPTURE clock.
+  it("a flush chunk — captured before the end, uploaded after it — is NOT a disagreement", async () => {
+    sessionStatus = "ended";
+    sessionEndedAt = "2026-08-23T05:24:09.817Z";
+    const { json } = await post(chunkBody({ started_at: "2026-08-23T05:23:51.705Z", ended_at: "2026-08-23T05:24:09.571Z" }));
+    expect(json.ok).toBe(true);
+    expect(json[CHUNK_DISAGREEMENT_FIELD]).toBeUndefined();
+    expect(afterCalls.filter((c) => /INSERT INTO bench_event/.test(c.text))).toHaveLength(0);
+  });
+
+  it("a chunk that BEGAN after the end is", async () => {
+    sessionStatus = "ended";
+    sessionEndedAt = "2026-08-23T05:24:09.817Z";
+    const { json } = await post(chunkBody({ started_at: "2026-08-23T05:30:00.000Z", ended_at: "2026-08-23T05:35:00.000Z" }));
+    expect(json[CHUNK_DISAGREEMENT_FIELD]).toBe(ENDED_DISAGREES);
+  });
+
+  it("the grace covers browser-vs-server clock skew and nothing wider", () => {
+    expect(ENDED_DISAGREES_SKEW_GRACE_MS).toBe(60_000);
+    const endedAt = "2026-08-23T05:24:09.817Z";
+    const at = (offsetMs: number) =>
+      chunkDisagreesWithEnd({ status: "ended", sessionEndedAt: endedAt, chunkStartedAtMs: Date.parse(endedAt) + offsetMs });
+    expect(at(30_000)).toBe(false);       // a fast browser clock is not a fault
+    expect(at(60_000)).toBe(false);       // boundary is exclusive
+    expect(at(61_000)).toBe(true);
+    // and a genuinely rogue chunk is a WHOLE ROTATION late at minimum, so the grace costs nothing
+    expect(at(5 * 60_000)).toBe(true);
+  });
+
+  it("a live session and a session with no ended_at are never disagreements", () => {
+    expect(chunkDisagreesWithEnd({ status: "recording", sessionEndedAt: null, chunkStartedAtMs: Date.now() })).toBe(false);
+    expect(chunkDisagreesWithEnd({ status: "ended", sessionEndedAt: null, chunkStartedAtMs: Date.now() })).toBe(false);
+    expect(chunkDisagreesWithEnd({ status: "ended", sessionEndedAt: "not a date", chunkStartedAtMs: Date.now() })).toBe(false);
+  });
+});
+
 describe("A1 — the chunk is accepted, always", () => {
   it("stores and verifies a chunk for a session that is already ended", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     const { status, json } = await post();
     expect(status).toBe(200);
     expect(json.ok).toBe(true);
@@ -131,14 +178,14 @@ describe("A1 — the chunk is accepted, always", () => {
     expect(refusals.length).toBeGreaterThan(0);
     for (const r of refusals) expect(r).not.toMatch(/ended|status|closed/);
     // and the status read is explicitly not a guard
-    expect(src).toMatch(/const endedDisagrees = session\.status === "ended";/);
+    expect(src).toMatch(/const endedDisagrees = chunkDisagreesWithEnd\(\{/);
   });
 });
 
 describe("A2 — recorded as an event, once per session", () => {
   it("writes one bench_event on first detection", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     await post();
     const ev = afterCalls.filter((c) => /INSERT INTO bench_event/.test(c.text));
     expect(ev).toHaveLength(1);
@@ -151,14 +198,14 @@ describe("A2 — recorded as an event, once per session", () => {
 
   it("a second, third and hundredth chunk add no further rows", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     for (let i = 0; i < 5; i++) await post(chunkBody({ idx: i }));
     expect(eventRows.filter((r) => r.kind === ENDED_DISAGREES)).toHaveLength(1);
   });
 
   it("a failed event write costs nothing else — the chunk is already stored and answered", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     insertThrows = true;
     const { status, json } = await post();
     expect(status).toBe(200);
@@ -169,7 +216,7 @@ describe("A2 — recorded as an event, once per session", () => {
 describe("A3 — the kiosk is told, in the response", () => {
   it("carries the signal beside the normal success", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     const { json } = await post();
     expect(json[CHUNK_DISAGREEMENT_FIELD]).toBe(ENDED_DISAGREES);
     expect(json.ok).toBe(true); // the UPLOAD succeeded; the SESSION is what is wrong
@@ -193,14 +240,14 @@ describe("A6 — nothing was added to the request path", () => {
     const normal = calls.map((c) => c.text);
     calls.length = 0; afterCalls.length = 0; phase = "request";
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     await post();
     expect(calls.map((c) => c.text)).toEqual(normal);
   });
 
   it("the event write is in the after() hook, never in front of the response", async () => {
     sessionStatus = "ended";
-    sessionEndedAt = "2026-08-22T13:30:36.000Z";
+    sessionEndedAt = "2026-08-22T13:30:36.000Z"; // the reaper's stamp; the chunk below begins hours later
     await post();
     expect(calls.some((c) => /bench_event/.test(c.text))).toBe(false);
     expect(afterCalls.some((c) => /bench_event/.test(c.text))).toBe(true);

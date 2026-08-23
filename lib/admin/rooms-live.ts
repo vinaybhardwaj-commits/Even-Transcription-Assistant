@@ -26,6 +26,7 @@ import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 import { LISTENER_FRESH_MS, type ListenerRow } from "@/lib/bench-commands";
 import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { ENDED_DISAGREES_SKEW_GRACE_MS } from "@/lib/bench-bus-constants";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
  *  same literal, and tests hold the two in agreement with 0054's index predicate. */
@@ -113,6 +114,8 @@ export {
   ENDED_DISAGREES,
   ENDED_DISAGREES_TITLE,
   ENDED_DISAGREES_HINT,
+  ENDED_DISAGREES_SKEW_GRACE_MS,
+  chunkDisagreesWithEnd,
   type RoomState,
   type RoomStateView,
 } from "@/lib/bench-bus-constants";
@@ -316,10 +319,11 @@ export function buildRoomLive(
   // ENDED DISAGREES. No extra query and no extra join: `chunks_after_end` rides the same
   // per-session aggregate that already counts pieces per microphone.
   //
-  // A NORMAL end never trips this. The kiosk flushes its whole queue and only then PATCHes end,
-  // so on a clean day every chunk row's created_at precedes ended_at; a late retry of an
-  // already-verified chunk hits ON CONFLICT DO UPDATE, which does not touch created_at. What
-  // trips it is a session that was ended by somebody the kiosk was never told about.
+  // A NORMAL end never trips this — but NOT for the reason it first appears. The kiosk marks the
+  // session ended as soon as the recorder stops and only then finishes uploading its flush, so a
+  // chunk ROW created after ended_at is the ordinary case, in every room, every evening. What the
+  // count above measures is chunks whose CAPTURE began after the end, which a flush cannot
+  // produce: it holds only the chunk that was already in progress.
   //
   // Worst first: if more than one session in the day disagrees, report the one still taking
   // audio most recently, because that is the one somebody has to walk to.
@@ -419,10 +423,23 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
              MAX(c.created_at) FILTER (WHERE c.source = 'backup')  AS last_backup_at,
              COUNT(c.id)       FILTER (WHERE c.source = 'backup')  AS backup_chunks,
              COUNT(c.id)       FILTER (WHERE c.source = 'primary') AS primary_chunks,
-             -- ENDED DISAGREES: pieces whose UPLOAD landed after the row said the session was
-             -- over. A FILTER on the aggregate that is already here — no extra query, no extra
-             -- join, and s.ended_at is in the GROUP BY so it is legal to reference.
-             COUNT(c.id)       FILTER (WHERE s.ended_at IS NOT NULL AND c.created_at > s.ended_at) AS chunks_after_end
+             -- ENDED DISAGREES: pieces RECORDED after the row said the session was over.
+             --
+             -- c.started_at, NOT c.created_at, and this is the whole precision of the alarm. The
+             -- kiosk marks the session ended as soon as the recorder stops and only then finishes
+             -- uploading its flush, so on EVERY normal end of day a chunk row is created after
+             -- ended_at while holding audio captured before it. The upload clock cannot tell that
+             -- apart from a kiosk nobody told; the capture clock can.
+             --
+             -- Deliberately the opposite clock from the mic vitals above, which use created_at
+             -- because they ask "is audio still ARRIVING". This asks "was it RECORDED after we
+             -- stopped". The grace covers browser-vs-server skew only (see the constant).
+             -- A FILTER on the aggregate that is already here — no extra query, no extra join,
+             -- and s.ended_at is in the GROUP BY so it is legal to reference.
+             COUNT(c.id) FILTER (
+               WHERE s.ended_at IS NOT NULL
+                 AND c.started_at > s.ended_at + make_interval(secs => ${ENDED_DISAGREES_SKEW_GRACE_MS / 1000}::int)
+             ) AS chunks_after_end
         FROM bench_session s
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.started_at >= ${fromIso}::timestamptz

@@ -57,6 +57,60 @@ export const POLL_HIDDEN_MS = 5_000;
 export const ENDED_DISAGREES = "ended_disagrees";
 
 /**
+ * THE DISCRIMINATOR, and getting it wrong makes this alarm worthless.
+ *
+ * "A chunk arrived for a session whose row says ended" is NOT the fault. It is what happens on
+ * EVERY normal end of day, and it took a live run on OPD Test to see it: the kiosk PATCHes the
+ * session to ended as soon as the recorder stops, and only then does the flush finish uploading.
+ * Every session in that room's history shows it —
+ *
+ *     session bs_jmh9jxmx   ended_at   05:24:09.817
+ *     chunk   bc_744vkbng   started_at 05:23:51.705   ended_at 05:24:09.571
+ *
+ * — a chunk row written after the end, holding audio captured entirely before it. An alarm that
+ * fires on that fires every evening in every room, and is unread by Wednesday.
+ *
+ * What separates the two is the CAPTURE clock, not the upload clock. A flush contains at most the
+ * chunk that was in progress when the session ended, so its `started_at` is BEFORE `ended_at` by
+ * construction. A rogue chunk — the kiosk that was never told — is audio that began after we said
+ * we had stopped. bs_g3dwud4p's kept beginning for six hours.
+ *
+ * NOTE THIS IS THE OPPOSITE CLOCK from the monitor's mic vitals, which use `created_at` because
+ * they ask "is audio still ARRIVING". This asks "was this audio RECORDED after we said we
+ * stopped", and only the capture stamp can answer that.
+ */
+export const ENDED_DISAGREES_CLOCK = "capture";
+
+/**
+ * Clock skew only — NOT a rotation window.
+ *
+ * `started_at` is stamped by the kiosk's browser and `ended_at` by the server, so the comparison
+ * above straddles two clocks. On a normal end the margin can be small: an operator who presses
+ * End day two seconds after a rotation leaves a flush chunk whose start is two seconds before the
+ * end, and a browser clock a few seconds fast would flip it. Sixty seconds is far more skew than
+ * anything else in this system tolerates.
+ *
+ * It costs nothing in detection: a genuinely rogue chunk is a WHOLE ROTATION late at minimum
+ * (five minutes), because that is when the next chunk begins. So this widens the safe margin
+ * without widening the window in which the room goes untold.
+ */
+export const ENDED_DISAGREES_SKEW_GRACE_MS = 60_000;
+
+/** PURE. Was this chunk RECORDED after the session was declared over? */
+export function chunkDisagreesWithEnd(input: {
+  status: string;
+  sessionEndedAt: string | Date | null | undefined;
+  chunkStartedAtMs: number;
+}): boolean {
+  if (input.status !== "ended") return false;
+  const v = input.sessionEndedAt;
+  if (v == null || v === "") return false; // ended with no ended_at: nothing to compare against
+  const endedMs = v instanceof Date ? v.getTime() : Date.parse(String(v));
+  if (!Number.isFinite(endedMs)) return false;
+  return input.chunkStartedAtMs > endedMs + ENDED_DISAGREES_SKEW_GRACE_MS;
+}
+
+/**
  * What POST /api/bench/chunks returns ALONGSIDE its normal success when it accepts a chunk into
  * an ended session. The upload succeeded — that is not in question and never is. The SESSION is
  * what is wrong, and this is the field that says so.

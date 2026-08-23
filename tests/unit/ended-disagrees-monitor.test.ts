@@ -16,6 +16,7 @@
  * reads by Wednesday.
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { buildRoomLive, normaliseSessions, type LiveSession } from "@/lib/admin/rooms-live";
 import { attentionItems } from "@/components/admin/BenchRoomsLive";
 import { ENDED_DISAGREES_TITLE, ENDED_DISAGREES_HINT } from "@/lib/bench-bus-constants";
@@ -82,17 +83,30 @@ describe("the monitor can contradict the session row", () => {
 });
 
 describe("the query asks for it without asking for anything extra", () => {
-  it("counts pieces uploaded after ended_at inside the aggregate that is already there", async () => {
-    const { readFileSync } = await import("node:fs");
+  it("counts pieces RECORDED after ended_at inside the aggregate that is already there", () => {
     const src = readFileSync("lib/admin/rooms-live.ts", "utf8");
     const q = /SELECT s\.id, s\.room_id[\s\S]*?ORDER BY s\.started_at DESC/.exec(src)?.[0] ?? "";
     expect(q).toBeTruthy();
-    expect(q).toMatch(/FILTER \(WHERE s\.ended_at IS NOT NULL AND c\.created_at > s\.ended_at\) AS chunks_after_end/);
+    expect(q).toMatch(/c\.started_at > s\.ended_at \+ make_interval/);
+    expect(q).toMatch(/AS chunks_after_end/);
     // one FROM, one LEFT JOIN — no second query, no second join
     expect(q.match(/JOIN/g) ?? []).toHaveLength(1);
     expect(q.match(/SELECT/g) ?? []).toHaveLength(1);
-    // created_at is the UPLOAD clock, the same one the mic vitals use
-    expect(q).not.toMatch(/c\.ended_at > s\.ended_at/);
+  });
+
+  it("uses the CAPTURE clock, not the upload clock — the opposite of the mic vitals", () => {
+    // Not a style choice. The kiosk marks the session ended as soon as the recorder stops and
+    // only then finishes uploading its flush, so on every normal end of day a chunk ROW is
+    // created after ended_at while holding audio captured before it. Observed live:
+    //   session bs_jmh9jxmx  ended_at 05:24:09.817   chunk started_at 05:23:51.705
+    // created_at here would fire in every room, every evening.
+    const src = readFileSync("lib/admin/rooms-live.ts", "utf8");
+    const q = /SELECT s\.id, s\.room_id[\s\S]*?ORDER BY s\.started_at DESC/.exec(src)?.[0] ?? "";
+    const filter = /COUNT\(c\.id\) FILTER \([\s\S]*?\) AS chunks_after_end/.exec(q)?.[0] ?? "";
+    expect(filter).toBeTruthy();
+    expect(filter).not.toMatch(/c\.created_at/);
+    // the mic vitals in the SAME query still use created_at, deliberately
+    expect(q).toMatch(/MAX\(c\.created_at\) FILTER \(WHERE c\.source = 'primary'\)/);
   });
 });
 
@@ -122,8 +136,7 @@ describe("the operator's line says what happened and what to do", () => {
       .some((i) => i.title === ENDED_DISAGREES_TITLE)).toBe(false);
   });
 
-  it("the copy is read from the one source, never retyped in the component", async () => {
-    const { readFileSync } = await import("node:fs");
+  it("the copy is read from the one source, never retyped in the component", () => {
     const src = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
     expect(src).toMatch(/ENDED_DISAGREES_TITLE/);
     expect(src).toMatch(/ENDED_DISAGREES_HINT/);

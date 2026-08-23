@@ -44,7 +44,7 @@ import { readRoomClaims } from "@/lib/room-auth";
 import { findBenchSession, newChunkId, newEventId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
 import { evaluateAndWriteWindows } from "@/lib/bench-window";
-import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,7 +117,17 @@ export async function POST(req: NextRequest) {
 
   // The disagreement, read off the row we already have. NOT a guard — nothing below branches on
   // it, and no chunk is ever refused for it. It only decides what we say afterwards.
-  const endedDisagrees = session.status === "ended";
+  //
+  // "Ended" ALONE IS NOT THE FAULT. The kiosk PATCHes the session to ended as soon as the
+  // recorder stops and only then finishes uploading its flush, so a chunk arriving for an ended
+  // session is what every normal end of day looks like. The question is whether this audio was
+  // RECORDED after we said we had stopped — the capture clock, not the upload clock. See
+  // chunkDisagreesWithEnd.
+  const endedDisagrees = chunkDisagreesWithEnd({
+    status: session.status,
+    sessionEndedAt: session.ended_at,
+    chunkStartedAtMs: startedAt.getTime(),
+  });
 
   // Server-side authoritative verify (D8): the object must exist in R2 with
   // the exact claimed size before a 'verified' row is written.
