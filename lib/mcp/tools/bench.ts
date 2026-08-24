@@ -105,14 +105,35 @@ import { query as brainQuery } from "@/lib/brain/db";
 // The live monitor's shared rules, imported so the MCP and the admin screen can never
 // disagree about a threshold, a label, or what an unreadable marker means.
 import {
-  DOCTOR_CLOCK_NOTE,
   SQL_LAST_WINDOW_MARKER,
   SQL_ROOM_DAY_ROLLUP,
+  SQL_VISITS_TODAY,
   istDayRangeUtc,
   listenerState as listenerStateOf,
   markerComplete,
   roomState,
 } from "@/lib/admin/rooms-live";
+// EVERY ROOM FACT IS DECIDED IN ONE PLACE (Build 1 §3.6). The door used to hold its own copy of
+// half of these rules and disagree with the screen about the other half — the doctor clock fell
+// back on one side only, the screen had the ended-disagrees alarm and the door only its mirror
+// image, and the two processing switches were reported by neither. All of it now comes from the
+// same pure module the screen renders from, so anything the screen can say the door can say, in
+// the same words.
+import {
+  DOCTOR_CLOCK_NOTE,
+  doctorClockLevel,
+  doctorClockSilentMs,
+  endedAtLies as endedAtLiesShared,
+  hasDoctorClock,
+  strandedAudio,
+  tapeLane,
+  transcriptLane,
+  visitsLane,
+  ZERO_STRANDED_RAW,
+  type TranscriptCounts,
+} from "@/lib/room-facts";
+import { readChunksAfterEnd, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE } from "@/lib/bench-bus-constants";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import {
@@ -1881,8 +1902,10 @@ export function endTimeDisagrees(storedEndMs: number | null, tapeMs: number | nu
 /** U3 diff flag: the stored end time is LATER than the last piece by more than the same
  *  window — the session claims tape that was never recorded (PRD: `ended_at_lies`). */
 export function endedAtLies(storedEndMs: number | null, tapeMs: number | null): boolean {
-  if (storedEndMs == null || tapeMs == null) return false;
-  return storedEndMs - tapeMs > STALLED_BADGE_MINUTES * 60_000;
+  // THE RULE ITSELF LIVES IN lib/room-facts.ts NOW (§3.6), so the screen raises the same check
+  // with the same window. This keeps the door's existing one-argument-pair shape and its name;
+  // it is the stall window that both sides must agree on, and there is one of it.
+  return endedAtLiesShared(storedEndMs, tapeMs, STALLED_BADGE_MINUTES * 60_000);
 }
 
 /** Periods with no piece on EITHER microphone: merge every chunk interval across both
@@ -2036,37 +2059,63 @@ async function liveMonitorExtras(
   now: Date,
   recording: boolean,
   paused: boolean,
+  sessionIds: readonly string[],
   reasons: string[],
 ): Promise<Record<string, unknown>> {
   const { fromIso, toIso } = istDayRangeUtc(istDay);
   let lastPrimary: string | null = null;
   let lastBackup: string | null = null;
   let backupChunks = 0;
+  let audioRecordedMs = 0;
   let marksNotSent = 0;
   try {
     // Per-source maxima on the UPLOAD clock (created_at), the same FILTER shape the kiosk's
     // active-session route uses. HALF-OPEN started_at range so 0054's index is usable.
+    //
+    // THE MARK COUNT USED TO BE IN THIS QUERY AND WAS WRONG. It joined bench_chunk AND
+    // bench_event off the same session row, which is a cross product: every chunk paired with
+    // every event, so `backup_chunks` was multiplied by the number of events on the session and
+    // `marks_not_sent` by the number of chunks. It only ever read correctly on a session with no
+    // events at all, which is why nobody saw it. The screen counted the same two facts in two
+    // separate reads and got them right, so the door and the screen disagreed about a room by a
+    // whole multiplication. Split, and it now agrees.
     const rows = (await sql`
       SELECT MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_primary_at,
              MAX(c.created_at) FILTER (WHERE c.source = 'backup')  AS last_backup_at,
              COUNT(c.id)       FILTER (WHERE c.source = 'backup')::int AS backup_chunks,
-             COUNT(e.id) FILTER (WHERE e.kind = 'consult_mark' AND e.brain_status <> 'sent')::int AS marks_not_sent
+             COALESCE(SUM(c.duration_ms) FILTER (WHERE c.source = 'primary'), 0)::bigint AS audio_ms
         FROM bench_session s
         LEFT JOIN bench_chunk c ON c.session_id = s.id
-        LEFT JOIN bench_event e ON e.session_id = s.id
        WHERE s.room_id = ${roomId}
          AND s.started_at >= ${fromIso}::timestamptz
          AND s.started_at <  ${toIso}::timestamptz
-    `) as Array<{ last_primary_at: string | Date | null; last_backup_at: string | Date | null; backup_chunks: number; marks_not_sent: number }>;
+    `) as Array<{ last_primary_at: string | Date | null; last_backup_at: string | Date | null; backup_chunks: number; audio_ms: string | number }>;
     const r = rows[0];
     if (r) {
       lastPrimary = r.last_primary_at ? new Date(r.last_primary_at).toISOString() : null;
       lastBackup = r.last_backup_at ? new Date(r.last_backup_at).toISOString() : null;
       backupChunks = Number(r.backup_chunks) || 0;
-      marksNotSent = Number(r.marks_not_sent) || 0;
+      audioRecordedMs = Number(r.audio_ms) || 0;
     }
   } catch (e) {
     reasons.push(`chunk_sources_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+  }
+  try {
+    // Marks the kiosk recorded and could not get to the brain. Its own read, for the reason
+    // above. bench_event_session_kind_idx (0054) serves it.
+    const rows = (await sql`
+      SELECT COUNT(*)::int AS marks_not_sent
+        FROM bench_event e
+        JOIN bench_session s ON s.id = e.session_id
+       WHERE s.room_id = ${roomId}
+         AND s.started_at >= ${fromIso}::timestamptz
+         AND s.started_at <  ${toIso}::timestamptz
+         AND e.kind = 'consult_mark'
+         AND e.brain_status <> 'sent'
+    `) as Array<{ marks_not_sent: number }>;
+    marksNotSent = Number(rows[0]?.marks_not_sent) || 0;
+  } catch (e) {
+    reasons.push(`marks_not_sent_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
   }
 
   let lastWarehouse: string | null = null;
@@ -2074,10 +2123,17 @@ async function liveMonitorExtras(
   let lastMark: string | null = null;
   let lastWindowAt: string | null = null;
   let lastWindowComplete: boolean | null = null;
+  // The rollup selects FROM room_day, so a room with no day today yields NO ROW — which is
+  // exactly the fact the no-day-record alarm turns on. `dayKnown` separates that from a failed
+  // read, and only a successful read may answer the question at all.
+  let dayKnown = false;
+  let roomDayFound = false;
   try {
     const r = await brainQuery<{ last_warehouse_at: Date | null; marks_today: number; last_mark_at: Date | null }>(SQL_ROOM_DAY_ROLLUP, [istDay, [roomId]]);
+    dayKnown = true;
     const row = r.rows[0];
     if (row) {
+      roomDayFound = true;
       lastWarehouse = row.last_warehouse_at ? new Date(row.last_warehouse_at).toISOString() : null;
       marksToday = Number(row.marks_today) || 0;
       lastMark = row.last_mark_at ? new Date(row.last_mark_at).toISOString() : null;
@@ -2098,32 +2154,102 @@ async function liveMonitorExtras(
     reasons.push(`window_marker_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
   }
 
-  // THE DOCTOR CLOCK, and its name is deliberate. Counted only while recording and not paused;
-  // it measures Pulse clocks from the LABELLED DOCTOR, and cannot see the room at all —
-  // even_hospitals.doctor_opd_rooms is null on every hospital. A gap means that doctor has not
-  // clocked, NOT that the room is empty and NOT that the warehouse is down (D13).
-  const clockBase = lastWarehouse ? Date.parse(lastWarehouse) : null;
-  const warehouseSilentMs = recording && !paused && clockBase !== null ? Math.max(0, now.getTime() - clockBase) : null;
+  // ---- the two processing switches (§3.6) -------------------------------------------------
+  //
+  // THE DOOR COULD NOT REPORT THESE AT ALL, which is the divergence that matters most of the
+  // three: an automated watcher had no way to warn that a room was recording into nothing.
+  // NULL where the read failed — never false, because "off" is a claim and a failed read is not.
+  const sw = await readSwitches(roomId);
+  if (sw.degraded) reasons.push(sw.degraded);
+
+  // ---- the three lanes, in the SCREEN'S OWN WORDS -----------------------------------------
+  let counts: TranscriptCounts | null = null;
+  let strandedRaw = ZERO_STRANDED_RAW;
+  if (sessionIds.length) {
+    const ts = await readTranscriptAndStranded(sessionIds);
+    if (ts.degraded) reasons.push(ts.degraded);
+    const mine = ts.value.get(roomId) ?? null;
+    if (mine) { counts = mine.counts; strandedRaw = mine.stranded; }
+    else if (!ts.degraded) counts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+  } else {
+    counts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+  }
+
+  let visits: { built: number; open: number } | null = null;
+  try {
+    const r = await brainQuery<{ room_id: string; built: number; open: number }>(SQL_VISITS_TODAY, [istDay, [roomId]]);
+    const row = r.rows[0];
+    visits = { built: Number(row?.built) || 0, open: Number(row?.open) || 0 };
+  } catch (e) {
+    reasons.push(`visits_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+  }
+
+  // Does a room_day exist for this room today? SQL_ROOM_DAY_ROLLUP selects FROM room_day, so a
+  // room with no day yields no row. `dayKnown` is false when the brain read FAILED, and null is
+  // passed rather than false: telling a watcher a room has no day because a database was briefly
+  // unreachable is how the one true alarm on this surface gets ignored.
+  const hasRoomDayToday = dayKnown ? roomDayFound : null;
+
+  // ---- ENDED DISAGREES, which the door could not raise ------------------------------------
+  const afterEnd = await readChunksAfterEnd(roomId, fromIso, toIso, ENDED_DISAGREES_SKEW_GRACE_MS);
+  if (afterEnd.degraded) reasons.push(afterEnd.degraded);
+  const disagreeing = [...afterEnd.value.entries()].filter(([, n]) => n > 0);
+
+  // THE DOCTOR CLOCK, and its name is deliberate. Counted only while recording and not paused,
+  // and ONLY where a genuine warehouse-typed cue exists — there is no fallback to the session's
+  // own start on either surface any more (§3.1). It measures Pulse clocks from the LABELLED
+  // DOCTOR and cannot see the room at all: even_hospitals.doctor_opd_rooms is null on every
+  // hospital. A gap means that doctor has not clocked, NOT that the room is empty and NOT that
+  // the warehouse is down (D13).
+  const warehouseSilentMs = doctorClockSilentMs({
+    lastWarehouseAt: lastWarehouse,
+    recording,
+    paused,
+    nowMs: now.getTime(),
+  });
+
+  const stranded = strandedAudio(strandedRaw, hasRoomDayToday);
 
   return {
     last_primary_at: lastPrimary,
     last_backup_at: lastBackup,
     backup_chunks_today: backupChunks,
+    audio_recorded_ms: audioRecordedMs,
     last_warehouse_at: lastWarehouse,
+    has_doctor_clock: hasDoctorClock(lastWarehouse),
     warehouse_silent_ms: warehouseSilentMs,
+    warehouse_silent_level: doctorClockLevel(warehouseSilentMs),
     doctor_clock_note: DOCTOR_CLOCK_NOTE,
     marks_today: marksToday,
     last_mark_at: lastMark,
     marks_not_sent: marksNotSent,
     last_window_asked_at: lastWindowAt,
     last_window_complete: lastWindowComplete,
+    // --- the switches, the lanes and the stranded minutes: what the screen says, verbatim ---
+    transcript_enabled: sw.value.transcript_enabled,
+    visits_enabled: sw.value.visits_enabled,
+    has_room_day_today: hasRoomDayToday,
+    transcript_counts: counts,
+    visit_counts: visits,
+    lanes: {
+      transcript: counts === null || sw.value.transcript_enabled === null
+        ? null
+        : transcriptLane(sw.value.transcript_enabled, counts, hasRoomDayToday),
+      visits: visits === null || sw.value.visits_enabled === null
+        ? null
+        : visitsLane(sw.value.visits_enabled, visits),
+    },
+    stranded_audio: stranded,
+    ended_disagrees: disagreeing.length > 0,
+    ended_disagrees_sessions: disagreeing.map(([id, n]) => ({ session_id: id, chunks_after_end: n })),
+    ...(disagreeing.length ? { ended_disagrees_title: ENDED_DISAGREES_TITLE, ended_disagrees_hint: ENDED_DISAGREES_HINT } : {}),
   };
 }
 
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
   description:
-    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused.",
+    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused — AND unless a genuine warehouse-typed cue exists on the room-day. There is no fallback to the session's own start on either surface any more: with no cue the answer is null, because the number that fallback produced was the length of the recording wearing a clock gap's label, and it turned every room amber at fifteen minutes and red at thirty. has_doctor_clock says whether the vital has any input at all. BUILD 1 §3.6 — THE DOOR NOW SAYS EVERYTHING THE SCREEN SAYS, IN THE SAME WORDS, from the same shared module (lib/room-facts.ts): transcript_enabled / visits_enabled, the two processing switches, which this tool could not report at all before — so a watcher could not warn that a room was recording into nothing (null, never false, where the read failed); lanes.transcript and lanes.visits plus tape_lane, the three lane lines exactly as the card renders them; transcript_counts and visit_counts behind them; has_room_day_today (null where the brain read failed, never false); stranded_audio — MINUTES THAT CANNOT CURRENTLY BE TURNED INTO WORDS, split into waiting for someone to run it / no day record / never closed, measured in fifteen-minute slots, which is NOT the measure audio_recorded_ms uses (that sums the pieces themselves) so the two do not subtract; and ended_disagrees with its sessions and chunk counts, the capture-clock alarm the screen has always had and this tool could not raise. room_state gains a seventh state, `finished` — the most recent session today is ended and nothing is recording (D30) — placed after paused and recording and before ready, dropped and offline, and never amber; and every room_state now carries start_available, which answers whether a start would succeed rather than making the caller infer it from the state word.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -2216,7 +2342,23 @@ const diffRoom: McpTool = {
           // last_backup_at needs a per-source maximum, which the session rollup does not expose
           // (it carries primary-only and both-combined). listBenchSessions is NOT changed for
           // it — other consumers depend on that shape — so the helper reads it directly.
-          const live = await liveMonitorExtras(room.id, today, now, recordingSession !== null, pausedListener || pausedSession, reasons);
+          // D30 — the room's MOST RECENT session today, and whether it is an ended one. The
+          // seventh state's own input, computed here so the door reaches the same chain the
+          // screen does with the same facts.
+          const newestSession = sessions.reduce<BenchSessionRollupRow | null>((acc, sn) => {
+            const t = msOfLoose(sn.started_at);
+            if (t === null) return acc;
+            const at = acc === null ? null : msOfLoose(acc.started_at);
+            return at === null || t > at ? sn : acc;
+          }, null);
+          const lastSessionEnded =
+            newestSession?.status === "ended" && recordingSession === null && !pausedSession;
+          const primaryChunks = sessions.reduce((a, sn) => a + (Number(sn.chunk_count) || 0), 0);
+
+          const live = await liveMonitorExtras(
+            room.id, today, now, recordingSession !== null, pausedListener || pausedSession,
+            sessions.map((sn) => sn.id), reasons,
+          );
 
           return {
             room: { id: room.id, slug: room.slug, name: room.name },
@@ -2236,6 +2378,19 @@ const diffRoom: McpTool = {
               pausedSession,
               recording: recordingSession !== null,
               recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
+              nowMs: now.getTime(),
+              lastSessionEnded,
+              recordedMsToday: Number(live.audio_recorded_ms) || 0,
+            }),
+            // The Tape lane, in the screen's words. The other two are assembled in
+            // liveMonitorExtras, where their counts are read.
+            tape_lane: tapeLane({
+              recording: recordingSession !== null,
+              paused_session: pausedSession,
+              stalled,
+              stalled_age_ms: stalledAgeMs,
+              session_started_at: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
+              primary_chunks: primaryChunks,
               nowMs: now.getTime(),
             }),
             paused_listener: pausedListener,

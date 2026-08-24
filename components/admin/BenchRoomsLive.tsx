@@ -36,7 +36,16 @@ import {
   NO_DAY_TITLE,
   NO_DAY_FIX,
   type RoomState,
+  type RoomStateView,
 } from "@/lib/bench-bus-constants";
+// The lane words, the stranded-audio reasons and the measurement warning come from the same
+// pure module the server renders them with and the MCP door reports them from (§3.6). Safe in a
+// browser bundle: lib/room-facts.ts imports lib/bench-bus-constants and nothing else.
+import {
+  STRANDED_MEASURE_NOTE,
+  WAITING_PHRASE,
+  type Stranded,
+} from "@/lib/room-facts";
 
 // ---------------------------------------------------------------------------
 // The selected room — shared with BenchClient, which renders that room's sessions
@@ -85,7 +94,7 @@ type Level = "ok" | "amber" | "red" | "unknown";
 /** The four lamp colours from the approved mockup: working, act, audio-at-risk, off-or-idle. */
 type LaneLevel = "ok" | "amber" | "red" | "off";
 type LaneView = { level: LaneLevel; state: string; enabled: boolean | null; note?: string };
-type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number };
+type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number; stranded?: Stranded };
 
 type ListenerRowView = {
   room_id: string;
@@ -120,6 +129,11 @@ type RoomLive = {
   transcript_counts: { done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: number };
   has_room_day_today: boolean | null;
   visit_counts: { built: number; open: number };
+  /** D7 — minutes that cannot currently be turned into words, split by reason. */
+  stranded?: Stranded;
+  /** Audio recorded in this room today, summed from the PIECES. A different measure from the
+   *  window spans in `stranded` and in `words_ms` — see STRANDED_MEASURE_NOTE. */
+  audio_recorded_ms?: number;
   lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
   /** ENDED DISAGREES — the session row says over and pieces are still landing. */
   ended_disagrees: boolean;
@@ -127,7 +141,15 @@ type RoomLive = {
   ended_disagrees_ended_at: string | null;
   ended_disagrees_last_piece_at: string | null;
   ended_disagrees_chunks: number;
+  /** The door's mirror-image check, now on the screen too (§3.6). */
+  ended_at_lies?: boolean;
+  ended_at_lies_sessions?: string[];
+  /** D30 — the most recent session today is ended. The seventh state's own input. */
+  last_session_ended?: boolean;
   last_warehouse_at: string | null;
+  /** Is there a genuine warehouse-typed cue today? With none, the This-doctor row does not
+   *  render at all — a vital nothing feeds should not hold a line saying nothing (§3.1). */
+  has_doctor_clock?: boolean;
   doctor_clock_silent_ms: number | null;
   doctor_clock_level: Level;
   marks_today: number;
@@ -170,10 +192,20 @@ const CONFIRM_STOP_MS = 10_000;
  *
  * Returns null when start IS available — the caller renders nothing at all then.
  */
-export function startBlockedReason(state: RoomState): string | null {
-  switch (state) {
+export function startBlockedReason(st: RoomStateView): string | null {
+  // D30 SPLIT THIS QUESTION IN TWO. `finished` outranks `ready`, so "is the state ready" is no
+  // longer the same question as "would a start work". The view answers the second one directly;
+  // asking it here is what keeps the seventh state's own hint — press start to record again —
+  // from being contradicted by a greyed-out button two lines below it.
+  if (st.start_available) return null;
+  switch (st.state) {
     case "ready":
       return null;
+    case "finished":
+      // The day is over AND no kiosk page is listening. The state stays `finished`, because why
+      // the page is quiet stopped being the operator's question when the day was ended on
+      // purpose — but the button cannot pretend, so this says what to do before pressing it.
+      return "This day is finished. To record again, open the room page on the clinic Mac — no kiosk page is listening in this room right now.";
     case "recording":
       return "Start is off because this room is already recording. Use stop to end the day first.";
     case "paused":
@@ -242,10 +274,22 @@ const STATE_WORD: Record<RoomState, string> = {
   cant_tell: "can't tell",
   paused: "paused",
   recording: "recording",
+  finished: "finished",
   ready: "ready",
   dropped: "dropped",
   offline: "offline",
 };
+
+/**
+ * D30 — FINISHED WEARS GREY, not green and never amber.
+ *
+ * Its level is `ok`, which is right for the card edge and for the worst-condition rollup: a
+ * finished day is not a problem. But GREEN MEANS WORKING on this screen, and a day that is over
+ * is not working — the same argument that makes a switched-on lane with nothing to do grey. Both
+ * shades are defined in tailwind.config.ts; an undefined one would render as nothing at all and
+ * has three times before.
+ */
+const FINISHED_PILL = "bg-even-ink-100 text-even-ink-600";
 
 // ---------------------------------------------------------------------------
 // The three lanes — Tape, Transcript, Visits (PRD R4)
@@ -361,6 +405,21 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         detail: `${r.ended_disagrees_chunks} piece${r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was marked ended ${fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago — ${ENDED_DISAGREES_HINT}`,
       });
     }
+    // §3.6 — THE MIRROR IMAGE, which the DOOR has raised since it was written and the screen
+    // could not. `ended_disagrees` above is the tape running on after the row said stop; this is
+    // the row claiming to have run on after the tape stopped — a stored end time later than the
+    // last piece by more than the stall window. Two different faults, and until this build each
+    // surface carried exactly one of them, so an operator and a watcher looking at one room saw
+    // two different pictures. AMBER, not red: nothing is being lost, the record is simply wrong.
+    if (r.ended_at_lies) {
+      const n = r.ended_at_lies_sessions?.length ?? 0;
+      out.push({
+        room: name,
+        severity: "amber",
+        title: "a recording's stored end time is later than its last piece",
+        detail: `${n === 1 ? "one recording says" : `${n} recordings say`} they ran on after the last audio arrived. The audio is safe and complete — it is the end time on the record that is wrong.`,
+      });
+    }
     // R10 — THE TWO EMERGENCIES ARE DIFFERENT AND MUST READ DIFFERENTLY.
     // This one is the tape gone quiet: audio is BEING LOST, and the answer is to walk to the
     // room. The processing rows below are the other kind, where the audio is already safe on
@@ -381,7 +440,11 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         detail: `last piece ${fmtAge(ageMs(r.last_piece_at, nowMs))} ago`,
       });
     }
-    if (r.doctor_clock_level === "red" || r.doctor_clock_level === "amber") {
+    // §3.1 — GUARDED ON A GENUINE CUE EXISTING. The level is already `unknown` without one, so
+    // this is belt to that braces: nothing in production writes a warehouse clock event, and
+    // until this build the missing cue was silently replaced by the session's own start time,
+    // which turned every room red thirty minutes in.
+    if (r.has_doctor_clock && (r.doctor_clock_level === "red" || r.doctor_clock_level === "amber")) {
       out.push({
         room: name,
         severity: r.doctor_clock_level,
@@ -402,22 +465,28 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         detail: `${n} piece${n === 1 ? "" : "s"} of audio recorded and safe, but this room has no day record for today, so none of it can be turned into words yet. ${NO_DAY_FIX}`,
       });
     }
-    // Processing behind. AUDIO IS SAFE, and the row says so first, because the instinct on
-    // seeing red is to stop the recording — which would be exactly wrong.
+    // NOBODY HAS RUN IT. Not "behind", and there is nothing to tell to stop (§3.4).
+    //
+    // This row used to read "transcript behind — the audio is safe … Turn Transcript off if you
+    // want it to stop trying". Nothing was trying. There is no scheduled pass anywhere in this
+    // system; a person runs each one by hand. Offering to stop something that is not running
+    // teaches an operator that the words on this screen are decorative — and on 24 August that
+    // was the row sitting on top of the one true alarm on the page.
     if (r.transcript_enabled && (r.transcript_counts.waiting > 0 || r.transcript_counts.failed > 0)) {
       const bits: string[] = [];
-      if (r.transcript_counts.waiting > 0) bits.push(`${r.transcript_counts.waiting} piece${r.transcript_counts.waiting === 1 ? "" : "s"} of audio waiting to be turned into words`);
+      if (r.transcript_counts.waiting > 0) bits.push(`${r.transcript_counts.waiting} piece${r.transcript_counts.waiting === 1 ? "" : "s"} of audio ${WAITING_PHRASE}`);
       if (r.transcript_counts.failed > 0) bits.push(`${r.transcript_counts.failed} gave up`);
       out.push({
         room: name,
         severity: "amber",
-        title: "transcript behind — the audio is safe",
-        detail: `${bits.join(", ")}. Nothing is lost: the audio is saved and can be processed later. Turn Transcript off if you want it to stop trying.`,
+        title: `transcript ${WAITING_PHRASE} — the audio is safe`,
+        detail: `${bits.join(", ")}. Nothing is lost: the audio is saved and stays until somebody runs it. No pass is scheduled — each one is started by hand.`,
       });
     }
-    if (r.backup_reads_no_chunks) {
-      out.push({ room: name, severity: "amber", title: "backup mic reads no chunks", detail: "the second microphone has recorded nothing at all this session" });
-    }
+    // D32 — A ROOM WITH ONE MICROPHONE SAYS NOTHING ABOUT A SPARE. The amber "backup mic reads
+    // no chunks" row fired on every single-mic room, which is most of them, for the whole of
+    // every session. Most rooms have one microphone and that is normal. Removed, not softened:
+    // the field is still computed and still on the wire for Build 2, and nothing renders it.
     if (r.marks_not_sent > 0) {
       out.push({ room: name, severity: "amber", title: `${r.marks_not_sent} mark${r.marks_not_sent === 1 ? "" : "s"} did not reach the brain`, detail: "the kiosk recorded the press but the cue never landed" });
     }
@@ -532,6 +601,10 @@ export function BenchRoomsLive() {
   }, [listeners]);
   const listenersKnown = Boolean(listeners) && !(listeners?.degraded?.length);
   const rooms = rollup?.rooms ?? [];
+  /** §3.5 — THE THRESHOLDS THEMSELVES, so a person can see that amber means seven minutes.
+   *  They have been computed and sent on every poll since this screen shipped and rendered
+   *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */
+  const thresholds = rollup?.thresholds ?? null;
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
   const selectedId = useSelectedRoom()?.roomId ?? null;
 
@@ -765,10 +838,18 @@ export function BenchRoomsLive() {
             recording: r.recording,
             recordingSince: r.session_started_at,
             nowMs,
+            // D30 — a day that was ended on purpose is not a kiosk that vanished by accident.
+            lastSessionEnded: Boolean(r.last_session_ended),
+            recordedMsToday: r.audio_recorded_ms ?? null,
           });
+          // The card's edge carries the WORST condition on it. `backup_reads_no_chunks` is no
+          // longer one of them (D32): most rooms have one microphone, so it promoted almost
+          // every card to amber for the whole of every session and said nothing true about any
+          // of them. The doctor clock can only reach amber or red where a genuine cue exists,
+          // which since §3.1 it almost never does.
           const worst: Level = r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red"
             ? "red"
-            : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.backup_reads_no_chunks || r.marks_not_sent > 0
+            : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.ended_at_lies || r.marks_not_sent > 0
               ? "amber"
               : st.level === "unknown" ? "unknown" : "ok";
           // K5 A2 — the deadlock condition, computed from the two facts the page already has.
@@ -803,7 +884,11 @@ export function BenchRoomsLive() {
                   <p className="font-semibold text-even-navy-800 truncate">{r.room.name}</p>
                   <p className="text-caption text-even-ink-400 truncate">{r.room.slug}</p>
                 </div>
-                <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
+                {st.state === "finished" ? (
+                  <span className={`${PILL} ${FINISHED_PILL}`} title={st.hint ?? undefined}>{STATE_WORD.finished}</span>
+                ) : (
+                  <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
+                )}
               </div>
 
               <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
@@ -849,11 +934,47 @@ export function BenchRoomsLive() {
                 ) : null}
               </div>
 
+              {/* ── STRANDED AUDIO (D7) ────────────────────────────────────────────────────
+                  MINUTES, NOT PIECES. The card counted pieces and never said how much TIME
+                  could not be turned into words. On 24 August that figure was over eight hours
+                  across the estate and it was nowhere on this screen — while the one count that
+                  WAS shown, "17 waiting", described a queue that did not exist: all seventeen
+                  were finished slots with no job row at all, so nothing had ever been enqueued.
+
+                  NOT RED. Every minute counted here is audio that is safely stored; what is
+                  missing is the words, and the instinct on seeing red is to stop the recording,
+                  which would be exactly wrong. */}
+              {r.stranded && r.stranded.total_ms > 0 ? (
+                <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50 p-3" data-testid="stranded-audio" onClick={(e) => e.stopPropagation()}>
+                  <p className="text-caption text-even-navy-800 leading-snug">
+                    <span className="font-semibold">{fmtMinutes(r.stranded.total_ms)}</span> of audio cannot
+                    currently be turned into words. It is recorded and safe.
+                  </p>
+                  <ul className="mt-1 space-y-0.5">
+                    {r.stranded.reasons.map((x) => (
+                      <li key={x.reason} className="text-caption text-even-ink-600 leading-snug">
+                        {fmtMinutes(x.ms)} — {x.reason}
+                      </li>
+                    ))}
+                  </ul>
+                  {/* THE TWO NUMBERS ARE MEASURED DIFFERENTLY AND THEY DO NOT SUBTRACT. Said
+                      out loud rather than left to be discovered by someone doing the arithmetic
+                      on a clinic floor. */}
+                  <p className="mt-1 text-caption text-even-ink-400 leading-snug">{STRANDED_MEASURE_NOTE}</p>
+                </div>
+              ) : null}
+
               <dl className="mt-3 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   {/* A4 — "on the UPLOAD clock, 0–5 min is healthy" used to live only in the
                       pill's title, which iOS never renders, so the number had no units. */}
-                  <dt className="text-caption text-even-ink-500">Mic <span className="text-even-ink-400">· newest piece, 0–5 min is healthy</span></dt>
+                  <dt className="text-caption text-even-ink-500">
+                    Main mic{" "}
+                    <span className="text-even-ink-400">
+                      · newest piece, 0–5 min is healthy
+                      {thresholds ? ` · amber at ${Math.round(thresholds.mic_amber_ms / 60_000)} min, red at ${Math.round(thresholds.mic_red_ms / 60_000)}` : ""}
+                    </span>
+                  </dt>
                   <dd>
                     {/* READY CLAIMS NOTHING ABOUT THE MICROPHONES. Before a session starts there
                         are no chunks, so mic health is unknown by construction — the mockup's
@@ -861,57 +982,96 @@ export function BenchRoomsLive() {
                     {st.state === "ready" || (!r.recording && r.last_piece_at === null) ? (
                       <span className="text-caption text-even-ink-400">no tape yet</span>
                     ) : (
-                      <Pill level={r.mic_level} title="newest piece on either mic, on the UPLOAD clock — a healthy mic cycles 0–5 min">
-                        {r.last_piece_at ? fmtAge(ageMs(r.last_piece_at, nowMs)) : r.recording ? "no piece yet" : "—"}
+                      // §3.5 — THE MAIN MICROPHONE'S OWN AGE. Both per-source instants have
+                      // been on the wire since this screen shipped and only the NEWER OF THE TWO
+                      // was ever shown, so a main mic that had stopped an hour ago read healthy
+                      // for as long as the spare kept uploading. The lamp still follows either
+                      // mic — that rule is Build 2's and is untouched — but the number beside it
+                      // now names which microphone it belongs to.
+                      <Pill level={r.mic_level} title="the lamp follows the newest piece on EITHER mic, on the UPLOAD clock — a healthy mic cycles 0–5 min">
+                        {r.last_primary_at ? fmtAge(ageMs(r.last_primary_at, nowMs)) : r.recording ? "no piece yet" : "—"}
                       </Pill>
                     )}
                   </dd>
                 </div>
 
-                <div className="flex items-center justify-between gap-2">
-                  <dt className="text-caption text-even-ink-500" title="Pulse clocks from the LABELLED doctor only. The warehouse holds no room.">This doctor</dt>
-                  <dd>
-                    {r.doctor_clock_silent_ms === null ? (
-                      <span className="text-caption text-even-ink-400">—</span>
-                    ) : (
-                      <Pill
-                        level={r.doctor_clock_level}
-                        title="Pulse clocks from the LABELLED doctor only. Another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty."
-                      >
-                        {fmtAge(r.doctor_clock_silent_ms)}
-                      </Pill>
-                    )}
-                  </dd>
-                </div>
-                {/* A4 — THE MISREADING THIS PREVENTS is the one that turned a busy morning into
-                    an apparent six-hour blackout on 19 August. It lived only in a `title`, which
-                    is exactly nowhere on the iPad this screen is now built for. Shown only when
-                    the vital is actually complaining, so a healthy card stays short. */}
-                {r.doctor_clock_level === "amber" || r.doctor_clock_level === "red" ? (
-                  <p className="text-caption text-even-ink-500 leading-snug">
-                    A gap here means the labelled doctor has not clocked — not that the room is
-                    empty. Another doctor may be in it seeing patients.
-                  </p>
+                {/* §3.1 — THE ROW RENDERS ONLY WHERE THERE IS A CLOCK TO SHOW.
+                    Nothing in production writes a warehouse clock event; the only writer is a
+                    script somebody runs by hand. The screen used to fall back to the time
+                    RECORDING STARTED when no cue existed, so the number displayed was the length
+                    of the recording wearing a clock gap's label — every room amber at fifteen
+                    minutes and red at thirty, every day, one of the four alarms that fired on
+                    healthy behaviour. The fallback is deleted and the row is gone with it. The
+                    vital, its label and its thresholds are untouched: it returns the day
+                    something feeds it. */}
+                {r.has_doctor_clock ? (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="text-caption text-even-ink-500" title="Pulse clocks from the LABELLED doctor only. The warehouse holds no room.">
+                        This doctor
+                        {thresholds ? <span className="text-even-ink-400"> · amber at {Math.round(thresholds.doctor_clock_amber_ms / 60_000)} min</span> : null}
+                      </dt>
+                      <dd>
+                        {r.doctor_clock_silent_ms === null ? (
+                          <span className="text-caption text-even-ink-400">—</span>
+                        ) : (
+                          <Pill
+                            level={r.doctor_clock_level}
+                            title="Pulse clocks from the LABELLED doctor only. Another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty."
+                          >
+                            {fmtAge(r.doctor_clock_silent_ms)}
+                          </Pill>
+                        )}
+                      </dd>
+                    </div>
+                    {/* A4 — THE MISREADING THIS PREVENTS is the one that turned a busy morning
+                        into an apparent six-hour blackout on 19 August. It lived only in a
+                        `title`, which is exactly nowhere on the iPad this screen targets. Shown
+                        only when the vital is actually complaining, so a healthy card stays
+                        short. */}
+                    {r.doctor_clock_level === "amber" || r.doctor_clock_level === "red" ? (
+                      <p className="text-caption text-even-ink-500 leading-snug">
+                        A gap here means the labelled doctor has not clocked — not that the room is
+                        empty. Another doctor may be in it seeing patients.
+                      </p>
+                    ) : null}
+                  </>
                 ) : null}
 
                 <div className="flex items-center justify-between gap-2">
                   <dt className="text-caption text-even-ink-500">Marks</dt>
                   <dd className="text-caption text-even-navy-800">
                     {r.marks_today}
+                    {/* §3.5 — WHEN, not just how many. The instant was already on the wire and
+                        thrown away, and "3 marks" without a time cannot answer the only question
+                        an operator asks about it: is this room still being marked? */}
+                    {r.last_mark_at ? <span className="text-even-ink-400"> · last {fmtAge(ageMs(r.last_mark_at, nowMs))} ago</span> : null}
                     {r.marks_not_sent > 0 ? <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`}>{r.marks_not_sent} not sent</span> : null}
                   </dd>
                 </div>
 
-                {r.backup_reads_no_chunks ? (
+                {/* §3.5 — PIECES FROM A SPARE, AS A NUMBER. Rendered only where a spare has
+                    actually recorded something (D32): most rooms have one microphone and a room
+                    with one microphone says NOTHING about a spare — no empty lane, no grey
+                    placeholder, no amber vital. The old "backup mic reads no chunks" row fired on
+                    every single-mic room for the whole of every session. */}
+                {r.backup_chunks_today > 0 ? (
                   <div className="flex items-center justify-between gap-2">
-                    <dt className="text-caption text-even-ink-500">Backup mic</dt>
-                    <dd><Pill level="amber" title="the second microphone has recorded nothing at all this session">reads no chunks</Pill></dd>
+                    <dt className="text-caption text-even-ink-500">Spare mic</dt>
+                    <dd className="text-caption text-even-navy-800">
+                      {r.backup_chunks_today} piece{r.backup_chunks_today === 1 ? "" : "s"} today
+                      {r.last_backup_at ? <span className="text-even-ink-400"> · newest {fmtAge(ageMs(r.last_backup_at, nowMs))} ago</span> : null}
+                    </dd>
                   </div>
                 ) : null}
-                {r.backup_reads_no_chunks ? (
-                  <p className="text-caption text-even-ink-500 leading-snug">
-                    The second microphone has recorded nothing at all this session.
-                  </p>
+
+                {/* §3.5 — MINUTES TURNED INTO WORDS, PER ROOM. Computed per room since this
+                    screen shipped and only ever shown as an all-rooms total. */}
+                {r.transcript_counts.words_ms > 0 ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <dt className="text-caption text-even-ink-500">Turned into words</dt>
+                    <dd className="text-caption text-even-navy-800">{fmtMinutes(r.transcript_counts.words_ms)}</dd>
+                  </div>
                 ) : null}
 
                 {r.last_window_complete === false ? (
@@ -934,8 +1094,8 @@ export function BenchRoomsLive() {
               <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
                 <button
                   type="button"
-                  disabled={st.state !== "ready"}
-                  title={st.state === "ready" ? "queue start_day" : startBlockedReason(st.state) ?? undefined}
+                  disabled={!st.start_available}
+                  title={st.start_available ? "queue start_day" : startBlockedReason(st) ?? undefined}
                   onClick={() => void send(r.room.id, "start_day")}
                   className={CTRL_BTN}
                 >
@@ -985,8 +1145,8 @@ export function BenchRoomsLive() {
                   iPad this screen now targets, a greyed Start had no explanation anywhere at
                   all. It names the cause and the fix, and it is only rendered when Start is
                   actually off. */}
-              {startBlockedReason(st.state) ? (
-                <p className="mt-2 text-caption text-even-ink-600 leading-snug">{startBlockedReason(st.state)}</p>
+              {startBlockedReason(st) ? (
+                <p className="mt-2 text-caption text-even-ink-600 leading-snug">{startBlockedReason(st)}</p>
               ) : null}
               {confirmStop === r.room.id ? (
                 <p className="mt-2 text-caption text-danger-700 leading-snug">
@@ -1009,6 +1169,16 @@ export function BenchRoomsLive() {
                   </p>
                   <p className="text-caption text-even-ink-500 leading-snug mt-1">{ENDED_DISAGREES_HINT}.</p>
                 </div>
+              ) : null}
+
+              {/* §3.5 — WHAT THIS CARD COULD NOT READ. Assembled per room on every poll since
+                  this screen shipped and never rendered anywhere, so a card quietly missing a
+                  whole section looked identical to a card with nothing to report. Grey, because
+                  it is not a fault in the room — it is a gap in what we can currently see of it. */}
+              {r.degraded?.length ? (
+                <p className="mt-2 text-caption text-even-ink-500 leading-snug">
+                  Some of this room’s picture could not be read: {r.degraded.join(" · ")}
+                </p>
               ) : null}
 
               {/* K5 A2 — THE REPAIR. Shown ONLY on a room whose session is open while no kiosk
@@ -1069,10 +1239,12 @@ export function BenchRoomsLive() {
       {rollup?.day ? (
         <div className="rounded-xl border border-even-ink-200 bg-even-white p-4">
           <p className="text-caption uppercase tracking-wide text-even-ink-500 mb-2">Today, all rooms</p>
-          <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="day-summary">
+          <dl className="grid grid-cols-2 sm:grid-cols-5 gap-3" data-testid="day-summary">
             {[
               [fmtMinutes(rollup.day.audio_recorded_ms), "audio recorded"],
               [fmtMinutes(rollup.day.turned_into_words_ms), "turned into words"],
+              // D7 — THE FIGURE THAT WAS OVER EIGHT HOURS ON 24 AUGUST AND WAS INVISIBLE.
+              [fmtMinutes(rollup.day.stranded?.total_ms ?? 0), "cannot be turned into words"],
               [String(rollup.day.gave_up), "gave up"],
               [String(rollup.day.visits_built), "visits built"],
             ].map(([v, k]) => (
@@ -1083,6 +1255,25 @@ export function BenchRoomsLive() {
               </div>
             ))}
           </dl>
+          {/* The reasons, so the total is actionable rather than alarming. Each one names a
+              different fix and two of them are one press. */}
+          {rollup.day.stranded && rollup.day.stranded.reasons.length > 0 ? (
+            <ul className="mt-2 space-y-0.5" data-testid="day-stranded-reasons">
+              {rollup.day.stranded.reasons.map((x) => (
+                <li key={x.reason} className="text-caption text-even-ink-600 leading-snug">
+                  {fmtMinutes(x.ms)} — {x.reason}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {/* THREE OF THESE FIVE NUMBERS ARE MINUTES AND THEY ARE NOT ALL THE SAME MINUTES.
+              "audio recorded" sums the pieces themselves; "turned into words" and "cannot be
+              turned into words" sum fifteen-minute slots. Every one is honest and they do not
+              subtract, and saying so here is cheaper than the conversation that follows somebody
+              doing the arithmetic. */}
+          <p className="mt-2 text-caption text-even-ink-400 leading-snug">
+            “Turned into words” and “cannot be turned into words” are {STRANDED_MEASURE_NOTE}.
+          </p>
         </div>
       ) : null}
 
@@ -1122,10 +1313,16 @@ export function BenchRoomsLive() {
         </div>
       ) : null}
 
-      <p className="text-caption text-even-ink-400">
-        “This doctor” counts Pulse clocks from the labelled doctor only. The warehouse holds no room, so a gap there
-        never means the room is empty — another doctor may be in it and seeing patients.
-      </p>
+      {/* §3.1 — THE FOOTNOTE FOLLOWS THE VITAL. It explains a row that, with no warehouse-typed
+          cue anywhere today, no card is rendering — and a paragraph about a number nobody can
+          see is the kind of leftover that teaches an operator to skim this screen. It returns
+          with the row. The wording is unchanged and still normative: never "warehouse silent". */}
+      {rooms.some((r) => r.has_doctor_clock) ? (
+        <p className="text-caption text-even-ink-400">
+          “This doctor” counts Pulse clocks from the labelled doctor only. The warehouse holds no room, so a gap there
+          never means the room is empty — another doctor may be in it and seeing patients.
+        </p>
+      ) : null}
     </section>
   );
 }

@@ -109,15 +109,22 @@ describe("R10 — the two emergencies read differently", () => {
     ...over,
   }) as never;
 
-  it("processing behind says THE AUDIO IS SAFE, first", () => {
+  it("unrun audio says THE AUDIO IS SAFE first, and never offers to stop what is not running", () => {
     const items = attentionItems([room({ transcript_counts: { ...NONE, done: 4, waiting: 6, failed: 2 } })], new Map(), true, NOW);
-    const row = items.find((i) => i.title.includes("transcript behind"))!;
+    const row = items.find((i) => i.title.includes("waiting for someone to run it"))!;
     expect(row).toBeTruthy();
     expect(row.severity).toBe("amber");
     expect(row.title).toContain("the audio is safe");
     expect(row.detail).toContain("Nothing is lost");
     // and it must NOT tell somebody to go and stand in the room
     expect(row.detail).not.toMatch(/go to the room/i);
+    // BUILD 1 §3.4 — NOTHING IS TRYING. There is no scheduled pass anywhere in this system; a
+    // person runs each one by hand. The row used to end "Turn Transcript off if you want it to
+    // stop trying", which offers to stop something that is not running — and on 24 August that
+    // row sat on top of the one true alarm on the page.
+    expect(row.detail).not.toMatch(/stop trying/i);
+    expect(row.title).not.toMatch(/behind/i);
+    expect(row.detail).toMatch(/started by hand/i);
   });
 
   it("the tape gone quiet says audio is BEING LOST and sends somebody there", () => {
@@ -295,7 +302,8 @@ describe("a window with no room-day is NOT waiting", () => {
     // Firing on no_day alone would alarm every room every morning for one chunk cycle.
     const v = transcriptLane(true, C({ done: 1, no_day: 2 }), true);
     expect(v.level).toBe("amber");
-    expect(v.state).toBe("1 done, 2 waiting");
+    // §3.4 — "waiting" alone implied a worker working through a queue. There is none.
+    expect(v.state).toBe("1 done, 2 waiting for someone to run it");
     expect(v.note).toBeUndefined();
   });
 

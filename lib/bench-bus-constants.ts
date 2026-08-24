@@ -49,8 +49,8 @@ export const POLL_HIDDEN_MS = 5_000;
  * by some route nobody has thought of, it is visible on the screen instead of six hours later in
  * a chunk listing.
  *
- * NOT a seventh room state. The six in `roomState()` below are a precedence chain where the first
- * match wins, and this is ORTHOGONAL to every one of them: a room can be ready, dropped or
+ * NOT A ROOM STATE AT ALL. The states in `roomState()` below are a precedence chain where the
+ * first match wins, and this is ORTHOGONAL to every one of them: a room can be ready, dropped or
  * offline AND be taking chunks into an ended session, and folding it into that chain would hide
  * one fact behind the other. `paused_disagrees` sits beside the states for the same reason.
  */
@@ -162,7 +162,7 @@ export const NO_DAY_LANE_STATE = (n: number): string =>
   `${n} piece${n === 1 ? "" : "s"} recorded, no day record yet`;
 
 // ---------------------------------------------------------------------------
-// The six room states (K2 §1) — operator language, and one precedence order
+// The seven room states (K2 §1, plus D30) — operator language, and one precedence order
 // ---------------------------------------------------------------------------
 
 /**
@@ -175,7 +175,22 @@ export const NO_DAY_LANE_STATE = (n: number): string =>
  *  this module must stay import-free so it is safe in the kiosk and admin browser bundles. */
 export type RoomStateLevel = "ok" | "amber" | "red" | "unknown";
 
-export type RoomState = "cant_tell" | "paused" | "recording" | "ready" | "dropped" | "offline";
+export type RoomState = "cant_tell" | "paused" | "recording" | "finished" | "ready" | "dropped" | "offline";
+
+/**
+ * FINISHED FOR TODAY (D30) — the seventh state, and the reason it exists.
+ *
+ * On 24 August both clinic rooms were ended deliberately at 16:16 and nine minutes later the
+ * monitor read "Kiosk dropped 9m ago — it may come back on its own", in amber, telling an
+ * operator to go and reopen a page over a day that was simply over. There was no state for a
+ * finished day, so the chain fell through to the one that describes a kiosk that vanished by
+ * accident — which is exactly what ending a day looks like from the bus's point of view.
+ *
+ * It sits AFTER paused and recording (a live tape is never "finished") and BEFORE ready,
+ * dropped and offline (a deliberate end outranks every explanation of why the page went away).
+ * It is never amber: nothing here needs anybody to do anything.
+ */
+export const FINISHED_HINT = "Press start to record again";
 
 export type RoomStateView = {
   state: RoomState;
@@ -184,6 +199,17 @@ export type RoomStateView = {
   /** What to do about it, when there is something to do. */
   hint: string | null;
   level: RoomStateLevel;
+  /**
+   * Would a start succeed right now? A SEPARATE QUESTION from the state, since D30.
+   *
+   * Until the seventh state arrived, "start is offered" and "state is ready" were the same
+   * sentence. They are not any more: `finished` outranks `ready`, so a room whose day was ended
+   * while its kiosk is still open would have had its start button greyed out by the very state
+   * whose hint tells the operator to press start. This answers the button's question directly —
+   * READY, or FINISHED with a kiosk still listening — so the chain can stay about what happened
+   * while the control stays about what is possible.
+   */
+  start_available: boolean;
 };
 
 const stateMs = (v: string | Date | null | undefined): number | null => {
@@ -226,11 +252,14 @@ export function fmtCoarse(msAgo: number): string {
  *                 that is paused-and-recording is a room where consent was withdrawn, and that is
  *                 the fact the operator must act on, not the tape that is still open.
  *   3 RECORDING   a live tape.
- *   4 READY       listening, not recording, not paused — and it claims NOTHING ELSE. It means a
+ *   4 FINISHED    the most recent session today is ENDED and nothing is recording (D30). It
+ *                 outranks the three below because a day ended on purpose explains the quiet
+ *                 kiosk, and each of them would call that quiet an accident.
+ *   5 READY       listening, not recording, not paused — and it claims NOTHING ELSE. It means a
  *                 start will succeed, not that the microphones work: before a session begins there
  *                 are no chunks, so mic health is unknown by construction.
- *   5 DROPPED     gone less than LISTENER_OFFLINE_MS. It may come back; wait.
- *   6 OFFLINE     gone longer, or never seen at all. Nothing is coming back on its own.
+ *   6 DROPPED     gone less than LISTENER_OFFLINE_MS. It may come back; wait.
+ *   7 OFFLINE     gone longer, or never seen at all. Nothing is coming back on its own.
  */
 export function roomState(input: {
   listenerReadFailed: boolean;
@@ -239,12 +268,18 @@ export function roomState(input: {
   recording: boolean;
   recordingSince: string | null;
   nowMs: number;
+  /** D30 — the room's MOST RECENT session today is `ended`. Absent is false, so every caller
+   *  that has not been taught about the seventh state keeps exactly the chain it had. */
+  lastSessionEnded?: boolean;
+  /** Audio recorded in this room today, summed from the PIECES themselves. Null or zero simply
+   *  drops the duration from the label; it never suppresses the state. */
+  recordedMsToday?: number | null;
 }): RoomStateView {
   if (input.listenerReadFailed) {
-    return { state: "cant_tell", label: "Can't tell — cannot reach the command bus", hint: null, level: "unknown" };
+    return { state: "cant_tell", label: "Can't tell — cannot reach the command bus", hint: null, level: "unknown", start_available: false };
   }
   if (Boolean(input.listener?.paused) || input.pausedSession) {
-    return { state: "paused", label: "Paused for consent", hint: null, level: "amber" };
+    return { state: "paused", label: "Paused for consent", hint: null, level: "amber", start_available: false };
   }
   if (input.recording) {
     const since = stateMs(input.recordingSince);
@@ -253,16 +288,35 @@ export function roomState(input: {
       label: since === null ? "Recording" : `Recording · ${fmtCoarse(input.nowMs - since)}`,
       hint: null,
       level: "ok",
+      start_available: false,
     };
   }
   const age = input.listener ? input.nowMs - new Date(input.listener.last_poll_at).getTime() : null;
   const listening = age !== null && Number.isFinite(age) && age <= LISTENER_FRESH_MS;
+  // 4 FINISHED FOR TODAY (D30). Ahead of ready, dropped and offline, because a day that was
+  // ended on purpose ALREADY EXPLAINS the quiet kiosk and each of those three would describe it
+  // as an accident. Never amber: nothing here needs anybody to do anything.
+  if (input.lastSessionEnded) {
+    const rec = Number(input.recordedMsToday);
+    const dur = Number.isFinite(rec) && rec > 0 ? ` · ${fmtCoarse(rec)} recorded` : "";
+    return {
+      state: "finished",
+      label: `Finished for today${dur}`,
+      hint: FINISHED_HINT,
+      level: "ok",
+      // The hint says press start, so the button must actually be there — but only where a kiosk
+      // is listening for it. Where none is, the button stays off and the card's own
+      // start-is-off sentence names the reason. The STATE does not change for it: once a day has
+      // been ended deliberately, why the page is quiet is no longer the operator's question.
+      start_available: listening,
+    };
+  }
   if (listening) {
     // READY, and nothing more. The mockup's "both mics seen" was not buildable and is not built.
-    return { state: "ready", label: "Ready", hint: null, level: "ok" };
+    return { state: "ready", label: "Ready", hint: null, level: "ok", start_available: true };
   }
   if (age !== null && Number.isFinite(age) && age < LISTENER_OFFLINE_MS) {
-    return { state: "dropped", label: `Kiosk dropped ${fmtCoarse(age)} ago`, hint: "it may come back on its own — wait a moment", level: "amber" };
+    return { state: "dropped", label: `Kiosk dropped ${fmtCoarse(age)} ago`, hint: "it may come back on its own — wait a moment", level: "amber", start_available: false };
   }
   // OFFLINE says what to DO, because "offline" alone is a symptom and the operator needs the cure.
   const day = input.listener ? fmtDayIst(input.listener.last_poll_at) : null;
@@ -271,5 +325,6 @@ export function roomState(input: {
     label: day ? `Offline · no kiosk since ${day}` : "Offline · never opened",
     hint: "open the room page on the Mini",
     level: "red",
+    start_available: false,
   };
 }

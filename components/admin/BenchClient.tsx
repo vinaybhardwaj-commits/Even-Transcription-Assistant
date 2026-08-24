@@ -326,29 +326,20 @@ export function BenchClient() {
                     {fmtMb(s.total_bytes)}
                   </td>
                   <td className="py-2.5 px-2.5 whitespace-nowrap">
-                    {/* K-B R10 mic badge: red = main mic lost with no backup tape; amber = ran on backup */}
-                    {s.mic_status === "lost_no_backup" ? (
-                      <span
-                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"
-                        title={`main mic lost ${s.primary_lost_count ?? 0}× — no backup chunks`}
-                      >
-                        mic lost {s.primary_lost_count ?? 0}× · no backup
-                      </span>
-                    ) : s.mic_status === "on_backup" ? (
-                      <span
-                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
-                        title={`main mic lost ${s.primary_lost_count ?? 0}× · ${s.backup_chunk_count ?? 0} backup chunks`}
-                      >
-                        on backup mic · {s.backup_chunk_count ?? 0} chunks
-                      </span>
-                    ) : s.mic_status === "backup_covered" ? (
-                      <span
-                        className="inline-block mr-1.5 px-2 py-0.5 rounded-full text-caption font-semibold bg-warning-100 text-warning-700"
-                        title={`main mic lost ${s.primary_lost_count ?? 0}× and restored · ${s.backup_chunk_count ?? 0} backup chunks`}
-                      >
-                        backup used {s.backup_chunk_count ?? 0}× · mic restored
-                      </span>
-                    ) : null}
+                    {/* THE MIC BADGE IS GONE, and rendering nothing is the point (Build 1 §3.4).
+                        It read the stale lost-microphone flag: `primary_lost_count > 0` on a
+                        session, which does not clear and does not mean the session ran on the
+                        spare. So a session that used its MAIN microphone from the first piece to
+                        the last was labelled "on backup mic · 40 chunks" in amber, and the two
+                        siblings of that branch — "mic lost N× · no backup" in red, and
+                        "backup used N× · mic restored" — read the same flag and make the same
+                        claim. Two working microphones raised this alarm twice in one morning.
+
+                        NOT REPLACED WITH A SIZE JUDGEMENT: deciding which microphone actually
+                        carried a session from the bytes is Build 2, and guessing it here would
+                        put a second false badge where the first one was. Render nothing rather
+                        than something false. `mic_status` is still on the wire and nothing
+                        reads it. */}
                     {isStalled(s) ? (
                       <span
                         className="inline-block px-2 py-0.5 rounded-full text-caption font-semibold bg-danger-100 text-danger-700"

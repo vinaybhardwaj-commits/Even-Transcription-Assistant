@@ -206,9 +206,28 @@ describe("buildRoomLive", () => {
     expect(fresh.doctor_clock_level).toBe("ok");
   });
 
-  it("with no clock all day the gap runs from the tape's own start, not from zero", () => {
+  /**
+   * BUILD 1 §3.1 — THE FALLBACK IS DELETED, and this test is the inverse of the one it replaces.
+   *
+   * It used to assert that with no warehouse cue the gap runs from the TAPE'S OWN START. That is
+   * exactly the bug: nothing in production writes a warehouse clock event, so what the screen
+   * displayed was the length of the recording wearing a clock gap's label. Every room in the
+   * estate went amber at fifteen minutes and red at thirty, every single day — one of the four
+   * alarms that fired on entirely healthy behaviour. And the door had no such fallback, so the
+   * two surfaces reported different numbers for the same room.
+   */
+  it("§3.1 — WITH NO CUE THERE IS NO CLOCK. It never falls back to the tape's own start", () => {
     const r = buildRoomLive(ROOM, [session()], NO_COUNTS, NO_BRAIN, 0, NOW, []);
-    expect(r.doctor_clock_silent_ms).toBe(60 * 60_000);
+    expect(r.doctor_clock_silent_ms).toBeNull();
+    expect(r.doctor_clock_level).toBe("unknown");
+    // and the row that renders it knows there is nothing to render
+    expect(r.has_doctor_clock).toBe(false);
+  });
+
+  it("§3.1 — a room that HAS a cue still gets a real clock, unchanged", () => {
+    const r = buildRoomLive(ROOM, [session()], NO_COUNTS, { ...NO_BRAIN, last_warehouse_at: new Date(NOW - 40 * 60_000).toISOString() }, 0, NOW, []);
+    expect(r.has_doctor_clock).toBe(true);
+    expect(r.doctor_clock_silent_ms).toBe(40 * 60_000);
     expect(r.doctor_clock_level).toBe("red");
   });
 
