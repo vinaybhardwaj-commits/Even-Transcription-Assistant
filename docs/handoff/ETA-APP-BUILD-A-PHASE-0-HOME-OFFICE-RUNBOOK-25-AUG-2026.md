@@ -29,7 +29,9 @@ Before staging, building, recording, unplugging a microphone or pulling power:
 3. Wait for any just-ended upload disagreement to settle and record the result in `notes.txt`.
 4. Tell the room operator the kiosk will be unavailable during the physical protocol.
 5. Close the kiosk page before native microphone tests so it is not a competing CoreAudio client.
-6. Reopen the kiosk page and confirm `listener_state:listening` after the protocol.
+6. In System Settings > Accessibility > Voice Control, require Voice Control to be off. Do not
+   let the recorder change this setting. Record the read-only preflight below in `environment.txt`.
+7. Reopen the kiosk page and confirm `listener_state:listening` after the protocol.
 
 Never stop a production recording to make room for a test.
 
@@ -81,6 +83,16 @@ swift package reset
 swift build -c release 2>&1 | tee ~/EvenScribeBench/runs/$SHA/build-release.txt
 shasum -a 256 .build/release/tapewriter \
   | tee ~/EvenScribeBench/runs/$SHA/binary.sha256
+
+VOICE_CONTROL=$(defaults read com.apple.Accessibility CommandAndControlEnabled 2>/dev/null || \
+  printf '0\n')
+printf 'voice_control_enabled=%s\n' "$VOICE_CONTROL" \
+  | tee -a ~/EvenScribeBench/runs/$SHA/environment.txt
+if test "$VOICE_CONTROL" = 1; then
+  printf '%s\n' \
+    'STOP: turn off System Settings > Accessibility > Voice Control before microphone tests.' >&2
+  false
+fi
 ```
 
 Run all 20 tests with the dependency-free CLT scratch recipe in section 4.2 of the test plan and
@@ -90,8 +102,9 @@ is the explicit `CANDIDATE_SHA` plus the verified archive hash; it is not a remo
 
 Run a short foreground recording first. Grant microphone permission when macOS asks, confirm the
 printed device is `TONOR TM20 Audio Device`, retain its stable UID, stop with Ctrl-C, verify, export
-and listen. A zero-audio run, any dropped block, any ring overflow or a checkpoint gap over 2.5 s
-is a failure.
+and listen. While it runs, speak with Terminal and a browser text field focused in turn; speech
+must not be inserted into either field. A zero-audio run, injected text, any dropped block, any ring
+overflow or a checkpoint gap over 2.5 s is a failure.
 
 ## 6. Detached recording
 

@@ -86,6 +86,66 @@ hard-kill and restart protocol after the main hardening changes, but the final r
 followed it. The protocol must be rerun after the tree is fixed as a candidate commit before the
 binding Home Office protocol is cited.
 
+### 3.1 Home Office evidence obtained
+
+The first Home Office capture candidate is source commit
+`4618a2ca0dabe335ed88aeb8d1177c277789d1ee`. Its release binary on the Home Office Mini is
+`e08f16642991f5011f11bacfbd23c63c0e8b5661badb921be069139308bf466b`. The Mini's native Swift
+6.3/Testing 1902 run passed all 20 tests in 4 suites. A preceding `c94d487` microphone smoke is
+retained as a failure: it accepted no blocks after assigning AUHAL to a TONOR that was already the
+default input. Candidate `4618a2c` leaves that route intact and its replacement smoke accepted 190
+blocks with no drop, recorded 19.000688 s and verified `PASS`.
+
+H-01's numeric and durability portion completed on `4618a2c` on 25 August:
+
+| Measure | Home Office result |
+|---|---|
+| Tape | 57,603,222 samples; 3,600.201375 s; 115,206,444 PCM bytes |
+| Deliberate hard kill | PID 30878, `2026-08-25T12:06:21Z` |
+| Restart and clean stop | PID 37273, restart `12:10:51Z`, SIGINT `12:40:51Z` |
+| Surviving crash tail | 32,940 bytes; 1.029375 s; retained after restart |
+| Largest checkpoint gap | 1.300015 s |
+| Native input-clock drift | -1.663 ppm; -0.499 ms per five minutes |
+| Recorder load | Whole-run peak 0.7% CPU and 19,472 KiB RSS |
+| Final artifacts | 16 kHz mono Int16 WAV; PCM/index/WAV hashes retained; `VERDICT: PASS` |
+
+The verifier also recorded one unexpected `configuration_change` followed by `resumed` with a
+0.225 s gap. It remains named for interpretation rather than discarded. V listened from 29:50
+through 30:10 around the approximately 30:00.101 hard-kill/restart seam and reported a seamless
+direct transition: no corruption, repetition, buzz or fabricated silence. H-01 passes its binding
+threshold for `4618a2c`; because H-02 forced a capture-source correction, H-01 must be repeated on
+the superseding source before final acceptance.
+
+V also observed speech being inserted into Terminal and browser fields during this run. The Mini
+read-back shows this was macOS Voice Control, not `tapewriter`: `CommandAndControlEnabled=1`, the
+Accessibility preference and `DictationIM` process date from 22 August, three days before the
+candidate ran, and unified logging attributes the microphone independently to both `Terminal` and
+`Voice Control` while `DictationIM` inserts text. Keyboard Dictation itself read disabled. The
+candidate imports no Speech or Accessibility API and has no event-injection, AppleScript or
+preference-writing path. This does not invalidate the raw-capture verdict, but it is an unacceptable
+room configuration. Voice Control must be turned off through System Settings and a short no-text-
+injection smoke must pass before H-02 or production app acceptance. V turned Voice Control off and
+the read-back changed to `CommandAndControlEnabled=0`; `DictationIM` exited. The fixed candidate then
+recorded a 100.000687 s isolation smoke with a 1.300007 s largest checkpoint gap, zero final tail and
+`VERDICT: PASS`. Spoken sentences with Terminal and browser text fields focused appeared in neither
+field. The smoke evidence is retained under `voice-control-off-smoke/`.
+
+H-02 on `4618a2c` is retained as a failed acceptance attempt. The physical power cut left a valid
+tape with 41,828 surviving unindexed bytes (1.307125 s), a 1.300003 s largest checkpoint gap and a
+pre-restart `VERDICT: PASS`. After normal boot, the TONOR was present and default, but both the first
+restart and one controlled retry exited before accepting audio with AVFAudio error `2003329396`
+(`0x77686174`, `'what'`). Each failed launch wrote only honest zero-audio `restart` and `stopped`
+records; it neither changed PCM nor erased the historical tail. This fails unattended boot recovery
+even though the durability threshold passed.
+
+The superseding source uses the input node's hardware-facing format object unchanged, requests an
+8,192-frame tap within Apple's documented callback range on the 44.1/48 kHz rig, keeps the writer
+alive while initial CoreAudio acquisition retries every five seconds and refreshes the numeric
+device ID after stable-UID reacquisition. It builds and formats cleanly, has no dependencies, and all
+20 local deterministic tests pass. A persistent unsupported 24 kHz local input also confirmed that
+the process now retries until SIGINT instead of exiting. None of that is Home Office acceptance; the
+new immutable candidate still requires native Mini build/tests, TONOR smoke and repeated H-01/H-02.
+
 ---
 
 ## 4. Automated test status
@@ -475,7 +535,7 @@ Phase 0 can be reported for review only when all boxes below have evidence:
 
 - [ ] Candidate commit is fixed; worktree and binary hash recorded.
 - [ ] Release build passes on the Home Office Mini.
-- [ ] Package has no external dependencies or networking.
+- [x] Package has no external dependencies or networking.
 - [ ] Swift Testing suite reruns and passes at the fixed candidate commit; use full Xcode or
       the recorded CLT scratch recipe and retain the output.
 - [ ] H-01 one-hour kill protocol completed with verbatim before/after verifier output.
@@ -499,10 +559,8 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 
 | Priority | Debt | Exit condition |
 |---|---|---|
-| P0 | Test suite not yet rerun at a fixed candidate commit | All 20 tests pass at candidate SHA and output is retained |
-| P0 | Four Home Office protocols not run | H-01 through H-04 evidence bundles complete |
-| P0 | CPU, memory, disk and callback-drop acceptance figures absent | Full-day and load measurements reported |
-| P0 | Candidate-SHA local crash smoke not rerun after commit | Repeat the passing L-19 command at the fixed SHA before Home Office destructive run |
+| P0 | Superseding candidate needs native freeze checks and H-01 through H-04 | Fixed SHA build/tests and all four evidence bundles complete |
+| P0 | Full-day CPU, memory, disk and callback-drop figures absent | Full-day and load measurements reported; H-01 peak figures remain supporting evidence |
 | P1 | No deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing |
 | P1 | No deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated or fault-injected and passing |
 | P1 | Converter rate/flush matrix incomplete | SRC-01 through SRC-04 passing with documented accounting bound |

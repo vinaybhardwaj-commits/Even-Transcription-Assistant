@@ -43,7 +43,7 @@ final class CaptureSession: @unchecked Sendable {
     state = State(resumeAfterNS: resumeAfterNS)
     if !AudioDevices.isDefaultInput(device) { try selectDevice(device, on: engine) }
     let input = engine.inputNode
-    let hardwareFormat = input.outputFormat(forBus: 0)
+    let hardwareFormat = input.inputFormat(forBus: 0)
     guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
       throw RecorderError("input device has no active capture format")
     }
@@ -52,16 +52,12 @@ final class CaptureSession: @unchecked Sendable {
         "input sample rate \(hardwareFormat.sampleRate) Hz is below the 44.1 kHz durability envelope"
       )
     }
-    guard
-      let captureFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: hardwareFormat.sampleRate,
-        channels: hardwareFormat.channelCount,
-        interleaved: false
-      )
-    else { throw RecorderError("cannot construct the native capture format") }
+    guard hardwareFormat.commonFormat == .pcmFormatFloat32, !hardwareFormat.isInterleaved else {
+      throw RecorderError("input device does not provide noninterleaved Float32 audio")
+    }
+    print("Capture format: \(hardwareFormat)")
 
-    input.installTap(onBus: 0, bufferSize: 4_096, format: captureFormat) {
+    input.installTap(onBus: 0, bufferSize: 8_192, format: hardwareFormat) {
       [ring, state] buffer, when in
       guard let channels = buffer.floatChannelData else { return }
       let frameCount = Int(buffer.frameLength)
@@ -204,23 +200,29 @@ public enum Recorder {
       print("Recording stopped cleanly before capture started.")
       return
     }
-    let initialCapture: CaptureSession
-    do {
-      initialCapture = try CaptureSession(device: device, ring: ring)
-    } catch {
-      try? writer.stopAndWait()
-      throw error
-    }
-    var capture: CaptureSession? = initialCapture
-
+    var currentDevice = device
+    var capture: CaptureSession?
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
-    var retryAfterNS: UInt64 = 0
+    var retryAfterNS = UInt64.max
+    do {
+      capture = try CaptureSession(device: device, ring: ring)
+    } catch {
+      let boundary = (monoNS: monotonicNowNS(), wallNS: wallNowNS())
+      lossBoundary = boundary
+      retryAfterNS = boundary.monoNS + 5_000_000_000
+      fputs(
+        "Initial audio unavailable; retrying every 5 seconds: \(error.localizedDescription)\n",
+        stderr)
+    }
+
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
-      if let active = capture, !AudioDevices.isAlive(device) || active.hasStoppedProducing {
+      if let active = capture,
+        !AudioDevices.isAlive(currentDevice) || active.hasStoppedProducing
+      {
         active.stop()
         capture = nil
-        let alive = AudioDevices.isAlive(device)
+        let alive = AudioDevices.isAlive(currentDevice)
         let marker: StreamMarker = alive ? .configurationChange : .deviceLost
         if let boundary = active.lastAcceptedFrameEnd {
           lossBoundary = boundary
@@ -241,8 +243,10 @@ public enum Recorder {
       if capture == nil, monotonicNowNS() >= retryAfterNS {
         do {
           let current = try AudioDevices.selected(uid: device.uid)
-          capture = try CaptureSession(
+          let replacement = try CaptureSession(
             device: current, ring: ring, resumeAfterNS: lossBoundary?.monoNS)
+          currentDevice = current
+          capture = replacement
           retryAfterNS = UInt64.max
         } catch {
           retryAfterNS = monotonicNowNS() + 5_000_000_000
