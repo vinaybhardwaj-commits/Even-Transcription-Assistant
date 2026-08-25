@@ -41,7 +41,7 @@ final class CaptureSession: @unchecked Sendable {
   init(device: AudioDeviceInfo, ring: AudioRing, resumeAfterNS: UInt64? = nil) throws {
     self.ring = ring
     state = State(resumeAfterNS: resumeAfterNS)
-    try selectDevice(device, on: engine)
+    if !AudioDevices.isDefaultInput(device) { try selectDevice(device, on: engine) }
     let input = engine.inputNode
     let hardwareFormat = input.outputFormat(forBus: 0)
     guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {

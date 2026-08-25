@@ -17,19 +17,11 @@ enum AudioDevices {
       }
       return match
     }
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultInputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var id = AudioDeviceID(0)
-    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-    let status = AudioObjectGetPropertyData(
-      AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
-    guard status == noErr, id != kAudioObjectUnknown else {
-      throw RecorderError("no default input device is available")
-    }
-    return try info(id: id)
+    return try info(id: defaultInputID())
+  }
+
+  static func isDefaultInput(_ device: AudioDeviceInfo) -> Bool {
+    (try? defaultInputID()) == device.id
   }
 
   static func isAlive(_ device: AudioDeviceInfo) -> Bool {
@@ -67,6 +59,22 @@ enum AudioDevices {
       let streams = try inputStreamCount(id: id)
       return streams > 0 ? try info(id: id) : nil
     }
+  }
+
+  private static func defaultInputID() throws -> AudioDeviceID {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDefaultInputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var id = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
+    guard status == noErr, id != kAudioObjectUnknown else {
+      throw RecorderError("no default input device is available")
+    }
+    return id
   }
 
   private static func info(id: AudioDeviceID) throws -> AudioDeviceInfo {
