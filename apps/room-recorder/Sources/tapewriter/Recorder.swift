@@ -203,6 +203,7 @@ public enum Recorder {
     var currentDevice = device
     var capture: CaptureSession?
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
+    var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
     do {
       capture = try CaptureSession(device: device, ring: ring)
@@ -224,6 +225,7 @@ public enum Recorder {
         capture = nil
         let alive = AudioDevices.isAlive(currentDevice)
         let marker: StreamMarker = alive ? .configurationChange : .deviceLost
+        lossMarkedDeviceLost = !alive
         if let boundary = active.lastAcceptedFrameEnd {
           lossBoundary = boundary
           try enqueue(
@@ -247,8 +249,20 @@ public enum Recorder {
             device: current, ring: ring, resumeAfterNS: lossBoundary?.monoNS)
           currentDevice = current
           capture = replacement
+          lossMarkedDeviceLost = false
           retryAfterNS = UInt64.max
         } catch {
+          if !lossMarkedDeviceLost, AudioDevices.presence(uid: device.uid) == false,
+            let boundary = lossBoundary
+          {
+            try enqueue(
+              .deviceLost,
+              monoNS: boundary.monoNS,
+              wallNS: boundary.wallNS,
+              ring: ring,
+              writer: writer)
+            lossMarkedDeviceLost = true
+          }
           retryAfterNS = monotonicNowNS() + 5_000_000_000
           fputs("Retry failed: \(error.localizedDescription)\n", stderr)
         }

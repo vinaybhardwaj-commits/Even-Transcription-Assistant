@@ -36,6 +36,11 @@ enum AudioDevices {
       && alive != 0
   }
 
+  static func presence(uid: String) -> Bool? {
+    guard let devices = try? all() else { return nil }
+    return devices.contains { $0.uid == uid }
+  }
+
   private static func all() throws -> [AudioDeviceInfo] {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDevices,

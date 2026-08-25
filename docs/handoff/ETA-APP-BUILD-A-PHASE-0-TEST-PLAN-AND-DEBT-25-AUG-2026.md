@@ -138,13 +138,37 @@ restart and one controlled retry exited before accepting audio with AVFAudio err
 records; it neither changed PCM nor erased the historical tail. This fails unattended boot recovery
 even though the durability threshold passed.
 
-The superseding source uses the input node's hardware-facing format object unchanged, requests an
-8,192-frame tap within Apple's documented callback range on the 44.1/48 kHz rig, keeps the writer
-alive while initial CoreAudio acquisition retries every five seconds and refreshes the numeric
-device ID after stable-UID reacquisition. It builds and formats cleanly, has no dependencies, and all
-20 local deterministic tests pass. A persistent unsupported 24 kHz local input also confirmed that
-the process now retries until SIGINT instead of exiting. None of that is Home Office acceptance; the
-new immutable candidate still requires native Mini build/tests, TONOR smoke and repeated H-01/H-02.
+Source `6408eed7bc1342710b2c64cfc577d598420e64a5` uses the input node's hardware-facing format object
+unchanged, requests an 8,192-frame tap within Apple's documented callback range on the 44.1/48 kHz
+rig, keeps the writer alive while initial CoreAudio acquisition retries every five seconds and
+refreshes the numeric device ID after stable-UID reacquisition. It built and formatted cleanly on
+the Mini, had no dependencies, and all 20 native tests passed. A persistent unsupported 24 kHz local
+input also confirmed that the process retries until SIGINT instead of exiting.
+
+That candidate then named the deeper H-02 hardware boundary. After the physical power cycle, the
+Apple USB remote driver repeatedly failed `start_io` with `'what'`; neither changing TONOR from 48
+kHz to 44.1 kHz nor using the exact negotiated output-bus format recovered it. CoreAudio deactivated
+old device ID 171 only when the TONOR was physically unplugged, activated the same stable UID as ID
+885 on replug, and then started IO. `6408eed` followed that stable UID without process restart,
+recorded 498 blocks with zero drops and indexed the 103.401 s unavailable interval as `resumed`.
+The resulting 92.509 s tape had a 1.300319 s largest checkpoint gap, zero tail and `VERDICT: PASS`.
+This validates app retry/reacquisition but leaves H-02 failed: this TONOR/Mini pairing did not recover
+unattended after the tested wall-power cycle.
+
+H-03 on `6408eed` recorded at least five minutes on each side of a 63.41 s stopwatch yank. PCM and
+index growth resumed without process restart; 498-block startup evidence above and this run both
+show the refreshed numeric device ID path works. H-03's indexed last-frame-to-first-frame gap was
+66.015709 s, 2.606 s longer than the stopwatch and within the five-second retry interval. Final tape
+was 712.203938 s, with a 1.300319 s ordinary checkpoint gap, zero tail, valid 16 kHz mono Int16 WAV
+and `VERDICT: PASS`. It nevertheless failed the binding marker rule: the stale pre-unplug device ID
+briefly read alive, so the tape wrote `configuration_change` then `resumed`, not `device_lost` then
+`resumed`.
+
+The next source correction upgrades that pending boundary to `device_lost` only when a successful
+CoreAudio enumeration proves the stable UID absent; an enumeration failure remains unknown and does
+not guess. Reacquisition still measures `resumed` from the last true pre-loss frame. The correction
+builds and formats cleanly and all 20 local deterministic tests pass, but requires a new immutable
+candidate and native H-03 rerun. None of these results closes the cold-boot H-02 hardware blocker.
 
 ---
 
@@ -559,7 +583,8 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 
 | Priority | Debt | Exit condition |
 |---|---|---|
-| P0 | Superseding candidate needs native freeze checks and H-01 through H-04 | Fixed SHA build/tests and all four evidence bundles complete |
+| P0 | Loss-classification correction needs immutable candidate checks and H-01/H-03/H-04 | Fixed SHA build/tests and the remaining evidence bundles complete |
+| P0 | TONOR Apple USB driver did not recover unattended after tested wall-power cycle | Repeated cold-power boot starts IO without physical USB replug, or production hardware/provisioning changes and H-02 is rerun |
 | P0 | Full-day CPU, memory, disk and callback-drop figures absent | Full-day and load measurements reported; H-01 peak figures remain supporting evidence |
 | P1 | No deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing |
 | P1 | No deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated or fault-injected and passing |
