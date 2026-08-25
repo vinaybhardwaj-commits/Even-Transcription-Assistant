@@ -6,9 +6,15 @@ Spec: `docs/handoff/ETA-MONITORING-SURFACE-PRD-24-AUG-2026-v1.2.md`. Read §3.5,
 
 Production is `05aaf2e`. Migrations run through `0067`. The next migration number is `0068`.
 
-All design decisions are settled: 39 of them, D1 to D38 plus D33a, ratified by V. Do not reopen any. If something is genuinely not covered, flag it in your report instead of deciding it silently.
+All design decisions are settled: 40 of them, D1 to D39 plus D33a, ratified by V. Do not reopen any. If something is genuinely not covered, flag it in your report instead of deciding it silently.
 
-**One check before you start.** The repo copies of the PRD and the backlog were stale until this commit. They were re-synced from the master copies together with this kickoff. Confirm that the PRD in `docs/handoff/` contains decision **D33a** and that the backlog contains **P7 and P8**. If either is missing, stop and say so.
+**D39, ratified 25 August, governs item 2.3 and supersedes the earlier rule that only a cue creates a day record.** The day record opens itself when tape starts. No key stroke and no mark may ever stand between recorded tape and processable tape.
+
+**One check before you start.** Confirm the PRD in `docs/handoff/` contains **D33a** and the backlog contains **P7 and P8** — they were synced on 25 August at `e199cd1`. **D39 was ratified after that sync, so the repo copy will not have it.** Append this row to the PRD's decision table in `docs/handoff/` in your first commit, verbatim:
+
+> | **D39** | **The day record opens itself when tape starts** — on a `start_day` ack, or when a chunk verifies for an IST date that has no record yet, keyed to the piece's own date. Ratified 25 August; supersedes the 22 August rule that only a cue creates a day. Wider rule, also ratified: **no key stroke and no mark may ever stand between recorded tape and processable tape.** Marks are consult boundaries only. The destination for consult boundaries is voice identification from the room-audio diarization work, not taps. |
+
+The Room Recorder PRD referenced in item 2.4 is not yet in the repo; that reference is informational for this build. Its full text arrives with the App Build A kickoff.
 
 ---
 
@@ -58,15 +64,19 @@ Builds 1 and 2 made the page tell the truth. Build 3 is recovery. It turns two d
 2. Re-run with the caution D28 sets for paid batches: transcribe **four first**. The rest run only after V reads the four and the output reads well. Your report carries the four outputs and stops there. Do not run the remaining twelve in this build's automated flow.
 3. Control: the window recovered by hand on 24 August (5,468 characters, Sarvam, 23 seconds). Re-running that window must produce substantially the same text. If it does not, stop and report.
 
-### 2.3 A day record creatable from the desk (backlog P7)
+### 2.3 The day record opens itself when tape starts (backlog P7, D39)
 
 **Observed.** Session `bs_fudv3gqt` was started from the desk on 25 August and recorded 55 minutes of verified tape. None of it could be processed until V pressed Mark consult in the room, 54 minutes in. A recording creates no day record. Only a cue does. The desk has a start button and nothing that creates the day.
 
+**Ruling (D39, 25 August).** A recording with no day record is a bug. The fix is not a desk control. The day opens automatically.
+
 **Build:**
 
-1. A control on the room card that creates today's day record. It does exactly what Mark consult does, through the same path. The operator connector already proves this works from the desk (`scribe_mark_consult`, used on Cardiology on 24 August).
-2. The card already alarms when a room records with no day record. The new control is the action that resolves that alarm. Put them next to each other.
-3. Out of scope, named so it is not lost: the drain creating its own day record for the window's own IST date (PRD §11). Do not build it here.
+1. When a chunk verifies and the room has no day record for that chunk's IST date, create it. Server side, in the chunk-verify path, through the same durable path Mark consult writes through. Idempotent: the second chunk of the day finds the record and creates nothing.
+2. Also create it on a `start_day` ack, so the day exists from the moment the desk starts a room, before the first piece lands.
+3. Key the record to the **piece's own IST date**, not the session's start date. A session that crosses midnight opens the new day's record with its first piece after midnight. This subsumes the drain-side version of the fix (PRD §11); do not build a separate drain path.
+4. The no-day-record alarm stays. Under D39 it can only fire on a bug, which is exactly what an alarm is for.
+5. Mark consult is untouched. Marks are consult boundaries. They never gate processing (D39).
 
 ### 2.4 A spare exists only when a second device exists (backlog P8, D32)
 
@@ -74,12 +84,12 @@ Builds 1 and 2 made the page tell the truth. Build 3 is recovery. It turns two d
 
 **Check first.** On Home Office, identify what the phantom captured device actually is. Report it.
 
-**Build:**
+**Build (server half only — the client half moves to the native Room Recorder app, PRD `ETA-ROOM-RECORDER-PRD-25-AUG-2026-v1.1.md` R6; do not modify the browser kiosk's capture code):**
 
-1. Decide `spare_exists` from device selection: a distinct second device chosen in the kiosk. Never from the arrival of a backup piece.
-2. If no distinct second device is chosen: do not open a backup lane, do not write backup pieces, do not render a spare vital.
+1. Server and operator page: decide `spare_exists` from an explicitly chosen second device reported by the client. Never from the arrival of a backup piece.
+2. When no second device is reported: do not render a spare lane, do not render a spare vital, and raise no alarm about the spare.
 3. A room with one microphone is a normal room, not a degraded one (D32). No alarm and no warning for having one.
-4. In your report, state whether the long-standing 68-to-1 reading was a broken spare or no spare at all.
+4. In your report, state whether the long-standing 68-to-1 reading was a broken spare or no spare at all. On Home Office, identify the phantom captured device (the check-first above).
 
 ### 2.5 The operator door reports the level numbers (PRD §3.5, §3.6)
 
@@ -129,7 +139,7 @@ The backlog file still marks P1–P6 open. The Build 2 kickoff intended P1, P2 a
 
 Home Office is the only live kiosk. All clinic rooms are offline until they are rebuilt by hand. Field acceptance runs on Home Office, and on the Cardiology tape already in the archive. Re-runs need no kiosk.
 
-Non-negotiables: paid calls run in small batches with per-window cost reporting, and nothing writes a live room's day record except through the Mark-consult path.
+Non-negotiables: paid calls run in small batches with per-window cost reporting, and nothing writes a live room's day record except through the Mark-consult path and the D39 auto-open in item 2.3.
 
 ---
 
@@ -144,9 +154,9 @@ Treat as verified only the columns you check against production yourself, plus w
 1. `tsc` clean.
 2. Tests pass. Name the new ones.
 3. Build passes.
-4. Screenshot: the two new room-card controls, and a one-microphone room rendering no spare lane.
+4. Screenshot: the new run-waiting-audio control, and a one-microphone room rendering no spare lane.
 5. Field acceptance, item by item:
-   - a. From the desk only: start Home Office, create its day record, stop it. Nobody touches the Mini.
+   - a. From the desk only: start Home Office and stop it. Its day record appears on its own, with zero marks and nobody touching the Mini. Report the record id and what created it (ack or first piece).
    - b. Run-waiting-audio on a room with waiting windows. Per-window report with cost.
    - c. The control window from 2.2 re-runs to substantially the same 5,468-character Sarvam text.
    - d. A Home Office session shows no spare lane and writes no backup pieces.
