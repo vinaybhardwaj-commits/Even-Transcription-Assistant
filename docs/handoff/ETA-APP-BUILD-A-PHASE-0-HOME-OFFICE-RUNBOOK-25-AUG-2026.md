@@ -74,6 +74,8 @@ Build from a logged-in Terminal on the Mini so microphone permission is attribut
 ```sh
 SHA=$(cat ~/EvenScribeBench/ACTIVE_CANDIDATE_SHA)
 test "$(cat ~/EvenScribeBench/candidates/$SHA/CANDIDATE_SHA)" = "$SHA"
+(cd ~/EvenScribeBench/candidates/$SHA && \
+  shasum -a 256 -c "tapewriter-$SHA.tar.sha256")
 cd ~/EvenScribeBench/candidates/$SHA/apps/room-recorder
 swift package reset
 swift build -c release 2>&1 | tee ~/EvenScribeBench/runs/$SHA/build-release.txt

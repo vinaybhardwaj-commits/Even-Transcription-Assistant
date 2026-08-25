@@ -441,7 +441,7 @@ Each protocol directory must contain:
 
 ```sh
 cat ../../CANDIDATE_SHA
-shasum -a 256 -c ../../tapewriter-$(cat ../../CANDIDATE_SHA).tar.sha256
+(cd ../.. && shasum -a 256 -c tapewriter-$(cat CANDIDATE_SHA).tar.sha256)
 swift --version
 sw_vers
 uname -a
