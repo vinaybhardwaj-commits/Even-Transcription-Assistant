@@ -140,18 +140,30 @@ cd apps/room-recorder
 
 SCRATCH="${TMPDIR%/}/tapewriter-swift-build-$(date +%s)"
 PLUGIN=/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
-PRODUCTS="$SCRATCH/out/Products/Debug"
+FRAMEWORKS=/Library/Developer/CommandLineTools/Library/Developer/Frameworks
+SWIFT_FLAGS=(
+  -Xswiftc -load-plugin-library -Xswiftc "$PLUGIN"
+  -Xswiftc -F -Xswiftc "$FRAMEWORKS"
+  -Xlinker "-F$FRAMEWORKS"
+)
 
 swift build --build-tests --scratch-path "$SCRATCH" \
-  -Xswiftc -load-plugin-library -Xswiftc "$PLUGIN"
+  "${SWIFT_FLAGS[@]}"
 
-ditto /Library/Developer/CommandLineTools/Library/Developer/Frameworks/Testing.framework \
-  "$PRODUCTS/PackageFrameworks/Testing.framework"
+if test -d "$SCRATCH/out/Products/Debug"; then
+  PRODUCTS="$SCRATCH/out/Products/Debug"
+  TESTING_DEST="$PRODUCTS/PackageFrameworks/Testing.framework"
+else
+  PRODUCTS="$SCRATCH/$(uname -m)-apple-macosx/debug"
+  TESTING_DEST="$PRODUCTS/Testing.framework"
+fi
+
+ditto "$FRAMEWORKS/Testing.framework" "$TESTING_DEST"
 ditto /Library/Developer/CommandLineTools/Library/Developer/usr/lib/lib_TestingInterop.dylib \
   "$PRODUCTS/lib_TestingInterop.dylib"
 
 swift test --skip-build --scratch-path "$SCRATCH" \
-  -Xswiftc -load-plugin-library -Xswiftc "$PLUGIN"
+  "${SWIFT_FLAGS[@]}"
 ```
 
 Observed result:
@@ -160,7 +172,10 @@ Observed result:
 Test run with 20 tests in 4 suites passed.
 ```
 
-This closes the missing test-execution debt for the current working tree. The simpler bare
+The `out/Products/Debug` branch is the development Mac's CLT/Xcode-style layout. The
+`<arch>-apple-macosx/debug` branch is the Home Office Mini's native SwiftPM layout; its test bundle
+has a direct products-directory rpath, so `Testing.framework` belongs there. This closes the
+missing test-execution debt for the current working tree. The simpler bare
 `swift test` command remains CLT/SwiftPM integration debt. Prefer full Xcode when available,
 or repeat the documented scratch recipe at the fixed candidate commit. Retain full output and
 `swift --version` in the evidence bundle. Do not add a network or third-party test dependency
