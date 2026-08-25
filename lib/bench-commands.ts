@@ -71,6 +71,11 @@ export type ListenerRow = {
   spare_peak?: number | null;
   spare_avg?: number | null;
   levels_at?: string | Date | null;
+  /** §2.4 (D32/P8) — TRUE only when the client reported an EXPLICITLY chosen second device.
+   *  NULL = not reported, NEVER "no spare": the arrival of a backup piece must never imply one.
+   *  The browser kiosk does not set it (its capture code is untouched this build); the native
+   *  Room Recorder app will. Until then it is null on every rig and no spare lane is drawn. */
+  spare_device?: boolean | null;
 };
 
 export type CommandRow = {
@@ -104,6 +109,9 @@ export type PollInput = {
   /** §2.2 — optional, and its absence is never an error. See the upsert for why. */
   mic?: MicLevels | null;
   spare?: MicLevels | null;
+  /** §2.4 — did the client report an explicitly chosen second device? undefined = not reported
+   *  (the browser kiosk never sends it), and undefined never erases a stored value. */
+  spareDevice?: boolean | null;
 };
 
 /**
@@ -139,7 +147,7 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
   return guarded(async () => {
     const existing = (await sql`
       SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
-             mic_peak, mic_avg, spare_peak, spare_avg, levels_at
+             mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
         FROM bench_listener
        WHERE room_id = ${input.roomId}
        LIMIT 1
@@ -166,27 +174,32 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     const mic = input.mic ?? null;
     const spare = input.spare ?? null;
     const anyLevel = mic !== null || spare !== null;
+    // §2.4 — the explicit-second-device flag rides the same upsert, COALESCEd like the levels: an
+    // absent value (undefined → null here) never erases a stored one, so a native-app poll that
+    // reports it once keeps reporting it and a browser-kiosk poll that never sends it leaves it be.
+    const spareDevice = input.spareDevice === undefined ? null : input.spareDevice;
     await sql`
       INSERT INTO bench_listener (
         room_id, tab_id, last_poll_at, recording_session_id, paused,
-        mic_peak, mic_avg, spare_peak, spare_avg, levels_at
+        mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
       )
       VALUES (
         ${input.roomId}, ${input.tabId}, now(), ${input.recordingSessionId}, ${input.paused},
         ${mic?.peak ?? null}, ${mic?.avg ?? null},
         ${spare?.peak ?? null}, ${spare?.avg ?? null},
-        ${anyLevel ? "now()" : null}::timestamptz
+        ${anyLevel ? "now()" : null}::timestamptz, ${spareDevice}
       )
       ON CONFLICT (room_id) DO UPDATE
          SET tab_id = EXCLUDED.tab_id,
              last_poll_at = now(),
              recording_session_id = EXCLUDED.recording_session_id,
              paused = EXCLUDED.paused,
-             mic_peak   = COALESCE(EXCLUDED.mic_peak,   bench_listener.mic_peak),
-             mic_avg    = COALESCE(EXCLUDED.mic_avg,    bench_listener.mic_avg),
-             spare_peak = COALESCE(EXCLUDED.spare_peak, bench_listener.spare_peak),
-             spare_avg  = COALESCE(EXCLUDED.spare_avg,  bench_listener.spare_avg),
-             levels_at  = COALESCE(EXCLUDED.levels_at,  bench_listener.levels_at)
+             mic_peak     = COALESCE(EXCLUDED.mic_peak,     bench_listener.mic_peak),
+             mic_avg      = COALESCE(EXCLUDED.mic_avg,      bench_listener.mic_avg),
+             spare_peak   = COALESCE(EXCLUDED.spare_peak,   bench_listener.spare_peak),
+             spare_avg    = COALESCE(EXCLUDED.spare_avg,    bench_listener.spare_avg),
+             levels_at    = COALESCE(EXCLUDED.levels_at,    bench_listener.levels_at),
+             spare_device = COALESCE(EXCLUDED.spare_device, bench_listener.spare_device)
     `;
     // Lazy expiry (PRD §8.2 "pending > 15 s WITHOUT a poll"): a command older than 15 s that no
     // poll has delivered — i.e. created after this room's previous poll (`cur.last_poll_at`,
@@ -245,7 +258,7 @@ export async function getListener(roomId: string): Promise<ListenerRow | null> {
   return guarded(async () => {
     const rows = (await sql`
       SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
-             mic_peak, mic_avg, spare_peak, spare_avg, levels_at
+             mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
         FROM bench_listener
        WHERE room_id = ${roomId}
        LIMIT 1
@@ -260,7 +273,7 @@ export async function listListeners(now: Date = new Date()): Promise<ListenerVie
   return guarded(async () => {
     const rows = (await sql`
       SELECT l.room_id, l.tab_id, l.last_poll_at, l.recording_session_id, l.paused,
-             l.mic_peak, l.mic_avg, l.spare_peak, l.spare_avg, l.levels_at,
+             l.mic_peak, l.mic_avg, l.spare_peak, l.spare_avg, l.levels_at, l.spare_device,
              r.slug, r.name
         FROM bench_listener l
         JOIN room r ON r.id = l.room_id

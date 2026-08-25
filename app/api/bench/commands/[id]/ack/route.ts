@@ -6,10 +6,12 @@
  * 404 command_not_pending when no such pending row for this room (already acked/expired/other room).
  * D10: DB error → 503 bus_down / bus_not_migrated.
  */
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
-import { ackCommand, classifyBusError } from "@/lib/bench-commands";
+import { ackCommand, classifyBusError, getCommand } from "@/lib/bench-commands";
+import { ensureRoomDayOpen } from "@/lib/brain/open-day";
+import { istDate } from "@/lib/brain/state";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +38,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   try {
     const status = await ackCommand({ roomId: claims.room_id, commandId: id, ok: body.ok, sessionId, error });
     if (!status) return respondError("NOT_FOUND", "command_not_pending");
+
+    // D39 (Build 3 §2.3) — on a successful START_DAY ack, open today's day record so it exists
+    // from the moment the desk starts a room, before the first piece lands. OFF the ack path
+    // (after()), and never throwing, so a slow or failed day-open never delays or fails the ack
+    // the kiosk is waiting on. Keyed to today's IST date; the chunk-verify path (keyed to each
+    // piece's own date) is what carries a session across midnight.
+    if (body.ok) {
+      const roomId = claims.room_id;
+      after(async () => {
+        try {
+          const cmd = await getCommand(id);
+          if (cmd?.kind === "start_day") {
+            const opened = await ensureRoomDayOpen(roomId, istDate());
+            if (opened.created) console.log(`[bench-ack] D39 opened room_day ${opened.room_day_id} for ${roomId} on ${opened.ist_date} (start_day)`);
+          }
+        } catch {
+          /* the chunk-verify path opens the day on the first piece regardless; this is the earlier of two chances */
+        }
+      });
+    }
     return NextResponse.json({ ok: true, id, status }, { headers: NO_STORE });
   } catch (e) {
     const b = classifyBusError(e);

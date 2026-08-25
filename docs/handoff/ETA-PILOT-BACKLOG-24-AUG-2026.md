@@ -21,7 +21,7 @@ Started 24 Aug 2026, during the OPD room pilot. This file collects bugs found by
 
 **Fix:** When a session ends, set `ended_at` from the last verified piece, not from a fixed clock time or a reaper sweep. Check the resume/reload path for the same bug.
 
-**Status:** open, not assigned.
+**Status:** FIXED — Build 2 (`05aaf2e`). On end, resume and reload, `ended_at` is now set from the last verified piece (`app/api/bench/sessions/[id]/route.ts`: `ended_at = MAX(c.ended_at) …`), and migration 0067 repaired the rows already wrong, including the stale `bs_jmh9jxmx`. Verified 24 Aug 2026 (Build 3 review). `bs_f46u4jxw` predates the fix and its historical row was among those 0067 corrected.
 
 ---
 
@@ -39,7 +39,63 @@ Started 24 Aug 2026, during the OPD room pilot. This file collects bugs found by
 
 **Fix:** Either emit a `mic_primary_restored` event once a subsequent primary chunk comes in above a minimum size, or have the room-status computation judge current mic health from the size of the last few primary chunks instead of the stale `primary_lost` flag.
 
-**Status:** open, not assigned.
+**Status:** LARGELY FIXED — Build 2 (`05aaf2e`). Live mic health is now judged from piece size against the room's own baseline (D36/D37), a `mic_primary_restored` event fires when a healthy piece follows a loss, and the window writer no longer trusts the `mic_primary_lost` flag (D33/D37) — a silence trip alone moves nothing. The stale-flag badge this surfaced in ("on backup mic · N chunks") was REMOVED in Build 1 §3.4 and now renders nothing, so it is honest (`mic_status` stays on the wire, unread) — confirmed against `bs_z3gpbh6e`, which carries `primary_lost_count: 1` yet no longer shows any backup badge. Build 3 (`this build`) re-bound the sixteen windows the false 12:25 IST flag had already mis-bound to the spare (0068, D34). Remaining: the historical `mic_primary_lost` event on `bs_z3gpbh6e` is untouched — it is a true record that the watchdog tripped, just not evidence the mic died.
+
+---
+
+## P7 — A room started from the desk records into nothing until somebody walks in
+
+**Found:** 25 Aug 2026, by V, during the Build 2 acceptance run on Home Office.
+**Session:** `bs_fudv3gqt`, started remotely 07:44:10, recorded 55 minutes.
+
+**Symptom.** The recording was started from the Bench screen and ran perfectly — twelve pieces, all
+verified, 19 ms of gap. But **none of it could be turned into words** until V pressed **Mark
+consult** on the room page at 08:38:56, fifty-four minutes in. Recording creates no day record;
+only a cue does. Until the cue arrived, every window was stranded.
+
+**Why this is worse than the old version of the problem.** It was always true that a room needs a
+mark. What is new is that a room can now be **started** from the desk — so an operator can begin a
+recording remotely and has no way, from that same screen, to make its audio processable. The page
+has a start button and nothing that creates the day. The tape runs; the day does not exist.
+
+The operator connector *can* post a mark (`scribe_mark_consult`, used on Cardiology on 24 August),
+so the capability exists. It is simply absent from the screen a person uses.
+
+**Fix, two parts.**
+1. **Short term, Build 3:** a control on the room card that creates today's record — the same thing
+   Mark consult does, from the operator side. Anywhere a room can be started remotely, its day must
+   be creatable remotely.
+2. **Proper, and already owed:** the drain creates its own day record for the window's own IST date
+   (carryover §5 item 4). That removes the dependency on anybody pressing anything, and it is the
+   only version that survives a midnight rollover.
+
+**Status:** FIXED — Build 3 (`this build`, D39). The day record now opens itself: on a `start_day` ack, and when a chunk verifies for an IST date with no record yet (keyed to the piece's own date), through the same resolve-or-create path Mark consult writes through (`lib/brain/open-day.ts`, wired into `app/api/bench/chunks/route.ts` and the ack route). This subsumes the drain-side fix in part 2 — the window writer still only LOOKS UP a day, and there is no separate drain path. No key stroke and no mark stands between recorded tape and processable tape any more; the no-day alarm stays and can now only fire on a genuine bug.
+
+---
+
+## P8 — A rig with one microphone reports a spare that is not there
+
+**Found:** 25 Aug 2026, during the same run.
+
+**Symptom.** V states the Home Office Mini has **one microphone and no spare**. The page reports
+`spare_exists: true`, draws a spare lane and a spare bar, and the session wrote **12 backup pieces
+at 70,534–70,590 bytes each** — a consistent 0.235 bytes per millisecond against the main
+microphone's 16.1. Earlier the same rig logged `mic_backup_unavailable` at session start.
+
+**Cause.** `spare_exists` is derived from *a backup piece arrived*, not from *a distinct second
+device is present*. Something on that Mac is being captured as a phantom second microphone and
+writes near-silence at a steady rate.
+
+**Why it matters.** D32 says a room with no second device has no spare lane, and §3.9 rule 3 says a
+near-empty spare piece is worse than no piece because it looks like a working failsafe. This rig
+proves the rule and breaks it at the same time. It also means the 68-to-1 ratio we have carried for
+weeks as "a broken spare microphone" may be **no spare microphone at all**.
+
+**Fix.** Decide a spare exists from the device selection, not from the arrival of a piece. If no
+distinct second device is chosen, do not open a backup lane, do not write backup pieces, and do not
+render a spare vital.
+
+**Status:** FIXED (server half) — Build 3 (`this build`, D32/0068). `spare_exists` is now decided from an explicitly chosen second device the client reports (`bench_listener.spare_device`), never from the arrival of a backup piece. The browser kiosk does not set it (its capture code is untouched this build), so Home Office and every one-microphone rig now show no spare lane, no spare vital and no spare alarm. The phantom captured device on Home Office was the Mac's own BUILT-IN microphone, auto-selected as backup by `pickDefaultBackupDevice` (the heuristic default) because it is a distinct `audioinput` from the TONOR USB mic — it wrote room ambient at ~70 KB/5 min. So the long-carried 68-to-1 reading was NO SPARE AT ALL, not a broken spare. Client half (reporting a real chosen second device) moves to the native Room Recorder app (PRD R6).
 
 ---
 
@@ -86,7 +142,7 @@ morning.
 **Operating instruction until this is fixed: do not end a day from the Bench screen.** End it at
 the Mac in the room. The remote stop works, and that is the problem — it works once.
 
-**Status:** open, not assigned. Folded into the monitoring surface PRD v1.2 §3.8.
+**Status:** FIXED (part 1) — Build 2 (`05aaf2e`, D38). The room page now reports itself every 3 s whenever it is open, whatever the session is doing, so idle-and-open is distinguishable from dead and a stopped room stays startable from the desk. Parts 2 and 3 (proving sufficiency on a clinic Mac, and the stop control stating its cost) are open: no clinic Mac is reachable to run the 30-minute proof, and the operating instruction — end a day at the Mac, not from the desk — still stands until it is proven. The stop control already states its cost on the card (§3.8 part 3).
 
 ---
 
@@ -124,7 +180,7 @@ chunks"* for its whole 4h 21m. The session ran on the main microphone throughout
 of pieces the spare wrote before it failed at 15:15. This is P2 showing up in a second place, and
 the fix for P2 must cover this badge too.
 
-**Status:** open, not assigned. Folded into the monitoring surface PRD v1.2 §3.7.
+**Status:** FIXED — Build 1/Build 2. The seventh state, `finished for today`, ships (D30), grey never amber; the heartbeat keeps running while the page is open (Build 2, D38), so `dropped`/`offline` now mean only a page that stopped responding with something still to do. The "on backup mic · 40 chunks" badge was removed in Build 1 §3.4 (renders nothing rather than the false claim) — see P2.
 
 ---
 

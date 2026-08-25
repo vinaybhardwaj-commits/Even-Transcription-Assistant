@@ -65,6 +65,10 @@ export async function GET() {
           mic: levelsOf(l.mic_peak, l.mic_avg),
           spare: levelsOf(l.spare_peak, l.spare_avg),
           levels_at: l.levels_at ? new Date(l.levels_at).toISOString() : null,
+          // §2.4 — a spare exists only when the client reported an explicitly chosen second device.
+          // TRUE only for a literal true; null/false → false. The page draws no spare lane unless
+          // this is true, whatever backup pieces may have arrived.
+          spare_device: l.spare_device === true,
         })),
       },
       noStore,

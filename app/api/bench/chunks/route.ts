@@ -43,7 +43,8 @@ import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
 import { findBenchSession, newChunkId, newEventId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
-import { evaluateAndWriteWindows } from "@/lib/bench-window";
+import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
+import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 
 export const runtime = "nodejs";
@@ -221,6 +222,21 @@ export async function POST(req: NextRequest) {
         // timeline row must not cost anything else.
         console.warn(`[bench-chunks] ${ENDED_DISAGREES} event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
       }
+    }
+    // D39 (Build 3 §2.3) — THE DAY RECORD OPENS ITSELF WHEN TAPE STARTS. Keyed to THIS PIECE'S own
+    // IST date, so a session that crosses midnight opens the new day with its first piece after it.
+    // Done BEFORE the window evaluation so the room_day exists when the windows look it up and
+    // bind to it — no mark, no key stroke, and no drain-side path (this subsumes PRD §11). It
+    // never throws, and a day it fails to open is retried by the very next verified chunk.
+    try {
+      const opened = await ensureRoomDayOpen(session.room_id, istDateOf(startedAt.getTime()));
+      if (opened.created) {
+        console.log(`[bench-chunks] D39 opened room_day ${opened.room_day_id} for ${session.room_id} on ${opened.ist_date} (first tape, no mark)`);
+      } else if (!opened.ok) {
+        console.warn(`[bench-chunks] D39 could not open room_day for ${session.room_id} on ${opened.ist_date}: ${opened.error} — the no-day alarm will surface it; the next chunk retries`);
+      }
+    } catch {
+      /* ensureRoomDayOpen never throws; this is belt-and-braces so a day miss never costs the window write */
     }
     try {
       await evaluateAndWriteWindows(sessionId);

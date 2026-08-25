@@ -208,9 +208,23 @@ describe("R11 — no money figure anywhere on this screen", () => {
   const ui = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
   const agg = readFileSync("lib/admin/rooms-live.ts", "utf8");
 
-  it("the day summary carries minutes, and no currency is rendered", () => {
+  it("the day summary carries minutes, and no PATIENT-FACING currency is rendered on the passive monitor", () => {
     expect(ui).toMatch(/fmtMinutes\(rollup\.day\.audio_recorded_ms\)/);
-    expect(rendered("components/admin/BenchRoomsLive.tsx")).not.toMatch(/₹|\brupee|\busd\b|cost_usd|cost_inr/i);
+    // R11 stands: no rupee figure on the clinical monitor — that is the one that "invites the wrong
+    // conversation in front of the wrong person". Never a ₹, never a rupee, never an INR amount.
+    expect(rendered("components/admin/BenchRoomsLive.tsx")).not.toMatch(/₹|\brupee|\binr\b|cost_inr/i);
+    // The passive day summary still cannot carry a cost field of any kind — enforced by the
+    // DaySummary-type test below, so a money figure can never sit on the always-on surface.
+  });
+
+  it("Build 3 §2.1/D28 exception — the operator's own run-waiting report states what each piece cost", () => {
+    // The recovery control is a PAID action a person explicitly triggered, and the kickoff requires
+    // it to report "engine, characters out, seconds taken, cost" per piece. That report — and only
+    // that report — may show the engine's USD cost. It is not a passive figure on the monitor: it
+    // appears after somebody presses "run … now (paid)" and confirms.
+    expect(ui).toMatch(/run-waiting-report/);
+    expect(ui).toMatch(/cost_usd/);
+    expect(ui).toMatch(/each one is a paid call/i);
   });
 
   it("the DaySummary type has no field that could carry one", () => {

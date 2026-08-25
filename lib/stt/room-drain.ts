@@ -41,6 +41,7 @@ import { transcribeWithWhisper } from "@/lib/whisper";
 import { resolveRange, type CoveringChunk, type RangeChunk } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService, refuseIfTooLong, clipKey, joinServiceConfigured } from "@/lib/bench-join";
 import { isTranscriptEnabled } from "@/lib/room-switches";
+import { enqueueSubject } from "@/lib/stt/fanout";
 import { resolveRouting } from "./routing";
 import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
@@ -197,6 +198,11 @@ export type DrainOutcome = {
   attempts?: number;
   sarvam_ms?: number | null;
   audio_seconds?: number | null;
+  /** §3.10 — EVERY RUN REPORTS WHAT IT COST, PER WINDOW. Characters out, seconds taken and the
+   *  paid engine's own cost, so an operator who asked for a batch sees exactly what the batch did
+   *  and what it spent. Null where the engine reported no cost (e.g. a local/free engine). */
+  cost_usd?: number | null;
+  transcript_chars?: number | null;
 };
 
 type WindowRow = {
@@ -361,6 +367,10 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
     });
     out.sarvam_ms = asr.latencyMs;
     out.audio_seconds = audioSeconds;
+    // §3.10 — the per-window cost report. Characters and cost come from what the engine actually
+    // returned on THIS call, not from a re-read, so they cannot drift from the run just written.
+    out.cost_usd = asr.costUsd ?? null;
+    out.transcript_chars = typeof asr.original === "string" ? asr.original.length : null;
 
     // C5 — THE ENGINE ID IS READ FROM THE ADAPTER THAT WAS CALLED. `adapter.key` is the object
     // whose transcribe() just ran; nothing here re-derives it from a string the caller supplied.
@@ -479,6 +489,78 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
  * disabled room's window through on the same pass, so the room is re-read per job rather than
  * once for the batch.
  */
+/**
+ * §3.10 (Build 3 §2.1) — RUN A ROOM'S WAITING AUDIO. The recovery control behind "run this room's
+ * waiting audio".
+ *
+ * WHAT IT PROCESSES. Finished windows that have NO JOB AT ALL — the exact state Cardiology's
+ * seventeen windows were in on 24 August, when the card said "17 waiting" and nothing had ever
+ * been enqueued, so there was no queue for them to wait in and no control that would run them. A
+ * closed, grid-aligned window with a room_day and no stt_subject_job row is one nobody has run;
+ * this enqueues it and drains it. Oldest first.
+ *
+ * ONE OPERATOR ACTION, ONE BOUNDED BATCH. `limit` is small (the route caps it) so the whole batch
+ * finishes inside one request and the operator sees what every window cost before deciding to run
+ * more. NOTHING SCHEDULES THIS — every paid call in it was asked for by a person pressing a button.
+ *
+ * THE PER-JOB FLAG CHECK IS THE THIRD HAZARD CALL SITE. The room's Transcript switch is re-read on
+ * entry to drainRoomWindow, so a switch flipped off mid-batch stops the rest of it.
+ *
+ * WHY closed-AND-no-job rather than the drain's own queued set: a window Build 2 already enqueued
+ * has a job and rides drainQueuedRoomWindows; THIS is for the windows that fell through the crack
+ * the whole build exists to close — finished audio nobody ever queued.
+ */
+export async function drainRoomWaitingWindows(roomId: string, origin: string, limit = 4): Promise<DrainOutcome[]> {
+  const n = Math.max(1, Math.min(12, Math.trunc(limit) || 4));
+  const rows = (await sql`
+    SELECT w.id
+      FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+     WHERE s.room_id = ${roomId}
+       AND w.state = 'closed'
+       AND w.grid_aligned = TRUE
+       AND w.room_day_id IS NOT NULL
+       AND NOT EXISTS (
+             SELECT 1 FROM stt_subject_job j
+              WHERE j.subject_type = 'bench_window' AND j.subject_id = w.id AND j.tier = 'asr'
+           )
+     ORDER BY w.start_ms ASC
+     LIMIT ${n}
+  `) as Array<{ id: string }>;
+  const out: DrainOutcome[] = [];
+  for (const r of rows) {
+    // Re-read the switch per window (HAZARD 3). A window with the switch off is reported, not run.
+    if (!(await isTranscriptEnabled(roomId))) {
+      out.push({ window_id: r.id, ok: false, step: "flag_off" });
+      continue;
+    }
+    // Enqueue first so drainRoomWindow has a job row to track, then drain. enqueueSubject is
+    // idempotent (ON CONFLICT DO NOTHING), so a retry after a crash mid-batch never double-queues.
+    await enqueueSubject("bench_window", r.id, "asr");
+    out.push(await drainRoomWindow(r.id, origin));
+  }
+  return out;
+}
+
+/** §3.10 — how many finished windows are waiting to be run in this room (closed, grid-aligned,
+ *  with a day, no job). Drives the control's count and its "each is a paid call" reminder. */
+export async function countRoomWaitingWindows(roomId: string): Promise<number> {
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n
+      FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+     WHERE s.room_id = ${roomId}
+       AND w.state = 'closed'
+       AND w.grid_aligned = TRUE
+       AND w.room_day_id IS NOT NULL
+       AND NOT EXISTS (
+             SELECT 1 FROM stt_subject_job j
+              WHERE j.subject_type = 'bench_window' AND j.subject_id = w.id AND j.tier = 'asr'
+           )
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n) || 0;
+}
+
 export async function drainQueuedRoomWindows(origin: string, limit = 1): Promise<DrainOutcome[]> {
   const jobs = (await sql`
     SELECT j.subject_id, s.room_id

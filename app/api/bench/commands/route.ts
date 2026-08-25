@@ -46,9 +46,14 @@ export async function GET(req: NextRequest) {
     cleanLevels({ peak: Number(sp.get(peakKey)), avg: Number(sp.get(avgKey)) });
   const mic = levelPair("mic_peak", "mic_avg");
   const spare = levelPair("spare_peak", "spare_avg");
+  // §2.4 — an EXPLICITLY chosen second device. Only ever true when the client says `spare_device=true`;
+  // any other value (including absent — the browser kiosk never sends it) leaves it unreported, and
+  // the upsert COALESCE means unreported never erases a stored flag. Never derived from a piece.
+  const spareDeviceRaw = sp.get("spare_device");
+  const spareDevice = spareDeviceRaw === "true" ? true : spareDeviceRaw === "false" ? false : null;
 
   try {
-    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare });
+    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare, spareDevice });
     return NextResponse.json({ ok: true, room_id: claims.room_id, ...out }, { headers: NO_STORE });
   } catch (e) {
     const b = classifyBusError(e);

@@ -43,6 +43,7 @@ import {
 // browser bundle: lib/room-facts.ts imports lib/bench-bus-constants and nothing else.
 import {
   STRANDED_MEASURE_NOTE,
+  STRANDED_WAITING,
   WAITING_PHRASE,
   type Stranded,
 } from "@/lib/room-facts";
@@ -114,6 +115,22 @@ type ListenerRowView = {
   mic?: Levels;
   spare?: Levels;
   levels_at?: string | null;
+  /** §2.4 — the client reported an EXPLICITLY chosen second device. The card draws no spare lane,
+   *  no spare vital and no spare line unless this is true — never from a backup piece arriving. */
+  spare_device?: boolean;
+};
+
+/** §3.10 — one window's line in a run-waiting-audio report: what engine ran it, characters out,
+ *  seconds taken, and what it cost. `step` names why a window did not run (flag_off, no_chunks…). */
+type RunOutcome = {
+  window_id: string;
+  ok: boolean;
+  step: string;
+  engine?: string | null;
+  transcript_chars?: number | null;
+  cost_usd?: number | null;
+  sarvam_ms?: number | null;
+  audio_seconds?: number | null;
 };
 
 type ListenersResp = { now: string; freshness_window_ms: number; listeners: ListenerRowView[]; degraded?: string[] };
@@ -607,6 +624,13 @@ export function BenchRoomsLive() {
    */
   const [confirmOrphan, setConfirmOrphan] = React.useState<string | null>(null);
   const [note, setNote] = React.useState<string | null>(null);
+  // §3.10 (Build 3 §2.1) — RUN THIS ROOM'S WAITING AUDIO. Armed per room, because every window in
+  // the batch is a paid call and a one-tap money-spender on a tablet in a pocket is exactly the
+  // trap this build's other confirms guard against. `running` disables the button while a batch is
+  // in flight; `result` holds the per-window cost report the run came back with.
+  const [confirmRun, setConfirmRun] = React.useState<string | null>(null);
+  const [runningWaiting, setRunningWaiting] = React.useState<string | null>(null);
+  const [runResult, setRunResult] = React.useState<Record<string, { drained: RunOutcome[]; remaining: number }>>({});
 
   const fetchListeners = React.useCallback(async () => {
     try {
@@ -810,6 +834,36 @@ export function BenchRoomsLive() {
     }
   }, [fetchListeners, fetchRollup]);
 
+  /**
+   * §3.10 (Build 3 §2.1) — run one bounded batch of a room's waiting audio. EVERY WINDOW IS A PAID
+   * CALL, so the batch is small and the answer says what each window cost. Not `send`: this reaches
+   * the drain route, not the command bus, and its answer is a per-window cost report the operator
+   * reads before running any more.
+   */
+  const runWaiting = React.useCallback(async (roomId: string) => {
+    setNote(null);
+    setConfirmRun(null);
+    setRunningWaiting(roomId);
+    try {
+      const res = await fetch("/api/admin/bench/run-waiting", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ room_id: roomId, limit: 4 }),
+      });
+      const j = (await res.json()) as { data?: { drained?: RunOutcome[]; remaining?: number }; drained?: RunOutcome[]; remaining?: number; error?: { message?: string; code?: string } };
+      if (!res.ok) throw new Error(j?.error?.message || j?.error?.code || `failed_${res.status}`);
+      const d = j.data ?? j;
+      setRunResult((p) => ({ ...p, [roomId]: { drained: d.drained ?? [], remaining: Number(d.remaining) || 0 } }));
+      void fetchRollup();
+    } catch (e) {
+      setRunResult((p) => ({ ...p, [roomId]: { drained: [], remaining: -1 } }));
+      setNote(`run waiting audio: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRunningWaiting(null);
+    }
+  }, [fetchRollup]);
+
   return (
     <section className="space-y-4 mb-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -1010,6 +1064,83 @@ export function BenchRoomsLive() {
                 ) : null}
               </div>
 
+              {/* §3.10 (Build 3 §2.1) — RUN THIS ROOM'S WAITING AUDIO. On 24 August Cardiology's
+                  finished audio had no job row and no control anywhere would run it; the card said
+                  "17 waiting" over a queue that did not exist. This is the control that runs it.
+                  Shown only when Transcript is on and something is actually waiting with no worker.
+                  EVERY ONE IS A PAID CALL, so it arms with a first tap and spends on the second,
+                  runs a bounded batch, and reports engine, characters, seconds and cost per piece.
+                  The interface never says "window" — the operator vocabulary is pieces of audio. */}
+              {(() => {
+                const waiting = r.stranded?.reasons.find((x) => x.reason === STRANDED_WAITING)?.slots ?? 0;
+                if (!r.transcript_enabled || waiting < 1) return null;
+                const run = runResult[r.room.id];
+                const isRunning = runningWaiting === r.room.id;
+                const armed = confirmRun === r.room.id;
+                return (
+                  <div className="mt-3 rounded-lg border border-even-navy-200 bg-even-navy-50 p-3" onClick={(e) => e.stopPropagation()}>
+                    <p className="text-caption text-even-navy-800 leading-snug">
+                      <span className="font-semibold">{waiting} piece{waiting === 1 ? "" : "s"} of audio {WAITING_PHRASE}.</span>{" "}
+                      Nothing runs on its own — press to turn them into words. Each one is a paid call.
+                    </p>
+                    {armed ? (
+                      <button
+                        type="button"
+                        disabled={isRunning}
+                        onClick={() => void runWaiting(r.room.id)}
+                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-even-navy-800 text-even-white ring-2 ring-even-navy-900 ring-offset-1 hover:bg-even-navy-900 disabled:opacity-50"
+                      >
+                        {isRunning ? "running…" : `confirm — run ${Math.min(4, waiting)} now (paid)`}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isRunning}
+                        onClick={() => setConfirmRun(r.room.id)}
+                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-even-navy-800 text-even-white hover:bg-even-navy-900 disabled:opacity-50"
+                      >
+                        Run this room’s waiting audio
+                      </button>
+                    )}
+                    {armed ? (
+                      <p className="mt-1 text-caption text-even-ink-500 leading-snug">
+                        Runs up to 4 at a time, so you see what each one cost before running any more.
+                      </p>
+                    ) : null}
+                    {run ? (
+                      <div className="mt-2 border-t border-even-navy-100 pt-2" data-testid="run-waiting-report">
+                        {run.drained.length === 0 ? (
+                          <p className="text-caption text-even-ink-500 leading-snug">
+                            Nothing ran{run.remaining < 0 ? " — the run failed; see the note above." : "."}
+                          </p>
+                        ) : (
+                          <ul className="space-y-0.5">
+                            {run.drained.map((w) => (
+                              <li key={w.window_id} className="text-caption text-even-navy-800 leading-snug">
+                                {w.ok ? (
+                                  <>
+                                    ✓ {w.engine ?? "engine"} · {w.transcript_chars ?? 0} chars ·{" "}
+                                    {w.sarvam_ms != null ? `${(w.sarvam_ms / 1000).toFixed(1)} s` : "—"} ·{" "}
+                                    {w.cost_usd != null ? `$${w.cost_usd.toFixed(4)}` : "no cost reported"}
+                                  </>
+                                ) : (
+                                  <span className="text-warning-700">✗ did not run — {w.step}</span>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {run.remaining > 0 ? (
+                          <p className="mt-1 text-caption text-even-ink-500 leading-snug">
+                            {run.remaining} still waiting — press again to run the next {Math.min(4, run.remaining)}.
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })()}
+
               {/* ── STRANDED AUDIO (D7) ────────────────────────────────────────────────────
                   MINUTES, NOT PIECES. The card counted pieces and never said how much TIME
                   could not be turned into words. On 24 August that figure was over eight hours
@@ -1175,7 +1306,7 @@ export function BenchRoomsLive() {
                     with one microphone says NOTHING about a spare — no empty lane, no grey
                     placeholder, no amber vital. The old "backup mic reads no chunks" row fired on
                     every single-mic room for the whole of every session. */}
-                {r.backup_chunks_today > 0 ? (
+                {r.spare_exists && r.backup_chunks_today > 0 ? (
                   <div className="flex items-center justify-between gap-2">
                     <dt className="text-caption text-even-ink-500">Spare mic</dt>
                     <dd className="text-caption text-even-navy-800">

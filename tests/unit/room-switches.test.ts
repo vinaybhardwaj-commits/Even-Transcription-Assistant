@@ -155,17 +155,19 @@ describe("the environment variables are GONE, not ignored", () => {
   });
 });
 
-describe("all eight call sites read the room", () => {
-  /** PRD §5.2, by file. The count is asserted so a ninth cannot appear unnoticed. */
+describe("all nine call sites read the room", () => {
+  /** PRD §5.2, by file. The count is asserted so a tenth cannot appear unnoticed.
+   *  Build 3 §2.1 adds the ninth: drainRoomWaitingWindows re-reads the switch per piece (HAZARD 3),
+   *  so one enabled room's waiting batch never carries a disabled room's audio through. */
   const EXPECTED: Record<string, number> = {
-    "lib/stt/room-drain.ts": 2,
+    "lib/stt/room-drain.ts": 3,
     "lib/bench-window.ts": 1,
     "app/api/brain/cues/route.ts": 2,
     "app/api/admin/bench/drain/route.ts": 1,
     "lib/brain/fuse/live.ts": 2,
   };
 
-  it("every guard calls the room reader, and there are exactly eight", () => {
+  it("every guard calls the room reader, and there are exactly nine", () => {
     const hits = execFileSync(
       "git", ["grep", "-n", "-E", "isTranscriptEnabled\\(|isVisitsEnabled\\(|readRoomSwitches\\(", "--", "lib", "app"],
       { encoding: "utf8" },
@@ -178,7 +180,7 @@ describe("all eight call sites read the room", () => {
       byFile[f] = (byFile[f] ?? 0) + 1;
     }
     expect(byFile).toEqual(EXPECTED);
-    expect(Object.values(byFile).reduce((a, b) => a + b, 0)).toBe(8);
+    expect(Object.values(byFile).reduce((a, b) => a + b, 0)).toBe(9);
   });
 
   it("nothing snapshots a switch at module scope — the mistake being undone", () => {

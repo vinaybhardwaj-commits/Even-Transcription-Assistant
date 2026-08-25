@@ -24,7 +24,7 @@
 import { sql } from "@/lib/db";
 import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
-import { LISTENER_FRESH_MS, type ListenerRow } from "@/lib/bench-commands";
+import { LISTENER_FRESH_MS, listListeners, type ListenerRow } from "@/lib/bench-commands";
 import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse } from "@/lib/bench-bus-constants";
 // EVERY DECISION ON THIS SCREEN IS MADE IN lib/room-facts.ts, and the door makes it there too
@@ -638,6 +638,19 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   if (sizeRead.degraded) topDegraded.push(sizeRead.degraded);
   const sizeByRoom = sizeRead.value;
 
+  // §2.4 (D32/P8) — A SPARE EXISTS ONLY WHERE THE CLIENT REPORTED A SECOND DEVICE, never where a
+  // backup piece merely arrived. Read from bench_listener.spare_device, on its OWN try/catch: a
+  // bus fault degrades this to "no spare reported anywhere" (the safe direction — draw no spare
+  // lane) and touches no other vital, and it must never be allowed to spread and silence the
+  // no-day alarm (Build 3 §4). The browser kiosk never sets the flag, so today every rig reads
+  // false and the phantom Home Office spare disappears from the page.
+  const spareDeviceByRoom = new Map<string, boolean>();
+  try {
+    for (const l of await listListeners(now)) spareDeviceByRoom.set(l.room_id, l.spare_device === true);
+  } catch (e) {
+    topDegraded.push(`spare_device_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+  }
+
   const brainByRoom = new Map<string, { last_warehouse_at: string | null; marks_today: number; last_mark_at: string | null; last_window_asked_at: string | null; last_window_complete: boolean | null }>();
   const brainDegraded: string[] = [];
   const visitsByRoom = new Map<string, VisitCounts>();
@@ -692,7 +705,10 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       audio_recorded_ms: audioMsByRoom.get(room.id) ?? 0,
       mic_size: sizeByRoom.get(room.id)?.primary ?? null,
       spare_size: sizeByRoom.get(room.id)?.backup ?? null,
-      spare_exists: sizeByRoom.get(room.id)?.spare_exists ?? false,
+      // §2.4 — from the reported device, NOT from sizeByRoom's backup-piece count. A rig that
+      // wrote backup pieces from an auto-picked phantom device but reported no second device has
+      // no spare here.
+      spare_exists: spareDeviceByRoom.get(room.id) ?? false,
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });

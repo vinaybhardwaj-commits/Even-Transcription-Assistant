@@ -132,7 +132,7 @@ import {
   ZERO_STRANDED_RAW,
   type TranscriptCounts,
 } from "@/lib/room-facts";
-import { readChunksAfterEnd, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
+import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE } from "@/lib/bench-bus-constants";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -2061,6 +2061,7 @@ async function liveMonitorExtras(
   paused: boolean,
   sessionIds: readonly string[],
   reasons: string[],
+  listener: ListenerRow | null,
 ): Promise<Record<string, unknown>> {
   const { fromIso, toIso } = istDayRangeUtc(istDay);
   let lastPrimary: string | null = null;
@@ -2210,10 +2211,49 @@ async function liveMonitorExtras(
 
   const stranded = strandedAudio(strandedRaw, hasRoomDayToday);
 
+  // §3.5/§3.6 (Build 3 §2.5) — THE DOOR NOW REPORTS THE LEVEL NUMBERS THE SCREEN RENDERS. Build 2
+  // put level bars on the page; the door could not report them, so the screen and the door knew
+  // different things again — the exact divergence Build 1 was meant to end. From the SAME shared
+  // sources the card reads: the per-microphone level pair off the listener row (bench_listener,
+  // 0066), and the size vital off readMicSizes — the learned baseline and the D36/D37 judgement
+  // inputs (newest verdict, the tiny run, and proven_dead_by_size). A NULL level is "not measured",
+  // never silent, exactly as the card treats it.
+  const levelOf = (peak: unknown, avg: unknown): { peak: number; avg: number } | null => {
+    const n = (v: unknown): number | null => {
+      const x = Number(v);
+      return Number.isFinite(x) && x >= 0 ? x : null;
+    };
+    const p = n(peak);
+    const a = n(avg);
+    return p === null && a === null ? null : { peak: p ?? 0, avg: a ?? 0 };
+  };
+  const micLevelNow = listener ? levelOf(listener.mic_peak, listener.mic_avg) : null;
+  const spareLevelNow = listener ? levelOf(listener.spare_peak, listener.spare_avg) : null;
+  // §2.4 — a spare exists only where the client reported an explicitly chosen second device.
+  const spareExists = listener?.spare_device === true;
+  let micSize: unknown = null;
+  let spareSize: unknown = null;
+  if (sessionIds.length) {
+    const sizes = await readMicSizes(sessionIds);
+    if (sizes.degraded) reasons.push(sizes.degraded);
+    const s = sizes.value.get(roomId);
+    if (s) {
+      micSize = s.primary;
+      spareSize = s.backup;
+    }
+  }
+
   return {
     last_primary_at: lastPrimary,
     last_backup_at: lastBackup,
     backup_chunks_today: backupChunks,
+    // §2.5 — the levels and the size judgement, in the screen's own numbers.
+    mic_level: micLevelNow,
+    spare_level: spareLevelNow,
+    levels_at: listener?.levels_at ? new Date(listener.levels_at).toISOString() : null,
+    spare_exists: spareExists,
+    mic_size: micSize,
+    spare_size: spareSize,
     audio_recorded_ms: audioRecordedMs,
     last_warehouse_at: lastWarehouse,
     has_doctor_clock: hasDoctorClock(lastWarehouse),
@@ -2357,7 +2397,7 @@ const diffRoom: McpTool = {
 
           const live = await liveMonitorExtras(
             room.id, today, now, recordingSession !== null, pausedListener || pausedSession,
-            sessions.map((sn) => sn.id), reasons,
+            sessions.map((sn) => sn.id), reasons, listener,
           );
 
           return {
