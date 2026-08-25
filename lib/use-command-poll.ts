@@ -26,8 +26,8 @@ import type { RoomRecorderState } from "@/lib/use-room-recorder";
 
 // S4-2: the poll cadence lives in the pure lib/bench-bus-constants.ts (values unchanged) so
 // the handover probe derives from the hidden round; re-exported here so callers keep working.
-export { POLL_VISIBLE_MS, POLL_HIDDEN_MS } from "@/lib/bench-bus-constants";
-import { POLL_VISIBLE_MS, POLL_HIDDEN_MS } from "@/lib/bench-bus-constants";
+export { POLL_VISIBLE_MS, POLL_HIDDEN_MS, POLL_IDLE_MS } from "@/lib/bench-bus-constants";
+import { POLL_VISIBLE_MS, POLL_HIDDEN_MS, POLL_IDLE_MS } from "@/lib/bench-bus-constants";
 const BACKOFF_MIN_MS = 5_000;
 const BACKOFF_MAX_MS = 30_000;
 const ACK_RETRIES = 3;
@@ -37,6 +37,18 @@ export type CommandKind = "start_day" | "pause_day" | "resume_day" | "end_day";
 
 export type CommandActions = {
   getSnapshot: () => { state: RoomRecorderState; sessionId: string | null };
+  /**
+   * §2.2 — WHAT THE MICROPHONES HAVE HEARD SINCE THE LAST REPORT, and reading it CLEARS it.
+   *
+   * The highest and the mean since the previous poll, never the instantaneous reading: an
+   * analyser sample is about eleven milliseconds of audio, which is shorter than the pause
+   * between two words, so a snapshot reads zero on a room that is talking.
+   *
+   * Optional, and its absence is not an error. A page that cannot measure (no AudioContext, no
+   * permission yet) simply does not provide it, the fields never reach the query string, and the
+   * columns stay NULL — which every reader renders as "not measured", never as silence.
+   */
+  getLevels?: () => { mic: { peak: number; avg: number } | null; spare: { peak: number; avg: number } | null } | null;
   /** existing start-of-day flow; resolves with the new session id */
   start: () => Promise<{ session_id: string }>;
   pause: () => Promise<void>;
@@ -223,6 +235,20 @@ export function useCommandPoll(opts: { enabled: boolean; actions: CommandActions
       if (prevPollAt) qs.set("prev_poll_at", prevPollAt);
       if (snap.sessionId && (snap.state === "recording" || snap.state === "paused")) qs.set("recording_session_id", snap.sessionId);
       qs.set("paused", snap.state === "paused" ? "true" : "false");
+      // §2.2 — the levels ride the channel that is already running. WRAPPED, because THE POLL
+      // MUST NOT BE ABLE TO FAIL BECAUSE OF THIS: this is the operator command bus and it fails
+      // open for the doctor by design, so a meter that throws must cost the room nothing at all.
+      // A missing or malformed reading simply does not reach the query string.
+      try {
+        const lv = actionsRef.current.getLevels?.() ?? null;
+        const put = (key: string, v: number | undefined) => {
+          if (typeof v === "number" && Number.isFinite(v) && v >= 0) qs.set(key, v.toFixed(4));
+        };
+        if (lv?.mic) { put("mic_peak", lv.mic.peak); put("mic_avg", lv.mic.avg); }
+        if (lv?.spare) { put("spare_peak", lv.spare.peak); put("spare_avg", lv.spare.avg); }
+      } catch {
+        /* a meter fault is never the room's problem */
+      }
       try {
         const res = await fetch(`/api/bench/commands?${qs.toString()}`, { signal: AbortSignal.timeout(6_000), cache: "no-store" });
         const j = (await res.json().catch(() => null)) as
@@ -255,7 +281,20 @@ export function useCommandPoll(opts: { enabled: boolean; actions: CommandActions
           chain = chain.then(() => run(cmd)).catch(() => undefined);
         }
         busy = false;
-        schedule(typeof document !== "undefined" && document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS);
+        // D38 — the beat depends on what the room is DOING, not on whether a session exists.
+        // Recording keeps the cadence it has always had; an idle-but-open page reports itself
+        // every three seconds, which is three chances to be heard inside the unchanged ten-second
+        // freshness window. Hidden still wins over both: a tab in the background is throttled by
+        // the browser anyway and 5 s is still inside the window.
+        const live = snap.state === "recording" || snap.state === "paused";
+        busy = false;
+        schedule(
+          typeof document !== "undefined" && document.hidden
+            ? POLL_HIDDEN_MS
+            : live
+              ? POLL_VISIBLE_MS
+              : POLL_IDLE_MS,
+        );
       } catch (e) {
         const msg = String((e as Error)?.message ?? e).slice(0, 120);
         setState((s) => ({ ...s, link: "down", last_error: msg, failures: s.failures + 1 }));

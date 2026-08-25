@@ -11,7 +11,9 @@ import {
   rmsOfBytes,
   runLockstep,
   SILENCE_TRIP_MS,
+  SILENCE_TRIP_SAMPLES,
   SilenceWatchdog,
+  type WatchdogEvent,
   uploadBodies,
 } from "../../lib/bench-dual";
 
@@ -52,28 +54,70 @@ describe("uploadBodies — source tagging", () => {
 });
 
 describe("SilenceWatchdog — trip after ~60 s of RMS≈0, clear when audio returns", () => {
+  /**
+   * BUILD 2 §2.3 — FED AT THE REAL CADENCE, which is the whole point of the change.
+   *
+   * These tests used to feed samples thirty seconds apart and expect a trip, because the old
+   * watchdog compared two wall-clock moments and never asked how many samples it had actually
+   * taken. That is the bug: sixty seconds of NOT LOOKING counted as sixty seconds of silence, so
+   * a throttled timer or a long pause could convict a microphone that was working throughout.
+   * The watchdog is fed once a second in the room, so the tests feed it once a second too.
+   */
+  const feedQuiet = (wd: SilenceWatchdog, from: number, samples: number): WatchdogEvent => {
+    let last: WatchdogEvent = null;
+    for (let i = 0; i < samples; i++) last = wd.feed(0, from + i * 1_000);
+    return last;
+  };
+
   it("does not trip on short silence, trips once at the threshold, clears once on audio", () => {
     const wd = new SilenceWatchdog();
     const t0 = 1_000_000;
-    expect(wd.feed(0, t0)).toBeNull();
-    expect(wd.feed(0, t0 + 30_000)).toBeNull();
-    expect(wd.feed(0, t0 + SILENCE_TRIP_MS - 1)).toBeNull();
-    expect(wd.feed(0, t0 + SILENCE_TRIP_MS)).toBe("trip");
+    // 59 consecutive quiet samples: not yet.
+    expect(feedQuiet(wd, t0, SILENCE_TRIP_SAMPLES - 1)).toBeNull();
+    // the 60th trips, exactly once
+    expect(wd.feed(0, t0 + (SILENCE_TRIP_SAMPLES - 1) * 1_000)).toBe("trip");
     expect(wd.isTripped).toBe(true);
-    expect(wd.feed(0, t0 + SILENCE_TRIP_MS + 5_000)).toBeNull(); // no double trip
-    expect(wd.feed(0.05, t0 + SILENCE_TRIP_MS + 6_000)).toBe("clear");
+    expect(wd.feed(0, t0 + SILENCE_TRIP_SAMPLES * 1_000)).toBeNull(); // no double trip
+    expect(wd.feed(0.05, t0 + (SILENCE_TRIP_SAMPLES + 1) * 1_000)).toBe("clear");
     expect(wd.isTripped).toBe(false);
-    expect(wd.feed(0.05, t0 + SILENCE_TRIP_MS + 7_000)).toBeNull(); // no double clear
+    expect(wd.feed(0.05, t0 + (SILENCE_TRIP_SAMPLES + 2) * 1_000)).toBeNull(); // no double clear
   });
-  it("audio in between resets the silence clock", () => {
-    const wd = new SilenceWatchdog({ tripAfterMs: 10_000 });
+
+  it("audio in between resets the run", () => {
+    const wd = new SilenceWatchdog({ tripAfterMs: 10_000 }); // 10 samples
+    expect(feedQuiet(wd, 0, 9)).toBeNull();
+    expect(wd.feed(0.02, 9_000)).toBeNull(); // speech — the run goes back to zero
+    expect(wd.run).toBe(0);
+    expect(feedQuiet(wd, 10_000, 9)).toBeNull(); // nine more is still not ten
+    expect(wd.feed(0, 19_000)).toBe("trip");
+  });
+
+  /**
+   * THE FALSE ALARM THIS REMOVES, in one test.
+   *
+   * A minute of wall clock with only two samples taken in it is not a minute of observed silence.
+   * The old class tripped here; this one counts two samples and reports nothing.
+   */
+  it("§2.3 — A SKIPPED SAMPLE RESETS THE RUN: sixty seconds of not looking is not silence", () => {
+    const wd = new SilenceWatchdog();
     expect(wd.feed(0, 0)).toBeNull();
-    expect(wd.feed(0, 8_000)).toBeNull();
-    expect(wd.feed(0.02, 9_000)).toBeNull(); // speech
-    expect(wd.feed(0, 10_000)).toBeNull(); // clock restarted at 10s
-    expect(wd.feed(0, 19_000)).toBeNull();
-    expect(wd.feed(0, 20_000)).toBe("trip");
+    // the timer was throttled for a minute — one sample, a long way after the last
+    expect(wd.feed(0, 60_000)).toBeNull();
+    expect(wd.run).toBe(0);
+    // and it takes a full run of real samples from here, not one more
+    expect(feedQuiet(wd, 61_000, SILENCE_TRIP_SAMPLES - 1)).toBeNull();
+    expect(wd.feed(0, 61_000 + (SILENCE_TRIP_SAMPLES - 1) * 1_000)).toBe("trip");
   });
+
+  it("§2.3 — a gap cannot CLEAR a tripped watchdog either; it is evidence of nothing", () => {
+    const wd = new SilenceWatchdog({ tripAfterMs: 3_000 });
+    expect(feedQuiet(wd, 0, 2)).toBeNull();
+    expect(wd.feed(0, 2_000)).toBe("trip");
+    expect(wd.feed(0.5, 90_000)).toBeNull(); // loud, but after a gap — no clear
+    expect(wd.isTripped).toBe(true);
+    expect(wd.feed(0.5, 91_000)).toBe("clear"); // the next real sample clears it
+  });
+
   it("room noise (RMS well above the floor) never trips; reset() clears state", () => {
     const wd = new SilenceWatchdog();
     for (let t = 0; t < 10 * SILENCE_TRIP_MS; t += 1_000) expect(wd.feed(0.01, t)).toBeNull();

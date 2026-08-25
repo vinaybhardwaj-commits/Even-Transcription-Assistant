@@ -64,6 +64,13 @@ export type ListenerRow = {
   last_poll_at: string | Date;
   recording_session_id: string | null;
   paused: boolean;
+  /** §2.2 — what the microphones heard since this room's previous poll. NULL = NOT MEASURED,
+   *  never silent: an older kiosk, a refused AudioContext, or a rig with no second device. */
+  mic_peak?: number | null;
+  mic_avg?: number | null;
+  spare_peak?: number | null;
+  spare_avg?: number | null;
+  levels_at?: string | Date | null;
 };
 
 export type CommandRow = {
@@ -85,6 +92,8 @@ export type PendingCommand = { id: string; kind: CommandKind; args: unknown; cre
 // Kiosk side — poll + ack
 // ---------------------------------------------------------------------------
 
+export type MicLevels = { peak: number; avg: number };
+
 export type PollInput = {
   roomId: string;
   tabId: string;
@@ -92,7 +101,31 @@ export type PollInput = {
   prevPollAt: Date | null;
   recordingSessionId: string | null;
   paused: boolean;
+  /** §2.2 — optional, and its absence is never an error. See the upsert for why. */
+  mic?: MicLevels | null;
+  spare?: MicLevels | null;
 };
+
+/**
+ * PURE — one level pair, sanitised, or null.
+ *
+ * RMS is 0..1 by construction. Anything outside that, or not a number at all, is a bug somewhere
+ * upstream and is DROPPED rather than clamped: a clamped value is indistinguishable from a real
+ * one and would put a number on a clinical screen that no microphone produced. Dropping it leaves
+ * the column NULL, which every reader already renders as "not measured".
+ */
+export function cleanLevels(v: unknown): MicLevels | null {
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const n = (x: unknown): number | null => {
+    const q = Number(x);
+    return Number.isFinite(q) && q >= 0 && q <= 1 ? q : null;
+  };
+  const peak = n(o.peak);
+  const avg = n(o.avg);
+  if (peak === null || avg === null) return null;
+  return { peak, avg };
+}
 
 export type PollResult =
   | { superseded: true; now: string; owner_tab_id: string }
@@ -105,7 +138,8 @@ export type PollResult =
 export async function pollCommands(input: PollInput): Promise<PollResult> {
   return guarded(async () => {
     const existing = (await sql`
-      SELECT room_id, tab_id, last_poll_at, recording_session_id, paused
+      SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
+             mic_peak, mic_avg, spare_peak, spare_avg, levels_at
         FROM bench_listener
        WHERE room_id = ${input.roomId}
        LIMIT 1
@@ -120,14 +154,39 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
         return { superseded: true, now: new Date().toISOString(), owner_tab_id: cur.tab_id };
       }
     }
+    // §2.2 — THE LEVELS RIDE THE ROW THAT IS ALREADY BEING WRITTEN. No new table, no new write,
+    // no new failure mode: four values are added to an upsert that runs on every poll anyway.
+    //
+    // A POLL WITH NO LEVELS MUST NOT ERASE THE LAST ONES IT HAD. `COALESCE(EXCLUDED.x, old.x)`
+    // rather than a plain assignment, because a page that momentarily cannot measure — a
+    // suspended AudioContext, a permission prompt — would otherwise blank the bars on a room that
+    // is recording perfectly well, and a bar that drops to nothing reads as a dead microphone.
+    // `levels_at` moves only when a reading actually arrives, so a reader can always tell a fresh
+    // silence from a stale number left by a kiosk that stopped sending.
+    const mic = input.mic ?? null;
+    const spare = input.spare ?? null;
+    const anyLevel = mic !== null || spare !== null;
     await sql`
-      INSERT INTO bench_listener (room_id, tab_id, last_poll_at, recording_session_id, paused)
-      VALUES (${input.roomId}, ${input.tabId}, now(), ${input.recordingSessionId}, ${input.paused})
+      INSERT INTO bench_listener (
+        room_id, tab_id, last_poll_at, recording_session_id, paused,
+        mic_peak, mic_avg, spare_peak, spare_avg, levels_at
+      )
+      VALUES (
+        ${input.roomId}, ${input.tabId}, now(), ${input.recordingSessionId}, ${input.paused},
+        ${mic?.peak ?? null}, ${mic?.avg ?? null},
+        ${spare?.peak ?? null}, ${spare?.avg ?? null},
+        ${anyLevel ? "now()" : null}::timestamptz
+      )
       ON CONFLICT (room_id) DO UPDATE
          SET tab_id = EXCLUDED.tab_id,
              last_poll_at = now(),
              recording_session_id = EXCLUDED.recording_session_id,
-             paused = EXCLUDED.paused
+             paused = EXCLUDED.paused,
+             mic_peak   = COALESCE(EXCLUDED.mic_peak,   bench_listener.mic_peak),
+             mic_avg    = COALESCE(EXCLUDED.mic_avg,    bench_listener.mic_avg),
+             spare_peak = COALESCE(EXCLUDED.spare_peak, bench_listener.spare_peak),
+             spare_avg  = COALESCE(EXCLUDED.spare_avg,  bench_listener.spare_avg),
+             levels_at  = COALESCE(EXCLUDED.levels_at,  bench_listener.levels_at)
     `;
     // Lazy expiry (PRD §8.2 "pending > 15 s WITHOUT a poll"): a command older than 15 s that no
     // poll has delivered — i.e. created after this room's previous poll (`cur.last_poll_at`,
@@ -185,7 +244,8 @@ export async function ackCommand(input: AckInput): Promise<"acked" | "failed" | 
 export async function getListener(roomId: string): Promise<ListenerRow | null> {
   return guarded(async () => {
     const rows = (await sql`
-      SELECT room_id, tab_id, last_poll_at, recording_session_id, paused
+      SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
+             mic_peak, mic_avg, spare_peak, spare_avg, levels_at
         FROM bench_listener
        WHERE room_id = ${roomId}
        LIMIT 1
@@ -199,7 +259,9 @@ export type ListenerView = ListenerRow & { slug: string; name: string; listening
 export async function listListeners(now: Date = new Date()): Promise<ListenerView[]> {
   return guarded(async () => {
     const rows = (await sql`
-      SELECT l.room_id, l.tab_id, l.last_poll_at, l.recording_session_id, l.paused, r.slug, r.name
+      SELECT l.room_id, l.tab_id, l.last_poll_at, l.recording_session_id, l.paused,
+             l.mic_peak, l.mic_avg, l.spare_peak, l.spare_avg, l.levels_at,
+             r.slug, r.name
         FROM bench_listener l
         JOIN room r ON r.id = l.room_id
        ORDER BY l.last_poll_at DESC

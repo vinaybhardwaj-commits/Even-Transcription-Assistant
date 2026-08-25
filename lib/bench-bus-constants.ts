@@ -29,6 +29,31 @@ export const ACK_POLL_MS = 400;
 export const POLL_VISIBLE_MS = 1_500;
 export const POLL_HIDDEN_MS = 5_000;
 
+/**
+ * D38 — HOW OFTEN AN IDLE ROOM REPORTS ITSELF, and why it has its own number.
+ *
+ * THE FAULT THIS ADDRESSES (§3.8, the most serious item in Slice 0). An operator can stop a room
+ * from the Bench screen and cannot start it again, because STOPPING IS WHAT MAKES IT STOP
+ * LISTENING. Measured 24 August on three rooms out of three: both clinic rooms were ended remotely
+ * at 16:16 and went quiet within seconds; at 16:33 one was listening only because V had walked
+ * downstairs and reloaded it by hand, and the other had been unreachable for sixteen minutes.
+ * There is no counter-example. A control that can be used but not undone from the same place is
+ * worse than no control at all, because it looks safe.
+ *
+ * So the page reports itself WHENEVER IT IS OPEN, whatever the session is doing, and an idle room
+ * that is open stops being indistinguishable from a room whose page has died.
+ *
+ * THREE SECONDS, NOT 1.5. Idle costs nothing to be slightly slower about — nobody is waiting on a
+ * command in a room that is not recording — and halving the request rate on a machine that may sit
+ * open all night is worth more than a second and a half of latency. It is still THREE CHANCES to
+ * be heard inside the ten-second freshness window, which is the property that actually matters:
+ * two polls may fail and the room is still not called gone.
+ *
+ * THE FRESHNESS WINDOW IS UNCHANGED at LISTENER_FRESH_MS, and so is the recording cadence. This
+ * adds a slower beat where there was previously NO beat at all; it does not slow an existing one.
+ */
+export const POLL_IDLE_MS = 3_000;
+
 // ---------------------------------------------------------------------------
 // ENDED DISAGREES — the session row says over, the tape says otherwise
 // ---------------------------------------------------------------------------

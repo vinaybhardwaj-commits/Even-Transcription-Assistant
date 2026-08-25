@@ -61,6 +61,8 @@ export async function POST(req: NextRequest) {
     ended_at?: unknown;
     duration_ms?: unknown;
     size_bytes?: unknown;
+    peak_level?: unknown;
+    avg_level?: unknown;
     gap_before_ms?: unknown;
     source?: unknown;
   };
@@ -108,6 +110,16 @@ export async function POST(req: NextRequest) {
     return respondError("VALIDATION_FAILED", "bad_source");
   }
   const source: "primary" | "backup" = body.source === "backup" ? "backup" : "primary";
+  // D36 — what the meter heard during this piece. OPTIONAL, and its absence is not an error: an
+  // older kiosk sends nothing and every piece recorded before Build 2 has nothing. Out-of-range
+  // values are DROPPED rather than clamped — RMS is 0..1 by construction, so anything else is a
+  // bug upstream, and a clamped value would be indistinguishable from a real one.
+  const level = (v: unknown): number | null => {
+    const n = Number(v);
+    return typeof v === "number" && Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
+  };
+  const peakLevel = level(body.peak_level);
+  const avgLevel = level(body.avg_level);
 
   const session = await findBenchSession(sessionId);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
@@ -151,15 +163,20 @@ export async function POST(req: NextRequest) {
     await sql`
       INSERT INTO bench_chunk (
         id, session_id, idx, source, r2_key, content_type, started_at, ended_at,
-        duration_ms, size_bytes, upload_state, gap_before_ms
+        duration_ms, size_bytes, upload_state, gap_before_ms, peak_level, avg_level
       ) VALUES (
         ${id}, ${sessionId}, ${idx}, ${source}, ${key}, ${contentType},
         ${startedAt.toISOString()}, ${endedAt.toISOString()},
-        ${durationMs}, ${sizeBytes}, 'verified', ${gapBeforeMs}
+        ${durationMs}, ${sizeBytes}, 'verified', ${gapBeforeMs}, ${peakLevel}, ${avgLevel}
       )
       ON CONFLICT (session_id, source, idx) DO UPDATE SET
         upload_state = 'verified',
-        size_bytes = EXCLUDED.size_bytes
+        size_bytes = EXCLUDED.size_bytes,
+        -- A RETRY MUST NOT ERASE WHAT THE FIRST ATTEMPT HEARD. The retry re-uploads the same
+        -- bytes but its body may carry no levels (an older page, a meter that has since died),
+        -- and overwriting a real reading with NULL would silently disarm D36 for that piece.
+        peak_level = COALESCE(EXCLUDED.peak_level, bench_chunk.peak_level),
+        avg_level  = COALESCE(EXCLUDED.avg_level,  bench_chunk.avg_level)
     `;
   } catch (e) {
     return respondError("UPSTREAM_UNAVAILABLE", String(e).slice(0, 150));

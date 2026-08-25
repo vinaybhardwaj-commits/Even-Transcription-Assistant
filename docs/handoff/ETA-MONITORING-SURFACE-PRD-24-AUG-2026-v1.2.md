@@ -59,6 +59,9 @@ Ratified by V on 24 August. Settled. A builder must not reopen them.
 | **D26** | **Room windows get their own job record.** The phone app's diarization path is not touched. Two shapes, and the working one is left alone. |
 | **D27** | **Build order: 1 and 2 first.** Fix the false alarms and add the level bars, then the voice-service panel, batch diarization, the naming screen, live identification, the relay and listening, the Pulse feed and patient sets. The pre-flight in §15 runs immediately and in parallel, because it can void three slices. |
 | **D28** | **Four of the 24 stranded windows are transcribed first.** Read the output before paying for the other twenty. |
+| **D38** | **An idle room reports itself every 3 seconds; the 10-second freshness window is unchanged.** Three chances to be heard before it is called gone. While recording, the existing cadence stands. |
+| **D37** | **The main microphone is dead only when the device is gone, or when two consecutive full-length pieces come back tiny while the meter heard sound.** Both are evidence. **The silence watchdog is not used for this decision at all** — it produced two false alarms in one morning and bound sixteen windows to a spare. |
+| **D36** | **A microphone is called faulty on size only when the level meter heard sound during that piece.** A quiet room making small pieces is quiet, not broken. Both halves ship in Build 2 so they check each other, and it is the only version that cannot cry wolf on a slow afternoon. |
 | **D35** | **The build ships in three parts** — the page, then the room and the tape, then the recovery control. §17 carries the split and what gates each one. |
 | **D34** | **Today's wrongly bound windows are re-bound to the main microphone and re-run.** Sixteen of Cardiology's twenty are bound to the spare because of a false alarm. They are not transcribed as they stand. |
 | **D33** | **A window binds to the main microphone unless the main is proven dead AND a spare is proven healthy.** Never on a flag alone. The flag that bound today's windows to the spare was false, and nothing ever cleared it. |
@@ -667,7 +670,7 @@ alarms available, it cannot touch a recording, and it can ship while the pilot r
 | Gate | State |
 |---|---|
 | V approves the mockup (§16) | **APPROVED by V, 24 August.** Build 1 kickoff written: `ETA-BUILD-1-KICKOFF-24-AUG-2026.md`, same folder. |
-| Look at OPD 5's screen before touching it | Thirty seconds, at the hospital. Decides whether §3.8 is software or machine. Gates Build 2. |
+| ~~Look at OPD 5's screen before touching it~~ | **DROPPED 25 August.** V is not at the hospital and the clinic machines will all be reloaded when he next is, which destroys the evidence anyway. §3.8's heartbeat change is right whether the cause was software or the machine — it is just not proof of *sufficiency*. Build 2 no longer waits on it. The room-rig question moves to its own track (§18). |
 | The pre-flight on tonight's tape (§15) | Not yet run. Gates the voice slices only, not Builds 1 to 3. |
 
 **Build order (D27), in full:**

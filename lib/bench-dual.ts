@@ -48,6 +48,11 @@ export type ChunkMeta = {
   duration_ms: number;
   gap_before_ms: number;
   size_bytes: number;
+  /** D36 — what the meter heard during this piece. Null where it could not be measured; the
+   *  field is then OMITTED from the wire entirely rather than sent as a zero, because a zero
+   *  and an absence mean opposite things to the size rule. */
+  peak_level?: number | null;
+  avg_level?: number | null;
 };
 
 /** Request bodies for POST /api/bench/upload-url and POST /api/bench/chunks. */
@@ -67,6 +72,10 @@ export function uploadBodies(m: ChunkMeta): {
       duration_ms: m.duration_ms,
       size_bytes: m.size_bytes,
       gap_before_ms: m.gap_before_ms,
+      // Omitted, not zeroed, when the meter had nothing: an older server ignores the fields and
+      // a newer one stores NULL, which reads as "not measured" rather than as silence.
+      ...(typeof m.peak_level === "number" ? { peak_level: m.peak_level } : {}),
+      ...(typeof m.avg_level === "number" ? { avg_level: m.avg_level } : {}),
       ...src,
     },
   };
@@ -79,30 +88,95 @@ export function uploadBodies(m: ChunkMeta): {
 export const SILENCE_RMS = 0.0015; // digital-zero territory; room noise on a live mic is ≫ this
 export const SILENCE_TRIP_MS = 60_000;
 
+/**
+ * The cadence the watchdog is fed at, and therefore how many samples a trip needs.
+ *
+ * Build 2 §2.3 turned the trip condition from ELAPSED TIME into CONSECUTIVE EVIDENCE, so the
+ * count matters where the duration used to: sixty consecutive silent samples at one a second.
+ */
+export const WATCHDOG_FEED_MS = 1_000;
+export const SILENCE_TRIP_SAMPLES = Math.round(SILENCE_TRIP_MS / WATCHDOG_FEED_MS);
+
+/**
+ * How late a sample may be before it counts as a SKIPPED one rather than a consecutive one.
+ *
+ * Twice the cadence. A browser that throttles a background timer, a garbage collection pause or a
+ * suspended AudioContext all produce a gap; none of them is evidence about the microphone.
+ */
+export const WATCHDOG_SKIP_AFTER_MS = WATCHDOG_FEED_MS * 2;
+
 export type WatchdogEvent = "trip" | "clear" | null;
 
+/**
+ * The primary microphone's silence failsafe (R5).
+ *
+ * WHAT CHANGED IN BUILD 2 (§2.3, D37), and why it had to.
+ *
+ * It used to compare two WALL-CLOCK MOMENTS: it stamped `silentSince` on the first quiet sample
+ * and tripped once `now - silentSince` passed a minute. Each sample is about eleven milliseconds
+ * of audio — shorter than the pause between two words — so the stamp survived any gap in the
+ * feed, and a minute of WALL CLOCK is not a minute of silence. A throttled timer, a long GC pause
+ * or a suspended context could carry a stale stamp across a gap and trip on a microphone that was
+ * working the whole time. That is what fired on two working microphones in one morning, and each
+ * false trip bound every remaining window of the day to a spare.
+ *
+ * It now requires CONSECUTIVE EVIDENCE: sixty samples in a row that were actually taken, actually
+ * quiet, and actually one second apart. A sample that arrives late — meaning one was skipped —
+ * RESETS the run rather than extending it, because a gap is an absence of evidence and this
+ * class's whole failure mode was treating absence as proof.
+ *
+ * The trip threshold is unchanged in wall-clock terms: sixty seconds of continuous silence still
+ * trips it. What changed is that sixty seconds of NOT LOOKING no longer does.
+ *
+ * It is also no longer an input to which microphone answers a window (D37) — see lib/mic-health.ts.
+ * It still does the one job it was built for: flushing the segment and reporting a room that has
+ * genuinely gone silent.
+ */
 export class SilenceWatchdog {
-  private silentSince: number | null = null;
+  private silentRun = 0;
+  private lastFeedMs: number | null = null;
   private tripped = false;
-  constructor(private opts: { silentRms?: number; tripAfterMs?: number } = {}) {}
+  constructor(private opts: { silentRms?: number; tripAfterMs?: number; feedMs?: number; skipAfterMs?: number } = {}) {}
 
   get isTripped(): boolean {
     return this.tripped;
   }
 
-  /** Feed one RMS sample. Returns "trip" once when silence has lasted tripAfterMs, "clear" once when audio returns. */
+  /** How many consecutive quiet samples are currently counted. Exposed for tests and the chip. */
+  get run(): number {
+    return this.silentRun;
+  }
+
+  /**
+   * Feed one RMS sample. Returns "trip" once when silence has lasted for the required run of
+   * consecutive samples, "clear" once when audio returns.
+   */
   feed(rms: number, nowMs: number): WatchdogEvent {
     const thr = this.opts.silentRms ?? SILENCE_RMS;
-    const after = this.opts.tripAfterMs ?? SILENCE_TRIP_MS;
+    const feedMs = this.opts.feedMs ?? WATCHDOG_FEED_MS;
+    const skipAfter = this.opts.skipAfterMs ?? Math.max(feedMs * 2, WATCHDOG_SKIP_AFTER_MS);
+    const needed = Math.max(1, Math.round((this.opts.tripAfterMs ?? SILENCE_TRIP_MS) / feedMs));
+
+    // A SKIPPED SAMPLE RESETS THE RUN. The gap tells us nothing about the microphone, and the old
+    // version's habit of carrying a stale stamp across exactly this gap is what made it fire on
+    // healthy rooms. Counted from the previous feed, so a first sample never counts as a skip.
+    const gap = this.lastFeedMs === null ? 0 : nowMs - this.lastFeedMs;
+    const skipped = this.lastFeedMs !== null && gap > skipAfter;
+    this.lastFeedMs = nowMs;
+    if (skipped) {
+      this.silentRun = 0;
+      return null; // never trip and never clear on a gap: it is not evidence either way
+    }
+
     if (!Number.isFinite(rms) || rms < thr) {
-      if (this.silentSince === null) this.silentSince = nowMs;
-      if (!this.tripped && nowMs - this.silentSince >= after) {
+      this.silentRun++;
+      if (!this.tripped && this.silentRun >= needed) {
         this.tripped = true;
         return "trip";
       }
       return null;
     }
-    this.silentSince = null;
+    this.silentRun = 0;
     if (this.tripped) {
       this.tripped = false;
       return "clear";
@@ -111,8 +185,67 @@ export class SilenceWatchdog {
   }
 
   reset(): void {
-    this.silentSince = null;
+    this.silentRun = 0;
+    this.lastFeedMs = null;
     this.tripped = false;
+  }
+}
+
+/**
+ * WHAT A MICROPHONE HEARD OVER AN INTERVAL (Build 2 §2.2, D36).
+ *
+ * ONE SAMPLE IS NOT A LEVEL. The analyser reads about eleven milliseconds of audio, which is
+ * shorter than the pause between two words, so a snapshot taken at the wrong instant reads zero on
+ * a room in full conversation. Everything that consumes a level in this build — the operator
+ * page's bars, and the per-piece evidence the size rule needs — wants a summary over a span
+ * instead: the HIGHEST reading, which says somebody spoke at all, and the MEAN, which says how
+ * much of the span had sound in it. Neither is derivable from the other and both are kept.
+ *
+ * TAKE-AND-RESET. `take()` returns the summary and starts a fresh interval, so consecutive reads
+ * describe consecutive spans and never overlap. A span with no samples in it returns NULL, never
+ * zero: nothing was measured, and a zero would be indistinguishable from a microphone that heard
+ * silence — which is the exact confusion this build exists to remove.
+ *
+ * Deliberately not a hook and not React-aware: it is fed from a bare interval and read from a
+ * poll, both outside the render cycle, and made a class so a test can drive it directly.
+ */
+export type LevelSummary = { peak: number; avg: number };
+
+export class LevelAccumulator {
+  private peak = 0;
+  private sum = 0;
+  private n = 0;
+
+  /** Feed one RMS reading. Non-finite and negative values are ignored, never counted as zero. */
+  add(rms: number): void {
+    if (!Number.isFinite(rms) || rms < 0) return;
+    if (rms > this.peak) this.peak = rms;
+    this.sum += rms;
+    this.n++;
+  }
+
+  /** How many samples this interval has so far. */
+  get samples(): number {
+    return this.n;
+  }
+
+  /** The summary WITHOUT resetting — for a reader that must not disturb another's interval. */
+  peek(): LevelSummary | null {
+    if (this.n === 0) return null;
+    return { peak: this.peak, avg: this.sum / this.n };
+  }
+
+  /** The summary, and start a fresh interval. NULL when nothing was measured. */
+  take(): LevelSummary | null {
+    const out = this.peek();
+    this.reset();
+    return out;
+  }
+
+  reset(): void {
+    this.peak = 0;
+    this.sum = 0;
+    this.n = 0;
   }
 }
 

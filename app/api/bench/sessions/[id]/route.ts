@@ -57,9 +57,36 @@ export async function PATCH(
          WHERE id = ${id} AND room_id = ${claims.room_id} AND status = 'paused'
       `;
     } else if (action === "end") {
+      // ── §3.3 / Build 2 §2.5 — THE END TIME IS THE END OF THE AUDIO, not a clock reading ────
+      //
+      // `NOW()` recorded when the PATCH arrived, which is not when the recording stopped.
+      // `bs_f46u4jxw` on OPD 5 carries a stored end more than TEN MINUTES after its last piece,
+      // because the request landed long after the tape did. A stored end that does not match the
+      // tape is not a cosmetic error: it is the number the operator page compares against, the
+      // one `ended_at_lies` raises on, and the boundary every later reader uses to decide which
+      // audio belongs to this session.
+      //
+      // VERIFIED PIECES ONLY. A pending upload may still fail, and an end time resting on a piece
+      // that never lands would be a claim about audio we do not have.
+      //
+      // COALESCE TO NOW() — the fallback is not laziness, it is the only correct answer for a
+      // session that recorded nothing at all. There is no tape to take an end from, and leaving
+      // ended_at NULL would make an ended session read as still running for ever.
+      //
+      // BEING A FEW SECONDS EARLY IS SAFE AND BEING LATE IS NOT. The kiosk PATCHes end as soon as
+      // the recorder stops and only then finishes uploading its flush piece, so at this instant
+      // the final piece is often still in flight and the end lands on the piece before it. That
+      // is at most one rotation early. It cannot trip the ended-disagrees alarm, which compares
+      // CAPTURE times: a flush piece began before the end by construction.
       await sql`
-        UPDATE bench_session SET status = 'ended', ended_at = NOW()
-         WHERE id = ${id} AND room_id = ${claims.room_id} AND status <> 'ended'
+        UPDATE bench_session s
+           SET status = 'ended',
+               ended_at = COALESCE(
+                 (SELECT MAX(c.ended_at) FROM bench_chunk c
+                   WHERE c.session_id = s.id AND c.upload_state = 'verified'),
+                 NOW()
+               )
+         WHERE s.id = ${id} AND s.room_id = ${claims.room_id} AND s.status <> 'ended'
       `;
     } else if (action != null) {
       return respondError("VALIDATION_FAILED", "unknown_action");

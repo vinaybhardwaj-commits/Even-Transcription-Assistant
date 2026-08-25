@@ -184,11 +184,21 @@ export async function closeOrphanedSession(input: {
   try {
     // `AND status <> 'ended'` makes this safe to run twice: a second press finds nothing to do
     // rather than rewriting ended_at. bench_chunk is not named anywhere in this statement.
+    // §3.3 / Build 2 §2.5 — THE SAME RULE AS THE NORMAL END PATH, and it matters more here.
+    // This closes a session whose kiosk vanished, so the gap between the last piece and the
+    // moment somebody presses the repair button is not seconds but hours. `NOW()` would have
+    // recorded an end time hours after the audio stopped — exactly the class of wrong row §2.5
+    // exists to stop creating. Verified pieces only; NOW() only when there is no tape to read.
     const updated = (await sql`
-      UPDATE bench_session
-         SET status = 'ended', ended_at = NOW()
-       WHERE id = ${decision.session_id} AND status <> 'ended'
-       RETURNING id, ended_at
+      UPDATE bench_session s
+         SET status = 'ended',
+             ended_at = COALESCE(
+               (SELECT MAX(c.ended_at) FROM bench_chunk c
+                 WHERE c.session_id = s.id AND c.upload_state = 'verified'),
+               NOW()
+             )
+       WHERE s.id = ${decision.session_id} AND s.status <> 'ended'
+       RETURNING s.id, s.ended_at
     `) as Array<{ id: string; ended_at: string | Date }>;
     if (updated.length === 0) {
       return { ok: false, error: "no_open_session", session_id: decision.session_id, evidence: decision.evidence };

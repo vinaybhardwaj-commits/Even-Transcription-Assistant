@@ -213,23 +213,66 @@ describe("A3 — the source is decided, never hard-coded", () => {
     expect(ws[0]!.source_mic).toBe("primary");
   });
 
-  it("a primary-lost period over the slot makes it a BACKUP window", () => {
+  /**
+   * BUILD 2 §2.4 — THE INVERSE OF THE TEST THIS REPLACES, and the reason the whole rule changed.
+   *
+   * It used to assert that a `mic_primary_lost` / `mic_primary_restored` pair over a slot moved
+   * that slot to the BACKUP microphone. That is the bug, exactly as it happened: Cardiology's
+   * false silence trip at 12:25 opened an interval nothing ever closed, so every remaining window
+   * of the day — sixteen of twenty — bound to the spare while the main microphone was recording
+   * perfectly. On a rig with no spare, or one writing near-silence, the same fault would have
+   * handed four hours of consultation to an empty microphone and returned nothing.
+   *
+   * A FLAG NOW MOVES NOTHING (D33). Only the device being reported gone, or two consecutive
+   * full-length pieces coming back tiny while the meter heard sound (D37), can move a window —
+   * and even then only onto a spare proven healthy on its own pieces.
+   */
+  it("§2.4 — a primary-lost FLAG alone does NOT move the slot to the spare", () => {
     const events: MicEventRow[] = [
       { id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000) },
       { id: "e2", kind: "mic_primary_restored", at: iso(slotStart + WINDOW_MS + 60_000) },
     ];
     const ws = evaluateWindows({ chunks: both(), events, tapeEndMs: slotStart + WINDOW_MS });
     expect(ws).toHaveLength(1);
+    expect(ws[0]!.source_mic).toBe("primary");
+    expect(ws[0]!.bind_reason).toBe("default_main");
+  });
+
+  it("§2.4 — an UNCLOSED loss (the Cardiology shape) still does not move it", () => {
+    // No restore at all: the old rule held the interval open to the end of the tape, which is
+    // what bound sixteen of twenty windows.
+    const events: MicEventRow[] = [{ id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000), payload: { reason: "silence" } }];
+    const ws = evaluateWindows({ chunks: both(), events, tapeEndMs: slotStart + WINDOW_MS });
+    expect(ws[0]!.source_mic).toBe("primary");
+  });
+
+  it("§2.4 — the DEVICE reported gone moves it, but only onto a spare with real pieces", () => {
+    const events: MicEventRow[] = [{ id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000), payload: { reason: "track_ended" } }];
+    const ws = evaluateWindows({ chunks: both(), events, tapeEndMs: slotStart + WINDOW_MS });
     expect(ws[0]!.source_mic).toBe("backup");
+    // These fixture pieces carry no size or level, so the spare's health is UNPROVEN rather than
+    // established — and once the main is proven dead the spare is the only tape there is, so it
+    // is used and the reason says so. Refusing an unmeasurable spare here would discard the only
+    // recording of those minutes to satisfy a word.
+    expect(ws[0]!.bind_reason).toBe("main_dead_spare_unmeasured");
     // and completeness is then judged against the BACKUP lane
     expect(ws[0]!.complete).toBe(true);
   });
 
-  it("when the slot is a backup window, an unverified PRIMARY chunk is irrelevant to it", () => {
-    const events: MicEventRow[] = [
-      { id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000) },
-      { id: "e2", kind: "mic_primary_restored", at: iso(slotStart + WINDOW_MS + 60_000) },
-    ];
+  it("§2.4 — a dead device with NO spare lane keeps the audio on the main, and says so", () => {
+    // D32: most rooms have one microphone. There is nothing to move to, and inventing a spare
+    // lane would hand the room a window that resolves to no audio at all.
+    const mainOnly = [0, 1, 2].map((i) =>
+      chunk({ idx: i, source: "primary", upload_state: "verified", started_at: iso(slotStart + i * 300_000), ended_at: iso(slotStart + (i + 1) * 300_000) }),
+    );
+    const events: MicEventRow[] = [{ id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000), payload: { reason: "track_ended" } }];
+    const ws = evaluateWindows({ chunks: mainOnly, events, tapeEndMs: slotStart + WINDOW_MS });
+    expect(ws[0]!.source_mic).toBe("primary");
+    expect(ws[0]!.bind_reason).toBe("main_dead_no_healthy_spare");
+  });
+
+  it("when the slot IS a backup window, an unverified PRIMARY chunk is irrelevant to it", () => {
+    const events: MicEventRow[] = [{ id: "e1", kind: "mic_primary_lost", at: iso(slotStart - 60_000), payload: { reason: "track_ended" } }];
     const ws = evaluateWindows({ chunks: both("pending"), events, tapeEndMs: slotStart + WINDOW_MS });
     expect(ws[0]!.source_mic).toBe("backup");
     expect(ws[0]!.complete).toBe(true);

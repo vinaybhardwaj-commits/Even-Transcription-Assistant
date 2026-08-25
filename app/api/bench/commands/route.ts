@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
-import { classifyBusError, pollCommands } from "@/lib/bench-commands";
+import { classifyBusError, cleanLevels, pollCommands } from "@/lib/bench-commands";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,9 +38,17 @@ export async function GET(req: NextRequest) {
   const rs = (sp.get("recording_session_id") ?? "").trim();
   const recordingSessionId = rs && rs.startsWith("bs_") && rs.length <= 64 ? rs : null;
   const paused = sp.get("paused") === "true";
+  // §2.2 — the level pair, if the page sent one. `cleanLevels` drops anything outside 0..1 rather
+  // than clamping it, so a malformed reading leaves the columns NULL instead of putting a number
+  // on a clinical screen that no microphone produced. Nothing here can make the poll fail: an
+  // absent, partial or nonsense pair simply becomes null.
+  const levelPair = (peakKey: string, avgKey: string) =>
+    cleanLevels({ peak: Number(sp.get(peakKey)), avg: Number(sp.get(avgKey)) });
+  const mic = levelPair("mic_peak", "mic_avg");
+  const spare = levelPair("spare_peak", "spare_avg");
 
   try {
-    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused });
+    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare });
     return NextResponse.json({ ok: true, room_id: claims.room_id, ...out }, { headers: NO_STORE });
   } catch (e) {
     const b = classifyBusError(e);

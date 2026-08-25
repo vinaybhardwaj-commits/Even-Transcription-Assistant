@@ -72,7 +72,10 @@
  */
 
 import { sql } from "@/lib/db";
-import { decideSource, type MicEventRow, type MicSource } from "@/lib/bench-source";
+import { type MicEventRow, type MicSource } from "@/lib/bench-source";
+// §2.4 — the binding rule and the size judgement behind it. PURE, and shared with the operator
+// page and the room page so all three judge a microphone the same way.
+import { decideBinding, deviceReportedGone, type BindReason, type MicPiece } from "@/lib/mic-health";
 import { isTranscriptEnabled } from "@/lib/room-switches";
 import { enqueueSubject } from "@/lib/stt/fanout";
 
@@ -87,11 +90,35 @@ export type WindowChunk = {
   started_at: string | Date;
   ended_at: string | Date;
   upload_state: string;
+  /** §2.4 — the evidence the binding rule judges a microphone by. All optional: a piece recorded
+   *  before Build 2 carries none, and the rule is written so that a piece it cannot measure can
+   *  never convict a microphone. */
+  duration_ms?: number | null;
+  size_bytes?: number | null;
+  peak_level?: number | null;
+  avg_level?: number | null;
 };
 
 export type GridSlot = { start_ms: number; end_ms: number };
 
 const ms = (d: string | Date): number => (d instanceof Date ? d.getTime() : Date.parse(d));
+
+/** A chunk row as the size rule wants it. Tolerant: a missing number stays null, never NaN — and
+ *  lib/mic-health is written so a piece it cannot measure never convicts a microphone. */
+const toMicPiece = (c: WindowChunk): MicPiece => {
+  const n = (v: unknown): number | null => {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : null;
+  };
+  return {
+    idx: c.idx,
+    source: c.source === "backup" ? "backup" : "primary",
+    duration_ms: n(c.duration_ms) ?? Math.max(0, ms(c.ended_at) - ms(c.started_at)),
+    size_bytes: n(c.size_bytes),
+    peak_level: n(c.peak_level),
+    avg_level: n(c.avg_level),
+  };
+};
 
 /** PURE — the IST-aligned slot an instant falls in. */
 export function slotStartFor(atMs: number): number {
@@ -172,6 +199,8 @@ export function runIntervals(chunks: readonly WindowChunk[]): Array<{ from: numb
 
 export type WindowVerdict = GridSlot & {
   source_mic: MicSource;
+  /** §2.4 — WHY this window is bound where it is, so the choice is always auditable. */
+  bind_reason: BindReason;
   /** true → this slot may be `closed`; false → it stays `open` */
   complete: boolean;
   covered_ms: number;
@@ -204,17 +233,41 @@ export function evaluateWindows(input: {
     for (const s of gridSlotsFor(ms(c.started_at), ms(c.ended_at))) slots.set(s.start_ms, s);
   }
 
+  // ── THE BINDING RULE (§2.4, D33/D37) ─────────────────────────────────────────────────────
+  //
+  // ONE DECISION FOR THE SESSION, not one per slot, and evidence-based rather than flag-based.
+  //
+  // What this replaces: `decideSource` bound a slot to the spare whenever the slot overlapped a
+  // `mic_primary_lost` → `mic_primary_restored` interval, and an unclosed loss is held open to the
+  // end of the tape. So one false silence trip at 12:25 bound EVERY REMAINING WINDOW of
+  // Cardiology's day to the spare — sixteen of twenty — on a day its main microphone recorded
+  // perfectly. Nothing ever cleared it, because nothing ever wrote the restore.
+  //
+  // The rule now asks whether the microphone actually worked, from the pieces themselves. A loss
+  // event moves nothing on its own; only the device being REPORTED GONE, or two consecutive
+  // full-length pieces coming back tiny while the meter heard sound, can move a window off the
+  // main microphone — and even then only onto a spare proven healthy on its own pieces.
+  //
+  // PER SESSION rather than per slot because the question it answers is about the hardware, not
+  // about a fifteen-minute span: a microphone is not dead for one slot and alive for the next.
+  // That also makes the outcome auditable — one decision, one reason, for the whole tape.
+  const mainPieces = chunks.filter((c) => c.source === "primary");
+  const sparePieces = chunks.filter((c) => c.source === "backup");
+  const lastOf = (list: readonly WindowChunk[]): number | null =>
+    list.length ? list.reduce((a, c) => Math.max(a, c.idx), -1) : null;
+  const binding = decideBinding({
+    mainPieces: mainPieces.map(toMicPiece),
+    sparePieces: sparePieces.map(toMicPiece),
+    // THE SILENCE WATCHDOG IS NOT AN INPUT (D37). Only loss events whose recorded reason means
+    // the hardware itself went away reach this, and `deviceReportedGone` filters by that name.
+    deviceReportedGone: deviceReportedGone(events),
+    lastMainIdx: lastOf(mainPieces),
+    lastSpareIdx: lastOf(sparePieces),
+  });
+
   const out: WindowVerdict[] = [];
   for (const slot of [...slots.values()].sort((a, b) => a.start_ms - b.start_ms)) {
-    // A3 — the same rule the range machinery uses. `requested: null` means "no one named a
-    // mic", which is the only way auto_switched can fire.
-    const decision = decideSource({
-      requested: null,
-      events,
-      tapeEndMs,
-      startMs: slot.start_ms,
-      endMs: slot.end_ms,
-    });
+    const decision = { source: binding.source };
     const mine = chunks.filter((c) => c.source === decision.source);
     const touching = mine.filter((c) => ms(c.ended_at) > slot.start_ms && ms(c.started_at) < slot.end_ms);
     const verified = touching.filter((c) => c.upload_state === "verified");
@@ -223,6 +276,7 @@ export function evaluateWindows(input: {
     out.push({
       ...slot,
       source_mic: decision.source,
+      bind_reason: binding.reason,
       // The FULL span, from verified chunks only. See the header on why this is not
       // "everything present is verified".
       complete: gaps.length === 0,
@@ -267,7 +321,8 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
   const base: WriteWindowsResult = { session_id: sessionId, slots: 0, inserted: 0, closed: 0, still_open: 0, unchanged: 0 };
   try {
     const chunks = (await sql`
-      SELECT idx, source, started_at, ended_at, upload_state
+      SELECT idx, source, started_at, ended_at, upload_state,
+             duration_ms, size_bytes, peak_level, avg_level
         FROM bench_chunk WHERE session_id = ${sessionId}
        ORDER BY source, idx
     `) as WindowChunk[];

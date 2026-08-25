@@ -96,6 +96,8 @@ type LaneLevel = "ok" | "amber" | "red" | "off";
 type LaneView = { level: LaneLevel; state: string; enabled: boolean | null; note?: string };
 type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number; stranded?: Stranded };
 
+type Levels = { peak: number; avg: number } | null;
+
 type ListenerRowView = {
   room_id: string;
   room_slug: string;
@@ -106,6 +108,12 @@ type ListenerRowView = {
   recording_session_id: string | null;
   tab_id: string;
   last_poll_at: string;
+  /** §2.2 — what each microphone heard since this room's previous poll. NULL = NOT MEASURED,
+   *  which draws NO BAR: an unmeasured microphone and a silent one are different facts and only
+   *  one of them is a reason to walk to a room. */
+  mic?: Levels;
+  spare?: Levels;
+  levels_at?: string | null;
 };
 
 type ListenersResp = { now: string; freshness_window_ms: number; listeners: ListenerRowView[]; degraded?: string[] };
@@ -122,6 +130,10 @@ type RoomLive = {
   mic_level: Level;
   backup_chunks_today: number;
   backup_reads_no_chunks: boolean;
+  /** §2.3 — the size vital, per microphone. */
+  mic_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
+  spare_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
+  spare_exists?: boolean;
   stalled: boolean;
   stalled_age_ms: number | null;
   transcript_enabled: boolean;
@@ -359,6 +371,56 @@ function laneWithPending(view: LaneView, pendingOn: boolean | undefined): LaneVi
   return pendingOn ? { level: "off", state: "On, nothing to do", enabled: true } : { level: "off", state: "Off", enabled: false };
 }
 
+/**
+ * §2.2 — THE LEVEL BAR. One per microphone THAT ACTUALLY EXISTS on that rig (D32).
+ *
+ * TWO MARKS, NOT ONE, because they answer different questions. The filled bar is the AVERAGE
+ * since the last report — how much of the interval had sound in it — and the tick is the PEAK,
+ * which says somebody spoke at all. A single instantaneous reading would be neither: an analyser
+ * sample is about eleven milliseconds of audio, shorter than the pause between two words, so a
+ * snapshot reads zero on a room in full conversation.
+ *
+ * RMS IS LOGARITHMIC TO THE EAR AND LINEAR IN THE DATA. Speech sits between roughly 0.02 and 0.2,
+ * so a linear bar would leave every real room in the leftmost tenth and look broken. The square
+ * root spreads that range across most of the bar, which is what makes it readable at a glance
+ * while walking — the only way this is ever looked at.
+ *
+ * NULL DRAWS NOTHING AT ALL. Not an empty bar, not a grey placeholder: an unmeasured microphone
+ * is not a silent one, and a room with one microphone must say nothing whatsoever about a spare.
+ */
+function LevelBar({ label, levels }: { label: string; levels: Levels }) {
+  if (!levels) return null;
+  const scale = (v: number) => Math.max(0, Math.min(1, Math.sqrt(Math.max(0, Math.min(1, v)) / 0.3)));
+  const avg = scale(levels.avg);
+  const peak = scale(levels.peak);
+  // Grey until something is actually heard, then green: GREEN MEANS WORKING on this screen, and
+  // a microphone in a silent room is not working, it is waiting.
+  const heard = levels.peak > 0.0015;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-caption text-even-ink-500 w-[70px] shrink-0">{label}</span>
+      <span
+        className="relative flex-1 h-2 rounded-full bg-even-ink-100 overflow-hidden"
+        role="meter"
+        aria-label={`${label} level`}
+        aria-valuenow={Math.round(levels.avg * 100)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <span
+          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ${heard ? "bg-success-500" : "bg-even-ink-200"}`}
+          style={{ width: `${Math.round(avg * 100)}%` }}
+        />
+        {/* the peak, as a tick rather than a second fill: it is a moment, not a duration */}
+        <span
+          className="absolute inset-y-0 w-0.5 bg-even-navy-800/60"
+          style={{ left: `calc(${Math.round(peak * 100)}% - 1px)` }}
+        />
+      </span>
+    </div>
+  );
+}
+
 /** Minutes, never money (R11). There is deliberately no code path here that could render one. */
 function fmtMinutes(ms: number): string {
   const m = Math.round((Number(ms) || 0) / 60_000);
@@ -403,6 +465,20 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         severity: "red",
         title: ENDED_DISAGREES_TITLE,
         detail: `${r.ended_disagrees_chunks} piece${r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was marked ended ${fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago — ${ENDED_DISAGREES_HINT}`,
+      });
+    }
+    // §2.3 — A MICROPHONE PRODUCING PIECES THAT ARE NOT AUDIO.
+    //
+    // D36 IS THE GUARD, and without it this is the fifth false alarm. `proven_dead_by_size` is
+    // true only when two consecutive FULL-LENGTH pieces came back tiny AND THE METER HEARD SOUND
+    // through both — a quiet room making small pieces is quiet, not broken, and a slow afternoon
+    // must not raise anything. A piece carrying no level reading can never satisfy it.
+    if (r.recording && r.mic_size?.proven_dead_by_size) {
+      out.push({
+        room: name,
+        severity: "red",
+        title: "the main microphone is producing pieces that are not audio",
+        detail: "two full-length pieces in a row came back a fraction of this microphone's usual size while the meter could hear the room. Go to the room and check the microphone.",
       });
     }
     // §3.6 — THE MIRROR IMAGE, which the DOOR has raised since it was written and the screen
@@ -847,7 +923,7 @@ export function BenchRoomsLive() {
           // every card to amber for the whole of every session and said nothing true about any
           // of them. The doctor clock can only reach amber or red where a genuine cue exists,
           // which since §3.1 it almost never does.
-          const worst: Level = r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red"
+          const worst: Level = r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red" || Boolean(r.recording && r.mic_size?.proven_dead_by_size)
             ? "red"
             : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.ended_at_lies || r.marks_not_sent > 0
               ? "amber"
@@ -994,6 +1070,50 @@ export function BenchRoomsLive() {
                     )}
                   </dd>
                 </div>
+
+                {/* ── §2.2 THE LEVEL BARS ────────────────────────────────────────────────
+                    One per microphone THAT EXISTS on this rig. A room with one microphone shows
+                    ONE bar and says nothing at all about a spare (D32) — most rooms have one, and
+                    a grey "no spare" placeholder would make the normal case look degraded. The
+                    spare's bar appears only where a second device has actually recorded. */}
+                {l?.mic ? (
+                  <div className="pt-1 space-y-1.5">
+                    <LevelBar label="Main mic" levels={l.mic} />
+                    {r.spare_exists && l.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
+                  </div>
+                ) : null}
+
+                {/* ── §2.3 THE SIZE VITAL, beside freshness and never instead of it ───────────
+                    Freshness says audio is ARRIVING. This says what arrives is actually audio.
+                    Cardiology's spare wrote full-length pieces at a sixty-eighth of the main's
+                    rate and nothing on this page could show it.
+
+                    RENDERED ONLY WHEN IT HAS SOMETHING TO SAY. `unknown` — too few pieces to have
+                    learned a baseline, or pieces carrying no measurements — renders nothing at
+                    all, because a vital that cannot be computed must read as absent rather than
+                    as healthy. */}
+                {r.mic_size && r.mic_size.newest !== "unknown" ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <dt className="text-caption text-even-ink-500">
+                      Piece size <span className="text-even-ink-400">· against this room&rsquo;s own recent pieces</span>
+                    </dt>
+                    <dd>
+                      {r.mic_size.newest === "tiny" ? (
+                        <Pill level="amber" title="full-length pieces are coming back a fraction of this microphone's usual size">
+                          {r.mic_size.tiny_run > 1 ? `${r.mic_size.tiny_run} pieces tiny` : "tiny"}
+                        </Pill>
+                      ) : (
+                        <Pill level="ok" title="pieces are the size this microphone usually produces">normal here</Pill>
+                      )}
+                    </dd>
+                  </div>
+                ) : null}
+                {r.spare_exists && r.spare_size && r.spare_size.newest === "tiny" ? (
+                  <p className="text-caption text-warning-700 leading-snug">
+                    The spare microphone is recording pieces a fraction of its usual size. The main
+                    microphone is unaffected and is still the source of record.
+                  </p>
+                ) : null}
 
                 {/* §3.1 — THE ROW RENDERS ONLY WHERE THERE IS A CLOCK TO SHOW.
                     Nothing in production writes a warehouse clock event; the only writer is a
@@ -1148,9 +1268,19 @@ export function BenchRoomsLive() {
               {startBlockedReason(st) ? (
                 <p className="mt-2 text-caption text-even-ink-600 leading-snug">{startBlockedReason(st)}</p>
               ) : null}
+              {/* §3.8 part 3 — THE CONTROL STATES ITS COST BEFORE IT IS USED, not afterwards on
+                  the room card. An operator can stop a room from here and, until Build 2's
+                  heartbeat is PROVEN on a clinic Mac, may not be able to start it again: stopping
+                  is what used to make a room stop listening, and on 24 August that cost one walk
+                  downstairs on three rooms out of three. A control that can be used but not undone
+                  from the same place is worse than no control, because it looks safe — so the
+                  second tap says what it will cost while there is still time not to take it. */}
               {confirmStop === r.room.id ? (
                 <p className="mt-2 text-caption text-danger-700 leading-snug">
-                  Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
+                  Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.{" "}
+                  {l?.listening
+                    ? "This room is reporting itself, so start should be available again from here. If it goes quiet after stopping, it has to be restarted at the Mac in the room."
+                    : "This room is NOT reporting itself right now, so you will not be able to start it again from this screen — somebody has to open the room page on the Mac in that room."}
                 </p>
               ) : null}
 

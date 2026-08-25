@@ -25,6 +25,7 @@
 import { sql } from "@/lib/db";
 import type { StrandedRaw, TranscriptCounts } from "@/lib/room-facts";
 import { ZERO_STRANDED_RAW } from "@/lib/room-facts";
+import { micHealth, type MicHealth, type MicPiece } from "@/lib/mic-health";
 
 export type Read<T> = { value: T; degraded: string | null };
 
@@ -208,5 +209,72 @@ export async function readChunksAfterEnd(
     return { value: out, degraded: null };
   } catch (e) {
     return { value: out, degraded: fail("chunks_after_end_unavailable", e) };
+  }
+}
+
+/**
+ * §2.3 — THE SIZE VITAL, per microphone, for one room's live session.
+ *
+ * Reads the pieces themselves and judges each microphone against ITS OWN recent work. Freshness
+ * is untouched and still answers "is audio still arriving"; this answers the different question
+ * that let four hours of Cardiology go unnoticed — "is what arrives actually audio".
+ *
+ * BASELINE_PIECES + a couple, ordered newest-first and reversed, so the window is the same one
+ * the recorder learns from and the two cannot disagree about the same microphone.
+ *
+ * FAILS TO UNKNOWN. An error returns no entry at all, the vital renders nothing, and nothing on
+ * the card claims a microphone is healthy or broken on the strength of a failed query.
+ */
+export async function readMicSizes(
+  sessionIds: readonly string[],
+): Promise<Read<Map<string, { primary: MicHealth; backup: MicHealth; spare_exists: boolean }>>> {
+  const out = new Map<string, { primary: MicHealth; backup: MicHealth; spare_exists: boolean }>();
+  if (!sessionIds.length) return { value: out, degraded: null };
+  try {
+    const rows = (await sql`
+      SELECT s.room_id, c.session_id, c.idx, c.source, c.duration_ms, c.size_bytes,
+             c.peak_level, c.avg_level
+        FROM bench_chunk c
+        JOIN bench_session s ON s.id = c.session_id
+       WHERE c.session_id = ANY(${sessionIds as string[]}::text[])
+         AND c.upload_state = 'verified'
+       ORDER BY s.room_id, c.source, c.idx
+    `) as Array<Record<string, unknown>>;
+
+    const byRoom = new Map<string, { primary: MicPiece[]; backup: MicPiece[] }>();
+    const n = (v: unknown): number | null => {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : null;
+    };
+    for (const r of rows) {
+      const roomId = String(r.room_id ?? "");
+      if (!roomId) continue;
+      const lane = r.source === "backup" ? "backup" : "primary";
+      const bucket = byRoom.get(roomId) ?? { primary: [], backup: [] };
+      bucket[lane].push({
+        idx: n(r.idx) ?? 0,
+        source: lane,
+        duration_ms: n(r.duration_ms) ?? 0,
+        size_bytes: n(r.size_bytes),
+        peak_level: n(r.peak_level),
+        avg_level: n(r.avg_level),
+      });
+      byRoom.set(roomId, bucket);
+    }
+    for (const [roomId, b] of byRoom) {
+      // The flush piece is exempt (§2.3): it is legitimately 27 KB, and judging it would raise a
+      // fault at the end of every ordinary day.
+      const lastOf = (list: MicPiece[]) => (list.length ? list[list.length - 1]!.idx : null);
+      out.set(roomId, {
+        primary: micHealth(b.primary, { lastIdxOfSession: lastOf(b.primary) }),
+        backup: micHealth(b.backup, { lastIdxOfSession: lastOf(b.backup) }),
+        // D32 — a spare EXISTS only where one actually recorded something. Most rooms have one
+        // microphone and that is normal; nothing about a spare is shown for them.
+        spare_exists: b.backup.length > 0,
+      });
+    }
+    return { value: out, degraded: null };
+  } catch (e) {
+    return { value: out, degraded: fail("mic_sizes_unavailable", e) };
   }
 }

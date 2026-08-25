@@ -55,6 +55,7 @@ import { LIVE_SINK } from "@/lib/live-flags";
 import { CHUNK_DISAGREEMENT_FIELD, ENDED_DISAGREES } from "@/lib/bench-bus-constants";
 import {
   idbChunkKey,
+  LevelAccumulator,
   pickDefaultBackupDevice,
   rmsOfBytes,
   runLockstep,
@@ -64,6 +65,9 @@ import {
   type ChunkSource,
 } from "@/lib/bench-dual";
 import { primaryFallbackEvents, seedStartIdx } from "@/lib/bench-resume-core";
+// §2.3 — the size judgement, shared with the window writer and the operator page so all three
+// judge a microphone by the same rule. PURE, and safe in this browser bundle.
+import { BASELINE_PIECES, micHealth, type MicPiece } from "@/lib/mic-health";
 
 const CHUNK_MS = 5 * 60 * 1000; // D1: 5-minute chunks
 const BACKOFF_MIN_MS = 5_000;
@@ -121,6 +125,10 @@ export type BenchChunkRecord = {
   ended_at: number; // ms epoch
   duration_ms: number;
   gap_before_ms: number;
+  /** D36 — what the meter heard while THIS piece was recorded. Optional: a browser that could
+   *  not measure sends nothing, and a size rule with no ear stays silent rather than guessing. */
+  peak_level?: number | null;
+  avg_level?: number | null;
   ts: number;
 };
 
@@ -526,6 +534,8 @@ export function useRoomRecorder(opts?: {
       duration_ms: item.duration_ms,
       gap_before_ms: item.gap_before_ms,
       size_bytes: item.blob.size,
+      peak_level: item.peak_level ?? null,
+      avg_level: item.avg_level ?? null,
     });
     const presignRes = await fetch("/api/bench/upload-url", {
       method: "POST",
@@ -729,6 +739,59 @@ export function useRoomRecorder(opts?: {
       const prevEnd = lane.lastChunkEndedAt;
       const gapBeforeMs = prevEnd === null ? 0 : Math.max(0, startedAt - prevEnd);
       lane.lastChunkEndedAt = endedAt;
+      // D36 — TAKE the interval, so the next piece starts a fresh one. Drained exactly here, at
+      // the piece boundary, which is the span the size rule judges over: a room-level average
+      // could not say which piece was quiet, and that distinction is the whole difference between
+      // "this microphone is broken" and "this afternoon was slow".
+      const heard = chunkLevelsRef.current[lane.source === "backup" ? "backup" : "primary"].take();
+
+      // ── §2.3 — A MICROPHONE THAT COMES BACK MUST BE SEEN TO COME BACK ─────────────────────
+      //
+      // NOTHING EVER CLEARED THE LOST FLAG. There was no restored event on this path, so a room
+      // that had one false silence trip read as being on its spare FOR THE REST OF THE DAY — and
+      // that flag is one of the two inputs that later decide which microphone's audio to serve.
+      // Both clinic rooms showed lost with no restore on 24 August while full-size pieces kept
+      // arriving from the microphone that was supposedly gone.
+      //
+      // A HEALTHY PIECE IS THE EVIDENCE, because a piece is proof the microphone produced audio —
+      // which is the thing in question. Judged against this lane's own recent pieces, so it works
+      // on a one-microphone rig.
+      //
+      // WRAPPED, AND THE WRAP IS THE MOST IMPORTANT LINE IN THIS BLOCK. Everything here runs
+      // BETWEEN the recorder handing over a finished piece and `enqueue` taking it, so anything
+      // that throws in here would lose that piece — five minutes of a consultation — to a
+      // display feature. The archive always wins: if any of this fails, it fails silently and
+      // the audio still gets queued.
+      try {
+        const laneKey = lane.source === "backup" ? "backup" : "primary";
+        const ring = recentPiecesRef.current[laneKey];
+        ring.push({
+          idx,
+          source: laneKey,
+          duration_ms: endedAt - startedAt,
+          size_bytes: blob.size,
+          peak_level: heard?.peak ?? null,
+          avg_level: heard?.avg ?? null,
+        });
+        if (ring.length > BASELINE_PIECES + 2) ring.splice(0, ring.length - (BASELINE_PIECES + 2));
+        if (laneKey === "primary" && primarySilentRef.current) {
+          // `newest === "ok"` needs a real baseline and a full-length piece; on a lane with too
+          // few pieces to learn from it reads "unknown" and nothing is claimed either way. Silence
+          // about a microphone we cannot judge is the whole discipline of this build.
+          if (micHealth(ring).newest === "ok") {
+            primarySilentRef.current = false;
+            setPrimaryMic("active");
+            setPrimaryLostAt(null);
+            setPrimaryLostReason(null);
+            setMicLost(false);
+            watchdogRef.current.reset();
+            emitEvent("mic_primary_restored", { reason: "healthy_piece", idx });
+          }
+        }
+      } catch {
+        /* a health judgement is never worth a piece of audio */
+      }
+
       enqueue({
         key: idbChunkKey(sessionId, idx, lane.source),
         session_id: sessionId,
@@ -740,10 +803,11 @@ export function useRoomRecorder(opts?: {
         ended_at: endedAt,
         duration_ms: endedAt - startedAt,
         gap_before_ms: gapBeforeMs,
+        ...(heard ? { peak_level: heard.peak, avg_level: heard.avg } : {}),
         ts: startedAt,
       });
     },
-    [enqueue, finalizeRecorder, mimeType],
+    [emitEvent, enqueue, finalizeRecorder, mimeType],
   );
 
   // ---- K-B backup lane ----
@@ -754,6 +818,111 @@ export function useRoomRecorder(opts?: {
   };
 
   /** Acquire (or re-acquire) the backup stream and, if the day is recording, start its segment. */
+  // ---- §2.2 / D36 — WHAT THE MICROPHONES HEARD ------------------------------------------
+  //
+  // FOUR ACCUMULATORS, TWO PER MICROPHONE, and the pairing is the point: the operator poll and
+  // the piece boundary drain on completely different rhythms (three seconds against five
+  // minutes), so one shared accumulator would have each reader stealing the other's interval.
+  // Each is fed the same readings and drained by exactly one consumer.
+  //
+  // Fed from the tick that already exists. The watchdog samples the primary once a second to do
+  // its own job, and that reading was thrown away one second later; the spare gets a meter of its
+  // own below, because today only the main microphone is measured — which is why nobody noticed a
+  // spare recording nothing for weeks.
+  /**
+   * §2.3 — THE LAST FEW PIECES PER LANE, so a microphone can be judged against its own recent
+   * work rather than against a number typed into this file.
+   *
+   * Measured per five minutes on 24 August: 4.83 MB on Home Office, 8.2 MB on both clinic rigs,
+   * 70 KB for the Home Office spare. An absolute floor is wrong on at least one rig in each
+   * direction, and the ratio between two microphones needs a second microphone to exist — which
+   * on most rooms it does not (D32). A rolling window of that lane's own pieces needs neither.
+   */
+  const recentPiecesRef = React.useRef<{ primary: MicPiece[]; backup: MicPiece[] }>({ primary: [], backup: [] });
+  const pollLevelsRef = React.useRef({ primary: new LevelAccumulator(), backup: new LevelAccumulator() });
+  const chunkLevelsRef = React.useRef({ primary: new LevelAccumulator(), backup: new LevelAccumulator() });
+  const spareMeterRef = React.useRef<{ ctx: AudioContext | null; timer: ReturnType<typeof setInterval> | null }>({ ctx: null, timer: null });
+
+  /** Feed one reading to both of a lane's accumulators. The only way levels enter this module. */
+  const feedLevel = React.useCallback((lane: ChunkSource, rms: number) => {
+    const key = lane === "backup" ? "backup" : "primary";
+    pollLevelsRef.current[key].add(rms);
+    chunkLevelsRef.current[key].add(rms);
+  }, []);
+
+  /**
+   * §2.2 — what to send on the next operator poll, draining the interval.
+   *
+   * NULL FOR A LANE THAT WAS NOT MEASURED, never a zero. A rig with one microphone returns null
+   * for the spare for ever, and the operator page draws no spare bar at all (D32): a room with
+   * one microphone says nothing about a spare — no empty lane, no grey placeholder, no vital.
+   */
+  const takePollLevels = React.useCallback(() => {
+    return {
+      mic: pollLevelsRef.current.primary.take(),
+      spare: pollLevelsRef.current.backup.take(),
+    };
+  }, []);
+
+  /**
+   * §2.2 — A METER ON THE SPARE, where one exists.
+   *
+   * TODAY ONLY THE MAIN MICROPHONE IS MEASURED, which is why nobody noticed a spare recording
+   * nothing for weeks: the Home Office spare wrote 70 KB against the main's 4.8 MB for the same
+   * five minutes and the page had no way to show it. The spare gets the same once-a-second RMS
+   * reading the primary has always had.
+   *
+   * ITS OWN AudioContext, deliberately not the watchdog's. The watchdog's context is created under
+   * the Start click and lives for the whole day; the spare's stream is re-acquired on every
+   * backup failure, and tying a re-acquire to the context that keeps the failsafe alive would let
+   * a spare fault take the primary's watchdog down with it. A spare is optional; the failsafe is
+   * not.
+   *
+   * ENTIRELY BEST-EFFORT. Every path swallows its own error: this is a display feature, and no
+   * part of it may cost a piece of audio.
+   */
+  const stopSpareMeter = React.useCallback(() => {
+    const m = spareMeterRef.current;
+    if (m.timer) clearInterval(m.timer);
+    m.timer = null;
+    void m.ctx?.close().catch(() => undefined);
+    m.ctx = null;
+  }, []);
+
+  const startSpareMeter = React.useCallback(
+    (stream: MediaStream) => {
+      stopSpareMeter();
+      try {
+        const Ctx =
+          window.AudioContext ??
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        const ctx = new Ctx();
+        spareMeterRef.current.ctx = ctx;
+        if (ctx.state === "suspended") void ctx.resume().catch(() => undefined);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        const buf = new Uint8Array(analyser.fftSize);
+        spareMeterRef.current.timer = setInterval(() => {
+          // A suspended context reads flat 128, which would report a working spare as silent.
+          // Skipping the sample leaves the accumulator empty, which reports NOT MEASURED.
+          if (ctx.state !== "running") return;
+          if (stateRef.current !== "recording") return; // paused: silence is expected
+          try {
+            analyser.getByteTimeDomainData(buf);
+            feedLevel("backup", rmsOfBytes(buf));
+          } catch {
+            /* an analyser hiccup is never fatal */
+          }
+        }, WATCHDOG_TICK_MS);
+      } catch {
+        // No AudioContext for the spare — it simply goes unmeasured, and unmeasured renders as
+        // no bar rather than as an empty one.
+      }
+    },
+    [feedLevel, stopSpareMeter],
+  );
+
   const acquireBackup = React.useCallback(
     async (reason: string): Promise<void> => {
       const lane = backupRef.current;
@@ -771,6 +940,7 @@ export function useRoomRecorder(opts?: {
           track.onended = () => backupFailureRef.current("track_ended", "backup_track_ended");
         }
         if (stateRef.current === "recording") startRecorderSegment(lane);
+        startSpareMeter(stream);
         backupBackoffRef.current = REACQUIRE_MIN_MS;
         setBackupMic("active");
         setBackupError(null);
@@ -784,7 +954,7 @@ export function useRoomRecorder(opts?: {
         backupFailureRef.current("acquire", `${name ?? "error"}:${msg}`.slice(0, 160));
       }
     },
-    [emitEvent, startRecorderSegment],
+    [emitEvent, startRecorderSegment, startSpareMeter],
   );
 
   // Backup failure = event + retry with backoff. Separate try/catch domain; no primary refs touched.
@@ -793,6 +963,7 @@ export function useRoomRecorder(opts?: {
     try {
       // Flush whatever the backup recorder had, then drop the dead stream.
       void finalizeIntoQueue(lane).catch(() => undefined);
+      stopSpareMeter();
       stopTracks(lane.stream);
       lane.stream = null;
     } catch {
@@ -814,6 +985,8 @@ export function useRoomRecorder(opts?: {
   // ---- K-B primary failsafe ----
 
   const watchdogSrcRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
+
+
 
   /** Stop sampling (keeps the day's AudioContext — it was created under the Start click). */
   const stopWatchdog = React.useCallback(() => {
@@ -918,7 +1091,11 @@ export function useRoomRecorder(opts?: {
           }
           try {
             analyser.getByteTimeDomainData(buf);
-            const ev = watchdogRef.current.feed(rmsOfBytes(buf), Date.now());
+            const rms = rmsOfBytes(buf);
+            // §2.2 — the reading the watchdog was already taking, kept instead of discarded.
+            // Before the watchdog is consulted, so a tick that trips still contributes its level.
+            feedLevel("primary", rms);
+            const ev = watchdogRef.current.feed(rms, Date.now());
             if (ev === "trip") {
               void (async () => {
                 // Is the device still present? If it vanished without an `ended`, treat as lost.
@@ -957,7 +1134,7 @@ export function useRoomRecorder(opts?: {
         // No AudioContext — the track-ended listener still covers the yank case.
       }
     },
-    [emitEvent, stopWatchdog],
+    [emitEvent, feedLevel, stopWatchdog],
   );
 
   const attachPrimaryListeners = React.useCallback((stream: MediaStream) => {
@@ -1378,6 +1555,7 @@ export function useRoomRecorder(opts?: {
     P.stream = null;
     stopTracks(B.stream);
     B.stream = null;
+    stopSpareMeter();
     backupWantedRef.current = false;
     setBackupMic("off");
     try {
@@ -1386,7 +1564,7 @@ export function useRoomRecorder(opts?: {
       /* noop */
     }
     wakeLockRef.current = null;
-  }, [clearArmCheck, closeWatchdog, finalizeIntoQueue]);
+  }, [clearArmCheck, closeWatchdog, finalizeIntoQueue, stopSpareMeter]);
 
   /** Called by the client once the queue is fully drained after endDay. */
   const markEnded = React.useCallback(() => {
@@ -1440,5 +1618,5 @@ export function useRoomRecorder(opts?: {
     watchdogSuspended,
   };
 
-  return { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream };
+  return { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream, takePollLevels, feedLevel };
 }

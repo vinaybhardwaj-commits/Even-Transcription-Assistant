@@ -179,7 +179,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
     }),
     [postMicEvent],
   );
-  const { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream } =
+  const { status, startDay, resumeSession, pauseDay, resumeDay, endDay, markEnded, getStream, takePollLevels, feedLevel } =
     useRoomRecorder(recorderOpts);
   const [live, setLive] = React.useState<LiveSinkCounters | null>(null);
 
@@ -278,6 +278,12 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
           const rms = Math.sqrt(sum / buf.length);
           setMicLevel((prev) => prev * 0.7 + rms * 0.3);
           if (rms > 0.02) setSpeechSeen(true);
+          // §2.2 — an OPEN-AND-IDLE room has a level too, and the operator page wants it: a bar
+          // moving on a room that is not recording is how you see the microphone is alive before
+          // pressing start. This loop runs on requestAnimationFrame (~60/s) while the watchdog's
+          // runs at 1/s; both feed the same accumulator and the average is over whatever samples
+          // arrived, which is exactly what "since the last report" means.
+          feedLevel("primary", rms);
           meterRafRef.current = requestAnimationFrame(loop);
         };
         loop();
@@ -297,7 +303,7 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       void meterCtxRef.current?.close().catch(() => undefined);
       meterCtxRef.current = null;
     };
-  }, [idle, micId]);
+  }, [idle, micId, feedLevel]);
 
   const micLabelText = React.useMemo(() => {
     const found = mics.find((m) => m.deviceId === micId);
@@ -727,8 +733,12 @@ export function RoomRecorderClient({ slug, roomName }: Props) {
       },
       end: endDayFlow,
       takeover: onTakeover,
+      // §2.2 — the levels ride the poll that is already running. Drained here and nowhere else,
+      // so consecutive polls describe consecutive spans. Wrapped by the poll itself as well: a
+      // meter fault must never cost the room its operator link.
+      getLevels: takePollLevels,
     }),
-    [startDayFlow, onPause, onResume, endDayFlow, onTakeover],
+    [startDayFlow, onPause, onResume, endDayFlow, onTakeover, takePollLevels],
   );
   // FU2: the poll waits for the first /active look (pollEnabled) — see the mount effect.
   const operator = useCommandPoll({ enabled: pollEnabled, actions: commandActions });

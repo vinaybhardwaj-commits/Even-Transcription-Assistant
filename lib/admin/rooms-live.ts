@@ -36,7 +36,8 @@ import {
   type Level, type LaneView, type TranscriptCounts, type VisitCounts,
   type Stranded, type StrandedRaw,
 } from "@/lib/room-facts";
-import { readAudioMs, readTranscriptAndStranded } from "@/lib/admin/room-reads";
+import { readAudioMs, readMicSizes, readTranscriptAndStranded } from "@/lib/admin/room-reads";
+import type { MicHealth } from "@/lib/mic-health";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
  *  same literal, and tests hold the two in agreement with 0054's index predicate. */
@@ -153,6 +154,19 @@ export type RoomLive = {
   backup_chunks_today: number;
   /** Amber: a backup mic that recorded nothing at all this session. */
   backup_reads_no_chunks: boolean;
+  /**
+   * §2.3 — THE SIZE VITAL, beside the freshness vital and never instead of it.
+   *
+   * Freshness answers "is audio still arriving". This answers the question that let four hours of
+   * Cardiology go unnoticed: "is what arrives actually audio". Each microphone judged against a
+   * baseline learned from THAT ROOM'S OWN recent pieces on THAT SAME microphone, so the rule works
+   * on a rig with one microphone — which is the normal case (D32).
+   */
+  mic_size: MicHealth | null;
+  spare_size: MicHealth | null;
+  /** D32 — a spare EXISTS only where one actually recorded. Most rooms have one microphone and
+   *  the card says nothing at all about a spare for them: no lane, no placeholder, no vital. */
+  spare_exists: boolean;
   stalled: boolean;
   stalled_age_ms: number | null;
   /**
@@ -335,6 +349,9 @@ export function buildRoomLive(
     has_room_day_today?: boolean | null;
     stranded_raw?: StrandedRaw;
     audio_recorded_ms?: number;
+    mic_size?: MicHealth | null;
+    spare_size?: MicHealth | null;
+    spare_exists?: boolean;
   },
   brain: {
     last_warehouse_at: string | null;
@@ -457,6 +474,9 @@ export function buildRoomLive(
     mic_level: micLevel(micAge),
     backup_chunks_today: backupChunks,
     backup_reads_no_chunks: backupReadsNoChunks,
+    mic_size: counts.mic_size ?? null,
+    spare_size: counts.spare_size ?? null,
+    spare_exists: Boolean(counts.spare_exists),
     stalled: stalledSession !== null,
     stalled_age_ms: stalledAge,
     transcript_enabled: transcriptEnabled,
@@ -612,6 +632,12 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   if (audioRead.degraded) topDegraded.push(audioRead.degraded);
   const audioMsByRoom = audioRead.value;
 
+  // §2.3 — the size vital. Its own read and its own failure: if this one breaks, the size vital
+  // reads UNKNOWN on every card and every other vital on the page is untouched.
+  const sizeRead = await readMicSizes(sessionIds);
+  if (sizeRead.degraded) topDegraded.push(sizeRead.degraded);
+  const sizeByRoom = sizeRead.value;
+
   const brainByRoom = new Map<string, { last_warehouse_at: string | null; marks_today: number; last_mark_at: string | null; last_window_asked_at: string | null; last_window_complete: boolean | null }>();
   const brainDegraded: string[] = [];
   const visitsByRoom = new Map<string, VisitCounts>();
@@ -664,6 +690,9 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       has_room_day_today: dayKnown ? brainByRoom.has(room.id) : null,
       stranded_raw: ts?.stranded ?? ZERO_STRANDED_RAW,
       audio_recorded_ms: audioMsByRoom.get(room.id) ?? 0,
+      mic_size: sizeByRoom.get(room.id)?.primary ?? null,
+      spare_size: sizeByRoom.get(room.id)?.backup ?? null,
+      spare_exists: sizeByRoom.get(room.id)?.spare_exists ?? false,
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });
