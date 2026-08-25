@@ -1,0 +1,5 @@
+.build/
+captures/
+*.wav
+*.pcm
+*.idx
