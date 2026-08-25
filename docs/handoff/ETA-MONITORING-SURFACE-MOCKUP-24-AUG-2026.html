@@ -1,0 +1,647 @@
+<title>Bench Mockups</title>
+<style>
+  :root{
+    --ink:#0f2740; --ink2:#3d5a75; --muted:#7b8ea3; --line:#e3e9ef;
+    --bg:#f4f7fa; --card:#ffffff; --nav:#0e2033; --navtext:#c7d6e4;
+    --blue:#2563eb; --bluesoft:#eaf1fe;
+    --green:#0f9d58; --greensoft:#e6f6ed;
+    --amber:#b7791f; --ambersoft:#fdf4e3;
+    --red:#d1364a; --redsoft:#fdecef;
+    --grey:#8a9bad; --greysoft:#eef2f6;
+    --new:#7c3aed; --newsoft:#f3ecff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--ink2);margin:0 0 28px;max-width:62ch}
+  h2{font-size:19px;margin:0 0 4px;letter-spacing:-.01em}
+  .why{color:var(--ink2);margin:0 0 16px;max-width:70ch;font-size:14px}
+  section{margin:0 0 46px}
+  .tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;
+    text-transform:uppercase;padding:3px 7px;border-radius:5px;vertical-align:2px;margin-left:8px}
+  .tag.new{background:var(--newsoft);color:var(--new)}
+  .tag.gone{background:var(--redsoft);color:var(--red)}
+  .tag.fix{background:var(--ambersoft);color:var(--amber)}
+
+  /* app chrome */
+  .app{display:flex;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,40,64,.05)}
+  .nav{width:190px;background:var(--nav);color:var(--navtext);padding:18px 0;flex:none}
+  .brand{padding:0 18px 16px;font-weight:700;color:#fff;font-size:15px}
+  .brand em{font-style:normal;color:#5b9dff}
+  .brand span{display:block;font-size:10px;letter-spacing:.14em;color:#6f8ba6;font-weight:600;margin-top:2px}
+  .navsec{padding:14px 18px 6px;font-size:10px;letter-spacing:.14em;color:#5f7c96;font-weight:700}
+  .navitem{padding:6px 18px;font-size:13.5px;display:flex;gap:9px;align-items:center}
+  .navitem .dot{width:7px;height:7px;border-radius:50%;background:#3d5f80;flex:none}
+  .navitem.on{background:#18334d;color:#fff;border-left:3px solid #5b9dff;padding-left:15px}
+  .navitem.on .dot{background:#5b9dff}
+  .main{flex:1;padding:22px 26px 28px;min-width:0}
+  .ptitle{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+  .ptitle h3{margin:0;font-size:21px}
+  .awake{background:var(--greensoft);color:var(--green);font-size:12px;font-weight:600;
+    padding:6px 11px;border-radius:7px}
+  .eyebrow{font-size:10.5px;letter-spacing:.13em;color:var(--muted);font-weight:700}
+  .rowhead{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px}
+  .rowhead h4{margin:2px 0 0;font-size:18px}
+  .upd{font-size:12px;color:var(--muted)}
+
+  .stopall{background:var(--redsoft);border-radius:10px;padding:14px 16px;display:flex;
+    justify-content:space-between;align-items:center;gap:20px;margin-bottom:14px}
+  .stopall b{color:var(--red);display:block;font-size:14px}
+  .stopall p{margin:3px 0 0;font-size:12.5px;color:#8a4553;max-width:52ch}
+  .btn-red{background:var(--red);color:#fff;border:0;border-radius:8px;padding:10px 16px;
+    font-size:13.5px;font-weight:600;white-space:nowrap}
+
+  .attn{border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin-bottom:16px}
+  .attn .eyebrow{margin-bottom:9px;display:block}
+  .attnrow{display:flex;gap:11px;align-items:flex-start;padding:6px 0}
+  .pill-act{background:var(--redsoft);color:var(--red);font-size:11px;font-weight:700;
+    padding:3px 8px;border-radius:5px;flex:none;margin-top:1px}
+  .pill-watch{background:var(--ambersoft);color:var(--amber);font-size:11px;font-weight:700;
+    padding:3px 8px;border-radius:5px;flex:none;margin-top:1px}
+  .attnrow b{font-size:13.5px}
+  .attnrow p{margin:2px 0 0;font-size:12.5px;color:var(--ink2)}
+  .allclear{font-size:13px;color:var(--muted);padding:2px 0 4px}
+
+  /* room cards */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:1000px){.grid{grid-template-columns:repeat(2,1fr)}}
+  .rc{border:1px solid var(--line);border-radius:11px;padding:14px;background:var(--card)}
+  .rc.sel{border-color:var(--blue);box-shadow:0 0 0 2px var(--bluesoft)}
+  .rc.dim{background:#fbfcfd}
+  .rchead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+  .rcname{font-weight:700;font-size:15px}
+  .rcslug{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .st{font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;white-space:nowrap}
+  .st.rec{background:var(--greensoft);color:var(--green)}
+  .st.off{background:var(--redsoft);color:var(--red)}
+  .st.ready{background:var(--greysoft);color:var(--ink2)}
+  .rcstate{margin:10px 0 2px;font-size:13.5px;font-weight:600}
+  .rchint{font-size:12px;color:var(--muted)}
+  .hr{height:1px;background:var(--line);margin:11px 0}
+
+  .lane{display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13px}
+  .lane .ldot{width:8px;height:8px;border-radius:50%;background:#cfd9e3;flex:none}
+  .lane.on .ldot{background:var(--green)}
+  .lane .lname{font-weight:600;width:74px;flex:none}
+  .lane .lval{color:var(--ink2);flex:1;font-size:12.5px}
+  .sw{width:36px;height:20px;border-radius:20px;background:#d7dfe8;position:relative;flex:none}
+  .sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .sw.on{background:var(--green)}
+  .sw.on i{left:18px}
+
+  .vit{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;padding:3.5px 0}
+  .vit .vk{color:var(--ink2)}
+  .vchip{font-size:11.5px;font-weight:700;padding:2px 7px;border-radius:5px}
+  .vchip.ok{background:var(--greensoft);color:var(--green)}
+  .vchip.warn{background:var(--ambersoft);color:var(--amber)}
+  .vchip.bad{background:var(--redsoft);color:var(--red)}
+  .vchip.na{background:var(--greysoft);color:var(--grey)}
+  .capt{font-size:11.5px;color:var(--muted);margin-top:7px}
+
+  /* level meter */
+  .meter{display:flex;align-items:center;gap:8px;padding:4px 0}
+  .mlabel{font-size:12px;color:var(--ink2);width:74px;flex:none}
+  .bars{display:flex;gap:2px;align-items:flex-end;height:18px;flex:1}
+  .bars i{width:4px;background:#dbe3ec;border-radius:1px;display:block}
+  .bars.live i{background:var(--green)}
+  .bars.quiet i{background:#dbe3ec}
+  .bars.dead i{background:#e9edf2;height:2px !important}
+  .mnum{font-size:11px;color:var(--muted);width:44px;text-align:right;flex:none}
+
+  .btns{display:flex;gap:7px;margin-top:11px}
+  .b{flex:1;border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 0;
+    font-size:12.5px;font-weight:600;color:var(--ink);text-align:center}
+  .b.mut{color:#b7c2cd}
+  .b.pri{border-color:var(--blue);color:var(--blue);background:var(--bluesoft)}
+  .b.warn{border-color:#f0c98a;color:var(--amber);background:var(--ambersoft)}
+
+  /* day summary */
+  .tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px;
+    border:1px solid var(--line);border-radius:11px;padding:15px}
+  .tile{background:#fafcfe;border-radius:9px;padding:12px}
+  .tile b{display:block;font-size:22px;letter-spacing:-.02em}
+  .tile span{font-size:11.5px;color:var(--muted)}
+  .tile.alert b{color:var(--amber)}
+
+  /* standalone panels */
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+    box-shadow:0 1px 2px rgba(16,40,64,.05)}
+  .panel h5{margin:0 0 3px;font-size:15px}
+  .panel .psub{font-size:12.5px;color:var(--muted);margin:0 0 14px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:900px){.two{grid-template-columns:1fr}.tiles{grid-template-columns:repeat(2,1fr)}}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-size:10.5px;letter-spacing:.09em;color:var(--muted);
+    font-weight:700;padding:0 8px 7px 0;border-bottom:1px solid var(--line)}
+  td{padding:9px 8px 9px 0;border-bottom:1px solid #f0f4f7;vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  .who{font-weight:600}
+  .rolechip{font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px}
+  .rolechip.staff{background:var(--bluesoft);color:var(--blue)}
+  .rolechip.pt{background:var(--greensoft);color:var(--green)}
+  .rolechip.one{background:var(--greysoft);color:var(--ink2)}
+  .rolechip.q{background:var(--ambersoft);color:var(--amber)}
+  .wave{display:flex;gap:1.5px;align-items:center;height:22px}
+  .wave i{width:2.5px;background:#b9c8d6;border-radius:1px}
+  .empty{border:1px dashed #d5dee7;border-radius:9px;padding:18px;text-align:center;
+    color:var(--muted);font-size:13px;background:#fbfcfe}
+  .note{background:#fbfcfe;border-left:3px solid var(--blue);padding:9px 12px;border-radius:0 7px 7px 0;
+    font-size:12.5px;color:var(--ink2);margin-top:12px}
+  .kbd{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef2f6;
+    padding:1px 5px;border-radius:4px;color:var(--ink2)}
+</style>
+
+<div class="wrap">
+
+<h1>Bench — proposed screens</h1>
+<p class="sub">Mockups for the six changes in the monitoring surface document, version 1.2.
+Purple marks something new, red marks something removed, amber marks a fix to something that is
+already there. Every number shown is real, taken from the two clinic rooms between 12:26 and
+13:00 on 24 August.</p>
+
+<!-- ===================== 1. THE ROOM CARD ===================== -->
+<section>
+  <h2>1 · The room card<span class="tag fix">fixes</span><span class="tag new">level bars</span></h2>
+  <p class="why">The doctor clock is gone, and with it the two false <em>act now</em> rows that were
+  on your screen at 13:42. Both microphones now have a level bar, so you can see somebody speaking.
+  The microphone vital gains a size reading beside the age reading, so a microphone that is
+  recording near-silence at full length can no longer read green.</p>
+
+  <div class="app">
+    <div class="nav">
+      <div class="brand">Even <em>ETA</em><span>ADMIN</span></div>
+      <div class="navsec">OPERATE</div>
+      <div class="navitem"><span class="dot"></span>Dashboard</div>
+      <div class="navitem"><span class="dot"></span>Clinicians</div>
+      <div class="navitem"><span class="dot"></span>Encounters</div>
+      <div class="navsec">OBSERVE</div>
+      <div class="navitem"><span class="dot"></span>LLM traces</div>
+      <div class="navitem"><span class="dot"></span>Sends</div>
+      <div class="navitem"><span class="dot"></span>Voices</div>
+      <div class="navitem"><span class="dot"></span>STT Lab</div>
+      <div class="navitem on"><span class="dot"></span>Bench</div>
+      <div class="navsec">CONFIGURE</div>
+      <div class="navitem"><span class="dot"></span>Admins</div>
+      <div class="navitem"><span class="dot"></span>System map</div>
+      <div class="navitem"><span class="dot"></span>Settings</div>
+    </div>
+
+    <div class="main">
+      <div class="ptitle">
+        <h3>Bench — room recording sessions</h3>
+        <span class="awake">screen awake</span>
+      </div>
+
+      <div class="rowhead">
+        <div>
+          <span class="eyebrow">LIVE MONITOR · 2026-08-24 IST</span>
+          <h4>Rooms, right now</h4>
+        </div>
+        <span class="upd">updated 13:42:10 ⟳</span>
+      </div>
+
+      <div class="stopall">
+        <div>
+          <b>Stop all processing</b>
+          <p>Turns Transcript and Visits off in every room. Recording carries on and no audio is
+          lost. Use this first if something looks wrong.</p>
+        </div>
+        <button class="btn-red">Stop all processing</button>
+      </div>
+
+      <div class="attn">
+        <span class="eyebrow">NEEDS YOUR ATTENTION</span>
+        <div class="attnrow">
+          <span class="pill-act">act now</span>
+          <div>
+            <b>Cardiology OPD — 1h 44m of audio cannot be turned into words</b>
+            <p>Transcript is off for this room, so nothing recorded today has been queued. The
+            audio is safe. Turn Transcript on, or run a pass by hand.</p>
+          </div>
+        </div>
+        <div class="attnrow">
+          <span class="pill-watch">watch</span>
+          <div>
+            <b>OPD 5 · Dr. Salanki — one session ended 15 minutes after its last audio</b>
+            <p>Session <span class="kbd">bs_f46u4jxw</span>. The recording stopped at 11:35 and the
+            row says 11:50. Nothing is lost; the end time is wrong.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid">
+
+        <!-- Cardiology -->
+        <div class="rc sel">
+          <div class="rchead">
+            <div><div class="rcname">Cardiology OPD</div><div class="rcslug">cardiology-opd-gh4a</div></div>
+            <span class="st rec">recording</span>
+          </div>
+          <div class="rcstate">Recording · 1h 44m</div>
+          <div class="rchint">Dr Salanki heard 12 seconds ago</div>
+
+          <div class="hr"></div>
+          <div class="lane on"><span class="ldot"></span><span class="lname">Tape</span>
+            <span class="lval">Recording · 20 pieces</span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Transcript</span>
+            <span class="lval">Off · 1h 44m waiting</span><span class="sw"><i></i></span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Visits</span>
+            <span class="lval">Off</span><span class="sw"><i></i></span></div>
+
+          <div class="hr"></div>
+          <div class="meter">
+            <span class="mlabel">Room mic</span>
+            <span class="bars live" data-live="1"></span>
+            <span class="mnum">−18 dB</span>
+          </div>
+          <div class="meter">
+            <span class="mlabel">Spare mic</span>
+            <span class="bars live" data-live="1" data-scale=".8"></span>
+            <span class="mnum">−21 dB</span>
+          </div>
+          <div class="vit"><span class="vk">Newest piece</span><span class="vchip ok">4m 15s</span></div>
+          <div class="vit"><span class="vk">Piece size</span><span class="vchip ok">8.3 MB · normal here</span></div>
+          <div class="vit"><span class="vk">Marks</span><span class="vchip na">1</span></div>
+          <div class="capt">Both microphones healthy. Size is judged against this room's own
+          recent pieces, not a fixed number.</div>
+
+          <div class="btns"><span class="b mut">start</span><span class="b">pause</span>
+            <span class="b mut">resume</span><span class="b">stop</span></div>
+        </div>
+
+        <!-- OPD 5 -->
+        <div class="rc">
+          <div class="rchead">
+            <div><div class="rcname">OPD 5 · Dr. Salanki</div><div class="rcslug">opd-5-dr-salanki-wxmp</div></div>
+            <span class="st rec">recording</span>
+          </div>
+          <div class="rcstate">Recording · 1h 47m</div>
+          <div class="rchint">no voice recognised yet — nobody in this room is enrolled</div>
+
+          <div class="hr"></div>
+          <div class="lane on"><span class="ldot"></span><span class="lname">Tape</span>
+            <span class="lval">Recording · 21 pieces</span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Transcript</span>
+            <span class="lval">Off · 1h 47m waiting</span><span class="sw"><i></i></span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Visits</span>
+            <span class="lval">Off</span><span class="sw"><i></i></span></div>
+
+          <div class="hr"></div>
+          <div class="meter">
+            <span class="mlabel">Room mic</span>
+            <span class="bars live" data-live="1" data-scale=".9"></span>
+            <span class="mnum">−16 dB</span>
+          </div>
+          <div class="meter">
+            <span class="mlabel">Spare mic</span>
+            <span class="bars live" data-live="1" data-scale=".75"></span>
+            <span class="mnum">−20 dB</span>
+          </div>
+          <div class="vit"><span class="vk">Newest piece</span><span class="vchip ok">4m 44s</span></div>
+          <div class="vit"><span class="vk">Piece size</span><span class="vchip ok">8.4 MB · normal here</span></div>
+          <div class="vit"><span class="vk">Marks</span><span class="vchip na">1</span></div>
+          <div class="capt">This room raised “main mic lost” at 12:05. Full-size pieces kept
+          arriving, so the room now shows recovered instead of staying stuck on the spare.</div>
+
+          <div class="btns"><span class="b mut">start</span><span class="b">pause</span>
+            <span class="b mut">resume</span><span class="b">stop</span></div>
+        </div>
+
+        <!-- Home Office, dead spare -->
+        <div class="rc">
+          <div class="rchead">
+            <div><div class="rcname">Home Office</div><div class="rcslug">home-office-w8fb</div></div>
+            <span class="st ready">ready</span>
+          </div>
+          <div class="rcstate">Ready</div>
+          <div class="rchint">page open, not recording</div>
+
+          <div class="hr"></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Tape</span>
+            <span class="lval">Not recording</span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Transcript</span>
+            <span class="lval">Off</span><span class="sw"><i></i></span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Visits</span>
+            <span class="lval">Off</span><span class="sw"><i></i></span></div>
+
+          <div class="hr"></div>
+          <div class="meter">
+            <span class="mlabel">Room mic</span>
+            <span class="bars quiet" data-live="0"></span>
+            <span class="mnum">quiet</span>
+          </div>
+          <div class="vit"><span class="vk">Newest piece</span><span class="vchip na">no tape yet</span></div>
+          <div class="vit"><span class="vk">Piece size</span><span class="vchip na">no tape yet</span></div>
+          <div class="vit"><span class="vk">Marks</span><span class="vchip na">3</span></div>
+          <div class="capt">One microphone on this rig, and that is normal — most rooms have one.
+          No spare lane, no grey placeholder, no amber vital. A room with one microphone is not a
+          degraded room, and the page must stop implying it is.</div>
+
+          <div class="btns"><span class="b pri">start</span><span class="b mut">pause</span>
+            <span class="b mut">resume</span><span class="b mut">stop</span></div>
+        </div>
+
+        <!-- finished for today -->
+        <div class="rc dim">
+          <div class="rchead">
+            <div><div class="rcname">OPD 7</div><div class="rcslug">opd-7-y74w</div></div>
+            <span class="st ready">finished</span>
+          </div>
+          <div class="rcstate">Finished for today · 4h 21m recorded</div>
+          <div class="rchint">press start to record again</div>
+
+          <div class="hr"></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Tape</span>
+            <span class="lval">Ended 16:16 · 53 pieces, all verified</span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Transcript</span>
+            <span class="lval">Off · 4h 21m waiting</span><span class="sw"><i></i></span></div>
+          <div class="lane"><span class="ldot"></span><span class="lname">Visits</span>
+            <span class="lval">Off</span><span class="sw"><i></i></span></div>
+
+          <div class="hr"></div>
+          <div class="vit"><span class="vk">Room mic</span><span class="vchip ok">53 pieces · all full size</span></div>
+          <div class="vit"><span class="vk">Spare mic</span><span class="vchip warn">stopped at 15:15 · 40 pieces</span></div>
+          <div class="vit"><span class="vk">Marks</span><span class="vchip na">1</span></div>
+          <div class="capt">Today this same room said <b>“Kiosk dropped 9m ago — it may come back
+          on its own”</b>, in amber, and told the operator to reopen a page that was already open.
+          A day that was ended on purpose is not a fault.</div>
+
+          <div class="btns"><span class="b pri">start</span><span class="b mut">pause</span>
+            <span class="b mut">resume</span><span class="b mut">stop</span></div>
+        </div>
+      </div>
+
+      <!-- day summary -->
+      <div class="tiles">
+        <div class="tile"><b>3h 31m</b><span>audio recorded</span></div>
+        <div class="tile"><b>0 m</b><span>turned into words</span></div>
+        <div class="tile alert"><b>3h 31m</b><span>cannot be processed yet</span></div>
+        <div class="tile"><b>0</b><span>gave up</span></div>
+        <div class="tile"><b>0</b><span>visits built</span></div>
+      </div>
+      <div class="note">The third tile is new. Before this, the page counted pieces and never said
+      how much time could not be turned into words. This morning that number would have been three
+      and a half hours and nobody could see it.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 2. STRANDED ===================== -->
+<section>
+  <h2>2 · Why audio is stranded<span class="tag new">new</span></h2>
+  <p class="why">Opening the third tile. Four different reasons audio cannot be turned into words,
+  and they need different actions — one is a switch, one is a button, one is a bug, and one cannot
+  be recovered at all.</p>
+
+  <div class="panel">
+    <h5>3h 31m cannot be turned into words</h5>
+    <p class="psub">24 August, all rooms</p>
+    <table>
+      <tr><th>Reason</th><th>How much</th><th>Where</th><th>What fixes it</th></tr>
+      <tr>
+        <td><b>Transcript is off</b></td><td>3h 31m</td><td>Cardiology OPD, OPD 5</td>
+        <td>Turn the switch on. Tonight's test says whether the switch alone picks these up.</td>
+      </tr>
+      <tr>
+        <td><b>Never queued</b></td><td>6h 00m</td><td>Home Office · <span class="kbd">bs_g3dwud4p</span></td>
+        <td>24 finished windows. Run a pass by hand — each one is a paid call.</td>
+      </tr>
+      <tr>
+        <td><b>No day record</b></td><td>0m</td><td>—</td>
+        <td>None today. Cleared at 12:28 by a consult mark.</td>
+      </tr>
+      <tr>
+        <td><b>Slot started late</b></td><td>15m</td><td>Cardiology OPD</td>
+        <td>Cannot be recovered. Recording began 3 seconds after the quarter-hour and the whole
+        slot was lost.</td>
+      </tr>
+    </table>
+    <div class="note">The last row is the only one that is genuinely gone. The other three are
+    waiting, and saying so plainly is the point — the page used to call all of them “waiting”,
+    including the ones that could never be processed at all.</div>
+  </div>
+</section>
+
+<!-- ===================== 3. LISTEN ===================== -->
+<section>
+  <h2>3 · Listening to a room<span class="tag new">new</span></h2>
+  <p class="why">Left: the control at rest. Right: while listening. No audio is stored and no
+  record is kept of who listened — your decision, written into the document as D3.</p>
+
+  <div class="two">
+    <div class="panel">
+      <h5>Cardiology OPD</h5>
+      <p class="psub">recording · 1h 44m</p>
+      <div class="meter"><span class="mlabel">Room mic</span>
+        <span class="bars live" data-live="1"></span><span class="mnum">−18 dB</span></div>
+      <div class="btns" style="margin-top:14px">
+        <span class="b pri" style="flex:0 0 auto;padding:8px 18px">▶ Listen</span>
+        <span style="flex:1"></span>
+      </div>
+      <div class="note">Listening does not touch the recording. The archive is written the same way
+      whether anyone is listening or not.</div>
+    </div>
+
+    <div class="panel" style="border-color:#bcd3fb;box-shadow:0 0 0 2px var(--bluesoft)">
+      <h5>Cardiology OPD <span class="tag new" style="margin-left:4px">listening</span></h5>
+      <p class="psub">live · 1.4 seconds behind</p>
+      <div class="meter"><span class="mlabel">Room mic</span>
+        <span class="bars live" data-live="1" data-scale="1.15"></span><span class="mnum">−14 dB</span></div>
+      <div class="meter"><span class="mlabel">Spare mic</span>
+        <span class="bars live" data-live="1" data-scale=".8"></span><span class="mnum">−19 dB</span></div>
+      <div class="btns" style="margin-top:14px">
+        <span class="b warn" style="flex:0 0 auto;padding:8px 18px">■ Stop listening</span>
+        <span class="b" style="flex:0 0 auto;padding:8px 14px">Room mic</span>
+        <span class="b mut" style="flex:0 0 auto;padding:8px 14px">Spare</span>
+        <span style="flex:1"></span>
+      </div>
+      <div class="note">Delay is shown because it is real and it varies. A number that moves is
+      trustworthy; a claim of “live” is not.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 4. VOICE SERVICE ===================== -->
+<section>
+  <h2>4 · What the voice service is doing<span class="tag new">new</span></h2>
+  <p class="why">Left: today, before any room voices exist. Right: once room diarization is
+  running. Every number on the left is already stored and displayed nowhere — particularly the
+  timing split, which is the only thing that tells you whether a slow job was a slow network or a
+  slow model.</p>
+
+  <div class="two">
+    <div class="panel">
+      <h5>Voice service</h5>
+      <p class="psub">the Mac Mini · checked 13:42:04</p>
+      <table>
+        <tr><td>Reachable</td><td style="text-align:right"><span class="vchip ok">yes · 253 ms</span></td></tr>
+        <tr><td>Models loaded</td><td style="text-align:right">speaker split, voice signature</td></tr>
+        <tr><td>Working on</td><td style="text-align:right"><span class="vchip na">nothing</span></td></tr>
+        <tr><td>Queue</td><td style="text-align:right">empty</td></tr>
+        <tr><td>Time budget</td><td style="text-align:right">5m · <span style="color:var(--amber)">upper bound, not measured</span></td></tr>
+        <tr><td>Voices it can recognise</td><td style="text-align:right">2 · last added 31 May</td></tr>
+      </table>
+      <div class="empty" style="margin-top:14px">No room voices yet.<br>
+        <span style="font-size:12px">Diarization has never run on room audio. This panel stays
+        empty until it does — it is not a fault.</span></div>
+    </div>
+
+    <div class="panel">
+      <h5>Voice service <span class="tag new" style="margin-left:4px">after</span></h5>
+      <p class="psub">the Mac Mini · checked 13:42:04</p>
+      <table>
+        <tr><td>Working on</td><td style="text-align:right"><span class="vchip warn">Cardiology 13:15–13:30</span></td></tr>
+        <tr><td>Queue</td><td style="text-align:right">2 windows waiting</td></tr>
+      </table>
+      <p class="psub" style="margin:14px 0 6px">Last four jobs</p>
+      <table>
+        <tr><th>Window</th><th>Waiting</th><th>Moving</th><th>Model</th><th>Voices</th></tr>
+        <tr><td>Cardiology 13:00</td><td>28.5s</td><td>4.1s</td><td>41.9s</td><td>3</td></tr>
+        <tr><td>OPD 5 13:00</td><td>0.4s</td><td>3.8s</td><td>42.6s</td><td>4</td></tr>
+        <tr><td>Cardiology 12:45</td><td>0.2s</td><td>4.0s</td><td>43.1s</td><td>3</td></tr>
+        <tr><td>OPD 5 12:45</td><td>0.3s</td><td>3.9s</td><td>41.4s</td><td>2</td></tr>
+      </table>
+      <div class="note">Waiting is shown apart from working on purpose. The first row waited 28
+      seconds for 42 seconds of work. Added together it would look as though the model had slowed
+      down.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 5. NAMING ===================== -->
+<section>
+  <h2>5 · Naming a voice<span class="tag new">new</span></h2>
+  <p class="why">A person listens, then names. This is how the first room voiceprints get made, and
+  it replaces sitting doctors down to record sentences. The reviewer must hear the voice before
+  naming it — a voice with two people merged into it will poison every later match if it is named
+  blind.</p>
+
+  <div class="panel">
+    <h5>Cardiology OPD · 24 August</h5>
+    <p class="psub">four voices found across seven windows</p>
+    <table>
+      <tr><th>Voice</th><th>Spoke for</th><th>Windows</th><th>Sample</th><th>Agreement</th><th></th></tr>
+      <tr>
+        <td class="who">Voice A</td><td>1h 12m</td><td>7 of 7</td>
+        <td><span class="wave" data-wave="1"></span></td>
+        <td><span class="vchip ok">0.91</span></td>
+        <td style="text-align:right"><span class="b pri" style="display:inline-block;padding:5px 12px">Name this voice</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice B</td><td>21m</td><td>4 of 7</td>
+        <td><span class="wave" data-wave="1"></span></td>
+        <td><span class="vchip ok">0.88</span></td>
+        <td style="text-align:right"><span class="b" style="display:inline-block;padding:5px 12px">Name this voice</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice C</td><td>9m</td><td>2 of 7</td>
+        <td><span class="wave" data-wave="1"></span></td>
+        <td><span class="vchip warn">0.71</span></td>
+        <td style="text-align:right"><span class="b" style="display:inline-block;padding:5px 12px">Name this voice</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice D</td><td>3m</td><td>1 of 7</td>
+        <td><span class="wave" data-wave="1"></span></td>
+        <td><span class="vchip bad">0.52 · may be two people</span></td>
+        <td style="text-align:right"><span class="b mut" style="display:inline-block;padding:5px 12px">Do not name</span></td>
+      </tr>
+    </table>
+    <div class="note">Agreement is how well the pieces of a voice match each other. A low number
+    means the voice is probably two people put together, and naming it would put one person's
+    speech into another person's voiceprint. Voice D is blocked for that reason.</div>
+  </div>
+</section>
+
+<!-- ===================== 6. PATIENT SET ===================== -->
+<section>
+  <h2>6 · A patient's set of voices<span class="tag new">new</span></h2>
+  <p class="why">Every voice around a consultation is kept, and nobody decides which one is the
+  patient. The role column is worked out from how often each voice comes back and for how many
+  different patients — nothing is asserted. The row at the bottom is the useful one: a voice
+  turning up for eleven unrelated patients is not family.</p>
+
+  <div class="panel">
+    <h5>Lakshmi R · 4 visits</h5>
+    <p class="psub">first seen 2 May 2026 · last seen 24 August 2026</p>
+    <table>
+      <tr><th>Voice</th><th>Visits</th><th>Other patients</th><th>Share of talk</th><th>Reading</th><th>Confidence</th></tr>
+      <tr>
+        <td class="who">Voice 1</td><td>4 of 4</td><td>0</td><td>38%</td>
+        <td><span class="rolechip pt">the patient, or a constant carer</span></td>
+        <td><span class="vchip ok">confirmed ×3</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice 2</td><td>3 of 4</td><td>0</td><td>29%</td>
+        <td><span class="rolechip pt">constant carer</span></td>
+        <td><span class="vchip ok">confirmed ×2</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice 3</td><td>1 of 4</td><td>0</td><td>11%</td>
+        <td><span class="rolechip one">came once</span></td>
+        <td><span class="vchip warn">provisional</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice 4</td><td>1 of 4</td><td>0</td><td>6%</td>
+        <td><span class="rolechip one">came once</span></td>
+        <td><span class="vchip warn">provisional</span></td>
+      </tr>
+      <tr>
+        <td class="who">Voice 5</td><td>2 of 4</td><td><b>11</b></td><td>16%</td>
+        <td><span class="rolechip staff">staff — appears for 11 other patients</span></td>
+        <td><span class="vchip na">move to naming</span></td>
+      </tr>
+    </table>
+    <div class="note">Voice 5 was found without anyone reviewing anything. A voice that appears
+    across unrelated patients is a nurse, an attendant, a translator, or the person who brings the
+    file in. It leaves this set and goes to the naming screen.</div>
+    <div class="note" style="border-left-color:var(--amber)">Nothing here identifies anyone until a
+    voice has been confirmed on two separate visits. A first link is a claim, not a fact.</div>
+  </div>
+</section>
+
+<p class="sub" style="margin-top:44px">Six screens, matching version 1.2 of the monitoring surface
+document. Build order is items 1 and 2 first, then the voice-service panel, batch diarization, the
+naming screen, live identification, listening, and the Pulse feed.</p>
+
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll('.bars').forEach(function(el){
+    var live = el.dataset.live === '1';
+    var scale = parseFloat(el.dataset.scale || '1');
+    var n = 26;
+    for (var i=0;i<n;i++){
+      var b = document.createElement('i');
+      var h;
+      if (!live) { h = el.classList.contains('dead') ? 2 : 2 + Math.random()*2; }
+      else {
+        var env = Math.sin(i/n*Math.PI*2.1) * 0.5 + 0.5;
+        h = (3 + env*13*scale + Math.random()*4*scale);
+      }
+      b.style.height = Math.max(2, Math.min(18, h)) + 'px';
+      el.appendChild(b);
+    }
+    if (live) {
+      setInterval(function(){
+        el.querySelectorAll('i').forEach(function(b){
+          var env = Math.random();
+          var h = 3 + env*13*scale + Math.random()*3*scale;
+          b.style.height = Math.max(2, Math.min(18, h)) + 'px';
+        });
+      }, 420);
+    }
+  });
+  document.querySelectorAll('.wave').forEach(function(el){
+    for (var i=0;i<38;i++){
+      var b=document.createElement('i');
+      b.style.height = (3 + Math.abs(Math.sin(i/2.3))*14 + Math.random()*4) + 'px';
+      el.appendChild(b);
+    }
+  });
+})();
+</script>
