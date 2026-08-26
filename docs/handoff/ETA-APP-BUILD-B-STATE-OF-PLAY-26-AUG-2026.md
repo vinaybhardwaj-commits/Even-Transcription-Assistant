@@ -4,10 +4,10 @@
 **Audience:** engineering, product, operations and the next delivery team
 **Repository:** `/Users/vinaybhardwaj/Documents/EvenScribe`
 **Branch:** `feat/room-recorder`
-**Committed source base:** `2e8beb6c`
+**Committed source base:** `c1d72b9`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** canonical encrypted-index payload codec accepted; encrypted index persistence next
+**Current stage:** paired encrypted tape/index persistence accepted; key lifecycle remains gated
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All
@@ -95,6 +95,20 @@ fingerprint is `a8d4498ead869d88f5c08c441d43f36a90008592dcdf1ddfd931b9a687aa5999
 `d439ef16d48dde06e96a2bcc9e31e157065f91204d75474306788535e0dd9ecc`. Independent follow-up review
 returned `PASS` with no blocking or material finding. The slice is accepted. Encrypted index file
 persistence and exact recovery adoption are the next blocker; Secure Enclave and capture remain gated.
+
+**Encrypted-index persistence acceptance, 26 August 2026:** V ratified the paired tape/index
+contract and authorized implementation from accepted source base `c1d72b9`. The binding kickoff is
+`ETA-APP-BUILD-B-ARCHIVE-INDEX-PERSISTENCE-P1-KICKOFF-26-AUG-2026.md`. It requires one public paired
+owner, atomic tape-then-index nonblocking locks, authenticated cross-validation before repair,
+tape-first paired-tail repair, exact recovery-epoch adoption, tape-before-index durability, one shared
+poison state and caller-supplied root key/context/URLs. The focused 28-test gate passes; the complete
+177-test suite passes normally and under TSAN; matching `DUR-02` through `DUR-05`, release, format,
+diff and dependency gates pass. Source fingerprint is
+`d4229bc91aba1ab678ab722a44961c1d7bc8cd418e4ba97c5c267c51c86ac63d`; release SHA-256 is
+`8f2f7bf4967aad0c745085f9ab3df5f4aefc3d197611db8775dde9cfd0583e83`. Independent final review
+returned `PASS` with no blocking or material issue after descriptor ownership, non-mutating creation,
+recovery-epoch and atomic rollback defects were repaired. The slice is accepted. Production names,
+Secure Enclave, capture integration and encrypted patient recording remain gated.
 
 ## 1. Executive status
 

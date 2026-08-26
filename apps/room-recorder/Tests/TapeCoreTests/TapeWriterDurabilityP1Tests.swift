@@ -298,6 +298,7 @@ private let durP1FingerprintSourcePaths = [
   "Package.swift",
   "Sources/TapeCore/ArchiveCrypto.swift",
   "Sources/TapeCore/ArchiveEnvelope.swift",
+  "Sources/TapeCore/ArchiveIndexPersistence.swift",
   "Sources/TapeCore/ArchiveIndexPayload.swift",
   "Sources/TapeCore/ArchivePersistence.swift",
   "Sources/TapeCore/TapeFormat.swift",

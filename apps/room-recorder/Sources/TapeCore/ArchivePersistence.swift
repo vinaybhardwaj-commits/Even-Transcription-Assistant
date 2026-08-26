@@ -70,7 +70,7 @@ struct ArchiveTapePersistenceHooks {
   var synchronizeDirectory: (URL) throws -> Void = archiveSynchronizeDirectory
 }
 
-public final class ArchiveTapeStore: @unchecked Sendable {
+final class ArchiveTapeStore: @unchecked Sendable {
   private let lock = NSLock()
   private let url: URL
   private let contextHash: Data
@@ -115,7 +115,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     }
   }
 
-  public static func inspect(
+  static func inspect(
     url: URL,
     rootKey: Data,
     context: ArchiveContext
@@ -146,7 +146,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     )
   }
 
-  public static func openRecoveringForAppend(
+  static func openRecoveringForAppend(
     url: URL,
     rootKey: Data,
     context: ArchiveContext,
@@ -247,7 +247,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     return store
   }
 
-  public var scanResult: ArchiveTapeScanResult {
+  var scanResult: ArchiveTapeScanResult {
     lock.withLock {
       ArchiveTapeScanResult(
         records: records,
@@ -257,7 +257,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     }
   }
 
-  public var unindexedRecords: [ArchiveTapeRecordMetadata] {
+  var unindexedRecords: [ArchiveTapeRecordMetadata] {
     lock.withLock { Array(records.dropFirst(indexedRecordCountAtOpen)) }
   }
 
@@ -265,7 +265,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     lock.withLock { sealer.sealedRecordCount }
   }
 
-  public func appendPCM(_ plaintext: Data) throws -> ArchiveTapeRecordMetadata {
+  func appendPCM(_ plaintext: Data) throws -> ArchiveTapeRecordMetadata {
     try lock.withLock {
       guard let fileDescriptor else { throw ArchiveTapePersistenceError.closed }
       guard !poisoned else { throw ArchiveTapePersistenceError.requiresAuthenticatedReopen }
@@ -330,7 +330,7 @@ public final class ArchiveTapeStore: @unchecked Sendable {
     }
   }
 
-  public func close() {
+  func close() {
     lock.withLock {
       if let fileDescriptor {
         _ = flock(fileDescriptor, LOCK_UN)
