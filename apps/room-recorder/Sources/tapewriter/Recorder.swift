@@ -15,6 +15,24 @@ public struct RecorderError: Error, LocalizedError {
   }
 }
 
+func captureFormatRejection(
+  sampleRate: Double,
+  channelCount: Int,
+  isFloat32: Bool,
+  isInterleaved: Bool
+) -> String? {
+  guard sampleRate.isFinite, sampleRate > 0, channelCount > 0 else {
+    return "input device has no active capture format"
+  }
+  guard sampleRate >= 44_100 else {
+    return "input sample rate \(sampleRate) Hz is below the 44.1 kHz durability envelope"
+  }
+  guard isFloat32, !isInterleaved else {
+    return "input device does not provide noninterleaved Float32 audio"
+  }
+  return nil
+}
+
 final class CaptureSession: @unchecked Sendable {
   private final class State: @unchecked Sendable {
     let lastCallbackNS = Atomic<UInt64>(monotonicNowNS())
@@ -32,29 +50,33 @@ final class CaptureSession: @unchecked Sendable {
   private let engine = AVAudioEngine()
   private let ring: AudioRing
   private let state: State
+  let captureGeneration: UInt64
   private var didStop = false
 
-  init(device: AudioDeviceInfo, ring: AudioRing, resumeAfterNS: UInt64? = nil) throws {
+  init(
+    device: AudioDeviceInfo,
+    ring: AudioRing,
+    captureGeneration: UInt64 = 0,
+    resumeAfterNS: UInt64? = nil
+  ) throws {
     self.ring = ring
+    self.captureGeneration = captureGeneration
     state = State(resumeAfterNS: resumeAfterNS)
     if !AudioDevices.isDefaultInput(device) { try selectDevice(device, on: engine) }
     let input = engine.inputNode
     let hardwareFormat = input.inputFormat(forBus: 0)
-    guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
-      throw RecorderError("input device has no active capture format")
-    }
-    guard hardwareFormat.sampleRate >= 44_100 else {
-      throw RecorderError(
-        "input sample rate \(hardwareFormat.sampleRate) Hz is below the 44.1 kHz durability envelope"
-      )
-    }
-    guard hardwareFormat.commonFormat == .pcmFormatFloat32, !hardwareFormat.isInterleaved else {
-      throw RecorderError("input device does not provide noninterleaved Float32 audio")
+    if let rejection = captureFormatRejection(
+      sampleRate: hardwareFormat.sampleRate,
+      channelCount: Int(hardwareFormat.channelCount),
+      isFloat32: hardwareFormat.commonFormat == .pcmFormatFloat32,
+      isInterleaved: hardwareFormat.isInterleaved
+    ) {
+      throw RecorderError(rejection)
     }
     print("Capture format: \(hardwareFormat)")
 
     input.installTap(onBus: 0, bufferSize: 8_192, format: hardwareFormat) {
-      [ring, state] buffer, when in
+      [ring, state, captureGeneration] buffer, when in
       guard let channels = buffer.floatChannelData else { return }
       let frameCount = Int(buffer.frameLength)
       let sampleRate = buffer.format.sampleRate
@@ -79,7 +101,8 @@ final class CaptureSession: @unchecked Sendable {
         monoEndNS: timing.monoEndNS,
         wallStartNS: timing.wallStartNS,
         wallEndNS: timing.wallEndNS,
-        boundaries: timing.boundaries
+        boundaries: timing.boundaries,
+        captureGeneration: captureGeneration
       )
       if accepted {
         state.timeline.didPublishFrame()
@@ -122,8 +145,8 @@ final class CaptureSession: @unchecked Sendable {
 public enum Recorder {
   public static func run(outputDirectory: URL, requestedDeviceUID: String?) throws {
     try requireMicrophonePermission()
-    let device = try AudioDevices.selected(uid: requestedDeviceUID)
-    print("Input device: \(device.name) [\(device.uid)]")
+    let validatedDevice = try AudioDevices.selected(uid: requestedDeviceUID)
+    let stableDeviceUID = validatedDevice.uid
     print("Writing: \(outputDirectory.path)")
     print("Press Ctrl-C to stop cleanly.")
 
@@ -142,28 +165,86 @@ public enum Recorder {
     }
 
     let ring = AudioRing()
-    let writer = TapeWriter(directory: outputDirectory, deviceUID: device.uid, ring: ring)
+    let writer = TapeWriter(directory: outputDirectory, deviceUID: stableDeviceUID, ring: ring)
     try writer.startAndWaitUntilReady()
     if stopping.load(ordering: .acquiring) {
       try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)
       print("Recording stopped cleanly before capture started.")
       return
     }
-    var currentDevice = device
-    var capture: CaptureSession?
+    var resolvedDevice: AudioDeviceInfo?
+    let acquisitionBoundary = (monoNS: monotonicNowNS(), wallNS: wallNowNS())
+    var retryResumeAfterNS = acquisitionBoundary.monoNS
+    let baselineDurableOffset = writer.durableCheckpointOffset
+    let readiness = try CaptureReadinessCoordinator.acquire(
+      isCancelled: { stopping.load(ordering: .acquiring) },
+      nowNS: monotonicNowNS,
+      sleepNS: { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) },
+      hasDurableGrowth: { attempt, deadlineNS in
+        writer.hasDurableGrowth(
+          after: baselineDurableOffset,
+          captureGeneration: UInt64(attempt),
+          completedByNS: deadlineNS
+        )
+      },
+      checkWriter: { try writer.throwFailure() },
+      startAttempt: { attempt in
+        let resolved = try AudioDevices.selected(uid: stableDeviceUID)
+        let session = try CaptureSession(
+          device: resolved,
+          ring: ring,
+          captureGeneration: UInt64(attempt),
+          resumeAfterNS: attempt == 1 ? nil : retryResumeAfterNS
+        )
+        resolvedDevice = resolved
+        return session
+      },
+      stopAttempt: {
+        $0.stop()
+        if let boundary = $0.lastAcceptedFrameEnd { retryResumeAfterNS = boundary.monoNS }
+      },
+      attemptDidNotGrow: { attempt, error in
+        if let error {
+          fputs(
+            "Audio acquisition cycle \(attempt) failed: \(error.localizedDescription)\n", stderr)
+        } else {
+          fputs("Audio acquisition cycle \(attempt) produced no durable growth.\n", stderr)
+        }
+      }
+    )
+    if readiness.outcome == .cancelled {
+      try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)
+      print("Recording stopped cleanly before durable capture began.")
+      return
+    }
+    if readiness.outcome == .physicalFallbackRequired {
+      try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)
+      throw RecorderError(
+        "physical_fallback_required: durable audio did not grow after two five-second acquisition retries; unplug the input USB device for at least five seconds, then reconnect it"
+      )
+    }
+    guard let readyCapture = readiness.session else {
+      try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)
+      throw RecorderError("capture readiness returned without an active session")
+    }
+    if stopping.load(ordering: .acquiring) {
+      try finalizeCapture(stopCapture: { readyCapture.stop() }, ring: ring, writer: writer)
+      print("Recording stopped cleanly before durable capture began.")
+      return
+    }
+    try writer.throwFailure()
+    guard let readyDevice = resolvedDevice else {
+      try finalizeCapture(stopCapture: { readyCapture.stop() }, ring: ring, writer: writer)
+      throw RecorderError("capture readiness returned without a resolved input device")
+    }
+    var capture: CaptureSession? = readyCapture
+    var currentDevice = readyDevice
+    print("Input device: \(readyDevice.name) [\(readyDevice.uid)]")
+    print("Recording ready after durable checkpoint growth.")
+
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
     var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
-    do {
-      capture = try CaptureSession(device: device, ring: ring)
-    } catch {
-      let boundary = (monoNS: monotonicNowNS(), wallNS: wallNowNS())
-      lossBoundary = boundary
-      retryAfterNS = boundary.monoNS + 5_000_000_000
-      fputs(
-        "Initial audio unavailable; retrying every 5 seconds: \(error.localizedDescription)\n",
-        stderr)
-    }
 
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
@@ -193,15 +274,19 @@ public enum Recorder {
       }
       if capture == nil, monotonicNowNS() >= retryAfterNS {
         do {
-          let current = try AudioDevices.selected(uid: device.uid)
+          let current = try AudioDevices.selected(uid: stableDeviceUID)
           let replacement = try CaptureSession(
-            device: current, ring: ring, resumeAfterNS: lossBoundary?.monoNS)
+            device: current,
+            ring: ring,
+            captureGeneration: readyCapture.captureGeneration,
+            resumeAfterNS: lossBoundary?.monoNS
+          )
           currentDevice = current
           capture = replacement
           lossMarkedDeviceLost = false
           retryAfterNS = UInt64.max
         } catch {
-          if !lossMarkedDeviceLost, AudioDevices.presence(uid: device.uid) == false,
+          if !lossMarkedDeviceLost, AudioDevices.presence(uid: stableDeviceUID) == false,
             let boundary = lossBoundary
           {
             try enqueue(

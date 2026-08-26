@@ -1,6 +1,6 @@
 #if ETA_DURABILITY_FAULT_PROBE
   package enum DurabilityFaultBuild {
     package static let sourceSHA256 =
-      "a63a29762bee3cd511aefea00150ccec4c98ba6941a449f0faf462bd105b89c1"
+      "b604c5bdf4f0eed14f7adc10193d3bf2b59a4954c3641d3048d6b5e7f450f4d8"
   }
 #endif

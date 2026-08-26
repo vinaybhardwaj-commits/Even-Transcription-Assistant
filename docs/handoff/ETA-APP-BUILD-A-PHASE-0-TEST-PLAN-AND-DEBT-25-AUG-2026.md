@@ -365,6 +365,16 @@ offset, and forward/backward wall jumps that leave durable and native monotonic 
 30 package tests pass normally and under Thread Sanitizer. The real-device `CAP-01`/`CAP-08` and
 callback profiling `RING-07` remain acceptance gates.
 
+Build B explicitly disposed `CAP-02` and `CAP-03` before archive work on 26 August 2026 in
+`ETA-APP-BUILD-B-PRE-ARCHIVE-CAPTURE-DISPOSITION-26-AUG-2026.md`. `CAP-02` is closed for software
+reuse without claiming unavailable 96/192 kHz hardware: accepted 44.1 kHz physical evidence, local
+48 kHz evidence, four-rate converter evidence and explicit format admission/rejection are retained,
+while every available rate must be rerun on the fixed archive candidate. `CAP-03` locks arithmetic-mean
+downmix and now has direct left-only/right-only, in-phase, opposite-polarity and clipping-bound evidence
+from a deterministic two-channel fixture through the production ingress/downmix branch. This closes the
+isolated software row without claiming physical stereo-device evidence; that remains fixed-candidate
+acceptance where suitable hardware exists.
+
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | CAP-01 | Production microphone basic capture | Record at least 10 minutes using its stable UID. | Device name/UID correct; tape advances; RMS responds to speech; no dropped blocks. | Acceptance gate |

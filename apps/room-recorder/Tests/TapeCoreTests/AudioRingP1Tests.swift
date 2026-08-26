@@ -31,6 +31,64 @@ import Testing
     #expect(ring.statistics.droppedBlocks == 0)
   }
 
+  @Test func cap03AveragesLeftAndRightWithoutClipping() {
+    let ring = AudioRing(slotCount: 4, framesPerSlot: 8)
+    var left: [Float] = [0.8, -0.8, 0, 0, 1, -1, 1, -1]
+    var right: [Float] = [0, 0, 0.6, -0.6, 1, -1, -1, 1]
+    let expected: [Float] = [0.4, -0.4, 0.3, -0.3, 1, -1, 0, 0]
+
+    let accepted = left.withUnsafeMutableBufferPointer { leftBuffer in
+      right.withUnsafeMutableBufferPointer { rightBuffer in
+        let channels = [leftBuffer.baseAddress!, rightBuffer.baseAddress!]
+        return channels.withUnsafeBufferPointer { channelPointers in
+          ring.writeAudio(
+            channels: channelPointers.baseAddress!,
+            channelCount: channelPointers.count,
+            frameCount: leftBuffer.count,
+            sampleRate: 48_000,
+            monoStartNS: 1,
+            monoEndNS: 9,
+            wallStartNS: 1_001,
+            wallEndNS: 1_009,
+            boundaries: BoundaryBatch()
+          )
+        }
+      }
+    }
+
+    #expect(accepted)
+    let items = drain(ring)
+    #expect(items.count == 1)
+    #expect(items[0].samples == expected)
+    #expect(items[0].samples.allSatisfy { abs($0) <= 1 })
+  }
+
+  @Test func cap03RejectsInvalidChannelCount() {
+    for channelCount in [0, -1] {
+      let ring = AudioRing(slotCount: 4, framesPerSlot: 1)
+      var sample: Float = 1
+
+      #expect(
+        !withUnsafeMutablePointer(to: &sample) { samplePointer in
+          var channel = samplePointer
+          return withUnsafePointer(to: &channel) { channels in
+            ring.writeAudio(
+              channels: channels,
+              channelCount: channelCount,
+              frameCount: 1,
+              sampleRate: 48_000,
+              monoStartNS: 1,
+              monoEndNS: 2,
+              wallStartNS: 1,
+              wallEndNS: 2,
+              boundaries: BoundaryBatch()
+            )
+          }
+        })
+      #expect(ring.isEmpty)
+    }
+  }
+
   @Test func ring02AggregatesDropsOnceAndRetainsRecoveryAudio() {
     let ring = AudioRing(slotCount: 4, framesPerSlot: 4)
     for clock in 1...4 {

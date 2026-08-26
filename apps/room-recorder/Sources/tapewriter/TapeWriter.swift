@@ -4,12 +4,16 @@ import Synchronization
 import TapeCore
 
 final class TapeWriter: @unchecked Sendable {
-  private static let checkpointIntervalNS: UInt64 = 1_250_000_000
   private let directory: URL
   private let deviceUID: String
   private let ring: AudioRing
   private let faultPlan: DurabilityFaultPlan?
+  private let checkpointIntervalNS: UInt64
   private let stopping = Atomic<Bool>(false)
+  private let durableOffset = Atomic<Int64>(-1)
+  private let firstDurableCaptureOffset = Atomic<Int64>(-1)
+  private let firstDurableCaptureCompletedNS = Atomic<UInt64>(0)
+  private let durableCaptureGeneration = Atomic<UInt64>(0)
   private let readySignaled = Atomic<Bool>(false)
   private let ready = DispatchSemaphore(value: 0)
   private let finished = DispatchSemaphore(value: 0)
@@ -20,12 +24,14 @@ final class TapeWriter: @unchecked Sendable {
     directory: URL,
     deviceUID: String,
     ring: AudioRing,
-    faultPlan: DurabilityFaultPlan? = nil
+    faultPlan: DurabilityFaultPlan? = nil,
+    checkpointIntervalNS: UInt64 = 1_250_000_000
   ) {
     self.directory = directory
     self.deviceUID = deviceUID
     self.ring = ring
     self.faultPlan = faultPlan
+    self.checkpointIntervalNS = checkpointIntervalNS
   }
 
   func startAndWaitUntilReady() throws {
@@ -52,6 +58,22 @@ final class TapeWriter: @unchecked Sendable {
 
   var hasFailed: Bool {
     resultLock.withLock { failure != nil }
+  }
+
+  var durableCheckpointOffset: Int64 {
+    durableOffset.load(ordering: .acquiring)
+  }
+
+  func hasDurableGrowth(
+    after baselineOffset: Int64,
+    captureGeneration: UInt64,
+    completedByNS deadlineNS: UInt64
+  ) -> Bool {
+    guard durableCaptureGeneration.load(ordering: .acquiring) == captureGeneration else {
+      return false
+    }
+    return firstDurableCaptureOffset.load(ordering: .acquiring) > baselineOffset
+      && firstDurableCaptureCompletedNS.load(ordering: .acquiring) <= deadlineNS
   }
 
   private func signalReady() {
@@ -95,6 +117,7 @@ final class TapeWriter: @unchecked Sendable {
     var lastSyncScheduleNS = monotonicNowNS()
     var latestAudioMonoNS: UInt64?
     var latestAudioWallNS: UInt64?
+    var latestCaptureGeneration: UInt64?
     var lastRecordOffset = priorOffset
     var resampler: PCMResampler?
     var needsCaptureAnchor = true
@@ -171,6 +194,14 @@ final class TapeWriter: @unchecked Sendable {
         ),
         context: .checkpoint
       )
+      durableOffset.store(bytesWritten, ordering: .releasing)
+      if let latestCaptureGeneration,
+        latestCaptureGeneration > durableCaptureGeneration.load(ordering: .acquiring)
+      {
+        firstDurableCaptureOffset.store(bytesWritten, ordering: .relaxed)
+        firstDurableCaptureCompletedNS.store(monotonicNowNS(), ordering: .relaxed)
+        durableCaptureGeneration.store(latestCaptureGeneration, ordering: .releasing)
+      }
       squaredSum = 0
       rmsSampleCount = 0
       lastSyncScheduleNS = monotonicNowNS()
@@ -228,6 +259,7 @@ final class TapeWriter: @unchecked Sendable {
       resampler = nil
       latestAudioMonoNS = nil
       latestAudioWallNS = nil
+      latestCaptureGeneration = nil
       needsCaptureAnchor = true
       lastSyncScheduleNS = monotonicNowNS()
     }
@@ -249,6 +281,7 @@ final class TapeWriter: @unchecked Sendable {
         context: .restart
       )
     }
+    durableOffset.store(bytesWritten, ordering: .releasing)
     signalReady()
 
     while !stopping.load(ordering: .acquiring) || !ring.isEmpty {
@@ -282,10 +315,11 @@ final class TapeWriter: @unchecked Sendable {
         totalInputFrames += Int64(item.frameCount)
         latestAudioMonoNS = item.monoEndNS
         latestAudioWallNS = item.wallEndNS
+        latestCaptureGeneration = item.captureGeneration == 0 ? nil : item.captureGeneration
       }
 
       let now = monotonicNowNS()
-      if rmsSampleCount > 0, now - lastSyncScheduleNS >= Self.checkpointIntervalNS,
+      if rmsSampleCount > 0, now - lastSyncScheduleNS >= checkpointIntervalNS,
         let mono = latestAudioMonoNS, let wall = latestAudioWallNS
       {
         try checkpoint(monoNS: mono, wallNS: wall)

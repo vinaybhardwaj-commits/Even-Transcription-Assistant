@@ -74,6 +74,7 @@ struct BoundaryBatch: Sendable {
 
 struct StreamItem: Sendable {
   var marker: StreamMarker = .none
+  var captureGeneration: UInt64 = 0
   var frameCount: Int = 0
   var sampleRate: Double = 0
   var monoStartNS: UInt64 = 0
@@ -126,8 +127,10 @@ final class AudioRing: @unchecked Sendable {
     monoEndNS: UInt64,
     wallStartNS: UInt64,
     wallEndNS: UInt64,
-    boundaries: BoundaryBatch
+    boundaries: BoundaryBatch,
+    captureGeneration: UInt64 = 0
   ) -> Bool {
+    guard channelCount > 0 else { return false }
     guard frameCount <= framesPerSlot else {
       noteDrop(frames: frameCount, monoStartNS: monoStartNS)
       return false
@@ -168,6 +171,7 @@ final class AudioRing: @unchecked Sendable {
       }
     }
     items[slot] = StreamItem(
+      captureGeneration: captureGeneration,
       frameCount: frameCount,
       sampleRate: sampleRate,
       monoStartNS: monoStartNS,
