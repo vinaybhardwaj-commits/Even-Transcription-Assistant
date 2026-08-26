@@ -365,4 +365,5 @@ Gate evidence:
   `38c106586dd863de0e4375eb1263b8547699c646e704403948ebd8f1a87b8d1d`.
 
 No microphone, room audio, deployment, Mini reboot, power cycle, production room or paid service was
-used by this slice. `DUR-01`, `DUR-06`, `DUR-07` and `DUR-10` remain open as listed in section 14.
+used by this slice. `DUR-07` closed in the subsequent IDX/VER P1 slice; `DUR-01`, `DUR-06` and
+`DUR-10` remain for the integrated candidate.

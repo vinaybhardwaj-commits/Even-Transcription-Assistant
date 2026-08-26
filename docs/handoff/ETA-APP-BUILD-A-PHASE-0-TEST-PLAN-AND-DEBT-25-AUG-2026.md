@@ -424,7 +424,8 @@ remain acceptance gates.
 Completed checks include short clean shutdown, fixed-candidate Home Office `kill -9`, historical
 restart tail, power pull, exclusive lock and partial final index repair. `DUR-02` through `DUR-05`
 and `DUR-08`/`DUR-09` completed on 26 August 2026 with normal, TSAN, permission and isolated APFS
-ENOSPC evidence; the remaining rows below remain debt.
+ENOSPC evidence. `DUR-07` completed on 26 August 2026 in the following IDX/VER slice; the remaining
+acceptance rows below remain debt.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
@@ -434,43 +435,45 @@ ENOSPC evidence; the remaining rows below remain debt.
 | DUR-04 | Fault during JSONL append | Terminate after a partial line. | Prior index prefix parses; partial suffix is reported/repaired; PCM is not truncated except odd-byte alignment repair. | Pre-B hardening complete 26 Aug |
 | DUR-05 | Fault after index fsync | Terminate immediately after index sync. | Index offset never exceeds surviving PCM; tail is zero or later unsynced audio only. | Pre-B hardening complete 26 Aug |
 | DUR-06 | First-run directory power loss | Power loss shortly after first output directory/files are created. | Directory and committed entries survive parent/directory sync sequence. | Acceptance gate, covered by power-pull run if timed early enough |
-| DUR-07 | Odd PCM suffix recovery | Append one torn byte and restart. | One byte removed to Int16 alignment; index invariants retained; repair reported in notes. | Pre-B hardening |
+| DUR-07 | Odd PCM suffix recovery | Append one torn byte and restart. | One byte removed to Int16 alignment; index invariants retained; repair reported in notes. | Pre-B hardening complete 26 Aug |
 | DUR-08 | Disk full/permission failure | Fill or quota a test volume; revoke write permission in another fixture. | Recorder fails loudly; no false healthy state; committed tape/index remain parseable. | Pre-B hardening complete 26 Aug |
 | DUR-09 | Sync and write error injection | Force write, `F_FULLFSYNC`, index write and `fsync` failures separately. | Writer propagates failure; process stops capture; index never advances past durable PCM. | Pre-B hardening complete 26 Aug |
 | DUR-10 | Cadence under controlled load | Run capture while applying the ratified H-04 CPU contention. | Largest uninterrupted checkpoint gap reported; any sustained departure from the candidate's approximately 1.25 s schedule is named. Hard tail remains at or below 2.5 s. A future change toward 2 s requires retained-threshold evidence or a repeat. | Acceptance gate |
 
 ### 5.7 Index format and recovery validation
 
-The four written core corruption tests passed locally and at the fixed candidate commit. The matrix
-below records remaining expansion debt.
+The four written core corruption tests passed locally and at the fixed candidate commit. `IDX-02`
+through `IDX-08` completed on 26 August 2026 with raw committed-JSONL, restart-chain and reboot-reset
+fixtures.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | IDX-01 | Rerun written suite at candidate | Run `IndexLogTests` with section 4.2 recipe or full Xcode. | Four written tests pass and output is retained. | Acceptance gate |
-| IDX-02 | Missing/empty index | Verify nonempty PCM with missing index and empty index. | Clear integrity error; never `PASS`. | Pre-B hardening |
-| IDX-03 | Shape matrix | Omit each required field; use empty UID/cause, RMS outside 0...1, negative offsets/counts. | Every malformed committed record rejected with line number. | Pre-B hardening |
-| IDX-04 | Arithmetic limits | Test Int64 max/min offsets and samples. | No trap; invalid arithmetic rejected. | Pre-B hardening |
-| IDX-05 | Offset/sample regressions | Regress offset, tape samples and input frames independently. | Rejected unless the relevant clock segment is explicitly reset as designed. | Pre-B hardening |
-| IDX-06 | Rate transition | Change `input_sample_rate` with and without a discontinuity. | Unmarked change rejected; marked change establishes a valid new segment. | Pre-B hardening |
-| IDX-07 | Restart chain | Multiple kills/restarts, including zero-tail restart and torn final line. | Every restart references the preceding durable offset; worst historical tail preserved. | Acceptance gate |
-| IDX-08 | Reboot monotonic reset | Join pre-reboot index to post-boot restart. | Restart permits monotonic reset; verifier does not fit across reboot. | Acceptance gate |
+| IDX-02 | Missing/empty index | Verify nonempty PCM with missing index and empty index. | Clear integrity error; never `PASS`. | Pre-B hardening complete 26 Aug |
+| IDX-03 | Shape matrix | Omit each required field; use empty UID/cause, RMS outside 0...1, negative offsets/counts. | Every malformed committed record rejected with line number. | Pre-B hardening complete 26 Aug |
+| IDX-04 | Arithmetic limits | Test Int64 max/min offsets and samples. | No trap; invalid arithmetic rejected. | Pre-B hardening complete 26 Aug |
+| IDX-05 | Offset/sample regressions | Regress offset, tape samples and input frames independently. | Rejected unless the relevant clock segment is explicitly reset as designed. | Pre-B hardening complete 26 Aug |
+| IDX-06 | Rate transition | Change `input_sample_rate` with and without a discontinuity. | Unmarked change rejected; marked change establishes a valid new segment. | Pre-B hardening complete 26 Aug |
+| IDX-07 | Restart chain | Multiple kills/restarts, including zero-tail restart and torn final line. | Every restart references the preceding durable offset; worst historical tail preserved. | Acceptance gate complete 26 Aug |
+| IDX-08 | Reboot monotonic reset | Join pre-reboot index to post-boot restart. | Restart permits monotonic reset; verifier does not fit across reboot. | Acceptance gate complete 26 Aug |
 
 ### 5.8 Verifier arithmetic and verdict
 
 Written tests cover drift arithmetic, segment reset, current/historical tails, odd PCM, separate
-tape/native metrics, cadence/overflow failure, arithmetic limits and the production parser. All
-nine passed locally and at the fixed candidate commit.
+tape/native metrics, cadence/overflow failure, arithmetic limits and the production parser.
+`VER-02` through `VER-08` completed on 26 August 2026, including exact threshold and rendered-report
+stability fixtures.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | VER-01 | Rerun written suite at candidate | Run `TapeVerifierTests`. | Nine written tests pass and output is retained. | Acceptance gate |
-| VER-02 | Exact 2.5 s boundary | Test just below, exactly at and just above 80,000 tail bytes. | Below/at `PASS`; above `FAIL`. | Pre-B hardening |
-| VER-03 | All-discontinuity index | Index with no ordinary post-marker checkpoint. | Latest durable marker controls tail; drift shown unavailable, not fabricated. | Pre-B hardening |
-| VER-04 | Multiple segments and reboot | Mixed restart/device/clock/format/overflow events. | Fits stay inside segments; every event rendered in source order. | Pre-B hardening |
-| VER-05 | Wall jumps/backward time | Synthetic forward and backward wall jumps. | Wall span does not masquerade as native drift; jump explicitly listed. | Pre-B hardening |
-| VER-06 | Converter accounting | Synthetic bounded backlog and final flush surplus. | Tape drift, native drift and converter difference independently correct. | Acceptance gate |
-| VER-07 | Cadence report | Check ordinary checkpoints around markers and restarts. | Largest uninterrupted checkpoint gap excludes downtime; adjacent durable-record gap exposes downtime/stalls. | Acceptance gate |
-| VER-08 | Verbatim report stability | Golden fixture for all rendered sections and verdict. | Required report fields cannot disappear unnoticed. | Pre-B hardening |
+| VER-02 | Exact 2.5 s boundary | Test just below, exactly at and just above 80,000 tail bytes. | Below/at `PASS`; above `FAIL`. | Pre-B hardening complete 26 Aug |
+| VER-03 | All-discontinuity index | Index with no ordinary post-marker checkpoint. | Latest durable marker controls tail; drift shown unavailable, not fabricated. | Pre-B hardening complete 26 Aug |
+| VER-04 | Multiple segments and reboot | Mixed restart/device/clock/format/overflow events. | Fits stay inside segments; every event rendered in source order. | Pre-B hardening complete 26 Aug |
+| VER-05 | Wall jumps/backward time | Synthetic forward and backward wall jumps. | Wall span does not masquerade as native drift; jump explicitly listed. | Pre-B hardening complete 26 Aug |
+| VER-06 | Converter accounting | Synthetic bounded backlog and final flush surplus. | Tape drift, native drift and converter difference independently correct. | Acceptance gate complete 26 Aug |
+| VER-07 | Cadence report | Check ordinary checkpoints around markers and restarts. | Largest uninterrupted checkpoint gap excludes downtime; adjacent durable-record gap exposes downtime/stalls. | Acceptance gate complete 26 Aug |
+| VER-08 | Verbatim report stability | Golden fixture for all rendered sections and verdict. | Required report fields cannot disappear unnoticed. | Pre-B hardening complete 26 Aug |
 | VER-09 | Five-minute implication | For the ratified eight-hour controlled-load H-04 native ppm `p`, calculate `p * 0.3` ms per five-minute piece. | Report states ppm and signed ms/5 min with formula. | Acceptance gate |
 
 ### 5.9 WAV export and human listening
@@ -680,8 +683,8 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | P1 complete 26 Aug | Deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing normally and under Thread Sanitizer |
 | P1 complete 26 Aug | Deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated and passing normally and under Thread Sanitizer |
 | P1 complete 26 Aug | Converter rate/flush matrix | SRC-01 through SRC-04 passing with a documented 12-sample final bound and duration-independent intermediate bound |
-| P1 complete 26 Aug | Durable writer fault and recovery matrix | DUR-02 through DUR-05 and DUR-08/09 pass normally and under Thread Sanitizer, with isolated APFS ENOSPC acceptance |
-| P1 | Index/verifier malformed-input matrix incomplete | IDX-02 through IDX-08 and VER-02 through VER-08 passing |
+| P1 complete 26 Aug | Durable writer fault and recovery matrix | DUR-02 through DUR-05, DUR-07 and DUR-08/09 pass normally and under Thread Sanitizer, with isolated APFS ENOSPC acceptance |
+| P1 complete 26 Aug | Index/verifier malformed-input matrix | IDX-02 through IDX-08 and VER-02 through VER-08 pass normally and under Thread Sanitizer |
 | P1 | WAV alias/growth/4-GiB/failure matrix incomplete | WAV-02 through WAV-05 passing |
 | P2 | CLI invalid-argument matrix incomplete | CLI-06 deterministic and non-mutating |
 | P2 | Sleep/wake behavior unmeasured | PERF-06 recorded or excluded by proven provisioning |

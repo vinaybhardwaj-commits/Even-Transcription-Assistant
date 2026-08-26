@@ -48,6 +48,170 @@ struct TapeWriterDurabilityP1Tests {
     try durP1RunCrashScenario(.dur05)
   }
 
+  @Test func dur07OddPCMSuffixProductionReopenRecovery() throws {
+    let directory = try durP1TemporaryDirectory(label: "odd-pcm")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let baseline = try durP1MakeBaseline(directory: directory)
+    try #require(baseline.pcm.count == 8_192)
+    let tornByte: UInt8 = 0xA5
+    let handle = try FileHandle(forWritingTo: baseline.pcmURL)
+    do {
+      let appendOffset = try handle.seekToEnd()
+      try #require(appendOffset == UInt64(baseline.pcm.count))
+      try handle.write(contentsOf: Data([tornByte]))
+      try handle.synchronize()
+      try handle.close()
+    } catch {
+      try? handle.close()
+      throw error
+    }
+
+    let tornPCM = try Data(contentsOf: baseline.pcmURL)
+    try #require(tornPCM.count == baseline.pcm.count + 1)
+    #expect(tornPCM.prefix(baseline.pcm.count) == baseline.pcm)
+    #expect(tornPCM.last == tornByte)
+    #expect(try Data(contentsOf: baseline.indexURL) == baseline.index)
+
+    let firstWriter = TapeWriter(directory: directory, deviceUID: durP1Device, ring: AudioRing())
+    try firstWriter.startAndWaitUntilReady()
+    try firstWriter.stopAndWait()
+
+    let firstPCM = try Data(contentsOf: baseline.pcmURL)
+    let firstIndex = try Data(contentsOf: baseline.indexURL)
+    #expect(tornPCM.count - firstPCM.count == 1)
+    #expect(firstPCM == baseline.pcm)
+    #expect(firstIndex.starts(with: baseline.index))
+    let firstRead = try IndexLog.read(url: baseline.indexURL, pcmSize: Int64(firstPCM.count))
+    let firstAddedRecords = Array(firstRead.records.dropFirst(baseline.records.count))
+    #expect(firstAddedRecords.map { $0.discontinuity } == ["restart", "stopped"])
+    let firstRestart = try #require(firstAddedRecords.first)
+    let baselineOffset = try #require(baseline.records.compactMap(\.byteOffset).last)
+    let firstSurvivingTail = Int64(firstPCM.count) - baselineOffset
+    #expect(firstRestart.previousByteOffset == baselineOffset)
+    #expect(firstRestart.byteOffset == Int64(firstPCM.count))
+    #expect(firstRestart.survivingTailBytes == firstSurvivingTail)
+    #expect(firstRead.discardedTrailingBytes == 0)
+    let firstReport = try TapeVerifier.verify(directory: directory)
+    #expect(firstReport.passed)
+    #expect(firstReport.currentTailBytes == 0)
+
+    let secondWriter = TapeWriter(directory: directory, deviceUID: durP1Device, ring: AudioRing())
+    try secondWriter.startAndWaitUntilReady()
+    try secondWriter.stopAndWait()
+
+    let secondPCM = try Data(contentsOf: baseline.pcmURL)
+    let secondIndex = try Data(contentsOf: baseline.indexURL)
+    #expect(secondPCM == firstPCM)
+    #expect(secondIndex.starts(with: firstIndex))
+    let secondRead = try IndexLog.read(url: baseline.indexURL, pcmSize: Int64(secondPCM.count))
+    let secondAddedRecords = Array(secondRead.records.dropFirst(firstRead.records.count))
+    #expect(secondAddedRecords.map { $0.discontinuity } == ["restart", "stopped"])
+    let secondRestart = try #require(secondAddedRecords.first)
+    let secondPrecedingOffset = try #require(firstRead.records.compactMap(\.byteOffset).last)
+    #expect(secondRestart.previousByteOffset == secondPrecedingOffset)
+    #expect(secondRestart.byteOffset == Int64(secondPCM.count))
+    #expect(secondRestart.survivingTailBytes == Int64(secondPCM.count) - secondPrecedingOffset)
+    #expect(secondRead.discardedTrailingBytes == 0)
+    #expect(try TapeVerifier.verify(directory: directory).passed)
+
+    print(
+      "DUR-07 appended=1 removed=\(tornPCM.count - firstPCM.count) "
+        + "pcm_prefix_unchanged=\(firstPCM == baseline.pcm) "
+        + "index_prefix_unchanged=\(firstIndex.starts(with: baseline.index)) "
+        + "restart_previous=\(firstRestart.previousByteOffset ?? -1) "
+        + "restart_tail=\(firstRestart.survivingTailBytes ?? -1) "
+        + "second_reopen_removed=\(firstPCM.count - secondPCM.count)"
+    )
+  }
+
+  @Test func idx07ProductionRestartChainRepairsOnlyTornFinalLine() throws {
+    let directory = try durP1TemporaryDirectory(label: "restart-chain")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let baseline = try durP1MakeBaseline(directory: directory)
+
+    func appendPCM(_ count: Int, byte: UInt8) throws {
+      let handle = try FileHandle(forWritingTo: baseline.pcmURL)
+      do {
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(repeating: byte, count: count))
+        try handle.synchronize()
+        try handle.close()
+      } catch {
+        try? handle.close()
+        throw error
+      }
+    }
+
+    func reopen() throws -> IndexReadResult {
+      let writer = TapeWriter(directory: directory, deviceUID: durP1Device, ring: AudioRing())
+      try writer.startAndWaitUntilReady()
+      try writer.stopAndWait()
+      let pcmSize = Int64(try Data(contentsOf: baseline.pcmURL).count)
+      return try IndexLog.read(url: baseline.indexURL, pcmSize: pcmSize)
+    }
+
+    try appendPCM(20, byte: 0x31)
+    let first = try reopen()
+    let firstRecords = Array(first.records.dropFirst(baseline.records.count))
+    #expect(firstRecords.map(\.discontinuity) == ["restart", "stopped"])
+    #expect(firstRecords.first?.previousByteOffset == 8_192)
+    #expect(firstRecords.first?.survivingTailBytes == 20)
+
+    let second = try reopen()
+    let secondRecords = Array(second.records.dropFirst(first.records.count))
+    #expect(secondRecords.map(\.discontinuity) == ["restart", "stopped"])
+    #expect(secondRecords.first?.previousByteOffset == 8_212)
+    #expect(secondRecords.first?.survivingTailBytes == 0)
+
+    try appendPCM(10, byte: 0x32)
+    let third = try reopen()
+    let thirdRecords = Array(third.records.dropFirst(second.records.count))
+    #expect(thirdRecords.map(\.discontinuity) == ["restart", "stopped"])
+    #expect(thirdRecords.first?.previousByteOffset == 8_212)
+    #expect(thirdRecords.first?.survivingTailBytes == 10)
+
+    let committedIndex = try Data(contentsOf: baseline.indexURL)
+    let tornSuffix = Data("{\"byte_offset\":8222,\"samples\"".utf8)
+    let handle = try FileHandle(forWritingTo: baseline.indexURL)
+    do {
+      try handle.seekToEnd()
+      try handle.write(contentsOf: tornSuffix)
+      try handle.synchronize()
+      try handle.close()
+    } catch {
+      try? handle.close()
+      throw error
+    }
+    let tornIndex = try Data(contentsOf: baseline.indexURL)
+
+    let inspected = try IndexLog.read(
+      url: baseline.indexURL,
+      pcmSize: 8_222,
+      repairTrailingPartial: false
+    )
+    #expect(inspected.records == third.records)
+    #expect(inspected.discardedTrailingBytes == tornSuffix.count)
+    #expect(try Data(contentsOf: baseline.indexURL) == tornIndex)
+
+    let repaired = try reopen()
+    let repairedIndex = try Data(contentsOf: baseline.indexURL)
+    #expect(repairedIndex.starts(with: committedIndex))
+    #expect(repaired.discardedTrailingBytes == 0)
+    let repairedRecords = Array(repaired.records.dropFirst(third.records.count))
+    #expect(repairedRecords.map(\.discontinuity) == ["restart", "stopped"])
+    #expect(repairedRecords.first?.previousByteOffset == 8_222)
+    #expect(repairedRecords.first?.survivingTailBytes == 0)
+    let report = try TapeVerifier.verify(directory: directory)
+    #expect(report.currentTailBytes == 0)
+    #expect(report.worstTailBytes == 20)
+    #expect(report.passed)
+
+    print(
+      "IDX-07 restart_tails=20,0,10 repaired_suffix=\(tornSuffix.count) "
+        + "worst_tail=\(report.worstTailBytes) final_tail=\(report.currentTailBytes)"
+    )
+  }
+
   @Test func dur09PCMWriteEIO() throws {
     try durP1RunEIOFixture(operation: .pcmWrite, useRecorderFinalizer: false)
   }
@@ -642,7 +806,8 @@ private func durP1CurrentSourceSHA256() throws -> String {
       )
       let range = NSRange(text.startIndex..<text.endIndex, in: text)
       guard expression.numberOfMatches(in: text, range: range) == 1 else {
-        throw DurP1TestError("durability source fingerprint carrier must contain one digest literal")
+        throw DurP1TestError(
+          "durability source fingerprint carrier must contain one digest literal")
       }
       let normalized = expression.stringByReplacingMatches(
         in: text,
