@@ -3,3 +3,9 @@ captures/
 *.wav
 *.pcm
 *.idx
+*.eak
+*.lvl
+*.webm
+*.sparseimage
+evidence/
+spool/

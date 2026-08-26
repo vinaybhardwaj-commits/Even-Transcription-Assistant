@@ -478,16 +478,21 @@ stability fixtures.
 
 ### 5.9 WAV export and human listening
 
-Completed checks: canonical format, exact payload, existing destination replacement, alias
-rejection and `afinfo` validation.
+Completed checks: canonical format, exact payload, existing destination replacement, alias rejection
+and `afinfo` validation. Build B completed `WAV-02` through `WAV-05` on 26 August 2026 with descriptor
+snapshot growth/shrink fixtures, existing/absent protected-path aliases, the exact aligned classic
+RIFF maximum in a sparse isolated APFS image, read-only and rename failures, surfaced cleanup failure
+and real payload-write ENOSPC. The configured package gate now reports 81 tests in nine suites and
+passes normally and under Thread Sanitizer. The retained evidence is in
+`ETA-APP-BUILD-B-WAV-P1-KICKOFF-26-AUG-2026.md`; `WAV-06` and `WAV-07` remain acceptance gates.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | WAV-01 | Rerun written suite at candidate | Run `WAVExporterTests`. | Three written tests pass and output is retained. | Acceptance gate |
-| WAV-02 | Hard-link and symlink aliases | Point destination to PCM through both alias types. | Rejected without changing source inode/size/content. | Pre-B hardening |
-| WAV-03 | Growing source snapshot | Export while a fixture appends PCM. | WAV header and payload both equal the initial size snapshot; no trailing undeclared audio. | Pre-B hardening |
-| WAV-04 | Near 4 GiB boundary | Sparse fixtures at legal maximum and one byte over. | Legal RIFF exports; oversized source rejected before output replacement. | Pre-B hardening |
-| WAV-05 | Destination failure | Read-only parent, no space and interrupted rename. | Existing destination preserved; temporary file cleaned where possible. | Pre-B hardening |
+| WAV-02 | Hard-link and symlink aliases | Point destination to PCM/index through direct, hard-link, symlink-parent and case aliases, including absent reserved index. | Rejected without changing source/index inode, size or content. | Pre-B hardening complete 26 Aug |
+| WAV-03 | Growing source snapshot | Export while a fixture appends PCM; separately shrink after snapshot. | WAV header and payload both equal the initial size snapshot; shrink fails without replacement. | Pre-B hardening complete 26 Aug |
+| WAV-04 | Near 4 GiB boundary | Sparse isolated-APFS fixtures at legal maximum and one byte over. | Legal RIFF exports sparsely with selected offsets exact; oversized source rejected before output replacement. | Pre-B hardening complete 26 Aug |
+| WAV-05 | Destination failure | Read-only parent, real isolated ENOSPC, interrupted rename and cleanup denial. | Existing destination preserved; cleanup succeeds or retained temporary is named with errno. | Pre-B hardening complete 26 Aug |
 | WAV-06 | Kill-point listening | Export and listen to at least 30 s spanning the kill/restart boundary. | No fabricated silence; missing interval matches measured crash/restart gap; surrounding audio intelligible. | Acceptance gate |
 | WAV-07 | Device-yank listening | Listen around loss and resume. | Tape contains only true pre-loss and post-resume samples; no zero-fill minute. | Acceptance gate |
 
@@ -685,7 +690,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | P1 complete 26 Aug | Converter rate/flush matrix | SRC-01 through SRC-04 passing with a documented 12-sample final bound and duration-independent intermediate bound |
 | P1 complete 26 Aug | Durable writer fault and recovery matrix | DUR-02 through DUR-05, DUR-07 and DUR-08/09 pass normally and under Thread Sanitizer, with isolated APFS ENOSPC acceptance |
 | P1 complete 26 Aug | Index/verifier malformed-input matrix | IDX-02 through IDX-08 and VER-02 through VER-08 pass normally and under Thread Sanitizer |
-| P1 | WAV alias/growth/4-GiB/failure matrix incomplete | WAV-02 through WAV-05 passing |
+| P1 complete 26 Aug | WAV alias/growth/4-GiB/failure matrix | WAV-02 through WAV-05 pass normally and under Thread Sanitizer, with isolated sparse-boundary and payload-write ENOSPC acceptance |
 | P2 | CLI invalid-argument matrix incomplete | CLI-06 deterministic and non-mutating |
 | P2 | Sleep/wake behavior unmeasured | PERF-06 recorded or excluded by proven provisioning |
 | P2 | Bare CLT `swift test` does not auto-wire installed macro/runtime paths | Full Xcode runs bare command, or Apple fixes CLT layout; documented scratch recipe remains available |
