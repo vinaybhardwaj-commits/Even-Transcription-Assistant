@@ -357,6 +357,14 @@ source/destination export rejection.
 Completed checks: default built-in device at 48 kHz; native blocks reached the writer; no dropped
 blocks or ordinary-run discontinuities in short local runs.
 
+Build B completed `CAP-04` through `CAP-07` on 26 August 2026. Callback timing classification now
+lives in an allocation-free, lock-free pure state component fed by AVAudioEngine's observations.
+Five focused tests prove short-dropout ordering and no zero fill, independent invalid host/sample
+time handling, sample reset/gap/overlap and host gap/overlap boundaries at the exact durable PCM
+offset, and forward/backward wall jumps that leave durable and native monotonic fits separate. All
+30 package tests pass normally and under Thread Sanitizer. The real-device `CAP-01`/`CAP-08` and
+callback profiling `RING-07` remain acceptance gates.
+
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | CAP-01 | Production microphone basic capture | Record at least 10 minutes using its stable UID. | Device name/UID correct; tape advances; RMS responds to speech; no dropped blocks. | Acceptance gate |
@@ -659,7 +667,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 |---|---|---|
 | P1 | TONOR cold boot failed once; the fixed-candidate manual process restart acquired IO without a replug | Production readiness follows durable index growth; after two failed retry cycles the accepted fallback is a five-second USB replug |
 | P1 complete 26 Aug | Deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing normally and under Thread Sanitizer |
-| P1 | No deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated or fault-injected and passing |
+| P1 complete 26 Aug | Deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated and passing normally and under Thread Sanitizer |
 | P1 | Converter rate/flush matrix incomplete | SRC-01 through SRC-04 passing with documented accounting bound |
 | P1 | Writer fault points not injected | DUR-02 through DUR-05 and DUR-08/09 produce parseable honest recovery |
 | P1 | Index/verifier malformed-input matrix incomplete | IDX-02 through IDX-08 and VER-02 through VER-08 passing |

@@ -31,12 +31,12 @@ Pass `--device <uid>` to `record` to select a non-default input. The recorder pr
 
 The tape is append-only 16 kHz mono signed Int16 little-endian PCM. `tape.idx` contains durable JSONL anchors and explicit restart, device, clock, format, timestamp, and overflow discontinuities. The verifier reports durable-tape drift and native microphone-clock drift separately because sample-rate conversion can buffer output between anchors.
 
-Deterministic tests are under `Tests/TapeCoreTests`. All 25 currently pass in five suites with Apple
-Swift 6.4 and Testing Library 2078, including the complete `RING-01` through `RING-06` Build B P1
-group under Thread Sanitizer. They cover `TapeCore` plus the archive-critical ring, converter and
-writer paths exposed through `TapeCapture`. This Command Line Tools installation requires explicit
-macro/runtime staging in an external scratch build; the exact dependency-free recipe and remaining
-test debt are recorded in the Phase 0 test plan. The harness intentionally has no external
-dependencies.
+Deterministic tests are under `Tests/TapeCoreTests`. All 30 currently pass in six suites with Apple
+Swift 6.4 and Testing Library 2078, including the complete `RING-01` through `RING-06` and `CAP-04`
+through `CAP-07` Build B P1 groups under Thread Sanitizer. They cover `TapeCore` plus the
+archive-critical ring, capture timeline, converter and writer paths exposed through `TapeCapture`.
+This Command Line Tools installation requires explicit macro/runtime staging in an external scratch
+build; the exact dependency-free recipe and remaining test debt are recorded in the Phase 0 test
+plan. The harness intentionally has no external dependencies.
 
 Do not use local smoke runs as the Phase 0 acceptance report. The one-hour kill, power-pull, device-yank, full-day drift, CPU, and disk protocols must run on the Home Office Mini with the production microphone.

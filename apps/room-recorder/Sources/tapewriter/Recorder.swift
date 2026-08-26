@@ -21,14 +21,10 @@ final class CaptureSession: @unchecked Sendable {
     let lastFrameEndNS = Atomic<UInt64>(monotonicNowNS())
     let lastFrameEndWallNS = Atomic<UInt64>(wallNowNS())
     let hasAcceptedFrame = Atomic<Bool>(false)
-    var resumeAfterNS: UInt64?
-    var expectedSampleTime: AVAudioFramePosition?
-    var previousFrameEndNS: UInt64?
-    var previousWallOffsetNS: Int64?
-    var boundaries = BoundaryBatch()
+    var timeline: CaptureTimeline
 
     init(resumeAfterNS: UInt64?) {
-      self.resumeAfterNS = resumeAfterNS
+      timeline = CaptureTimeline(resumeAfterNS: resumeAfterNS)
     }
 
   }
@@ -63,79 +59,32 @@ final class CaptureSession: @unchecked Sendable {
       let frameCount = Int(buffer.frameLength)
       let sampleRate = buffer.format.sampleRate
       let hasHostTime = when.isHostTimeValid
-      let startMono = hasHostTime ? AudioConvertHostTimeToNanos(when.hostTime) : monotonicNowNS()
-      let duration = UInt64(Double(frameCount) / sampleRate * 1_000_000_000)
-      let endMono = startMono + duration
       let observedMono = monotonicNowNS()
       let observedWall = wallNowNS()
-      let callbackLag = observedMono >= startMono ? observedMono - startMono : 0
-      let startWall = observedWall >= callbackLag ? observedWall - callbackLag : observedWall
-      let endWall = startWall + duration
-      if !hasHostTime {
-        state.boundaries.append(.invalidTimestamp, monoNS: startMono, wallNS: startWall)
-      }
-      if when.isSampleTimeValid {
-        if let expected = state.expectedSampleTime, when.sampleTime != expected {
-          let gap = state.previousFrameEndNS.map { startMono >= $0 ? startMono - $0 : 0 } ?? 0
-          state.boundaries.append(
-            .captureDiscontinuity, monoNS: startMono, wallNS: startWall, gapNS: gap)
-        }
-        state.expectedSampleTime = when.sampleTime + AVAudioFramePosition(frameCount)
-      } else {
-        state.boundaries.append(.invalidTimestamp, monoNS: startMono, wallNS: startWall)
-        state.expectedSampleTime = nil
-      }
-      if let previousEnd = state.previousFrameEndNS {
-        let hostDelta = startMono >= previousEnd ? startMono - previousEnd : previousEnd - startMono
-        if hostDelta > 2_000_000 {
-          state.boundaries.append(
-            .captureDiscontinuity,
-            monoNS: startMono,
-            wallNS: startWall,
-            gapNS: startMono >= previousEnd ? startMono - previousEnd : 0
-          )
-        }
-      }
-      let wallOffset = Int64(startWall) - Int64(startMono)
-      if let previousOffset = state.previousWallOffsetNS {
-        let offsetDelta =
-          wallOffset >= previousOffset ? wallOffset - previousOffset : previousOffset - wallOffset
-        if offsetDelta > 100_000_000 {
-          state.boundaries.append(
-            .clockJump,
-            monoNS: startMono,
-            wallNS: startWall,
-            gapNS: UInt64(offsetDelta)
-          )
-        }
-      }
-      state.previousWallOffsetNS = wallOffset
-      state.previousFrameEndNS = endMono
-      var publishedBoundaries = state.boundaries
-      if let resumeAfter = state.resumeAfterNS {
-        publishedBoundaries.append(
-          .resumed,
-          monoNS: startMono,
-          wallNS: startWall,
-          gapNS: startMono >= resumeAfter ? startMono - resumeAfter : 0
-        )
-      }
+      let timing = state.timeline.classify(
+        CaptureObservation(
+          frameCount: frameCount,
+          sampleRate: sampleRate,
+          hostStartNS: hasHostTime ? AudioConvertHostTimeToNanos(when.hostTime) : nil,
+          sampleTime: when.isSampleTimeValid ? when.sampleTime : nil,
+          observedMonoNS: observedMono,
+          observedWallNS: observedWall
+        ))
       let accepted = ring.writeAudio(
         channels: channels,
         channelCount: Int(buffer.format.channelCount),
         frameCount: frameCount,
         sampleRate: sampleRate,
-        monoStartNS: startMono,
-        monoEndNS: endMono,
-        wallStartNS: startWall,
-        wallEndNS: endWall,
-        boundaries: publishedBoundaries
+        monoStartNS: timing.monoStartNS,
+        monoEndNS: timing.monoEndNS,
+        wallStartNS: timing.wallStartNS,
+        wallEndNS: timing.wallEndNS,
+        boundaries: timing.boundaries
       )
       if accepted {
-        state.resumeAfterNS = nil
-        state.boundaries.clear()
-        state.lastFrameEndNS.store(endMono, ordering: .releasing)
-        state.lastFrameEndWallNS.store(endWall, ordering: .releasing)
+        state.timeline.didPublishFrame()
+        state.lastFrameEndNS.store(timing.monoEndNS, ordering: .releasing)
+        state.lastFrameEndWallNS.store(timing.wallEndNS, ordering: .releasing)
         state.hasAcceptedFrame.store(true, ordering: .releasing)
       }
       state.lastCallbackNS.store(observedMono, ordering: .releasing)
