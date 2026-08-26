@@ -17,6 +17,7 @@
 
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
+import { parseMicLevels, type MicLevels } from "@/lib/bench-levels";
 
 export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
@@ -97,7 +98,7 @@ export type PendingCommand = { id: string; kind: CommandKind; args: unknown; cre
 // Kiosk side — poll + ack
 // ---------------------------------------------------------------------------
 
-export type MicLevels = { peak: number; avg: number };
+export type { MicLevels } from "@/lib/bench-levels";
 
 export type PollInput = {
   roomId: string;
@@ -123,16 +124,7 @@ export type PollInput = {
  * the column NULL, which every reader already renders as "not measured".
  */
 export function cleanLevels(v: unknown): MicLevels | null {
-  if (typeof v !== "object" || v === null) return null;
-  const o = v as Record<string, unknown>;
-  const n = (x: unknown): number | null => {
-    const q = Number(x);
-    return Number.isFinite(q) && q >= 0 && q <= 1 ? q : null;
-  };
-  const peak = n(o.peak);
-  const avg = n(o.avg);
-  if (peak === null || avg === null) return null;
-  return { peak, avg };
+  return parseMicLevels(v);
 }
 
 export type PollResult =
@@ -171,13 +163,17 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // is recording perfectly well, and a bar that drops to nothing reads as a dead microphone.
     // `levels_at` moves only when a reading actually arrives, so a reader can always tell a fresh
     // silence from a stale number left by a kiosk that stopped sending.
-    const mic = input.mic ?? null;
-    const spare = input.spare ?? null;
-    const anyLevel = mic !== null || spare !== null;
     // §2.4 — the explicit-second-device flag rides the same upsert, COALESCEd like the levels: an
     // absent value (undefined → null here) never erases a stored one, so a native-app poll that
     // reports it once keeps reporting it and a browser-kiosk poll that never sends it leaves it be.
     const spareDevice = input.spareDevice === undefined ? null : input.spareDevice;
+    const mic = input.mic ?? null;
+    // The browser still measures an automatically selected phantom backup input. It never reports
+    // a chosen second device, so those numbers are not a spare vital and must not be persisted.
+    // A native client may omit the flag after reporting it once; the stored true keeps its lane.
+    const spareReported = spareDevice === true || (spareDevice === null && cur?.spare_device === true);
+    const spare = spareReported ? (input.spare ?? null) : null;
+    const anyLevel = mic !== null || spare !== null;
     await sql`
       INSERT INTO bench_listener (
         room_id, tab_id, last_poll_at, recording_session_id, paused,
@@ -196,8 +192,8 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
              paused = EXCLUDED.paused,
              mic_peak     = COALESCE(EXCLUDED.mic_peak,     bench_listener.mic_peak),
              mic_avg      = COALESCE(EXCLUDED.mic_avg,      bench_listener.mic_avg),
-             spare_peak   = COALESCE(EXCLUDED.spare_peak,   bench_listener.spare_peak),
-             spare_avg    = COALESCE(EXCLUDED.spare_avg,    bench_listener.spare_avg),
+             spare_peak   = CASE WHEN EXCLUDED.spare_device IS FALSE THEN NULL ELSE COALESCE(EXCLUDED.spare_peak, bench_listener.spare_peak) END,
+             spare_avg    = CASE WHEN EXCLUDED.spare_device IS FALSE THEN NULL ELSE COALESCE(EXCLUDED.spare_avg, bench_listener.spare_avg) END,
              levels_at    = COALESCE(EXCLUDED.levels_at,    bench_listener.levels_at),
              spare_device = COALESCE(EXCLUDED.spare_device, bench_listener.spare_device)
     `;

@@ -134,6 +134,7 @@ import {
 } from "@/lib/room-facts";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE } from "@/lib/bench-bus-constants";
+import { parseMicLevelPair } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import {
@@ -2218,19 +2219,12 @@ async function liveMonitorExtras(
   // 0066), and the size vital off readMicSizes — the learned baseline and the D36/D37 judgement
   // inputs (newest verdict, the tiny run, and proven_dead_by_size). A NULL level is "not measured",
   // never silent, exactly as the card treats it.
-  const levelOf = (peak: unknown, avg: unknown): { peak: number; avg: number } | null => {
-    const n = (v: unknown): number | null => {
-      const x = Number(v);
-      return Number.isFinite(x) && x >= 0 ? x : null;
-    };
-    const p = n(peak);
-    const a = n(avg);
-    return p === null && a === null ? null : { peak: p ?? 0, avg: a ?? 0 };
-  };
-  const micLevelNow = listener ? levelOf(listener.mic_peak, listener.mic_avg) : null;
-  const spareLevelNow = listener ? levelOf(listener.spare_peak, listener.spare_avg) : null;
   // §2.4 — a spare exists only where the client reported an explicitly chosen second device.
   const spareExists = listener?.spare_device === true;
+  const micLevelNow = listener ? parseMicLevelPair(listener.mic_peak, listener.mic_avg) : null;
+  const spareLevelNow = spareExists && listener
+    ? parseMicLevelPair(listener.spare_peak, listener.spare_avg)
+    : null;
   let micSize: unknown = null;
   let spareSize: unknown = null;
   if (sessionIds.length) {

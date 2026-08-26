@@ -36,6 +36,7 @@ import {
 } from "@/lib/bench-dual";
 import { POLL_IDLE_MS, LISTENER_FRESH_MS, POLL_VISIBLE_MS } from "@/lib/bench-bus-constants";
 import { cleanLevels } from "@/lib/bench-commands";
+import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 const code = (...parts: string[]) =>
   readFileSync(join(process.cwd(), ...parts), "utf8")
@@ -335,6 +336,26 @@ describe("§2.2 — peak and average over an interval, never one instantaneous s
     expect(cleanLevels({})).toBeNull();
   });
 
+  it("preserves genuine zero but never coerces absence or an empty value into silence", () => {
+    expect(parseMicLevelPair(0, 0)).toEqual({ peak: 0, avg: 0 });
+    expect(parseMicLevelPair("0", "0.0000")).toEqual({ peak: 0, avg: 0 });
+    for (const absent of [null, undefined, "", "   ", false]) {
+      expect(parseMicLevelPair(absent, 0)).toBeNull();
+      expect(parseMicLevelPair(0, absent)).toBeNull();
+      expect(finiteNumberOrNull(absent)).toBeNull();
+    }
+  });
+
+  it("accepts a complete numeric-string pair and rejects partial, non-finite and out-of-range pairs", () => {
+    expect(parseMicLevelPair("0.4", "0.1")).toEqual({ peak: 0.4, avg: 0.1 });
+    expect(parseMicLevelPair("0.4", null)).toBeNull();
+    expect(parseMicLevelPair(Number.NaN, 0.1)).toBeNull();
+    expect(parseMicLevelPair(Number.POSITIVE_INFINITY, 0.1)).toBeNull();
+    expect(parseMicLevelPair(1.01, 0.1)).toBeNull();
+    expect(parseMicLevelPair(0.4, -0.01)).toBeNull();
+    expect(parseMicLevelPair(0.1, 0.4)).toBeNull();
+  });
+
   it("a piece with no level OMITS the fields from the wire rather than sending zero", () => {
     const withNone = uploadBodies({
       session_id: "bs_1", idx: 0, source: "primary", content_type: "audio/webm",
@@ -364,7 +385,7 @@ describe("§2.2 — peak and average over an interval, never one instantaneous s
     // recording perfectly, and a bar dropping to nothing reads as a dead microphone.
     const bus = code("lib", "bench-commands.ts");
     expect(bus).toMatch(/mic_peak\s*=\s*COALESCE\(EXCLUDED\.mic_peak,\s*bench_listener\.mic_peak\)/);
-    expect(bus).toMatch(/spare_avg\s*=\s*COALESCE\(EXCLUDED\.spare_avg,\s*bench_listener\.spare_avg\)/);
+    expect(bus).toMatch(/spare_avg\s*=\s*CASE[\s\S]*?ELSE COALESCE\(EXCLUDED\.spare_avg,\s*bench_listener\.spare_avg\) END/);
   });
 });
 

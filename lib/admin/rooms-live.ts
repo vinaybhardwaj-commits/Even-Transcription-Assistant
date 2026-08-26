@@ -36,7 +36,7 @@ import {
   type Level, type LaneView, type TranscriptCounts, type VisitCounts,
   type Stranded, type StrandedRaw,
 } from "@/lib/room-facts";
-import { readAudioMs, readMicSizes, readTranscriptAndStranded } from "@/lib/admin/room-reads";
+import { readAudioMs, readMicSizes, readTranscriptAndStranded, readWaitingAudioCounts } from "@/lib/admin/room-reads";
 import type { MicHealth } from "@/lib/mic-health";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
@@ -187,6 +187,8 @@ export type RoomLive = {
   transcript_enabled: boolean;
   visits_enabled: boolean;
   transcript_counts: TranscriptCounts;
+  /** Finished windows with no job across ALL clinic days. Drives the manual paid recovery control. */
+  waiting_audio_count: number;
   visit_counts: VisitCounts;
   /**
    * D7 — MINUTES THAT CANNOT CURRENTLY BE TURNED INTO WORDS, split by reason.
@@ -352,6 +354,7 @@ export function buildRoomLive(
     mic_size?: MicHealth | null;
     spare_size?: MicHealth | null;
     spare_exists?: boolean;
+    waiting_audio_count?: number;
   },
   brain: {
     last_warehouse_at: string | null;
@@ -482,6 +485,7 @@ export function buildRoomLive(
     transcript_enabled: transcriptEnabled,
     visits_enabled: visitsEnabled,
     transcript_counts: counts.transcript,
+    waiting_audio_count: Number(counts.waiting_audio_count) || 0,
     visit_counts: counts.visits,
     stranded,
     audio_recorded_ms: Number(counts.audio_recorded_ms) || 0,
@@ -628,6 +632,12 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   if (tsRead.degraded) topDegraded.push(tsRead.degraded);
   const transcriptByRoom = tsRead.value;
 
+  // §3.10 recovery is intentionally all-history. Today's transcript/stranded rollup above stays
+  // day-scoped; this independent count is the control's own eligibility query.
+  const waitingRead = await readWaitingAudioCounts(roomIds);
+  if (waitingRead.degraded) topDegraded.push(waitingRead.degraded);
+  const waitingAudioByRoom = waitingRead.value;
+
   const audioRead = await readAudioMs(sessionIds);
   if (audioRead.degraded) topDegraded.push(audioRead.degraded);
   const audioMsByRoom = audioRead.value;
@@ -709,6 +719,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       // wrote backup pieces from an auto-picked phantom device but reported no second device has
       // no spare here.
       spare_exists: spareDeviceByRoom.get(room.id) ?? false,
+      waiting_audio_count: waitingAudioByRoom.get(room.id) ?? 0,
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });

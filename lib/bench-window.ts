@@ -78,6 +78,7 @@ import { type MicEventRow, type MicSource } from "@/lib/bench-source";
 import { decideBinding, deviceReportedGone, type BindReason, type MicPiece } from "@/lib/mic-health";
 import { isTranscriptEnabled } from "@/lib/room-switches";
 import { enqueueSubject } from "@/lib/stt/fanout";
+import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 /** The grid. 15 minutes, aligned to the IST hour. */
 export const WINDOW_MS = 15 * 60 * 1000;
@@ -106,17 +107,14 @@ const ms = (d: string | Date): number => (d instanceof Date ? d.getTime() : Date
 /** A chunk row as the size rule wants it. Tolerant: a missing number stays null, never NaN — and
  *  lib/mic-health is written so a piece it cannot measure never convicts a microphone. */
 const toMicPiece = (c: WindowChunk): MicPiece => {
-  const n = (v: unknown): number | null => {
-    const x = Number(v);
-    return Number.isFinite(x) ? x : null;
-  };
+  const levels = parseMicLevelPair(c.peak_level, c.avg_level);
   return {
     idx: c.idx,
     source: c.source === "backup" ? "backup" : "primary",
-    duration_ms: n(c.duration_ms) ?? Math.max(0, ms(c.ended_at) - ms(c.started_at)),
-    size_bytes: n(c.size_bytes),
-    peak_level: n(c.peak_level),
-    avg_level: n(c.avg_level),
+    duration_ms: finiteNumberOrNull(c.duration_ms) ?? Math.max(0, ms(c.ended_at) - ms(c.started_at)),
+    size_bytes: finiteNumberOrNull(c.size_bytes),
+    peak_level: levels?.peak ?? null,
+    avg_level: levels?.avg ?? null,
   };
 };
 

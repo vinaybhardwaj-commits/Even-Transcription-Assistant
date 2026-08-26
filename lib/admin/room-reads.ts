@@ -26,10 +26,43 @@ import { sql } from "@/lib/db";
 import type { StrandedRaw, TranscriptCounts } from "@/lib/room-facts";
 import { ZERO_STRANDED_RAW } from "@/lib/room-facts";
 import { micHealth, type MicHealth, type MicPiece } from "@/lib/mic-health";
+import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 export type Read<T> = { value: T; degraded: string | null };
 
 const fail = (label: string, e: unknown): string => `${label}:${String((e as Error)?.message ?? e).slice(0, 80)}`;
+
+/**
+ * Finished audio the manual recovery control can run, across the room's whole history.
+ *
+ * This is deliberately NOT scoped to today's sessions. The control was built for stranded tape
+ * from prior clinic days; using the live monitor's day-scoped session list hid the sixteen
+ * repaired Cardiology windows while the action itself could still run them.
+ */
+export async function readWaitingAudioCounts(roomIds: readonly string[]): Promise<Read<Map<string, number>>> {
+  const out = new Map<string, number>();
+  if (!roomIds.length) return { value: out, degraded: null };
+  try {
+    const rows = (await sql`
+      SELECT s.room_id, COUNT(*)::int AS waiting_audio_count
+        FROM bench_window w
+        JOIN bench_session s ON s.id = w.session_id
+       WHERE s.room_id = ANY(${roomIds as string[]}::text[])
+         AND w.state = 'closed'
+         AND w.grid_aligned = TRUE
+         AND w.room_day_id IS NOT NULL
+         AND NOT EXISTS (
+               SELECT 1 FROM stt_subject_job j
+                WHERE j.subject_type = 'bench_window' AND j.subject_id = w.id AND j.tier = 'asr'
+             )
+       GROUP BY s.room_id
+    `) as Array<{ room_id: string; waiting_audio_count: number | string }>;
+    for (const row of rows) out.set(row.room_id, Number(row.waiting_audio_count) || 0);
+    return { value: out, degraded: null };
+  } catch (e) {
+    return { value: out, degraded: fail("waiting_audio_count_unavailable", e) };
+  }
+}
 
 /**
  * The Transcript lane's counts AND the stranded-audio buckets, per room, for the given sessions.
@@ -242,22 +275,19 @@ export async function readMicSizes(
     `) as Array<Record<string, unknown>>;
 
     const byRoom = new Map<string, { primary: MicPiece[]; backup: MicPiece[] }>();
-    const n = (v: unknown): number | null => {
-      const x = Number(v);
-      return Number.isFinite(x) ? x : null;
-    };
     for (const r of rows) {
       const roomId = String(r.room_id ?? "");
       if (!roomId) continue;
       const lane = r.source === "backup" ? "backup" : "primary";
       const bucket = byRoom.get(roomId) ?? { primary: [], backup: [] };
+      const levels = parseMicLevelPair(r.peak_level, r.avg_level);
       bucket[lane].push({
-        idx: n(r.idx) ?? 0,
+        idx: finiteNumberOrNull(r.idx) ?? 0,
         source: lane,
-        duration_ms: n(r.duration_ms) ?? 0,
-        size_bytes: n(r.size_bytes),
-        peak_level: n(r.peak_level),
-        avg_level: n(r.avg_level),
+        duration_ms: finiteNumberOrNull(r.duration_ms) ?? 0,
+        size_bytes: finiteNumberOrNull(r.size_bytes),
+        peak_level: levels?.peak ?? null,
+        avg_level: levels?.avg ?? null,
       });
       byRoom.set(roomId, bucket);
     }

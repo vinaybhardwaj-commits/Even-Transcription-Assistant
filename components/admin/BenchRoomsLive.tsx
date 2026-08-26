@@ -43,7 +43,6 @@ import {
 // browser bundle: lib/room-facts.ts imports lib/bench-bus-constants and nothing else.
 import {
   STRANDED_MEASURE_NOTE,
-  STRANDED_WAITING,
   WAITING_PHRASE,
   type Stranded,
 } from "@/lib/room-facts";
@@ -156,6 +155,8 @@ type RoomLive = {
   transcript_enabled: boolean;
   visits_enabled: boolean;
   transcript_counts: { done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: number };
+  /** Finished audio with no job across all clinic days, not only today's live-monitor sessions. */
+  waiting_audio_count?: number;
   has_room_day_today: boolean | null;
   visit_counts: { built: number; open: number };
   /** D7 — minutes that cannot currently be turned into words, split by reason. */
@@ -1072,7 +1073,7 @@ export function BenchRoomsLive() {
                   runs a bounded batch, and reports engine, characters, seconds and cost per piece.
                   The interface never says "window" — the operator vocabulary is pieces of audio. */}
               {(() => {
-                const waiting = r.stranded?.reasons.find((x) => x.reason === STRANDED_WAITING)?.slots ?? 0;
+                const waiting = r.waiting_audio_count ?? 0;
                 if (!r.transcript_enabled || waiting < 1) return null;
                 const run = runResult[r.room.id];
                 const isRunning = runningWaiting === r.room.id;

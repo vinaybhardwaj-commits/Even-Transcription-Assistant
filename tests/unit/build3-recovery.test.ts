@@ -123,6 +123,63 @@ describe("0068 — re-bind Cardiology's sixteen windows without costing a piece"
   });
 });
 
+describe("0069 — only untouched repair jobs are released to the manual control", () => {
+  const mig = raw("db", "migrations", "0069_build3_corrective.sql");
+
+  it("changes only untouched queue rows and the unreported listener spare vital — never a window, piece, run or cue", () => {
+    expect(mig).toMatch(/DELETE FROM stt_subject_job/);
+    expect(mig).toMatch(/UPDATE bench_listener/);
+    expect(mig).not.toMatch(/(?:DELETE FROM|UPDATE|INSERT INTO)\s+bench_(?:window|chunk)/i);
+    expect(mig).not.toMatch(/(?:DELETE FROM|UPDATE|INSERT INTO)\s+transcription_run/i);
+    expect(mig).not.toMatch(/(?:DELETE FROM|UPDATE|INSERT INTO)\s+cue/i);
+  });
+
+  it("is scoped to Cardiology's re-bound primary windows", () => {
+    expect(mig).toMatch(/w\.session_id = 'bs_z3gpbh6e'/);
+    expect(mig).toMatch(/w\.source_mic = 'primary'/);
+    expect(mig).toMatch(/w\.rebound_from = 'backup'/);
+    expect(mig).toMatch(/w\.rebind_reason LIKE 'D34 re-bind:%'/);
+  });
+
+  it("preserves every row carrying any evidence that work began", () => {
+    expect(mig).toMatch(/j\.state = 'queued'/);
+    expect(mig).toMatch(/j\.attempts = 0/);
+    expect(mig).toMatch(/j\.started_at IS NULL/);
+    expect(mig).toMatch(/j\.finished_at IS NULL/);
+    expect(mig).toMatch(/j\.last_error IS NULL/);
+    expect(mig).toMatch(/NOT EXISTS[\s\S]*FROM transcription_run/);
+  });
+
+  it("also removes 0068's untouched synthesized-ID orphan when the upsert kept an existing ID", () => {
+    expect(mig).toMatch(/j\.subject_id IN/);
+    expect(mig).toMatch(/'bw_' \|\| substr\(w\.session_id, 4\) \|\| '_' \|\| w\.start_ms \|\| '_primary'/);
+    expect(mig).toMatch(/tr\.subject_id = j\.subject_id/);
+  });
+
+  it("records itself exactly once", () => {
+    expect(mig).toMatch(/INSERT INTO schema_migrations[\s\S]*VALUES \(69, '0069_build3_corrective'\)/);
+  });
+
+  it("clears a legacy spare vital only where no second device was reported", () => {
+    expect(mig).toMatch(/spare_device IS DISTINCT FROM TRUE/);
+    expect(mig).toMatch(/SET spare_peak = NULL,[\s\S]*spare_avg = NULL/);
+  });
+});
+
+describe("0070 — the post-deploy phantom-spare cleanup", () => {
+  const mig = raw("db", "migrations", "0070_clear_unreported_spare_levels.sql");
+
+  it("clears listener spare levels only where no second device was reported", () => {
+    expect(mig).toMatch(/UPDATE bench_listener/);
+    expect(mig).toMatch(/spare_device IS DISTINCT FROM TRUE/);
+    expect(mig).not.toMatch(/(?:DELETE FROM|UPDATE|INSERT INTO)\s+bench_(?:session|window|chunk)/i);
+  });
+
+  it("records itself", () => {
+    expect(mig).toMatch(/VALUES \(70, '0070_clear_unreported_spare_levels'\)/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // §2.1 / §3.10 — run this room's waiting audio.
 // ---------------------------------------------------------------------------
@@ -137,6 +194,18 @@ describe("§3.10 — the control that runs a room's waiting audio", () => {
     expect(fn).toMatch(/w\.room_day_id IS NOT NULL/);
     expect(fn).toMatch(/NOT EXISTS/);
     expect(fn).toMatch(/ORDER BY w\.start_ms ASC/);
+  });
+
+  it("the card's count is all-history, not today's stranded-audio rollup", () => {
+    const ui = code("components", "admin", "BenchRoomsLive.tsx");
+    const reads = code("lib", "admin", "room-reads.ts");
+    const waitingRead = reads.slice(
+      reads.indexOf("export async function readWaitingAudioCounts"),
+      reads.indexOf("export async function readTranscriptAndStranded"),
+    );
+    expect(ui).toMatch(/const waiting = r\.waiting_audio_count \?\? 0/);
+    expect(waitingRead).toMatch(/COUNT\(\*\)::int AS waiting_audio_count/);
+    expect(waitingRead).not.toMatch(/s\.started_at/);
   });
 
   it("runs a BOUNDED batch — a small cap so one request finishes and the operator sees the cost", () => {
@@ -212,8 +281,15 @@ describe("§2.5 — the screen and the door report the same level numbers", () =
     expect(door).toMatch(/readMicSizes\(sessionIds\)/);
   });
 
-  it("a NULL level is reported as not-measured, never as zero/silent", () => {
-    // levelOf returns null when neither peak nor avg was measured.
-    expect(door).toMatch(/return p === null && a === null \? null/);
+  it("the screen, door and D36/D37 piece readers use the same strict pair parser", () => {
+    const chunks = code("app", "api", "bench", "chunks", "route.ts");
+    const listeners = code("app", "api", "admin", "bench", "listeners", "route.ts");
+    const reads = code("lib", "admin", "room-reads.ts");
+    const windows = code("lib", "bench-window.ts");
+    expect(door).toMatch(/spareExists && listener[\s\S]*parseMicLevelPair\(listener\.spare_peak, listener\.spare_avg\)/);
+    expect(listeners).toMatch(/l\.spare_device === true \? parseMicLevelPair\(l\.spare_peak, l\.spare_avg\) : null/);
+    expect(reads).toMatch(/parseMicLevelPair\(r\.peak_level, r\.avg_level\)/);
+    expect(windows).toMatch(/parseMicLevelPair\(c\.peak_level, c\.avg_level\)/);
+    expect(chunks).toMatch(/parseMicLevelPair\(body\.peak_level, body\.avg_level\)/);
   });
 });

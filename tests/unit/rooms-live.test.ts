@@ -282,6 +282,7 @@ describe("readRoomsLive", () => {
     brainCalls.length = 0;
     appResponder = (text) => {
       if (/FROM room WHERE/.test(text)) return [ROOM];
+      if (/waiting_audio_count/.test(text)) return [{ room_id: ROOM.id, waiting_audio_count: 16 }];
       if (/FROM bench_session s/.test(text)) return [{ id: "bs_1", room_id: ROOM.id, status: "recording", started_at: new Date(NOW - 60 * 60_000), ended_at: null, last_primary_at: new Date(NOW - 60_000), last_backup_at: null, backup_chunks: 0, primary_chunks: 5 }];
       if (/FROM bench_event/.test(text)) return [{ session_id: "bs_1", n: 1 }];
       return [];
@@ -300,7 +301,19 @@ describe("readRoomsLive", () => {
     expect(r.marks_today).toBe(4);
     expect(r.marks_not_sent).toBe(1);
     expect(r.last_window_complete).toBe(true);
+    expect(r.waiting_audio_count).toBe(16);
     expect(out.degraded).toEqual([]);
+  });
+
+  it("counts recovery audio across all clinic days with the action's no-job predicate", async () => {
+    await readRoomsLive(new Date(NOW));
+    const q = appCalls.find((c) => /waiting_audio_count/.test(c.text))!;
+    expect(q).toBeTruthy();
+    expect(q.text).toMatch(/w\.state = 'closed'/);
+    expect(q.text).toMatch(/w\.grid_aligned = TRUE/);
+    expect(q.text).toMatch(/w\.room_day_id IS NOT NULL/);
+    expect(q.text).toMatch(/NOT EXISTS/);
+    expect(q.text).not.toMatch(/s\.started_at/);
   });
 
   it("the session read uses a HALF-OPEN started_at range, so 0054's index is usable", async () => {

@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
   // on a clinical screen that no microphone produced. Nothing here can make the poll fail: an
   // absent, partial or nonsense pair simply becomes null.
   const levelPair = (peakKey: string, avgKey: string) =>
-    cleanLevels({ peak: Number(sp.get(peakKey)), avg: Number(sp.get(avgKey)) });
+    cleanLevels({ peak: sp.get(peakKey), avg: sp.get(avgKey) });
   const mic = levelPair("mic_peak", "mic_avg");
   const spare = levelPair("spare_peak", "spare_avg");
   // §2.4 — an EXPLICITLY chosen second device. Only ever true when the client says `spare_device=true`;

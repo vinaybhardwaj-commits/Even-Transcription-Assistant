@@ -125,6 +125,34 @@ describe("pollCommands — poll lifecycle", () => {
     expect(r.superseded).toBe(false);
     expect(findCall(/INSERT INTO bench_listener/)!.values).toContain(true); // paused flag stored
   });
+
+  it("stores spare levels only after a second device was explicitly reported", async () => {
+    responder = (text) => {
+      if (/FROM bench_listener/.test(text)) return [];
+      return [];
+    };
+    await pollCommands({
+      roomId: "room_1", tabId: "tab_A", prevPollAt: null, recordingSessionId: null, paused: false,
+      spare: { peak: 0.4, avg: 0.1 },
+    });
+    let upsert = findCall(/INSERT INTO bench_listener/)!;
+    expect(upsert.values.slice(6, 8)).toEqual([null, null]);
+
+    calls.length = 0;
+    responder = (text) => {
+      if (/FROM bench_listener/.test(text)) {
+        return [{ room_id: "room_1", tab_id: "tab_A", last_poll_at: iso(secondsAgo(1)), recording_session_id: null, paused: false, spare_device: true }];
+      }
+      return [];
+    };
+    await pollCommands({
+      roomId: "room_1", tabId: "tab_A", prevPollAt: secondsAgo(1), recordingSessionId: null, paused: false,
+      spare: { peak: 0.4, avg: 0.1 },
+    });
+    upsert = findCall(/INSERT INTO bench_listener/)!;
+    expect(upsert.values.slice(6, 8)).toEqual([0.4, 0.1]);
+    expect(upsert.text).toMatch(/EXCLUDED\.spare_device IS FALSE THEN NULL/);
+  });
 });
 
 describe("ackCommand — pending → acked | failed", () => {

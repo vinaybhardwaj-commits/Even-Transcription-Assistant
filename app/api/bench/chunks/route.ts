@@ -46,6 +46,7 @@ import { headObject, benchChunkKey } from "@/lib/r2";
 import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
+import { parseMicLevelPair } from "@/lib/bench-levels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -115,12 +116,9 @@ export async function POST(req: NextRequest) {
   // older kiosk sends nothing and every piece recorded before Build 2 has nothing. Out-of-range
   // values are DROPPED rather than clamped — RMS is 0..1 by construction, so anything else is a
   // bug upstream, and a clamped value would be indistinguishable from a real one.
-  const level = (v: unknown): number | null => {
-    const n = Number(v);
-    return typeof v === "number" && Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
-  };
-  const peakLevel = level(body.peak_level);
-  const avgLevel = level(body.avg_level);
+  const levels = parseMicLevelPair(body.peak_level, body.avg_level);
+  const peakLevel = levels?.peak ?? null;
+  const avgLevel = levels?.avg ?? null;
 
   const session = await findBenchSession(sessionId);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
@@ -173,9 +171,9 @@ export async function POST(req: NextRequest) {
       ON CONFLICT (session_id, source, idx) DO UPDATE SET
         upload_state = 'verified',
         size_bytes = EXCLUDED.size_bytes,
-        -- A RETRY MUST NOT ERASE WHAT THE FIRST ATTEMPT HEARD. The retry re-uploads the same
-        -- bytes but its body may carry no levels (an older page, a meter that has since died),
-        -- and overwriting a real reading with NULL would silently disarm D36 for that piece.
+        -- A RETRY MUST NOT ERASE WHAT THE FIRST ATTEMPT HEARD. Levels are parsed as one complete
+        -- pair above, so both EXCLUDED values are present or both are NULL: complementary partial
+        -- retries can never combine into a measurement that no single request reported.
         peak_level = COALESCE(EXCLUDED.peak_level, bench_chunk.peak_level),
         avg_level  = COALESCE(EXCLUDED.avg_level,  bench_chunk.avg_level)
     `;
