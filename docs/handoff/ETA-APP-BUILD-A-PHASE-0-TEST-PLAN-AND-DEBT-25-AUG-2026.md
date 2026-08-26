@@ -370,8 +370,12 @@ blocks or ordinary-run discontinuities in short local runs.
 
 ### 5.4 Preallocated SPSC audio and marker ring
 
-Two deterministic ring/writer tests cover maximum marker pressure, overflow recovery and durable
-final-overflow ordering. Wraparound, concurrency stress and callback profiling remain debt.
+Build B's first P1 slice completed `RING-01` through `RING-06` on 26 August 2026. Five focused tests
+now prove exact samples over 4,096 wraps, aggregated multi-block overflow and recovery, all retained
+boundary metadata in source order, producer handoff around loss/resume, and a 25,000-block concurrent
+producer/consumer run. The existing writer test proves final overflow is durable before `stopped`.
+All 25 package tests pass normally and under Thread Sanitizer with no race report. `RING-07` callback
+profiling remains an acceptance gate.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
@@ -654,7 +658,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | Priority | Debt | Exit condition |
 |---|---|---|
 | P1 | TONOR cold boot failed once; the fixed-candidate manual process restart acquired IO without a replug | Production readiness follows durable index growth; after two failed retry cycles the accepted fallback is a five-second USB replug |
-| P1 | No deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing |
+| P1 complete 26 Aug | Deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing normally and under Thread Sanitizer |
 | P1 | No deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated or fault-injected and passing |
 | P1 | Converter rate/flush matrix incomplete | SRC-01 through SRC-04 passing with documented accounting bound |
 | P1 | Writer fault points not injected | DUR-02 through DUR-05 and DUR-08/09 produce parseable honest recovery |
