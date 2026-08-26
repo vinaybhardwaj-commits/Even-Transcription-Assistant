@@ -145,7 +145,7 @@ public enum Recorder {
     let writer = TapeWriter(directory: outputDirectory, deviceUID: device.uid, ring: ring)
     try writer.startAndWaitUntilReady()
     if stopping.load(ordering: .acquiring) {
-      try writer.stopAndWait()
+      try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)
       print("Recording stopped cleanly before capture started.")
       return
     }
@@ -218,16 +218,24 @@ public enum Recorder {
       }
       Thread.sleep(forTimeInterval: 0.1)
     }
-    capture?.stop()
+    try finalizeCapture(stopCapture: { capture?.stop() }, ring: ring, writer: writer)
+    let statistics = ring.statistics
+    print(
+      "Capture blocks: \(statistics.acceptedBlocks) accepted, \(statistics.droppedBlocks) dropped")
+    print("Recording stopped cleanly.")
+  }
+
+  static func finalizeCapture(
+    stopCapture: () -> Void,
+    ring: AudioRing,
+    writer: TapeWriter
+  ) throws {
+    stopCapture()
     while !ring.flushPendingOverflow(monoNS: monotonicNowNS(), wallNS: wallNowNS()) {
       if writer.hasFailed { try writer.throwFailure() }
       Thread.sleep(forTimeInterval: 0.005)
     }
     try writer.stopAndWait()
-    let statistics = ring.statistics
-    print(
-      "Capture blocks: \(statistics.acceptedBlocks) accepted, \(statistics.droppedBlocks) dropped")
-    print("Recording stopped cleanly.")
   }
 
   private static func requireMicrophonePermission() throws {

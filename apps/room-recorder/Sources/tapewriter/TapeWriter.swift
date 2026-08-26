@@ -8,6 +8,7 @@ final class TapeWriter: @unchecked Sendable {
   private let directory: URL
   private let deviceUID: String
   private let ring: AudioRing
+  private let faultPlan: DurabilityFaultPlan?
   private let stopping = Atomic<Bool>(false)
   private let readySignaled = Atomic<Bool>(false)
   private let ready = DispatchSemaphore(value: 0)
@@ -15,10 +16,16 @@ final class TapeWriter: @unchecked Sendable {
   private let resultLock = NSLock()
   private var failure: Error?
 
-  init(directory: URL, deviceUID: String, ring: AudioRing) {
+  init(
+    directory: URL,
+    deviceUID: String,
+    ring: AudioRing,
+    faultPlan: DurabilityFaultPlan? = nil
+  ) {
     self.directory = directory
     self.deviceUID = deviceUID
     self.ring = ring
+    self.faultPlan = faultPlan
   }
 
   func startAndWaitUntilReady() throws {
@@ -94,23 +101,62 @@ final class TapeWriter: @unchecked Sendable {
     var totalInputFrames: Int64 = prior.records.compactMap(\.inputFrames).last ?? 0
     var currentInputSampleRate: Double?
 
-    func fullSyncTape() throws {
-      guard fcntl(pcmFD, F_FULLFSYNC) == 0 else {
-        throw RecorderError.posix("F_FULLFSYNC tape.pcm failed")
+    func fullSyncTape(_ context: DurabilityRecordContext) throws {
+      let operation = DurabilityOperation.tapeFullSync(context)
+      let result: Int32
+      if let injectedErrno = faultPlan?.injectedErrno(for: operation, offset: bytesWritten) {
+        errno = injectedErrno
+        result = -1
+      } else {
+        result = fcntl(pcmFD, F_FULLFSYNC)
       }
+      let syncErrno = errno
+      guard result == 0 else {
+        throw DurabilitySyscallError(
+          operation: operation,
+          errnoCode: syncErrno,
+          offset: bytesWritten
+        )
+      }
+      faultPlan?.perform(.afterTapeFullSync(context), offset: bytesWritten)
     }
 
-    func appendRecord(_ record: IndexRecord) throws {
+    func appendRecord(_ record: IndexRecord, context: DurabilityRecordContext) throws {
       let data = try IndexLog.encodedLine(record)
+      let offset = record.byteOffset ?? lastRecordOffset
+      let operation = DurabilityOperation.indexWrite(context)
       try data.withUnsafeBytes { bytes in
-        try writeAll(fd: indexFD, pointer: bytes.baseAddress!, byteCount: bytes.count)
+        try writeAll(
+          fd: indexFD,
+          pointer: bytes.baseAddress!,
+          byteCount: bytes.count,
+          operation: operation,
+          offset: offset,
+          faultPlan: faultPlan
+        )
       }
-      guard fsync(indexFD) == 0 else { throw RecorderError.posix("fsync tape.idx failed") }
+      let syncOperation = DurabilityOperation.indexSync(context)
+      let result: Int32
+      if let injectedErrno = faultPlan?.injectedErrno(for: syncOperation, offset: offset) {
+        errno = injectedErrno
+        result = -1
+      } else {
+        result = fsync(indexFD)
+      }
+      let syncErrno = errno
+      guard result == 0 else {
+        throw DurabilitySyscallError(
+          operation: syncOperation,
+          errnoCode: syncErrno,
+          offset: offset
+        )
+      }
+      faultPlan?.perform(.afterIndexSync(context), offset: offset)
       lastRecordOffset = record.byteOffset ?? lastRecordOffset
     }
 
     func checkpoint(monoNS: UInt64, wallNS: UInt64) throws {
-      try fullSyncTape()
+      try fullSyncTape(.checkpoint)
       let rms = rmsSampleCount == 0 ? 0 : min(1, sqrt(squaredSum / Double(rmsSampleCount)))
       try appendRecord(
         IndexRecord(
@@ -122,20 +168,32 @@ final class TapeWriter: @unchecked Sendable {
           rms: rms,
           inputFrames: currentInputSampleRate == nil ? nil : totalInputFrames,
           inputSampleRate: currentInputSampleRate
-        ))
+        ),
+        context: .checkpoint
+      )
       squaredSum = 0
       rmsSampleCount = 0
       lastSyncScheduleNS = monotonicNowNS()
     }
 
     func writeConverted(_ output: UnsafePointer<Int16>, count: Int) throws {
-      try writeAll(fd: pcmFD, pointer: output, byteCount: count * MemoryLayout<Int16>.size)
+      let byteCount = count * MemoryLayout<Int16>.size
+      let targetOffset = bytesWritten + Int64(byteCount)
+      try writeAll(
+        fd: pcmFD,
+        pointer: output,
+        byteCount: byteCount,
+        operation: .pcmWrite,
+        offset: targetOffset,
+        faultPlan: faultPlan
+      )
       for index in 0..<count {
         let normalized = Double(output[index]) / 32_768
         squaredSum += normalized * normalized
       }
       rmsSampleCount += Int64(count)
-      bytesWritten += Int64(count * MemoryLayout<Int16>.size)
+      bytesWritten = targetOffset
+      faultPlan?.perform(.afterPCMAppend, offset: bytesWritten)
     }
 
     func finishConversion() throws {
@@ -149,7 +207,7 @@ final class TapeWriter: @unchecked Sendable {
       if rmsSampleCount > 0, let mono = latestAudioMonoNS, let wall = latestAudioWallNS {
         try checkpoint(monoNS: mono, wallNS: wall)
       } else {
-        try fullSyncTape()
+        try fullSyncTape(.discontinuity)
       }
       try appendRecord(
         IndexRecord(
@@ -163,7 +221,9 @@ final class TapeWriter: @unchecked Sendable {
           droppedInputFrames: item.droppedFrames == 0 ? nil : item.droppedFrames,
           inputFrames: currentInputSampleRate == nil ? nil : totalInputFrames,
           inputSampleRate: currentInputSampleRate
-        ))
+        ),
+        context: .discontinuity
+      )
       if item.marker == .formatChange { currentInputSampleRate = nil }
       resampler = nil
       latestAudioMonoNS = nil
@@ -174,7 +234,7 @@ final class TapeWriter: @unchecked Sendable {
 
     if existed {
       let now = monotonicNowNS()
-      try fullSyncTape()
+      try fullSyncTape(.restart)
       try appendRecord(
         IndexRecord(
           byteOffset: bytesWritten,
@@ -185,7 +245,9 @@ final class TapeWriter: @unchecked Sendable {
           discontinuity: "restart",
           previousByteOffset: priorOffset,
           survivingTailBytes: max(0, bytesWritten - priorOffset)
-        ))
+        ),
+        context: .restart
+      )
     }
     signalReady()
 
@@ -237,7 +299,7 @@ final class TapeWriter: @unchecked Sendable {
     } else if bytesWritten > lastRecordOffset {
       try checkpoint(monoNS: monotonicNowNS(), wallNS: wallNowNS())
     }
-    try fullSyncTape()
+    try fullSyncTape(.stopped)
     try appendRecord(
       IndexRecord(
         byteOffset: bytesWritten,
@@ -248,22 +310,64 @@ final class TapeWriter: @unchecked Sendable {
         discontinuity: "stopped",
         inputFrames: currentInputSampleRate == nil ? nil : totalInputFrames,
         inputSampleRate: currentInputSampleRate
-      ))
+      ),
+      context: .stopped
+    )
   }
 }
 
-private func writeAll(fd: Int32, pointer: UnsafeRawPointer, byteCount: Int) throws {
+private func writeAll(
+  fd: Int32,
+  pointer: UnsafeRawPointer,
+  byteCount: Int,
+  operation: DurabilityOperation,
+  offset: Int64,
+  faultPlan: DurabilityFaultPlan?
+) throws {
   var remaining = byteCount
   var cursor = pointer
+  var completed = 0
+  let prefixByteCount: Int?
+  if operation.code == .indexWrite, let context = operation.context {
+    prefixByteCount = faultPlan?.indexPrefixByteCount(context: context, offset: offset)
+    if let prefixByteCount {
+      guard prefixByteCount < byteCount,
+        pointer.load(fromByteOffset: byteCount - 1, as: UInt8.self) == 0x0A
+      else {
+        throw RecorderError("durability index prefix must terminate before the final newline")
+      }
+    }
+  } else {
+    prefixByteCount = nil
+  }
   while remaining > 0 {
-    let result = Darwin.write(fd, cursor, remaining)
+    let requestCount = min(remaining, prefixByteCount.map { $0 - completed } ?? remaining)
+    let result: Int
+    if let injectedErrno = faultPlan?.injectedErrno(for: operation, offset: offset) {
+      errno = injectedErrno
+      result = -1
+    } else {
+      result = Darwin.write(fd, cursor, requestCount)
+    }
+    let writeErrno = errno
     if result < 0 {
-      if errno == EINTR { continue }
-      throw RecorderError.posix("write failed")
+      if writeErrno == EINTR { continue }
+      throw DurabilitySyscallError(
+        operation: operation,
+        errnoCode: writeErrno,
+        offset: offset
+      )
     }
     guard result > 0 else { throw RecorderError("write made no progress") }
     remaining -= result
     cursor = cursor.advanced(by: result)
+    completed += result
+    if let prefixByteCount, completed == prefixByteCount, let context = operation.context {
+      faultPlan?.perform(
+        .duringIndexWrite(context, prefixByteCount: prefixByteCount),
+        offset: offset
+      )
+    }
   }
 }
 

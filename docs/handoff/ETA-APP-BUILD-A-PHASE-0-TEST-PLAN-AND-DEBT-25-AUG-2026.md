@@ -422,20 +422,21 @@ remain acceptance gates.
 ### 5.6 Durable PCM writer, fsync and restart
 
 Completed checks include short clean shutdown, fixed-candidate Home Office `kill -9`, historical
-restart tail, power pull, exclusive lock and partial final index repair. The additional fault matrix
-below remains hardening debt.
+restart tail, power pull, exclusive lock and partial final index repair. `DUR-02` through `DUR-05`
+and `DUR-08`/`DUR-09` completed on 26 August 2026 with normal, TSAN, permission and isolated APFS
+ENOSPC evidence; the remaining rows below remain debt.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | DUR-01 | Candidate local hard kill | Record at least 10 minutes; random `kill -9`; verify before restart, then restart and verify. | Current and historical tail agree; hard verdict follows 2.5 s threshold. | Acceptance gate |
-| DUR-02 | Fault after PCM append, before full sync | Instrument/fault-inject termination at this boundary. | Verifier reports only bytes beyond last durable index as tail; committed prefix remains playable. | Pre-B hardening |
-| DUR-03 | Fault after PCM full sync, before index append | Terminate at this boundary. | Durable unindexed PCM survives and is counted as crash tail. | Pre-B hardening |
-| DUR-04 | Fault during JSONL append | Terminate after a partial line. | Prior index prefix parses; partial suffix is reported/repaired; PCM is not truncated except odd-byte alignment repair. | Pre-B hardening |
-| DUR-05 | Fault after index fsync | Terminate immediately after index sync. | Index offset never exceeds surviving PCM; tail is zero or later unsynced audio only. | Pre-B hardening |
+| DUR-02 | Fault after PCM append, before full sync | Instrument/fault-inject termination at this boundary. | Verifier reports only bytes beyond last durable index as tail; committed prefix remains playable. | Pre-B hardening complete 26 Aug |
+| DUR-03 | Fault after PCM full sync, before index append | Terminate at this boundary. | Durable unindexed PCM survives and is counted as crash tail. | Pre-B hardening complete 26 Aug |
+| DUR-04 | Fault during JSONL append | Terminate after a partial line. | Prior index prefix parses; partial suffix is reported/repaired; PCM is not truncated except odd-byte alignment repair. | Pre-B hardening complete 26 Aug |
+| DUR-05 | Fault after index fsync | Terminate immediately after index sync. | Index offset never exceeds surviving PCM; tail is zero or later unsynced audio only. | Pre-B hardening complete 26 Aug |
 | DUR-06 | First-run directory power loss | Power loss shortly after first output directory/files are created. | Directory and committed entries survive parent/directory sync sequence. | Acceptance gate, covered by power-pull run if timed early enough |
 | DUR-07 | Odd PCM suffix recovery | Append one torn byte and restart. | One byte removed to Int16 alignment; index invariants retained; repair reported in notes. | Pre-B hardening |
-| DUR-08 | Disk full/permission failure | Fill or quota a test volume; revoke write permission in another fixture. | Recorder fails loudly; no false healthy state; committed tape/index remain parseable. | Pre-B hardening |
-| DUR-09 | Sync and write error injection | Force write, `F_FULLFSYNC`, index write and `fsync` failures separately. | Writer propagates failure; process stops capture; index never advances past durable PCM. | Pre-B hardening |
+| DUR-08 | Disk full/permission failure | Fill or quota a test volume; revoke write permission in another fixture. | Recorder fails loudly; no false healthy state; committed tape/index remain parseable. | Pre-B hardening complete 26 Aug |
+| DUR-09 | Sync and write error injection | Force write, `F_FULLFSYNC`, index write and `fsync` failures separately. | Writer propagates failure; process stops capture; index never advances past durable PCM. | Pre-B hardening complete 26 Aug |
 | DUR-10 | Cadence under controlled load | Run capture while applying the ratified H-04 CPU contention. | Largest uninterrupted checkpoint gap reported; any sustained departure from the candidate's approximately 1.25 s schedule is named. Hard tail remains at or below 2.5 s. A future change toward 2 s requires retained-threshold evidence or a repeat. | Acceptance gate |
 
 ### 5.7 Index format and recovery validation
@@ -679,7 +680,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | P1 complete 26 Aug | Deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing normally and under Thread Sanitizer |
 | P1 complete 26 Aug | Deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated and passing normally and under Thread Sanitizer |
 | P1 complete 26 Aug | Converter rate/flush matrix | SRC-01 through SRC-04 passing with a documented 12-sample final bound and duration-independent intermediate bound |
-| P1 | Writer fault points not injected | DUR-02 through DUR-05 and DUR-08/09 produce parseable honest recovery |
+| P1 complete 26 Aug | Durable writer fault and recovery matrix | DUR-02 through DUR-05 and DUR-08/09 pass normally and under Thread Sanitizer, with isolated APFS ENOSPC acceptance |
 | P1 | Index/verifier malformed-input matrix incomplete | IDX-02 through IDX-08 and VER-02 through VER-08 passing |
 | P1 | WAV alias/growth/4-GiB/failure matrix incomplete | WAV-02 through WAV-05 passing |
 | P2 | CLI invalid-argument matrix incomplete | CLI-06 deterministic and non-mutating |

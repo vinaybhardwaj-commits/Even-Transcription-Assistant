@@ -12,6 +12,7 @@ Governing documents:
 - [`Phase 0 test plan and debt`](../../docs/handoff/ETA-APP-BUILD-A-PHASE-0-TEST-PLAN-AND-DEBT-25-AUG-2026.md)
 - [`Home Office Mini runbook`](../../docs/handoff/ETA-APP-BUILD-A-PHASE-0-HOME-OFFICE-RUNBOOK-25-AUG-2026.md)
 - [`App Build B Phase 1 kickoff`](../../docs/handoff/ETA-APP-BUILD-B-PHASE-1-KICKOFF-26-AUG-2026.md)
+- [`App Build B DUR P1 evidence`](../../docs/handoff/ETA-APP-BUILD-B-DUR-P1-KICKOFF-26-AUG-2026.md)
 - [`ETA build plan`](../../docs/handoff/ETA-BUILD-PLAN-25-AUG-2026.md)
 
 The archive always wins. Room Recorder work stays inside this directory unless a ratified build explicitly requires a server-contract change.
@@ -31,12 +32,14 @@ Pass `--device <uid>` to `record` to select a non-default input. The recorder pr
 
 The tape is append-only 16 kHz mono signed Int16 little-endian PCM. `tape.idx` contains durable JSONL anchors and explicit restart, device, clock, format, timestamp, and overflow discontinuities. The verifier reports durable-tape drift and native microphone-clock drift separately because sample-rate conversion can buffer output between anchors.
 
-Deterministic tests are under `Tests/TapeCoreTests`. The routine gate now has 42 passing tests plus
-one opt-in 24-hour-equivalent converter soak, for 43 declarations in eight suites with Apple Swift
-6.4 and Testing Library 2078. `RING-01` through `RING-06`, `CAP-04` through `CAP-07`, and `SRC-01`
-through `SRC-04` are complete; all routine tests pass under Thread Sanitizer, and the dedicated
-converter soak also passes at 44.1, 48, 96 and 192 kHz. The suites cover `TapeCore` plus the
-archive-critical ring, capture timeline, converter and writer paths exposed through `TapeCapture`.
+Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 54 tests in nine
+suites with Apple Swift 6.4 and Testing Library 2078; the converter soak and isolated APFS ENOSPC
+fixture remain opt-in for ordinary runs. `RING-01` through `RING-06`, `CAP-04` through `CAP-07`,
+`SRC-01` through `SRC-04`, `DUR-02` through `DUR-05`, and `DUR-08`/`DUR-09` are complete. The full
+routine gate passes normally and under Thread Sanitizer, the converter soak passes at 44.1, 48, 96
+and 192 kHz, and the disposable-volume ENOSPC acceptance fixture passes independently. The suites
+cover `TapeCore` plus the archive-critical ring, capture timeline, converter and durable-writer paths
+exposed through `TapeCapture`.
 This Command Line Tools installation requires explicit macro/runtime staging in an external scratch
 build; the exact dependency-free recipe and remaining test debt are recorded in the Phase 0 test
 plan. The harness intentionally has no external dependencies.
