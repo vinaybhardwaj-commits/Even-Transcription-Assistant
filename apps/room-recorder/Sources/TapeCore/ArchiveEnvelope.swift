@@ -268,6 +268,27 @@ public enum ArchiveEnvelopeCodec {
     expectedPurpose: ArchiveRecordPurpose,
     expectedContextHash: Data
   ) throws -> UnauthenticatedArchiveEnvelope {
+    let header = try decodeHeaderPrefix(
+      data, expectedPurpose: expectedPurpose, expectedContextHash: expectedContextHash)
+
+    let expectedCount =
+      headerByteCount + Int(header.plaintextByteCount) + authenticationTagByteCount
+    guard data.count == expectedCount else {
+      throw ArchiveEnvelopeError.recordLengthMismatch(expected: expectedCount, actual: data.count)
+    }
+    let ciphertextEnd = headerByteCount + Int(header.plaintextByteCount)
+    return UnauthenticatedArchiveEnvelope(
+      header: header,
+      ciphertext: data.bytes(atOffsets: headerByteCount..<ciphertextEnd),
+      authenticationTag: data.bytes(atOffsets: ciphertextEnd..<expectedCount)
+    )
+  }
+
+  static func decodeHeaderPrefix(
+    _ data: Data,
+    expectedPurpose: ArchiveRecordPurpose,
+    expectedContextHash: Data
+  ) throws -> ArchiveEnvelopeHeader {
     guard data.count >= headerByteCount else {
       throw ArchiveEnvelopeError.truncatedHeader(actual: data.count)
     }
@@ -305,18 +326,7 @@ public enum ArchiveEnvelopeCodec {
     guard header.contextHash == expectedContextHash else {
       throw ArchiveEnvelopeError.contextMismatch
     }
-
-    let expectedCount =
-      headerByteCount + Int(header.plaintextByteCount) + authenticationTagByteCount
-    guard data.count == expectedCount else {
-      throw ArchiveEnvelopeError.recordLengthMismatch(expected: expectedCount, actual: data.count)
-    }
-    let ciphertextEnd = headerByteCount + Int(header.plaintextByteCount)
-    return UnauthenticatedArchiveEnvelope(
-      header: header,
-      ciphertext: data.bytes(atOffsets: headerByteCount..<ciphertextEnd),
-      authenticationTag: data.bytes(atOffsets: ciphertextEnd..<expectedCount)
-    )
+    return header
   }
 
   private static func validate(header: ArchiveEnvelopeHeader) throws {

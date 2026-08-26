@@ -147,6 +147,10 @@ public final class ArchivePurposeSealer: @unchecked Sendable {
     }
     return Data(bytes)
   }
+
+  static func secureRandomNonceForPersistence() throws -> Data {
+    try secureRandomNonce()
+  }
 }
 
 public enum ArchiveRecordCrypto {

@@ -4,10 +4,10 @@
 **Audience:** engineering, product, operations and the next delivery team
 **Repository:** `/Users/vinaybhardwaj/Documents/EvenScribe`
 **Branch:** `feat/room-recorder`
-**Committed source base:** `f1bee7cefb222d360dab4ced6cb3a811034e4f54`
+**Committed source base:** `2e8beb6c`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** archive crypto core accepted; encrypted persistence not yet authorized
+**Current stage:** canonical encrypted-index payload codec accepted; encrypted index persistence next
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All
@@ -62,6 +62,39 @@ fingerprint is `3164d8777aa91dbf801c0d23aae19967a65fe85870d7b49d0a4e72f28ff93f3d
 no blocking or material issue and returned `PASS`; the same-sealer concurrency proof now exercises
 contention at the final available record slots. The crypto-core slice is accepted. Encrypted file
 persistence and Secure Enclave work remain gated pending their own narrow authorization.
+
+**Encrypted-tape persistence authorization, 26 August 2026:** V authorized the next blocker after the
+accepted crypto checkpoint `2e8beb6`. The narrow contract is
+`ETA-APP-BUILD-B-ARCHIVE-TAPE-PERSISTENCE-P1-KICKOFF-26-AUG-2026.md`: bounded authenticated tape scan,
+exclusive append plus `F_FULLFSYNC`, read-only torn-tail reporting, explicit durable final-tail repair
+and exact complete-unindexed metadata with caller-supplied keys. Canonical encrypted index JSON,
+recovery-index writes, Secure Enclave, capture and server integration remain outside this slice.
+
+**Encrypted-tape persistence acceptance, 26 August 2026:** the authorized slice is implemented in
+`Sources/TapeCore/ArchivePersistence.swift`. It bounds scans to one record, authenticates exact
+sequence/logical/predecessor chains, separates read-only inspection from explicit durable final-tail
+repair, validates the indexed checkpoint before mutation, re-establishes tape and parent-directory
+durability on writable reopen, serializes exclusive append plus `F_FULLFSYNC`, poisons uncertain
+owners and returns ordered complete-unindexed metadata. The focused 16-test gate passes; the complete
+139-test suite passes normally and under TSAN; matching `DUR-02` through `DUR-05`, release, format,
+diff and dependency gates pass. Source fingerprint is
+`f816160b8a62e6d5e375a155f6fa69b7d877eb12badc1ddb15636cb7b156e7cf`; release SHA-256 is
+`f6ae95d9a4bc0184a9227fd583547d9eed3019a7c0fa94be4ed3a3e4825170d1`. Independent follow-up review
+returned `PASS` with no blocking or material finding. The slice is accepted. Canonical encrypted-index
+JSON vectors are the next blocker; index writing, Secure Enclave and capture remain gated.
+
+**Encrypted-index codec acceptance, 26 August 2026:** the pure payload codec is implemented in
+`Sources/TapeCore/ArchiveIndexPayload.swift` and recorded in
+`ETA-APP-BUILD-B-ARCHIVE-INDEX-CODEC-P1-KICKOFF-26-AUG-2026.md`. It freezes all 17 keys in exact UTF-8
+order, explicit nulls, padded 16-byte tag Base64, shortest unsigned integers, Unicode scalar
+preservation and strict recovery-only `crash_recovered_unindexed` semantics. Decode accepts only the
+already-canonical bytes and rejects malformed, reordered, duplicate, unknown, overflowing and
+noncanonical input. The focused 10-test gate passes; the complete 149-test suite passes normally and
+under TSAN; matching `DUR-02` through `DUR-05`, release, format, diff and dependency gates pass. Source
+fingerprint is `a8d4498ead869d88f5c08c441d43f36a90008592dcdf1ddfd931b9a687aa5999`; release SHA-256 is
+`d439ef16d48dde06e96a2bcc9e31e157065f91204d75474306788535e0dd9ecc`. Independent follow-up review
+returned `PASS` with no blocking or material finding. The slice is accepted. Encrypted index file
+persistence and exact recovery adoption are the next blocker; Secure Enclave and capture remain gated.
 
 ## 1. Executive status
 
