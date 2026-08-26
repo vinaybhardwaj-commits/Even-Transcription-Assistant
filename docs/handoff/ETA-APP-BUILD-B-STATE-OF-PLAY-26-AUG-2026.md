@@ -7,7 +7,7 @@
 **Committed source base:** `f1bee7cefb222d360dab4ced6cb3a811034e4f54`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** archive envelope foundations accepted; next slice not yet authorized
+**Current stage:** archive crypto core accepted; encrypted persistence not yet authorized
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All
@@ -48,6 +48,20 @@ through `DUR-05`, release, diff and dependency gates pass. The current source fi
 review found no remaining blocking or material issue and returned `PASS` after the non-zero-based
 `Data` parser defect was repaired and malformed vectors were expanded. The envelope slice is accepted;
 no later cryptographic or persistence slice is authorized by this update.
+
+**Archive-crypto update, 26 August 2026:** the next pure slice is implemented in
+`Sources/TapeCore/ArchiveCrypto.swift` and recorded in
+`ETA-APP-BUILD-B-ARCHIVE-CRYPTO-P1-KICKOFF-26-AUG-2026.md`. It adds all seven HKDF-SHA-256 purpose
+keys, serialized AES-256-GCM sealing, production `SecRandomCopyBytes` nonces, the exact 131,072-record
+cap, full-header AAD, and an authenticated result type returned only after successful GCM open. It
+adds no key persistence, Secure Enclave, file I/O, recovery, capture or server integration. The
+focused 9-test gate passes; the full 123-test suite passes normally and under TSAN; matching
+`DUR-02` through `DUR-05`, release, format, diff and dependency gates pass. The current source
+fingerprint is `3164d8777aa91dbf801c0d23aae19967a65fe85870d7b49d0a4e72f28ff93f3d`; the release SHA-256 is
+`248ebeab28a4abaa894deae4f99d98e24300d8774d0e80037fe7e0337ee10c8f`. Independent final review found
+no blocking or material issue and returned `PASS`; the same-sealer concurrency proof now exercises
+contention at the final available record slots. The crypto-core slice is accepted. Encrypted file
+persistence and Secure Enclave work remain gated pending their own narrow authorization.
 
 ## 1. Executive status
 

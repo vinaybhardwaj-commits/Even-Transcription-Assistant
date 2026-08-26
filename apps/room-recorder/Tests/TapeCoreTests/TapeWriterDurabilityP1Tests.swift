@@ -296,6 +296,7 @@ private let durP1FrameCount = 4_096
 private let durP1CrashPrefixByteCount = 31
 private let durP1FingerprintSourcePaths = [
   "Package.swift",
+  "Sources/TapeCore/ArchiveCrypto.swift",
   "Sources/TapeCore/ArchiveEnvelope.swift",
   "Sources/TapeCore/TapeFormat.swift",
   "Sources/TapeCore/TapeVerifier.swift",
