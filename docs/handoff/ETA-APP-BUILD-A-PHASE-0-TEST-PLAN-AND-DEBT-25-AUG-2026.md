@@ -400,6 +400,16 @@ profiling remains an acceptance gate.
 The short local smoke proved valid output and exposed bounded converter buffering. It did not
 prove that converter discrepancy stays bounded for a day or across every input rate.
 
+Build B completed `SRC-01` through `SRC-04` on 26 August 2026. The deterministic matrix covers
+44.1, 48, 96 and 192 kHz, every short length from 1 through 512, production block edges, terminal
+suffix retention, clean writer flush, bounded long accounting and all direct/configuration/explicit
+format-change paths through restart. The routine gate has 42 passing tests plus one opt-in soak in
+eight suites and passes under Thread Sanitizer. The dedicated real-converter soak separately passed
+24 hours equivalent at every rate; final differences were +11, +11, +5 and +2 samples respectively,
+with a maximum intermediate difference of -1 sample throughout each soak. The retained evidence and
+exact environment are in `ETA-APP-BUILD-B-SRC-P1-KICKOFF-26-AUG-2026.md`. `SRC-05` and `SRC-06`
+remain acceptance gates.
+
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | SRC-01 | Deterministic rate matrix | Convert known-duration tones at 44.1, 48, 96 and 192 kHz with randomized block sizes. | Output is mono Int16; final sample count differs from rational expectation only by a documented bounded prime/rounding amount. | Pre-B hardening |
@@ -668,7 +678,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | P1 | TONOR cold boot failed once; the fixed-candidate manual process restart acquired IO without a replug | Production readiness follows durable index growth; after two failed retry cycles the accepted fallback is a five-second USB replug |
 | P1 complete 26 Aug | Deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing normally and under Thread Sanitizer |
 | P1 complete 26 Aug | Deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated and passing normally and under Thread Sanitizer |
-| P1 | Converter rate/flush matrix incomplete | SRC-01 through SRC-04 passing with documented accounting bound |
+| P1 complete 26 Aug | Converter rate/flush matrix | SRC-01 through SRC-04 passing with a documented 12-sample final bound and duration-independent intermediate bound |
 | P1 | Writer fault points not injected | DUR-02 through DUR-05 and DUR-08/09 produce parseable honest recovery |
 | P1 | Index/verifier malformed-input matrix incomplete | IDX-02 through IDX-08 and VER-02 through VER-08 passing |
 | P1 | WAV alias/growth/4-GiB/failure matrix incomplete | WAV-02 through WAV-05 passing |

@@ -164,6 +164,7 @@ final class TapeWriter: @unchecked Sendable {
           inputFrames: currentInputSampleRate == nil ? nil : totalInputFrames,
           inputSampleRate: currentInputSampleRate
         ))
+      if item.marker == .formatChange { currentInputSampleRate = nil }
       resampler = nil
       latestAudioMonoNS = nil
       latestAudioWallNS = nil
@@ -195,7 +196,7 @@ final class TapeWriter: @unchecked Sendable {
           return
         }
         guard let samples else { throw RecorderError("audio stream item has no samples") }
-        if let resampler, resampler.inputSampleRate != item.sampleRate {
+        if let currentInputSampleRate, currentInputSampleRate != item.sampleRate {
           try discontinuity(
             StreamItem(
               marker: .formatChange,

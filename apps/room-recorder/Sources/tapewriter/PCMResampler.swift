@@ -43,6 +43,9 @@ final class PCMResampler {
     frameCount: Int,
     body: (UnsafePointer<Int16>, Int) throws -> Void
   ) throws {
+    guard frameCount > 0 else {
+      throw RecorderError("native input block is empty")
+    }
     guard frameCount <= inputBuffer.frameCapacity, let input = inputBuffer.floatChannelData?[0]
     else {
       throw RecorderError("native input block exceeds converter capacity")

@@ -68,23 +68,6 @@ import Testing
     #expect(overflow?.gapNS == 20)
   }
 
-  @Test func converterFinalDifferenceIsBoundedAcrossBoundaries() throws {
-    for frameCount in [1, 2, 3, 4, 31, 32, 33, 4_095, 4_096] {
-      let converter = try PCMResampler(inputSampleRate: 48_000, maximumInputFrames: 4_096)
-      let input = [Float](repeating: 0.25, count: frameCount)
-      var outputCount = 0
-      try input.withUnsafeBufferPointer { buffer in
-        try converter.convert(samples: buffer.baseAddress!, frameCount: frameCount) { _, count in
-          outputCount += count
-        }
-      }
-      try converter.finish { _, count in outputCount += count }
-
-      let expected = Int((Double(frameCount) / 3).rounded())
-      #expect(abs(outputCount - expected) <= 12)
-    }
-  }
-
   @Test func cleanStopAlwaysCommitsFinalRecord() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
