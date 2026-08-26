@@ -143,6 +143,12 @@ section 7 of the Phase 0 test plan.
 - SSH process gone, tape present: run `tapewriter verify` before any restart.
 - Mini rebooted: confirm host fingerprint, collect the pre-restart verifier output, then restart in
   the same tape directory so the durable restart record preserves the surviving tail.
+- TONOR after a cold-power event: the first 25 August run did not start IO until USB re-enumeration;
+  the fixed-candidate H-02 rerun recovered without a post-boot replug. Do not infer readiness from
+  enumeration. Let the recorder retry, and require durable sample-index growth. If it still does not
+  advance after two five-second retry cycles, V accepted unplugging the TONOR USB cable for at least
+  five seconds and reconnecting it as the hardware fallback. Device presence, process liveness and a
+  level display are not substitutes for tape growth.
 - Kiosk does not return after testing: reopen the Home Office room page on the Mini and confirm the
   Scribe listener is fresh before leaving.
 - Any verifier `FAIL`, dropped block, unexpected discontinuity, or missing evidence: stop the

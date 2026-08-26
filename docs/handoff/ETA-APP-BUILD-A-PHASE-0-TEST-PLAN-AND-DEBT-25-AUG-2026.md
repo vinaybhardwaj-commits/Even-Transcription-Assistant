@@ -8,11 +8,12 @@ Companion to:
 
 This is the execution document for testing the Phase 0 `tapewriter` harness. It records what
 has already been checked, what test code exists but has not run, and every known test debt by
-part of the build. It is not an acceptance report. The four binding protocols still have to
-run on the Home Office Mini with the production microphone, with V present for the destructive
-steps.
+part of the build. It is not an acceptance report. H-01 through H-04 are technically complete on the
+fixed candidate, and V accepted the complete report on 26 August 2026. The remaining hardening matrix
+stays explicit below.
 
-**Current gate state: Phase 0 is implemented but not accepted. App Build B remains blocked.**
+**Current gate state: Phase 0 is accepted, and V accepted Build 3 after its production field evidence
+on 26 August 2026. The App Build B gate is open; its no-open-issue kickoff is the next document.**
 
 ---
 
@@ -167,8 +168,61 @@ briefly read alive, so the tape wrote `configuration_change` then `resumed`, not
 The next source correction upgrades that pending boundary to `device_lost` only when a successful
 CoreAudio enumeration proves the stable UID absent; an enumeration failure remains unknown and does
 not guess. Reacquisition still measures `resumed` from the last true pre-loss frame. The correction
-builds and formats cleanly and all 20 local deterministic tests pass, but requires a new immutable
-candidate and native H-03 rerun. None of these results closes the cold-boot H-02 hardware blocker.
+is candidate `3d4139e1d6a630814d88a932676a62b37172584a`, Mini release binary
+`d26e776172266e41809d5a280e04bca929f1325014a57b27a18d15fd60797cc7`. It builds and formats cleanly,
+has no dependencies, and all 20 native Mini tests pass.
+
+The strict H-03 rerun on `3d4139e` passed. After more than five minutes of monotonic pre-loss growth,
+the TONOR was unplugged for approximately 62 s. The tape contains ordered `configuration_change`,
+`device_lost`, then `resumed`; the indexed last-frame-to-first-frame gap is 66.288102 s, approximately
+4.29 s longer than the operator timing and within the five-second retry cadence. It then recorded
+more than five post-resume minutes without a new error. Final tape is 786.507750 s with a 1.300319 s
+ordinary checkpoint gap, zero tail, valid 16 kHz mono Int16 WAV and `VERDICT: PASS`. V listened from
+6:30 through 6:50 around the approximately 6:39.755 no-silence splice and reported a clean direct
+transition with no fabricated silence, corruption, repetition, buzz or pre-resume audio. The extra
+startup `configuration_change`/`resumed` pair at byte offset zero, with a 0.121 s gap, remains named.
+H-03 is complete for this candidate.
+
+H-02 then passed on `3d4139e` in `power-pull-manual-replug-2/`. The recorder initially met the stale
+TONOR state left by the earlier experiments, and V replugged it before the power protocol began. That
+pre-power action is explicitly present as `device_lost` then `resumed`, with a 15.572796 s gap. After
+170.528000 s of true tape, V pulled wall power. The first verifier after normal boot, saved before any
+restart or USB action, reported 41,610 surviving unindexed bytes (1.300312 s), a 1.300319 s ordinary
+checkpoint gap, valid offsets and `VERDICT: PASS`. The exact UTC of the wall-power pull was not
+captured; this is an evidence limitation and must not be reconstructed from boot time.
+
+V did not replug TONOR after boot. V manually launched restart PID 3708 in the visible Terminal; it
+opened the same tape and advanced immediately, then recorded for several minutes and stopped cleanly.
+This proves acquisition without post-boot USB intervention, not automatic process relaunch. Final
+tape is 395.112125 s with zero current tail, a retained `restart` record naming the 41,610-byte power
+tail, fitted native drift -0.706 ppm
+(-0.212 ms per five minutes), fitted durable tape drift -0.886 ppm, largest converter difference 12
+samples and `VERDICT: PASS`. V listened from approximately 2:40 through 3:00 around the 2:50.528
+power/restart splice and reported a clean direct transition with no fabricated silence, corruption,
+repetition, buzz or pre-restart audio. H-02 therefore passes its binding durability and same-tape
+recovery protocol on the fixed candidate. The earlier failed unattended boot remains a named
+intermittent TONOR/CoreAudio risk: per R5 the room cannot report ready until the durable index grows.
+V accepted a five-second physical USB replug as the fallback only if two startup retry cycles still
+produce no tape growth.
+
+The fixed-candidate H-01 rerun passed in `one-hour-kill-final/`. PID 5130 recorded until the tape
+held 57,630,068 bytes, then received `kill -9` at `2026-08-25T15:51:03Z`. The immediate verifier
+reported 35,666 surviving unindexed bytes (1.114562 s), a 1.300319 s largest checkpoint gap, no
+discontinuity and `VERDICT: PASS`. PID 12493 restarted the same tape at `15:52:09Z`; its first boundary
+is a `restart` at byte 57,630,068 retaining that exact crash tail. The 67.555006 s adjacent durable-
+record gap is the measured operator restart interval and does not exist as PCM or zero-filled WAV.
+
+The clean stop at `16:22:14Z` left 57,627,108 samples, 115,254,216 PCM bytes and 3,601.694250 s of
+true tape, with zero current tail. Its final boundaries are the deliberate `restart`, a known startup
+`configuration_change`/`resumed` pair with a 0.120 s gap, and clean `stopped`. Fitted native drift is 0.008 ppm
+(0.002 ms per five minutes), fitted durable tape drift is -0.018 ppm and the largest converter
+difference is 11 samples. Across 690 five-second resource samples, peak CPU was 0.6%, peak RSS 20,736
+KiB and final tape disk footprint 115,468 KiB. The post-restart recorder reported 9,694 accepted
+blocks and zero dropped; the killed process could not flush its summary, while its index contains no
+overflow or loss event. The exported tape is 16 kHz mono Int16. V listened from approximately 29:50
+through 30:10 around the 30:00.939 hard-kill/restart splice and reported it seamless, with no
+fabricated silence, corruption, repetition, buzz or pre-restart audio. H-01 passes its hard threshold
+on `3d4139e`; the earlier `4618a2c` run remains supporting repeat evidence only.
 
 ---
 
@@ -345,8 +399,9 @@ prove that converter discrepancy stays bounded for a day or across every input r
 
 ### 5.6 Durable PCM writer, fsync and restart
 
-Completed checks: short clean shutdown, local `kill -9`, historical restart tail, exclusive lock,
-partial final index repair. These must be repeated at candidate SHA and on the Home Office disk.
+Completed checks include short clean shutdown, fixed-candidate Home Office `kill -9`, historical
+restart tail, power pull, exclusive lock and partial final index repair. The additional fault matrix
+below remains hardening debt.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
@@ -359,12 +414,12 @@ partial final index repair. These must be repeated at candidate SHA and on the H
 | DUR-07 | Odd PCM suffix recovery | Append one torn byte and restart. | One byte removed to Int16 alignment; index invariants retained; repair reported in notes. | Pre-B hardening |
 | DUR-08 | Disk full/permission failure | Fill or quota a test volume; revoke write permission in another fixture. | Recorder fails loudly; no false healthy state; committed tape/index remain parseable. | Pre-B hardening |
 | DUR-09 | Sync and write error injection | Force write, `F_FULLFSYNC`, index write and `fsync` failures separately. | Writer propagates failure; process stops capture; index never advances past durable PCM. | Pre-B hardening |
-| DUR-10 | Cadence under CPU/disk load | Run capture while applying representative CPU and disk pressure. | Largest uninterrupted checkpoint gap reported; any sustained departure from about 2 s is named. Hard tail remains at or below 2.5 s. | Acceptance gate |
+| DUR-10 | Cadence under controlled load | Run capture while applying the ratified H-04 CPU contention. | Largest uninterrupted checkpoint gap reported; any sustained departure from the candidate's approximately 1.25 s schedule is named. Hard tail remains at or below 2.5 s. A future change toward 2 s requires retained-threshold evidence or a repeat. | Acceptance gate |
 
 ### 5.7 Index format and recovery validation
 
-The four written core corruption tests passed locally. They must be repeated at the candidate
-commit and expanded by the matrix below.
+The four written core corruption tests passed locally and at the fixed candidate commit. The matrix
+below records remaining expansion debt.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
@@ -381,7 +436,7 @@ commit and expanded by the matrix below.
 
 Written tests cover drift arithmetic, segment reset, current/historical tails, odd PCM, separate
 tape/native metrics, cadence/overflow failure, arithmetic limits and the production parser. All
-nine passed locally and must be rerun at the candidate commit.
+nine passed locally and at the fixed candidate commit.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
@@ -393,7 +448,7 @@ nine passed locally and must be rerun at the candidate commit.
 | VER-06 | Converter accounting | Synthetic bounded backlog and final flush surplus. | Tape drift, native drift and converter difference independently correct. | Acceptance gate |
 | VER-07 | Cadence report | Check ordinary checkpoints around markers and restarts. | Largest uninterrupted checkpoint gap excludes downtime; adjacent durable-record gap exposes downtime/stalls. | Acceptance gate |
 | VER-08 | Verbatim report stability | Golden fixture for all rendered sections and verdict. | Required report fields cannot disappear unnoticed. | Pre-B hardening |
-| VER-09 | Five-minute implication | For full-day native ppm `p`, calculate `p * 0.3` ms per five-minute piece. | Report states ppm and signed ms/5 min with formula. | Acceptance gate |
+| VER-09 | Five-minute implication | For the ratified eight-hour controlled-load H-04 native ppm `p`, calculate `p * 0.3` ms per five-minute piece. | Report states ppm and signed ms/5 min with formula. | Acceptance gate |
 
 ### 5.9 WAV export and human listening
 
@@ -412,16 +467,18 @@ rejection and `afinfo` validation.
 
 ### 5.10 Performance, resource and privacy behavior
 
-No acceptance performance numbers have been measured. The local short runs are too brief and
-on the wrong machine.
+Fixed-candidate H-01 retained 690 Home Office samples. H-04 retained 479 controlled-load samples:
+recorder CPU average/p95/max 0.277%/0.400%/0.500%; RSS start/end/max
+18,768/14,736/18,784 KiB; both load workers averaged approximately 99.6%; tape-directory growth was
+903,144 KiB. The final tape held 28,824.695125 seconds, accepted 155,172 blocks and dropped zero.
 
 | ID | Debt/test to run | Procedure | Pass condition | Gate |
 |---|---|---|---|---|
 | PERF-01 | Recording CPU | Sample process CPU for at least 30 minutes, including a sync and load period. | CPU is at most a few percent on the Home Office Mini; report average, p95 and maximum. | Acceptance gate |
-| PERF-02 | Memory stability | Record one hour and full day; sample RSS/virtual size. | No sustained growth with elapsed time; report start/end/max RSS. | Acceptance gate |
+| PERF-02 | Memory stability | Record one hour and the ratified eight-hour controlled-load duration; sample RSS/virtual size. | No sustained growth with elapsed time; report start/end/max RSS. | Acceptance gate |
 | PERF-03 | Disk throughput and size | Record duration and compare PCM/index byte growth. | PCM near 32,000 bytes/s: about 115.2 MB/h and 2.7648 GB/day, plus small index overhead. Explain variance. | Acceptance gate |
 | PERF-04 | Sync latency | Measure or infer checkpoint intervals under ordinary and loaded disk. | Full-sync cost does not violate hard tail limit; largest gap retained. | Acceptance gate |
-| PERF-05 | Callback drops | Retain final accepted/dropped block counters for every run. | Zero dropped blocks on ordinary full-day run. Any drop has an ordered overflow marker and investigation. | Acceptance gate |
+| PERF-05 | Callback drops | Retain final accepted/dropped block counters for every run. | Zero dropped blocks on the ratified eight-hour controlled-load H-04. Any drop has an ordered overflow marker and investigation. | Acceptance gate |
 | PERF-06 | Sleep/wake | If the Mini can sleep despite provisioning, test one cycle. | Gap/discontinuity honest; no zero fill. Production provisioning should prevent sleep. | Pre-B hardening |
 
 ---
@@ -457,7 +514,8 @@ Pass/review rules:
 ### H-02 Power pull
 
 1. Start a fresh output directory and record long enough to include several anchors.
-2. At an unannounced point in the two-second cycle, physically pull the Mini's wall power.
+2. At an unannounced point in the candidate's approximately 1.25-second checkpoint cycle, physically
+   pull the Mini's wall power.
 3. Boot normally. Do not restart capture before saving the first verifier output.
 4. Save `verify-after-power-before-restart.txt` verbatim.
 5. Restart against the same tape, capture several minutes, stop cleanly and verify again.
@@ -487,16 +545,25 @@ Pass/review rules:
 - No zero-filled minute exists in PCM/WAV.
 - No pre-resume sample appears before the `resumed` marker.
 
-### H-04 Full-day untouched drift run
+### H-04 Eight-hour controlled-load substitute
+
+V ratified an eight-hour uninterrupted overnight run under controlled CPU contention as the fixed-
+candidate H-04 substitute. For this candidate's Phase 0 H-04 only, V waived R15's full-day duration
+and superseded the matching ordinary/full-day wording in the kickoff, this plan and the recorder
+README. Every other R15 gate remains, and this creates no precedent for later phases, candidates or
+rooms. Two `/usr/bin/yes` workers each hold one core busy: approximately 200%
+process CPU across this 12-core Mini, while its ordinary apps and services remain running. Do not add
+synthetic disk writes; the tape's real append/fsync path is the disk workload under test. Record the
+load-worker PIDs and sample their CPU beside recorder CPU/RSS and tape disk growth throughout.
 
 1. Start a fresh tape with the production microphone UID.
-2. Record a whole ordinary day without intentional interruption.
+2. Record at least eight uninterrupted hours with both controlled load workers alive throughout.
 3. Sample CPU/RSS and disk behavior throughout the day.
 4. Stop cleanly, verify, export representative opening/middle/closing audio and save all output.
 
 Pass/review rules:
 
-- Zero dropped blocks in ordinary operation.
+- Zero dropped blocks in controlled-load operation.
 - Every unexpected discontinuity is named and investigated.
 - Fitted **native input-clock** ppm is the microphone/Mac clock result.
 - Fitted **durable tape** ppm and converter-accounting bounds are reported separately.
@@ -557,23 +624,26 @@ location and commit only the textual report and non-sensitive hashes.
 
 Phase 0 can be reported for review only when all boxes below have evidence:
 
-- [ ] Candidate commit is fixed; worktree and binary hash recorded.
-- [ ] Release build passes on the Home Office Mini.
+- [x] Candidate commit is fixed; worktree and binary hash recorded.
+- [x] Release build passes on the Home Office Mini.
 - [x] Package has no external dependencies or networking.
-- [ ] Swift Testing suite reruns and passes at the fixed candidate commit; use full Xcode or
+- [x] Swift Testing suite reruns and passes at the fixed candidate commit; use full Xcode or
       the recorded CLT scratch recipe and retain the output.
-- [ ] H-01 one-hour kill protocol completed with verbatim before/after verifier output.
-- [ ] H-02 power-pull protocol completed with verbatim before/after verifier output.
-- [ ] H-03 device-yank protocol completed with measured physical and indexed gap.
-- [ ] H-04 full-day protocol completed with native/tape drift and converter accounting.
-- [ ] Worst tail per crash event listed; hard 2.5 s verdict stated.
-- [ ] Any 2.0-2.5 s result named against R3's approximately 2 s premise.
-- [ ] Largest uninterrupted checkpoint gap under ordinary and loaded operation listed.
-- [ ] Every deliberate and unexpected discontinuity listed with interpretation.
-- [ ] CPU, memory and disk measurements listed.
-- [ ] Listening checks around kill, restart and yank completed.
-- [ ] Anything contradicting R3/R4/R14 is named plainly and not worked around.
-- [ ] V has read and accepted the Phase 0 report before any App Build B engine work begins.
+- [x] H-01 one-hour kill protocol completed with verbatim before/after verifier output.
+- [x] H-02 power-pull protocol completed with verbatim before/after verifier output.
+- [x] H-03 device-yank protocol completed with measured physical and indexed gap.
+- [x] H-04 eight-hour controlled-load substitute completed with native/tape drift and converter accounting.
+- [x] Worst tail per crash event listed; hard 2.5 s verdict stated.
+- [x] Any 2.0-2.5 s result named against R3's approximately 2 s premise; no such result occurred.
+- [x] Largest uninterrupted checkpoint gap under ordinary and loaded operation listed.
+- [x] Every deliberate and unexpected discontinuity listed with interpretation.
+- [x] CPU, memory and disk measurements listed.
+- [x] Listening checks around kill, restart and yank completed.
+- [x] H-04 opening, middle and closing listening observations recorded; all three passed.
+- [x] Anything contradicting R3/R4/R14 is named plainly and not worked around.
+- [x] V adjudicated R15's `~200-line` wording as descriptive; the larger offline harness is accepted,
+      while P1 hardening still gates reuse of each corresponding module.
+- [x] V read and accepted the Phase 0 report on 26 August 2026.
 
 ---
 
@@ -583,9 +653,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 
 | Priority | Debt | Exit condition |
 |---|---|---|
-| P0 | Loss-classification correction needs immutable candidate checks and H-01/H-03/H-04 | Fixed SHA build/tests and the remaining evidence bundles complete |
-| P0 | TONOR Apple USB driver did not recover unattended after tested wall-power cycle | Repeated cold-power boot starts IO without physical USB replug, or production hardware/provisioning changes and H-02 is rerun |
-| P0 | Full-day CPU, memory, disk and callback-drop figures absent | Full-day and load measurements reported; H-01 peak figures remain supporting evidence |
+| P1 | TONOR cold boot failed once; the fixed-candidate manual process restart acquired IO without a replug | Production readiness follows durable index growth; after two failed retry cycles the accepted fallback is a five-second USB replug |
 | P1 | No deterministic SPSC ring/marker suite | RING-01 through RING-06 automated and passing |
 | P1 | No deterministic AVAudioTime discontinuity suite | CAP-04 through CAP-07 automated or fault-injected and passing |
 | P1 | Converter rate/flush matrix incomplete | SRC-01 through SRC-04 passing with documented accounting bound |
@@ -597,7 +665,7 @@ This is the short queue. Detailed procedures remain authoritative in section 5.
 | P2 | Bare CLT `swift test` does not auto-wire installed macro/runtime paths | Full Xcode runs bare command, or Apple fixes CLT layout; documented scratch recipe remains available |
 | P2 | Swift 6.4 CLT emits nonexistent `Developer/...` linker search-path warnings | Warning disappears under full Xcode/fixed CLT, or remains documented as an Apple toolchain issue |
 
-P0 blocks the Phase 0 acceptance report. P1 must be resolved before the corresponding mechanism
-is reused as production App Build B engine code, unless V explicitly adjudicates a narrower
-gate from the real-machine evidence. P2 remains tracked hardening debt and must not disappear
-from the next build kickoff.
+No Phase 0 P0 debt remains. P1 must be resolved before the corresponding mechanism is reused as
+production App Build B engine code, unless V explicitly adjudicates a narrower gate from the
+real-machine evidence. P2 remains tracked hardening debt and must not disappear from the next build
+kickoff.
