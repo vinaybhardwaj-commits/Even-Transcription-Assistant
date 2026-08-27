@@ -143,7 +143,11 @@ final class CaptureSession: @unchecked Sendable {
 }
 
 public enum Recorder {
-  public static func run(outputDirectory: URL, requestedDeviceUID: String?) throws {
+  public static func run(
+    outputDirectory: URL,
+    requestedDeviceUID: String?,
+    unsignedDevelopmentArchive: UnsignedDevelopmentArchiveOptions? = nil
+  ) throws {
     try requireMicrophonePermission()
     let validatedDevice = try AudioDevices.selected(uid: requestedDeviceUID)
     let stableDeviceUID = validatedDevice.uid
@@ -165,7 +169,12 @@ public enum Recorder {
     }
 
     let ring = AudioRing()
-    let writer = TapeWriter(directory: outputDirectory, deviceUID: stableDeviceUID, ring: ring)
+    let writer = TapeWriter(
+      directory: outputDirectory,
+      deviceUID: stableDeviceUID,
+      ring: ring,
+      unsignedDevelopmentArchive: unsignedDevelopmentArchive
+    )
     try writer.startAndWaitUntilReady()
     if stopping.load(ordering: .acquiring) {
       try finalizeCapture(stopCapture: {}, ring: ring, writer: writer)

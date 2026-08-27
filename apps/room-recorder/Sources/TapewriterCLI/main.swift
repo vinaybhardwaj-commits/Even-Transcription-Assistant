@@ -5,6 +5,10 @@ import TapeCore
 private let usage = """
   Usage:
     tapewriter record --out <dir> [--device <uid>]
+      [--unsigned-development-archive --archive-stream <UUID> --archive-room <id>
+       --archive-date YYYY-MM-DD --archive-lane <id>]
+    tapewriter inspect-unsigned-development-archive --dir <dir> --device <uid>
+      --archive-stream <UUID> --archive-room <id> --archive-date YYYY-MM-DD --archive-lane <id>
     tapewriter verify --dir <dir>
     tapewriter export --dir <dir> --wav <file>
   """
@@ -27,10 +31,11 @@ do {
   guard let command = arguments.first else { throw RecorderError(usage) }
   switch command {
   case "record":
-    let output = try require("--out", in: arguments)
+    let options = try RecordCommandOptions.parse(Array(arguments.dropFirst()))
     try Recorder.run(
-      outputDirectory: URL(fileURLWithPath: output).standardizedFileURL,
-      requestedDeviceUID: try option("--device", in: arguments)
+      outputDirectory: options.outputDirectory,
+      requestedDeviceUID: options.requestedDeviceUID,
+      unsignedDevelopmentArchive: options.unsignedDevelopmentArchive
     )
   case "verify":
     let directory = try require("--dir", in: arguments)
@@ -38,6 +43,18 @@ do {
       directory: URL(fileURLWithPath: directory).standardizedFileURL)
     print(report.rendered())
     if !report.passed { exit(2) }
+  case "inspect-unsigned-development-archive":
+    let options = try UnsignedDevelopmentArchiveInspectionCommandOptions.parse(
+      Array(arguments.dropFirst()))
+    let result = try UnsignedDevelopmentArchiveInspection.inspect(
+      directory: options.directory,
+      options: options.archive,
+      stableDeviceUID: options.stableDeviceUID
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    print(String(decoding: try encoder.encode(result), as: UTF8.self))
+    if !result.ok { exit(2) }
   case "export":
     let directory = URL(fileURLWithPath: try require("--dir", in: arguments)).standardizedFileURL
     let output = URL(fileURLWithPath: try require("--wav", in: arguments)).standardizedFileURL

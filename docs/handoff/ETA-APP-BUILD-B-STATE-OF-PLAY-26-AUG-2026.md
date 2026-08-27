@@ -4,10 +4,10 @@
 **Audience:** engineering, product, operations and the next delivery team
 **Repository:** `/Users/vinaybhardwaj/Documents/EvenScribe`
 **Branch:** `feat/room-recorder`
-**Committed source base:** `7207fdc`
+**Committed source base:** `53f2354`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** unsigned end-to-end vertical slice; Secure Enclave and signing work parked
+**Current stage:** unsigned no-network archive integration complete; next scope not selected
 
 **Execution reset, 27 August 2026:** V replaced the bottom-up Build B sequence for current execution
 with `ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md`. The immediate outcome is the
@@ -17,6 +17,18 @@ key-lifecycle implementation at `7207fdc` remains dormant. Secure Enclave, signi
 archive integration, destructive tests and later phases cannot interrupt this milestone without V's
 explicit approval. Progress is measured against the reset's end-to-end exit gate, not by additional
 isolated mechanism or test counts.
+
+**Post-reset decision, 27 August 2026:** the unsigned browser-replacement exit gate passed and was
+committed at `53f2354`. V chose to keep the next archive integration unsigned. Current work is governed
+by `ETA-ROOM-RECORDER-UNSIGNED-ARCHIVE-INTEGRATION-27-AUG-2026.md` and may use only the published,
+non-confidential test key in an explicit standalone development mode. It does not resume canonical
+Secure Enclave/keywrap, signing or patient use.
+
+**Unsigned archive result, 27 August 2026:** candidate `unsigned-archive-705cfb9b5cba` passed the local
+226-test gate and one standalone Home Office Mini capture. Its authenticated 35-record tape/index archive
+decrypted byte-for-byte to the 725,228-byte plaintext staging tape without creating a Bench session. This
+is development format/persistence evidence under a published fixed test key, not production
+confidentiality or canonical room-archive acceptance.
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All

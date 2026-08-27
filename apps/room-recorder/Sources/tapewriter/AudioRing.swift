@@ -1,7 +1,8 @@
 import Synchronization
 
-enum StreamMarker: UInt8, Sendable {
+enum StreamMarker: UInt8, CaseIterable, Hashable, Sendable {
   case none
+  case restart
   case deviceLost
   case resumed
   case configurationChange
@@ -14,6 +15,7 @@ enum StreamMarker: UInt8, Sendable {
   var indexName: String {
     switch self {
     case .none: ""
+    case .restart: "restart"
     case .deviceLost: "device_lost"
     case .resumed: "resumed"
     case .configurationChange: "configuration_change"

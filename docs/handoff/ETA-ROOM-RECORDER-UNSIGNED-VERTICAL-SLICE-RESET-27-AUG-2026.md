@@ -2,7 +2,8 @@
 
 **Date:** 27 August 2026
 
-**Status:** governing current Room Recorder execution
+**Status:** completed at `53f2354`; superseded for current execution by
+`ETA-ROOM-RECORDER-UNSIGNED-ARCHIVE-INTEGRATION-27-AUG-2026.md`
 
 **Decision owner:** V
 
@@ -11,6 +12,9 @@
 This reset changes the order of work. It does not discard the accepted recorder foundations or rewrite
 their evidence. Where an older Room Recorder plan conflicts with this document, this document governs
 until V explicitly closes or replaces the unsigned vertical-slice milestone.
+
+**Closure, 27 August 2026:** the exit gate below passed on the Home Office Mini and was committed at
+`53f2354`. V then explicitly chose to continue with an unsigned, development-only archive integration.
 
 ## 1. Product outcome
 

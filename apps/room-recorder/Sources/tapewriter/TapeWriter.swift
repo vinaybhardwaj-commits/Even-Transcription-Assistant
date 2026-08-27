@@ -9,6 +9,7 @@ final class TapeWriter: @unchecked Sendable {
   private let ring: AudioRing
   private let faultPlan: DurabilityFaultPlan?
   private let checkpointIntervalNS: UInt64
+  private let unsignedDevelopmentArchive: UnsignedDevelopmentArchiveOptions?
   private let stopping = Atomic<Bool>(false)
   private let durableOffset = Atomic<Int64>(-1)
   private let firstDurableCaptureOffset = Atomic<Int64>(-1)
@@ -25,13 +26,15 @@ final class TapeWriter: @unchecked Sendable {
     deviceUID: String,
     ring: AudioRing,
     faultPlan: DurabilityFaultPlan? = nil,
-    checkpointIntervalNS: UInt64 = 1_250_000_000
+    checkpointIntervalNS: UInt64 = 1_250_000_000,
+    unsignedDevelopmentArchive: UnsignedDevelopmentArchiveOptions? = nil
   ) {
     self.directory = directory
     self.deviceUID = deviceUID
     self.ring = ring
     self.faultPlan = faultPlan
     self.checkpointIntervalNS = checkpointIntervalNS
+    self.unsignedDevelopmentArchive = unsignedDevelopmentArchive
   }
 
   func startAndWaitUntilReady() throws {
@@ -81,14 +84,24 @@ final class TapeWriter: @unchecked Sendable {
   }
 
   private func run() throws {
+    if unsignedDevelopmentArchive != nil {
+      UnsignedDevelopmentArchiveWriter.printNonConfidentialWarning()
+    }
     try createDurableDirectory(directory)
     let pcmURL = directory.appendingPathComponent("tape.pcm")
     let indexURL = directory.appendingPathComponent("tape.idx")
     let existed =
       FileManager.default.fileExists(atPath: pcmURL.path)
       || FileManager.default.fileExists(atPath: indexURL.path)
+    let existingPlaintextHasContent: Bool
+    if unsignedDevelopmentArchive == nil {
+      existingPlaintextHasContent = false
+    } else {
+      existingPlaintextHasContent = try fileHasContent(pcmURL) || fileHasContent(indexURL)
+    }
 
-    let pcmFD = open(pcmURL.path, O_CREAT | O_WRONLY | O_APPEND, S_IRUSR | S_IWUSR)
+    let pcmAccess = unsignedDevelopmentArchive == nil ? O_WRONLY : O_RDWR
+    let pcmFD = open(pcmURL.path, O_CREAT | pcmAccess | O_APPEND, S_IRUSR | S_IWUSR)
     guard pcmFD >= 0 else { throw RecorderError.posix("cannot open tape.pcm") }
     defer { close(pcmFD) }
     guard flock(pcmFD, LOCK_EX | LOCK_NB) == 0 else {
@@ -98,12 +111,24 @@ final class TapeWriter: @unchecked Sendable {
 
     var bytesWritten = lseek(pcmFD, 0, SEEK_END)
     guard bytesWritten >= 0 else { throw RecorderError.posix("cannot seek tape.pcm") }
-    if bytesWritten % 2 != 0 {
+    var archiveWriter: UnsignedDevelopmentArchiveWriter?
+    if let unsignedDevelopmentArchive {
+      archiveWriter = try UnsignedDevelopmentArchiveWriter.open(
+        directory: directory,
+        options: unsignedDevelopmentArchive,
+        stableDeviceUID: deviceUID,
+        pcmFileDescriptor: pcmFD,
+        plaintextByteCount: bytesWritten,
+        existingPlaintextHasContent: existingPlaintextHasContent
+      )
+      bytesWritten = archiveWriter!.logicalByteEnd
+    } else if bytesWritten % 2 != 0 {
       guard ftruncate(pcmFD, bytesWritten - 1) == 0 else {
         throw RecorderError.posix("cannot align tape.pcm")
       }
       bytesWritten -= 1
     }
+    defer { archiveWriter?.close() }
 
     let prior = try IndexLog.read(url: indexURL, pcmSize: bytesWritten, repairTrailingPartial: true)
     let priorOffset = prior.records.compactMap(\.byteOffset).last ?? 0
@@ -181,6 +206,12 @@ final class TapeWriter: @unchecked Sendable {
     func checkpoint(monoNS: UInt64, wallNS: UInt64) throws {
       try fullSyncTape(.checkpoint)
       let rms = rmsSampleCount == 0 ? 0 : min(1, sqrt(squaredSum / Double(rmsSampleCount)))
+      try archiveWriter?.mirrorDurablePCM(
+        fileDescriptor: pcmFD,
+        durableByteEnd: bytesWritten,
+        monoNS: monoNS,
+        wallNS: wallNS
+      )
       try appendRecord(
         IndexRecord(
           byteOffset: bytesWritten,
@@ -240,6 +271,7 @@ final class TapeWriter: @unchecked Sendable {
       } else {
         try fullSyncTape(.discontinuity)
       }
+      archiveWriter?.noteDiscontinuity(item)
       try appendRecord(
         IndexRecord(
           byteOffset: bytesWritten,
@@ -266,6 +298,8 @@ final class TapeWriter: @unchecked Sendable {
 
     if existed {
       let now = monotonicNowNS()
+      archiveWriter?.noteDiscontinuity(
+        StreamItem(marker: .restart, monoStartNS: now, wallStartNS: wallNowNS()))
       try fullSyncTape(.restart)
       try appendRecord(
         IndexRecord(
@@ -429,4 +463,14 @@ private func createDurableDirectory(_ directory: URL) throws {
   try createDurableDirectory(parent)
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
   try synchronizeDirectory(parent)
+}
+
+private func fileHasContent(_ url: URL) throws -> Bool {
+  guard FileManager.default.fileExists(atPath: url.path) else { return false }
+  do {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    return (attributes[.size] as? NSNumber)?.int64Value ?? 0 > 0
+  } catch {
+    throw RecorderError("cannot inspect \(url.lastPathComponent): \(error.localizedDescription)")
+  }
 }

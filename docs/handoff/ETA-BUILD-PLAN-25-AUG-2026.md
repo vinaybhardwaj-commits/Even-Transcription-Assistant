@@ -10,6 +10,11 @@ whole into Claude Code, and no kickoff is written while a fact it depends on is 
 > wherever it conflicts with the sequence below. Secure Enclave, signing, canonical encrypted archive,
 > destructive tests and later builds are parked until the existing browser contract works end to end
 > from the native process. Scope may expand only with V's explicit approval.
+>
+> **Post-reset decision:** that exit gate passed and was committed at `53f2354`. Current execution is the
+> unsigned, development-only no-network archive integration defined in
+> `ETA-ROOM-RECORDER-UNSIGNED-ARCHIVE-INTEGRATION-27-AUG-2026.md`; signing and production key security
+> remain parked.
 
 **Governing documents.** Server work: `ETA-MONITORING-SURFACE-PRD-24-AUG-2026-v1.2.md`
 (D1–D39) plus `ETA-PILOT-BACKLOG-24-AUG-2026.md`. App work:
