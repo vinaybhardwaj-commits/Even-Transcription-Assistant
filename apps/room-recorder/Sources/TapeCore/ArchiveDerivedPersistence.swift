@@ -17,6 +17,11 @@ public struct ArchiveDerivedScanResult: Equatable, Sendable {
 
 public enum ArchiveDerivedPersistenceError: Error, Equatable, Sendable {
   case unsupportedPurpose(ArchiveRecordPurpose)
+  case invalidControlContext
+  case reservedControlContext(ArchiveRecordPurpose)
+  case journalContextMismatch(String)
+  case journalReservationIdentityMismatch(String)
+  case invalidSpoolLogicalRange(expected: UInt32, actual: UInt32)
   case openFailed(path: String, errno: Int32)
   case notRegularFile
   case statFailed(errno: Int32)
@@ -56,6 +61,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
   private let context: ArchiveContext
   private let contextHash: Data
   private let rootKey: Data
+  private let initialLogicalUnit: UInt64
   private let validator: PayloadValidator
   private let headerValidator: HeaderValidator
   private let partialHeaderValidator: PartialHeaderValidator
@@ -74,6 +80,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     context: ArchiveContext,
     contextHash: Data,
     rootKey: Data,
+    initialLogicalUnit: UInt64,
     validator: @escaping PayloadValidator,
     headerValidator: @escaping HeaderValidator,
     partialHeaderValidator: @escaping PartialHeaderValidator,
@@ -88,6 +95,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     self.context = context
     self.contextHash = contextHash
     self.rootKey = rootKey
+    self.initialLogicalUnit = initialLogicalUnit
     self.validator = validator
     self.headerValidator = headerValidator
     self.partialHeaderValidator = partialHeaderValidator
@@ -111,7 +119,8 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     validator: @escaping PayloadValidator = { _ in },
     headerValidator: @escaping HeaderValidator = { _, _ in },
     partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
-    allowExpectedIncompletePayloadRepair: Bool = false
+    allowExpectedIncompletePayloadRepair: Bool = false,
+    initialLogicalUnit: UInt64 = 0
   ) throws -> ArchiveDerivedScanResult {
     try validate(purpose: purpose, rootKey: rootKey, context: context)
     let contextHash = try context.sha256()
@@ -129,6 +138,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialLogicalUnit: initialLogicalUnit,
       validator: validator,
       headerValidator: headerValidator,
       partialHeaderValidator: partialHeaderValidator,
@@ -145,7 +155,8 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     headerValidator: @escaping HeaderValidator = { _, _ in },
     partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
     allowExpectedIncompletePayloadRepair: Bool = false,
-    repairTrailingRecord: Bool = true
+    repairTrailingRecord: Bool = true,
+    initialLogicalUnit: UInt64 = 0
   ) throws -> ArchiveDerivedStore {
     try validate(purpose: purpose, rootKey: rootKey, context: context)
     let contextHash = try context.sha256()
@@ -176,6 +187,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialLogicalUnit: initialLogicalUnit,
       validator: validator,
       headerValidator: headerValidator,
       partialHeaderValidator: partialHeaderValidator,
@@ -193,6 +205,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       context: context,
       contextHash: contextHash,
       rootKey: rootKey,
+      initialLogicalUnit: initialLogicalUnit,
       validator: validator,
       headerValidator: headerValidator,
       partialHeaderValidator: partialHeaderValidator,
@@ -284,8 +297,17 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       guard logicalUnitCount > 0 else {
         throw ArchiveDerivedPersistenceError.emptyLogicalRange
       }
+      try Self.validateCandidate(
+        plaintext: plaintext,
+        firstLogicalUnit: firstLogicalUnit,
+        logicalUnitCount: logicalUnitCount,
+        existingRecords: records,
+        purpose: purpose,
+        context: context
+      )
       let previous = records.last
-      let expectedLogicalUnit = try Self.logicalEnd(previous?.header)
+      let expectedLogicalUnit = try Self.logicalEnd(
+        previous?.header, initialLogicalUnit: initialLogicalUnit)
       guard firstLogicalUnit == expectedLogicalUnit else {
         if previous == nil {
           throw ArchiveDerivedPersistenceError.invalidFirstLogicalUnit(firstLogicalUnit)
@@ -350,13 +372,149 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext
   ) throws {
-    guard purpose == .journal || purpose == .level else {
+    guard
+      purpose == .journal || purpose == .control || purpose == .level
+        || purpose == .manifest || purpose == .spool
+    else {
       throw ArchiveDerivedPersistenceError.unsupportedPurpose(purpose)
     }
     guard rootKey.count == 32 else {
       throw ArchiveCryptoError.invalidRootKeyLength(rootKey.count)
     }
+    if purpose == .control,
+      context.laneID != "_control" || !context.stableDeviceUID.isEmpty
+    {
+      throw ArchiveDerivedPersistenceError.invalidControlContext
+    }
+    if purpose != .control, context.laneID == "_control" {
+      throw ArchiveDerivedPersistenceError.reservedControlContext(purpose)
+    }
     _ = try context.encodedBytes()
+  }
+
+  private static func validateCandidate(
+    plaintext: Data,
+    firstLogicalUnit: UInt64,
+    logicalUnitCount: UInt32,
+    existingRecords: [ArchiveDerivedRecord],
+    purpose: ArchiveRecordPurpose,
+    context: ArchiveContext
+  ) throws {
+    switch purpose {
+    case .journal:
+      guard logicalUnitCount == 1 else {
+        throw ArchiveJournalPayloadError.invalidEnvelopeRange
+      }
+      var payloads = try existingRecords.map { try ArchiveJournalPayloadCodec.decode($0.plaintext) }
+      payloads.append(try ArchiveJournalPayloadCodec.decode(plaintext))
+      try validateJournalHistory(payloads, context: context)
+    case .control:
+      guard logicalUnitCount == 1 else {
+        throw ArchiveControlPayloadError.invalidEnvelope
+      }
+      var payloads = try existingRecords.map { try ArchiveControlPayloadCodec.decode($0.plaintext) }
+      payloads.append(try ArchiveControlPayloadCodec.decode(plaintext))
+      _ = try ArchiveControlReplay.validate(payloads)
+    case .manifest:
+      guard logicalUnitCount == 1 else {
+        throw ArchiveManifestPayloadError.invalidEnvelope
+      }
+      var payloads = try existingRecords.map {
+        try ArchiveManifestPayloadCodec.decode($0.plaintext)
+      }
+      payloads.append(try ArchiveManifestPayloadCodec.decode(plaintext))
+      _ = try ArchiveManifestReplay.validate(payloads)
+    case .spool:
+      let expected = UInt32(plaintext.count)
+      guard logicalUnitCount == expected else {
+        throw ArchiveDerivedPersistenceError.invalidSpoolLogicalRange(
+          expected: expected,
+          actual: logicalUnitCount
+        )
+      }
+      _ = firstLogicalUnit
+    case .level:
+      break
+    case .tape, .index:
+      throw ArchiveDerivedPersistenceError.unsupportedPurpose(purpose)
+    }
+  }
+
+  private static func validateHistory(
+    _ records: [ArchiveDerivedRecord],
+    purpose: ArchiveRecordPurpose,
+    context: ArchiveContext
+  ) throws {
+    switch purpose {
+    case .journal:
+      for record in records { try ArchiveJournalPayloadCodec.validateRecord(record) }
+      try validateJournalHistory(
+        records.map { try ArchiveJournalPayloadCodec.decode($0.plaintext) },
+        context: context
+      )
+    case .control:
+      for record in records { try ArchiveControlPayloadCodec.validateRecord(record) }
+      _ = try ArchiveControlReplay.validate(
+        records.map { try ArchiveControlPayloadCodec.decode($0.plaintext) })
+    case .manifest:
+      for record in records { try ArchiveManifestPayloadCodec.validateRecord(record) }
+      _ = try ArchiveManifestReplay.validate(
+        records.map { try ArchiveManifestPayloadCodec.decode($0.plaintext) })
+    case .spool:
+      for record in records {
+        let expected = UInt32(record.plaintext.count)
+        guard record.header.logicalUnitCount == expected else {
+          throw ArchiveDerivedPersistenceError.invalidSpoolLogicalRange(
+            expected: expected,
+            actual: record.header.logicalUnitCount
+          )
+        }
+      }
+    case .level:
+      break
+    case .tape, .index:
+      throw ArchiveDerivedPersistenceError.unsupportedPurpose(purpose)
+    }
+  }
+
+  private static func validateJournalHistory(
+    _ payloads: [ArchiveJournalPayload],
+    context: ArchiveContext
+  ) throws {
+    _ = try ArchiveJournalReplay.validate(payloads)
+    for payload in payloads where payload.priorState == nil && payload.newState == .reserved {
+      guard payload.roomID == context.roomID, payload.laneID == context.laneID,
+        payload.istDate == context.istDate
+      else {
+        throw ArchiveDerivedPersistenceError.journalContextMismatch(payload.reservationID)
+      }
+      let expected = try ArchiveReservationIdentity.make(
+        context: context,
+        sessionID: payload.sessionID,
+        chunkIndex: payload.chunkIndex,
+        sampleStart: payload.sampleStart,
+        sampleEnd: payload.sampleEnd
+      )
+      guard payload.reservationID == expected else {
+        throw ArchiveDerivedPersistenceError.journalReservationIdentityMismatch(
+          payload.reservationID)
+      }
+    }
+  }
+
+  private static func validatedScanResult(
+    records: [ArchiveDerivedRecord],
+    completeByteCount: UInt64,
+    incompleteTrailingByteCount: UInt64,
+    purpose: ArchiveRecordPurpose,
+    context: ArchiveContext
+  ) throws -> ArchiveDerivedScanResult {
+    try validateHistory(records, purpose: purpose, context: context)
+    return ArchiveDerivedScanResult(
+      records: records,
+      completeByteCount: completeByteCount,
+      incompleteTrailingByteCount: incompleteTrailingByteCount
+    )
   }
 
   private static func identity(of fileDescriptor: Int32) throws -> DerivedFileIdentity {
@@ -373,6 +531,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialLogicalUnit: UInt64,
     validator: PayloadValidator,
     headerValidator: HeaderValidator,
     partialHeaderValidator: PartialHeaderValidator,
@@ -393,7 +552,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     var offset: UInt64 = 0
     var records: [ArchiveDerivedRecord] = []
     var expectedSequence: UInt64 = 1
-    var expectedLogicalUnit: UInt64 = 0
+    var expectedLogicalUnit = initialLogicalUnit
     var expectedPredecessor = Data(repeating: 0, count: 16)
     while offset < fileSize {
       guard UInt64(records.count) < ArchivePurposeSealer.maximumRecordsPerPurposeKey else {
@@ -412,10 +571,12 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
           expectedPredecessor: expectedPredecessor
         )
         try partialHeaderValidator(partial, records.count)
-        return ArchiveDerivedScanResult(
+        return try validatedScanResult(
           records: records,
           completeByteCount: offset,
-          incompleteTrailingByteCount: remaining
+          incompleteTrailingByteCount: remaining,
+          purpose: purpose,
+          context: context
         )
       }
       let headerData = try readExactly(
@@ -464,10 +625,12 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
           throw ArchiveDerivedPersistenceError.ambiguousIncompleteRecord(
             sequence: header.recordSequence)
         }
-        return ArchiveDerivedScanResult(
+        return try validatedScanResult(
           records: records,
           completeByteCount: offset,
-          incompleteTrailingByteCount: remaining
+          incompleteTrailingByteCount: remaining,
+          purpose: purpose,
+          context: context
         )
       }
       guard recordByteCount <= UInt64(Int.max) else {
@@ -500,10 +663,12 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       expectedSequence = try increment(expectedSequence)
       offset = end
     }
-    return ArchiveDerivedScanResult(
+    return try validatedScanResult(
       records: records,
       completeByteCount: offset,
-      incompleteTrailingByteCount: 0
+      incompleteTrailingByteCount: 0,
+      purpose: purpose,
+      context: context
     )
   }
 
@@ -565,8 +730,11 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     }
   }
 
-  private static func logicalEnd(_ header: ArchiveEnvelopeHeader?) throws -> UInt64 {
-    guard let header else { return 0 }
+  private static func logicalEnd(
+    _ header: ArchiveEnvelopeHeader?,
+    initialLogicalUnit: UInt64 = 0
+  ) throws -> UInt64 {
+    guard let header else { return initialLogicalUnit }
     return try logicalEnd(header)
   }
 

@@ -513,6 +513,7 @@ import Testing
       finalFlush: true
     )
     #expect(first.authenticatedSampleCount == 32_000)
+    #expect(first.authenticatedSampleEnd == 32_000)
     #expect(first.reservations.count == 1)
     #expect(first.journalRecordsWritten == 1)
     #expect(first.levelRecordsWritten == 1)
@@ -555,21 +556,261 @@ import Testing
     #expect(try Data(contentsOf: fixture.index) == originalIndex)
 
     try append(Data("ETA".utf8), to: journal)
-    let unexpectedPrefix = try Data(contentsOf: journal)
-    #expect(throws: ArchiveLocalDerivationError.existingJournalMismatch(position: 1)) {
-      try ArchiveLocalDeriver.derive(
-        tapeURL: fixture.tape,
-        indexURL: fixture.index,
-        journalURL: journal,
-        levelURL: level,
-        rootKey: rootKey,
-        context: context,
-        sessionID: "bs_unsigned_development",
-        finalFlush: true
+    let repaired = try ArchiveLocalDeriver.derive(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      journalURL: journal,
+      levelURL: level,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_unsigned_development",
+      finalFlush: true
+    )
+    #expect(repaired.repairedJournalTrailingByteCount == 3)
+    #expect(try Data(contentsOf: journal) == journalBytes)
+  }
+
+  @Test func localDeriverAcceptsAdvancedJournalAndAppendsOnlyNewReservations() throws {
+    let fixture = try makeLaneFixture("derive-advanced")
+    defer { fixture.remove() }
+    var lane = try ArchiveLaneStore.openRecoveringForAppend(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      rootKey: rootKey,
+      context: context
+    )
+    _ = try lane.appendPCM(
+      pcm(Array(repeating: Int16(1_000), count: 16_000)),
+      observation: observation(sampleEnd: 16_000)
+    )
+    lane.close()
+    let journalURL = fixture.directory.appendingPathComponent("primary.jrn")
+    let levelURL = fixture.directory.appendingPathComponent("primary.lvl")
+    let first = try ArchiveLocalDeriver.derive(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      journalURL: journalURL,
+      levelURL: levelURL,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_advanced",
+      finalFlush: true
+    )
+    let reservation = first.reservations[0]
+    let encoded = try ArchiveJournalPayload(
+      reservationID: reservation.reservationID,
+      roomID: reservation.roomID,
+      sessionID: reservation.sessionID,
+      laneID: reservation.laneID,
+      istDate: reservation.istDate,
+      chunkIndex: reservation.chunkIndex,
+      sampleStart: reservation.sampleStart,
+      sampleEnd: reservation.sampleEnd,
+      startMS: reservation.startMS,
+      endMS: reservation.endMS,
+      uncertainty: reservation.uncertainty,
+      averageLevelQ15: reservation.averageLevelQ15,
+      peakLevelQ15: reservation.peakLevelQ15,
+      attemptID: "attempt_1",
+      priorState: .reserved,
+      newState: .encoded,
+      error: nil
+    )
+    let journal = try ArchiveDerivedStore.openRecoveringForAppend(
+      url: journalURL,
+      purpose: .journal,
+      rootKey: rootKey,
+      context: context
+    )
+    try journal.append(
+      plaintext: ArchiveJournalPayloadCodec.encode(encoded),
+      firstLogicalUnit: 1,
+      logicalUnitCount: 1
+    )
+    journal.close()
+
+    lane = try ArchiveLaneStore.openRecoveringForAppend(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      rootKey: rootKey,
+      context: context
+    )
+    _ = try lane.appendPCM(
+      pcm(Array(repeating: Int16(2_000), count: 16_000)),
+      observation: ArchiveIndexObservation(
+        monoNS: 2_000_000_000,
+        wallNS: wallBase + 2_000_000_000,
+        rmsQ15: 0,
+        nativeFrames: nil,
+        inputRateNumerator: nil,
+        inputRateDenominator: nil,
+        discontinuity: .restart,
+        reason: ArchiveIndexDiscontinuity.restart.rawValue
       )
+    )
+    lane.close()
+
+    let second = try ArchiveLocalDeriver.derive(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      journalURL: journalURL,
+      levelURL: levelURL,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_advanced",
+      finalFlush: true
+    )
+    #expect(second.reservations.count == 2)
+    #expect(second.journalRecordsWritten == 1)
+    let scan = try ArchiveDerivedStore.inspect(
+      url: journalURL,
+      purpose: .journal,
+      rootKey: rootKey,
+      context: context
+    )
+    let replay = try ArchiveJournalReplay.validate(
+      scan.records.map { try ArchiveJournalPayloadCodec.decode($0.plaintext) }
+    )
+    #expect(replay.count == 2)
+    #expect(replay[reservation.reservationID]?.state == .encoded)
+    #expect(
+      replay[second.reservations[1].reservationID]?.initialReservation
+        == second.reservations[1]
+    )
+  }
+
+  @Test func liveDerivationFreezesShortTailThenAppendsSixtyObservationRecordAndDiscontinuity()
+    throws
+  {
+    let fixture = try makeLaneFixture("derive-live-growth")
+    defer { fixture.remove() }
+    let writer = try ArchiveLaneStore.openRecoveringForAppend(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      rootKey: rootKey,
+      context: context)
+    let journal = fixture.directory.appendingPathComponent("primary.jrn")
+    let level = fixture.directory.appendingPathComponent("primary.lvl")
+
+    _ = try writer.appendPCM(
+      pcm(Array(repeating: Int16(100), count: 8_000)),
+      observation: observation(sampleEnd: 8_000))
+    var snapshot = try writer.authenticatedSnapshot()
+    let first = try ArchiveLocalDeriver.derive(
+      snapshot: snapshot,
+      journalURL: journal,
+      levelURL: level,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_live",
+      finalFlush: false)
+    snapshot.close()
+    #expect(first.levelRecords.map(\.observations.count) == [1])
+    #expect(first.levelRecords[0].sampleCount == 8_000)
+    let firstBytes = try Data(contentsOf: level)
+
+    let oneSecond = pcm(Array(repeating: Int16(1_000), count: 16_000))
+    for second in 1...60 {
+      _ = try writer.appendPCM(
+        oneSecond,
+        observation: observation(sampleEnd: 8_000 + UInt64(second) * 16_000))
     }
-    #expect(try Data(contentsOf: journal) == unexpectedPrefix)
-    try journalBytes.write(to: journal)
+    snapshot = try writer.authenticatedSnapshot()
+    let second = try ArchiveLocalDeriver.derive(
+      snapshot: snapshot,
+      journalURL: journal,
+      levelURL: level,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_live",
+      finalFlush: false)
+    snapshot.close()
+    #expect(second.levelRecords.map(\.observations.count) == [1, 60])
+    #expect(second.levelRecordsWritten == 1)
+    let secondBytes = try Data(contentsOf: level)
+    #expect(secondBytes.starts(with: firstBytes))
+
+    _ = try writer.appendPCM(
+      pcm(Array(repeating: Int16(2_000), count: 8_000)),
+      observation: ArchiveIndexObservation(
+        monoNS: nil,
+        wallNS: nil,
+        rmsQ15: 0,
+        nativeFrames: nil,
+        inputRateNumerator: nil,
+        inputRateDenominator: nil,
+        discontinuity: .restart,
+        reason: ArchiveIndexDiscontinuity.restart.rawValue))
+    snapshot = try writer.authenticatedSnapshot()
+    let third = try ArchiveLocalDeriver.derive(
+      snapshot: snapshot,
+      journalURL: journal,
+      levelURL: level,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_live",
+      finalFlush: false)
+    snapshot.close()
+    writer.close()
+    #expect(third.levelRecords.map(\.observations.count) == [1, 60, 1])
+    #expect(third.levelRecords.map(\.firstSample) == [0, 8_000, 968_000])
+    #expect(third.levelRecordsWritten == 1)
+    let thirdBytes = try Data(contentsOf: level)
+    #expect(thirdBytes.starts(with: secondBytes))
+
+    let rerun = try ArchiveLocalDeriver.derive(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      journalURL: journal,
+      levelURL: level,
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_live",
+      finalFlush: false)
+    #expect(rerun.levelRecords == third.levelRecords)
+    #expect(rerun.levelRecordsWritten == 0)
+    #expect(try Data(contentsOf: level) == thirdBytes)
+  }
+
+  @Test func postMidnightDerivationReportsCoveredCountAndGlobalEndSeparately() throws {
+    let fixture = try makeLaneFixture("derive-nonzero-count")
+    defer { fixture.remove() }
+    let origin: UInt64 = 4_800_000
+    let writer = try ArchiveLaneStore.openRecoveringForAppend(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      rootKey: rootKey,
+      context: context,
+      initialSamplePosition: origin)
+    var snapshot = try writer.authenticatedSnapshot()
+    var result = try ArchiveLocalDeriver.derive(
+      snapshot: snapshot,
+      journalURL: fixture.directory.appendingPathComponent("primary.jrn"),
+      levelURL: fixture.directory.appendingPathComponent("primary.lvl"),
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_nonzero",
+      finalFlush: false)
+    #expect(result.authenticatedSampleCount == 0)
+    #expect(result.authenticatedSampleEnd == origin)
+    snapshot.close()
+
+    _ = try writer.appendPCM(
+      pcm([1, 2, 3]), observation: observation(sampleEnd: origin + 3))
+    snapshot = try writer.authenticatedSnapshot()
+    result = try ArchiveLocalDeriver.derive(
+      snapshot: snapshot,
+      journalURL: fixture.directory.appendingPathComponent("primary.jrn"),
+      levelURL: fixture.directory.appendingPathComponent("primary.lvl"),
+      rootKey: rootKey,
+      context: context,
+      sessionID: "bs_nonzero",
+      finalFlush: false)
+    #expect(result.authenticatedSampleCount == 3)
+    #expect(result.authenticatedSampleEnd == origin + 3)
+    #expect(result.levelRecords.reduce(0) { $0 + UInt64($1.sampleCount) } == 3)
+    snapshot.close()
+    writer.close()
   }
 
   @Test func derivationParserRejectsPartialContextBeforeOpeningFiles() throws {
@@ -602,10 +843,17 @@ import Testing
     sampleEnd: UInt64,
     chunkIndex: UInt32
   ) throws -> ArchiveJournalPayload {
-    try ArchiveJournalPayload(
-      reservationID: String(repeating: "b", count: 64),
+    let sessionID = "bs_test"
+    return try ArchiveJournalPayload(
+      reservationID: ArchiveReservationIdentity.make(
+        context: context,
+        sessionID: sessionID,
+        chunkIndex: chunkIndex,
+        sampleStart: sampleStart,
+        sampleEnd: sampleEnd
+      ),
       roomID: context.roomID,
-      sessionID: "bs_test",
+      sessionID: sessionID,
       laneID: context.laneID,
       istDate: context.istDate,
       chunkIndex: chunkIndex,

@@ -55,7 +55,7 @@ Pass `--device <uid>` to `record` to select a non-default input. The recorder pr
 
 The tape is append-only 16 kHz mono signed Int16 little-endian PCM. `tape.idx` contains durable JSONL anchors and explicit restart, device, clock, format, timestamp, and overflow discontinuities. The verifier reports durable-tape drift and native microphone-clock drift separately because sample-rate conversion can buffer output between anchors.
 
-Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 242 tests in 22
+Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 283 tests in 28
 suites with Apple Swift 6.4 and Testing Library 2078; the converter soak and two isolated APFS ENOSPC
 fixtures remain opt-in for ordinary runs. `RING-01` through `RING-06`, `CAP-02` through `CAP-07`,
 `SRC-01` through `SRC-04`, `DUR-02` through `DUR-05`, `DUR-07` through `DUR-09`, `IDX-02` through

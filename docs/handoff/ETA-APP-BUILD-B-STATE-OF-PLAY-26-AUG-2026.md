@@ -7,7 +7,7 @@
 **Committed predecessor:** `a757791`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** unsigned no-network, one-day local derivation complete; next scope not selected
+**Current stage:** midnight foundation complete; Build B encoder stage in progress
 
 **Execution reset, 27 August 2026:** V replaced the bottom-up Build B sequence for current execution
 with `ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md`. The immediate outcome is the
@@ -39,6 +39,12 @@ resident room listener remained idle and no Bench session appeared. This closes 
 development reader/cutter/reserved-journal/level-sidecar gate. The fixed key remains public and
 non-confidential; production key handling, midnight identity, encoding/upload transitions and
 room-process wiring remain deferred. No next implementation slice is selected.
+
+**Build B completion authorization, 27 August 2026:** V selected the entire remaining Build B and
+ratified session-global samples, a fresh root/stream UUID for each lane/day, and capture inside the
+resident app with FFmpeg as the only production helper. Current execution is governed by
+`ETA-ROOM-RECORDER-BUILD-B-COMPLETION-27-AUG-2026.md`; the older local-derivation stop is superseded.
+All server-contract, security, signing, physical-coordination and evidence gates remain binding.
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All

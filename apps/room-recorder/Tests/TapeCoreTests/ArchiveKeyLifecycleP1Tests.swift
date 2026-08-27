@@ -231,6 +231,7 @@ import Testing
     #expect(security.operations == [.encrypt, .encrypt])
     #expect(random.remaining == 0)
     let inspection = try ArchiveKeyLifecycle.inspectKeywrap(at: fixture.keywrapURL)
+    #expect(!inspection.authenticated)
     #expect(inspection.algorithmID == 1)
     #expect(inspection.wrappedByteCount > 0)
     #expect(inspection.publicKeyHashHex == keySHA256(security.publicRepresentation))
@@ -271,6 +272,24 @@ import Testing
       #expect(!FileManager.default.fileExists(atPath: fixture.keywrapURL.path))
       #expect(!FileManager.default.fileExists(atPath: fixture.tapeURL.path))
       #expect(!FileManager.default.fileExists(atPath: fixture.indexURL.path))
+    }
+  }
+
+  @Test func key03DailyStreamUUIDUsesInjectedSecureBytesAndRFC4122Bits() throws {
+    let fixture = try KeyFixture("daily-stream")
+    defer { fixture.remove() }
+    let random = OrderedRandom([Data(repeating: 0xFF, count: 16)])
+    let lifecycle = makeLifecycle(
+      fixture,
+      security: FakeArchiveSecurityProvider(),
+      random: random.next)
+    let streamUUID = try lifecycle.makeDailyStreamUUID()
+    #expect(streamUUID.count == 16)
+    #expect(streamUUID[6] >> 4 == 4)
+    #expect(streamUUID[8] >> 6 == 2)
+    #expect(random.remaining == 0)
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try lifecycle.makeDailyStreamUUID()
     }
   }
 
@@ -399,6 +418,79 @@ import Testing
     #expect(inspection.wrappedByteCount > 0)
     #expect(!FileManager.default.fileExists(atPath: fixture.tapeURL.path))
     #expect(!FileManager.default.fileExists(atPath: fixture.indexURL.path))
+  }
+
+  @Test func key04OpenWithInspectionUsesTheHeldWrapAcrossFormerSubstitutionBoundary() throws {
+    let fixture = try KeyFixture("held-wrap-inspection")
+    defer { fixture.remove() }
+    let replacementFixture = try KeyFixture("held-wrap-replacement")
+    defer { replacementFixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    try writeWrap(fixture, security: security, context: context)
+    let originalBytes = try Data(contentsOf: fixture.keywrapURL)
+
+    let replacementRoot = Data(repeating: 0xD1, count: 32)
+    let replacementLifecycle = makeLifecycle(
+      replacementFixture,
+      security: security,
+      random: OrderedRandom([
+        replacementRoot, Data(repeating: 0xD2, count: 16),
+      ]).next)
+    let replacementStore = try replacementLifecycle.openLaneStoreDetailed(
+      keywrapURL: replacementFixture.keywrapURL,
+      tapeURL: replacementFixture.tapeURL,
+      indexURL: replacementFixture.indexURL,
+      context: context)
+    replacementStore.close()
+    let replacementBytes = try Data(contentsOf: replacementFixture.keywrapURL)
+    #expect(keySHA256(originalBytes) != keySHA256(replacementBytes))
+
+    let substitutions = LockedCounter()
+    let lifecycle = makeLifecycle(
+      fixture,
+      security: security,
+      onRootRelease: { releasedRoot in
+        #expect(releasedRoot == root)
+        _ = substitutions.increment()
+        try replacementBytes.write(to: fixture.keywrapURL, options: .atomic)
+        guard chmod(fixture.keywrapURL.path, S_IRUSR | S_IWUSR) == 0 else {
+          throw ArchiveKeyLifecycleFailure.fileStatFailed(errno: errno)
+        }
+      })
+    let opened = try lifecycle.openLaneStoreWithInspection(
+      keywrapURL: fixture.keywrapURL,
+      tapeURL: fixture.tapeURL,
+      indexURL: fixture.indexURL,
+      context: context)
+    #expect(substitutions.value == 1)
+    #expect(opened.keywrap.authenticated)
+    #expect(opened.keywrap.keywrapDigestHex == keySHA256(originalBytes))
+    #expect(opened.keywrap.keywrapDigestHex != keySHA256(replacementBytes))
+    #expect(keySHA256(try Data(contentsOf: fixture.keywrapURL)) == keySHA256(replacementBytes))
+    _ = try opened.store.appendPCM(
+      keyHex("01000200"),
+      observation: ArchiveIndexObservation(
+        monoNS: 1,
+        wallNS: 2,
+        rmsQ15: 3,
+        nativeFrames: 2,
+        inputRateNumerator: 16_000,
+        inputRateDenominator: 1))
+    opened.store.close()
+
+    let authenticated = try ArchiveLaneStore.inspect(
+      tapeURL: fixture.tapeURL,
+      indexURL: fixture.indexURL,
+      rootKey: root,
+      context: context)
+    #expect(authenticated.tape.records.count == 1)
+    #expect(throws: ArchiveCryptoError.authenticationFailed) {
+      try ArchiveLaneStore.inspect(
+        tapeURL: fixture.tapeURL,
+        indexURL: fixture.indexURL,
+        rootKey: replacementRoot,
+        context: context)
+    }
   }
 
   @Test func key04RejectsWrongRoomDayLaneDeviceControlAndStreamBeforeRootRelease() throws {
@@ -925,6 +1017,84 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: fixture.indexURL.path))
   }
 
+  @Test func key04NextDayOpenDerivesEmptyOriginFromOldAuthenticatedWitness() throws {
+    let fixture = try KeyFixture("next-day-origin")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let random = OrderedRandom([
+      root, Data(repeating: 0xA5, count: 16),
+      Data(repeating: 0xB1, count: 32), Data(repeating: 0xB2, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let old = try lifecycle.openLaneStoreWithInspection(
+      keywrapURL: fixture.keywrapURL,
+      tapeURL: fixture.tapeURL,
+      indexURL: fixture.indexURL,
+      context: context)
+    #expect(old.keywrap.authenticated)
+    _ = try old.store.appendPCM(
+      keyHex("01000200"),
+      observation: ArchiveIndexObservation(
+        monoNS: nil, wallNS: nil, rmsQ15: 0, nativeFrames: nil,
+        inputRateNumerator: nil, inputRateDenominator: nil))
+    let oldSnapshot = try old.store.authenticatedSnapshot()
+    old.store.close()
+    #expect(old.keywrap.keywrapDigestHex == keySHA256(try Data(contentsOf: fixture.keywrapURL)))
+
+    var newStream = Data(repeating: 0xB3, count: 16)
+    newStream[6] = (newStream[6] & 0x0F) | 0x40
+    newStream[8] = (newStream[8] & 0x3F) | 0x80
+    let newContext = ArchiveContext(
+      streamUUID: newStream,
+      roomID: context.roomID,
+      istDate: "2026-08-28",
+      laneID: context.laneID,
+      stableDeviceUID: context.stableDeviceUID)
+    let newKeywrap = fixture.directory.appendingPathComponent("next.keywrap.eak")
+    let newTape = fixture.directory.appendingPathComponent("next.tape")
+    let newIndex = fixture.directory.appendingPathComponent("next.index")
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try lifecycle.openNextDayLaneStore(
+        keywrapURL: newKeywrap,
+        tapeURL: newTape,
+        indexURL: newIndex,
+        context: newContext,
+        oldDaySnapshot: oldSnapshot,
+        expectedInitialSamplePosition: 3)
+    }
+    #expect(!FileManager.default.fileExists(atPath: newKeywrap.path))
+    #expect(!FileManager.default.fileExists(atPath: newTape.path))
+    #expect(!FileManager.default.fileExists(atPath: newIndex.path))
+
+    let new = try lifecycle.openNextDayLaneStore(
+      keywrapURL: newKeywrap,
+      tapeURL: newTape,
+      indexURL: newIndex,
+      context: newContext,
+      oldDaySnapshot: oldSnapshot,
+      expectedInitialSamplePosition: 2)
+    #expect(new.store.initialSamplePosition == 2)
+    #expect(new.store.scanResult.index.records.isEmpty)
+    #expect(new.keywrap.keywrapDigestHex == keySHA256(try Data(contentsOf: newKeywrap)))
+    #expect(new.keywrap.keywrapDigestHex != old.keywrap.keywrapDigestHex)
+    new.store.close()
+    let newKeywrapBefore = try Data(contentsOf: newKeywrap)
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try lifecycle.openNextDayLaneStore(
+        keywrapURL: newKeywrap,
+        tapeURL: newTape,
+        indexURL: newIndex,
+        context: newContext,
+        oldDaySnapshot: oldSnapshot,
+        expectedInitialSamplePosition: 3)
+    }
+    #expect(try Data(contentsOf: newKeywrap) == newKeywrapBefore)
+    #expect(try Data(contentsOf: newTape).isEmpty)
+    #expect(try Data(contentsOf: newIndex).isEmpty)
+    oldSnapshot.close()
+    #expect(random.remaining == 0)
+  }
+
   private func encodedOuter(wrappedData: Data) throws -> Data {
     try ArchiveKeywrapCodec.encode(
       ArchiveKeywrapOuter(
@@ -940,22 +1110,24 @@ import Testing
     ioHooks: ArchiveKeyIOHooks = ArchiveKeyIOHooks(),
     applicationSupportRoot: URL? = nil,
     random: @escaping (Int) throws -> Data = { Data(repeating: UInt8($0), count: $0) },
-    onRootRelease: @escaping (Data) -> Void = { _ in }
+    onRootRelease: @escaping (Data) throws -> Void = { _ in }
   ) -> ArchiveKeyLifecycle {
     ArchiveKeyLifecycle(
       security: security,
       durableStore: ArchiveKeyDurableStore(hooks: ioHooks),
       applicationSupportRoot: applicationSupportRoot ?? fixture.directory,
       randomBytes: random,
-      reservedLaneStoreOpener: { tape, index, tapeFD, indexFD, releasedRoot, context in
-        onRootRelease(releasedRoot)
+      reservedLaneStoreOpener: {
+        tape, index, tapeFD, indexFD, releasedRoot, context, initialSamplePosition in
+        try onRootRelease(releasedRoot)
         return try ArchiveLaneStore.openReservedForAppend(
           tapeURL: tape,
           indexURL: index,
           tapeFileDescriptor: tapeFD,
           indexFileDescriptor: indexFD,
           rootKey: releasedRoot,
-          context: context)
+          context: context,
+          initialSamplePosition: initialSamplePosition)
       })
   }
 

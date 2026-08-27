@@ -39,6 +39,7 @@ public enum ArchiveLevelSidecarError: Error, Equatable, Sendable {
   case invalidPCMByteCount(Int)
   case rangeMismatch(expected: UInt64, actual: UInt64)
   case sampleCountOverflow(UInt64)
+  case frozenRecordMismatch(position: Int)
 }
 
 public enum ArchiveLevelPayloadCodec {
@@ -100,57 +101,111 @@ public enum ArchiveLevelSidecarBuilder {
     indexRecords: [ArchiveIndexRecordMetadata],
     readPCM: (_ sampleStart: UInt64, _ sampleEnd: UInt64) throws -> Data
   ) throws -> [ArchiveLevelRecordPlan] {
-    guard let first = indexRecords.first else { return [] }
+    try build(indexRecords: indexRecords, frozenRecords: [], readPCM: readPCM)
+  }
+
+  public static func build(
+    indexRecords: [ArchiveIndexRecordMetadata],
+    frozenRecords: [ArchiveLevelRecordPlan],
+    readPCM: (_ sampleStart: UInt64, _ sampleEnd: UInt64) throws -> Data
+  ) throws -> [ArchiveLevelRecordPlan] {
+    guard let first = indexRecords.first else {
+      guard frozenRecords.isEmpty else {
+        throw ArchiveLevelSidecarError.frozenRecordMismatch(position: 0)
+      }
+      return []
+    }
     let authenticatedEnd = indexRecords.last!.payload.sampleEnd
-    var boundaries = [first.payload.sampleStart]
-    boundaries.append(
-      contentsOf: indexRecords.compactMap { record in
+    let discontinuities = Set(
+      indexRecords.compactMap { record in
         record.payload.discontinuity == nil ? nil : record.payload.sampleStart
       })
-    boundaries.append(authenticatedEnd)
-    boundaries = Array(Set(boundaries)).sorted()
 
     var history = LevelVADHistory(capacity: historyFrameCount)
     var plans: [ArchiveLevelRecordPlan] = []
-    for pair in zip(boundaries, boundaries.dropFirst()) {
-      let segmentStart = pair.0
-      let segmentEnd = pair.1
-      guard segmentEnd > segmentStart else { continue }
-      var recordStart = segmentStart
-      var recordSamples: UInt64 = 0
-      var observations: [ArchiveLevelObservation] = []
-      var cursor = segmentStart
-      while cursor < segmentEnd {
-        let end = min(segmentEnd, cursor + observationSamples)
-        let pcm = try readPCM(cursor, end)
-        let expectedBytes = (end - cursor) * 2
-        guard expectedBytes <= UInt64(Int.max), pcm.count == Int(expectedBytes) else {
-          throw ArchiveLevelSidecarError.rangeMismatch(
-            expected: expectedBytes, actual: UInt64(pcm.count))
-        }
-        let values = try samples(pcm)
-        let level = levelObservation(samples: values, history: &history)
-        observations.append(level)
-        recordSamples += end - cursor
-        cursor = end
-
-        if observations.count == 60 || cursor == segmentEnd {
-          guard recordSamples <= UInt64(UInt32.max) else {
-            throw ArchiveLevelSidecarError.sampleCountOverflow(recordSamples)
-          }
-          plans.append(
-            ArchiveLevelRecordPlan(
-              firstSample: recordStart,
-              sampleCount: UInt32(recordSamples),
-              observations: observations
-            ))
-          recordStart = cursor
-          recordSamples = 0
-          observations.removeAll(keepingCapacity: true)
-        }
+    var cursor = first.payload.sampleStart
+    for (position, frozen) in frozenRecords.enumerated() {
+      let end = cursor.addingReportingOverflow(UInt64(frozen.sampleCount))
+      guard !end.overflow, frozen.firstSample == cursor, end.partialValue <= authenticatedEnd,
+        !discontinuities.contains(where: { $0 > cursor && $0 < end.partialValue })
+      else {
+        throw ArchiveLevelSidecarError.frozenRecordMismatch(position: position)
       }
+      let observations = try observations(
+        start: cursor,
+        end: end.partialValue,
+        history: &history,
+        readPCM: readPCM)
+      guard observations == frozen.observations else {
+        throw ArchiveLevelSidecarError.frozenRecordMismatch(position: position)
+      }
+      plans.append(frozen)
+      cursor = end.partialValue
+    }
+
+    while cursor < authenticatedEnd {
+      let segmentEnd =
+        discontinuities.filter { $0 > cursor }.min() ?? authenticatedEnd
+      var observations: [ArchiveLevelObservation] = []
+      let recordStart = cursor
+      while cursor < segmentEnd && observations.count < 60 {
+        let remaining = segmentEnd - cursor
+        let end = cursor + min(remaining, observationSamples)
+        observations.append(
+          try observation(start: cursor, end: end, history: &history, readPCM: readPCM))
+        cursor = end
+      }
+      let sampleCount = cursor - recordStart
+      guard sampleCount > 0, sampleCount <= UInt64(UInt32.max) else {
+        throw ArchiveLevelSidecarError.sampleCountOverflow(sampleCount)
+      }
+      plans.append(
+        ArchiveLevelRecordPlan(
+          firstSample: recordStart,
+          sampleCount: UInt32(sampleCount),
+          observations: observations))
     }
     return plans
+  }
+
+  private static func observations(
+    start: UInt64,
+    end: UInt64,
+    history: inout LevelVADHistory,
+    readPCM: (_ sampleStart: UInt64, _ sampleEnd: UInt64) throws -> Data
+  ) throws -> [ArchiveLevelObservation] {
+    var result: [ArchiveLevelObservation] = []
+    var cursor = start
+    while cursor < end {
+      let remaining = end - cursor
+      let observationEnd = cursor + min(remaining, observationSamples)
+      result.append(
+        try observation(
+          start: cursor, end: observationEnd, history: &history, readPCM: readPCM))
+      cursor = observationEnd
+    }
+    guard !result.isEmpty, result.count <= 60 else {
+      throw ArchiveLevelSidecarError.tooManyObservations(result.count)
+    }
+    return result
+  }
+
+  private static func observation(
+    start: UInt64,
+    end: UInt64,
+    history: inout LevelVADHistory,
+    readPCM: (_ sampleStart: UInt64, _ sampleEnd: UInt64) throws -> Data
+  ) throws -> ArchiveLevelObservation {
+    let pcm = try readPCM(start, end)
+    let sampleCount = end - start
+    let expectedBytes = sampleCount.multipliedReportingOverflow(by: 2)
+    guard !expectedBytes.overflow, expectedBytes.partialValue <= UInt64(Int.max),
+      pcm.count == Int(expectedBytes.partialValue)
+    else {
+      throw ArchiveLevelSidecarError.rangeMismatch(
+        expected: expectedBytes.partialValue, actual: UInt64(pcm.count))
+    }
+    return levelObservation(samples: try samples(pcm), history: &history)
   }
 
   public static func quantizedLevels(_ pcm: Data) throws -> (averageQ15: UInt16, peakQ15: UInt16) {

@@ -32,6 +32,19 @@ public struct ArchiveTapeScanResult: Equatable, Sendable {
   public let records: [ArchiveTapeRecordMetadata]
   public let completeByteCount: UInt64
   public let incompleteTrailingByteCount: UInt64
+  public let initialLogicalUnit: UInt64
+
+  public init(
+    records: [ArchiveTapeRecordMetadata],
+    completeByteCount: UInt64,
+    incompleteTrailingByteCount: UInt64,
+    initialLogicalUnit: UInt64 = 0
+  ) {
+    self.records = records
+    self.completeByteCount = completeByteCount
+    self.incompleteTrailingByteCount = incompleteTrailingByteCount
+    self.initialLogicalUnit = initialLogicalUnit
+  }
 }
 
 public enum ArchiveTapePersistenceError: Error, Equatable, Sendable {
@@ -46,6 +59,7 @@ public enum ArchiveTapePersistenceError: Error, Equatable, Sendable {
   case invalidFirstSequence(UInt64)
   case sequenceDiscontinuity(expected: UInt64, actual: UInt64)
   case invalidFirstLogicalUnit(UInt64)
+  case initialLogicalUnitMismatch(expected: UInt64, actual: UInt64)
   case logicalDiscontinuity(expected: UInt64, actual: UInt64)
   case predecessorMismatch(sequence: UInt64)
   case recordCountExceedsLimit(UInt64)
@@ -76,6 +90,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
   private let contextHash: Data
   private let sealer: ArchivePurposeSealer
   private let hooks: ArchiveTapePersistenceHooks
+  private let initialLogicalUnit: UInt64
   private var fileDescriptor: Int32?
   private var records: [ArchiveTapeRecordMetadata]
   private let indexedRecordCountAtOpen: Int
@@ -91,6 +106,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
     contextHash: Data,
     sealer: ArchivePurposeSealer,
     hooks: ArchiveTapePersistenceHooks,
+    initialLogicalUnit: UInt64,
     records: [ArchiveTapeRecordMetadata],
     indexedRecordCountAtOpen: Int,
     repairedTrailingByteCount: UInt64,
@@ -101,6 +117,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
     self.contextHash = contextHash
     self.sealer = sealer
     self.hooks = hooks
+    self.initialLogicalUnit = initialLogicalUnit
     self.records = records
     self.indexedRecordCountAtOpen = indexedRecordCountAtOpen
     startupUnindexedRecordCount = records.count - indexedRecordCountAtOpen
@@ -118,15 +135,22 @@ final class ArchiveTapeStore: @unchecked Sendable {
   static func inspect(
     url: URL,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialLogicalUnit: UInt64 = 0
   ) throws -> ArchiveTapeScanResult {
-    try inspect(url: url, rootKey: rootKey, context: context, hooks: ArchiveTapePersistenceHooks())
+    try inspect(
+      url: url,
+      rootKey: rootKey,
+      context: context,
+      initialLogicalUnit: initialLogicalUnit,
+      hooks: ArchiveTapePersistenceHooks())
   }
 
   static func inspect(
     url: URL,
     rootKey: Data,
     context: ArchiveContext,
+    initialLogicalUnit: UInt64 = 0,
     hooks: ArchiveTapePersistenceHooks
   ) throws -> ArchiveTapeScanResult {
     let contextHash = try validateInputs(rootKey: rootKey, context: context)
@@ -142,6 +166,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialLogicalUnit: initialLogicalUnit,
       hooks: hooks
     )
   }
@@ -150,13 +175,15 @@ final class ArchiveTapeStore: @unchecked Sendable {
     url: URL,
     rootKey: Data,
     context: ArchiveContext,
-    indexedCheckpoint: ArchiveTapeCheckpoint? = nil
+    indexedCheckpoint: ArchiveTapeCheckpoint? = nil,
+    initialLogicalUnit: UInt64 = 0
   ) throws -> ArchiveTapeStore {
     try openRecoveringForAppend(
       url: url,
       rootKey: rootKey,
       context: context,
       indexedCheckpoint: indexedCheckpoint,
+      initialLogicalUnit: initialLogicalUnit,
       hooks: ArchiveTapePersistenceHooks(),
       nonceProvider: { try ArchivePurposeSealer.secureRandomNonceForPersistence() }
     )
@@ -167,6 +194,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     indexedCheckpoint: ArchiveTapeCheckpoint? = nil,
+    initialLogicalUnit: UInt64 = 0,
     hooks: ArchiveTapePersistenceHooks,
     nonceProvider: @escaping @Sendable () throws -> Data
   ) throws -> ArchiveTapeStore {
@@ -198,6 +226,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialLogicalUnit: initialLogicalUnit,
       hooks: hooks
     )
     let repairedTrailingByteCount = scanResult.incompleteTrailingByteCount
@@ -212,7 +241,8 @@ final class ArchiveTapeStore: @unchecked Sendable {
       scanResult = ArchiveTapeScanResult(
         records: scanResult.records,
         completeByteCount: scanResult.completeByteCount,
-        incompleteTrailingByteCount: 0
+        incompleteTrailingByteCount: 0,
+        initialLogicalUnit: initialLogicalUnit
       )
     }
     if scanResult.completeByteCount > 0 || repairedTrailingByteCount > 0 {
@@ -238,6 +268,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
       contextHash: contextHash,
       sealer: sealer,
       hooks: hooks,
+      initialLogicalUnit: initialLogicalUnit,
       records: scanResult.records,
       indexedRecordCountAtOpen: indexedRecordCount,
       repairedTrailingByteCount: repairedTrailingByteCount,
@@ -252,7 +283,8 @@ final class ArchiveTapeStore: @unchecked Sendable {
       ArchiveTapeScanResult(
         records: records,
         completeByteCount: records.last?.encryptedEndOffset ?? 0,
-        incompleteTrailingByteCount: 0
+        incompleteTrailingByteCount: 0,
+        initialLogicalUnit: initialLogicalUnit
       )
     }
   }
@@ -282,7 +314,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
       let firstLogicalUnit =
         previous.map {
           $0.header.firstLogicalUnit + UInt64($0.header.logicalUnitCount)
-        } ?? 0
+        } ?? initialLogicalUnit
       let request = ArchiveRecordSealRequest(
         recordSequence: sequence,
         firstLogicalUnit: firstLogicalUnit,
@@ -372,6 +404,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialLogicalUnit: UInt64,
     hooks: ArchiveTapePersistenceHooks
   ) throws -> ArchiveTapeScanResult {
     var fileStat = stat()
@@ -393,7 +426,7 @@ final class ArchiveTapeStore: @unchecked Sendable {
     var offset: UInt64 = 0
     var records: [ArchiveTapeRecordMetadata] = []
     var expectedSequence: UInt64 = 1
-    var expectedLogicalUnit: UInt64 = 0
+    var expectedLogicalUnit = initialLogicalUnit
     var expectedPredecessor = Data(repeating: 0, count: 16)
 
     while offset < fileSize {
@@ -402,7 +435,8 @@ final class ArchiveTapeStore: @unchecked Sendable {
         return ArchiveTapeScanResult(
           records: records,
           completeByteCount: offset,
-          incompleteTrailingByteCount: remaining
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialLogicalUnit
         )
       }
       let headerData = try readExactly(
@@ -429,7 +463,8 @@ final class ArchiveTapeStore: @unchecked Sendable {
         return ArchiveTapeScanResult(
           records: records,
           completeByteCount: offset,
-          incompleteTrailingByteCount: remaining
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialLogicalUnit
         )
       }
       let encoded = try readExactly(
@@ -472,7 +507,8 @@ final class ArchiveTapeStore: @unchecked Sendable {
     return ArchiveTapeScanResult(
       records: records,
       completeByteCount: offset,
-      incompleteTrailingByteCount: 0
+      incompleteTrailingByteCount: 0,
+      initialLogicalUnit: initialLogicalUnit
     )
   }
 
@@ -494,8 +530,12 @@ final class ArchiveTapeStore: @unchecked Sendable {
       throw ArchiveTapePersistenceError.sequenceDiscontinuity(
         expected: expectedSequence, actual: header.recordSequence)
     }
-    if isFirstRecord, header.firstLogicalUnit != 0 {
-      throw ArchiveTapePersistenceError.invalidFirstLogicalUnit(header.firstLogicalUnit)
+    if isFirstRecord, header.firstLogicalUnit != expectedLogicalUnit {
+      if expectedLogicalUnit == 0 {
+        throw ArchiveTapePersistenceError.invalidFirstLogicalUnit(header.firstLogicalUnit)
+      }
+      throw ArchiveTapePersistenceError.initialLogicalUnitMismatch(
+        expected: expectedLogicalUnit, actual: header.firstLogicalUnit)
     }
     guard header.firstLogicalUnit == expectedLogicalUnit else {
       throw ArchiveTapePersistenceError.logicalDiscontinuity(

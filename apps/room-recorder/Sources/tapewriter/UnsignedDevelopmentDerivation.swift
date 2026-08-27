@@ -85,6 +85,7 @@ public struct UnsignedDevelopmentDerivationReport: Codable, Equatable, Sendable 
 
   public let ok: Bool
   public let authenticatedSampleCount: UInt64
+  public let authenticatedSampleEnd: UInt64
   public let reservationCount: Int
   public let reservations: [Reservation]
   public let journalRecordsWritten: Int
@@ -98,6 +99,7 @@ public struct UnsignedDevelopmentDerivationReport: Codable, Equatable, Sendable 
   enum CodingKeys: String, CodingKey {
     case ok
     case authenticatedSampleCount = "authenticated_sample_count"
+    case authenticatedSampleEnd = "authenticated_sample_end"
     case reservationCount = "reservation_count"
     case reservations
     case journalRecordsWritten = "journal_records_written"
@@ -131,6 +133,7 @@ public struct UnsignedDevelopmentDerivationReport: Codable, Equatable, Sendable 
     return UnsignedDevelopmentDerivationReport(
       ok: sidecarSamples == result.authenticatedSampleCount,
       authenticatedSampleCount: result.authenticatedSampleCount,
+      authenticatedSampleEnd: result.authenticatedSampleEnd,
       reservationCount: result.reservations.count,
       reservations: result.reservations.map {
         Reservation(

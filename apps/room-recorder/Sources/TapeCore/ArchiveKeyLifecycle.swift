@@ -11,12 +11,19 @@ public enum ArchiveKeyLifecycleError: String, Error, LocalizedError, Sendable {
 }
 
 public struct ArchiveKeywrapInspection: Equatable, Sendable {
+  public let authenticated: Bool
   public let formatVersion: UInt16
   public let algorithmID: UInt16
   public let streamUUIDHex: String
   public let contextHashHex: String
   public let publicKeyHashHex: String
+  public let keywrapDigestHex: String
   public let wrappedByteCount: UInt32
+}
+
+public struct ArchiveOpenedLane: Sendable {
+  public let store: ArchiveLaneStore
+  public let keywrap: ArchiveKeywrapInspection
 }
 
 #if ETA_KEYWRAP_PROBE
@@ -90,6 +97,7 @@ enum ArchiveKeyLifecycleFailure: Error, Equatable {
   case reservationCleanupFailed(errno: Int32)
   case existingModeMismatch(mode_t)
   case snapshotChanged
+  case initialSamplePositionMismatch(expected: UInt64, actual: UInt64)
 }
 
 struct ArchiveKeywrapOuter {
@@ -352,6 +360,11 @@ enum ArchiveLaneOpenPolicy: Equatable {
   case requireCompleteArchive
 }
 
+private struct ArchiveLaneOpenResult {
+  let store: ArchiveLaneStore
+  let keywrap: ArchiveKeywrapInspection
+}
+
 public final class ArchiveKeyLifecycle: @unchecked Sendable {
   public static let applicationTag = Data(
     "com.evenscribe.room-recorder.archive-wrap-v1".utf8)
@@ -365,7 +378,7 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
   private let applicationSupportRoot: URL
   private let randomBytes: (Int) throws -> Data
   private let reservedLaneStoreOpener:
-    (URL, URL, Int32, Int32, Data, ArchiveContext) throws -> ArchiveLaneStore
+    (URL, URL, Int32, Int32, Data, ArchiveContext, UInt64) throws -> ArchiveLaneStore
   private var poisoned = false
 
   public convenience init() {
@@ -375,14 +388,16 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       durableStore: ArchiveKeyDurableStore(),
       applicationSupportRoot: Self.defaultApplicationSupportRoot,
       randomBytes: secureArchiveRandomBytes,
-      reservedLaneStoreOpener: { tapeURL, indexURL, tapeFD, indexFD, rootKey, context in
+      reservedLaneStoreOpener: {
+        tapeURL, indexURL, tapeFD, indexFD, rootKey, context, initialSamplePosition in
         try ArchiveLaneStore.openReservedForAppend(
           tapeURL: tapeURL,
           indexURL: indexURL,
           tapeFileDescriptor: tapeFD,
           indexFileDescriptor: indexFD,
           rootKey: rootKey,
-          context: context)
+          context: context,
+          initialSamplePosition: initialSamplePosition)
       })
   }
 
@@ -400,14 +415,16 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
         durableStore: ArchiveKeyDurableStore(),
         applicationSupportRoot: Self.defaultApplicationSupportRoot,
         randomBytes: secureArchiveRandomBytes,
-        reservedLaneStoreOpener: { tapeURL, indexURL, tapeFD, indexFD, rootKey, context in
+        reservedLaneStoreOpener: {
+          tapeURL, indexURL, tapeFD, indexFD, rootKey, context, initialSamplePosition in
           try ArchiveLaneStore.openReservedForAppend(
             tapeURL: tapeURL,
             indexURL: indexURL,
             tapeFileDescriptor: tapeFD,
             indexFileDescriptor: indexFD,
             rootKey: rootKey,
-            context: context)
+            context: context,
+            initialSamplePosition: initialSamplePosition)
         })
     }
 
@@ -416,7 +433,8 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       keywrapURL: URL,
       tapeURL: URL,
       indexURL: URL,
-      context: ArchiveContext
+      context: ArchiveContext,
+      initialSamplePosition: UInt64 = 0
     ) throws -> ArchiveLaneStore {
       let policy: ArchiveLaneOpenPolicy
       switch mode {
@@ -430,6 +448,7 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
           tapeURL: tapeURL,
           indexURL: indexURL,
           context: context,
+          initialSamplePosition: initialSamplePosition,
           policy: policy)
       } catch let error as ArchiveKeyLifecycleError {
         throw error
@@ -479,7 +498,7 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     applicationSupportRoot: URL,
     randomBytes: @escaping (Int) throws -> Data,
     reservedLaneStoreOpener:
-      @escaping (URL, URL, Int32, Int32, Data, ArchiveContext) throws -> ArchiveLaneStore
+      @escaping (URL, URL, Int32, Int32, Data, ArchiveContext, UInt64) throws -> ArchiveLaneStore
   ) {
     self.keyTag = keyTag
     self.security = security
@@ -494,13 +513,31 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     tapeURL: URL,
     indexURL: URL,
     context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
   ) throws -> ArchiveLaneStore {
+    try openLaneStoreResult(
+      keywrapURL: keywrapURL,
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      context: context,
+      initialSamplePosition: initialSamplePosition
+    ).store
+  }
+
+  private func openLaneStoreResult(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
+  ) throws -> ArchiveLaneOpenResult {
     do {
-      return try openLaneStoreDetailed(
+      return try openLaneStoreDetailedResult(
         keywrapURL: keywrapURL,
         tapeURL: tapeURL,
         indexURL: indexURL,
-        context: context)
+        context: context,
+        initialSamplePosition: initialSamplePosition)
     } catch let error as ArchiveKeyLifecycleError {
       throw error
     } catch let failure as ArchiveKeyLifecycleFailure {
@@ -510,6 +547,70 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       default:
         throw ArchiveKeyLifecycleError.archiveKeyUnavailable
       }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
+  }
+
+  public func makeDailyStreamUUID() throws -> Data {
+    do {
+      return try lock.withLock {
+        guard !poisoned else { throw ArchiveKeyLifecycleFailure.ownerPoisoned }
+        var bytes = try exactRandomBytes(16)
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return bytes
+      }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
+  }
+
+  public func openLaneStoreWithInspection(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
+  ) throws -> ArchiveOpenedLane {
+    let result = try openLaneStoreResult(
+      keywrapURL: keywrapURL,
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      context: context,
+      initialSamplePosition: initialSamplePosition)
+    return ArchiveOpenedLane(store: result.store, keywrap: result.keywrap)
+  }
+
+  public func openNextDayLaneStore(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    oldDaySnapshot: ArchiveLaneStore.AuthenticatedSnapshot,
+    expectedInitialSamplePosition: UInt64
+  ) throws -> ArchiveOpenedLane {
+    let old = oldDaySnapshot.authenticatedFacts
+    do {
+      guard old.authenticatedSampleEnd == expectedInitialSamplePosition else {
+        throw ArchiveKeyLifecycleFailure.initialSamplePositionMismatch(
+          expected: old.authenticatedSampleEnd,
+          actual: expectedInitialSamplePosition)
+      }
+      guard old.context.roomID == context.roomID, old.context.laneID == context.laneID,
+        old.context.stableDeviceUID == context.stableDeviceUID,
+        try ArchiveISTDay(old.context.istDate).next.description == context.istDate
+      else {
+        throw ArchiveKeyLifecycleFailure.contextHashMismatch
+      }
+      return try openLaneStoreWithInspection(
+        keywrapURL: keywrapURL,
+        tapeURL: tapeURL,
+        indexURL: indexURL,
+        context: context,
+        initialSamplePosition: old.authenticatedSampleEnd)
+    } catch let error as ArchiveKeyLifecycleError {
+      throw error
     } catch {
       throw ArchiveKeyLifecycleError.archiveKeyUnavailable
     }
@@ -543,7 +644,7 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
         throw ArchiveKeyLifecycleFailure.fileOpenFailed(errno: ENOENT)
       }
       let outer = try ArchiveKeywrapCodec.decode(held.bytes)
-      return inspection(outer)
+      return inspection(outer, encoded: held.bytes, authenticated: false)
     } catch {
       throw ArchiveKeyLifecycleError.archiveKeyUnavailable
     }
@@ -554,8 +655,27 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     tapeURL: URL,
     indexURL: URL,
     context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0,
     policy: ArchiveLaneOpenPolicy = .createOrOpen
   ) throws -> ArchiveLaneStore {
+    try openLaneStoreDetailedResult(
+      keywrapURL: keywrapURL,
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      context: context,
+      initialSamplePosition: initialSamplePosition,
+      policy: policy
+    ).store
+  }
+
+  private func openLaneStoreDetailedResult(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64,
+    policy: ArchiveLaneOpenPolicy = .createOrOpen
+  ) throws -> ArchiveLaneOpenResult {
     try lock.withLock {
       guard !poisoned else { throw ArchiveKeyLifecycleFailure.ownerPoisoned }
       let paths = try ArchiveValidatedKeyPaths(
@@ -637,9 +757,11 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
             }
           }
           return try withExtendedLifetime(heldWrap) {
-            guard let reservation else {
+            guard let heldWrap, let reservation else {
               throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed
             }
+            let outer = try ArchiveKeywrapCodec.decode(heldWrap.bytes)
+            let keywrap = Self.inspection(outer, encoded: heldWrap.bytes, authenticated: true)
             try reservation.validateForHandoff()
             let store = try reservedLaneStoreOpener(
               paths.tape.url,
@@ -647,9 +769,10 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
               reservation.tapeDescriptor,
               reservation.indexDescriptor,
               rootKey,
-              context)
+              context,
+              initialSamplePosition)
             reservation.completeHandoff()
-            return store
+            return ArchiveLaneOpenResult(store: store, keywrap: keywrap)
           }
         } catch {
           if let reservation {
@@ -689,7 +812,9 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
           privateKey: key,
           context: context,
           contextHash: try context.sha256())
-        return withExtendedLifetime(rootKey) { Self.inspection(outer) }
+        return withExtendedLifetime(rootKey) {
+          Self.inspection(outer, encoded: heldWrap.bytes, authenticated: true)
+        }
       }
     }
   }
@@ -700,13 +825,19 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       .appendingPathComponent("Application Support", isDirectory: true)
   }
 
-  private static func inspection(_ outer: ArchiveKeywrapOuter) -> ArchiveKeywrapInspection {
+  private static func inspection(
+    _ outer: ArchiveKeywrapOuter,
+    encoded: Data,
+    authenticated: Bool
+  ) -> ArchiveKeywrapInspection {
     ArchiveKeywrapInspection(
+      authenticated: authenticated,
       formatVersion: ArchiveKeywrapCodec.formatVersion,
       algorithmID: ArchiveKeywrapCodec.algorithmID,
       streamUUIDHex: outer.streamUUID.keyHex,
       contextHashHex: outer.contextHash.keyHex,
       publicKeyHashHex: outer.publicKeyHash.keyHex,
+      keywrapDigestHex: Data(SHA256.hash(data: encoded)).keyHex,
       wrappedByteCount: UInt32(outer.wrappedData.count))
   }
 

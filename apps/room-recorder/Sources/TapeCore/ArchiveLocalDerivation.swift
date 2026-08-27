@@ -2,6 +2,7 @@ import Foundation
 
 public struct ArchiveLocalDerivationResult: Equatable, Sendable {
   public let authenticatedSampleCount: UInt64
+  public let authenticatedSampleEnd: UInt64
   public let reservations: [ArchiveJournalPayload]
   public let journalRecordsWritten: Int
   public let levelRecords: [ArchiveLevelRecordPlan]
@@ -15,6 +16,7 @@ public enum ArchiveLocalDerivationError: Error, Equatable, Sendable {
   case aliasedPath(String)
   case existingJournalMismatch(position: Int)
   case existingLevelMismatch(position: Int)
+  case snapshotContextMismatch
 }
 
 public enum ArchiveLocalDeriver {
@@ -26,7 +28,9 @@ public enum ArchiveLocalDeriver {
     rootKey: Data,
     context: ArchiveContext,
     sessionID: String,
-    finalFlush: Bool
+    finalFlush: Bool,
+    initialSamplePosition: UInt64 = 0,
+    startingChunkIndex: UInt64 = 0
   ) throws -> ArchiveLocalDerivationResult {
     guard !sessionID.isEmpty, sessionID.utf8.count <= 256 else {
       throw ArchiveLocalDerivationError.invalidSessionID
@@ -40,19 +44,59 @@ public enum ArchiveLocalDeriver {
       tapeURL: tapeURL,
       indexURL: indexURL,
       rootKey: rootKey,
-      context: context
+      context: context,
+      initialSamplePosition: initialSamplePosition
     )
     defer { snapshot.close() }
+    return try derive(
+      snapshot: snapshot,
+      journalURL: journalURL,
+      levelURL: levelURL,
+      rootKey: rootKey,
+      context: context,
+      sessionID: sessionID,
+      finalFlush: finalFlush,
+      startingChunkIndex: startingChunkIndex
+    )
+  }
+
+  public static func derive(
+    snapshot: ArchiveLaneStore.AuthenticatedSnapshot,
+    journalURL: URL,
+    levelURL: URL,
+    rootKey: Data,
+    context: ArchiveContext,
+    sessionID: String,
+    finalFlush: Bool,
+    startingChunkIndex: UInt64 = 0
+  ) throws -> ArchiveLocalDerivationResult {
+    guard !sessionID.isEmpty, sessionID.utf8.count <= 256 else {
+      throw ArchiveLocalDerivationError.invalidSessionID
+    }
+    guard journalURL.standardizedFileURL.path != levelURL.standardizedFileURL.path else {
+      throw ArchiveLocalDerivationError.aliasedPath(journalURL.standardizedFileURL.path)
+    }
+    guard snapshot.authenticates(rootKey: rootKey, context: context) else {
+      throw ArchiveLocalDerivationError.snapshotContextMismatch
+    }
+    for url in [journalURL, levelURL] {
+      if try snapshot.aliasesSourceFile(at: url) {
+        throw ArchiveLocalDerivationError.aliasedPath(url.standardizedFileURL.path)
+      }
+    }
+    let initialSamplePosition = snapshot.initialSamplePosition
     let indexRecords = snapshot.indexRecords
     guard let authenticatedEnd = indexRecords.last?.payload.sampleEnd else {
       try validateEmptyDerivedIfPresent(
         journalURL: journalURL,
         levelURL: levelURL,
         rootKey: rootKey,
-        context: context
+        context: context,
+        initialSamplePosition: initialSamplePosition
       )
       return ArchiveLocalDerivationResult(
         authenticatedSampleCount: 0,
+        authenticatedSampleEnd: initialSamplePosition,
         reservations: [],
         journalRecordsWritten: 0,
         levelRecords: [],
@@ -66,6 +110,7 @@ public enum ArchiveLocalDeriver {
     }
     let plans = try ArchiveLocalCutter.plan(
       indexRecords: indexRecords,
+      startingChunkIndex: startingChunkIndex,
       finalFlush: finalFlush
     )
     var reservations: [ArchiveJournalPayload] = []
@@ -101,11 +146,7 @@ public enum ArchiveLocalDeriver {
           error: nil
         ))
     }
-    let levelPlans = try ArchiveLevelSidecarBuilder.build(
-      indexRecords: indexRecords,
-      readPCM: readPCM
-    )
-    let journalPlaintexts = try reservations.map(ArchiveJournalPayloadCodec.encode)
+    var existingLevelRecords: [ArchiveDerivedRecord] = []
     if FileManager.default.fileExists(atPath: journalURL.path) {
       let existing = try ArchiveDerivedStore.inspect(
         url: journalURL,
@@ -114,7 +155,7 @@ public enum ArchiveLocalDeriver {
         context: context,
         validator: { try ArchiveJournalPayloadCodec.validateRecord($0) }
       )
-      try validateJournalPrefix(existing.records, expected: journalPlaintexts)
+      _ = try validateJournalReservations(existing.records, expected: reservations)
     }
     if FileManager.default.fileExists(atPath: levelURL.path) {
       let existing = try ArchiveDerivedStore.inspect(
@@ -122,9 +163,29 @@ public enum ArchiveLocalDeriver {
         purpose: .level,
         rootKey: rootKey,
         context: context,
-        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) }
+        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+        initialLogicalUnit: initialSamplePosition
       )
-      try validateLevelPrefix(existing.records, expected: levelPlans)
+      existingLevelRecords = existing.records
+    }
+    let frozenLevelPlans = try existingLevelRecords.enumerated().map { position, record in
+      do {
+        return ArchiveLevelRecordPlan(
+          firstSample: record.header.firstLogicalUnit,
+          sampleCount: record.header.logicalUnitCount,
+          observations: try ArchiveLevelPayloadCodec.decode(record.plaintext))
+      } catch {
+        throw ArchiveLocalDerivationError.existingLevelMismatch(position: position)
+      }
+    }
+    let levelPlans: [ArchiveLevelRecordPlan]
+    do {
+      levelPlans = try ArchiveLevelSidecarBuilder.build(
+        indexRecords: indexRecords,
+        frozenRecords: frozenLevelPlans,
+        readPCM: readPCM)
+    } catch ArchiveLevelSidecarError.frozenRecordMismatch(let position) {
+      throw ArchiveLocalDerivationError.existingLevelMismatch(position: position)
     }
     var journalStore: ArchiveDerivedStore?
     var levelStore: ArchiveDerivedStore?
@@ -136,20 +197,15 @@ public enum ArchiveLocalDeriver {
         context: context,
         validator: { try ArchiveJournalPayloadCodec.validateRecord($0) },
         headerValidator: { header, position in
-          guard position < journalPlaintexts.count,
-            header.firstLogicalUnit == UInt64(position), header.logicalUnitCount == 1,
-            header.plaintextByteCount == UInt32(journalPlaintexts[position].count)
+          guard header.firstLogicalUnit == UInt64(position), header.logicalUnitCount == 1
           else {
             throw ArchiveLocalDerivationError.existingJournalMismatch(position: position)
           }
         },
         partialHeaderValidator: { partial, position in
-          try validatePartialExpectedHeader(
+          try validatePartialJournalHeader(
             partial,
             position: position,
-            expectedFirstLogicalUnit: UInt64(position),
-            expectedLogicalUnitCount: 1,
-            expectedPlaintextByteCount: journalPlaintexts[safe: position]?.count,
             mismatch: .existingJournalMismatch(position: position)
           )
         },
@@ -182,9 +238,13 @@ public enum ArchiveLocalDeriver {
           )
         },
         allowExpectedIncompletePayloadRepair: true,
-        repairTrailingRecord: false
+        repairTrailingRecord: false,
+        initialLogicalUnit: initialSamplePosition
       )
-      try validateJournalPrefix(journalStore!.scanResult.records, expected: journalPlaintexts)
+      _ = try validateJournalReservations(
+        journalStore!.scanResult.records,
+        expected: reservations
+      )
       try validateLevelPrefix(levelStore!.scanResult.records, expected: levelPlans)
       try journalStore!.repairIncompleteTrailingRecord()
       try levelStore!.repairIncompleteTrailingRecord()
@@ -205,13 +265,21 @@ public enum ArchiveLocalDeriver {
     defer { levelStore!.close() }
     defer { journalStore!.close() }
 
-    let journalStart = journalStore!.scanResult.records.count
-    for position in journalStart..<journalPlaintexts.count {
+    let existingReservations = try validateJournalReservations(
+      journalStore!.scanResult.records,
+      expected: reservations
+    )
+    let missingReservations = reservations.filter {
+      existingReservations[$0.reservationID] == nil
+    }
+    var journalPosition = journalStore!.scanResult.records.count
+    for reservation in missingReservations {
       try journalStore!.append(
-        plaintext: journalPlaintexts[position],
-        firstLogicalUnit: UInt64(position),
+        plaintext: ArchiveJournalPayloadCodec.encode(reservation),
+        firstLogicalUnit: UInt64(journalPosition),
         logicalUnitCount: 1
       )
+      journalPosition += 1
     }
     let levelStart = levelStore!.scanResult.records.count
     for position in levelStart..<levelPlans.count {
@@ -222,10 +290,15 @@ public enum ArchiveLocalDeriver {
         logicalUnitCount: plan.sampleCount
       )
     }
+    let covered = authenticatedEnd.subtractingReportingOverflow(initialSamplePosition)
+    guard !covered.overflow else {
+      throw ArchiveLanePersistenceError.arithmeticOverflow(field: "authenticated_sample_count")
+    }
     return ArchiveLocalDerivationResult(
-      authenticatedSampleCount: authenticatedEnd,
+      authenticatedSampleCount: covered.partialValue,
+      authenticatedSampleEnd: authenticatedEnd,
       reservations: reservations,
-      journalRecordsWritten: journalPlaintexts.count - journalStart,
+      journalRecordsWritten: missingReservations.count,
       levelRecords: levelPlans,
       levelRecordsWritten: levelPlans.count - levelStart,
       repairedJournalTrailingByteCount: journalStore!.repairedTrailingByteCount,
@@ -233,28 +306,28 @@ public enum ArchiveLocalDeriver {
     )
   }
 
-  private static func validateJournalPrefix(
+  private static func validateJournalReservations(
     _ records: [ArchiveDerivedRecord],
-    expected: [Data]
-  ) throws {
-    guard records.count <= expected.count else {
-      throw ArchiveLocalDerivationError.existingJournalMismatch(position: expected.count)
-    }
-    for position in records.indices {
-      guard records[position].header.firstLogicalUnit == UInt64(position),
-        records[position].header.logicalUnitCount == 1,
-        records[position].plaintext == expected[position]
-      else {
+    expected: [ArchiveJournalPayload]
+  ) throws -> [String: ArchiveJournalReplayReservation] {
+    let payloads = try records.map { try ArchiveJournalPayloadCodec.decode($0.plaintext) }
+    let replay = try ArchiveJournalReplay.validate(payloads)
+    let expectedByID = Dictionary(uniqueKeysWithValues: expected.map { ($0.reservationID, $0) })
+    for (reservationID, reservation) in replay {
+      guard reservation.initialReservation == expectedByID[reservationID] else {
+        let position = payloads.firstIndex { $0.reservationID == reservationID } ?? records.count
         throw ArchiveLocalDerivationError.existingJournalMismatch(position: position)
       }
     }
+    return replay
   }
 
   private static func validateEmptyDerivedIfPresent(
     journalURL: URL,
     levelURL: URL,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
   ) throws {
     if FileManager.default.fileExists(atPath: journalURL.path) {
       let journal = try ArchiveDerivedStore.inspect(
@@ -274,7 +347,8 @@ public enum ArchiveLocalDeriver {
         purpose: .level,
         rootKey: rootKey,
         context: context,
-        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) }
+        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+        initialLogicalUnit: initialSamplePosition
       )
       guard level.records.isEmpty, level.incompleteTrailingByteCount == 0 else {
         throw ArchiveLocalDerivationError.existingLevelMismatch(position: 0)
@@ -328,6 +402,26 @@ public enum ArchiveLocalDeriver {
       }
     }
     _ = position
+  }
+
+  private static func validatePartialJournalHeader(
+    _ partial: Data,
+    position: Int,
+    mismatch: ArchiveLocalDerivationError
+  ) throws {
+    let fields: [(offset: Int, bytes: [UInt8])] = [
+      (40, littleEndianBytes(UInt64(position))),
+      (48, littleEndianBytes(UInt32(1))),
+    ]
+    for field in fields where partial.count > field.offset {
+      let available = min(field.bytes.count, partial.count - field.offset)
+      guard
+        Array(partial[field.offset..<(field.offset + available)])
+          == Array(field.bytes.prefix(available))
+      else {
+        throw mismatch
+      }
+    }
   }
 
   private static func littleEndianBytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {

@@ -18,11 +18,46 @@ public struct ArchiveIndexScanResult: Equatable, Sendable {
   public let records: [ArchiveIndexRecordMetadata]
   public let completeByteCount: UInt64
   public let incompleteTrailingByteCount: UInt64
+  public let initialSamplePosition: UInt64
+
+  public init(
+    records: [ArchiveIndexRecordMetadata],
+    completeByteCount: UInt64,
+    incompleteTrailingByteCount: UInt64,
+    initialSamplePosition: UInt64 = 0
+  ) {
+    self.records = records
+    self.completeByteCount = completeByteCount
+    self.incompleteTrailingByteCount = incompleteTrailingByteCount
+    self.initialSamplePosition = initialSamplePosition
+  }
 }
 
 public struct ArchiveLaneScanResult: Equatable, Sendable {
   public let tape: ArchiveTapeScanResult
   public let index: ArchiveIndexScanResult
+
+  public var initialSamplePosition: UInt64 { tape.initialLogicalUnit }
+
+  public init(tape: ArchiveTapeScanResult, index: ArchiveIndexScanResult) {
+    self.tape = tape
+    self.index = index
+  }
+}
+
+public struct ArchiveAuthenticatedLaneFacts: Equatable, Sendable {
+  public let context: ArchiveContext
+  public let initialSamplePosition: UInt64
+  public let authenticatedSampleEnd: UInt64
+  public let recordCount: Int
+
+  fileprivate init(context: ArchiveContext, scanResult: ArchiveLaneScanResult) {
+    self.context = context
+    initialSamplePosition = scanResult.initialSamplePosition
+    authenticatedSampleEnd =
+      scanResult.index.records.last?.payload.sampleEnd ?? scanResult.initialSamplePosition
+    recordCount = scanResult.index.records.count
+  }
 }
 
 public struct AuthenticatedArchivePCMRange: Equatable, Sendable {
@@ -90,6 +125,7 @@ public enum ArchiveLanePersistenceError: Error, Equatable, Sendable {
   case invalidFirstSequence(file: ArchiveLaneFile, actual: UInt64)
   case sequenceDiscontinuity(file: ArchiveLaneFile, expected: UInt64, actual: UInt64)
   case invalidFirstLogicalUnit(file: ArchiveLaneFile, actual: UInt64)
+  case initialSamplePositionMismatch(file: ArchiveLaneFile, expected: UInt64, actual: UInt64)
   case logicalDiscontinuity(file: ArchiveLaneFile, expected: UInt64, actual: UInt64)
   case predecessorMismatch(file: ArchiveLaneFile, sequence: UInt64)
   case recordCountExceedsLimit(file: ArchiveLaneFile, count: UInt64)
@@ -115,6 +151,8 @@ public enum ArchiveLanePersistenceError: Error, Equatable, Sendable {
   case createdPathChanged(file: ArchiveLaneFile, path: String)
   case createdPathCleanupFailed(file: ArchiveLaneFile, path: String, errno: Int32)
   case recoveryEpochMismatch(sequence: UInt64)
+  case descriptorDuplicationFailed(file: ArchiveLaneFile, errno: Int32)
+  case pathInspectionFailed(path: String, errno: Int32)
   case requiresAuthenticatedReopen
   case closed
 }
@@ -148,6 +186,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     private let lock = NSLock()
     private var descriptors: LaneDescriptors?
     private let rootKey: Data
+    public let context: ArchiveContext
+    public let initialSamplePosition: UInt64
     private let contextHash: Data
     fileprivate let scanResult: ArchiveLaneScanResult
 
@@ -155,14 +195,22 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       scanResult.index.records
     }
 
+    public var authenticatedFacts: ArchiveAuthenticatedLaneFacts {
+      ArchiveAuthenticatedLaneFacts(context: context, scanResult: scanResult)
+    }
+
     fileprivate init(
       descriptors: LaneDescriptors,
       rootKey: Data,
+      context: ArchiveContext,
+      initialSamplePosition: UInt64,
       contextHash: Data,
       scanResult: ArchiveLaneScanResult
     ) {
       self.descriptors = descriptors
       self.rootKey = rootKey
+      self.context = context
+      self.initialSamplePosition = initialSamplePosition
       self.contextHash = contextHash
       self.scanResult = scanResult
     }
@@ -196,6 +244,38 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         _ = Darwin.close(descriptors.tape)
       }
     }
+
+    func authenticates(rootKey: Data, context: ArchiveContext) -> Bool {
+      self.rootKey == rootKey && self.context == context
+    }
+
+    func aliasesSourceFile(at url: URL) throws -> Bool {
+      try lock.withLock {
+        guard let descriptors else { throw ArchiveLanePersistenceError.closed }
+        var pathStat = stat()
+        var result: Int32
+        repeat {
+          result = lstat(url.path, &pathStat)
+        } while result != 0 && errno == EINTR
+        if result != 0, errno == ENOENT { return false }
+        guard result == 0 else {
+          throw ArchiveLanePersistenceError.pathInspectionFailed(path: url.path, errno: errno)
+        }
+        for (file, descriptor) in [
+          (ArchiveLaneFile.tape, descriptors.tape),
+          (ArchiveLaneFile.index, descriptors.index),
+        ] {
+          var descriptorStat = stat()
+          guard retryingStat(descriptor, &descriptorStat) == 0 else {
+            throw ArchiveLanePersistenceError.statFailed(file: file, errno: errno)
+          }
+          if pathStat.st_dev == descriptorStat.st_dev && pathStat.st_ino == descriptorStat.st_ino {
+            return true
+          }
+        }
+        return false
+      }
+    }
   }
 
   private let lock = NSLock()
@@ -203,6 +283,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
   private let indexURL: URL
   private let context: ArchiveContext
   private let contextHash: Data
+  private let rootKey: Data
+  public let initialSamplePosition: UInt64
   private let tapeSealer: ArchivePurposeSealer
   private let indexSealer: ArchivePurposeSealer
   private let hooks: ArchiveLanePersistenceHooks
@@ -223,6 +305,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     indexURL: URL,
     context: ArchiveContext,
     contextHash: Data,
+    rootKey: Data,
+    initialSamplePosition: UInt64,
     tapeSealer: ArchivePurposeSealer,
     indexSealer: ArchivePurposeSealer,
     tapeFileDescriptor: Int32,
@@ -237,6 +321,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     self.indexURL = indexURL
     self.context = context
     self.contextHash = contextHash
+    self.rootKey = rootKey
+    self.initialSamplePosition = initialSamplePosition
     self.tapeFileDescriptor = tapeFileDescriptor
     self.indexFileDescriptor = indexFileDescriptor
     self.tapeRecords = tapeRecords
@@ -259,13 +345,15 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     tapeURL: URL,
     indexURL: URL,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
   ) throws -> ArchiveLaneScanResult {
     try inspect(
       tapeURL: tapeURL,
       indexURL: indexURL,
       rootKey: rootKey,
       context: context,
+      initialSamplePosition: initialSamplePosition,
       hooks: ArchiveLanePersistenceHooks()
     )
   }
@@ -275,6 +363,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     indexURL: URL,
     rootKey: Data,
     context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0,
     hooks: ArchiveLanePersistenceHooks
   ) throws -> ArchiveLaneScanResult {
     let contextHash = try validateInputs(
@@ -289,6 +378,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialSamplePosition: initialSamplePosition,
       hooks: hooks
     )
     try crossValidate(result, context: context)
@@ -299,7 +389,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     tapeURL: URL,
     indexURL: URL,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
   ) throws -> AuthenticatedSnapshot {
     let contextHash = try validateInputs(
       tapeURL: tapeURL, indexURL: indexURL, rootKey: rootKey, context: context)
@@ -311,6 +402,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
           descriptors.tape,
           context: context,
           contextHash: contextHash,
+          initialSamplePosition: initialSamplePosition,
           hooks: hooks
         ),
         index: try scanIndex(
@@ -318,6 +410,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
           rootKey: rootKey,
           context: context,
           contextHash: contextHash,
+          initialSamplePosition: initialSamplePosition,
           hooks: hooks
         )
       )
@@ -325,6 +418,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       return AuthenticatedSnapshot(
         descriptors: descriptors,
         rootKey: rootKey,
+        context: context,
+        initialSamplePosition: initialSamplePosition,
         contextHash: contextHash,
         scanResult: scan
       )
@@ -341,13 +436,15 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     sampleStart: UInt64,
-    sampleEnd: UInt64
+    sampleEnd: UInt64,
+    initialSamplePosition: UInt64 = 0
   ) throws -> AuthenticatedArchivePCMRange {
     let snapshot = try openAuthenticatedSnapshot(
       tapeURL: tapeURL,
       indexURL: indexURL,
       rootKey: rootKey,
-      context: context
+      context: context,
+      initialSamplePosition: initialSamplePosition
     )
     defer { snapshot.close() }
     return try snapshot.readPCMRange(sampleStart: sampleStart, sampleEnd: sampleEnd)
@@ -364,7 +461,11 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     guard sampleEnd > sampleStart else {
       throw ArchiveLanePersistenceError.invalidReadRange(start: sampleStart, end: sampleEnd)
     }
-    let authenticatedEnd = scan.index.records.last?.payload.sampleEnd ?? 0
+    guard sampleStart >= scan.initialSamplePosition else {
+      throw ArchiveLanePersistenceError.invalidReadRange(start: sampleStart, end: sampleEnd)
+    }
+    let authenticatedEnd =
+      scan.index.records.last?.payload.sampleEnd ?? scan.initialSamplePosition
     guard sampleEnd <= authenticatedEnd else {
       throw ArchiveLanePersistenceError.readRangeBeyondAuthenticatedEnd(
         requested: sampleEnd, authenticated: authenticatedEnd)
@@ -440,13 +541,15 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     tapeURL: URL,
     indexURL: URL,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
   ) throws -> ArchiveLaneStore {
     try openRecoveringForAppend(
       tapeURL: tapeURL,
       indexURL: indexURL,
       rootKey: rootKey,
       context: context,
+      initialSamplePosition: initialSamplePosition,
       hooks: ArchiveLanePersistenceHooks(),
       tapeNonceProvider: { try ArchivePurposeSealer.secureRandomNonceForPersistence() },
       indexNonceProvider: { try ArchivePurposeSealer.secureRandomNonceForPersistence() }
@@ -458,6 +561,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     indexURL: URL,
     rootKey: Data,
     context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0,
     hooks: ArchiveLanePersistenceHooks,
     tapeNonceProvider: @escaping @Sendable () throws -> Data,
     indexNonceProvider: @escaping @Sendable () throws -> Data
@@ -471,6 +575,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialSamplePosition: initialSamplePosition,
       descriptors: descriptors,
       callerRetainsDescriptorsOnFailure: false,
       hooks: hooks,
@@ -484,7 +589,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     tapeFileDescriptor: Int32,
     indexFileDescriptor: Int32,
     rootKey: Data,
-    context: ArchiveContext
+    context: ArchiveContext,
+    initialSamplePosition: UInt64 = 0
   ) throws -> ArchiveLaneStore {
     let descriptors = LaneDescriptors(
       tapeFile: OpenedLaneFile(
@@ -499,6 +605,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       rootKey: rootKey,
       context: context,
       contextHash: contextHash,
+      initialSamplePosition: initialSamplePosition,
       descriptors: descriptors,
       callerRetainsDescriptorsOnFailure: true,
       hooks: ArchiveLanePersistenceHooks(),
@@ -512,6 +619,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialSamplePosition: UInt64,
     descriptors: LaneDescriptors,
     callerRetainsDescriptorsOnFailure: Bool,
     hooks: ArchiveLanePersistenceHooks,
@@ -526,6 +634,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         rootKey: rootKey,
         context: context,
         contextHash: contextHash,
+        initialSamplePosition: initialSamplePosition,
         hooks: hooks
       )
       try crossValidate(scan, context: context)
@@ -557,7 +666,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
           tape: ArchiveTapeScanResult(
             records: scan.tape.records,
             completeByteCount: scan.tape.completeByteCount,
-            incompleteTrailingByteCount: 0),
+            incompleteTrailingByteCount: 0,
+            initialLogicalUnit: initialSamplePosition),
           index: scan.index
         )
       }
@@ -572,7 +682,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
           index: ArchiveIndexScanResult(
             records: scan.index.records,
             completeByteCount: scan.index.completeByteCount,
-            incompleteTrailingByteCount: 0)
+            incompleteTrailingByteCount: 0,
+            initialSamplePosition: initialSamplePosition)
         )
       }
 
@@ -592,6 +703,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         indexURL: indexURL,
         context: context,
         contextHash: contextHash,
+        rootKey: rootKey,
+        initialSamplePosition: initialSamplePosition,
         tapeSealer: tapeSealer,
         indexSealer: indexSealer,
         tapeFileDescriptor: descriptors.tape,
@@ -627,11 +740,13 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         tape: ArchiveTapeScanResult(
           records: tapeRecords,
           completeByteCount: tapeRecords.last?.encryptedEndOffset ?? 0,
-          incompleteTrailingByteCount: 0),
+          incompleteTrailingByteCount: 0,
+          initialLogicalUnit: initialSamplePosition),
         index: ArchiveIndexScanResult(
           records: indexRecords,
           completeByteCount: indexRecords.last?.encryptedEndOffset ?? 0,
-          incompleteTrailingByteCount: 0)
+          incompleteTrailingByteCount: 0,
+          initialSamplePosition: initialSamplePosition)
       )
     }
   }
@@ -668,7 +783,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         let previousTape = tapeRecords.last
         let sequence = try Self.increment(
           previousTape?.header.recordSequence ?? 0, field: "tape_sequence")
-        let sampleStart = try Self.logicalEnd(of: previousTape?.header)
+        let sampleStart = try Self.logicalEnd(
+          of: previousTape?.header, initialSamplePosition: initialSamplePosition)
         let sampleCount = UInt32(plaintext.count / 2)
         let tapeRequest = ArchiveRecordSealRequest(
           recordSequence: sequence,
@@ -739,12 +855,60 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     lock.withLock { closeDescriptors() }
   }
 
+  public func authenticatedSnapshot() throws -> AuthenticatedSnapshot {
+    try lock.withLock {
+      guard let tapeFileDescriptor, let indexFileDescriptor else {
+        throw ArchiveLanePersistenceError.closed
+      }
+      guard !poisoned, tapeRecords.count == indexRecords.count else {
+        throw ArchiveLanePersistenceError.requiresAuthenticatedReopen
+      }
+      let tapeCopy = try Self.duplicate(tapeFileDescriptor, file: .tape)
+      do {
+        let indexCopy = try Self.duplicate(indexFileDescriptor, file: .index)
+        return AuthenticatedSnapshot(
+          descriptors: LaneDescriptors(
+            tapeFile: OpenedLaneFile(
+              file: .tape, url: tapeURL, fileDescriptor: tapeCopy, createdIdentity: nil),
+            indexFile: OpenedLaneFile(
+              file: .index, url: indexURL, fileDescriptor: indexCopy, createdIdentity: nil)
+          ),
+          rootKey: rootKey,
+          context: context,
+          initialSamplePosition: initialSamplePosition,
+          contextHash: contextHash,
+          scanResult: scanResultUnlocked()
+        )
+      } catch {
+        _ = Darwin.close(tapeCopy)
+        throw error
+      }
+    }
+  }
+
+  private func scanResultUnlocked() -> ArchiveLaneScanResult {
+    ArchiveLaneScanResult(
+      tape: ArchiveTapeScanResult(
+        records: tapeRecords,
+        completeByteCount: tapeRecords.last?.encryptedEndOffset ?? 0,
+        incompleteTrailingByteCount: 0,
+        initialLogicalUnit: initialSamplePosition),
+      index: ArchiveIndexScanResult(
+        records: indexRecords,
+        completeByteCount: indexRecords.last?.encryptedEndOffset ?? 0,
+        incompleteTrailingByteCount: 0,
+        initialSamplePosition: initialSamplePosition)
+    )
+  }
+
   private func adoptStartupTapeRecords() throws {
     guard let indexFileDescriptor else { throw ArchiveLanePersistenceError.closed }
     let originalIndexCount = indexRecords.count
     guard originalIndexCount < tapeRecords.count else { return }
     let recoveryOrigin = try Self.recoveryOrigin(
-      tapeRecords: tapeRecords, indexRecords: indexRecords)
+      tapeRecords: tapeRecords,
+      indexRecords: indexRecords,
+      initialSamplePosition: initialSamplePosition)
 
     for tape in tapeRecords.dropFirst(originalIndexCount) {
       hooks.event(.adoption(tape.header.recordSequence))
@@ -830,12 +994,10 @@ public final class ArchiveLaneStore: @unchecked Sendable {
 
   private func closeDescriptors() {
     if let indexFileDescriptor {
-      _ = flock(indexFileDescriptor, LOCK_UN)
       _ = Darwin.close(indexFileDescriptor)
       self.indexFileDescriptor = nil
     }
     if let tapeFileDescriptor {
-      _ = flock(tapeFileDescriptor, LOCK_UN)
       _ = Darwin.close(tapeFileDescriptor)
       self.tapeFileDescriptor = nil
     }
@@ -907,6 +1069,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialSamplePosition: UInt64,
     hooks: ArchiveLanePersistenceHooks
   ) throws -> ArchiveLaneScanResult {
     ArchiveLaneScanResult(
@@ -915,12 +1078,14 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         rootKey: rootKey,
         context: context,
         contextHash: contextHash,
+        initialSamplePosition: initialSamplePosition,
         hooks: hooks),
       index: try scanIndex(
         descriptors.index,
         rootKey: rootKey,
         context: context,
         contextHash: contextHash,
+        initialSamplePosition: initialSamplePosition,
         hooks: hooks)
     )
   }
@@ -930,13 +1095,14 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialSamplePosition: UInt64,
     hooks: ArchiveLanePersistenceHooks
   ) throws -> ArchiveTapeScanResult {
     let fileSize = try size(of: fileDescriptor, file: .tape)
     var offset: UInt64 = 0
     var records: [ArchiveTapeRecordMetadata] = []
     var expectedSequence: UInt64 = 1
-    var expectedLogicalUnit: UInt64 = 0
+    var expectedLogicalUnit = initialSamplePosition
     var expectedPredecessor = zeroTag
     while offset < fileSize {
       try enforceCap(records.count + 1, file: .tape)
@@ -944,7 +1110,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= UInt64(ArchiveEnvelopeCodec.headerByteCount) else {
         return ArchiveTapeScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialSamplePosition)
       }
       let headerData = try readExactly(
         fileDescriptor, file: .tape, offset: offset,
@@ -961,7 +1128,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= recordByteCount else {
         return ArchiveTapeScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialSamplePosition)
       }
       let encoded = try readExactly(
         fileDescriptor, file: .tape, offset: offset, count: Int(recordByteCount), hooks: hooks)
@@ -979,20 +1147,22 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       offset = end
     }
     return ArchiveTapeScanResult(
-      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0)
+      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0,
+      initialLogicalUnit: initialSamplePosition)
   }
 
   private static func scanTapeMetadata(
     _ fileDescriptor: Int32,
     context: ArchiveContext,
     contextHash: Data,
+    initialSamplePosition: UInt64,
     hooks: ArchiveLanePersistenceHooks
   ) throws -> ArchiveTapeScanResult {
     let fileSize = try size(of: fileDescriptor, file: .tape)
     var offset: UInt64 = 0
     var records: [ArchiveTapeRecordMetadata] = []
     var expectedSequence: UInt64 = 1
-    var expectedLogicalUnit: UInt64 = 0
+    var expectedLogicalUnit = initialSamplePosition
     var expectedPredecessor = zeroTag
     while offset < fileSize {
       try enforceCap(records.count + 1, file: .tape)
@@ -1000,7 +1170,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= UInt64(ArchiveEnvelopeCodec.headerByteCount) else {
         return ArchiveTapeScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialSamplePosition)
       }
       let headerData = try readExactly(
         fileDescriptor, file: .tape, offset: offset,
@@ -1017,7 +1188,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= recordByteCount else {
         return ArchiveTapeScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialLogicalUnit: initialSamplePosition)
       }
       let tagOffset = try add(
         offset,
@@ -1045,7 +1217,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       offset = end
     }
     return ArchiveTapeScanResult(
-      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0)
+      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0,
+      initialLogicalUnit: initialSamplePosition)
   }
 
   private static func scanIndex(
@@ -1053,13 +1226,14 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     rootKey: Data,
     context: ArchiveContext,
     contextHash: Data,
+    initialSamplePosition: UInt64,
     hooks: ArchiveLanePersistenceHooks
   ) throws -> ArchiveIndexScanResult {
     let fileSize = try size(of: fileDescriptor, file: .index)
     var offset: UInt64 = 0
     var records: [ArchiveIndexRecordMetadata] = []
     var expectedSequence: UInt64 = 1
-    var expectedLogicalUnit: UInt64 = 0
+    var expectedLogicalUnit = initialSamplePosition
     var expectedPredecessor = zeroTag
     while offset < fileSize {
       try enforceCap(records.count + 1, file: .index)
@@ -1067,7 +1241,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= UInt64(ArchiveEnvelopeCodec.headerByteCount) else {
         return ArchiveIndexScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialSamplePosition: initialSamplePosition)
       }
       let headerData = try readExactly(
         fileDescriptor, file: .index, offset: offset,
@@ -1084,7 +1259,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       guard remaining >= recordByteCount else {
         return ArchiveIndexScanResult(
           records: records, completeByteCount: offset,
-          incompleteTrailingByteCount: remaining)
+          incompleteTrailingByteCount: remaining,
+          initialSamplePosition: initialSamplePosition)
       }
       let encoded = try readExactly(
         fileDescriptor, file: .index, offset: offset, count: Int(recordByteCount), hooks: hooks)
@@ -1116,11 +1292,18 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       offset = end
     }
     return ArchiveIndexScanResult(
-      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0)
+      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0,
+      initialSamplePosition: initialSamplePosition)
   }
 
   private static func crossValidate(_ result: ArchiveLaneScanResult, context: ArchiveContext) throws
   {
+    guard result.tape.initialLogicalUnit == result.index.initialSamplePosition else {
+      throw ArchiveLanePersistenceError.initialSamplePositionMismatch(
+        file: .index,
+        expected: result.tape.initialLogicalUnit,
+        actual: result.index.initialSamplePosition)
+    }
     guard result.index.records.count <= result.tape.records.count else {
       throw ArchiveLanePersistenceError.indexAhead(
         indexCount: UInt64(result.index.records.count),
@@ -1159,12 +1342,15 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       }
     }
     _ = try recoveryOrigin(
-      tapeRecords: result.tape.records, indexRecords: result.index.records)
+      tapeRecords: result.tape.records,
+      indexRecords: result.index.records,
+      initialSamplePosition: result.initialSamplePosition)
   }
 
   private static func recoveryOrigin(
     tapeRecords: [ArchiveTapeRecordMetadata],
-    indexRecords: [ArchiveIndexRecordMetadata]
+    indexRecords: [ArchiveIndexRecordMetadata],
+    initialSamplePosition: UInt64
   ) throws -> (sample: UInt64, tapeOffset: UInt64) {
     var firstRecovery = indexRecords.count
     while firstRecovery > 0,
@@ -1174,7 +1360,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     }
     guard firstRecovery < indexRecords.count else {
       return (
-        indexRecords.last?.payload.sampleEnd ?? 0,
+        indexRecords.last?.payload.sampleEnd ?? initialSamplePosition,
         indexRecords.isEmpty ? 0 : tapeRecords[indexRecords.count - 1].encryptedEndOffset
       )
     }
@@ -1223,9 +1409,13 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       throw ArchiveLanePersistenceError.sequenceDiscontinuity(
         file: file, expected: expectedSequence, actual: header.recordSequence)
     }
-    if isFirstRecord, header.firstLogicalUnit != 0 {
-      throw ArchiveLanePersistenceError.invalidFirstLogicalUnit(
-        file: file, actual: header.firstLogicalUnit)
+    if isFirstRecord, header.firstLogicalUnit != expectedLogicalUnit {
+      if expectedLogicalUnit == 0 {
+        throw ArchiveLanePersistenceError.invalidFirstLogicalUnit(
+          file: file, actual: header.firstLogicalUnit)
+      }
+      throw ArchiveLanePersistenceError.initialSamplePositionMismatch(
+        file: file, expected: expectedLogicalUnit, actual: header.firstLogicalUnit)
     }
     guard header.firstLogicalUnit == expectedLogicalUnit else {
       throw ArchiveLanePersistenceError.logicalDiscontinuity(
@@ -1258,9 +1448,23 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     }
   }
 
-  private static func logicalEnd(of header: ArchiveEnvelopeHeader?) throws -> UInt64 {
-    guard let header else { return 0 }
+  private static func logicalEnd(
+    of header: ArchiveEnvelopeHeader?,
+    initialSamplePosition: UInt64 = 0
+  ) throws -> UInt64 {
+    guard let header else { return initialSamplePosition }
     return try logicalEnd(of: header)
+  }
+
+  private static func duplicate(_ fileDescriptor: Int32, file: ArchiveLaneFile) throws -> Int32 {
+    var duplicate: Int32
+    repeat {
+      duplicate = fcntl(fileDescriptor, F_DUPFD_CLOEXEC, 0)
+    } while duplicate < 0 && errno == EINTR
+    guard duplicate >= 0 else {
+      throw ArchiveLanePersistenceError.descriptorDuplicationFailed(file: file, errno: errno)
+    }
+    return duplicate
   }
 
   private static func logicalEnd(of header: ArchiveEnvelopeHeader) throws -> UInt64 {
