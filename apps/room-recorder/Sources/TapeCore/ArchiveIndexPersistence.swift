@@ -25,6 +25,13 @@ public struct ArchiveLaneScanResult: Equatable, Sendable {
   public let index: ArchiveIndexScanResult
 }
 
+public struct AuthenticatedArchivePCMRange: Equatable, Sendable {
+  public let sampleStart: UInt64
+  public let sampleEnd: UInt64
+  public let pcm: Data
+  public let indexRecords: [ArchiveIndexRecordMetadata]
+}
+
 public struct ArchiveIndexObservation: Equatable, Sendable {
   public let monoNS: UInt64?
   public let wallNS: UInt64?
@@ -97,6 +104,8 @@ public enum ArchiveLanePersistenceError: Error, Equatable, Sendable {
   case indexEnvelopeRangeMismatch(sequence: UInt64)
   case arithmeticOverflow(field: String)
   case invalidPCMByteCount(Int)
+  case invalidReadRange(start: UInt64, end: UInt64)
+  case readRangeBeyondAuthenticatedEnd(requested: UInt64, authenticated: UInt64)
   case recoveryObservationNotAllowed
   case writeFailed(file: ArchiveLaneFile, offset: UInt64, errno: Int32)
   case writeMadeNoProgress(file: ArchiveLaneFile, offset: UInt64)
@@ -135,6 +144,60 @@ struct ArchiveLanePersistenceHooks {
 }
 
 public final class ArchiveLaneStore: @unchecked Sendable {
+  public final class AuthenticatedSnapshot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var descriptors: LaneDescriptors?
+    private let rootKey: Data
+    private let contextHash: Data
+    fileprivate let scanResult: ArchiveLaneScanResult
+
+    public var indexRecords: [ArchiveIndexRecordMetadata] {
+      scanResult.index.records
+    }
+
+    fileprivate init(
+      descriptors: LaneDescriptors,
+      rootKey: Data,
+      contextHash: Data,
+      scanResult: ArchiveLaneScanResult
+    ) {
+      self.descriptors = descriptors
+      self.rootKey = rootKey
+      self.contextHash = contextHash
+      self.scanResult = scanResult
+    }
+
+    deinit {
+      close()
+    }
+
+    public func readPCMRange(
+      sampleStart: UInt64,
+      sampleEnd: UInt64
+    ) throws -> AuthenticatedArchivePCMRange {
+      try lock.withLock {
+        guard let descriptors else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveLaneStore.readAuthenticatedPCMRange(
+          descriptors: descriptors,
+          scan: scanResult,
+          rootKey: rootKey,
+          contextHash: contextHash,
+          sampleStart: sampleStart,
+          sampleEnd: sampleEnd
+        )
+      }
+    }
+
+    public func close() {
+      lock.withLock {
+        guard let descriptors else { return }
+        self.descriptors = nil
+        _ = Darwin.close(descriptors.index)
+        _ = Darwin.close(descriptors.tape)
+      }
+    }
+  }
+
   private let lock = NSLock()
   private let tapeURL: URL
   private let indexURL: URL
@@ -230,6 +293,147 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     )
     try crossValidate(result, context: context)
     return result
+  }
+
+  public static func openAuthenticatedSnapshot(
+    tapeURL: URL,
+    indexURL: URL,
+    rootKey: Data,
+    context: ArchiveContext
+  ) throws -> AuthenticatedSnapshot {
+    let contextHash = try validateInputs(
+      tapeURL: tapeURL, indexURL: indexURL, rootKey: rootKey, context: context)
+    let descriptors = try openPair(tapeURL: tapeURL, indexURL: indexURL, readOnly: true)
+    do {
+      let hooks = ArchiveLanePersistenceHooks()
+      let scan = ArchiveLaneScanResult(
+        tape: try scanTapeMetadata(
+          descriptors.tape,
+          context: context,
+          contextHash: contextHash,
+          hooks: hooks
+        ),
+        index: try scanIndex(
+          descriptors.index,
+          rootKey: rootKey,
+          context: context,
+          contextHash: contextHash,
+          hooks: hooks
+        )
+      )
+      try crossValidate(scan, context: context)
+      return AuthenticatedSnapshot(
+        descriptors: descriptors,
+        rootKey: rootKey,
+        contextHash: contextHash,
+        scanResult: scan
+      )
+    } catch {
+      _ = Darwin.close(descriptors.index)
+      _ = Darwin.close(descriptors.tape)
+      throw error
+    }
+  }
+
+  public static func readAuthenticatedPCMRange(
+    tapeURL: URL,
+    indexURL: URL,
+    rootKey: Data,
+    context: ArchiveContext,
+    sampleStart: UInt64,
+    sampleEnd: UInt64
+  ) throws -> AuthenticatedArchivePCMRange {
+    let snapshot = try openAuthenticatedSnapshot(
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      rootKey: rootKey,
+      context: context
+    )
+    defer { snapshot.close() }
+    return try snapshot.readPCMRange(sampleStart: sampleStart, sampleEnd: sampleEnd)
+  }
+
+  private static func readAuthenticatedPCMRange(
+    descriptors: LaneDescriptors,
+    scan: ArchiveLaneScanResult,
+    rootKey: Data,
+    contextHash: Data,
+    sampleStart: UInt64,
+    sampleEnd: UInt64
+  ) throws -> AuthenticatedArchivePCMRange {
+    guard sampleEnd > sampleStart else {
+      throw ArchiveLanePersistenceError.invalidReadRange(start: sampleStart, end: sampleEnd)
+    }
+    let authenticatedEnd = scan.index.records.last?.payload.sampleEnd ?? 0
+    guard sampleEnd <= authenticatedEnd else {
+      throw ArchiveLanePersistenceError.readRangeBeyondAuthenticatedEnd(
+        requested: sampleEnd, authenticated: authenticatedEnd)
+    }
+    let requestedSamples = sampleEnd - sampleStart
+    guard requestedSamples <= UInt64(Int.max / 2) else {
+      throw ArchiveLanePersistenceError.arithmeticOverflow(field: "read_range_byte_count")
+    }
+
+    var pcm = Data()
+    pcm.reserveCapacity(Int(requestedSamples) * 2)
+    var selectedIndexRecords: [ArchiveIndexRecordMetadata] = []
+    let hooks = ArchiveLanePersistenceHooks()
+    var lower = 0
+    var upper = scan.index.records.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      if scan.index.records[middle].payload.sampleEnd > sampleStart {
+        upper = middle
+      } else {
+        lower = middle + 1
+      }
+    }
+    var position = lower
+    while position < scan.index.records.count {
+      let indexRecord = scan.index.records[position]
+      let payload = indexRecord.payload
+      if payload.sampleStart >= sampleEnd { break }
+      let overlapStart = max(sampleStart, payload.sampleStart)
+      let overlapEnd = min(sampleEnd, payload.sampleEnd)
+      guard overlapEnd > overlapStart else {
+        position += 1
+        continue
+      }
+
+      let tapeRecord = scan.tape.records[position]
+      let encodedCount = tapeRecord.encryptedEndOffset - tapeRecord.encryptedStartOffset
+      guard encodedCount <= UInt64(Int.max) else {
+        throw ArchiveLanePersistenceError.arithmeticOverflow(field: "read_record_byte_count")
+      }
+      let encoded = try readExactly(
+        descriptors.tape,
+        file: .tape,
+        offset: tapeRecord.encryptedStartOffset,
+        count: Int(encodedCount),
+        hooks: hooks
+      )
+      let authenticated = try ArchiveRecordCrypto.open(
+        encoded,
+        rootKey: rootKey,
+        expectedPurpose: .tape,
+        expectedContextHash: contextHash
+      )
+      let localStart = Int(overlapStart - payload.sampleStart) * 2
+      let localEnd = Int(overlapEnd - payload.sampleStart) * 2
+      pcm.append(authenticated.plaintext[localStart..<localEnd])
+      selectedIndexRecords.append(indexRecord)
+      position += 1
+    }
+    guard pcm.count == Int(requestedSamples) * 2 else {
+      throw ArchiveLanePersistenceError.unexpectedEndOfFile(
+        file: .tape, offset: UInt64(pcm.count))
+    }
+    return AuthenticatedArchivePCMRange(
+      sampleStart: sampleStart,
+      sampleEnd: sampleEnd,
+      pcm: pcm,
+      indexRecords: selectedIndexRecords
+    )
   }
 
   public static func openRecoveringForAppend(
@@ -771,6 +975,72 @@ public final class ArchiveLaneStore: @unchecked Sendable {
           encryptedStartOffset: offset, encryptedEndOffset: end))
       expectedPredecessor = tag
       expectedLogicalUnit = try logicalEnd(of: authenticated.header)
+      expectedSequence = try increment(expectedSequence, field: "tape_expected_sequence")
+      offset = end
+    }
+    return ArchiveTapeScanResult(
+      records: records, completeByteCount: offset, incompleteTrailingByteCount: 0)
+  }
+
+  private static func scanTapeMetadata(
+    _ fileDescriptor: Int32,
+    context: ArchiveContext,
+    contextHash: Data,
+    hooks: ArchiveLanePersistenceHooks
+  ) throws -> ArchiveTapeScanResult {
+    let fileSize = try size(of: fileDescriptor, file: .tape)
+    var offset: UInt64 = 0
+    var records: [ArchiveTapeRecordMetadata] = []
+    var expectedSequence: UInt64 = 1
+    var expectedLogicalUnit: UInt64 = 0
+    var expectedPredecessor = zeroTag
+    while offset < fileSize {
+      try enforceCap(records.count + 1, file: .tape)
+      let remaining = fileSize - offset
+      guard remaining >= UInt64(ArchiveEnvelopeCodec.headerByteCount) else {
+        return ArchiveTapeScanResult(
+          records: records, completeByteCount: offset,
+          incompleteTrailingByteCount: remaining)
+      }
+      let headerData = try readExactly(
+        fileDescriptor, file: .tape, offset: offset,
+        count: ArchiveEnvelopeCodec.headerByteCount, hooks: hooks)
+      let header = try ArchiveEnvelopeCodec.decodeHeaderPrefix(
+        headerData, expectedPurpose: .tape, expectedContextHash: contextHash)
+      let recordByteCount =
+        UInt64(ArchiveEnvelopeCodec.headerByteCount) + UInt64(header.plaintextByteCount)
+        + UInt64(ArchiveEnvelopeCodec.authenticationTagByteCount)
+      try validateContinuation(
+        header: header, file: .tape, streamUUID: context.streamUUID,
+        expectedSequence: expectedSequence, expectedLogicalUnit: expectedLogicalUnit,
+        expectedPredecessor: expectedPredecessor, isFirstRecord: records.isEmpty)
+      guard remaining >= recordByteCount else {
+        return ArchiveTapeScanResult(
+          records: records, completeByteCount: offset,
+          incompleteTrailingByteCount: remaining)
+      }
+      let tagOffset = try add(
+        offset,
+        UInt64(ArchiveEnvelopeCodec.headerByteCount) + UInt64(header.plaintextByteCount),
+        field: "tape_tag_offset"
+      )
+      let tag = try readExactly(
+        fileDescriptor,
+        file: .tape,
+        offset: tagOffset,
+        count: ArchiveEnvelopeCodec.authenticationTagByteCount,
+        hooks: hooks
+      )
+      let end = try add(offset, recordByteCount, field: "tape_scan_end")
+      records.append(
+        ArchiveTapeRecordMetadata(
+          header: header,
+          authenticationTag: tag,
+          encryptedStartOffset: offset,
+          encryptedEndOffset: end
+        ))
+      expectedPredecessor = tag
+      expectedLogicalUnit = try logicalEnd(of: header)
       expectedSequence = try increment(expectedSequence, field: "tape_expected_sequence")
       offset = end
     }

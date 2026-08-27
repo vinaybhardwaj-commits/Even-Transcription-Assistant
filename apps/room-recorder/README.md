@@ -2,14 +2,14 @@
 
 This directory is the isolated home of the native macOS Room Recorder.
 
-> **Current governing milestone:**
-> [`Unsigned archive integration`](../../docs/handoff/ETA-ROOM-RECORDER-UNSIGNED-ARCHIVE-INTEGRATION-27-AUG-2026.md).
-> The unsigned browser-replacement path is accepted at `53f2354`. Current work is the explicit,
-> no-network development integration into the authenticated tape/index format. Its published fixed test
-> key is non-confidential. Secure Enclave, signing, canonical encrypted archive wiring and later roadmap
-> work remain parked.
+> **Latest completed milestone:**
+> [`Unsigned local derivation`](../../docs/handoff/ETA-ROOM-RECORDER-UNSIGNED-LOCAL-DERIVATION-27-AUG-2026.md).
+> The unsigned browser-replacement path is accepted at `53f2354`, and the standalone authenticated
+> archive integration is accepted at `a757791`. The published fixed test key is non-confidential. Secure
+> Enclave, signing, canonical encrypted archive wiring and later roadmap work remain parked.
 > The standalone slice passed on the Home Office Mini as `unsigned-archive-705cfb9b5cba`; its governing
-> handoff records the exact source, binary and archive hashes. No next scope is selected yet.
+> handoff records the exact source, binary and archive hashes. The one-day local derivation then passed
+> against that stopped archive as candidate `unsigned-derivation-f4e82eea41c4`. No next scope is selected.
 >
 > The bounded 27 August implementation cut is
 > [`Unsigned EOD build`](../../docs/handoff/ETA-ROOM-RECORDER-UNSIGNED-EOD-BUILD-27-AUG-2026.md).
@@ -55,7 +55,7 @@ Pass `--device <uid>` to `record` to select a non-default input. The recorder pr
 
 The tape is append-only 16 kHz mono signed Int16 little-endian PCM. `tape.idx` contains durable JSONL anchors and explicit restart, device, clock, format, timestamp, and overflow discontinuities. The verifier reports durable-tape drift and native microphone-clock drift separately because sample-rate conversion can buffer output between anchors.
 
-Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 200 tests in 17
+Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 242 tests in 22
 suites with Apple Swift 6.4 and Testing Library 2078; the converter soak and two isolated APFS ENOSPC
 fixtures remain opt-in for ordinary runs. `RING-01` through `RING-06`, `CAP-02` through `CAP-07`,
 `SRC-01` through `SRC-04`, `DUR-02` through `DUR-05`, `DUR-07` through `DUR-09`, `IDX-02` through

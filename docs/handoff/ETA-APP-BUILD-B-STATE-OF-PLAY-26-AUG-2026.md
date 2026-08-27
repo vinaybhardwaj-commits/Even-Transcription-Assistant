@@ -4,10 +4,10 @@
 **Audience:** engineering, product, operations and the next delivery team
 **Repository:** `/Users/vinaybhardwaj/Documents/EvenScribe`
 **Branch:** `feat/room-recorder`
-**Committed source base:** `53f2354`
+**Committed predecessor:** `a757791`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** unsigned no-network archive integration complete; next scope not selected
+**Current stage:** unsigned no-network, one-day local derivation complete; next scope not selected
 
 **Execution reset, 27 August 2026:** V replaced the bottom-up Build B sequence for current execution
 with `ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md`. The immediate outcome is the
@@ -29,6 +29,16 @@ Secure Enclave/keywrap, signing or patient use.
 decrypted byte-for-byte to the 725,228-byte plaintext staging tape without creating a Bench session. This
 is development format/persistence evidence under a published fixed test key, not production
 confidentiality or canonical room-archive acceptance.
+
+**Unsigned local-derivation result, 27 August 2026:** candidate
+`unsigned-derivation-f4e82eea41c4` passed the 242-test local gate and an explicit no-network Home Office
+Mini run over the stopped `unsigned-archive-705cfb9b5cba` archive. It authenticated 362,614 source
+samples, wrote one deterministic reservation and one 23-observation level record, then wrote nothing on
+an identical second run. Source tape/index hashes were unchanged and derived hashes were stable. The
+resident room listener remained idle and no Bench session appeared. This closes only the isolated
+development reader/cutter/reserved-journal/level-sidecar gate. The fixed key remains public and
+non-confidential; production key handling, midnight identity, encoding/upload transitions and
+room-process wiring remain deferred. No next implementation slice is selected.
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All

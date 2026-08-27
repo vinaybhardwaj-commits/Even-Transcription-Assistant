@@ -9,6 +9,9 @@ private let usage = """
        --archive-date YYYY-MM-DD --archive-lane <id>]
     tapewriter inspect-unsigned-development-archive --dir <dir> --device <uid>
       --archive-stream <UUID> --archive-room <id> --archive-date YYYY-MM-DD --archive-lane <id>
+    tapewriter derive-unsigned-development-archive --dir <dir> --device <uid> --session <id>
+      --archive-stream <UUID> --archive-room <id> --archive-date YYYY-MM-DD --archive-lane <id>
+      [--final]
     tapewriter verify --dir <dir>
     tapewriter export --dir <dir> --wav <file>
   """
@@ -51,6 +54,14 @@ do {
       options: options.archive,
       stableDeviceUID: options.stableDeviceUID
     )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    print(String(decoding: try encoder.encode(result), as: UTF8.self))
+    if !result.ok { exit(2) }
+  case "derive-unsigned-development-archive":
+    let options = try UnsignedDevelopmentDerivationCommandOptions.parse(
+      Array(arguments.dropFirst()))
+    let result = try UnsignedDevelopmentDerivationReport.derive(options: options)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     print(String(decoding: try encoder.encode(result), as: UTF8.self))

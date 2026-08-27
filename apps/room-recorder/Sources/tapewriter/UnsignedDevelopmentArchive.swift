@@ -43,11 +43,11 @@ public struct UnsignedDevelopmentArchiveOptions: Equatable, Sendable {
     self.laneID = laneID
   }
 
-  fileprivate var streamUUIDBytes: Data {
+  var streamUUIDBytes: Data {
     withUnsafeBytes(of: streamUUID.uuid) { Data($0) }
   }
 
-  fileprivate func context(stableDeviceUID: String) -> ArchiveContext {
+  func context(stableDeviceUID: String) -> ArchiveContext {
     ArchiveContext(
       streamUUID: streamUUIDBytes,
       roomID: roomID,
@@ -57,8 +57,8 @@ public struct UnsignedDevelopmentArchiveOptions: Equatable, Sendable {
     )
   }
 
-  fileprivate var tapeBasename: String { "\(laneID).tape" }
-  fileprivate var indexBasename: String { "\(laneID).index" }
+  var tapeBasename: String { "\(laneID).tape" }
+  var indexBasename: String { "\(laneID).index" }
 }
 
 public struct RecordCommandOptions: Equatable, Sendable {
