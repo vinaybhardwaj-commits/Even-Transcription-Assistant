@@ -4,11 +4,19 @@
 **Audience:** engineering, product, operations and the next delivery team
 **Repository:** `/Users/vinaybhardwaj/Documents/EvenScribe`
 **Branch:** `feat/room-recorder`
-**Committed source base:** `c1d72b9`
+**Committed source base:** `7207fdc`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** paired encrypted tape/index persistence accepted; key lifecycle implemented for
-review under narrow authorization, not accepted
+**Current stage:** unsigned end-to-end vertical slice; Secure Enclave and signing work parked
+
+**Execution reset, 27 August 2026:** V replaced the bottom-up Build B sequence for current execution
+with `ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md`. The immediate outcome is the
+smallest unsigned, side-loaded native process that replaces the browser using the existing five-minute
+piece, upload, command and cue contracts. The accepted foundations remain available, and the committed
+key-lifecycle implementation at `7207fdc` remains dormant. Secure Enclave, signing, canonical encrypted
+archive integration, destructive tests and later phases cannot interrupt this milestone without V's
+explicit approval. Progress is measured against the reset's end-to-end exit gate, not by additional
+isolated mechanism or test counts.
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All

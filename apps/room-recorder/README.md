@@ -2,6 +2,16 @@
 
 This directory is the isolated home of the native macOS Room Recorder.
 
+> **Current governing milestone:**
+> [`Unsigned vertical-slice reset`](../../docs/handoff/ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md).
+> Build the smallest unsigned, side-loaded native path that replaces the browser and sends the existing
+> five-minute pieces, controls and consult marks end to end. Secure Enclave, signing, canonical encrypted
+> archive integration and later roadmap work are parked. Any scope expansion requires V's explicit
+> approval.
+>
+> The bounded 27 August implementation cut is
+> [`Unsigned EOD build`](../../docs/handoff/ETA-ROOM-RECORDER-UNSIGNED-EOD-BUILD-27-AUG-2026.md).
+
 Phase 0 is accepted. App Build B Phase 1 starts by completing the mechanism-specific P1 hardening
 gates before any Phase 0 component is reused in the production engine.
 

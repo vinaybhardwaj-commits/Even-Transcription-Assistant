@@ -11,6 +11,7 @@ let includeKeywrapProbe =
 var products: [Product] = [
   .library(name: "TapeCore", targets: ["TapeCore"]),
   .executable(name: "tapewriter", targets: ["tapewriter"]),
+  .executable(name: "room-recorder", targets: ["RoomRecorderCLI"]),
 ]
 
 var targets: [Target] = [
@@ -24,6 +25,10 @@ var targets: [Target] = [
     swiftSettings: includeDurabilityFaultProbe
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
       : []
+  ),
+  .target(
+    name: "RoomRecorderCore",
+    dependencies: ["TapeCore"]
   ),
   .executableTarget(
     name: "tapewriter",
@@ -39,9 +44,13 @@ var targets: [Target] = [
       ])
     ]
   ),
+  .executableTarget(
+    name: "RoomRecorderCLI",
+    dependencies: ["RoomRecorderCore"]
+  ),
   .testTarget(
     name: "TapeCoreTests",
-    dependencies: ["TapeCore", "TapeCapture"],
+    dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],
     swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
 ]
 

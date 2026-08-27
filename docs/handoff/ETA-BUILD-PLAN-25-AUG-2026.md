@@ -4,6 +4,13 @@ The order of work from today until the Room Recorder replaces the browser kiosk.
 in flight at a time unless a row says otherwise. Every build gets its own kickoff, pasted
 whole into Claude Code, and no kickoff is written while a fact it depends on is unknown.
 
+> **Current execution override, 27 August 2026:** V reset Room Recorder delivery to the unsigned,
+> side-loaded end-to-end milestone in
+> `ETA-ROOM-RECORDER-UNSIGNED-VERTICAL-SLICE-RESET-27-AUG-2026.md`. That reset governs current work
+> wherever it conflicts with the sequence below. Secure Enclave, signing, canonical encrypted archive,
+> destructive tests and later builds are parked until the existing browser contract works end to end
+> from the native process. Scope may expand only with V's explicit approval.
+
 **Governing documents.** Server work: `ETA-MONITORING-SURFACE-PRD-24-AUG-2026-v1.2.md`
 (D1–D39) plus `ETA-PILOT-BACKLOG-24-AUG-2026.md`. App work:
 `ETA-ROOM-RECORDER-PRD-25-AUG-2026-v1.1.md` (R1–R22). Designer locks:
