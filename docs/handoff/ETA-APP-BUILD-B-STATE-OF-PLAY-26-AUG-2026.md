@@ -7,7 +7,8 @@
 **Committed source base:** `c1d72b9`
 **Remote state at authoring:** `origin/feat/room-recorder` matched `f1bee7c`
 **Current build:** App Build B, Phase 1
-**Current stage:** paired encrypted tape/index persistence accepted; key lifecycle remains gated
+**Current stage:** paired encrypted tape/index persistence accepted; key lifecycle implemented for
+review under narrow authorization, not accepted
 
 **Post-authoring update, 26 August 2026:** the cold-boot/durable-growth software mechanism described as
 pending in this snapshot is now implemented and locally verified in the uncommitted working tree. All
@@ -109,6 +110,25 @@ diff and dependency gates pass. Source fingerprint is
 returned `PASS` with no blocking or material issue after descriptor ownership, non-mutating creation,
 recovery-epoch and atomic rollback defects were repaired. The slice is accepted. Production names,
 Secure Enclave, capture integration and encrypted patient recording remain gated.
+
+**Archive-key lifecycle implementation update, 27 August 2026:** implementation was authorized from
+committed source base `a429b9f` under the ratified frozen key/keywrap and publication contract. The
+local, unaccepted implementation is recorded in
+`ETA-APP-BUILD-B-ARCHIVE-KEY-LIFECYCLE-P1-KICKOFF-27-AUG-2026.md`. It adds strict keywrap codecs, the
+permanent tagged Secure Enclave provider, create-only durable publication, fail-closed existing-file
+rules, one internally resolved canonical provisioning lock, atomic locked tape/index reservations with
+descriptor handoff,
+strict durable existing-keywrap snapshots and an opt-in candidate-tag probe product. Independent review
+found blockers in the first local candidate; the ratified corrections are implemented and final local
+re-review returned `PASS` with no blocking or material finding. The focused gate passes 23 tests in an ordinary build and 24, including raw absolute-path
+validation before file-URL construction, in a probe-enabled build normally and under TSAN. The complete
+200-test gate passes normally and under TSAN;
+matching `DUR-02` through `DUR-05`, release, format, dependency and diff gates pass. The normalized
+source fingerprint is `89456a803af90f3774cb1fa20cefb65c22a5abae27fc2f3626d8749f2cab0125`;
+ordinary release SHA-256 is `d1e922890e26466b375225d23bcea42aaa2b7ab8c84fc560541d67508e67b7ba`.
+The probe was compiled but not run. No real Secure Enclave operation or permanent key creation occurred
+on either Mac, no signing or capture integration is claimed, and acceptance remains pending immutable
+commit and target-Mac execution.
 
 ## 1. Executive status
 

@@ -5,9 +5,18 @@ import PackageDescription
 
 let includeDurabilityFaultProbe =
   ProcessInfo.processInfo.environment["ETA_INCLUDE_DURABILITY_FAULT_PROBE"] == "1"
+let includeKeywrapProbe =
+  ProcessInfo.processInfo.environment["ETA_INCLUDE_KEYWRAP_PROBE"] == "1"
+
+var products: [Product] = [
+  .library(name: "TapeCore", targets: ["TapeCore"]),
+  .executable(name: "tapewriter", targets: ["tapewriter"]),
+]
 
 var targets: [Target] = [
-  .target(name: "TapeCore"),
+  .target(
+    name: "TapeCore",
+    swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
   .target(
     name: "TapeCapture",
     dependencies: ["TapeCore"],
@@ -30,7 +39,10 @@ var targets: [Target] = [
       ])
     ]
   ),
-  .testTarget(name: "TapeCoreTests", dependencies: ["TapeCore", "TapeCapture"]),
+  .testTarget(
+    name: "TapeCoreTests",
+    dependencies: ["TapeCore", "TapeCapture"],
+    swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
 ]
 
 if includeDurabilityFaultProbe {
@@ -43,13 +55,21 @@ if includeDurabilityFaultProbe {
   )
 }
 
+if includeKeywrapProbe {
+  products.append(.executable(name: "ArchiveKeywrapProbe", targets: ["ArchiveKeywrapProbe"]))
+  targets.append(
+    .executableTarget(
+      name: "ArchiveKeywrapProbe",
+      dependencies: ["TapeCore"],
+      path: "Tests/ArchiveKeywrapProbe"
+    )
+  )
+}
+
 let package = Package(
   name: "ETARoomRecorder",
   platforms: [.macOS(.v15)],
-  products: [
-    .library(name: "TapeCore", targets: ["TapeCore"]),
-    .executable(name: "tapewriter", targets: ["tapewriter"]),
-  ],
+  products: products,
   targets: targets,
   swiftLanguageModes: [.v5]
 )

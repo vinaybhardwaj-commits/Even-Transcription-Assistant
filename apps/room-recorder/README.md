@@ -23,6 +23,7 @@ Governing documents:
 - [`App Build B encrypted tape persistence P1`](../../docs/handoff/ETA-APP-BUILD-B-ARCHIVE-TAPE-PERSISTENCE-P1-KICKOFF-26-AUG-2026.md)
 - [`App Build B encrypted index codec P1`](../../docs/handoff/ETA-APP-BUILD-B-ARCHIVE-INDEX-CODEC-P1-KICKOFF-26-AUG-2026.md)
 - [`App Build B encrypted index persistence P1`](../../docs/handoff/ETA-APP-BUILD-B-ARCHIVE-INDEX-PERSISTENCE-P1-KICKOFF-26-AUG-2026.md)
+- [`App Build B archive key lifecycle P1`](../../docs/handoff/ETA-APP-BUILD-B-ARCHIVE-KEY-LIFECYCLE-P1-KICKOFF-27-AUG-2026.md)
 - [`ETA build plan`](../../docs/handoff/ETA-BUILD-PLAN-25-AUG-2026.md)
 
 The archive always wins. Room Recorder work stays inside this directory unless a ratified build explicitly requires a server-contract change.
@@ -42,7 +43,7 @@ Pass `--device <uid>` to `record` to select a non-default input. The recorder pr
 
 The tape is append-only 16 kHz mono signed Int16 little-endian PCM. `tape.idx` contains durable JSONL anchors and explicit restart, device, clock, format, timestamp, and overflow discontinuities. The verifier reports durable-tape drift and native microphone-clock drift separately because sample-rate conversion can buffer output between anchors.
 
-Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 177 tests in 16
+Deterministic tests are under `Tests/TapeCoreTests`. The configured gate now reports 200 tests in 17
 suites with Apple Swift 6.4 and Testing Library 2078; the converter soak and two isolated APFS ENOSPC
 fixtures remain opt-in for ordinary runs. `RING-01` through `RING-06`, `CAP-02` through `CAP-07`,
 `SRC-01` through `SRC-04`, `DUR-02` through `DUR-05`, `DUR-07` through `DUR-09`, `IDX-02` through
@@ -54,5 +55,15 @@ ring, capture timeline, converter and durable-writer paths exposed through `Tape
 This Command Line Tools installation requires explicit macro/runtime staging in an external scratch
 build; the exact dependency-free recipe and remaining test debt are recorded in the Phase 0 test
 plan. The harness intentionally has no external dependencies.
+
+The focused archive key-lifecycle suite reports 23 tests in an ordinary build and 24 in a
+probe-enabled build. The additional compile-gated test proves that probe path arguments are rejected
+unless their raw strings are absolute, before any file URL is constructed.
+
+The archive key-lifecycle slice is implemented for review but is not accepted. Its real Secure
+Enclave provider and compile-gated `ArchiveKeywrapProbe` have not been executed on either Mac; no
+permanent key has been created by this work. The probe now permits only candidate-specific test tags,
+never the canonical production tag. Target-Mini mechanism proof, independent re-review, an immutable
+candidate commit, signing and capture integration remain required.
 
 Do not use local smoke runs as the Phase 0 acceptance report. The one-hour kill, power-pull, device-yank, full-day drift, CPU, and disk protocols must run on the Home Office Mini with the production microphone.

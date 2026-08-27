@@ -261,7 +261,61 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     let contextHash = try validateInputs(
       tapeURL: tapeURL, indexURL: indexURL, rootKey: rootKey, context: context)
     let descriptors = try openPair(tapeURL: tapeURL, indexURL: indexURL, readOnly: false)
+    return try openRecoveringForAppend(
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      rootKey: rootKey,
+      context: context,
+      contextHash: contextHash,
+      descriptors: descriptors,
+      callerRetainsDescriptorsOnFailure: false,
+      hooks: hooks,
+      tapeNonceProvider: tapeNonceProvider,
+      indexNonceProvider: indexNonceProvider)
+  }
+
+  static func openReservedForAppend(
+    tapeURL: URL,
+    indexURL: URL,
+    tapeFileDescriptor: Int32,
+    indexFileDescriptor: Int32,
+    rootKey: Data,
+    context: ArchiveContext
+  ) throws -> ArchiveLaneStore {
+    let descriptors = LaneDescriptors(
+      tapeFile: OpenedLaneFile(
+        file: .tape, url: tapeURL, fileDescriptor: tapeFileDescriptor, createdIdentity: nil),
+      indexFile: OpenedLaneFile(
+        file: .index, url: indexURL, fileDescriptor: indexFileDescriptor, createdIdentity: nil))
+    let contextHash = try validateInputs(
+      tapeURL: tapeURL, indexURL: indexURL, rootKey: rootKey, context: context)
+    return try openRecoveringForAppend(
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      rootKey: rootKey,
+      context: context,
+      contextHash: contextHash,
+      descriptors: descriptors,
+      callerRetainsDescriptorsOnFailure: true,
+      hooks: ArchiveLanePersistenceHooks(),
+      tapeNonceProvider: { try ArchivePurposeSealer.secureRandomNonceForPersistence() },
+      indexNonceProvider: { try ArchivePurposeSealer.secureRandomNonceForPersistence() })
+  }
+
+  private static func openRecoveringForAppend(
+    tapeURL: URL,
+    indexURL: URL,
+    rootKey: Data,
+    context: ArchiveContext,
+    contextHash: Data,
+    descriptors: LaneDescriptors,
+    callerRetainsDescriptorsOnFailure: Bool,
+    hooks: ArchiveLanePersistenceHooks,
+    tapeNonceProvider: @escaping @Sendable () throws -> Data,
+    indexNonceProvider: @escaping @Sendable () throws -> Data
+  ) throws -> ArchiveLaneStore {
     var transferred = false
+    var openedStore: ArchiveLaneStore?
     do {
       var scan = try scanPair(
         descriptors: descriptors,
@@ -344,6 +398,7 @@ public final class ArchiveLaneStore: @unchecked Sendable {
         repairedIndexTrailingByteCount: indexRepair,
         hooks: hooks
       )
+      openedStore = store
       transferred = true
       do {
         try store.adoptStartupTapeRecords()
@@ -353,7 +408,9 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       }
       return store
     } catch {
-      if !transferred {
+      if callerRetainsDescriptorsOnFailure {
+        openedStore?.releaseDescriptorsWithoutClosing()
+      } else if !transferred {
         try descriptors.releaseCloseAndCleanupCreatedPaths()
       }
       throw error
@@ -578,6 +635,11 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       _ = Darwin.close(tapeFileDescriptor)
       self.tapeFileDescriptor = nil
     }
+  }
+
+  private func releaseDescriptorsWithoutClosing() {
+    indexFileDescriptor = nil
+    tapeFileDescriptor = nil
   }
 
   private static let zeroTag = Data(

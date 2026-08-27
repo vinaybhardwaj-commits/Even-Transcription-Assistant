@@ -300,6 +300,8 @@ private let durP1FingerprintSourcePaths = [
   "Sources/TapeCore/ArchiveEnvelope.swift",
   "Sources/TapeCore/ArchiveIndexPersistence.swift",
   "Sources/TapeCore/ArchiveIndexPayload.swift",
+  "Sources/TapeCore/ArchiveKeyLifecycle.swift",
+  "Sources/TapeCore/ArchiveKeyLifecycleIO.swift",
   "Sources/TapeCore/ArchivePersistence.swift",
   "Sources/TapeCore/TapeFormat.swift",
   "Sources/TapeCore/TapeVerifier.swift",
@@ -314,6 +316,7 @@ private let durP1FingerprintSourcePaths = [
   "Sources/tapewriter/PCMResampler.swift",
   "Sources/tapewriter/Recorder.swift",
   "Sources/tapewriter/TapeWriter.swift",
+  "Tests/ArchiveKeywrapProbe/main.swift",
   "Tests/DurabilityFaultProbe/main.swift",
 ]
 
