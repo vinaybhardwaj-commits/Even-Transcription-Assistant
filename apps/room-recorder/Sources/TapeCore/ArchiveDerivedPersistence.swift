@@ -213,59 +213,132 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       if !transferred { _ = Darwin.close(fileDescriptor) }
     }
     if createdFile { createdIdentity = try Self.identity(of: fileDescriptor) }
-    let scan = try scan(
-      fileDescriptor: fileDescriptor,
-      purpose: purpose,
-      rootKey: rootKey,
-      context: context,
-      contextHash: contextHash,
-      initialLogicalUnit: initialLogicalUnit,
-      validator: validator,
-      headerValidator: headerValidator,
-      partialHeaderValidator: partialHeaderValidator,
-      allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair
-    )
-    let sealer = try ArchivePurposeSealer(
-      purpose: purpose,
-      rootKey: rootKey,
-      streamUUID: context.streamUUID,
-      existingRecordCount: UInt64(scan.records.count)
-    )
-    let store = ArchiveDerivedStore(
+    let store = try openRecoveringForAppend(
       url: url,
       purpose: purpose,
+      rootKey: rootKey,
       context: context,
       contextHash: contextHash,
-      rootKey: rootKey,
-      initialLogicalUnit: initialLogicalUnit,
       validator: validator,
       headerValidator: headerValidator,
       partialHeaderValidator: partialHeaderValidator,
-      sealer: sealer,
+      allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair,
+      repairTrailingRecord: repairTrailingRecord,
+      initialLogicalUnit: initialLogicalUnit,
       fileDescriptor: fileDescriptor,
       directoryFileDescriptor: nil,
-      records: scan.records,
-      incompleteTrailingByteCount: scan.incompleteTrailingByteCount,
-      createdIdentity: createdIdentity
-    )
+      createdIdentity: createdIdentity,
+      createdFile: createdFile,
+      callerRetainsDescriptorsOnFailure: true)
     transferred = true
-    if repairTrailingRecord {
-      do {
-        try store.repairIncompleteTrailingRecord()
-      } catch {
-        store.close()
-        throw error
-      }
-    }
-    if !createdFile, !store.scanResult.records.isEmpty {
-      do {
-        try store.resynchronizeExistingFile()
-      } catch {
-        store.close()
-        throw error
-      }
-    }
     return store
+  }
+
+  static func openReservedForAppend(
+    url: URL,
+    fileDescriptor: Int32,
+    directoryFileDescriptor: Int32,
+    purpose: ArchiveRecordPurpose,
+    rootKey: Data,
+    context: ArchiveContext,
+    validator: @escaping PayloadValidator = { _ in },
+    headerValidator: @escaping HeaderValidator = { _, _ in },
+    partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
+    allowExpectedIncompletePayloadRepair: Bool = false,
+    repairTrailingRecord: Bool = true,
+    initialLogicalUnit: UInt64 = 0
+  ) throws -> ArchiveDerivedStore {
+    try validate(purpose: purpose, rootKey: rootKey, context: context)
+    return try openRecoveringForAppend(
+      url: url,
+      purpose: purpose,
+      rootKey: rootKey,
+      context: context,
+      contextHash: try context.sha256(),
+      validator: validator,
+      headerValidator: headerValidator,
+      partialHeaderValidator: partialHeaderValidator,
+      allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair,
+      repairTrailingRecord: repairTrailingRecord,
+      initialLogicalUnit: initialLogicalUnit,
+      fileDescriptor: fileDescriptor,
+      directoryFileDescriptor: directoryFileDescriptor,
+      createdIdentity: nil,
+      createdFile: false,
+      callerRetainsDescriptorsOnFailure: true)
+  }
+
+  private static func openRecoveringForAppend(
+    url: URL,
+    purpose: ArchiveRecordPurpose,
+    rootKey: Data,
+    context: ArchiveContext,
+    contextHash: Data,
+    validator: @escaping PayloadValidator,
+    headerValidator: @escaping HeaderValidator,
+    partialHeaderValidator: @escaping PartialHeaderValidator,
+    allowExpectedIncompletePayloadRepair: Bool,
+    repairTrailingRecord: Bool,
+    initialLogicalUnit: UInt64,
+    fileDescriptor: Int32,
+    directoryFileDescriptor: Int32?,
+    createdIdentity: DerivedFileIdentity?,
+    createdFile: Bool,
+    callerRetainsDescriptorsOnFailure: Bool
+  ) throws -> ArchiveDerivedStore {
+    var openedStore: ArchiveDerivedStore?
+    do {
+      let scan = try scan(
+        fileDescriptor: fileDescriptor,
+        purpose: purpose,
+        rootKey: rootKey,
+        context: context,
+        contextHash: contextHash,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair
+      )
+      let sealer = try ArchivePurposeSealer(
+        purpose: purpose,
+        rootKey: rootKey,
+        streamUUID: context.streamUUID,
+        existingRecordCount: UInt64(scan.records.count)
+      )
+      let store = ArchiveDerivedStore(
+        url: url,
+        purpose: purpose,
+        context: context,
+        contextHash: contextHash,
+        rootKey: rootKey,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        sealer: sealer,
+        fileDescriptor: fileDescriptor,
+        directoryFileDescriptor: directoryFileDescriptor,
+        records: scan.records,
+        incompleteTrailingByteCount: scan.incompleteTrailingByteCount,
+        createdIdentity: createdIdentity
+      )
+      openedStore = store
+      if repairTrailingRecord {
+        try store.repairIncompleteTrailingRecord()
+      }
+      if !createdFile, !store.scanResult.records.isEmpty {
+        try store.resynchronizeExistingFile()
+      }
+      return store
+    } catch {
+      if callerRetainsDescriptorsOnFailure {
+        openedStore?.releaseDescriptorsWithoutClosing()
+      } else {
+        openedStore?.close()
+      }
+      throw error
+    }
   }
 
   static func createNew(
@@ -466,8 +539,20 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       guard let fileDescriptor else { throw ArchiveDerivedPersistenceError.closed }
       let completeByteCount = records.last?.encryptedEndOffset ?? 0
       try Self.fullSync(fileDescriptor, offset: completeByteCount)
-      try Self.syncDirectory(url.deletingLastPathComponent())
+      if let directoryFileDescriptor {
+        try Self.syncDirectory(
+          directoryFileDescriptor, path: url.deletingLastPathComponent().path)
+      } else {
+        try Self.syncDirectory(url.deletingLastPathComponent())
+      }
       needsDirectorySync = false
+    }
+  }
+
+  func releaseDescriptorsWithoutClosing() {
+    lock.withLock {
+      fileDescriptor = nil
+      directoryFileDescriptor = nil
     }
   }
 

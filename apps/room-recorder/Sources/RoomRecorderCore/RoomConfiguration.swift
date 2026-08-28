@@ -6,9 +6,139 @@ public enum RoomConfigurationError: Error, Equatable, Sendable {
   case invalidDeviceUID
   case invalidExecutablePath(String)
   case invalidIdentifier(String)
+  case invalidArchivePreflightReceipt(String)
   case unsafeRoot
   case rootIsNotDirectory
   case permissionsNotEnforced(path: String, expected: Int, actual: Int?)
+}
+
+public struct RoomArchivePreflightReceipt: Codable, Equatable, Sendable {
+  public static let formatVersion: UInt64 = 1
+
+  public let formatVersion: UInt64
+  public let origin: URL
+  public let roomSlug: String
+  public let deviceUID: String
+  public let ffmpegPath: String
+  public let archiveRootPath: String
+  public let archiveProbeSucceeded: Bool
+  public let keyProbeSucceeded: Bool
+  public let encoderProbeSucceeded: Bool
+  public let secureEnclavePublicKeySHA256: String
+  public let encoderProvenanceID: String
+  public let completedAt: Date
+
+  enum CodingKeys: String, CodingKey {
+    case formatVersion = "format_version"
+    case origin
+    case roomSlug = "room_slug"
+    case deviceUID = "device_uid"
+    case ffmpegPath = "ffmpeg_path"
+    case archiveRootPath = "archive_root_path"
+    case archiveProbeSucceeded = "archive_probe_succeeded"
+    case keyProbeSucceeded = "key_probe_succeeded"
+    case encoderProbeSucceeded = "encoder_probe_succeeded"
+    case secureEnclavePublicKeySHA256 = "secure_enclave_public_key_sha256"
+    case encoderProvenanceID = "encoder_provenance_id"
+    case completedAt = "completed_at"
+  }
+
+  public init(
+    origin: URL,
+    roomSlug: String,
+    deviceUID: String,
+    ffmpegPath: String,
+    archiveRootPath: String,
+    archiveProbeSucceeded: Bool,
+    keyProbeSucceeded: Bool,
+    encoderProbeSucceeded: Bool,
+    secureEnclavePublicKeySHA256: String,
+    encoderProvenanceID: String,
+    completedAt: Date
+  ) throws {
+    try self.init(
+      formatVersion: Self.formatVersion,
+      origin: origin,
+      roomSlug: roomSlug,
+      deviceUID: deviceUID,
+      ffmpegPath: ffmpegPath,
+      archiveRootPath: archiveRootPath,
+      archiveProbeSucceeded: archiveProbeSucceeded,
+      keyProbeSucceeded: keyProbeSucceeded,
+      encoderProbeSucceeded: encoderProbeSucceeded,
+      secureEnclavePublicKeySHA256: secureEnclavePublicKeySHA256,
+      encoderProvenanceID: encoderProvenanceID,
+      completedAt: completedAt
+    )
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      formatVersion: values.decode(UInt64.self, forKey: .formatVersion),
+      origin: values.decode(URL.self, forKey: .origin),
+      roomSlug: values.decode(String.self, forKey: .roomSlug),
+      deviceUID: values.decode(String.self, forKey: .deviceUID),
+      ffmpegPath: values.decode(String.self, forKey: .ffmpegPath),
+      archiveRootPath: values.decode(String.self, forKey: .archiveRootPath),
+      archiveProbeSucceeded: values.decode(Bool.self, forKey: .archiveProbeSucceeded),
+      keyProbeSucceeded: values.decode(Bool.self, forKey: .keyProbeSucceeded),
+      encoderProbeSucceeded: values.decode(Bool.self, forKey: .encoderProbeSucceeded),
+      secureEnclavePublicKeySHA256: values.decode(
+        String.self, forKey: .secureEnclavePublicKeySHA256),
+      encoderProvenanceID: values.decode(String.self, forKey: .encoderProvenanceID),
+      completedAt: values.decode(Date.self, forKey: .completedAt)
+    )
+  }
+
+  private init(
+    formatVersion: UInt64,
+    origin: URL,
+    roomSlug: String,
+    deviceUID: String,
+    ffmpegPath: String,
+    archiveRootPath: String,
+    archiveProbeSucceeded: Bool,
+    keyProbeSucceeded: Bool,
+    encoderProbeSucceeded: Bool,
+    secureEnclavePublicKeySHA256: String,
+    encoderProvenanceID: String,
+    completedAt: Date
+  ) throws {
+    guard formatVersion == Self.formatVersion else {
+      throw RoomConfigurationError.invalidArchivePreflightReceipt("format_version")
+    }
+    guard origin.scheme == "https" || origin.scheme == "http", origin.host != nil,
+      !roomSlug.isEmpty, !deviceUID.isEmpty, ffmpegPath.hasPrefix("/"),
+      archiveRootPath.hasPrefix("/"), !encoderProvenanceID.isEmpty,
+      secureEnclavePublicKeySHA256.utf8.count == 64,
+      secureEnclavePublicKeySHA256.utf8.allSatisfy({
+        (0x30...0x39).contains($0) || (0x61...0x66).contains($0)
+      })
+    else {
+      throw RoomConfigurationError.invalidArchivePreflightReceipt("fields")
+    }
+    self.formatVersion = formatVersion
+    self.origin = origin
+    self.roomSlug = roomSlug
+    self.deviceUID = deviceUID
+    self.ffmpegPath = ffmpegPath
+    self.archiveRootPath = URL(fileURLWithPath: archiveRootPath).standardizedFileURL.path
+    self.archiveProbeSucceeded = archiveProbeSucceeded
+    self.keyProbeSucceeded = keyProbeSucceeded
+    self.encoderProbeSucceeded = encoderProbeSucceeded
+    self.secureEnclavePublicKeySHA256 = secureEnclavePublicKeySHA256
+    self.encoderProvenanceID = encoderProvenanceID
+    self.completedAt = completedAt
+  }
+}
+
+public enum RoomResidentArchiveEligibility: Equatable, Sendable {
+  case disabled
+  case missingPreflightReceipt
+  case unsuccessfulPreflightReceipt
+  case preflightReceiptMismatch
+  case eligible
 }
 
 public struct RoomConfiguration: Codable, Equatable, Sendable {
@@ -21,6 +151,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   public var installID: String?
   public var tabID: String?
   public var retainedArchiveRecoveryEnabled: Bool
+  public var residentArchiveCaptureEnabled: Bool
+  public var archivePreflightReceipt: RoomArchivePreflightReceipt?
 
   enum CodingKeys: String, CodingKey {
     case origin
@@ -32,6 +164,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     case installID = "install_id"
     case tabID = "tab_id"
     case retainedArchiveRecoveryEnabled = "retained_archive_recovery_enabled"
+    case residentArchiveCaptureEnabled = "resident_archive_capture_enabled"
+    case archivePreflightReceipt = "archive_preflight_receipt"
   }
 
   public init(
@@ -43,7 +177,9 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     etaRoomSession: String? = nil,
     installID: String? = nil,
     tabID: String? = nil,
-    retainedArchiveRecoveryEnabled: Bool = false
+    retainedArchiveRecoveryEnabled: Bool = false,
+    residentArchiveCaptureEnabled: Bool = false,
+    archivePreflightReceipt: RoomArchivePreflightReceipt? = nil
   ) throws {
     guard
       let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
@@ -93,6 +229,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     self.installID = installID
     self.tabID = tabID
     self.retainedArchiveRecoveryEnabled = retainedArchiveRecoveryEnabled
+    self.residentArchiveCaptureEnabled = residentArchiveCaptureEnabled
+    self.archivePreflightReceipt = archivePreflightReceipt
   }
 
   public init(from decoder: Decoder) throws {
@@ -107,8 +245,28 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       installID: values.decodeIfPresent(String.self, forKey: .installID),
       tabID: values.decodeIfPresent(String.self, forKey: .tabID),
       retainedArchiveRecoveryEnabled:
-        values.decodeIfPresent(Bool.self, forKey: .retainedArchiveRecoveryEnabled) ?? false
+        values.decodeIfPresent(Bool.self, forKey: .retainedArchiveRecoveryEnabled) ?? false,
+      residentArchiveCaptureEnabled:
+        values.decodeIfPresent(Bool.self, forKey: .residentArchiveCaptureEnabled) ?? false,
+      archivePreflightReceipt: values.decodeIfPresent(
+        RoomArchivePreflightReceipt.self, forKey: .archivePreflightReceipt)
     )
+  }
+
+  public func residentArchiveEligibility(archiveRootURL: URL) -> RoomResidentArchiveEligibility {
+    guard residentArchiveCaptureEnabled else { return .disabled }
+    guard let receipt = archivePreflightReceipt else { return .missingPreflightReceipt }
+    guard receipt.archiveProbeSucceeded, receipt.keyProbeSucceeded, receipt.encoderProbeSucceeded
+    else {
+      return .unsuccessfulPreflightReceipt
+    }
+    guard receipt.origin == origin, receipt.roomSlug == roomSlug, receipt.deviceUID == deviceUID,
+      receipt.ffmpegPath == ffmpegPath,
+      receipt.archiveRootPath == archiveRootURL.standardizedFileURL.path
+    else {
+      return .preflightReceiptMismatch
+    }
+    return .eligible
   }
 }
 

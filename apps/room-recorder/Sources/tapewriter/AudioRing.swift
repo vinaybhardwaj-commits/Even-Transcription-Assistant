@@ -96,6 +96,7 @@ final class AudioRing: @unchecked Sendable {
   private let writePosition = Atomic<UInt64>(0)
   private let acceptedBlocks = Atomic<UInt64>(0)
   private let droppedBlocks = Atomic<UInt64>(0)
+  private let consumerClaimed = Atomic<Bool>(false)
 
   // Producer-only state. AVAudioEngine serializes a tap callback; the main thread uses
   // producer methods only after stopping that engine.
@@ -245,6 +246,14 @@ final class AudioRing: @unchecked Sendable {
       acceptedBlocks.load(ordering: .acquiring),
       droppedBlocks.load(ordering: .acquiring)
     )
+  }
+
+  func claimConsumer() -> Bool {
+    !consumerClaimed.exchange(true, ordering: .acquiringAndReleasing)
+  }
+
+  func releaseConsumer() {
+    consumerClaimed.store(false, ordering: .releasing)
   }
 
   private var freeSlots: UInt64 {

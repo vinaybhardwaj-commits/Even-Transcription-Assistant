@@ -31,6 +31,11 @@ public struct ArchiveOpenedLaneSnapshot: Sendable {
   public let keywrap: ArchiveKeywrapInspection
 }
 
+public struct ArchiveOpenedControl: Sendable {
+  public let store: ArchiveDerivedStore
+  public let keywrap: ArchiveKeywrapInspection
+}
+
 #if ETA_KEYWRAP_PROBE
   public enum ArchiveKeywrapProbeOpenMode: Sendable {
     case provision
@@ -370,6 +375,11 @@ private struct ArchiveLaneOpenResult {
   let keywrap: ArchiveKeywrapInspection
 }
 
+private struct ArchiveControlOpenResult {
+  let store: ArchiveDerivedStore
+  let keywrap: ArchiveKeywrapInspection
+}
+
 public final class ArchiveKeyLifecycle: @unchecked Sendable {
   public static let applicationTag = Data(
     "com.evenscribe.room-recorder.archive-wrap-v1".utf8)
@@ -384,6 +394,8 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
   private let randomBytes: (Int) throws -> Data
   private let reservedLaneStoreOpener:
     (URL, URL, Int32, Int32, Data, ArchiveContext, UInt64) throws -> ArchiveLaneStore
+  private let reservedControlStoreOpener:
+    (URL, Int32, Int32, Data, ArchiveContext) throws -> ArchiveDerivedStore
   private var poisoned = false
 
   public convenience init() {
@@ -503,7 +515,18 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     applicationSupportRoot: URL,
     randomBytes: @escaping (Int) throws -> Data,
     reservedLaneStoreOpener:
-      @escaping (URL, URL, Int32, Int32, Data, ArchiveContext, UInt64) throws -> ArchiveLaneStore
+      @escaping (URL, URL, Int32, Int32, Data, ArchiveContext, UInt64) throws -> ArchiveLaneStore,
+    reservedControlStoreOpener:
+      @escaping (URL, Int32, Int32, Data, ArchiveContext) throws -> ArchiveDerivedStore = {
+        journalURL, journalFD, directoryFD, rootKey, context in
+        try ArchiveDerivedStore.openReservedForAppend(
+          url: journalURL,
+          fileDescriptor: journalFD,
+          directoryFileDescriptor: directoryFD,
+          purpose: .control,
+          rootKey: rootKey,
+          context: context)
+      }
   ) {
     self.keyTag = keyTag
     self.security = security
@@ -511,6 +534,7 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     self.applicationSupportRoot = applicationSupportRoot
     self.randomBytes = randomBytes
     self.reservedLaneStoreOpener = reservedLaneStoreOpener
+    self.reservedControlStoreOpener = reservedControlStoreOpener
   }
 
   public func openLaneStore(
@@ -527,6 +551,69 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       context: context,
       initialSamplePosition: initialSamplePosition
     ).store
+  }
+
+  public func openControlStore(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext
+  ) throws -> ArchiveDerivedStore {
+    try openControlStoreResult(
+      keywrapURL: keywrapURL,
+      journalURL: journalURL,
+      context: context,
+      policy: .createOrOpen
+    ).store
+  }
+
+  public func openControlStoreWithInspection(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext
+  ) throws -> ArchiveOpenedControl {
+    let result = try openControlStoreResult(
+      keywrapURL: keywrapURL,
+      journalURL: journalURL,
+      context: context,
+      policy: .createOrOpen)
+    return ArchiveOpenedControl(store: result.store, keywrap: result.keywrap)
+  }
+
+  public func prepareControlKeywrapWithInspection(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext
+  ) throws -> ArchiveKeywrapInspection {
+    do {
+      return try prepareControlKeywrapDetailed(
+        keywrapURL: keywrapURL,
+        journalURL: journalURL,
+        context: context)
+    } catch let error as ArchiveKeyLifecycleError {
+      throw error
+    } catch let failure as ArchiveKeyLifecycleFailure {
+      switch failure {
+      case .algorithmUnavailable, .accessControlCreationFailed, .keyQueryFailed, .keyCreationFailed:
+        throw ArchiveKeyLifecycleError.secureHardwareUnavailable
+      default:
+        throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+      }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
+  }
+
+  public func openExistingControlStoreWithInspection(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext
+  ) throws -> ArchiveOpenedControl {
+    let result = try openControlStoreResult(
+      keywrapURL: keywrapURL,
+      journalURL: journalURL,
+      context: context,
+      policy: .requireCompleteArchive)
+    return ArchiveOpenedControl(store: result.store, keywrap: result.keywrap)
   }
 
   public func openExistingLaneSnapshot(
@@ -609,6 +696,32 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
     }
   }
 
+  private func openControlStoreResult(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext,
+    policy: ArchiveLaneOpenPolicy
+  ) throws -> ArchiveControlOpenResult {
+    do {
+      return try openControlStoreDetailedResult(
+        keywrapURL: keywrapURL,
+        journalURL: journalURL,
+        context: context,
+        policy: policy)
+    } catch let error as ArchiveKeyLifecycleError {
+      throw error
+    } catch let failure as ArchiveKeyLifecycleFailure {
+      switch failure {
+      case .algorithmUnavailable, .accessControlCreationFailed, .keyQueryFailed, .keyCreationFailed:
+        throw ArchiveKeyLifecycleError.secureHardwareUnavailable
+      default:
+        throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+      }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
+  }
+
   public func makeDailyStreamUUID() throws -> Data {
     do {
       return try lock.withLock {
@@ -617,6 +730,55 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
         bytes[6] = (bytes[6] & 0x0F) | 0x40
         bytes[8] = (bytes[8] & 0x3F) | 0x80
         return bytes
+      }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
+  }
+
+  public func probeSecureEnclaveKey() throws -> String {
+    do {
+      return try lock.withLock {
+        guard !poisoned else { throw ArchiveKeyLifecycleFailure.ownerPoisoned }
+        let provisioningLockPath = try durableStore.canonicalProvisioningLock(
+          applicationSupportRoot: applicationSupportRoot)
+        let provisioningLock = try durableStore.acquireGlobalLock(provisioningLockPath)
+        return try withExtendedLifetime(provisioningLock) {
+          let privateKey = try resolvePrivateKey(allowCreation: true)
+          let publicKey = try security.publicKey(for: privateKey)
+          let representation = try security.externalRepresentation(of: publicKey)
+          guard representation.count == 65 else {
+            throw ArchiveKeyLifecycleFailure.invalidPublicKeyRepresentationLength(
+              representation.count)
+          }
+          guard security.supports(Self.algorithm, operation: .encrypt, key: publicKey),
+            security.supports(Self.algorithm, operation: .decrypt, key: privateKey)
+          else {
+            throw ArchiveKeyLifecycleFailure.algorithmUnavailable
+          }
+          let challenge = try exactRandomBytes(32)
+          let ciphertext = try security.encrypt(
+            challenge,
+            with: publicKey,
+            algorithm: Self.algorithm)
+          guard !ciphertext.isEmpty else { throw ArchiveKeyLifecycleFailure.encryptionFailed }
+          let recovered = try security.decrypt(
+            ciphertext,
+            with: privateKey,
+            algorithm: Self.algorithm)
+          guard recovered == challenge else { throw ArchiveKeyLifecycleFailure.decryptionFailed }
+          return Data(SHA256.hash(data: representation)).keyHex
+        }
+      }
+    } catch let error as ArchiveKeyLifecycleError {
+      throw error
+    } catch let failure as ArchiveKeyLifecycleFailure {
+      switch failure {
+      case .algorithmUnavailable, .accessControlCreationFailed, .keyQueryFailed,
+        .keyCreationFailed:
+        throw ArchiveKeyLifecycleError.secureHardwareUnavailable
+      default:
+        throw ArchiveKeyLifecycleError.archiveKeyUnavailable
       }
     } catch {
       throw ArchiveKeyLifecycleError.archiveKeyUnavailable
@@ -843,6 +1005,182 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
           }
           if let failure = error as? ArchiveKeyLifecycleFailure { throw failure }
           throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed
+        }
+      }
+    }
+  }
+
+  private func openControlStoreDetailedResult(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext,
+    policy: ArchiveLaneOpenPolicy
+  ) throws -> ArchiveControlOpenResult {
+    try lock.withLock {
+      guard !poisoned else { throw ArchiveKeyLifecycleFailure.ownerPoisoned }
+      guard context.laneID == "_control", context.stableDeviceUID.isEmpty else {
+        throw ArchiveKeyLifecycleFailure.contextHashMismatch
+      }
+      let paths = try ArchiveValidatedControlPaths(
+        keywrapURL: keywrapURL,
+        journalURL: journalURL,
+        hooks: durableStore.hooks)
+      let provisioningLockPath = try durableStore.canonicalProvisioningLock(
+        applicationSupportRoot: applicationSupportRoot)
+      let provisioningLock = try durableStore.acquireGlobalLock(provisioningLockPath)
+      return try withExtendedLifetime(provisioningLock) {
+        let contextHash = try context.sha256()
+        var reservation: ArchiveFileReservation?
+        do {
+          var heldWrap = try durableStore.loadKeywrapIfExists(paths.keywrap)
+          let journalIdentity = try durableStore.existingArtifactIdentity(paths.journal)
+          let existingIdentities = [heldWrap?.identity, journalIdentity].compactMap { $0 }
+          guard Set(existingIdentities).count == existingIdentities.count else {
+            throw ArchiveKeyLifecycleFailure.pathAlias
+          }
+
+          if heldWrap == nil {
+            guard policy == .createOrOpen, journalIdentity == nil else {
+              throw ArchiveKeyLifecycleFailure.existingArchiveWithoutKeywrap
+            }
+            reservation = try durableStore.reserveFile(paths.journal, expectedIdentity: nil)
+          } else if let journalIdentity {
+            reservation = try durableStore.reserveFile(
+              paths.journal, expectedIdentity: journalIdentity)
+          } else {
+            guard policy != .requireCompleteArchive else {
+              throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed
+            }
+            reservation = try durableStore.reserveFile(paths.journal, expectedIdentity: nil)
+          }
+
+          let key = try resolvePrivateKey(allowCreation: heldWrap == nil)
+          let rootKey: Data
+          if let heldWrap {
+            rootKey = try unwrap(
+              heldWrap.bytes, privateKey: key, context: context, contextHash: contextHash)
+          } else {
+            let candidateRoot = try exactRandomBytes(32)
+            let wrapID = try exactRandomBytes(16)
+            let encoded = try wrap(
+              rootKey: candidateRoot,
+              wrapID: wrapID,
+              privateKey: key,
+              context: context,
+              contextHash: contextHash)
+            do {
+              switch try durableStore.publishCreateOnly(encoded, at: paths.keywrap) {
+              case .published(let published):
+                heldWrap = published
+                rootKey = candidateRoot
+              case .alreadyExists(let raced):
+                heldWrap = raced
+                rootKey = try unwrap(
+                  raced.bytes, privateKey: key, context: context, contextHash: contextHash)
+              }
+            } catch ArchiveKeyLifecycleFailure.publicationUncertain {
+              poisoned = true
+              throw ArchiveKeyLifecycleFailure.publicationUncertain
+            }
+          }
+
+          return try withExtendedLifetime(heldWrap) {
+            guard let heldWrap, let reservation else {
+              throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed
+            }
+            let outer = try ArchiveKeywrapCodec.decode(heldWrap.bytes)
+            let inspection = Self.inspection(outer, encoded: heldWrap.bytes, authenticated: true)
+            try reservation.validateForHandoff()
+            let store = try reservedControlStoreOpener(
+              paths.journal.url,
+              reservation.fileDescriptor,
+              reservation.directoryDescriptor,
+              rootKey,
+              context)
+            do {
+              try reservation.validatePathIdentityAfterOpen()
+            } catch {
+              store.releaseDescriptorsWithoutClosing()
+              throw error
+            }
+            reservation.completeHandoff()
+            return ArchiveControlOpenResult(store: store, keywrap: inspection)
+          }
+        } catch {
+          if let reservation {
+            do {
+              try reservation.cleanup()
+            } catch let cleanupFailure as ArchiveKeyLifecycleFailure {
+              throw cleanupFailure
+            } catch {
+              throw ArchiveKeyLifecycleFailure.reservationCleanupFailed(errno: EIO)
+            }
+          }
+          if let failure = error as? ArchiveKeyLifecycleFailure { throw failure }
+          throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed
+        }
+      }
+    }
+  }
+
+  private func prepareControlKeywrapDetailed(
+    keywrapURL: URL,
+    journalURL: URL,
+    context: ArchiveContext
+  ) throws -> ArchiveKeywrapInspection {
+    try lock.withLock {
+      guard !poisoned else { throw ArchiveKeyLifecycleFailure.ownerPoisoned }
+      guard context.laneID == "_control", context.stableDeviceUID.isEmpty else {
+        throw ArchiveKeyLifecycleFailure.contextHashMismatch
+      }
+      let paths = try ArchiveValidatedControlPaths(
+        keywrapURL: keywrapURL,
+        journalURL: journalURL,
+        hooks: durableStore.hooks)
+      let provisioningLockPath = try durableStore.canonicalProvisioningLock(
+        applicationSupportRoot: applicationSupportRoot)
+      let provisioningLock = try durableStore.acquireGlobalLock(provisioningLockPath)
+      return try withExtendedLifetime(provisioningLock) {
+        let contextHash = try context.sha256()
+        var heldWrap = try durableStore.loadKeywrapIfExists(paths.keywrap)
+        let journalIdentity = try durableStore.existingArtifactIdentity(paths.journal)
+        if let heldWrap, let journalIdentity, heldWrap.identity == journalIdentity {
+          throw ArchiveKeyLifecycleFailure.pathAlias
+        }
+        if heldWrap == nil, journalIdentity != nil {
+          throw ArchiveKeyLifecycleFailure.existingArchiveWithoutKeywrap
+        }
+
+        let key = try resolvePrivateKey(allowCreation: heldWrap == nil)
+        if let heldWrap {
+          _ = try unwrap(
+            heldWrap.bytes, privateKey: key, context: context, contextHash: contextHash)
+        } else {
+          let rootKey = try exactRandomBytes(32)
+          let encoded = try wrap(
+            rootKey: rootKey,
+            wrapID: try exactRandomBytes(16),
+            privateKey: key,
+            context: context,
+            contextHash: contextHash)
+          do {
+            switch try durableStore.publishCreateOnly(encoded, at: paths.keywrap) {
+            case .published(let published):
+              heldWrap = published
+            case .alreadyExists(let raced):
+              _ = try unwrap(
+                raced.bytes, privateKey: key, context: context, contextHash: contextHash)
+              heldWrap = raced
+            }
+          } catch ArchiveKeyLifecycleFailure.publicationUncertain {
+            poisoned = true
+            throw ArchiveKeyLifecycleFailure.publicationUncertain
+          }
+        }
+        guard let heldWrap else { throw ArchiveKeyLifecycleFailure.laneStoreOpenFailed }
+        return try withExtendedLifetime(heldWrap) {
+          let outer = try ArchiveKeywrapCodec.decode(heldWrap.bytes)
+          return Self.inspection(outer, encoded: heldWrap.bytes, authenticated: true)
         }
       }
     }

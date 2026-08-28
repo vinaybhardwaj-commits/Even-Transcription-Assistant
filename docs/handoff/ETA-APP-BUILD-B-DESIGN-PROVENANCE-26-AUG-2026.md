@@ -255,9 +255,11 @@ outcome occurred. The ACK endpoint is therefore retryable but not described as i
 replays only effects the existing contract makes idempotent; it never replays session creation. An
 `end_intent` can never resume capture. Maintenance never ends the server session and reclaim reconciles
 server indices before capture. Rollover neither ends nor creates a server session, does not wait for
-derivative verification, and keeps capture flowing through the ring at one shared sample boundary
-while file close/open work is done off the callback. Lane indices remain monotonic across days. Crash
-fixtures cover every arrow and both deliberately unobservable external-effect windows.
+derivative verification, and keeps capture flowing through the ring while file close/open work is done
+off the callback. Primary and backup roll at the same IST midnight instant, but each lane authenticates
+its own exact session-global sample boundary; one lane's boundary is never imposed on the other. Lane
+indices remain monotonic across days. Crash fixtures cover every arrow and both deliberately
+unobservable external-effect windows.
 
 One immutable encrypted manifest record describes each derivative: reservation identity, sample
 range, timestamps, uncertainty reason, fit segment, levels, MIME, encoded size, SHA-256 and encoder
@@ -280,10 +282,20 @@ index, validates every optional named artifact that is present, unwraps the exis
 provisioning, verifies its stream/context/digest against `lane.json`, then authenticates tape/index and
 any encrypted journal before trusting a session or range. Missing,
 duplicate, noncanonical, substituted or mismatched descriptors fail closed and create nothing.
+The day's control stream is a sibling, never an audio lane:
+`archive-v1/<YYYY-MM-DD>/_control/`. Its fixed names are `control.json`, `keywrap.eak` and
+`control.journal`; the journal is absent until the first durable command. `control.json` is canonical
+JSON carrying the complete nonsecret `_control` context and keywrap SHA-256, with no sample origin and
+an explicitly empty device UID; it carries no session, credential or root key. Catalog validation
+accepts this sibling but never returns it as retained audio work.
 The retained-delivery startup barrier is persisted but defaults off. Enabling it drains authenticated
 retained delivery work before session adoption or capture; reserved or encoded work that cannot yet be
 resumed fails closed. With it disabled, no catalog scan, key access, recovery task or extra request is
 added to the accepted recorder path.
+A separate persisted `resident_archive_capture_enabled` gate also defaults off. Enabling it is not
+sufficient: runtime selection requires a persisted successful archive/key/encoder preflight receipt
+whose room, device, origin, FFmpeg path and archive root still match the active configuration. A
+missing, unsuccessful or mismatched receipt fails closed and can never select plaintext capture.
 
 ## 5. Clock fit and uncertainty
 

@@ -221,6 +221,71 @@ public struct ArchiveDailyLaneIdentity: Equatable, Sendable {
   }
 }
 
+public enum ArchiveDailyControlIdentityError: Error, Equatable, Sendable {
+  case invalidContext
+  case invalidStreamUUID
+  case invalidKeywrapDigest
+  case keywrapContextMismatch
+  case nonAdjacentDays
+  case contextSubstitution
+  case reusedKeywrap
+  case reusedStreamUUID
+}
+
+public struct ArchiveDailyControlIdentity: Equatable, Sendable {
+  public let context: ArchiveContext
+  public let keywrapDigestHex: String
+
+  public init(context: ArchiveContext, keywrap: ArchiveKeywrapInspection) throws {
+    guard keywrap.authenticated,
+      keywrap.streamUUIDHex == ArchiveDailyLaneIdentity.hex(context.streamUUID),
+      keywrap.contextHashHex == ArchiveDailyLaneIdentity.hex(try context.sha256())
+    else {
+      throw ArchiveDailyControlIdentityError.keywrapContextMismatch
+    }
+    try self.init(context: context, keywrapDigestHex: keywrap.keywrapDigestHex)
+  }
+
+  init(context: ArchiveContext, keywrapDigestHex: String) throws {
+    _ = try context.encodedBytes()
+    _ = try ArchiveISTDay(context.istDate)
+    guard context.laneID == "_control", context.stableDeviceUID.isEmpty else {
+      throw ArchiveDailyControlIdentityError.invalidContext
+    }
+    guard context.streamUUID[6] >> 4 == 4, context.streamUUID[8] >> 6 == 2 else {
+      throw ArchiveDailyControlIdentityError.invalidStreamUUID
+    }
+    guard ArchiveDailyLaneIdentity.isLowercaseDigest(keywrapDigestHex) else {
+      throw ArchiveDailyControlIdentityError.invalidKeywrapDigest
+    }
+    self.context = context
+    self.keywrapDigestHex = keywrapDigestHex
+  }
+
+  public var istDay: ArchiveISTDay { get throws { try ArchiveISTDay(context.istDate) } }
+  public var roomID: String { context.roomID }
+  public var laneID: String { context.laneID }
+  public var streamUUID: Data { context.streamUUID }
+
+  public static func validateRollover(
+    from oldDay: ArchiveDailyControlIdentity,
+    to newDay: ArchiveDailyControlIdentity
+  ) throws {
+    guard try oldDay.istDay.next == newDay.istDay else {
+      throw ArchiveDailyControlIdentityError.nonAdjacentDays
+    }
+    guard oldDay.roomID == newDay.roomID else {
+      throw ArchiveDailyControlIdentityError.contextSubstitution
+    }
+    guard oldDay.keywrapDigestHex != newDay.keywrapDigestHex else {
+      throw ArchiveDailyControlIdentityError.reusedKeywrap
+    }
+    guard oldDay.streamUUID != newDay.streamUUID else {
+      throw ArchiveDailyControlIdentityError.reusedStreamUUID
+    }
+  }
+}
+
 public enum ArchiveRolloverError: Error, Equatable, Sendable {
   case invalidID(String)
   case invalidChunkIndex(UInt64)
@@ -236,6 +301,7 @@ public enum ArchiveRolloverError: Error, Equatable, Sendable {
 public struct ArchiveRolloverAudioLane: Equatable, Sendable {
   public let oldDay: ArchiveDailyLaneIdentity
   public let newDay: ArchiveDailyLaneIdentity
+  public let boundarySample: UInt64
   public let nextChunkIndex: UInt32
   public let oldAuthenticatedFacts: ArchiveAuthenticatedLaneFacts
   public let newAuthenticatedFacts: ArchiveAuthenticatedLaneFacts
@@ -279,6 +345,7 @@ public struct ArchiveRolloverAudioLane: Equatable, Sendable {
     }
     self.oldDay = oldDay
     self.newDay = newDay
+    self.boundarySample = boundarySample
     self.nextChunkIndex = UInt32(nextChunkIndex)
     self.oldAuthenticatedFacts = oldAuthenticatedFacts
     self.newAuthenticatedFacts = newAuthenticatedFacts
@@ -288,19 +355,17 @@ public struct ArchiveRolloverAudioLane: Equatable, Sendable {
 public struct ArchiveRolloverPlan: Equatable, Sendable {
   public let commandID: String
   public let sessionID: String
-  public let boundarySample: UInt64
   public let primary: ArchiveRolloverAudioLane
   public let backup: ArchiveRolloverAudioLane?
-  public let oldControl: ArchiveDailyLaneIdentity
-  public let newControl: ArchiveDailyLaneIdentity
+  public let oldControl: ArchiveDailyControlIdentity
+  public let newControl: ArchiveDailyControlIdentity
 
   public init(
     sessionID: String,
-    boundarySample: UInt64,
     primary: ArchiveRolloverAudioLane,
     backup: ArchiveRolloverAudioLane?,
-    oldControl: ArchiveDailyLaneIdentity,
-    newControl: ArchiveDailyLaneIdentity
+    oldControl: ArchiveDailyControlIdentity,
+    newControl: ArchiveDailyControlIdentity
   ) throws {
     guard !sessionID.isEmpty, sessionID.utf8.count <= 256 else {
       throw ArchiveRolloverError.invalidID("session_id")
@@ -317,33 +382,51 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
         throw ArchiveRolloverError.invalidLaneConfiguration
       }
     }
-    try ArchiveDailyLaneIdentity.validateRollover(
-      from: oldControl, to: newControl, boundarySample: boundarySample)
-    let oldIdentities = [primary.oldDay, backup?.oldDay, oldControl].compactMap { $0 }
-    let newIdentities = [primary.newDay, backup?.newDay, newControl].compactMap { $0 }
-    let allIdentities = oldIdentities + newIdentities
+    try ArchiveDailyControlIdentity.validateRollover(from: oldControl, to: newControl)
+    let allStreamUUIDs = [
+      primary.oldDay.streamUUID,
+      backup?.oldDay.streamUUID,
+      oldControl.streamUUID,
+      primary.newDay.streamUUID,
+      backup?.newDay.streamUUID,
+      newControl.streamUUID,
+    ].compactMap { $0 }
+    let allKeywrapDigests = [
+      primary.oldDay.keywrapDigestHex,
+      backup?.oldDay.keywrapDigestHex,
+      oldControl.keywrapDigestHex,
+      primary.newDay.keywrapDigestHex,
+      backup?.newDay.keywrapDigestHex,
+      newControl.keywrapDigestHex,
+    ].compactMap { $0 }
     let oldISTDay = try primary.oldDay.istDay
     let newISTDay = try primary.newDay.istDay
-    guard oldIdentities.allSatisfy({ $0.roomID == primary.oldDay.roomID }),
-      newIdentities.allSatisfy({ $0.roomID == primary.oldDay.roomID }),
-      oldIdentities.allSatisfy({ (try? $0.istDay) == oldISTDay }),
-      newIdentities.allSatisfy({ (try? $0.istDay) == newISTDay }),
-      oldIdentities.allSatisfy({ $0.expectedInitialSessionSample <= boundarySample }),
-      newIdentities.allSatisfy({ $0.expectedInitialSessionSample == boundarySample }),
-      Set(allIdentities.map(\.streamUUID)).count == allIdentities.count,
-      Set(allIdentities.map(\.keywrapDigestHex)).count == allIdentities.count
+    let oldRoomIDs = [primary.oldDay.roomID, backup?.oldDay.roomID, oldControl.roomID].compactMap {
+      $0
+    }
+    let newRoomIDs = [primary.newDay.roomID, backup?.newDay.roomID, newControl.roomID].compactMap {
+      $0
+    }
+    let oldDays = [try primary.oldDay.istDay, try backup?.oldDay.istDay, try oldControl.istDay]
+      .compactMap { $0 }
+    let newDays = [try primary.newDay.istDay, try backup?.newDay.istDay, try newControl.istDay]
+      .compactMap { $0 }
+    guard oldRoomIDs.allSatisfy({ $0 == primary.oldDay.roomID }),
+      newRoomIDs.allSatisfy({ $0 == primary.oldDay.roomID }),
+      oldDays.allSatisfy({ $0 == oldISTDay }),
+      newDays.allSatisfy({ $0 == newISTDay }),
+      Set(allStreamUUIDs).count == allStreamUUIDs.count,
+      Set(allKeywrapDigests).count == allKeywrapDigests.count
     else {
       throw ArchiveRolloverError.invalidLaneConfiguration
     }
     self.sessionID = sessionID
-    self.boundarySample = boundarySample
     self.primary = primary
     self.backup = backup
     self.oldControl = oldControl
     self.newControl = newControl
     commandID = Self.makeCommandID(
       sessionID: sessionID,
-      boundarySample: boundarySample,
       primary: primary,
       backup: backup,
       oldControl: oldControl,
@@ -352,15 +435,13 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
 
   private static func makeCommandID(
     sessionID: String,
-    boundarySample: UInt64,
     primary: ArchiveRolloverAudioLane,
     backup: ArchiveRolloverAudioLane?,
-    oldControl: ArchiveDailyLaneIdentity,
-    newControl: ArchiveDailyLaneIdentity
+    oldControl: ArchiveDailyControlIdentity,
+    newControl: ArchiveDailyControlIdentity
   ) -> String {
-    var bytes = Data("eta.room-recorder/rollover-plan/v1".utf8)
+    var bytes = Data("eta.room-recorder/rollover-plan/v2".utf8)
     append(sessionID, to: &bytes)
-    append(boundarySample, to: &bytes)
     append(primary, to: &bytes)
     if let backup {
       bytes.append(1)
@@ -376,7 +457,16 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
   private static func append(_ lane: ArchiveRolloverAudioLane, to data: inout Data) {
     append(lane.oldDay, to: &data)
     append(lane.newDay, to: &data)
+    append(lane.boundarySample, to: &data)
     append(lane.nextChunkIndex, to: &data)
+  }
+
+  private static func append(_ identity: ArchiveDailyControlIdentity, to data: inout Data) {
+    append(identity.context.istDate, to: &data)
+    append(identity.context.roomID, to: &data)
+    append(identity.context.laneID, to: &data)
+    append(identity.context.streamUUID, to: &data)
+    append(identity.keywrapDigestHex, to: &data)
   }
 
   private static func append(_ identity: ArchiveDailyLaneIdentity, to data: inout Data) {
@@ -633,7 +723,6 @@ extension ArchiveRolloverPlan {
   fileprivate var recomputedCommandID: String {
     Self.makeCommandID(
       sessionID: sessionID,
-      boundarySample: boundarySample,
       primary: primary,
       backup: backup,
       oldControl: oldControl,

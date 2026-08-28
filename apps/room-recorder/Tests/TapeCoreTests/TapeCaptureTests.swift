@@ -134,4 +134,24 @@ import Testing
     let report = try TapeVerifier.verify(directory: directory)
     #expect(!report.passed)
   }
+
+  @Test func startupFailureReleasesRingBeforeReturning() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let invalidDirectory = root.appendingPathComponent("not-a-directory")
+    try Data("fixture".utf8).write(to: invalidDirectory)
+    let ring = AudioRing()
+    let failed = TapeWriter(directory: invalidDirectory, deviceUID: "fixture", ring: ring)
+
+    #expect(throws: RecorderError.self) {
+      try failed.startAndWaitUntilReady()
+    }
+
+    let replacement = TapeWriter(
+      directory: root.appendingPathComponent("replacement"),
+      deviceUID: "fixture",
+      ring: ring)
+    try replacement.startAndWaitUntilReady()
+    try replacement.stopAndWait()
+  }
 }

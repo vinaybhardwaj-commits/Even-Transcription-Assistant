@@ -41,6 +41,11 @@
       )
       let decoded = try JSONDecoder().decode(RoomConfiguration.self, from: legacy)
       #expect(!decoded.retainedArchiveRecoveryEnabled)
+      #expect(!decoded.residentArchiveCaptureEnabled)
+      #expect(decoded.archivePreflightReceipt == nil)
+      #expect(
+        decoded.residentArchiveEligibility(
+          archiveRootURL: URL(fileURLWithPath: "/private/archive")) == .disabled)
 
       let enabled = try RoomConfiguration(
         origin: #require(URL(string: "https://eta.test")),
@@ -55,6 +60,73 @@
         from: JSONEncoder().encode(enabled)
       )
       #expect(roundTrip.retainedArchiveRecoveryEnabled)
+    }
+
+    @Test func residentArchiveRequiresMatchingSuccessfulPreflightReceipt() throws {
+      let origin = try #require(URL(string: "https://eta.test/"))
+      let archiveRoot = URL(fileURLWithPath: "/private/room-recorder/archive")
+      let successful = try RoomArchivePreflightReceipt(
+        origin: origin,
+        roomSlug: "home-office",
+        deviceUID: "device-stable-1",
+        ffmpegPath: "/opt/ffmpeg",
+        archiveRootPath: archiveRoot.path,
+        archiveProbeSucceeded: true,
+        keyProbeSucceeded: true,
+        encoderProbeSucceeded: true,
+        secureEnclavePublicKeySHA256: String(repeating: "a", count: 64),
+        encoderProvenanceID: "ffmpeg-pinned-build-1",
+        completedAt: Date(timeIntervalSince1970: 1_777_000_000)
+      )
+      let eligible = try RoomConfiguration(
+        origin: origin,
+        roomSlug: "home-office",
+        deviceUID: "device-stable-1",
+        tapewriterPath: "/usr/bin/tapewriter",
+        ffmpegPath: "/opt/ffmpeg",
+        residentArchiveCaptureEnabled: true,
+        archivePreflightReceipt: successful
+      )
+      #expect(eligible.residentArchiveEligibility(archiveRootURL: archiveRoot) == .eligible)
+      #expect(
+        eligible.residentArchiveEligibility(
+          archiveRootURL: URL(fileURLWithPath: "/private/other")) == .preflightReceiptMismatch)
+
+      var missing = eligible
+      missing.archivePreflightReceipt = nil
+      #expect(
+        missing.residentArchiveEligibility(archiveRootURL: archiveRoot) == .missingPreflightReceipt)
+
+      let unsuccessfulReceipt = try RoomArchivePreflightReceipt(
+        origin: origin,
+        roomSlug: "home-office",
+        deviceUID: "device-stable-1",
+        ffmpegPath: "/opt/ffmpeg",
+        archiveRootPath: archiveRoot.path,
+        archiveProbeSucceeded: true,
+        keyProbeSucceeded: false,
+        encoderProbeSucceeded: true,
+        secureEnclavePublicKeySHA256: String(repeating: "a", count: 64),
+        encoderProvenanceID: "ffmpeg-pinned-build-1",
+        completedAt: Date(timeIntervalSince1970: 1_777_000_000)
+      )
+      var unsuccessful = eligible
+      unsuccessful.archivePreflightReceipt = unsuccessfulReceipt
+      #expect(
+        unsuccessful.residentArchiveEligibility(archiveRootURL: archiveRoot)
+          == .unsuccessfulPreflightReceipt)
+
+      var changedDevice = eligible
+      changedDevice.deviceUID = "device-stable-2"
+      #expect(
+        changedDevice.residentArchiveEligibility(archiveRootURL: archiveRoot)
+          == .preflightReceiptMismatch)
+
+      let roundTrip = try JSONDecoder().decode(
+        RoomConfiguration.self,
+        from: JSONEncoder().encode(eligible)
+      )
+      #expect(roundTrip == eligible)
     }
 
     @Test func loginPathBodyCookieAndActiveLookup() async throws {

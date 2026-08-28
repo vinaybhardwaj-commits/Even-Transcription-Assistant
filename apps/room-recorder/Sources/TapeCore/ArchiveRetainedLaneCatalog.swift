@@ -39,6 +39,7 @@ public struct ArchiveRetainedLaneDescriptor: Equatable, Sendable {
       throw ArchiveRetainedLaneDescriptorError.invalidKeywrapDigest
     }
     _ = try context.encodedBytes()
+    _ = try ArchiveISTDay(context.istDate)
     self.context = context
     self.initialSamplePosition = initialSamplePosition
     self.keywrapDigestHex = keywrapDigestHex
@@ -190,6 +191,153 @@ public struct ArchiveRetainedLaneLayout: Equatable, Sendable {
   }
 }
 
+public struct ArchiveRetainedControlDescriptor: Equatable, Sendable {
+  public static let formatVersion: UInt64 = 1
+  public static let maximumEncodedByteCount = 4_096
+
+  public let context: ArchiveContext
+  public let keywrapDigestHex: String
+
+  public init(context: ArchiveContext, keywrapDigestHex: String) throws {
+    guard context.laneID == "_control", context.stableDeviceUID.isEmpty else {
+      throw ArchiveRetainedLaneDescriptorError.unsupportedLane(context.laneID)
+    }
+    guard context.streamUUID.count == 16, context.streamUUID[6] >> 4 == 4,
+      context.streamUUID[8] >> 6 == 2
+    else {
+      throw ArchiveRetainedLaneDescriptorError.invalidStreamUUID
+    }
+    guard keywrapDigestHex.utf8.count == 64,
+      keywrapDigestHex.utf8.allSatisfy({
+        (0x30...0x39).contains($0) || (0x61...0x66).contains($0)
+      })
+    else {
+      throw ArchiveRetainedLaneDescriptorError.invalidKeywrapDigest
+    }
+    _ = try context.encodedBytes()
+    _ = try ArchiveISTDay(context.istDate)
+    self.context = context
+    self.keywrapDigestHex = keywrapDigestHex
+    _ = try ArchiveRetainedControlDescriptorCodec.encode(self)
+  }
+
+  public init(identity: ArchiveDailyControlIdentity) throws {
+    try self.init(context: identity.context, keywrapDigestHex: identity.keywrapDigestHex)
+  }
+}
+
+public enum ArchiveRetainedControlDescriptorCodec {
+  public static func encode(_ descriptor: ArchiveRetainedControlDescriptor) throws -> Data {
+    var result = Data()
+    result.append(contentsOf: "{\"format_version\":".utf8)
+    ArchiveCanonicalJSON.appendInteger(ArchiveRetainedControlDescriptor.formatVersion, to: &result)
+    result.append(contentsOf: ",\"ist_date\":".utf8)
+    ArchiveCanonicalJSON.appendString(descriptor.context.istDate, to: &result)
+    result.append(contentsOf: ",\"keywrap_sha256\":".utf8)
+    ArchiveCanonicalJSON.appendString(descriptor.keywrapDigestHex, to: &result)
+    result.append(contentsOf: ",\"lane_id\":".utf8)
+    ArchiveCanonicalJSON.appendString(descriptor.context.laneID, to: &result)
+    result.append(contentsOf: ",\"room_id\":".utf8)
+    ArchiveCanonicalJSON.appendString(descriptor.context.roomID, to: &result)
+    result.append(contentsOf: ",\"stable_device_uid\":".utf8)
+    ArchiveCanonicalJSON.appendString(descriptor.context.stableDeviceUID, to: &result)
+    result.append(contentsOf: ",\"stream_uuid_b64\":".utf8)
+    ArchiveCanonicalJSON.appendString(
+      descriptor.context.streamUUID.base64EncodedString(), to: &result)
+    result.append(0x7D)
+    guard result.count <= ArchiveRetainedControlDescriptor.maximumEncodedByteCount else {
+      throw ArchiveRetainedLaneDescriptorError.payloadTooLarge(result.count)
+    }
+    return result
+  }
+
+  public static func decode(_ data: Data) throws -> ArchiveRetainedControlDescriptor {
+    guard data.count <= ArchiveRetainedControlDescriptor.maximumEncodedByteCount else {
+      throw ArchiveRetainedLaneDescriptorError.payloadTooLarge(data.count)
+    }
+    var parser = ArchiveCanonicalJSONParser(data)
+    do {
+      try parser.expect("{\"format_version\":")
+      let formatVersion = try parser.integer(field: "format_version")
+      guard formatVersion == ArchiveRetainedControlDescriptor.formatVersion else {
+        throw ArchiveRetainedLaneDescriptorError.unsupportedFormatVersion(formatVersion)
+      }
+      try parser.expect(",\"ist_date\":")
+      let istDate = try parser.string()
+      try parser.expect(",\"keywrap_sha256\":")
+      let keywrapDigestHex = try parser.string()
+      try parser.expect(",\"lane_id\":")
+      let laneID = try parser.string()
+      try parser.expect(",\"room_id\":")
+      let roomID = try parser.string()
+      try parser.expect(",\"stable_device_uid\":")
+      let stableDeviceUID = try parser.string()
+      try parser.expect(",\"stream_uuid_b64\":")
+      let streamUUIDBase64 = try parser.string()
+      try parser.expect("}")
+      try parser.expectEnd()
+      guard let streamUUID = Data(base64Encoded: streamUUIDBase64),
+        streamUUID.base64EncodedString() == streamUUIDBase64
+      else {
+        throw ArchiveRetainedLaneDescriptorError.invalidStreamUUID
+      }
+      let descriptor = try ArchiveRetainedControlDescriptor(
+        context: ArchiveContext(
+          streamUUID: streamUUID,
+          roomID: roomID,
+          istDate: istDate,
+          laneID: laneID,
+          stableDeviceUID: stableDeviceUID
+        ),
+        keywrapDigestHex: keywrapDigestHex
+      )
+      guard try encode(descriptor) == data else {
+        throw ArchiveRetainedLaneDescriptorError.invalidSyntax(offset: 0)
+      }
+      return descriptor
+    } catch ArchiveCanonicalJSONError.invalidSyntax(let offset) {
+      throw ArchiveRetainedLaneDescriptorError.invalidSyntax(offset: offset)
+    } catch ArchiveCanonicalJSONError.integerOverflow {
+      throw ArchiveRetainedLaneDescriptorError.invalidSyntax(offset: 0)
+    }
+  }
+}
+
+public struct ArchiveRetainedControlLayout: Equatable, Sendable {
+  public static let descriptorFileName = "control.json"
+  public static let journalFileName = "control.journal"
+
+  public let rootURL: URL
+  public let directoryURL: URL
+  public let descriptorURL: URL
+  public let keywrapURL: URL
+  public let journalURL: URL
+
+  public init(rootURL: URL, descriptor: ArchiveRetainedControlDescriptor) throws {
+    try self.init(rootURL: rootURL, context: descriptor.context)
+  }
+
+  public init(rootURL: URL, context: ArchiveContext) throws {
+    guard rootURL.isFileURL, rootURL.path.hasPrefix("/") else {
+      throw ArchiveRetainedLaneDescriptorError.invalidSyntax(offset: 0)
+    }
+    guard context.laneID == "_control", context.stableDeviceUID.isEmpty else {
+      throw ArchiveRetainedLaneDescriptorError.unsupportedLane(context.laneID)
+    }
+    _ = try context.encodedBytes()
+    let directory =
+      rootURL
+      .appendingPathComponent(ArchiveRetainedLaneLayout.archiveDirectoryName, isDirectory: true)
+      .appendingPathComponent(context.istDate, isDirectory: true)
+      .appendingPathComponent("_control", isDirectory: true)
+    self.rootURL = rootURL
+    directoryURL = directory
+    descriptorURL = directory.appendingPathComponent(Self.descriptorFileName)
+    keywrapURL = directory.appendingPathComponent("keywrap.eak")
+    journalURL = directory.appendingPathComponent(Self.journalFileName)
+  }
+}
+
 public enum ArchiveRetainedLaneCatalogError: String, Error, LocalizedError, Sendable {
   case invalidRoot = "archive_catalog_invalid_root"
   case invalidHierarchy = "archive_catalog_invalid_hierarchy"
@@ -211,10 +359,26 @@ public struct ArchiveRetainedLaneCatalogEntry: Equatable, Sendable {
   public let layout: ArchiveRetainedLaneLayout
 }
 
+public struct ArchiveRetainedControlCatalogEntry: Equatable, Sendable {
+  public let descriptor: ArchiveRetainedControlDescriptor
+  public let layout: ArchiveRetainedControlLayout
+  public let journalPresent: Bool
+}
+
+public struct ArchiveRetainedCatalogSnapshot: Equatable, Sendable {
+  public let lanes: [ArchiveRetainedLaneCatalogEntry]
+  public let controls: [ArchiveRetainedControlCatalogEntry]
+}
+
 public struct ArchiveOpenedRetainedLane: Sendable {
   public let store: ArchiveLaneStore
   public let keywrap: ArchiveKeywrapInspection
   public let catalogEntry: ArchiveRetainedLaneCatalogEntry
+}
+
+public struct ArchivePreparedRetainedControl: Sendable {
+  public let keywrap: ArchiveKeywrapInspection
+  public let catalogEntry: ArchiveRetainedControlCatalogEntry
 }
 
 public struct ArchiveRetainedLaneBuilder: Sendable {
@@ -265,6 +429,18 @@ public struct ArchiveRetainedLaneBuilder: Sendable {
     )
   }
 
+  public func prepareControl(context: ArchiveContext) throws -> ArchivePreparedRetainedControl {
+    let layout = try catalog.prepareControlLayout(context: context)
+    let keywrap = try keyLifecycle.prepareControlKeywrapWithInspection(
+      keywrapURL: layout.keywrapURL,
+      journalURL: layout.journalURL,
+      context: context)
+    let identity = try ArchiveDailyControlIdentity(context: context, keywrap: keywrap)
+    return ArchivePreparedRetainedControl(
+      keywrap: keywrap,
+      catalogEntry: try catalog.publish(identity: identity))
+  }
+
   private func publish(
     _ opened: ArchiveOpenedLane,
     context: ArchiveContext,
@@ -309,6 +485,11 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
     "lane.manifest",
     "spool",
   ]
+  private static let expectedControlEntries: Set<String> = [
+    ArchiveRetainedControlLayout.descriptorFileName,
+    "keywrap.eak",
+    ArchiveRetainedControlLayout.journalFileName,
+  ]
 
   public let rootURL: URL
 
@@ -334,6 +515,22 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
     defer { _ = Darwin.close(lane) }
     let spool = try Self.openOrCreatePrivateDirectory(named: "spool", parent: lane)
     _ = Darwin.close(spool)
+    return layout
+  }
+
+  public func prepareControlLayout(context: ArchiveContext) throws -> ArchiveRetainedControlLayout {
+    let layout = try ArchiveRetainedControlLayout(rootURL: rootURL, context: context)
+    let root = try Self.openPrivateDirectory(at: rootURL)
+    defer { _ = Darwin.close(root) }
+    let archive = try Self.openOrCreatePrivateDirectory(
+      named: ArchiveRetainedLaneLayout.archiveDirectoryName,
+      parent: root
+    )
+    defer { _ = Darwin.close(archive) }
+    let day = try Self.openOrCreatePrivateDirectory(named: context.istDate, parent: archive)
+    defer { _ = Darwin.close(day) }
+    let control = try Self.openOrCreatePrivateDirectory(named: "_control", parent: day)
+    _ = Darwin.close(control)
     return layout
   }
 
@@ -368,7 +565,42 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
     return ArchiveRetainedLaneCatalogEntry(descriptor: descriptor, layout: layout)
   }
 
+  @discardableResult
+  public func publish(identity: ArchiveDailyControlIdentity) throws
+    -> ArchiveRetainedControlCatalogEntry
+  {
+    let descriptor = try ArchiveRetainedControlDescriptor(identity: identity)
+    let layout = try prepareControlLayout(context: descriptor.context)
+    let control = try Self.openPrivateDirectory(at: layout.directoryURL)
+    defer { _ = Darwin.close(control) }
+    guard try Self.privateRegularFileExists(named: "keywrap.eak", parent: control) else {
+      throw ArchiveRetainedLaneCatalogError.missingRequiredArtifact
+    }
+    let keywrap = try ArchiveKeyLifecycle.inspectKeywrap(at: layout.keywrapURL)
+    guard keywrap.keywrapDigestHex == descriptor.keywrapDigestHex,
+      keywrap.streamUUIDHex == Self.hex(descriptor.context.streamUUID),
+      keywrap.contextHashHex == Self.hex(try descriptor.context.sha256())
+    else {
+      throw ArchiveRetainedLaneCatalogError.keywrapMismatch
+    }
+    try Self.publishCreateOnly(
+      ArchiveRetainedControlDescriptorCodec.encode(descriptor),
+      named: ArchiveRetainedControlLayout.descriptorFileName,
+      parent: control
+    )
+    return ArchiveRetainedControlCatalogEntry(
+      descriptor: descriptor,
+      layout: layout,
+      journalPresent: try Self.privateRegularFileExists(
+        named: ArchiveRetainedControlLayout.journalFileName,
+        parent: control))
+  }
+
   public func scan() throws -> [ArchiveRetainedLaneCatalogEntry] {
+    try scanIncludingControls().lanes
+  }
+
+  public func scanIncludingControls() throws -> ArchiveRetainedCatalogSnapshot {
     let root = try Self.openPrivateDirectory(at: rootURL)
     defer { _ = Darwin.close(root) }
     let archiveURL = rootURL.appendingPathComponent(
@@ -382,13 +614,14 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
       &archiveStat,
       AT_SYMLINK_NOFOLLOW
     ) != 0 {
-      if errno == ENOENT { return [] }
+      if errno == ENOENT { return ArchiveRetainedCatalogSnapshot(lanes: [], controls: []) }
       throw ArchiveRetainedLaneCatalogError.invalidHierarchy
     }
     let archive = try Self.openPrivateDirectory(at: archiveURL)
     defer { _ = Darwin.close(archive) }
 
-    var result: [ArchiveRetainedLaneCatalogEntry] = []
+    var lanes: [ArchiveRetainedLaneCatalogEntry] = []
+    var controls: [ArchiveRetainedControlCatalogEntry] = []
     for dayName in try Self.directoryEntries(at: archiveURL, heldDescriptor: archive).sorted() {
       guard (try? ArchiveISTDay(dayName)) != nil else {
         throw ArchiveRetainedLaneCatalogError.unexpectedEntry
@@ -400,7 +633,64 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
       guard !laneNames.isEmpty else {
         throw ArchiveRetainedLaneCatalogError.missingDescriptor
       }
+      var dayRoomID: String?
       for laneName in laneNames {
+        if laneName == "_control" {
+          let controlURL = dayURL.appendingPathComponent(laneName, isDirectory: true)
+          let control = try Self.openPrivateDirectory(at: controlURL)
+          defer { _ = Darwin.close(control) }
+          let entries = try Self.directoryEntries(at: controlURL, heldDescriptor: control)
+          guard entries.isSubset(of: Self.expectedControlEntries) else {
+            throw ArchiveRetainedLaneCatalogError.unexpectedEntry
+          }
+          guard entries.contains(ArchiveRetainedControlLayout.descriptorFileName) else {
+            throw ArchiveRetainedLaneCatalogError.missingDescriptor
+          }
+          guard entries.contains("keywrap.eak"),
+            try Self.privateRegularFileExists(named: "keywrap.eak", parent: control)
+          else {
+            throw ArchiveRetainedLaneCatalogError.missingRequiredArtifact
+          }
+          if entries.contains(ArchiveRetainedControlLayout.journalFileName) {
+            guard
+              try Self.privateRegularFileExists(
+                named: ArchiveRetainedControlLayout.journalFileName,
+                parent: control
+              )
+            else {
+              throw ArchiveRetainedLaneCatalogError.insecureArtifact
+            }
+          }
+          let encoded = try Self.readPrivateFile(
+            named: ArchiveRetainedControlLayout.descriptorFileName,
+            parent: control,
+            maximumByteCount: ArchiveRetainedControlDescriptor.maximumEncodedByteCount
+          )
+          let descriptor: ArchiveRetainedControlDescriptor
+          do {
+            descriptor = try ArchiveRetainedControlDescriptorCodec.decode(encoded)
+          } catch {
+            throw ArchiveRetainedLaneCatalogError.invalidDescriptor
+          }
+          let layout = try ArchiveRetainedControlLayout(rootURL: rootURL, descriptor: descriptor)
+          guard descriptor.context.istDate == dayName, layout.directoryURL == controlURL else {
+            throw ArchiveRetainedLaneCatalogError.descriptorLocationMismatch
+          }
+          guard dayRoomID == nil || dayRoomID == descriptor.context.roomID else {
+            throw ArchiveRetainedLaneCatalogError.descriptorLocationMismatch
+          }
+          try Self.validateKeywrap(
+            at: layout.keywrapURL,
+            context: descriptor.context,
+            expectedDigestHex: descriptor.keywrapDigestHex)
+          dayRoomID = descriptor.context.roomID
+          controls.append(
+            ArchiveRetainedControlCatalogEntry(
+              descriptor: descriptor,
+              layout: layout,
+              journalPresent: entries.contains(ArchiveRetainedControlLayout.journalFileName)))
+          continue
+        }
         guard laneName == "primary" || laneName == "backup" else {
           throw ArchiveRetainedLaneCatalogError.unexpectedEntry
         }
@@ -445,14 +735,42 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
         guard descriptor.context.istDate == dayName, descriptor.context.laneID == laneName else {
           throw ArchiveRetainedLaneCatalogError.descriptorLocationMismatch
         }
+        guard dayRoomID == nil || dayRoomID == descriptor.context.roomID else {
+          throw ArchiveRetainedLaneCatalogError.descriptorLocationMismatch
+        }
+        dayRoomID = descriptor.context.roomID
         let layout = try ArchiveRetainedLaneLayout(rootURL: rootURL, descriptor: descriptor)
         guard layout.directoryURL == laneURL else {
           throw ArchiveRetainedLaneCatalogError.descriptorLocationMismatch
         }
-        result.append(ArchiveRetainedLaneCatalogEntry(descriptor: descriptor, layout: layout))
+        try Self.validateKeywrap(
+          at: layout.keywrapURL,
+          context: descriptor.context,
+          expectedDigestHex: descriptor.keywrapDigestHex)
+        lanes.append(ArchiveRetainedLaneCatalogEntry(descriptor: descriptor, layout: layout))
       }
     }
-    return result
+    return ArchiveRetainedCatalogSnapshot(lanes: lanes, controls: controls)
+  }
+
+  private static func validateKeywrap(
+    at url: URL,
+    context: ArchiveContext,
+    expectedDigestHex: String
+  ) throws {
+    do {
+      let keywrap = try ArchiveKeyLifecycle.inspectKeywrap(at: url)
+      guard keywrap.keywrapDigestHex == expectedDigestHex,
+        keywrap.streamUUIDHex == hex(context.streamUUID),
+        keywrap.contextHashHex == hex(try context.sha256())
+      else {
+        throw ArchiveRetainedLaneCatalogError.keywrapMismatch
+      }
+    } catch let error as ArchiveRetainedLaneCatalogError {
+      throw error
+    } catch {
+      throw ArchiveRetainedLaneCatalogError.keywrapMismatch
+    }
   }
 
   private static func openPrivateDirectory(at url: URL) throws -> Int32 {
@@ -600,7 +918,7 @@ public struct ArchiveRetainedLaneCatalog: Sendable {
       return
     }
 
-    let temporaryName = ".lane.json.tmp.\(UUID().uuidString.lowercased())"
+    let temporaryName = ".\(name).tmp.\(UUID().uuidString.lowercased())"
     let descriptor = openat(
       parent,
       temporaryName,

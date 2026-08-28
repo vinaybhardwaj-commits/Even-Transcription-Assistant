@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Testing
@@ -26,6 +27,19 @@ import Testing
     }
   }
 
+  @Test func controlDescriptorFreezesDayLevelCanonicalBytes() throws {
+    let descriptor = try makeControlDescriptor()
+    let encoded = try ArchiveRetainedControlDescriptorCodec.encode(descriptor)
+    let expected = Data(
+      (#"{"format_version":1,"ist_date":"2026-08-28","keywrap_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","lane_id":"_control","room_id":"room_1","stable_device_uid":"","stream_uuid_b64":"EBEiM0RVRneImaq7zN3u/w=="}"#)
+        .utf8
+    )
+
+    #expect(encoded == expected)
+    #expect(try ArchiveRetainedControlDescriptorCodec.decode(encoded) == descriptor)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("initial_sample"))
+  }
+
   @Test func layoutIsVersionedDeterministicAndLaneBound() throws {
     let descriptor = try makeDescriptor()
     let layout = try ArchiveRetainedLaneLayout(
@@ -42,6 +56,16 @@ import Testing
     #expect(layout.levelURL.lastPathComponent == "lane.level")
     #expect(layout.manifestURL.lastPathComponent == "lane.manifest")
     #expect(layout.spoolDirectoryURL.lastPathComponent == "spool")
+
+    let control = try ArchiveRetainedControlLayout(
+      rootURL: URL(fileURLWithPath: "/var/private/room-recorder"),
+      descriptor: makeControlDescriptor()
+    )
+    #expect(
+      control.directoryURL.path == "/var/private/room-recorder/archive-v1/2026-08-28/_control")
+    #expect(control.descriptorURL.lastPathComponent == "control.json")
+    #expect(control.keywrapURL.lastPathComponent == "keywrap.eak")
+    #expect(control.journalURL.lastPathComponent == "control.journal")
 
     #expect(throws: ArchiveRetainedLaneDescriptorError.unsupportedLane("_control")) {
       try ArchiveRetainedLaneDescriptor(
@@ -61,19 +85,31 @@ import Testing
   @Test func scannerDiscoversOnlyCanonicalCompleteDescriptorLanes() throws {
     let temporary = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: temporary) }
-    let descriptor = try makeDescriptor()
+    let laneContext = try makeDescriptor().context
+    let laneKeywrap = try makeKeywrap(context: laneContext, wrappedByte: 0x01)
+    let descriptor = try makeDescriptor(keywrapDigestHex: sha256(laneKeywrap))
     let layout = try ArchiveRetainedLaneLayout(rootURL: temporary, descriptor: descriptor)
+    let controlContext = try makeControlDescriptor().context
+    let controlKeywrap = try makeKeywrap(context: controlContext, wrappedByte: 0x02)
+    let controlDescriptor = try makeControlDescriptor(keywrapDigestHex: sha256(controlKeywrap))
+    let controlLayout = try ArchiveRetainedControlLayout(
+      rootURL: temporary, descriptor: controlDescriptor)
     try makePrivateDirectory(layout.spoolDirectoryURL)
-    for url in [layout.keywrapURL, layout.tapeURL, layout.indexURL] {
-      try writePrivate(Data([0x01]), to: url)
-    }
+    try makePrivateDirectory(controlLayout.directoryURL)
+    try writePrivate(laneKeywrap, to: layout.keywrapURL)
+    for url in [layout.tapeURL, layout.indexURL] { try writePrivate(Data([0x01]), to: url) }
     try writePrivate(
       ArchiveRetainedLaneDescriptorCodec.encode(descriptor), to: layout.descriptorURL)
+    try writePrivate(controlKeywrap, to: controlLayout.keywrapURL)
+    try writePrivate(
+      ArchiveRetainedControlDescriptorCodec.encode(controlDescriptor),
+      to: controlLayout.descriptorURL)
+    try writePrivate(Data([0x03]), to: controlLayout.journalURL)
 
     for url in [
       temporary, layout.directoryURL.deletingLastPathComponent().deletingLastPathComponent(),
       layout.directoryURL.deletingLastPathComponent(), layout.directoryURL,
-      layout.spoolDirectoryURL,
+      layout.spoolDirectoryURL, controlLayout.directoryURL,
     ] {
       var value = stat()
       #expect(lstat(url.path, &value) == 0)
@@ -83,6 +119,26 @@ import Testing
     let entries = try ArchiveRetainedLaneCatalog(rootURL: temporary).scan()
 
     #expect(entries == [ArchiveRetainedLaneCatalogEntry(descriptor: descriptor, layout: layout)])
+
+    try writePrivate(Data([0x02]), to: controlLayout.keywrapURL)
+    #expect(throws: ArchiveRetainedLaneCatalogError.keywrapMismatch) {
+      try ArchiveRetainedLaneCatalog(rootURL: temporary).scan()
+    }
+    try writePrivate(controlKeywrap, to: controlLayout.keywrapURL)
+
+    try writePrivate(Data([0x01]), to: layout.keywrapURL)
+    #expect(throws: ArchiveRetainedLaneCatalogError.keywrapMismatch) {
+      try ArchiveRetainedLaneCatalog(rootURL: temporary).scan()
+    }
+    try writePrivate(laneKeywrap, to: layout.keywrapURL)
+
+    try writePrivate(
+      ArchiveRetainedControlDescriptorCodec.encode(
+        makeControlDescriptor(roomID: "room_other", keywrapDigestHex: sha256(controlKeywrap))),
+      to: controlLayout.descriptorURL)
+    #expect(throws: ArchiveRetainedLaneCatalogError.keywrapMismatch) {
+      try ArchiveRetainedLaneCatalog(rootURL: temporary).scan()
+    }
   }
 
   @Test func scannerRejectsOrphansAndDescriptorAliases() throws {
@@ -108,7 +164,9 @@ import Testing
     }
   }
 
-  private func makeDescriptor() throws -> ArchiveRetainedLaneDescriptor {
+  private func makeDescriptor(
+    keywrapDigestHex: String = String(repeating: "a", count: 64)
+  ) throws -> ArchiveRetainedLaneDescriptor {
     try ArchiveRetainedLaneDescriptor(
       context: ArchiveContext(
         streamUUID: streamUUID,
@@ -118,8 +176,41 @@ import Testing
         stableDeviceUID: "AppleUSBAudioEngine:test"
       ),
       initialSamplePosition: 4_800_000,
-      keywrapDigestHex: String(repeating: "a", count: 64)
+      keywrapDigestHex: keywrapDigestHex
     )
+  }
+
+  private func makeControlDescriptor(
+    roomID: String = "room_1",
+    keywrapDigestHex: String = String(repeating: "b", count: 64)
+  ) throws
+    -> ArchiveRetainedControlDescriptor
+  {
+    var controlStreamUUID = streamUUID
+    controlStreamUUID[0] = 0x10
+    return try ArchiveRetainedControlDescriptor(
+      context: ArchiveContext(
+        streamUUID: controlStreamUUID,
+        roomID: roomID,
+        istDate: "2026-08-28",
+        laneID: "_control",
+        stableDeviceUID: ""
+      ),
+      keywrapDigestHex: keywrapDigestHex
+    )
+  }
+
+  private func makeKeywrap(context: ArchiveContext, wrappedByte: UInt8) throws -> Data {
+    try ArchiveKeywrapCodec.encode(
+      ArchiveKeywrapOuter(
+        streamUUID: context.streamUUID,
+        contextHash: context.sha256(),
+        publicKeyHash: Data(repeating: 0x03, count: 32),
+        wrappedData: Data([wrappedByte])))
+  }
+
+  private func sha256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
   private func makeTemporaryDirectory() throws -> URL {

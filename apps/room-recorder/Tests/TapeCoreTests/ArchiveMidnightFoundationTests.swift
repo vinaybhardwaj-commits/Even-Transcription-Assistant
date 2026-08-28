@@ -107,6 +107,12 @@ import Testing
     #expect(twoLane.plan.backup?.oldAuthenticatedFacts.authenticatedSampleEnd == 104)
     #expect(twoLane.plan.commandID != primaryOnly.plan.commandID)
 
+    let distinctBoundaries = try PlanFixture(backup: true, backupBoundary: 106)
+    defer { distinctBoundaries.close() }
+    #expect(distinctBoundaries.plan.primary.boundarySample == 104)
+    #expect(distinctBoundaries.plan.backup?.boundarySample == 106)
+    #expect(distinctBoundaries.plan.commandID != twoLane.plan.commandID)
+
     let backup = try #require(twoLane.plan.backup)
     let reusedDigestIdentity = try ArchiveDailyLaneIdentity(
       context: backup.newDay.context,
@@ -122,20 +128,17 @@ import Testing
     #expect(throws: ArchiveRolloverError.invalidLaneConfiguration) {
       try ArchiveRolloverPlan(
         sessionID: twoLane.plan.sessionID,
-        boundarySample: 104,
         primary: twoLane.plan.primary,
         backup: reusedDigestBackup,
         oldControl: twoLane.plan.oldControl,
         newControl: twoLane.plan.newControl)
     }
 
-    let substitutedControl = try dailyIdentity(
-      date: "2026-08-28", room: "room_other", lane: "_control", device: "",
-      streamByte: 0x76, digestByte: 0x86, initial: 104)
-    #expect(throws: ArchiveDailyLaneIdentityError.contextSubstitution) {
+    let substitutedControl = try controlIdentity(
+      date: "2026-08-28", room: "room_other", streamByte: 0x76, digestByte: 0x86)
+    #expect(throws: ArchiveDailyControlIdentityError.contextSubstitution) {
       try ArchiveRolloverPlan(
         sessionID: twoLane.plan.sessionID,
-        boundarySample: 104,
         primary: twoLane.plan.primary,
         backup: twoLane.plan.backup,
         oldControl: twoLane.plan.oldControl,
@@ -363,6 +366,7 @@ private final class PlanFixture {
     device: String = "device_1",
     primaryNextChunk: UInt64 = 7,
     backup: Bool = false,
+    backupBoundary: UInt64? = nil,
     streamOffset: UInt8 = 0,
     digestOffset: UInt8 = 0
   ) throws {
@@ -389,21 +393,20 @@ private final class PlanFixture {
         newDate: newDate,
         room: room,
         device: device,
-        boundary: boundary,
+        boundary: backupBoundary ?? boundary,
         nextChunk: 19,
         streamBase: 0x31 &+ streamOffset,
         digestBase: 0x41 &+ digestOffset,
         retained: &retained)
       : nil
-    let oldControl = try dailyIdentity(
-      date: oldDate, room: room, lane: "_control", device: "",
-      streamByte: 0x51 &+ streamOffset, digestByte: 0x61 &+ digestOffset, initial: 100)
-    let newControl = try dailyIdentity(
-      date: newDate, room: room, lane: "_control", device: "",
-      streamByte: 0x52 &+ streamOffset, digestByte: 0x62 &+ digestOffset, initial: boundary)
+    let oldControl = try controlIdentity(
+      date: oldDate, room: room,
+      streamByte: 0x51 &+ streamOffset, digestByte: 0x61 &+ digestOffset)
+    let newControl = try controlIdentity(
+      date: newDate, room: room,
+      streamByte: 0x52 &+ streamOffset, digestByte: 0x62 &+ digestOffset)
     plan = try ArchiveRolloverPlan(
       sessionID: sessionID,
-      boundarySample: boundary,
       primary: primary,
       backup: backupLane,
       oldControl: oldControl,
@@ -572,6 +575,18 @@ private func dailyIdentity(
       date: date, lane: lane, streamByte: streamByte, room: room, device: device),
     digestByte: digestByte,
     initial: initial)
+}
+
+private func controlIdentity(
+  date: String,
+  room: String,
+  streamByte: UInt8,
+  digestByte: UInt8
+) throws -> ArchiveDailyControlIdentity {
+  try ArchiveDailyControlIdentity(
+    context: laneContext(
+      date: date, lane: "_control", streamByte: streamByte, room: room, device: ""),
+    keywrapDigestHex: String(repeating: String(format: "%02x", digestByte), count: 32))
 }
 
 private func dailyIdentity(

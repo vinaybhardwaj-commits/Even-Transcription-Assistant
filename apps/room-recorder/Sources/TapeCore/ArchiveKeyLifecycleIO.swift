@@ -19,6 +19,7 @@ struct ArchiveKeyIOHooks {
     name.withCString { Darwin.mkdirat(directory, $0, permissions) }
   }
   var changeMode: (Int32, mode_t) -> Int32 = Darwin.fchmod
+  var duplicate: (Int32) -> Int32 = { fcntl($0, F_DUPFD_CLOEXEC, 0) }
   var close: (Int32) -> Int32 = Darwin.close
   var renameExclusiveAt: (Int32, String, String) -> Int32 = { directory, source, destination in
     source.withCString { sourcePath in
@@ -202,6 +203,19 @@ struct ArchiveValidatedKeyPaths {
   }
 }
 
+struct ArchiveValidatedControlPaths {
+  let keywrap: ArchiveResolvedFile
+  let journal: ArchiveResolvedFile
+
+  init(keywrapURL: URL, journalURL: URL, hooks: ArchiveKeyIOHooks) throws {
+    keywrap = try ArchiveValidatedKeyPaths.resolve(keywrapURL, hooks: hooks)
+    journal = try ArchiveValidatedKeyPaths.resolve(journalURL, hooks: hooks)
+    guard keywrap.identityKey != journal.identityKey else {
+      throw ArchiveKeyLifecycleFailure.pathAlias
+    }
+  }
+}
+
 final class ArchiveProvisioningLock {
   private let descriptor: Int32
   private let closeDescriptor: (Int32) -> Int32
@@ -375,6 +389,96 @@ final class ArchiveLaneReservation {
   }
 
   deinit { try? cleanup() }
+}
+
+final class ArchiveFileReservation {
+  let fileDescriptor: Int32
+  let directoryDescriptor: Int32
+  private let path: ArchiveResolvedFile
+  private let snapshot: ArchiveFileSnapshot
+  private let created: Bool
+  private let hooks: ArchiveKeyIOHooks
+  private var ownsDescriptors = true
+  private var ownsCreatedPath = true
+
+  init(
+    path: ArchiveResolvedFile,
+    fileDescriptor: Int32,
+    directoryDescriptor: Int32,
+    snapshot: ArchiveFileSnapshot,
+    created: Bool,
+    hooks: ArchiveKeyIOHooks
+  ) {
+    self.path = path
+    self.fileDescriptor = fileDescriptor
+    self.directoryDescriptor = directoryDescriptor
+    self.snapshot = snapshot
+    self.created = created
+    self.hooks = hooks
+  }
+
+  func validateForHandoff() throws {
+    let current = try validateSecureFile(
+      fileDescriptor, path: path, maximumSize: nil, hooks: hooks)
+    guard current == snapshot else { throw ArchiveKeyLifecycleFailure.snapshotChanged }
+    try validateDirectoryIdentity(path.directory, hooks: hooks)
+  }
+
+  func validatePathIdentityAfterOpen() throws {
+    let current = try validateSecureFile(
+      fileDescriptor, path: path, maximumSize: nil, hooks: hooks)
+    guard current.identity == snapshot.identity,
+      current.links == snapshot.links,
+      current.mode == snapshot.mode
+    else {
+      throw ArchiveKeyLifecycleFailure.pathIdentityChanged
+    }
+    try validateDirectoryIdentity(path.directory, hooks: hooks)
+  }
+
+  func completeHandoff() {
+    ownsDescriptors = false
+    ownsCreatedPath = false
+  }
+
+  func cleanup() throws {
+    var firstFailure: ArchiveKeyLifecycleFailure?
+    if ownsCreatedPath, created {
+      do {
+        var value = stat()
+        guard retryingFstatAt(path, &value, hooks: hooks) == 0 else {
+          throw ArchiveKeyLifecycleFailure.reservationCleanupFailed(errno: errno)
+        }
+        guard ArchiveFileIdentity(value) == snapshot.identity, value.st_size == 0 else {
+          throw ArchiveKeyLifecycleFailure.pathIdentityChanged
+        }
+        while hooks.unlinkAt(path.directory.descriptor, path.name) != 0 {
+          let unlinkErrno = errno
+          if unlinkErrno == EINTR { continue }
+          throw ArchiveKeyLifecycleFailure.reservationCleanupFailed(errno: unlinkErrno)
+        }
+        try syncDistinctDirectories([path.directory], hooks: hooks)
+      } catch let failure as ArchiveKeyLifecycleFailure {
+        firstFailure = failure
+      } catch {
+        firstFailure = .reservationCleanupFailed(errno: EIO)
+      }
+    }
+    if ownsDescriptors {
+      _ = hooks.close(directoryDescriptor)
+      _ = hooks.close(fileDescriptor)
+      ownsDescriptors = false
+    }
+    ownsCreatedPath = false
+    if let firstFailure { throw firstFailure }
+  }
+
+  deinit {
+    if ownsDescriptors {
+      _ = hooks.close(directoryDescriptor)
+      _ = hooks.close(fileDescriptor)
+    }
+  }
 }
 
 struct ArchiveKeyDurableStore {
@@ -597,6 +701,86 @@ struct ArchiveKeyDurableStore {
         }
       }
       for openedLane in opened { openedLane.closeOnce() }
+      if let cleanupFailure { throw cleanupFailure }
+      throw error
+    }
+  }
+
+  func reserveFile(
+    _ path: ArchiveResolvedFile,
+    expectedIdentity: ArchiveFileIdentity?
+  ) throws -> ArchiveFileReservation {
+    let created = expectedIdentity == nil
+    let flags =
+      O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_EXLOCK
+      | (created ? O_CREAT | O_EXCL : 0)
+    let descriptor = retryingOpenAt(
+      path,
+      flags: flags,
+      permissions: S_IRUSR | S_IWUSR,
+      hooks: hooks)
+    guard descriptor >= 0 else {
+      throw ArchiveKeyLifecycleFailure.reservationFailed(errno: errno)
+    }
+    var directoryDescriptor: Int32 = -1
+    var createdIdentity: ArchiveFileIdentity?
+    do {
+      var value = stat()
+      guard retryingFstat(descriptor, &value, hooks: hooks) == 0 else {
+        throw ArchiveKeyLifecycleFailure.fileStatFailed(errno: errno)
+      }
+      createdIdentity = ArchiveFileIdentity(value)
+      let initial = try validateSecureFile(
+        descriptor, path: path, maximumSize: created ? 0 : nil, hooks: hooks)
+      guard expectedIdentity == nil || initial.identity == expectedIdentity else {
+        throw ArchiveKeyLifecycleFailure.pathIdentityChanged
+      }
+      try fullSync(descriptor, hooks: hooks)
+      let durable = try validateSecureFile(
+        descriptor, path: path, maximumSize: created ? 0 : nil, hooks: hooks)
+      guard durable.identity == initial.identity, durable.size == initial.size else {
+        throw ArchiveKeyLifecycleFailure.snapshotChanged
+      }
+      try syncDistinctDirectories([path.directory], hooks: hooks)
+      directoryDescriptor = hooks.duplicate(path.directory.descriptor)
+      guard directoryDescriptor >= 0 else {
+        throw ArchiveKeyLifecycleFailure.reservationFailed(errno: errno)
+      }
+      return ArchiveFileReservation(
+        path: path,
+        fileDescriptor: descriptor,
+        directoryDescriptor: directoryDescriptor,
+        snapshot: durable,
+        created: created,
+        hooks: hooks)
+    } catch {
+      var cleanupFailure: ArchiveKeyLifecycleFailure?
+      if created {
+        do {
+          guard let createdIdentity else {
+            throw ArchiveKeyLifecycleFailure.pathIdentityChanged
+          }
+          var value = stat()
+          guard retryingFstatAt(path, &value, hooks: hooks) == 0,
+            ArchiveFileIdentity(value) == createdIdentity,
+            value.st_size == 0
+          else {
+            throw ArchiveKeyLifecycleFailure.pathIdentityChanged
+          }
+          while hooks.unlinkAt(path.directory.descriptor, path.name) != 0 {
+            let unlinkErrno = errno
+            if unlinkErrno == EINTR { continue }
+            throw ArchiveKeyLifecycleFailure.reservationCleanupFailed(errno: unlinkErrno)
+          }
+          try syncDistinctDirectories([path.directory], hooks: hooks)
+        } catch let failure as ArchiveKeyLifecycleFailure {
+          cleanupFailure = failure
+        } catch {
+          cleanupFailure = .reservationCleanupFailed(errno: EIO)
+        }
+      }
+      if directoryDescriptor >= 0 { _ = hooks.close(directoryDescriptor) }
+      _ = hooks.close(descriptor)
       if let cleanupFailure { throw cleanupFailure }
       throw error
     }

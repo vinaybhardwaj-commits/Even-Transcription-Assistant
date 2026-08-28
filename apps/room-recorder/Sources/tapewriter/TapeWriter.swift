@@ -38,10 +38,14 @@ final class TapeWriter: @unchecked Sendable {
   }
 
   func startAndWaitUntilReady() throws {
+    guard ring.claimConsumer() else {
+      throw RecorderError("audio ring already has a writer consumer")
+    }
     Thread.detachNewThread { [self] in
       do { try run() } catch {
         resultLock.withLock { failure = error }
       }
+      ring.releaseConsumer()
       signalReady()
       finished.signal()
     }

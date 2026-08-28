@@ -5,6 +5,7 @@ import Security
 import Synchronization
 import Testing
 
+@testable import RoomRecorderCore
 @testable import TapeCore
 
 @Suite(.serialized) struct ArchiveKeyLifecycleP1Tests {
@@ -12,12 +13,24 @@ import Testing
   private let stream = keyHex("00112233445566778899aabbccddeeff")
 
   private var context: ArchiveContext {
-    ArchiveContext(
+    return ArchiveContext(
       streamUUID: stream,
       roomID: "room_1",
       istDate: "2026-08-27",
       laneID: "primary",
       stableDeviceUID: "AppleUSBAudioEngine:test")
+  }
+
+  private var controlContext: ArchiveContext {
+    var controlStream = Data(repeating: 0xCC, count: 16)
+    controlStream[6] = (controlStream[6] & 0x0F) | 0x40
+    controlStream[8] = (controlStream[8] & 0x3F) | 0x80
+    return ArchiveContext(
+      streamUUID: controlStream,
+      roomID: "room_1",
+      istDate: "2026-08-27",
+      laneID: "_control",
+      stableDeviceUID: "")
   }
 
   @Test func key01FreezesIndependentOuterAndPlaintextVectorsIncludingDataSlice() throws {
@@ -706,6 +719,251 @@ import Testing
     reopened.close()
   }
 
+  @Test func key04ControlLifecycleAppendsAndAuthenticatesReplayOnStrictReopen() throws {
+    let fixture = try KeyFixture("control-append-reopen")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let random = OrderedRandom([root, Data(repeating: 0xA6, count: 16)])
+    let opened = try makeLifecycle(fixture, security: security, random: random.next)
+      .openControlStoreWithInspection(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    #expect(opened.keywrap.authenticated)
+    let intent = try ArchiveControlPayload(
+      commandID: "cmd_1",
+      commandKind: .startDay,
+      sessionID: nil,
+      priorState: nil,
+      newState: .startIntent,
+      atMonoNS: 1,
+      atWallNS: 2,
+      error: nil)
+    _ = try opened.store.append(
+      plaintext: ArchiveControlPayloadCodec.encode(intent),
+      firstLogicalUnit: 0,
+      logicalUnitCount: 1)
+    opened.store.close()
+
+    let reopened = try makeLifecycle(fixture, security: security)
+      .openExistingControlStoreWithInspection(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    #expect(reopened.keywrap == opened.keywrap)
+    #expect(reopened.store.scanResult.records.count == 1)
+    #expect(
+      try ArchiveControlPayloadCodec.decode(reopened.store.scanResult.records[0].plaintext)
+        == intent)
+    reopened.store.close()
+  }
+
+  @Test func key04StrictControlReopenRefusesMissingJournalWithoutCreatingIt() throws {
+    let fixture = try KeyFixture("control-strict-missing")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let opened = try makeLifecycle(fixture, security: security).openControlStore(
+      keywrapURL: fixture.keywrapURL,
+      journalURL: fixture.journalURL,
+      context: controlContext)
+    opened.close()
+    try FileManager.default.removeItem(at: fixture.journalURL)
+
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try makeLifecycle(fixture, security: security).openExistingControlStoreWithInspection(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    }
+    #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
+  }
+
+  @Test func key04ControlReopenRejectsTamperedAuthenticatedHistory() throws {
+    let fixture = try KeyFixture("control-tamper")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let store = try makeLifecycle(fixture, security: security).openControlStore(
+      keywrapURL: fixture.keywrapURL,
+      journalURL: fixture.journalURL,
+      context: controlContext)
+    let intent = try ArchiveControlPayload(
+      commandID: "cmd_1",
+      commandKind: .startDay,
+      sessionID: nil,
+      priorState: nil,
+      newState: .startIntent,
+      atMonoNS: 1,
+      atWallNS: 2,
+      error: nil)
+    _ = try store.append(
+      plaintext: ArchiveControlPayloadCodec.encode(intent),
+      firstLogicalUnit: 0,
+      logicalUnitCount: 1)
+    store.close()
+    var bytes = try Data(contentsOf: fixture.journalURL)
+    bytes[bytes.index(before: bytes.endIndex)] ^= 1
+    try bytes.write(to: fixture.journalURL)
+
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try makeLifecycle(fixture, security: security).openExistingControlStoreWithInspection(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    }
+  }
+
+  @Test func key04FailedControlOpenerRemovesOnlyItsEmptyReservation() throws {
+    let fixture = try KeyFixture("control-opener-cleanup")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let lifecycle = makeLifecycle(
+      fixture,
+      security: security,
+      reservedControlStoreOpener: { _, _, _, _, _ in
+        throw ArchiveDerivedPersistenceError.closed
+      })
+
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try lifecycle.openControlStore(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    }
+    #expect(FileManager.default.fileExists(atPath: fixture.keywrapURL.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
+  }
+
+  @Test func key04ControlPathSubstitutionDuringAuthenticatedOpenFailsClosed() throws {
+    let fixture = try KeyFixture("control-open-substitution")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let displacedURL = fixture.directory.appendingPathComponent("displaced.control")
+    let lifecycle = makeLifecycle(
+      fixture,
+      security: security,
+      reservedControlStoreOpener: { url, fileDescriptor, directoryDescriptor, rootKey, context in
+        let store = try ArchiveDerivedStore.openReservedForAppend(
+          url: url,
+          fileDescriptor: fileDescriptor,
+          directoryFileDescriptor: directoryDescriptor,
+          purpose: .control,
+          rootKey: rootKey,
+          context: context)
+        try FileManager.default.moveItem(at: url, to: displacedURL)
+        try Data().write(to: url)
+        #expect(chmod(url.path, S_IRUSR | S_IWUSR) == 0)
+        return store
+      })
+
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try lifecycle.openControlStore(
+        keywrapURL: fixture.keywrapURL,
+        journalURL: fixture.journalURL,
+        context: controlContext)
+    }
+    #expect(FileManager.default.fileExists(atPath: displacedURL.path))
+  }
+
+  @Test func retainedControlBuilderPublishesAuthenticatedIdentityWithoutCreatingJournal() throws {
+    let fixture = try KeyFixture("retained-control-builder")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let builder = try ArchiveRetainedLaneBuilder(
+      rootURL: fixture.directory,
+      keyLifecycle: makeLifecycle(fixture, security: security))
+    let prepared = try builder.prepareControl(context: controlContext)
+    #expect(prepared.keywrap.authenticated)
+    #expect(prepared.catalogEntry.descriptor.context == controlContext)
+    #expect(
+      FileManager.default.fileExists(
+        atPath: prepared.catalogEntry.layout.descriptorURL.path))
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: prepared.catalogEntry.layout.journalURL.path))
+    #expect(!prepared.catalogEntry.journalPresent)
+  }
+
+  @Test func retainedRecoveryAuthenticatesPresentControlHistory() async throws {
+    let fixture = try KeyFixture("retained-control-recovery")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let lifecycle = makeLifecycle(fixture, security: security)
+    let builder = try ArchiveRetainedLaneBuilder(
+      rootURL: fixture.directory,
+      keyLifecycle: lifecycle)
+    let prepared = try builder.prepareControl(context: controlContext)
+    let store = try lifecycle.openControlStore(
+      keywrapURL: prepared.catalogEntry.layout.keywrapURL,
+      journalURL: prepared.catalogEntry.layout.journalURL,
+      context: controlContext)
+    _ = try store.append(
+      plaintext: ArchiveControlPayloadCodec.encode(
+        try ArchiveControlPayload(
+          commandID: "cmd_1",
+          commandKind: .startDay,
+          sessionID: nil,
+          priorState: nil,
+          newState: .startIntent,
+          atMonoNS: 1,
+          atWallNS: 2,
+          error: nil)),
+      firstLogicalUnit: 0,
+      logicalUnitCount: 1)
+    store.close()
+
+    let recovery = try RetainedArchiveRecovery(
+      rootURL: fixture.directory,
+      wire: KeyUnusedWire(),
+      keyLifecycle: lifecycle)
+    await recovery.run()
+    #expect(await recovery.state() == .complete)
+  }
+
+  @Test func retainedRecoveryFailsClosedOnTamperedControlHistory() async throws {
+    let fixture = try KeyFixture("retained-control-recovery-tamper")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let lifecycle = makeLifecycle(fixture, security: security)
+    let builder = try ArchiveRetainedLaneBuilder(
+      rootURL: fixture.directory,
+      keyLifecycle: lifecycle)
+    let prepared = try builder.prepareControl(context: controlContext)
+    let store = try lifecycle.openControlStore(
+      keywrapURL: prepared.catalogEntry.layout.keywrapURL,
+      journalURL: prepared.catalogEntry.layout.journalURL,
+      context: controlContext)
+    _ = try store.append(
+      plaintext: ArchiveControlPayloadCodec.encode(
+        try ArchiveControlPayload(
+          commandID: "cmd_1",
+          commandKind: .startDay,
+          sessionID: nil,
+          priorState: nil,
+          newState: .startIntent,
+          atMonoNS: 1,
+          atWallNS: 2,
+          error: nil)),
+      firstLogicalUnit: 0,
+      logicalUnitCount: 1)
+    store.close()
+    var bytes = try Data(contentsOf: prepared.catalogEntry.layout.journalURL)
+    bytes[bytes.index(before: bytes.endIndex)] ^= 1
+    try bytes.write(to: prepared.catalogEntry.layout.journalURL)
+
+    let recovery = try RetainedArchiveRecovery(
+      rootURL: fixture.directory,
+      wire: KeyUnusedWire(),
+      keyLifecycle: lifecycle)
+    await recovery.run()
+    guard case .failed = await recovery.state() else {
+      Issue.record("tampered control history passed retained recovery")
+      return
+    }
+  }
+
   @Test func key04ExistingLaneSubstitutionIsRejectedWithoutPathReopen() throws {
     for target in ["tape", "index"] {
       let fixture = try KeyFixture("existing-substitution-\(target)")
@@ -1183,6 +1441,81 @@ import Testing
     #expect(random.remaining == 0)
   }
 
+  @Test func keyPreflightPerformsCanonicalInMemoryRoundTripWithoutArchiveArtifacts() throws {
+    let fixture = try KeyFixture("preflight-round-trip")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let random = OrderedRandom([
+      Data(repeating: 0x31, count: 32),
+      Data(repeating: 0x32, count: 32),
+    ])
+    let lifecycle = makeLifecycle(
+      fixture,
+      security: security,
+      random: random.next)
+    let expectedHash = Data(SHA256.hash(data: security.publicRepresentation)).map {
+      String(format: "%02x", $0)
+    }.joined()
+
+    #expect(try lifecycle.probeSecureEnclaveKey() == expectedHash)
+    #expect(try lifecycle.probeSecureEnclaveKey() == expectedHash)
+    #expect(security.createCalls.count == 1)
+    #expect(random.remaining == 0)
+    #expect(!FileManager.default.fileExists(atPath: fixture.keywrapURL.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.tapeURL.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.indexURL.path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: fixture.directory.appendingPathComponent(
+          "EvenScribe/RoomRecorder/archive-wrap-v1.lock"
+        ).path))
+  }
+
+  @Test func keyPreflightSerializesCanonicalProvisioningAcrossLifecycleInstances() async throws {
+    let fixture = try KeyFixture("preflight-global-lock")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    security.emptyQueryDelay = 0.05
+    let firstRandom = OrderedRandom([Data(repeating: 0x41, count: 32)])
+    let secondRandom = OrderedRandom([Data(repeating: 0x42, count: 32)])
+    let first = makeLifecycle(fixture, security: security, random: firstRandom.next)
+    let second = makeLifecycle(fixture, security: security, random: secondRandom.next)
+
+    let hashes = try await withThrowingTaskGroup(of: String.self) { group in
+      group.addTask { try first.probeSecureEnclaveKey() }
+      group.addTask { try second.probeSecureEnclaveKey() }
+      var values: [String] = []
+      for try await value in group { values.append(value) }
+      return values
+    }
+
+    #expect(Set(hashes).count == 1)
+    #expect(security.createCalls.count == 1)
+    #expect(firstRandom.remaining == 0)
+    #expect(secondRandom.remaining == 0)
+  }
+
+  @Test func keyPreflightFailsClosedForUnsupportedAlgorithmAndMalformedPublicKey() throws {
+    let unsupportedFixture = try KeyFixture("preflight-unsupported")
+    defer { unsupportedFixture.remove() }
+    let unsupported = FakeArchiveSecurityProvider(initialKeyCount: 1)
+    unsupported.algorithmSupported = false
+    #expect(throws: ArchiveKeyLifecycleError.secureHardwareUnavailable) {
+      try makeLifecycle(unsupportedFixture, security: unsupported).probeSecureEnclaveKey()
+    }
+
+    let malformedFixture = try KeyFixture("preflight-malformed")
+    defer { malformedFixture.remove() }
+    let malformed = FakeArchiveSecurityProvider(initialKeyCount: 1)
+    malformed.publicRepresentation = Data(repeating: 0x04, count: 64)
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try makeLifecycle(malformedFixture, security: malformed).probeSecureEnclaveKey()
+    }
+    #expect(!FileManager.default.fileExists(atPath: malformedFixture.keywrapURL.path))
+    #expect(!FileManager.default.fileExists(atPath: malformedFixture.tapeURL.path))
+    #expect(!FileManager.default.fileExists(atPath: malformedFixture.indexURL.path))
+  }
+
   private func encodedOuter(wrappedData: Data) throws -> Data {
     try ArchiveKeywrapCodec.encode(
       ArchiveKeywrapOuter(
@@ -1198,7 +1531,18 @@ import Testing
     ioHooks: ArchiveKeyIOHooks = ArchiveKeyIOHooks(),
     applicationSupportRoot: URL? = nil,
     random: @escaping (Int) throws -> Data = { Data(repeating: UInt8($0), count: $0) },
-    onRootRelease: @escaping (Data) throws -> Void = { _ in }
+    onRootRelease: @escaping (Data) throws -> Void = { _ in },
+    reservedControlStoreOpener:
+      @escaping (URL, Int32, Int32, Data, ArchiveContext) throws -> ArchiveDerivedStore = {
+        url, fileDescriptor, directoryFileDescriptor, rootKey, context in
+        try ArchiveDerivedStore.openReservedForAppend(
+          url: url,
+          fileDescriptor: fileDescriptor,
+          directoryFileDescriptor: directoryFileDescriptor,
+          purpose: .control,
+          rootKey: rootKey,
+          context: context)
+      }
   ) -> ArchiveKeyLifecycle {
     ArchiveKeyLifecycle(
       security: security,
@@ -1216,7 +1560,8 @@ import Testing
           rootKey: releasedRoot,
           context: context,
           initialSamplePosition: initialSamplePosition)
-      })
+      },
+      reservedControlStoreOpener: reservedControlStoreOpener)
   }
 
   private func writeWrap(
@@ -1413,6 +1758,7 @@ private struct KeyFixture {
   let keywrapURL: URL
   let tapeURL: URL
   let indexURL: URL
+  let journalURL: URL
 
   init(_ label: String) throws {
     let requested = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1426,6 +1772,7 @@ private struct KeyFixture {
     keywrapURL = directory.appendingPathComponent("keywrap.eak")
     tapeURL = directory.appendingPathComponent("primary.tape")
     indexURL = directory.appendingPathComponent("primary.index")
+    journalURL = directory.appendingPathComponent("control.journal")
   }
 
   func remove() { try? FileManager.default.removeItem(at: directory) }
@@ -1497,6 +1844,32 @@ private final class LockedDescriptorCounts: @unchecked Sendable {
     }
   }
   func count(for descriptor: Int32) -> Int { lock.withLock { counts[descriptor, default: 0] } }
+}
+
+private struct KeyUnusedWire: ArchiveDeliveryWire {
+  func prepareDelivery(for piece: ArchiveDeliveryPiece) async throws
+    -> ArchiveDeliveryPresignResult
+  {
+    throw KeyUnusedWireError.called
+  }
+
+  func probeDeliveryObject(at url: URL) async throws -> ArchiveDeliveryRemoteObject {
+    throw KeyUnusedWireError.called
+  }
+
+  func putDeliveryObject(chunks: [Data], to url: URL, contentType: String) async throws {
+    throw KeyUnusedWireError.called
+  }
+
+  func registerDelivery(_ piece: ArchiveDeliveryPiece) async throws
+    -> ArchiveDeliveryRegistration
+  {
+    throw KeyUnusedWireError.called
+  }
+}
+
+private enum KeyUnusedWireError: Error {
+  case called
 }
 
 private final class LockedNamedDescriptors: @unchecked Sendable {

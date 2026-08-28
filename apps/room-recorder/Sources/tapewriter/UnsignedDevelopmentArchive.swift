@@ -302,7 +302,7 @@ public struct UnsignedDevelopmentArchiveInspection: Codable, Equatable, Sendable
   }
 }
 
-struct UnsignedDevelopmentArchiveDiscontinuity: Equatable {
+struct ArchiveDiscontinuityObservation: Equatable {
   let discontinuity: ArchiveIndexDiscontinuity
   let reason: String
   let gapNS: UInt64?
@@ -310,7 +310,7 @@ struct UnsignedDevelopmentArchiveDiscontinuity: Equatable {
   let wallNS: UInt64?
 }
 
-struct UnsignedDevelopmentArchiveDiscontinuityAccumulator {
+struct ArchiveDiscontinuityAccumulator {
   private var facts: [StreamMarker: UInt64] = [:]
   private var maximumGapNS: UInt64 = 0
   private var singleMonoNS: UInt64?
@@ -330,14 +330,14 @@ struct UnsignedDevelopmentArchiveDiscontinuityAccumulator {
     }
   }
 
-  var observation: UnsignedDevelopmentArchiveDiscontinuity? {
+  var observation: ArchiveDiscontinuityObservation? {
     guard !facts.isEmpty else { return nil }
     let totalFacts = facts.values.reduce(UInt64(0)) { partial, count in
       let addition = partial.addingReportingOverflow(count)
       return addition.overflow ? UInt64.max : addition.partialValue
     }
     if totalFacts == 1, let marker = facts.keys.first {
-      return UnsignedDevelopmentArchiveDiscontinuity(
+      return ArchiveDiscontinuityObservation(
         discontinuity: marker.archiveDiscontinuity,
         reason: marker.indexName,
         gapNS: maximumGapNS == 0 ? nil : maximumGapNS,
@@ -349,7 +349,7 @@ struct UnsignedDevelopmentArchiveDiscontinuityAccumulator {
       let count = facts[marker]!
       return count == 1 ? marker.indexName : "\(marker.indexName)*\(count)"
     }
-    return UnsignedDevelopmentArchiveDiscontinuity(
+    return ArchiveDiscontinuityObservation(
       discontinuity: .captureDiscontinuity,
       reason: "coalesced:\(names.joined(separator: ","))",
       gapNS: maximumGapNS == 0 ? nil : maximumGapNS,
@@ -369,7 +369,7 @@ struct UnsignedDevelopmentArchiveDiscontinuityAccumulator {
 final class UnsignedDevelopmentArchiveWriter {
   private let store: ArchiveLaneStore
   private(set) var logicalByteEnd: Int64
-  private var pendingDiscontinuities = UnsignedDevelopmentArchiveDiscontinuityAccumulator()
+  private var pendingDiscontinuities = ArchiveDiscontinuityAccumulator()
 
   private init(store: ArchiveLaneStore, logicalByteEnd: Int64) {
     self.store = store

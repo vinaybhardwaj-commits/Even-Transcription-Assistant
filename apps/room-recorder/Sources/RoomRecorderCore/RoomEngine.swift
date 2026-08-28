@@ -14,6 +14,13 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   case sessionEndedByServer
   case retainedArchiveRecoveryPending
   case retainedArchiveRecoveryFailed(String)
+  case residentArchivePreflightRequired
+  case residentArchivePreflightFailed
+  case residentArchivePreflightMismatch
+  case residentArchiveRuntimeUnavailable
+  case residentArchiveMissingRoomID
+  case residentArchiveDidNotBecomeDurable
+  case residentArchiveCaptureStopped
   case invalidManifestMetadata
   case io(String)
 
@@ -31,6 +38,13 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
     case .sessionEndedByServer: return "session_ended_by_server"
     case .retainedArchiveRecoveryPending: return "archive_recovery_pending"
     case .retainedArchiveRecoveryFailed(let reason): return reason
+    case .residentArchivePreflightRequired: return "resident_archive_preflight_required"
+    case .residentArchivePreflightFailed: return "resident_archive_preflight_failed"
+    case .residentArchivePreflightMismatch: return "resident_archive_preflight_mismatch"
+    case .residentArchiveRuntimeUnavailable: return "resident_archive_runtime_unavailable"
+    case .residentArchiveMissingRoomID: return "resident_archive_missing_room_id"
+    case .residentArchiveDidNotBecomeDurable: return "resident_archive_capture_not_durable"
+    case .residentArchiveCaptureStopped: return "resident_archive_capture_stopped"
     case .invalidManifestMetadata: return "spool manifest metadata is invalid"
     case .io(let message): return message
     }
@@ -150,6 +164,65 @@ public protocol RoomCaptureLaunching: Sendable {
     -> any RoomCaptureProcess
 }
 
+public struct RoomResidentCaptureStartContext: Equatable, Sendable {
+  public enum Trigger: Equatable, Sendable {
+    case startDay(commandID: String)
+    case resumeDay(commandID: String)
+    case reconciliation
+  }
+
+  public let roomID: String
+  public let sessionID: String
+  public let nextPrimaryIndex: Int
+  public let nextBackupIndex: Int?
+  public let trigger: Trigger
+
+  public init(
+    roomID: String,
+    sessionID: String,
+    nextPrimaryIndex: Int,
+    nextBackupIndex: Int? = nil,
+    trigger: Trigger
+  ) {
+    self.roomID = roomID
+    self.sessionID = sessionID
+    self.nextPrimaryIndex = nextPrimaryIndex
+    self.nextBackupIndex = nextBackupIndex
+    self.trigger = trigger
+  }
+}
+
+public enum RoomResidentCaptureStopReason: Equatable, Sendable {
+  case startupFailed
+  case pause(commandID: String)
+  case end(commandID: String)
+  case superseded
+  case cancelled
+  case serverEnded
+}
+
+public protocol RoomResidentCaptureOwning: AnyObject, Sendable {
+  var isActive: Bool { get }
+  /// True while a started generation has not yet proved its durable final boundary.
+  var requiresFinalization: Bool { get }
+  var nextPrimaryIndex: Int { get }
+  var nextBackupIndex: Int? { get }
+  /// Returns only after this generation has authenticated durable tape and index growth.
+  func start(context: RoomResidentCaptureStartContext) throws
+  /// Advances local derivation, delivery, health, and unexpected-stop detection off the callback.
+  func service() throws
+  /// Idempotently stops the producer, drains the writer, and durably closes the boundary.
+  /// A failed call must retain `requiresFinalization` so a later command can retry.
+  func stopAndFinalize(reason: RoomResidentCaptureStopReason) throws
+  func currentLevels() -> BenchLevelPair?
+}
+
+public typealias RoomResidentCaptureFactory =
+  @Sendable (
+    _ configuration: RoomConfiguration,
+    _ archiveRootURL: URL
+  ) throws -> any RoomResidentCaptureOwning
+
 public struct FoundationRoomCaptureLauncher: RoomCaptureLaunching {
   public init() {}
 
@@ -241,9 +314,12 @@ public actor RoomEngine {
   private let capturesURL: URL
   private let instanceLock: RoomEngineInstanceLock
   private let retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
+  private let residentCaptureOwner: (any RoomResidentCaptureOwning)?
   private var phase: RoomEnginePhase = .ready
   private var sessionID: String?
   private var nextPieceIndex = 0
+  private var nextBackupPieceIndex = 0
+  private var roomID: String?
   private var capture: Segment?
   private var previousPollAt: String?
   private var completedCommands: [String: CommandResult] = [:]
@@ -261,11 +337,32 @@ public actor RoomEngine {
     },
     captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
     pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
-    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil
+    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil,
+    residentCaptureFactory: RoomResidentCaptureFactory? = nil
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
     let configuration = try persistence.loadConfiguration()
+    let eligibility = configuration.residentArchiveEligibility(archiveRootURL: persistence.root)
+    switch eligibility {
+    case .disabled, .eligible:
+      break
+    case .missingPreflightReceipt:
+      throw RoomEngineError.residentArchivePreflightRequired
+    case .unsuccessfulPreflightReceipt:
+      throw RoomEngineError.residentArchivePreflightFailed
+    case .preflightReceiptMismatch:
+      throw RoomEngineError.residentArchivePreflightMismatch
+    }
     let lock = try RoomEngineInstanceLock(root: persistence.root)
+    let residentCaptureOwner: (any RoomResidentCaptureOwning)?
+    if eligibility == .eligible {
+      guard let residentCaptureFactory else {
+        throw RoomEngineError.residentArchiveRuntimeUnavailable
+      }
+      residentCaptureOwner = try residentCaptureFactory(configuration, persistence.root)
+    } else {
+      residentCaptureOwner = nil
+    }
     let captures = persistence.root.appendingPathComponent("captures", isDirectory: true)
     try createPrivateDirectory(captures)
     let spoolURL = persistence.root.appendingPathComponent("spool", isDirectory: true)
@@ -280,7 +377,8 @@ public actor RoomEngine {
       spool: spool,
       capturesURL: captures,
       instanceLock: lock,
-      retainedArchiveRecovery: retainedArchiveRecovery
+      retainedArchiveRecovery: retainedArchiveRecovery,
+      residentCaptureOwner: residentCaptureOwner
     )
   }
 
@@ -293,7 +391,8 @@ public actor RoomEngine {
     spool: RoomPieceSpool,
     capturesURL: URL,
     instanceLock: RoomEngineInstanceLock,
-    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
+    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?,
+    residentCaptureOwner: (any RoomResidentCaptureOwning)?
   ) {
     self.persistence = persistence
     self.configuration = configuration
@@ -304,6 +403,7 @@ public actor RoomEngine {
     self.capturesURL = capturesURL
     self.instanceLock = instanceLock
     self.retainedArchiveRecovery = retainedArchiveRecovery
+    self.residentCaptureOwner = residentCaptureOwner
     listenerTabID =
       configuration.tabID ?? configuration.installID
       ?? "native_\(UUID().uuidString.prefix(8).lowercased())"
@@ -391,8 +491,9 @@ public actor RoomEngine {
           primaryLevels: currentLevels() ?? levels
         )
         previousPollAt = response.now ?? previousPollAt
+        if let polledRoomID = response.roomID, !polledRoomID.isEmpty { roomID = polledRoomID }
         if response.superseded {
-          await stopWithoutEnding()
+          try await stopAfterSuperseded()
           await stopRetainedArchiveRecovery()
           break
         }
@@ -414,7 +515,12 @@ public actor RoomEngine {
     }
 
     if Task.isCancelled {
-      await stopWithoutEnding()
+      do {
+        try await stopWithoutEnding(reason: .cancelled)
+      } catch {
+        await stopRetainedArchiveRecovery()
+        throw error
+      }
       await stopRetainedArchiveRecovery()
       return
     }
@@ -494,6 +600,7 @@ public actor RoomEngine {
       phase = .ready
       transition(to: nil)
       nextPieceIndex = 0
+      nextBackupPieceIndex = 0
       try saveStatus()
       return
     }
@@ -503,11 +610,13 @@ public actor RoomEngine {
       throw RoomEngineError.handoverPending
     }
     transition(to: session.id)
+    if let sessionRoomID = session.roomID, !sessionRoomID.isEmpty { roomID = sessionRoomID }
     nextPieceIndex = active.nextIndex?.primary ?? 0
+    nextBackupPieceIndex = active.nextIndex?.backup ?? 0
     if session.status == .paused {
       phase = .paused
     } else {
-      try startCapture()
+      try startCapture(trigger: .reconciliation)
       phase = .recording
     }
     try saveStatus()
@@ -532,25 +641,25 @@ public actor RoomEngine {
       case .acknowledgeCurrentState:
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .start:
-        try await beginOrResume()
+        try await beginOrResume(commandID: command.id)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .resume:
-        try await resume()
+        try await resume(commandID: command.id)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .pause:
         let id = sessionID
-        try await pause()
+        try await pause(commandID: command.id)
         result = CommandResult(ok: true, sessionID: id, error: nil)
       case .end:
         let id = sessionID
-        try await end()
+        try await end(commandID: command.id)
         result = CommandResult(ok: true, sessionID: id, error: nil)
       case .refuse(let reason):
         result = CommandResult(ok: false, sessionID: nil, error: reason)
       }
     } catch {
       lastError = bounded(error)
-      if capture?.process.isRunning != true || (phase != .paused && phase != .recording) {
+      if !hasActiveCapture || (phase != .paused && phase != .recording) {
         phase = .failed
       }
       try? saveStatus()
@@ -579,7 +688,7 @@ public actor RoomEngine {
     try? saveStatus(preferred: .offline)
   }
 
-  private func beginOrResume() async throws {
+  private func beginOrResume(commandID: String) async throws {
     try await requireRetainedArchiveReady()
     _ = try await drainPending()
     let pending = try spool.pending().count
@@ -591,20 +700,26 @@ public actor RoomEngine {
       }
       guard existing.status != .paused else { throw RoomEngineError.roomPaused }
       transition(to: existing.id)
+      if let existingRoomID = existing.roomID, !existingRoomID.isEmpty { roomID = existingRoomID }
       nextPieceIndex = active.nextIndex?.primary ?? 0
+      nextBackupPieceIndex = active.nextIndex?.backup ?? 0
     } else {
       let created = try await remote.createSession(label: nil, micLabel: configuration.deviceUID)
       transition(to: created.session.id)
+      if let createdRoomID = created.session.roomID, !createdRoomID.isEmpty {
+        roomID = createdRoomID
+      }
       nextPieceIndex = 0
+      nextBackupPieceIndex = 0
     }
-    try startCapture()
+    try startCapture(trigger: .startDay(commandID: commandID))
     phase = .recording
     try saveStatus()
   }
 
-  private func pause() async throws {
+  private func pause(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
-    try stopCaptureAndPublishFinal()
+    try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
     do {
       _ = try await remote.patchSession(id: id, action: .pause, notes: nil)
       phase = .paused
@@ -615,12 +730,12 @@ public actor RoomEngine {
     }
   }
 
-  private func resume() async throws {
+  private func resume(commandID: String) async throws {
     try await requireRetainedArchiveReady()
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
     _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
     do {
-      try startCapture()
+      try startCapture(trigger: .resumeDay(commandID: commandID))
       phase = .recording
       try saveStatus()
     } catch {
@@ -630,17 +745,18 @@ public actor RoomEngine {
     }
   }
 
-  private func end() async throws {
+  private func end(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
     phase = .ending
     try saveStatus()
-    try stopCaptureAndPublishFinal()
+    try stopCaptureAndPublishFinal(reason: .end(commandID: commandID))
     var finalError: Error?
     for attempt in 1...3 {
       do {
         if try await drainPending() {
           transition(to: nil)
           nextPieceIndex = 0
+          nextBackupPieceIndex = 0
           phase = .ready
           try saveStatus()
           return
@@ -662,13 +778,47 @@ public actor RoomEngine {
     _ = try await remote.patchSession(id: id, action: .end, notes: nil)
     transition(to: nil)
     nextPieceIndex = 0
+    nextBackupPieceIndex = 0
     phase = .ready
     try saveStatus()
   }
 
-  private func startCapture() throws {
-    guard capture == nil else { throw RoomEngineError.captureAlreadyActive }
+  private func startCapture(trigger: RoomResidentCaptureStartContext.Trigger) throws {
+    guard !hasActiveCapture else { throw RoomEngineError.captureAlreadyActive }
     guard let sessionID else { throw RoomEngineError.noActiveSession }
+    if let residentCaptureOwner {
+      if residentCaptureOwner.requiresFinalization {
+        defer { updateResidentIndices(residentCaptureOwner) }
+        try residentCaptureOwner.stopAndFinalize(reason: .startupFailed)
+      }
+      guard let roomID, !roomID.isEmpty else { throw RoomEngineError.residentArchiveMissingRoomID }
+      guard nextPieceIndex >= 0 else {
+        throw RoomEngineError.io("resident archive received a negative primary server lane index")
+      }
+      do {
+        try residentCaptureOwner.start(
+          context: RoomResidentCaptureStartContext(
+            roomID: roomID,
+            sessionID: sessionID,
+            nextPrimaryIndex: nextPieceIndex,
+            trigger: trigger
+          ))
+        guard residentCaptureOwner.isActive else {
+          throw RoomEngineError.residentArchiveDidNotBecomeDurable
+        }
+      } catch let startupError {
+        if residentCaptureOwner.isActive || residentCaptureOwner.requiresFinalization {
+          do {
+            try residentCaptureOwner.stopAndFinalize(reason: .startupFailed)
+          } catch {
+            throw error
+          }
+        }
+        throw startupError
+      }
+      updateResidentIndices(residentCaptureOwner)
+      return
+    }
     let safeSession = safePathComponent(sessionID)
     let sessionDirectory = capturesURL.appendingPathComponent(safeSession, isDirectory: true)
     try createPrivateDirectory(sessionDirectory)
@@ -738,6 +888,24 @@ public actor RoomEngine {
   }
 
   private func finishUnexpectedCaptureIfNeeded() throws {
+    if let residentCaptureOwner {
+      defer { updateResidentIndices(residentCaptureOwner) }
+      do {
+        try residentCaptureOwner.service()
+      } catch {
+        if phase == .recording && !residentCaptureOwner.isActive {
+          phase = .failed
+          needsActiveReconciliation = true
+        }
+        throw error
+      }
+      guard phase != .recording || residentCaptureOwner.isActive else {
+        phase = .failed
+        needsActiveReconciliation = true
+        throw RoomEngineError.residentArchiveCaptureStopped
+      }
+      return
+    }
     guard var segment = capture, !segment.process.isRunning else { return }
     segment.process.waitUntilExit()
     do {
@@ -754,7 +922,15 @@ public actor RoomEngine {
     throw RoomEngineError.captureExited(segment.process.terminationStatus ?? -1)
   }
 
-  private func stopCaptureAndPublishFinal() throws {
+  private func stopCaptureAndPublishFinal(reason: RoomResidentCaptureStopReason) throws {
+    if let residentCaptureOwner {
+      guard residentCaptureOwner.isActive || residentCaptureOwner.requiresFinalization else {
+        return
+      }
+      defer { updateResidentIndices(residentCaptureOwner) }
+      try residentCaptureOwner.stopAndFinalize(reason: reason)
+      return
+    }
     guard var segment = capture else { return }
     segment.process.interrupt()
     segment.process.waitUntilExit()
@@ -773,6 +949,7 @@ public actor RoomEngine {
   }
 
   private func publishAvailable(finalFlush: Bool) throws {
+    if residentCaptureOwner != nil { return }
     guard var segment = capture else { return }
     do {
       try publishAvailable(segment: &segment, finalFlush: finalFlush)
@@ -838,22 +1015,48 @@ public actor RoomEngine {
     return endedByServer
   }
 
-  private func stopWithoutEnding() async {
+  private func stopWithoutEnding(reason: RoomResidentCaptureStopReason) async throws {
     do {
-      try stopCaptureAndPublishFinal()
+      try stopCaptureAndPublishFinal(reason: reason)
       _ = try await drainPending()
     } catch {
       lastError = bounded(error)
+      phase = .failed
+      needsActiveReconciliation = true
+      try? saveStatus()
+      throw error
     }
     phase = .superseded
-    try? saveStatus()
+    try saveStatus()
+  }
+
+  private func stopAfterSuperseded() async throws {
+    var retryNanoseconds: UInt64 = 1_000_000_000
+    while true {
+      do {
+        try await stopWithoutEnding(reason: .superseded)
+        return
+      } catch {
+        if Task.isCancelled { throw CancellationError() }
+        try await Task.sleep(nanoseconds: retryNanoseconds)
+        retryNanoseconds = min(retryNanoseconds * 2, 30_000_000_000)
+      }
+    }
+  }
+
+  private func updateResidentIndices(_ owner: any RoomResidentCaptureOwning) {
+    nextPieceIndex = owner.nextPrimaryIndex
+    if let nextBackupIndex = owner.nextBackupIndex {
+      nextBackupPieceIndex = nextBackupIndex
+    }
   }
 
   private func stopAfterServerEnd() async throws {
-    try stopCaptureAndPublishFinal()
+    try stopCaptureAndPublishFinal(reason: .serverEnded)
     _ = try await drainPending()
     transition(to: nil)
     nextPieceIndex = 0
+    nextBackupPieceIndex = 0
     phase = .ready
     needsActiveReconciliation = true
     lastError = RoomEngineError.sessionEndedByServer.localizedDescription
@@ -861,11 +1064,16 @@ public actor RoomEngine {
   }
 
   private func currentLevels() -> BenchLevelPair? {
+    if let residentCaptureOwner { return residentCaptureOwner.currentLevels() }
     guard let capture,
       let records = try? IndexLog.read(url: capture.indexURL).records,
       let rms = records.reversed().compactMap(\.rms).first
     else { return nil }
     return BenchLevelPair(peak: rms, average: rms)
+  }
+
+  private var hasActiveCapture: Bool {
+    residentCaptureOwner?.isActive ?? (capture?.process.isRunning == true)
   }
 
   private func saveStatus(preferred: RoomRecorderStatus.State? = nil) throws {

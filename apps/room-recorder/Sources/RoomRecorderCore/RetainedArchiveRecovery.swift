@@ -43,9 +43,24 @@ public actor RetainedArchiveRecovery: RoomRetainedArchiveRecovering {
     guard !started else { return }
     started = true
     do {
-      let entries = try catalog.scan()
+      let catalogSnapshot = try catalog.scanIncludingControls()
+      for entry in catalogSnapshot.controls where entry.journalPresent {
+        try Task.checkCancellation()
+        let opened = try keyLifecycle.openExistingControlStoreWithInspection(
+          keywrapURL: entry.layout.keywrapURL,
+          journalURL: entry.layout.journalURL,
+          context: entry.descriptor.context)
+        guard opened.keywrap.authenticated,
+          opened.keywrap.keywrapDigestHex == entry.descriptor.keywrapDigestHex
+        else {
+          opened.store.close()
+          throw RetainedArchiveRecoveryError.descriptorAuthenticationFailed
+        }
+        opened.store.close()
+      }
+
       var lanes: [ArchiveDeliveryDiskLane] = []
-      for entry in entries {
+      for entry in catalogSnapshot.lanes {
         try Task.checkCancellation()
         let opened = try open(entry)
         opened.close()

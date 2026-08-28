@@ -239,7 +239,7 @@ import Testing
       (.formatChange, .formatChange),
     ]
     for (marker, expected) in mappings {
-      var accumulator = UnsignedDevelopmentArchiveDiscontinuityAccumulator()
+      var accumulator = ArchiveDiscontinuityAccumulator()
       accumulator.append(
         StreamItem(marker: marker, monoStartNS: 10, wallStartNS: 20, gapNS: 30))
       let observation = try #require(accumulator.observation)
@@ -250,7 +250,7 @@ import Testing
       #expect(observation.wallNS == 20)
     }
 
-    var coalesced = UnsignedDevelopmentArchiveDiscontinuityAccumulator()
+    var coalesced = ArchiveDiscontinuityAccumulator()
     coalesced.append(
       StreamItem(marker: .configurationChange, monoStartNS: 1, wallStartNS: 2, gapNS: 3))
     coalesced.append(
