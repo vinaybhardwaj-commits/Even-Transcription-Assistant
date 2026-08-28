@@ -67,6 +67,13 @@ public struct AuthenticatedArchivePCMRange: Equatable, Sendable {
   public let indexRecords: [ArchiveIndexRecordMetadata]
 }
 
+public struct AuthenticatedArchivePCMStreamResult: Equatable, Sendable {
+  public let sampleStart: UInt64
+  public let sampleEnd: UInt64
+  public let byteCount: UInt64
+  public let indexRecords: [ArchiveIndexRecordMetadata]
+}
+
 public struct ArchiveIndexObservation: Equatable, Sendable {
   public let monoNS: UInt64?
   public let wallNS: UInt64?
@@ -223,15 +230,209 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       sampleStart: UInt64,
       sampleEnd: UInt64
     ) throws -> AuthenticatedArchivePCMRange {
+      var pcm = Data()
+      let result = try streamPCMRange(sampleStart: sampleStart, sampleEnd: sampleEnd) {
+        pcm.append($0)
+      }
+      return AuthenticatedArchivePCMRange(
+        sampleStart: result.sampleStart,
+        sampleEnd: result.sampleEnd,
+        pcm: pcm,
+        indexRecords: result.indexRecords
+      )
+    }
+
+    public func streamPCMRange(
+      sampleStart: UInt64,
+      sampleEnd: UInt64,
+      consume: (Data) throws -> Void
+    ) throws -> AuthenticatedArchivePCMStreamResult {
       try lock.withLock {
         guard let descriptors else { throw ArchiveLanePersistenceError.closed }
-        return try ArchiveLaneStore.readAuthenticatedPCMRange(
+        return try ArchiveLaneStore.streamAuthenticatedPCMRange(
           descriptors: descriptors,
           scan: scanResult,
           rootKey: rootKey,
           contextHash: contextHash,
           sampleStart: sampleStart,
-          sampleEnd: sampleEnd
+          sampleEnd: sampleEnd,
+          consume: consume
+        )
+      }
+    }
+
+    public func inspectJournal(at url: URL) throws -> ArchiveDerivedScanResult {
+      try inspectDerivedStore(
+        at: url,
+        purpose: .journal,
+        validator: { try ArchiveJournalPayloadCodec.validateRecord($0) }
+      )
+    }
+
+    public func openJournalStoreForAppend(
+      at url: URL,
+      headerValidator: @escaping ArchiveDerivedStore.HeaderValidator = { _, _ in },
+      partialHeaderValidator: @escaping ArchiveDerivedStore.PartialHeaderValidator = { _, _ in },
+      repairTrailingRecord: Bool = true
+    ) throws -> ArchiveDerivedStore {
+      try openDerivedStoreForAppend(
+        at: url,
+        purpose: .journal,
+        validator: { try ArchiveJournalPayloadCodec.validateRecord($0) },
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        allowExpectedIncompletePayloadRepair: true,
+        repairTrailingRecord: repairTrailingRecord
+      )
+    }
+
+    public func inspectLevel(
+      at url: URL,
+      initialLogicalUnit: UInt64
+    ) throws -> ArchiveDerivedScanResult {
+      try inspectDerivedStore(
+        at: url,
+        purpose: .level,
+        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+        initialLogicalUnit: initialLogicalUnit
+      )
+    }
+
+    public func openLevelStoreForAppend(
+      at url: URL,
+      initialLogicalUnit: UInt64,
+      headerValidator: @escaping ArchiveDerivedStore.HeaderValidator = { _, _ in },
+      partialHeaderValidator: @escaping ArchiveDerivedStore.PartialHeaderValidator = { _, _ in },
+      repairTrailingRecord: Bool = true
+    ) throws -> ArchiveDerivedStore {
+      try openDerivedStoreForAppend(
+        at: url,
+        purpose: .level,
+        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        allowExpectedIncompletePayloadRepair: true,
+        repairTrailingRecord: repairTrailingRecord,
+        initialLogicalUnit: initialLogicalUnit
+      )
+    }
+
+    public func openManifestStoreForAppend(at url: URL) throws -> ArchiveDerivedStore {
+      try openDerivedStoreForAppend(
+        at: url,
+        purpose: .manifest,
+        validator: { try ArchiveManifestPayloadCodec.validateRecord($0) },
+        allowExpectedIncompletePayloadRepair: true
+      )
+    }
+
+    func openSpoolStoreForAppend(
+      at url: URL,
+      repairTrailingRecord: Bool = true
+    ) throws -> ArchiveDerivedStore {
+      try openDerivedStoreForAppend(
+        at: url,
+        purpose: .spool,
+        repairTrailingRecord: repairTrailingRecord
+      )
+    }
+
+    func createSpoolStore(at url: URL) throws -> ArchiveDerivedStore {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.createNew(
+          url: url,
+          purpose: .spool,
+          rootKey: rootKey,
+          context: context
+        )
+      }
+    }
+
+    func createSpoolStore(
+      directoryFileDescriptor: Int32,
+      fileName: String,
+      at url: URL
+    ) throws -> ArchiveDerivedStore {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.createNew(
+          directoryFileDescriptor: directoryFileDescriptor,
+          fileName: fileName,
+          url: url,
+          purpose: .spool,
+          rootKey: rootKey,
+          context: context
+        )
+      }
+    }
+
+    public func inspectSpool(at url: URL) throws -> ArchiveDerivedScanResult {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.inspect(
+          url: url,
+          purpose: .spool,
+          rootKey: rootKey,
+          context: context
+        )
+      }
+    }
+
+    func inspectSpool(fileDescriptor: Int32) throws -> ArchiveDerivedScanResult {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.inspect(
+          fileDescriptor: fileDescriptor,
+          purpose: .spool,
+          rootKey: rootKey,
+          context: context
+        )
+      }
+    }
+
+    private func openDerivedStoreForAppend(
+      at url: URL,
+      purpose: ArchiveRecordPurpose,
+      validator: @escaping ArchiveDerivedStore.PayloadValidator = { _ in },
+      headerValidator: @escaping ArchiveDerivedStore.HeaderValidator = { _, _ in },
+      partialHeaderValidator: @escaping ArchiveDerivedStore.PartialHeaderValidator = { _, _ in },
+      allowExpectedIncompletePayloadRepair: Bool = false,
+      repairTrailingRecord: Bool = true,
+      initialLogicalUnit: UInt64 = 0
+    ) throws -> ArchiveDerivedStore {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.openRecoveringForAppend(
+          url: url,
+          purpose: purpose,
+          rootKey: rootKey,
+          context: context,
+          validator: validator,
+          headerValidator: headerValidator,
+          partialHeaderValidator: partialHeaderValidator,
+          allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair,
+          repairTrailingRecord: repairTrailingRecord,
+          initialLogicalUnit: initialLogicalUnit
+        )
+      }
+    }
+
+    private func inspectDerivedStore(
+      at url: URL,
+      purpose: ArchiveRecordPurpose,
+      validator: @escaping ArchiveDerivedStore.PayloadValidator = { _ in },
+      initialLogicalUnit: UInt64 = 0
+    ) throws -> ArchiveDerivedScanResult {
+      try lock.withLock {
+        guard descriptors != nil else { throw ArchiveLanePersistenceError.closed }
+        return try ArchiveDerivedStore.inspect(
+          url: url,
+          purpose: purpose,
+          rootKey: rootKey,
+          context: context,
+          validator: validator,
+          initialLogicalUnit: initialLogicalUnit
         )
       }
     }
@@ -458,6 +659,32 @@ public final class ArchiveLaneStore: @unchecked Sendable {
     sampleStart: UInt64,
     sampleEnd: UInt64
   ) throws -> AuthenticatedArchivePCMRange {
+    var pcm = Data()
+    let result = try streamAuthenticatedPCMRange(
+      descriptors: descriptors,
+      scan: scan,
+      rootKey: rootKey,
+      contextHash: contextHash,
+      sampleStart: sampleStart,
+      sampleEnd: sampleEnd
+    ) { pcm.append($0) }
+    return AuthenticatedArchivePCMRange(
+      sampleStart: result.sampleStart,
+      sampleEnd: result.sampleEnd,
+      pcm: pcm,
+      indexRecords: result.indexRecords
+    )
+  }
+
+  private static func streamAuthenticatedPCMRange(
+    descriptors: LaneDescriptors,
+    scan: ArchiveLaneScanResult,
+    rootKey: Data,
+    contextHash: Data,
+    sampleStart: UInt64,
+    sampleEnd: UInt64,
+    consume: (Data) throws -> Void
+  ) throws -> AuthenticatedArchivePCMStreamResult {
     guard sampleEnd > sampleStart else {
       throw ArchiveLanePersistenceError.invalidReadRange(start: sampleStart, end: sampleEnd)
     }
@@ -475,8 +702,8 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       throw ArchiveLanePersistenceError.arithmeticOverflow(field: "read_range_byte_count")
     }
 
-    var pcm = Data()
-    pcm.reserveCapacity(Int(requestedSamples) * 2)
+    let expectedByteCount = Int(requestedSamples) * 2
+    var streamedByteCount = 0
     var selectedIndexRecords: [ArchiveIndexRecordMetadata] = []
     let hooks = ArchiveLanePersistenceHooks()
     var lower = 0
@@ -521,18 +748,20 @@ public final class ArchiveLaneStore: @unchecked Sendable {
       )
       let localStart = Int(overlapStart - payload.sampleStart) * 2
       let localEnd = Int(overlapEnd - payload.sampleStart) * 2
-      pcm.append(authenticated.plaintext[localStart..<localEnd])
+      let chunk = authenticated.plaintext.subdata(in: localStart..<localEnd)
+      try consume(chunk)
+      streamedByteCount += chunk.count
       selectedIndexRecords.append(indexRecord)
       position += 1
     }
-    guard pcm.count == Int(requestedSamples) * 2 else {
+    guard streamedByteCount == expectedByteCount else {
       throw ArchiveLanePersistenceError.unexpectedEndOfFile(
-        file: .tape, offset: UInt64(pcm.count))
+        file: .tape, offset: UInt64(streamedByteCount))
     }
-    return AuthenticatedArchivePCMRange(
+    return AuthenticatedArchivePCMStreamResult(
       sampleStart: sampleStart,
       sampleEnd: sampleEnd,
-      pcm: pcm,
+      byteCount: UInt64(streamedByteCount),
       indexRecords: selectedIndexRecords
     )
   }

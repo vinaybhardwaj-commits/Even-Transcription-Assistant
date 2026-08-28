@@ -1,9 +1,20 @@
 import Foundation
 
+public struct ArchiveLocalReservedPiece: Equatable, Sendable {
+  public let reservation: ArchiveJournalPayload
+  public let fitSegment: UInt64
+
+  public init(reservation: ArchiveJournalPayload, fitSegment: UInt64) {
+    self.reservation = reservation
+    self.fitSegment = fitSegment
+  }
+}
+
 public struct ArchiveLocalDerivationResult: Equatable, Sendable {
   public let authenticatedSampleCount: UInt64
   public let authenticatedSampleEnd: UInt64
   public let reservations: [ArchiveJournalPayload]
+  public let reservedPieces: [ArchiveLocalReservedPiece]
   public let journalRecordsWritten: Int
   public let levelRecords: [ArchiveLevelRecordPlan]
   public let levelRecordsWritten: Int
@@ -79,25 +90,50 @@ public enum ArchiveLocalDeriver {
     guard snapshot.authenticates(rootKey: rootKey, context: context) else {
       throw ArchiveLocalDerivationError.snapshotContextMismatch
     }
+    return try derive(
+      snapshot: snapshot,
+      journalURL: journalURL,
+      levelURL: levelURL,
+      sessionID: sessionID,
+      finalFlush: finalFlush,
+      startingChunkIndex: startingChunkIndex
+    )
+  }
+
+  public static func derive(
+    snapshot: ArchiveLaneStore.AuthenticatedSnapshot,
+    journalURL: URL,
+    levelURL: URL,
+    sessionID: String,
+    finalFlush: Bool,
+    startingChunkIndex: UInt64 = 0
+  ) throws -> ArchiveLocalDerivationResult {
+    guard !sessionID.isEmpty, sessionID.utf8.count <= 256 else {
+      throw ArchiveLocalDerivationError.invalidSessionID
+    }
+    guard journalURL.standardizedFileURL.path != levelURL.standardizedFileURL.path else {
+      throw ArchiveLocalDerivationError.aliasedPath(journalURL.standardizedFileURL.path)
+    }
     for url in [journalURL, levelURL] {
       if try snapshot.aliasesSourceFile(at: url) {
         throw ArchiveLocalDerivationError.aliasedPath(url.standardizedFileURL.path)
       }
     }
+    let context = snapshot.context
     let initialSamplePosition = snapshot.initialSamplePosition
     let indexRecords = snapshot.indexRecords
     guard let authenticatedEnd = indexRecords.last?.payload.sampleEnd else {
       try validateEmptyDerivedIfPresent(
+        snapshot: snapshot,
         journalURL: journalURL,
         levelURL: levelURL,
-        rootKey: rootKey,
-        context: context,
         initialSamplePosition: initialSamplePosition
       )
       return ArchiveLocalDerivationResult(
         authenticatedSampleCount: 0,
         authenticatedSampleEnd: initialSamplePosition,
         reservations: [],
+        reservedPieces: [],
         journalRecordsWritten: 0,
         levelRecords: [],
         levelRecordsWritten: 0,
@@ -110,60 +146,95 @@ public enum ArchiveLocalDeriver {
     }
     let plans = try ArchiveLocalCutter.plan(
       indexRecords: indexRecords,
-      startingChunkIndex: startingChunkIndex,
+      startingChunkIndex: 0,
       finalFlush: finalFlush
     )
+    var existingJournalRecords: [ArchiveDerivedRecord] = []
+    if FileManager.default.fileExists(atPath: journalURL.path) {
+      let existing = try snapshot.inspectJournal(at: journalURL)
+      existingJournalRecords = existing.records
+    }
+    let existingPayloads = try existingJournalRecords.map {
+      try ArchiveJournalPayloadCodec.decode($0.plaintext)
+    }
+    _ = try ArchiveJournalReplay.validate(existingPayloads)
+    let existingInitialReservations = existingPayloads.filter {
+      $0.priorState == nil && $0.newState == .reserved && $0.error == nil
+    }
+    guard existingInitialReservations.count <= plans.count else {
+      throw ArchiveLocalDerivationError.existingJournalMismatch(position: plans.count)
+    }
+    try ArchiveReservationIndexReconciler.validate(existingInitialReservations)
+    var nextChunkIndex = startingChunkIndex
+    if let localMaximum = existingInitialReservations.map(\.chunkIndex).max() {
+      nextChunkIndex = max(nextChunkIndex, UInt64(localMaximum) + 1)
+    }
     var reservations: [ArchiveJournalPayload] = []
+    var reservedPieces: [ArchiveLocalReservedPiece] = []
     reservations.reserveCapacity(plans.count)
-    for plan in plans {
+    reservedPieces.reserveCapacity(plans.count)
+    for (position, plan) in plans.enumerated() {
       let pcm = try readPCM(plan.sampleStart, plan.sampleEnd)
       let levels = try ArchiveLevelSidecarBuilder.quantizedLevels(pcm)
+      let chunkIndex: UInt32
+      if position < existingInitialReservations.count {
+        chunkIndex = existingInitialReservations[position].chunkIndex
+      } else {
+        guard nextChunkIndex <= UInt64(ArchiveReservationIndexReconciler.maximumServerIndex) else {
+          throw ArchiveReservationIndexError.indexExhausted(
+            ArchiveReservationLane(sessionID: sessionID, laneID: context.laneID)
+          )
+        }
+        chunkIndex = UInt32(nextChunkIndex)
+        nextChunkIndex += 1
+      }
       let reservationID = try ArchiveReservationIdentity.make(
         context: context,
         sessionID: sessionID,
-        chunkIndex: plan.chunkIndex,
+        chunkIndex: chunkIndex,
         sampleStart: plan.sampleStart,
         sampleEnd: plan.sampleEnd
       )
-      reservations.append(
-        try ArchiveJournalPayload(
-          reservationID: reservationID,
-          roomID: context.roomID,
-          sessionID: sessionID,
-          laneID: context.laneID,
-          istDate: context.istDate,
-          chunkIndex: plan.chunkIndex,
-          sampleStart: plan.sampleStart,
-          sampleEnd: plan.sampleEnd,
-          startMS: plan.startMS,
-          endMS: plan.endMS,
-          uncertainty: plan.uncertainty,
-          averageLevelQ15: levels.averageQ15,
-          peakLevelQ15: levels.peakQ15,
-          attemptID: nil,
-          priorState: nil,
-          newState: .reserved,
-          error: nil
+      let reservation = try ArchiveJournalPayload(
+        reservationID: reservationID,
+        roomID: context.roomID,
+        sessionID: sessionID,
+        laneID: context.laneID,
+        istDate: context.istDate,
+        chunkIndex: chunkIndex,
+        sampleStart: plan.sampleStart,
+        sampleEnd: plan.sampleEnd,
+        startMS: plan.startMS,
+        endMS: plan.endMS,
+        uncertainty: plan.uncertainty,
+        averageLevelQ15: levels.averageQ15,
+        peakLevelQ15: levels.peakQ15,
+        attemptID: nil,
+        priorState: nil,
+        newState: .reserved,
+        error: nil
+      )
+      if position < existingInitialReservations.count,
+        reservation != existingInitialReservations[position]
+      {
+        let recordPosition =
+          existingPayloads.firstIndex {
+            $0.reservationID == existingInitialReservations[position].reservationID
+          } ?? position
+        throw ArchiveLocalDerivationError.existingJournalMismatch(position: recordPosition)
+      }
+      reservations.append(reservation)
+      reservedPieces.append(
+        ArchiveLocalReservedPiece(
+          reservation: reservation,
+          fitSegment: plan.fitSegment
         ))
     }
     var existingLevelRecords: [ArchiveDerivedRecord] = []
-    if FileManager.default.fileExists(atPath: journalURL.path) {
-      let existing = try ArchiveDerivedStore.inspect(
-        url: journalURL,
-        purpose: .journal,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveJournalPayloadCodec.validateRecord($0) }
-      )
-      _ = try validateJournalReservations(existing.records, expected: reservations)
-    }
+    _ = try validateJournalReservations(existingJournalRecords, expected: reservations)
     if FileManager.default.fileExists(atPath: levelURL.path) {
-      let existing = try ArchiveDerivedStore.inspect(
-        url: levelURL,
-        purpose: .level,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+      let existing = try snapshot.inspectLevel(
+        at: levelURL,
         initialLogicalUnit: initialSamplePosition
       )
       existingLevelRecords = existing.records
@@ -190,12 +261,8 @@ public enum ArchiveLocalDeriver {
     var journalStore: ArchiveDerivedStore?
     var levelStore: ArchiveDerivedStore?
     do {
-      journalStore = try ArchiveDerivedStore.openRecoveringForAppend(
-        url: journalURL,
-        purpose: .journal,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveJournalPayloadCodec.validateRecord($0) },
+      journalStore = try snapshot.openJournalStoreForAppend(
+        at: journalURL,
         headerValidator: { header, position in
           guard header.firstLogicalUnit == UInt64(position), header.logicalUnitCount == 1
           else {
@@ -209,15 +276,11 @@ public enum ArchiveLocalDeriver {
             mismatch: .existingJournalMismatch(position: position)
           )
         },
-        allowExpectedIncompletePayloadRepair: true,
         repairTrailingRecord: false
       )
-      levelStore = try ArchiveDerivedStore.openRecoveringForAppend(
-        url: levelURL,
-        purpose: .level,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+      levelStore = try snapshot.openLevelStoreForAppend(
+        at: levelURL,
+        initialLogicalUnit: initialSamplePosition,
         headerValidator: { header, position in
           guard position < levelPlans.count,
             header.firstLogicalUnit == levelPlans[position].firstSample,
@@ -237,9 +300,7 @@ public enum ArchiveLocalDeriver {
             mismatch: .existingLevelMismatch(position: position)
           )
         },
-        allowExpectedIncompletePayloadRepair: true,
-        repairTrailingRecord: false,
-        initialLogicalUnit: initialSamplePosition
+        repairTrailingRecord: false
       )
       _ = try validateJournalReservations(
         journalStore!.scanResult.records,
@@ -298,6 +359,7 @@ public enum ArchiveLocalDeriver {
       authenticatedSampleCount: covered.partialValue,
       authenticatedSampleEnd: authenticatedEnd,
       reservations: reservations,
+      reservedPieces: reservedPieces,
       journalRecordsWritten: missingReservations.count,
       levelRecords: levelPlans,
       levelRecordsWritten: levelPlans.count - levelStart,
@@ -323,31 +385,20 @@ public enum ArchiveLocalDeriver {
   }
 
   private static func validateEmptyDerivedIfPresent(
+    snapshot: ArchiveLaneStore.AuthenticatedSnapshot,
     journalURL: URL,
     levelURL: URL,
-    rootKey: Data,
-    context: ArchiveContext,
     initialSamplePosition: UInt64
   ) throws {
     if FileManager.default.fileExists(atPath: journalURL.path) {
-      let journal = try ArchiveDerivedStore.inspect(
-        url: journalURL,
-        purpose: .journal,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveJournalPayloadCodec.validateRecord($0) }
-      )
+      let journal = try snapshot.inspectJournal(at: journalURL)
       guard journal.records.isEmpty, journal.incompleteTrailingByteCount == 0 else {
         throw ArchiveLocalDerivationError.existingJournalMismatch(position: 0)
       }
     }
     if FileManager.default.fileExists(atPath: levelURL.path) {
-      let level = try ArchiveDerivedStore.inspect(
-        url: levelURL,
-        purpose: .level,
-        rootKey: rootKey,
-        context: context,
-        validator: { try ArchiveLevelPayloadCodec.validateRecord($0) },
+      let level = try snapshot.inspectLevel(
+        at: levelURL,
         initialLogicalUnit: initialSamplePosition
       )
       guard level.records.isEmpty, level.incompleteTrailingByteCount == 0 else {

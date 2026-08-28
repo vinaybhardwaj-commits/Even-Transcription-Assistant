@@ -402,6 +402,94 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: wrapOnly.indexURL.path))
   }
 
+  @Test func key04ExistingSnapshotAuthenticatesWithoutProvisioningOrRootRelease() throws {
+    let fixture = try KeyFixture("existing-snapshot")
+    defer { fixture.remove() }
+    let security = FakeArchiveSecurityProvider()
+    let lifecycle = makeLifecycle(fixture, security: security)
+    let writer = try lifecycle.openLaneStore(
+      keywrapURL: fixture.keywrapURL,
+      tapeURL: fixture.tapeURL,
+      indexURL: fixture.indexURL,
+      context: context
+    )
+    _ = try writer.appendPCM(
+      keyHex("01000200"),
+      observation: ArchiveIndexObservation(
+        monoNS: 1,
+        wallNS: 2,
+        rmsQ15: 3,
+        nativeFrames: 2,
+        inputRateNumerator: 16_000,
+        inputRateDenominator: 1
+      ))
+    writer.close()
+    let createCount = security.createCalls.count
+
+    let opened = try lifecycle.openExistingLaneSnapshotWithInspection(
+      keywrapURL: fixture.keywrapURL,
+      tapeURL: fixture.tapeURL,
+      indexURL: fixture.indexURL,
+      context: context,
+      initialSamplePosition: 0
+    )
+    let snapshot = opened.snapshot
+    defer { snapshot.close() }
+    #expect(opened.keywrap.authenticated)
+    #expect(opened.keywrap.keywrapDigestHex.count == 64)
+    #expect(snapshot.authenticatedFacts.authenticatedSampleEnd == 2)
+    #expect(try snapshot.readPCMRange(sampleStart: 0, sampleEnd: 2).pcm == keyHex("01000200"))
+    #expect(security.createCalls.count == createCount)
+
+    let missing = try KeyFixture("existing-snapshot-missing")
+    defer { missing.remove() }
+    #expect(throws: ArchiveKeyLifecycleError.archiveKeyUnavailable) {
+      try makeLifecycle(missing, security: security).openExistingLaneSnapshot(
+        keywrapURL: missing.keywrapURL,
+        tapeURL: missing.tapeURL,
+        indexURL: missing.indexURL,
+        context: context,
+        initialSamplePosition: 0
+      )
+    }
+    #expect(!FileManager.default.fileExists(atPath: missing.keywrapURL.path))
+    #expect(!FileManager.default.fileExists(atPath: missing.tapeURL.path))
+    #expect(!FileManager.default.fileExists(atPath: missing.indexURL.path))
+  }
+
+  @Test func retainedLaneBuilderPublishesOnlyAfterAuthenticatedOpenAndRerunsIdempotently() throws {
+    let fixture = try KeyFixture("retained-builder")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    var streamUUID = stream
+    streamUUID[6] = (streamUUID[6] & 0x0F) | 0x40
+    streamUUID[8] = (streamUUID[8] & 0x3F) | 0x80
+    let retainedContext = ArchiveContext(
+      streamUUID: streamUUID,
+      roomID: "room_1",
+      istDate: "2026-08-27",
+      laneID: "primary",
+      stableDeviceUID: "AppleUSBAudioEngine:test"
+    )
+    let lifecycle = makeLifecycle(fixture, security: security)
+    let builder = try ArchiveRetainedLaneBuilder(
+      rootURL: fixture.directory,
+      keyLifecycle: lifecycle
+    )
+
+    let first = try builder.openLane(context: retainedContext, initialSamplePosition: 480)
+    let descriptorBytes = try Data(contentsOf: first.catalogEntry.layout.descriptorURL)
+    first.store.close()
+    let second = try builder.openLane(context: retainedContext, initialSamplePosition: 480)
+    second.store.close()
+
+    #expect(first.keywrap.authenticated)
+    #expect(first.catalogEntry.descriptor.keywrapDigestHex == first.keywrap.keywrapDigestHex)
+    #expect(try Data(contentsOf: second.catalogEntry.layout.descriptorURL) == descriptorBytes)
+    #expect(try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scan().count == 1)
+  }
+
   @Test func key04UnwrapInspectionRequiresExistingWrapAndNeverCreatesLanes() throws {
     let fixture = try KeyFixture("unwrap-inspection")
     defer { fixture.remove() }

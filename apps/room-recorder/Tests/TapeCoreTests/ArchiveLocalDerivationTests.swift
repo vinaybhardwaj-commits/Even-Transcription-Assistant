@@ -94,6 +94,28 @@ import Testing
     let crossing = try readRange(fixture, start: 6, end: 19)
     #expect(decodePCM(crossing.pcm) == Array(values[6..<19]))
     #expect(crossing.indexRecords.count == 3)
+    let snapshot = try ArchiveLaneStore.openAuthenticatedSnapshot(
+      tapeURL: fixture.tape,
+      indexURL: fixture.index,
+      rootKey: rootKey,
+      context: context
+    )
+    defer { snapshot.close() }
+    var chunks: [Data] = []
+    let streamed = try snapshot.streamPCMRange(sampleStart: 6, sampleEnd: 19) {
+      chunks.append($0)
+    }
+    #expect(streamed.byteCount == 26)
+    #expect(streamed.indexRecords.count == 3)
+    #expect(decodePCM(chunks.reduce(into: Data()) { $0.append($1) }) == Array(values[6..<19]))
+    var callbackCount = 0
+    #expect(throws: StreamFixtureError.stop) {
+      try snapshot.streamPCMRange(sampleStart: 6, sampleEnd: 19) { _ in
+        callbackCount += 1
+        throw StreamFixtureError.stop
+      }
+    }
+    #expect(callbackCount == 1)
     #expect(
       throws: ArchiveLanePersistenceError.readRangeBeyondAuthenticatedEnd(
         requested: 25, authenticated: 24)
@@ -167,6 +189,7 @@ import Testing
     #expect(plans[1].sampleEnd == plans[2].sampleStart)
     #expect(plans.allSatisfy { !($0.sampleStart < 5_600_000 && $0.sampleEnd > 5_600_000) })
     #expect(plans.map(\.chunkIndex) == [0, 1, 2, 3])
+    #expect(plans.map(\.fitSegment) == [0, 0, 1, 1])
   }
 
   @Test func cutterClosesAtEveryRatifiedArchiveDiscontinuity() throws {
@@ -515,6 +538,8 @@ import Testing
     #expect(first.authenticatedSampleCount == 32_000)
     #expect(first.authenticatedSampleEnd == 32_000)
     #expect(first.reservations.count == 1)
+    #expect(first.reservedPieces.map(\.reservation) == first.reservations)
+    #expect(first.reservedPieces.map(\.fitSegment) == [0])
     #expect(first.journalRecordsWritten == 1)
     #expect(first.levelRecordsWritten == 1)
     #expect(first.levelRecords[0].observations.count == 2)
@@ -628,6 +653,7 @@ import Testing
       logicalUnitCount: 1
     )
     journal.close()
+    let journalPrefix = try Data(contentsOf: journalURL)
 
     lane = try ArchiveLaneStore.openRecoveringForAppend(
       tapeURL: fixture.tape,
@@ -658,10 +684,13 @@ import Testing
       rootKey: rootKey,
       context: context,
       sessionID: "bs_advanced",
-      finalFlush: true
+      finalFlush: true,
+      startingChunkIndex: 8
     )
     #expect(second.reservations.count == 2)
+    #expect(second.reservations.map(\.chunkIndex) == [0, 8])
     #expect(second.journalRecordsWritten == 1)
+    #expect(try Data(contentsOf: journalURL).starts(with: journalPrefix))
     let scan = try ArchiveDerivedStore.inspect(
       url: journalURL,
       purpose: .journal,
@@ -677,6 +706,104 @@ import Testing
       replay[second.reservations[1].reservationID]?.initialReservation
         == second.reservations[1]
     )
+  }
+
+  @Test func indexReconcilerCombinesCrossDayLocalAndServerWitnesses() throws {
+    let reservations = [
+      try indexReservation(
+        seed: "1", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-27",
+        chunkIndex: 4, sampleStart: 0, sampleEnd: 100),
+      try indexReservation(
+        seed: "2", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-28",
+        chunkIndex: 7, sampleStart: 100, sampleEnd: 200),
+      try indexReservation(
+        seed: "3", sessionID: "bs_one", laneID: "backup", istDate: "2026-08-28",
+        chunkIndex: 2, sampleStart: 0, sampleEnd: 100),
+      try indexReservation(
+        seed: "4", sessionID: "bs_two", laneID: "primary", istDate: "2026-08-28",
+        chunkIndex: 0, sampleStart: 0, sampleEnd: 100),
+    ]
+
+    #expect(
+      try ArchiveReservationIndexReconciler.nextIndex(
+        localReservations: reservations,
+        sessionID: "bs_one",
+        laneID: "primary",
+        serverNextIndex: 3
+      ) == 8)
+    #expect(
+      try ArchiveReservationIndexReconciler.nextIndex(
+        localReservations: reservations,
+        sessionID: "bs_one",
+        laneID: "primary",
+        serverNextIndex: 11
+      ) == 11)
+    #expect(
+      try ArchiveReservationIndexReconciler.nextIndex(
+        localReservations: reservations,
+        sessionID: "bs_one",
+        laneID: "backup",
+        serverNextIndex: 0
+      ) == 3)
+  }
+
+  @Test func indexReconcilerRejectsCollisionsOverlapsAndExhaustion() throws {
+    let first = try indexReservation(
+      seed: "1", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-27",
+      chunkIndex: 4, sampleStart: 0, sampleEnd: 100)
+    let duplicateIndex = try indexReservation(
+      seed: "2", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-28",
+      chunkIndex: 4, sampleStart: 100, sampleEnd: 200)
+    #expect(
+      throws: ArchiveReservationIndexError.duplicateChunkIndex(
+        lane: ArchiveReservationLane(sessionID: "bs_one", laneID: "primary"),
+        index: 4
+      )
+    ) {
+      try ArchiveReservationIndexReconciler.validate([first, duplicateIndex])
+    }
+
+    let overlap = try indexReservation(
+      seed: "3", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-28",
+      chunkIndex: 5, sampleStart: 99, sampleEnd: 200)
+    #expect(throws: ArchiveReservationIndexError.self) {
+      try ArchiveReservationIndexReconciler.validate([first, overlap])
+    }
+    let gap = try indexReservation(
+      seed: "4", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-28",
+      chunkIndex: 5, sampleStart: 101, sampleEnd: 200)
+    #expect(
+      throws: ArchiveReservationIndexError.noncontiguousSampleRanges(
+        lane: ArchiveReservationLane(sessionID: "bs_one", laneID: "primary"),
+        expected: 100,
+        actual: 101
+      )
+    ) {
+      try ArchiveReservationIndexReconciler.validate([first, gap])
+    }
+    let regressed = try indexReservation(
+      seed: "5", sessionID: "bs_one", laneID: "primary", istDate: "2026-08-28",
+      chunkIndex: 3, sampleStart: 100, sampleEnd: 200)
+    #expect(
+      throws: ArchiveReservationIndexError.nonmonotonicChunkIndex(
+        lane: ArchiveReservationLane(sessionID: "bs_one", laneID: "primary"),
+        previous: 4,
+        current: 3
+      )
+    ) {
+      try ArchiveReservationIndexReconciler.validate([first, regressed])
+    }
+    #expect(
+      throws: ArchiveReservationIndexError.indexExhausted(
+        ArchiveReservationLane(sessionID: "bs_one", laneID: "primary"))
+    ) {
+      try ArchiveReservationIndexReconciler.nextIndex(
+        localReservations: [],
+        sessionID: "bs_one",
+        laneID: "primary",
+        serverNextIndex: 100_000
+      )
+    }
   }
 
   @Test func liveDerivationFreezesShortTailThenAppendsSixtyObservationRecordAndDiscontinuity()
@@ -700,8 +827,6 @@ import Testing
       snapshot: snapshot,
       journalURL: journal,
       levelURL: level,
-      rootKey: rootKey,
-      context: context,
       sessionID: "bs_live",
       finalFlush: false)
     snapshot.close()
@@ -871,6 +996,36 @@ import Testing
     )
   }
 
+  private func indexReservation(
+    seed: Character,
+    sessionID: String,
+    laneID: String,
+    istDate: String,
+    chunkIndex: UInt32,
+    sampleStart: UInt64,
+    sampleEnd: UInt64
+  ) throws -> ArchiveJournalPayload {
+    try ArchiveJournalPayload(
+      reservationID: String(repeating: seed, count: 64),
+      roomID: "room_dev",
+      sessionID: sessionID,
+      laneID: laneID,
+      istDate: istDate,
+      chunkIndex: chunkIndex,
+      sampleStart: sampleStart,
+      sampleEnd: sampleEnd,
+      startMS: nil,
+      endMS: nil,
+      uncertainty: .fewerThanThreeAnchors,
+      averageLevelQ15: 0,
+      peakLevelQ15: 0,
+      attemptID: nil,
+      priorState: nil,
+      newState: .reserved,
+      error: nil
+    )
+  }
+
   private func metadata(
     sequence: UInt64,
     start: UInt64,
@@ -990,6 +1145,10 @@ import Testing
     try handle.seekToEnd()
     try handle.write(contentsOf: data)
   }
+}
+
+private enum StreamFixtureError: Error {
+  case stop
 }
 
 private struct LaneFixture {

@@ -4,7 +4,7 @@ import RoomRecorderCore
 
 private let usage = """
   Usage:
-    room-recorder configure --origin <url> --room <slug> --device <uid> --tapewriter <absolute-path> --ffmpeg <absolute-path> [--root <dir>]
+    room-recorder configure --origin <url> --room <slug> --device <uid> --tapewriter <absolute-path> --ffmpeg <absolute-path> [--retained-archive-recovery <true|false>] [--root <dir>]
     room-recorder login [--root <dir>]
     room-recorder run [--root <dir>]
     room-recorder status [--root <dir>]
@@ -66,6 +66,7 @@ private enum RoomRecorderCLI {
       case "configure":
         try arguments.rejectOptions(except: [
           "--origin", "--room", "--device", "--tapewriter", "--ffmpeg", "--root",
+          "--retained-archive-recovery",
         ])
         guard let origin = URL(string: try arguments.require("--origin")) else {
           throw CLIError("--origin must be an HTTP(S) URL")
@@ -77,7 +78,11 @@ private enum RoomRecorderCLI {
           tapewriterPath: try absolutePath(arguments.require("--tapewriter"), name: "--tapewriter"),
           ffmpegPath: try absolutePath(arguments.require("--ffmpeg"), name: "--ffmpeg"),
           installID: "install_\(UUID().uuidString.prefix(12).lowercased())",
-          tabID: "native_\(UUID().uuidString.prefix(12).lowercased())"
+          tabID: "native_\(UUID().uuidString.prefix(12).lowercased())",
+          retainedArchiveRecoveryEnabled: try strictBoolean(
+            arguments.options["--retained-archive-recovery"] ?? "false",
+            name: "--retained-archive-recovery"
+          )
         )
         try RoomPersistence(root: root).saveConfiguration(configuration)
         print("Configured \(configuration.roomSlug) at \(root.path)")
@@ -98,7 +103,17 @@ private enum RoomRecorderCLI {
 
       case "run":
         try arguments.rejectOptions(except: ["--root"])
-        try await RoomEngine.load(rootURL: root).run()
+        let configuration = try RoomPersistence(root: root).loadConfiguration()
+        let bench = BenchClient(configuration: configuration)
+        let recovery: (any RoomRetainedArchiveRecovering)? =
+          configuration.retainedArchiveRecoveryEnabled
+          ? try RetainedArchiveRecovery(rootURL: root, wire: bench)
+          : nil
+        try await RoomEngine.load(
+          rootURL: root,
+          remoteFactory: { _ in bench },
+          retainedArchiveRecovery: recovery
+        ).run()
 
       case "status":
         try arguments.rejectOptions(except: ["--root"])
@@ -178,5 +193,13 @@ private enum RoomRecorderCLI {
   private static func absolutePath(_ value: String, name: String) throws -> String {
     guard value.hasPrefix("/") else { throw CLIError("\(name) must be an absolute path") }
     return URL(fileURLWithPath: value).standardizedFileURL.path
+  }
+
+  private static func strictBoolean(_ value: String, name: String) throws -> Bool {
+    switch value {
+    case "true": return true
+    case "false": return false
+    default: throw CLIError("\(name) must be true or false")
+    }
   }
 }

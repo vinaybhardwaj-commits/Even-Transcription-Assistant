@@ -721,6 +721,7 @@ import Testing
       firstLogicalUnit += UInt64(count)
     }
     try encoded.write(to: url)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
   }
 
   private func temporaryDirectory(_ label: String) throws -> URL {

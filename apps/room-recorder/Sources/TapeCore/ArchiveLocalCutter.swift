@@ -3,6 +3,7 @@ import Foundation
 
 public struct ArchiveLocalPiecePlan: Equatable, Sendable {
   public let chunkIndex: UInt32
+  public let fitSegment: UInt64
   public let sampleStart: UInt64
   public let sampleEnd: UInt64
   public let startMS: UInt64?
@@ -115,13 +116,14 @@ public enum ArchiveLocalCutter {
 
     var result: [ArchiveLocalPiecePlan] = []
     var chunkIndex = startingChunkIndex
-    for segment in segments {
+    for (fitSegment, segment) in segments.enumerated() {
       var cursor = segment.start
       while segment.end - cursor >= fullPieceSamples {
         let end = cursor + fullPieceSamples
         result.append(
           try makePlan(
             chunkIndex: &chunkIndex,
+            fitSegment: UInt64(fitSegment),
             start: cursor,
             end: end,
             anchors: segment.anchors,
@@ -134,6 +136,7 @@ public enum ArchiveLocalCutter {
         result.append(
           try makePlan(
             chunkIndex: &chunkIndex,
+            fitSegment: UInt64(fitSegment),
             start: cursor,
             end: segment.end,
             anchors: segment.anchors,
@@ -147,6 +150,7 @@ public enum ArchiveLocalCutter {
 
   private static func makePlan(
     chunkIndex: inout UInt64,
+    fitSegment: UInt64,
     start: UInt64,
     end: UInt64,
     anchors: [CutterAnchor],
@@ -182,6 +186,7 @@ public enum ArchiveLocalCutter {
     let endMS = projectedMS(sample: end, anchors: anchors, fallback: fallback, fit: fit)
     let plan = ArchiveLocalPiecePlan(
       chunkIndex: UInt32(chunkIndex),
+      fitSegment: fitSegment,
       sampleStart: start,
       sampleEnd: end,
       startMS: startMS,

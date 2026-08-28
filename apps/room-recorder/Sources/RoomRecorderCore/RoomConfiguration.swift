@@ -20,6 +20,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   public var etaRoomSession: String?
   public var installID: String?
   public var tabID: String?
+  public var retainedArchiveRecoveryEnabled: Bool
 
   enum CodingKeys: String, CodingKey {
     case origin
@@ -30,6 +31,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     case etaRoomSession = "eta_room_session"
     case installID = "install_id"
     case tabID = "tab_id"
+    case retainedArchiveRecoveryEnabled = "retained_archive_recovery_enabled"
   }
 
   public init(
@@ -40,7 +42,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     ffmpegPath: String,
     etaRoomSession: String? = nil,
     installID: String? = nil,
-    tabID: String? = nil
+    tabID: String? = nil,
+    retainedArchiveRecoveryEnabled: Bool = false
   ) throws {
     guard
       let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
@@ -89,6 +92,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     self.etaRoomSession = etaRoomSession
     self.installID = installID
     self.tabID = tabID
+    self.retainedArchiveRecoveryEnabled = retainedArchiveRecoveryEnabled
   }
 
   public init(from decoder: Decoder) throws {
@@ -101,7 +105,9 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       ffmpegPath: values.decode(String.self, forKey: .ffmpegPath),
       etaRoomSession: values.decodeIfPresent(String.self, forKey: .etaRoomSession),
       installID: values.decodeIfPresent(String.self, forKey: .installID),
-      tabID: values.decodeIfPresent(String.self, forKey: .tabID)
+      tabID: values.decodeIfPresent(String.self, forKey: .tabID),
+      retainedArchiveRecoveryEnabled:
+        values.decodeIfPresent(Bool.self, forKey: .retainedArchiveRecoveryEnabled) ?? false
     )
   }
 }

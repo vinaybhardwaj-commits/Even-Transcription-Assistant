@@ -469,7 +469,11 @@ public enum ArchiveJournalPayloadCodec {
   }
 
   public static func validateRecord(_ record: ArchiveDerivedRecord) throws {
-    guard record.header.logicalUnitCount == 1 else {
+    guard record.header.purpose == .journal, record.header.logicalUnitCount == 1,
+      UInt64(record.header.plaintextByteCount) == UInt64(record.plaintext.count),
+      record.header.recordSequence > 0,
+      record.header.firstLogicalUnit == record.header.recordSequence - 1
+    else {
       throw ArchiveJournalPayloadError.invalidEnvelopeRange
     }
     _ = try decode(record.plaintext)

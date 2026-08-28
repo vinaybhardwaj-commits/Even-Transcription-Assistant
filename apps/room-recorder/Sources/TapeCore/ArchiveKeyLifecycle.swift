@@ -26,6 +26,11 @@ public struct ArchiveOpenedLane: Sendable {
   public let keywrap: ArchiveKeywrapInspection
 }
 
+public struct ArchiveOpenedLaneSnapshot: Sendable {
+  public let snapshot: ArchiveLaneStore.AuthenticatedSnapshot
+  public let keywrap: ArchiveKeywrapInspection
+}
+
 #if ETA_KEYWRAP_PROBE
   public enum ArchiveKeywrapProbeOpenMode: Sendable {
     case provision
@@ -522,6 +527,58 @@ public final class ArchiveKeyLifecycle: @unchecked Sendable {
       context: context,
       initialSamplePosition: initialSamplePosition
     ).store
+  }
+
+  public func openExistingLaneSnapshot(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
+  ) throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try openExistingLaneSnapshotWithInspection(
+      keywrapURL: keywrapURL,
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      context: context,
+      initialSamplePosition: initialSamplePosition
+    ).snapshot
+  }
+
+  public func openExistingLaneSnapshotWithInspection(
+    keywrapURL: URL,
+    tapeURL: URL,
+    indexURL: URL,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
+  ) throws -> ArchiveOpenedLaneSnapshot {
+    do {
+      let result = try openLaneStoreDetailedResult(
+        keywrapURL: keywrapURL,
+        tapeURL: tapeURL,
+        indexURL: indexURL,
+        context: context,
+        initialSamplePosition: initialSamplePosition,
+        policy: .requireCompleteArchive
+      )
+      defer { result.store.close() }
+      return ArchiveOpenedLaneSnapshot(
+        snapshot: try result.store.authenticatedSnapshot(),
+        keywrap: result.keywrap
+      )
+    } catch let error as ArchiveKeyLifecycleError {
+      throw error
+    } catch let failure as ArchiveKeyLifecycleFailure {
+      switch failure {
+      case .algorithmUnavailable, .accessControlCreationFailed, .keyQueryFailed,
+        .keyCreationFailed:
+        throw ArchiveKeyLifecycleError.secureHardwareUnavailable
+      default:
+        throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+      }
+    } catch {
+      throw ArchiveKeyLifecycleError.archiveKeyUnavailable
+    }
   }
 
   private func openLaneStoreResult(

@@ -1,0 +1,29 @@
+{
+  "ffmpeg": {
+    "archive": "ffmpeg-9.0.1.tar.xz",
+    "archive_bytes": 12036420,
+    "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
+    "signature": "ffmpeg-9.0.1.tar.xz.asc",
+    "signature_sha256": "b613a00005232a1245ace7080088781ac23a916119d3e5b0d6c042368eee0177",
+    "signature_url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz.asc",
+    "signing_key": "ffmpeg-release-signing-key.asc",
+    "signing_key_fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+    "signing_key_sha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+    "signing_key_url": "https://ffmpeg.org/ffmpeg-devel.asc",
+    "tag": "n9.0.1",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+    "version": "9.0.1"
+  },
+  "libopus": {
+    "archive": "opus-1.6.1.tar.gz",
+    "archive_bytes": 10472813,
+    "official_checksum_url": "https://downloads.xiph.org/releases/opus/SHA256SUMS.txt",
+    "release_page_url": "https://opus-codec.org/release/stable/2026/01/14/libopus-1_6_1.html",
+    "sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+    "signature": null,
+    "signature_status": "upstream_does_not_publish_detached_signature_for_this_archive",
+    "url": "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz",
+    "version": "1.6.1"
+  },
+  "schema_version": 1
+}

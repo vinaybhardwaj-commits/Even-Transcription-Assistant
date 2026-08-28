@@ -315,6 +315,11 @@ public struct ChunkRegistrationResponse: Codable, Equatable, Sendable {
   }
 }
 
+public enum BenchHeadResult: Equatable, Sendable {
+  case missing
+  case present(contentLength: Int64?)
+}
+
 public enum ImmutablePieceUploadResult: Equatable, Sendable {
   case alreadyVerified
   case registered(response: ChunkRegistrationResponse, uploaded: Bool)
@@ -529,7 +534,9 @@ public actor BenchClient {
     }
 
     var uploaded = true
-    if let existingSize = try? await probeHead(url: headURL), existingSize == piece.sizeBytes {
+    if case .present(let existingSize) = try? await probeHead(url: headURL),
+      existingSize == piece.sizeBytes
+    {
       uploaded = false
     } else {
       try await put(bytes: bytes, to: putURL, contentType: piece.contentType)
@@ -626,14 +633,33 @@ public actor BenchClient {
     return (data, http)
   }
 
-  private func probeHead(url: URL) async throws -> Int64? {
+  public func probeHead(url: URL) async throws -> BenchHeadResult {
     var request = URLRequest(url: url)
     request.httpMethod = "HEAD"
-    let (_, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-      return nil
+    let data: Data
+    let response: URLResponse
+    do {
+      (data, response) = try await session.data(for: request)
+    } catch {
+      throw BenchClientError.transport(
+        message: String(describing: error).prefix(500).description,
+        retention: .retainLocalPiece
+      )
     }
-    return Self.contentLength(http)
+    guard let http = response as? HTTPURLResponse else {
+      throw BenchClientError.invalidResponse(retention: .retainLocalPiece)
+    }
+    if http.statusCode == 404 { return .missing }
+    guard (200..<300).contains(http.statusCode) else {
+      throw BenchClientError.http(
+        BenchHTTPError(
+          statusCode: http.statusCode,
+          body: String(decoding: data.prefix(Self.maximumErrorBodyBytes), as: UTF8.self),
+          retention: .retainLocalPiece
+        )
+      )
+    }
+    return .present(contentLength: Self.contentLength(http))
   }
 
   private static func contentLength(_ response: HTTPURLResponse) -> Int64? {

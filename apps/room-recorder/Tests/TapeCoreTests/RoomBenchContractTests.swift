@@ -1,6 +1,7 @@
 #if canImport(RoomRecorderCore)
   import Foundation
   import RoomRecorderCore
+  import TapeCore
   import Testing
 
   @Suite(.serialized) struct RoomBenchContractTests {
@@ -31,6 +32,29 @@
       let configJSON = try String(contentsOf: persistence.configurationURL, encoding: .utf8)
       #expect(!configJSON.contains("\"pin\""))
       #expect(configJSON.contains("\"eta_room_session\""))
+    }
+
+    @Test func retainedArchiveRecoveryFlagIsPersistedAndDefaultsOffForExistingConfig() throws {
+      let legacy = Data(
+        #"{"device_uid":"device-stable-1","ffmpeg_path":"/opt/ffmpeg","origin":"https://eta.test/","room_slug":"home-office","tapewriter_path":"/usr/bin/tapewriter"}"#
+          .utf8
+      )
+      let decoded = try JSONDecoder().decode(RoomConfiguration.self, from: legacy)
+      #expect(!decoded.retainedArchiveRecoveryEnabled)
+
+      let enabled = try RoomConfiguration(
+        origin: #require(URL(string: "https://eta.test")),
+        roomSlug: "home-office",
+        deviceUID: "device-stable-1",
+        tapewriterPath: "/usr/bin/tapewriter",
+        ffmpegPath: "/opt/ffmpeg",
+        retainedArchiveRecoveryEnabled: true
+      )
+      let roundTrip = try JSONDecoder().decode(
+        RoomConfiguration.self,
+        from: JSONEncoder().encode(enabled)
+      )
+      #expect(roundTrip.retainedArchiveRecoveryEnabled)
     }
 
     @Test func loginPathBodyCookieAndActiveLookup() async throws {
@@ -229,6 +253,100 @@
           "HEAD /piece-head",
           "PUT /piece",
           "HEAD /piece-head",
+          "POST /api/bench/chunks",
+        ])
+    }
+
+    @Test func archiveDeliveryAdapterPreservesExistingWireFields() async throws {
+      let client = try makeClient()
+      let piece = ArchiveDeliveryPiece(
+        sessionID: "bs_a",
+        index: 7,
+        contentType: "audio/webm",
+        startedAtMS: 1_000,
+        endedAtMS: 1_006,
+        durationMS: 6,
+        sizeBytes: 3,
+        gapBeforeMS: 27,
+        peakLevel: Double(300) / 32_767,
+        averageLevel: Double(100) / 32_767,
+        source: .backup
+      )
+      var methodsAndPaths: [String] = []
+      ContractURLProtocol.handler = { request in
+        methodsAndPaths.append("\(request.httpMethod ?? "") \(request.url?.path ?? "")")
+        switch (request.httpMethod, request.url?.host, request.url?.path) {
+        case ("POST", _, "/api/bench/upload-url"):
+          let body = try jsonObject(request)
+          #expect(body["session_id"] as? String == "bs_a")
+          #expect(body["idx"] as? Int == 7)
+          #expect(body["content_type"] as? String == "audio/webm")
+          #expect(body["source"] as? String == "backup")
+          return stub(
+            request,
+            body:
+              #"{"url":"https://r2.test/piece","head_url":"https://r2.test/piece-head","key":"bench/piece.webm","expires_in_seconds":600,"method":"PUT"}"#
+          )
+        case ("HEAD", "r2.test", "/piece-head"):
+          return stub(request, headers: ["Content-Length": "3"])
+        case ("PUT", "r2.test", "/piece"):
+          #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/webm")
+          #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+          #expect(try requestBody(request) == Data([1, 2, 3]))
+          return stub(request)
+        case ("POST", _, "/api/bench/chunks"):
+          let body = try jsonObject(request)
+          #expect(body["session_id"] as? String == "bs_a")
+          #expect(body["idx"] as? Int == 7)
+          #expect(body["content_type"] as? String == "audio/webm")
+          #expect(body["started_at"] as? String == "1970-01-01T00:00:01.000Z")
+          #expect(body["ended_at"] as? String == "1970-01-01T00:00:01.006Z")
+          #expect(body["duration_ms"] as? Int == 6)
+          #expect(body["size_bytes"] as? Int == 3)
+          #expect(body["gap_before_ms"] as? Int == 27)
+          #expect(body["source"] as? String == "backup")
+          #expect(
+            abs((body["peak_level"] as? Double ?? 0) - Double(300) / 32_767)
+              < Double.ulpOfOne)
+          #expect(
+            abs((body["avg_level"] as? Double ?? 0) - Double(100) / 32_767)
+              < Double.ulpOfOne)
+          return stub(
+            request,
+            body:
+              #"{"ok":true,"key":"bench/piece.webm","upload_state":"verified","ended_disagrees":"ended_disagrees"}"#
+          )
+        default:
+          Issue.record("unexpected request \(request)")
+          return stub(request, status: 404)
+        }
+      }
+
+      let prepared = try await client.prepareDelivery(for: piece)
+      guard case .upload(let putURL, let headURL, let key) = prepared else {
+        Issue.record("expected upload URLs")
+        return
+      }
+      #expect(key == "bench/piece.webm")
+      #expect(try await client.probeDeliveryObject(at: headURL) == .present(byteCount: 3))
+      try await client.putDeliveryObject(
+        chunks: [Data([1]), Data([2, 3])],
+        to: putURL,
+        contentType: "audio/webm"
+      )
+      #expect(
+        try await client.registerDelivery(piece)
+          == ArchiveDeliveryRegistration(
+            ok: true,
+            key: "bench/piece.webm",
+            uploadState: "verified",
+            endedDisagrees: "ended_disagrees"
+          ))
+      #expect(
+        methodsAndPaths == [
+          "POST /api/bench/upload-url",
+          "HEAD /piece-head",
+          "PUT /piece",
           "POST /api/bench/chunks",
         ])
     }

@@ -24,6 +24,9 @@ public enum ArchiveDerivedPersistenceError: Error, Equatable, Sendable {
   case invalidSpoolLogicalRange(expected: UInt32, actual: UInt32)
   case openFailed(path: String, errno: Int32)
   case notRegularFile
+  case hardLinkedFile(UInt64)
+  case existingModeMismatch(UInt16)
+  case changeModeFailed(errno: Int32)
   case statFailed(errno: Int32)
   case fileTooLarge(Int64)
   case readFailed(offset: UInt64, errno: Int32)
@@ -67,6 +70,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
   private let partialHeaderValidator: PartialHeaderValidator
   private let sealer: ArchivePurposeSealer
   private var fileDescriptor: Int32?
+  private var directoryFileDescriptor: Int32?
   private var records: [ArchiveDerivedRecord]
   private var needsDirectorySync: Bool
   private var incompleteTrailingByteCount: UInt64
@@ -86,6 +90,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     partialHeaderValidator: @escaping PartialHeaderValidator,
     sealer: ArchivePurposeSealer,
     fileDescriptor: Int32,
+    directoryFileDescriptor: Int32?,
     records: [ArchiveDerivedRecord],
     incompleteTrailingByteCount: UInt64,
     createdIdentity: DerivedFileIdentity?
@@ -101,6 +106,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     self.partialHeaderValidator = partialHeaderValidator
     self.sealer = sealer
     self.fileDescriptor = fileDescriptor
+    self.directoryFileDescriptor = directoryFileDescriptor
     self.records = records
     self.incompleteTrailingByteCount = incompleteTrailingByteCount
     self.createdIdentity = createdIdentity
@@ -143,6 +149,32 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       headerValidator: headerValidator,
       partialHeaderValidator: partialHeaderValidator,
       allowExpectedIncompletePayloadRepair: allowExpectedIncompletePayloadRepair
+    )
+  }
+
+  static func inspect(
+    fileDescriptor: Int32,
+    purpose: ArchiveRecordPurpose,
+    rootKey: Data,
+    context: ArchiveContext,
+    validator: @escaping PayloadValidator = { _ in },
+    headerValidator: @escaping HeaderValidator = { _, _ in },
+    partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
+    initialLogicalUnit: UInt64 = 0
+  ) throws -> ArchiveDerivedScanResult {
+    try validate(purpose: purpose, rootKey: rootKey, context: context)
+    let contextHash = try context.sha256()
+    return try scan(
+      fileDescriptor: fileDescriptor,
+      purpose: purpose,
+      rootKey: rootKey,
+      context: context,
+      contextHash: contextHash,
+      initialLogicalUnit: initialLogicalUnit,
+      validator: validator,
+      headerValidator: headerValidator,
+      partialHeaderValidator: partialHeaderValidator,
+      allowExpectedIncompletePayloadRepair: false
     )
   }
 
@@ -211,6 +243,7 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       partialHeaderValidator: partialHeaderValidator,
       sealer: sealer,
       fileDescriptor: fileDescriptor,
+      directoryFileDescriptor: nil,
       records: scan.records,
       incompleteTrailingByteCount: scan.incompleteTrailingByteCount,
       createdIdentity: createdIdentity
@@ -224,7 +257,182 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
         throw error
       }
     }
+    if !createdFile, !store.scanResult.records.isEmpty {
+      do {
+        try store.resynchronizeExistingFile()
+      } catch {
+        store.close()
+        throw error
+      }
+    }
     return store
+  }
+
+  static func createNew(
+    url: URL,
+    purpose: ArchiveRecordPurpose,
+    rootKey: Data,
+    context: ArchiveContext,
+    validator: @escaping PayloadValidator = { _ in },
+    headerValidator: @escaping HeaderValidator = { _, _ in },
+    partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
+    initialLogicalUnit: UInt64 = 0
+  ) throws -> ArchiveDerivedStore {
+    try validate(purpose: purpose, rootKey: rootKey, context: context)
+    let contextHash = try context.sha256()
+    let flags =
+      O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_EXLOCK
+    let fileDescriptor = derivedOpen(
+      path: url.path,
+      flags: flags,
+      permissions: S_IRUSR | S_IWUSR
+    )
+    guard fileDescriptor >= 0 else {
+      throw ArchiveDerivedPersistenceError.openFailed(path: url.path, errno: errno)
+    }
+    do {
+      var modeResult: Int32
+      repeat {
+        modeResult = fchmod(fileDescriptor, mode_t(0o600))
+      } while modeResult != 0 && errno == EINTR
+      guard modeResult == 0 else {
+        throw ArchiveDerivedPersistenceError.changeModeFailed(errno: errno)
+      }
+      let identity = try Self.identity(of: fileDescriptor)
+      _ = try scan(
+        fileDescriptor: fileDescriptor,
+        purpose: purpose,
+        rootKey: rootKey,
+        context: context,
+        contextHash: contextHash,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        allowExpectedIncompletePayloadRepair: false
+      )
+      let sealer = try ArchivePurposeSealer(
+        purpose: purpose,
+        rootKey: rootKey,
+        streamUUID: context.streamUUID
+      )
+      return ArchiveDerivedStore(
+        url: url,
+        purpose: purpose,
+        context: context,
+        contextHash: contextHash,
+        rootKey: rootKey,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        sealer: sealer,
+        fileDescriptor: fileDescriptor,
+        directoryFileDescriptor: nil,
+        records: [],
+        incompleteTrailingByteCount: 0,
+        createdIdentity: identity
+      )
+    } catch {
+      _ = Darwin.close(fileDescriptor)
+      throw error
+    }
+  }
+
+  static func createNew(
+    directoryFileDescriptor: Int32,
+    fileName: String,
+    url: URL,
+    purpose: ArchiveRecordPurpose,
+    rootKey: Data,
+    context: ArchiveContext,
+    validator: @escaping PayloadValidator = { _ in },
+    headerValidator: @escaping HeaderValidator = { _, _ in },
+    partialHeaderValidator: @escaping PartialHeaderValidator = { _, _ in },
+    initialLogicalUnit: UInt64 = 0
+  ) throws -> ArchiveDerivedStore {
+    try validate(purpose: purpose, rootKey: rootKey, context: context)
+    guard !fileName.isEmpty, !fileName.contains("/"), fileName != ".", fileName != "..",
+      url.lastPathComponent == fileName
+    else {
+      throw ArchiveDerivedPersistenceError.openFailed(path: url.path, errno: EINVAL)
+    }
+    var directoryStat = stat()
+    guard fstat(directoryFileDescriptor, &directoryStat) == 0,
+      directoryStat.st_mode & S_IFMT == S_IFDIR
+    else {
+      throw ArchiveDerivedPersistenceError.openFailed(
+        path: url.deletingLastPathComponent().path, errno: errno)
+    }
+    let contextHash = try context.sha256()
+    let flags =
+      O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_EXLOCK
+    var fileDescriptor: Int32
+    repeat {
+      fileDescriptor = fileName.withCString {
+        openat(directoryFileDescriptor, $0, flags, S_IRUSR | S_IWUSR)
+      }
+    } while fileDescriptor < 0 && errno == EINTR
+    guard fileDescriptor >= 0 else {
+      throw ArchiveDerivedPersistenceError.openFailed(path: url.path, errno: errno)
+    }
+    let retainedDirectory = fcntl(directoryFileDescriptor, F_DUPFD_CLOEXEC, 0)
+    guard retainedDirectory >= 0 else {
+      let duplicateErrno = errno
+      _ = Darwin.close(fileDescriptor)
+      throw ArchiveDerivedPersistenceError.openFailed(
+        path: url.deletingLastPathComponent().path,
+        errno: duplicateErrno
+      )
+    }
+    do {
+      var modeResult: Int32
+      repeat {
+        modeResult = fchmod(fileDescriptor, mode_t(0o600))
+      } while modeResult != 0 && errno == EINTR
+      guard modeResult == 0 else {
+        throw ArchiveDerivedPersistenceError.changeModeFailed(errno: errno)
+      }
+      let identity = try Self.identity(of: fileDescriptor)
+      _ = try scan(
+        fileDescriptor: fileDescriptor,
+        purpose: purpose,
+        rootKey: rootKey,
+        context: context,
+        contextHash: contextHash,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        allowExpectedIncompletePayloadRepair: false
+      )
+      let sealer = try ArchivePurposeSealer(
+        purpose: purpose,
+        rootKey: rootKey,
+        streamUUID: context.streamUUID
+      )
+      return ArchiveDerivedStore(
+        url: url,
+        purpose: purpose,
+        context: context,
+        contextHash: contextHash,
+        rootKey: rootKey,
+        initialLogicalUnit: initialLogicalUnit,
+        validator: validator,
+        headerValidator: headerValidator,
+        partialHeaderValidator: partialHeaderValidator,
+        sealer: sealer,
+        fileDescriptor: fileDescriptor,
+        directoryFileDescriptor: retainedDirectory,
+        records: [],
+        incompleteTrailingByteCount: 0,
+        createdIdentity: identity
+      )
+    } catch {
+      _ = Darwin.close(retainedDirectory)
+      _ = Darwin.close(fileDescriptor)
+      throw error
+    }
   }
 
   public var repairedTrailingByteCount: UInt64 {
@@ -250,6 +458,16 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       try Self.fullSync(fileDescriptor, offset: completeByteCount)
       repairedByteCount += incompleteTrailingByteCount
       incompleteTrailingByteCount = 0
+    }
+  }
+
+  private func resynchronizeExistingFile() throws {
+    try lock.withLock {
+      guard let fileDescriptor else { throw ArchiveDerivedPersistenceError.closed }
+      let completeByteCount = records.last?.encryptedEndOffset ?? 0
+      try Self.fullSync(fileDescriptor, offset: completeByteCount)
+      try Self.syncDirectory(url.deletingLastPathComponent())
+      needsDirectorySync = false
     }
   }
 
@@ -347,7 +565,12 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
         try Self.writeAll(fileDescriptor, data: encoded, startOffset: startOffset)
         try Self.fullSync(fileDescriptor, offset: endOffset)
         if needsDirectorySync {
-          try Self.syncDirectory(url.deletingLastPathComponent())
+          if let directoryFileDescriptor {
+            try Self.syncDirectory(
+              directoryFileDescriptor, path: url.deletingLastPathComponent().path)
+          } else {
+            try Self.syncDirectory(url.deletingLastPathComponent())
+          }
           needsDirectorySync = false
         }
       } catch {
@@ -361,9 +584,12 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
 
   public func close() {
     lock.withLock {
-      guard let fileDescriptor else { return }
+      let openFile = fileDescriptor
+      let openDirectory = directoryFileDescriptor
       self.fileDescriptor = nil
-      _ = Darwin.close(fileDescriptor)
+      directoryFileDescriptor = nil
+      if let openFile { _ = Darwin.close(openFile) }
+      if let openDirectory { _ = Darwin.close(openDirectory) }
     }
   }
 
@@ -544,6 +770,13 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
     }
     guard (fileStat.st_mode & S_IFMT) == S_IFREG else {
       throw ArchiveDerivedPersistenceError.notRegularFile
+    }
+    guard fileStat.st_nlink == 1 else {
+      throw ArchiveDerivedPersistenceError.hardLinkedFile(UInt64(fileStat.st_nlink))
+    }
+    let mode = fileStat.st_mode & mode_t(0o777)
+    guard mode == mode_t(0o600) else {
+      throw ArchiveDerivedPersistenceError.existingModeMismatch(UInt16(mode))
     }
     guard fileStat.st_size >= 0 else {
       throw ArchiveDerivedPersistenceError.fileTooLarge(fileStat.st_size)
@@ -854,6 +1087,14 @@ public final class ArchiveDerivedStore: @unchecked Sendable {
       if syncErrno == EINTR { continue }
       throw ArchiveDerivedPersistenceError.directorySyncFailed(
         path: directory.path, errno: syncErrno)
+    }
+  }
+
+  private static func syncDirectory(_ descriptor: Int32, path: String) throws {
+    while fcntl(descriptor, F_FULLFSYNC) != 0 {
+      let syncErrno = errno
+      if syncErrno == EINTR { continue }
+      throw ArchiveDerivedPersistenceError.directorySyncFailed(path: path, errno: syncErrno)
     }
   }
 }

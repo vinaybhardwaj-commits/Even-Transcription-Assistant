@@ -12,6 +12,8 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   case pendingUploads(Int)
   case handoverPending
   case sessionEndedByServer
+  case retainedArchiveRecoveryPending
+  case retainedArchiveRecoveryFailed(String)
   case invalidManifestMetadata
   case io(String)
 
@@ -27,6 +29,8 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
     case .pendingUploads(let count): return "\(count) piece(s) remain pending"
     case .handoverPending: return "browser_handover_pending"
     case .sessionEndedByServer: return "session_ended_by_server"
+    case .retainedArchiveRecoveryPending: return "archive_recovery_pending"
+    case .retainedArchiveRecoveryFailed(let reason): return reason
     case .invalidManifestMetadata: return "spool manifest metadata is invalid"
     case .io(let message): return message
     }
@@ -236,6 +240,7 @@ public actor RoomEngine {
   private let spool: RoomPieceSpool
   private let capturesURL: URL
   private let instanceLock: RoomEngineInstanceLock
+  private let retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
   private var phase: RoomEnginePhase = .ready
   private var sessionID: String?
   private var nextPieceIndex = 0
@@ -246,6 +251,8 @@ public actor RoomEngine {
   private var lastPieceEndedAt: Date?
   private var needsActiveReconciliation = false
   private let listenerTabID: String
+  private var retainedArchiveRecoveryTask: Task<Void, Never>?
+  private var retainedArchiveRecoveryState: RoomRetainedArchiveRecoveryState?
 
   public static func load(
     rootURL: URL = defaultRootURL,
@@ -253,7 +260,8 @@ public actor RoomEngine {
       BenchClient(configuration: $0)
     },
     captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
-    pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner()
+    pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
+    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
     let configuration = try persistence.loadConfiguration()
@@ -271,7 +279,8 @@ public actor RoomEngine {
       pieceRunner: pieceRunner,
       spool: spool,
       capturesURL: captures,
-      instanceLock: lock
+      instanceLock: lock,
+      retainedArchiveRecovery: retainedArchiveRecovery
     )
   }
 
@@ -283,7 +292,8 @@ public actor RoomEngine {
     pieceRunner: any RoomPieceProcessRunning,
     spool: RoomPieceSpool,
     capturesURL: URL,
-    instanceLock: RoomEngineInstanceLock
+    instanceLock: RoomEngineInstanceLock,
+    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
   ) {
     self.persistence = persistence
     self.configuration = configuration
@@ -293,6 +303,7 @@ public actor RoomEngine {
     self.spool = spool
     self.capturesURL = capturesURL
     self.instanceLock = instanceLock
+    self.retainedArchiveRecovery = retainedArchiveRecovery
     listenerTabID =
       configuration.tabID ?? configuration.installID
       ?? "native_\(UUID().uuidString.prefix(8).lowercased())"
@@ -306,22 +317,29 @@ public actor RoomEngine {
       lastError = bounded(error)
       try saveStatus(preferred: .offline)
     }
+    tryStartRetainedArchiveRecovery()
 
-    do {
-      let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
-      if try spool.pending().isEmpty {
-        try await adopt(active)
-      } else {
-        transition(to: active.session?.id)
-        nextPieceIndex = active.nextIndex?.primary ?? 0
-        phase = .failed
+    if await refreshRetainedArchiveRecovery() {
+      do {
+        let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
+        if try spool.pending().isEmpty {
+          try await adopt(active)
+        } else {
+          transition(to: active.session?.id)
+          nextPieceIndex = active.nextIndex?.primary ?? 0
+          phase = .failed
+          needsActiveReconciliation = true
+          try saveStatus()
+        }
+      } catch {
         needsActiveReconciliation = true
-        try saveStatus()
+        lastError = bounded(error)
+        try saveStatus(preferred: .offline)
       }
-    } catch {
+    } else {
       needsActiveReconciliation = true
-      lastError = bounded(error)
-      try saveStatus(preferred: .offline)
+      phase = .failed
+      try saveStatus()
     }
 
     var backoffNanoseconds: UInt64 = 5_000_000_000
@@ -351,7 +369,9 @@ public actor RoomEngine {
         }
       }
 
-      if needsActiveReconciliation {
+      tryStartRetainedArchiveRecovery()
+      let retainedArchiveReady = await refreshRetainedArchiveRecovery()
+      if needsActiveReconciliation && retainedArchiveReady {
         do {
           let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
           try await adopt(active)
@@ -373,9 +393,10 @@ public actor RoomEngine {
         previousPollAt = response.now ?? previousPollAt
         if response.superseded {
           await stopWithoutEnding()
+          await stopRetainedArchiveRecovery()
           break
         }
-        lastError = nil
+        if retainedArchiveReady { lastError = nil }
         for command in response.commands {
           await handle(command)
         }
@@ -394,8 +415,10 @@ public actor RoomEngine {
 
     if Task.isCancelled {
       await stopWithoutEnding()
+      await stopRetainedArchiveRecovery()
       return
     }
+    await stopRetainedArchiveRecovery()
     while phase == .superseded && !Task.isCancelled {
       try await Task.sleep(nanoseconds: 3_600_000_000_000)
     }
@@ -403,6 +426,52 @@ public actor RoomEngine {
 
   public func markConsult(at: Date = Date()) async throws -> ConsultMarkResponse {
     try await remote.markConsult(sessionID: sessionID, at: Self.iso8601(at))
+  }
+
+  private func tryStartRetainedArchiveRecovery() {
+    guard retainedArchiveRecoveryTask == nil, let retainedArchiveRecovery else { return }
+    guard (try? spool.pending().isEmpty) == true else { return }
+    retainedArchiveRecoveryTask = Task { await retainedArchiveRecovery.run() }
+  }
+
+  private func stopRetainedArchiveRecovery() async {
+    guard let task = retainedArchiveRecoveryTask else { return }
+    task.cancel()
+    await task.value
+    retainedArchiveRecoveryTask = nil
+  }
+
+  private func refreshRetainedArchiveRecovery() async -> Bool {
+    guard let retainedArchiveRecovery else { return true }
+    let state = await retainedArchiveRecovery.state()
+    if state != retainedArchiveRecoveryState {
+      retainedArchiveRecoveryState = state
+      if state == .complete { needsActiveReconciliation = true }
+    }
+    switch state {
+    case .complete:
+      return true
+    case .pending:
+      phase = .failed
+      lastError = RoomEngineError.retainedArchiveRecoveryPending.localizedDescription
+      return false
+    case .failed(let reason):
+      phase = .failed
+      lastError = RoomEngineError.retainedArchiveRecoveryFailed(reason).localizedDescription
+      return false
+    }
+  }
+
+  private func requireRetainedArchiveReady() async throws {
+    guard let retainedArchiveRecovery else { return }
+    switch await retainedArchiveRecovery.state() {
+    case .complete:
+      return
+    case .pending:
+      throw RoomEngineError.retainedArchiveRecoveryPending
+    case .failed(let reason):
+      throw RoomEngineError.retainedArchiveRecoveryFailed(reason)
+    }
   }
 
   public static func markConsult(rootURL: URL = defaultRootURL, at: Date = Date()) async throws
@@ -511,6 +580,7 @@ public actor RoomEngine {
   }
 
   private func beginOrResume() async throws {
+    try await requireRetainedArchiveReady()
     _ = try await drainPending()
     let pending = try spool.pending().count
     guard pending == 0 else { throw RoomEngineError.pendingUploads(pending) }
@@ -546,6 +616,7 @@ public actor RoomEngine {
   }
 
   private func resume() async throws {
+    try await requireRetainedArchiveReady()
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
     _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
     do {

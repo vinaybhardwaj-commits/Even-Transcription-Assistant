@@ -269,6 +269,22 @@ with no gap, overlap or unreserved range, and every control/end transition is te
 reservation is verified” is insufficient and an empty reservation set is never deletion evidence.
 Time elapsed alone cannot delete a day with unfinished or ambiguous work.
 
+Retained production lane discovery uses one builder-owned, versioned layout beneath the recorder root:
+`archive-v1/<YYYY-MM-DD>/<primary|backup>/`. Each lane has fixed names: `lane.json`, `keywrap.eak`,
+`lane.tape`, `lane.index`, `lane.journal`, `lane.level`, `lane.manifest` and `spool/`; journal, level and
+manifest are absent until their durable stage creates them. `lane.json` is
+canonical JSON carrying only format version, the complete nonsecret archive context, initial
+session-global sample position and keywrap SHA-256. It carries no session, credential or root key and
+is candidate metadata, never authentication: discovery requires the descriptor, keywrap, tape and
+index, validates every optional named artifact that is present, unwraps the existing keywrap without
+provisioning, verifies its stream/context/digest against `lane.json`, then authenticates tape/index and
+any encrypted journal before trusting a session or range. Missing,
+duplicate, noncanonical, substituted or mismatched descriptors fail closed and create nothing.
+The retained-delivery startup barrier is persisted but defaults off. Enabling it drains authenticated
+retained delivery work before session adoption or capture; reserved or encoded work that cannot yet be
+resumed fails closed. With it disabled, no catalog scan, key access, recovery task or extra request is
+added to the accepted recorder path.
+
 ## 5. Clock fit and uncertainty
 
 Fit logical sample position against monotonic nanoseconds by least squares inside one uninterrupted
@@ -335,10 +351,15 @@ Candidate configuration:
 --disable-gpl --disable-nonfree --disable-version3
 --disable-everything --enable-ffmpeg
 --enable-protocol=file --enable-protocol=pipe
---enable-demuxer=s16le --enable-decoder=pcm_s16le
+--enable-demuxer=pcm_s16le --enable-decoder=pcm_s16le
 --enable-libopus --enable-encoder=libopus --enable-muxer=webm
 --enable-pthreads
 ```
+
+Implementation verification on 27 August corrected the raw-demuxer component name from `s16le` to
+`pcm_s16le`; `s16le` remains the unchanged CLI format passed to `-f`. FFmpeg 9.0.1 otherwise warns
+that the former component name matches nothing and produces a binary unable to open the required raw
+PCM input.
 
 The artifact must be thin arm64, use only Apple system dynamic libraries, contain no GPL/nonfree,
 network, capture, video or unrelated codec surface, and bundle FFmpeg LGPL-2.1-or-later plus libopus
