@@ -1,12 +1,32 @@
 # Even Scribe Room Recorder - engineering state of play
 
-**Date:** 28 August 2026
+**Date:** 28 August 2026 · **updated 29 August 2026 for engineering handover**
 **Audience:** engineering, product and operations
-**Repository:** `EvenScribe`
-**Branch:** `feat/room-recorder`
+**Repository:** https://github.com/vinaybhardwaj-commits/Even-Transcription-Assistant
+**Branch:** `feat/room-recorder` — https://github.com/vinaybhardwaj-commits/Even-Transcription-Assistant/tree/feat/room-recorder
 **Committed baseline:** `33e9359` (`Add retained archive delivery recovery`)
 **Current phase:** App Build B, headless native engine
 **Overall verdict:** substantial foundations, incomplete product integration, not production-ready
+
+## 29 August handover update
+
+The branch is published. Clone the repository above and check out `feat/room-recorder`.
+
+- **Remote tip:** `f8726fe` — a **work-in-progress snapshot committed 29 August for this handover.
+  It is not accepted Build B evidence.** The last accepted checkpoint is `5befcf1`
+  (`Build resident encrypted capture foundation`, 28 August). Everything between them is the
+  28 August working tree, committed so engineering can inspect it.
+- **Body of this document:** written 28 August against baseline `33e9359`. The completion log
+  (`ETA-ROOM-RECORDER-BUILD-B-COMPLETION-27-AUG-2026.md`) carries the sections that landed after it.
+- **Live status, verified 29 August through the operator door:** the unsigned development build
+  runs on the Home Office Mini as the LaunchAgent, polling and listening. It recorded a short
+  session on 29 August; both pieces verified by the production server; the room-day opened itself
+  with zero consult marks (D39); no spare lane, no backup pieces.
+- **Deployment caveats for OPD test installs:** the build is unsigned — each Mac needs a one-time
+  Gatekeeper approval and one microphone permission click, and both reset with every new binary
+  until the signing identity lands at B4. There is no room screen (Build C). What is testable is
+  the headless engine: tape, uploads, remote commands.
+- Raw audio evidence stays on the Home Office Mini by design; it is not in Git.
 
 ## Executive summary
 

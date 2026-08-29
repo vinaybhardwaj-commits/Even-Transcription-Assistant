@@ -1,9 +1,11 @@
 # Even Scribe Room Recorder - revised build and completion plan
 
-**Date:** 28 August 2026
+**Date:** 28 August 2026 · **updated 29 August 2026: branch published for engineering handover**
 **Status:** current planning baseline; V directed execution to continue on 28 August 2026
 **Scope:** Build B through clinic-ready browser replacement, with the Phase 4 path shown separately
-**Committed code baseline:** `33e9359` on `feat/room-recorder`
+**Repository:** https://github.com/vinaybhardwaj-commits/Even-Transcription-Assistant
+**Branch:** `feat/room-recorder` — https://github.com/vinaybhardwaj-commits/Even-Transcription-Assistant/tree/feat/room-recorder
+**Committed code baseline:** `33e9359` on `feat/room-recorder`; remote tip `f8726fe` (29 August WIP handover snapshot, not accepted evidence; last accepted checkpoint `5befcf1`)
 **Current execution authority:** `ETA-ROOM-RECORDER-BUILD-B-COMPLETION-27-AUG-2026.md`
 
 ## 1. Why this reset is necessary
