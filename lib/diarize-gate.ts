@@ -61,6 +61,31 @@ export const DIARIZE_QUEUE_WAIT_MS = (): number =>
 const POLL_MIN_MS = 400;
 const POLL_MAX_MS = 1_200;
 
+/**
+ * The label a room-window caller puts on the lease.
+ *
+ * THE QUEUE IS ALREADY SHARED, AND THAT IS THE POINT. `DIARIZE_SLOT` is a single global key, not
+ * one slot per subject, so a room window and an encounter contend for the SAME lease by
+ * construction — no mechanism changes to admit the room path, only a label so the holder is
+ * legible in `readDiarizeSlot()` and in the logs. A per-subject slot would have been the bug: two
+ * callers would each hold "their own" lease and both reach the Mini, which serialises anyway and
+ * would charge the first one's runtime to the second's budget.
+ *
+ * The prefix is a NAME, not a table reference: this module stays free of schema vocabulary so it
+ * remains readable as pure admission control.
+ */
+export const ROOM_DIARIZE_LABEL_PREFIX = "room";
+
+/** PURE — the lease label for a room-window diarize call. */
+export function roomDiarizeLabel(windowId: string): string {
+  return `${ROOM_DIARIZE_LABEL_PREFIX}:${windowId}`;
+}
+
+/** PURE — did this lease belong to a room-window caller? For operator visibility. */
+export function isRoomDiarizeLabel(holder: string | null | undefined): boolean {
+  return typeof holder === "string" && holder.startsWith(`${ROOM_DIARIZE_LABEL_PREFIX}:`);
+}
+
 export type SlotHold = {
   holder: string;
   /** Milliseconds spent waiting for the slot. NOT charged against the dispatch timeout. */

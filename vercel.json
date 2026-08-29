@@ -16,6 +16,10 @@
     {
       "path": "/api/admin/measure-windows",
       "schedule": "30 20 * * *"
+    },
+    {
+      "path": "/api/admin/diarize-windows",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
