@@ -6,6 +6,7 @@ import Synchronization
 import Testing
 
 @testable import RoomRecorderCore
+@testable import TapeCapture
 @testable import TapeCore
 
 @Suite(.serialized) struct ArchiveKeyLifecycleP1Tests {
@@ -964,6 +965,740 @@ import Testing
     }
   }
 
+  @Test func primaryResidentOwnerCapturesReservesAndVerifiesOneSyntheticLane() async throws {
+    let fixture = try KeyFixture("primary-owner")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    var dailyStream = Data(repeating: 0x43, count: 16)
+    dailyStream[6] = (dailyStream[6] & 0x0F) | 0x40
+    dailyStream[8] = (dailyStream[8] & 0x3F) | 0x80
+    let random = OrderedRandom([
+      keyUUID(0x42),
+      Data(repeating: 0x40, count: 32),
+      Data(repeating: 0xA4, count: 16),
+      dailyStream,
+      root,
+      Data(repeating: 0xA5, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let journal = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: ArchiveISTDay(containing: Date(timeIntervalSince1970: 1_777_579_200)))
+    let calls = KeyOwnerEncoderCalls()
+    let wire = KeyOwnerDeliveryWire(endedDisagrees: "ended_disagrees")
+    let owner = try PrimaryResidentArchiveCaptureOwner(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      stableDeviceUID: "synthetic-device-1",
+      wire: wire,
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: KeyOwnerSpoolEncoder(calls: calls),
+        encoderProvenanceID: "ffmpeg-owner-test"),
+      keyLifecycle: lifecycle,
+      captureFactory: { _, store, _ in KeyOwnerCapture(store: store) },
+      now: { Date(timeIntervalSince1970: 1_777_579_200) })
+    owner.installRolloverHandlers(
+      pendingPlans: [],
+      captureBindings: [],
+      persistCaptureBinding: { try journal.persistCaptureSessionBinding($0) },
+      persistPreparation: { try journal.persistRolloverPreparation($0) },
+      persistIntent: {
+        try journal.persistRolloverIntent(preparation: $0, primary: $1, stagedPrimary: $2)
+      },
+      resume: { try journal.resumeRollover($0, effects: $1) },
+      rotateControl: { try journal.rotate(to: $0) })
+    let start = RoomResidentCaptureStartContext(
+      roomID: "room_1",
+      sessionID: "bs_owner_test",
+      nextPrimaryIndex: 3,
+      trigger: .reconciliation)
+
+    try owner.start(context: start)
+    #expect(owner.isActive)
+    #expect(owner.requiresFinalization)
+    #expect(owner.nextBackupIndex == nil)
+    try await owner.service()
+    try owner.stopAndFinalize(reason: .end(commandID: "cmd_end"))
+    let final = RoomResidentFinalizationContext(
+      roomID: "room_1",
+      sessionID: "bs_owner_test",
+      nextPrimaryIndex: 3)
+    try await owner.reserveFinalRanges(context: final)
+    try await owner.verifyFinalRanges(context: final)
+
+    #expect(!owner.isActive)
+    #expect(!owner.requiresFinalization)
+    #expect(owner.nextPrimaryIndex == 4)
+    #expect(calls.count == 1)
+    #expect(await wire.registrationCount == 1)
+    #expect(owner.serverEndedSessionID == "bs_owner_test")
+    #expect(owner.terminalFailure == nil)
+    #expect(random.remaining == 0)
+    let entries = try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scan()
+    #expect(entries.count == 1)
+    let entry = try #require(entries.first)
+    #expect(entry.descriptor.context.roomID == "room_1")
+    #expect(entry.descriptor.context.laneID == "primary")
+    let backup = entry.layout.directoryURL.deletingLastPathComponent().appendingPathComponent(
+      "backup", isDirectory: true)
+    #expect(!FileManager.default.fileExists(atPath: backup.path))
+  }
+
+  @Test func primaryRuntimeFactoryCreatesOnlyDailyControlStateBeforeCapture() throws {
+    let fixture = try KeyFixture("primary-runtime-factory")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    var controlStream = Data(repeating: 0x53, count: 16)
+    controlStream[6] = (controlStream[6] & 0x0F) | 0x40
+    controlStream[8] = (controlStream[8] & 0x3F) | 0x80
+    let random = OrderedRandom([
+      controlStream,
+      root,
+      Data(repeating: 0xA6, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let origin = URL(string: "https://scribe.test/")!
+    let ffmpegPath = "/usr/bin/true"
+    let receipt = try RoomArchivePreflightReceipt(
+      origin: origin,
+      roomSlug: "owner-test",
+      deviceUID: "synthetic-device-1",
+      ffmpegPath: ffmpegPath,
+      archiveRootPath: fixture.directory.path,
+      archiveProbeSucceeded: true,
+      keyProbeSucceeded: true,
+      encoderProbeSucceeded: true,
+      secureEnclavePublicKeySHA256: String(repeating: "a", count: 64),
+      encoderProvenanceID: "ffmpeg-owner-test",
+      completedAt: Date(timeIntervalSince1970: 1_777_579_100))
+    let configuration = try RoomConfiguration(
+      origin: origin,
+      roomSlug: "owner-test",
+      deviceUID: "synthetic-device-1",
+      tapewriterPath: "/usr/bin/false",
+      ffmpegPath: ffmpegPath,
+      residentArchiveCaptureEnabled: true,
+      archivePreflightReceipt: receipt)
+
+    let runtime = try PrimaryResidentRuntimeFactory.make(
+      configuration: configuration,
+      context: RoomResidentRuntimeContext(
+        archiveRootURL: fixture.directory,
+        roomID: "room_1",
+        archiveDeliveryWire: KeyOwnerDeliveryWire()),
+      keyLifecycle: lifecycle,
+      now: { Date(timeIntervalSince1970: 1_777_579_200) })
+
+    #expect(try runtime.controlJournal.recover().isEmpty)
+    #expect(runtime.capture.nextBackupIndex == nil)
+    #expect(!runtime.capture.isActive)
+    let catalog = try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scanIncludingControls()
+    #expect(catalog.lanes.isEmpty)
+    #expect(catalog.controls.count == 1)
+    #expect(catalog.controls.first?.descriptor.context.roomID == "room_1")
+    #expect(random.remaining == 0)
+  }
+
+  @Test func captureBindingPersistenceFailureStartsNoCaptureGrowth() throws {
+    let fixture = try KeyFixture("capture-binding-before-growth-failure")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let random = OrderedRandom([
+      keyUUID(0x21), Data(repeating: 0x31, count: 32), Data(repeating: 0x91, count: 16),
+      keyUUID(0x22), root, Data(repeating: 0x92, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let journal = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: try ArchiveISTDay("2026-08-29"))
+    let calls = KeyOwnerCaptureStartCalls()
+    let owner = try PrimaryResidentArchiveCaptureOwner(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      stableDeviceUID: "synthetic-device-1",
+      wire: KeyOwnerDeliveryWire(),
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: KeyOwnerSpoolEncoder(calls: KeyOwnerEncoderCalls()),
+        encoderProvenanceID: "ffmpeg-binding-failure-test"),
+      keyLifecycle: lifecycle,
+      captureFactory: { _, store, _ in
+        KeyOwnerCrashCapture(store: store, calls: calls, failBeforeGrowth: false)
+      },
+      now: { try! ArchiveISTDay("2026-08-29").start.addingTimeInterval(60) })
+    owner.installRolloverHandlers(
+      pendingPlans: [],
+      captureBindings: [],
+      persistCaptureBinding: { _ in throw KeyOwnerCrash.bindingPersistence },
+      persistPreparation: { try journal.persistRolloverPreparation($0) },
+      persistIntent: {
+        try journal.persistRolloverIntent(preparation: $0, primary: $1, stagedPrimary: $2)
+      },
+      resume: { try journal.resumeRollover($0, effects: $1) },
+      rotateControl: { try journal.rotate(to: $0) })
+
+    #expect(throws: KeyOwnerCrash.bindingPersistence) {
+      try owner.start(
+        context: RoomResidentCaptureStartContext(
+          roomID: "room_1", sessionID: "bs_binding_failure", nextPrimaryIndex: 0,
+          trigger: .reconciliation))
+    }
+    #expect(calls.count == 0)
+    #expect(try journal.recover().values.allSatisfy { $0.commandKind != .captureSessionBinding })
+  }
+
+  @Test func crashAfterProspectiveBindingBeforeGrowthRestartsWithoutMisattribution() async throws {
+    let fixture = try KeyFixture("capture-binding-before-growth-crash")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let random = OrderedRandom([
+      keyUUID(0x23), Data(repeating: 0x33, count: 32), Data(repeating: 0x93, count: 16),
+      keyUUID(0x24), root, Data(repeating: 0x94, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let day = try ArchiveISTDay("2026-08-29")
+    let journal = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: day)
+    let failedCalls = KeyOwnerCaptureStartCalls()
+    let wire = KeyOwnerDeliveryWire()
+    let encoderCalls = KeyOwnerEncoderCalls()
+
+    func makeOwner(failBeforeGrowth: Bool, calls: KeyOwnerCaptureStartCalls)
+      throws -> PrimaryResidentArchiveCaptureOwner
+    {
+      let owner = try PrimaryResidentArchiveCaptureOwner(
+        rootURL: fixture.directory,
+        roomID: "room_1",
+        stableDeviceUID: "synthetic-device-1",
+        wire: wire,
+        spoolCoordinator: ArchiveSpoolCoordinator(
+          testEncoder: KeyOwnerSpoolEncoder(calls: encoderCalls),
+          encoderProvenanceID: "ffmpeg-binding-crash-test"),
+        keyLifecycle: lifecycle,
+        captureFactory: { _, store, _ in
+          KeyOwnerCrashCapture(
+            store: store, calls: calls, failBeforeGrowth: failBeforeGrowth)
+        },
+        now: { try! day.start.addingTimeInterval(60) })
+      let recovered = try journal.recover()
+      owner.installRolloverHandlers(
+        pendingPlans: recovered.values.compactMap(\.rolloverPlan),
+        captureBindings: recovered.values.compactMap(\.captureSessionBinding),
+        persistCaptureBinding: { try journal.persistCaptureSessionBinding($0) },
+        persistPreparation: { try journal.persistRolloverPreparation($0) },
+        persistIntent: {
+          try journal.persistRolloverIntent(preparation: $0, primary: $1, stagedPrimary: $2)
+        },
+        resume: { try journal.resumeRollover($0, effects: $1) },
+        rotateControl: { try journal.rotate(to: $0) })
+      return owner
+    }
+
+    let context = RoomResidentCaptureStartContext(
+      roomID: "room_1", sessionID: "bs_binding_crash", nextPrimaryIndex: 0,
+      trigger: .reconciliation)
+    let crashed = try makeOwner(failBeforeGrowth: true, calls: failedCalls)
+    #expect(throws: KeyOwnerCrash.beforeGrowth) { try crashed.start(context: context) }
+    let retainedBinding = try #require(
+      journal.recover().values.compactMap(\.captureSessionBinding).first)
+    #expect(retainedBinding.segmentSampleStart == 0)
+
+    let restartedCalls = KeyOwnerCaptureStartCalls()
+    let restarted = try makeOwner(failBeforeGrowth: false, calls: restartedCalls)
+    try restarted.start(context: context)
+    try restarted.stopAndFinalize(reason: .cancelled)
+    let final = RoomResidentFinalizationContext(
+      roomID: "room_1", sessionID: context.sessionID, nextPrimaryIndex: 0)
+    try await restarted.reserveFinalRanges(context: final)
+    try await restarted.verifyFinalRanges(context: final)
+
+    #expect(failedCalls.count == 1)
+    #expect(restartedCalls.count == 1)
+    #expect(try journal.recover().values.compactMap(\.captureSessionBinding) == [retainedBinding])
+    #expect(encoderCalls.count == 1)
+  }
+
+  @Test func crashAfterCompletedRolloverBeforeNewBindingRecoversBothSides() async throws {
+    let fixture = try KeyFixture("primary-owner-rollover")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    var firstStream = Data(repeating: 0x71, count: 16)
+    firstStream[6] = (firstStream[6] & 0x0F) | 0x40
+    firstStream[8] = (firstStream[8] & 0x3F) | 0x80
+    var secondStream = Data(repeating: 0x72, count: 16)
+    secondStream[6] = (secondStream[6] & 0x0F) | 0x40
+    secondStream[8] = (secondStream[8] & 0x3F) | 0x80
+    var firstControlStream = Data(repeating: 0x73, count: 16)
+    firstControlStream[6] = (firstControlStream[6] & 0x0F) | 0x40
+    firstControlStream[8] = (firstControlStream[8] & 0x3F) | 0x80
+    var secondControlStream = Data(repeating: 0x74, count: 16)
+    secondControlStream[6] = (secondControlStream[6] & 0x0F) | 0x40
+    secondControlStream[8] = (secondControlStream[8] & 0x3F) | 0x80
+    let random = OrderedRandom([
+      firstControlStream,
+      Data(repeating: 0x41, count: 32),
+      Data(repeating: 0xC0, count: 16),
+      firstStream,
+      root,
+      Data(repeating: 0xC1, count: 16),
+      Data(root.reversed()),
+      Data(repeating: 0xC2, count: 16),
+      Data(repeating: 0x42, count: 32),
+      Data(repeating: 0xC3, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let calls = KeyOwnerEncoderCalls()
+    let wire = KeyOwnerDeliveryWire()
+    let firstDay = try ArchiveISTDay("2026-08-28")
+    let secondDay = try ArchiveISTDay("2026-08-29")
+    let controlJournal =
+      try RotatingArchiveRoomControlJournal(
+        rootURL: fixture.directory,
+        roomID: "room_1",
+        keyLifecycle: lifecycle,
+        currentDay: firstDay)
+    let order = KeyOwnerRolloverOrder()
+    let bindingWrites = Atomic<Int>(0)
+    let owner = try PrimaryResidentArchiveCaptureOwner(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      stableDeviceUID: "synthetic-device-1",
+      wire: wire,
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: KeyOwnerSpoolEncoder(calls: calls),
+        encoderProvenanceID: "ffmpeg-owner-rollover-test"),
+      keyLifecycle: lifecycle,
+      captureFactory: { _, store, rolloverStoreFactory in
+        KeyOwnerRolloverCapture(
+          store: store,
+          rolloverStoreFactory: try #require(rolloverStoreFactory),
+          rolloverWallNS: UInt64(try secondDay.start.timeIntervalSince1970 * 1_000_000_000),
+          order: order)
+      },
+      now: { try! firstDay.start.addingTimeInterval(3_600) })
+    owner.installRolloverHandlers(
+      pendingPlans: [],
+      captureBindings: [],
+      persistCaptureBinding: {
+        if bindingWrites.wrappingAdd(1, ordering: .relaxed).oldValue == 1 {
+          throw KeyOwnerCrash.bindingPersistence
+        }
+        try controlJournal.persistCaptureSessionBinding($0)
+      },
+      persistPreparation: {
+        order.record("preparation")
+        try controlJournal.persistRolloverPreparation($0)
+      },
+      persistIntent: {
+        order.record("intent")
+        return try controlJournal.persistRolloverIntent(
+          preparation: $0, primary: $1, stagedPrimary: $2)
+      },
+      resume: { try controlJournal.resumeRollover($0, effects: $1) },
+      rotateControl: { try controlJournal.rotate(to: $0) })
+    let start = RoomResidentCaptureStartContext(
+      roomID: "room_1",
+      sessionID: "bs_owner_rollover",
+      nextPrimaryIndex: 3,
+      trigger: .reconciliation)
+
+    try owner.start(context: start)
+    await #expect(throws: KeyOwnerCrash.bindingPersistence) {
+      try await owner.service()
+    }
+    #expect(owner.isActive)
+    #expect(order.values.prefix(3) == ["preparation", "intent", "old_close"])
+    let crashedRecovery = try controlJournal.recover()
+    #expect(
+      crashedRecovery.values.first { $0.commandKind == .rollover }?.state == .rolloverComplete)
+    #expect(crashedRecovery.values.compactMap(\.captureSessionBinding).count == 1)
+    try owner.stopAndFinalize(reason: .cancelled)
+
+    let restarted = try PrimaryResidentArchiveCaptureOwner(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      stableDeviceUID: "synthetic-device-1",
+      wire: wire,
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: KeyOwnerSpoolEncoder(calls: calls),
+        encoderProvenanceID: "ffmpeg-owner-rollover-test"),
+      keyLifecycle: lifecycle,
+      captureFactory: { _, store, _ in KeyOwnerCapture(store: store) },
+      now: { try! secondDay.start.addingTimeInterval(60) })
+    restarted.installRolloverHandlers(
+      pendingPlans: crashedRecovery.values.compactMap(\.rolloverPlan),
+      captureBindings: crashedRecovery.values.compactMap(\.captureSessionBinding),
+      persistCaptureBinding: { try controlJournal.persistCaptureSessionBinding($0) },
+      persistPreparation: { try controlJournal.persistRolloverPreparation($0) },
+      persistIntent: {
+        try controlJournal.persistRolloverIntent(
+          preparation: $0, primary: $1, stagedPrimary: $2)
+      },
+      resume: { try controlJournal.resumeRollover($0, effects: $1) },
+      rotateControl: { try controlJournal.rotate(to: $0) })
+    let final = RoomResidentFinalizationContext(
+      roomID: "room_1",
+      sessionID: "bs_owner_rollover",
+      nextPrimaryIndex: 3)
+    try await restarted.reserveFinalRanges(context: final)
+    try await restarted.verifyFinalRanges(context: final)
+
+    #expect(random.remaining == 0)
+    #expect(calls.count == 2)
+    #expect(await wire.registrationCount == 2)
+    #expect(restarted.nextPrimaryIndex == 5)
+    let entries = try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scan()
+      .filter { $0.descriptor.context.laneID == "primary" }
+      .sorted { $0.descriptor.context.istDate < $1.descriptor.context.istDate }
+    #expect(
+      entries.map(\.descriptor.context.istDate) == [firstDay.description, secondDay.description])
+    #expect(entries[0].descriptor.initialSamplePosition == 0)
+    #expect(entries[1].descriptor.initialSamplePosition == 16_000)
+    var durableIndices: [[UInt32]] = []
+    for entry in entries {
+      let opened = try lifecycle.openExistingLaneSnapshotWithInspection(
+        keywrapURL: entry.layout.keywrapURL,
+        tapeURL: entry.layout.tapeURL,
+        indexURL: entry.layout.indexURL,
+        context: entry.descriptor.context,
+        initialSamplePosition: entry.descriptor.initialSamplePosition)
+      let journal = try opened.snapshot.openJournalStoreForAppend(at: entry.layout.journalURL)
+      durableIndices.append(
+        try ArchiveJournalReplay.validate(
+          journal.scanResult.records.map {
+            try ArchiveJournalPayloadCodec.decode($0.plaintext)
+          }
+        ).values.map(\.initialReservation.chunkIndex).sorted())
+      journal.close()
+      opened.snapshot.close()
+    }
+    #expect(durableIndices == [[3], [4]])
+    let recovered = try controlJournal.recover()
+    let preparation = try #require(
+      recovered.values.first { $0.commandKind == .rolloverPreparation })
+    let rollover = try #require(recovered.values.first { $0.commandKind == .rollover })
+    let bindings = recovered.values.compactMap(\.captureSessionBinding).sorted {
+      $0.primaryIdentity.context.istDate < $1.primaryIdentity.context.istDate
+    }
+    #expect(preparation.rolloverPreparation?.nextChunkIndex == 3)
+    #expect(rollover.state == .rolloverComplete)
+    #expect(rollover.rolloverPlan?.backup == nil)
+    #expect(rollover.rolloverPlan?.primary.nextChunkIndex == 3)
+    #expect(
+      bindings.map(\.primaryIdentity.context.istDate) == [
+        firstDay.description, secondDay.description,
+      ])
+    #expect(bindings.map(\.segmentSampleStart) == [0, 16_000])
+  }
+
+  @Test func midnightRelaunchWithoutPreparationStagesAndCompletesTheSameSession() async throws {
+    let fixture = try KeyFixture("primary-owner-midnight-relaunch")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let firstDay = try ArchiveISTDay("2026-08-28")
+    let secondDay = try ArchiveISTDay("2026-08-29")
+    let thirdDay = try ArchiveISTDay("2026-08-30")
+    let fourthDay = try ArchiveISTDay("2026-08-31")
+    let random = OrderedRandom([
+      keyUUID(0x31), Data(repeating: 0x41, count: 32), Data(repeating: 0xA1, count: 16),
+      keyUUID(0x32), root, Data(repeating: 0xA2, count: 16),
+      Data(root.reversed()), Data(repeating: 0xA3, count: 16),
+      Data(repeating: 0x42, count: 32), Data(repeating: 0xA4, count: 16),
+      Data(repeating: 0x43, count: 32), Data(repeating: 0xA5, count: 16),
+      Data(repeating: 0x44, count: 32), Data(repeating: 0xA6, count: 16),
+      keyUUID(0x37), Data(repeating: 0x45, count: 32), Data(repeating: 0xA7, count: 16),
+      keyUUID(0x38), Data(repeating: 0x46, count: 32), Data(repeating: 0xA8, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let journal = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: firstDay)
+    let calls = KeyOwnerEncoderCalls()
+    let wire = KeyOwnerDeliveryWire()
+    func makeOwner(
+      now: @escaping @Sendable () -> Date,
+      rolloverAt: ArchiveISTDay? = nil
+    ) throws
+      -> PrimaryResidentArchiveCaptureOwner
+    {
+      let owner = try PrimaryResidentArchiveCaptureOwner(
+        rootURL: fixture.directory,
+        roomID: "room_1",
+        stableDeviceUID: "synthetic-device-1",
+        wire: wire,
+        spoolCoordinator: ArchiveSpoolCoordinator(
+          testEncoder: KeyOwnerSpoolEncoder(calls: calls),
+          encoderProvenanceID: "ffmpeg-owner-relaunch-test"),
+        keyLifecycle: lifecycle,
+        captureFactory: { _, store, rolloverStoreFactory -> any PrimaryResidentAudioCapturing in
+          guard let rolloverAt else { return KeyOwnerCapture(store: store) }
+          return KeyOwnerRolloverCapture(
+            store: store,
+            rolloverStoreFactory: try #require(rolloverStoreFactory),
+            rolloverWallNS: UInt64(try rolloverAt.start.timeIntervalSince1970 * 1_000_000_000),
+            order: KeyOwnerRolloverOrder())
+        },
+        now: now)
+      let recovered = try journal.recover()
+      owner.installRolloverHandlers(
+        pendingPlans: recovered.values.compactMap(\.rolloverPlan),
+        captureBindings: recovered.values.compactMap(\.captureSessionBinding),
+        persistCaptureBinding: { try journal.persistCaptureSessionBinding($0) },
+        persistPreparation: { try journal.persistRolloverPreparation($0) },
+        persistIntent: {
+          try journal.persistRolloverIntent(
+            preparation: $0, primary: $1, stagedPrimary: $2)
+        },
+        resume: { try journal.resumeRollover($0, effects: $1) },
+        rotateControl: { try journal.rotate(to: $0) })
+      return owner
+    }
+    let context = RoomResidentCaptureStartContext(
+      roomID: "room_1", sessionID: "bs_midnight_relaunch", nextPrimaryIndex: 5,
+      trigger: .reconciliation)
+    let first = try makeOwner(now: { try! firstDay.start.addingTimeInterval(3_600) })
+    try first.start(context: context)
+    try first.stopAndFinalize(reason: .cancelled)
+
+    let relaunched = try makeOwner(
+      now: { try! secondDay.start.addingTimeInterval(60) }, rolloverAt: thirdDay)
+    try relaunched.start(context: context)
+    try await relaunched.service()
+
+    #expect(relaunched.isActive)
+    let recovered = try journal.recover()
+    let preparations = recovered.values.filter { $0.commandKind == .rolloverPreparation }
+    let rollovers = recovered.values.filter { $0.commandKind == .rollover }.sorted {
+      $0.rolloverPlan!.primary.oldDay.context.istDate
+        < $1.rolloverPlan!.primary.oldDay.context.istDate
+    }
+    #expect(preparations.count == 2)
+    #expect(preparations.allSatisfy { $0.rolloverPreparation?.sessionID == context.sessionID })
+    #expect(rollovers.allSatisfy { $0.state == .rolloverComplete })
+    #expect(rollovers.compactMap(\.rolloverPlan?.sessionSampleStart) == [0, 0])
+    #expect(rollovers.compactMap(\.rolloverPlan?.primary.boundarySample) == [16_000, 32_000])
+    let days = try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scan()
+      .filter { $0.descriptor.context.laneID == "primary" }
+      .sorted { $0.descriptor.context.istDate < $1.descriptor.context.istDate }
+    #expect(
+      days.map(\.descriptor.context.istDate) == [
+        firstDay.description, secondDay.description, thirdDay.description,
+      ])
+    #expect(days.map(\.descriptor.initialSamplePosition) == [0, 16_000, 32_000])
+    try relaunched.stopAndFinalize(reason: .cancelled)
+    let endingNow = KeyOwnerNow(try thirdDay.start.addingTimeInterval(60))
+    let ending = try makeOwner(now: { endingNow.value })
+    let final = RoomResidentFinalizationContext(
+      roomID: "room_1", sessionID: context.sessionID,
+      nextPrimaryIndex: relaunched.nextPrimaryIndex)
+    try await ending.reserveFinalRanges(context: final)
+    try await ending.verifyFinalRanges(context: final)
+
+    let endStates: [ArchiveControlState] = [
+      .endIntent, .finalRangesReserved, .finalRangesVerified, .sessionEndPatched,
+    ]
+    for (index, state) in endStates.enumerated() {
+      _ = try journal.advance(
+        RoomControlTransition(
+          commandID: "cmd_end_session_a",
+          commandKind: .endDay,
+          sessionID: context.sessionID,
+          priorState: index == 0 ? nil : endStates[index - 1],
+          newState: state))
+    }
+    _ = try journal.advance(
+      RoomControlTransition(
+        commandID: "cmd_start_session_b",
+        commandKind: .startDay,
+        sessionID: nil,
+        priorState: nil,
+        newState: .startIntent))
+    _ = try journal.advance(
+      RoomControlTransition(
+        commandID: "cmd_start_session_b",
+        commandKind: .startDay,
+        sessionID: "bs_after_rollover",
+        priorState: .startIntent,
+        newState: .sessionOpened))
+    endingNow.value = try fourthDay.start.addingTimeInterval(60)
+    let secondContext = RoomResidentCaptureStartContext(
+      roomID: "room_1",
+      sessionID: "bs_after_rollover",
+      nextPrimaryIndex: ending.nextPrimaryIndex,
+      trigger: .startDay(commandID: "cmd_start_session_b"))
+    try ending.start(context: secondContext)
+    try ending.stopAndFinalize(reason: .end(commandID: "cmd_end_session_b"))
+    let secondFinal = RoomResidentFinalizationContext(
+      roomID: "room_1",
+      sessionID: secondContext.sessionID,
+      nextPrimaryIndex: ending.nextPrimaryIndex)
+    try await ending.reserveFinalRanges(context: secondFinal)
+    try await ending.verifyFinalRanges(context: secondFinal)
+  }
+
+  @Test func rolloverEffectFailureIsTerminalEvenAfterTheNewWriterStarts() async throws {
+    let fixture = try KeyFixture("primary-owner-terminal-rollover")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    let firstDay = try ArchiveISTDay("2026-08-28")
+    let secondDay = try ArchiveISTDay("2026-08-29")
+    let firstDayStart = try firstDay.start
+    let secondDayStart = try secondDay.start
+    let random = OrderedRandom([
+      keyUUID(0x51), Data(repeating: 0x61, count: 32), Data(repeating: 0xB1, count: 16),
+      keyUUID(0x52), root, Data(repeating: 0xB2, count: 16),
+      Data(root.reversed()), Data(repeating: 0xB3, count: 16),
+      Data(repeating: 0x62, count: 32), Data(repeating: 0xB4, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let journal = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: firstDay)
+    let owner = try PrimaryResidentArchiveCaptureOwner(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      stableDeviceUID: "synthetic-device-1",
+      wire: KeyOwnerDeliveryWire(),
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: KeyOwnerSpoolEncoder(calls: KeyOwnerEncoderCalls()),
+        encoderProvenanceID: "ffmpeg-owner-terminal-test"),
+      keyLifecycle: lifecycle,
+      captureFactory: { _, store, rolloverStoreFactory in
+        KeyOwnerRolloverCapture(
+          store: store,
+          rolloverStoreFactory: try #require(rolloverStoreFactory),
+          rolloverWallNS: UInt64(secondDayStart.timeIntervalSince1970 * 1_000_000_000),
+          order: KeyOwnerRolloverOrder())
+      },
+      now: { firstDayStart.addingTimeInterval(3_600) })
+    owner.installRolloverHandlers(
+      pendingPlans: [],
+      captureBindings: [],
+      persistCaptureBinding: { try journal.persistCaptureSessionBinding($0) },
+      persistPreparation: { try journal.persistRolloverPreparation($0) },
+      persistIntent: {
+        try journal.persistRolloverIntent(
+          preparation: $0, primary: $1, stagedPrimary: $2)
+      },
+      resume: { plan, _ in
+        try journal.resumeRollover(
+          plan,
+          effects: ArchiveRolloverEffects(
+            reserveOldDayFinal: { _ in
+              throw ArchiveRolloverEffectFailure.internalIOFailed
+            },
+            closeOldDayFiles: { _ in
+              throw ArchiveRolloverEffectFailure.internalIOFailed
+            },
+            makeNewDayFilesDurable: { _ in
+              throw ArchiveRolloverEffectFailure.internalIOFailed
+            }))
+      },
+      rotateControl: { try journal.rotate(to: $0) })
+    try owner.start(
+      context: RoomResidentCaptureStartContext(
+        roomID: "room_1", sessionID: "bs_terminal_rollover", nextPrimaryIndex: 0,
+        trigger: .reconciliation))
+
+    do {
+      try await owner.service()
+      Issue.record("expected rollover effect failure")
+    } catch {
+      #expect(
+        error as? ArchiveRolloverError
+          == .effectFailed(.internalIOFailed))
+    }
+
+    #expect(owner.isActive)
+    #expect(owner.terminalFailure != nil)
+    #expect(try journal.recover().values.contains { $0.state == .rolloverFailed })
+    try owner.stopAndFinalize(reason: .cancelled)
+  }
+
+  @Test func rotatingControlJournalKeepsOldCommandsOwnedAndRecoversBothDays() throws {
+    let fixture = try KeyFixture("rotating-control-journal")
+    defer { fixture.remove() }
+    #expect(chmod(fixture.directory.path, mode_t(0o700)) == 0)
+    let security = FakeArchiveSecurityProvider()
+    var firstStream = Data(repeating: 0x61, count: 16)
+    firstStream[6] = (firstStream[6] & 0x0F) | 0x40
+    firstStream[8] = (firstStream[8] & 0x3F) | 0x80
+    var secondStream = Data(repeating: 0x62, count: 16)
+    secondStream[6] = (secondStream[6] & 0x0F) | 0x40
+    secondStream[8] = (secondStream[8] & 0x3F) | 0x80
+    let random = OrderedRandom([
+      firstStream,
+      root,
+      Data(repeating: 0xB1, count: 16),
+      secondStream,
+      Data(root.reversed()),
+      Data(repeating: 0xB2, count: 16),
+    ])
+    let lifecycle = makeLifecycle(fixture, security: security, random: random.next)
+    let firstDay = try ArchiveISTDay("2026-08-28")
+    let secondDay = try ArchiveISTDay("2026-08-29")
+    var journal: RotatingArchiveRoomControlJournal? = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: firstDay)
+    _ = try journal?.advance(
+      RoomControlTransition(
+        commandID: "cmd_old",
+        commandKind: .startDay,
+        sessionID: nil,
+        priorState: nil,
+        newState: .startIntent))
+
+    try journal?.rotate(to: secondDay)
+    _ = try journal?.advance(
+      RoomControlTransition(
+        commandID: "cmd_old",
+        commandKind: .startDay,
+        sessionID: "bs_1",
+        priorState: .startIntent,
+        newState: .sessionOpened))
+    _ = try journal?.advance(
+      RoomControlTransition(
+        commandID: "cmd_new",
+        commandKind: .pauseDay,
+        sessionID: "bs_1",
+        priorState: nil,
+        newState: .pauseIntent))
+    #expect(random.remaining == 0)
+    #expect(
+      try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).scanIncludingControls().controls
+        .count
+        == 2)
+    journal = nil
+
+    let reopened = try RotatingArchiveRoomControlJournal(
+      rootURL: fixture.directory,
+      roomID: "room_1",
+      keyLifecycle: lifecycle,
+      currentDay: secondDay)
+    let recovered = try reopened.recover()
+    #expect(recovered["cmd_old"]?.state == .sessionOpened)
+    #expect(recovered["cmd_new"]?.state == .pauseIntent)
+  }
+
   @Test func key04ExistingLaneSubstitutionIsRejectedWithoutPathReopen() throws {
     for target in ["tape", "index"] {
       let fixture = try KeyFixture("existing-substitution-\(target)")
@@ -1753,6 +2488,18 @@ private final class OrderedRandom: @unchecked Sendable {
   }
 }
 
+private final class KeyOwnerNow: @unchecked Sendable {
+  private let lock = NSLock()
+  private var date: Date
+
+  init(_ date: Date) { self.date = date }
+
+  var value: Date {
+    get { lock.withLock { date } }
+    set { lock.withLock { date = newValue } }
+  }
+}
+
 private struct KeyFixture {
   let directory: URL
   let keywrapURL: URL
@@ -1776,6 +2523,342 @@ private struct KeyFixture {
   }
 
   func remove() { try? FileManager.default.removeItem(at: directory) }
+}
+
+private final class KeyOwnerCapture: PrimaryResidentAudioCapturing, @unchecked Sendable {
+  private let store: ArchiveLaneStore
+  private var active = false
+  private var finalizationRequired = false
+
+  init(store: ArchiveLaneStore) { self.store = store }
+
+  var isActive: Bool { active }
+  var requiresFinalization: Bool { finalizationRequired }
+  var durableSampleEnd: UInt64 {
+    store.scanResult.index.records.last?.payload.sampleEnd ?? store.initialSamplePosition
+  }
+  var currentLevels: ResidentAudioCaptureLevels? { nil }
+
+  func startAndWaitUntilDurable() throws {
+    _ = try store.appendPCM(
+      Data(repeating: 0x20, count: 32_000),
+      observation: ArchiveIndexObservation(
+        monoNS: 1_000_000_000,
+        wallNS: 2_000_000_000,
+        rmsQ15: 100,
+        nativeFrames: 48_000,
+        inputRateNumerator: 48_000,
+        inputRateDenominator: 1,
+        discontinuity: .resumed,
+        reason: ArchiveIndexDiscontinuity.resumed.rawValue,
+        gapNS: 0))
+    active = true
+    finalizationRequired = true
+  }
+
+  func service() throws {}
+
+  func stopAndDrain() throws {
+    guard finalizationRequired else { return }
+    active = false
+    finalizationRequired = false
+    store.close()
+  }
+
+  func authenticatedSnapshot() throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try store.authenticatedSnapshot()
+  }
+}
+
+private enum KeyOwnerCrash: Error, Equatable {
+  case bindingPersistence
+  case beforeGrowth
+}
+
+private final class KeyOwnerCaptureStartCalls: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+  var count: Int { lock.withLock { value } }
+  func increment() { lock.withLock { value += 1 } }
+}
+
+private final class KeyOwnerCrashCapture: PrimaryResidentAudioCapturing, @unchecked Sendable {
+  private let store: ArchiveLaneStore
+  private let calls: KeyOwnerCaptureStartCalls
+  private let failBeforeGrowth: Bool
+  private var active = false
+  private var finalizationRequired = false
+
+  init(
+    store: ArchiveLaneStore,
+    calls: KeyOwnerCaptureStartCalls,
+    failBeforeGrowth: Bool
+  ) {
+    self.store = store
+    self.calls = calls
+    self.failBeforeGrowth = failBeforeGrowth
+  }
+
+  var isActive: Bool { active }
+  var requiresFinalization: Bool { finalizationRequired }
+  var durableSampleEnd: UInt64 {
+    store.scanResult.index.records.last?.payload.sampleEnd ?? store.initialSamplePosition
+  }
+  var currentLevels: ResidentAudioCaptureLevels? { nil }
+
+  func startAndWaitUntilDurable() throws {
+    calls.increment()
+    if failBeforeGrowth { throw KeyOwnerCrash.beforeGrowth }
+    _ = try store.appendPCM(
+      Data(repeating: 0x25, count: 32_000),
+      observation: ArchiveIndexObservation(
+        monoNS: 1_000_000_000,
+        wallNS: 2_000_000_000,
+        rmsQ15: 100,
+        nativeFrames: 48_000,
+        inputRateNumerator: 48_000,
+        inputRateDenominator: 1,
+        discontinuity: .resumed,
+        reason: ArchiveIndexDiscontinuity.resumed.rawValue,
+        gapNS: 0))
+    active = true
+    finalizationRequired = true
+  }
+
+  func service() throws {}
+
+  func stopAndDrain() throws {
+    active = false
+    finalizationRequired = false
+    store.close()
+  }
+
+  func authenticatedSnapshot() throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try store.authenticatedSnapshot()
+  }
+}
+
+private final class KeyOwnerRolloverCapture: PrimaryResidentAudioCapturing, @unchecked Sendable {
+  private var store: ArchiveLaneStore
+  private let rolloverStoreFactory: ResidentAudioCaptureLane.RolloverStoreFactory
+  private let rolloverWallNSs: [UInt64]
+  private let order: KeyOwnerRolloverOrder
+  private var active = false
+  private var finalizationRequired = false
+  private var rolloverIndex = 0
+
+  init(
+    store: ArchiveLaneStore,
+    rolloverStoreFactory: @escaping ResidentAudioCaptureLane.RolloverStoreFactory,
+    rolloverWallNS: UInt64,
+    order: KeyOwnerRolloverOrder
+  ) {
+    self.store = store
+    self.rolloverStoreFactory = rolloverStoreFactory
+    rolloverWallNSs = [rolloverWallNS]
+    self.order = order
+  }
+
+  init(
+    store: ArchiveLaneStore,
+    rolloverStoreFactory: @escaping ResidentAudioCaptureLane.RolloverStoreFactory,
+    rolloverWallNSs: [UInt64],
+    order: KeyOwnerRolloverOrder
+  ) {
+    self.store = store
+    self.rolloverStoreFactory = rolloverStoreFactory
+    self.rolloverWallNSs = rolloverWallNSs
+    self.order = order
+  }
+
+  var isActive: Bool { active }
+  var requiresFinalization: Bool { finalizationRequired }
+  var durableSampleEnd: UInt64 {
+    store.scanResult.index.records.last?.payload.sampleEnd ?? store.initialSamplePosition
+  }
+  var currentLevels: ResidentAudioCaptureLevels? { nil }
+
+  func startAndWaitUntilDurable() throws {
+    try appendPCM(byte: 0x31)
+    active = true
+    finalizationRequired = true
+  }
+
+  func service() throws {
+    guard rolloverIndex < rolloverWallNSs.count else { return }
+    let rolloverWallNS = rolloverWallNSs[rolloverIndex]
+    let snapshot = try store.authenticatedSnapshot()
+    let facts = snapshot.authenticatedFacts
+    snapshot.close()
+    let replacement = try rolloverStoreFactory(
+      ResidentArchiveRolloverFence(
+        monoNS: 10_000,
+        wallNS: rolloverWallNS,
+        authenticatedFacts: facts))
+    store.close()
+    order.record("old_close")
+    store = replacement
+    try appendPCM(byte: 0x32 &+ UInt8(rolloverIndex))
+    rolloverIndex += 1
+  }
+
+  func stopAndDrain() throws {
+    guard finalizationRequired else { return }
+    active = false
+    finalizationRequired = false
+    store.close()
+  }
+
+  func authenticatedSnapshot() throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try store.authenticatedSnapshot()
+  }
+
+  private func appendPCM(byte: UInt8) throws {
+    _ = try store.appendPCM(
+      Data(repeating: byte, count: 32_000),
+      observation: ArchiveIndexObservation(
+        monoNS: 1_000_000_000,
+        wallNS: rolloverWallNSs[min(rolloverIndex, rolloverWallNSs.count - 1)],
+        rmsQ15: 100,
+        nativeFrames: 48_000,
+        inputRateNumerator: 48_000,
+        inputRateDenominator: 1))
+  }
+}
+
+private final class KeyOwnerRolloverOrder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [String] = []
+  var values: [String] { lock.withLock { events } }
+  func record(_ event: String) { lock.withLock { events.append(event) } }
+}
+
+private final class KeyOwnerEncoderCalls: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+  var count: Int { lock.withLock { value } }
+  func increment() { lock.withLock { value += 1 } }
+}
+
+private struct KeyOwnerSpoolEncoder: ArchivePCMSpoolEncoding {
+  let calls: KeyOwnerEncoderCalls
+
+  func encode(
+    snapshot _: ArchiveLaneStore.AuthenticatedSnapshot,
+    sampleStart _: UInt64,
+    sampleEnd _: UInt64,
+    spoolWriter: ArchiveEncryptedSpoolWriter
+  ) throws -> ArchiveEncodedSpoolAttempt {
+    calls.increment()
+    try spoolWriter.append(Data("synthetic-webm".utf8))
+    return try spoolWriter.finishEncoding()
+  }
+}
+
+private actor KeyOwnerDeliveryWire: ArchiveDeliveryWire {
+  private let putURL = URL(string: "https://r2.test/owner-put")!
+  private let headURL = URL(string: "https://r2.test/owner-head")!
+  private var object: Data?
+  private(set) var registrationCount = 0
+  private let endedDisagrees: String?
+
+  init(endedDisagrees: String? = nil) {
+    self.endedDisagrees = endedDisagrees
+  }
+
+  func prepareDelivery(for piece: ArchiveDeliveryPiece) async throws
+    -> ArchiveDeliveryPresignResult
+  {
+    .upload(putURL: putURL, headURL: headURL, key: "bench/owner/chunk_00003.webm")
+  }
+
+  func probeDeliveryObject(at url: URL) async throws -> ArchiveDeliveryRemoteObject {
+    object.map { .present(byteCount: UInt64($0.count)) } ?? .missing
+  }
+
+  func putDeliveryObject(chunks: [Data], to url: URL, contentType: String) async throws {
+    object = chunks.reduce(into: Data()) { $0.append($1) }
+  }
+
+  func registerDelivery(_ piece: ArchiveDeliveryPiece) async throws
+    -> ArchiveDeliveryRegistration
+  {
+    registrationCount += 1
+    return ArchiveDeliveryRegistration(
+      ok: true,
+      key: "bench/owner/chunk_00003.webm",
+      uploadState: "verified",
+      endedDisagrees: endedDisagrees)
+  }
+}
+
+private actor KeyCompleteRecovery: RoomRetainedArchiveRecovering {
+  nonisolated let encoderCapable = true
+  func run() {}
+  func state() -> RoomRetainedArchiveRecoveryState { .complete }
+}
+
+private final class KeyRefusingCaptureLauncher: RoomCaptureLaunching, @unchecked Sendable {
+  func launch(executable: URL, outputDirectory: URL, deviceUID: String, logURL: URL) throws
+    -> any RoomCaptureProcess
+  {
+    throw KeyUnusedWireError.called
+  }
+}
+
+private actor KeyCrashReconciliationRemote: RoomEngineRemote {
+  private let activeOK: Bool
+  private(set) var patchCalls = 0
+
+  init(activeOK: Bool) { self.activeOK = activeOK }
+
+  func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
+    try JSONDecoder().decode(
+      ActiveSessionResponse.self,
+      from: Data(
+        """
+        {"ok":\(activeOK),"resumable":false,"session":null,"next_idx":null,"reason":null,"handover_pending":false,"tab_gone":false}
+        """.utf8))
+  }
+
+  func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
+    throw KeyUnusedWireError.called
+  }
+
+  func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws
+    -> BenchOKResponse
+  {
+    patchCalls += 1
+    throw KeyUnusedWireError.called
+  }
+
+  func pollCommands(
+    tabID: String,
+    previousPollAt: String?,
+    recordingSessionID: String?,
+    paused: Bool,
+    primaryLevels: BenchLevelPair?
+  ) async throws -> CommandPollResponse {
+    try JSONDecoder().decode(
+      CommandPollResponse.self,
+      from: Data(#"{"ok":true,"room_id":"room_1","superseded":false,"commands":[]}"#.utf8))
+  }
+
+  func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
+    -> CommandAcknowledgement
+  {
+    throw KeyUnusedWireError.called
+  }
+
+  func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse {
+    throw KeyUnusedWireError.called
+  }
+
+  func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
+    -> ImmutablePieceUploadResult
+  {
+    throw KeyUnusedWireError.called
+  }
 }
 
 private enum WrapMutation: String, CaseIterable {
@@ -1898,6 +2981,13 @@ private func keyHex(_ value: String) -> Data {
     index = end
   }
   return result
+}
+
+private func keyUUID(_ byte: UInt8) -> Data {
+  var value = Data(repeating: byte, count: 16)
+  value[6] = (value[6] & 0x0F) | 0x40
+  value[8] = (value[8] & 0x3F) | 0x80
+  return value
 }
 
 private func keySHA256(_ data: Data) -> String {

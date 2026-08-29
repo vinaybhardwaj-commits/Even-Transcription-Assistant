@@ -256,6 +256,26 @@
       #expect(answer.commands.first?.kind == .pauseDay)
     }
 
+    @Test func pollOmitsMicrophoneLevelsWhenUnavailable() async throws {
+      let client = try makeClient()
+      ContractURLProtocol.handler = { request in
+        let items =
+          URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?.queryItems
+          ?? []
+        let query = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+        #expect(query["mic_peak"] == nil)
+        #expect(query["mic_avg"] == nil)
+        return stub(
+          request,
+          body: #"{"ok":true,"room_id":"room_1","superseded":false,"commands":[]}"#)
+      }
+
+      _ = try await client.pollCommands(
+        tabID: "app_device",
+        paused: false,
+        primaryLevels: nil)
+    }
+
     @Test func primaryPresignOmitsSourceAndKeepsAlreadyVerifiedSignal() async throws {
       let client = try makeClient()
       ContractURLProtocol.handler = { request in

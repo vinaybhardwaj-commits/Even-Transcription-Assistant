@@ -7,6 +7,7 @@ public enum ArchiveJournalState: String, CaseIterable, Equatable, Hashable, Send
   case putComplete = "put_complete"
   case headVerified = "head_verified"
   case rowRegistered = "row_registered"
+  case serverEnded = "server_ended"
   case done
 }
 
@@ -133,7 +134,8 @@ public struct ArchiveJournalPayload: Equatable, Sendable {
       }
     } else {
       let isPreManifestReencode = priorState == .encoded && newState == .encoded
-      guard isPreManifestReencode || priorState == Self.successPredecessor(of: newState) else {
+      guard isPreManifestReencode || Self.isSuccessTransition(from: priorState, to: newState)
+      else {
         throw ArchiveJournalPayloadError.invalidTransition(prior: priorState, new: newState)
       }
       if newState != .reserved, attemptID == nil {
@@ -165,15 +167,19 @@ public struct ArchiveJournalPayload: Equatable, Sendable {
     !value.isEmpty && value.utf8.count <= 256
   }
 
-  private static func successPredecessor(of state: ArchiveJournalState) -> ArchiveJournalState? {
-    switch state {
-    case .reserved: nil
-    case .encoded: .reserved
-    case .spoolDurable: .encoded
-    case .putComplete: .spoolDurable
-    case .headVerified: .putComplete
-    case .rowRegistered: .headVerified
-    case .done: .rowRegistered
+  private static func isSuccessTransition(
+    from prior: ArchiveJournalState?,
+    to state: ArchiveJournalState
+  ) -> Bool {
+    switch (prior, state) {
+    case (.reserved, .encoded), (.encoded, .spoolDurable),
+      (.spoolDurable, .putComplete), (.putComplete, .headVerified),
+      (.headVerified, .rowRegistered), (.headVerified, .serverEnded),
+      (.rowRegistered, .serverEnded),
+      (.serverEnded, .done), (.rowRegistered, .done):
+      return true
+    default:
+      return false
     }
   }
 
@@ -206,6 +212,19 @@ public struct ArchiveJournalReplayReservation: Equatable, Sendable {
   public let initialReservation: ArchiveJournalPayload
   public let state: ArchiveJournalState
   public let attemptID: String?
+  public let serverEndedObserved: Bool
+
+  public init(
+    initialReservation: ArchiveJournalPayload,
+    state: ArchiveJournalState,
+    attemptID: String?,
+    serverEndedObserved: Bool = false
+  ) {
+    self.initialReservation = initialReservation
+    self.state = state
+    self.attemptID = attemptID
+    self.serverEndedObserved = serverEndedObserved
+  }
 }
 
 public enum ArchiveJournalReplay {
@@ -223,7 +242,8 @@ public enum ArchiveJournalReplay {
         reservations[payload.reservationID] = ArchiveJournalReplayReservation(
           initialReservation: payload,
           state: .reserved,
-          attemptID: nil
+          attemptID: nil,
+          serverEndedObserved: false
         )
         continue
       }
@@ -243,7 +263,8 @@ public enum ArchiveJournalReplay {
           reservations[payload.reservationID] = ArchiveJournalReplayReservation(
             initialReservation: previous.initialReservation,
             state: previous.state,
-            attemptID: nil
+            attemptID: nil,
+            serverEndedObserved: previous.serverEndedObserved
           )
         } else {
           guard let attemptID = payload.attemptID else {
@@ -273,7 +294,8 @@ public enum ArchiveJournalReplay {
         reservations[payload.reservationID] = ArchiveJournalReplayReservation(
           initialReservation: previous.initialReservation,
           state: .encoded,
-          attemptID: attemptID
+          attemptID: attemptID,
+          serverEndedObserved: previous.serverEndedObserved
         )
         continue
       }
@@ -283,7 +305,8 @@ public enum ArchiveJournalReplay {
       reservations[payload.reservationID] = ArchiveJournalReplayReservation(
         initialReservation: previous.initialReservation,
         state: payload.newState,
-        attemptID: attemptID
+        attemptID: attemptID,
+        serverEndedObserved: previous.serverEndedObserved || payload.newState == .serverEnded
       )
     }
     return reservations

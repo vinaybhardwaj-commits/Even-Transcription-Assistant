@@ -455,7 +455,7 @@ public enum ArchiveSpoolCorrespondence {
     expectedFitSegment: UInt64
   ) throws -> ArchivePublishedSpoolAttempt {
     switch reservation.state {
-    case .spoolDurable, .putComplete, .headVerified, .rowRegistered, .done:
+    case .spoolDurable, .putComplete, .headVerified, .rowRegistered, .serverEnded, .done:
       break
     case .reserved, .encoded:
       throw ArchiveEncryptedSpoolError.journalNotSpoolDurable(reservation.state)

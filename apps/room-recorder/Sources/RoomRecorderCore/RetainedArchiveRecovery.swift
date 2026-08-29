@@ -8,8 +8,13 @@ public enum RoomRetainedArchiveRecoveryState: Equatable, Sendable {
 }
 
 public protocol RoomRetainedArchiveRecovering: Sendable {
+  var encoderCapable: Bool { get }
   func run() async
   func state() async -> RoomRetainedArchiveRecoveryState
+}
+
+extension RoomRetainedArchiveRecovering {
+  public var encoderCapable: Bool { false }
 }
 
 public enum RetainedArchiveRecoveryError: String, Error, LocalizedError, Sendable {
@@ -24,17 +29,39 @@ public actor RetainedArchiveRecovery: RoomRetainedArchiveRecovering {
   private let catalog: ArchiveRetainedLaneCatalog
   private let wire: any ArchiveDeliveryWire
   private let keyLifecycle: ArchiveKeyLifecycle
+  private let spoolCoordinator: ArchiveSpoolCoordinator?
+  public nonisolated let encoderCapable: Bool
   private var currentState: RoomRetainedArchiveRecoveryState = .pending
   private var started = false
 
   public init(
     rootURL: URL,
     wire: any ArchiveDeliveryWire,
-    keyLifecycle: ArchiveKeyLifecycle = ArchiveKeyLifecycle()
+    keyLifecycle: ArchiveKeyLifecycle = ArchiveKeyLifecycle(),
+    spoolCoordinator: ArchiveSpoolCoordinator? = nil
   ) throws {
     catalog = try ArchiveRetainedLaneCatalog(rootURL: rootURL)
     self.wire = wire
     self.keyLifecycle = keyLifecycle
+    self.spoolCoordinator = spoolCoordinator
+    encoderCapable = spoolCoordinator != nil
+  }
+
+  public init(
+    rootURL: URL,
+    wire: any ArchiveDeliveryWire,
+    ffmpegURL: URL,
+    encoderProvenanceID: String,
+    keyLifecycle: ArchiveKeyLifecycle = ArchiveKeyLifecycle()
+  ) throws {
+    try self.init(
+      rootURL: rootURL,
+      wire: wire,
+      keyLifecycle: keyLifecycle,
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        encoder: ArchiveFFmpegStreamingEncoder(
+          command: ArchiveFFmpegCommand(executableURL: ffmpegURL)),
+        encoderProvenanceID: encoderProvenanceID))
   }
 
   public func state() -> RoomRetainedArchiveRecoveryState { currentState }
@@ -43,6 +70,10 @@ public actor RetainedArchiveRecovery: RoomRetainedArchiveRecovering {
     guard !started else { return }
     started = true
     do {
+      try RetainedArchiveRolloverRecovery(
+        rootURL: catalog.rootURL,
+        keyLifecycle: keyLifecycle
+      ).run()
       let catalogSnapshot = try catalog.scanIncludingControls()
       for entry in catalogSnapshot.controls where entry.journalPresent {
         try Task.checkCancellation()
@@ -76,7 +107,10 @@ public actor RetainedArchiveRecovery: RoomRetainedArchiveRecovering {
         )
       }
 
-      let inventory = ArchiveDeliveryDiskInventory(lanes: lanes, wire: wire)
+      let inventory = ArchiveDeliveryDiskInventory(
+        lanes: lanes,
+        wire: wire,
+        spoolCoordinator: spoolCoordinator)
       let initial = try await inventory.scan()
       guard initial.blockedReservations.isEmpty else {
         throw RetainedArchiveRecoveryError.unfinishedLocalReservation

@@ -30,10 +30,10 @@ import Testing
     )
     let controlPayload = try ArchiveControlPayload(
       commandID: "cmd_1",
-      commandKind: .rollover,
+      commandKind: .pauseDay,
       sessionID: "bs_1",
       priorState: nil,
-      newState: .rolloverIntent,
+      newState: .pauseIntent,
       atMonoNS: 1,
       atWallNS: 2,
       error: nil

@@ -11,6 +11,7 @@ enum StreamMarker: UInt8, CaseIterable, Hashable, Sendable {
   case invalidTimestamp
   case clockJump
   case formatChange
+  case dayRollover
 
   var indexName: String {
     switch self {
@@ -24,8 +25,15 @@ enum StreamMarker: UInt8, CaseIterable, Hashable, Sendable {
     case .invalidTimestamp: "invalid_timestamp"
     case .clockJump: "clock_jump"
     case .formatChange: "format_change"
+    case .dayRollover: "day_rollover"
     }
   }
+}
+
+struct CaptureRolloverSplit: Equatable, Sendable {
+  let frameOffset: Int
+  let monoNS: UInt64
+  let wallNS: UInt64
 }
 
 struct BoundaryEvent: Sendable {
@@ -87,6 +95,17 @@ struct StreamItem: Sendable {
   var droppedFrames: UInt64 = 0
 }
 
+enum AudioRingReadDisposition: Equatable {
+  case consume
+  case retain
+}
+
+enum AudioRingReadResult: Equatable {
+  case empty
+  case consumed
+  case retained
+}
+
 final class AudioRing: @unchecked Sendable {
   private let samples: UnsafeMutablePointer<Float>
   private let items: UnsafeMutablePointer<StreamItem>
@@ -103,7 +122,7 @@ final class AudioRing: @unchecked Sendable {
   private var pendingDroppedFrames: UInt64 = 0
   private var pendingDropStartNS: UInt64 = 0
 
-  init(slotCount: Int = 6, framesPerSlot: Int = 8_192) {
+  init(slotCount: Int = 64, framesPerSlot: Int = 8_192) {
     precondition(slotCount > 2 && framesPerSlot > 0)
     self.slotCount = UInt64(slotCount)
     self.framesPerSlot = framesPerSlot
@@ -131,6 +150,7 @@ final class AudioRing: @unchecked Sendable {
     wallStartNS: UInt64,
     wallEndNS: UInt64,
     boundaries: BoundaryBatch,
+    rollover: CaptureRolloverSplit? = nil,
     captureGeneration: UInt64 = 0
   ) -> Bool {
     guard channelCount > 0 else { return false }
@@ -138,8 +158,22 @@ final class AudioRing: @unchecked Sendable {
       noteDrop(frames: frameCount, monoStartNS: monoStartNS)
       return false
     }
+    guard let rollover, (0...frameCount).contains(rollover.frameOffset) else {
+      return writeUnsplitAudio(
+        channels: channels,
+        channelCount: channelCount,
+        frameCount: frameCount,
+        sampleRate: sampleRate,
+        monoStartNS: monoStartNS,
+        monoEndNS: monoEndNS,
+        wallStartNS: wallStartNS,
+        wallEndNS: wallEndNS,
+        boundaries: boundaries,
+        captureGeneration: captureGeneration)
+    }
+    let audioSlots: UInt64 = rollover.frameOffset == 0 || rollover.frameOffset == frameCount ? 1 : 2
     let overflowCount: UInt64 = pendingDroppedFrames > 0 ? 1 : 0
-    let requiredSlots = 1 + boundaries.count + overflowCount
+    let requiredSlots = boundaries.count + overflowCount + audioSlots + 1
     guard freeSlots >= requiredSlots else {
       noteDrop(frames: frameCount, monoStartNS: monoStartNS)
       return false
@@ -160,16 +194,117 @@ final class AudioRing: @unchecked Sendable {
       pendingDroppedFrames = 0
       pendingDropStartNS = 0
     }
+    let prefixFrames = rollover.frameOffset
+    if prefixFrames > 0 {
+      publishAudio(
+        channels: channels,
+        channelCount: channelCount,
+        sourceFrameOffset: 0,
+        frameCount: prefixFrames,
+        sampleRate: sampleRate,
+        monoStartNS: monoStartNS,
+        monoEndNS: segmentEnd(start: monoStartNS, frameCount: prefixFrames, sampleRate: sampleRate),
+        wallStartNS: wallStartNS,
+        wallEndNS: segmentEnd(start: wallStartNS, frameCount: prefixFrames, sampleRate: sampleRate),
+        captureGeneration: captureGeneration)
+    }
+    publishMarker(
+      .dayRollover,
+      monoNS: rollover.monoNS,
+      wallNS: rollover.wallNS,
+      gapNS: 0,
+      droppedFrames: 0)
+    let suffixFrames = frameCount - prefixFrames
+    if suffixFrames > 0 {
+      publishAudio(
+        channels: channels,
+        channelCount: channelCount,
+        sourceFrameOffset: prefixFrames,
+        frameCount: suffixFrames,
+        sampleRate: sampleRate,
+        monoStartNS: segmentEnd(
+          start: monoStartNS, frameCount: prefixFrames, sampleRate: sampleRate),
+        monoEndNS: monoEndNS,
+        wallStartNS: segmentEnd(
+          start: wallStartNS, frameCount: prefixFrames, sampleRate: sampleRate),
+        wallEndNS: wallEndNS,
+        captureGeneration: captureGeneration)
+    }
+    acceptedBlocks.wrappingAdd(1, ordering: .relaxed)
+    return true
+  }
+
+  private func writeUnsplitAudio(
+    channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+    channelCount: Int,
+    frameCount: Int,
+    sampleRate: Double,
+    monoStartNS: UInt64,
+    monoEndNS: UInt64,
+    wallStartNS: UInt64,
+    wallEndNS: UInt64,
+    boundaries: BoundaryBatch,
+    captureGeneration: UInt64
+  ) -> Bool {
+    let overflowCount: UInt64 = pendingDroppedFrames > 0 ? 1 : 0
+    let requiredSlots = 1 + boundaries.count + overflowCount
+    guard freeSlots >= requiredSlots else {
+      noteDrop(frames: frameCount, monoStartNS: monoStartNS)
+      return false
+    }
+    publishBoundary(boundaries.first)
+    publishBoundary(boundaries.second)
+    publishBoundary(boundaries.third)
+    publishBoundary(boundaries.fourth)
+    if pendingDroppedFrames > 0 {
+      publishMarker(
+        .ringOverflow,
+        monoNS: monoStartNS,
+        wallNS: wallStartNS,
+        gapNS: monoStartNS >= pendingDropStartNS ? monoStartNS - pendingDropStartNS : 0,
+        droppedFrames: pendingDroppedFrames)
+      pendingDroppedFrames = 0
+      pendingDropStartNS = 0
+    }
+    publishAudio(
+      channels: channels,
+      channelCount: channelCount,
+      sourceFrameOffset: 0,
+      frameCount: frameCount,
+      sampleRate: sampleRate,
+      monoStartNS: monoStartNS,
+      monoEndNS: monoEndNS,
+      wallStartNS: wallStartNS,
+      wallEndNS: wallEndNS,
+      captureGeneration: captureGeneration)
+    acceptedBlocks.wrappingAdd(1, ordering: .relaxed)
+    return true
+  }
+
+  private func publishAudio(
+    channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+    channelCount: Int,
+    sourceFrameOffset: Int,
+    frameCount: Int,
+    sampleRate: Double,
+    monoStartNS: UInt64,
+    monoEndNS: UInt64,
+    wallStartNS: UInt64,
+    wallEndNS: UInt64,
+    captureGeneration: UInt64
+  ) {
     let write = writePosition.load(ordering: .relaxed)
     let slot = Int(write % slotCount)
     let destination = samples.advanced(by: slot * framesPerSlot)
     if channelCount == 1 {
-      destination.update(from: channels[0], count: frameCount)
+      destination.update(from: channels[0].advanced(by: sourceFrameOffset), count: frameCount)
     } else {
       let divisor = Float(channelCount)
       for frame in 0..<frameCount {
         var mono: Float = 0
-        for channel in 0..<channelCount { mono += channels[channel][frame] }
+        for channel in 0..<channelCount {
+          mono += channels[channel][sourceFrameOffset + frame]
+        }
         destination[frame] = mono / divisor
       }
     }
@@ -183,8 +318,10 @@ final class AudioRing: @unchecked Sendable {
       wallEndNS: wallEndNS
     )
     writePosition.store(write + 1, ordering: .releasing)
-    acceptedBlocks.wrappingAdd(1, ordering: .relaxed)
-    return true
+  }
+
+  private func segmentEnd(start: UInt64, frameCount: Int, sampleRate: Double) -> UInt64 {
+    start + UInt64(Double(frameCount) / sampleRate * 1_000_000_000)
   }
 
   // Main-thread producer calls are valid only after the capture engine has stopped.
@@ -225,16 +362,26 @@ final class AudioRing: @unchecked Sendable {
 
   func withReadableItem(_ body: (StreamItem, UnsafePointer<Float>?) throws -> Void) rethrows -> Bool
   {
+    let result = try withReadableItemDisposition { item, samples in
+      try body(item, samples)
+      return .consume
+    }
+    return result == .consumed
+  }
+
+  func withReadableItemDisposition(
+    _ body: (StreamItem, UnsafePointer<Float>?) throws -> AudioRingReadDisposition
+  ) rethrows -> AudioRingReadResult {
     let read = readPosition.load(ordering: .relaxed)
     let write = writePosition.load(ordering: .acquiring)
-    guard read < write else { return false }
+    guard read < write else { return .empty }
     let slot = Int(read % slotCount)
     let item = items[slot]
     let pointer =
       item.marker == .none ? UnsafePointer(samples.advanced(by: slot * framesPerSlot)) : nil
-    try body(item, pointer)
+    guard try body(item, pointer) == .consume else { return .retained }
     readPosition.store(read + 1, ordering: .releasing)
-    return true
+    return .consumed
   }
 
   var isEmpty: Bool {

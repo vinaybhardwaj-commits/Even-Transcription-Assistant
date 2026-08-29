@@ -539,7 +539,7 @@ final class UnsignedDevelopmentArchiveWriter {
 extension StreamMarker {
   fileprivate var archiveDiscontinuity: ArchiveIndexDiscontinuity {
     switch self {
-    case .none, .configurationChange, .captureDiscontinuity:
+    case .none, .configurationChange, .captureDiscontinuity, .dayRollover:
       return .captureDiscontinuity
     case .restart:
       return .restart

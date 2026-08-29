@@ -290,6 +290,7 @@ public enum ArchiveRolloverError: Error, Equatable, Sendable {
   case invalidID(String)
   case invalidChunkIndex(UInt64)
   case invalidLaneConfiguration
+  case preparationMismatch
   case authenticatedContextMismatch(laneID: String)
   case authenticatedBoundaryMismatch(laneID: String, expected: UInt64, actual: UInt64)
   case planHistoryMismatch
@@ -343,6 +344,18 @@ public struct ArchiveRolloverAudioLane: Equatable, Sendable {
         expected: boundarySample,
         actual: newAuthenticatedFacts.initialSamplePosition)
     }
+    guard newAuthenticatedFacts.authenticatedSampleEnd == boundarySample else {
+      throw ArchiveRolloverError.authenticatedBoundaryMismatch(
+        laneID: newDay.laneID,
+        expected: boundarySample,
+        actual: newAuthenticatedFacts.authenticatedSampleEnd)
+    }
+    guard newAuthenticatedFacts.recordCount == 0 else {
+      throw ArchiveRolloverError.authenticatedBoundaryMismatch(
+        laneID: newDay.laneID,
+        expected: 0,
+        actual: UInt64(newAuthenticatedFacts.recordCount))
+    }
     self.oldDay = oldDay
     self.newDay = newDay
     self.boundarySample = boundarySample
@@ -355,6 +368,8 @@ public struct ArchiveRolloverAudioLane: Equatable, Sendable {
 public struct ArchiveRolloverPlan: Equatable, Sendable {
   public let commandID: String
   public let sessionID: String
+  public let sessionSampleStart: UInt64
+  public let preparationID: String
   public let primary: ArchiveRolloverAudioLane
   public let backup: ArchiveRolloverAudioLane?
   public let oldControl: ArchiveDailyControlIdentity
@@ -362,6 +377,8 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
 
   public init(
     sessionID: String,
+    sessionSampleStart: UInt64? = nil,
+    preparationID: String? = nil,
     primary: ArchiveRolloverAudioLane,
     backup: ArchiveRolloverAudioLane?,
     oldControl: ArchiveDailyControlIdentity,
@@ -369,6 +386,19 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
   ) throws {
     guard !sessionID.isEmpty, sessionID.utf8.count <= 256 else {
       throw ArchiveRolloverError.invalidID("session_id")
+    }
+    let resolvedSessionSampleStart =
+      sessionSampleStart ?? primary.oldDay.expectedInitialSessionSample
+    let preparation = try ArchiveRolloverPreparation(
+      sessionID: sessionID,
+      sessionSampleStart: resolvedSessionSampleStart,
+      oldDay: primary.oldDay,
+      boundarySample: primary.boundarySample,
+      nextChunkIndex: primary.nextChunkIndex,
+      oldAuthenticatedFacts: primary.oldAuthenticatedFacts,
+      targetISTDay: primary.newDay.istDay)
+    guard preparationID == nil || preparationID == preparation.commandID else {
+      throw ArchiveRolloverError.preparationMismatch
     }
     guard primary.oldDay.laneID == "primary", primary.newDay.laneID == "primary",
       oldControl.laneID == "_control", newControl.laneID == "_control",
@@ -421,12 +451,16 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
       throw ArchiveRolloverError.invalidLaneConfiguration
     }
     self.sessionID = sessionID
+    self.sessionSampleStart = resolvedSessionSampleStart
+    self.preparationID = preparation.commandID
     self.primary = primary
     self.backup = backup
     self.oldControl = oldControl
     self.newControl = newControl
     commandID = Self.makeCommandID(
       sessionID: sessionID,
+      sessionSampleStart: resolvedSessionSampleStart,
+      preparationID: preparation.commandID,
       primary: primary,
       backup: backup,
       oldControl: oldControl,
@@ -435,13 +469,17 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
 
   private static func makeCommandID(
     sessionID: String,
+    sessionSampleStart: UInt64,
+    preparationID: String,
     primary: ArchiveRolloverAudioLane,
     backup: ArchiveRolloverAudioLane?,
     oldControl: ArchiveDailyControlIdentity,
     newControl: ArchiveDailyControlIdentity
   ) -> String {
-    var bytes = Data("eta.room-recorder/rollover-plan/v2".utf8)
+    var bytes = Data("eta.room-recorder/rollover-plan/v3".utf8)
     append(sessionID, to: &bytes)
+    append(sessionSampleStart, to: &bytes)
+    append(preparationID, to: &bytes)
     append(primary, to: &bytes)
     if let backup {
       bytes.append(1)
@@ -459,6 +497,14 @@ public struct ArchiveRolloverPlan: Equatable, Sendable {
     append(lane.newDay, to: &data)
     append(lane.boundarySample, to: &data)
     append(lane.nextChunkIndex, to: &data)
+    append(lane.oldAuthenticatedFacts, to: &data)
+    append(lane.newAuthenticatedFacts, to: &data)
+  }
+
+  private static func append(_ facts: ArchiveAuthenticatedLaneFacts, to data: inout Data) {
+    append(facts.initialSamplePosition, to: &data)
+    append(facts.authenticatedSampleEnd, to: &data)
+    append(UInt64(facts.recordCount), to: &data)
   }
 
   private static func append(_ identity: ArchiveDailyControlIdentity, to data: inout Data) {
@@ -565,6 +611,69 @@ public struct ArchiveRolloverClock: Sendable {
 
 public enum ArchiveRolloverCoordinator {
   @discardableResult
+  public static func persistIntent(
+    plan: ArchiveRolloverPlan,
+    controlStore: ArchiveDerivedStore,
+    clock: ArchiveRolloverClock
+  ) throws -> ArchiveControlState {
+    let payloads = try controlStore.scanResult.records.map {
+      try ArchiveControlPayloadCodec.decode($0.plaintext)
+    }
+    let replay = try ArchiveControlReplay.validate(payloads)
+    guard plan.commandID == plan.recomputedCommandID else {
+      throw ArchiveRolloverError.planHistoryMismatch
+    }
+    let conflicting = replay.contains { commandID, command in
+      commandID != plan.commandID && command.commandKind == .rollover
+    }
+    guard !conflicting else { throw ArchiveRolloverError.planHistoryMismatch }
+    if let command = replay[plan.commandID] {
+      guard command.commandKind == .rollover, command.sessionID == plan.sessionID,
+        command.rolloverPlan == plan
+      else {
+        throw ArchiveRolloverError.planHistoryMismatch
+      }
+      return command.state
+    }
+    return try append(
+      state: .rolloverIntent,
+      prior: nil,
+      plan: plan,
+      controlStore: controlStore,
+      clock: clock,
+      persistedPlan: plan)
+  }
+
+  public static func recoverPendingPlan(controlStore: ArchiveDerivedStore) throws
+    -> ArchiveRolloverPlan?
+  {
+    let payloads = try controlStore.scanResult.records.map {
+      try ArchiveControlPayloadCodec.decode($0.plaintext)
+    }
+    let replay = try ArchiveControlReplay.validate(payloads)
+    let pending = replay.values.filter {
+      $0.commandKind == .rollover && $0.state != .rolloverComplete
+        && $0.state != .rolloverFailed
+    }
+    guard pending.count <= 1 else { throw ArchiveRolloverError.planHistoryMismatch }
+    guard let command = pending.first, let plan = command.rolloverPlan else { return nil }
+    guard plan.commandID == plan.recomputedCommandID, command.sessionID == plan.sessionID else {
+      throw ArchiveRolloverError.planHistoryMismatch
+    }
+    return plan
+  }
+
+  @discardableResult
+  public static func resumePersisted(
+    controlStore: ArchiveDerivedStore,
+    effects: ArchiveRolloverEffects,
+    clock: ArchiveRolloverClock
+  ) throws -> ArchiveControlState? {
+    guard let plan = try recoverPendingPlan(controlStore: controlStore) else { return nil }
+    return try resume(plan: plan, controlStore: controlStore, effects: effects, clock: clock)
+  }
+
+  @discardableResult
   public static func resume(
     plan: ArchiveRolloverPlan,
     controlStore: ArchiveDerivedStore,
@@ -583,7 +692,9 @@ public enum ArchiveRolloverCoordinator {
     }
     guard !conflicting else { throw ArchiveRolloverError.planHistoryMismatch }
     if let command = replay[plan.commandID] {
-      guard command.commandKind == .rollover, command.sessionID == plan.sessionID else {
+      guard command.commandKind == .rollover, command.sessionID == plan.sessionID,
+        command.rolloverPlan == plan
+      else {
         throw ArchiveRolloverError.planHistoryMismatch
       }
     }
@@ -592,9 +703,7 @@ public enum ArchiveRolloverCoordinator {
     while true {
       switch state {
       case nil:
-        state = try append(
-          state: .rolloverIntent, prior: nil, plan: plan,
-          controlStore: controlStore, clock: clock)
+        state = try persistIntent(plan: plan, controlStore: controlStore, clock: clock)
       case .rolloverIntent:
         try perform(
           kind: .reserveOldDayFinal,
@@ -696,7 +805,8 @@ public enum ArchiveRolloverCoordinator {
     plan: ArchiveRolloverPlan,
     controlStore: ArchiveDerivedStore,
     clock: ArchiveRolloverClock,
-    error: ArchiveControlFailure? = nil
+    error: ArchiveControlFailure? = nil,
+    persistedPlan: ArchiveRolloverPlan? = nil
   ) throws -> ArchiveControlState {
     let timestamp = clock.now()
     let payload = try ArchiveControlPayload(
@@ -707,7 +817,8 @@ public enum ArchiveRolloverCoordinator {
       newState: state,
       atMonoNS: timestamp.monotonicNS,
       atWallNS: timestamp.wallNS,
-      error: error
+      error: error,
+      rolloverPlan: persistedPlan
     )
     let position = controlStore.scanResult.records.count
     _ = try controlStore.append(
@@ -723,6 +834,8 @@ extension ArchiveRolloverPlan {
   fileprivate var recomputedCommandID: String {
     Self.makeCommandID(
       sessionID: sessionID,
+      sessionSampleStart: sessionSampleStart,
+      preparationID: preparationID,
       primary: primary,
       backup: backup,
       oldControl: oldControl,

@@ -41,8 +41,10 @@ final class CaptureSession: @unchecked Sendable {
     let hasAcceptedFrame = Atomic<Bool>(false)
     var timeline: CaptureTimeline
 
-    init(resumeAfterNS: UInt64?) {
-      timeline = CaptureTimeline(resumeAfterNS: resumeAfterNS)
+    init(resumeAfterNS: UInt64?, nextRolloverWallNS: UInt64?) {
+      timeline = CaptureTimeline(
+        resumeAfterNS: resumeAfterNS,
+        nextRolloverWallNS: nextRolloverWallNS)
     }
 
   }
@@ -61,7 +63,16 @@ final class CaptureSession: @unchecked Sendable {
   ) throws {
     self.ring = ring
     self.captureGeneration = captureGeneration
-    state = State(resumeAfterNS: resumeAfterNS)
+    let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })
+    let nextMidnightNS = nextMidnight.timeIntervalSince1970 * 1_000_000_000
+    guard nextMidnightNS.isFinite, nextMidnightNS >= 0,
+      nextMidnightNS <= Double(UInt64.max)
+    else {
+      throw RecorderError("cannot represent next IST midnight")
+    }
+    state = State(
+      resumeAfterNS: resumeAfterNS,
+      nextRolloverWallNS: UInt64(nextMidnightNS.rounded()))
     if !AudioDevices.isDefaultInput(device) { try selectDevice(device, on: engine) }
     let input = engine.inputNode
     let hardwareFormat = input.inputFormat(forBus: 0)
@@ -102,6 +113,7 @@ final class CaptureSession: @unchecked Sendable {
         wallStartNS: timing.wallStartNS,
         wallEndNS: timing.wallEndNS,
         boundaries: timing.boundaries,
+        rollover: timing.rollover,
         captureGeneration: captureGeneration
       )
       if accepted {

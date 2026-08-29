@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import RoomRecorderCore
 import Testing
 
 @testable import TapeCore
@@ -146,11 +147,198 @@ import Testing
     }
   }
 
+  @Test func rolloverPlanCodecIsStrictDeterministicAndCoversOptionalBackup() throws {
+    for hasBackup in [false, true] {
+      let fixture = try PlanFixture(backup: hasBackup)
+      defer { fixture.close() }
+      let encoded = try ArchiveRolloverPlanCodec.encode(fixture.plan)
+      #expect(try ArchiveRolloverPlanCodec.encode(fixture.plan) == encoded)
+      #expect(try ArchiveRolloverPlanCodec.decode(encoded) == fixture.plan)
+      #expect(encoded.count <= ArchiveRolloverPlanCodec.maximumEncodedByteCount)
+
+      var trailing = encoded
+      trailing.append(0)
+      #expect(throws: ArchiveRolloverPlanCodecError.self) {
+        try ArchiveRolloverPlanCodec.decode(trailing)
+      }
+      var substituted = encoded
+      substituted[substituted.count - 1] ^= 1
+      #expect(throws: (any Error).self) {
+        try ArchiveRolloverPlanCodec.decode(substituted)
+      }
+    }
+  }
+
+  @Test func rolloverPreparationIsStrictVersionedAndBindsEveryWitness() throws {
+    let fixture = try PlanFixture()
+    defer { fixture.close() }
+    let prepared = try preparation(for: fixture.plan)
+    let encoded = try ArchiveRolloverPreparationCodec.encode(prepared)
+    let targetISTDay = try fixture.plan.primary.newDay.istDay
+
+    #expect(prepared.commandID.count == 64)
+    #expect(prepared.commandID == prepared.commandID.lowercased())
+    #expect(prepared.sessionSampleStart == fixture.plan.primary.oldDay.expectedInitialSessionSample)
+    #expect(prepared.targetISTDay == targetISTDay)
+    #expect(try ArchiveRolloverPreparationCodec.encode(prepared) == encoded)
+    #expect(try ArchiveRolloverPreparationCodec.decode(encoded) == prepared)
+
+    var trailing = encoded
+    trailing.append(0)
+    #expect(throws: ArchiveRolloverPreparationCodecError.self) {
+      try ArchiveRolloverPreparationCodec.decode(trailing)
+    }
+    var substitutedID = encoded
+    substitutedID[14] ^= 1
+    #expect(throws: ArchiveRolloverPreparationCodecError.commandIDMismatch) {
+      try ArchiveRolloverPreparationCodec.decode(substitutedID)
+    }
+
+    let earlierSessionStart = try preparation(for: fixture.plan, sessionSampleStart: 99)
+    #expect(earlierSessionStart.commandID != prepared.commandID)
+    #expect(throws: ArchiveRolloverPreparationError.invalidSessionSampleStart) {
+      try preparation(for: fixture.plan, sessionSampleStart: 105)
+    }
+    #expect(throws: ArchiveRolloverPreparationError.nonAdjacentTargetDay) {
+      try ArchiveRolloverPreparation(
+        sessionID: prepared.sessionID,
+        sessionSampleStart: prepared.sessionSampleStart,
+        oldDay: prepared.oldDay,
+        boundarySample: prepared.boundarySample,
+        nextChunkIndex: prepared.nextChunkIndex,
+        oldAuthenticatedFacts: prepared.oldAuthenticatedFacts,
+        targetISTDay: ArchiveISTDay("2026-08-29"))
+    }
+  }
+
+  @Test func preparationPayloadIsCanonicalTerminalAndRetainedByReplay() throws {
+    let fixture = try PlanFixture()
+    defer { fixture.close() }
+    let preparation = try preparation(for: fixture.plan)
+    let payload = try ArchiveControlPayload(
+      commandID: preparation.commandID,
+      commandKind: .rolloverPreparation,
+      sessionID: preparation.sessionID,
+      priorState: nil,
+      newState: .rolloverPreparation,
+      atMonoNS: 8,
+      atWallNS: 9,
+      error: nil,
+      rolloverPreparation: preparation)
+    let encoded = try ArchiveControlPayloadCodec.encode(payload)
+
+    #expect(String(decoding: encoded, as: UTF8.self).contains("\"rollover_preparation\":"))
+    #expect(try ArchiveControlPayloadCodec.decode(encoded) == payload)
+    #expect(
+      try ArchiveControlReplay.validate([payload])[preparation.commandID]?.rolloverPreparation
+        == preparation)
+    #expect(
+      throws: ArchiveControlPayloadError.invalidTransition(
+        commandKind: .rolloverPreparation,
+        priorState: .rolloverPreparation,
+        newState: .rolloverPreparation)
+    ) {
+      try ArchiveControlPayload(
+        commandID: preparation.commandID,
+        commandKind: .rolloverPreparation,
+        sessionID: preparation.sessionID,
+        priorState: .rolloverPreparation,
+        newState: .rolloverPreparation,
+        atMonoNS: 10,
+        atWallNS: 10,
+        error: nil,
+        rolloverPreparation: preparation)
+    }
+    #expect(
+      throws: ArchiveControlPayloadError.invalidRolloverPreparation(
+        commandID: preparation.commandID)
+    ) {
+      try ArchiveControlPayload(
+        commandID: preparation.commandID,
+        commandKind: .rollover,
+        sessionID: preparation.sessionID,
+        priorState: nil,
+        newState: .rolloverIntent,
+        atMonoNS: 10,
+        atWallNS: 10,
+        error: nil,
+        rolloverPreparation: preparation)
+    }
+  }
+
+  @Test func rolloverIntentAtomicallyCarriesTheCanonicalPlan() throws {
+    let fixture = try PlanFixture(backup: true)
+    defer { fixture.close() }
+    let payload = try ArchiveControlPayload(
+      commandID: fixture.plan.commandID,
+      commandKind: .rollover,
+      sessionID: fixture.plan.sessionID,
+      priorState: nil,
+      newState: .rolloverIntent,
+      atMonoNS: 10,
+      atWallNS: 20,
+      error: nil,
+      rolloverPlan: fixture.plan)
+    let encoded = try ArchiveControlPayloadCodec.encode(payload)
+    #expect(String(decoding: encoded, as: UTF8.self).contains("\"rollover_plan\":"))
+    #expect(try ArchiveControlPayloadCodec.decode(encoded) == payload)
+    #expect(
+      try ArchiveControlReplay.validate([payload])[fixture.plan.commandID]?.rolloverPlan
+        == fixture.plan)
+
+    let legacy = try ArchiveControlPayload(
+      commandID: fixture.plan.commandID,
+      commandKind: .rollover,
+      sessionID: fixture.plan.sessionID,
+      priorState: nil,
+      newState: .rolloverIntent,
+      atMonoNS: 10,
+      atWallNS: 20,
+      error: nil)
+    #expect(
+      throws: ArchiveControlPayloadError.missingRolloverPlan(
+        commandID: fixture.plan.commandID)
+    ) {
+      try ArchiveControlReplay.validate([legacy])
+    }
+  }
+
+  @Test func roomControlJournalRecoversThePersistedPlanAfterReopen() throws {
+    let fixture = try PlanFixture()
+    defer { fixture.close() }
+    var control = try fixture.openControlStore()
+    var journal: ArchiveRoomControlJournal? = ArchiveRoomControlJournal(store: control)
+    let recovered = try journal!.advance(
+      RoomControlTransition(
+        commandID: fixture.plan.commandID,
+        commandKind: .rollover,
+        sessionID: fixture.plan.sessionID,
+        priorState: nil,
+        newState: .rolloverIntent,
+        rolloverPlan: fixture.plan))
+    #expect(recovered.rolloverPlan == fixture.plan)
+    _ = try journal!.advance(
+      RoomControlTransition(
+        commandID: fixture.plan.commandID,
+        commandKind: .rollover,
+        sessionID: fixture.plan.sessionID,
+        priorState: .rolloverIntent,
+        newState: .oldDayFinalReserved))
+    journal = nil
+
+    control = try fixture.openControlStore()
+    journal = ArchiveRoomControlJournal(store: control)
+    #expect(try journal!.recover()[fixture.plan.commandID]?.rolloverPlan == fixture.plan)
+    #expect(try journal!.recover()[fixture.plan.commandID]?.state == .oldDayFinalReserved)
+    journal = nil
+  }
+
   @Test func commandIDBindsEveryPlanCategoryAndSubstitutionCannotResumeHistory() throws {
     let baseline = try PlanFixture()
     defer { baseline.close() }
     let variants = try [
       PlanFixture(sessionID: "bs_other"),
+      PlanFixture(sessionSampleStart: 99),
       PlanFixture(boundary: 105),
       PlanFixture(oldDate: "2026-08-28", newDate: "2026-08-29"),
       PlanFixture(room: "room_other"),
@@ -166,6 +354,18 @@ import Testing
     #expect(variants.allSatisfy { $0.plan.commandID != baseline.plan.commandID })
     #expect(baseline.plan.commandID.count == 64)
     #expect(baseline.plan.commandID == baseline.plan.commandID.lowercased())
+    let baselinePreparation = try preparation(for: baseline.plan)
+    #expect(baseline.plan.preparationID == baselinePreparation.commandID)
+    #expect(throws: ArchiveRolloverError.preparationMismatch) {
+      try ArchiveRolloverPlan(
+        sessionID: baseline.plan.sessionID,
+        sessionSampleStart: baseline.plan.sessionSampleStart,
+        preparationID: String(repeating: "0", count: 64),
+        primary: baseline.plan.primary,
+        backup: baseline.plan.backup,
+        oldControl: baseline.plan.oldControl,
+        newControl: baseline.plan.newControl)
+    }
 
     var control = try baseline.openControlStore()
     #expect(throws: MidnightCrash.self) {
@@ -177,6 +377,8 @@ import Testing
     }
     control.close()
     control = try baseline.openControlStore()
+    #expect(
+      try ArchiveRolloverCoordinator.recoverPendingPlan(controlStore: control) == baseline.plan)
     for variant in variants {
       #expect(throws: ArchiveRolloverError.planHistoryMismatch) {
         try ArchiveRolloverCoordinator.resume(
@@ -211,8 +413,7 @@ import Testing
       let hashesBefore = try durableEffectHashes(effectsDirectory)
       control = try fixture.openControlStore()
       #expect(
-        try ArchiveRolloverCoordinator.resume(
-          plan: fixture.plan,
+        try ArchiveRolloverCoordinator.resumePersisted(
           controlStore: control,
           effects: DiskRolloverEffects(directory: effectsDirectory, crashKind: nil).value,
           clock: clock.value) == .rolloverComplete)
@@ -359,6 +560,7 @@ private final class PlanFixture {
   init(
     label: String = UUID().uuidString,
     sessionID: String = "bs_same_session",
+    sessionSampleStart: UInt64? = nil,
     boundary: UInt64 = 104,
     oldDate: String = "2026-08-27",
     newDate: String = "2026-08-28",
@@ -407,6 +609,7 @@ private final class PlanFixture {
       streamByte: 0x52 &+ streamOffset, digestByte: 0x62 &+ digestOffset)
     plan = try ArchiveRolloverPlan(
       sessionID: sessionID,
+      sessionSampleStart: sessionSampleStart,
       primary: primary,
       backup: backupLane,
       oldControl: oldControl,
@@ -559,6 +762,20 @@ private func unusedEffects() -> ArchiveRolloverEffects {
     reserveOldDayFinal: { _ in throw ArchiveRolloverEffectFailure.internalIOFailed },
     closeOldDayFiles: { _ in throw ArchiveRolloverEffectFailure.internalIOFailed },
     makeNewDayFilesDurable: { _ in throw ArchiveRolloverEffectFailure.internalIOFailed })
+}
+
+private func preparation(
+  for plan: ArchiveRolloverPlan,
+  sessionSampleStart: UInt64? = nil
+) throws -> ArchiveRolloverPreparation {
+  try ArchiveRolloverPreparation(
+    sessionID: plan.sessionID,
+    sessionSampleStart: sessionSampleStart ?? plan.sessionSampleStart,
+    oldDay: plan.primary.oldDay,
+    boundarySample: plan.primary.boundarySample,
+    nextChunkIndex: plan.primary.nextChunkIndex,
+    oldAuthenticatedFacts: plan.primary.oldAuthenticatedFacts,
+    targetISTDay: plan.primary.newDay.istDay)
 }
 
 private func dailyIdentity(

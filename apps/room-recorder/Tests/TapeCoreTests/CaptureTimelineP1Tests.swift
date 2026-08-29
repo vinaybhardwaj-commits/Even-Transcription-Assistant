@@ -229,6 +229,83 @@ import Testing
     #expect(abs(report.fittedNativePPM ?? 1) < 0.001)
     #expect(report.rendered().contains("clock adjustment 0.500 s"))
   }
+
+  @Test func cap08ClassifiesTheFirstFrameAtOrAfterISTMidnight() throws {
+    let midnight = UInt64(20_000_000_000)
+    var timeline = CaptureTimeline(nextRolloverWallNS: midnight)
+    let timing = timeline.classify(
+      observation(
+        hostStartNS: 5_000_000_000,
+        sampleTime: 0,
+        observedMonoNS: 5_000_000_000,
+        observedWallNS: midnight - 5_000_000))
+
+    let rollover = try #require(timing.rollover)
+    #expect(rollover.frameOffset == 240)
+    #expect(rollover.monoNS == 5_005_000_000)
+    #expect(rollover.wallNS == midnight)
+
+    let ring = AudioRing(slotCount: 4, framesPerSlot: 480)
+    #expect(publish(ring, samples: (0..<480).map(Float.init), timing: timing))
+    let items = consume(ring)
+    #expect(items.map(\.item.marker) == [.none, .dayRollover, .none])
+    #expect(items[0].samples == (0..<240).map(Float.init))
+    #expect(items[2].samples == (240..<480).map(Float.init))
+  }
+
+  @Test func cap09RetainsRolloverUntilTheWholeRingTransactionPublishes() throws {
+    let midnight = UInt64(20_000_000_000)
+    var timeline = CaptureTimeline(nextRolloverWallNS: midnight)
+    let rejected = timeline.classify(
+      observation(
+        hostStartNS: 5_000_000_000,
+        sampleTime: 0,
+        observedMonoNS: 5_000_000_000,
+        observedWallNS: midnight - 5_000_000))
+    #expect(try #require(rejected.rollover).frameOffset == 240)
+
+    let retry = timeline.classify(
+      observation(
+        hostStartNS: 5_010_000_000,
+        sampleTime: 480,
+        observedMonoNS: 5_010_000_000,
+        observedWallNS: midnight + 5_000_000))
+    #expect(try #require(retry.rollover).frameOffset == 0)
+    #expect(try #require(retry.rollover).wallNS == midnight)
+
+    timeline.didPublishFrame()
+    let afterPublish = timeline.classify(
+      observation(
+        hostStartNS: 5_020_000_000,
+        sampleTime: 960,
+        observedMonoNS: 5_020_000_000,
+        observedWallNS: midnight + 15_000_000))
+    #expect(afterPublish.rollover == nil)
+  }
+
+  @Test func cap10TreatsMidnightAtEitherBlockEdgeWithoutAnEmptySegment() throws {
+    let midnight = UInt64(20_000_000_000)
+    for (wallStart, expectedOffset) in [
+      (midnight, 0),
+      (midnight - 10_000_000, 480),
+    ] {
+      var timeline = CaptureTimeline(nextRolloverWallNS: midnight)
+      let timing = timeline.classify(
+        observation(
+          hostStartNS: 5_000_000_000,
+          sampleTime: 0,
+          observedMonoNS: 5_000_000_000,
+          observedWallNS: wallStart))
+      #expect(try #require(timing.rollover).frameOffset == expectedOffset)
+
+      let ring = AudioRing(slotCount: 3, framesPerSlot: 480)
+      #expect(publish(ring, samples: [Float](repeating: 1, count: 480), timing: timing))
+      let items = consume(ring)
+      #expect(items.count == 2)
+      #expect(items.filter { $0.item.marker == .none }.count == 1)
+      #expect(items.first { $0.item.marker == .none }?.item.frameCount == 480)
+    }
+  }
 }
 
 private struct CapturedTimelineItem {
@@ -266,7 +343,8 @@ private func publish(_ ring: AudioRing, samples: [Float], timing: CaptureFrameTi
         monoEndNS: timing.monoEndNS,
         wallStartNS: timing.wallStartNS,
         wallEndNS: timing.wallEndNS,
-        boundaries: timing.boundaries
+        boundaries: timing.boundaries,
+        rollover: timing.rollover
       )
     }
   }

@@ -107,6 +107,60 @@ import Testing
     try second.stopAndWait()
   }
 
+  @Test func rolloverFinalizesOldDayAndRetainsFenceAndSuffixForHandoff() throws {
+    let fixture = try makeFixture("rollover-fence")
+    defer { fixture.remove() }
+    let ring = AudioRing(slotCount: 8, framesPerSlot: 8_000)
+    let writer = ResidentArchiveLaneWriter(ring: ring, store: try fixture.open(rootKey: rootKey))
+    try writer.start()
+
+    try enqueueTone(blockCount: 2, captureGeneration: 1, ring: ring)
+    var samples = [Float](repeating: 0.25, count: 8_000)
+    let accepted = samples.withUnsafeMutableBufferPointer { buffer in
+      var channel = buffer.baseAddress!
+      return withUnsafePointer(to: &channel) { channels in
+        ring.writeAudio(
+          channels: channels,
+          channelCount: 1,
+          frameCount: 8_000,
+          sampleRate: 48_000,
+          monoStartNS: 2_000_000_000,
+          monoEndNS: 2_166_666_666,
+          wallStartNS: 4_000_000_000,
+          wallEndNS: 4_166_666_666,
+          boundaries: BoundaryBatch(),
+          rollover: CaptureRolloverSplit(
+            frameOffset: 4_000,
+            monoNS: 2_083_333_333,
+            wallNS: 4_083_333_333),
+          captureGeneration: 1)
+      }
+    }
+    #expect(accepted)
+
+    let deadline = Date().addingTimeInterval(3)
+    while writer.isRunning, Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.005)
+    }
+    try writer.stopAndWait()
+    let fence = try #require(writer.rolloverFence)
+    #expect(fence.monoNS == 2_083_333_333)
+    #expect(fence.wallNS == 4_083_333_333)
+    #expect(fence.authenticatedFacts.authenticatedSampleEnd == writer.durableSampleEnd)
+
+    var retainedItems: [StreamItem] = []
+    var retainedSamples: [[Float]] = []
+    while ring.withReadableItem({ item, pointer in
+      retainedItems.append(item)
+      retainedSamples.append(
+        pointer.map { Array(UnsafeBufferPointer(start: $0, count: item.frameCount)) } ?? [])
+    }) {}
+    #expect(retainedItems.map(\.marker) == [.dayRollover, .none])
+    #expect(retainedSamples[1] == [Float](repeating: 0.25, count: 4_000))
+    #expect(retainedItems[1].frameCount == 4_000)
+    #expect(retainedItems[1].monoStartNS == 2_083_333_333)
+  }
+
   @Test func readinessDoesNotMaskFailureAfterDurableGrowth() throws {
     let fixture = try makeFixture("readiness-failure")
     defer { fixture.remove() }
@@ -228,6 +282,168 @@ import Testing
     let snapshot = try fixture.snapshot(rootKey: rootKey)
     defer { snapshot.close() }
     #expect(snapshot.authenticatedFacts.authenticatedSampleEnd == 16_011)
+  }
+
+  @Test func captureFacadeHandsTheLiveProducerToANewStoreAtTheAuthenticatedSeam() throws {
+    let oldFixture = try makeFixture("capture-rollover-old")
+    let newFixture = try makeFixture("capture-rollover-new")
+    defer {
+      oldFixture.remove()
+      newFixture.remove()
+    }
+    let newRootKey = Data(rootKey.reversed())
+    let newContext = ArchiveContext(
+      streamUUID: Data([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+      roomID: oldFixture.context.roomID,
+      istDate: "2026-08-29",
+      laneID: "primary",
+      stableDeviceUID: oldFixture.context.stableDeviceUID)
+    let ring = AudioRing(slotCount: 64, framesPerSlot: 8_000)
+    let captured = SyntheticResidentCaptureSession()
+    let rollover = ResidentRolloverCollector()
+    let oldWriter = ResidentArchiveLaneWriter(
+      ring: ring,
+      store: try oldFixture.open(rootKey: rootKey))
+    let lane = ResidentAudioCaptureLane(
+      ring: ring,
+      writer: oldWriter,
+      rolloverStoreFactory: { fence in
+        let claimedConsumer = ring.claimConsumer()
+        if claimedConsumer { ring.releaseConsumer() }
+        let oldSnapshot = try oldWriter.authenticatedSnapshot()
+        oldSnapshot.close()
+        rollover.record(
+          fence,
+          oldConsumerHeld: !claimedConsumer,
+          oldStoreOpen: true)
+        return try newFixture.open(
+          rootKey: newRootKey,
+          context: newContext,
+          initialSamplePosition: fence.authenticatedFacts.authenticatedSampleEnd)
+      },
+      sessionFactory: { generation, _ in
+        try enqueueTone(blockCount: 6, captureGeneration: UInt64(generation), ring: ring)
+        return captured
+      })
+
+    try lane.startAndWaitUntilDurable()
+    var samples = [Float](repeating: 0.25, count: 8_000)
+    let accepted = samples.withUnsafeMutableBufferPointer { buffer in
+      var channel = buffer.baseAddress!
+      return withUnsafePointer(to: &channel) { channels in
+        ring.writeAudio(
+          channels: channels,
+          channelCount: 1,
+          frameCount: 8_000,
+          sampleRate: 48_000,
+          monoStartNS: 2_000_000_000,
+          monoEndNS: 2_166_666_666,
+          wallStartNS: 4_000_000_000,
+          wallEndNS: 4_166_666_666,
+          boundaries: BoundaryBatch(),
+          rollover: CaptureRolloverSplit(
+            frameOffset: 4_000,
+            monoNS: 2_083_333_333,
+            wallNS: 4_083_333_333),
+          captureGeneration: 1)
+      }
+    }
+    #expect(accepted)
+    let deadline = Date().addingTimeInterval(3)
+    while rollover.fence == nil, Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.005)
+    }
+    let fence = try #require(rollover.fence)
+    #expect(rollover.oldConsumerHeld)
+    #expect(rollover.oldStoreOpen)
+    while !ring.isEmpty, Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.005)
+    }
+    #expect(ring.isEmpty)
+    try lane.service()
+    #expect(captured.stopCount == 0)
+    #expect(lane.isActive)
+
+    try lane.stopAndDrain()
+    let oldSnapshot = try oldFixture.snapshot(rootKey: rootKey)
+    defer { oldSnapshot.close() }
+    let newSnapshot = try newFixture.snapshot(
+      rootKey: newRootKey,
+      context: newContext,
+      initialSamplePosition: fence.authenticatedFacts.authenticatedSampleEnd)
+    defer { newSnapshot.close() }
+    #expect(
+      oldSnapshot.authenticatedFacts.authenticatedSampleEnd
+        == newSnapshot.authenticatedFacts.initialSamplePosition)
+    #expect(
+      newSnapshot.authenticatedFacts.authenticatedSampleEnd
+        > newSnapshot.authenticatedFacts.initialSamplePosition)
+    #expect(captured.stopCount == 1)
+  }
+
+  @Test func rolloverPreparationFailureClosesPreparedStoreAndDoesNotStrandStop() throws {
+    let oldFixture = try makeFixture("capture-rollover-preparation-failure-old")
+    let preparedFixture = try makeFixture("capture-rollover-preparation-failure-new")
+    defer {
+      oldFixture.remove()
+      preparedFixture.remove()
+    }
+    let preparedRootKey = Data(rootKey.reversed())
+    let ring = AudioRing(slotCount: 64, framesPerSlot: 8_000)
+    let oldWriter = ResidentArchiveLaneWriter(
+      ring: ring,
+      store: try oldFixture.open(rootKey: rootKey))
+    let lane = ResidentAudioCaptureLane(
+      ring: ring,
+      writer: oldWriter,
+      rolloverStoreFactory: { _ in
+        try preparedFixture.open(rootKey: preparedRootKey)
+      },
+      sessionFactory: { generation, _ in
+        try enqueueTone(blockCount: 6, captureGeneration: UInt64(generation), ring: ring)
+        return SyntheticResidentCaptureSession()
+      })
+    defer { try? lane.stopAndDrain() }
+
+    try lane.startAndWaitUntilDurable()
+    var samples = [Float](repeating: 0.25, count: 8_000)
+    let accepted = samples.withUnsafeMutableBufferPointer { buffer in
+      var channel = buffer.baseAddress!
+      return withUnsafePointer(to: &channel) { channels in
+        ring.writeAudio(
+          channels: channels,
+          channelCount: 1,
+          frameCount: 8_000,
+          sampleRate: 48_000,
+          monoStartNS: 2_000_000_000,
+          monoEndNS: 2_166_666_666,
+          wallStartNS: 4_000_000_000,
+          wallEndNS: 4_166_666_666,
+          boundaries: BoundaryBatch(),
+          rollover: CaptureRolloverSplit(
+            frameOffset: 4_000,
+            monoNS: 2_083_333_333,
+            wallNS: 4_083_333_333),
+          captureGeneration: 1)
+      }
+    }
+    #expect(accepted)
+    let deadline = Date().addingTimeInterval(3)
+    while !oldWriter.hasFailed, Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.005)
+    }
+    #expect(oldWriter.hasFailed)
+
+    #expect(throws: ResidentArchiveLaneWriterError.self) {
+      try lane.service()
+    }
+    #expect(throws: ResidentArchiveLaneWriterError.self) {
+      try lane.stopAndDrain()
+    }
+    let reopened = try preparedFixture.open(rootKey: preparedRootKey)
+    reopened.close()
+    #expect(ring.claimConsumer())
+    ring.releaseConsumer()
   }
 
   @Test func captureFacadeAuthorizationFailureDoesNotClaimRingOrStartWriter() throws {
@@ -490,6 +706,29 @@ private final class ResidentCaptureErrorCollector: @unchecked Sendable {
   func append(_ error: Error) { lock.withLock { storage.append(error) } }
 }
 
+private final class ResidentRolloverCollector: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: ResidentArchiveRolloverFence?
+  private var oldConsumerHeldValue = false
+  private var oldStoreOpenValue = false
+
+  var fence: ResidentArchiveRolloverFence? { lock.withLock { value } }
+  var oldConsumerHeld: Bool { lock.withLock { oldConsumerHeldValue } }
+  var oldStoreOpen: Bool { lock.withLock { oldStoreOpenValue } }
+
+  func record(
+    _ fence: ResidentArchiveRolloverFence,
+    oldConsumerHeld: Bool,
+    oldStoreOpen: Bool
+  ) {
+    lock.withLock {
+      value = fence
+      oldConsumerHeldValue = oldConsumerHeld
+      oldStoreOpenValue = oldStoreOpen
+    }
+  }
+}
+
 private struct ResidentWriterLaneFixture {
   let directory: URL
 
@@ -506,19 +745,37 @@ private struct ResidentWriterLaneFixture {
   }
 
   func open(rootKey: Data) throws -> ArchiveLaneStore {
+    try open(rootKey: rootKey, context: context, initialSamplePosition: 0)
+  }
+
+  func open(
+    rootKey: Data,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
+  ) throws -> ArchiveLaneStore {
     try ArchiveLaneStore.openRecoveringForAppend(
       tapeURL: tape,
       indexURL: index,
       rootKey: rootKey,
-      context: context)
+      context: context,
+      initialSamplePosition: initialSamplePosition)
   }
 
   func snapshot(rootKey: Data) throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try snapshot(rootKey: rootKey, context: context, initialSamplePosition: 0)
+  }
+
+  func snapshot(
+    rootKey: Data,
+    context: ArchiveContext,
+    initialSamplePosition: UInt64
+  ) throws -> ArchiveLaneStore.AuthenticatedSnapshot {
     try ArchiveLaneStore.openAuthenticatedSnapshot(
       tapeURL: tape,
       indexURL: index,
       rootKey: rootKey,
-      context: context)
+      context: context,
+      initialSamplePosition: initialSamplePosition)
   }
 
   func remove() {

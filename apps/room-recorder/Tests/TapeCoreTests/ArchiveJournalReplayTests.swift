@@ -38,6 +38,48 @@ import Testing
     #expect(records.filter { $0.error == nil }.allSatisfy { $0.priorState != $0.newState })
   }
 
+  @Test func serverEndedWitnessSurvivesDoneWhileLegacyDoneStillReplays() throws {
+    let initial = try payload()
+    var prefix = [initial]
+    var prior = ArchiveJournalState.reserved
+    for state in [
+      ArchiveJournalState.encoded, .spoolDurable, .putComplete, .headVerified, .rowRegistered,
+    ] {
+      prefix.append(try payload(attemptID: "attempt_final", prior: prior, new: state))
+      prior = state
+    }
+    let observed = try payload(
+      attemptID: "attempt_final", prior: .rowRegistered, new: .serverEnded)
+    let observedDone = try payload(
+      attemptID: "attempt_final", prior: .serverEnded, new: .done)
+    let observedReplay = try ArchiveJournalReplay.validate(prefix + [observed, observedDone])
+    #expect(observedReplay[initial.reservationID]?.state == .done)
+    #expect(observedReplay[initial.reservationID]?.serverEndedObserved == true)
+
+    let legacyDone = try payload(
+      attemptID: "attempt_final", prior: .rowRegistered, new: .done)
+    let legacyReplay = try ArchiveJournalReplay.validate(prefix + [legacyDone])
+    #expect(legacyReplay[initial.reservationID]?.state == .done)
+    #expect(legacyReplay[initial.reservationID]?.serverEndedObserved == false)
+  }
+
+  @Test func serverEndedRegistrationCanBeWitnessedAtomicallyFromHeadVerification() throws {
+    let initial = try payload()
+    let states: [ArchiveJournalState] = [
+      .encoded, .spoolDurable, .putComplete, .headVerified, .serverEnded, .done,
+    ]
+    var payloads = [initial]
+    var prior = ArchiveJournalState.reserved
+    for state in states {
+      payloads.append(try payload(attemptID: "attempt_atomic", prior: prior, new: state))
+      prior = state
+    }
+
+    let replay = try ArchiveJournalReplay.validate(payloads)
+    #expect(replay[initial.reservationID]?.state == .done)
+    #expect(replay[initial.reservationID]?.serverEndedObserved == true)
+  }
+
   @Test func illegalStateFactsAndAttemptChangesAreRejected() throws {
     let initial = try payload()
     let skipped = try payload(

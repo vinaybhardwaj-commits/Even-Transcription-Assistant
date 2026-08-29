@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import TapeCore
@@ -17,6 +18,7 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   case residentArchivePreflightRequired
   case residentArchivePreflightFailed
   case residentArchivePreflightMismatch
+  case residentArchiveRecoveryUnavailable
   case residentArchiveRuntimeUnavailable
   case residentArchiveMissingRoomID
   case residentArchiveDidNotBecomeDurable
@@ -41,6 +43,7 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
     case .residentArchivePreflightRequired: return "resident_archive_preflight_required"
     case .residentArchivePreflightFailed: return "resident_archive_preflight_failed"
     case .residentArchivePreflightMismatch: return "resident_archive_preflight_mismatch"
+    case .residentArchiveRecoveryUnavailable: return "resident_archive_recovery_unavailable"
     case .residentArchiveRuntimeUnavailable: return "resident_archive_runtime_unavailable"
     case .residentArchiveMissingRoomID: return "resident_archive_missing_room_id"
     case .residentArchiveDidNotBecomeDurable: return "resident_archive_capture_not_durable"
@@ -201,27 +204,99 @@ public enum RoomResidentCaptureStopReason: Equatable, Sendable {
   case serverEnded
 }
 
+public struct RoomResidentFinalizationContext: Equatable, Sendable {
+  public let roomID: String
+  public let sessionID: String
+  public let nextPrimaryIndex: Int
+  public let nextBackupIndex: Int?
+
+  public init(
+    roomID: String,
+    sessionID: String,
+    nextPrimaryIndex: Int,
+    nextBackupIndex: Int? = nil
+  ) {
+    self.roomID = roomID
+    self.sessionID = sessionID
+    self.nextPrimaryIndex = nextPrimaryIndex
+    self.nextBackupIndex = nextBackupIndex
+  }
+}
+
 public protocol RoomResidentCaptureOwning: AnyObject, Sendable {
   var isActive: Bool { get }
   /// True while a started generation has not yet proved its durable final boundary.
   var requiresFinalization: Bool { get }
   var nextPrimaryIndex: Int { get }
   var nextBackupIndex: Int? { get }
+  /// A retained correctness failure that cannot be healed by retrying delivery.
+  var terminalFailure: String? { get }
+  /// The exact session for which delivery durably observed that the server had already ended it.
+  var serverEndedSessionID: String? { get }
+  /// Authenticated capture authority that has no converged local terminal control.
+  var retainedUnfinalizedSessionID: String? { get }
   /// Returns only after this generation has authenticated durable tape and index growth.
   func start(context: RoomResidentCaptureStartContext) throws
   /// Advances local derivation, delivery, health, and unexpected-stop detection off the callback.
-  func service() throws
+  func service() async throws
   /// Idempotently stops the producer, drains the writer, and durably closes the boundary.
   /// A failed call must retain `requiresFinalization` so a later command can retry.
   func stopAndFinalize(reason: RoomResidentCaptureStopReason) throws
+  /// Durably reserves every final derivative range after the capture boundary is closed.
+  func reserveFinalRanges(context: RoomResidentFinalizationContext) async throws
+  /// Returns only after every reserved final range has its immutable delivery witnesses.
+  func verifyFinalRanges(context: RoomResidentFinalizationContext) async throws
+  /// Clears only the in-memory startup signal after local finalization has converged.
+  func clearServerEndedSessionID(_ sessionID: String)
+  /// Promotes retained capture authority after an authoritative no-active server response.
+  func markRetainedUnfinalizedSessionAsServerEnded(_ sessionID: String) throws
   func currentLevels() -> BenchLevelPair?
 }
 
-public typealias RoomResidentCaptureFactory =
+extension RoomResidentCaptureOwning {
+  public var terminalFailure: String? { nil }
+  public var serverEndedSessionID: String? { nil }
+  public var retainedUnfinalizedSessionID: String? { nil }
+  public func clearServerEndedSessionID(_: String) {}
+  public func markRetainedUnfinalizedSessionAsServerEnded(_: String) throws {
+    throw RoomEngineError.residentArchiveRuntimeUnavailable
+  }
+}
+
+public struct RoomResidentRuntime: Sendable {
+  public let capture: any RoomResidentCaptureOwning
+  public let controlJournal: any RoomControlJournalOwning
+
+  public init(
+    capture: any RoomResidentCaptureOwning,
+    controlJournal: any RoomControlJournalOwning
+  ) {
+    self.capture = capture
+    self.controlJournal = controlJournal
+  }
+}
+
+public struct RoomResidentRuntimeContext: Sendable {
+  public let archiveRootURL: URL
+  public let roomID: String
+  public let archiveDeliveryWire: (any ArchiveDeliveryWire)?
+
+  public init(
+    archiveRootURL: URL,
+    roomID: String,
+    archiveDeliveryWire: (any ArchiveDeliveryWire)? = nil
+  ) {
+    self.archiveRootURL = archiveRootURL
+    self.roomID = roomID
+    self.archiveDeliveryWire = archiveDeliveryWire
+  }
+}
+
+public typealias RoomResidentRuntimeFactory =
   @Sendable (
     _ configuration: RoomConfiguration,
-    _ archiveRootURL: URL
-  ) throws -> any RoomResidentCaptureOwning
+    _ context: RoomResidentRuntimeContext
+  ) throws -> RoomResidentRuntime
 
 public struct FoundationRoomCaptureLauncher: RoomCaptureLaunching {
   public init() {}
@@ -314,7 +389,12 @@ public actor RoomEngine {
   private let capturesURL: URL
   private let instanceLock: RoomEngineInstanceLock
   private let retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
-  private let residentCaptureOwner: (any RoomResidentCaptureOwning)?
+  private let residentRuntimeFactory: RoomResidentRuntimeFactory?
+  private var residentCaptureOwner: (any RoomResidentCaptureOwning)?
+  private var residentControlJournal: (any RoomControlJournalOwning)?
+  private var residentRuntimeRoomID: String?
+  private var residentControlCommands: [String: RoomRecoveredControlCommand]
+  private var unacknowledgeableControlCommands: Set<String> = []
   private var phase: RoomEnginePhase = .ready
   private var sessionID: String?
   private var nextPieceIndex = 0
@@ -326,6 +406,9 @@ public actor RoomEngine {
   private var lastError: String?
   private var lastPieceEndedAt: Date?
   private var needsActiveReconciliation = false
+  private var reconciledServerStateKnown = false
+  private var reconciledServerSessionID: String?
+  private var reconciledServerSessionStatus: BenchSessionStatus?
   private let listenerTabID: String
   private var retainedArchiveRecoveryTask: Task<Void, Never>?
   private var retainedArchiveRecoveryState: RoomRetainedArchiveRecoveryState?
@@ -338,7 +421,7 @@ public actor RoomEngine {
     captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
     pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
     retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil,
-    residentCaptureFactory: RoomResidentCaptureFactory? = nil
+    residentRuntimeFactory: RoomResidentRuntimeFactory? = nil
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
     let configuration = try persistence.loadConfiguration()
@@ -353,16 +436,15 @@ public actor RoomEngine {
     case .preflightReceiptMismatch:
       throw RoomEngineError.residentArchivePreflightMismatch
     }
-    let lock = try RoomEngineInstanceLock(root: persistence.root)
-    let residentCaptureOwner: (any RoomResidentCaptureOwning)?
     if eligibility == .eligible {
-      guard let residentCaptureFactory else {
+      guard let retainedArchiveRecovery, retainedArchiveRecovery.encoderCapable else {
+        throw RoomEngineError.residentArchiveRecoveryUnavailable
+      }
+      guard residentRuntimeFactory != nil else {
         throw RoomEngineError.residentArchiveRuntimeUnavailable
       }
-      residentCaptureOwner = try residentCaptureFactory(configuration, persistence.root)
-    } else {
-      residentCaptureOwner = nil
     }
+    let lock = try RoomEngineInstanceLock(root: persistence.root)
     let captures = persistence.root.appendingPathComponent("captures", isDirectory: true)
     try createPrivateDirectory(captures)
     let spoolURL = persistence.root.appendingPathComponent("spool", isDirectory: true)
@@ -378,7 +460,7 @@ public actor RoomEngine {
       capturesURL: captures,
       instanceLock: lock,
       retainedArchiveRecovery: retainedArchiveRecovery,
-      residentCaptureOwner: residentCaptureOwner
+      residentRuntimeFactory: eligibility == .eligible ? residentRuntimeFactory : nil
     )
   }
 
@@ -392,7 +474,7 @@ public actor RoomEngine {
     capturesURL: URL,
     instanceLock: RoomEngineInstanceLock,
     retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?,
-    residentCaptureOwner: (any RoomResidentCaptureOwning)?
+    residentRuntimeFactory: RoomResidentRuntimeFactory?
   ) {
     self.persistence = persistence
     self.configuration = configuration
@@ -403,7 +485,10 @@ public actor RoomEngine {
     self.capturesURL = capturesURL
     self.instanceLock = instanceLock
     self.retainedArchiveRecovery = retainedArchiveRecovery
-    self.residentCaptureOwner = residentCaptureOwner
+    self.residentRuntimeFactory = residentRuntimeFactory
+    residentCaptureOwner = nil
+    residentControlJournal = nil
+    residentControlCommands = [:]
     listenerTabID =
       configuration.tabID ?? configuration.installID
       ?? "native_\(UUID().uuidString.prefix(8).lowercased())"
@@ -422,6 +507,11 @@ public actor RoomEngine {
     if await refreshRetainedArchiveRecovery() {
       do {
         let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
+        if let activeRoomID = active.session?.roomID, !activeRoomID.isEmpty {
+          _ = try initializeResidentRuntime(roomID: activeRoomID)
+        } else if residentRuntimeFactory != nil, active.resumable {
+          throw RoomEngineError.residentArchiveMissingRoomID
+        }
         if try spool.pending().isEmpty {
           try await adopt(active)
         } else {
@@ -442,12 +532,14 @@ public actor RoomEngine {
       try saveStatus()
     }
 
+    await retryRecoveredAcknowledgements()
+
     var backoffNanoseconds: UInt64 = 5_000_000_000
     var uploadRetryAfter = Date.distantPast
     var uploadBackoff: TimeInterval = 5
     while !Task.isCancelled && phase != .superseded {
       do {
-        try finishUnexpectedCaptureIfNeeded()
+        try await finishUnexpectedCaptureIfNeeded()
         try publishAvailable(finalFlush: false)
       } catch {
         lastError = bounded(error)
@@ -482,16 +574,28 @@ public actor RoomEngine {
       }
 
       do {
-        let levels = BenchLevelPair(peak: 0, average: 0)
         let response = try await remote.pollCommands(
           tabID: listenerTabID,
           previousPollAt: previousPollAt,
           recordingSessionID: phase == .recording || phase == .paused ? sessionID : nil,
           paused: phase == .paused,
-          primaryLevels: currentLevels() ?? levels
+          primaryLevels: currentLevels()
         )
         previousPollAt = response.now ?? previousPollAt
-        if let polledRoomID = response.roomID, !polledRoomID.isEmpty { roomID = polledRoomID }
+        if let polledRoomID = response.roomID, !polledRoomID.isEmpty {
+          roomID = polledRoomID
+          if retainedArchiveReady {
+            let initialized = try initializeResidentRuntime(roomID: polledRoomID)
+            if initialized {
+              needsActiveReconciliation = true
+              await retryRecoveredAcknowledgements()
+            }
+          }
+        }
+        if residentRuntimeFactory != nil, residentCaptureOwner == nil {
+          if !retainedArchiveReady { throw RoomEngineError.retainedArchiveRecoveryPending }
+          throw RoomEngineError.residentArchiveMissingRoomID
+        }
         if response.superseded {
           try await stopAfterSuperseded()
           await stopRetainedArchiveRecovery()
@@ -538,6 +642,30 @@ public actor RoomEngine {
     guard retainedArchiveRecoveryTask == nil, let retainedArchiveRecovery else { return }
     guard (try? spool.pending().isEmpty) == true else { return }
     retainedArchiveRecoveryTask = Task { await retainedArchiveRecovery.run() }
+  }
+
+  @discardableResult
+  private func initializeResidentRuntime(roomID: String) throws -> Bool {
+    guard let residentRuntimeFactory else { return false }
+    guard !roomID.isEmpty else { throw RoomEngineError.residentArchiveMissingRoomID }
+    if let residentRuntimeRoomID {
+      guard residentRuntimeRoomID == roomID else {
+        throw RoomEngineError.io("resident runtime room identity changed")
+      }
+      return false
+    }
+    let runtime = try residentRuntimeFactory(
+      configuration,
+      RoomResidentRuntimeContext(
+        archiveRootURL: persistence.root,
+        roomID: roomID,
+        archiveDeliveryWire: remote as? any ArchiveDeliveryWire))
+    let recovered = try runtime.controlJournal.recover()
+    residentCaptureOwner = runtime.capture
+    residentControlJournal = runtime.controlJournal
+    residentControlCommands = recovered
+    residentRuntimeRoomID = roomID
+    return true
   }
 
   private func stopRetainedArchiveRecovery() async {
@@ -593,14 +721,67 @@ public actor RoomEngine {
   }
 
   private func adopt(_ active: ActiveSessionResponse) async throws {
-    needsActiveReconciliation = false
+    needsActiveReconciliation = !active.ok
+    reconciledServerStateKnown = active.ok
+    reconciledServerSessionID = active.ok ? active.session?.id : nil
+    reconciledServerSessionStatus = active.ok ? active.session?.status : nil
+    let activeSessionID = active.ok ? active.session?.id : nil
+    if let serverEndedSessionID = residentCaptureOwner?.serverEndedSessionID,
+      let activeSessionID, serverEndedSessionID != activeSessionID
+    {
+      throw RoomEngineError.retainedArchiveRecoveryFailed(
+        "server_ended_session_conflict")
+    }
+    let resumableSession =
+      active.ok && active.resumable
+        && (active.session?.status == .recording || active.session?.status == .paused)
+      ? active.session : nil
+    if active.ok, let retainedSessionID = residentCaptureOwner?.retainedUnfinalizedSessionID {
+      if let resumableSession {
+        guard resumableSession.id == retainedSessionID else {
+          phase = .failed
+          needsActiveReconciliation = true
+          throw RoomEngineError.retainedArchiveRecoveryFailed(
+            "retained_unfinalized_session_conflict")
+        }
+      } else {
+        try residentCaptureOwner?.markRetainedUnfinalizedSessionAsServerEnded(retainedSessionID)
+        transition(to: retainedSessionID)
+        nextPieceIndex = residentCaptureOwner?.nextPrimaryIndex ?? 0
+        nextBackupPieceIndex = residentCaptureOwner?.nextBackupIndex ?? 0
+        phase = .ending
+        try saveStatus()
+        return
+      }
+    }
+    let latestActiveControl = activeSessionID.flatMap { latestRecoveredControl(sessionID: $0) }
+    let barrier: RoomRecoveredControlCommand?
+    if let latestActiveControl,
+      !(latestActiveControl.commandKind == .pauseDay && active.session?.status == .paused),
+      controlBlocksCaptureReconciliation(latestActiveControl)
+    {
+      barrier = latestActiveControl
+    } else {
+      barrier = nil
+    }
     guard active.ok, active.resumable, let session = active.session,
       session.status == .recording || session.status == .paused
     else {
-      phase = .ready
-      transition(to: nil)
+      if let serverEndedSessionID = residentCaptureOwner?.serverEndedSessionID {
+        transition(to: serverEndedSessionID)
+        nextPieceIndex = residentCaptureOwner?.nextPrimaryIndex ?? 0
+        nextBackupPieceIndex = residentCaptureOwner?.nextBackupIndex ?? 0
+        phase = .ending
+        try saveStatus()
+        return
+      }
+      phase = barrier == nil ? .ready : .failed
+      transition(to: barrier?.sessionID)
       nextPieceIndex = 0
       nextBackupPieceIndex = 0
+      if let barrier {
+        lastError = "resident_control_recovery_required:\(barrier.state.rawValue)"
+      }
       try saveStatus()
       return
     }
@@ -609,11 +790,24 @@ public actor RoomEngine {
       needsActiveReconciliation = true
       throw RoomEngineError.handoverPending
     }
+    if let barrier {
+      phase = .failed
+      needsActiveReconciliation = true
+      if let barrierSessionID = barrier.sessionID { transition(to: barrierSessionID) }
+      if let sessionRoomID = session.roomID, !sessionRoomID.isEmpty { roomID = sessionRoomID }
+      nextPieceIndex = active.nextIndex?.primary ?? 0
+      nextBackupPieceIndex = active.nextIndex?.backup ?? 0
+      lastError = "resident_control_recovery_required:\(barrier.state.rawValue)"
+      try saveStatus()
+      return
+    }
     transition(to: session.id)
     if let sessionRoomID = session.roomID, !sessionRoomID.isEmpty { roomID = sessionRoomID }
     nextPieceIndex = active.nextIndex?.primary ?? 0
     nextBackupPieceIndex = active.nextIndex?.backup ?? 0
-    if session.status == .paused {
+    if residentCaptureOwner?.serverEndedSessionID == session.id {
+      phase = .ending
+    } else if session.status == .paused {
       phase = .paused
     } else {
       try startCapture(trigger: .reconciliation)
@@ -624,8 +818,12 @@ public actor RoomEngine {
 
   private func handle(_ command: BenchCommand) async {
     if let result = completedCommands[command.id] {
-      await acknowledge(command.id, result: result)
+      await acknowledge(command, result: result)
       return
+    }
+    if let recovered = residentControlCommands[command.id] {
+      unacknowledgeableControlCommands.remove(command.id)
+      if await resumeRecoveredAcknowledgement(command, recovered: recovered) { return }
     }
     let overridePause: Bool
     if case .object(let arguments) = command.args, case .bool(true) = arguments["override_pause"] {
@@ -639,6 +837,7 @@ public actor RoomEngine {
     do {
       switch decision {
       case .acknowledgeCurrentState:
+        try prepareDecisionAcknowledgement(command, success: true)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .start:
         try await beginOrResume(commandID: command.id)
@@ -655,31 +854,478 @@ public actor RoomEngine {
         try await end(commandID: command.id)
         result = CommandResult(ok: true, sessionID: id, error: nil)
       case .refuse(let reason):
+        try prepareDecisionAcknowledgement(command, success: false)
         result = CommandResult(ok: false, sessionID: nil, error: reason)
       }
     } catch {
       lastError = bounded(error)
+      do {
+        try prepareFailureAcknowledgement(command)
+      } catch {
+        lastError = bounded(error)
+      }
       if !hasActiveCapture || (phase != .paused && phase != .recording) {
         phase = .failed
       }
       try? saveStatus()
       result = CommandResult(ok: false, sessionID: sessionID, error: bounded(error, limit: 160))
     }
-    completedCommands[command.id] = result
-    await acknowledge(command.id, result: result)
+    if residentControlJournal == nil || controlIsAtAcknowledgementBoundary(command, result: result)
+    {
+      completedCommands[command.id] = result
+    }
+    await acknowledge(command, result: result)
   }
 
-  private func acknowledge(_ commandID: String, result: CommandResult) async {
+  private func resumeRecoveredAcknowledgement(
+    _ command: BenchCommand,
+    recovered: RoomRecoveredControlCommand
+  ) async -> Bool {
+    guard let recoveredKind = benchCommandKind(recovered.commandKind) else { return false }
+    let successStates = acknowledgementStates(kind: recoveredKind, success: true)
+    let failureStates = acknowledgementStates(kind: recoveredKind, success: false)
+    if recovered.state == successStates.observed || recovered.state == failureStates.observed
+      || recovered.state == successStates.outcomeUnobservable
+      || recovered.state == failureStates.outcomeUnobservable
+    {
+      return true
+    }
+    if recovered.state == successStates.ready || recovered.state == failureStates.ready {
+      let success = recovered.state == successStates.ready
+      let result = CommandResult(
+        ok: success,
+        sessionID: recovered.sessionID,
+        error: success ? nil : recovered.failure?.rawValue ?? "resident_control_command_failed")
+      completedCommands[command.id] = result
+      await acknowledge(command, result: result)
+      return true
+    }
+    if recovered.state == .commandNoop || recovered.state == .commandRefused {
+      let success = recovered.state == .commandNoop
+      do {
+        let states = acknowledgementStates(kind: recoveredKind, success: success)
+        try advanceControl(
+          commandID: command.id,
+          commandKind: recovered.commandKind,
+          sessionID: recovered.sessionID,
+          priorState: recovered.state,
+          newState: states.ready)
+        let result = CommandResult(
+          ok: success,
+          sessionID: recovered.sessionID,
+          error: success ? nil : ArchiveControlFailure.commandRefused.rawValue)
+        completedCommands[command.id] = result
+        await acknowledge(command, result: result)
+      } catch {
+        lastError = bounded(error)
+        try? saveStatus(preferred: .offline)
+      }
+      return true
+    }
+    if recovered.commandKind == .startDay, recovered.state == .startIntent {
+      do {
+        try advanceControl(
+          commandID: command.id, commandKind: .startDay, sessionID: nil,
+          priorState: .startIntent, newState: .sessionOpenOutcomeUnobservable,
+          failure: .sessionOpenOutcomeUnobservable)
+        try prepareFailureAcknowledgement(command)
+        let result = CommandResult(
+          ok: false, sessionID: nil, error: "session_open_outcome_unobservable")
+        completedCommands[command.id] = result
+        await acknowledge(command, result: result)
+      } catch {
+        lastError = bounded(error)
+        try? saveStatus(preferred: .offline)
+      }
+      return true
+    }
+    guard recoveredIsLatestEffectCandidate(recovered) else { return true }
+    do {
+      switch recovered.commandKind {
+      case .startDay:
+        try await continueRecoveredStart(command, recovered: recovered)
+      case .pauseDay:
+        try await continueRecoveredPause(command, recovered: recovered)
+      case .resumeDay:
+        try await continueRecoveredResume(command, recovered: recovered)
+      case .endDay:
+        try await continueRecoveredEnd(command, recovered: recovered)
+      default:
+        return false
+      }
+      if let updated = residentControlCommands[command.id], updated.state != recovered.state {
+        return await resumeRecoveredAcknowledgement(command, recovered: updated)
+      }
+      lastError = "resident_control_recovery_required:\(recovered.state.rawValue)"
+      try? saveStatus(preferred: .offline)
+    } catch {
+      lastError = bounded(error)
+      try? saveStatus(preferred: .offline)
+    }
+    return true
+  }
+
+  private func continueRecoveredStart(
+    _ command: BenchCommand,
+    recovered: RoomRecoveredControlCommand
+  ) async throws {
+    if recovered.state == .sessionOpenOutcomeUnobservable || recovered.state == .startFailed {
+      try prepareFailureAcknowledgement(command)
+      return
+    }
+    guard let id = recovered.sessionID else {
+      throw RoomEngineError.io("recovered start state has no session")
+    }
+    transition(to: id)
+    switch recovered.state {
+    case .sessionOpened:
+      try advanceControl(
+        commandID: command.id, commandKind: .startDay, sessionID: id,
+        priorState: .sessionOpened, newState: .startCompensationIntent,
+        failure: .noDurableGrowth)
+    case .captureDurable:
+      try requireRecoveredActiveSession(id, statuses: [.recording])
+      if !hasActiveCapture {
+        try startCapture(trigger: .reconciliation)
+      }
+      guard hasActiveCapture else { throw RoomEngineError.residentArchiveCaptureStopped }
+      phase = .recording
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .startDay, sessionID: id,
+        priorState: .captureDurable, newState: .startAckReady)
+    case .startCompensationIntent:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .startupFailed)
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .startDay, sessionID: id,
+        priorState: .startCompensationIntent, newState: .captureStopped)
+    case .captureStopped:
+      _ = try await remote.patchSession(id: id, action: .end, notes: nil)
+      reconciledServerSessionID = nil
+      reconciledServerSessionStatus = nil
+      try advanceControl(
+        commandID: command.id, commandKind: .startDay, sessionID: id,
+        priorState: .captureStopped, newState: .sessionEndPatched)
+    case .sessionEndPatched:
+      residentCaptureOwner?.clearServerEndedSessionID(id)
+      transition(to: nil)
+      phase = .ready
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .startDay, sessionID: id,
+        priorState: .sessionEndPatched, newState: .startFailed,
+        failure: .noDurableGrowth)
+    default:
+      break
+    }
+  }
+
+  private func continueRecoveredPause(
+    _ command: BenchCommand,
+    recovered: RoomRecoveredControlCommand
+  ) async throws {
+    guard let id = recovered.sessionID else {
+      throw RoomEngineError.io("recovered pause state has no session")
+    }
+    transition(to: id)
+    switch recovered.state {
+    case .pauseIntent:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .pauseDay, sessionID: id,
+        priorState: .pauseIntent, newState: .laneBoundariesDurable)
+    case .laneBoundariesDurable:
+      do {
+        _ = try await remote.patchSession(id: id, action: .pause, notes: nil)
+        reconciledServerSessionStatus = .paused
+      } catch {
+        try advanceControl(
+          commandID: command.id, commandKind: .pauseDay, sessionID: id,
+          priorState: .laneBoundariesDurable, newState: .pauseFailed,
+          failure: .sessionPatchFailed)
+        try prepareFailureAcknowledgement(command)
+        return
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .pauseDay, sessionID: id,
+        priorState: .laneBoundariesDurable, newState: .pausePatched)
+    case .pausePatched:
+      phase = .paused
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .pauseDay, sessionID: id,
+        priorState: .pausePatched, newState: .pauseAckReady)
+    case .pauseFailed:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try prepareFailureAcknowledgement(command)
+    default:
+      break
+    }
+  }
+
+  private func continueRecoveredResume(
+    _ command: BenchCommand,
+    recovered: RoomRecoveredControlCommand
+  ) async throws {
+    guard let id = recovered.sessionID else {
+      throw RoomEngineError.io("recovered resume state has no session")
+    }
+    transition(to: id)
+    switch recovered.state {
+    case .resumeIntent:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .resumeIntent, newState: .resumeFailed,
+        failure: .internalIOFailed)
+    case .cleanSegmentOpened:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .cleanSegmentOpened, newState: .resumeFailed,
+        failure: .noDurableGrowth)
+    case .captureDurable:
+      try requireRecoveredActiveSession(id, statuses: [.paused, .recording])
+      if !hasActiveCapture {
+        try startCapture(trigger: .reconciliation)
+      }
+      guard hasActiveCapture else { throw RoomEngineError.residentArchiveCaptureStopped }
+      do {
+        _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
+        reconciledServerSessionStatus = .recording
+      } catch {
+        try advanceControl(
+          commandID: command.id, commandKind: .resumeDay, sessionID: id,
+          priorState: .captureDurable, newState: .resumeCompensationIntent,
+          failure: .sessionPatchFailed)
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+        try advanceControl(
+          commandID: command.id, commandKind: .resumeDay, sessionID: id,
+          priorState: .resumeCompensationIntent, newState: .captureStopped)
+        try advanceControl(
+          commandID: command.id, commandKind: .resumeDay, sessionID: id,
+          priorState: .captureStopped, newState: .resumeFailed,
+          failure: .sessionPatchFailed)
+        try prepareFailureAcknowledgement(command)
+        return
+      }
+      phase = .recording
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .captureDurable, newState: .resumePatched)
+    case .resumePatched:
+      try requireRecoveredActiveSession(id, statuses: [.paused, .recording])
+      if reconciledServerSessionStatus == .paused {
+        _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
+        reconciledServerSessionStatus = .recording
+      }
+      if !hasActiveCapture {
+        try startCapture(trigger: .reconciliation)
+      }
+      guard hasActiveCapture else { throw RoomEngineError.residentArchiveCaptureStopped }
+      phase = .recording
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .resumePatched, newState: .resumeAckReady)
+    case .resumeCompensationIntent:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .resumeCompensationIntent, newState: .captureStopped)
+    case .captureStopped:
+      try advanceControl(
+        commandID: command.id, commandKind: .resumeDay, sessionID: id,
+        priorState: .captureStopped, newState: .resumeFailed,
+        failure: .sessionPatchFailed)
+    case .resumeFailed:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: command.id))
+      }
+      try prepareFailureAcknowledgement(command)
+    default:
+      break
+    }
+  }
+
+  private func continueRecoveredEnd(
+    _ command: BenchCommand,
+    recovered: RoomRecoveredControlCommand
+  ) async throws {
+    guard let id = recovered.sessionID else {
+      throw RoomEngineError.io("recovered end state has no session")
+    }
+    transition(to: id)
+    switch recovered.state {
+    case .endIntent:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .end(commandID: command.id))
+      }
+      try await residentCaptureOwner?.reserveFinalRanges(context: try finalizationContext())
+      try advanceControl(
+        commandID: command.id, commandKind: .endDay, sessionID: id,
+        priorState: .endIntent, newState: .finalRangesReserved)
+    case .finalRangesReserved:
+      if try await drainPending() { throw RoomEngineError.sessionEndedByServer }
+      let remaining = try spool.pending().count
+      guard remaining == 0 else { throw RoomEngineError.pendingUploads(remaining) }
+      do {
+        try await residentCaptureOwner?.verifyFinalRanges(context: try finalizationContext())
+      } catch {
+        try advanceControl(
+          commandID: command.id, commandKind: .endDay, sessionID: id,
+          priorState: .finalRangesReserved, newState: .endFailed,
+          failure: .finalVerificationFailed)
+        try prepareFailureAcknowledgement(command)
+        return
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .endDay, sessionID: id,
+        priorState: .finalRangesReserved, newState: .finalRangesVerified)
+    case .finalRangesVerified:
+      if try !residentObservedServerEnd(sessionID: id) {
+        do {
+          _ = try await remote.patchSession(id: id, action: .end, notes: nil)
+          reconciledServerSessionID = nil
+          reconciledServerSessionStatus = nil
+        } catch {
+          try advanceControl(
+            commandID: command.id, commandKind: .endDay, sessionID: id,
+            priorState: .finalRangesVerified, newState: .endFailed,
+            failure: .sessionPatchFailed)
+          try prepareFailureAcknowledgement(command)
+          return
+        }
+      }
+      try advanceControl(
+        commandID: command.id, commandKind: .endDay, sessionID: id,
+        priorState: .finalRangesVerified, newState: .sessionEndPatched)
+    case .sessionEndPatched:
+      transition(to: nil)
+      nextPieceIndex = 0
+      nextBackupPieceIndex = 0
+      phase = .ready
+      try saveStatus()
+      try advanceControl(
+        commandID: command.id, commandKind: .endDay, sessionID: id,
+        priorState: .sessionEndPatched, newState: .endAckReady)
+    case .endFailed:
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .end(commandID: command.id))
+      }
+      try prepareFailureAcknowledgement(command)
+    default:
+      break
+    }
+  }
+
+  private func retryRecoveredAcknowledgements() async {
+    for recovered in residentControlCommands.values.sorted(by: {
+      ($0.atWallNS, $0.atMonoNS, $0.commandID)
+        < ($1.atWallNS, $1.atMonoNS, $1.commandID)
+    }) {
+      guard let kind = benchCommandKind(recovered.commandKind) else { continue }
+      let command = BenchCommand(
+        id: recovered.commandID,
+        kind: kind,
+        args: .object([:]),
+        createdAt: nil)
+      _ = await resumeRecoveredAcknowledgement(command, recovered: recovered)
+    }
+  }
+
+  private func acknowledge(_ command: BenchCommand, result: CommandResult) async {
+    if residentControlJournal != nil {
+      guard !unacknowledgeableControlCommands.contains(command.id) else { return }
+      guard let recovered = residentControlCommands[command.id] else {
+        lastError = "control journal has no durable command intent"
+        try? saveStatus(preferred: .offline)
+        return
+      }
+      let controlKind = benchCommandKind(recovered.commandKind) ?? command.kind
+      let states = acknowledgementStates(kind: controlKind, success: result.ok)
+      if recovered.state == states.observed || recovered.state == states.outcomeUnobservable {
+        return
+      }
+      guard recovered.state == states.ready else {
+        lastError = "control journal is not durable at an acknowledgement boundary"
+        try? saveStatus(preferred: .offline)
+        return
+      }
+    }
     for attempt in 1...3 {
       do {
-        _ = try await remote.acknowledge(
-          commandID: commandID,
+        let acknowledgement = try await remote.acknowledge(
+          commandID: command.id,
           ok: result.ok,
           sessionID: result.sessionID,
           error: result.error)
+        let expectedStatus = result.ok ? "acked" : "failed"
+        guard acknowledgement.ok, acknowledgement.id == command.id,
+          acknowledgement.status == expectedStatus
+        else {
+          throw RoomEngineError.io("invalid command acknowledgement response")
+        }
+        do {
+          let recovered = residentControlCommands[command.id]
+          let controlKind = recovered.flatMap { benchCommandKind($0.commandKind) } ?? command.kind
+          let states = acknowledgementStates(kind: controlKind, success: result.ok)
+          let journalSessionID: String?
+          if let recovered = residentControlCommands[command.id] {
+            journalSessionID = recovered.sessionID
+          } else {
+            journalSessionID = result.sessionID
+          }
+          try advanceControl(
+            commandID: command.id,
+            commandKind: recovered?.commandKind ?? archiveCommandKind(command.kind),
+            sessionID: journalSessionID,
+            priorState: states.ready,
+            newState: states.observed)
+        } catch {
+          lastError = bounded(error)
+          try? saveStatus(preferred: .offline)
+        }
         return
       } catch {
         lastError = bounded(error)
+        if commandNotPending(error) {
+          let recovered = residentControlCommands[command.id]
+          let controlKind = recovered.flatMap { benchCommandKind($0.commandKind) } ?? command.kind
+          let states = acknowledgementStates(kind: controlKind, success: result.ok)
+          do {
+            let journalSessionID: String?
+            if let recovered = residentControlCommands[command.id] {
+              journalSessionID = recovered.sessionID
+            } else {
+              journalSessionID = result.sessionID
+            }
+            try advanceControl(
+              commandID: command.id,
+              commandKind: recovered?.commandKind ?? archiveCommandKind(command.kind),
+              sessionID: journalSessionID,
+              priorState: states.ready,
+              newState: states.outcomeUnobservable,
+              failure: .ackOutcomeUnobservable)
+          } catch {
+            lastError = bounded(error)
+            try? saveStatus(preferred: .offline)
+          }
+          return
+        }
         if attempt < 3 {
           try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
         }
@@ -688,12 +1334,301 @@ public actor RoomEngine {
     try? saveStatus(preferred: .offline)
   }
 
+  private func advanceControl(
+    commandID: String,
+    commandKind: ArchiveControlCommandKind,
+    sessionID: String?,
+    priorState: ArchiveControlState?,
+    newState: ArchiveControlState,
+    failure: ArchiveControlFailure? = nil
+  ) throws {
+    guard let residentControlJournal else { return }
+    let recovered = try residentControlJournal.advance(
+      RoomControlTransition(
+        commandID: commandID,
+        commandKind: commandKind,
+        sessionID: sessionID,
+        priorState: priorState,
+        newState: newState,
+        failure: failure))
+    residentControlCommands[commandID] = recovered
+  }
+
+  private func archiveCommandKind(_ kind: BenchCommandKind) -> ArchiveControlCommandKind {
+    switch kind {
+    case .startDay: return .startDay
+    case .pauseDay: return .pauseDay
+    case .resumeDay: return .resumeDay
+    case .endDay: return .endDay
+    }
+  }
+
+  private func benchCommandKind(_ kind: ArchiveControlCommandKind) -> BenchCommandKind? {
+    switch kind {
+    case .startDay: return .startDay
+    case .pauseDay: return .pauseDay
+    case .resumeDay: return .resumeDay
+    case .endDay: return .endDay
+    case .maintenanceHandoff, .maintenanceReclaim, .captureSessionBinding,
+      .serverEndedFinalization, .rolloverPreparation, .rollover:
+      return nil
+    }
+  }
+
+  private func commandNotPending(_ error: Error) -> Bool {
+    guard let benchError = error as? BenchClientError,
+      case .http(let response) = benchError
+    else { return false }
+    return response.statusCode == 404 && response.body.contains("command_not_pending")
+  }
+
+  private func controlBlocksCaptureReconciliation(
+    _ command: RoomRecoveredControlCommand
+  ) -> Bool {
+    switch command.commandKind {
+    case .startDay:
+      switch command.state {
+      case .captureDurable, .startAckReady, .startAckObserved, .startAckOutcomeUnobservable,
+        .commandNoop:
+        return false
+      default:
+        return true
+      }
+    case .pauseDay, .endDay:
+      return true
+    case .resumeDay:
+      switch command.state {
+      case .resumePatched, .resumeAckReady, .resumeAckObserved,
+        .resumeAckOutcomeUnobservable:
+        return false
+      default:
+        return true
+      }
+    default:
+      return false
+    }
+  }
+
+  private func latestRecoveredControl(sessionID: String? = nil) -> RoomRecoveredControlCommand? {
+    residentControlCommands.values
+      .filter { sessionID == nil || $0.sessionID == nil || $0.sessionID == sessionID }
+      .max {
+        ($0.atWallNS, $0.atMonoNS, $0.commandID)
+          < ($1.atWallNS, $1.atMonoNS, $1.commandID)
+      }
+  }
+
+  private func recoveredIsLatestEffectCandidate(_ recovered: RoomRecoveredControlCommand) -> Bool {
+    let activeSessionID = sessionID
+    guard
+      activeSessionID == nil || recovered.sessionID == nil || recovered.sessionID == activeSessionID
+    else { return false }
+    return latestRecoveredControl(sessionID: activeSessionID)?.commandID == recovered.commandID
+  }
+
+  private func requireRecoveredActiveSession(
+    _ expectedSessionID: String,
+    statuses: [BenchSessionStatus]
+  ) throws {
+    guard reconciledServerStateKnown else {
+      throw RoomEngineError.io("active session state is unknown during control recovery")
+    }
+    guard reconciledServerSessionID == expectedSessionID else {
+      throw RoomEngineError.io("recovered control session is not active")
+    }
+    guard let status = reconciledServerSessionStatus, statuses.contains(status) else {
+      throw RoomEngineError.io("active session status conflicts with recovered control")
+    }
+  }
+
+  private func controlBlocksNewStart(_ command: RoomRecoveredControlCommand) -> Bool {
+    switch command.commandKind {
+    case .startDay:
+      return [
+        .startIntent, .sessionOpened, .startCompensationIntent, .captureStopped,
+        .sessionEndPatched, .sessionOpenOutcomeUnobservable, .startFailed,
+      ].contains(command.state)
+    case .pauseDay:
+      return [
+        .pauseIntent, .laneBoundariesDurable, .pauseFailed,
+      ].contains(command.state)
+    case .resumeDay:
+      return [
+        .resumeCompensationIntent, .captureStopped, .resumeFailed,
+      ].contains(command.state)
+    case .endDay:
+      return [
+        .endIntent, .finalRangesReserved, .finalRangesVerified, .endFailed,
+      ].contains(command.state)
+    default:
+      return false
+    }
+  }
+
+  private func acknowledgementStates(kind: BenchCommandKind, success: Bool) -> (
+    ready: ArchiveControlState,
+    observed: ArchiveControlState,
+    outcomeUnobservable: ArchiveControlState
+  ) {
+    switch (kind, success) {
+    case (.startDay, true):
+      return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
+    case (.startDay, false):
+      return (
+        .startFailureAckReady, .startFailureAckObserved,
+        .startFailureAckOutcomeUnobservable
+      )
+    case (.pauseDay, true):
+      return (.pauseAckReady, .pauseAckObserved, .pauseAckOutcomeUnobservable)
+    case (.pauseDay, false):
+      return (
+        .pauseFailureAckReady, .pauseFailureAckObserved,
+        .pauseFailureAckOutcomeUnobservable
+      )
+    case (.resumeDay, true):
+      return (.resumeAckReady, .resumeAckObserved, .resumeAckOutcomeUnobservable)
+    case (.resumeDay, false):
+      return (
+        .resumeFailureAckReady, .resumeFailureAckObserved,
+        .resumeFailureAckOutcomeUnobservable
+      )
+    case (.endDay, true):
+      return (.endAckReady, .endAckObserved, .endAckOutcomeUnobservable)
+    case (.endDay, false):
+      return (
+        .endFailureAckReady, .endFailureAckObserved,
+        .endFailureAckOutcomeUnobservable
+      )
+    }
+  }
+
+  private func controlIsAtAcknowledgementBoundary(
+    _ command: BenchCommand,
+    result: CommandResult
+  ) -> Bool {
+    guard let recovered = residentControlCommands[command.id],
+      let kind = benchCommandKind(recovered.commandKind)
+    else { return false }
+    let states = acknowledgementStates(kind: kind, success: result.ok)
+    return recovered.state == states.ready || recovered.state == states.observed
+      || recovered.state == states.outcomeUnobservable
+  }
+
+  private func prepareDecisionAcknowledgement(
+    _ command: BenchCommand,
+    success: Bool
+  ) throws {
+    guard residentControlJournal != nil else { return }
+    let kind = archiveCommandKind(command.kind)
+    let journalSessionID: String?
+    switch command.kind {
+    case .startDay: journalSessionID = nil
+    case .pauseDay, .resumeDay, .endDay: journalSessionID = sessionID
+    }
+    let decisionState: ArchiveControlState = success ? .commandNoop : .commandRefused
+    let failure: ArchiveControlFailure? = success ? nil : .commandRefused
+    try advanceControl(
+      commandID: command.id,
+      commandKind: kind,
+      sessionID: journalSessionID,
+      priorState: nil,
+      newState: decisionState,
+      failure: failure)
+    let states = acknowledgementStates(kind: command.kind, success: success)
+    try advanceControl(
+      commandID: command.id,
+      commandKind: kind,
+      sessionID: journalSessionID,
+      priorState: decisionState,
+      newState: states.ready)
+  }
+
+  private func prepareFailureAcknowledgement(_ command: BenchCommand) throws {
+    guard !unacknowledgeableControlCommands.contains(command.id) else { return }
+    guard let current = residentControlCommands[command.id] else { return }
+    let kind = current.commandKind
+    guard let commandKind = benchCommandKind(kind) else { return }
+    switch (commandKind, current.state) {
+    case (.startDay, .startIntent):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: nil,
+        priorState: .startIntent, newState: .startFailed, failure: .internalIOFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.startDay, .sessionOpenOutcomeUnobservable):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: nil,
+        priorState: .sessionOpenOutcomeUnobservable, newState: .startFailureAckReady)
+    case (.startDay, .startFailed):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .startFailed, newState: .startFailureAckReady)
+    case (.pauseDay, .pauseIntent):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .pauseIntent, newState: .pauseFailed, failure: .internalIOFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.pauseDay, .laneBoundariesDurable):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .laneBoundariesDurable, newState: .pauseFailed,
+        failure: .sessionPatchFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.pauseDay, .pauseFailed):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .pauseFailed, newState: .pauseFailureAckReady)
+    case (.resumeDay, .resumeIntent):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .resumeIntent, newState: .resumeFailed, failure: .internalIOFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.resumeDay, .cleanSegmentOpened):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .cleanSegmentOpened, newState: .resumeFailed, failure: .noDurableGrowth)
+      try prepareFailureAcknowledgement(command)
+    case (.resumeDay, .captureStopped):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .captureStopped, newState: .resumeFailed, failure: .sessionPatchFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.resumeDay, .resumeFailed):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .resumeFailed, newState: .resumeFailureAckReady)
+    case (.endDay, .endIntent):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .endIntent, newState: .endFailed, failure: .internalIOFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.endDay, .finalRangesVerified):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .finalRangesVerified, newState: .endFailed,
+        failure: .sessionPatchFailed)
+      try prepareFailureAcknowledgement(command)
+    case (.endDay, .endFailed):
+      try advanceControl(
+        commandID: command.id, commandKind: kind, sessionID: current.sessionID,
+        priorState: .endFailed, newState: .endFailureAckReady)
+    default:
+      break
+    }
+  }
+
   private func beginOrResume(commandID: String) async throws {
+    if let barrier = latestRecoveredControl(), controlBlocksNewStart(barrier) {
+      unacknowledgeableControlCommands.insert(commandID)
+      throw RoomEngineError.io("resident control recovery blocks start: \(barrier.state.rawValue)")
+    }
     try await requireRetainedArchiveReady()
     _ = try await drainPending()
     let pending = try spool.pending().count
     guard pending == 0 else { throw RoomEngineError.pendingUploads(pending) }
     let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
+    reconciledServerStateKnown = active.ok
+    reconciledServerSessionID = active.ok ? active.session?.id : nil
+    reconciledServerSessionStatus = active.ok ? active.session?.status : nil
     if active.resumable, let existing = active.session {
       guard !active.handoverPending || active.tabGone else {
         throw RoomEngineError.handoverPending
@@ -703,29 +1638,122 @@ public actor RoomEngine {
       if let existingRoomID = existing.roomID, !existingRoomID.isEmpty { roomID = existingRoomID }
       nextPieceIndex = active.nextIndex?.primary ?? 0
       nextBackupPieceIndex = active.nextIndex?.backup ?? 0
+      try startCapture(trigger: .reconciliation)
+      phase = .recording
+      try saveStatus()
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: nil,
+        priorState: nil, newState: .commandNoop)
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: nil,
+        priorState: .commandNoop, newState: .startAckReady)
+      return
     } else {
-      let created = try await remote.createSession(label: nil, micLabel: configuration.deviceUID)
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: nil,
+        priorState: nil, newState: .startIntent)
+      let created: CreateSessionResponse
+      do {
+        created = try await remote.createSession(label: nil, micLabel: configuration.deviceUID)
+      } catch {
+        try advanceControl(
+          commandID: commandID, commandKind: .startDay, sessionID: nil,
+          priorState: .startIntent, newState: .sessionOpenOutcomeUnobservable,
+          failure: .sessionOpenOutcomeUnobservable)
+        throw error
+      }
       transition(to: created.session.id)
+      reconciledServerStateKnown = true
+      reconciledServerSessionID = created.session.id
+      reconciledServerSessionStatus = .recording
       if let createdRoomID = created.session.roomID, !createdRoomID.isEmpty {
         roomID = createdRoomID
       }
       nextPieceIndex = 0
       nextBackupPieceIndex = 0
     }
-    try startCapture(trigger: .startDay(commandID: commandID))
+    guard let openedSessionID = sessionID else { throw RoomEngineError.noActiveSession }
+    do {
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+        priorState: .startIntent, newState: .sessionOpened)
+    } catch {
+      unacknowledgeableControlCommands.insert(commandID)
+      if (try? await remote.patchSession(id: openedSessionID, action: .end, notes: nil)) != nil {
+        transition(to: nil)
+      }
+      throw error
+    }
+    do {
+      try startCapture(trigger: .startDay(commandID: commandID))
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+        priorState: .sessionOpened, newState: .captureDurable)
+    } catch {
+      let startupError = error
+      do {
+        try advanceControl(
+          commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+          priorState: .sessionOpened, newState: .startCompensationIntent,
+          failure: .noDurableGrowth)
+      } catch {
+        unacknowledgeableControlCommands.insert(commandID)
+        if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+          try? stopCaptureAndPublishFinal(reason: .startupFailed)
+        }
+        throw error
+      }
+      if hasActiveCapture || residentCaptureOwner?.requiresFinalization == true {
+        try stopCaptureAndPublishFinal(reason: .startupFailed)
+      }
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+        priorState: .startCompensationIntent, newState: .captureStopped)
+      _ = try await remote.patchSession(id: openedSessionID, action: .end, notes: nil)
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+        priorState: .captureStopped, newState: .sessionEndPatched)
+      try advanceControl(
+        commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+        priorState: .sessionEndPatched, newState: .startFailed,
+        failure: .noDurableGrowth)
+      transition(to: nil)
+      throw startupError
+    }
     phase = .recording
     try saveStatus()
+    try advanceControl(
+      commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
+      priorState: .captureDurable, newState: .startAckReady)
   }
 
   private func pause(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
+    try advanceControl(
+      commandID: commandID, commandKind: .pauseDay, sessionID: id,
+      priorState: nil, newState: .pauseIntent)
     try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
+    try advanceControl(
+      commandID: commandID, commandKind: .pauseDay, sessionID: id,
+      priorState: .pauseIntent, newState: .laneBoundariesDurable)
     do {
       _ = try await remote.patchSession(id: id, action: .pause, notes: nil)
-      phase = .paused
-      try saveStatus()
+      reconciledServerSessionStatus = .paused
     } catch {
       phase = .failed
+      throw error
+    }
+    phase = .paused
+    try saveStatus()
+    do {
+      try advanceControl(
+        commandID: commandID, commandKind: .pauseDay, sessionID: id,
+        priorState: .laneBoundariesDurable, newState: .pausePatched)
+      try advanceControl(
+        commandID: commandID, commandKind: .pauseDay, sessionID: id,
+        priorState: .pausePatched, newState: .pauseAckReady)
+    } catch {
+      unacknowledgeableControlCommands.insert(commandID)
       throw error
     }
   }
@@ -733,33 +1761,72 @@ public actor RoomEngine {
   private func resume(commandID: String) async throws {
     try await requireRetainedArchiveReady()
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
-    _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
+    try advanceControl(
+      commandID: commandID, commandKind: .resumeDay, sessionID: id,
+      priorState: nil, newState: .resumeIntent)
+    var serverResumeObserved = false
     do {
       try startCapture(trigger: .resumeDay(commandID: commandID))
+      try advanceControl(
+        commandID: commandID, commandKind: .resumeDay, sessionID: id,
+        priorState: .resumeIntent, newState: .cleanSegmentOpened)
+      try advanceControl(
+        commandID: commandID, commandKind: .resumeDay, sessionID: id,
+        priorState: .cleanSegmentOpened, newState: .captureDurable)
+      do {
+        _ = try await remote.patchSession(id: id, action: .resume, notes: nil)
+        serverResumeObserved = true
+        reconciledServerSessionStatus = .recording
+      } catch {
+        try advanceControl(
+          commandID: commandID, commandKind: .resumeDay, sessionID: id,
+          priorState: .captureDurable, newState: .resumeCompensationIntent,
+          failure: .sessionPatchFailed)
+        try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
+        try advanceControl(
+          commandID: commandID, commandKind: .resumeDay, sessionID: id,
+          priorState: .resumeCompensationIntent, newState: .captureStopped)
+        throw error
+      }
+      try advanceControl(
+        commandID: commandID, commandKind: .resumeDay, sessionID: id,
+        priorState: .captureDurable, newState: .resumePatched)
       phase = .recording
       try saveStatus()
+      try advanceControl(
+        commandID: commandID, commandKind: .resumeDay, sessionID: id,
+        priorState: .resumePatched, newState: .resumeAckReady)
     } catch {
-      _ = try? await remote.patchSession(id: id, action: .pause, notes: nil)
-      phase = .paused
+      if !serverResumeObserved, hasActiveCapture {
+        do {
+          try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
+        } catch {
+          phase = .failed
+          throw error
+        }
+      }
+      phase = serverResumeObserved && hasActiveCapture ? .recording : .paused
       throw error
     }
   }
 
   private func end(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
+    try advanceControl(
+      commandID: commandID, commandKind: .endDay, sessionID: id,
+      priorState: nil, newState: .endIntent)
     phase = .ending
-    try saveStatus()
     try stopCaptureAndPublishFinal(reason: .end(commandID: commandID))
+    try saveStatus()
+    try await residentCaptureOwner?.reserveFinalRanges(context: try finalizationContext())
+    try advanceControl(
+      commandID: commandID, commandKind: .endDay, sessionID: id,
+      priorState: .endIntent, newState: .finalRangesReserved)
     var finalError: Error?
     for attempt in 1...3 {
       do {
         if try await drainPending() {
-          transition(to: nil)
-          nextPieceIndex = 0
-          nextBackupPieceIndex = 0
-          phase = .ready
-          try saveStatus()
-          return
+          throw RoomEngineError.sessionEndedByServer
         }
         finalError = nil
         break
@@ -775,12 +1842,40 @@ public actor RoomEngine {
     if let finalError { throw finalError }
     let remaining = try spool.pending().count
     guard remaining == 0 else { throw RoomEngineError.pendingUploads(remaining) }
-    _ = try await remote.patchSession(id: id, action: .end, notes: nil)
+    do {
+      try await residentCaptureOwner?.verifyFinalRanges(context: try finalizationContext())
+    } catch {
+      try advanceControl(
+        commandID: commandID, commandKind: .endDay, sessionID: id,
+        priorState: .finalRangesReserved, newState: .endFailed,
+        failure: .finalVerificationFailed)
+      throw error
+    }
+    try advanceControl(
+      commandID: commandID, commandKind: .endDay, sessionID: id,
+      priorState: .finalRangesReserved, newState: .finalRangesVerified)
+    if try !residentObservedServerEnd(sessionID: id) {
+      _ = try await remote.patchSession(id: id, action: .end, notes: nil)
+      reconciledServerSessionID = nil
+      reconciledServerSessionStatus = nil
+    }
+    do {
+      try advanceControl(
+        commandID: commandID, commandKind: .endDay, sessionID: id,
+        priorState: .finalRangesVerified, newState: .sessionEndPatched)
+    } catch {
+      unacknowledgeableControlCommands.insert(commandID)
+      throw error
+    }
+    residentCaptureOwner?.clearServerEndedSessionID(id)
     transition(to: nil)
     nextPieceIndex = 0
     nextBackupPieceIndex = 0
     phase = .ready
     try saveStatus()
+    try advanceControl(
+      commandID: commandID, commandKind: .endDay, sessionID: id,
+      priorState: .sessionEndPatched, newState: .endAckReady)
   }
 
   private func startCapture(trigger: RoomResidentCaptureStartContext.Trigger) throws {
@@ -801,6 +1896,7 @@ public actor RoomEngine {
             roomID: roomID,
             sessionID: sessionID,
             nextPrimaryIndex: nextPieceIndex,
+            nextBackupIndex: residentCaptureOwner.nextBackupIndex.map { _ in nextBackupPieceIndex },
             trigger: trigger
           ))
         guard residentCaptureOwner.isActive else {
@@ -818,6 +1914,9 @@ public actor RoomEngine {
       }
       updateResidentIndices(residentCaptureOwner)
       return
+    }
+    if residentRuntimeFactory != nil {
+      throw RoomEngineError.residentArchiveRuntimeUnavailable
     }
     let safeSession = safePathComponent(sessionID)
     let sessionDirectory = capturesURL.appendingPathComponent(safeSession, isDirectory: true)
@@ -871,6 +1970,18 @@ public actor RoomEngine {
     capture = segment
   }
 
+  private func finalizationContext() throws -> RoomResidentFinalizationContext {
+    guard let roomID, !roomID.isEmpty else {
+      throw RoomEngineError.residentArchiveMissingRoomID
+    }
+    guard let sessionID else { throw RoomEngineError.noActiveSession }
+    return RoomResidentFinalizationContext(
+      roomID: roomID,
+      sessionID: sessionID,
+      nextPrimaryIndex: nextPieceIndex,
+      nextBackupIndex: residentCaptureOwner?.nextBackupIndex.map { _ in nextBackupPieceIndex })
+  }
+
   private func waitForDurableGrowth(segment: Segment) throws {
     let deadline = Date().addingTimeInterval(20)
     while Date() < deadline {
@@ -887,17 +1998,46 @@ public actor RoomEngine {
     throw RoomEngineError.captureDidNotBecomeDurable
   }
 
-  private func finishUnexpectedCaptureIfNeeded() throws {
+  private func finishUnexpectedCaptureIfNeeded() async throws {
     if let residentCaptureOwner {
       defer { updateResidentIndices(residentCaptureOwner) }
       do {
-        try residentCaptureOwner.service()
+        try await residentCaptureOwner.service()
       } catch {
-        if phase == .recording && !residentCaptureOwner.isActive {
+        if residentCaptureOwner.terminalFailure != nil
+          || (phase == .recording && !residentCaptureOwner.isActive)
+        {
           phase = .failed
           needsActiveReconciliation = true
         }
         throw error
+      }
+      if let terminalFailure = residentCaptureOwner.terminalFailure {
+        phase = .failed
+        needsActiveReconciliation = true
+        throw RoomEngineError.retainedArchiveRecoveryFailed(terminalFailure)
+      }
+      if let serverEndedSessionID = residentCaptureOwner.serverEndedSessionID {
+        if let sessionID, sessionID != serverEndedSessionID {
+          phase = .failed
+          needsActiveReconciliation = true
+          throw RoomEngineError.retainedArchiveRecoveryFailed(
+            "server_ended_session_conflict")
+        }
+        if sessionID == nil {
+          transition(to: serverEndedSessionID)
+          nextPieceIndex = residentCaptureOwner.nextPrimaryIndex
+          nextBackupPieceIndex = residentCaptureOwner.nextBackupIndex ?? 0
+          phase = .ending
+        }
+        do {
+          try await stopAfterServerEnd()
+        } catch {
+          phase = .failed
+          needsActiveReconciliation = true
+          throw error
+        }
+        return
       }
       guard phase != .recording || residentCaptureOwner.isActive else {
         phase = .failed
@@ -1052,15 +2192,55 @@ public actor RoomEngine {
   }
 
   private func stopAfterServerEnd() async throws {
+    let residentFinalizationContext = try residentCaptureOwner.map { _ in
+      try finalizationContext()
+    }
     try stopCaptureAndPublishFinal(reason: .serverEnded)
+    if let residentCaptureOwner, let residentFinalizationContext {
+      try await residentCaptureOwner.reserveFinalRanges(context: residentFinalizationContext)
+      try await residentCaptureOwner.verifyFinalRanges(context: residentFinalizationContext)
+    }
     _ = try await drainPending()
+    if let finalizedSessionID = residentFinalizationContext?.sessionID {
+      try persistServerEndedFinalization(sessionID: finalizedSessionID)
+      residentCaptureOwner?.clearServerEndedSessionID(finalizedSessionID)
+    }
     transition(to: nil)
     nextPieceIndex = 0
     nextBackupPieceIndex = 0
+    reconciledServerSessionID = nil
+    reconciledServerSessionStatus = nil
     phase = .ready
     needsActiveReconciliation = true
     lastError = RoomEngineError.sessionEndedByServer.localizedDescription
     try saveStatus()
+  }
+
+  private func residentObservedServerEnd(sessionID: String) throws -> Bool {
+    guard let observed = residentCaptureOwner?.serverEndedSessionID else { return false }
+    guard observed == sessionID else {
+      throw RoomEngineError.retainedArchiveRecoveryFailed(
+        "server_ended_session_conflict")
+    }
+    return true
+  }
+
+  private func persistServerEndedFinalization(sessionID: String) throws {
+    guard let residentControlJournal else {
+      throw RoomEngineError.residentArchiveRuntimeUnavailable
+    }
+    let digest = SHA256.hash(data: Data(sessionID.utf8)).map {
+      String(format: "%02x", $0)
+    }.joined()
+    let commandID = "local_server_ended_\(digest)"
+    let recovered = try residentControlJournal.advance(
+      RoomControlTransition(
+        commandID: commandID,
+        commandKind: .serverEndedFinalization,
+        sessionID: sessionID,
+        priorState: nil,
+        newState: .serverEndedFinalized))
+    residentControlCommands[commandID] = recovered
   }
 
   private func currentLevels() -> BenchLevelPair? {

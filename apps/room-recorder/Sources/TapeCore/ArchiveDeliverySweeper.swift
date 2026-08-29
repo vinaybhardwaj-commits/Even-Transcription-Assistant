@@ -73,13 +73,23 @@ public struct ArchiveDeliveryDiskLane: Sendable {
   }
 }
 
+public enum ArchiveDeliveryDiskInventoryError: Error, Equatable, Sendable {
+  case missingPiecePlan(String)
+}
+
 public struct ArchiveDeliveryDiskInventory: ArchiveDeliveryInventory {
   private let lanes: [ArchiveDeliveryDiskLane]
   private let wire: any ArchiveDeliveryWire
+  private let spoolCoordinator: ArchiveSpoolCoordinator?
 
-  public init(lanes: [ArchiveDeliveryDiskLane], wire: any ArchiveDeliveryWire) {
+  public init(
+    lanes: [ArchiveDeliveryDiskLane],
+    wire: any ArchiveDeliveryWire,
+    spoolCoordinator: ArchiveSpoolCoordinator? = nil
+  ) {
     self.lanes = lanes
     self.wire = wire
+    self.spoolCoordinator = spoolCoordinator
   }
 
   public func scan() async throws -> ArchiveDeliveryInventorySnapshot {
@@ -90,7 +100,9 @@ public struct ArchiveDeliveryDiskInventory: ArchiveDeliveryInventory {
       let snapshot = try lane.openSnapshot()
       let replay: [String: ArchiveJournalReplayReservation]
       let manifests: [String: ArchiveManifestPayload]
+      let indexRecords: [ArchiveIndexRecordMetadata]
       do {
+        indexRecords = snapshot.indexRecords
         let journal = try snapshot.openJournalStoreForAppend(at: lane.journalURL)
         defer { journal.close() }
         replay = try ArchiveJournalReplay.validate(
@@ -114,7 +126,7 @@ public struct ArchiveDeliveryDiskInventory: ArchiveDeliveryInventory {
         let initial = reservation.initialReservation
         localReservations.append(initial)
         switch reservation.state {
-        case .spoolDurable, .putComplete, .headVerified, .rowRegistered:
+        case .spoolDurable, .putComplete, .headVerified, .rowRegistered, .serverEnded:
           let expectedFitSegment = manifests[initial.reservationID]?.fitSegment ?? 0
           candidates.append(
             ArchiveDeliveryCandidate(initialReservation: initial) {
@@ -130,7 +142,47 @@ public struct ArchiveDeliveryDiskInventory: ArchiveDeliveryInventory {
               )
             })
         case .reserved, .encoded:
-          blockedReservations.append(reservation)
+          guard let spoolCoordinator else {
+            blockedReservations.append(reservation)
+            continue
+          }
+          let expectedFitSegment: UInt64
+          if let manifest = manifests[initial.reservationID] {
+            expectedFitSegment = manifest.fitSegment
+          } else {
+            let plans = try ArchiveLocalCutter.plan(
+              indexRecords: indexRecords,
+              finalFlush: true)
+            guard
+              let plan = plans.first(where: {
+                $0.sampleStart == initial.sampleStart && $0.sampleEnd == initial.sampleEnd
+              })
+            else {
+              throw ArchiveDeliveryDiskInventoryError.missingPiecePlan(initial.reservationID)
+            }
+            expectedFitSegment = plan.fitSegment
+          }
+          candidates.append(
+            ArchiveDeliveryCandidate(initialReservation: initial) {
+              let deliverySnapshot = try lane.openSnapshot()
+              defer { deliverySnapshot.close() }
+              _ = try spoolCoordinator.advance(
+                snapshot: deliverySnapshot,
+                journalURL: lane.journalURL,
+                manifestURL: lane.manifestURL,
+                spoolDirectoryURL: lane.spoolDirectoryURL,
+                initialReservation: initial,
+                fitSegment: expectedFitSegment
+              )
+              return try await ArchiveDeliveryCoordinator(wire: wire).advance(
+                snapshot: deliverySnapshot,
+                journalURL: lane.journalURL,
+                manifestURL: lane.manifestURL,
+                spoolDirectoryURL: lane.spoolDirectoryURL,
+                initialReservation: initial,
+                expectedFitSegment: expectedFitSegment
+              )
+            })
         case .done:
           break
         }

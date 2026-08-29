@@ -199,12 +199,134 @@ a release build, strict Swift formatting and `git diff --check`. Independent rev
 high or medium issue in the capture or control slices. No physical, signing, production or destructive
 gate is claimed.
 
-B0's code stabilization is complete locally, but its named clean baseline commit is still pending; no
-commit was created without an explicit commit instruction. B1 is not complete. The next action is the
-production resident owner/factory that binds the capture facade and canonical retained lane/control
-stores to those identities and origins, then exposes the journal calls with which `RoomEngine` brackets
-session and acknowledgement effects. The package dependency, CLI preflight and default factory
-selection remain pending. Build C, Build D, clinic rollout and Phase 4 remain gated.
+B0's code stabilization is complete locally and its named clean baseline is commit `5befcf1`. B1 is not
+complete. The next action is the production resident owner/factory that binds the capture facade and
+canonical retained lane/control stores to those identities and origins, then exposes the journal calls
+with which `RoomEngine` brackets session and acknowledgement effects. The package dependency, CLI
+preflight and default factory selection remain pending. Build C, Build D, clinic rollout and Phase 4
+remain gated.
+
+### 6.6 B1 durable command-control slice
+
+Implemented locally on 28 August 2026 after baseline commit `5befcf1`:
+
+- added the serialized authenticated `ArchiveRoomControlJournal` compare-and-append interface with
+  exact-state idempotency, stale/divergent rejection, non-regressing command clocks and retained named
+  failure recovery;
+- made the eligible resident construction seam return capture and control owners as one runtime while
+  preserving the disabled path's zero-construction behavior;
+- bracketed fresh start, pause, resume and end effects with the ratified durable success and failure
+  states, including capture-before-resume-patch ordering and explicit start/resume compensation;
+- required the resident owner to reserve and verify final derivative ranges before the server end patch;
+- validated command acknowledgement IDs/status, retried recovered ACK-ready states without replaying
+  effects, and recorded `command_not_pending` as an unobservable ACK outcome;
+- added ratified `command_noop` and `command_refused` decision states so already-satisfied and
+  policy-refused commands reach durable ACK boundaries without fabricating session effects;
+- blocked relaunch reconciliation from restarting capture across ambiguous start, unfinished end,
+  unfinished pause and compensated resume states; and
+- added fault tests proving that post-start and resume journal failures stop capture, ambiguous start/end
+  never adopt capture, and final verification failure never patches server end.
+- completed relaunch continuation for every intermediate start, pause, resume and end state: an ambiguous
+  `start_intent` remains fail-closed, `session_opened` compensates instead of assuming capture, durable
+  capture witnesses reconcile only against the exact authoritative session, pause retries its idempotent
+  patch, resume compensates failed patches, and end reserves and verifies final ranges before patching;
+- made the newest control for the exact active session authoritative, so stale controls cannot stop or
+  restart a replacement session and a newer end supersedes older capture-producing recovery regardless
+  of opaque command-ID order;
+- separated observed server effects from subsequent journal writes. A post-patch journal failure now
+  retains the retryable pre-patch state and retries the idempotent patch after relaunch instead of sending
+  a false failure acknowledgement;
+- required capture-producing recovery to match the server's current session and compatible status, so a
+  known absent session and an authoritative pause are never treated as permission to record;
+- made `start_day` with `override_pause:true` retain the resume control/acknowledgement family while using
+  the original server command ID, and changed an already-existing server recording into local capture
+  reconciliation rather than a session that start compensation could end; and
+- strengthened the resident control test journal with the production payload transition validator and
+  added crash-point, replacement-session, causal-order, nil-session, patch-failure, post-effect journal
+  failure and override-pause tests; and
+- deferred eligible resident-runtime construction until the canonical server room ID is available from
+  either the active session or command poll, while keeping the factory mandatory, waiting for retained
+  recovery, rejecting room-identity changes and forbidding fallback to the plaintext sibling launcher.
+
+That B1 control checkpoint passed 397 tests in 38 suites, 48 focused Thread Sanitizer tests in three
+suites, a release build, strict Swift formatting and `git diff --check`. No physical, signing,
+production or destructive gate is claimed.
+
+B1 remains incomplete. The start/pause/resume/end relaunch continuations are implemented, but maintenance
+handoff/reclaim and rollover remain owned by their dedicated coordinators rather than `RoomEngine`, and
+effectfully superseded intermediate controls remain fail-closed pending an explicit terminalization
+contract. Deferred construction resolves canonical room identity and retained-recovery store ordering.
+
+### 6.7 Primary resident owner and verified derivative pipeline
+
+Implemented locally on 28 August 2026:
+
+- made `RoomRecorderCore` depend directly on `TapeCapture` and added a concrete primary-only resident
+  owner that opens or reuses the canonical retained daily lane, proves first authenticated growth,
+  recreates capture generations after pause, preserves server-provided lane indices and never creates
+  backup state;
+- added the eligible production runtime factory and canonical daily `_control` owner. Factory creation
+  creates control identity only; it does not open a microphone or create a primary/backup audio lane;
+- made resident service and final-range operations asynchronous and gave finalization an explicit room,
+  session and per-lane index context, so a freshly constructed owner can finish a paused session after
+  relaunch without process-memory identity;
+- composed deterministic cutter reservation, level sidecar, pinned streaming encoder, immutable encrypted
+  spool and unchanged Bench delivery into one local pipeline. Final reservation is durably complete before
+  the control journal enters `final_ranges_reserved`, and final verification requires exact contiguous
+  `.done` coverage before the server end patch;
+- extended retained delivery recovery to advance authenticated `.reserved` and `.encoded` work through
+  spooling and verification when the production encoder is available, while preserving the prior
+  fail-closed classification when it is not; and
+- added synthetic owner/factory, pre-spool restart, pipeline idempotency and final-coverage tests. The
+  primary-only owner test produces authenticated tape/index, one deterministic reservation, encrypted
+  spool and a verified mock chunk row without any backup artifact.
+
+The current local gate passes 403 tests in 39 suites, 78 focused Thread Sanitizer tests in six suites, a
+release build, strict Swift formatting and `git diff --check`. No physical, signing, production or
+destructive gate is claimed.
+
+The runtime factory is intentionally not selected in the CLI. Exact live IST rollover remains open: a
+native input block that straddles midnight must be split on the callback without allocation or locking,
+the boundary must enter the SPSC ring in order, the old writer must close at that exact sample and the new
+daily writer must continue from it without stopping the producer. A timer-driven stop/start would violate
+the ratified exact-seam and keep-capture-flowing contract. The current ring/writer API does not yet expose
+that operation. Daily `_control` ownership must rotate with the audio lane in the same implementation.
+
+Deletion is also deliberately deferred. The frozen V1 delivery journal records no authenticated
+verification time, so it cannot prove when a 14-day post-verification interval starts. V chose indefinite
+retention rather than adding an unratified receipt/format or using an unsafe filesystem-clock surrogate.
+No archive or spool deletion path is enabled.
+
+### 6.8 Exact live rollover transport slice
+
+Implemented locally on 28 August 2026:
+
+- the audio callback classifies the next IST midnight without calendar work on the callback and publishes
+  timing boundaries, prior overflow, the pre-midnight prefix, one dedicated rollover fence and the
+  post-midnight suffix as one capacity-checked SPSC transaction;
+- a rejected transaction publishes none of those items and retains the same midnight target for the next
+  accepted callback; boundary-equals-start and boundary-equals-end publish no empty audio item;
+- the old resident writer finalizes its resampler and authenticated old-day tail before the fence, retains
+  the fence for handoff and invokes replacement-consumer construction immediately after releasing ring
+  ownership, independently of command polling or network progress;
+- the replacement writer requires the new retained lane's initial sample to equal the old authenticated
+  sample end, consumes the exact retained fence and continues with the already-buffered suffix without
+  stopping the capture session;
+- the primary owner creates or authenticates a fresh adjacent-day primary identity, rotates to a fresh
+  adjacent `_control` identity, preserves ownership of commands begun on older control days, reserves the
+  final old-day tail before deriving the new day and verifies every daily segment before end-day can patch
+  the server session;
+- synthetic tests cover interior and block-edge splits, atomic capacity failure, retained-fence consumer
+  handoff, an active producer crossing into a second encrypted store, two-day control recovery and
+  two-day final delivery with contiguous session-global samples and monotonic chunk indices.
+
+The local gate passes 414 tests in 39 suites, 36 focused Thread Sanitizer tests in four suites, a release
+build, strict Swift formatting and `git diff --check`. This is not rollover completion and does not make
+the CLI factory selectable. The live path does not yet persist and resume the complete authenticated
+`ArchiveRolloverPlan` through every crash point. A crash between old-day closure, final reservation,
+new-day durability and control rotation must be reconstructed and resumed through the ratified
+`ArchiveRolloverCoordinator` before this checkpoint can be promoted. Startup must also prove that
+encoder-capable retained recovery is mandatory whenever resident archive capture is enabled.
 
 ## 7. Log rules from this reset
 

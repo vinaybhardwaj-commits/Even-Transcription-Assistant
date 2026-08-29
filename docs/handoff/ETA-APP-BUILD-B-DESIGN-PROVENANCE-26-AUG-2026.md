@@ -222,6 +222,12 @@ journals operator intent before effects. Its append-only state machines are:
 - `rollover_intent -> old_day_final_reserved -> old_day_files_closed -> new_day_files_durable ->`
   `rollover_complete`.
 
+An already-satisfied command durably records `command_noop` and then enters that command kind's
+existing success ACK-ready/observed path. A policy-refused command durably records `command_refused`
+with error `command_refused` and then enters that command kind's existing failure ACK-ready/observed
+path. These decision states may carry no session when no active session exists; they never create,
+adopt, pause, resume or end a session and never alter replay's active-session witness.
+
 Every command also has durable named-failure edges. Before session creation, start may enter
 `start_failed -> start_failure_ack_ready -> start_failure_ack_observed`. After `session_opened`, failure
 to obtain durable growth within the command lifetime enters `start_compensation_intent ->`
@@ -234,7 +240,7 @@ keeps capture stopped, tape/spool retained and the server session unended, then 
 `end_failed -> end_failure_ack_ready -> end_failure_ack_observed`; a later end command resumes the
 same finalization, never capture. Maintenance failures retain the current owner and use the same
 `*_failed -> *_failure_ack_ready -> *_failure_ack_observed` convention where the caller has an ACK.
-The exact error values are `session_open_failed`, `no_durable_growth`, `session_patch_failed`,
+The exact error values are `command_refused`, `session_open_failed`, `no_durable_growth`, `session_patch_failed`,
 `final_verification_failed`, `authentication_failed`, `command_expired`, `maintenance_failed` and
 `internal_io_failed`; the two terminal ambiguity values are `session_open_outcome_unobservable` and
 `ack_outcome_unobservable`.

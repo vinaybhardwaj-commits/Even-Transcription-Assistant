@@ -28,7 +28,7 @@ var targets: [Target] = [
   ),
   .target(
     name: "RoomRecorderCore",
-    dependencies: ["TapeCore"]
+    dependencies: ["TapeCore", "TapeCapture"]
   ),
   .executableTarget(
     name: "tapewriter",

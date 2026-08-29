@@ -58,6 +58,25 @@ public struct ArchiveAuthenticatedLaneFacts: Equatable, Sendable {
       scanResult.index.records.last?.payload.sampleEnd ?? scanResult.initialSamplePosition
     recordCount = scanResult.index.records.count
   }
+
+  init(
+    context: ArchiveContext,
+    initialSamplePosition: UInt64,
+    authenticatedSampleEnd: UInt64,
+    recordCount: Int
+  ) throws {
+    guard authenticatedSampleEnd >= initialSamplePosition, recordCount >= 0,
+      (recordCount == 0) == (authenticatedSampleEnd == initialSamplePosition)
+    else {
+      throw ArchiveLanePersistenceError.invalidReadRange(
+        start: initialSamplePosition,
+        end: authenticatedSampleEnd)
+    }
+    self.context = context
+    self.initialSamplePosition = initialSamplePosition
+    self.authenticatedSampleEnd = authenticatedSampleEnd
+    self.recordCount = recordCount
+  }
 }
 
 public struct AuthenticatedArchivePCMRange: Equatable, Sendable {

@@ -211,6 +211,94 @@ import Testing
     #expect(items[3].samples == [3, 4])
   }
 
+  @Test func ring07SplitsOneCallbackAroundTheRolloverFence() {
+    let ring = AudioRing(slotCount: 4, framesPerSlot: 8)
+    let samples = (0..<8).map(Float.init)
+
+    #expect(
+      writeBlock(
+        ring,
+        samples: samples,
+        monoStartNS: 1_000,
+        wallStartNS: 2_000,
+        sampleRate: 4,
+        rollover: CaptureRolloverSplit(
+          frameOffset: 3,
+          monoNS: 750_001_000,
+          wallNS: 750_002_000)))
+    let items = drain(ring)
+
+    #expect(items.map(\.item.marker) == [.none, .dayRollover, .none])
+    #expect(items[0].samples == [0, 1, 2])
+    #expect(items[0].item.monoStartNS == 1_000)
+    #expect(items[0].item.monoEndNS == 750_001_000)
+    #expect(items[1].item.monoStartNS == 750_001_000)
+    #expect(items[1].item.wallStartNS == 750_002_000)
+    #expect(items[2].samples == [3, 4, 5, 6, 7])
+    #expect(items[2].item.monoStartNS == 750_001_000)
+    #expect(items[2].item.monoEndNS == 2_000_001_000)
+    #expect(ring.statistics.acceptedBlocks == 1)
+  }
+
+  @Test func ring08BoundaryOffsetsDoNotPublishEmptyAudioItems() {
+    for offset in [0, 4] {
+      let ring = AudioRing(slotCount: 3, framesPerSlot: 4)
+      #expect(
+        writeBlock(
+          ring,
+          samples: [1, 2, 3, 4],
+          monoStartNS: 10,
+          sampleRate: 4,
+          rollover: CaptureRolloverSplit(
+            frameOffset: offset,
+            monoNS: 20,
+            wallNS: 1_020)))
+
+      let items = drain(ring)
+      #expect(items.count == 2)
+      #expect(items.map(\.item.marker).filter { $0 == .none }.count == 1)
+      #expect(items.first { $0.item.marker == .none }?.samples == [1, 2, 3, 4])
+      #expect(items.first { $0.item.marker == .none }?.item.frameCount == 4)
+    }
+  }
+
+  @Test func ring09RejectsTheEntireRolloverTransactionWhenCapacityIsShort() {
+    let ring = AudioRing(slotCount: 3, framesPerSlot: 4)
+    #expect(ring.writeMarker(.configurationChange, monoNS: 1, wallNS: 1))
+
+    #expect(
+      !writeBlock(
+        ring,
+        samples: [1, 2, 3, 4],
+        monoStartNS: 10,
+        sampleRate: 4,
+        rollover: CaptureRolloverSplit(
+          frameOffset: 2,
+          monoNS: 500_000_010,
+          wallNS: 500_001_010)))
+    let items = drain(ring)
+
+    #expect(items.map(\.item.marker) == [.configurationChange])
+    #expect(ring.statistics.acceptedBlocks == 0)
+    #expect(ring.statistics.droppedBlocks == 1)
+  }
+
+  @Test func ring10RetainedReadLeavesTheFenceForTheNextConsumer() {
+    let ring = AudioRing(slotCount: 3, framesPerSlot: 1)
+    #expect(ring.writeMarker(.dayRollover, monoNS: 10, wallNS: 20))
+    #expect(ring.writeMarker(.resumed, monoNS: 11, wallNS: 21))
+
+    let retained = ring.withReadableItemDisposition { item, _ in
+      #expect(item.marker == .dayRollover)
+      return .retain
+    }
+    #expect(retained == .retained)
+    #expect(!ring.isEmpty)
+
+    let items = drain(ring)
+    #expect(items.map(\.item.marker) == [.dayRollover, .resumed])
+  }
+
   @Test func ring06SustainsConcurrentProducerAndConsumerWithoutCorruption() {
     let ring = AudioRing(slotCount: 17, framesPerSlot: 1)
     let producerDone = Atomic<Bool>(false)
@@ -276,9 +364,12 @@ private func writeBlock(
   samples: [Float],
   monoStartNS: UInt64,
   wallStartNS: UInt64? = nil,
-  boundaries: BoundaryBatch = BoundaryBatch()
+  boundaries: BoundaryBatch = BoundaryBatch(),
+  sampleRate: Double = 48_000,
+  rollover: CaptureRolloverSplit? = nil
 ) -> Bool {
   var mutableSamples = samples
+  let durationNS = UInt64(Double(samples.count) / sampleRate * 1_000_000_000)
   return mutableSamples.withUnsafeMutableBufferPointer { inputBuffer in
     var channel = inputBuffer.baseAddress!
     return withUnsafePointer(to: &channel) { channels in
@@ -286,12 +377,13 @@ private func writeBlock(
         channels: channels,
         channelCount: 1,
         frameCount: inputBuffer.count,
-        sampleRate: 48_000,
+        sampleRate: sampleRate,
         monoStartNS: monoStartNS,
-        monoEndNS: monoStartNS + UInt64(inputBuffer.count),
+        monoEndNS: monoStartNS + durationNS,
         wallStartNS: wallStartNS ?? monoStartNS + 1_000,
-        wallEndNS: (wallStartNS ?? monoStartNS + 1_000) + UInt64(inputBuffer.count),
-        boundaries: boundaries
+        wallEndNS: (wallStartNS ?? monoStartNS + 1_000) + durationNS,
+        boundaries: boundaries,
+        rollover: rollover
       )
     }
   }

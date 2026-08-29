@@ -105,10 +105,22 @@ private enum RoomRecorderCLI {
         try arguments.rejectOptions(except: ["--root"])
         let configuration = try RoomPersistence(root: root).loadConfiguration()
         let bench = BenchClient(configuration: configuration)
-        let recovery: (any RoomRetainedArchiveRecovering)? =
-          configuration.retainedArchiveRecoveryEnabled
-          ? try RetainedArchiveRecovery(rootURL: root, wire: bench)
-          : nil
+        let recovery: (any RoomRetainedArchiveRecovering)?
+        if configuration.retainedArchiveRecoveryEnabled {
+          if configuration.residentArchiveEligibility(archiveRootURL: root) == .eligible,
+            let receipt = configuration.archivePreflightReceipt
+          {
+            recovery = try RetainedArchiveRecovery(
+              rootURL: root,
+              wire: bench,
+              ffmpegURL: URL(fileURLWithPath: configuration.ffmpegPath),
+              encoderProvenanceID: receipt.encoderProvenanceID)
+          } else {
+            recovery = try RetainedArchiveRecovery(rootURL: root, wire: bench)
+          }
+        } else {
+          recovery = nil
+        }
         try await RoomEngine.load(
           rootURL: root,
           remoteFactory: { _ in bench },

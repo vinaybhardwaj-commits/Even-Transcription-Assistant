@@ -499,6 +499,142 @@ import Testing
     #expect(remote.registrationCount == 1)
   }
 
+  @Test func diskInventorySpoolsAndDeliversReservedWorkAfterRestart() async throws {
+    let fixture = try makeFixture(
+      initialObservation: ArchiveIndexObservation(
+        monoNS: 1_000_000_000,
+        wallNS: 2_000_000_000,
+        rmsQ15: 100,
+        nativeFrames: nil,
+        inputRateNumerator: nil,
+        inputRateDenominator: nil,
+        discontinuity: .resumed,
+        reason: ArchiveIndexDiscontinuity.resumed.rawValue,
+        gapNS: 0
+      ))
+    defer { fixture.remove() }
+    let journal = fixture.directory.appendingPathComponent("primary.jrn")
+    let level = fixture.directory.appendingPathComponent("primary.lvl")
+    let manifest = fixture.directory.appendingPathComponent("primary.manifest")
+    let derived = try ArchiveLocalDeriver.derive(
+      snapshot: fixture.snapshot,
+      journalURL: journal,
+      levelURL: level,
+      sessionID: "bs_spool_test",
+      finalFlush: true,
+      startingChunkIndex: 7
+    )
+    let initial = try #require(derived.reservations.first)
+    let tapeURL = fixture.directory.appendingPathComponent("primary.tape")
+    let indexURL = fixture.directory.appendingPathComponent("primary.idx")
+    fixture.snapshot.close()
+    let lane = ArchiveDeliveryDiskLane(
+      journalURL: journal,
+      manifestURL: manifest,
+      spoolDirectoryURL: fixture.directory
+    ) {
+      try ArchiveLaneStore.openAuthenticatedSnapshot(
+        tapeURL: tapeURL,
+        indexURL: indexURL,
+        rootKey: self.rootKey,
+        context: self.context
+      )
+    }
+    let calls = EncoderCalls()
+    let output = deterministicBytes(count: 2_047)
+    let wire = MockArchiveDeliveryWire()
+    let inventory = ArchiveDeliveryDiskInventory(
+      lanes: [lane],
+      wire: wire,
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: DeterministicSpoolEncoder(output: output, calls: calls),
+        encoderProvenanceID: "ffmpeg-n9.0.1-arm64-test")
+    )
+
+    let before = try await inventory.scan()
+    #expect(before.blockedReservations.isEmpty)
+    #expect(before.candidates.map(\.initialReservation) == [initial])
+    try await ArchiveDeliverySweeper(
+      inventory: inventory,
+      sleeper: SweepNeverSleeper()
+    ).drain()
+
+    #expect(calls.count == 1)
+    let after = try await inventory.scan()
+    #expect(after.candidates.isEmpty)
+    #expect(after.blockedReservations.isEmpty)
+    let reopened = try ArchiveLaneStore.openAuthenticatedSnapshot(
+      tapeURL: tapeURL,
+      indexURL: indexURL,
+      rootKey: rootKey,
+      context: context)
+    defer { reopened.close() }
+    #expect(try journalStates(reopened, at: journal).last == .done)
+    let remote = await wire.snapshot()
+    #expect(remote.object == output)
+    #expect(remote.registrationCount == 1)
+  }
+
+  @Test func localDeliveryPipelineRunsReservationThroughVerifiedDeliveryIdempotently() async throws
+  {
+    let fixture = try makeFixture(
+      initialObservation: ArchiveIndexObservation(
+        monoNS: 1_000_000_000,
+        wallNS: 2_000_000_000,
+        rmsQ15: 100,
+        nativeFrames: nil,
+        inputRateNumerator: nil,
+        inputRateDenominator: nil,
+        discontinuity: .resumed,
+        reason: ArchiveIndexDiscontinuity.resumed.rawValue,
+        gapNS: 0
+      ))
+    defer { fixture.remove() }
+    let calls = EncoderCalls()
+    let wire = MockArchiveDeliveryWire(endedDisagrees: "ended_disagrees")
+    let pipeline = ArchiveLocalDeliveryPipeline(
+      spoolCoordinator: ArchiveSpoolCoordinator(
+        testEncoder: DeterministicSpoolEncoder(
+          output: deterministicBytes(count: 3_001),
+          calls: calls),
+        encoderProvenanceID: "ffmpeg-n9.0.1-arm64-test"),
+      wire: wire)
+    let layout = try ArchiveRetainedLaneCatalog(rootURL: fixture.directory).prepareLayout(
+      context: context)
+
+    let first = try await pipeline.advance(
+      snapshot: fixture.snapshot,
+      layout: layout,
+      sessionID: "bs_spool_test",
+      finalFlush: true,
+      startingChunkIndex: 7)
+    let reservation = try #require(first.reservations.first)
+    #expect(reservation.state == .done)
+    #expect(reservation.serverEndedObserved)
+    #expect(first.deliveredReservationIDs == [reservation.initialReservation.reservationID])
+    #expect(first.endedDisagrees == "ended_disagrees")
+    #expect(
+      try ArchiveFinalRangeCoverage.verify(
+        reservations: first.reservations,
+        sessionID: "bs_spool_test",
+        laneID: "primary",
+        sampleStart: 0,
+        sampleEnd: 100
+      ) == first.deliveredReservationIDs)
+    let wireAfterFirst = await wire.snapshot()
+
+    let second = try await pipeline.advance(
+      snapshot: fixture.snapshot,
+      layout: layout,
+      sessionID: "bs_spool_test",
+      finalFlush: true,
+      startingChunkIndex: 7)
+    #expect(second.deliveredReservationIDs.isEmpty)
+    #expect(second.endedDisagrees == "server_ended")
+    #expect(calls.count == 1)
+    #expect(await wire.snapshot() == wireAfterFirst)
+  }
+
   @Test func alreadyVerifiedRequiresLocalHeadWitness() async throws {
     let fixture = try makeFixture()
     defer { fixture.remove() }
@@ -624,6 +760,7 @@ import Testing
       ArchiveJournalState.putComplete,
       ArchiveJournalState.headVerified,
       ArchiveJournalState.rowRegistered,
+      ArchiveJournalState.serverEnded,
     ] {
       let fixture = try makeFixture()
       defer { fixture.remove() }
@@ -641,6 +778,7 @@ import Testing
           case .spoolDurable: .putComplete
           case .putComplete: .headVerified
           case .headVerified: .rowRegistered
+          case .rowRegistered: .serverEnded
           default: target
           }
         try appendJournal(
@@ -675,6 +813,8 @@ import Testing
       case .headVerified:
         #expect(remote.events == ["presign", "register"])
       case .rowRegistered:
+        #expect(remote.events.isEmpty)
+      case .serverEnded:
         #expect(remote.events.isEmpty)
       default:
         Issue.record("unexpected recovery state")
@@ -1413,6 +1553,7 @@ private actor MockArchiveDeliveryWire: ArchiveDeliveryWire {
   private let alreadyVerified: Bool
   private let omitContentLength: Bool
   private let registrationKey: String
+  private let endedDisagrees: String?
   private var failPutAfterStoreOnce: Bool
   private var failRegistrationAfterStoreOnce: Bool
   private var events: [String] = []
@@ -1428,7 +1569,8 @@ private actor MockArchiveDeliveryWire: ArchiveDeliveryWire {
     failPutAfterStoreOnce: Bool = false,
     failRegistrationAfterStoreOnce: Bool = false,
     omitContentLength: Bool = false,
-    registrationKey: String = "bench/mock.webm"
+    registrationKey: String = "bench/mock.webm",
+    endedDisagrees: String? = nil
   ) {
     self.alreadyVerified = alreadyVerified
     object = existingObject
@@ -1436,6 +1578,7 @@ private actor MockArchiveDeliveryWire: ArchiveDeliveryWire {
     self.failRegistrationAfterStoreOnce = failRegistrationAfterStoreOnce
     self.omitContentLength = omitContentLength
     self.registrationKey = registrationKey
+    self.endedDisagrees = endedDisagrees
   }
 
   func prepareDelivery(for piece: ArchiveDeliveryPiece) async throws
@@ -1483,7 +1626,8 @@ private actor MockArchiveDeliveryWire: ArchiveDeliveryWire {
     return ArchiveDeliveryRegistration(
       ok: true,
       key: registrationKey,
-      uploadState: "verified"
+      uploadState: "verified",
+      endedDisagrees: endedDisagrees
     )
   }
 

@@ -8,6 +8,8 @@ enum ResidentArchiveLaneWriterError: Error, Equatable {
   case ringAlreadyHasConsumer
   case invalidInputSampleRate(Double)
   case nativeFrameOverflow
+  case rolloverFenceMismatch
+  case rolloverOriginMismatch(expected: UInt64, actual: UInt64)
   case unattributedNativeFrames(UInt64)
 }
 
@@ -16,7 +18,21 @@ struct ResidentArchiveLevels: Equatable, Sendable {
   let peakQ15: UInt16
 }
 
+package struct ResidentArchiveRolloverFence: Equatable, Sendable {
+  package let monoNS: UInt64
+  package let wallNS: UInt64
+  package let authenticatedFacts: ArchiveAuthenticatedLaneFacts
+}
+
 final class ResidentArchiveLaneWriter: @unchecked Sendable {
+  private struct PreparedRollover {
+    let fence: ResidentArchiveRolloverFence
+    let store: ArchiveLaneStore
+  }
+
+  private typealias RolloverStoreFactory =
+    @Sendable (ResidentArchiveRolloverFence) throws -> ArchiveLaneStore
+
   private struct NativeRate: Equatable {
     let value: Double
     let numerator: UInt64
@@ -28,6 +44,7 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
 
   private let ring: AudioRing
   private let store: ArchiveLaneStore
+  private let initialRolloverFence: ResidentArchiveRolloverFence?
   private let stopping = Atomic<Bool>(false)
   private let condition = NSCondition()
   private var didStart = false
@@ -37,6 +54,9 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
   private var durableCaptureGeneration: UInt64 = 0
   private var durableCaptureCompletedNS: UInt64 = 0
   private var levelsValue: ResidentArchiveLevels?
+  private var rolloverFenceValue: ResidentArchiveRolloverFence?
+  private var rolloverStoreFactory: RolloverStoreFactory?
+  private var rolloverHandler: (@Sendable (ResidentArchiveRolloverFence, ArchiveLaneStore) -> Void)?
 
   // Writer-thread-only state.
   private var resampler: PCMResampler?
@@ -47,10 +67,16 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
   private var latestMonoNS: UInt64?
   private var latestWallNS: UInt64?
   private var discontinuities = ArchiveDiscontinuityAccumulator()
+  private var didConsumeInitialRolloverFence = false
 
-  init(ring: AudioRing, store: ArchiveLaneStore) {
+  init(
+    ring: AudioRing,
+    store: ArchiveLaneStore,
+    initialRolloverFence: ResidentArchiveRolloverFence? = nil
+  ) {
     self.ring = ring
     self.store = store
+    self.initialRolloverFence = initialRolloverFence
     durableSampleEndValue =
       store.scanResult.index.records.last?.payload.sampleEnd ?? store.initialSamplePosition
     pcm.reserveCapacity(Self.recordBytes + 8_192)
@@ -64,14 +90,24 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
     condition.lock()
     defer { condition.unlock() }
     guard !didStart else { throw ResidentArchiveLaneWriterError.alreadyStarted }
+    if let initialRolloverFence {
+      let expected = initialRolloverFence.authenticatedFacts.authenticatedSampleEnd
+      guard store.initialSamplePosition == expected else {
+        throw ResidentArchiveLaneWriterError.rolloverOriginMismatch(
+          expected: expected,
+          actual: store.initialSamplePosition)
+      }
+    }
     guard ring.claimConsumer() else {
       throw ResidentArchiveLaneWriterError.ringAlreadyHasConsumer
     }
     didStart = true
     Thread.detachNewThread { [self] in
+      var preparedRollover: PreparedRollover?
       do {
-        try run()
+        preparedRollover = try run()
       } catch {
+        preparedRollover?.store.close()
         condition.lock()
         failure = error
         condition.unlock()
@@ -80,8 +116,24 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
       ring.releaseConsumer()
       condition.lock()
       didFinish = true
+      let rolloverHandler = self.rolloverHandler
       condition.broadcast()
       condition.unlock()
+      if let preparedRollover, let rolloverHandler {
+        rolloverHandler(preparedRollover.fence, preparedRollover.store)
+      } else {
+        preparedRollover?.store.close()
+      }
+    }
+  }
+
+  func installRolloverHandler(
+    storeFactory: @escaping @Sendable (ResidentArchiveRolloverFence) throws -> ArchiveLaneStore,
+    _ handler: @escaping @Sendable (ResidentArchiveRolloverFence, ArchiveLaneStore) -> Void
+  ) {
+    condition.withLock {
+      rolloverStoreFactory = storeFactory
+      rolloverHandler = handler
     }
   }
 
@@ -117,6 +169,10 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
     return didStart && !didFinish
   }
 
+  func authenticatedSnapshot() throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try store.authenticatedSnapshot()
+  }
+
   var durableSampleEnd: UInt64 {
     condition.lock()
     defer { condition.unlock() }
@@ -127,6 +183,12 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
     condition.lock()
     defer { condition.unlock() }
     return levelsValue
+  }
+
+  var rolloverFence: ResidentArchiveRolloverFence? {
+    condition.lock()
+    defer { condition.unlock() }
+    return rolloverFenceValue
   }
 
   func waitForDurableGrowth(
@@ -160,7 +222,7 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
       && durableCaptureCompletedNS <= deadlineNS
   }
 
-  private func run() throws {
+  private func run() throws -> PreparedRollover? {
     if !store.scanResult.index.records.isEmpty {
       discontinuities.append(
         StreamItem(
@@ -170,12 +232,70 @@ final class ResidentArchiveLaneWriter: @unchecked Sendable {
         ))
     }
     while !stopping.load(ordering: .acquiring) || !ring.isEmpty {
-      let consumed = try ring.withReadableItem { item, samples in
+      let result = try ring.withReadableItemDisposition { item, samples in
+        if item.marker == .dayRollover {
+          if let initialRolloverFence, !didConsumeInitialRolloverFence {
+            guard item.monoStartNS == initialRolloverFence.monoNS,
+              item.wallStartNS == initialRolloverFence.wallNS
+            else {
+              throw ResidentArchiveLaneWriterError.rolloverFenceMismatch
+            }
+            didConsumeInitialRolloverFence = true
+            return .consume
+          }
+          return .retain
+        }
         try consume(item: item, samples: samples)
+        return .consume
       }
-      if !consumed { Thread.sleep(forTimeInterval: 0.005) }
+      if result == .retained {
+        try finishCurrentStream()
+        let snapshot = try store.authenticatedSnapshot()
+        let facts = snapshot.authenticatedFacts
+        snapshot.close()
+        let marker = try retainedRolloverMarker()
+        let fence = ResidentArchiveRolloverFence(
+          monoNS: marker.monoStartNS,
+          wallNS: marker.wallStartNS,
+          authenticatedFacts: facts)
+        condition.lock()
+        rolloverFenceValue = fence
+        let rolloverStoreFactory = self.rolloverStoreFactory
+        condition.broadcast()
+        condition.unlock()
+        guard let rolloverStoreFactory else { return nil }
+        var preparedStore: ArchiveLaneStore?
+        do {
+          let store = try rolloverStoreFactory(fence)
+          preparedStore = store
+          let expected = fence.authenticatedFacts.authenticatedSampleEnd
+          guard store.initialSamplePosition == expected else {
+            throw ResidentArchiveLaneWriterError.rolloverOriginMismatch(
+              expected: expected,
+              actual: store.initialSamplePosition)
+          }
+          return PreparedRollover(fence: fence, store: store)
+        } catch {
+          preparedStore?.close()
+          throw error
+        }
+      }
+      if result == .empty { Thread.sleep(forTimeInterval: 0.005) }
     }
     try finishCurrentStream()
+    return nil
+  }
+
+  private func retainedRolloverMarker() throws -> StreamItem {
+    var retained: StreamItem?
+    let result = ring.withReadableItemDisposition { item, _ in
+      retained = item
+      return .retain
+    }
+    guard result == .retained, let retained, retained.marker == .dayRollover else {
+      throw RecorderError("rollover fence disappeared before writer handoff")
+    }
+    return retained
   }
 
   private func consume(item: StreamItem, samples: UnsafePointer<Float>?) throws {

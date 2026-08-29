@@ -71,6 +71,12 @@ struct ArchiveCanonicalJSONParser {
     }
   }
 
+  mutating func consume(_ literal: String) -> Bool {
+    guard hasPrefix(literal) else { return false }
+    offset += literal.utf8.count
+    return true
+  }
+
   mutating func integer(field: String) throws -> UInt64 {
     let start = offset
     guard offset < bytes.count, (0x30...0x39).contains(bytes[offset]) else {

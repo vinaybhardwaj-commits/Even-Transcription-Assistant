@@ -62,13 +62,6 @@ import Testing
           .captureDurable, .nativeOwnerReady,
         ]
       ),
-      (
-        .rollover,
-        [
-          .rolloverIntent, .oldDayFinalReserved, .oldDayFilesClosed, .newDayFilesDurable,
-          .rolloverComplete,
-        ]
-      ),
     ]
 
     for (index, chain) in chains.enumerated() {
@@ -131,11 +124,12 @@ import Testing
     #expect(
       Set(ArchiveControlCommandKind.allCases.map(\.rawValue)) == [
         "start_day", "pause_day", "resume_day", "end_day", "maintenance_handoff",
-        "maintenance_reclaim", "rollover",
+        "maintenance_reclaim", "capture_session_binding", "server_ended_finalization",
+        "rollover_preparation", "rollover",
       ])
     #expect(
       Set(ArchiveControlFailure.allCases.map(\.rawValue)) == [
-        "session_open_failed", "no_durable_growth", "session_patch_failed",
+        "command_refused", "session_open_failed", "no_durable_growth", "session_patch_failed",
         "final_verification_failed", "authentication_failed", "command_expired",
         "maintenance_failed", "internal_io_failed", "session_open_outcome_unobservable",
         "ack_outcome_unobservable",
@@ -256,6 +250,33 @@ import Testing
     )
     #expect(throws: ArchiveControlPayloadError.self) {
       try ArchiveControlReplay.validate(start + secondOpen)
+    }
+  }
+
+  @Test func serverEndedFinalizationConvergesAnExactActiveOrHistoricalSession() throws {
+    let start = try chain(
+      commandID: "cmd_start",
+      kind: .startDay,
+      states: [(.startIntent, nil), (.sessionOpened, nil), (.captureDurable, nil)])
+    let finalized = try chain(
+      commandID: "local_server_ended",
+      kind: .serverEndedFinalization,
+      states: [(.serverEndedFinalized, nil)])
+    let nextStart = try chain(
+      commandID: "cmd_next",
+      kind: .startDay,
+      states: [(.startIntent, nil), (.sessionOpened, nil)],
+      sessionID: "bs_2")
+
+    #expect(try ArchiveControlReplay.validate(start + finalized + nextStart).count == 3)
+    #expect(try ArchiveControlReplay.validate(finalized).count == 1)
+    let other = try chain(
+      commandID: "local_server_ended_other",
+      kind: .serverEndedFinalization,
+      states: [(.serverEndedFinalized, nil)],
+      sessionID: "bs_other")
+    #expect(throws: ArchiveControlPayloadError.self) {
+      try ArchiveControlReplay.validate(start + other)
     }
   }
 
@@ -404,6 +425,49 @@ import Testing
       #expect(throws: ArchiveControlPayloadError.self) {
         try ArchiveControlPayloadCodec.decode(malformed)
       }
+    }
+  }
+
+  @Test func captureSessionBindingCodecAndReplayFreezeExactDailyAuthority() throws {
+    let identity = try ArchiveDailyLaneIdentity(
+      context: ArchiveContext(
+        streamUUID: Data([
+          0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77,
+          0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        ]),
+        roomID: "room_1",
+        istDate: "2026-08-28",
+        laneID: "primary",
+        stableDeviceUID: "device_1"),
+      expectedInitialSessionSample: 4_000,
+      keywrapDigestHex: String(repeating: "a", count: 64))
+    let binding = try ArchiveCaptureSessionBinding(
+      sessionID: "bs_1",
+      primaryIdentity: identity,
+      sessionSampleStart: 1_000,
+      segmentSampleStart: 4_000)
+    let encoded = try ArchiveCaptureSessionBindingCodec.encode(binding)
+    #expect(try ArchiveCaptureSessionBindingCodec.decode(encoded) == binding)
+    let payload = try ArchiveControlPayload(
+      commandID: binding.commandID,
+      commandKind: .captureSessionBinding,
+      sessionID: binding.sessionID,
+      priorState: nil,
+      newState: .captureSessionBound,
+      atMonoNS: 10,
+      atWallNS: 20,
+      error: nil,
+      captureSessionBinding: binding)
+    let controlBytes = try ArchiveControlPayloadCodec.encode(payload)
+    #expect(try ArchiveControlPayloadCodec.decode(controlBytes) == payload)
+    #expect(
+      try ArchiveControlReplay.validate([payload])[binding.commandID]?.captureSessionBinding
+        == binding)
+
+    var tampered = encoded
+    tampered[tampered.index(before: tampered.endIndex)] ^= 1
+    #expect(throws: ArchiveCaptureSessionBindingError.self) {
+      try ArchiveCaptureSessionBindingCodec.decode(tampered)
     }
   }
 

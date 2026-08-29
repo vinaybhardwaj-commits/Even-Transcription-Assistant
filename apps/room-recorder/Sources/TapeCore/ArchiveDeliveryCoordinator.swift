@@ -163,7 +163,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       throw ArchiveDeliveryCoordinatorError.missingManifest(initialReservation.reservationID)
     }
     switch reservation.state {
-    case .spoolDurable, .putComplete, .headVerified, .rowRegistered, .done:
+    case .spoolDurable, .putComplete, .headVerified, .rowRegistered, .serverEnded, .done:
       break
     case .reserved, .encoded:
       throw ArchiveDeliveryCoordinatorError.deliveryBeforeSpoolDurable(reservation.state)
@@ -200,7 +200,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
         uploaded: false,
         alreadyVerified: false,
         spoolURL: published.url,
-        endedDisagrees: nil
+        endedDisagrees: reservation.serverEndedObserved ? "server_ended" : nil
       )
     }
 
@@ -228,7 +228,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
           expectedInitial: initialReservation
         )
         switch reservation.state {
-        case .headVerified, .rowRegistered, .done:
+        case .headVerified, .rowRegistered, .serverEnded, .done:
           break
         case .spoolDurable, .putComplete:
           try observeFailure(
@@ -364,7 +364,8 @@ public struct ArchiveDeliveryCoordinator: Sendable {
           let advanced = try appendNextSuccess(
             reservation: reservation,
             snapshot: snapshot,
-            journalURL: journalURL
+            journalURL: journalURL,
+            observeServerEnded: registration.endedDisagrees != nil
           )
           reservation = advanced.reservation
           journalRecordsWritten += advanced.written ? 1 : 0
@@ -372,7 +373,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       }
     }
 
-    if reservation.state == .rowRegistered {
+    if reservation.state == .rowRegistered || reservation.state == .serverEnded {
       let advanced = try appendNextSuccess(
         reservation: reservation,
         snapshot: snapshot,
@@ -388,7 +389,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       uploaded: uploaded,
       alreadyVerified: false,
       spoolURL: published.url,
-      endedDisagrees: endedDisagrees
+      endedDisagrees: endedDisagrees ?? (reservation.serverEndedObserved ? "server_ended" : nil)
     )
   }
 
@@ -526,7 +527,8 @@ public struct ArchiveDeliveryCoordinator: Sendable {
   private func appendNextSuccess(
     reservation: ArchiveJournalReplayReservation,
     snapshot: ArchiveLaneStore.AuthenticatedSnapshot,
-    journalURL: URL
+    journalURL: URL,
+    observeServerEnded: Bool = false
   ) throws -> (reservation: ArchiveJournalReplayReservation, written: Bool) {
     let journal = try snapshot.openJournalStoreForAppend(at: journalURL)
     defer { journal.close() }
@@ -548,8 +550,9 @@ public struct ArchiveDeliveryCoordinator: Sendable {
     switch current.state {
     case .spoolDurable: next = .putComplete
     case .putComplete: next = .headVerified
-    case .headVerified: next = .rowRegistered
-    case .rowRegistered: next = .done
+    case .headVerified: next = observeServerEnded ? .serverEnded : .rowRegistered
+    case .rowRegistered: next = observeServerEnded ? .serverEnded : .done
+    case .serverEnded: next = .done
     case .reserved, .encoded, .done:
       throw ArchiveDeliveryCoordinatorError.deliveryBeforeSpoolDurable(reservation.state)
     }
@@ -564,7 +567,8 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       ArchiveJournalReplayReservation(
         initialReservation: reservation.initialReservation,
         state: next,
-        attemptID: current.attemptID
+        attemptID: current.attemptID,
+        serverEndedObserved: current.serverEndedObserved || next == .serverEnded
       ),
       true
     )
@@ -649,7 +653,8 @@ public struct ArchiveDeliveryCoordinator: Sendable {
     case .putComplete: 3
     case .headVerified: 4
     case .rowRegistered: 5
-    case .done: 6
+    case .serverEnded: 6
+    case .done: 7
     }
   }
 

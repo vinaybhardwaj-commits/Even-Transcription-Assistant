@@ -10,6 +10,12 @@ public struct BenchHTTPError: Error, Equatable, Sendable, CustomStringConvertibl
   public let body: String
   public let retention: BenchPieceRetention
 
+  public init(statusCode: Int, body: String, retention: BenchPieceRetention) {
+    self.statusCode = statusCode
+    self.body = body
+    self.retention = retention
+  }
+
   public var mustRetainLocalPiece: Bool { retention == .retainLocalPiece }
   public var description: String { "HTTP \(statusCode): \(body)" }
 }

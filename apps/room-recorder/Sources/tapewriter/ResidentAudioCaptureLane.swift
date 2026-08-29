@@ -8,6 +8,7 @@ package enum ResidentAudioCaptureLaneError: String, Error, LocalizedError, Senda
   case microphoneAuthorizationRequired = "resident_capture_microphone_authorization_required"
   case cancelled = "resident_capture_cancelled"
   case physicalFallbackRequired = "resident_capture_physical_fallback_required"
+  case rolloverUnavailable = "resident_capture_rollover_unavailable"
   case stoppedUnexpectedly = "resident_capture_stopped_unexpectedly"
 
   package var errorDescription: String? { rawValue }
@@ -34,9 +35,13 @@ extension CaptureSession: ResidentAudioCaptureSession {}
 package final class ResidentAudioCaptureLane: @unchecked Sendable {
   typealias SessionFactory = (_ generation: Int, _ resumeAfterNS: UInt64?) throws ->
     any ResidentAudioCaptureSession
+  package typealias RolloverStoreFactory =
+    @Sendable (ResidentArchiveRolloverFence) throws ->
+    ArchiveLaneStore
 
   private let ring: AudioRing
-  private let writer: ResidentArchiveLaneWriter
+  private var writer: ResidentArchiveLaneWriter
+  private let rolloverStoreFactory: RolloverStoreFactory?
   private let authorize: () throws -> Void
   private let sessionFactory: SessionFactory
   private let isCancelled: () -> Bool
@@ -49,12 +54,19 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   private var didStart = false
   private var active = false
   private var finalizationRequired = false
+  private var handoffError: Error?
+  private var handoffsInProgress = 0
 
-  package convenience init(stableDeviceUID: String, store: ArchiveLaneStore) {
+  package convenience init(
+    stableDeviceUID: String,
+    store: ArchiveLaneStore,
+    rolloverStoreFactory: RolloverStoreFactory? = nil
+  ) {
     let ring = AudioRing()
     self.init(
       ring: ring,
       writer: ResidentArchiveLaneWriter(ring: ring, store: store),
+      rolloverStoreFactory: rolloverStoreFactory,
       authorize: { try Self.validateInput(stableDeviceUID: stableDeviceUID) },
       sessionFactory: { generation, resumeAfterNS in
         let device = try AudioDevices.selected(uid: stableDeviceUID)
@@ -73,6 +85,7 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   init(
     ring: AudioRing,
     writer: ResidentArchiveLaneWriter,
+    rolloverStoreFactory: RolloverStoreFactory? = nil,
     authorize: @escaping () throws -> Void = {},
     sessionFactory: @escaping SessionFactory,
     isCancelled: @escaping () -> Bool = { false },
@@ -83,11 +96,13 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   ) {
     self.ring = ring
     self.writer = writer
+    self.rolloverStoreFactory = rolloverStoreFactory
     self.authorize = authorize
     self.sessionFactory = sessionFactory
     self.isCancelled = isCancelled
     self.nowNS = nowNS
     self.sleepNS = sleepNS
+    installRolloverHandler(on: writer)
   }
 
   deinit {
@@ -102,16 +117,22 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   }
 
   package var isActive: Bool {
-    stateLock.withLock { active && writer.isRunning }
+    stateLock.withLock { active && session?.hasStoppedProducing == false }
   }
 
   package var requiresFinalization: Bool {
     stateLock.withLock { finalizationRequired }
   }
-  package var durableSampleEnd: UInt64 { writer.durableSampleEnd }
+  package var durableSampleEnd: UInt64 {
+    stateLock.withLock { writer }.durableSampleEnd
+  }
+
+  package func authenticatedSnapshot() throws -> ArchiveLaneStore.AuthenticatedSnapshot {
+    try stateLock.withLock { writer }.authenticatedSnapshot()
+  }
 
   package var currentLevels: ResidentAudioCaptureLevels? {
-    writer.currentLevels.map {
+    stateLock.withLock { writer }.currentLevels.map {
       ResidentAudioCaptureLevels(averageQ15: $0.averageQ15, peakQ15: $0.peakQ15)
     }
   }
@@ -194,7 +215,9 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   package func service() throws {
     operationLock.lock()
     defer { operationLock.unlock() }
-    try writer.throwFailure()
+    try waitForRolloverHandoffIfNeeded()
+    if let handoffError = stateLock.withLock({ handoffError }) { throw handoffError }
+    try stateLock.withLock { writer }.throwFailure()
     let state = stateLock.withLock { (active, session, finalizationRequired) }
     guard state.0, let session = state.1 else {
       if state.2 { throw ResidentAudioCaptureLaneError.stoppedUnexpectedly }
@@ -218,12 +241,68 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
       return value
     }
     activeSession?.stop()
-    while !ring.flushPendingOverflow(monoNS: monotonicNowNS(), wallNS: wallNowNS()) {
-      try writer.throwFailure()
+    while true {
+      let currentWriter = stateLock.withLock { writer }
+      while !ring.flushPendingOverflow(monoNS: monotonicNowNS(), wallNS: wallNowNS()) {
+        try currentWriter.throwFailure()
+        Thread.sleep(forTimeInterval: 0.005)
+      }
+      try currentWriter.stopAndWait()
+      guard currentWriter.rolloverFence != nil else { break }
+      try waitForRolloverHandoffIfNeeded()
+      if let handoffError = stateLock.withLock({ handoffError }) { throw handoffError }
+    }
+    stateLock.withLock { finalizationRequired = false }
+  }
+
+  private func installRolloverHandler(on writer: ResidentArchiveLaneWriter) {
+    writer.installRolloverHandler(
+      storeFactory: { [rolloverStoreFactory] fence in
+        guard let rolloverStoreFactory else {
+          throw ResidentAudioCaptureLaneError.rolloverUnavailable
+        }
+        return try rolloverStoreFactory(fence)
+      },
+      { [weak self] fence, store in
+        guard let self else {
+          store.close()
+          return
+        }
+        self.handleRollover(fence, store: store)
+      })
+  }
+
+  private func handleRollover(
+    _ fence: ResidentArchiveRolloverFence,
+    store: ArchiveLaneStore
+  ) {
+    stateLock.withLock { handoffsInProgress += 1 }
+    defer { stateLock.withLock { handoffsInProgress -= 1 } }
+    do {
+      let replacement = ResidentArchiveLaneWriter(
+        ring: ring,
+        store: store,
+        initialRolloverFence: fence)
+      installRolloverHandler(on: replacement)
+      try replacement.start()
+      stateLock.withLock { writer = replacement }
+      if stopRequested.load(ordering: .acquiring) { try replacement.stopAndWait() }
+    } catch {
+      store.close()
+      stateLock.withLock { handoffError = error }
+    }
+  }
+
+  private func waitForRolloverHandoffIfNeeded() throws {
+    let deadline = Date().addingTimeInterval(30)
+    while true {
+      let state = stateLock.withLock { (writer, handoffError, handoffsInProgress) }
+      if let error = state.1 { throw error }
+      try state.0.throwFailure()
+      guard state.2 > 0 || state.0.rolloverFence != nil else { return }
+      if Date() >= deadline { throw ResidentAudioCaptureLaneError.stoppedUnexpectedly }
       Thread.sleep(forTimeInterval: 0.005)
     }
-    try writer.stopAndWait()
-    stateLock.withLock { finalizationRequired = false }
   }
 
   private func finishWithoutActiveCapture() throws {

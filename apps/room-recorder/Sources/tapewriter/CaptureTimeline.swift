@@ -13,6 +13,7 @@ struct CaptureFrameTiming: Sendable {
   let wallStartNS: UInt64
   let wallEndNS: UInt64
   let boundaries: BoundaryBatch
+  let rollover: CaptureRolloverSplit?
 }
 
 /// Callback-only timing state. Keeping classification pure of AVAudioEngine and global clocks makes
@@ -20,15 +21,19 @@ struct CaptureFrameTiming: Sendable {
 struct CaptureTimeline: Sendable {
   private static let hostDiscontinuityNS: UInt64 = 2_000_000
   private static let wallJumpNS: Int64 = 100_000_000
+  private static let istDayNS: UInt64 = 86_400_000_000_000
 
   private var resumeAfterNS: UInt64?
   private var expectedSampleTime: Int64?
   private var previousFrameEndNS: UInt64?
   private var previousWallOffsetNS: Int64?
   private var pendingBoundaries = BoundaryBatch()
+  private var nextRolloverWallNS: UInt64?
+  private var pendingRolloverWallNS: UInt64?
 
-  init(resumeAfterNS: UInt64? = nil) {
+  init(resumeAfterNS: UInt64? = nil, nextRolloverWallNS: UInt64? = nil) {
     self.resumeAfterNS = resumeAfterNS
+    self.nextRolloverWallNS = nextRolloverWallNS
   }
 
   mutating func classify(_ observation: CaptureObservation) -> CaptureFrameTiming {
@@ -98,17 +103,56 @@ struct CaptureTimeline: Sendable {
         gapNS: startMono >= resumeAfterNS ? startMono - resumeAfterNS : 0
       )
     }
+    let rollover = rolloverSplit(
+      frameCount: observation.frameCount,
+      sampleRate: observation.sampleRate,
+      monoStartNS: startMono,
+      wallStartNS: startWall,
+      wallEndNS: endWall)
     return CaptureFrameTiming(
       monoStartNS: startMono,
       monoEndNS: endMono,
       wallStartNS: startWall,
       wallEndNS: endWall,
-      boundaries: publishedBoundaries
+      boundaries: publishedBoundaries,
+      rollover: rollover
     )
   }
 
   mutating func didPublishFrame() {
     resumeAfterNS = nil
     pendingBoundaries.clear()
+    if let pendingRolloverWallNS {
+      nextRolloverWallNS =
+        pendingRolloverWallNS.addingReportingOverflow(Self.istDayNS).overflow
+        ? nil
+        : pendingRolloverWallNS + Self.istDayNS
+      self.pendingRolloverWallNS = nil
+    }
+  }
+
+  private mutating func rolloverSplit(
+    frameCount: Int,
+    sampleRate: Double,
+    monoStartNS: UInt64,
+    wallStartNS: UInt64,
+    wallEndNS: UInt64
+  ) -> CaptureRolloverSplit? {
+    guard let target = nextRolloverWallNS, target <= wallEndNS else { return nil }
+    let frameOffset: Int
+    if target <= wallStartNS {
+      frameOffset = 0
+    } else {
+      let elapsedNS = target - wallStartNS
+      frameOffset = min(
+        frameCount,
+        Int((Double(elapsedNS) * sampleRate / 1_000_000_000).rounded(.up)))
+    }
+    pendingRolloverWallNS = target
+    let monoNS =
+      target >= wallStartNS
+      ? monoStartNS.addingReportingOverflow(target - wallStartNS).partialValue
+      : monoStartNS
+    return CaptureRolloverSplit(frameOffset: frameOffset, monoNS: monoNS, wallNS: target)
   }
 }

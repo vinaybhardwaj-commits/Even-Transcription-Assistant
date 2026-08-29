@@ -7,10 +7,16 @@ public enum ArchiveControlCommandKind: String, CaseIterable, Equatable, Sendable
   case endDay = "end_day"
   case maintenanceHandoff = "maintenance_handoff"
   case maintenanceReclaim = "maintenance_reclaim"
+  case captureSessionBinding = "capture_session_binding"
+  case serverEndedFinalization = "server_ended_finalization"
+  case rolloverPreparation = "rollover_preparation"
   case rollover
 }
 
 public enum ArchiveControlState: String, CaseIterable, Equatable, Hashable, Sendable {
+  case commandNoop = "command_noop"
+  case commandRefused = "command_refused"
+
   case startIntent = "start_intent"
   case sessionOpened = "session_opened"
   case captureDurable = "capture_durable"
@@ -77,6 +83,10 @@ public enum ArchiveControlState: String, CaseIterable, Equatable, Hashable, Send
   case maintenanceReclaimFailureAckOutcomeUnobservable =
     "maintenance_reclaim_failure_ack_outcome_unobservable"
 
+  case captureSessionBound = "capture_session_bound"
+  case serverEndedFinalized = "server_ended_finalized"
+
+  case rolloverPreparation = "rollover_preparation"
   case rolloverIntent = "rollover_intent"
   case oldDayFinalReserved = "old_day_final_reserved"
   case oldDayFilesClosed = "old_day_files_closed"
@@ -86,6 +96,7 @@ public enum ArchiveControlState: String, CaseIterable, Equatable, Hashable, Send
 }
 
 public enum ArchiveControlFailure: String, CaseIterable, Equatable, Sendable {
+  case commandRefused = "command_refused"
   case sessionOpenFailed = "session_open_failed"
   case noDurableGrowth = "no_durable_growth"
   case sessionPatchFailed = "session_patch_failed"
@@ -123,6 +134,13 @@ public enum ArchiveControlPayloadError: Error, Equatable, Sendable {
   case replayActiveSessionMismatch(commandID: String, expected: String?, actual: String?)
   case replaySessionAlreadyActive(commandID: String, activeSessionID: String)
   case replayTimestampRegression(commandID: String)
+  case invalidRolloverPreparation(commandID: String)
+  case missingRolloverPreparation(commandID: String)
+  case invalidRolloverPlan(commandID: String)
+  case missingRolloverPlan(commandID: String)
+  case invalidCaptureSessionBinding(commandID: String)
+  case missingCaptureSessionBinding(commandID: String)
+  case replayCaptureSessionBindingConflict(sessionID: String, istDate: String)
   case integerOverflow(field: String)
   case invalidSyntax(offset: Int)
   case invalidEnvelope
@@ -138,6 +156,9 @@ public struct ArchiveControlPayload: Equatable, Sendable {
   public let atMonoNS: UInt64
   public let atWallNS: UInt64
   public let error: ArchiveControlFailure?
+  public let captureSessionBinding: ArchiveCaptureSessionBinding?
+  public let rolloverPlan: ArchiveRolloverPlan?
+  public let rolloverPreparation: ArchiveRolloverPreparation?
 
   public init(
     commandID: String,
@@ -147,7 +168,10 @@ public struct ArchiveControlPayload: Equatable, Sendable {
     newState: ArchiveControlState,
     atMonoNS: UInt64,
     atWallNS: UInt64,
-    error: ArchiveControlFailure?
+    error: ArchiveControlFailure?,
+    captureSessionBinding: ArchiveCaptureSessionBinding? = nil,
+    rolloverPlan: ArchiveRolloverPlan? = nil,
+    rolloverPreparation: ArchiveRolloverPreparation? = nil
   ) throws {
     guard Self.validID(commandID) else {
       throw ArchiveControlPayloadError.invalidID("command_id")
@@ -155,7 +179,8 @@ public struct ArchiveControlPayload: Equatable, Sendable {
     if let sessionID, !Self.validID(sessionID) {
       throw ArchiveControlPayloadError.invalidID("session_id")
     }
-    if priorState == nil {
+    let sessionlessDecision = newState == .commandNoop || newState == .commandRefused
+    if priorState == nil, !sessionlessDecision {
       if commandKind == .startDay {
         guard sessionID == nil else {
           throw ArchiveControlPayloadError.replaySessionMismatch(commandID: commandID)
@@ -175,6 +200,29 @@ public struct ArchiveControlPayload: Equatable, Sendable {
       newState: newState,
       error: error
     )
+    if let rolloverPlan {
+      guard commandKind == .rollover, newState == .rolloverIntent,
+        rolloverPlan.commandID == commandID, rolloverPlan.sessionID == sessionID
+      else {
+        throw ArchiveControlPayloadError.invalidRolloverPlan(commandID: commandID)
+      }
+    }
+    if let captureSessionBinding {
+      guard commandKind == .captureSessionBinding, newState == .captureSessionBound,
+        captureSessionBinding.commandID == commandID,
+        captureSessionBinding.sessionID == sessionID
+      else {
+        throw ArchiveControlPayloadError.invalidCaptureSessionBinding(commandID: commandID)
+      }
+    }
+    if let rolloverPreparation {
+      guard commandKind == .rolloverPreparation, newState == .rolloverPreparation,
+        rolloverPreparation.commandID == commandID,
+        rolloverPreparation.sessionID == sessionID
+      else {
+        throw ArchiveControlPayloadError.invalidRolloverPreparation(commandID: commandID)
+      }
+    }
 
     self.commandID = commandID
     self.commandKind = commandKind
@@ -184,6 +232,9 @@ public struct ArchiveControlPayload: Equatable, Sendable {
     self.atMonoNS = atMonoNS
     self.atWallNS = atWallNS
     self.error = error
+    self.captureSessionBinding = captureSessionBinding
+    self.rolloverPlan = rolloverPlan
+    self.rolloverPreparation = rolloverPreparation
     try ArchiveControlPayloadCodec.validateEncodedSize(self)
   }
 
@@ -198,6 +249,9 @@ public struct ArchiveControlReplayCommand: Equatable, Sendable {
   public let state: ArchiveControlState
   public let atMonoNS: UInt64
   public let atWallNS: UInt64
+  public let captureSessionBinding: ArchiveCaptureSessionBinding?
+  public let rolloverPlan: ArchiveRolloverPlan?
+  public let rolloverPreparation: ArchiveRolloverPreparation?
 }
 
 public enum ArchiveControlReplay {
@@ -209,6 +263,8 @@ public enum ArchiveControlReplay {
     var carriedSessionEstablished = false
     var sawStartHistory = false
     var terminallyEndedCommands: Set<String> = []
+    var sessionlessDecisionCommands: Set<String> = []
+    var bindings: [String: ArchiveCaptureSessionBinding] = [:]
     for payload in payloads {
       let previous = commands[payload.commandID]
       if let previous {
@@ -236,6 +292,14 @@ public enum ArchiveControlReplay {
         } else if payload.sessionID != nil {
           throw ArchiveControlPayloadError.replaySessionMismatch(commandID: payload.commandID)
         }
+      } else if payload.commandKind == .serverEndedFinalization {
+        if let activeSessionID, payload.sessionID != activeSessionID {
+          throw ArchiveControlPayloadError.replayActiveSessionMismatch(
+            commandID: payload.commandID,
+            expected: activeSessionID,
+            actual: payload.sessionID
+          )
+        }
       } else {
         guard payload.priorState == nil else {
           throw ArchiveControlPayloadError.replayStateMismatch(
@@ -245,8 +309,33 @@ public enum ArchiveControlReplay {
           )
         }
       }
+      if payload.commandKind == .rollover, previous != nil, payload.rolloverPlan != nil {
+        throw ArchiveControlPayloadError.invalidRolloverPlan(commandID: payload.commandID)
+      }
+      if payload.commandKind == .captureSessionBinding {
+        guard let binding = payload.captureSessionBinding else {
+          throw ArchiveControlPayloadError.missingCaptureSessionBinding(
+            commandID: payload.commandID)
+        }
+        let key = "\(binding.sessionID)\u{0}\(binding.primaryIdentity.context.istDate)"
+        if let existing = bindings[key], existing != binding {
+          throw ArchiveControlPayloadError.replayCaptureSessionBindingConflict(
+            sessionID: binding.sessionID,
+            istDate: binding.primaryIdentity.context.istDate)
+        }
+        bindings[key] = binding
+      }
 
-      if payload.commandKind == .startDay { sawStartHistory = true }
+      if (payload.newState == .commandNoop || payload.newState == .commandRefused)
+        && payload.sessionID == nil
+      {
+        sessionlessDecisionCommands.insert(payload.commandID)
+      }
+      if payload.commandKind == .startDay,
+        !sessionlessDecisionCommands.contains(payload.commandID)
+      {
+        sawStartHistory = true
+      }
       let commandAlreadyEnded = terminallyEndedCommands.contains(payload.commandID)
       if payload.commandKind == .startDay {
         if payload.newState == .sessionOpened {
@@ -270,7 +359,9 @@ public enum ArchiveControlReplay {
           }
         }
       } else {
-        if previous == nil, activeSessionID == nil {
+        if !sessionlessDecisionCommands.contains(payload.commandID), previous == nil,
+          activeSessionID == nil
+        {
           guard !sawStartHistory, !carriedSessionEstablished else {
             throw ArchiveControlPayloadError.replayActiveSessionMismatch(
               commandID: payload.commandID,
@@ -281,7 +372,7 @@ public enum ArchiveControlReplay {
           activeSessionID = payload.sessionID
           carriedSessionEstablished = true
         }
-        if !commandAlreadyEnded {
+        if !sessionlessDecisionCommands.contains(payload.commandID), !commandAlreadyEnded {
           guard let activeSessionID, payload.sessionID == activeSessionID else {
             throw ArchiveControlPayloadError.replayActiveSessionMismatch(
               commandID: payload.commandID,
@@ -305,14 +396,35 @@ public enum ArchiveControlReplay {
         activeSessionID = nil
         terminallyEndedCommands.insert(payload.commandID)
       }
+      if payload.newState == .serverEndedFinalized,
+        payload.commandKind == .serverEndedFinalization
+      {
+        activeSessionID = nil
+        terminallyEndedCommands.insert(payload.commandID)
+      }
 
       commands[payload.commandID] = ArchiveControlReplayCommand(
         commandKind: payload.commandKind,
         sessionID: previous?.sessionID ?? payload.sessionID,
         state: payload.newState,
         atMonoNS: payload.atMonoNS,
-        atWallNS: payload.atWallNS
+        atWallNS: payload.atWallNS,
+        captureSessionBinding: previous?.captureSessionBinding ?? payload.captureSessionBinding,
+        rolloverPlan: previous?.rolloverPlan ?? payload.rolloverPlan,
+        rolloverPreparation: previous?.rolloverPreparation ?? payload.rolloverPreparation
       )
+    }
+    for (commandID, command) in commands where command.commandKind == .rollover {
+      if command.state != .rolloverComplete, command.state != .rolloverFailed,
+        command.rolloverPlan == nil
+      {
+        throw ArchiveControlPayloadError.missingRolloverPlan(commandID: commandID)
+      }
+    }
+    for (commandID, command) in commands where command.commandKind == .rolloverPreparation {
+      guard command.rolloverPreparation != nil else {
+        throw ArchiveControlPayloadError.missingRolloverPreparation(commandID: commandID)
+      }
     }
     return commands
   }
@@ -329,12 +441,29 @@ public enum ArchiveControlPayloadCodec {
     ArchiveCanonicalJSON.appendString(payload.commandID, to: &result)
     result.append(contentsOf: ",\"command_kind\":".utf8)
     ArchiveCanonicalJSON.appendString(payload.commandKind.rawValue, to: &result)
+    if let captureSessionBinding = payload.captureSessionBinding {
+      result.append(contentsOf: ",\"capture_session_binding\":".utf8)
+      ArchiveCanonicalJSON.appendString(
+        try ArchiveCaptureSessionBindingCodec.encode(captureSessionBinding).base64EncodedString(),
+        to: &result)
+    }
     result.append(contentsOf: ",\"error\":".utf8)
     ArchiveCanonicalJSON.appendOptionalString(payload.error?.rawValue, to: &result)
     result.append(contentsOf: ",\"new_state\":".utf8)
     ArchiveCanonicalJSON.appendString(payload.newState.rawValue, to: &result)
     result.append(contentsOf: ",\"prior_state\":".utf8)
     ArchiveCanonicalJSON.appendOptionalString(payload.priorState?.rawValue, to: &result)
+    if let rolloverPlan = payload.rolloverPlan {
+      result.append(contentsOf: ",\"rollover_plan\":".utf8)
+      let encodedPlan = try ArchiveRolloverPlanCodec.encode(rolloverPlan).base64EncodedString()
+      ArchiveCanonicalJSON.appendString(encodedPlan, to: &result)
+    }
+    if let rolloverPreparation = payload.rolloverPreparation {
+      result.append(contentsOf: ",\"rollover_preparation\":".utf8)
+      let encodedPreparation = try ArchiveRolloverPreparationCodec.encode(rolloverPreparation)
+        .base64EncodedString()
+      ArchiveCanonicalJSON.appendString(encodedPreparation, to: &result)
+    }
     result.append(contentsOf: ",\"session_id\":".utf8)
     ArchiveCanonicalJSON.appendOptionalString(payload.sessionID, to: &result)
     result.append(0x7D)
@@ -360,6 +489,20 @@ public enum ArchiveControlPayloadCodec {
       let commandKindRaw = try parser.string()
       guard let commandKind = ArchiveControlCommandKind(rawValue: commandKindRaw) else {
         throw ArchiveControlPayloadError.unknownCommandKind(commandKindRaw)
+      }
+      let captureSessionBinding: ArchiveCaptureSessionBinding?
+      if parser.consume(",\"capture_session_binding\":") {
+        let raw = try parser.string()
+        guard let bytes = Data(base64Encoded: raw), bytes.base64EncodedString() == raw else {
+          throw ArchiveControlPayloadError.invalidCaptureSessionBinding(commandID: commandID)
+        }
+        do {
+          captureSessionBinding = try ArchiveCaptureSessionBindingCodec.decode(bytes)
+        } catch {
+          throw ArchiveControlPayloadError.invalidCaptureSessionBinding(commandID: commandID)
+        }
+      } else {
+        captureSessionBinding = nil
       }
       try parser.expect(",\"error\":")
       let errorRaw = try parser.optionalString()
@@ -388,6 +531,48 @@ public enum ArchiveControlPayloadCodec {
       } else {
         priorState = nil
       }
+      let rolloverPlanRaw: String?
+      if parser.consume(",\"rollover_plan\":") {
+        rolloverPlanRaw = try parser.string()
+      } else {
+        rolloverPlanRaw = nil
+      }
+      let rolloverPlan: ArchiveRolloverPlan?
+      if let rolloverPlanRaw {
+        guard let bytes = Data(base64Encoded: rolloverPlanRaw),
+          bytes.base64EncodedString() == rolloverPlanRaw
+        else {
+          throw ArchiveControlPayloadError.invalidRolloverPlan(commandID: commandID)
+        }
+        do {
+          rolloverPlan = try ArchiveRolloverPlanCodec.decode(bytes)
+        } catch {
+          throw ArchiveControlPayloadError.invalidRolloverPlan(commandID: commandID)
+        }
+      } else {
+        rolloverPlan = nil
+      }
+      let rolloverPreparationRaw: String?
+      if parser.consume(",\"rollover_preparation\":") {
+        rolloverPreparationRaw = try parser.string()
+      } else {
+        rolloverPreparationRaw = nil
+      }
+      let rolloverPreparation: ArchiveRolloverPreparation?
+      if let rolloverPreparationRaw {
+        guard let bytes = Data(base64Encoded: rolloverPreparationRaw),
+          bytes.base64EncodedString() == rolloverPreparationRaw
+        else {
+          throw ArchiveControlPayloadError.invalidRolloverPreparation(commandID: commandID)
+        }
+        do {
+          rolloverPreparation = try ArchiveRolloverPreparationCodec.decode(bytes)
+        } catch {
+          throw ArchiveControlPayloadError.invalidRolloverPreparation(commandID: commandID)
+        }
+      } else {
+        rolloverPreparation = nil
+      }
       try parser.expect(",\"session_id\":")
       let sessionID = try parser.optionalString()
       try parser.expect("}")
@@ -400,7 +585,10 @@ public enum ArchiveControlPayloadCodec {
         newState: newState,
         atMonoNS: atMonoNS,
         atWallNS: atWallNS,
-        error: error
+        error: error,
+        captureSessionBinding: captureSessionBinding,
+        rolloverPlan: rolloverPlan,
+        rolloverPreparation: rolloverPreparation
       )
       guard try encode(payload) == data else {
         throw ArchiveControlPayloadError.invalidSyntax(offset: 0)
@@ -471,6 +659,10 @@ private enum ArchiveControlTransition {
     commandKind: ArchiveControlCommandKind
   ) -> Bool {
     switch newState {
+    case .commandRefused:
+      return error == .commandRefused
+    case .commandNoop:
+      return error == nil
     case .sessionOpenOutcomeUnobservable:
       return error == .sessionOpenOutcomeUnobservable
     case .startAckOutcomeUnobservable, .startFailureAckOutcomeUnobservable,
@@ -543,6 +735,10 @@ private enum ArchiveControlTransition {
     switch commandKind {
     case .startDay:
       return edges([
+        (nil, .commandNoop),
+        (.commandNoop, .startAckReady),
+        (nil, .commandRefused),
+        (.commandRefused, .startFailureAckReady),
         (nil, .startIntent),
         (.startIntent, .sessionOpened),
         (.startIntent, .startFailed),
@@ -562,6 +758,10 @@ private enum ArchiveControlTransition {
       ])
     case .pauseDay:
       return edges([
+        (nil, .commandNoop),
+        (.commandNoop, .pauseAckReady),
+        (nil, .commandRefused),
+        (.commandRefused, .pauseFailureAckReady),
         (nil, .pauseIntent),
         (.pauseIntent, .laneBoundariesDurable),
         (.pauseIntent, .pauseFailed),
@@ -576,6 +776,10 @@ private enum ArchiveControlTransition {
       ])
     case .resumeDay:
       return edges([
+        (nil, .commandNoop),
+        (.commandNoop, .resumeAckReady),
+        (nil, .commandRefused),
+        (.commandRefused, .resumeFailureAckReady),
         (nil, .resumeIntent),
         (.resumeIntent, .cleanSegmentOpened),
         (.resumeIntent, .resumeFailed),
@@ -594,6 +798,10 @@ private enum ArchiveControlTransition {
       ])
     case .endDay:
       return edges([
+        (nil, .commandNoop),
+        (.commandNoop, .endAckReady),
+        (nil, .commandRefused),
+        (.commandRefused, .endFailureAckReady),
         (nil, .endIntent),
         (.endIntent, .finalRangesReserved),
         (.endIntent, .endFailed),
@@ -639,6 +847,18 @@ private enum ArchiveControlTransition {
           .maintenanceReclaimFailureAckReady,
           .maintenanceReclaimFailureAckOutcomeUnobservable
         ),
+      ])
+    case .captureSessionBinding:
+      return edges([
+        (nil, .captureSessionBound)
+      ])
+    case .serverEndedFinalization:
+      return edges([
+        (nil, .serverEndedFinalized)
+      ])
+    case .rolloverPreparation:
+      return edges([
+        (nil, .rolloverPreparation)
       ])
     case .rollover:
       return edges([
