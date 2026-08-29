@@ -65,6 +65,17 @@ export type WhisperResult =
       /** Always present, possibly empty — a server that sent none is not an error. */
       segments: WhisperSegment[];
       /**
+       * Build 3 (PRD §5 amendment) — the model whisper.cpp REPORTED, when it reports one.
+       *
+       * Read defensively off the response body and never defaulted to the model named in this
+       * file's header comment: the header says `ggml-large-v3-turbo` because that is what the
+       * Mini was loaded with in June, and a comment is not evidence about what answered today.
+       * Most whisper.cpp builds send no model field at all, so this is usually null — which is
+       * the honest answer and keeps `receipt_complete` false rather than asserting a version
+       * nobody confirmed.
+       */
+      engineVersion?: string | null;
+      /**
        * How many attempts this answer took (1 or 2). Build 1 §C.3 — a call that only succeeded
        * on the retry is a healthy answer from an unhealthy link, and a latency trend that cannot
        * tell the two apart will read a flapping tunnel as a fast server.
@@ -149,6 +160,24 @@ export const WHISPER_RETRY_BACKOFF_MS = 2_000;
  *   whisper_base_url_missing. Configuration, not weather. It will be missing again in two
  *   seconds.
  */
+/**
+ * PURE — the model whisper.cpp reported, or null.
+ *
+ * VERBATIM FROM THE RESPONSE, with no fallback to anything we know or believe about the server.
+ * whisper.cpp's `/inference` is not documented to return a model field and most builds do not,
+ * so null is the expected answer; the moment a build starts reporting one, it flows through to
+ * `transcription_run.engine_version_reported` with no further change.
+ */
+export function reportedWhisperModel(json: unknown): string | null {
+  if (typeof json !== "object" || json === null) return null;
+  const j = json as Record<string, unknown>;
+  for (const k of ["model", "model_name"]) {
+    const v = j[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 export function isRetryableWhisperError(error: string): boolean {
   if (error.startsWith('network:')) return true;
   const m = /^http_(\d{3})/.exec(error);
@@ -278,6 +307,8 @@ async function whisperAttempt(
       language?: string;
       duration?: number;
       segments?: unknown;
+      model?: unknown;
+      model_name?: unknown;
     };
 
     const segments = parseWhisperSegments(json.segments);
@@ -296,6 +327,7 @@ async function whisperAttempt(
       duration_seconds: json.duration,
       latency_ms,
       segments,
+      engineVersion: reportedWhisperModel(json),
     };
   } catch (e: unknown) {
     clearTimeout(tid);

@@ -10,6 +10,7 @@ import { ekascribeAdapter } from "./adapters/ekascribe";
 import { elevenlabsScribeAdapter } from "./adapters/elevenlabs-scribe";
 import { indicconformerAdapter } from "./adapters/indicconformer";
 import { indicconformerScribeAdapter } from "./adapters/indicconformer-scribe";
+import { geminiAdapter } from "./adapters/gemini";
 
 export const ADAPTERS: Record<string, SttAdapter> = {
   deepgram: deepgramAdapter,
@@ -20,6 +21,7 @@ export const ADAPTERS: Record<string, SttAdapter> = {
   elevenlabs_scribe: elevenlabsScribeAdapter,
   indicconformer: indicconformerAdapter,
   indicconformer_scribe: indicconformerScribeAdapter,
+  gemini: geminiAdapter,
 };
 
 export function adapterFor(key: string): SttAdapter | null {

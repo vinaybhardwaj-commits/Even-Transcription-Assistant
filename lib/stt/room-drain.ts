@@ -563,6 +563,16 @@ export async function drainRoomWindow(
            whisper_probe_attempts: whisperProbeAttempts,
            whisper_full_ms: full.latency_ms,
            whisper_full_attempts: full.attempts ?? 1,
+           // Build 3 (PRD §5 amendment) — the model whisper.cpp reported, when it reports one.
+           //
+           // WHY HERE AND NOT IN engine_version_reported. That column belongs to the engine the
+           // ROW NAMES, which on this path is the paid engine (Sarvam today, Gemini when routed).
+           // Whisper is the segmenter and the language arbitrator on the same window, not the
+           // run's engine, so its version rides in metrics_json beside its latency — exactly
+           // where Build 1 put `whisper_probe_ms`. Writing it into engine_version_reported would
+           // caption a Sarvam run with Whisper's version, which is the typed-provider-label
+           // failure wearing a new hat.
+           whisper_model_reported: full.engineVersion ?? null,
            audio_seconds: audioSeconds,
            clip_r2_key: join.key,
            window: { start_ms: startMs, end_ms: endMs, source_mic: source },

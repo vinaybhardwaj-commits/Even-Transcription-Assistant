@@ -47,6 +47,7 @@ import {
   ALARM_KIND_REFERENCE,
   type ForkOutcome,
 } from "./tuning-fork";
+import { scoreWindows, type ScoreRunResult } from "./window-scoring";
 
 /** How many windows one pass will measure. Bounded so the pass fits a single invocation. */
 export const MEASURE_BATCH_LIMIT = 200;
@@ -98,6 +99,23 @@ export type MeasureJobResult = {
     level_coverage: number | null;
   };
   fork: ForkOutcome | { kind: "not_run"; reason: string };
+  /**
+   * Build 3 §C — the scoring pass (PRD §1.2a).
+   *
+   * Build 2 shipped a refusal-emitting scorer that NOTHING CALLED: `window-scoring.ts` was
+   * reachable only from its own test, because the spec named the function and never its
+   * invocation. A scorer with no trigger produces an empty leaderboard that looks exactly like a
+   * leaderboard of engines nobody has run — the precise ambiguity the refusal vocabulary exists
+   * to abolish. This is that trigger.
+   */
+  scoring: ScoreRunResult | { skipped: string };
+  /**
+   * Gold rows whose window has NO room run at all. Reported rather than scored, because a
+   * (window, engine) pair needs an engine and a gold row alone does not name one — so there is
+   * literally no pair to refuse. Counted so a reference that nobody has run against is visible
+   * instead of vanishing between the two enumerations.
+   */
+  gold_without_run: number | null;
   proxy_version: string;
   errors: string[];
 };
@@ -105,7 +123,7 @@ export type MeasureJobResult = {
 /**
  * One pass. Never throws — a caller gets a result describing what happened, including nothing.
  */
-export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFork?: boolean } = {}): Promise<MeasureJobResult> {
+export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFork?: boolean; skipScoring?: boolean } = {}): Promise<MeasureJobResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
   const limit = Math.max(1, Math.min(MEASURE_BATCH_LIMIT, Math.trunc(opts.limit ?? MEASURE_BATCH_LIMIT) || MEASURE_BATCH_LIMIT));
   const errors: string[] = [];
@@ -113,6 +131,8 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
     scanned: 0, measured: 0, skipped_unreadable: 0, quarantined: {}, scores_written: 0,
     coverage: { windows: 0, energy_ms: 0, silent_ms: 0, unknown_ms: 0, level_coverage: null },
     fork: { kind: "not_run", reason: "not_reached" },
+    scoring: { skipped: "not_reached" },
+    gold_without_run: null,
     proxy_version: PROXY_VERSION,
     errors,
   };
@@ -304,6 +324,45 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
     ? Math.round(((result.coverage.energy_ms + result.coverage.silent_ms) / covered) * 1e4) / 1e4
     : null;
 
+  // --- the scoring pass (§C) -----------------------------------------------------------------
+  //
+  // AFTER measurement, deliberately: the scorer refuses a quarantined window, so running it
+  // before tonight's measurements exist would refuse pairs that this same pass was about to make
+  // scoreable, and the refusal rows are idempotent by (window, engine, reason) — a wrong refusal
+  // written first would still be sitting there afterwards.
+  //
+  // IDEMPOTENT ACROSS DOUBLE RUNS by the uq_stt_score_refusal_pair unique index (migration 0072)
+  // and the (window_id, engine_key) primary key on stt_window_score. Two overlapping crons
+  // therefore converge rather than accumulate — the same structural idempotence the measure pass
+  // relies on, not a second layer of care in this file.
+  if (opts.skipScoring) {
+    result.scoring = { skipped: "skipped_by_caller" };
+  } else {
+    try {
+      result.scoring = await scoreWindows({ log });
+    } catch (e) {
+      // The scorer never throws by design; this catch exists so that if it ever does, the
+      // measurements this pass already committed are not lost with it.
+      const reason = String((e as Error)?.message ?? e).slice(0, 200);
+      log(`[measure] scoring pass failed: ${reason} — measurements are unaffected`);
+      result.scoring = { skipped: reason };
+      errors.push(`scoring: ${reason}`);
+    }
+  }
+
+  // INFERRED SQL #9 — gold references with no room run. Fails safe to null, which reads as "not
+  // counted", never as zero.
+  const orphan = await safeRead<Array<{ n: number }>>("gold without run", [], log, async () =>
+    (await sql`
+      SELECT COUNT(*)::int AS n
+        FROM stt_gold_window g
+       WHERE NOT EXISTS (
+         SELECT 1 FROM transcription_run r
+          WHERE r.subject_type = 'bench_window' AND r.subject_id = g.window_id
+       )
+    `) as Array<{ n: number }>);
+  result.gold_without_run = orphan.ok ? (Number(orphan.value[0]?.n) || 0) : null;
+
   // --- the tuning fork, once per pass --------------------------------------------------------
   if (opts.skipFork) {
     result.fork = { kind: "not_run", reason: "skipped_by_caller" };
@@ -311,7 +370,7 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
     result.fork = await runForkStep(log);
   }
 
-  log(`[measure] pass done: scanned=${result.scanned} measured=${result.measured} scores=${result.scores_written} skipped=${result.skipped_unreadable} coverage=${result.coverage.level_coverage ?? "n/a"} fork=${result.fork.kind}`);
+  log(`[measure] pass done: scanned=${result.scanned} measured=${result.measured} scores=${result.scores_written} skipped=${result.skipped_unreadable} coverage=${result.coverage.level_coverage ?? "n/a"} fork=${result.fork.kind} scored=${"scored" in result.scoring ? result.scoring.scored : "skipped"} refused=${"refused" in result.scoring ? result.scoring.refused : "skipped"}`);
   return result;
 }
 

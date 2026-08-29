@@ -19,6 +19,18 @@ export interface SttTranscribeResult {
   language: string | null;
   latencyMs: number;
   costUsd: number | null;
+  /**
+   * The engine version THE PROVIDER REPORTED on this call, copied verbatim, or null (PRD §5
+   * amendment, added in Build 3).
+   *
+   * OPTIONAL so every existing adapter compiles unchanged and keeps returning nothing. NEVER the
+   * model string we SENT: Build 2 established that `receipt_complete` stays false rather than
+   * carry a label the provider did not confirm, because this system has shipped a typed provider
+   * label twice and both times it hid a wrong provider for months. Gemini fills it from the
+   * response's model field; Whisper fills it when whisper.cpp reports one; Sarvam stays null
+   * until its API returns a model identifier.
+   */
+  engineVersion?: string | null;
   error: string | null;
 }
 

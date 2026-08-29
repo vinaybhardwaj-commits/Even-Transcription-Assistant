@@ -264,7 +264,13 @@ describe("B3 — the timeout is configurable and its default carries its provena
     }).trim().split("\n").filter(Boolean);
     const code = hits.filter((h) => {
       const body = h.split(":").slice(2).join(":").trim();
-      return !body.startsWith("//") && !body.startsWith("*") && !body.startsWith("--");
+      if (body.startsWith("//") || body.startsWith("*") || body.startsWith("--")) return false;
+      // STANDALONE ONLY. `git grep -E` has no word boundaries, so the pattern above also matches
+      // 300000 sitting INSIDE a longer digit run — e.g. the epoch window-ms literals
+      // `1787553000000` in migration 0072, which are a window address and not a timeout at all.
+      // The boundary check is done here, in JS, where lookarounds are reliable. B3's intent is
+      // unchanged: a re-typed 300000 timeout constant still fails this test.
+      return /(?<![0-9])300_?000(?![0-9])/.test(body);
     });
     expect(code).toHaveLength(1);
     expect(code[0]).toContain("export const DIARIZE_TIMEOUT_MS_DEFAULT = 300_000;");
