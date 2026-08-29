@@ -24,6 +24,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { drainRoomWaitingWindows, countRoomWaitingWindows } from "@/lib/stt/room-drain";
+import { isUsableActor } from "@/lib/stt/receipt";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,7 +42,13 @@ async function guard(): Promise<string | null> {
 }
 
 export async function POST(req: NextRequest) {
-  if ((await guard()) === null) return respondError("AUTH_REQUIRED", "Sign in required");
+  // Build 2 §B — the admin id is KEPT now. This line used to be `if ((await guard()) === null)`,
+  // which resolved the initiator and dropped it on the floor; every paid run this route started
+  // was therefore unattributable. An empty admin_id is refused rather than defaulted: a receipt
+  // naming nobody is worse than no run.
+  const adminId = await guard();
+  if (adminId === null) return respondError("AUTH_REQUIRED", "Sign in required");
+  if (!isUsableActor(adminId)) return respondError("AUTH_REQUIRED", "admin_id_missing_from_token");
   let body: { room_id?: unknown; limit?: unknown };
   try {
     body = (await req.json()) as typeof body;
@@ -53,7 +60,7 @@ export async function POST(req: NextRequest) {
   const batch = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.floor(body.limit) : 4;
 
   const origin = new URL(req.url).origin;
-  const drained = await drainRoomWaitingWindows(roomId, origin, batch);
+  const drained = await drainRoomWaitingWindows(roomId, origin, batch, { actor: adminId, via: "admin_route" });
   const remaining = await countRoomWaitingWindows(roomId);
   return respondOk({ drained, remaining });
 }

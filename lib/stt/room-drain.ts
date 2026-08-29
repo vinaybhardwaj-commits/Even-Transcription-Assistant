@@ -47,6 +47,7 @@ import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
 import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
+import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from "./receipt";
 
 /**
  * PURE — did this window's turns actually land AS A SET?
@@ -227,6 +228,11 @@ export type DrainStep =
    * failure the language probe exists to prevent.
    */
   | "language_unmapped"
+  /**
+   * Build 2 §B — the edge did not say who asked. Returned BEFORE the window is claimed and
+   * before any paid call, so a broken caller costs nothing. Never a default: see receipt.ts.
+   */
+  | "no_actor"
   | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok";
 
 export type DrainOutcome = {
@@ -274,6 +280,12 @@ export type DrainOutcome = {
    *  and what it spent. Null where the engine reported no cost (e.g. a local/free engine). */
   cost_usd?: number | null;
   transcript_chars?: number | null;
+  /** Build 2 §B — the receipt as written, echoed so an operator sees it without a re-read. */
+  initiated_by?: string | null;
+  initiated_via?: string | null;
+  audio_sha256?: string | null;
+  engine_version_reported?: string | null;
+  receipt_complete?: boolean;
 };
 
 type WindowRow = {
@@ -310,9 +322,27 @@ async function recordFailure(windowId: string, step: DrainStep, detail: string):
  * Drain ONE window, end to end. Never throws — every failure is a named step, so a caller can
  * report what happened rather than a stack trace.
  */
-export async function drainRoomWindow(windowId: string, origin: string, opts: { force?: boolean } = {}): Promise<DrainOutcome> {
+export async function drainRoomWindow(
+  windowId: string,
+  origin: string,
+  /**
+   * Build 2 §B — `actor` and `via` are REQUIRED, and required is the point. `drainRoomWindow`
+   * used to have no idea who asked (its signature was `(windowId, origin, opts)`), while both
+   * HTTP edges had already resolved the admin id and thrown it away. Making these optional would
+   * have threaded the plumbing without closing the gap: every caller that forgot would compile,
+   * and the ledger would fill with runs nobody asked for.
+   */
+  opts: { force?: boolean } & RunActor,
+): Promise<DrainOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found" };
   try {
+    // THE FIRST THING, BEFORE ANYTHING COSTS ANYTHING. Not after the window is claimed and not
+    // after the clip is joined: a caller that cannot say who it is must not be able to spend
+    // money, and must not leave a window parked in 'transcribing' either.
+    const problem = actorProblem(opts);
+    if (problem) return { ...out, step: "no_actor", detail: problem };
+    out.initiated_by = opts.actor;
+    out.initiated_via = opts.via;
     const wr = (await sql`
       SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic,
              w.clip_r2_key, w.grid_aligned, w.state, s.room_id
@@ -469,6 +499,14 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
     });
     out.sarvam_ms = asr.latencyMs;
     out.audio_seconds = audioSeconds;
+    // §B — the receipt for THESE bytes: the key they came from, the range sent (the whole
+    // object), and their sha256. Taken from `bytes`, the same buffer just handed to the adapter,
+    // so the fingerprint cannot drift from what was actually transcribed.
+    const receipt = audioReceipt(join.key, bytes);
+    const engineVersion = providerEngineVersion(asr);
+    out.audio_sha256 = receipt.audio_sha256;
+    out.engine_version_reported = engineVersion;
+    out.receipt_complete = engineVersion !== null;
     // §3.10 — the per-window cost report. Characters and cost come from what the engine actually
     // returned on THIS call, not from a re-read, so they cannot drift from the run just written.
     out.cost_usd = asr.costUsd ?? null;
@@ -498,7 +536,9 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
       INSERT INTO transcription_run
         (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
          detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
-         error, metrics_json, created_at)
+         error, metrics_json, created_at,
+         initiated_by, initiated_via, engine_version_reported,
+         audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
       VALUES
         (${id}, NULL, 'bench_window', ${windowId}, ${engineKey}, ${engineId}, 'batch', 'asr',
          ${asr.language ?? decided}, ${asr.original}, ${asr.english}, ${asr.latencyMs}, ${asr.costUsd},
@@ -526,7 +566,10 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
            audio_seconds: audioSeconds,
            clip_r2_key: join.key,
            window: { start_ms: startMs, end_ms: endMs, source_mic: source },
-         })}::jsonb, NOW())
+         })}::jsonb, NOW(),
+         ${opts.actor}, ${opts.via}, ${engineVersion},
+         ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},
+         ${receipt.audio_sha256})
     `;
     out.run_id = id;
 
@@ -622,7 +665,18 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
  * has a job and rides drainQueuedRoomWindows; THIS is for the windows that fell through the crack
  * the whole build exists to close — finished audio nobody ever queued.
  */
-export async function drainRoomWaitingWindows(roomId: string, origin: string, limit = 4): Promise<DrainOutcome[]> {
+export async function drainRoomWaitingWindows(
+  roomId: string,
+  origin: string,
+  limit = 4,
+  /** Build 2 §B — required, and carried unchanged onto every window in the batch. */
+  actor?: RunActor,
+): Promise<DrainOutcome[]> {
+  // A batch that cannot say who asked refuses AS A BATCH, before the first window is read. The
+  // alternative — refusing per window inside the loop — would still be correct but would burn a
+  // query per window to report the same single fact about the caller.
+  const problem = actorProblem(actor);
+  if (problem) return [{ window_id: "", ok: false, step: "no_actor", detail: problem }];
   const n = Math.max(1, Math.min(12, Math.trunc(limit) || 4));
   const rows = (await sql`
     SELECT w.id
@@ -649,7 +703,7 @@ export async function drainRoomWaitingWindows(roomId: string, origin: string, li
     // Enqueue first so drainRoomWindow has a job row to track, then drain. enqueueSubject is
     // idempotent (ON CONFLICT DO NOTHING), so a retry after a crash mid-batch never double-queues.
     await enqueueSubject("bench_window", r.id, "asr");
-    out.push(await drainRoomWindow(r.id, origin));
+    out.push(await drainRoomWindow(r.id, origin, actor!));
   }
   return out;
 }
@@ -673,7 +727,14 @@ export async function countRoomWaitingWindows(roomId: string): Promise<number> {
   return Number(rows[0]?.n) || 0;
 }
 
-export async function drainQueuedRoomWindows(origin: string, limit = 1): Promise<DrainOutcome[]> {
+export async function drainQueuedRoomWindows(
+  origin: string,
+  limit = 1,
+  /** Build 2 §B — required. An unattended sweep passes SYSTEM_ACTOR with via 'cron', deliberately. */
+  actor?: RunActor,
+): Promise<DrainOutcome[]> {
+  const problem = actorProblem(actor);
+  if (problem) return [{ window_id: "", ok: false, step: "no_actor", detail: problem }];
   const jobs = (await sql`
     SELECT j.subject_id, s.room_id
       FROM stt_subject_job j
@@ -690,7 +751,7 @@ export async function drainQueuedRoomWindows(origin: string, limit = 1): Promise
       out.push({ window_id: j.subject_id, ok: false, step: "flag_off" });
       continue;
     }
-    out.push(await drainRoomWindow(j.subject_id, origin));
+    out.push(await drainRoomWindow(j.subject_id, origin, actor!));
   }
   return out;
 }

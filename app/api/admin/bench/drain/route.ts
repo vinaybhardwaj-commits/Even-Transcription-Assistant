@@ -18,6 +18,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { drainRoomWindow, drainQueuedRoomWindows } from "@/lib/stt/room-drain";
+import { isUsableActor } from "@/lib/stt/receipt";
 import { readRoomSwitches, ROOM_SWITCH_CACHE_MS } from "@/lib/room-switches";
 
 export const runtime = "nodejs";
@@ -80,6 +81,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const adminId = await guard();
   if (adminId === null) return respondError("AUTH_REQUIRED", "Sign in required");
+  // Build 2 §B — `adminId` was already bound here and then never used (grounding §3). It is the
+  // initiator now, and an empty one is refused rather than defaulted.
+  if (!isUsableActor(adminId)) return respondError("AUTH_REQUIRED", "admin_id_missing_from_token");
+  const actor = { actor: adminId, via: "admin_route" as const };
   let body: { window_id?: unknown; session_id?: unknown; limit?: unknown; force?: unknown };
   try {
     body = (await req.json()) as typeof body;
@@ -89,11 +94,11 @@ export async function POST(req: NextRequest) {
   const origin = new URL(req.url).origin;
 
   if (typeof body.window_id === "string" && body.window_id.startsWith("bw_")) {
-    const out = await drainRoomWindow(body.window_id, origin, { force: body.force === true });
+    const out = await drainRoomWindow(body.window_id, origin, { force: body.force === true, ...actor });
     return respondOk({ drained: [out] });
   }
 
   const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.floor(body.limit) : 1;
-  const out = await drainQueuedRoomWindows(origin, limit);
+  const out = await drainQueuedRoomWindows(origin, limit, actor);
   return respondOk({ drained: out });
 }

@@ -242,6 +242,13 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
     // `payload.window` is the window ASKED FOR and is identical on every cue of the window
     // (buildTurns), so it is the join key; `payload.engine` names the adapter that produced the
     // segments, read from the payload rather than assumed to be Whisper.
+    //
+    // BUILD 2 §E — CAST TO ::bigint, matching lib/brain/state.ts. This compared the window bounds
+    // as TEXT, which is right only while both sides are the same digits: jsonb preserves whatever
+    // numeric form was written, so a value serialised as 1.7875566e12 or with a trailing .0 by any
+    // future writer would stop matching and the window would silently score with no transcript —
+    // a fail-safe miss, but a miss. Comparing numbers as numbers removes the dependency on
+    // formatting entirely. Queued out of the Build 1 validation pass.
     const spans = await safeRead<Array<{ engine: string | null; start_ms: string | number; end_ms: string | number; text: string | null }>>(
       `cue turns for ${w.id}`, [], log, async () =>
         (await sql`
@@ -251,8 +258,8 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
                  payload->>'text' AS text
             FROM cue
            WHERE type = 'stt_turn'
-             AND payload->'window'->>'start_ms' = ${String(startMs)}
-             AND payload->'window'->>'end_ms' = ${String(endMs)}
+             AND (payload->'window'->>'start_ms')::bigint = ${startMs}
+             AND (payload->'window'->>'end_ms')::bigint = ${endMs}
              AND payload->>'session_id' = ${w.session_id}
         `) as Array<{ engine: string | null; start_ms: string | number; end_ms: string | number; text: string | null }>);
 
