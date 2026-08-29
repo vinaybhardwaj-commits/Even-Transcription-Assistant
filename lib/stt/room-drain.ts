@@ -45,7 +45,7 @@ import { enqueueSubject } from "@/lib/stt/fanout";
 import { resolveRouting } from "./routing";
 import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
-import { isEnglishCode } from "@/lib/language-route";
+import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 
 /**
@@ -147,15 +147,59 @@ export function probeSlice<C extends RangeChunk>(
 const SARVAM_LOCALES: Record<string, string> = {
   en: "en-IN", hi: "hi-IN", bn: "bn-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN",
   mr: "mr-IN", od: "od-IN", or: "od-IN", pa: "pa-IN", ta: "ta-IN", te: "te-IN",
+  ur: "ur-IN",
 };
 
+/**
+ * The language decision for one window, as three outcomes rather than a nullable string.
+ *
+ *   { kind: "none" }      Whisper had no opinion. Do not force — the long-standing correct
+ *                         behaviour, unchanged.
+ *   { kind: "ok", code }  Force this locale on the paid engine.
+ *   { kind: "unmapped" }  Whisper NAMED a language this system cannot carry. The drain must stop
+ *                         and say so.
+ *
+ * WHY THIS IS A UNION AND NOT A NULLABLE STRING. `sarvamLanguageCode` returned null for both of
+ * the first and third cases, and that single null is the entire defect (grounding §A6): a
+ * confident "hindi" and an unsure shrug produced the same value, so the arbitrator built to stop
+ * Sarvam picking its own language switched itself off, silently, for exactly the windows it was
+ * built for. A type that cannot express the difference cannot be guarded, so the type changed.
+ */
+export type SarvamLanguageResolution =
+  | { kind: "none" }
+  | { kind: "ok"; code: string }
+  | { kind: "unmapped"; answer: string };
+
+/**
+ * PURE — Whisper's language answer → the locale Sarvam is told, or a loud refusal.
+ *
+ * BLAST RADIUS, FLAGGED RATHER THAN DECIDED QUIETLY. The spec names "an unmapped NAME" as the
+ * loud case. This treats any confident answer with no locale as unmapped — including a
+ * two-letter ISO code outside SARVAM_LOCALES, e.g. a window whisper.cpp calls "fr". That is a
+ * widening of the letter of the spec and it is deliberate, because the normative sentence is
+ * "never silently pass the guard" and a French code disables the arbitrator in precisely the way
+ * a French name would. It is called out in the build report for the orchestrator to confirm.
+ */
+export function resolveSarvamLanguage(whisperLang: string | null | undefined): SarvamLanguageResolution {
+  const iso = whisperLanguageToIso(whisperLang);
+  if (iso.kind === "unknown") return { kind: "none" };
+  if (iso.kind === "unmapped") return { kind: "unmapped", answer: iso.answer };
+  const locale = SARVAM_LOCALES[iso.code];
+  if (locale) return { kind: "ok", code: locale };
+  if (isEnglishCode(iso.code)) return { kind: "ok", code: "en-IN" };
+  // A code with no locale is a language this system cannot serve. Loud, not null.
+  return { kind: "unmapped", answer: iso.code };
+}
+
+/**
+ * The pre-existing nullable accessor, kept so nothing that reads a locale has to learn a union.
+ * It CANNOT distinguish unmapped from unknown — that is the whole point of the union above — so
+ * the drain itself calls `resolveSarvamLanguage` and this remains for callers that only want the
+ * locale when there is one.
+ */
 export function sarvamLanguageCode(whisperLang: string | null | undefined): string | null {
-  if (!whisperLang) return null;
-  const l = whisperLang.toLowerCase().trim();
-  if (!l || l === "auto" || l === "und" || l === "unknown") return null;
-  if (SARVAM_LOCALES[l]) return SARVAM_LOCALES[l]!;
-  if (isEnglishCode(l)) return "en-IN";
-  return null;
+  const r = resolveSarvamLanguage(whisperLang);
+  return r.kind === "ok" ? r.code : null;
 }
 
 /** The language bucket the routing matrix is keyed on. */
@@ -170,6 +214,19 @@ export function bucketFor(lang: string | null): "english" | "indic" {
 export type DrainStep =
   | "flag_off" | "not_found" | "wrong_state" | "no_room_day" | "no_chunks"
   | "too_long" | "join_failed" | "clip_missing" | "probe_failed"
+  /**
+   * Build 1 §C.3 — Whisper answered on NEITHER attempt. Distinct from `probe_failed`, which this
+   * step replaces for the full-window call: the old name blamed the 30-second probe for a
+   * failure of the fifteen-minute pass and made a dead transcriber unreadable from the operator
+   * report. NO SILENT SKIP: the window parks with this name on it.
+   */
+  | "whisper_unavailable"
+  /**
+   * Build 1 §C.1 — whisper.cpp named a language with no Sarvam locale behind it. The drain
+   * REFUSES rather than proceeding unforced, because proceeding unforced is exactly the silent
+   * failure the language probe exists to prevent.
+   */
+  | "language_unmapped"
   | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok";
 
 export type DrainOutcome = {
@@ -197,6 +254,20 @@ export type DrainOutcome = {
   run_id?: string | null;
   attempts?: number;
   sarvam_ms?: number | null;
+  /**
+   * Build 1 §C.2 — WHISPER'S OWN TIME ON THE ROOM PATH, at last. Whisper is called twice per
+   * window and neither call left a latency figure anywhere in the database (grounding §A5), so
+   * the drain's local-compute time has been unobservable while Whisper was simultaneously the
+   * room path's hard single point of failure. Both calls are reported here and both are written
+   * to metrics_json.
+   */
+  whisper_probe_ms?: number | null;
+  whisper_full_ms?: number | null;
+  /** 1 or 2 per call — a window that only transcribed on the retry is a healthy answer from an
+   *  unhealthy link, and a latency trend that cannot see the retry reads a flapping tunnel as a
+   *  fast server. */
+  whisper_probe_attempts?: number | null;
+  whisper_full_attempts?: number | null;
   audio_seconds?: number | null;
   /** §3.10 — EVERY RUN REPORTS WHAT IT COST, PER WINDOW. Characters out, seconds taken and the
    *  paid engine's own cost, so an operator who asked for a batch sees exactly what the batch did
@@ -321,15 +392,28 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
     probeReq.out_key = clipKey(w.session_id, startMs, startMs + Math.round(slice.seconds * 1000), source).replace(/\.webm$/, `-probe${PROBE_SECONDS}.webm`);
     const probeJoin = await callJoinService(probeReq);
     let probeLanguage: string | null = null;
+    // §C.2 — the probe's own time, recorded whether it answered or not. A probe that FAILED is
+    // still a Whisper call that took time on the Mini, and a latency series that silently drops
+    // the failures is a series about the good days only.
+    let whisperProbeMs: number | null = null;
+    let whisperProbeAttempts: number | null = null;
     if (probeJoin.ok) {
       const pb = await getObjectBytes(probeJoin.key);
       if (pb) {
         const pw = await transcribeWithWhisper(Buffer.from(pb), "audio/webm", { timeoutMs: 90_000 });
+        whisperProbeMs = pw.latency_ms;
+        whisperProbeAttempts = pw.attempts ?? 1;
+        // A FAILED PROBE IS STILL NOT AN ERROR (unchanged). probeLanguage stays null and the
+        // drain proceeds unforced — that has always been the rule and this build does not
+        // change it. What changes is only that the failure is now VISIBLE in the latency and
+        // attempt figures instead of leaving no trace at all.
         if (pw.ok) probeLanguage = pw.language ?? null;
       }
     }
     out.probe_language = probeLanguage;
     out.probe_seconds = slice.seconds;
+    out.whisper_probe_ms = whisperProbeMs;
+    out.whisper_probe_attempts = whisperProbeAttempts;
 
     // --- Whisper on the FULL window: segments, timing, and a second language opinion --------
     const bytes = await getObjectBytes(join.key);
@@ -343,9 +427,18 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
       // language and produce turns in a script neither the probe nor Sarvam agreed on.
       ...(probeLanguage ? { language: probeLanguage } : {}),
     });
+    out.whisper_full_ms = full.latency_ms;
+    out.whisper_full_attempts = full.attempts ?? 1;
     if (!full.ok) {
-      const attempts = await recordFailure(windowId, "probe_failed", full.error ?? "whisper_failed");
-      return { ...out, step: "probe_failed", detail: full.error, attempts };
+      // §C.3 — BOTH ATTEMPTS FAILED. The client has already retried once with backoff, so
+      // reaching here means Whisper did not answer twice, two seconds apart. Named
+      // `whisper_unavailable` rather than the inherited `probe_failed`: the probe is a different
+      // call on a different clip that is allowed to fail harmlessly, and labelling a dead
+      // transcriber with the harmless failure's name is how an outage reads as a quiet skip in
+      // the operator report. The report already renders the step verbatim, so this name is the
+      // visibility the spec asks for.
+      const attempts = await recordFailure(windowId, "whisper_unavailable", full.error ?? "whisper_failed");
+      return { ...out, step: "whisper_unavailable", detail: full.error, attempts };
     }
     out.full_language = full.language ?? null;
 
@@ -357,7 +450,16 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
       const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
       return { ...out, step: "no_engine", attempts };
     }
-    const languageSent = sarvamLanguageCode(decided);
+    // §C.1 — THE GUARD THAT USED TO PASS SILENTLY. `decided` is whisper.cpp's answer, which is a
+    // full language NAME. A name with no Sarvam locale behind it stops the window here instead
+    // of proceeding with no language forced, which is the failure mode the probe exists to
+    // prevent and which would have fired on the first Indic window ever drained.
+    const resolution = resolveSarvamLanguage(decided);
+    if (resolution.kind === "unmapped") {
+      const attempts = await recordFailure(windowId, "language_unmapped", resolution.answer);
+      return { ...out, step: "language_unmapped", detail: resolution.answer, attempts };
+    }
+    const languageSent = resolution.kind === "ok" ? resolution.code : null;
     out.language_sent = languageSent;
     const asr = await adapter.transcribe(Buffer.from(bytes), {
       contentType: "audio/webm",
@@ -411,6 +513,16 @@ export async function drainRoomWindow(windowId: string, origin: string, opts: { 
            sarvam_language: asr.language ?? null,
            segment_count: segments.length,
            activity,
+           // §C.2 — WHISPER'S LATENCY, on the run, at last. Grounding §A5: metrics_json carried
+           // probe_engine, probe_seconds and segment_count but no whisper_ms, so the room path's
+           // local-compute time was unobservable from the database while Whisper was
+           // simultaneously its hard single point of failure. Placed here rather than on a new
+           // column because this blob is already the run's provenance record and a reader
+           // holding the run has the numbers in the same fetch.
+           whisper_probe_ms: whisperProbeMs,
+           whisper_probe_attempts: whisperProbeAttempts,
+           whisper_full_ms: full.latency_ms,
+           whisper_full_attempts: full.attempts ?? 1,
            audio_seconds: audioSeconds,
            clip_r2_key: join.key,
            window: { start_ms: startMs, end_ms: endMs, source_mic: source },

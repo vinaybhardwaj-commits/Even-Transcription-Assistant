@@ -64,8 +64,16 @@ export type WhisperResult =
       latency_ms: number;
       /** Always present, possibly empty — a server that sent none is not an error. */
       segments: WhisperSegment[];
+      /**
+       * How many attempts this answer took (1 or 2). Build 1 §C.3 — a call that only succeeded
+       * on the retry is a healthy answer from an unhealthy link, and a latency trend that cannot
+       * tell the two apart will read a flapping tunnel as a fast server.
+       */
+      attempts?: number;
+      /** Present whenever a retry happened: what attempt 1's failure actually was. */
+      first_error?: string;
     }
-  | { ok: false; error: string; latency_ms: number };
+  | { ok: false; error: string; latency_ms: number; attempts?: number; first_error?: string };
 
 const TIMESTAMP_RE = /^(\d{1,2}):([0-5]?\d):([0-5]?\d)(?:[.,](\d{1,3}))?$/;
 
@@ -108,7 +116,80 @@ export function parseWhisperSegments(raw: unknown): WhisperSegment[] {
   return out;
 }
 
+/**
+ * The pause between the two attempts (Build 1 §C.3). One retry, one backoff, no ladder.
+ */
+export const WHISPER_RETRY_BACKOFF_MS = 2_000;
+
+/**
+ * PURE — is this failure worth a second attempt?
+ *
+ * WHAT IS RETRIED: transport failures. A network error or an HTTP 5xx is the Cloudflare tunnel
+ * or the Mini blinking, and grounding §A5 recorded the cost of not retrying them — "a single
+ * transient tunnel blip burns one of three job attempts", and three burnt attempts park a window
+ * that was never actually unreadable.
+ *
+ * WHAT IS NOT, AND WHY IT MATTERS MORE THAN THE LIST OF WHAT IS:
+ *
+ *   TIMEOUTS. A timeout already spent its entire budget. The full room window is given 180 s, so
+ *   retrying a timeout would make one call 362 s — past the 300 s ceiling of the function it runs
+ *   inside. The retry would not fail; it would kill the whole request, and the window would end
+ *   up parked by a fix meant to stop windows being parked. The intent in the grounding is a blip,
+ *   and a blip is not a 180-second silence.
+ *
+ *   HTTP 4xx. The server understood and refused. Sending the identical body again gets the
+ *   identical refusal, one backoff later.
+ *
+ *   empty_transcript. NOT A FAILURE OF THE CALL. The call succeeded and the model returned
+ *   nothing, which on a quiet window is the true answer — and on THIS build it is the answer the
+ *   whole silence measurement is looking for. Retrying it would spend a second inference to try
+ *   to talk Whisper out of a correct result, and a second attempt that "succeeded" would report
+ *   invented words on known-zero tape as though the first answer had been a fault.
+ *
+ *   whisper_base_url_missing. Configuration, not weather. It will be missing again in two
+ *   seconds.
+ */
+export function isRetryableWhisperError(error: string): boolean {
+  if (error.startsWith('network:')) return true;
+  const m = /^http_(\d{3})/.exec(error);
+  if (m) return Number(m[1]) >= 500;
+  return false;
+}
+
+/**
+ * The Whisper call, WITH ONE RETRY (Build 1 §C.3).
+ *
+ * Attempt, and on a retryable transport failure wait `WHISPER_RETRY_BACKOFF_MS` and attempt once
+ * more. Both failing is not a silent skip: the error is returned to the caller, and the room
+ * drain turns it into the named `whisper_unavailable` step, which the operator report already
+ * renders. There is no third attempt — the drain's own job machinery owns the retry ladder
+ * above this (DRAIN_MAX_ATTEMPTS = 3), and nesting a second ladder inside it would multiply into
+ * nine calls for one window.
+ *
+ * `latency_ms` on a retried call is the SECOND attempt's own latency, and `attempts` says how
+ * many were made — so a latency figure is never the sum of a failure and a success, which would
+ * make every recorded number a different quantity depending on whether the tunnel blipped.
+ */
 export async function transcribeWithWhisper(
+  audio: Buffer | Uint8Array,
+  contentType: string = 'audio/webm',
+  opts: { language?: string; timeoutMs?: number } = {},
+): Promise<WhisperResult> {
+  const first = await whisperAttempt(audio, contentType, opts);
+  if (first.ok) return { ...first, attempts: 1 };
+  if (!isRetryableWhisperError(first.error)) return { ...first, attempts: 1 };
+
+  await new Promise((r) => setTimeout(r, WHISPER_RETRY_BACKOFF_MS));
+
+  const second = await whisperAttempt(audio, contentType, opts);
+  // `first_error` is carried on BOTH outcomes. A call that only succeeded on the retry is the
+  // most interesting case there is — the transcript is good and the link is not — and dropping
+  // the blip on success would make a flapping tunnel invisible in exactly the runs that prove
+  // it is flapping.
+  return { ...second, attempts: 2, first_error: first.error };
+}
+
+async function whisperAttempt(
   audio: Buffer | Uint8Array,
   contentType: string = 'audio/webm',
   opts: { language?: string; timeoutMs?: number } = {},

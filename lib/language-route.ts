@@ -85,6 +85,91 @@ export function decideEncounterLanguage(sig: LangSignals): LangDecision {
   return { nonEnglish: false, language: sig.whisperLang ?? "en", reason: "default_english" };
 }
 
+// ---------------------------------------------------------------------------
+// whisper.cpp's language NAMES (Build 1 §C.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * whisper.cpp answers with the full language NAME, not an ISO code — and the whole language
+ * arbitration was built assuming a code.
+ *
+ * THE DEFECT THIS TABLE FIXES. `verbose_json` returns `"language": "english"`, not `"en"`. That
+ * survived by pure accident: `isEnglishCode` tests `startsWith("eng")`, so `"english"` reached
+ * `"en-IN"` anyway. Nothing else did. `"hindi"`, `"kannada"`, `"tamil"` are not ISO codes and
+ * are not English, so the locale lookup returned null, which means "do not force" — and the
+ * arbitrator that exists specifically to stop Sarvam picking its own language was silently
+ * switched off for every Indic window. It has never fired only because all fifteen windows ever
+ * drained happened to be English (grounding §A6). It would have fired on the first Indic one.
+ *
+ * This is the restated normative table from the Build 1 spec. It is the spec, not a convenience:
+ * a name absent from it must reach the caller as an UNMAPPED answer that fails loudly, never as
+ * a null that reads exactly like "Whisper was unsure" and passes the guard.
+ */
+export const WHISPER_LANGUAGE_NAMES: Record<string, string> = {
+  english: "en",
+  hindi: "hi",
+  kannada: "kn",
+  tamil: "ta",
+  telugu: "te",
+  malayalam: "ml",
+  marathi: "mr",
+  bengali: "bn",
+  gujarati: "gu",
+  punjabi: "pa",
+  urdu: "ur",
+};
+
+/**
+ * The sentinels that mean "I do not know", as distinct from a language this system cannot map.
+ *
+ * THE WHOLE FIX TURNS ON THIS DISTINCTION. "Whisper was unsure" is a legitimate answer and has
+ * always meant "do not force a language on Sarvam" — that behaviour is correct and is kept. "I
+ * am confident it was Hindi and you have no mapping for me" is a DIFFERENT answer that has been
+ * wearing the first one's clothes. Collapsing them is the defect; keeping them apart is the fix.
+ */
+const UNKNOWN_SENTINELS = new Set(["", "auto", "und", "unknown", "nan", "null"]);
+
+export function isUnknownLanguageAnswer(lang: string | null | undefined): boolean {
+  if (lang === null || lang === undefined) return true;
+  return UNKNOWN_SENTINELS.has(lang.trim().toLowerCase());
+}
+
+/**
+ * PURE — whisper.cpp's answer → an ISO-639-1 code, or a verdict that says why not.
+ *
+ *   { kind: "unknown" }            Whisper had no opinion. Do not force. Not an error.
+ *   { kind: "code", code }         A code this system can carry forward.
+ *   { kind: "unmapped", answer }   Whisper named a language and there is no mapping for it.
+ *                                  THE CALLER MUST FAIL LOUDLY. Returning null here is exactly
+ *                                  the defect above.
+ *
+ * A value that is already an ISO-639-1 code passes through, because this function sits in front
+ * of a map that has always been keyed on codes and older callers still supply them.
+ */
+export type WhisperLanguageAnswer =
+  | { kind: "unknown" }
+  | { kind: "code"; code: string }
+  | { kind: "unmapped"; answer: string };
+
+export function whisperLanguageToIso(raw: string | null | undefined): WhisperLanguageAnswer {
+  if (isUnknownLanguageAnswer(raw)) return { kind: "unknown" };
+  const l = (raw as string).trim().toLowerCase();
+
+  const named = WHISPER_LANGUAGE_NAMES[l];
+  if (named) return { kind: "code", code: named };
+
+  // Keep the startsWith("eng") behaviour the spec preserves explicitly: "eng", "en", "en-IN" and
+  // "english" all mean English, and "english" is already handled by the table above.
+  if (isEnglishCode(l)) return { kind: "code", code: "en" };
+
+  // A bare two-letter code is a code. Longer than that and not in the table is a NAME this
+  // system does not know — and that is the loud case, never a quiet null.
+  if (/^[a-z]{2}$/.test(l)) return { kind: "code", code: l };
+  if (/^[a-z]{2}[-_][a-z]{2,4}$/i.test(l)) return { kind: "code", code: l.split(/[-_]/)[0]! };
+
+  return { kind: "unmapped", answer: l };
+}
+
 /** Which live engine should be the PRIMARY on-screen transcript for a language. */
 export function primaryLiveEngine(isEnglish: boolean): "deepgram" | "sarvam" {
   // English → Deepgram (real-time English specialist, pinned en-IN).
