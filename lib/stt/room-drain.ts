@@ -45,6 +45,11 @@ import { enqueueSubject } from "@/lib/stt/fanout";
 import { resolveRouting } from "./routing";
 import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
+import {
+  GEMINI_ADAPTER_KEY,
+  GEMINI_PREFERRED_JOIN_FORMAT,
+  GEMINI_PREFERRED_CONTENT_TYPE,
+} from "./adapters/gemini";
 import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from "./receipt";
@@ -233,6 +238,12 @@ export type DrainStep =
    * before any paid call, so a broken caller costs nothing. Never a default: see receipt.ts.
    */
   | "no_actor"
+  /**
+   * Build 3.1 — the routed engine needs an ogg clip and the join service could not produce one
+   * (service down, or a box still running the pre-3.1 image that ignores `format`). Loud and
+   * named, BEFORE the paid call, exactly like the MIME refusal it replaces on this path.
+   */
+  | "ogg_join_unavailable"
   | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok";
 
 export type DrainOutcome = {
@@ -491,8 +502,50 @@ export async function drainRoomWindow(
     }
     const languageSent = resolution.kind === "ok" ? resolution.code : null;
     out.language_sent = languageSent;
-    const asr = await adapter.transcribe(Buffer.from(bytes), {
-      contentType: "audio/webm",
+
+    // --- Build 3.1. THE CONTAINER THE ROUTED ENGINE CAN ACTUALLY READ -----------------------
+    //
+    // Gemini accepts ogg and not webm; every other engine takes the webm clip that was already
+    // joined, downloaded and handed to Whisper. So this is a SECOND join for one engine, not a
+    // change to the clip everything else uses — the webm clip and its Whisper segments are
+    // untouched, and a window routed to Sarvam does exactly what it did yesterday.
+    //
+    // WHY A SECOND JOIN RATHER THAN A CONVERSION. Vercel has no ffmpeg. The join service is the
+    // only thing in this system that can mux audio, and it is already being asked for this
+    // window's bytes — asking it once more with `format: "ogg"` costs one container call and
+    // produces a clip with its own R2 key, so the two containers coexist rather than one
+    // overwriting the other under a deterministic key.
+    //
+    // THE RECEIPT FOLLOWS THE BYTES. `audioBytes` and `audioKey` below are what the engine was
+    // actually handed, so `audio_sha256` fingerprints the ogg for a Gemini run and the webm for
+    // every other — never the clip we happened to download first.
+    let audioBytes: Uint8Array = bytes;
+    let audioKey: string = join.key;
+    let audioContentType = "audio/webm";
+
+    if (adapter.key === GEMINI_ADAPTER_KEY) {
+      // `now` is positional and defaults, so it is passed explicitly to reach `format` — the
+      // parameter order is left alone rather than reshuffled under the existing callers.
+      const oggReq = buildJoinRequest(w.session_id, covering, startMs, endMs, source, new Date(), GEMINI_PREFERRED_JOIN_FORMAT);
+      const oggJoin = await callJoinService(oggReq);
+      if (!oggJoin.ok) {
+        // No spend. A join service that is down, or a box still running the pre-3.1 image, must
+        // not become a paid call against a container the engine will reject.
+        const attempts = await recordFailure(windowId, "ogg_join_unavailable", oggJoin.error);
+        return { ...out, step: "ogg_join_unavailable", detail: oggJoin.error, attempts };
+      }
+      const oggBytes = await getObjectBytes(oggJoin.key);
+      if (!oggBytes) {
+        const attempts = await recordFailure(windowId, "ogg_join_unavailable", `clip_missing:${oggJoin.key}`);
+        return { ...out, step: "ogg_join_unavailable", detail: `clip_missing:${oggJoin.key}`, attempts };
+      }
+      audioBytes = oggBytes;
+      audioKey = oggJoin.key;
+      audioContentType = GEMINI_PREFERRED_CONTENT_TYPE;
+    }
+
+    const asr = await adapter.transcribe(Buffer.from(audioBytes), {
+      contentType: audioContentType,
       longForm: true,
       mode: "transcribe",
       ...(languageSent ? { language: languageSent } : {}),
@@ -502,7 +555,7 @@ export async function drainRoomWindow(
     // §B — the receipt for THESE bytes: the key they came from, the range sent (the whole
     // object), and their sha256. Taken from `bytes`, the same buffer just handed to the adapter,
     // so the fingerprint cannot drift from what was actually transcribed.
-    const receipt = audioReceipt(join.key, bytes);
+    const receipt = audioReceipt(audioKey, audioBytes);
     const engineVersion = providerEngineVersion(asr);
     out.audio_sha256 = receipt.audio_sha256;
     out.engine_version_reported = engineVersion;

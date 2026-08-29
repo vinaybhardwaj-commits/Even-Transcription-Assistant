@@ -42,6 +42,68 @@ export const MAX_INPUT_BYTES = 128 * 1024 * 1024;
 
 export const OUT_CONTENT_TYPE = "audio/webm";
 
+/**
+ * Build 3.1 — the output container is a REQUEST PARAMETER now, defaulting to webm.
+ *
+ * WHY THIS EXISTS. Gemini accepts wav/mp3/aiff/aac/ogg/flac and NOT webm, and webm was the only
+ * thing this service could emit, so the room drain could not feed Gemini at all. The codec does
+ * not change — libopus either way — only the container the same Opus stream is muxed into.
+ *
+ * WHY DEFAULTING TO webm IS LOAD-BEARING. Every existing caller sends no `format` at all, and
+ * this default is what makes their request byte-identical to yesterday's. A required parameter,
+ * or a default of ogg, would silently change the container of every clip the room drain, the MCP
+ * extract tool and the operator page have ever produced — and `clipKey()` is deterministic, so
+ * re-joining a window OVERWRITES the stored object. The blast radius of getting this default
+ * wrong is the whole clip archive.
+ *
+ * WHY THE KEY CARRIES THE EXTENSION. `clipKey()` is deterministic by design: the same window on
+ * the same session and microphone is the same key, so asking twice overwrites one object rather
+ * than growing the archive. Two CONTAINERS of the same window would collide on that key and the
+ * second would silently replace the first — a webm clip and an ogg clip are different bytes with
+ * the same name. The extension is therefore part of the identity, and `outKeyForFormat` below
+ * enforces it in the SERVICE rather than trusting every caller to remember.
+ */
+export const FORMATS = {
+  webm: { ffmpegFormat: "webm", contentType: "audio/webm", ext: ".webm" },
+  ogg: { ffmpegFormat: "ogg", contentType: "audio/ogg", ext: ".ogg" },
+};
+
+export const DEFAULT_FORMAT = "webm";
+
+/**
+ * The version this code reports over /health, so a deploy is verifiable FROM OUTSIDE without
+ * reading the container's logs or trusting that `wrangler deploy` did what it said.
+ *
+ * Bumped whenever the wire contract changes. It lives here, next to the contract it describes,
+ * rather than in package.json — nothing reads that file at runtime, and a version that is not
+ * served is not evidence.
+ */
+export const JOIN_SERVICE_VERSION = "1.1.0";
+
+/** PURE — the format descriptor, or null when the name is not one this service emits. */
+export function formatSpec(format) {
+  if (format === undefined || format === null) return FORMATS[DEFAULT_FORMAT];
+  return Object.prototype.hasOwnProperty.call(FORMATS, format) ? FORMATS[format] : null;
+}
+
+/** PURE — the content type for a format name, defaulting to webm. */
+export function contentTypeFor(format) {
+  return (formatSpec(format) ?? FORMATS[DEFAULT_FORMAT]).contentType;
+}
+
+/**
+ * PURE — the out_key with the extension the format demands.
+ *
+ * A trailing `.webm` or `.ogg` is REPLACED; anything else gets the extension appended. Done in
+ * the service so a caller that forgets cannot produce two containers under one key — the
+ * collision this function exists to make impossible is silent and destroys the earlier clip.
+ */
+export function outKeyForFormat(outKey, format) {
+  const spec = formatSpec(format) ?? FORMATS[DEFAULT_FORMAT];
+  const stripped = outKey.replace(/\.(webm|ogg)$/i, "");
+  return `${stripped}${spec.ext}`;
+}
+
 const isPlainObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isFiniteInt = (v) => typeof v === "number" && Number.isFinite(v) && Number.isInteger(v);
 
@@ -53,7 +115,7 @@ const isFiniteInt = (v) => typeof v === "number" && Number.isFinite(v) && Number
 export function validateJoinRequest(body) {
   if (!isPlainObject(body)) return { ok: false, error: "bad_request_body" };
 
-  const { pieces, trim, out_key: outKey, meta } = body;
+  const { pieces, trim, out_key: outKey, meta, format } = body;
 
   if (!Array.isArray(pieces) || pieces.length === 0) return { ok: false, error: "no_pieces" };
   if (pieces.length > MAX_PIECES) {
@@ -89,12 +151,23 @@ export function validateJoinRequest(body) {
     return { ok: false, error: "bad_out_key", required_prefix: CLIPS_PREFIX };
   }
 
+  // ABSENT IS webm, and an UNKNOWN NAME IS A REFUSAL — not a silent fall back to the default.
+  // A caller asking for flac has a reason; giving it webm and saying nothing would hand it a
+  // container it cannot read while reporting success.
+  const spec = formatSpec(format);
+  if (spec === null) {
+    return { ok: false, error: "bad_format", requested: String(format), supported: Object.keys(FORMATS) };
+  }
+  const normFormat = format === undefined || format === null ? DEFAULT_FORMAT : format;
+
   return {
     ok: true,
     job: {
       pieces: normPieces,
       trim: { start_ms: startMs, end_ms: endMs },
-      out_key: outKey,
+      format: normFormat,
+      // The service, not the caller, owns the extension (see outKeyForFormat).
+      out_key: outKeyForFormat(outKey, normFormat),
       // D4 — provenance rides on the stored object; anything the caller sent is carried through
       // as strings (R2 custom metadata is a string map).
       meta: isPlainObject(meta) ? stringifyMeta(meta) : {},
@@ -233,18 +306,21 @@ export function buildFilterGraph(pieceCount, startMs, endMs) {
  * Full ffmpeg argv for one job. PURE — `files` is used in the order given, one `-i` each, so the
  * Nth file is the Nth input is the Nth segment of the joined clip.
  */
-export function buildFfmpegArgs(files, startMs, endMs, outPath) {
+export function buildFfmpegArgs(files, startMs, endMs, outPath, format = DEFAULT_FORMAT) {
+  const spec = formatSpec(format) ?? FORMATS[DEFAULT_FORMAT];
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y"];
   for (const f of files) args.push("-i", f);
   args.push(
     "-filter_complex", buildFilterGraph(files.length, startMs, endMs),
     "-map", "[out]",
     "-vn", "-sn", "-dn",
+    // THE CODEC IS UNCHANGED. Opus either way; only the mux differs, so an ogg clip and a webm
+    // clip of the same window carry the same audio at the same bitrate and are comparable.
     "-c:a", "libopus",
     "-b:a", "32k",
     "-ar", "48000",
     "-ac", "1",
-    "-f", "webm",
+    "-f", spec.ffmpegFormat,
     outPath,
   );
   return args;

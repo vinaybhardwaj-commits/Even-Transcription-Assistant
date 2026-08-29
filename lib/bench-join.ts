@@ -187,11 +187,24 @@ export async function roomsRecordingNow(now: Date = new Date()): Promise<Recordi
 
 export type JoinPiece = { key: string; idx: number };
 
+/**
+ * Build 3.1 — the output container. Optional, and ABSENT MEANS webm, so every existing caller's
+ * request is byte-identical to what it sent before this field existed.
+ *
+ * Only the mux changes: the codec is libopus either way, so an ogg clip and a webm clip of the
+ * same window carry the same Opus audio at the same bitrate. The service owns the key's
+ * extension (`outKeyForFormat`), so the two containers can never collide on one deterministic
+ * clip key and silently overwrite each other.
+ */
+export type JoinFormat = "webm" | "ogg";
+
 export type JoinRequest = {
   pieces: JoinPiece[];
   trim: { start_ms: number; end_ms: number };
   out_key: string;
   meta: ClipMeta;
+  /** Absent = webm. The service refuses an unknown name rather than falling back. */
+  format?: JoinFormat;
 };
 
 export type JoinOutcome =
@@ -217,6 +230,8 @@ export function buildJoinRequest(
   endMs: number,
   source: "primary" | "backup",
   now: Date = new Date(),
+  /** Build 3.1 — omitted keeps today's exact request shape: no `format` key on the wire at all. */
+  format?: JoinFormat,
 ): JoinRequest {
   const trimStartMs = Math.round((covering[0]?.offset_in_chunk_s ?? 0) * 1000);
   const coveredMs = Math.round(covering.reduce((a, c) => a + c.duration_s, 0) * 1000);
@@ -225,6 +240,11 @@ export function buildJoinRequest(
     trim: { start_ms: trimStartMs, end_ms: trimStartMs + coveredMs },
     out_key: clipKey(sessionId, startMs, endMs, source),
     meta: clipMeta(sessionId, startMs, endMs, source, now),
+    // Spread rather than `format: format` so an omitted format leaves the KEY OFF the JSON
+    // entirely. `{"format": undefined}` and no key at all serialise the same today, but the
+    // difference is one JSON.stringify change away from mattering, and "byte-identical to
+    // yesterday" is the property this parameter was allowed to exist on.
+    ...(format ? { format } : {}),
   };
 }
 

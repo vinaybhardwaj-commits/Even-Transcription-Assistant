@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildFfmpegArgs, unframeJob, MAX_INPUT_BYTES } from "./join-core.mjs";
+import { buildFfmpegArgs, unframeJob, MAX_INPUT_BYTES, formatSpec, contentTypeFor, DEFAULT_FORMAT, FORMATS, JOIN_SERVICE_VERSION } from "./join-core.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 /** A 30-minute re-encode on the configured instance is seconds, not minutes; 10 minutes is a
@@ -118,8 +118,13 @@ async function handleJoin(req, res) {
       await writeFile(p, pieces[i]);
       files.push(p);
     }
-    const outPath = join(dir, "out.webm");
-    const r = await run("ffmpeg", buildFfmpegArgs(files, startMs, endMs, outPath), FFMPEG_TIMEOUT_MS);
+    // Build 3.1 — the container the Worker asked for. An unknown name here would already have
+    // been refused by validateJoinRequest in the Worker, so this defaults defensively rather
+    // than failing: the frame is trusted, the caller is not.
+    const format = formatSpec(header?.format) ? header.format : DEFAULT_FORMAT;
+    const spec = formatSpec(format);
+    const outPath = join(dir, `out${spec.ext}`);
+    const r = await run("ffmpeg", buildFfmpegArgs(files, startMs, endMs, outPath, format), FFMPEG_TIMEOUT_MS);
     if (r.timedOut) return json(res, 200, { ok: false, error: "ffmpeg_timeout" });
     if (r.code !== 0) {
       return json(res, 200, { ok: false, error: "ffmpeg_failed", detail: r.err.slice(-600) });
@@ -134,11 +139,12 @@ async function handleJoin(req, res) {
 
     const probed = await probeDurationMs(outPath);
     res.writeHead(200, {
-      "content-type": "audio/webm",
+      "content-type": contentTypeFor(format),
       "content-length": bytes.length,
       "x-join-duration-ms": String(probed ?? endMs - startMs),
       "x-join-duration-source": probed === null ? "trim_window" : "ffprobe",
       "x-join-pieces": String(pieces.length),
+      "x-join-format": format,
     });
     res.end(bytes);
     return undefined;
@@ -151,7 +157,10 @@ async function handleJoin(req, res) {
 
 const server = createServer((req, res) => {
   const path = new URL(req.url ?? "/", "http://container").pathname;
-  if (req.method === "GET" && (path === "/health" || path === "/")) return json(res, 200, { ok: true });
+  if (req.method === "GET" && (path === "/health" || path === "/")) {
+    // The formats and the version ride on health so a deploy is verifiable from outside.
+    return json(res, 200, { ok: true, version: JOIN_SERVICE_VERSION, formats: Object.keys(FORMATS) });
+  }
   if (req.method === "POST" && path === "/join") return void handleJoin(req, res);
   return json(res, 404, { ok: false, error: "no_such_route" });
 });

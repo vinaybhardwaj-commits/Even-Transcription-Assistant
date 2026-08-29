@@ -37,6 +37,21 @@
 import { getVertexAccessToken } from "@/lib/gcp-auth";
 import type { SttAdapter, SttTranscribeResult } from "../types";
 
+/**
+ * The adapter's own key and the container it needs, exported so the room drain can BRANCH on the
+ * adapter rather than on a string typed into the drain. Same house rule as C5 ("the engine id is
+ * read from the adapter that was called; nothing re-derives it from a string the caller
+ * supplied") — a literal "gemini" in room-drain.ts would be a second place to get it wrong.
+ */
+export const GEMINI_ADAPTER_KEY = "gemini";
+
+/**
+ * Build 3.1 — the join container this engine needs. Gemini accepts ogg and not webm, and the
+ * join service can now emit either; the drain reads this to decide which clip to ask for.
+ */
+export const GEMINI_PREFERRED_JOIN_FORMAT = "ogg" as const;
+export const GEMINI_PREFERRED_CONTENT_TYPE = "audio/ogg" as const;
+
 /** Set to exactly "1" to arm the adapter. Absent = inert even if a row and a routing cell exist. */
 export const GEMINI_STT_GATE_ENV = "GEMINI_STT";
 export const GEMINI_STT_MODEL_ENV = "GEMINI_STT_MODEL";

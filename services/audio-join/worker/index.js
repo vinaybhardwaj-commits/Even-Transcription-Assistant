@@ -40,6 +40,9 @@ import {
   CLIPS_PREFIX,
   MAX_INPUT_BYTES,
   OUT_CONTENT_TYPE,
+  contentTypeFor,
+  FORMATS,
+  JOIN_SERVICE_VERSION,
   frameHeader,
   framePiecePrefix,
   frameWireLength,
@@ -149,7 +152,9 @@ export class Joiner extends Container {
     // 2. Stream the pieces to the box, IN THE ORDER GIVEN. Nothing sorts, and nothing is
     //    buffered: one piece is in flight at a time, so a 30-minute job costs ~5 MB of Worker
     //    memory rather than the whole 30.
-    const header = { trim: job.trim, pieces: sized.map((p) => ({ key: p.key, idx: p.idx })) };
+    // Build 3.1 — the container travels in the frame header, so the box does not have to guess
+    // and the two hops cannot disagree about what was asked for.
+    const header = { trim: job.trim, format: job.format, pieces: sized.map((p) => ({ key: p.key, idx: p.idx })) };
     const env = this.env;
 
     // The header block and the 8-byte prefixes are bytes on the wire too, so the declared length
@@ -273,7 +278,9 @@ export class Joiner extends Container {
     let stored;
     try {
       stored = await this.env.AUDIO.put(job.out_key, fixed.readable, {
-        httpMetadata: { contentType: OUT_CONTENT_TYPE },
+        // The stored object's type follows the requested container. OUT_CONTENT_TYPE stays
+        // exported for the webm default and for any caller still reading it.
+        httpMetadata: { contentType: contentTypeFor(job.format) },
         customMetadata: job.meta,
       });
       await drained;
@@ -304,7 +311,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
-      return json({ ok: true, service: "eta-audio-join", clips_prefix: CLIPS_PREFIX });
+      // `formats` and `version` are the deploy check: a box still running the pre-3.1 image
+      // answers this route WITHOUT them, so "did my deploy land" is one curl and not a guess.
+      return json({
+        ok: true,
+        service: "eta-audio-join",
+        clips_prefix: CLIPS_PREFIX,
+        version: JOIN_SERVICE_VERSION,
+        formats: Object.keys(FORMATS),
+      });
     }
     if (url.pathname !== "/join") return json({ ok: false, error: "no_such_route" }, 404);
     if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);

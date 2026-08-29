@@ -112,14 +112,50 @@ the join (D9), not from pieces trimmed beforehand. Output is Opus 32 kbps in Web
 
 ---
 
+## Output container (`format`, added 3.1)
+
+`POST /join` takes an optional `"format": "webm" | "ogg"`. **Absent means `webm`**, so every
+request written before this parameter existed behaves exactly as it did.
+
+Only the mux changes — the codec is `libopus` at 32 kbit/s mono either way, so an ogg clip and a
+webm clip of the same window carry the same audio and are directly comparable.
+
+**The service owns the key's extension.** `clipKey()` is deterministic by design (the same window
+on the same session and mic is the same key, so re-joining overwrites rather than growing the
+archive). Two *containers* of one window would therefore collide and the second would silently
+replace the first, so `out_key` is rewritten to `.ogg` or `.webm` to match the format asked for.
+A caller cannot get this wrong.
+
+An unrecognised format is refused (`bad_format`), never quietly served as webm: handing a caller a
+container it cannot read while reporting success is the failure this refusal exists to prevent.
+
+Why it exists: Gemini accepts wav/mp3/aiff/aac/ogg/flac and **not** webm, so the room drain could
+not feed it at all while this service could only emit webm.
+
 ## Deploy
 
 ```sh
 cd services/audio-join
 npm install
-npx wrangler secret put JOIN_TOKEN     # same value as the app's AUDIO_JOIN_TOKEN
+npx wrangler secret put JOIN_TOKEN     # FIRST DEPLOY ONLY — the secret persists across deploys
 npx wrangler deploy                    # builds ./container for linux/amd64 and pushes it
 ```
+
+### Verifying the deploy from outside
+
+`/health` carries the version and the containers this box can emit, so "did my deploy land" is one
+curl rather than a log-read. It needs no auth.
+
+```sh
+curl -s https://eta-audio-join.<subdomain>.workers.dev/health
+# 3.1 and later: {"ok":true,"service":"eta-audio-join","clips_prefix":"clips/",
+#                 "version":"1.1.0","formats":["webm","ogg"]}
+# pre-3.1 box:   {"ok":true,"service":"eta-audio-join","clips_prefix":"clips/"}
+```
+
+A box still answering **without** `formats` is the pre-3.1 image: it will ignore `format` and
+return webm bytes under a `.ogg` key. The room drain refuses that case before spending
+(`ogg_join_unavailable`), but the health check is how you tell without waiting for a window.
 
 Then set on the app (Vercel):
 
