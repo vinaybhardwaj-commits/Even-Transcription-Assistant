@@ -15,8 +15,10 @@
 | Blob store | `eta-releases` `store_P2RwHyh5DGHotPi6`, sin1, **public**, connected preview + production (§7.1) |
 | Gate | 1504 unit tests green (was 1443) · typecheck clean · production build green |
 
-Production is still `d7df4b1`. Vercel's production branch is `main`, so the push built a preview
-and promotion is yours.
+**PROMOTED TO PRODUCTION 7 September 2026, 16:40 UTC — production now serves `61b6e13`.** See §9.
+
+V ratified the acceptance on 7 September: items 2, 3, 4, 5, 6, 8 and 9 proven; items 1 and 7
+carried to Build R2.
 
 ---
 
@@ -785,3 +787,88 @@ probe data, not clinic data.
 | `room_state` | ready | ready | ready |
 
 Its kiosk polled continuously through both runs and was never touched.
+
+
+---
+
+## 9. Promotion to production — 7 September 2026, 16:40 UTC
+
+Promoted on V's instruction after V ratified the acceptance (2, 3, 4, 5, 6, 8, 9 proven; 1 and 7
+carried to R2).
+
+### 9.1 What `vercel promote` actually did — worth knowing
+
+```
+$ vercel promote dpl_G6YQAWor6tbczfdMixXyv2Bq62LF
+? This deployment is not a production deployment and cannot be directly promoted.
+  A new deployment will be built using your production environment. Are you sure? y
+> Successfully created new deployment of even-transcription-assistant
+```
+
+**A preview is not alias-swapped into production.** Vercel rebuilt from the same commit against
+the production environment, producing `dpl_9vA18daynTx8aMGCWmGTP3Vp7cCS`
+(`even-transcription-assistant-66em34j17.vercel.app`, region `bom1`). Vercel records the lineage —
+`action: promote`, `originalDeploymentId: dpl_G6YQAWor6tbczfdMixXyv2Bq62LF`,
+`githubCommitSha: 61b6e13d…` — so it is the same source, but **it is not the same build artifact
+that the acceptance ran against**. The acceptance ran on the preview build; production is a
+rebuild of the identical commit with production env vars.
+
+That distinction matters for exactly one thing in this module and it is worth stating: the
+preview and production environments hold the same `APP_DATABASE_URL`, the same
+`JWT_SECRET_DOCTOR`, and now the same `BLOB_READ_WRITE_TOKEN`, so nothing the R1 routes depend on
+differs between the two builds. The env comparison is in §7.8.
+
+### 9.2 The four checks, cache-busted
+
+Production immediately **before** the promote, for the record: `{"sha":"d7df4b1","ok":true}`, and
+`GET /api/admin/bench/fleet` → `404` (the route did not exist there). The alias flipped about
+twenty seconds after the build completed.
+
+```
+1. GET https://www.evenscribe.app/api/health
+   {"sha":"61b6e13","ok":true}
+
+2. GET https://www.evenscribe.app/api/admin/bench/fleet   (Bearer MIGRATION_SECRET)
+   {"latest_release":null,"degraded":[],"room_count":5,
+    "rooms":["Cardiology OPD","Home Office","OPD 5 - Dr. Salanki","OPD 7 -","OPD Test"]}
+
+3. Home Office via Scribe MCP
+   page_open=true  listener_age_ms=97  listener_state=listening  room_state=ready
+
+4. GET https://www.evenscribe.app/api/run-migrations
+   {"count":74,"last":{"version":75,"name":"0075_room_install",
+                       "applied_at":"2026-09-07 16:14:20.25123+00"}}
+```
+
+All four as expected. `degraded: []` on production means the three tables are readable by the
+production build, not merely by the preview. `latest_release: null` means the card ships to
+production **with its gate closed** — no release, every install button off, which is the state
+Build R1 was specified to ship in.
+
+### 9.3 Item 9, on the real thing
+
+Home Office's browser kiosk was polling **throughout the promotion** and did not notice it:
+
+| | 16:17:44 | 16:20:29 | 16:34:30 | **16:41:11 (post-promote)** |
+|---|---|---|---|---|
+| `page_open` | true | true | true | **true** |
+| `listener_state` | listening | listening | listening | **listening** |
+| `room_state` | ready | ready | ready | **ready** |
+
+PRD §8 item 9 asks that an existing browser room kiosk still polls "with no change in behaviour"
+after the deploy. It polled across the alias flip without a gap, on production, and the last
+reading is 97 ms old. **That is the acceptance item met on the real thing rather than argued
+from a unit test.**
+
+The one part still unobserved is a kiosk *recording* across a deploy — Home Office was idle
+(`Not recording`) the whole time. Starting a tape to prove it was outside what was asked and would
+have written real audio rows, so it was not done.
+
+### 9.4 State at hand-off
+
+- Production serves `61b6e13`; migrations at `0075`; five rooms on the card; gate closed.
+- `app_release` holds two withdrawn probe rows; the Blob store `eta-releases` is empty.
+- The retired probe install `install_7fs9pxt8gdcf` is still in `room_install` — see §8.5 for why
+  the nightly job will never remove it and the two statements that will.
+- Items 1 and 7 carried to R2: both need a SQL path into production, which is the one capability
+  this session never had.
