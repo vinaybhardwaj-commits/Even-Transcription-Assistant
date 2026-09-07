@@ -7,6 +7,13 @@
  * pending commands oldest first. If another tab polled this room more recently than this tab
  * last did → { superseded:true } and this tab should stop.
  *
+ * INSTALL AND FLEET §4.3 adds seven OPTIONAL query fields for the native Room Recorder:
+ * install_id · app_version · build_sha · mic_state · tape_advancing · never_sleep · launched_by
+ * (plus hostname / hardware_model / os_version, which §6 step 2 renders). A poll carrying
+ * install_id also writes last_seen_at and the six state columns on that room_install row; a poll
+ * WITHOUT it behaves exactly as it behaves today, which is why the browser kiosk is untouched by
+ * this build. A poll from a RETIRED install is answered 409 RETIRED (§4.5 rule 3) and stops.
+ *
  * D10 loud failure: DB error → 503 { error:"bus_down" }; migration 0044 not applied → 503
  * { error:"bus_not_migrated" }. NEVER an empty 200 — the kiosk shows "operator link down"
  * and its buttons keep working (fail-open for the doctor).
@@ -52,8 +59,46 @@ export async function GET(req: NextRequest) {
   const spareDeviceRaw = sp.get("spare_device");
   const spareDevice = spareDeviceRaw === "true" ? true : spareDeviceRaw === "false" ? false : null;
 
+  // Install and Fleet §4.3 — SEVEN OPTIONAL FIELDS, and the emphasis is on optional.
+  //
+  // `install_id` is the switch. Absent, this whole block yields undefined and the poll runs
+  // exactly as it ran before this build — same query, same upsert, same response. Present, it
+  // carries the native Room Recorder's report of itself onto its room_install row.
+  //
+  // THE THREE MACHINE FACTS (hostname, model, OS) ARE NOT AMONG THE SEVEN. They are read here
+  // because §6 step 2 renders them and the app has nowhere else to put them; they are COALESCEd
+  // like everything else, so a poll that omits them never erases what the first poll said.
+  const installId = (sp.get("install_id") ?? "").trim();
+  const tri = (key: string): boolean | null => {
+    const v = sp.get(key);
+    return v === "true" ? true : v === "false" ? false : null;
+  };
+  const install = installId
+    ? {
+        install_id: installId.slice(0, 64),
+        app_version: sp.get("app_version"),
+        build_sha: sp.get("build_sha"),
+        mic_state: sp.get("mic_state"),
+        tape_advancing: tri("tape_advancing"),
+        never_sleep: tri("never_sleep"),
+        launched_by: sp.get("launched_by"),
+        hostname: sp.get("hostname"),
+        hardware_model: sp.get("hardware_model"),
+        os_version: sp.get("os_version"),
+      }
+    : undefined;
+
   try {
-    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare, spareDevice });
+    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare, spareDevice, install });
+    // §4.5 rule 3 — a retired install is told once, in a status it cannot mistake for a transient
+    // fault, and it stops polling. Deliberately NOT a 503: 503 means "try again", and this one
+    // never should.
+    if ("retired" in out) {
+      return NextResponse.json(
+        { ok: false, error: "RETIRED", room_id: claims.room_id, now: out.now },
+        { status: 409, headers: NO_STORE },
+      );
+    }
     return NextResponse.json({ ok: true, room_id: claims.room_id, ...out }, { headers: NO_STORE });
   } catch (e) {
     const b = classifyBusError(e);

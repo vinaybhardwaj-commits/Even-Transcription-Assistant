@@ -59,7 +59,43 @@ Indic-only, submit-time fallback (not live, not English — per the 93%-English 
 is OFF until the Mac-Mini exposes `indic.llmvinayminihome.uk` (Pattern B); then it A/B's against
 Sarvam/Whisper/etc. on the Indic slice. See `IndicConformer-Integration-Handoff.md`.
 
+## Install and fleet, Build R1 — server, routes and the Bench card (7 Sep 2026)
+Room Recorder installs on a clinic Mac with **one Terminal paste**, and `/admin/bench` gains a
+third card saying which Mac runs which room. Ships nothing to a Mac; the app itself is Build R2.
+
+- **Migration 0075** — `app_release`, `room_bootstrap_token`, `room_install`, with the partial
+  unique index that makes "one active enrolled install per room" a database fact rather than a
+  convention. Three columns beyond PRD §4.1 (`first_seen_at`, `tape_poll_streak`,
+  `tape_advancing_since`) because §6 asks for state the listed columns cannot hold — flagged, not
+  smuggled.
+- **Eight routes** (PRD §4.2): publish / list / withdraw releases, mint a bootstrap token, serve
+  the §4.4 script, spend the token for a 365-day room session, read the fleet, retire an install.
+  All admin routes also take `Bearer MIGRATION_SECRET`, the stt-admin pattern, so the whole
+  acceptance runs from curl.
+- **Nothing is typed.** `POST /api/admin/releases` streams the Blob object, recomputes `sha256`
+  and `size_bytes`, and refuses `SHA_MISMATCH` before any row exists. The same digest goes into
+  the script that `shasum` checks on the Mac.
+- **Poll additions** (§4.3): seven optional fields on `GET /api/bench/commands`. A poll without
+  `install_id` issues no `room_install` SQL at all, which is why the browser kiosk is untouched;
+  a poll from a retired install gets `409 RETIRED` (§4.5 rule 3) and stops.
+- **The Install and fleet card** (§6, D11/D13): rows per room polled every 20 s, a five-step
+  checklist polled every 3 s. The page never asserts completion from its own actions — step 1,
+  "Command copied", is the only page-driven step and never reads "Installed".
+- **Nightly cleanup** rides `/api/admin/measure-windows`, the only genuinely nightly cron, rather
+  than adding a schedule.
+- **No feature flag.** The empty release table is the gate: with no row the card reads "No release
+  published yet" and every install button is off.
+
+Gate: 1498 unit tests green (was 1443), typecheck clean, production build green. Migration 0075
+is **not run** — V applies it through `/api/run-migrations`.
+
 ## Current state
-Migrations 0001–0026 applied; all backend services green; `npm run smoke` 9/9; CI green
-(typecheck + vitest + silent-gate); Playwright e2e green. See `ETA-OPEN-ITEMS.md` for pending-V
-items and `../content/ETA-BUG-LOG.md` for the parked security P0s (B19).
+Migrations 0001–0074 applied, 0075 written and awaiting V; all backend services green; CI green
+on typecheck + vitest. `npm run check:silent` currently reports 9 pre-existing findings in the
+encounter `/process` and note-composer paths — unrelated to any recent build and untouched by
+them, recorded here because the line below used to claim the gate was green.
+
+This chronology lapsed after 13 June: Builds 1 to 4 (Aug–Sep 2026) carry their changelogs in
+their commit messages rather than here. See `git log` and the `docs/handoff/` kickoffs for those.
+See `ETA-OPEN-ITEMS.md` for pending-V items and `../content/ETA-BUG-LOG.md` for the parked
+security P0s (B19).

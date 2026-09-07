@@ -18,6 +18,7 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { parseMicLevels, type MicLevels } from "@/lib/bench-levels";
+import { applyInstallPoll, type InstallPollFields } from "@/lib/room-install";
 
 export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
@@ -113,6 +114,16 @@ export type PollInput = {
   /** §2.4 — did the client report an explicitly chosen second device? undefined = not reported
    *  (the browser kiosk never sends it), and undefined never erases a stored value. */
   spareDevice?: boolean | null;
+  /**
+   * Install and Fleet §4.3 — the native Room Recorder's seven optional fields.
+   *
+   * ABSENT MEANS THE BROWSER KIOSK, and the browser kiosk must behave EXACTLY as it does today.
+   * That is not a hope about this code, it is the shape of it: `install` is undefined on every
+   * poll the kiosk sends, and the one branch that reads it is skipped entirely. Nothing above
+   * this line changed, so there is no path by which a room recording in a browser can notice
+   * that this build shipped.
+   */
+  install?: InstallPollFields | null;
 };
 
 /**
@@ -129,6 +140,7 @@ export function cleanLevels(v: unknown): MicLevels | null {
 
 export type PollResult =
   | { superseded: true; now: string; owner_tab_id: string }
+  | { retired: true; now: string }
   | { superseded: false; now: string; commands: PendingCommand[] };
 
 /**
@@ -137,6 +149,44 @@ export type PollResult =
  */
 export async function pollCommands(input: PollInput): Promise<PollResult> {
   return guarded(async () => {
+    // ── Install and Fleet §4.3 / §4.5 rule 3 ────────────────────────────────────────────────
+    // The native app's poll writes its own row BEFORE anything touches bench_listener, and a
+    // retired install is turned away here. The ordering IS the supersession rule: a retired copy
+    // must not write the listener row on the same poll that tells it to stop, or it would take
+    // the room back from the install that just replaced it for one more beat.
+    //
+    // THE BROWSER KIOSK NEVER ENTERS THIS BLOCK. `install` is undefined on every poll it sends.
+    if (input.install?.install_id) {
+      let applied: Awaited<ReturnType<typeof applyInstallPoll>> | null = null;
+      try {
+        applied = await applyInstallPoll(input.install);
+      } catch (e) {
+        // FAIL OPEN, LOUDLY. The install registry is bookkeeping; the tape is not. A room that
+        // is recording must not stop because the fleet card cannot be updated, and the card
+        // shows the consequence anyway — the Mac goes stale and the row asks for attention.
+        console.warn(
+          "[bench-commands] install poll write failed",
+          JSON.stringify({
+            room_id: input.roomId,
+            install_id: input.install.install_id,
+            err: String((e as Error)?.message ?? e).slice(0, 200),
+          }),
+        );
+      }
+      if (applied && !applied.ok && applied.code === "RETIRED") {
+        return { retired: true, now: new Date().toISOString() };
+      }
+      if (applied && !applied.ok && applied.code === "NOT_FOUND") {
+        // An install_id nobody minted. NOT fatal: telling this app to stop for ever on the
+        // strength of a typo would take a room down, and the poll below is the same poll a
+        // browser kiosk makes. Named here so it is findable rather than mysterious.
+        console.warn(
+          "[bench-commands] poll carried an unknown install_id",
+          JSON.stringify({ room_id: input.roomId, install_id: input.install.install_id }),
+        );
+      }
+    }
+
     const existing = (await sql`
       SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
              mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device

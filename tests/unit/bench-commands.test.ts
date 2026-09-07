@@ -266,3 +266,86 @@ describe("runtime guard — bus_not_migrated / bus_down", () => {
     await expect(pollCommands({ roomId: "room_1", tabId: "t", prevPollAt: null, recordingSessionId: null, paused: false })).rejects.toMatchObject({ code: "bus_down" });
   });
 });
+
+/**
+ * Install and Fleet §4.3 / §4.5 — the seven optional poll fields, bolted onto this same poll.
+ *
+ * THE FIRST TEST IS THE ONE THAT MATTERS, and it is the mechanism behind acceptance item 9: a
+ * poll with no `install_id` must issue NO room_install SQL AT ALL. Not a harmless query, not a
+ * no-op UPDATE — nothing. That is what makes "the browser kiosk behaves exactly as today" a
+ * property of the code rather than a hope about it. The seventeen tests above this block are the
+ * other half of the same claim: none of them needed changing.
+ */
+describe("install poll additions (§4.3, §4.5 rule 3)", () => {
+  const roomInstallSql = () => calls.filter((c) => /room_install/i.test(c.text));
+
+  it("issues NO room_install SQL when the poll carries no install_id (the browser kiosk)", async () => {
+    responder = () => [];
+    const out = await pollCommands({
+      roomId: "room_1",
+      tabId: "tab_browser",
+      prevPollAt: null,
+      recordingSessionId: null,
+      paused: false,
+    });
+    expect(out).toMatchObject({ superseded: false });
+    expect(roomInstallSql()).toHaveLength(0);
+    // And the listener upsert still ran, unchanged.
+    expect(calls.some((c) => /INSERT INTO bench_listener/.test(c.text))).toBe(true);
+  });
+
+  it("writes the install row when the poll carries one, before touching bench_listener", async () => {
+    responder = (text) => (/UPDATE room_install/.test(text) ? [{ install_id: "install_1" }] : []);
+    await pollCommands({
+      roomId: "room_1",
+      tabId: "app_install_1",
+      prevPollAt: null,
+      recordingSessionId: null,
+      paused: false,
+      install: { install_id: "install_1", launched_by: "launchd", mic_state: "authorized" },
+    });
+    const installAt = calls.findIndex((c) => /UPDATE room_install/.test(c.text));
+    const listenerAt = calls.findIndex((c) => /INSERT INTO bench_listener/.test(c.text));
+    expect(installAt).toBeGreaterThanOrEqual(0);
+    expect(installAt).toBeLessThan(listenerAt);
+  });
+
+  it("turns a retired install away WITHOUT letting it write bench_listener", async () => {
+    // The UPDATE matches nothing (retired), the probe says why.
+    responder = (text) => {
+      if (/UPDATE room_install/.test(text)) return [];
+      if (/SELECT retired_at FROM room_install/.test(text)) return [{ retired_at: iso(NOW) }];
+      return [];
+    };
+    const out = await pollCommands({
+      roomId: "room_1",
+      tabId: "app_install_old",
+      prevPollAt: null,
+      recordingSessionId: null,
+      paused: false,
+      install: { install_id: "install_old" },
+    });
+    expect(out).toMatchObject({ retired: true });
+    // §4.5 rule 4 — the retired install never writes the listener row again, so the new install
+    // owns it. If this poll had upserted, it would have taken the room back for one more beat.
+    expect(calls.some((c) => /INSERT INTO bench_listener/.test(c.text))).toBe(false);
+  });
+
+  it("keeps the room recording when the install write itself fails", async () => {
+    // FAIL OPEN, LOUDLY. The registry is bookkeeping; the tape is not.
+    responder = (text) => {
+      if (/room_install/i.test(text)) throw new Error("install store unavailable");
+      return [];
+    };
+    const out = await pollCommands({
+      roomId: "room_1",
+      tabId: "app_install_1",
+      prevPollAt: null,
+      recordingSessionId: null,
+      paused: false,
+      install: { install_id: "install_1" },
+    });
+    expect(out).toMatchObject({ superseded: false });
+    expect(calls.some((c) => /INSERT INTO bench_listener/.test(c.text))).toBe(true);
+  });
+});

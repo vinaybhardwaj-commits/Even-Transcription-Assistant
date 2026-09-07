@@ -1,0 +1,457 @@
+/**
+ * lib/room-install-view.ts — the fleet card's decisions, PURE (Install and Fleet PRD §6).
+ *
+ * NO IMPORTS, deliberately, exactly like lib/bench-bus-constants.ts: this module is pulled into
+ * the admin browser bundle by BenchInstallFleet, and lib/room-install.ts carries the database
+ * module graph. Every rule §6 states — the five checklist steps, the room words, the five row
+ * states — is decided HERE, once, so the card and the tests cannot drift from each other.
+ *
+ * ─── THE RULE THIS FILE EXISTS TO ENFORCE ────────────────────────────────────────────────
+ * THE PAGE NEVER ASSERTS COMPLETION FROM ITS OWN ACTIONS. Every step below reads server state
+ * that arrived in a poll the APP sent. The single exception is step 1, which carries the label
+ * "Command copied" and never the label "Installed" — and it is the only step whose input is a
+ * page event rather than a column.
+ *
+ * That is why `deriveSteps` takes `copiedAt` as its only page-side input and reads everything
+ * else off the install row. A step cannot turn done here without a Mac having said so.
+ */
+
+// ---------------------------------------------------------------------------
+// Wire types — what GET /api/admin/bench/fleet returns
+// ---------------------------------------------------------------------------
+
+export type MicState = "authorized" | "denied" | "not_determined" | "unknown";
+export type LaunchedBy = "launchd" | "user";
+
+export type InstallView = {
+  install_id: string;
+  room_id: string;
+  created_at: string;
+  enrolled_at: string | null;
+  session_expires_at: string | null;
+  launched_by: LaunchedBy | null;
+  hostname: string | null;
+  hardware_model: string | null;
+  os_version: string | null;
+  app_version: string | null;
+  build_sha: string | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  mic_state: MicState;
+  launch_agent_loaded: boolean;
+  tape_advancing: boolean;
+  tape_poll_streak: number;
+  tape_advancing_since: string | null;
+  never_sleep: boolean | null;
+  retired_at: string | null;
+};
+
+export type ReleaseView = {
+  id: string;
+  version: string;
+  build_sha: string;
+  sha256: string;
+  size_bytes: number;
+  blob_url: string;
+  channel: "stable" | "test";
+  published_at: string;
+  published_by: string;
+  withdrawn_at: string | null;
+  notes: string | null;
+  min_macos: string;
+};
+
+export type FleetRow = {
+  room_id: string;
+  room_slug: string;
+  room_name: string;
+  disabled: boolean;
+  /** The bound install: enrolled and not retired. At most one, by the partial unique index. */
+  install: InstallView | null;
+  /** A minted-but-not-yet-enrolled install, if one is outstanding. What the checklist watches. */
+  pending: InstallView | null;
+  /** The most recently retired install, when nothing is bound. Gives §6's `retired` state its
+   *  meaning: a room that HAD a Mac and no longer does reads differently from one that never did. */
+  last_retired: InstallView | null;
+};
+
+export type FleetPayload = {
+  now: string;
+  rows: FleetRow[];
+  latest_release: ReleaseView | null;
+  degraded: string[];
+};
+
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
+
+/** §6 polling. Both cadences "match the existing Rooms Live monitor", and these are its numbers. */
+export const FLEET_POLL_MS = 20_000;
+export const CHECKLIST_POLL_MS = 3_000;
+
+/**
+ * THE LAST-SEEN ALARM WINDOW — §6 marks it UNKNOWN and asks the builder to establish it "against
+ * an ordinary day, per R18".
+ *
+ * IT IS NOT ESTABLISHED HERE, AND SAYING SO IS THE POINT. An ordinary day of the native app
+ * cannot be observed yet: the app is Build R2 and does not exist. Measuring the browser kiosk
+ * instead would establish the cadence of a different program.
+ *
+ * So this is INHERITED, not invented. lib/bench-bus-constants.ts already decides exactly this
+ * question for the kiosk — "how long a listener may be gone before 'it might come back' becomes
+ * 'somebody has to walk there'" — and answers ten minutes. The fleet card asks the identical
+ * question about a different process on the same Mac, and a second, differently-guessed number
+ * would only mean two screens disagreeing about when a room is dark.
+ *
+ * R18 IS THEREFORE STILL OPEN and is carried into R2, where a real Mac running a real day can
+ * settle it. This is a defensible default with a stated basis, not a measurement.
+ */
+export const LAST_SEEN_ALARM_MS = 10 * 60_000;
+
+/** §6: "A warning appears at 30 days or fewer." */
+export const SESSION_WARN_DAYS = 30;
+
+// ---------------------------------------------------------------------------
+// Small pure helpers
+// ---------------------------------------------------------------------------
+
+export function msOf(v: string | Date | null | undefined): number | null {
+  if (v == null || v === "") return null;
+  const t = v instanceof Date ? v.getTime() : Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
+}
+
+/** "4 s ago", "12 m ago", "3 days ago", "never". The card's Last seen column. */
+export function fmtSeen(iso: string | null, nowMs: number): string {
+  const t = msOf(iso);
+  if (t === null) return "never";
+  const ms = Math.max(0, nowMs - t);
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+/** Clock time for a step stamp: "14:34", in the viewer's own zone. */
+export function fmtClock(iso: string | null): string {
+  const t = msOf(iso);
+  if (t === null) return "—";
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Whole days until the session expires. Negative once it has. */
+export function daysUntil(iso: string | null, nowMs: number): number | null {
+  const t = msOf(iso);
+  if (t === null) return null;
+  return Math.floor((t - nowMs) / 86_400_000);
+}
+
+// ---------------------------------------------------------------------------
+// The five checklist steps (§6, D11)
+// ---------------------------------------------------------------------------
+
+export type StepState = "done" | "waiting" | "blocked";
+
+export type Step = {
+  n: 1 | 2 | 3 | 4 | 5;
+  title: string;
+  state: StepState;
+  /** What actually happened, shown only on `done`. Never a claim the page made up. */
+  did: string | null;
+  /** The ONE instruction. §6: "A blocked step shows one instruction." */
+  note: string | null;
+  /** `bad` on blocked, `warn` for the auto-login reminder that is never done. */
+  tone: "plain" | "bad" | "warn";
+};
+
+const machineLine = (i: InstallView): string => {
+  const bits = [i.hostname ?? "this Mac", i.hardware_model, i.os_version].filter(Boolean);
+  return bits.join(" · ");
+};
+
+/**
+ * PURE — the five steps, from one install row and the moment the page copied the command.
+ *
+ * `install` is null until the mint returns; every step but 1 is `waiting` in that case, which is
+ * exactly the state the operator sees between clicking Copy and pasting into Terminal.
+ */
+export function deriveSteps(input: {
+  install: InstallView | null;
+  /** ISO instant the page put the command on the clipboard. The ONLY page-driven input here. */
+  copiedAt: string | null;
+}): Step[] {
+  const i = input.install;
+
+  // ── 1. Command copied ────────────────────────────────────────────────────────────────────
+  // NEVER blocked, and never says "Installed". This step records a clipboard write and claims
+  // nothing about a Mac. Its note says so out loud, because it is the one place on this card
+  // where a page action turns something green and the operator must not read it as progress.
+  const step1: Step = input.copiedAt
+    ? {
+        n: 1,
+        title: "Command copied",
+        state: "done",
+        did: `Command copied ${fmtClock(input.copiedAt)}`,
+        note: "This records that the command was copied. It does not mean the install finished.",
+        tone: "plain",
+      }
+    : {
+        n: 1,
+        title: "Command copied",
+        state: "waiting",
+        did: null,
+        note: "Press Copy install command, then paste it into Terminal on the room Mac.",
+        tone: "plain",
+      };
+
+  // ── 2. App running ───────────────────────────────────────────────────────────────────────
+  // DONE on `launched_by = launchd`, BLOCKED on `launched_by = user`. The distinction is the
+  // whole point of the step: an app someone double-clicked runs until the window is closed, and
+  // a room that records only while a person is standing in it is not installed. §6 gives the
+  // blocked instruction as "report it" — there is no setting the operator can change.
+  const started = i?.first_seen_at ?? null;
+  const step2: Step =
+    i?.launched_by === "launchd"
+      ? {
+          n: 2,
+          title: "App running",
+          state: "done",
+          did: `App running on ${machineLine(i)} · started by launchd · ${fmtClock(started)}`,
+          note: "Reported from this Mac's first poll after the command ran.",
+          tone: "plain",
+        }
+      : i?.launched_by === "user"
+        ? {
+            n: 2,
+            title: "App running",
+            state: "blocked",
+            did: null,
+            note: "App opened but not resident. Started by user, not launchd. Wait 10 seconds. If this stays, stop and report.",
+            tone: "bad",
+          }
+        : {
+            n: 2,
+            title: "App running",
+            state: "waiting",
+            did: null,
+            note: "Paste the command in Terminal and press Return. This turns done on the Mac's first poll.",
+            tone: "plain",
+          };
+
+  // ── 3. Microphone allowed ────────────────────────────────────────────────────────────────
+  // The blocked instruction is the System Settings path, because that is the only thing that
+  // fixes it — and the step clears itself on the next poll after the switch is turned on, so the
+  // note says there is nothing to press here.
+  const step3: Step =
+    i?.mic_state === "authorized"
+      ? {
+          n: 3,
+          title: "Microphone allowed",
+          state: "done",
+          did: `Authorized, reported ${fmtClock(i.last_seen_at)}.`,
+          note: null,
+          tone: "plain",
+        }
+      : i?.mic_state === "denied"
+        ? {
+            n: 3,
+            title: "Microphone allowed",
+            state: "blocked",
+            did: null,
+            note: "Microphone denied. On this Mac: System Settings → Privacy & Security → Microphone → turn on EvenScribe Room Recorder. This step clears itself on the next poll — nothing to press here.",
+            tone: "bad",
+          }
+        : {
+            n: 3,
+            title: "Microphone allowed",
+            state: "waiting",
+            did: null,
+            note: "Click Allow on the microphone prompt when it appears.",
+            tone: "plain",
+          };
+
+  // ── 4. Tape advancing ────────────────────────────────────────────────────────────────────
+  // TWO CONSECUTIVE POLLS, which is why room_install carries a streak and not just a boolean.
+  // §6: this step is NEVER blocked. A room with no audio stays waiting, because "no audio yet"
+  // and "audio will never come" look identical from here and only one of them is worth an alarm.
+  const tapeDone = Boolean(i && i.tape_advancing && i.tape_poll_streak >= 2);
+  const step4: Step = tapeDone
+    ? {
+        n: 4,
+        title: "Tape advancing",
+        state: "done",
+        did: `Audio arriving since ${fmtClock(i!.tape_advancing_since)} · two polls in a row · listener app_${i!.install_id}`,
+        note: null,
+        tone: "plain",
+      }
+    : {
+        n: 4,
+        title: "Tape advancing",
+        state: "waiting",
+        did: null,
+        note:
+          i?.mic_state === "denied"
+            ? "No audio can arrive until the microphone is allowed."
+            : "Turns done after two polls in a row report audio arriving from this room.",
+        tone: "plain",
+      };
+
+  // ── 5. Machine settings ──────────────────────────────────────────────────────────────────
+  // NEVER SLEEP is reported and can turn done. AUTOMATIC LOGIN IS NOT REPORTED BY ANYTHING, so
+  // it stays a reminder for ever — §6 says it "never turns done", and this step honours that by
+  // carrying the reminder into the done branch rather than dropping it once never-sleep lands.
+  const autoLoginNote =
+    "Automatic login: set it in System Settings → Users & Groups → Automatic login (reminder, not checked).";
+  const step5: Step =
+    i?.never_sleep === true
+      ? {
+          n: 5,
+          title: "Machine settings",
+          state: "done",
+          did: "Never sleep: detected",
+          note: autoLoginNote,
+          tone: "warn",
+        }
+      : {
+          n: 5,
+          title: "Machine settings",
+          state: "waiting",
+          did: null,
+          note:
+            i?.never_sleep === false
+              ? "Never sleep is off. On this Mac: System Settings → Displays → Advanced → turn on “Prevent automatic sleeping when the display is off”. " +
+                autoLoginNote
+              : "Never sleep turns done when the app reports it. " + autoLoginNote,
+          tone: "warn",
+        };
+
+  return [step1, step2, step3, step4, step5];
+}
+
+// ---------------------------------------------------------------------------
+// Row words and row state (§6, D13)
+// ---------------------------------------------------------------------------
+
+/** The four words a room row may wear. §6 "States" are the machine states; these are the pills. */
+export type RoomWord = "installed" | "not installed" | "needs re-enrol" | "update pending";
+
+export type RowState = "not_installed" | "enrolling" | "healthy" | "needs_attention" | "retired";
+
+export type RowView = {
+  state: RowState;
+  words: RoomWord[];
+  /** Why this row wants attention. Empty on a healthy row. One line each, worst first. */
+  attention: string[];
+  /** Session expiry, already worded: "session expires in 341 d" / "session expired". */
+  session_label: string | null;
+  session_warn: boolean;
+};
+
+/**
+ * PURE — one row's state, words and reasons.
+ *
+ * PRECEDENCE, first match wins, and the order is the operator's order:
+ *
+ *   1 NOT INSTALLED   no enrolled install. If a token is outstanding it reads `enrolling`, which
+ *                     is the same absence with a reason and a countdown attached.
+ *   2 NEEDS RE-ENROL  the session has expired. The app is on that Mac and is polling into 401s;
+ *                     it will not record again until a second paste. This outranks every other
+ *                     complaint because it is the only one that has already stopped the room.
+ *   3 NEEDS ATTENTION mic denied, tape not advancing, session expiring inside 30 days, or last
+ *                     seen older than the alarm window.
+ *   4 HEALTHY         none of the above. `update pending` rides alongside as a word, never as a
+ *                     state: a room on the previous version is recording perfectly well.
+ */
+export function deriveRow(input: {
+  row: FleetRow;
+  latestRelease: ReleaseView | null;
+  nowMs: number;
+}): RowView {
+  const { row, latestRelease, nowMs } = input;
+  const i = row.install;
+  const words: RoomWord[] = [];
+  const attention: string[] = [];
+
+  // ── Session wording, needed by two branches below ────────────────────────────────────────
+  const days = i ? daysUntil(i.session_expires_at, nowMs) : null;
+  const expired = days !== null && days < 0;
+  const sessionLabel =
+    days === null ? null : expired ? "session expired" : `session expires in ${days} d`;
+  const sessionWarn = days !== null && days <= SESSION_WARN_DAYS;
+
+  // ── 1. Nothing bound ─────────────────────────────────────────────────────────────────────
+  // Three ways to have no Mac, and they are not the same fact. A token is out and the paste has
+  // not happened yet (`enrolling`); a Mac was bound and was retired (`retired`); or this room has
+  // never had one (`not_installed`). All three wear the same word, because the word answers "can
+  // this room record" and the answer is no in every case.
+  if (!i) {
+    words.push("not installed");
+    return {
+      state: row.pending ? "enrolling" : row.last_retired ? "retired" : "not_installed",
+      words,
+      attention: [],
+      session_label: null,
+      session_warn: false,
+    };
+  }
+
+  words.push("installed");
+
+  // `update pending` is a WORD, never a state — see the doc comment above.
+  if (
+    latestRelease &&
+    !latestRelease.withdrawn_at &&
+    i.app_version &&
+    i.app_version !== latestRelease.version
+  ) {
+    words.push("update pending");
+  }
+
+  // ── 2. Expired session outranks everything ───────────────────────────────────────────────
+  if (expired) {
+    return {
+      state: "needs_attention",
+      words: [...words.filter((w) => w !== "installed"), "needs re-enrol"],
+      attention: [
+        "Room session expired. The app stopped polling on a 401 and will not record until this Mac is enrolled again.",
+      ],
+      session_label: sessionLabel,
+      session_warn: true,
+    };
+  }
+
+  // ── 3. The four attention reasons, worst first ───────────────────────────────────────────
+  if (i.mic_state === "denied") {
+    attention.push("Microphone denied on this Mac. Nothing will be recorded until it is allowed.");
+  }
+  const seenMs = msOf(i.last_seen_at);
+  const darkFor = seenMs === null ? null : nowMs - seenMs;
+  if (darkFor === null || darkFor > LAST_SEEN_ALARM_MS) {
+    attention.push(
+      seenMs === null
+        ? "Enrolled but has never polled. The app may not be running on that Mac."
+        : "No poll from this Mac for over 10 minutes. Nothing is coming back on its own.",
+    );
+  } else if (!i.tape_advancing) {
+    // Only worth saying while the Mac is actually reachable — an offline Mac's tape state is a
+    // stale reading, and reporting both would name the same silence twice.
+    attention.push("Tape not advancing. The room is not putting audio on the day tape.");
+  }
+  if (sessionWarn) {
+    attention.push(`Room session ${sessionLabel}. Re-enrol this Mac with a second paste.`);
+  }
+
+  return {
+    state: attention.length > 0 ? "needs_attention" : "healthy",
+    words,
+    attention,
+    session_label: sessionLabel,
+    session_warn: sessionWarn,
+  };
+}

@@ -25,6 +25,11 @@
  * `?limit=` bounds one pass (default and ceiling 200). `?dry=1` measures nothing and reports what
  * the pass WOULD do; `?fork=0` skips the canary.
  *
+ * IT ALSO CARRIES THE INSTALL REGISTRY'S NIGHTLY CLEANUP (Install and Fleet PRD §4.1). This is
+ * the only genuinely nightly cron in vercel.json, so the deletion of abandoned bootstrap install
+ * rows rides it rather than adding a second schedule. It runs after the measurement and its
+ * failure is reported in `install_cleanup`, never thrown — see runInstallCleanup.
+ *
  * NEVER 500s ON A DATA FAULT. Every read inside the job degrades to empty with a logged reason
  * and the pass continues, so a schema surprise on one table cannot take down a scheduled route
  * or, worse, write a measurement built from a partial answer.
@@ -35,6 +40,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { runMeasureJob, MEASURE_BATCH_LIMIT } from "@/lib/stt/measure-job";
+import { cleanupExpiredInstalls } from "@/lib/room-install";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,13 +104,40 @@ async function pendingCount(): Promise<number | null> {
   }
 }
 
+/**
+ * INSTALL AND FLEET §4.1 — the nightly deletion of abandoned install rows, riding this job.
+ *
+ * WHY HERE AND NOT ON ITS OWN CRON. The Build R1 kickoff asks for the existing nightly job unless
+ * it cannot host this, and it can: this is the only genuinely nightly entry in vercel.json
+ * (`30 20 * * *` — reap-stuck is hourly, resume-processing is every three minutes,
+ * diarize-windows every five). A second cron entry would buy nothing and would add a second
+ * schedule to reason about.
+ *
+ * IT CANNOT TAKE THE MEASURE JOB DOWN. The cleanup runs after the measurement, its failure is
+ * caught and reported in the response rather than thrown, and it deletes at most 500 rows per
+ * pass. The measure job's own answer is returned whether this succeeds or not — a fleet
+ * bookkeeping failure must not look like a measurement failure.
+ *
+ * WHAT IT DELETES, precisely: install rows that were MINTED AND NEVER ENROLLED, whose token
+ * expired more than 24 hours ago. An enrolled install is never deleted by a schedule.
+ */
+async function runInstallCleanup(): Promise<{ deleted: number } | { error: string }> {
+  try {
+    return await cleanupExpiredInstalls();
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e).slice(0, 160);
+    console.warn("[measure-windows] install cleanup failed", JSON.stringify({ err: msg }));
+    return { error: msg };
+  }
+}
+
 async function run(req: NextRequest) {
   const { limit, dry, skipFork } = paramsOf(req);
   if (dry) {
     return respondOk({ dry_run: true, pending_windows: await pendingCount(), limit });
   }
   const result = await runMeasureJob({ limit, skipFork });
-  return respondOk(result);
+  return respondOk({ ...result, install_cleanup: await runInstallCleanup() });
 }
 
 export async function GET(req: NextRequest) {

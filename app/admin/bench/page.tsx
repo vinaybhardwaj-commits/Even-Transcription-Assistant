@@ -4,6 +4,7 @@ import { verifyAdminJwt } from "@/lib/auth";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { BenchClient } from "@/components/admin/BenchClient";
 import { BenchRoomsLive } from "@/components/admin/BenchRoomsLive";
+import { BenchInstallFleet } from "@/components/admin/BenchInstallFleet";
 import { WakeLockBadge } from "@/components/admin/WakeLockBadge";
 
 /**
@@ -35,6 +36,11 @@ export default async function AdminBenchPage() {
       {/* The live monitor sits ABOVE the session table: on a clinic day the question is always
           "what is wrong right now", and the day's history is what you read afterwards. */}
       <BenchRoomsLive />
+      {/* D3 — the third card, beside Rooms and Rooms Live. Not a new page: an operator standing
+          at an OPD Mac is already on this screen, and a separate route would need its own guard,
+          shell and navigation to say less. It sits between the live monitor and the desk work
+          because installing a Mac is a today job, not a history one. */}
+      <BenchInstallFleet />
       <BenchClient />
     </AdminShell>
   );

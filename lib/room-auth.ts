@@ -35,15 +35,35 @@ function roomSecret(): Uint8Array {
   return new TextEncoder().encode(env);
 }
 
-export async function signRoomJwt(claims: {
-  room_id: string;
-  slug: string;
-}): Promise<string> {
+/**
+ * Sign a room session.
+ *
+ * THE TTL IS A PARAMETER, AND ITS DEFAULT IS UNCHANGED (Install and Fleet PRD D10). A human
+ * signing in with the room PIN still gets 30 days — every existing caller passes no options and
+ * is therefore untouched. Only the app install path asks for 365 days, and it asks explicitly.
+ *
+ * WHY THE TWO DIFFER AT ALL. A 30-day session on a native install kills all four rooms silently
+ * one month after install, with no browser open to notice the 401 and no person in the room to
+ * sign in again. A 365-day session on a human PIN login would be a credential left in a shared
+ * clinic browser for a year. Same secret, same audience, two lifetimes, because the two things
+ * holding them fail in opposite directions.
+ */
+export async function signRoomJwt(
+  claims: {
+    room_id: string;
+    slug: string;
+  },
+  opts?: { ttlSeconds?: number },
+): Promise<string> {
+  const ttl =
+    opts?.ttlSeconds && Number.isFinite(opts.ttlSeconds) && opts.ttlSeconds > 0
+      ? Math.floor(opts.ttlSeconds)
+      : TTL_SECONDS;
   return new SignJWT({ room_id: claims.room_id, slug: claims.slug })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setAudience("room")
-    .setExpirationTime(`${TTL_SECONDS}s`)
+    .setExpirationTime(`${ttl}s`)
     .sign(roomSecret());
 }
 
