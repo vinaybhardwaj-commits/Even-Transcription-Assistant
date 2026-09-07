@@ -445,3 +445,29 @@ describe("migration 0075 (§4.1, acceptance item 1)", () => {
     expect((body.match(/\$\$/g) ?? []).length % 2).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §6 — which rooms the card is allowed to show
+// ---------------------------------------------------------------------------
+
+describe("readFleet room selection (§6, acceptance item 2)", () => {
+  it("hides the fuse's scratch rooms and disabled rooms, the rooms-live predicate", async () => {
+    responses = [[], [], []];
+    await M.readFleet(new Date());
+    const roomsQuery = calls[0]!.text;
+    // The same two exclusions lib/admin/rooms-live.ts applies. Found by running the acceptance:
+    // the card listed eight rows for five rooms and offered an install command on a replay target.
+    expect(roomsQuery).toMatch(/disabled_at IS NULL/);
+    expect(roomsQuery).toMatch(/room_scratch_/);
+  });
+
+  it("still shows a room that has a live install, whatever its state", async () => {
+    responses = [[], [], []];
+    await M.readFleet(new Date());
+    const roomsQuery = calls[0]!.text;
+    // A blanket filter would make disabling a room silently remove its RUNNING install from the
+    // one card whose job is "which Mac runs which room". The EXISTS is what prevents that.
+    expect(roomsQuery).toMatch(/OR EXISTS \( SELECT 1 FROM room_install ri/);
+    expect(roomsQuery).toMatch(/ri\.retired_at IS NULL/);
+  });
+});

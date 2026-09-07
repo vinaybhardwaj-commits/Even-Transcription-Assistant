@@ -872,8 +872,29 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
 
   let rooms: Array<{ id: string; slug: string; name: string; disabled_at: string | null }> = [];
   try {
+    // WHICH ROOMS ARE ON THIS CARD, and the second half of the predicate is the important half.
+    //
+    // The first half matches lib/admin/rooms-live.ts exactly — enabled, and not one of the fuse's
+    // `room_scratch_` replay targets. Without it the card listed eight rows for five rooms and
+    // offered "Copy install command" on a scratch room, which is not a place a Mac can be put.
+    //
+    // THE `EXISTS` IS THERE SO A BOUND MAC CAN NEVER BECOME INVISIBLE. A blanket filter would
+    // mean disabling a room for a week silently removes its running install from the one card
+    // whose whole job is "which Mac runs which room" — the exact failure this card exists to
+    // prevent. So a row that has a live install is shown whatever the room's state, and its
+    // Retire action stays reachable.
     rooms = (await sql`
-      SELECT id, slug, name, disabled_at FROM room ORDER BY name ASC
+      SELECT id, slug, name, disabled_at
+        FROM room
+       WHERE (
+               disabled_at IS NULL
+               AND left(id, length('room_scratch_'::text)) <> 'room_scratch_'::text
+             )
+          OR EXISTS (
+               SELECT 1 FROM room_install ri
+                WHERE ri.room_id = room.id AND ri.retired_at IS NULL
+             )
+       ORDER BY name ASC
     `) as typeof rooms;
   } catch (e) {
     degraded.push(`rooms_unavailable:${String((e as Error)?.message ?? e).slice(0, 120)}`);
