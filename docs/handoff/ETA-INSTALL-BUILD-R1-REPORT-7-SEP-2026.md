@@ -10,7 +10,9 @@
 | Fix commit | `35aed03` — dropped an unratified `?channel=` I had added (see §5.1) |
 | Preview deployment | `dpl_FkCFr2ptNb7ME6rvBXxHGPyLtvFF` · `even-transcription-assistant-fnpzac1mp.vercel.app` |
 | Earlier preview (86c7c11) | `dpl_7qZsqHfHZ31uKDJdRmytBbg2PtUR` · `even-transcription-assistant-rcklt336u.vercel.app` |
-| Migration | `0075_room_install` — **written, NOT run.** Yours. |
+| Fix commit | `74e6d82` — fleet card listed eight rows for five rooms (§7.3) |
+| Migration | `0075_room_install` — **APPLIED to production 2026-09-07 16:14:20 UTC** |
+| Blob store | `eta-releases` `store_P2RwHyh5DGHotPi6`, sin1, **public**, connected preview + production (§7.1) |
 | Gate | 1504 unit tests green (was 1443) · typecheck clean · production build green |
 
 Production is still `d7df4b1`. Vercel's production branch is `main`, so the push built a preview
@@ -44,22 +46,24 @@ bookkeeping fault cannot look like a measurement fault.
 
 ## 2. Acceptance — what is proven, and what waits on you
 
-The kickoff asks for items 1 to 7; PRD §8 lists 9. Both numberings are given. **Items 1 and 3 to
-8 cannot be demonstrated by me: every one of them needs migration 0075 applied, and the kickoff
-tells me not to run it.** §3 below is the runbook that closes them in about five minutes once you
-have.
+The kickoff asks for items 1 to 7; PRD §8 lists 9. Both numberings are given.
+
+**This table is the state after the acceptance run of 7 September 16:14–16:27 UTC**, recorded in
+full in §7. §3 remains the runbook; §7 is what happened when it was executed. Sections 2.1 and 2.2
+below are the earlier pre-migration evidence and are kept because they are the only record of how
+the routes behave with the tables absent.
 
 | PRD §8 | Kickoff | Status |
 |---|---|---|
-| 1 · three tables + partial unique index, read from production | 1 | **Waits on the migration.** The file is asserted off disk by `tests/unit/room-install.test.ts` — the exact index predicate, three `CREATE TABLE IF NOT EXISTS`, and no `ALTER`/`DROP`/`TRUNCATE` anywhere. |
-| 2 · card with four rooms and "No release published yet" | 2 | **Renders now, and cleanly after the migration.** Before it, the card shows the rooms and a `Partial read: installs_unavailable:STORE_UNAVAILABLE` line — `readFleet` guards each read separately, so an operator always gets a screen. |
-| 3 · release registered from a real Blob upload, server sha256 matching the local file | — | **Waits.** Runbook §3.3. The mechanism is proven in tests: a manifest whose size or sha256 disagrees with the bytes is `SHA_MISMATCH` **and no row is written**, because the bytes are hashed before the INSERT. |
-| 4 · minted token, its row, and the `command` matching §4.2 exactly | — | **Waits.** The string itself is pinned byte-for-byte by a test. |
-| 5 · bootstrap returns `text/x-shellscript` with the real Blob URL, sha256 and room name | — | **Waits.** Script body pinned line-by-line by test, including the `bootout` line. |
-| 6 · the same token posted twice, second is `TOKEN_INVALID` | — | **Waits.** Enforced in the statement, not by a check that could race — see §4.2. |
-| 7 · an expired token on both routes returns `TOKEN_INVALID` | — | **Waits.** Both predicates carry `expires_at > now()`. |
-| 8 · a hand-posted poll turns step 2 done with the hostname; `launched_by=user` turns it blocked | 3 | **Waits.** Both branches are pinned by test; the runbook posts the real poll. |
-| 9 · the browser kiosk still polls and records unchanged | 7 | **Proven structurally, not on a live room** — see §2.1. |
+| 1 · three tables + partial unique index, read from production | 1 | **Tables PROVEN. Index predicate INFERRED, NOT READ** — see §7.2. |
+| 2 · card with the clinic rooms and "No release published yet" | 2 | **PROVEN.** `{"latest_release":null,"degraded":[],"room_count":5}`. Took a fix to get there — §7.3. |
+| 3 · release registered from a real Blob upload, server sha256 matching the local file | — | **PROVEN**, both directions — §7.4. |
+| 4 · minted token, its row, and the `command` matching §4.2 exactly | — | **BLOCKED** by the test-channel ruling — §7.5. |
+| 5 · bootstrap returns `text/x-shellscript` with the real Blob URL, sha256 and room name | — | **BLOCKED** — downstream of 4. |
+| 6 · the same token posted twice, second is `TOKEN_INVALID` | — | **BLOCKED** — downstream of 4. |
+| 7 · an expired token on both routes returns `TOKEN_INVALID` | — | **BLOCKED** — downstream of 4. |
+| 8 · a hand-posted poll turns step 2 done; `launched_by=user` turns it blocked | 3 | **BLOCKED** — downstream of 4. |
+| 9 · the browser kiosk still polls and records unchanged | 7 | **PROVEN on a live room** — §7.6. |
 
 ### 2.1 Item 9, stated precisely
 
@@ -153,7 +157,10 @@ SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
 SIZE=$(wc -c < "$ZIP" | tr -d ' ')
 echo "local sha256=$SHA size=$SIZE"
 
-# 3. upload to Vercel Blob (BLOB_READ_WRITE_TOKEN from the project env)
+# 3. upload to Vercel Blob. The store `eta-releases` (store_P2RwHyh5DGHotPi6, sin1, public) was
+#    created on 7 Sep and is connected to preview + production, so BLOB_READ_WRITE_TOKEN is in
+#    the pulled env. NOTE: `vercel blob del/list` will refuse while a VERCEL_OIDC_TOKEN sits in
+#    .env.local from `vercel link` — use the SDK, or pass --rw-token explicitly.
 BLOB_URL=$(node -e '
   const {put}=require("@vercel/blob");const fs=require("fs");
   put("room-recorder/rr-test.zip", fs.readFileSync(process.argv[1]),
@@ -209,8 +216,11 @@ needs the same token for its own `enrol` call seconds later.
 ### 3.5 Item 6 — the same token twice
 
 ```bash
-curl -sS -X POST "$BASE/api/room-recorder/enrol" -H 'content-type: application/json' \
-  -d "{\"token\":\"$TOKEN\"}" | jq      # 200, with a 365-day session
+# CAPTURE the response — §3.7 needs the session out of it. (This assignment was missing in the
+# first draft of this runbook: $ENROL was read there and never set here.)
+ENROL=$(curl -sS -X POST "$BASE/api/room-recorder/enrol" -H 'content-type: application/json' \
+          -d "{\"token\":\"$TOKEN\"}")
+echo "$ENROL" | jq                        # 200, with a 365-day session
 
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/api/room-recorder/enrol" \
   -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}"
@@ -415,3 +425,188 @@ existing caller of `signRoomJwt` passes no options and still gets 30 days. `GET
 /api/room-recorder/release` is R3 and is not here.
 
 Nothing was added from a security checklist beyond what §4 states.
+
+
+---
+
+## 7. Acceptance run — 7 September 2026, 16:14 to 16:27 UTC
+
+Run by Claude Code on V's instruction, against the preview for `74e6d82`
+(`even-transcription-assistant-gkzpkxxc4.vercel.app`, a redeploy of
+`dpl_CqSPLBgSSENm3GTY2iMBVzdC6Uuy` made after the Blob store existed so the token was injected).
+Room **OPD Test** (`room_xf5vcjpt`) only. Probe release on channel **test** only. Production was
+not promoted and was untouched throughout.
+
+### 7.1 The Blob store did not exist, and now does
+
+P2/D7 read "`@vercel/blob` is already a dependency with a token in the project". **The dependency
+was there; the store and the token were not.** `vercel blob list-stores --all` showed nine stores
+on the team and none connected to `even-transcription-assistant`, and
+`BLOB_READ_WRITE_TOKEN` was absent from preview *and* production. This blocked item 3 outright,
+and would have blocked R2's packaging step at exactly the same point.
+
+Created on V's ruling:
+
+```
+$ vercel blob create-store eta-releases --access public --region sin1 --yes \
+      --environment production --environment preview
+> Success! Blob store created: eta-releases (store_P2RwHyh5DGHotPi6) in sin1
+> Access: public.
+> Success! Blob store eta-releases linked to even-transcription-assistant
+```
+
+Two choices worth recording. **`--access public`** because the §4.4 script does
+`curl -fsSL "$BLOB_URL"` on a clinic Mac that holds no credential — a private store cannot serve
+that. **`sin1`** rather than the `iad1` default, matching the team's other India-facing stores and
+the app's own `bom1` region; `iad1` would send every clinic download across the Atlantic. The CLI
+subcommand is `create-store`, not `store add`.
+
+After the redeploy, `BLOB_READ_WRITE_TOKEN` is present in preview and production (len 62).
+
+### 7.2 Item 1 — tables PROVEN, index predicate INFERRED and NOT READ
+
+**This is the one acceptance item that is not fully closed, and it is recorded as open.**
+
+The three tables are proven functionally: `GET /api/admin/bench/fleet` returns `"degraded": []`,
+where the identical call before the migration returned `installs_unavailable:STORE_UNAVAILABLE`.
+`readFleet` guards its reads separately, so an empty `degraded` means `room`, `room_install` and
+`app_release` were all selected from successfully.
+
+**The partial unique index predicate was never read from the database.** Vercel withholds all
+eight database credentials as `[SENSITIVE]` on `vercel env pull`, so there is no SQL path from
+here, and no MCP tool exposes `pg_indexes`. What is known instead:
+
+- the migration is one Neon HTTP transaction, so a failure in *any* statement would have rolled
+  the whole file back and `schema_migrations` would carry no version 75;
+- version 75 is recorded (`2026-09-07 16:14:20.25123+00`);
+- the file's `CREATE UNIQUE INDEX` line is asserted character-for-character by
+  `tests/unit/room-install.test.ts` against the exact §4.1 predicate.
+
+That is a strong chain, and it is still **inference, not the query §3.2 asks for**. Closing it
+needs one `SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_room_install_active_room';` run
+by someone with database access. Until then, item 1 is **half proven**.
+
+### 7.3 A defect the run found — the card listed eight rows for five rooms
+
+`readFleet` selected every row in `room`, so the card showed the fuse's two `room_scratch_` replay
+targets and the disabled `ZZ Verification Probe` alongside the real rooms — each with a live
+"Copy install command" button. A scratch room is not a place a Mac can be put.
+
+Fixed in `74e6d82`. The predicate's first half is `lib/admin/rooms-live.ts:549-551` verbatim, so
+the two cards on the same page cannot disagree about what a room is. Its second half shows a room
+that has a **live install whatever its state**, because a blanket filter would mean disabling a
+room silently removes its running Mac from the one card whose job is to show you Macs.
+
+Before: 8 rows. After: `{"latest_release":null,"degraded":[],"room_count":5}` — Cardiology OPD,
+Home Office, OPD 5 - Dr. Salanki, OPD 7 -, OPD Test.
+
+### 7.4 Item 3 — PROVEN, in both directions
+
+Local artefact: `sha256=907b069dd7a0b2487528dbcb1c5a72874a2087faed2aab77e75d2770b9cfb2cc`,
+`size=241`, uploaded to
+`https://p2rwhyh5dghotpi6.public.blob.vercel-storage.com/room-recorder/rr-probe.zip`.
+
+**The refusals first, which are the half that matters.** Neither wrote a row —
+`GET /api/admin/releases` returned `{"releases":[]}` after both:
+
+```
+size_bytes 242 instead of 241
+  -> 400 {"code":"SHA_MISMATCH","message":"size mismatch: the manifest says 242 bytes, the blob is 241"}
+
+sha256 first character changed to f
+  -> 400 {"code":"SHA_MISMATCH","message":"sha256 mismatch: the manifest says f07b06…, the blob hashes to 907b06…"}
+```
+
+**Then the honest manifest** — `201`, and the stored digest is the server's own recomputation over
+the bytes it streamed, identical to the local file's:
+
+```json
+{"release":{"id":"rel_neh3d9vu2tpa","version":"0.0.1-probe","build_sha":"0000000",
+ "sha256":"907b069dd7a0b2487528dbcb1c5a72874a2087faed2aab77e75d2770b9cfb2cc","size_bytes":241,
+ "blob_url":"https://p2rwhyh5dghotpi6.public.blob.vercel-storage.com/room-recorder/rr-probe.zip",
+ "channel":"test","published_at":"2026-09-07T16:26:00.781Z","published_by":"migration_secret",
+ "withdrawn_at":null,"notes":null,"min_macos":"15.0"}}
+```
+
+A non-Blob address is refused before anything is fetched from it:
+`{"code":"BAD_BUNDLE","message":"blob_url must be an https Vercel Blob address"}`.
+
+### 7.5 Items 4 to 8 — BLOCKED by the test-channel ruling
+
+With a release on `test` and none on `stable`, the mint refuses:
+
+```
+$ curl -X POST $P/api/admin/rooms/room_xf5vcjpt/bootstrap-token -H "Authorization: Bearer $SECRET"
+  -> 409 {"error":{"code":"NO_RELEASE","message":"no release published yet"}}
+```
+
+and the card header reads `"latest_release": null` while `app_release` holds
+`[{"id":"rel_neh3d9vu2tpa","version":"0.0.1-probe","channel":"test"}]`.
+
+**This is the ratified §5.1 behaviour working exactly as specified, not a fault.** The install
+path is stable-only: `mintBootstrapToken` calls `latestRelease("stable")`. Items 5 to 8 all need
+the token item 4 could not mint, so all four are untestable while the only release is on `test`.
+
+`ROOM_UNKNOWN` was confirmed on the same route for contrast
+(`404 {"code":"ROOM_UNKNOWN","message":"no such room"}`), as were the token shapes:
+enrol with a well-formed but never-minted token → `400 TOKEN_INVALID`; bootstrap with the same →
+`404`.
+
+**To close items 4 to 8, one of two decisions is needed:**
+
+1. publish a second probe on `stable` — the same three commands as §3.3 with `"channel":"stable"`,
+   which arms every install button on the card until it is withdrawn; or
+2. relax the §5.1 ruling so the mint falls back to the newest release on any channel — a code
+   change reopening a ratified decision, which the kickoff forbids without V's word.
+
+### 7.6 Item 9 — PROVEN on a live room
+
+Home Office's browser kiosk was **polling throughout the run**. Before and after
+`scribe_diff_room home-office-w8fb`:
+
+| | before 16:17:44 | after 16:20:29 |
+|---|---|---|
+| `page_open` | true | true |
+| `listener_state` | listening | listening |
+| `room_state` | ready | ready |
+| `listener_age_ms` | 501 | 879 |
+
+No request was issued against Home Office at any point. The proof is stronger than the timestamps:
+had the run written that room's `bench_listener` row under a different `tab_id`, D4 supersession
+would have stopped the kiosk and driven it to `dropped` within ten seconds. It stayed `listening`,
+with its own `levels_at` advancing on its own clock.
+
+One stated limit: `bench_listener.tab_id` is exposed by no read tool available here, so this is the
+kiosk's continued life rather than a column diff.
+
+### 7.7 Cleanup
+
+```
+POST /api/admin/releases/rel_neh3d9vu2tpa/withdraw
+  -> 200, withdrawn_at 2026-09-07T16:26:36.141Z
+POST the same again
+  -> 404 {"code":"NOT_FOUND","message":"no such release, or it is already withdrawn"}
+```
+
+The second call is a 404 by design: the UPDATE matches only a row that is not already withdrawn,
+so the withdrawal instant stays the first one — the instant the rollback actually happened.
+
+The probe blob was deleted (`del` via the SDK; the CLI refused because `vercel link` had written a
+`VERCEL_OIDC_TOKEN` into `.env.local` and it demands `BLOB_STORE_ID` alongside). The store now
+holds 0 objects and the URL is `404` on GET, HEAD and with a cache-buster.
+
+**Worth carrying into R3:** immediately after deletion the URL still answered `200`, and was `404`
+about thirty seconds later. Vercel Blob deletion is not instantaneous at the edge. R3's rollback
+story depends on `withdraw` rather than on deletion, so this does not affect it — but an updater
+that treated a 404 as "this release is gone" would be reading a lagging signal.
+
+`app_release` now holds one withdrawn row and the store is empty, so the card is back to
+"No release published yet" with every install button off.
+
+### 7.8 Answering the preview-env question
+
+The preview lacks **nothing the routes need**: `APP_DATABASE_URL`, `JWT_SECRET_DOCTOR`,
+`JWT_SECRET_ADMIN` and `MIGRATION_SECRET` are all present in both preview and production.
+`ROOM_RECORDER_ORIGIN` is absent, which is correct — the default is the PRD literal.
+`BLOB_READ_WRITE_TOKEN` was absent and now is not; the **routes never needed it** (they fetch a
+public URL), only the publisher does.
