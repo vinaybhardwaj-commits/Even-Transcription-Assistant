@@ -58,11 +58,11 @@ the routes behave with the tables absent.
 | 1 · three tables + partial unique index, read from production | 1 | **Tables PROVEN. Index predicate INFERRED, NOT READ** — see §7.2. |
 | 2 · card with the clinic rooms and "No release published yet" | 2 | **PROVEN.** `{"latest_release":null,"degraded":[],"room_count":5}`. Took a fix to get there — §7.3. |
 | 3 · release registered from a real Blob upload, server sha256 matching the local file | — | **PROVEN**, both directions — §7.4. |
-| 4 · minted token, its row, and the `command` matching §4.2 exactly | — | **BLOCKED** by the test-channel ruling — §7.5. |
-| 5 · bootstrap returns `text/x-shellscript` with the real Blob URL, sha256 and room name | — | **BLOCKED** — downstream of 4. |
-| 6 · the same token posted twice, second is `TOKEN_INVALID` | — | **BLOCKED** — downstream of 4. |
-| 7 · an expired token on both routes returns `TOKEN_INVALID` | — | **BLOCKED** — downstream of 4. |
-| 8 · a hand-posted poll turns step 2 done; `launched_by=user` turns it blocked | 3 | **BLOCKED** — downstream of 4. |
+| 4 · minted token, its row, and the `command` matching §4.2 exactly | — | **PROVEN** — §8.1. Byte-for-byte match. |
+| 5 · bootstrap returns `text/x-shellscript` with the real Blob URL, sha256 and room name | — | **PROVEN** — §8.2. Full body in the log. |
+| 6 · the same token posted twice, second is `TOKEN_INVALID` | — | **PROVEN** — §8.3. Session is 365 days. |
+| 7 · an expired token on both routes returns `TOKEN_INVALID` | — | **PARTIAL** — a SPENT token gives 400/404 on the two routes (§8.3). An expiry-aged token still needs the SQL in §3.6. |
+| 8 · a hand-posted poll turns step 2 done; `launched_by=user` turns it blocked | 3 | **PROVEN** — §8.4, including the two-poll tape rule and the 409 RETIRED. |
 | 9 · the browser kiosk still polls and records unchanged | 7 | **PROVEN on a live room** — §7.6. |
 
 ### 2.1 Item 9, stated precisely
@@ -610,3 +610,178 @@ The preview lacks **nothing the routes need**: `APP_DATABASE_URL`, `JWT_SECRET_D
 `ROOM_RECORDER_ORIGIN` is absent, which is correct — the default is the PRD literal.
 `BLOB_READ_WRITE_TOKEN` was absent and now is not; the **routes never needed it** (they fetch a
 public URL), only the publisher does.
+
+
+---
+
+## 8. Second acceptance run — 7 September 2026, 16:31 to 16:34 UTC
+
+V ruled a stable probe release. Same preview (`even-transcription-assistant-gkzpkxxc4.vercel.app`,
+commit `74e6d82`), room **OPD Test** (`room_xf5vcjpt`) only. **Items 4, 5, 6 and 8 closed; item 7
+partially.** Production not promoted.
+
+OPD Test had no live kiosk before the run (`page_open:false`, offline since 23 Aug), so nothing of
+this superseded a listening page.
+
+### 8.1 Item 4 — the mint, and the one-liner byte for byte
+
+`POST /api/admin/rooms/room_xf5vcjpt/bootstrap-token` → `201`:
+
+```json
+{"token":"21b282513a631bd4e00838e0efae32014b811d2da604765c",
+ "install_id":"install_7fs9pxt8gdcf",
+ "command":"curl -fsSL \"https://www.evenscribe.app/api/room-recorder/bootstrap/21b28251…765c\" | bash",
+ "expires_at":"2026-09-07T17:01:36.377Z",
+ "room":{"id":"room_xf5vcjpt","slug":"opd-test-a7q9","name":"OPD Test"},
+ "release":{"id":"rel_7fhpz23sqhfq","version":"0.0.1-stable-probe","channel":"stable"}}
+```
+
+The returned `command` was compared to the §4.2 literal and is an **exact string match**. The
+expiry is `created_at + 30 minutes` exactly. The fleet row immediately read
+`install:null, pending:{install_id:"install_7fs9pxt8gdcf", enrolled_at:null}` — the `enrolling`
+state, which is the row a token-out-but-not-pasted room wears.
+
+### 8.2 Item 5 — the script
+
+Headers: `HTTP/2 200`, `content-type: text/x-shellscript; charset=utf-8`,
+`cache-control: no-store, max-age=0`, `x-content-type-options: nosniff`.
+
+The body is the §4.4 text with six substitutions and nothing else — the full transcript is in the
+session log. Verified present: the real Blob URL
+(`…/room-recorder/rr-stable-probe.zip`), the real `EXPECTED_SHA`
+(`4e95974618b26c94aec91cf81f744b68ab06bce4b945b7c5682e2e8aa6d60666`), the real version in the
+download line, the `launchctl bootout` line, and `echo "Installed and enrolled as OPD Test. Close
+this window."`.
+
+**The fetch does not consume the token, and the enrol does.** Fetched twice before enrolling — both
+`200`. Fetched again after enrolling — `404`.
+
+### 8.3 Item 6 — enrol once, then replay
+
+First enrol → `200`:
+
+```json
+{"install_id":"install_7fs9pxt8gdcf","room_slug":"opd-test-a7q9","room_name":"OPD Test",
+ "session":{"expires_at":"2027-09-07T16:32:11.916Z","token":"eyJhbGciOiJIUzI1NiJ9.…"}}
+```
+
+The session's own claims, decoded: `aud=room`, `slug=opd-test-a7q9`, `room_id=room_xf5vcjpt`, and
+`(exp - iat) / 86400 = 365`. **D10 confirmed on the wire, not merely in a unit test.**
+
+Same token again → `400 {"code":"TOKEN_INVALID","message":"token is unknown, expired or already
+used"}`.
+
+**On item 7.** This proves the SPENT arm of `TOKEN_INVALID` on both routes (enrol `400`,
+bootstrap `404`). The EXPIRED arm was not exercised: the TTL is 30 minutes and ageing a token
+needs the `UPDATE room_bootstrap_token SET expires_at = …` in §3.6, which needs database access
+this session does not have. Both arms share one predicate (`used_at IS NULL AND expires_at >
+now()`), so the untested arm is one conjunct of a clause whose other conjunct is proven — but it
+is **not proven**, and item 7 is recorded as partial.
+
+### 8.4 Item 8 — the polls, and the checklist turning
+
+Polled as `tab_id=app_install_7fs9pxt8gdcf`. Checklist states below are computed by the card's own
+`deriveSteps`/`deriveRow` from `lib/room-install-view.ts`, bundled straight out of the repo and run
+against the live `GET /api/admin/bench/fleet` payload — the same function the page calls, not a
+re-implementation.
+
+**Poll 1** (`launched_by=launchd&tape_advancing=true&mic_state=authorized&never_sleep=true`, plus
+hostname/model/OS/version) → `{"ok":true,"superseded":false}`:
+
+```
+FLEET ROW  state=healthy  words=["installed"]  session expires in 364 d
+           OPD-TEST-MINI · Mac mini M2 · macOS 15.6 | app 0.0.1-stable-probe
+           | mic authorized | tape true streak=1
+  1. Command copied     [done]  Command copied 22:01
+  2. App running        [done]  App running on OPD-TEST-MINI · Mac mini M2 · macOS 15.6
+                                · started by launchd · 22:02
+  3. Microphone allowed [done]  Authorized, reported 22:02.
+  4. Tape advancing     [waiting]
+  5. Machine settings   [done]  Never sleep: detected
+```
+
+**Step 2 turned done and shows the hostname — that is the kickoff's item 3 / PRD item 8.** And
+**step 4 stayed waiting at `streak=1`**, which is the two-consecutive-polls rule doing the one
+thing a single boolean could never have done.
+
+**Poll 2**, identical → `streak=2`:
+
+```
+  4. Tape advancing     [done]  Audio arriving since 22:02 · two polls in a row
+                                · listener app_install_7fs9pxt8gdcf
+```
+
+`tape_advancing_since` reads **22:02, the start of the run**, not poll 2's time — the COALESCE
+holding, so the line says when audio began rather than when it was last confirmed.
+
+**Poll 3**, carrying `launched_by=user` **and nothing else**:
+
+```
+  2. App running        [blocked]
+     ! App opened but not resident. Started by user, not launchd. Wait 10 seconds.
+       If this stays, stop and report.
+```
+
+Everything the poll did not mention survived it — hostname, model, OS, app version, mic state and
+the tape streak all unchanged. That is the COALESCE contract demonstrated in the one case that
+matters: a poll that makes no claim erases nothing.
+
+**Retire, then the next poll** (§4.5 rules 3 and 5):
+
+```
+POST /api/admin/installs/install_7fs9pxt8gdcf/retire
+  -> 200  retired_at 2026-09-07T16:33:44.282Z
+
+GET /api/bench/commands?...&install_id=install_7fs9pxt8gdcf
+  -> 409 {"ok":false,"error":"RETIRED","room_id":"room_xf5vcjpt"}
+
+POST the same retire again
+  -> 404 {"code":"NOT_FOUND","message":"no such install, or it is already retired"}
+```
+
+The row then read `state=retired`, `words=["not installed"]` — §6's fifth state, reached for the
+first time outside a unit test.
+
+### 8.5 Teardown, and one artefact left behind
+
+```
+POST /api/admin/releases/rel_7fhpz23sqhfq/withdraw  -> 200, withdrawn_at 16:34:08.258Z
+blob del …/rr-stable-probe.zip                      -> store now holds 0 objects
+GET  /api/admin/bench/fleet                         -> {"latest_release":null,"degraded":[],"room_count":5}
+```
+
+`app_release` holds two rows, both withdrawn (`0.0.1-stable-probe` on stable, `0.0.1-probe` on
+test). The store is empty.
+
+**"Every Copy button disabled" proven at the server, not just in the JSX.** The card disables the
+button on `!release`; the route refuses independently. All five rooms:
+
+```
+OPD Test  409 · Home Office  409 · Cardiology OPD  409 · OPD 7 -  409 · OPD 5 - Dr. Salanki  409
+```
+
+**⚠ ONE ARTEFACT REMAINS IN PRODUCTION DATA.** The retired install row
+`install_7fs9pxt8gdcf` (hostname `OPD-TEST-MINI`, a Mac that has never existed) is still in
+`room_install`. It is harmless — retired rows are excluded from the active-install index and the
+room reads "not installed" — but it makes OPD Test's row say *"The Mac that was bound here has
+been retired"* rather than *"No Mac bound to this room"*, and the nightly cleanup will never remove
+it because that job only deletes rows that were **never enrolled**. Deleting it needs one
+statement from someone with database access:
+
+```sql
+DELETE FROM room_bootstrap_token WHERE install_id = 'install_7fs9pxt8gdcf';
+DELETE FROM room_install         WHERE install_id = 'install_7fs9pxt8gdcf';
+```
+
+V's call. Leaving it is defensible — it is a true record that an install once existed — but it is
+probe data, not clinic data.
+
+### 8.6 Home Office, across the whole run
+
+| | 16:17:44 | 16:20:29 | 16:34:30 |
+|---|---|---|---|
+| `page_open` | true | true | true |
+| `listener_state` | listening | listening | listening |
+| `room_state` | ready | ready | ready |
+
+Its kiosk polled continuously through both runs and was never touched.
