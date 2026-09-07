@@ -554,3 +554,49 @@ This module does not build any of the following.
 ## 11. Open items for V
 
 None. Every decision is ratified.
+
+---
+
+## 12. Build R1 addendum, 7 September 2026, evening
+
+Build R1 shipped and was promoted the same evening. Production serves `61b6e13`. Migration
+`0075_room_install` applied at 16:14 UTC. Report: `docs/handoff/ETA-INSTALL-BUILD-R1-REPORT-7-SEP-2026.md`
+(commit `ecbd8e4`). Commits: `2c217f2` docs, `86c7c11` build, `35aed03` fix, `bf7ce0b` report,
+`74e6d82` fleet filter fix, `61b6e13` runbook fix, `ecbd8e4` promote evidence.
+
+### 12.1 Rulings by V on the builder's six questions, all accepted
+
+| # | Ruling |
+|---|---|
+| R1-1 | `room_install` carries three columns beyond §4.1: `first_seen_at`, `tape_poll_streak`, `tape_advancing_since`. Step 4's "two consecutive polls" and step 2's start time need them. §4.1 is amended. |
+| R1-2 | `launch_agent_loaded` is derived from `launched_by = launchd`, not sent as an eighth poll field. |
+| R1-3 | Rate limits are 30 per minute on bootstrap and 10 per minute on enrol, per IP, in process. |
+| R1-4 | R18's alarm window inherits `LISTENER_OFFLINE_MS`. It carries into Build R2. |
+| R1-5 | The origin in the command comes from `ROOM_RECORDER_ORIGIN`, default `https://www.evenscribe.app`. Never from `APP_URL`, whose deployed value is a dead host. |
+| R1-6 | `check:silent` reports 9 findings at `d7df4b1` before this build. Not this build's. |
+
+### 12.2 Facts established during acceptance
+
+- Vercel Blob store `eta-releases` (`store_P2RwHyh5DGHotPi6`, region sin1, public access)
+  created 7 Sep and linked to the project for preview and production. Public access is
+  required: the §4.4 script downloads with no credential. D7's premise that a token already
+  existed was wrong. The store did not exist before this build.
+- `vercel promote` of a preview rebuilds the same commit against the production environment.
+  Production runs a fresh build of `61b6e13`, not the artifact acceptance ran on.
+- Vercel Blob deletion lags at the edge by about 30 seconds. R3 must rest rollback on withdraw,
+  never on a 404.
+- The fleet read filters rooms the way `lib/admin/rooms-live.ts` does, plus one clause: a room
+  with a live install is shown whatever its state.
+- Acceptance: items 2, 3, 4, 5, 6, 8, 9 proven on preview, item 9 proven again on production
+  across the alias flip (Home Office kiosk never dropped). Items 1 and 7 partial.
+
+### 12.3 Carried into Build R2
+
+1. Item 1: read `pg_indexes` for `uq_room_install_active_room` from a SQL session. Inferred so far.
+2. Item 7: prove the expired arm of `TOKEN_INVALID` with a real token left 30 minutes.
+3. Delete the probe install row `install_7fs9pxt8gdcf` (§8.5 of the report has the statements).
+   The nightly job never removes it because it was enrolled.
+4. `room_bootstrap_token.install_id` has no foreign key. Add it in R2's migration.
+5. A kiosk recording across a deploy is still unobserved.
+6. Prerequisites X1 (certificate) and X3 (build Mac) are still open. R2 cannot ship a zip
+   without them.
