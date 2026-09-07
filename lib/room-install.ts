@@ -420,7 +420,6 @@ export type MintResult = {
 export async function mintBootstrapToken(input: {
   roomId: string;
   createdBy: string;
-  channel?: "stable" | "test";
 }): Promise<MintResult> {
   const rooms = (await sql`
     SELECT id, slug, name FROM room WHERE id = ${input.roomId} LIMIT 1
@@ -428,7 +427,11 @@ export async function mintBootstrapToken(input: {
   const room = rooms[0];
   if (!room) throw new InstallError("ROOM_UNKNOWN", "no such room");
 
-  const release = await latestRelease(input.channel ?? "stable");
+  // STABLE, and only stable. The token row has no channel column to carry any other choice, and
+  // the bootstrap fetch reads the release again minutes later — so a token minted against a
+  // different channel could not be honoured by the script it produces. `latestRelease` keeps its
+  // channel parameter for Build R3's release route, which reads it per request.
+  const release = await latestRelease("stable");
   if (!release) throw new InstallError("NO_RELEASE", "no release published yet");
 
   const token = newBootstrapToken();

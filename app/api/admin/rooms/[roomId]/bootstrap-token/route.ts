@@ -38,13 +38,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ roomId: st
   }
 
   const { roomId } = await ctx.params;
-  // `channel` is accepted so a test build can be pushed to one Mac (the mockup's Home Office row
-  // wears a "channel test" tag). It defaults to stable and is not a form field on the card.
-  const channelRaw = req.nextUrl.searchParams.get("channel");
-  const channel = channelRaw === "test" ? "test" : "stable";
 
+  // NO CHANNEL PARAMETER. §4.2 gives this route no request at all, and an unratified `?channel=`
+  // would have been a real inconsistency rather than a harmless extra: the token row has no
+  // channel column to carry the choice, so the bootstrap fetch — which reads the release at FETCH
+  // time, minutes later — would have served a stable script for a token minted against test. One
+  // channel on this path, and it is the published stable release.
   try {
-    const minted = await mintBootstrapToken({ roomId, createdBy: guard.adminId, channel });
+    const minted = await mintBootstrapToken({ roomId, createdBy: guard.adminId });
     return NextResponse.json(
       {
         token: minted.token,
