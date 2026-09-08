@@ -96,8 +96,8 @@ fi
 # X2 is closed: ship the vendored encoder with its LGPL notices. The app no longer uses Homebrew.
 if [ -z "$FFMPEG_SOURCE" ]; then
   for candidate in \
-    "${PACKAGE_DIR}/.build/encoder-candidate/artifact/bin/ffmpeg" \
-    "${PACKAGE_DIR}/.build/encoder-candidate/artifact/ffmpeg"; do
+    "${PACKAGE_DIR}/.build/encoder-candidate/artifact/Contents/Helpers/ffmpeg" \
+    "${PACKAGE_DIR}/.build/encoder-candidate/artifact/bin/ffmpeg"; do
     [ -x "$candidate" ] && FFMPEG_SOURCE="$candidate" && break
   done
 fi
@@ -134,7 +134,8 @@ APP="${STAGE}/${APP_NAME}"
   "${APP}/Contents/Helpers/tapewriter" "${APP}/Contents/Helpers/ffmpeg"
 
 # LGPL notices and the source lock ride inside the bundle (X2's condition for shipping).
-for licence in "${PACKAGE_DIR}/Encoder/source-lock.json" "${PACKAGE_DIR}/Encoder/README.md"; do
+ENCODER_PROVENANCE_SRC="${PACKAGE_DIR}/.build/encoder-candidate/artifact/Contents/Resources/build-provenance.json"
+for licence in "${PACKAGE_DIR}/Encoder/source-lock.json" "${PACKAGE_DIR}/Encoder/README.md" "$ENCODER_PROVENANCE_SRC"; do
   [ -f "$licence" ] && /bin/cp "$licence" "${APP}/Contents/Resources/Licenses/"
 done
 if [ -f "${PACKAGE_DIR}/Encoder/LGPL-NOTICES.txt" ]; then
@@ -187,6 +188,28 @@ for helper in ffmpeg tapewriter; do
     || die "helper ${helper} failed verification"
 done
 codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
+
+# ─── The encoder's provenance, now that it IS signed ─────────────────────────────────────────
+# X2 shipped the encoder; `build-provenance.json` still said `production_ready: false` with
+# `reason: "unsigned_encoder_candidate"`, and until this point that was TRUE — build-ffmpeg.sh
+# produces an unsigned candidate and signs nothing. The flag flips here, immediately after the
+# signature exists, and records which certificate made it true. Flipping it inside build-ffmpeg.sh
+# would have put a false statement in a provenance file. See PRD §12, X2.
+ENCODER_PROVENANCE="${APP}/Contents/Resources/Licenses/build-provenance.json"
+if [ -f "$ENCODER_PROVENANCE" ]; then
+  ENCODER_SHA="$(/usr/bin/shasum -a 256 "${APP}/Contents/Helpers/ffmpeg" | /usr/bin/awk '{print $1}')"
+  /bin/cat > "$ENCODER_PROVENANCE" <<PROV
+{
+  "binary_sha256": "${ENCODER_SHA}",
+  "certificate_sha256": "${CERT_SHA256}",
+  "encoder_identifier": "${FFMPEG_BUNDLE_ID}",
+  "production_ready": true,
+  "reason": "signed_with_in_house_certificate (X2 ruled 7 Sep 2026; X1 closed 8 Sep 2026)",
+  "schema_version": 1
+}
+PROV
+  say "Encoder provenance: production_ready=true"
+fi
 
 # ─── Zip, hash, manifest ─────────────────────────────────────────────────────────────────────
 # `ditto -c -k --keepParent` is the counterpart of the `ditto -x -k` the §4.4 script runs, and it

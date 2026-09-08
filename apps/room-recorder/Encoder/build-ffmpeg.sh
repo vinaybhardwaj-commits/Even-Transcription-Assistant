@@ -275,11 +275,12 @@ ENCODER_SHA256="$(sha256 "$ENCODER")"
   "  \"ffmpeg_source_sha256\": \"${FFMPEG_SHA256}\"," \
   "  \"libopus_source_sha256\": \"${OPUS_SHA256}\"," \
   '  "production_ready": false,' \
-  '  "reason": "unsigned_encoder_candidate",' \
+  '  "reason": "unsigned_encoder_candidate (Packaging/build-bundle.sh signs it and flips this flag — PRD §12 X2)",' \
   '  "schema_version": 1' \
   '}' > "${RESOURCES}/build-provenance.json"
 
 "$ENCODER" -version
 /usr/bin/printf 'encoder_sha256=%s\n' "$ENCODER_SHA256"
 /usr/bin/printf 'artifact=%s\n' "$ARTIFACT_ROOT"
-/usr/bin/printf 'production_ready=false (signing and frozen-command gates remain)\n'
+/usr/bin/printf 'production_ready=false here by design: this script does not sign.\n'
+/usr/bin/printf 'Packaging/build-bundle.sh signs this binary as %s and flips the flag (X2 ruled, X1 closed).\n' 'com.evenscribe.room-recorder.ffmpeg'
