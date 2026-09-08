@@ -172,39 +172,43 @@ private enum RoomRecorderCLI {
 
       case "run":
         try arguments.rejectOptions(except: ["--root"])
-        // NOT `loadConfiguration()`. That returns what is on disk, and §5.4 keeps no session
-        // there, so a client built from it polls unauthenticated for ever. `startingConfiguration`
-        // is the one place that adds the keychain session, and it refuses if there is none.
+        // Refuses with needs_enrol and exits 0 if the keychain holds no session — before any
+        // application is created, so a Mac that was never enrolled does not sit in a run loop.
         let configuration = try RoomEngine.startingConfiguration(rootURL: root)
-        // §9 hazard 1: raise the microphone prompt HERE, from the bundled app, immediately after
-        // the paste — so the operator standing at the Mac gets the one dialog D1 expects, instead
-        // of a silent denial the first time a session starts. Reported, never assumed: whatever
-        // the answer is, the next poll measures it.
-        let micAfterAsking = MachineFactsReader.requestMicrophoneAccess()
-        FileHandle.standardError.write(
-          Data("room-recorder: microphone \(micAfterAsking)\n".utf8))
-        let bench = BenchClient(configuration: configuration)
-        let recovery: (any RoomRetainedArchiveRecovering)?
-        if configuration.retainedArchiveRecoveryEnabled {
-          if configuration.residentArchiveEligibility(archiveRootURL: root) == .eligible,
-            let receipt = configuration.archivePreflightReceipt
-          {
-            recovery = try RetainedArchiveRecovery(
+        // Hands the main thread to AppKit and never returns. The microphone is requested from
+        // inside the run loop; see ResidentApplication for why that is the only order that works.
+        ResidentApplication.run {
+          do {
+            let bench = BenchClient(configuration: configuration)
+            let recovery: (any RoomRetainedArchiveRecovering)?
+            if configuration.retainedArchiveRecoveryEnabled {
+              if configuration.residentArchiveEligibility(archiveRootURL: root) == .eligible,
+                let receipt = configuration.archivePreflightReceipt
+              {
+                recovery = try RetainedArchiveRecovery(
+                  rootURL: root,
+                  wire: bench,
+                  ffmpegURL: URL(fileURLWithPath: configuration.ffmpegPath),
+                  encoderProvenanceID: receipt.encoderProvenanceID)
+              } else {
+                recovery = try RetainedArchiveRecovery(rootURL: root, wire: bench)
+              }
+            } else {
+              recovery = nil
+            }
+            try await RoomEngine.load(
               rootURL: root,
-              wire: bench,
-              ffmpegURL: URL(fileURLWithPath: configuration.ffmpegPath),
-              encoderProvenanceID: receipt.encoderProvenanceID)
-          } else {
-            recovery = try RetainedArchiveRecovery(rootURL: root, wire: bench)
+              remoteFactory: { _ in bench },
+              retainedArchiveRecovery: recovery
+            ).run()
+            // A clean return is the retired case (§4.5 rule 3): stop, and stay stopped.
+            return 0
+          } catch {
+            FileHandle.standardError.write(
+              Data("room-recorder: \(error.localizedDescription)\n".utf8))
+            return 1
           }
-        } else {
-          recovery = nil
         }
-        try await RoomEngine.load(
-          rootURL: root,
-          remoteFactory: { _ in bench },
-          retainedArchiveRecovery: recovery
-        ).run()
 
       case "status":
         try arguments.rejectOptions(except: ["--root"])

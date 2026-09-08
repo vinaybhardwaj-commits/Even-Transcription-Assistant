@@ -114,33 +114,21 @@ public enum MachineFactsReader {
     }
   }
 
-  /// Ask for the microphone once, from the RESIDENT APP, and wait for the answer.
+  /// Ask for the microphone once, from the RESIDENT APP, and report what the machine answered.
   ///
-  /// ─── WHY THE APP ASKS AND NOT THE HELPER ────────────────────────────────────────────────
-  /// tapewriter already calls `requestAccess` when it finds `.notDetermined`. On the first real
-  /// install that returned FALSE with no prompt on screen, and capture died with
-  /// "microphone permission was not granted" — §9's hazard 1, exactly as it was written up.
+  /// CALLBACK, NOT A BLOCKING WAIT, and that is the point. The previous version blocked on a
+  /// semaphore before any run loop existed; `requestAccess` answered FALSE immediately, no dialog
+  /// was ever drawn, and macOS wrote a denial. This is called from
+  /// `applicationDidFinishLaunching`, so the dialog has an application and a run loop to appear on.
   ///
-  /// tapewriter is a bare Mach-O helper launched as a CHILD of this app. TCC attributes a request
-  /// to the responsible process, which is the bundled app, and the bundled app had never asked for
-  /// anything. Asking here means the prompt is raised by the thing that has a bundle, an icon and
-  /// §5.2's usage string — the "EvenScribe Room Recorder" an operator sees named in the dialog —
-  /// and the grant it receives is the one D1 binds to the signing identity. The helper then
-  /// inherits it and its own `requestAccess` returns immediately.
-  ///
-  /// RETURNS THE STATE AFTER ASKING, never a promise. `.notDetermined` on return means macOS
-  /// declined to prompt at all, which is a different fault from a person clicking Don't Allow.
-  @discardableResult
-  public static func requestMicrophoneAccess(timeout: TimeInterval = 120) -> String {
+  /// Returns the state AFTER asking, never a promise. `not_determined` on return means macOS
+  /// declined to prompt at all — a different fault from a person clicking Don't Allow.
+  public static func requestMicrophoneAccess(completion: @escaping @Sendable (String) -> Void) {
     guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
-      return microphoneState()
+      completion(microphoneState())
+      return
     }
-    let done = DispatchSemaphore(value: 0)
-    AVCaptureDevice.requestAccess(for: .audio) { _ in done.signal() }
-    // A person has to reach the Mac. The wait is bounded so a room that is never attended still
-    // reaches its poll loop and reports `not_determined` rather than hanging silently for ever.
-    _ = done.wait(timeout: .now() + timeout)
-    return microphoneState()
+    AVCaptureDevice.requestAccess(for: .audio) { _ in completion(microphoneState()) }
   }
 
   // ---------------------------------------------------------------------------

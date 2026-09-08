@@ -217,3 +217,20 @@ poll fields arrive, which establishes §9 hazard 2. Step 3 does not turn.
 - **§9 hazard 1 remains UNESTABLISHED.** After a successful `tccutil reset`, the app is denied
   immediately with no dialog. Enabling it by hand in System Settings did not take effect either.
   See PRD §12.9, including the risk this raises for D1 and R3.
+
+## Install and fleet, R2 — the resident app becomes a real NSApplication (8 Sep 2026, 0.1.5)
+`room-recorder run` was a plain command-line binary under launchd. It polled fine and could never
+obtain a microphone: `requestAccess` returned false immediately, no dialog was drawn, and macOS
+recorded a denial. TCC has to attach its dialog to something, and a process with no run loop and no
+application identity gives it nothing.
+
+- **`ResidentApplication`** runs an `NSApplication` with `.accessory` activation policy — a run loop
+  and an application identity, still no Dock icon, no menu bar, no window. §5.2's `LSUIElement`
+  promise is now true of the process and not only of the plist.
+- **The microphone is requested from `applicationDidFinishLaunching`**, after the run loop exists.
+  Asking before it existed is why the old answer came back instantly and negative.
+- **The engine starts whatever the answer is.** A refused room must still poll, so the card can say
+  `denied` and send someone to System Settings; refusing to start would turn a fixable permission
+  into a Mac that looks dead.
+- R3 wants this shape anyway: a self-update needs an app identity to replace, and D1 binds the
+  microphone grant to that identity.
