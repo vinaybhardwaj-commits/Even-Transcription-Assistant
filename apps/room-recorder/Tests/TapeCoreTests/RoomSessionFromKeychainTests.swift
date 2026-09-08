@@ -109,6 +109,92 @@ import Testing
     }
   }
 
+  // MARK: - The starting configuration every client is built from
+
+  /// `run` builds its own `BenchClient` (it needs one for the retained-archive wire), so the
+  /// hydration has to be reachable OUTSIDE `load`. This is that entry point.
+  @Test func startingConfigurationCarriesTheKeychainSession() throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configuration = try RoomEngine.startingConfiguration(
+      rootURL: root, enrolmentReader: { self.record(session: "a.session.jwt") })
+    #expect(configuration.etaRoomSession == "a.session.jwt")
+    #expect(configuration.roomSlug == "home-office-w8fb")
+  }
+
+  @Test func startingConfigurationRefusesWithoutASession() throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    #expect(throws: RoomEngineError.needsEnrolment) {
+      _ = try RoomEngine.startingConfiguration(rootURL: root, enrolmentReader: { nil })
+    }
+    #expect(try RoomPersistence(root: root).loadStatus().state == .needsEnrol)
+  }
+
+  /// THE REGRESSION GUARD, and it is a source-level one on purpose.
+  ///
+  /// 0.1.2 shipped with the hydration correct inside `load` and STILL polled unauthenticated,
+  /// because the CLI's `run` passed `remoteFactory: { _ in bench }` — a factory that ignores its
+  /// argument — with `bench` built from `loadConfiguration()`. Every behavioural test passed: the
+  /// factory really was handed the session, and production really did throw it away.
+  ///
+  /// No unit test of `load` can catch that: the defect is in what the CALLER does with a correct
+  /// value. What catches it is the rule itself — outside `login`, which exists to obtain a
+  /// session, nothing may build a client from a configuration that did not come through
+  /// `startingConfiguration`.
+  ///
+  /// IT READS CODE, NOT COMMENTS. The first version of this test scanned a window of raw lines
+  /// and was satisfied by the word `startingConfiguration` appearing in the comment ABOVE the
+  /// offending call — it passed with the 0.1.2 bug deliberately reintroduced. Comments are
+  /// stripped here, and the exemption is an explicit inline marker rather than nearby prose.
+  @Test func noClientIsBuiltFromABareOnDiskConfiguration() throws {
+    let sources = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Sources", isDirectory: true)
+
+    var offenders: [String] = []
+    let walker = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil)
+    while let url = walker?.nextObject() as? URL {
+      guard url.pathExtension == "swift" else { continue }
+      // Comments stripped, so only executable text is examined.
+      let raw = try String(contentsOf: url, encoding: .utf8).components(separatedBy: .newlines)
+      // Comments stripped for the LOGIC, so prose near a call cannot excuse it. The exemption
+      // marker is deliberately checked against the raw line, since the marker is itself a comment.
+      let code = raw.map { line -> String in
+        guard let r = line.range(of: "//") else { return line }
+        return String(line[line.startIndex..<r.lowerBound])
+      }
+
+      for (n, line) in code.enumerated() where line.contains("BenchClient(configuration:") {
+        if line.contains("BenchClient(configuration: $0)") { continue }  // engine default: hydrated
+        if raw[n].contains("SESSION_EXEMPT") { continue }  // login, which obtains the session
+        if line.contains("startingConfiguration") { continue }  // built inline from the right source
+
+        // Otherwise the argument must be a local whose assignment came from startingConfiguration.
+        var ok = false
+        if let arg = line.range(of: "BenchClient(configuration: ").map({ line[$0.upperBound...] })
+          .map({ String($0.prefix(while: { $0 != ")" && $0 != "," })) })
+        {
+          let name = arg.trimmingCharacters(in: .whitespaces)
+          if !name.isEmpty {
+            for back in stride(from: n - 1, through: max(0, n - 20), by: -1)
+            where code[back].contains("\(name) =") || code[back].contains("\(name):") {
+              if code[back].contains("startingConfiguration") { ok = true }
+              break
+            }
+          }
+        }
+        if !ok {
+          offenders.append(
+            "\(url.lastPathComponent):\(n + 1)  \(line.trimmingCharacters(in: .whitespaces))")
+        }
+      }
+    }
+    #expect(
+      offenders.isEmpty,
+      "client built from a configuration that carries no keychain session: \(offenders)")
+  }
+
   // MARK: - The other half of the ruling: config never holds it
 
   /// The session is stripped at the persistence boundary, so no future writer can put a token on

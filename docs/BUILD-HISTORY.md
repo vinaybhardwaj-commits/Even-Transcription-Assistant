@@ -185,3 +185,22 @@ was already being called for `installID` and the session it returned was discard
 
 463 Swift tests in 41 suites. Third instance of "a stated guarantee is not an implemented one";
 see PRD §12.7 for the list.
+
+## Install and fleet, R2 follow-up 3 — the same bug twice (8 Sep 2026, 0.1.3)
+0.1.2 carried the keychain-read fix and still polled `missingSessionCookie`. `RoomEngine.load`
+hydrated the session and handed it to `remoteFactory`; the CLI's `run` passed
+`remoteFactory: { _ in bench }` — a factory that ignores its argument — with `bench` built from
+`loadConfiguration()`. The correct value was computed, passed, and discarded.
+
+- **`RoomEngine.startingConfiguration` is now the single source** of a starting configuration:
+  disk + keychain session, or a `needs_enrol` refusal. `load`, `run` and `markConsult` all use it.
+  `markConsult` had the identical defect and would have posted unauthenticated.
+- **`login` is the one exemption**, marked `SESSION_EXEMPT` in source — it is the verb that obtains
+  a session, so it starts without one by definition.
+- **A source-level guard** fails on any client built from a bare on-disk configuration. Its first
+  version did NOT discriminate: it matched the word `startingConfiguration` in the comment above
+  the offending line and passed with the bug reintroduced. It now strips comments before applying
+  the rule, and is verified to fail with 0.1.2's bug restored and pass on revert.
+
+466 Swift tests in 41 suites. Fourth instance of "a stated guarantee is not an implemented one" —
+this time the guarantee was implemented AND tested, and the test asserted the half that worked.

@@ -146,7 +146,10 @@ private enum RoomRecorderCLI {
         defer { memset(pointer, 0, strlen(pointer)) }
         guard !pin.isEmpty else { throw CLIError("PIN cannot be empty") }
         let persistence = RoomPersistence(root: root)
-        let client = BenchClient(configuration: try persistence.loadConfiguration())
+        // THE ONE LEGITIMATE EXCEPTION to "build clients from startingConfiguration". `login`
+        // is the verb that OBTAINS a session by exchanging a PIN, so by definition it starts
+        // without one and must not refuse for lack of it.
+        let client = BenchClient(configuration: try persistence.loadConfiguration())  // SESSION_EXEMPT
         let response = try await client.login(pin: pin)
         let loggedIn = await client.currentConfiguration()
         // The session goes to the keychain, not to config.json — `saveConfiguration` strips it
@@ -169,7 +172,10 @@ private enum RoomRecorderCLI {
 
       case "run":
         try arguments.rejectOptions(except: ["--root"])
-        let configuration = try RoomPersistence(root: root).loadConfiguration()
+        // NOT `loadConfiguration()`. That returns what is on disk, and §5.4 keeps no session
+        // there, so a client built from it polls unauthenticated for ever. `startingConfiguration`
+        // is the one place that adds the keychain session, and it refuses if there is none.
+        let configuration = try RoomEngine.startingConfiguration(rootURL: root)
         let bench = BenchClient(configuration: configuration)
         let recovery: (any RoomRetainedArchiveRecovering)?
         if configuration.retainedArchiveRecoveryEnabled {

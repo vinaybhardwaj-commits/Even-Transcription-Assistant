@@ -428,40 +428,31 @@ public actor RoomEngine {
   private var retainedArchiveRecoveryTask: Task<Void, Never>?
   private var retainedArchiveRecoveryState: RoomRetainedArchiveRecoveryState?
 
-  public static func load(
+  /// The configuration an engine starts from: what is on disk, plus the session from the keychain.
+  ///
+  /// ─── EVERY CLIENT MUST BE BUILT FROM THIS, NOT FROM `loadConfiguration()` ────────────────
+  /// V's ruling of 8 September 2026 put the keychain read in `RoomEngine`. The first attempt put
+  /// it inside `load` only, and that was not enough: the CLI's `run` builds a `BenchClient` of its
+  /// own for the retained-archive wire and passed `remoteFactory: { _ in bench }`. The factory
+  /// IGNORES ITS ARGUMENT, so the hydrated configuration `load` handed it was discarded and the
+  /// app polled with the same unauthenticated client as before — `missingSessionCookie`, again,
+  /// from a build that was supposed to have fixed it.
+  ///
+  /// Exposing the hydration is what makes that impossible: there is one place a starting
+  /// configuration comes from, it always carries the session, and a caller that wants a client
+  /// has to come through here to get a configuration at all.
+  ///
+  /// THE SESSION IS IN MEMORY ONLY — `saveConfiguration` strips it on the way to disk.
+  public static func startingConfiguration(
     rootURL: URL = defaultRootURL,
-    /// Where the session comes from. Injected so a test can prove the read without touching the
-    /// real login keychain — the live room's session lives in it and must not be disturbed.
-    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() },
-    remoteFactory: @Sendable (RoomConfiguration) -> any RoomEngineRemote = {
-      BenchClient(configuration: $0)
-    },
-    captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
-    pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
-    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil,
-    residentRuntimeFactory: RoomResidentRuntimeFactory? = nil
-  ) async throws -> RoomEngine {
+    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() }
+  ) throws -> RoomConfiguration {
     let persistence = RoomPersistence(root: rootURL)
     var configuration = try persistence.loadConfiguration()
-
-    // ─── THE SESSION COMES FROM THE KEYCHAIN, HERE, WHERE THE CLIENT IS BUILT ──────────────
-    // V's ruling, 8 September 2026. §5.4 said the session lives in the keychain and config.json
-    // holds no token. Half of that was implemented: `enrol` wrote the keychain and nilled the
-    // config field, and NOTHING EVER READ IT BACK. `RoomKeychain.load()` was already called a few
-    // lines below for `installID` and the session it returned was discarded, so every poll went
-    // out with no `eta_room_session` cookie and came back `missingSessionCookie`. Home Office sat
-    // enrolled and silent because of it.
-    //
-    // It is loaded in `load` rather than in the CLI's `run` case on purpose: every entry point
-    // that builds an engine gets an authenticated client, not just the one verb someone
-    // remembered to wire up. That is the same mistake in a different place.
-    //
-    // The hydrated value is IN MEMORY ONLY. `saveConfiguration` strips it on the way to disk.
     let enrolment = enrolmentReader()
     guard let session = enrolment?.session, !session.isEmpty else {
-      // REFUSE LOUDLY AND STOP. Polling unauthenticated in a loop is the one thing this must not
-      // do: it cannot succeed, it buries the real cause under a retry backoff, and on the server
-      // it looks like a room that is merely offline.
+      // REFUSE LOUDLY AND STOP. Polling unauthenticated in a loop cannot succeed, buries the real
+      // cause under a retry backoff, and on the server looks like a room that is merely offline.
       try? persistence.saveStatus(
         RoomRecorderStatus(
           state: .needsEnrol,
@@ -481,7 +472,24 @@ public actor RoomEngine {
       throw RoomEngineError.needsEnrolment
     }
     configuration.etaRoomSession = session
+    return configuration
+  }
 
+  public static func load(
+    rootURL: URL = defaultRootURL,
+    /// Where the session comes from. Injected so a test can prove the read without touching the
+    /// real login keychain — the live room's session lives in it and must not be disturbed.
+    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() },
+    remoteFactory: @Sendable (RoomConfiguration) -> any RoomEngineRemote = {
+      BenchClient(configuration: $0)
+    },
+    captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
+    pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
+    retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil,
+    residentRuntimeFactory: RoomResidentRuntimeFactory? = nil
+  ) async throws -> RoomEngine {
+    let persistence = RoomPersistence(root: rootURL)
+    let configuration = try startingConfiguration(rootURL: rootURL, enrolmentReader: enrolmentReader)
     let eligibility = configuration.residentArchiveEligibility(archiveRootURL: persistence.root)
     switch eligibility {
     case .disabled, .eligible:
@@ -837,7 +845,9 @@ public actor RoomEngine {
     -> ConsultMarkResponse
   {
     let persistence = RoomPersistence(root: rootURL)
-    let configuration = try persistence.loadConfiguration()
+    // Same rule as `run`: a client is built from a configuration that carries the keychain
+    // session, never from the bare on-disk one. `mark` posts to the server like any other verb.
+    let configuration = try startingConfiguration(rootURL: rootURL)
     let status = try? persistence.loadStatus()
     return try await BenchClient(configuration: configuration).markConsult(
       sessionID: status?.sessionID,

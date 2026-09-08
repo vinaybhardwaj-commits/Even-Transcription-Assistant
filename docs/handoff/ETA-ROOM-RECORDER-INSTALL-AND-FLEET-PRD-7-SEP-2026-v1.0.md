@@ -731,3 +731,33 @@ exit would have launchd restart it for ever.
 Each was a sentence everyone believed. In all three the half with a test was the half that was
 real; the other half had prose. `input_device_name` and the keychain read now both have tests
 because of this, and §12.6's device rule is enforced by `applyEnrolment` rather than by a comment.
+
+### 12.8 The same bug twice — 0.1.2 fixed the read and still could not poll
+
+0.1.2 shipped §12.7's fix and the re-paste polled with `missingSessionCookie` exactly as before.
+
+`RoomEngine.load` hydrated the session correctly and handed it to `remoteFactory`. The CLI's `run`
+passed `remoteFactory: { _ in bench }` — **a factory that ignores its argument** — with `bench`
+built from `loadConfiguration()`, which by §5.4 carries no session. The hydrated configuration was
+computed, passed, and discarded.
+
+The tests did not catch it and could not have. `loadHandsTheKeychainSessionToTheClientItBuilds`
+asserts the factory RECEIVES the session, which was true. Production's factory threw it away.
+
+**The fix.** `RoomEngine.startingConfiguration(rootURL:enrolmentReader:)` is now the single source
+of a starting configuration: it loads from disk, adds the keychain session, and refuses with
+`needs_enrol` when there is none. `load` uses it, `run` uses it, and `markConsult` — which had the
+same defect and would have posted unauthenticated — uses it. `login` is the one exemption and is
+marked `SESSION_EXEMPT` in the source, because it is the verb that obtains a session.
+
+**The guard is source-level, because the defect is in what a caller does with a correct value.**
+`noClientIsBuiltFromABareOnDiskConfiguration` walks `Sources/` and fails on any `BenchClient`
+built from a configuration that did not come through `startingConfiguration`. Its first version
+did not discriminate — it scanned raw lines and was satisfied by the word `startingConfiguration`
+appearing in the COMMENT above the offending call, so it passed with the bug deliberately
+reintroduced. It now strips comments before applying the rule, and reads the exemption marker from
+the raw line. Verified in both directions: passes clean, fails with 0.1.2's bug restored, passes
+again on revert.
+
+**Fourth instance of the standing rule**, and the sharpest: the guarantee was implemented, tested,
+and still not delivered, because the test asserted the half that worked.
