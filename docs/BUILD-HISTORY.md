@@ -122,3 +122,8 @@ X1 closed: in-house identity `EvenScribe Room Recorder Code Signing 1`
 
 Deployment target is set explicitly to macOS 15.0; the toolchain on the build Mac defaults to
 `macosx28.0`, which would not launch on the clinic Macs.
+
+**Fix, same day, first real run of the script:** `swift build --product a --product b` builds only
+`b`. SwiftPM's `--product` is single-valued and silently keeps the last one, so the run died at
+the assemble step with `room-recorder was not built` after happily building `tapewriter`. The
+build step now runs one invocation per product.

@@ -109,13 +109,17 @@ say "Encoder: ${FFMPEG_SOURCE}"
 # The toolchain on this Mac defaults to macosx28.0. Left implicit, the bundle would refuse to
 # launch on the macOS 15 clinic Macs (D4) with a message no operator could act on. Ratified 8 Sep.
 say "Building release binaries for macOS ${MIN_MACOS}"
-(
-  cd "$PACKAGE_DIR"
-  swift build -c release \
-    --product room-recorder \
-    --product tapewriter \
-    -Xswiftc -target -Xswiftc "$(/usr/bin/uname -m)-apple-macosx${MIN_MACOS}"
-)
+# One invocation per product. SwiftPM's `--product` is single-valued: passing it twice does not
+# build two products, it silently keeps the last one, and the build then dies at the assemble step
+# with `room-recorder was not built`. Observed 8 Sep on this script's first real run.
+for product in room-recorder tapewriter; do
+  (
+    cd "$PACKAGE_DIR"
+    swift build -c release \
+      --product "$product" \
+      -Xswiftc -target -Xswiftc "$(/usr/bin/uname -m)-apple-macosx${MIN_MACOS}"
+  )
+done
 BIN_DIR="$(cd "$PACKAGE_DIR" && swift build -c release --show-bin-path)"
 [ -x "${BIN_DIR}/room-recorder" ] || die "room-recorder was not built"
 [ -x "${BIN_DIR}/tapewriter" ] || die "tapewriter was not built"
