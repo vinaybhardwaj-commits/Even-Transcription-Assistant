@@ -330,6 +330,10 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case uploadPending = "upload_pending"
     case failed
     case offline
+    /// The keychain holds no session, so this install cannot authenticate and must not poll.
+    /// Distinct from `offline`, which means "the server is unreachable, keep trying". This one
+    /// means "there is nothing to try with" — a human has to re-paste the install command.
+    case needsEnrol = "needs_enrol"
   }
 
   public var state: State
@@ -379,8 +383,18 @@ public struct RoomPersistence: Sendable {
     root.appendingPathComponent(Self.statusFileName, isDirectory: false)
   }
 
+  /// §5.4, and V's ruling of 8 September 2026: THE KEYCHAIN IS THE ONLY HOME FOR THE SESSION.
+  ///
+  /// The session is stripped HERE, at the single point where a configuration becomes a file, so
+  /// no caller can put a token on disk by forgetting to. `enrol` already nils it deliberately;
+  /// this makes the guarantee structural instead of dependent on every future writer remembering.
+  ///
+  /// The in-memory copy keeps its session — `RoomEngine.load` hydrates one from the keychain on
+  /// every start, and that value must survive being handed to the client.
   public func saveConfiguration(_ configuration: RoomConfiguration) throws {
-    try write(configuration, to: configurationURL)
+    var onDisk = configuration
+    onDisk.etaRoomSession = nil
+    try write(onDisk, to: configurationURL)
   }
 
   public func loadConfiguration() throws -> RoomConfiguration {

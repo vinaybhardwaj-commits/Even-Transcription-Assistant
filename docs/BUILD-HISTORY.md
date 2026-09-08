@@ -165,3 +165,23 @@ archive index — from the `hw.uuid` sysctl, which macOS 26/27 removed.
   `error 6` was `invalidDeviceUID`, not `unsafeRoot`. `RoomInstallDeviceTests` pins the mapping.
 
 459 Swift tests in 40 suites; 62 server unit tests.
+
+## Install and fleet, R2 follow-up 2 — the session had no reader (8 Sep 2026, 0.1.2)
+The re-paste enrolled and never polled: `{"state":"offline","last_error":"missingSessionCookie"}`
+with a valid 365-day session sitting in the keychain. §5.4's guarantee was half-built — `enrol`
+wrote the item and nilled the config field, and nothing ever read it back. `RoomKeychain.load()`
+was already being called for `installID` and the session it returned was discarded.
+
+- **`RoomEngine.load` hydrates the session from the keychain**, where the client is constructed, so
+  every entry point gets an authenticated client rather than only `run`.
+- **No session is a loud refusal**, not a retry: status `needs_enrol` (a distinct state, not
+  `offline`), a stderr explanation, and exit ZERO so `KeepAlive { SuccessfulExit: false }` does not
+  restart it for ever. The client is never constructed, so there is no unauthenticated poll loop.
+- **`saveConfiguration` strips the session**, making "config never holds it" structural instead of
+  dependent on every writer remembering. `login` now writes the keychain too.
+- **Tests cover the READ.** The suite covered `enrol` writing the item; nothing covered reading it.
+  One pre-existing test asserted the opposite guarantee — that `config.json` contains
+  `eta_room_session` — and moved with the ruling.
+
+463 Swift tests in 41 suites. Third instance of "a stated guarantee is not an implemented one";
+see PRD §12.7 for the list.

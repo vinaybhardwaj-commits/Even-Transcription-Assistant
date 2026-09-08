@@ -4,6 +4,9 @@ import Foundation
 import TapeCore
 
 public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
+  /// The keychain holds no session for this install. The app cannot authenticate and must not
+  /// poll — see `RoomEngine.load`.
+  case needsEnrolment
   case alreadyRunning
   case roomPaused
   case noActiveSession
@@ -28,6 +31,8 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
 
   public var errorDescription: String? {
     switch self {
+    case .needsEnrolment:
+      return "no room session in the keychain; this install is not enrolled"
     case .alreadyRunning: return "another room-recorder is already running under this root"
     case .roomPaused: return "room_paused"
     case .noActiveSession: return "no_active_session"
@@ -425,6 +430,9 @@ public actor RoomEngine {
 
   public static func load(
     rootURL: URL = defaultRootURL,
+    /// Where the session comes from. Injected so a test can prove the read without touching the
+    /// real login keychain — the live room's session lives in it and must not be disturbed.
+    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() },
     remoteFactory: @Sendable (RoomConfiguration) -> any RoomEngineRemote = {
       BenchClient(configuration: $0)
     },
@@ -434,7 +442,46 @@ public actor RoomEngine {
     residentRuntimeFactory: RoomResidentRuntimeFactory? = nil
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
-    let configuration = try persistence.loadConfiguration()
+    var configuration = try persistence.loadConfiguration()
+
+    // ─── THE SESSION COMES FROM THE KEYCHAIN, HERE, WHERE THE CLIENT IS BUILT ──────────────
+    // V's ruling, 8 September 2026. §5.4 said the session lives in the keychain and config.json
+    // holds no token. Half of that was implemented: `enrol` wrote the keychain and nilled the
+    // config field, and NOTHING EVER READ IT BACK. `RoomKeychain.load()` was already called a few
+    // lines below for `installID` and the session it returned was discarded, so every poll went
+    // out with no `eta_room_session` cookie and came back `missingSessionCookie`. Home Office sat
+    // enrolled and silent because of it.
+    //
+    // It is loaded in `load` rather than in the CLI's `run` case on purpose: every entry point
+    // that builds an engine gets an authenticated client, not just the one verb someone
+    // remembered to wire up. That is the same mistake in a different place.
+    //
+    // The hydrated value is IN MEMORY ONLY. `saveConfiguration` strips it on the way to disk.
+    let enrolment = enrolmentReader()
+    guard let session = enrolment?.session, !session.isEmpty else {
+      // REFUSE LOUDLY AND STOP. Polling unauthenticated in a loop is the one thing this must not
+      // do: it cannot succeed, it buries the real cause under a retry backoff, and on the server
+      // it looks like a room that is merely offline.
+      try? persistence.saveStatus(
+        RoomRecorderStatus(
+          state: .needsEnrol,
+          sessionID: nil,
+          pendingPieceCount: 0,
+          lastError: "no session in the keychain; this install is not enrolled",
+          updatedAt: Date()))
+      FileHandle.standardError.write(
+        Data(
+          """
+          room-recorder: no room session in the keychain (service \
+          \(RoomKeychain.service)). This install cannot authenticate and will not poll. \
+          Re-run the install command for this room from /admin/bench — enrolment is what writes \
+          the session.
+
+          """.utf8))
+      throw RoomEngineError.needsEnrolment
+    }
+    configuration.etaRoomSession = session
+
     let eligibility = configuration.residentArchiveEligibility(archiveRootURL: persistence.root)
     switch eligibility {
     case .disabled, .eligible:

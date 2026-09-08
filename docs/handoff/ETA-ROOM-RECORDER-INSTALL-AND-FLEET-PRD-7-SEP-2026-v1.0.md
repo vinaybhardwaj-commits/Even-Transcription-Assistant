@@ -692,3 +692,42 @@ the whole mapping.
 | `hw.uuid` | Deleted entirely, not repaired. Nothing needs a machine identifier — `install_id` is server-minted. If a future caller needs one, `IOPlatformUUID` via IOKit is the supported route. |
 
 Migration `0077_install_input_device_name` adds the column. Not run.
+
+### 12.7 Ruled 8 September 2026 — the session had no reader
+
+The re-paste enrolled cleanly and then never polled. `status.json` read
+`{"state":"offline","last_error":"missingSessionCookie"}` while the machine held a perfectly good
+365-day session.
+
+**Cause.** §5.4 says the session lives in the keychain and `config.json` holds no token. Only the
+writing half existed. `enrol` saved the record and nilled `etaRoomSession`; `run` built its
+`BenchClient` from `config.json` alone. `RoomKeychain.load()` WAS already called in
+`RoomEngine.init` — for `installID` and `listenerTabID` — and the `session` field it returned was
+read and discarded. `enrolled.session.token` appeared exactly once in the whole codebase, at the
+write. Every poll went out with no cookie.
+
+**V's ruling.**
+
+| | |
+|---|---|
+| Home | The keychain is the only home for the session. `config.json` never holds it. |
+| Where | Loaded in `RoomEngine.load`, where the client is constructed — so every entry point gets it, not only `run`. |
+| No session | Refuse loudly with a distinct state `needs_enrol`, and stop. Never poll unauthenticated in a loop. |
+| Test | Prove the READ. The suite covered `enrol` writing the item and nothing covered anything reading it. |
+
+Enforcement is structural, not conventional: `RoomPersistence.saveConfiguration` strips the session
+on the way to disk, so no future writer can put a token in a file by forgetting to. The refusal
+exits ZERO, because the LaunchAgent carries `KeepAlive = { SuccessfulExit: false }` and a non-zero
+exit would have launchd restart it for ever.
+
+**Third instance of the standing rule.** A stated guarantee is not an implemented one.
+
+1. R1: `room_bootstrap_token.install_id` was specified as a foreign key in §4.1 and shipped without
+   one. Caught by V reading the migration against the spec (§12.3 item 4, fixed by `0076`).
+2. R2: `production_ready` was asserted for the vendored encoder while the bundle it described was
+   signed after the verify step, so the zip carried a broken signature and the build reported green.
+3. R2: §5.4's "the session lives in the keychain" — written, never read.
+
+Each was a sentence everyone believed. In all three the half with a test was the half that was
+real; the other half had prose. `input_device_name` and the keychain read now both have tests
+because of this, and §12.6's device rule is enforced by `applyEnrolment` rather than by a comment.

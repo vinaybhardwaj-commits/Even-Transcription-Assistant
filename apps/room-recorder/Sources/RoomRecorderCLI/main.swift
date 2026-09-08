@@ -148,7 +148,23 @@ private enum RoomRecorderCLI {
         let persistence = RoomPersistence(root: root)
         let client = BenchClient(configuration: try persistence.loadConfiguration())
         let response = try await client.login(pin: pin)
-        try persistence.saveConfiguration(await client.currentConfiguration())
+        let loggedIn = await client.currentConfiguration()
+        // The session goes to the keychain, not to config.json — `saveConfiguration` strips it
+        // now, so writing it there would silently lose it. This verb predates §5.3's enrol and
+        // is kept working rather than left to fail quietly.
+        guard let installID = loggedIn.installID, let session = loggedIn.etaRoomSession else {
+          throw CLIError(
+            "login succeeded but this room has no install id to bind the session to. Enrol this Mac with the install command from /admin/bench.")
+        }
+        try RoomKeychain.save(
+          RoomKeychainRecord(
+            session: session,
+            installID: installID,
+            roomSlug: loggedIn.roomSlug,
+            roomName: response.room.name,
+            origin: loggedIn.origin.absoluteString
+          ))
+        try persistence.saveConfiguration(loggedIn)
         print("Logged in to \(response.room.name)")
 
       case "run":
@@ -250,6 +266,13 @@ private enum RoomRecorderCLI {
       default:
         throw CLIError("unknown command: \(arguments.command)\n\(usage)")
       }
+    } catch RoomEngineError.needsEnrolment {
+      // EXIT ZERO, and the zero is the whole point. The LaunchAgent carries
+      // `KeepAlive = { SuccessfulExit: false }`, so a non-zero exit here would have launchd
+      // restart the app immediately, for ever, each time failing the same way — the thrash §2.4
+      // exists to prevent. RoomEngine.load has already written `needs_enrol` and said why on
+      // stderr; there is nothing left to retry, so the process stops and stays stopped.
+      exit(0)
     } catch {
       let message = "room-recorder: \(error.localizedDescription)\n"
       FileHandle.standardError.write(Data(message.utf8))

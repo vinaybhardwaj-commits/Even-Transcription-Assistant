@@ -24,14 +24,21 @@
       try persistence.saveConfiguration(configuration)
       try persistence.saveStatus(status)
 
-      #expect(try persistence.loadConfiguration() == configuration)
+      // The round trip is equal EXCEPT for the session, which never reaches disk — §5.4 and V's
+      // ruling of 8 Sep. This assertion used to read `== configuration` and to require
+      // `eta_room_session` to be PRESENT in the file; both were correct until the keychain became
+      // the session's only home, and both are now the opposite of the guarantee.
+      var withoutSession = configuration
+      withoutSession.etaRoomSession = nil
+      #expect(try persistence.loadConfiguration() == withoutSession)
       #expect(try persistence.loadStatus() == status)
       #expect(permissions(of: root) == 0o700)
       #expect(permissions(of: persistence.configurationURL) == 0o600)
       #expect(permissions(of: persistence.statusURL) == 0o600)
       let configJSON = try String(contentsOf: persistence.configurationURL, encoding: .utf8)
       #expect(!configJSON.contains("\"pin\""))
-      #expect(configJSON.contains("\"eta_room_session\""))
+      #expect(!configJSON.contains("\"eta_room_session\""))
+      #expect(!configJSON.contains("signed.jwt"))
     }
 
     @Test func retainedArchiveRecoveryFlagIsPersistedAndDefaultsOffForExistingConfig() throws {
