@@ -309,7 +309,7 @@ Homebrew ffmpeg. `Resources/LGPL-NOTICES.txt` carries the FFmpeg and libopus not
 | Key | Value |
 |---|---|
 | `CFBundleIdentifier` | `com.evenscribe.room-recorder` |
-| `NSMicrophoneUsageDescription` | UNKNOWN, builder to establish. The string is patient-facing on the room Mac. V approves the wording before Build R2 ships. |
+| `NSMicrophoneUsageDescription` | **APPROVED by V, 8 Sep 2026:** "EvenScribe records this consultation room so the clinician's notes can be written from what was said." Lives in `apps/room-recorder/Packaging/MicrophoneUsageDescription.txt` so changing it is one line and a rebuild. |
 | `LSUIElement` | `true` |
 | `LSMinimumSystemVersion` | `15.0` |
 | `CFBundleShortVersionString` | the build version, written by the packaging script |
@@ -531,7 +531,7 @@ reports the result before the build is accepted.
    and a poll reporting `launch_agent_loaded = true` and `launched_by = launchd`.
 
 Two values in this document are UNKNOWN and the builder establishes them as well. They are the
-`NSMicrophoneUsageDescription` string of §5.2, which V approves, and the last-seen alarm window
+`NSMicrophoneUsageDescription` string of §5.2 (**closed 8 Sep**, see §12.4) and the last-seen alarm window
 of §6.
 
 ---
@@ -600,3 +600,49 @@ Build R1 shipped and was promoted the same evening. Production serves `61b6e13`.
 5. A kiosk recording across a deploy is still unobserved.
 6. Prerequisites X1 (certificate) and X3 (build Mac) are still open. R2 cannot ship a zip
    without them.
+
+
+### 12.4 Ratified 8 September 2026
+
+**X1 CLOSED.** The in-house signing identity exists, is trusted for code signing, and has been
+proven to sign and verify.
+
+| | |
+|---|---|
+| Common name | `EvenScribe Room Recorder Code Signing 1` |
+| Identity SHA-1 | `187DD424FB866204111113D60C6F88A21D098EDB` |
+| Certificate SHA-256 | `903EDCE6F78C2199DFF45939D492041FED0C0A8394DDABB985278349BB281643` |
+| Subject | `CN=EvenScribe Room Recorder Code Signing 1, C=IN` |
+| Validity | 7 Sep 2026 → 4 Sep 2036 |
+| Location | login keychain, `Vinays-Mac-mini-3` |
+
+Both values are public. The SHA-1 is pinned in `Packaging/build-bundle.sh` — by hash rather than
+by name, because a name is ambiguous and D1 binds the microphone grant on all four Macs to this
+exact identity. Proven 8 Sep: a scratch binary signed with it reads
+`Authority=EvenScribe Room Recorder Code Signing 1`, satisfies
+`-R '= anchor trusted and certificate leaf = H"187dd424…"'`, and FAILS that requirement when
+pinned to any other leaf — so the check discriminates rather than merely passing.
+
+**ESCROW IS STILL OPEN AND IS V'S.** The private key was never exported. From the first clinic
+install onwards D1 makes it unlosable without a fresh microphone grant on every Mac, so the
+`.p12` export should happen before Build R2's first paste, not after.
+
+**BUILDS HAPPEN AT THE CONSOLE.** No scripted `unlock-keychain`, no second keychain. Established
+8 Sep in both directions: `codesign` over SSH fails with `errSecInternalComponent`; the same
+command at the console succeeds. `security find-identity -v` succeeds in BOTH, so it cannot be
+used as the guard — `build-bundle.sh` trial-signs a disposable file in preflight instead.
+
+**DEPLOYMENT TARGET IS macOS 15.0, SET EXPLICITLY.** The toolchain on the build Mac defaults to
+`macosx28.0`, which would not launch on the clinic Macs.
+
+### 12.5 Carried out of Build R2's first session
+
+1. The Swift test suite could not be compiled: all 36 test files use swift-testing and SwiftPM
+   under Command Line Tools cannot resolve the `Testing` module. Full Xcode on the build Mac
+   closes this. Three `RoomEngineRemote` test doubles were updated for the new `install:`
+   parameter and are **unverified** until it is.
+2. `production_ready` in `build-provenance.json` flips in `Packaging/build-bundle.sh` after
+   signing, not in `Encoder/build-ffmpeg.sh` as the R2 kickoff worded it. That script signs
+   nothing, so the flag there would have been false. Deviation flagged, intent met.
+3. Items 1 and 7 of Build R1's acceptance remain partial (§12.3), both needing a SQL path into
+   production.
