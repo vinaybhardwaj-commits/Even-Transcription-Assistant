@@ -250,7 +250,10 @@
         previousPollAt: "2026-08-27T10:00:00.000Z",
         recordingSessionID: "bs_a",
         paused: false,
-        primaryLevels: levels
+        primaryLevels: levels,
+        // nil, and the exact-equality assertion above is the point: the seven install fields
+        // appear in the query ONLY when they are supplied. §5.5's invariant cuts both ways.
+        install: nil
       )
 
       #expect(answer.commands.first?.kind == .pauseDay)
@@ -273,7 +276,8 @@
       _ = try await client.pollCommands(
         tabID: "app_device",
         paused: false,
-        primaryLevels: nil)
+        primaryLevels: nil,
+        install: nil)
     }
 
     @Test func primaryPresignOmitsSourceAndKeepsAlreadyVerifiedSignal() async throws {

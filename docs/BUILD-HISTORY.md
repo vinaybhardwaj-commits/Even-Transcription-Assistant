@@ -135,3 +135,10 @@ carried a broken signature while the build reported green — the one output the
 says must never exist. The provenance write now sits between the helper signatures and the bundle
 signature, and the script additionally unpacks the finished zip and verifies *those* bytes against
 the pinned requirement, deleting the zip if they fail.
+
+**Test suite, same day:** §12.5 item 1 is closed without Xcode — CLT 27.0 ships `Testing.framework`
+and `swift test` resolves it. Compiling the suite for the first time exposed two stale
+`pollCommands` call sites in `RoomBenchContractTests.swift` that `148d04d` missed when it made
+`install:` required; the six sites it did update were protocol conformances. Both now pass
+`install: nil` rather than the parameter gaining a default, because a default would let a future
+caller drop the seven fields silently. 451 tests in 39 suites pass.

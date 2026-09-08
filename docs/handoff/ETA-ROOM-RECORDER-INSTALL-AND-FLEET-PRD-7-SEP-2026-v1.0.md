@@ -637,10 +637,16 @@ used as the guard — `build-bundle.sh` trial-signs a disposable file in preflig
 
 ### 12.5 Carried out of Build R2's first session
 
-1. The Swift test suite could not be compiled: all 36 test files use swift-testing and SwiftPM
-   under Command Line Tools cannot resolve the `Testing` module. Full Xcode on the build Mac
-   closes this. Three `RoomEngineRemote` test doubles were updated for the new `install:`
-   parameter and are **unverified** until it is.
+1. ~~The Swift test suite could not be compiled~~ **CLOSED 8 Sep, without Xcode.** Command Line
+   Tools 27.0.0.0.1787197235 ships `Testing.framework`, so `swift test` resolves the module and
+   the macro plugin. Xcode is NOT installed on the build Mac and was not needed. Two caveats
+   stand: `swift test` works only through the Xcode-style build system (`swift build
+   --build-tests` uses the legacy one and cannot load `TestingMacros`), and the framework is not
+   on the runtime search path, so it and `lib_TestingInterop.dylib` must be staged into the
+   `.xctest` bundle before the tests will launch. Staging them into `PackageFrameworks` instead
+   shadows the real framework and silently disables the macros — do not.
+   **451 tests in 39 suites pass.** The three `RoomEngineRemote` test doubles are now verified.
+   Compiling the suite also found two stale `pollCommands` call sites that `148d04d` missed.
 2. `production_ready` in `build-provenance.json` flips in `Packaging/build-bundle.sh` after
    signing, not in `Encoder/build-ffmpeg.sh` as the R2 kickoff worded it. That script signs
    nothing, so the flag there would have been false. Deviation flagged, intent met.
