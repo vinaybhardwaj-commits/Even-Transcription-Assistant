@@ -127,3 +127,11 @@ Deployment target is set explicitly to macOS 15.0; the toolchain on the build Ma
 `b`. SwiftPM's `--product` is single-valued and silently keeps the last one, so the run died at
 the assemble step with `room-recorder was not built` after happily building `tapewriter`. The
 build step now runs one invocation per product.
+
+**Second fix, same run:** the `production_ready` flip rewrote
+`Contents/Resources/Licenses/build-provenance.json` *after* the bundle was signed and *after* the
+verify step passed. `Contents/Resources/` is a sealed resource, so the zip built from that bundle
+carried a broken signature while the build reported green — the one output the script's own header
+says must never exist. The provenance write now sits between the helper signatures and the bundle
+signature, and the script additionally unpacks the finished zip and verifies *those* bytes against
+the pinned requirement, deleting the zip if they fail.

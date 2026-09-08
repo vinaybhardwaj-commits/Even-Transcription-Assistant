@@ -172,33 +172,25 @@ plist_set NSMicrophoneUsageDescription string "$(/bin/cat "${SCRIPT_DIR}/Microph
 # INSIDE OUT, and the order is not stylistic. The outer signature seals the bundle's contents, so
 # a helper signed afterwards invalidates the app's own seal — `codesign --verify --strict` on the
 # bundle would then fail, which is exactly what R3's updater refuses to install.
-say "Signing helpers, then the bundle"
+say "Signing helpers"
 codesign --force --timestamp --options runtime \
   --identifier "$FFMPEG_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/ffmpeg"
 codesign --force --timestamp --options runtime \
   --identifier "$TAPEWRITER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/tapewriter"
-codesign --force --timestamp --options runtime \
-  --identifier "$BUNDLE_ID" --sign "$SIGNING_IDENTITY" "$APP"
 
-# ─── Verify, pinned to our anchor ────────────────────────────────────────────────────────────
-# The same requirement string R3 uses. Verified 8 Sep to discriminate: pinned to a different leaf
-# it fails, so this is a check and not a formality.
-say "Verifying"
-codesign --verify --strict --verbose=4 \
-  -R "= anchor trusted and certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
-  "$APP" || die "the signed bundle does not satisfy the pinned requirement"
-for helper in ffmpeg tapewriter; do
-  codesign --verify --strict "${APP}/Contents/Helpers/${helper}" \
-    || die "helper ${helper} failed verification"
-done
-codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
-
-# ─── The encoder's provenance, now that it IS signed ─────────────────────────────────────────
-# X2 shipped the encoder; `build-provenance.json` still said `production_ready: false` with
-# `reason: "unsigned_encoder_candidate"`, and until this point that was TRUE — build-ffmpeg.sh
-# produces an unsigned candidate and signs nothing. The flag flips here, immediately after the
-# signature exists, and records which certificate made it true. Flipping it inside build-ffmpeg.sh
-# would have put a false statement in a provenance file. See PRD §12, X2.
+# ─── The encoder's provenance, written between the two signatures ────────────────────────────
+# `build-provenance.json` still said `production_ready: false` with `reason:
+# "unsigned_encoder_candidate"`, and until the line above that was TRUE — build-ffmpeg.sh produces
+# an unsigned candidate and signs nothing. The flag flips here, immediately after ffmpeg's
+# signature exists, and records the sha256 of the SIGNED binary plus the certificate that made the
+# statement true. See PRD §12, X2.
+#
+# THE POSITION OF THIS BLOCK IS LOAD-BEARING. It sits after the helpers are signed and before the
+# bundle is, because `Contents/Resources/` is a SEALED resource: written after the outer signature
+# it invalidates the seal, and `codesign --verify --strict` then reports "a sealed resource is
+# missing or invalid". That is exactly what happened on the first real run of this script, 8 Sep —
+# the bundle verified green and the zip built from it was already broken, because the verify ran
+# before the rewrite. It cannot move below the bundle signature again.
 ENCODER_PROVENANCE="${APP}/Contents/Resources/Licenses/build-provenance.json"
 if [ -f "$ENCODER_PROVENANCE" ]; then
   ENCODER_SHA="$(/usr/bin/shasum -a 256 "${APP}/Contents/Helpers/ffmpeg" | /usr/bin/awk '{print $1}')"
@@ -215,6 +207,25 @@ PROV
   say "Encoder provenance: production_ready=true"
 fi
 
+say "Signing the bundle"
+codesign --force --timestamp --options runtime \
+  --identifier "$BUNDLE_ID" --sign "$SIGNING_IDENTITY" "$APP"
+
+# ─── Verify, pinned to our anchor ────────────────────────────────────────────────────────────
+# The same requirement string R3 uses. Verified 8 Sep to discriminate: pinned to a different leaf
+# it fails, so this is a check and not a formality.
+say "Verifying"
+codesign --verify --strict --verbose=4 \
+  -R "= anchor trusted and certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
+  "$APP" || die "the signed bundle does not satisfy the pinned requirement"
+for helper in ffmpeg tapewriter; do
+  codesign --verify --strict "${APP}/Contents/Helpers/${helper}" \
+    || die "helper ${helper} failed verification"
+done
+codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
+
+# NOTHING MAY TOUCH THE BUNDLE BELOW THIS LINE except reading it into the zip.
+
 # ─── Zip, hash, manifest ─────────────────────────────────────────────────────────────────────
 # `ditto -c -k --keepParent` is the counterpart of the `ditto -x -k` the §4.4 script runs, and it
 # preserves the resource forks and extended attributes a signature depends on. `zip(1)` does not,
@@ -223,6 +234,19 @@ say "Zipping"
 ZIP="${OUTPUT_ROOT}/EvenScribe-Room-Recorder-${VERSION}.zip"
 /bin/rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
+
+# ─── Verify what is actually IN the zip ──────────────────────────────────────────────────────
+# The verify above checked the staged bundle. This one checks the shipped bytes, unpacked the same
+# way the §4.4 install script unpacks them, and it is the check that would have caught 8 Sep's
+# broken zip on its own. It also proves `ditto` carried the signature across the round trip, which
+# is the whole reason `zip(1)` is not used here.
+say "Verifying the unpacked zip"
+ROUNDTRIP="$(/usr/bin/mktemp -d)"
+/usr/bin/ditto -x -k "$ZIP" "$ROUNDTRIP"
+codesign --verify --strict --deep \
+  -R "= anchor trusted and certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
+  "${ROUNDTRIP}/${APP_NAME}" || { /bin/rm -rf "$ROUNDTRIP"; /bin/rm -f "$ZIP"; die "the ZIP does not verify. It has been deleted; nothing publishable was left behind."; }
+/bin/rm -rf "$ROUNDTRIP"
 
 SHA256="$(/usr/bin/shasum -a 256 "$ZIP" | /usr/bin/awk '{print $1}')"
 SIZE="$(/usr/bin/stat -f %z "$ZIP")"
