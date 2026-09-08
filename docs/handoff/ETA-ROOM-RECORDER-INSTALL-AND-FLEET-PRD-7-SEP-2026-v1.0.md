@@ -794,11 +794,70 @@ than to the designated requirement, then every new version loses the microphone 
 item 3 — "the microphone permission unchanged across both swaps, with no new macOS prompt" —
 cannot hold. That must be settled before R3, and probably before the clinic installs.
 
-Per §9's own instruction — "If the prompt does not appear, the builder stops and reports" — the
-builder stopped. Open for V: whether to make the resident app a real `NSApplication` so TCC can
+Per §9's own instruction the builder stopped and reported. **§12.10 resolves it.** Open for V: whether to make the resident app a real `NSApplication` so TCC can
 present the prompt, or to establish a different grant path.
 
 **Two TCC entries exist on the build Mac** — the unsigned 27 Aug copy under `EvenScribeBench` and
 the current signed bundle. The unsigned one is keyed by path and can never satisfy the signed app's
 request; it is stale and should be removed, mainly because a pane that reads "on" while the app
 reads `denied` is how an operator loses an hour.
+
+### 12.10 §9 hazard 1 CLOSED — the hardened runtime, and what D1 depends on
+
+**Root cause: the bundle was signed `--options runtime` and carried NO ENTITLEMENTS.** Under the
+hardened runtime a process may not open an audio input without
+`com.apple.security.device.audio-input`. The refusal happens INSIDE the process:
+`AVCaptureDevice.requestAccess` returns denied immediately, no dialog is drawn, and `tccd` is never
+asked — its log has nothing to say about the app at all.
+
+That single fact explains every symptom: the instant denial, the missing prompt, the empty TCC log,
+and why `tccutil reset` and switching the app on by hand in System Settings both changed nothing.
+
+Two earlier fixes were each NECESSARY AND NEITHER SUFFICIENT, which is why the cause took three
+cycles to find:
+
+1. The helper was doing the asking (§12.9). tapewriter is a bare Mach-O child and TCC attributes to
+   the responsible process, which is the bundled app.
+2. The resident app was a plain command-line binary with no run loop. It is now an `NSApplication`
+   with `.accessory` policy — no Dock icon, no menu bar, no window, which is what §5.2's
+   `LSUIElement` always meant, now true of the process and not only of the plist. R3 needs this
+   shape anyway: a self-update needs an app identity to replace.
+
+`build-bundle.sh` now FAILS the build if the entitlement is absent from the signed bytes. A bundle
+that signs cleanly without it looks perfect and cannot open a microphone.
+
+**THE GRANT SURVIVES A VERSION SWAP — D1 HOLDS.** The open question of §12.9 is answered. 0.1.6 held
+the grant; 0.1.7 was installed by the ordinary paste with NO `tccutil reset`:
+
+| | |
+|---|---|
+| cdhash before | `1d5b804bc28d153f71deca9965fb55123688c4c8` |
+| cdhash after | `1e72c93a9cb18a44d496be7f9065e622db7dfdd2` |
+| designated requirement | unchanged — `identifier "com.evenscribe.room-recorder" and certificate leaf = H"187dd424…"` |
+| result | `microphone authorized`, immediately, no prompt |
+
+TCC binds the grant to the DESIGNATED REQUIREMENT, not to the cdhash. R3 acceptance item 3 — "the
+microphone permission unchanged across both swaps, with no new macOS prompt" — is achievable, and
+D1's premise that the in-house certificate carries the grant across versions is sound.
+
+### 12.11 `tape_advancing` was measuring the piece cursor
+
+With the microphone granted, the room recorded for ten minutes, wrote 20 MB of durable audio with a
+growing index and an empty error log — and the card still read `tape=false/streak=0`.
+
+`currentDurableSampleIndex` returned `segment.nextSample`, the PIECE-CUTTING cursor, assigned in
+`publishAvailable` once every five minutes. `tapeIsAdvancing` compares it between polls four seconds
+apart, so it reported false on almost every poll and §6 step 4 — which needs two consecutive polls —
+could essentially never turn done.
+
+It now reads the durable frontier from the index tapewriter appends to. A record lands there only
+after its audio is durable, so the index growing IS §5.5's "durable sample index growing" — one
+`stat` per poll rather than re-reading a file that reaches tens of megabytes over a clinic day.
+
+**Checklist green on 0.1.7**, Home Office, `install_5bt4ue32w3vv`:
+steps 2, 3, 4 and 5 DONE; `tape=true streak=7`, advancing since `05:34:30.711Z`;
+`mic=authorized`; `DEVICE=TONOR TM20 Audio Device`; `launched_by=launchd`; `never_sleep=true`.
+
+**Still open:** the stale unsigned microphone entry. `tccutil` takes bundle identifiers only and the
+old unsigned binary has none, so it cannot be targeted; a bare `tccutil reset Microphone` would wipe
+the working grant too. It needs the "−" button in System Settings, or the old binary moved aside.
