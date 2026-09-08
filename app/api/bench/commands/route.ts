@@ -9,6 +9,7 @@
  *
  * INSTALL AND FLEET §4.3 adds seven OPTIONAL query fields for the native Room Recorder:
  * install_id · app_version · build_sha · mic_state · tape_advancing · never_sleep · launched_by
+ * · input_device_name
  * (plus hostname / hardware_model / os_version, which §6 step 2 renders). A poll carrying
  * install_id also writes last_seen_at and the six state columns on that room_install row; a poll
  * WITHOUT it behaves exactly as it behaves today, which is why the browser kiosk is untouched by
@@ -85,6 +86,7 @@ export async function GET(req: NextRequest) {
         hostname: sp.get("hostname"),
         hardware_model: sp.get("hardware_model"),
         os_version: sp.get("os_version"),
+        input_device_name: sp.get("input_device_name"),
       }
     : undefined;
 

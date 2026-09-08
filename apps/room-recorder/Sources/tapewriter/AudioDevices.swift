@@ -137,3 +137,43 @@ func selectDevice(_ device: AudioDeviceInfo, on engine: AVAudioEngine) throws {
     throw RecorderError("cannot select input device \(device.uid) (OSStatus \(status))")
   }
 }
+
+// MARK: - Public façade for the resident app (Install and Fleet PRD §5.5)
+//
+// The app needs two facts about audio input that only CoreAudio can answer: which device the
+// machine currently defaults to (read once, at enrol) and what a device UID is called right now
+// (read on every poll). Everything above stays internal to the capture target; only these two
+// readings cross the module boundary.
+//
+// BOTH MEASURE, NEITHER DEFAULTS. Nil means "the machine did not answer", which the poll sends as
+// absence so the server's COALESCE keeps the last true value. §5.5's invariant, same as the rest.
+
+/// One audio input device, as the machine reports it at the moment of the call.
+public struct AudioInputDevice: Equatable, Sendable {
+  public let uid: String
+  public let name: String
+
+  public init(uid: String, name: String) {
+    self.uid = uid
+    self.name = name
+  }
+}
+
+public enum AudioInputDevices {
+  /// The machine's CURRENT default audio input. Nil when it has no input device at all.
+  ///
+  /// V's ruling, 8 Sep: enrol takes this and stores its UID. There is no `--device` argument, no
+  /// prompt, and no refusal when several inputs exist — whichever one System Settings points at
+  /// is the answer, and an operator changes it there like on any other Mac.
+  public static func systemDefault() -> AudioInputDevice? {
+    guard let info = try? AudioDevices.selected(uid: nil) else { return nil }
+    return AudioInputDevice(uid: info.uid, name: info.name)
+  }
+
+  /// The display name of the device with this UID, read now. Nil when it is not currently present
+  /// — an unplugged USB mic is not a renamed one, and the poll must not claim otherwise.
+  public static func name(forUID uid: String) -> String? {
+    guard !uid.isEmpty, let info = try? AudioDevices.selected(uid: uid) else { return nil }
+    return info.name
+  }
+}

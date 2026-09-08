@@ -706,7 +706,7 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
          SET retired_at = now()
        WHERE install_id = ${installId} AND retired_at IS NULL
       RETURNING install_id, room_id, created_at, enrolled_at, session_expires_at, launched_by,
-             hostname, hardware_model, os_version, app_version, build_sha,
+             hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at
     `) as InstallView[];
@@ -732,6 +732,8 @@ export type InstallPollFields = {
   hostname?: string | null;
   hardware_model?: string | null;
   os_version?: string | null;
+  /** §4.3's eighth field (V, 8 Sep): what the configured input device is called, measured. */
+  input_device_name?: string | null;
 };
 
 export type InstallPollResult = { ok: true } | { ok: false; code: "RETIRED" | "NOT_FOUND" };
@@ -750,6 +752,7 @@ export function cleanPollFields(raw: InstallPollFields): {
   hostname: string | null;
   hardware_model: string | null;
   os_version: string | null;
+  input_device_name: string | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -769,6 +772,9 @@ export function cleanPollFields(raw: InstallPollFields): {
     hostname: str(raw.hostname, 128),
     hardware_model: str(raw.hardware_model, 128),
     os_version: str(raw.os_version, 64),
+    // 128 to match hostname/hardware_model. CoreAudio device names are short, but an aggregate
+    // device can be given any name a person types into Audio MIDI Setup.
+    input_device_name: str(raw.input_device_name, 128),
   };
 }
 
@@ -800,6 +806,9 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              hostname       = COALESCE(${f.hostname}::text,      hostname),
              hardware_model = COALESCE(${f.hardware_model}::text, hardware_model),
              os_version     = COALESCE(${f.os_version}::text,    os_version),
+             -- COALESCE like the rest: a poll sent while the mic is unplugged omits the name,
+             -- and the row keeps the last device it actually saw rather than going blank.
+             input_device_name = COALESCE(${f.input_device_name}::text, input_device_name),
              mic_state      = COALESCE(${f.mic_state}::text,     mic_state),
              never_sleep    = COALESCE(${f.never_sleep}::boolean, never_sleep),
              launched_by    = COALESCE(${f.launched_by}::text,   launched_by),
@@ -909,7 +918,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     installs = (
       (await sql`
         SELECT install_id, room_id, created_at, enrolled_at, session_expires_at, launched_by,
-             hostname, hardware_model, os_version, app_version, build_sha,
+             hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at
           FROM room_install

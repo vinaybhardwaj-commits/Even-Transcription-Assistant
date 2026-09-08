@@ -111,27 +111,27 @@ private enum RoomRecorderCLI {
         let persistence = RoomPersistence(root: root)
         var configuration: RoomConfiguration
         if let existing = try? persistence.loadConfiguration() {
+          // MIGRATION KEEPS THE ROOM'S DEVICE (V's ruling, 8 Sep). A re-enrol on a Mac that is
+          // already recording must not silently move the room onto whatever input happens to be
+          // the system default today — someone may have plugged in a headset an hour ago. The
+          // fields below are re-pointed on every enrol; `deviceUID` is deliberately not one of
+          // them, and this comment is here so it does not get "tidied" into the list.
           configuration = existing
         } else {
+          // First enrol on this Mac: take the current system default input. §5.3 has no --device
+          // argument and asks the operator nothing, so the machine's own default is the answer.
           configuration = try RoomConfiguration.residentDefault(
             origin: origin, roomSlug: enrolled.roomSlug)
         }
-        // X2: the bundle carries its own encoder. Re-point the helper paths on every enrol so a
-        // re-install off an older config cannot keep pointing at a Homebrew ffmpeg that may not
-        // be on this Mac at all.
-        if let tapewriter = BuildInfo.bundledHelper("tapewriter") {
-          configuration.tapewriterPath = tapewriter
-        }
-        if let ffmpeg = BuildInfo.bundledHelper("ffmpeg") {
-          configuration.ffmpegPath = ffmpeg
-        }
-        configuration.origin = origin
-        configuration.roomSlug = enrolled.roomSlug
-        configuration.installID = enrolled.installID
-        configuration.tabID = "app_\(enrolled.installID)"
-        // §5.4: config.json holds no token. The session lives in the keychain from here on, and
-        // this line is what guarantees a re-enrol leaves no earlier token behind on disk.
-        configuration.etaRoomSession = nil
+        // One named mutation, tested in RoomEnrolmentConfigurationTests. `deviceUID` is not among
+        // the fields it touches, which is the migration rule V ruled on.
+        configuration.applyEnrolment(
+          origin: origin,
+          roomSlug: enrolled.roomSlug,
+          installID: enrolled.installID,
+          tapewriterPath: BuildInfo.bundledHelper("tapewriter"),
+          ffmpegPath: BuildInfo.bundledHelper("ffmpeg")
+        )
         try persistence.saveConfiguration(configuration)
 
         // The token is NOT echoed. The room name is what tells V the paste bound the right room.

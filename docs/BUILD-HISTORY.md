@@ -142,3 +142,26 @@ and `swift test` resolves it. Compiling the suite for the first time exposed two
 `install:` required; the six sites it did update were protocol conformances. Both now pass
 `install: nil` rather than the parameter gaining a default, because a default would let a future
 caller drop the seven fields silently. 451 tests in 39 suites pass.
+
+## Install and fleet, R2 follow-up — the device the room records from (8 Sep 2026)
+The first Home Office paste installed cleanly and then died on `RoomConfigurationError error 6`,
+after the enrol token was spent and the old agent had been booted out. `residentDefault` was
+filling `deviceUID` — an AUDIO device UID, passed to `tapewriter --device` and sealed into the
+archive index — from the `hw.uuid` sysctl, which macOS 26/27 removed.
+
+- **`stableDeviceUID()` and the `hw.uuid` path are deleted**, not repaired. Nothing needs a machine
+  identifier; `install_id` is server-minted. `IOPlatformUUID` via IOKit is the route if one is ever
+  wanted.
+- **Enrol takes the system default audio input** and stores its UID. No argument, no prompt, no
+  refusal when several inputs exist.
+- **A re-enrol keeps the room's existing device.** The rule lives in `RoomConfiguration
+  .applyEnrolment`, which deliberately does not touch `deviceUID`, and is enforced by a test rather
+  than a comment.
+- **`input_device_name` is an eighth poll field** (migration `0077`, not run) — measured on every
+  poll, omitted when the device is not attached so COALESCE keeps the last true name. The fleet row
+  shows it under the mic state, because a room can be `authorized` and still be listening to the
+  wrong microphone.
+- **Error codes are not declaration order.** Swift bridges cases with associated values first, so
+  `error 6` was `invalidDeviceUID`, not `unsafeRoot`. `RoomInstallDeviceTests` pins the mapping.
+
+459 Swift tests in 40 suites; 62 server unit tests.

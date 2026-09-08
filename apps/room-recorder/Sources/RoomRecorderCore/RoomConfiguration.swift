@@ -1,6 +1,18 @@
 import Darwin
 import Foundation
+import TapeCapture
 
+/// ─── THE CASE ORDER HERE IS NOT THE ERROR CODE ORDER ────────────────────────────────────────
+/// Swift bridges an enum's cases to `NSError.code` by putting every case that carries an
+/// associated value FIRST, in declaration order, then the payload-free ones. So the codes are
+/// 0 invalidExecutablePath, 1 invalidIdentifier, 2 invalidArchivePreflightReceipt,
+/// 3 permissionsNotEnforced, 4 invalidOrigin, 5 invalidRoomSlug, 6 invalidDeviceUID,
+/// 7 unsafeRoot, 8 rootIsNotDirectory — NOT the order they are written in below.
+///
+/// This is recorded because it cost real time: `error 6` from a failed enrol was read off the
+/// source order as `unsafeRoot` and sent the diagnosis to the filesystem, when the machine was
+/// actually saying `invalidDeviceUID`. Adding, removing or reordering a case renumbers the codes,
+/// so never read a raw code off this list — reproduce it.
 public enum RoomConfigurationError: Error, Equatable, Sendable {
   case invalidOrigin
   case invalidRoomSlug
@@ -189,32 +201,23 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     guard let ffmpeg = BuildInfo.bundledHelper("ffmpeg") else {
       throw RoomConfigurationError.invalidExecutablePath("Contents/Helpers/ffmpeg")
     }
+    // V's ruling, 8 Sep: the device is the machine's CURRENT default audio input, taken here and
+    // stored as a UID. No --device argument, no prompt, and no refusal when several inputs exist.
+    //
+    // `deviceUID` IS AN AUDIO DEVICE, not a machine identifier. RoomEngine passes it straight to
+    // `tapewriter record --device` and reports it as the session's mic label, so a machine UUID in
+    // this field names no input and the room records nothing. The previous code put `hw.uuid` here,
+    // which was wrong on both counts — wrong kind of value, and an OID that no longer exists.
+    guard let input = AudioInputDevices.systemDefault() else {
+      throw RoomConfigurationError.invalidDeviceUID
+    }
     return try RoomConfiguration(
       origin: origin,
       roomSlug: roomSlug,
-      deviceUID: try stableDeviceUID(),
+      deviceUID: input.uid,
       tapewriterPath: tapewriter,
       ffmpegPath: ffmpeg
     )
-  }
-
-  /// The machine's hardware UUID, from `hw.uuid`.
-  ///
-  /// MEASURED, and it has to be: this value is sealed into the archive index and a mismatch makes
-  /// an index refuse to load (ArchiveIndexPersistence checks `deviceUID` against the context). A
-  /// per-install random id would orphan a Mac's own archive the first time it was re-enrolled.
-  public static func stableDeviceUID() throws -> String {
-    var size = 0
-    guard sysctlbyname("hw.uuid", nil, &size, nil, 0) == 0, size > 0 else {
-      throw RoomConfigurationError.invalidDeviceUID
-    }
-    var buffer = [CChar](repeating: 0, count: size)
-    guard sysctlbyname("hw.uuid", &buffer, &size, nil, 0) == 0 else {
-      throw RoomConfigurationError.invalidDeviceUID
-    }
-    let uuid = String(cString: buffer).trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !uuid.isEmpty else { throw RoomConfigurationError.invalidDeviceUID }
-    return uuid
   }
 
   public init(
@@ -452,5 +455,44 @@ public struct RoomPersistence: Sendable {
         actual: actual
       )
     }
+  }
+}
+
+// MARK: - Enrolment (Install and Fleet PRD §5.3)
+
+extension RoomConfiguration {
+  /// Re-point an existing configuration at what THIS enrol established — and nothing else.
+  ///
+  /// ─── WHAT IS DELIBERATELY ABSENT FROM THIS FUNCTION ─────────────────────────────────────
+  /// `deviceUID`. V's ruling, 8 September 2026: a re-enrol on a Mac that is already recording
+  /// keeps the input the room is already using. Taking the system default here instead would
+  /// silently move a live room onto whatever was plugged in most recently — a headset someone
+  /// left connected is enough to do it, and nothing on the card would explain why the room
+  /// suddenly sounds wrong.
+  ///
+  /// The first enrol on a Mac has no configuration to keep, and takes the system default through
+  /// `residentDefault(origin:roomSlug:)`. That is the ONLY place the device is chosen.
+  ///
+  /// This lives here rather than inline in the CLI so the rule above is a test and not a comment.
+  public mutating func applyEnrolment(
+    origin: URL,
+    roomSlug: String,
+    installID: String,
+    tapewriterPath: String?,
+    ffmpegPath: String?
+  ) {
+    // X2: the bundle carries its own encoder, so the helper paths are re-pointed on every enrol.
+    // A re-install off an older config must not keep pointing at a Homebrew ffmpeg that may not
+    // be on this Mac at all. Nil means "not running from a bundle" — keep what is configured.
+    if let tapewriterPath { self.tapewriterPath = tapewriterPath }
+    if let ffmpegPath { self.ffmpegPath = ffmpegPath }
+    self.origin = origin
+    self.roomSlug = roomSlug
+    self.installID = installID
+    // §4.5 rule 1: the app's listener tab id is always app_<install_id>.
+    self.tabID = "app_\(installID)"
+    // §5.4: config.json holds no token. The session lives in the keychain from here on, and this
+    // line is what guarantees a re-enrol leaves no earlier token behind on disk.
+    self.etaRoomSession = nil
   }
 }

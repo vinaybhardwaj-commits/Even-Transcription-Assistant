@@ -627,7 +627,10 @@ public actor RoomEngine {
         let installFields = installID.map {
           InstallPollFields(
             installID: $0,
-            facts: MachineFactsReader.read(),
+            // The device the CONFIG says this room records from — the same string RoomEngine
+            // hands `tapewriter --device`. The reader turns it into the name CoreAudio reports
+            // for it right now, or nil when it is not attached.
+            facts: MachineFactsReader.read(inputDeviceUID: configuration.deviceUID),
             tapeAdvancing: tapeIsAdvancing()
           )
         }

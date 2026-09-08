@@ -1,6 +1,6 @@
 import Foundation
 
-/// The seven poll fields of Install and Fleet PRD §4.3, plus the three machine facts §6 step 2
+/// The EIGHT poll fields of Install and Fleet PRD §4.3, plus the three machine facts §6 step 2
 /// renders, assembled from a `MachineFacts` reading at the moment of the poll.
 ///
 /// ─── NIL MEANS NOT MEASURED, AND IS SENT AS ABSENCE ──────────────────────────────────────
@@ -23,6 +23,10 @@ public struct InstallPollFields: Equatable, Sendable {
   public var hostname: String?
   public var hardwareModel: String?
   public var osVersion: String?
+  /// The eighth field (V's ruling, 8 Sep): what the configured input device is CALLED, so the
+  /// fleet row can show it beside the mic state. Same rules as the rest — derived, never typed,
+  /// and omitted rather than guessed when the device is not attached.
+  public var inputDeviceName: String?
 
   public init(
     installID: String,
@@ -34,7 +38,8 @@ public struct InstallPollFields: Equatable, Sendable {
     launchedBy: String? = nil,
     hostname: String? = nil,
     hardwareModel: String? = nil,
-    osVersion: String? = nil
+    osVersion: String? = nil,
+    inputDeviceName: String? = nil
   ) {
     self.installID = installID
     self.appVersion = appVersion
@@ -46,6 +51,7 @@ public struct InstallPollFields: Equatable, Sendable {
     self.hostname = hostname
     self.hardwareModel = hardwareModel
     self.osVersion = osVersion
+    self.inputDeviceName = inputDeviceName
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -67,7 +73,8 @@ public struct InstallPollFields: Equatable, Sendable {
       launchedBy: facts.launchedBy,
       hostname: facts.hostname,
       hardwareModel: facts.hardwareModel,
-      osVersion: facts.osVersion
+      osVersion: facts.osVersion,
+      inputDeviceName: facts.inputDeviceName
     )
   }
 
@@ -92,6 +99,7 @@ public struct InstallPollFields: Equatable, Sendable {
     add("hostname", hostname)
     add("hardware_model", hardwareModel)
     add("os_version", osVersion)
+    add("input_device_name", inputDeviceName)
     return items
   }
 }

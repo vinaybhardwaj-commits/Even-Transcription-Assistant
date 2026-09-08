@@ -33,6 +33,8 @@ export type InstallView = {
   hostname: string | null;
   hardware_model: string | null;
   os_version: string | null;
+  /** What the room's input device is called, as the app last measured it. Null = never reported. */
+  input_device_name: string | null;
   app_version: string | null;
   build_sha: string | null;
   first_seen_at: string | null;

@@ -456,7 +456,7 @@ function FleetRowView({
         {fmtSeen(i?.last_seen_at ?? null, nowMs)}
       </td>
 
-      <td className="py-2.5 px-2.5 whitespace-nowrap text-caption">
+      <td className="py-2.5 px-2.5 text-caption">
         {!i ? (
           <span className="text-even-ink-400">—</span>
         ) : i.mic_state === "authorized" ? (
@@ -465,6 +465,15 @@ function FleetRowView({
           <span className="text-danger-700">denied</span>
         ) : (
           <span className="text-even-ink-400">not reported</span>
+        )}
+        {/* The DEVICE, under the PERMISSION. They are different facts and a room can have one
+            without the other: `authorized` says macOS let the app open an input, this says which
+            input it opened. A room listening to the wrong microphone looks perfect on permission
+            alone, which is why the name sits here rather than in a detail view. */}
+        {i && (
+          <span className="block text-even-ink-400">
+            {i.input_device_name ?? "device not reported"}
+          </span>
         )}
       </td>
 

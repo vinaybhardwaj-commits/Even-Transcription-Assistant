@@ -326,7 +326,7 @@ describe("the poll write (§4.3)", () => {
     expect(up.text).toMatch(/tape_advancing_since = CASE/);
   });
 
-  it("derives launch_agent_loaded from launched_by rather than inventing an eighth field", async () => {
+  it("derives launch_agent_loaded from launched_by rather than trusting the app to report it", async () => {
     responses = [[{ install_id: "install_1" }]];
     await M.applyInstallPoll({ install_id: "install_1", launched_by: "launchd" });
     const up = calls.find((c) => /UPDATE room_install/.test(c.text))!;
@@ -348,6 +348,50 @@ describe("the poll write (§4.3)", () => {
     expect(c.mic_state).toBeNull();
     expect(c.launched_by).toBeNull();
     expect(c.tape_advancing).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // input_device_name — the eighth field (V's ruling, 8 Sep)
+  // -------------------------------------------------------------------------
+
+  it("reads the device name back on the fleet SELECT, so the row can render it", async () => {
+    responses = [[{ install_id: "install_1" }]];
+    await M.applyInstallPoll({ install_id: "install_1", input_device_name: "TONOR TM20 Audio Device" });
+    // Writing it is only half the job — a column the fleet read does not select cannot reach the
+    // card. Both retire and readFleet share this projection.
+    const src = require("node:fs").readFileSync("lib/room-install.ts", "utf8") as string;
+    const projections = src.match(/hostname, hardware_model, os_version[^\n]*/g) ?? [];
+    expect(projections.length).toBeGreaterThan(0);
+    for (const p of projections) expect(p).toContain("input_device_name");
+  });
+
+  it("keeps a reported input device name, trimmed", () => {
+    const c = M.cleanPollFields({ install_id: "i", input_device_name: "  TONOR TM20 Audio Device " });
+    expect(c.input_device_name).toBe("TONOR TM20 Audio Device");
+  });
+
+  it("drops an input device name that is absent, empty, over-long or not a string", () => {
+    expect(M.cleanPollFields({ install_id: "i" }).input_device_name).toBeNull();
+    expect(M.cleanPollFields({ install_id: "i", input_device_name: "   " }).input_device_name).toBeNull();
+    expect(M.cleanPollFields({ install_id: "i", input_device_name: "x".repeat(129) }).input_device_name).toBeNull();
+    expect(M.cleanPollFields({ install_id: "i", input_device_name: 42 as never }).input_device_name).toBeNull();
+  });
+
+  it("COALESCEs the device name, so a poll sent while the mic is unplugged does not blank it", async () => {
+    responses = [[{ install_id: "install_1" }]];
+    await M.applyInstallPoll({ install_id: "install_1", input_device_name: "TONOR TM20 Audio Device" });
+    const up = calls.find((c) => /UPDATE room_install/.test(c.text))!;
+    expect(up.text).toMatch(/input_device_name = COALESCE\(/);
+    expect(up.values).toContain("TONOR TM20 Audio Device");
+
+    // Omitted entirely: the statement still COALESCEs, so the last true name survives. This is
+    // the whole reason the column has no DEFAULT — NULL means never measured, not "no mic".
+    calls.length = 0;
+    responses = [[{ install_id: "install_1" }]];
+    await M.applyInstallPoll({ install_id: "install_1" });
+    const up2 = calls.find((c) => /UPDATE room_install/.test(c.text))!;
+    expect(up2.text).toMatch(/input_device_name = COALESCE\(/);
+    expect(up2.values).toContain(null);
   });
 });
 

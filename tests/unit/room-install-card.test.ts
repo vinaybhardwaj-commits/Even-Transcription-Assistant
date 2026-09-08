@@ -33,6 +33,7 @@ const install = (over: Partial<InstallView> = {}): InstallView => ({
   hostname: null,
   hardware_model: null,
   os_version: null,
+  input_device_name: null,
   app_version: null,
   build_sha: null,
   first_seen_at: null,

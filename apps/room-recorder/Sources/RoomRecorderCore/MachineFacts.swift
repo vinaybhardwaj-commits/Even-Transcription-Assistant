@@ -1,6 +1,7 @@
 import AVFoundation
 import Darwin
 import Foundation
+import TapeCapture
 
 /// The §5.5 derivations, in one place, each read from the machine at the moment of the poll.
 ///
@@ -29,6 +30,9 @@ public struct MachineFacts: Equatable, Sendable {
   public var hostname: String?
   public var hardwareModel: String?
   public var osVersion: String?
+  /// The display name of the configured input device, read now. Nil when that device is not
+  /// currently attached — an unplugged mic is not a renamed one.
+  public var inputDeviceName: String?
 
   public init(
     micState: String,
@@ -37,7 +41,8 @@ public struct MachineFacts: Equatable, Sendable {
     launchAgentLoaded: Bool,
     hostname: String?,
     hardwareModel: String?,
-    osVersion: String?
+    osVersion: String?,
+    inputDeviceName: String?
   ) {
     self.micState = micState
     self.neverSleep = neverSleep
@@ -46,6 +51,7 @@ public struct MachineFacts: Equatable, Sendable {
     self.hostname = hostname
     self.hardwareModel = hardwareModel
     self.osVersion = osVersion
+    self.inputDeviceName = inputDeviceName
   }
 }
 
@@ -54,7 +60,12 @@ public enum MachineFactsReader {
 
   /// Read everything §5.5 asks for. Cheap enough to run on every poll: one AVFoundation call
   /// that reads a cached TCC answer, two short subprocesses, and three sysctl-class lookups.
-  public static func read() -> MachineFacts {
+  ///
+  /// `inputDeviceUID` IS REQUIRED AND HAS NO DEFAULT, deliberately. It is the device the config
+  /// says this room records from, and only the caller holding the configuration knows it. A
+  /// default of nil would let a future call site silently stop reporting the device — the same
+  /// shape of mistake the `install:` parameter was given no default to prevent.
+  public static func read(inputDeviceUID: String?) -> MachineFacts {
     MachineFacts(
       micState: microphoneState(),
       neverSleep: neverSleep(),
@@ -62,8 +73,25 @@ public enum MachineFactsReader {
       launchAgentLoaded: launchAgentLoaded(),
       hostname: hostname(),
       hardwareModel: hardwareModel(),
-      osVersion: osVersion()
+      osVersion: osVersion(),
+      inputDeviceName: inputDeviceName(forUID: inputDeviceUID)
     )
+  }
+
+  // ---------------------------------------------------------------------------
+  // input_device_name — the eighth poll field (V's ruling, 8 Sep)
+  // ---------------------------------------------------------------------------
+
+  /// The name CoreAudio gives the configured device RIGHT NOW.
+  ///
+  /// MEASURED, never typed, and never the UID as a stand-in: the UID is a stable machine-readable
+  /// string ("AppleUSBAudioEngine:...:TONOR TM20 Audio Device:...") and the name is what an
+  /// operator reads on the fleet row ("TONOR TM20 Audio Device"). Nil when the configuration names
+  /// no device, or when that device is not attached — both are "not measured", which the poll
+  /// sends as absence so the server keeps the last true name rather than blanking the row.
+  public static func inputDeviceName(forUID uid: String?) -> String? {
+    guard let uid, !uid.isEmpty else { return nil }
+    return AudioInputDevices.name(forUID: uid)
   }
 
   // ---------------------------------------------------------------------------

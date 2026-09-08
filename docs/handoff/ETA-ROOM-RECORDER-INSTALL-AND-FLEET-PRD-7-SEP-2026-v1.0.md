@@ -332,6 +332,11 @@ room-recorder enrol --token <token> --origin <https origin>
 4. On any other response the verb prints the failure and exits with a non-zero status. The
    script then stops, because `set -e` is active.
 
+5. **The device.** On a Mac with no existing config the verb takes the CURRENT system default
+   audio input and stores its UID. There is no `--device` argument, no prompt, and no refusal when
+   several inputs exist. On a re-enrol the existing config KEEPS its device — a room already
+   recording is not moved onto whatever was plugged in most recently. Ruled by V, 8 Sep; see §12.6.
+
 The app performs no self-copy and registers no URL scheme. The script places the bundle.
 
 ### 5.4 Keychain item
@@ -357,6 +362,7 @@ There is no refresh call, because D10 gives the install session a 365-day TTL.
 | `tape_advancing` | the existing tape health signal of R5, which is the durable sample index growing |
 | `launch_agent_loaded` | the LaunchAgent plist exists at the resident path and `launchctl` lists the label |
 | `launched_by` | `launchd` when the parent process id is 1, else `user` |
+| `input_device_name` | CoreAudio's name for the device `config.json` names, read at the moment of the poll. Omitted when that device is not attached. **Added 8 Sep by V's ruling; see §12.6.** |
 
 **Invariant.** No reported value is typed by a person. No reported value is a constant that
 stands in for a measurement. Every value in the table comes from the machine at the moment of
@@ -652,3 +658,37 @@ used as the guard — `build-bundle.sh` trial-signs a disposable file in preflig
    nothing, so the flag there would have been false. Deviation flagged, intent met.
 3. Items 1 and 7 of Build R1's acceptance remain partial (§12.3), both needing a SQL path into
    production.
+
+### 12.6 Ruled 8 September 2026 — the device, after the first paste failed
+
+The first real paste on Home Office got through download, checksum and install, then died on
+`RoomRecorderCore.RoomConfigurationError error 6` **after** the server had spent the enrol token
+and the keychain had been written. The script had already booted the old agent out, so Home Office
+was left with nothing polling.
+
+**Cause.** `RoomConfiguration.residentDefault` filled `deviceUID` from `stableDeviceUID()`, which
+read the `hw.uuid` sysctl. That OID does not exist on macOS 26/27 — `sysctl hw.uuid` answers
+`unknown oid` — so the guard threw `invalidDeviceUID`.
+
+**Two separate mistakes, and the second is the worse one.** `deviceUID` is an AUDIO DEVICE: it is
+passed to `tapewriter record --device`, reported as the session's mic label, and sealed into the
+archive index as `stableDeviceUID`. A machine UUID there names no input, so repairing the sysctl
+alone would have produced an enrol that succeeded and a room that recorded nothing.
+
+**Read the error code, do not count the cases.** `error 6` was first read off the enum's
+declaration order as `unsafeRoot` and sent the diagnosis to the filesystem. Swift bridges cases
+carrying associated values FIRST, so 6 is `invalidDeviceUID`. `RoomInstallDeviceTests` now pins
+the whole mapping.
+
+**V's ruling.**
+
+| | |
+|---|---|
+| At enrol | Take the current system default audio input, store its UID in `config.json`. |
+| Argument | None. No `--device`, no prompt, no refusal when several inputs exist. |
+| Re-enrol | An existing config KEEPS its device. Only a first enrol chooses one. |
+| Poll | Report the device NAME as an eighth field, same rules as the others: derived, never typed, omitted rather than guessed. |
+| Fleet card | Show it on the row beside the mic state. |
+| `hw.uuid` | Deleted entirely, not repaired. Nothing needs a machine identifier — `install_id` is server-minted. If a future caller needs one, `IOPlatformUUID` via IOKit is the supported route. |
+
+Migration `0077_install_input_device_name` adds the column. Not run.
