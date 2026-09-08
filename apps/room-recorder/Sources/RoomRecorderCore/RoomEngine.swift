@@ -574,7 +574,26 @@ public actor RoomEngine {
   /// is capturing, which reports as "not advancing" rather than as an absent field: an idle room
   /// genuinely is not advancing, and that is a fact rather than a gap.
   private func currentDurableSampleIndex() -> Int64? {
-    if let capture { return capture.nextSample }
+    if let capture {
+      // ─── NOT `segment.nextSample` ─────────────────────────────────────────────────────────
+      // `nextSample` is the PIECE-CUTTING CURSOR. It is assigned in `publishAvailable` when a
+      // piece is encoded, which is once every five minutes (§10.7's wire format). Comparing it
+      // between polls four seconds apart therefore reports "not advancing" on almost every poll,
+      // and §6 step 4 — which needs TWO CONSECUTIVE polls — could essentially never turn done.
+      // Home Office recorded for ten minutes, wrote 20 MB of durable audio, and the fleet card
+      // still read `tape=false/streak=0`.
+      //
+      // The durable frontier is the index tapewriter appends to. A record lands there only after
+      // its audio is durably on disk, so the file growing IS the durable sample index growing —
+      // §5.5's signal, measured rather than inferred, and one `stat` rather than re-reading a
+      // file that reaches tens of megabytes over a clinic day.
+      if let durable = try? regularFileSizeIfPresent(capture.indexURL), durable > 0 {
+        return durable
+      }
+      // No index yet: capture has started but nothing is durable. Fall back to the cursor so a
+      // freshly cut piece still counts rather than reading as a gap.
+      return capture.nextSample
+    }
     if let owner = residentCaptureOwner, owner.isActive { return Int64(owner.nextPrimaryIndex) }
     return nil
   }

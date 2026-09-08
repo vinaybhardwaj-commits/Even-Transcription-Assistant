@@ -244,3 +244,12 @@ app on by hand in System Settings both changed nothing, and why neither the app-
 the `NSApplication` shape fixed it on their own. The app and `tapewriter` are now signed with the
 entitlement, `ffmpeg` deliberately is not, and `build-bundle.sh` FAILS the build if the entitlement
 is absent from the signed bytes.
+
+**tape_advancing was measuring the wrong number (0.1.7):** `currentDurableSampleIndex` returned
+`segment.nextSample`, the PIECE-CUTTING cursor, which is assigned once every five minutes when a
+piece is encoded. `tapeIsAdvancing` compares it between polls four seconds apart, so it reported
+false on almost every poll and §6 step 4 — which needs two consecutive polls — could essentially
+never turn done. Home Office recorded for ten minutes, wrote 20 MB of durable audio, and the card
+still read `tape=false/streak=0`. It now reads the durable frontier from the index tapewriter
+appends to: a record lands there only once its audio is durable, so the file growing IS §5.5's
+durable sample index growing, at one `stat` per poll.
