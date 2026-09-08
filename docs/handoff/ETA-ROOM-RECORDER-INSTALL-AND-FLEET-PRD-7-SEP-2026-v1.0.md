@@ -761,3 +761,44 @@ again on revert.
 
 **Fourth instance of the standing rule**, and the sharpest: the guarantee was implemented, tested,
 and still not delivered, because the test asserted the half that worked.
+
+### 12.9 §9 hazard 1 is NOT established — the microphone prompt does not appear
+
+Driven by the builder on Home Office, 8 September, with V out of the loop for the debug cycles.
+
+**What works.** The paste installs, enrols, and polls. Steps 2 and 5 turn DONE on the first poll,
+which establishes §9 hazard 2: `launchctl bootstrap` from `curl | bash` gives
+`launched_by = launchd`. All eight poll fields arrive, `input_device_name` included.
+
+**What does not.** `start_day` reaches the app and tapewriter dies with
+`microphone permission was not granted`. Two defects were found and fixed:
+
+1. `tapewriter`'s embedded `CFBundleIdentifier` was `com.evenscribe.tapewriter` while its signature
+   says `com.evenscribe.room-recorder.tapewriter`. Wrong on its own terms.
+2. The HELPER was doing the asking. tapewriter is a bare Mach-O child; TCC attributes a request to
+   the responsible process, which is the bundled app, and the app had never asked. The app now
+   requests at startup so the dialog comes from the thing with a bundle and §5.2's usage string.
+
+**It still fails.** After a successful `tccutil reset Microphone com.evenscribe.room-recorder`, the
+app asks and is denied IMMEDIATELY with no dialog on screen. macOS writes a denial rather than
+prompting. The likely mechanism is that a resident `LSUIElement` binary started by launchd, with no
+`NSApplication`, has no UI context for TCC to attach a prompt to.
+
+**And enabling it by hand did not take.** With both entries switched on in System Settings, the app
+still reports `denied` across a fresh process (`runs = 2`). Its designated requirement is
+identity-based and correct — `identifier "com.evenscribe.room-recorder" and certificate leaf =
+H"187dd424…"` — so a grant should survive a rebuild. It did not.
+
+**THE RISK THIS RAISES IS D1's WHOLE PREMISE.** If TCC is binding the grant to the cdhash rather
+than to the designated requirement, then every new version loses the microphone and R3's acceptance
+item 3 — "the microphone permission unchanged across both swaps, with no new macOS prompt" —
+cannot hold. That must be settled before R3, and probably before the clinic installs.
+
+Per §9's own instruction — "If the prompt does not appear, the builder stops and reports" — the
+builder stopped. Open for V: whether to make the resident app a real `NSApplication` so TCC can
+present the prompt, or to establish a different grant path.
+
+**Two TCC entries exist on the build Mac** — the unsigned 27 Aug copy under `EvenScribeBench` and
+the current signed bundle. The unsigned one is keyed by path and can never satisfy the signed app's
+request; it is stale and should be removed, mainly because a pane that reads "on" while the app
+reads `denied` is how an operator loses an hour.

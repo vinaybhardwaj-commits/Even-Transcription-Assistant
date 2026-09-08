@@ -204,3 +204,16 @@ hydrated the session and handed it to `remoteFactory`; the CLI's `run` passed
 
 466 Swift tests in 41 suites. Fourth instance of "a stated guarantee is not an implemented one" —
 this time the guarantee was implemented AND tested, and the test asserted the half that worked.
+
+## Install and fleet, R2 — microphone (8 Sep 2026, 0.1.4)
+Builder-driven paste cycles on Home Office. Steps 2 and 5 turn DONE on the first poll and all eight
+poll fields arrive, which establishes §9 hazard 2. Step 3 does not turn.
+
+- **`tapewriter`'s embedded `CFBundleIdentifier` did not match its code-signing identifier**
+  (`com.evenscribe.tapewriter` vs `com.evenscribe.room-recorder.tapewriter`). Aligned.
+- **The bundled app now requests microphone access at startup.** The helper was doing the asking;
+  it is a bare Mach-O child and TCC attributes the request to the responsible process, which is the
+  app — and the app had never asked.
+- **§9 hazard 1 remains UNESTABLISHED.** After a successful `tccutil reset`, the app is denied
+  immediately with no dialog. Enabling it by hand in System Settings did not take effect either.
+  See PRD §12.9, including the risk this raises for D1 and R3.

@@ -176,6 +176,13 @@ private enum RoomRecorderCLI {
         // there, so a client built from it polls unauthenticated for ever. `startingConfiguration`
         // is the one place that adds the keychain session, and it refuses if there is none.
         let configuration = try RoomEngine.startingConfiguration(rootURL: root)
+        // §9 hazard 1: raise the microphone prompt HERE, from the bundled app, immediately after
+        // the paste — so the operator standing at the Mac gets the one dialog D1 expects, instead
+        // of a silent denial the first time a session starts. Reported, never assumed: whatever
+        // the answer is, the next poll measures it.
+        let micAfterAsking = MachineFactsReader.requestMicrophoneAccess()
+        FileHandle.standardError.write(
+          Data("room-recorder: microphone \(micAfterAsking)\n".utf8))
         let bench = BenchClient(configuration: configuration)
         let recovery: (any RoomRetainedArchiveRecovering)?
         if configuration.retainedArchiveRecoveryEnabled {

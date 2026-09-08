@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.evenscribe.tapewriter</string>
+    <string>com.evenscribe.room-recorder.tapewriter</string>
     <key>CFBundleName</key>
     <string>tapewriter</string>
     <key>CFBundleVersion</key>
