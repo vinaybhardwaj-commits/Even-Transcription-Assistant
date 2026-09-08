@@ -234,3 +234,13 @@ application identity gives it nothing.
   into a Mac that looks dead.
 - R3 wants this shape anyway: a self-update needs an app identity to replace, and D1 binds the
   microphone grant to that identity.
+
+**Root cause of §9 hazard 1, same day (0.1.6):** the bundle is signed `--options runtime`, and the
+hardened runtime refuses the microphone to a process without
+`com.apple.security.device.audio-input`. It carried no entitlements at all. The refusal happens
+INSIDE the process — `requestAccess` returns denied immediately, no dialog is drawn, and `tccd` is
+never asked; its log has nothing to say about the app. That is why resetting TCC and switching the
+app on by hand in System Settings both changed nothing, and why neither the app-side request nor
+the `NSApplication` shape fixed it on their own. The app and `tapewriter` are now signed with the
+entitlement, `ffmpeg` deliberately is not, and `build-bundle.sh` FAILS the build if the entitlement
+is absent from the signed bytes.

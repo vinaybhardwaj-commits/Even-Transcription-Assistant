@@ -40,6 +40,21 @@ readonly FFMPEG_BUNDLE_ID="com.evenscribe.room-recorder.ffmpeg"
 readonly TAPEWRITER_BUNDLE_ID="com.evenscribe.room-recorder.tapewriter"
 readonly MIN_MACOS="15.0"
 readonly APP_NAME="EvenScribe Room Recorder.app"
+# ─── THE HARDENED RUNTIME REFUSES THE MICROPHONE WITHOUT AN ENTITLEMENT ──────────────────────
+# The bundle is signed `--options runtime` below. Under the hardened runtime a process may not open
+# an audio input unless it carries `com.apple.security.device.audio-input`, and the refusal happens
+# INSIDE the process: AVCaptureDevice.requestAccess returns denied immediately, no dialog is drawn,
+# and tccd is never asked — its log has nothing to say about the app at all.
+#
+# That is §9 hazard 1 as it was actually hit on 8 September. It is why `tccutil reset` and switching
+# the app on by hand in System Settings both changed nothing, and why asking from the app rather
+# than the helper, and giving the app a real NSApplication run loop, were each necessary and
+# neither sufficient.
+#
+# The entitlements file is kept to the single key. Explanations live here rather than in XML
+# comments, because an XML comment may not contain a double hyphen and `--options runtime` does —
+# a plist that reads perfectly well makes codesign fail with `AMFIUnserializeXML: syntax error`.
+readonly ENTITLEMENTS="${SCRIPT_DIR}/RoomRecorder.entitlements"
 
 VERSION_FILE="${SCRIPT_DIR}/VERSION"
 OUTPUT_ROOT="${1:-${PACKAGE_DIR}/.build/release-bundle}"
@@ -172,10 +187,14 @@ plist_set NSMicrophoneUsageDescription string "$(/bin/cat "${SCRIPT_DIR}/Microph
 # INSIDE OUT, and the order is not stylistic. The outer signature seals the bundle's contents, so
 # a helper signed afterwards invalidates the app's own seal — `codesign --verify --strict` on the
 # bundle would then fail, which is exactly what R3's updater refuses to install.
+[ -f "$ENTITLEMENTS" ] || die "no entitlements file at ${ENTITLEMENTS}. The hardened runtime denies the microphone without com.apple.security.device.audio-input, silently and in-process."
+
 say "Signing helpers"
+# ffmpeg never opens an input device — it reads the pipe tapewriter feeds it — so it gets no
+# entitlement. Least privilege, and it keeps the audio-input grant on the two binaries that need it.
 codesign --force --timestamp --options runtime \
   --identifier "$FFMPEG_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/ffmpeg"
-codesign --force --timestamp --options runtime \
+codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier "$TAPEWRITER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/tapewriter"
 
 # ─── The encoder's provenance, written between the two signatures ────────────────────────────
@@ -208,7 +227,7 @@ PROV
 fi
 
 say "Signing the bundle"
-codesign --force --timestamp --options runtime \
+codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier "$BUNDLE_ID" --sign "$SIGNING_IDENTITY" "$APP"
 
 # ─── Verify, pinned to our anchor ────────────────────────────────────────────────────────────
@@ -223,6 +242,15 @@ for helper in ffmpeg tapewriter; do
     || die "helper ${helper} failed verification"
 done
 codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
+
+# THE ENTITLEMENT IS VERIFIED, NOT ASSUMED. A bundle that signs cleanly without it looks perfect
+# and cannot open a microphone, which is a failure nobody can read off the build output.
+for signed in "$APP" "${APP}/Contents/Helpers/tapewriter"; do
+  codesign -d --entitlements - "$signed" 2>&1 \
+    | /usr/bin/grep -q "com.apple.security.device.audio-input" \
+    || die "the audio-input entitlement is missing from ${signed}. Under the hardened runtime this bundle would be refused the microphone in-process, with no prompt and nothing in tccd's log."
+done
+say "Entitlement present: com.apple.security.device.audio-input"
 
 # NOTHING MAY TOUCH THE BUNDLE BELOW THIS LINE except reading it into the zip.
 
