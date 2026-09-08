@@ -107,7 +107,8 @@ private actor RecoveryBarrierRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     polls += 1
     return try JSONDecoder().decode(

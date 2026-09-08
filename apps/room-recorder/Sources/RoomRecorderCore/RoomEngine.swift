@@ -144,7 +144,8 @@ public protocol RoomEngineRemote: Sendable {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse
   func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
     -> CommandAcknowledgement
@@ -410,6 +411,15 @@ public actor RoomEngine {
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
   private let listenerTabID: String
+  /// The server-minted install id from the keychain, when this build is enrolled (§5.3). Nil for
+  /// an unenrolled build, and nil is what keeps the seven fields off the wire entirely.
+  private let installID: String?
+  /// The durable sample index at the previous poll. §5.5 defines `tape_advancing` as this index
+  /// GROWING, so one reading is never enough — the first poll of a session reports false, and
+  /// that is correct rather than pessimistic: nothing has been shown to advance yet.
+  private var lastDurableSampleIndex: Int64?
+  /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
+  private var retiredByServer = false
   private var retainedArchiveRecoveryTask: Task<Void, Never>?
   private var retainedArchiveRecoveryState: RoomRetainedArchiveRecoveryState?
 
@@ -489,9 +499,47 @@ public actor RoomEngine {
     residentCaptureOwner = nil
     residentControlJournal = nil
     residentControlCommands = [:]
+    // §5.5: install_id is "read from the keychain item written at enrolment". The keychain is the
+    // authority, not config.json — a config copied between Macs would otherwise carry an install
+    // id that belongs to another machine, and the fleet card would show one Mac's facts under
+    // another's row. config.json's copy is a convenience for `status`, never the source.
+    let enrolled = try? RoomKeychain.load()
+    installID = enrolled?.installID ?? configuration.installID
+    // §4.5 rule 1: the app writes `app_<install_id>` and no other form.
     listenerTabID =
-      configuration.tabID ?? configuration.installID
+      installID.map { "app_\($0)" }
+      ?? configuration.tabID
       ?? "native_\(UUID().uuidString.prefix(8).lowercased())"
+  }
+
+  /// §5.5 — the durable sample index, from whichever capture path is running.
+  ///
+  /// The plain capture segment's `nextSample` is the index for the ordinary path; the resident
+  /// owner's primary index is the same measurement on the retained-archive path. Nil when nothing
+  /// is capturing, which reports as "not advancing" rather than as an absent field: an idle room
+  /// genuinely is not advancing, and that is a fact rather than a gap.
+  private func currentDurableSampleIndex() -> Int64? {
+    if let capture { return capture.nextSample }
+    if let owner = residentCaptureOwner, owner.isActive { return Int64(owner.nextPrimaryIndex) }
+    return nil
+  }
+
+  /// PURE — is this the server telling us the install is retired (§4.5 rule 3)?
+  ///
+  /// Matched on the STATUS AND the code, not the status alone: 409 is also the shape a future
+  /// conflict could take, and treating every 409 as "stop for ever" would be a way to silence a
+  /// room by accident.
+  static func isRetired(_ error: BenchClientError) -> Bool {
+    guard case .http(let http) = error else { return false }
+    return http.statusCode == 409 && http.body.contains("RETIRED")
+  }
+
+  /// True only when the index is present now, was present before, and GREW.
+  private func tapeIsAdvancing() -> Bool {
+    let current = currentDurableSampleIndex()
+    defer { lastDurableSampleIndex = current }
+    guard let current, let previous = lastDurableSampleIndex else { return false }
+    return current > previous
   }
 
   public func run() async throws {
@@ -574,12 +622,22 @@ public actor RoomEngine {
       }
 
       do {
+        // Install and Fleet §4.3/§5.5. Every value is read HERE, at the moment of the poll —
+        // MachineFactsReader measures on each call and reports nil for anything it cannot read.
+        let installFields = installID.map {
+          InstallPollFields(
+            installID: $0,
+            facts: MachineFactsReader.read(),
+            tapeAdvancing: tapeIsAdvancing()
+          )
+        }
         let response = try await remote.pollCommands(
           tabID: listenerTabID,
           previousPollAt: previousPollAt,
           recordingSessionID: phase == .recording || phase == .paused ? sessionID : nil,
           paused: phase == .paused,
-          primaryLevels: currentLevels()
+          primaryLevels: currentLevels(),
+          install: installFields
         )
         previousPollAt = response.now ?? previousPollAt
         if let polledRoomID = response.roomID, !polledRoomID.isEmpty {
@@ -609,6 +667,23 @@ public actor RoomEngine {
         backoffNanoseconds = 5_000_000_000
         try await Task.sleep(nanoseconds: 1_500_000_000)
       } catch is CancellationError {
+        break
+      } catch let error as BenchClientError where Self.isRetired(error) {
+        // §4.5 rule 3. NOT the generic backoff below: a retired install is not a transient fault
+        // and retrying it is how a superseded copy keeps taking the room back from the install
+        // that replaced it. Stop, say why, and let the process exit.
+        retiredByServer = true
+        lastError = "retired: this install was superseded by a newer enrolment"
+        FileHandle.standardError.write(
+          Data(
+            """
+            room-recorder: this install has been retired (409 RETIRED). \
+            A newer enrolment owns \(configuration.roomSlug). Stopping; this copy will not poll again. \
+            Re-enrol with a fresh install command from /admin/bench if this Mac should serve the room.
+
+            """.utf8))
+        try? await stopWithoutEnding(reason: .cancelled)
+        await stopRetainedArchiveRecovery()
         break
       } catch {
         lastError = bounded(error)

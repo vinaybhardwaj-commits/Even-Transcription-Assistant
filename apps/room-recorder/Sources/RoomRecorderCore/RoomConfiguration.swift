@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum RoomConfigurationError: Error, Equatable, Sendable {
@@ -166,6 +167,54 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     case retainedArchiveRecoveryEnabled = "retained_archive_recovery_enabled"
     case residentArchiveCaptureEnabled = "resident_archive_capture_enabled"
     case archivePreflightReceipt = "archive_preflight_receipt"
+  }
+
+
+  /// A complete configuration for a bundle installed by the §4.4 bootstrap script.
+  ///
+  /// WHY THIS EXISTS. The script runs `enrol` and then `install-launch-agent`, and nothing else —
+  /// there is no `configure` step in it (D9: "one paste does everything"). `install-launch-agent`
+  /// loads the configuration, so `enrol` has to leave a complete one behind or the paste dies one
+  /// line from the end.
+  ///
+  /// EVERY FIELD IS DERIVED, NOT DEFAULTED. The helper paths are resolved from the running bundle,
+  /// so they are correct wherever D6 placed it and carry no Homebrew absolute path (X2).
+  /// `deviceUID` is the machine's own hardware UUID — it is written into the archive index and
+  /// must be stable across restarts and re-enrolments of the same Mac, which rules out anything
+  /// generated at install time.
+  public static func residentDefault(origin: URL, roomSlug: String) throws -> RoomConfiguration {
+    guard let tapewriter = BuildInfo.bundledHelper("tapewriter") else {
+      throw RoomConfigurationError.invalidExecutablePath("Contents/Helpers/tapewriter")
+    }
+    guard let ffmpeg = BuildInfo.bundledHelper("ffmpeg") else {
+      throw RoomConfigurationError.invalidExecutablePath("Contents/Helpers/ffmpeg")
+    }
+    return try RoomConfiguration(
+      origin: origin,
+      roomSlug: roomSlug,
+      deviceUID: try stableDeviceUID(),
+      tapewriterPath: tapewriter,
+      ffmpegPath: ffmpeg
+    )
+  }
+
+  /// The machine's hardware UUID, from `hw.uuid`.
+  ///
+  /// MEASURED, and it has to be: this value is sealed into the archive index and a mismatch makes
+  /// an index refuse to load (ArchiveIndexPersistence checks `deviceUID` against the context). A
+  /// per-install random id would orphan a Mac's own archive the first time it was re-enrolled.
+  public static func stableDeviceUID() throws -> String {
+    var size = 0
+    guard sysctlbyname("hw.uuid", nil, &size, nil, 0) == 0, size > 0 else {
+      throw RoomConfigurationError.invalidDeviceUID
+    }
+    var buffer = [CChar](repeating: 0, count: size)
+    guard sysctlbyname("hw.uuid", &buffer, &size, nil, 0) == 0 else {
+      throw RoomConfigurationError.invalidDeviceUID
+    }
+    let uuid = String(cString: buffer).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !uuid.isEmpty else { throw RoomConfigurationError.invalidDeviceUID }
+    return uuid
   }
 
   public init(

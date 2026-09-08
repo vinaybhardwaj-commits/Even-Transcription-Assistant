@@ -1,0 +1,101 @@
+EvenScribe Room Recorder — third-party software notices
+=======================================================
+
+This application bundles two third-party components inside
+`EvenScribe Room Recorder.app/Contents/Helpers/`. Both are used unmodified,
+as separate executables invoked by the application; neither is linked into
+EvenScribe's own binaries.
+
+The exact upstream archives, their versions and their verified SHA-256
+checksums are recorded in `Contents/Resources/Licenses/source-lock.json`,
+which is reproduced from the build's pinned source lock. That file is the
+authoritative statement of what was built.
+
+
+1. FFmpeg
+---------
+
+Version:  9.0.1 (upstream tag n9.0.1)
+Source:   https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+SHA-256:  cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
+Verified against the FFmpeg release signing key, fingerprint
+FCF986EA15E6E293A5644F10B4322F04D67658D8.
+
+FFmpeg is free software licensed under the GNU Lesser General Public
+License version 2.1 or later (LGPL v2.1+). This build is configured to
+contain only LGPL-compatible components: it is built with `--disable-gpl`
+and without `--enable-nonfree`, so no GPL-only or non-redistributable
+component is present.
+
+The full text of the GNU Lesser General Public License version 2.1 is
+available at:
+
+    https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+You have the right to obtain the complete corresponding source code for the
+version of FFmpeg bundled here, and to modify and relink it. The unmodified
+upstream archive named above is that source; it can be downloaded from the
+URL given, and its identity checked against the SHA-256 above. The exact
+configure flags used for this build are recorded alongside the binary in the
+build's `encoder-dependencies.txt`. Requests for the corresponding source
+may also be addressed to Even Healthcare at the contact address published
+at https://evenscribe.app.
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+
+2. libopus
+----------
+
+Version:  1.6.1
+Source:   https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+SHA-256:  6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+
+libopus is distributed under the following BSD 3-clause licence:
+
+    Copyright (c) 2001-2011 Xiph.Org, Skype Limited, Octasic,
+                            Jean-Marc Valin, Timothy B. Terriberry,
+                            CSIRO, Gregory Maxwell, Mark Borgerding,
+                            Erik de Castro Lopo
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+    - Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+    - Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+    - Neither the name of Internet Society, IETF or IETF Trust, nor the
+    names of specific contributors, may be used to endorse or promote
+    products derived from this software without specific prior written
+    permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Opus is subject to the royalty-free patent licences described at
+https://opus-codec.org/license/ .
+
+
+Note on this file
+-----------------
+
+This notice is written to satisfy the redistribution obligations of the
+licences above. It has not been reviewed by counsel. X2 was ruled closed on
+7 September 2026 on the basis that the vendored encoder ships with its LGPL
+notices bundled; this file is that bundling. If legal review later requires
+different wording, only this file and `Packaging/build-bundle.sh`'s copy
+step need to change — no code depends on its contents.

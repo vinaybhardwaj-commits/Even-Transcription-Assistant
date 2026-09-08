@@ -2837,7 +2837,8 @@ private actor KeyCrashReconciliationRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     try JSONDecoder().decode(
       CommandPollResponse.self,

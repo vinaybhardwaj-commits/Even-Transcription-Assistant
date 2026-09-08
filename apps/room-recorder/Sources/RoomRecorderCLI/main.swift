@@ -6,6 +6,7 @@ private let usage = """
   Usage:
     room-recorder configure --origin <url> --room <slug> --device <uid> --tapewriter <absolute-path> --ffmpeg <absolute-path> [--retained-archive-recovery <true|false>] [--root <dir>]
     room-recorder login [--root <dir>]
+    room-recorder enrol --token <token> --origin <https origin> [--root <dir>]
     room-recorder run [--root <dir>]
     room-recorder status [--root <dir>]
     room-recorder mark [--root <dir>]
@@ -86,6 +87,55 @@ private enum RoomRecorderCLI {
         )
         try RoomPersistence(root: root).saveConfiguration(configuration)
         print("Configured \(configuration.roomSlug) at \(root.path)")
+
+      case "enrol":
+        // Install and Fleet PRD §5.3. Called by the §4.4 bootstrap script inside `curl | bash`.
+        // NOTHING here reads stdin — see RoomEnrolment's type comment for why that matters.
+        try arguments.rejectOptions(except: ["--token", "--origin", "--root"])
+        let token = try arguments.require("--token")
+        let origin = try RoomEnrolment.validate(origin: try arguments.require("--origin"))
+        let enrolled = try await RoomEnrolment.exchange(token: token, origin: origin)
+
+        // Keychain FIRST, config second. If the keychain write fails the verb must exit non-zero
+        // with no config written, so the script's `set -e` stops the paste before the LaunchAgent
+        // is installed — a resident app with no session would poll into 401s for ever.
+        try RoomKeychain.save(
+          RoomKeychainRecord(
+            session: enrolled.session.token,
+            installID: enrolled.installID,
+            roomSlug: enrolled.roomSlug,
+            roomName: enrolled.roomName,
+            origin: origin.absoluteString
+          ))
+
+        let persistence = RoomPersistence(root: root)
+        var configuration: RoomConfiguration
+        if let existing = try? persistence.loadConfiguration() {
+          configuration = existing
+        } else {
+          configuration = try RoomConfiguration.residentDefault(
+            origin: origin, roomSlug: enrolled.roomSlug)
+        }
+        // X2: the bundle carries its own encoder. Re-point the helper paths on every enrol so a
+        // re-install off an older config cannot keep pointing at a Homebrew ffmpeg that may not
+        // be on this Mac at all.
+        if let tapewriter = BuildInfo.bundledHelper("tapewriter") {
+          configuration.tapewriterPath = tapewriter
+        }
+        if let ffmpeg = BuildInfo.bundledHelper("ffmpeg") {
+          configuration.ffmpegPath = ffmpeg
+        }
+        configuration.origin = origin
+        configuration.roomSlug = enrolled.roomSlug
+        configuration.installID = enrolled.installID
+        configuration.tabID = "app_\(enrolled.installID)"
+        // §5.4: config.json holds no token. The session lives in the keychain from here on, and
+        // this line is what guarantees a re-enrol leaves no earlier token behind on disk.
+        configuration.etaRoomSession = nil
+        try persistence.saveConfiguration(configuration)
+
+        // The token is NOT echoed. The room name is what tells V the paste bound the right room.
+        print("Enrolled as \(enrolled.roomName) (\(enrolled.roomSlug)), install \(enrolled.installID)")
 
       case "login":
         try arguments.rejectOptions(except: ["--root"])
@@ -180,7 +230,12 @@ private enum RoomRecorderCLI {
           "Label": "com.evenscribe.room-recorder",
           "ProgramArguments": [executable.standardizedFileURL.path, "run", "--root", root.path],
           "RunAtLoad": true,
-          "KeepAlive": true,
+          // §4.5 rule 3 / R2 §2.4. NOT `KeepAlive: true`, which restarts on ANY exit: a retired
+          // install stops deliberately and cleanly, and an unconditional KeepAlive would have
+          // launchd relaunch it in a tight loop for ever, polling 409s. `SuccessfulExit: false`
+          // means "restart only when it exits non-zero", so a crash is still covered and a
+          // deliberate stop is honoured.
+          "KeepAlive": ["SuccessfulExit": false],
           "ProcessType": "Interactive",
           "StandardOutPath": logPath,
           "StandardErrorPath": logPath,

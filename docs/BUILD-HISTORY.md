@@ -99,3 +99,26 @@ This chronology lapsed after 13 June: Builds 1 to 4 (Aug–Sep 2026) carry their
 their commit messages rather than here. See `git log` and the `docs/handoff/` kickoffs for those.
 See `ETA-OPEN-ITEMS.md` for pending-V items and `../content/ETA-BUG-LOG.md` for the parked
 security P0s (B19).
+
+## Install and fleet, Build R2 — the signed bundle and the app side of the paste (8 Sep 2026)
+X1 closed: in-house identity `EvenScribe Room Recorder Code Signing 1`
+(SHA-1 `187DD424FB866204111113D60C6F88A21D098EDB`, cert SHA-256
+`903EDCE6…BB281643`, valid to 4 Sep 2036), created and trusted at the Mini's console.
+
+- **Packaging** — `apps/room-recorder/Packaging/build-bundle.sh` assembles, signs and zips the
+  bundle per §5.1/§5.2, pinning the identity by SHA-1 and verifying against the same requirement
+  string R3 will use. Preflight TRIAL-SIGNS a disposable file, because `find-identity -v` succeeds
+  over SSH while `codesign` does not — a check that only looks like one is worse than none.
+- **`enrol` verb** (§5.3) — posts the token, stores the session in the keychain, writes a config
+  holding no token. Reads nothing from stdin, because it runs inside `curl | bash`.
+- **Keychain item** (§5.4) — service `com.evenscribe.room-recorder.room-token`.
+- **Poll fields** (§4.3/§5.5) — seven fields, each measured at the moment of the poll; anything
+  unreadable is omitted rather than defaulted, so the server's COALESCE keeps the last true value.
+  `tab_id` becomes `app_<install_id>`. A 409 RETIRED stops the app, and `KeepAlive` became
+  `SuccessfulExit:false` so launchd honours that stop instead of thrashing.
+- **Migration 0076** — the `room_bootstrap_token.install_id` foreign key §4.1 specified and 0075
+  omitted. Not run.
+- **X2** — the vendored encoder ships with its LGPL notices bundled.
+
+Deployment target is set explicitly to macOS 15.0; the toolchain on the build Mac defaults to
+`macosx28.0`, which would not launch on the clinic Macs.

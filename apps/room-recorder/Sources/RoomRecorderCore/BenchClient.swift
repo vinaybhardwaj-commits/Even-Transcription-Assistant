@@ -429,7 +429,8 @@ public actor BenchClient {
     previousPollAt: String? = nil,
     recordingSessionID: String? = nil,
     paused: Bool,
-    primaryLevels: BenchLevelPair? = nil
+    primaryLevels: BenchLevelPair? = nil,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     var query = [URLQueryItem(name: "tab_id", value: tabID)]
     if let previousPollAt {
@@ -444,6 +445,9 @@ public actor BenchClient {
       query.append(URLQueryItem(name: "mic_avg", value: Self.levelString(primaryLevels.average)))
     }
     query.append(URLQueryItem(name: "spare_device", value: "false"))
+    // Install and Fleet §4.3 — the seven fields, appended only when this build is enrolled.
+    // Absent, the server takes the poll exactly as it took every poll before R1 shipped.
+    query.append(contentsOf: install?.queryItems() ?? [])
     var request = try request(path: "/api/bench/commands", query: query)
     request.cachePolicy = .reloadIgnoringLocalCacheData
     return try await decoded(request, as: CommandPollResponse.self)

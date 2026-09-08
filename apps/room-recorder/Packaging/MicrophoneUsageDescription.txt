@@ -1,0 +1,1 @@
+EvenScribe records this consultation room so the clinician's notes can be written from what was said.

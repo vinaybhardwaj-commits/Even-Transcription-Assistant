@@ -2000,7 +2000,8 @@ private actor ResidentCaptureRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     polls += 1
     levels = primaryLevels
@@ -2101,7 +2102,8 @@ private actor ResidentCommandRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     pollCount += 1
     let commands: String
@@ -2191,7 +2193,8 @@ private actor ResidentRetryEndRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     let commands: String
     switch nextCommand {
@@ -2261,7 +2264,8 @@ private actor ResidentSupersededRemote: RoomEngineRemote {
     previousPollAt: String?,
     recordingSessionID: String?,
     paused: Bool,
-    primaryLevels: BenchLevelPair?
+    primaryLevels: BenchLevelPair?,
+    install: InstallPollFields?
   ) async throws -> CommandPollResponse {
     try JSONDecoder().decode(
       CommandPollResponse.self,
