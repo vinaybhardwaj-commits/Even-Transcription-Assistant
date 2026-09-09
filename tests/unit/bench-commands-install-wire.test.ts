@@ -123,9 +123,43 @@ describe("the install poll's wire (F1)", () => {
   it("omits an unparseable update time rather than guessing one", async () => {
     expect((await poll({ ...FULL, last_update_at: "yesterday" })).install?.last_update_at).toBeNull();
     expect((await poll({ ...FULL, last_update_at: "" })).install?.last_update_at).toBeNull();
-    // A valid instant in any shape is normalised to ISO-8601, which is what the column takes.
+    // A valid instant is normalised to ISO-8601, which is what the column takes.
     expect((await poll({ ...FULL, last_update_at: "2026-09-09T09:14:00Z" })).install?.last_update_at)
       .toBe("2026-09-09T09:14:00.000Z");
+  });
+
+  it("rejects what Date.parse would have HAPPILY invented (Fix 2, G5)", async () => {
+    // ─── `Date.parse` IS NOT A VALIDATOR ────────────────────────────────────────────────────
+    // It reads "12" as December 2001 and "2026" as a year, so a truncated or garbled field used to
+    // arrive as a confident wrong timestamp instead of as silence. The card renders this as the
+    // clock time an update failed at; a value invented out of "12" is precisely the plausible
+    // fiction §5.5 exists to forbid. Shape first, then parse.
+    for (const bad of ["12", "2026", "2026-09", "2026-09-09", "Sep 9 2026", "1757400000"]) {
+      const { install } = await poll({ ...FULL, last_update_at: bad });
+      expect(install?.last_update_at, `last_update_at=${JSON.stringify(bad)}`).toBeNull();
+    }
+    // A shape-valid but impossible date is still refused — the parse runs after the regex.
+    expect((await poll({ ...FULL, last_update_at: "2026-13-45T99:99:99Z" })).install?.last_update_at)
+      .toBeNull();
+  });
+
+  it("carries a full ISO-8601 instant, with Z or an explicit offset", async () => {
+    // What `Date.toISOString()` produces is what the app actually sends.
+    expect(
+      (await poll({ ...FULL, last_update_at: "2026-09-09T09:14:00.000Z" })).install?.last_update_at,
+    ).toBe("2026-09-09T09:14:00.000Z");
+    expect(
+      (await poll({ ...FULL, last_update_at: "2026-09-09T14:44:00+05:30" })).install?.last_update_at,
+    ).toBe("2026-09-09T09:14:00.000Z");
+  });
+
+  it("carries version_mismatch, the outcome Fix 2 added (G1)", async () => {
+    const { install } = await poll({
+      ...FULL,
+      last_update_result: "version_mismatch",
+      last_update_error: "the downloaded app calls itself 0.1.9 but the release is named 0.1.8",
+    });
+    expect(install?.last_update_result).toBe("version_mismatch");
   });
 
   it("a poll WITHOUT install_id sends no install object at all", async () => {

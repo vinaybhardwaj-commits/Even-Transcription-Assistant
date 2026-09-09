@@ -1147,10 +1147,13 @@ out of the review; four of them blocked the trip.
 2. **A repeatable `swap_failed` was an unbounded download-and-swap loop.** The attempt schedule lived
    only in memory and was rebuilt on every process start, so a resident-verify failure restored
    `.previous`, launchd started the old app, and about eighty seconds later the whole cycle ran
-   again — for ever, each pass crossing the window where the resident bundle does not exist. A
-   publish whose `version` disagreed with the `CFBundleShortVersionString` inside its own zip would
-   do the same with no failure at all. **One retry, then hold**, recorded on disk and keyed by
-   version, cleared the moment a different version is offered.
+   again — for ever, each pass crossing the window where the resident bundle does not exist.
+   **One retry, then hold**, recorded on disk and keyed by version, cleared the moment a different
+   version is offered. A publish whose `version` disagreed with the `CFBundleShortVersionString`
+   inside its own zip ran the same loop with no failure at all, and the ledger could not bound that
+   one — the receipt said `ok`. **Fix 2 closes it upstream instead:** the app reads the staged
+   bundle's `Info.plist` after the signature check and before the swap, and a disagreement stops the
+   update as `version_mismatch`, which is then held after one retry like every other failure.
 3. **The restarted app deleted the staging directory the swap script was running from.**
    `ThrottleInterval` does not protect this — it is a minimum interval between *starts*, and a
    resident app that has run for hours has spent it, so exiting 64 gets an immediate respawn. A
@@ -1172,3 +1175,20 @@ out of the review; four of them blocked the trip.
 considered and ruled out; items 2 and 3 above shrink the exposure by far more than an atomic swap
 would, because they remove the repetition rather than narrowing one pass. Acceptance item 6 is run
 with `kill`, never `kill -9`.
+
+### 13.10 Fix 2, 9 September 2026 — the review of Fix 1
+
+1. **G1.** A correctly signed bundle whose own `CFBundleShortVersionString` disagrees with the
+   release that offered it now stops as `version_mismatch`, read from the STAGED `Info.plist` after
+   the signature check and before the swap. It was the one loop the ledger could not bound, because
+   its receipt said `ok`.
+2. **G2.** Startup counts only `swap_failed` — the sole outcome the swap script writes, and the only
+   failure whose author cannot count itself. Counting every non-`ok` receipt double-counted a
+   failure whose process restarted before its next poll, holding a room after one real failure.
+3. **G3.** §13.9 item 2 above and `docs/BUILD-HISTORY.md` corrected; they had claimed the typo case
+   closed when it was not.
+4. **G4.** `handoverGrace` raised from 10 minutes to **30** [V-9SEP].
+5. **G5.** The poll route's `instant()` accepts only a full ISO-8601 instant; `Date.parse` alone had
+   read `"12"` as December 2001.
+6. **G6.** The acceptance-item-6 FIFO reader takes a 10-second deadline instead of blocking for ever.
+7. **G7.** The repo's `CLAUDE.md` is committed.

@@ -140,7 +140,11 @@ import Testing
           # exactly the window acceptance item 6 kills the script in. Tell the test we are here,
           # then hold still long enough to be signalled.
           /bin/echo in-window > '\(fifo.path)'
-          /bin/sleep 30
+          # SHORT SLEEPS IN A LOOP, not one long one. Bash defers a trap until the current
+          # foreground command returns, so a single `/bin/sleep 30` made this test take thirty
+          # seconds every time the SIGTERM lost the race to the fork. Fifty-millisecond slices hold
+          # the window open just as reliably and let the trap fire at once.
+          for _ in $(/usr/bin/seq 1 200); do /bin/sleep 0.05; done
           \(anchor)
           """)
     }
@@ -157,11 +161,48 @@ import Testing
     try process.run()
 
     if let fifoURL {
-      // Opening a FIFO for reading blocks until a writer opens it, so this returns at the moment
-      // the script reaches the window — and not a millisecond before.
-      let reader = FileHandle(forReadingAtPath: fifoURL.path)
-      _ = reader?.readData(ofLength: 1)
-      try? reader?.close()
+      // Opening a FIFO for reading normally BLOCKS until a writer opens it, which is precisely the
+      // rendezvous this test wants — it returns at the moment the script reaches the window, and
+      // not a millisecond before.
+      //
+      // ─── BUT A BLOCKING OPEN NEVER TIMES OUT (Fix 2, G6) ─────────────────────────────────
+      // If the script dies before the anchor — a bad stub, a `set -u` trip, an edit that breaks
+      // the script — nothing ever opens the write end and the whole suite hangs for ever with no
+      // diagnosis. A test that cannot fail is bad; a test that cannot FINISH is worse, because it
+      // takes every other test with it.
+      //
+      // So: open non-blocking, then poll for a byte for at most ten seconds. `O_NONBLOCK` on a
+      // FIFO read end succeeds immediately even with no writer, and reads return EAGAIN until one
+      // arrives — which is what turns "wait for ever" into "wait, with a deadline". The green path
+      // is unchanged: the first byte still arrives inside the window.
+      let fd = open(fifoURL.path, O_RDONLY | O_NONBLOCK)
+      guard fd >= 0 else {
+        process.terminate()
+        throw SwapHarnessError.fifoFailed
+      }
+      defer { close(fd) }
+
+      var byte: UInt8 = 0
+      var reached = false
+      let deadline = Date().addingTimeInterval(10)
+      while Date() < deadline {
+        let n = read(fd, &byte, 1)
+        if n > 0 {
+          reached = true
+          break
+        }
+        // n == 0 is "no writer yet"; n < 0 with EAGAIN is "writer open, nothing written yet".
+        // Neither is fatal. Anything else is.
+        if n < 0 && errno != EAGAIN && errno != EINTR { break }
+        usleep(2000)
+      }
+      guard reached else {
+        // Kill it before throwing: a script left sleeping in the window would hold the temporary
+        // tree open and leak a process out of the test run.
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
+        throw SwapHarnessError.windowNeverReached
+      }
       kill(process.processIdentifier, SIGTERM)
     }
 
@@ -175,6 +216,9 @@ import Testing
     /// injection is how acceptance item 6 came to be tested by a test that could not fail.
     case anchorMissing(String)
     case fifoFailed
+    /// Fix 2, G6. Ten seconds passed and the script never reached the window between the two
+    /// moves. Something upstream of the rendezvous broke; say so instead of hanging the suite.
+    case windowNeverReached
   }
 
   static func readResult(_ fixture: Fixture) -> RoomUpdateResult? {
@@ -331,6 +375,7 @@ import Testing
     // signed by somebody who is not Even.
     let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 1])
     runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = "0.1.8"
     let updater = RoomUpdater(
       rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
       channel: "stable",
@@ -353,6 +398,7 @@ import Testing
     let bytes = Data("a plausible zip".utf8)
     let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
     runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = "0.1.8"
     let updater = RoomUpdater(
       rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
       channel: "stable",
@@ -377,6 +423,7 @@ import Testing
     let bytes = Data("a plausible zip".utf8)
     let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
     runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = "0.1.8"
     let updater = RoomUpdater(
       rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
       channel: "stable",
@@ -519,6 +566,140 @@ import Testing
     #expect(run.toolLog.contains("launchctl bootstrap"))
   }
 
+  // MARK: - G1: a correctly signed bundle that is labelled wrong
+
+  /// Build an updater whose staged bundle calls itself `stagedVersion` while the release row offers
+  /// `offered`. Everything before the version check passes.
+  private func mislabelledUpdater(
+    _ fixture: Fixture, offered: String, stagedVersion: String?, runner: RecordingRunner
+  ) -> RoomUpdater {
+    let bytes = Data("a plausible zip".utf8)
+    runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = stagedVersion
+    return RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
+      channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: offered, bytes: bytes)),
+      downloader: StubDownloader(bytes: bytes), runner: runner, log: { _ in })
+  }
+
+  @Test func aBundleThatCallsItselfSomethingElseIsStoppedBeforeTheSwap() async throws {
+    // ─── THE PUBLISH TYPO, AND WHY IT WAS THE ONE THAT LOOPED ────────────────────────────────
+    // The zip is authentic and correctly signed. `app_release.version` says 0.1.8; the Info.plist
+    // inside says 0.1.9. Before this check the swap SUCCEEDED, the new copy read its own version as
+    // 0.1.9, asked the route, was told 0.1.8, and `running != offered` was true again — download,
+    // swap, restart, every eighty seconds, for ever. The ledger could not bound it because the
+    // receipt said `ok`, and a ledger that counts failures cannot bound a loop made of successes.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = mislabelledUpdater(
+      fixture, offered: "0.1.8", stagedVersion: "0.1.9", runner: runner)
+
+    guard case .stopped(let outcome, let reason) = await updater.check(sessionIsOpen: false) else {
+      Issue.record("expected the update to stop on a version mismatch")
+      return
+    }
+    #expect(outcome == .versionMismatch)
+    #expect(reason.contains("0.1.9"))
+    #expect(reason.contains("0.1.8"))
+
+    // NOTHING WAS HANDED OVER and nothing resident was touched. The swap is the step this check
+    // sits in front of.
+    #expect(await runner.spawned.isEmpty)
+    #expect(fixture.version(of: fixture.resident) == "0.1.7")
+    #expect(!FileManager.default.fileExists(atPath: fixture.previous.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
+
+    // The receipt names the version that was OFFERED — the one the card's sentence is about, and
+    // the one the ledger is keyed by. Not the version the bundle wrongly claimed.
+    let receipt = try #require(Self.readResult(fixture))
+    #expect(receipt.outcome == .versionMismatch)
+    #expect(receipt.version == "0.1.8")
+
+    // And `stop()` counted it, so the ordinary one-retry-then-hold now applies with no new
+    // machinery — which is the whole point of catching it here rather than after the swap.
+    let ledger = try #require(RoomUpdateAttempts.read(root: fixture.root))
+    #expect(ledger.version == "0.1.8")
+    #expect(ledger.failures == 1)
+    #expect(ledger.holdUntil == nil)
+  }
+
+  @Test func theSameMislabelledReleaseIsTriedOnceMoreAndThenHeld() async throws {
+    // The bound: offer the identical bad build three times. Attempt, one retry, then held — the
+    // same shape every other failure gets, because it IS every other failure now.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+
+    func offerIt() async -> RoomUpdateAttempt {
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      return await mislabelledUpdater(
+        fixture, offered: "0.1.8", stagedVersion: "0.1.9", runner: runner
+      ).check(sessionIsOpen: false)
+    }
+
+    #expect(await offerIt() == .stopped(.versionMismatch, reason:
+      "the downloaded app calls itself 0.1.9 but the release is named 0.1.8"))
+    #expect(await offerIt() == .stopped(.versionMismatch, reason:
+      "the downloaded app calls itself 0.1.9 but the release is named 0.1.8"))
+    #expect(await offerIt() == .heldAfterRepeatedFailure(version: "0.1.8"))
+    #expect(await offerIt() == .heldAfterRepeatedFailure(version: "0.1.8"))
+  }
+
+  @Test func aStagedBundleThatWillNotSayWhatItIsIsAlsoRefused() async throws {
+    // No Info.plist at all. A bundle that cannot state its version has not been SHOWN to be the one
+    // the release names, and "cannot tell" must not read as "matches".
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = mislabelledUpdater(
+      fixture, offered: "0.1.8", stagedVersion: nil, runner: runner)
+
+    guard case .stopped(let outcome, let reason) = await updater.check(sessionIsOpen: false) else {
+      Issue.record("expected the update to stop")
+      return
+    }
+    #expect(outcome == .versionMismatch)
+    #expect(reason.contains("nothing"))
+    #expect(await runner.spawned.isEmpty)
+  }
+
+  @Test func aCorrectlyLabelledBundleStillHandsOver() async throws {
+    // The negative control. The check must not become a wall that stops every update.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = mislabelledUpdater(
+      fixture, offered: "0.1.8", stagedVersion: "0.1.8", runner: runner)
+    #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: "0.1.8"))
+  }
+
+  @Test func theVersionIsReadFromTheStagedBundleOnDisk() throws {
+    // Not from `Bundle.main` (this process's own identity) and not from `defaults` (a preferences
+    // cache). Bytes, from the path handed in.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let bundle = fixture.root.appendingPathComponent("probe.app", isDirectory: true)
+    let contents = bundle.appendingPathComponent("Contents", isDirectory: true)
+    try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+
+    #expect(RoomUpdater.bundleShortVersion(at: bundle) == nil)  // no plist yet
+
+    let data = try PropertyListSerialization.data(
+      fromPropertyList: ["CFBundleShortVersionString": "0.1.9-test"], format: .xml, options: 0)
+    try data.write(to: contents.appendingPathComponent("Info.plist", isDirectory: false))
+    #expect(RoomUpdater.bundleShortVersion(at: bundle) == "0.1.9-test")
+
+    // A plist with the key missing, and one that is not a plist at all, both read as nil.
+    let empty = try PropertyListSerialization.data(
+      fromPropertyList: ["CFBundleIdentifier": "x"], format: .xml, options: 0)
+    try empty.write(to: contents.appendingPathComponent("Info.plist", isDirectory: false))
+    #expect(RoomUpdater.bundleShortVersion(at: bundle) == nil)
+    try Data("not a plist".utf8)
+      .write(to: contents.appendingPathComponent("Info.plist", isDirectory: false))
+    #expect(RoomUpdater.bundleShortVersion(at: bundle) == nil)
+  }
+
   // MARK: - F2: a repeatable failure must not loop
 
   @Test func twoFailedSwapsOfOneVersionGiveExactlyOneRetryThenNoFurtherDownload() async throws {
@@ -536,6 +717,8 @@ import Testing
     func oneBoot() async -> RoomUpdateAttempt {
       let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
       runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = "0.1.8"
+      runner.dittoProducesVersion = "0.1.8"
       let updater = RoomUpdater(
         rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
         channel: "stable",
@@ -592,6 +775,8 @@ import Testing
     let bytes = Data("a plausible zip".utf8)
     let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
     runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    // The new build calls itself what the release calls it — G1's check must pass here.
+    runner.dittoProducesVersion = "0.1.9"
     let updater = RoomUpdater(
       rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
       channel: "stable",
@@ -643,7 +828,87 @@ import Testing
     #expect(RoomUpdateAttempts.read(root: fixture.root) == nil)
   }
 
+  // MARK: - G2: one real failure must not trigger the hold
+
+  @Test func aDownloadFailedReceiptAtStartupDoesNotTouchTheLedger() throws {
+    // ─── THE DOUBLE COUNT THIS CLOSES ────────────────────────────────────────────────────────
+    // `stop()` already counted this failure when it wrote the receipt. The receipt survives on disk
+    // until a poll carries it, so a restart before that poll — a reboot, a crash, or the very
+    // network outage that caused the download to fail — brought the app back to a receipt it had
+    // already counted. Counting again made two, and two is the hold: a room held after ONE real
+    // failure, having never had the retry the design promises it.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let t0 = Date(timeIntervalSince1970: 1_757_400_000)
+
+    for outcome in [
+      RoomUpdateOutcome.downloadFailed, .checksumMismatch, .signatureMismatch, .expandFailed,
+      .versionMismatch, .ok,
+    ] {
+      RoomUpdateAttempts.clear(root: fixture.root)
+      let receipt = RoomUpdateResult(
+        outcome: outcome, version: "0.1.8", reason: "something", at: t0)
+      let ledger = roomUpdateCountStartupReceipt(
+        root: fixture.root, receipt: receipt, now: t0)
+      #expect(ledger == nil, "\(outcome.rawValue) must not be counted at startup")
+      #expect(RoomUpdateAttempts.read(root: fixture.root) == nil)
+    }
+
+    // No receipt at all is likewise nothing to count.
+    #expect(roomUpdateCountStartupReceipt(root: fixture.root, receipt: nil, now: t0) == nil)
+  }
+
+  @Test func aSwapFailedReceiptAtStartupCountsExactlyOneFailure() throws {
+    // The one outcome the swap script writes, and the only failure whose author cannot count it:
+    // that process exited 64 and is gone.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let t0 = Date(timeIntervalSince1970: 1_757_400_000)
+    let receipt = RoomUpdateResult(
+      outcome: .swapFailed, version: "0.1.8",
+      reason: "the new version did not satisfy the pinned signing requirement", at: t0)
+
+    let first = try #require(
+      roomUpdateCountStartupReceipt(root: fixture.root, receipt: receipt, now: t0))
+    #expect(first.version == "0.1.8")
+    #expect(first.failures == 1)
+    #expect(first.holdUntil == nil)  // the retry is still owed
+
+    let second = try #require(
+      roomUpdateCountStartupReceipt(root: fixture.root, receipt: receipt, now: t0))
+    #expect(second.failures == 2)
+    #expect(second.holdUntil == t0.addingTimeInterval(RoomSelfUpdate.retryHold))
+  }
+
+  @Test func aDownloadFailureFollowedByARestartStillGetsItsRetry() throws {
+    // The whole G2 scenario end to end, at the ledger: `stop()` counts once, the process restarts
+    // with the receipt still on disk, startup counts nothing, and the room is NOT held.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let t0 = Date(timeIntervalSince1970: 1_757_400_000)
+
+    // What `stop()` does.
+    roomUpdateRecordFailure(previous: nil, version: "0.1.8", now: t0).write(root: fixture.root)
+    let receipt = RoomUpdateResult(
+      outcome: .downloadFailed, version: "0.1.8", reason: "the download did not finish", at: t0)
+    receipt.write(root: fixture.root)
+
+    // The restart, before any poll could carry the receipt away.
+    roomUpdateCountStartupReceipt(root: fixture.root, receipt: receipt, now: t0)
+
+    let ledger = try #require(RoomUpdateAttempts.read(root: fixture.root))
+    #expect(ledger.failures == 1)
+    #expect(!roomUpdateIsHeld(attempts: ledger, version: "0.1.8", now: t0))
+  }
+
   // MARK: - F3: the restarted app must not delete the running script's staging directory
+
+  @Test func theHandoverGraceIsThirtyMinutes() {
+    // V's ruling, 9 September 2026 (Fix 2, G4), raised from ten. Pinned as a number because the
+    // number is the ratified thing: too short sweeps the staging directory out from under a swap
+    // script that is still working, and that is a far worse failure than ~90 MB sitting around.
+    #expect(RoomSelfUpdate.handoverGrace == 30 * 60)
+  }
 
   @Test func staginIsLeftAloneWhileAHandoverIsInFlight() {
     let t0 = Date(timeIntervalSince1970: 1_757_400_000)
@@ -665,6 +930,7 @@ import Testing
     let bytes = Data("a plausible zip".utf8)
     let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
     runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = "0.1.8"
     // The marker has to exist by the time the script can run, so the runner checks AT SPAWN.
     runner.markerPathAtSpawn = RoomSelfUpdate.handoverMarkerURL(root: fixture.root).path
     let updater = RoomUpdater(
@@ -934,6 +1200,9 @@ private final class RecordingRunner: RoomUpdateCommandRunning, @unchecked Sendab
   /// When set, the `ditto` stub creates a directory of this name in its destination, so the step
   /// that looks for a `.app` finds one.
   var dittoProducesBundleNamed: String?
+  /// Fix 2, G1. The `CFBundleShortVersionString` the stub writes into that bundle's Info.plist.
+  /// Nil writes NO plist at all, which is the "will not say what it is" case the check also fails.
+  var dittoProducesVersion: String?
   /// F3. When set, `spawnDetached` records whether this path existed at the moment of the spawn —
   /// the marker has to be on disk BEFORE the script can run, not after.
   var markerPathAtSpawn: String?
@@ -950,7 +1219,21 @@ private final class RecordingRunner: RoomUpdateCommandRunning, @unchecked Sendab
       let destination = arguments.last
     {
       let bundle = URL(fileURLWithPath: destination).appendingPathComponent(name, isDirectory: true)
-      try? FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+      let contents = bundle.appendingPathComponent("Contents", isDirectory: true)
+      try? FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+      if let version = dittoProducesVersion {
+        // A real Info.plist, serialised the same way a real bundle carries one, so the check under
+        // test reads bytes rather than a fixture shortcut.
+        let plist: [String: Any] = [
+          "CFBundleShortVersionString": version,
+          "CFBundleIdentifier": "com.evenscribe.room-recorder",
+        ]
+        if let data = try? PropertyListSerialization.data(
+          fromPropertyList: plist, format: .xml, options: 0)
+        {
+          try? data.write(to: contents.appendingPathComponent("Info.plist", isDirectory: false))
+        }
+      }
     }
     return exitCodes[executable] ?? 0
   }

@@ -660,18 +660,29 @@ public actor RoomEngine {
     // happened, so the marker has done its job.
     if pendingUpdateResult != nil { RoomUpdateHandover.clear(root: persistence.root) }
 
-    // ─── COUNT A FAILED SWAP AGAINST THE VERSION THAT FAILED (Fix 1, F2) ────────────────────
+    // ─── COUNT A FAILED SWAP, AND ONLY A FAILED SWAP (Fix 1 F2, corrected by Fix 2 G2) ──────
     //
-    // The process that attempted the swap is gone; THIS one is its replacement, and this is the
-    // only moment the failure can be counted. Without it the ledger would never see a
-    // `swap_failed` — which is exactly the failure that loops, because the STAGED check passed and
-    // only the RESIDENT check did not.
-    if let receipt = pendingUpdateResult, receipt.outcome != .ok {
-      let ledger = roomUpdateRecordFailure(
-        previous: RoomUpdateAttempts.read(root: persistence.root),
-        version: receipt.version,
-        now: Date())
-      ledger.write(root: persistence.root)
+    // `swap_failed` IS THE ONLY OUTCOME THE SWAP SCRIPT WRITES, and the only failure whose author
+    // cannot count itself: the process that attempted it exited 64 and is gone, so THIS one, its
+    // replacement, is the only thing left that can. Every other outcome — checksum, signature,
+    // download, expand, version — is written by `stop()`, which counts it in the same breath.
+    //
+    // ─── WHY THE TEST IS NOT `!= .ok` ANY MORE ────────────────────────────────────────────
+    // It was, and that made the ledger over-count. The receipt is deleted only after a poll has
+    // actually carried it (see `run()`), so a process that fails to download and then restarts
+    // before its next poll — a reboot, a crash, or simply the network outage that caused the
+    // `download_failed` in the first place — arrived back here with its own receipt still on disk
+    // and counted the same failure a second time. Two counts is the hold. A room could be held
+    // after ONE real failure, having never had the retry the design promises it.
+    //
+    // Under-counting a swap failure loops a room; over-counting a download failure strands one.
+    // The narrow test is what makes each failure counted exactly once, by whoever can see it.
+    // The `.swapFailed` test lives inside `roomUpdateCountStartupReceipt`, stated once, so the rule
+    // is testable without standing a whole engine up.
+    if let ledger = roomUpdateCountStartupReceipt(
+      root: persistence.root, receipt: pendingUpdateResult, now: Date()),
+      let receipt = pendingUpdateResult
+    {
       // SAY SO ON THE CARD when the hold begins. The row already keeps the reason for ever (the
       // update columns COALESCE), but "and it has stopped trying" is a fact this app measured by
       // counting, and an operator reading the row deserves it rather than having to infer it from

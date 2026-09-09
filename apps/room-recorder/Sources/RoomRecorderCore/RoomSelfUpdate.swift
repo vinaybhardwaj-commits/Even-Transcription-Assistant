@@ -103,12 +103,20 @@ public enum RoomSelfUpdate {
     root.appendingPathComponent("update-handover.json", isDirectory: false)
   }
 
-  /// How long a marker is believed. Generous: a ~90 MB bundle, two directory renames and a
-  /// `codesign --deep` on a Mac mini's disk. Past it the marker is stale and staging is swept, so a
-  /// script that died without writing a result cannot leave the directory behind for ever.
+  /// How long a marker is believed. THIRTY MINUTES (V, 9 September 2026, Fix 2 G4 — raised from
+  /// ten). A ~90 MB bundle, two directory renames and a `codesign --deep` on a Mac mini's disk,
+  /// with the disk possibly busy writing a clinic day of audio at the same time. Ten minutes was
+  /// chosen without measuring, and the cost of it being too short is the worst kind: the staging
+  /// directory swept out from under a swap script that is still working.
+  ///
+  /// The cost of it being too LONG is only that a dead script's ~90 MB sits there half an hour
+  /// longer. That asymmetry is why the number went up rather than down.
+  ///
+  /// Past it the marker is stale and staging is swept, so a script that died without writing a
+  /// result cannot leave the directory behind for ever.
   ///
   /// NOT CONFIGURABLE — same ruling as the check interval (V, 9 September).
-  public static let handoverGrace: TimeInterval = 10 * 60
+  public static let handoverGrace: TimeInterval = 30 * 60
 
   /// Where the attempt ledger lives (Fix 1, F2).
   public static func attemptsURL(root: URL) -> URL {
@@ -157,7 +165,7 @@ public struct RoomReleaseDescriptor: Codable, Equatable, Sendable {
 
 // MARK: - What an attempt leaves behind
 
-/// The six outcomes §13.4 lets `last_update_result` hold, and no others.
+/// The outcomes `last_update_result` may hold, and no others.
 public enum RoomUpdateOutcome: String, Codable, Equatable, Sendable {
   case ok
   case checksumMismatch = "checksum_mismatch"
@@ -165,6 +173,10 @@ public enum RoomUpdateOutcome: String, Codable, Equatable, Sendable {
   case downloadFailed = "download_failed"
   case expandFailed = "expand_failed"
   case swapFailed = "swap_failed"
+  /// Fix 2, G1. The zip is authentic and correctly signed, and the bundle inside it calls itself a
+  /// DIFFERENT version from the one the release row names. §13.4's original five did not cover it
+  /// because it is not a corruption — it is a publish mistake, and it is the one that loops.
+  case versionMismatch = "version_mismatch"
 }
 
 /// `update-result.json`, written by the swap script in shell and by this file in Swift.
@@ -349,6 +361,31 @@ public func roomUpdateIsHeld(
     return false
   }
   return now < holdUntil
+}
+
+/// The startup half of the ledger: count a receipt this process did not write (Fix 2, G2).
+///
+/// ─── EXACTLY ONE COUNT PER FAILURE, BY WHOEVER CAN SEE IT ──────────────────────────────────────
+/// `swap_failed` is the ONLY outcome the swap script writes, and the only failure whose author
+/// cannot count itself — the process that attempted it exited 64 and is gone. Every other outcome
+/// comes from `stop()`, which counts it in the same breath.
+///
+/// This used to fire on any outcome but `ok`, and that over-counted. The receipt lives on disk
+/// until a poll has actually carried it, so a process that failed to download and restarted before
+/// its next poll — a reboot, a crash, or the very network outage that caused the `download_failed`
+/// — came back, found its own receipt, and counted the same failure a second time. Two counts is
+/// the hold, so a room could be held after ONE real failure having never had its retry.
+///
+/// Returns the ledger it wrote, or nil when there was nothing for this process to count.
+@discardableResult
+public func roomUpdateCountStartupReceipt(
+  root: URL, receipt: RoomUpdateResult?, now: Date
+) -> RoomUpdateAttempts? {
+  guard let receipt, receipt.outcome == .swapFailed else { return nil }
+  let ledger = roomUpdateRecordFailure(
+    previous: RoomUpdateAttempts.read(root: root), version: receipt.version, now: now)
+  ledger.write(root: root)
+  return ledger
 }
 
 /// PURE — may the staging directory be swept at startup? (Fix 1, F3.)
@@ -563,6 +600,33 @@ public struct RoomUpdater: Sendable {
     self.log = log
   }
 
+  /// `CFBundleShortVersionString` out of a bundle ON DISK, or nil (Fix 2, G1).
+  ///
+  /// `PropertyListSerialization` over the raw `Contents/Info.plist` bytes, deliberately:
+  ///
+  /// · NOT `defaults read` — it answers from a preferences cache, not from the file, and can be
+  ///   stale or simply wrong about a bundle that has just been unpacked into a temporary path.
+  /// · NOT `Bundle.main` — that is THIS process's identity. The question here is what the bundle
+  ///   sitting in the staging directory claims to be.
+  /// · `Bundle(url:)` would work but caches per-path inside the process, and the staging path is
+  ///   reused across attempts within one run of the app. Reading the bytes has no such memory.
+  ///
+  /// Nil on any failure — missing plist, unreadable plist, missing or non-string key. The caller
+  /// treats nil as a mismatch, which is right: a bundle that will not say what it is has not been
+  /// shown to be what the release claims.
+  static func bundleShortVersion(at bundleURL: URL) -> String? {
+    let plistURL = bundleURL.appendingPathComponent("Contents/Info.plist", isDirectory: false)
+    guard let data = try? Data(contentsOf: plistURL),
+      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+      let object = plist as? [String: Any],
+      let version = object["CFBundleShortVersionString"] as? String,
+      !version.isEmpty
+    else {
+      return nil
+    }
+    return version
+  }
+
   /// One whole check, from asking the route to spawning the script.
   ///
   /// `sessionIsOpen` IS PASSED IN AND READ ONCE, at the top. The engine owns that fact and this
@@ -693,6 +757,34 @@ public struct RoomUpdater: Sendable {
       ])
     guard verified == 0 else {
       return stop(.signatureMismatch, "the downloaded app was not signed by Even")
+    }
+
+    // ── Step 6c: does the bundle call itself what the release calls it? (Fix 2, G1) ─────────
+    //
+    // ─── THE ONLY FAILURE IN THIS FILE THAT NEEDS NO CORRUPTION TO HAPPEN ──────────────────
+    // Everything above catches a zip that is broken or forged. This catches one that is perfect
+    // and MISLABELLED: `app_release.version` says 0.1.8, the `Info.plist` inside says 0.1.9. A
+    // publish typo is enough.
+    //
+    // Left undetected it is not a failed update, it is an ENDLESS one. The swap succeeds, the new
+    // copy starts, reads its own `CFBundleShortVersionString` as 0.1.9, asks the route, is told
+    // 0.1.8, and `running != offered` is true again — so it downloads, swaps and restarts about
+    // every eighty seconds, for ever. The attempt ledger could not see it either, because the
+    // receipt said `ok`: a ledger that counts failures cannot bound a loop made of successes.
+    //
+    // Caught HERE, before the swap, it becomes an ordinary failure — `stop()` writes the receipt
+    // and counts it, so one-retry-then-hold applies with no further machinery, and nothing
+    // resident has been touched.
+    //
+    // READ FROM THE STAGED PATH, NEVER THE RUNNING BUNDLE. `Bundle.main` is this process's own
+    // identity and comparing it to the offer is the question we already answered in `check()`.
+    // And never `defaults read`: it consults a preferences cache, not the file on disk.
+    let stagedVersion = Self.bundleShortVersion(at: stagedApp)
+    guard let stagedVersion, stagedVersion == release.version else {
+      return stop(
+        .versionMismatch,
+        "the downloaded app calls itself \(stagedVersion ?? "nothing") but the release is named "
+          + release.version)
     }
 
     // ── Step 7: write the script, spawn it detached, and hand over ──────────────────────────

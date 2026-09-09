@@ -64,7 +64,7 @@ COMMENT ON COLUMN room_install.update_channel IS
   'Which release channel this Mac asks for, as its own config.json states it (R3-8). One of stable or test. Home Office sits on test so a bad publish reaches one Mac and not five. Reported by the app, never typed on the card. NOT NULL DEFAULT ''stable'' because every install predating Build R3 is on stable by construction.';
 
 COMMENT ON COLUMN room_install.last_update_result IS
-  'Outcome of the last self-update this Mac attempted, from update-result.json: ok, checksum_mismatch, signature_mismatch, download_failed, expand_failed or swap_failed. COALESCEd on poll so a later poll cannot erase the record of a failure (R3-7). NULL means no update has ever been attempted on this Mac.';
+  'Outcome of the last self-update this Mac attempted, from update-result.json: ok, checksum_mismatch, signature_mismatch, download_failed, expand_failed, swap_failed or version_mismatch (a correctly signed bundle whose own CFBundleShortVersionString disagrees with the release row that offered it — a publish mistake, caught before the swap). COALESCEd on poll so a later poll cannot erase the record of a failure (R3-7). NULL means no update has ever been attempted on this Mac.';
 
 COMMENT ON COLUMN room_install.last_update_version IS
   'The version the last self-update attempt was trying to reach — 0.1.8 in "Update to 0.1.8 stopped at 09:14". A COLUMN OF ITS OWN (V, 9 September 2026, Fix 1) because the card''s sentence names it and the first cut of R3 packed it into the head of last_update_error and parsed it back out, which made a free-text column load-bearing. COALESCEd with the other update columns. NULL means no attempt has been recorded.';

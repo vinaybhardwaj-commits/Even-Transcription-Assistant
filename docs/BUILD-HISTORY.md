@@ -316,7 +316,9 @@ database: `app/api/bench/commands/route.ts` built its `install` object from a ha
 read none of them, so `session_open` would have stayed NULL and R3-3 would have deleted the "Tape not
 advancing" warning rather than fixing it. Also closed: a repeatable `swap_failed` looped
 download-and-swap roughly every eighty seconds for ever (the attempt ledger is now on disk — one
-retry, then hold, keyed by version); the restarted app deleted the staging directory the swap script
+retry, then hold, keyed by version — though that bounds only loops made of FAILURES; the
+publish-typo variant, which loops on successes, was still open after Fix 1 and is closed by Fix 2
+below); the restarted app deleted the staging directory the swap script
 was still running from (a handover marker now guards it, and the claim that `ThrottleInterval`
 protected the swap was a misreading of launchd, corrected in place); and the acceptance-item-6 test
 asserted every outcome except an empty path, so it passed against a script with no `trap` — it now
@@ -324,3 +326,17 @@ signals through a FIFO at the exact instant the script sits between the two move
 became a seventh column in 0078 instead of being packed into a free-text one, `update pending` is
 measured against each row's own channel, the handover exit code is named, and the swap script
 JSON-escapes the version it writes into its receipt.
+
+**Fix 2, same day.** Review of Fix 1 found the publish-typo loop still unbounded: a release whose
+`version` disagrees with the `CFBundleShortVersionString` inside its own zip swaps *successfully*, so
+the new copy still sees `running != offered` and the download-swap-restart cycle runs about every
+eighty seconds for ever — and the attempt ledger could never bound it, because a ledger that counts
+failures cannot bound a loop made of successes. The app now reads the staged bundle's `Info.plist`
+after the signature check and before the swap, and a disagreement stops the update as
+`version_mismatch`, which the existing one-retry-then-hold covers. Fix 1's claim that this case was
+closed was wrong and is corrected here and in PRD §13.9. Also: startup now counts only `swap_failed`
+— counting every non-`ok` receipt double-counted a failure whose process restarted before its next
+poll, holding a room after ONE real failure with no retry; `handoverGrace` is 30 minutes, not 10; the
+poll route's `instant()` accepts only a full ISO-8601 instant, where bare `Date.parse` had read
+`"12"` as December 2001; the acceptance-item-6 FIFO reader takes a 10-second deadline instead of
+blocking for ever; and the repo's `CLAUDE.md` is committed.

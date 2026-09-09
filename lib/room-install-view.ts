@@ -65,14 +65,15 @@ export type InstallView = {
 
 export type UpdateChannel = "stable" | "test";
 
-/** §13.4 — the six outcomes update-result.json can carry. */
+/** §13.4 plus Fix 2's G1 — the outcomes update-result.json can carry. */
 export type UpdateResult =
   | "ok"
   | "checksum_mismatch"
   | "signature_mismatch"
   | "download_failed"
   | "expand_failed"
-  | "swap_failed";
+  | "swap_failed"
+  | "version_mismatch";
 
 export type ReleaseView = {
   id: string;
@@ -228,6 +229,11 @@ export const UPDATE_FAILURE_REASON: Record<Exclude<UpdateResult, "ok">, string> 
   expand_failed: "The downloaded file could not be unpacked.",
   swap_failed:
     "The new version did not verify once it was in place, so the previous one was put back.",
+  // Fix 2, G1. NOT a corrupted download — a correctly signed one that is labelled wrong. The
+  // sentence says "was published as" rather than "is broken" because the fault is on the shelf,
+  // not on the Mac, and the person reading the row is the person who publishes.
+  version_mismatch:
+    "The downloaded app was published as a different version from the one it says it is.",
 };
 
 /** Whole days until the session expires. Negative once it has. */

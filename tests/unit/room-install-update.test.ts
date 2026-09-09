@@ -40,7 +40,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("the R3 poll fields, sanitised (§5.5)", () => {
-  it("keeps only the six named outcomes", () => {
+  it("keeps only the named outcomes", () => {
     for (const ok of [
       "ok",
       "checksum_mismatch",
@@ -48,6 +48,8 @@ describe("the R3 poll fields, sanitised (§5.5)", () => {
       "download_failed",
       "expand_failed",
       "swap_failed",
+      // Fix 2, G1 — a correctly signed bundle that is labelled wrong.
+      "version_mismatch",
     ]) {
       expect(M.cleanPollFields({ install_id: "i", last_update_result: ok }).last_update_result).toBe(ok);
     }
@@ -334,6 +336,20 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
       last_update_error: "the downloaded app was not signed by Even",
     });
     expect(view.update_note).toContain("The downloaded app was not signed by Even.");
+  });
+
+  it("renders the version_mismatch sentence too (Fix 2, G1)", () => {
+    // The fault is on the shelf, not on the Mac: the bundle is authentic and correctly signed, it
+    // is simply labelled wrong. The sentence says so without calling the download broken.
+    const view = failed({
+      last_update_result: "version_mismatch",
+      last_update_error: "the downloaded app calls itself 0.1.9 but the release is named 0.1.8",
+    });
+    expect(view.update_note).toBe(
+      "Update to 0.1.8 stopped at 14:44. The downloaded app was published as a different version "
+        + "from the one it says it is. This Mac still runs 0.1.7 and is still recording.",
+    );
+    expect(view.update_failed).toBe(true);
   });
 
   it("shows NOTHING new when the last update worked, or when none was attempted", () => {

@@ -93,10 +93,23 @@ export async function GET(req: NextRequest) {
     const raw = (sp.get(key) ?? "").trim();
     return /^[0-9]{1,19}$/.test(raw) && raw !== "0" ? raw : null;
   };
-  /** An instant, or nothing. The Mac's clock wrote it, so it can be anything at all. */
+  /**
+   * An ISO-8601 instant, or nothing (Fix 2, G5).
+   *
+   * SHAPE FIRST, THEN `Date.parse` — and the order is the fix. `Date.parse` alone is not a
+   * validator: it accepts `"12"` as December 2001, `"2026"` as a year, and a pile of other legacy
+   * forms, so a truncated or garbled field arrived as a confident wrong timestamp instead of as
+   * silence. The card renders this as the clock time an update failed at; a value invented out of
+   * `"12"` is exactly the kind of plausible-looking fiction §5.5 exists to forbid.
+   *
+   * The regex admits what the app actually sends — `Date.toISOString()` — plus an explicit offset,
+   * and nothing else. `Date.parse` still runs afterwards so that a shape-valid but impossible date
+   * (month 13, day 32) is rejected too.
+   */
+  const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
   const instant = (key: string): string | null => {
     const raw = (sp.get(key) ?? "").trim();
-    if (!raw) return null;
+    if (!ISO_INSTANT.test(raw)) return null;
     const ms = Date.parse(raw);
     return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
   };

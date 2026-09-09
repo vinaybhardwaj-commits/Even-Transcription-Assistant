@@ -755,7 +755,7 @@ export type InstallPollResult = { ok: true } | { ok: false; code: "RETIRED" | "N
 
 const MIC_STATES = new Set(["authorized", "denied", "not_determined", "unknown"]);
 
-/** §13.4 — the six outcomes the swap script can record, and nothing else is stored. */
+/** §13.4 plus Fix 2's G1 — the outcomes an app may report, and nothing else is stored. */
 const UPDATE_RESULTS = new Set([
   "ok",
   "checksum_mismatch",
@@ -763,6 +763,7 @@ const UPDATE_RESULTS = new Set([
   "download_failed",
   "expand_failed",
   "swap_failed",
+  "version_mismatch",
 ]);
 
 /** R3-8 — the two channels that exist. An unknown one is not reported, never coerced to stable. */
