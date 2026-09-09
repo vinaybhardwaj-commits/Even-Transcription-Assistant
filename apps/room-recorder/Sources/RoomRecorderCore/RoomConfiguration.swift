@@ -166,6 +166,16 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   public var retainedArchiveRecoveryEnabled: Bool
   public var residentArchiveCaptureEnabled: Bool
   public var archivePreflightReceipt: RoomArchivePreflightReceipt?
+  /// R3-8 — WHICH SHELF THIS MAC TAKES ITS BUILDS FROM, and the only valve R3 has.
+  ///
+  /// Self-update's whole risk is that one bad publish walks into every room at once. Home Office
+  /// sits on `test`, clinic rooms sit on `stable`, and a publish to `test` therefore reaches one
+  /// Mac. PER MAC, in `config.json`, because the alternative — a channel the server assigns — puts
+  /// the valve on the same side of the wire as the thing it is meant to protect against.
+  ///
+  /// It survives a re-enrol: `applyEnrolment` mutates a named list of fields and this is not one of
+  /// them, so a second paste on Home Office does not quietly move it back to `stable`.
+  public var updateChannel: String
 
   enum CodingKeys: String, CodingKey {
     case origin
@@ -179,7 +189,11 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     case retainedArchiveRecoveryEnabled = "retained_archive_recovery_enabled"
     case residentArchiveCaptureEnabled = "resident_archive_capture_enabled"
     case archivePreflightReceipt = "archive_preflight_receipt"
+    case updateChannel = "update_channel"
   }
+
+  /// The two channels that exist. Stated once, so the app and the route cannot disagree.
+  public static let updateChannels = ["stable", "test"]
 
 
   /// A complete configuration for a bundle installed by the §4.4 bootstrap script.
@@ -231,7 +245,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     tabID: String? = nil,
     retainedArchiveRecoveryEnabled: Bool = false,
     residentArchiveCaptureEnabled: Bool = false,
-    archivePreflightReceipt: RoomArchivePreflightReceipt? = nil
+    archivePreflightReceipt: RoomArchivePreflightReceipt? = nil,
+    updateChannel: String = "stable"
   ) throws {
     guard
       let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
@@ -283,6 +298,11 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     self.retainedArchiveRecoveryEnabled = retainedArchiveRecoveryEnabled
     self.residentArchiveCaptureEnabled = residentArchiveCaptureEnabled
     self.archivePreflightReceipt = archivePreflightReceipt
+    // A CHANNEL THIS APP DOES NOT KNOW IS NOT AN ERROR, IT IS `stable`. A hand-edited config.json
+    // is how Home Office reaches `test` (there is no verb for it and deliberately so), and a typo
+    // there must leave the Mac on the safe shelf rather than refusing to start a clinic room.
+    self.updateChannel =
+      Self.updateChannels.contains(updateChannel) ? updateChannel : "stable"
   }
 
   public init(from decoder: Decoder) throws {
@@ -301,7 +321,11 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       residentArchiveCaptureEnabled:
         values.decodeIfPresent(Bool.self, forKey: .residentArchiveCaptureEnabled) ?? false,
       archivePreflightReceipt: values.decodeIfPresent(
-        RoomArchivePreflightReceipt.self, forKey: .archivePreflightReceipt)
+        RoomArchivePreflightReceipt.self, forKey: .archivePreflightReceipt),
+      // ABSENT MEANS STABLE. Every config.json written before Build R3 lacks this key, and every
+      // one of those Macs is on stable by construction. decodeIfPresent rather than decode so a
+      // 0.1.7 config keeps working the moment 0.1.8 lands on top of it.
+      updateChannel: values.decodeIfPresent(String.self, forKey: .updateChannel) ?? "stable"
     )
   }
 

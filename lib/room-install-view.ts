@@ -46,7 +46,31 @@ export type InstallView = {
   tape_advancing_since: string | null;
   never_sleep: boolean | null;
   retired_at: string | null;
+  // ── Build R3 (§13.4). Every one is NULL on an install below 0.1.8, for ever. ─────────────
+  /** R3-6. Whether a session was open at the moment of the poll. NULL = never reported. */
+  session_open: boolean | null;
+  /** R3-8. Which channel this Mac asks for, from its own config.json. */
+  update_channel: UpdateChannel | null;
+  /** The last self-update outcome this Mac reported. NULL = none ever attempted. */
+  last_update_result: UpdateResult | null;
+  /** The reason line that went with it. */
+  last_update_error: string | null;
+  /** When the swap script recorded that outcome, by the Mac's clock. */
+  last_update_at: string | null;
+  /** V, 9 Sep. Free bytes on the captures volume. NULL = not reported. NEVER 0. */
+  disk_free_bytes: number | null;
 };
+
+export type UpdateChannel = "stable" | "test";
+
+/** §13.4 — the six outcomes update-result.json can carry. */
+export type UpdateResult =
+  | "ok"
+  | "checksum_mismatch"
+  | "signature_mismatch"
+  | "download_failed"
+  | "expand_failed"
+  | "swap_failed";
 
 export type ReleaseView = {
   id: string;
@@ -145,6 +169,67 @@ export function fmtClock(iso: string | null): string {
   if (t === null) return "—";
   const d = new Date(t);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * "412.3 GB free" — the Machine cell's last line (V, 9 September 2026).
+ *
+ * DECIMAL UNITS, because that is what macOS shows in Get Info and About This Mac, and an operator
+ * comparing this row against the Finder must see the same number. Null in, null out: `disk_free_bytes`
+ * is never 0 and never -1 (the app omits it rather than guessing), so there is nothing here that
+ * turns "could not read the volume" into "the disk is full".
+ */
+export function fmtBytes(bytes: number | null): string | null {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return null;
+  const units: Array<[number, string, number]> = [
+    [1e12, "TB", 2],
+    [1e9, "GB", 1],
+    [1e6, "MB", 0],
+  ];
+  for (const [scale, unit, dp] of units) {
+    if (bytes >= scale) return `${(bytes / scale).toFixed(dp)} ${unit} free`;
+  }
+  return `${Math.round(bytes / 1000)} kB free`;
+}
+
+/**
+ * The reason sentences the App cell renders, one per outcome (§13.4, R3-7).
+ *
+ * THE FIRST TWO ARE THE MOCKUP'S OWN WORDS and are the contract. The other three the mockup does
+ * not show, and they are written to the same shape: plain, past tense, no jargon, and no
+ * instruction — nothing here is something an operator can act on from a screen, and a sentence
+ * that implied otherwise would send someone to a room for no reason.
+ */
+export const UPDATE_FAILURE_REASON: Record<Exclude<UpdateResult, "ok">, string> = {
+  checksum_mismatch: "The downloaded file did not match its checksum.",
+  signature_mismatch: "The downloaded app was not signed by Even.",
+  download_failed: "The download did not finish.",
+  expand_failed: "The downloaded file could not be unpacked.",
+  swap_failed:
+    "The new version did not verify once it was in place, so the previous one was put back.",
+};
+
+/**
+ * The separator the app puts between the version it was attempting and what it measured.
+ *
+ * ─── WHY THE VERSION TRAVELS INSIDE THE REASON LINE ──────────────────────────────────────
+ * §13.4 fixes the R3 columns at five, and V's 9 September addition made six. NONE of them is the
+ * version an update was attempting, and the mockup's sentence names it: "Update to 0.1.8 stopped
+ * at 09:14." Rather than invent a seventh column against a ratified list, the app writes the
+ * version at the head of `last_update_error`, which §13.4 calls "the reason line", and this module
+ * reads it back. Writer and reader ship in the same build.
+ *
+ * A LINE THAT DOES NOT MATCH IS STILL RENDERED, whole, as the reason, with no version in the
+ * sentence. A truncated or hand-edited value must degrade to a shorter true sentence, never to a
+ * crash and never to a version this module made up. FLAGGED in the build report for V.
+ */
+export const UPDATE_ERROR_SEPARATOR = " — ";
+
+/** PURE — the version an update was attempting, out of the reason line. Null when unreadable. */
+export function attemptedVersion(lastUpdateError: string | null): string | null {
+  if (!lastUpdateError) return null;
+  const head = lastUpdateError.split(UPDATE_ERROR_SEPARATOR)[0]?.trim() ?? "";
+  return /^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$/.test(head) ? head : null;
 }
 
 /** Whole days until the session expires. Negative once it has. */
@@ -353,6 +438,30 @@ export type RowView = {
   /** Session expiry, already worded: "session expires in 341 d" / "session expired". */
   session_label: string | null;
   session_warn: boolean;
+  // ── Build R3, state C and state E of the 8 September mockup delta ─────────────────────────
+  /**
+   * The Tape cell's words. `idle, no session` when the app says no session is open (R3-3);
+   * otherwise what the cell already said. Null when no Mac is bound.
+   */
+  tape_label: string | null;
+  /**
+   * STATE C. The one sentence the App cell carries under the version, when the last update this
+   * Mac attempted did not succeed. Null when the last result was `ok` or absent — R3-7: nothing
+   * new appears on the card while updates work.
+   */
+  update_note: string | null;
+  /** STATE C's pill, beside `installed`. True on exactly the same condition as `update_note`. */
+  update_failed: boolean;
+  /** STATE E. `channel stable` / `channel test`, from `update_channel`. Null when unreported. */
+  channel_label: string | null;
+  /**
+   * STATE E. The dim line under the app version. `latest`, `latest 0.1.8` — or `test channel` on a
+   * Mac that asks the `test` channel, where the card's stable release header is not what that Mac
+   * would download and "latest 0.1.8" would be answering a question nobody asked.
+   */
+  version_hint: string | null;
+  /** V, 9 Sep. "412.3 GB free" for the Machine cell. Null when the app could not read it. */
+  disk_label: string | null;
 };
 
 /**
@@ -380,6 +489,60 @@ export function deriveRow(input: {
   const words: RoomWord[] = [];
   const attention: string[] = [];
 
+  // ── Build R3 row facts, needed by every branch that returns an install ───────────────────
+  //
+  // THE TAPE CELL NOW HAS THREE ANSWERS, NOT TWO (R3-3, mockup states A and B). `idle, no session`
+  // is the one the approved mockup always drew and the shipped code never produced. It is said
+  // only when the app ACTUALLY REPORTED that no session is open: `session_open` is null on every
+  // install below 0.1.8 and on the first poll after enrolment, and null is "not reported", which
+  // must not be read as "idle".
+  const sessionOpen = i?.session_open ?? null;
+  const tapeLabel = !i
+    ? null
+    : sessionOpen === false
+      ? "idle, no session"
+      : i.tape_advancing
+        ? "advancing"
+        : sessionOpen === true
+          ? "recording, not advancing"
+          : "not advancing";
+
+  // STATE C. `ok` shows nothing; absent shows nothing. Only a failure speaks (R3-7).
+  const failure =
+    i && i.last_update_result && i.last_update_result !== "ok" ? i.last_update_result : null;
+  const updateNote = !failure
+    ? null
+    : [
+        attemptedVersion(i!.last_update_error) === null
+          ? `Update stopped at ${fmtClock(i!.last_update_at)}.`
+          : `Update to ${attemptedVersion(i!.last_update_error)} stopped at ${fmtClock(i!.last_update_at)}.`,
+        UPDATE_FAILURE_REASON[failure] ??
+          // An outcome this build does not know the words for. Say the code rather than nothing:
+          // a row that names a machine-readable reason is still a report, and silence is not.
+          `The update stopped with ${failure}.`,
+        i!.app_version
+          ? `This Mac still runs ${i!.app_version} and is still recording.`
+          : "This Mac still runs the version it had and is still recording.",
+      ].join(" ");
+
+  const channelLabel = i?.update_channel ? `channel ${i.update_channel}` : null;
+  const diskLabel = fmtBytes(i?.disk_free_bytes ?? null);
+  const versionHint = !i?.app_version
+    ? null
+    : i.update_channel === "test"
+      ? "test channel"
+      : latestRelease && i.app_version !== latestRelease.version
+        ? `latest ${latestRelease.version}`
+        : "latest";
+  const r3 = {
+    tape_label: tapeLabel,
+    update_note: updateNote,
+    update_failed: failure !== null,
+    channel_label: channelLabel,
+    disk_label: diskLabel,
+    version_hint: versionHint,
+  };
+
   // ── Session wording, needed by two branches below ────────────────────────────────────────
   const days = i ? daysUntil(i.session_expires_at, nowMs) : null;
   const expired = days !== null && days < 0;
@@ -400,6 +563,7 @@ export function deriveRow(input: {
       attention: [],
       session_label: null,
       session_warn: false,
+      ...r3,
     };
   }
 
@@ -425,6 +589,7 @@ export function deriveRow(input: {
       ],
       session_label: sessionLabel,
       session_warn: true,
+      ...r3,
     };
   }
 
@@ -440,20 +605,46 @@ export function deriveRow(input: {
         ? "Enrolled but has never polled. The app may not be running on that Mac."
         : "No poll from this Mac for over 10 minutes. Nothing is coming back on its own.",
     );
-  } else if (!i.tape_advancing) {
+  } else if (!i.tape_advancing && sessionOpen === true) {
     // Only worth saying while the Mac is actually reachable — an offline Mac's tape state is a
     // stale reading, and reporting both would name the same silence twice.
+    //
+    // ─── AND ONLY WHILE A SESSION IS OPEN (R3-3) ─────────────────────────────────────────
+    // This clause used to test `tape_advancing` alone, and that was the bug: an idle room with
+    // nobody in it is not putting audio on the tape because there is no audio, which is not a
+    // fault and is not something to send a person about. Home Office wore this warning while
+    // perfectly healthy. R3 makes it worse before it makes it better — every update restarts the
+    // app, and the first poll after a restart always reports the tape as not advancing — so the
+    // fix ships in the same build as the restarts that would have multiplied it.
+    //
+    // `=== true`, NOT a truthiness test. `session_open` is null on every install below 0.1.8, and
+    // null means "this app cannot tell me", which is not grounds for an alarm on a clinical
+    // screen. A room on 0.1.7 therefore stops raising this line until it updates itself, which is
+    // the correct trade: the warning it raised was false on an idle room anyway.
     attention.push("Tape not advancing. The room is not putting audio on the day tape.");
   }
   if (sessionWarn) {
     attention.push(`Room session ${sessionLabel}. Re-enrol this Mac with a second paste.`);
   }
 
+  // STATE C IS NOT AN ATTENTION LINE, and that is a deliberate difference from every other fact on
+  // this row. V named state C on 9 September: the sentence belongs in the App cell, under the
+  // version that did not change, because the failure is a fact ABOUT THE VERSION. The row still
+  // wears an `update failed` pill, and the row's STATE is untouched — a Mac that failed an update
+  // is recording perfectly well on the version it has, exactly like `update pending`.
+
   return {
-    state: attention.length > 0 ? "needs_attention" : "healthy",
+    // A FAILED UPDATE MARKS THE ROW WITHOUT ADDING A LINE TO `attention`. The approved mockup
+    // draws state C's row with the attention background (`tr class="attn"`), and it draws the
+    // sentence in the App cell and nowhere else. Pushing the sentence onto `attention` would
+    // print it a second time in the Actions cell, where every other attention line renders; not
+    // marking the row at all would leave a failure the same colour as a healthy room. So the
+    // state is raised here and the words stay where V put them.
+    state: attention.length > 0 || failure !== null ? "needs_attention" : "healthy",
     words,
     attention,
     session_label: sessionLabel,
     session_warn: sessionWarn,
+    ...r3,
   };
 }

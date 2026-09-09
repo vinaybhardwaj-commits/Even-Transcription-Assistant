@@ -253,3 +253,60 @@ never turn done. Home Office recorded for ten minutes, wrote 20 MB of durable au
 still read `tape=false/streak=0`. It now reads the durable frontier from the index tapewriter
 appends to: a record lands there only once its audio is durable, so the file growing IS §5.5's
 durable sample index growing, at one `stat` per poll.
+
+## Install and fleet, Build R3 — self-update, so no change needs a walk again (9 Sep 2026, 0.1.8)
+The app could not update itself, so every fix needed a person at each Mac and V is remote with four
+clinic rooms recording. Most of self-update was already live — `app_release`, the publish route with
+its server-side sha256 recompute, withdraw, `latestRelease()`, the release header, and every room
+reporting `app_version` and `build_sha` on every poll. **The one missing piece was that no room could
+ask what version it should be running.** R3 ships before any clinic Mac is installed again, so each
+room takes one paste, ever, rather than one now and another to reach the first self-updating build.
+
+- **`GET /api/room-recorder/release`**, room-session authenticated, `?channel=stable|test`, answering
+  `{version, sha256, size_bytes, blob_url}` — and **404 `NO_RELEASE`** when the channel has nothing
+  published. It carries no signer: R3-5 pins the certificate in the app at compile time, so a wrong
+  or compromised publish cannot point a Mac at a different one. A route the app fetches, deliberately
+  **not** a fifth command-bus kind — `BenchCommandKind` decodes as `[BenchCommand].self` and an
+  unknown `kind` throws for the whole poll response, which would break every 0.1.7 room's polling
+  rather than being ignored.
+- **The app never moves its own running bundle (R3-1).** It stages, hashes, expands with `ditto -x -k`
+  and verifies the staged copy against the pinned requirement; then it writes a swap script, spawns
+  it with `posix_spawn` + `POSIX_SPAWN_SETSID`, and **exits 64**. The script boots the agent out,
+  keeps exactly one `.previous`, swaps, re-verifies the RESIDENT copy, puts the old bundle back if
+  that fails, writes `update-result.json`, runs the NEW bundle's `install-launch-agent`, and
+  bootstraps. §7's original steps left the resident path empty if the process died between the two
+  moves — launchd with nothing to start, and a physical visit.
+- **64 is a fail-safe, not a status.** `KeepAlive` is `{"SuccessfulExit": false}`, so if the swap
+  script dies before it boots the agent out, launchd restarts the OLD app and the room keeps
+  recording. `needs_enrol` and the retired 409 still exit 0; 1 still means any error.
+- **A different version is an update, in either direction.** `latestRelease` orders by `published_at`,
+  not by version, so withdrawing the newest row makes the route answer with the one before it and
+  every Mac walks backwards at its next check. That is the whole of rollback.
+- **Any answer that is not a 200 means do nothing (R3-9)** — 404, 401, a timeout, a dead network: log
+  it, change nothing on disk, ask again next tick. A missing release is never a reason to remove
+  software from a room. **An update is deferred while a session records** and re-checks when the
+  session ENDS rather than six hours later (R3-10), because a clinic day is close to continuous.
+- **The "Tape not advancing" warning was fixed in the same build (R3-3)**, and had to be: `deriveRow`
+  raised it from `tape_advancing` alone with no test for whether a session was open, Home Office wore
+  it while healthy, and R3 restarts the app on every update — the first poll after a restart always
+  reports false. The row now reads `idle, no session` when the app says none is open.
+- **Migration 0078** adds `session_open`, `update_channel`, `last_update_result`, `last_update_error`,
+  `last_update_at` and `disk_free_bytes`. `applyInstallPoll` COALESCEs five of them so a failure
+  cannot be erased by the next poll, and deliberately does NOT coalesce `session_open`, which is a
+  live reading that has to be able to go false.
+- **A failed update shows on the row, and only a failed update shows (R3-7).** One sentence in the App
+  cell under the version that did not change, naming the reason and the version that failed, plus an
+  `update failed` pill. Nothing new appears while updates work.
+- **The channel is per Mac (R3-8)**, in `config.json`, default `stable`, reported on every poll and
+  shown on the row. Home Office sits on `test`. This is the valve that stops one bad publish walking
+  into every room at once.
+- **`spare_device=false` is gone from the wire (V, 9 Sep).** It was appended as a literal on every
+  poll and the app has no spare-microphone concept, so it was a constant standing in for a
+  measurement. Removed rather than corrected: the server maps an absent value to null and COALESCEs
+  it, so sending nothing keeps the column and claims nothing. **`disk_free_bytes`** joins in its
+  place — measured, or omitted, and never 0.
+- The plist gains **`ThrottleInterval` 30 s** (R3-11), which both stops a bundle that cannot launch
+  retrying six times a minute for ever and buys the swap its quiet window.
+
+**Not yet acceptance-tested.** Migration 0078 has not been run anywhere, and the seven §13.5
+acceptance items all need a Mac. See `ETA-INSTALL-BUILD-R3-REPORT-9-SEP-2026.md`.

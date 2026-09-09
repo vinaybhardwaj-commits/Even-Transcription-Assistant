@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install and fleet — Build R3 delta</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Tokens copied verbatim from ETA-INSTALL-AND-FLEET-MOCKUP-7-SEP-2026.html so the two files
+   read as one design. Light on bare :root; dark redefines the SAME tokens twice. */
+:root {
+  --page:#F7F8FA; --card:#FCFCFC; --rail:#EDEEF2; --sunken:#F7F8FA;
+  --line:#D6D9E0; --line-soft:#EDEEF2;
+  --ink:#002054; --ink-2:#454B58; --ink-3:#646B7A; --ink-4:#8C93A3; --ink-5:#B5BAC5;
+  --accent:#0055FF; --accent-hi:#0044CC; --accent-on:#FCFCFC; --accent-soft:#EBF1FF; --focus:#5C8FFF;
+  --ok-bg:#D1FAE5;  --ok-fg:#047857;  --ok-line:#A7F3D0;  --ok-led:#10B981;
+  --warn-bg:#FEF3C7; --warn-fg:#B45309; --warn-line:#FDE68A; --warn-led:#F59E0B; --warn-face:#FFFBEB;
+  --bad-bg:#FEE2E2; --bad-fg:#B91C1C; --bad-line:#FECACA; --bad-led:#EF4444; --bad-face:#FEF2F2;
+  --idle-bg:#EDEEF2; --idle-fg:#454B58; --idle-led:#D6D9E0;
+  --sh-card:0 1px 2px rgba(0,32,84,.04);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page:#0B0D11; --card:#14171D; --rail:#101318; --sunken:#0F1217;
+    --line:#2E323B; --line-soft:#23262D;
+    --ink:#EDEEF2; --ink-2:#C9CEDA; --ink-3:#9AA1B1; --ink-4:#7C8394; --ink-5:#5B6273;
+    --accent:#5C8FFF; --accent-hi:#85ABFF; --accent-on:#001133; --accent-soft:#10182C; --focus:#85ABFF;
+    --ok-bg:#0E2A22;  --ok-fg:#6EE7B7;  --ok-line:#1B4A3A;  --ok-led:#10B981;
+    --warn-bg:#2C210B; --warn-fg:#FCD34D; --warn-line:#4A3A12; --warn-led:#F59E0B; --warn-face:#1C1608;
+    --bad-bg:#2E1315; --bad-fg:#FCA5A5; --bad-line:#54222A; --bad-led:#EF4444; --bad-face:#1D0E10;
+    --idle-bg:#23262D; --idle-fg:#C9CEDA; --idle-led:#3A3F4A;
+    --sh-card:0 1px 2px rgba(0,0,0,.4);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page:#0B0D11; --card:#14171D; --rail:#101318; --sunken:#0F1217;
+  --line:#2E323B; --line-soft:#23262D;
+  --ink:#EDEEF2; --ink-2:#C9CEDA; --ink-3:#9AA1B1; --ink-4:#7C8394; --ink-5:#5B6273;
+  --accent:#5C8FFF; --accent-hi:#85ABFF; --accent-on:#001133; --accent-soft:#10182C; --focus:#85ABFF;
+  --ok-bg:#0E2A22;  --ok-fg:#6EE7B7;  --ok-line:#1B4A3A;  --ok-led:#10B981;
+  --warn-bg:#2C210B; --warn-fg:#FCD34D; --warn-line:#4A3A12; --warn-led:#F59E0B; --warn-face:#1C1608;
+  --bad-bg:#2E1315; --bad-fg:#FCA5A5; --bad-line:#54222A; --bad-led:#EF4444; --bad-face:#1D0E10;
+  --idle-bg:#23262D; --idle-fg:#C9CEDA; --idle-led:#3A3F4A;
+  --sh-card:0 1px 2px rgba(0,0,0,.4);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin:0; background:var(--page); color:var(--ink);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size:14px; line-height:20px; -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4,p,ul,ol { margin:0; }
+ul,ol { padding:0; list-style:none; }
+button { font:inherit; color:inherit; }
+.t-heading { font-size:18px; line-height:24px; font-weight:600; }
+.t-caption { font-size:12px; line-height:16px; font-weight:400; }
+.eyebrow { font-size:10px; line-height:14px; font-weight:600; text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); }
+.mono { font-family:"Roboto Mono", ui-monospace, SFMono-Regular, monospace; font-variant-numeric:tabular-nums; }
+.sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+
+.wrap { max-width:1180px; margin:0 auto; padding:24px; display:flex; flex-direction:column; gap:28px; }
+.doc-head { display:flex; flex-direction:column; gap:10px; }
+.doc-head h1 { font-size:24px; line-height:32px; font-weight:600; }
+.doc-head p { font-size:13px; line-height:20px; color:var(--ink-2); max-width:82ch; }
+.doc-head .note { color:var(--ink-3); font-size:12px; line-height:18px; }
+
+.state { display:flex; flex-direction:column; gap:10px; padding-top:14px; border-top:1px solid var(--line-soft); }
+.state-cap { font-size:12px; line-height:18px; color:var(--ink-4); max-width:96ch; }
+.state-cap b { font-family:"Roboto Mono", ui-monospace, monospace; font-weight:500; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); margin-right:8px; }
+.state-cap em { font-style:normal; color:var(--bad-fg); font-weight:500; }
+.state-cap strong { color:var(--ink-2); font-weight:600; }
+
+.card { background:var(--card); border:1px solid var(--line-soft); border-radius:12px; box-shadow:var(--sh-card); overflow:hidden; }
+.card-head { padding:14px 16px; border-bottom:1px solid var(--line-soft); display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:12px; }
+.release { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.release-facts { display:flex; flex-direction:column; gap:2px; text-align:right; }
+.release-facts .t-caption { color:var(--ink-3); }
+.release-facts .ver { font-size:15px; font-weight:600; letter-spacing:-.01em; color:var(--ink); }
+
+.pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; line-height:16px; font-weight:600; white-space:nowrap; }
+.pill-ok { background:var(--ok-bg); color:var(--ok-fg); }
+.pill-warn { background:var(--warn-bg); color:var(--warn-fg); }
+.pill-bad { background:var(--bad-bg); color:var(--bad-fg); }
+.pill-idle { background:var(--idle-bg); color:var(--idle-fg); }
+.tag { display:inline-block; padding:1px 6px; border-radius:4px; border:1px solid var(--line); font-family:"Roboto Mono", ui-monospace, monospace; font-size:11px; line-height:15px; color:var(--ink-3); white-space:nowrap; }
+
+.led { display:inline-block; width:8px; height:8px; border-radius:999px; flex:0 0 8px; }
+.led-ok { background:var(--ok-led); } .led-warn { background:var(--warn-led); }
+.led-bad { background:var(--bad-led); } .led-idle { background:var(--idle-led); }
+.fact { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+.fact span { font-size:12px; line-height:16px; color:var(--ink-2); }
+
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px; padding:0 12px; border-radius:8px; border:1px solid transparent; font-size:13px; line-height:16px; font-weight:500; cursor:pointer; white-space:nowrap; }
+.btn-line { background:transparent; border-color:var(--line); color:var(--ink-2); }
+.btn-primary { background:var(--accent); color:var(--accent-on); font-weight:600; }
+.btn-danger { background:transparent; border-color:var(--bad-line); color:var(--bad-fg); }
+
+.table-scroll { overflow-x:auto; }
+table.fleet { width:100%; min-width:1020px; border-collapse:collapse; }
+table.fleet thead th { text-align:left; padding:8px 16px 8px 0; font-size:10px; line-height:14px; font-weight:600; text-transform:uppercase; letter-spacing:.14em; color:var(--ink-4); border-bottom:1px solid var(--line-soft); white-space:nowrap; }
+table.fleet thead th:first-child { padding-left:16px; }
+table.fleet thead th:last-child { padding-right:16px; text-align:right; }
+table.fleet tbody td { padding:12px 16px 12px 0; vertical-align:top; border-bottom:1px solid var(--line-soft); }
+table.fleet tbody td:first-child { padding-left:16px; }
+table.fleet tbody td:last-child { padding-right:16px; text-align:right; }
+table.fleet tbody tr:last-child td { border-bottom:0; }
+table.fleet tbody tr.attn td { background:var(--bad-face); }
+table.fleet tbody tr.attn td:first-child { box-shadow:inset 3px 0 0 var(--bad-led); }
+.room-name { font-weight:600; color:var(--ink); }
+.room-slug { font-size:12px; line-height:16px; color:var(--ink-4); font-family:"Roboto Mono", ui-monospace, monospace; }
+.row-pills { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.machine { font-size:12px; line-height:17px; color:var(--ink-2); }
+.machine .host { font-family:"Roboto Mono", ui-monospace, monospace; color:var(--ink); }
+.machine.dim, .machine .dim { color:var(--ink-4); }
+.ver-cell { display:flex; flex-direction:column; gap:4px; align-items:flex-start; }
+.ver-cell .v { font-family:"Roboto Mono", ui-monospace, monospace; font-variant-numeric:tabular-nums; color:var(--ink); }
+.ver-cell .dim { font-size:12px; color:var(--ink-4); }
+.seen { font-family:"Roboto Mono", ui-monospace, monospace; font-variant-numeric:tabular-nums; font-size:13px; }
+.seen-ok { color:var(--ok-fg); } .seen-bad { color:var(--bad-fg); } .seen-dim { color:var(--ink-3); }
+.row-actions { display:inline-flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+.row-note { margin-top:6px; font-size:12px; line-height:16px; color:var(--bad-fg); max-width:34ch; }
+.card-foot { padding:10px 16px; border-top:1px solid var(--line-soft); background:var(--sunken); font-size:12px; line-height:16px; color:var(--ink-4); display:flex; flex-wrap:wrap; gap:4px 16px; justify-content:space-between; }
+
+.pick { border:1px solid var(--accent); background:var(--accent-soft); border-radius:8px; padding:10px 12px; font-size:12px; line-height:18px; color:var(--ink-2); }
+.pick b { color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="doc-head">
+    <p class="eyebrow">Build R3 · mockup delta · 8 September 2026</p>
+    <h1>Install and fleet — the three row changes Build R3 makes</h1>
+    <p>This file shows only what changes. It is a delta on the approved mockup of 7 September, and it copies that
+      file's tokens and class names exactly, so the two read as one design.</p>
+    <p class="note">Two of the three changes are not new design. The approved mockup already shows an idle room's tape
+      as "idle, no session" and already carries a channel tag. The shipped code does neither. R3 restores them.
+      The one genuinely new thing is the update failure line, and states C and D offer two places to put it.</p>
+  </div>
+
+  <!-- ═══════════════ STATE A ═══════════════ -->
+  <section class="state">
+    <p class="state-cap"><b>State A</b><strong>The correction.</strong> A room with the app running and no patient in
+      it. Today the shipped card raises <em>"Tape not advancing. The room is not putting audio on the day tape."</em>
+      on this row, because <span class="mono">deriveRow</span> tests only <span class="mono">tape_advancing</span> and
+      never asks whether a session is open. Home Office carries that warning right now while it is healthy. R3 adds a
+      <span class="mono">session_open</span> poll field, and the row reads what the approved mockup always said it
+      should read.</p>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">Install and fleet</p>
+          <h2 class="t-heading">Install and fleet</h2>
+        </div>
+        <div class="release">
+          <div class="release-facts">
+            <p class="ver mono">0.1.8 <span class="tag">stable</span></p>
+            <p class="t-caption">published 9 Sep 10:20 by vinay</p>
+          </div>
+          <button class="btn btn-danger" type="button">Withdraw</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="fleet">
+          <thead>
+            <tr>
+              <th scope="col">Room</th>
+              <th scope="col">Machine</th>
+              <th scope="col">App</th>
+              <th scope="col">Last seen</th>
+              <th scope="col">Microphone</th>
+              <th scope="col">Tape</th>
+              <th scope="col"><span class="sr">Actions</span>&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <p class="room-name">Cardiology OPD</p>
+                <p class="room-slug">cardiology-opd-gh4a</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-CARDIO-MINI</span></p>
+                <p class="machine dim">Mac mini M2 · macOS 15.6</p>
+                <p class="machine dim mono">install_7fq2r8k1mz04</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 364 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.8</span>
+                  <span class="dim">latest</span>
+                </div>
+              </td>
+              <td><span class="seen seen-ok">4 s ago</span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-idle" aria-hidden="true"></i><span>idle, no session</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot">
+        <span>Machine facts come from the app's own poll. Nothing on this card is typed by hand.</span>
+        <span class="mono">last poll 3 s · 5 rooms · 5 installs</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ STATE B ═══════════════ -->
+  <section class="state">
+    <p class="state-cap"><b>State B</b><strong>The warning still works.</strong> A session is open and no audio is
+      reaching the tape. This is the case the warning was written for, and R3 does not weaken it. The row goes to
+      attention exactly as before.</p>
+    <div class="card">
+      <div class="table-scroll">
+        <table class="fleet">
+          <thead>
+            <tr>
+              <th scope="col">Room</th><th scope="col">Machine</th><th scope="col">App</th>
+              <th scope="col">Last seen</th><th scope="col">Microphone</th><th scope="col">Tape</th>
+              <th scope="col"><span class="sr">Actions</span>&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="attn">
+              <td>
+                <p class="room-name">OPD 7</p>
+                <p class="room-slug">opd-7-y74w</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-7-MINI</span></p>
+                <p class="machine dim">Mac mini M2 · macOS 15.5</p>
+                <p class="machine dim mono">install_b3n9wq6ktp57</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 361 d</p>
+              </td>
+              <td>
+                <div class="ver-cell"><span class="v">0.1.8</span><span class="dim">latest</span></div>
+              </td>
+              <td>
+                <span class="seen seen-ok">6 s ago</span>
+                <p class="row-note">Recording since 10:12 and nothing is reaching the day tape. Check the microphone cable in this room.</p>
+              </td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-bad" aria-hidden="true"></i><span>recording, not advancing</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ STATE C ═══════════════ -->
+  <section class="state">
+    <p class="state-cap"><b>State C</b><strong>Update failure, note in the App cell. Option one, and my
+      recommendation.</strong> The failure is a fact about the version, so the sentence sits under the version that did
+      not change. Nothing new appears while updates work. This state exists because §8 acceptance item 5 requires the
+      app to report a corrupted download, and a report you can only read by walking to the Mac is not a report.</p>
+    <div class="card">
+      <div class="table-scroll">
+        <table class="fleet">
+          <thead>
+            <tr>
+              <th scope="col">Room</th><th scope="col">Machine</th><th scope="col">App</th>
+              <th scope="col">Last seen</th><th scope="col">Microphone</th><th scope="col">Tape</th>
+              <th scope="col"><span class="sr">Actions</span>&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="attn">
+              <td>
+                <p class="room-name">OPD 5 Dr Salanki</p>
+                <p class="room-slug">opd-5-dr-salanki-wxmp</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="pill pill-bad">update failed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-5-MINI</span></p>
+                <p class="machine dim">Mac mini M2 · macOS 15.6</p>
+                <p class="machine dim mono">install_x4m8t2vc9de1</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 358 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.7</span>
+                  <span class="dim">latest 0.1.8</span>
+                </div>
+                <p class="row-note">Update to 0.1.8 stopped at 09:14. The downloaded file did not match its checksum. This Mac still runs 0.1.7 and is still recording.</p>
+              </td>
+              <td><span class="seen seen-ok">8 s ago</span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>advancing</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+
+            <tr class="attn">
+              <td>
+                <p class="room-name">OPD Test</p>
+                <p class="room-slug">opd-test-a7q9</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="pill pill-bad">update failed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-TEST-MINI</span></p>
+                <p class="machine dim">Mac mini M1 · macOS 15.4</p>
+                <p class="machine dim mono">install_q2v7hk3nd849</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 351 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.7</span>
+                  <span class="dim">latest 0.1.8</span>
+                </div>
+                <p class="row-note">Update to 0.1.8 stopped at 09:14. The downloaded app was not signed by Even. This Mac still runs 0.1.7 and is still recording.</p>
+              </td>
+              <td><span class="seen seen-ok">11 s ago</span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-idle" aria-hidden="true"></i><span>idle, no session</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot">
+        <span>A failed update never removes the working copy. The room keeps recording on the version it has.</span>
+        <span class="mono">last poll 4 s · 5 rooms · 5 installs</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ STATE D ═══════════════ -->
+  <section class="state">
+    <p class="state-cap"><b>State D</b><strong>The same failure, note in the Last seen cell. Option two.</strong> This
+      follows the one precedent the approved mockup set: the "needs re-enrol" row puts its sentence there. It keeps the
+      App column narrow. It separates the sentence from the version mismatch it explains.</p>
+    <div class="card">
+      <div class="table-scroll">
+        <table class="fleet">
+          <thead>
+            <tr>
+              <th scope="col">Room</th><th scope="col">Machine</th><th scope="col">App</th>
+              <th scope="col">Last seen</th><th scope="col">Microphone</th><th scope="col">Tape</th>
+              <th scope="col"><span class="sr">Actions</span>&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="attn">
+              <td>
+                <p class="room-name">OPD 5 Dr Salanki</p>
+                <p class="room-slug">opd-5-dr-salanki-wxmp</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="pill pill-bad">update failed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-5-MINI</span></p>
+                <p class="machine dim">Mac mini M2 · macOS 15.6</p>
+                <p class="machine dim mono">install_x4m8t2vc9de1</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 358 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.7</span>
+                  <span class="dim">latest 0.1.8</span>
+                </div>
+              </td>
+              <td>
+                <span class="seen seen-ok">8 s ago</span>
+                <p class="row-note">Update to 0.1.8 stopped at 09:14. The downloaded file did not match its checksum. This Mac still runs 0.1.7 and is still recording.</p>
+              </td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>advancing</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="pick"><b>Pick one:</b> State C puts the sentence under the version. State D puts it under Last seen,
+      beside the re-enrol precedent. The builder implements whichever you name and nothing else.</div>
+  </section>
+
+  <!-- ═══════════════ STATE E ═══════════════ -->
+  <section class="state">
+    <p class="state-cap"><b>State E</b><strong>The test channel valve.</strong> Home Office sits on
+      <span class="mono">test</span>. A new build published to <span class="mono">test</span> reaches Home Office and
+      no clinic room. This is the whole safety of self-update: a bad publish cannot walk into five rooms at once. The
+      channel tag is already in the approved mockup. R3 makes it real by reporting the channel from
+      <span class="mono">config.json</span> on every poll.</p>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">Install and fleet</p>
+          <h2 class="t-heading">Install and fleet</h2>
+        </div>
+        <div class="release">
+          <div class="release-facts">
+            <p class="ver mono">0.1.8 <span class="tag">stable</span></p>
+            <p class="t-caption">published 9 Sep 10:20 by vinay</p>
+          </div>
+          <button class="btn btn-danger" type="button">Withdraw</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="fleet">
+          <thead>
+            <tr>
+              <th scope="col">Room</th><th scope="col">Machine</th><th scope="col">App</th>
+              <th scope="col">Last seen</th><th scope="col">Microphone</th><th scope="col">Tape</th>
+              <th scope="col"><span class="sr">Actions</span>&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <p class="room-name">Home Office</p>
+                <p class="room-slug">home-office-w8fb</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="tag">channel test</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">Vinays-Mac-mini-3</span></p>
+                <p class="machine dim">Mac16,11 · macOS 27.0</p>
+                <p class="machine dim mono">install_gd9tnfgqazvh</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 364 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.9-test</span>
+                  <span class="dim">test channel</span>
+                </div>
+              </td>
+              <td><span class="seen seen-ok">6 s ago</span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-idle" aria-hidden="true"></i><span>idle, no session</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+
+            <tr>
+              <td>
+                <p class="room-name">Cardiology OPD</p>
+                <p class="room-slug">cardiology-opd-gh4a</p>
+                <div class="row-pills">
+                  <span class="pill pill-ok">installed</span>
+                  <span class="tag">channel stable</span>
+                </div>
+              </td>
+              <td>
+                <p class="machine"><span class="host">OPD-CARDIO-MINI</span></p>
+                <p class="machine dim">Mac mini M2 · macOS 15.6</p>
+                <p class="machine dim mono">install_7fq2r8k1mz04</p>
+                <p class="t-caption" style="margin-top:4px;">session expires in 364 d</p>
+              </td>
+              <td>
+                <div class="ver-cell">
+                  <span class="v">0.1.8</span>
+                  <span class="dim">latest</span>
+                </div>
+              </td>
+              <td><span class="seen seen-ok">4 s ago</span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>authorized</span></span></td>
+              <td><span class="fact"><i class="led led-ok" aria-hidden="true"></i><span>advancing</span></span></td>
+              <td>
+                <span class="row-actions">
+                  <button class="btn btn-line" type="button">Copy install command</button>
+                  <button class="btn btn-line" type="button">Retire</button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot">
+        <span>A room's channel comes from its own config.json, reported on every poll. It is never typed here.</span>
+        <span class="mono">last poll 3 s · 5 rooms · 5 installs</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="state">
+    <p class="state-cap"><b>Not changed</b>The header, the five-step checklist, the empty state, the Withdraw control,
+      the Copy install command button, the Retire action, and every column heading. R3 touches three row facts and
+      nothing else on this card.</p>
+  </section>
+
+</div>
+</body>
+</html>

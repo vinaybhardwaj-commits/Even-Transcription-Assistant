@@ -157,9 +157,35 @@ public protocol RoomEngineRemote: Sendable {
   func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse
   func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
     -> ImmutablePieceUploadResult
+  /// Build R3 (§13.4). `nil` for every answer that is not a 200 — see `BenchClient.fetchRelease`.
+  func fetchRelease(channel: String) async -> RoomReleaseDescriptor?
+}
+
+extension RoomEngineRemote {
+  /// A REMOTE THAT DOES NOT SPEAK R3 NEVER OFFERS AN UPDATE, which is the safe answer and the one
+  /// that keeps every existing test double compiling unchanged. `BenchClient` provides the real
+  /// implementation and its witness wins; nothing else in this package needs to.
+  public func fetchRelease(channel: String) async -> RoomReleaseDescriptor? { nil }
 }
 
 extension BenchClient: RoomEngineRemote {}
+
+/// Adapts whatever remote the engine was built with to `RoomSelfUpdate`'s narrow seam, so
+/// `RoomUpdater` depends on one method and not on the whole bench wire.
+struct RoomEngineReleaseFetcher: RoomReleaseFetching {
+  let remote: any RoomEngineRemote
+  func fetchRelease(channel: String) async -> RoomReleaseDescriptor? {
+    await remote.fetchRelease(channel: channel)
+  }
+}
+
+/// What `run()` decided the process should do when it returned (§13.3 steps 7 and 9).
+public enum RoomEngineExit: Equatable, Sendable {
+  /// The ordinary stop: retired, superseded, cancelled. Exit 0 and stay stopped.
+  case stopped
+  /// A swap script now owns the bundle and the restart. Exit 64 (R3-4).
+  case handedOverToUpdate(version: String)
+}
 
 public protocol RoomCaptureProcess: AnyObject, Sendable {
   var isRunning: Bool { get }
@@ -425,6 +451,25 @@ public actor RoomEngine {
   private var lastDurableSampleIndex: Int64?
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
+
+  // ─── BUILD R3 (§13.3) ──────────────────────────────────────────────────────────────────────
+  /// Injected, and nil on every path that is not the resident app. A `swift run` binary, a test
+  /// and an unbundled build all have no bundle to replace and must never try.
+  private let updater: RoomUpdater?
+  private var updateSchedule = RoomUpdateSchedule()
+  /// Set once, by the check that spawned the swap script. `run()` returns on the next line after
+  /// it is set, and the CLI turns it into exit 64.
+  private var handedOverToUpdateVersion: String?
+  /// R3-10 — a session ended since the last update check, so a deferred check is due NOW rather
+  /// than in six hours. Set on the transition, cleared by the check that consumes it.
+  private var sessionEndedSinceUpdateCheck = false
+  /// §13.3 step 10. Read once at startup, carried until a poll has actually delivered it, and
+  /// only then is the file deleted. Held rather than deleted-on-read because the app that would
+  /// have reported it is the one that just started: a crash between the read and the first
+  /// successful poll would otherwise lose the only record that an update failed.
+  private var pendingUpdateResult: RoomUpdateResult?
+  /// The phase the previous poll reported, so a session ending is observable as a transition.
+  private var previousSessionWasOpen = false
   private var retainedArchiveRecoveryTask: Task<Void, Never>?
   private var retainedArchiveRecoveryState: RoomRetainedArchiveRecoveryState?
 
@@ -486,7 +531,13 @@ public actor RoomEngine {
     captureLauncher: any RoomCaptureLaunching = FoundationRoomCaptureLauncher(),
     pieceRunner: any RoomPieceProcessRunning = FoundationPieceProcessRunner(),
     retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)? = nil,
-    residentRuntimeFactory: RoomResidentRuntimeFactory? = nil
+    residentRuntimeFactory: RoomResidentRuntimeFactory? = nil,
+    /// Build R3. Nil disables self-update entirely, which is what every test and every unbundled
+    /// build wants. The default builds one only when this process is actually running from a
+    /// `.app` with a version — see `defaultUpdater`.
+    updaterFactory: @Sendable (RoomConfiguration, any RoomEngineRemote, URL) -> RoomUpdater? = {
+      RoomEngine.defaultUpdater(configuration: $0, remote: $1, rootURL: $2)
+    }
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
     let configuration = try startingConfiguration(rootURL: rootURL, enrolmentReader: enrolmentReader)
@@ -515,17 +566,44 @@ public actor RoomEngine {
     let spoolURL = persistence.root.appendingPathComponent("spool", isDirectory: true)
     try createPrivateDirectory(spoolURL)
     let spool = try RoomPieceSpool(rootURL: spoolURL)
+    let remote = remoteFactory(configuration)
     return RoomEngine(
       persistence: persistence,
       configuration: configuration,
-      remote: remoteFactory(configuration),
+      remote: remote,
       captureLauncher: captureLauncher,
       pieceRunner: pieceRunner,
       spool: spool,
       capturesURL: captures,
       instanceLock: lock,
       retainedArchiveRecovery: retainedArchiveRecovery,
-      residentRuntimeFactory: eligibility == .eligible ? residentRuntimeFactory : nil
+      residentRuntimeFactory: eligibility == .eligible ? residentRuntimeFactory : nil,
+      updater: updaterFactory(configuration, remote, persistence.root)
+    )
+  }
+
+  /// Build R3 — a self-updater, but ONLY when there is something to update.
+  ///
+  /// ─── THE THREE GUARDS, AND EACH ONE IS A REAL CASE ────────────────────────────────────────
+  /// A `swift run` binary has no `.app` and no `CFBundleShortVersionString`: it has no release
+  /// identity, must not claim one, and must never swap a bundle it is not running from. A test
+  /// harness is the same shape. And a bundle whose path does not end in `.app` is not a thing
+  /// launchd starts from a plist, so replacing it would achieve nothing and could destroy
+  /// something. In all three, nil — the app polls and records exactly as it always did.
+  public static func defaultUpdater(
+    configuration: RoomConfiguration,
+    remote: any RoomEngineRemote,
+    rootURL: URL
+  ) -> RoomUpdater? {
+    guard let version = BuildInfo.appVersion, !version.isEmpty else { return nil }
+    let bundle = Bundle.main.bundleURL.standardizedFileURL
+    guard bundle.pathExtension == "app" else { return nil }
+    return RoomUpdater(
+      rootURL: rootURL,
+      residentBundleURL: bundle,
+      runningVersion: version,
+      channel: configuration.updateChannel,
+      fetcher: RoomEngineReleaseFetcher(remote: remote)
     )
   }
 
@@ -539,7 +617,8 @@ public actor RoomEngine {
     capturesURL: URL,
     instanceLock: RoomEngineInstanceLock,
     retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?,
-    residentRuntimeFactory: RoomResidentRuntimeFactory?
+    residentRuntimeFactory: RoomResidentRuntimeFactory?,
+    updater: RoomUpdater? = nil
   ) {
     self.persistence = persistence
     self.configuration = configuration
@@ -551,6 +630,16 @@ public actor RoomEngine {
     self.instanceLock = instanceLock
     self.retainedArchiveRecovery = retainedArchiveRecovery
     self.residentRuntimeFactory = residentRuntimeFactory
+    self.updater = updater
+    // §13.3 step 10, at the earliest moment there is anywhere to put it. The swap script wrote
+    // this file and then started this process; the version and build sha this copy reports on its
+    // first poll are the other half of the same evidence, and the fleet card showing both change
+    // together is the ONLY proof the update landed.
+    pendingUpdateResult = RoomUpdateResult.read(root: persistence.root)
+    // Whatever the last attempt left staged is dead weight — the bundle it held has either been
+    // moved into place or been abandoned. Removed here rather than by the script, which would
+    // have been deleting the directory it was running out of.
+    try? FileManager.default.removeItem(at: RoomSelfUpdate.stagingURL(root: persistence.root))
     residentCaptureOwner = nil
     residentControlJournal = nil
     residentControlCommands = [:]
@@ -608,6 +697,14 @@ public actor RoomEngine {
     return http.statusCode == 409 && http.body.contains("RETIRED")
   }
 
+  /// R3-6 — is a recording session open on this Mac RIGHT NOW?
+  ///
+  /// The same expression that decides which `recording_session_id` the poll carries, stated once
+  /// so the two cannot drift apart. `.ending` is deliberately NOT open: a session being wound up
+  /// has stopped taking audio, and treating it as open would hold an update back for the length of
+  /// a finalisation that may itself be waiting on an upload.
+  private var sessionIsOpen: Bool { phase == .recording || phase == .paused }
+
   /// True only when the index is present now, was present before, and GREW.
   private func tapeIsAdvancing() -> Bool {
     let current = currentDurableSampleIndex()
@@ -616,6 +713,64 @@ public actor RoomEngine {
     return current > previous
   }
 
+  /// One whole update check, when one is due. Returns the version handed over to, or nil.
+  ///
+  /// R3-10 IS THE `sessionJustEnded` ARGUMENT. A clinic day is close to continuous recording, so a
+  /// check deferred at 09:10 would otherwise wait until 15:10 — most of a day after the last
+  /// patient left, on a Mac that has been idle the whole time.
+  private func checkForUpdateIfDue() async -> String? {
+    guard let updater else { return nil }
+
+    // The transition, not the state. A session that was open on the previous poll and is not open
+    // now is the moment R3-10 names, and it is observable only by remembering the previous answer.
+    let open = sessionIsOpen
+    let justEnded = previousSessionWasOpen && !open
+    previousSessionWasOpen = open
+    if justEnded { sessionEndedSinceUpdateCheck = true }
+
+    let now = Date()
+    guard updateSchedule.isDue(now: now, sessionJustEnded: sessionEndedSinceUpdateCheck) else {
+      return nil
+    }
+    sessionEndedSinceUpdateCheck = false
+    updateSchedule.lastCheckedAt = now
+
+    switch await updater.check(sessionIsOpen: open) {
+    case .upToDate:
+      updateSchedule.deferredWhileRecording = false
+      return nil
+    case .deferredWhileRecording:
+      // R3-10 arms here and fires at the end of the session, not six hours from now.
+      updateSchedule.deferredWhileRecording = true
+      return nil
+    case .stopped(_, _):
+      // R3-9 and acceptance item 5. `update-result.json` is on disk; the next poll carries it and
+      // the fleet card names the reason. NOTHING resident was touched, so the room is recording on
+      // the version it has and there is nothing to recover from.
+      updateSchedule.deferredWhileRecording = false
+      pendingUpdateResult = RoomUpdateResult.read(root: persistence.root)
+      return nil
+    case .handedOver(let version):
+      updateSchedule.deferredWhileRecording = false
+      return version
+    }
+  }
+
+  /// Why `run()` returned (§13.3 steps 7 and 9). `.stopped` until it returns.
+  ///
+  /// ─── A PROPERTY RATHER THAN A RETURN VALUE, DELIBERATELY ───────────────────────────────────
+  /// `run()` is called from a dozen existing tests that ignore what it gives back. Making it
+  /// return would have put a warning on every one of those call sites and invited a sweep through
+  /// test files this build's file contract does not open. The CLI reads this after `run()`
+  /// returns, which is the only place the answer is wanted.
+  public private(set) var exitReason: RoomEngineExit = .stopped
+
+  /// Run until the room stops, or until a swap script takes the bundle over (§13.3 step 7).
+  ///
+  /// On return, `exitReason` says which. The CLI turns `.handedOverToUpdate` into exit 64, and 64
+  /// is a fail-safe rather than a status: launchd restarts the app on any non-zero exit, so a swap
+  /// script that dies before it boots the agent out leaves launchd starting the OLD app and the
+  /// room recording on the version it has (R3-4).
   public func run() async throws {
     do {
       _ = try await drainPending()
@@ -698,6 +853,7 @@ public actor RoomEngine {
       do {
         // Install and Fleet §4.3/§5.5. Every value is read HERE, at the moment of the poll —
         // MachineFactsReader measures on each call and reports nil for anything it cannot read.
+        let reportedResult = pendingUpdateResult
         let installFields = installID.map {
           InstallPollFields(
             installID: $0,
@@ -705,7 +861,17 @@ public actor RoomEngine {
             // hands `tapewriter --device`. The reader turns it into the name CoreAudio reports
             // for it right now, or nil when it is not attached.
             facts: MachineFactsReader.read(inputDeviceUID: configuration.deviceUID),
-            tapeAdvancing: tapeIsAdvancing()
+            tapeAdvancing: tapeIsAdvancing(),
+            // R3-6. THE ENGINE'S OWN STATE, read here at the moment of the poll — the same
+            // expression that decides `recordingSessionID` two lines below, so the two can never
+            // disagree about whether a patient is in the room.
+            sessionOpen: sessionIsOpen,
+            updateChannel: configuration.updateChannel,
+            lastUpdateResult: reportedResult?.outcome.rawValue,
+            lastUpdateError: reportedResult?.reportedErrorLine,
+            lastUpdateAt: reportedResult.map { Self.iso8601($0.at) },
+            // V, 9 Sep. The volume the CAPTURES live on, which is the one that fills.
+            diskFreeBytes: InstallPollFields.freeBytes(onVolumeHolding: capturesURL)
           )
         }
         let response = try await remote.pollCommands(
@@ -736,12 +902,36 @@ public actor RoomEngine {
           await stopRetainedArchiveRecovery()
           break
         }
+        // §13.3 step 10. The poll carrying the receipt came back, so the file has done its job and
+        // is deleted. Only now: if this line ran before the poll, a network fault would have
+        // erased the only record that an update failed.
+        if reportedResult != nil {
+          RoomUpdateResult.delete(root: persistence.root)
+          pendingUpdateResult = nil
+        }
         if retainedArchiveReady { lastError = nil }
         for command in response.commands {
           await handle(command)
         }
         try saveStatus()
         backoffNanoseconds = 5_000_000_000
+
+        // ─── BUILD R3 — the update check (§13.3 steps 1 to 7) ────────────────────────────────
+        //
+        // HERE, AFTER A SUCCESSFUL POLL, AND NOT AT THE TOP OF THE LOOP. §9 of the kickoff asks
+        // where this sits and this is the answer, for three reasons. The receipt above has just
+        // been delivered, so no handover can discard an unreported failure. The commands above
+        // have just been applied, so `sessionIsOpen` below is the freshest reading the engine
+        // has and a session that ended on THIS poll is already visible. And a room that cannot
+        // reach the server does not reach this line at all, which is exactly R3-9's "do nothing".
+        //
+        // The cost is that "on launch" means "on the first successful poll", about 1.5 seconds
+        // in. That is the conservative half of the trade and it is stated in the build report.
+        if let handedOver = await checkForUpdateIfDue() {
+          handedOverToUpdateVersion = handedOver
+          break
+        }
+
         try await Task.sleep(nanoseconds: 1_500_000_000)
       } catch is CancellationError {
         break
@@ -768,6 +958,15 @@ public actor RoomEngine {
         try await Task.sleep(nanoseconds: backoffNanoseconds)
         backoffNanoseconds = min(backoffNanoseconds * 2, 30_000_000_000)
       }
+    }
+
+    // §13.3 step 7. THE FIRST THING CHECKED AFTER THE LOOP, and before anything that could block.
+    // A swap script is already running with this bundle's path in its hands; the only correct
+    // remaining action is to stop touching the disk and let the process exit 64.
+    if let version = handedOverToUpdateVersion {
+      exitReason = .handedOverToUpdate(version: version)
+      await stopRetainedArchiveRecovery()
+      return
     }
 
     if Task.isCancelled {

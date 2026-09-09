@@ -708,7 +708,9 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
       RETURNING install_id, room_id, created_at, enrolled_at, session_expires_at, launched_by,
              hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
-             tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at
+             tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
+             session_open, update_channel, last_update_result, last_update_error,
+             last_update_at, disk_free_bytes
     `) as InstallView[];
     return rows[0] ? normaliseInstall(rows[0]) : null;
   } catch (e) {
@@ -734,11 +736,35 @@ export type InstallPollFields = {
   os_version?: string | null;
   /** §4.3's eighth field (V, 8 Sep): what the configured input device is called, measured. */
   input_device_name?: string | null;
+  // ── Build R3, §13.4 ──────────────────────────────────────────────────────────────────────
+  /** R3-6. A LIVE reading of the app's own engine. The one field below that is not COALESCEd. */
+  session_open?: boolean | null;
+  /** R3-8. `stable` or `test`, from the Mac's own config.json. */
+  update_channel?: string | null;
+  /** From update-result.json, written by the swap script and read once by the new copy. */
+  last_update_result?: string | null;
+  last_update_error?: string | null;
+  last_update_at?: string | null;
+  /** V, 9 Sep. Free bytes on the captures volume. Never 0 or -1 — absent when unreadable. */
+  disk_free_bytes?: string | number | null;
 };
 
 export type InstallPollResult = { ok: true } | { ok: false; code: "RETIRED" | "NOT_FOUND" };
 
 const MIC_STATES = new Set(["authorized", "denied", "not_determined", "unknown"]);
+
+/** §13.4 — the six outcomes the swap script can record, and nothing else is stored. */
+const UPDATE_RESULTS = new Set([
+  "ok",
+  "checksum_mismatch",
+  "signature_mismatch",
+  "download_failed",
+  "expand_failed",
+  "swap_failed",
+]);
+
+/** R3-8 — the two channels that exist. An unknown one is not reported, never coerced to stable. */
+const UPDATE_CHANNELS = new Set(["stable", "test"]);
 
 /** PURE — sanitise one poll's claims. Anything malformed becomes "not reported", never a guess. */
 export function cleanPollFields(raw: InstallPollFields): {
@@ -753,6 +779,12 @@ export function cleanPollFields(raw: InstallPollFields): {
   hardware_model: string | null;
   os_version: string | null;
   input_device_name: string | null;
+  session_open: boolean | null;
+  update_channel: string | null;
+  last_update_result: string | null;
+  last_update_error: string | null;
+  last_update_at: string | null;
+  disk_free_bytes: string | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -761,6 +793,24 @@ export function cleanPollFields(raw: InstallPollFields): {
   };
   const mic = str(raw.mic_state, 32);
   const launched = str(raw.launched_by, 16);
+  const updateResult = str(raw.last_update_result, 32);
+  const updateChannel = str(raw.update_channel, 16);
+  // AN INSTANT OR NOTHING. The Mac's clock wrote this into update-result.json, so it can be
+  // anything; an unparseable stamp becomes "not reported" and the column keeps what it had rather
+  // than taking a string Postgres would reject and failing the whole poll.
+  const updateAtRaw = str(raw.last_update_at, 64);
+  const updateAtMs = updateAtRaw === null ? NaN : Date.parse(updateAtRaw);
+  // POSITIVE BYTES OR NOTHING (§5.5, V's 9 Sep addition). 0 and -1 are the two values a broken
+  // reader produces and the two this column must never hold: "0 bytes free" would read as a
+  // clinical emergency on a Mac that simply could not answer. Sent as a string because a byte
+  // count on a 2 TB volume exceeds what JSON numbers carry safely once it reaches bigint.
+  const diskRaw = raw.disk_free_bytes;
+  const diskDigits =
+    typeof diskRaw === "string"
+      ? diskRaw.trim()
+      : typeof diskRaw === "number" && Number.isSafeInteger(diskRaw)
+        ? String(diskRaw)
+        : "";
   return {
     install_id: raw.install_id,
     app_version: str(raw.app_version, 64),
@@ -775,6 +825,17 @@ export function cleanPollFields(raw: InstallPollFields): {
     // 128 to match hostname/hardware_model. CoreAudio device names are short, but an aggregate
     // device can be given any name a person types into Audio MIDI Setup.
     input_device_name: str(raw.input_device_name, 128),
+    // ── Build R3 (§13.4) ───────────────────────────────────────────────────────────────────
+    session_open: typeof raw.session_open === "boolean" ? raw.session_open : null,
+    update_channel: updateChannel && UPDATE_CHANNELS.has(updateChannel) ? updateChannel : null,
+    last_update_result:
+      updateResult && UPDATE_RESULTS.has(updateResult) ? updateResult : null,
+    // 300 to match the app's own bounded error strings, which are cut at 500 before they are ever
+    // written to disk. Long enough for the sentence the card renders, short enough that a garbled
+    // file cannot put a paragraph on a clinical screen.
+    last_update_error: str(raw.last_update_error, 300),
+    last_update_at: Number.isFinite(updateAtMs) ? new Date(updateAtMs).toISOString() : null,
+    disk_free_bytes: /^[0-9]{1,19}$/.test(diskDigits) && diskDigits !== "0" ? diskDigits : null,
   };
 }
 
@@ -790,6 +851,18 @@ export function cleanPollFields(raw: InstallPollFields): {
  * poll reporting false must RESET it rather than coalesce over it — otherwise a single true
  * followed by silence would eventually reach two and mark a dead room as recording. A poll that
  * does not mention the tape at all leaves the streak untouched, because it made no claim.
+ *
+ * `session_open` IS THE SECOND EXCEPTION, added in Build R3 (§13.4), and for the opposite reason
+ * to the first. It is a LIVE reading of whether a patient is in the room right now, and the whole
+ * of R3-3 rests on it being able to go false: the card suppresses "Tape not advancing" when no
+ * session is open, so a COALESCE here would freeze a room at "recording" the moment its last
+ * session ended and bring the false warning straight back. A poll that omits it — every install
+ * below 0.1.8, for ever — still writes NULL, which reads as "not reported" and raises nothing.
+ *
+ * THE FIVE R3 UPDATE COLUMNS COALESCE, and that is what makes a failure stick (R3-7). The app that
+ * attempted the update is gone; its successor reports the receipt once, on one poll, and deletes
+ * the file. Every poll after that omits the fields, and the row must go on saying why the room is
+ * still on the old version until a later update overwrites it.
  *
  * A RETIRED INSTALL IS TOLD SO (§4.5 rule 3). The route turns this into 409 RETIRED and the app
  * stops polling, which is what makes the last writer of `bench_listener` the new install.
@@ -829,7 +902,15 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
                WHEN ${f.tape_advancing}::boolean IS NULL THEN tape_advancing_since
                WHEN ${f.tape_advancing}::boolean THEN COALESCE(tape_advancing_since, now())
                ELSE NULL
-             END
+             END,
+             -- R3-6 / §13.4. WRITTEN RAW, NOT COALESCED — see the doc comment above. This is the
+             -- only poll column whose false must survive the write.
+             session_open   = ${f.session_open}::boolean,
+             update_channel = COALESCE(${f.update_channel}::text, update_channel),
+             last_update_result = COALESCE(${f.last_update_result}::text, last_update_result),
+             last_update_error  = COALESCE(${f.last_update_error}::text,  last_update_error),
+             last_update_at     = COALESCE(${f.last_update_at}::timestamptz, last_update_at),
+             disk_free_bytes    = COALESCE(${f.disk_free_bytes}::bigint, disk_free_bytes)
        WHERE install_id = ${f.install_id}
          AND retired_at IS NULL
       RETURNING install_id
@@ -865,6 +946,14 @@ function normaliseInstall(r: InstallView): InstallView {
     tape_advancing_since: iso(r.tape_advancing_since),
     retired_at: iso(r.retired_at),
     tape_poll_streak: Number(r.tape_poll_streak ?? 0),
+    last_update_at: iso(r.last_update_at ?? null),
+    // bigint arrives as a STRING from the driver, and a byte count is worth nothing to the card as
+    // a string. 2 TB is 2e12, comfortably inside Number.MAX_SAFE_INTEGER, so this is lossless for
+    // any volume a Mac mini has. Null stays null — see the column comment: never 0.
+    disk_free_bytes:
+      r.disk_free_bytes === null || r.disk_free_bytes === undefined
+        ? null
+        : Number(r.disk_free_bytes),
   };
 }
 
@@ -920,7 +1009,9 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
         SELECT install_id, room_id, created_at, enrolled_at, session_expires_at, launched_by,
              hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
-             tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at
+             tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
+             session_open, update_channel, last_update_result, last_update_error,
+             last_update_at, disk_free_bytes
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500

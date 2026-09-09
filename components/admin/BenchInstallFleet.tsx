@@ -411,6 +411,17 @@ function FleetRowView({
             </Pill>
           ))}
           {view.state === "enrolling" && <Pill tone="warn">enrolling</Pill>}
+          {/* STATE C (R3-7). Only a FAILED update speaks. Nothing new appears here while updates
+              work, which is the whole of R3-7 — a card that narrated every success would train
+              the eye to skip the one line that matters. */}
+          {view.update_failed && <Pill tone="bad">update failed</Pill>}
+          {/* STATE E (R3-8). A tag, not a pill: the channel is not a verdict on the room, it is
+              which shelf this Mac takes its builds from. Reported from its own config.json. */}
+          {view.channel_label && (
+            <span className="inline-block rounded border border-even-ink-100 px-1.5 py-0.5 font-mono text-caption text-even-ink-500">
+              {view.channel_label}
+            </span>
+          )}
         </div>
       </td>
 
@@ -427,6 +438,14 @@ function FleetRowView({
                 {view.session_label}
               </p>
             )}
+            {/* V, 9 September 2026. Free disk, UNDER the existing lines, as a plain size. No
+                column, no control, no colour and no threshold — nothing enforces retention yet
+                at about 115 MB per recorded hour, and a number an operator can read is the
+                honest amount to say before something does. Absent when the app could not read
+                the volume; it never sends 0. */}
+            {view.disk_label && (
+              <p className="text-caption text-even-ink-400">{view.disk_label}</p>
+            )}
           </>
         ) : (
           <p className="text-caption text-even-ink-400">
@@ -439,16 +458,25 @@ function FleetRowView({
         )}
       </td>
 
-      <td className="py-2.5 px-2.5 whitespace-nowrap">
+      <td className="py-2.5 px-2.5">
         {i?.app_version ? (
           <>
-            <span className="tabular-nums text-even-navy-800">{i.app_version}</span>
-            <span className="block text-caption text-even-ink-400">
-              {release && i.app_version !== release.version ? `latest ${release.version}` : "latest"}
+            <span className="tabular-nums text-even-navy-800 whitespace-nowrap">{i.app_version}</span>
+            <span className="block text-caption text-even-ink-400 whitespace-nowrap">
+              {view.version_hint}
             </span>
           </>
         ) : (
           <span className="text-even-ink-400">—</span>
+        )}
+        {/* STATE C, WHERE V PUT IT (9 September 2026). Under the version that did not change,
+            because a failed update is a fact about the version. The sentence is composed in
+            lib/room-install-view.ts from what the last poll reported and nothing else — the page
+            never asserts an outcome of its own. */}
+        {view.update_note && (
+          <p className="mt-1.5 max-w-[34ch] whitespace-normal text-caption text-danger-700">
+            {view.update_note}
+          </p>
         )}
       </td>
 
@@ -477,13 +505,19 @@ function FleetRowView({
         )}
       </td>
 
+      {/* STATES A AND B (R3-3). Three answers, not two: an idle room with nobody in it reads
+          `idle, no session` and is not a fault, while a room with a session open and no audio
+          reaching the tape reads `recording, not advancing` and still goes to attention exactly
+          as it does today. `deriveRow` decides the words; this cell only colours them. */}
       <td className="py-2.5 px-2.5 whitespace-nowrap text-caption">
-        {!i ? (
+        {!i || !view.tape_label ? (
           <span className="text-even-ink-400">—</span>
         ) : i.tape_advancing ? (
-          <span className="text-success-700">advancing</span>
+          <span className="text-success-700">{view.tape_label}</span>
+        ) : i.session_open === true ? (
+          <span className="text-danger-700">{view.tape_label}</span>
         ) : (
-          <span className="text-even-ink-400">not advancing</span>
+          <span className="text-even-ink-400">{view.tape_label}</span>
         )}
       </td>
 

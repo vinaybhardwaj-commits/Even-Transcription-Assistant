@@ -240,8 +240,15 @@
             "paused": "false",
             "mic_peak": "0.7500",
             "mic_avg": "0.1250",
-            "spare_device": "false",
           ])
+        // ─── `spare_device` IS GONE FROM THE WIRE (V, 9 Sep — Build R3 §5.7) ────────────────
+        // It used to be appended as the literal `spare_device=false` on every poll. This app has
+        // no spare-microphone concept, so it was a constant standing in for a measurement, which
+        // §5.5 forbids. Removed rather than corrected: the server maps an absent value to null and
+        // upserts it as COALESCE(EXCLUDED.spare_device, bench_listener.spare_device), so sending
+        // nothing keeps the column and claims nothing. This assertion is the guard against it
+        // being helpfully reinstated.
+        #expect(query["spare_device"] == nil)
         #expect(query["spare_peak"] == nil)
         #expect(query["spare_avg"] == nil)
         return stub(

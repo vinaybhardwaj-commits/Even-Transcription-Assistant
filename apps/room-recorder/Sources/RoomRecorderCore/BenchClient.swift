@@ -444,13 +444,49 @@ public actor BenchClient {
       query.append(URLQueryItem(name: "mic_peak", value: Self.levelString(primaryLevels.peak)))
       query.append(URLQueryItem(name: "mic_avg", value: Self.levelString(primaryLevels.average)))
     }
-    query.append(URLQueryItem(name: "spare_device", value: "false"))
-    // Install and Fleet §4.3 — the seven fields, appended only when this build is enrolled.
+    // ─── `spare_device=false` USED TO BE APPENDED HERE, UNCONDITIONALLY (V, 9 Sep) ──────────
+    // It was a literal. This app has no spare-microphone concept and never had one, so the value
+    // was a constant standing in for a measurement — precisely what §5.5 forbids, and the same
+    // shape as the two silent labelling incidents that rule was written after.
+    //
+    // REMOVED RATHER THAN CORRECTED, because there is nothing to correct it to. Sending nothing
+    // is the honest report: `app/api/bench/commands/route.ts` maps an absent `spare_device` to
+    // null, and `lib/bench-commands.ts` upserts it as
+    // `spare_device = COALESCE(EXCLUDED.spare_device, bench_listener.spare_device)`, so the column
+    // keeps whatever it last held instead of being overwritten by a claim. Verified in the source
+    // on 9 September before this line was deleted; the poll is not rejected for omitting it.
+    //
+    // Install and Fleet §4.3 — the poll fields, appended only when this build is enrolled.
     // Absent, the server takes the poll exactly as it took every poll before R1 shipped.
     query.append(contentsOf: install?.queryItems() ?? [])
     var request = try request(path: "/api/bench/commands", query: query)
     request.cachePolicy = .reloadIgnoringLocalCacheData
     return try await decoded(request, as: CommandPollResponse.self)
+  }
+
+  /// `GET /api/room-recorder/release?channel=` — what version should this Mac be running (§13.4).
+  ///
+  /// ─── EVERY NON-200 IS `nil`, AND THE SWALLOW IS THE FEATURE (R3-9) ────────────────────────
+  /// 404 `NO_RELEASE`, 401, a decode failure, a timeout, a dead network: one answer, `nil`, meaning
+  /// "there is nothing to do". The caller logs it and changes nothing on disk. A missing release is
+  /// a REAL situation and not only a broken one — `latestRelease` returns null whenever every
+  /// release on a channel has been withdrawn — and a room must never read "I could not ask" as a
+  /// reason to remove the software it is recording with.
+  ///
+  /// This is the one place in this client where an HTTP error is not propagated, so it is stated
+  /// out loud rather than left to a `try?` at a call site.
+  public func fetchRelease(channel: String) async -> RoomReleaseDescriptor? {
+    do {
+      var request = try request(
+        path: "/api/room-recorder/release",
+        query: [URLQueryItem(name: "channel", value: channel)])
+      // A cached answer would be a room asking a six-hourly question and being told what it was
+      // told last time — including after a withdraw, which is exactly when the answer changed.
+      request.cachePolicy = .reloadIgnoringLocalCacheData
+      return try await decoded(request, as: RoomReleaseDescriptor.self)
+    } catch {
+      return nil
+    }
   }
 
   public func acknowledge(

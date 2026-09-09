@@ -28,6 +28,30 @@ public struct InstallPollFields: Equatable, Sendable {
   /// and omitted rather than guessed when the device is not attached.
   public var inputDeviceName: String?
 
+  // ─── BUILD R3 (§13.4) ─────────────────────────────────────────────────────────────────────
+  /// R3-6. Whether a recording session was open at the moment of the poll, from the engine's own
+  /// state. A `Bool?` and not a `Bool`: an engine that has not decided yet reports nothing rather
+  /// than reporting "idle", and the server writes NULL, which the card reads as "not reported".
+  ///
+  /// THE BENCH LISTENER'S `recording` FLAG IS NOT USABLE FOR THIS. OPD 5's listener row has read
+  /// true since 24 August, fifteen days, with no session open. §5.5 wants a value read from the
+  /// machine at poll time, and this is one.
+  public var sessionOpen: Bool?
+  /// R3-8. Which channel this Mac asks for, from its own `config.json`.
+  public var updateChannel: String?
+  /// The last self-update outcome, read once out of `update-result.json` and then never again.
+  public var lastUpdateResult: String?
+  /// The reason line that goes with it, carrying the attempted version at its head.
+  public var lastUpdateError: String?
+  /// When the swap script recorded that outcome, ISO-8601.
+  public var lastUpdateAt: String?
+  /// V, 9 September 2026. Free bytes on the volume holding the captures directory.
+  ///
+  /// NIL RATHER THAN 0, and the distinction is the whole of §5.5 in one field. A reader that
+  /// cannot answer reports nothing; "0 bytes free" is a clinical emergency this app must never be
+  /// able to invent from a failed `resourceValues` call.
+  public var diskFreeBytes: Int64?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -39,7 +63,13 @@ public struct InstallPollFields: Equatable, Sendable {
     hostname: String? = nil,
     hardwareModel: String? = nil,
     osVersion: String? = nil,
-    inputDeviceName: String? = nil
+    inputDeviceName: String? = nil,
+    sessionOpen: Bool? = nil,
+    updateChannel: String? = nil,
+    lastUpdateResult: String? = nil,
+    lastUpdateError: String? = nil,
+    lastUpdateAt: String? = nil,
+    diskFreeBytes: Int64? = nil
   ) {
     self.installID = installID
     self.appVersion = appVersion
@@ -52,6 +82,12 @@ public struct InstallPollFields: Equatable, Sendable {
     self.hardwareModel = hardwareModel
     self.osVersion = osVersion
     self.inputDeviceName = inputDeviceName
+    self.sessionOpen = sessionOpen
+    self.updateChannel = updateChannel
+    self.lastUpdateResult = lastUpdateResult
+    self.lastUpdateError = lastUpdateError
+    self.lastUpdateAt = lastUpdateAt
+    self.diskFreeBytes = diskFreeBytes
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -61,7 +97,13 @@ public struct InstallPollFields: Equatable, Sendable {
     facts: MachineFacts,
     tapeAdvancing: Bool,
     appVersion: String? = BuildInfo.appVersion,
-    buildSHA: String? = BuildInfo.buildSHA
+    buildSHA: String? = BuildInfo.buildSHA,
+    sessionOpen: Bool? = nil,
+    updateChannel: String? = nil,
+    lastUpdateResult: String? = nil,
+    lastUpdateError: String? = nil,
+    lastUpdateAt: String? = nil,
+    diskFreeBytes: Int64? = nil
   ) {
     self.init(
       installID: installID,
@@ -74,8 +116,39 @@ public struct InstallPollFields: Equatable, Sendable {
       hostname: facts.hostname,
       hardwareModel: facts.hardwareModel,
       osVersion: facts.osVersion,
-      inputDeviceName: facts.inputDeviceName
+      inputDeviceName: facts.inputDeviceName,
+      sessionOpen: sessionOpen,
+      updateChannel: updateChannel,
+      lastUpdateResult: lastUpdateResult,
+      lastUpdateError: lastUpdateError,
+      lastUpdateAt: lastUpdateAt,
+      diskFreeBytes: diskFreeBytes
     )
+  }
+
+  /// Free space on the volume holding `directory`, or nil (§5.5, V's 9 September addition).
+  ///
+  /// ─── THIS LIVES HERE, NOT IN MachineFacts, AND SAYING WHY MATTERS ─────────────────────────
+  /// `MachineFacts` measures the MACHINE and takes no arguments beyond the configured input; free
+  /// space is a fact about ONE DIRECTORY, and the only object that knows which directory a room
+  /// records into is the engine. Build R3's file contract also does not open MachineFacts.swift,
+  /// and reaching into a file the contract did not name would be the wrong kind of tidy.
+  ///
+  /// `volumeAvailableCapacityForImportantUsageKey`, which is what the Finder shows and what a
+  /// purgeable-space-aware macOS actually considers available — not `volumeAvailableCapacityKey`,
+  /// which under-reports by whatever the system is holding in purgeable caches and would make a
+  /// healthy Mac look close to full. NIL, NEVER 0: see the property comment above.
+  public static func freeBytes(onVolumeHolding directory: URL) -> Int64? {
+    guard
+      let values = try? directory.resourceValues(forKeys: [
+        .volumeAvailableCapacityForImportantUsageKey
+      ]),
+      let available = values.volumeAvailableCapacityForImportantUsage,
+      available > 0
+    else {
+      return nil
+    }
+    return Int64(available)
   }
 
   /// §4.5 rule 1: the app's listener `tab_id` is `app_<install_id>` and the app writes no other
@@ -100,6 +173,23 @@ public struct InstallPollFields: Equatable, Sendable {
     add("hardware_model", hardwareModel)
     add("os_version", osVersion)
     add("input_device_name", inputDeviceName)
+    // ── Build R3 (§13.4) ────────────────────────────────────────────────────────────────────
+    // `session_open` follows the same absence rule as everything else here, but for a different
+    // reason at the far end: the server writes it RAW rather than COALESCEing it, so an omitted
+    // field lands as NULL and reads as "not reported" — which is exactly right for an engine that
+    // has not decided, and is why nil must not become "false" on the way out.
+    if let sessionOpen {
+      items.append(URLQueryItem(name: "session_open", value: sessionOpen ? "true" : "false"))
+    }
+    add("update_channel", updateChannel)
+    add("last_update_result", lastUpdateResult)
+    add("last_update_error", lastUpdateError)
+    add("last_update_at", lastUpdateAt)
+    // Sent as digits, and only when positive. `add` already drops an empty string; the guard is
+    // here so no arithmetic anywhere can turn an unreadable volume into a "0" on a clinical row.
+    if let diskFreeBytes, diskFreeBytes > 0 {
+      items.append(URLQueryItem(name: "disk_free_bytes", value: String(diskFreeBytes)))
+    }
     return items
   }
 }
