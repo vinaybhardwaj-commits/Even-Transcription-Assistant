@@ -41,7 +41,10 @@ public struct InstallPollFields: Equatable, Sendable {
   public var updateChannel: String?
   /// The last self-update outcome, read once out of `update-result.json` and then never again.
   public var lastUpdateResult: String?
-  /// The reason line that goes with it, carrying the attempted version at its head.
+  /// The version that attempt was reaching for. Its own field since Fix 1 (V, 9 Sep) — it used to
+  /// ride at the head of `lastUpdateError`, which made a free-text column load-bearing.
+  public var lastUpdateVersion: String?
+  /// What went wrong, in one sentence. The version is NOT in here.
   public var lastUpdateError: String?
   /// When the swap script recorded that outcome, ISO-8601.
   public var lastUpdateAt: String?
@@ -67,6 +70,7 @@ public struct InstallPollFields: Equatable, Sendable {
     sessionOpen: Bool? = nil,
     updateChannel: String? = nil,
     lastUpdateResult: String? = nil,
+    lastUpdateVersion: String? = nil,
     lastUpdateError: String? = nil,
     lastUpdateAt: String? = nil,
     diskFreeBytes: Int64? = nil
@@ -85,6 +89,7 @@ public struct InstallPollFields: Equatable, Sendable {
     self.sessionOpen = sessionOpen
     self.updateChannel = updateChannel
     self.lastUpdateResult = lastUpdateResult
+    self.lastUpdateVersion = lastUpdateVersion
     self.lastUpdateError = lastUpdateError
     self.lastUpdateAt = lastUpdateAt
     self.diskFreeBytes = diskFreeBytes
@@ -101,6 +106,7 @@ public struct InstallPollFields: Equatable, Sendable {
     sessionOpen: Bool? = nil,
     updateChannel: String? = nil,
     lastUpdateResult: String? = nil,
+    lastUpdateVersion: String? = nil,
     lastUpdateError: String? = nil,
     lastUpdateAt: String? = nil,
     diskFreeBytes: Int64? = nil
@@ -120,6 +126,7 @@ public struct InstallPollFields: Equatable, Sendable {
       sessionOpen: sessionOpen,
       updateChannel: updateChannel,
       lastUpdateResult: lastUpdateResult,
+      lastUpdateVersion: lastUpdateVersion,
       lastUpdateError: lastUpdateError,
       lastUpdateAt: lastUpdateAt,
       diskFreeBytes: diskFreeBytes
@@ -183,6 +190,7 @@ public struct InstallPollFields: Equatable, Sendable {
     }
     add("update_channel", updateChannel)
     add("last_update_result", lastUpdateResult)
+    add("last_update_version", lastUpdateVersion)
     add("last_update_error", lastUpdateError)
     add("last_update_at", lastUpdateAt)
     // Sent as digits, and only when positive. `add` already drops an empty string; the guard is

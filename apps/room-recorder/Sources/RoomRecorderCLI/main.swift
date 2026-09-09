@@ -204,25 +204,20 @@ private enum RoomRecorderCLI {
             try await engine.run()
             switch await engine.exitReason {
             case .handedOverToUpdate(let version):
-              // ─── EXIT 64 (§13.3 step 7, R3-4) ─────────────────────────────────────────────
-              // A detached swap script now owns the bundle and the restart. 64 is distinct from
-              // 0 (needs_enrol and the retired 409, which mean "stay stopped") and from 1 (any
-              // error), so an update restart is readable in launchd.log and separable from a
-              // crash.
-              //
-              // THE NON-ZERO VALUE IS THE FAIL-SAFE, not the label. `KeepAlive` is
-              // `{"SuccessfulExit": false}`, so if the swap script dies before it boots the agent
-              // out, launchd starts THIS bundle again and the room keeps recording on the version
-              // it has. An update that does not happen costs nothing; a room that stops recording
-              // is a clinic day.
+              // ─── THE HANDOVER EXIT (§13.3 step 7, R3-4) ───────────────────────────────────
+              // A detached swap script now owns the bundle and the restart. The code is
+              // `RoomSelfUpdate.handoverExitCode` — named there, with the reasoning, rather than
+              // written as a bare 64 here (Fix 1, F7), so the app and anything that reads
+              // launchd.log cannot drift apart on what the number means.
               FileHandle.standardError.write(
                 Data(
                   """
                   room-recorder: handing over to the swap script for \(version). \
-                  Exiting 64; launchd will restart this bundle if the swap does not take.
+                  Exiting \(RoomSelfUpdate.handoverExitCode); launchd will restart this bundle \
+                  if the swap does not take.
 
                   """.utf8))
-              return 64
+              return RoomSelfUpdate.handoverExitCode
             case .stopped:
               // A clean return is the retired case (§4.5 rule 3): stop, and stay stopped.
               return 0
@@ -294,12 +289,16 @@ private enum RoomRecorderCLI {
           // deliberate stop is honoured.
           "KeepAlive": ["SuccessfulExit": false],
           // R3-11. The plist carried no ThrottleInterval, so launchd's default of 10 seconds
-          // applied: a bundle that cannot launch would retry six times a minute for ever.
+          // applied: a bundle that cannot launch would retry six times a minute for ever. Thirty
+          // seconds is what that fixes, and it is ALL it fixes.
           //
-          // THIRTY SECONDS IS ALSO WHAT BUYS THE SWAP ITS QUIET. The app exits 64 and launchd
-          // wants to restart it immediately; the swap script needs to boot the agent out and move
-          // two bundles before that happens. Ten seconds is tight for a ~90 MB bundle on a Mac
-          // mini's disk. Thirty is not.
+          // ─── IT DOES NOT PROTECT THE SWAP, AND THE FIRST CUT OF THIS COMMENT SAID IT DID ────
+          // Corrected in Fix 1. `ThrottleInterval` is a minimum interval between STARTS, and a
+          // resident app that has been running for hours spent it long ago — so exiting 64 gets an
+          // immediate respawn and the swap script is racing the new process from the moment it is
+          // spawned. What actually protects the staging directory is the handover marker
+          // (`RoomSelfUpdate.handoverMarkerURL`, F3); what stops a failed swap looping is the
+          // attempt ledger (F2). Neither of those is this number.
           "ThrottleInterval": 30,
           "ProcessType": "Interactive",
           "StandardOutPath": logPath,

@@ -59,6 +59,16 @@ public enum RoomSelfUpdate {
   /// `install-launch-agent` derives it.
   public static let launchAgentLabel = "com.evenscribe.room-recorder"
 
+  /// ─── THE EXIT CODE A HANDOVER USES (R3-4). Fix 1, F7: named, not a bare literal. ──────────
+  /// 64 is distinct from 0 — which `needs_enrol` and the retired 409 use ON PURPOSE, to stay
+  /// stopped — and from 1, which already means any error. So an update restart is readable in
+  /// `launchd.log` and separable from a crash.
+  ///
+  /// ITS NON-ZERO-NESS IS THE FAIL-SAFE, not its value. `KeepAlive` is `{"SuccessfulExit": false}`,
+  /// so launchd restarts the app on any non-zero exit: if the swap script dies before it boots the
+  /// agent out, the OLD app comes back and the room keeps recording on the version it has.
+  public static let handoverExitCode: Int32 = 64
+
   // MARK: - Paths under the app root
 
   public static func stagingURL(root: URL) -> URL {
@@ -75,6 +85,44 @@ public enum RoomSelfUpdate {
   public static func logURL(root: URL) -> URL {
     root.appendingPathComponent("update.log", isDirectory: false)
   }
+
+  /// ─── THE HANDOVER MARKER (Fix 1, F3) ───────────────────────────────────────────────────────
+  /// Written immediately before the swap script is spawned, removed when its outcome is read.
+  ///
+  /// WHAT IT PREVENTS. The app exits 64 and launchd restarts it AT ONCE — `ThrottleInterval` is a
+  /// minimum interval between *starts*, and this process had been running for hours, so there is no
+  /// throttle left to spend. The new process reaches `RoomEngine.init`, which used to delete the
+  /// staging directory unconditionally — the directory holding `swap.sh` and the expanded bundle
+  /// the script is at that moment about to move. The swap had to win a race it was never told it
+  /// was in.
+  ///
+  /// A marker rather than a timestamp sweep because it states the intent: "a handover is in flight,
+  /// leave this alone". It carries the time so it cannot wedge for ever if the script dies without
+  /// writing a result.
+  public static func handoverMarkerURL(root: URL) -> URL {
+    root.appendingPathComponent("update-handover.json", isDirectory: false)
+  }
+
+  /// How long a marker is believed. Generous: a ~90 MB bundle, two directory renames and a
+  /// `codesign --deep` on a Mac mini's disk. Past it the marker is stale and staging is swept, so a
+  /// script that died without writing a result cannot leave the directory behind for ever.
+  ///
+  /// NOT CONFIGURABLE — same ruling as the check interval (V, 9 September).
+  public static let handoverGrace: TimeInterval = 10 * 60
+
+  /// Where the attempt ledger lives (Fix 1, F2).
+  public static func attemptsURL(root: URL) -> URL {
+    root.appendingPathComponent("update-attempts.json", isDirectory: false)
+  }
+
+  /// How long a version is held after its SECOND failure. One check interval: the room tries again
+  /// tomorrow morning rather than every eighty seconds for ever.
+  ///
+  /// NOT CONFIGURABLE (V, 9 September).
+  public static let retryHold: TimeInterval = 6 * 60 * 60
+
+  /// How many failures of the SAME version are allowed before the hold. One retry, then hold.
+  public static let failuresBeforeHold = 2
 
   public static func plistURL() -> URL {
     FileManager.default.homeDirectoryForCurrentUser
@@ -144,20 +192,16 @@ public struct RoomUpdateResult: Codable, Equatable, Sendable {
     self.at = at
   }
 
-  /// The reason line the poll carries into `last_update_error`.
+  /// What goes into `last_update_error` — the reason and NOTHING ELSE.
   ///
-  /// THE VERSION TRAVELS AT THE HEAD OF IT, and that is a decision worth naming. §13.4 fixes the
-  /// R3 columns and none of them holds the version an update was attempting, while the approved
-  /// mockup's sentence names it: "Update to 0.1.8 stopped at 09:14." Rather than add a column
-  /// against a ratified list, the version rides in the field §13.4 calls "the reason line" and
-  /// `lib/room-install-view.ts` reads it back off the same separator. FLAGGED in the build report.
+  /// The first cut of R3 packed the version into the head of this string and had the card parse it
+  /// back out on a delimiter, because §13.4's five columns had nowhere to put it. V ratified a
+  /// seventh column in Fix 1, so the version travels in `last_update_version` and this field is a
+  /// plain sentence again. A free-text column is no longer load-bearing.
   public var reportedErrorLine: String? {
     guard let reason, !reason.isEmpty else { return nil }
-    return "\(version)\(RoomUpdateResult.errorSeparator)\(reason)"
+    return reason
   }
-
-  /// Kept identical to `UPDATE_ERROR_SEPARATOR` in `lib/room-install-view.ts`.
-  public static let errorSeparator = " — "
 
   public static func read(root: URL) -> RoomUpdateResult? {
     guard let data = try? Data(contentsOf: RoomSelfUpdate.resultURL(root: root)) else { return nil }
@@ -181,6 +225,140 @@ public struct RoomUpdateResult: Codable, Equatable, Sendable {
   public static func delete(root: URL) {
     try? FileManager.default.removeItem(at: RoomSelfUpdate.resultURL(root: root))
   }
+}
+
+/// The marker `RoomSelfUpdate.handoverMarkerURL` holds (Fix 1, F3).
+public struct RoomUpdateHandover: Codable, Equatable, Sendable {
+  public let version: String
+  public let at: Date
+
+  public init(version: String, at: Date) {
+    self.version = version
+    self.at = at
+  }
+
+  @discardableResult
+  public func write(root: URL) -> Bool {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(self) else { return false }
+    let url = RoomSelfUpdate.handoverMarkerURL(root: root)
+    guard (try? data.write(to: url, options: [.atomic])) != nil else { return false }
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return true
+  }
+
+  public static func read(root: URL) -> RoomUpdateHandover? {
+    guard let data = try? Data(contentsOf: RoomSelfUpdate.handoverMarkerURL(root: root)) else {
+      return nil
+    }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try? decoder.decode(RoomUpdateHandover.self, from: data)
+  }
+
+  public static func clear(root: URL) {
+    try? FileManager.default.removeItem(at: RoomSelfUpdate.handoverMarkerURL(root: root))
+  }
+}
+
+/// The attempt ledger (Fix 1, F2) — how many times this Mac has failed on one version.
+///
+/// ─── WHY THIS HAS TO SURVIVE A RESTART ─────────────────────────────────────────────────────────
+/// `RoomUpdateSchedule` is in memory and is rebuilt on every process start, and `isDue` returns
+/// true unconditionally when nothing has been checked yet. So a resident-verify failure restored
+/// `.previous`, launchd started the old app, and about a second and a half later that app asked
+/// again, got the same version, downloaded ~90 MB again — the STAGED check had passed; it was the
+/// RESIDENT check that failed — spawned again and exited 64 again. Roughly every eighty seconds,
+/// for ever, until somebody withdrew the release. Every cycle booted the agent out and passed
+/// through the window where the resident bundle does not exist.
+///
+/// The same loop needs no failure at all: a published release whose `version` disagrees with the
+/// `CFBundleShortVersionString` inside its own zip never compares equal, so the swap "succeeds" and
+/// the new copy still wants to update. A publish typo would do it.
+///
+/// ONE RETRY, THEN HOLD. Recorded on disk, keyed by version, cleared the moment a DIFFERENT version
+/// is offered — because a new publish is exactly the thing that might fix it.
+public struct RoomUpdateAttempts: Codable, Equatable, Sendable {
+  public var version: String
+  public var failures: Int
+  /// Set when the hold begins. Nil while retries remain.
+  public var holdUntil: Date?
+
+  public init(version: String, failures: Int, holdUntil: Date? = nil) {
+    self.version = version
+    self.failures = failures
+    self.holdUntil = holdUntil
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case version, failures
+    case holdUntil = "hold_until"
+  }
+
+  public static func read(root: URL) -> RoomUpdateAttempts? {
+    guard let data = try? Data(contentsOf: RoomSelfUpdate.attemptsURL(root: root)) else {
+      return nil
+    }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try? decoder.decode(RoomUpdateAttempts.self, from: data)
+  }
+
+  @discardableResult
+  public func write(root: URL) -> Bool {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(self) else { return false }
+    let url = RoomSelfUpdate.attemptsURL(root: root)
+    guard (try? data.write(to: url, options: [.atomic])) != nil else { return false }
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return true
+  }
+
+  public static func clear(root: URL) {
+    try? FileManager.default.removeItem(at: RoomSelfUpdate.attemptsURL(root: root))
+  }
+}
+
+/// PURE — one more failure on `version`, folded into whatever the ledger already said.
+///
+/// A failure on a DIFFERENT version resets the count to one: the previous version's history says
+/// nothing about this one, and a fresh publish is the most likely fix for a bad one.
+public func roomUpdateRecordFailure(
+  previous: RoomUpdateAttempts?, version: String, now: Date
+) -> RoomUpdateAttempts {
+  let failures = (previous?.version == version ? (previous?.failures ?? 0) : 0) + 1
+  let hold =
+    failures >= RoomSelfUpdate.failuresBeforeHold
+    ? now.addingTimeInterval(RoomSelfUpdate.retryHold)
+    : nil
+  return RoomUpdateAttempts(version: version, failures: failures, holdUntil: hold)
+}
+
+/// PURE — is this Mac currently refusing to attempt `version` again? (Fix 1, F2.)
+///
+/// A different version is never held. That is deliberate: withdrawing the bad release and
+/// publishing a good one must reach the room immediately, without waiting out a backoff earned by
+/// the build it replaces.
+public func roomUpdateIsHeld(
+  attempts: RoomUpdateAttempts?, version: String, now: Date
+) -> Bool {
+  guard let attempts, attempts.version == version, let holdUntil = attempts.holdUntil else {
+    return false
+  }
+  return now < holdUntil
+}
+
+/// PURE — may the staging directory be swept at startup? (Fix 1, F3.)
+///
+/// NO while a marker is present and fresh: the swap script is running out of that directory right
+/// now. YES otherwise, including when the marker is stale, so a script that died without writing a
+/// result cannot leave ~90 MB parked on a clinic Mac for ever.
+public func roomUpdateMayClearStaging(handover: RoomUpdateHandover?, now: Date) -> Bool {
+  guard let handover else { return true }
+  return now.timeIntervalSince(handover.at) > RoomSelfUpdate.handoverGrace
 }
 
 // MARK: - Deciding whether to look at all
@@ -343,6 +521,9 @@ public enum RoomUpdateAttempt: Equatable, Sendable {
   case handedOver(version: String)
   /// Steps 4 to 6 failed. `update-result.json` has been written and the staging area removed.
   case stopped(RoomUpdateOutcome, reason: String)
+  /// F2. This version has failed twice on this Mac and is not being attempted again until the hold
+  /// expires or a different version appears. NOTHING was downloaded.
+  case heldAfterRepeatedFailure(version: String)
 }
 
 /// The steps of §13.3, with every piece of the outside world injected.
@@ -396,7 +577,20 @@ public struct RoomUpdater: Sendable {
       return .upToDate
     }
     guard roomUpdateIsAvailable(running: runningVersion, offered: release.version) else {
+      // A version match also means the ledger is spent: whatever went wrong before, this Mac is
+      // now running what its channel offers.
+      RoomUpdateAttempts.clear(root: rootURL)
       return .upToDate
+    }
+    // F2. THE LOOP-BREAKER. Two failures on this exact version and the Mac stops asking for it
+    // until the hold expires or a different version is published. Read from DISK, because the
+    // process that failed is not this one — that is the whole reason the ledger is a file.
+    let attempts = RoomUpdateAttempts.read(root: rootURL)
+    if roomUpdateIsHeld(attempts: attempts, version: release.version, now: now()) {
+      log(
+        "update to \(release.version) held: it has failed \(attempts?.failures ?? 0) times on this Mac. "
+          + "Publish a different version, or withdraw this one, to clear the hold.")
+      return .heldAfterRepeatedFailure(version: release.version)
     }
     // §13.3 step 3, BEFORE the download and not after it. A clinic Mac recording a consultation
     // must not spend its disk and its network on ~90 MB it has already decided not to install.
@@ -419,6 +613,11 @@ public struct RoomUpdater: Sendable {
       try? manager.removeItem(at: staging)
       RoomUpdateResult(outcome: outcome, version: release.version, reason: reason, at: now())
         .write(root: rootURL)
+      // F2. Counted here, on disk, so the count survives the restart that follows a failed swap —
+      // and so a staging failure that repeats every tick is held after one retry too.
+      roomUpdateRecordFailure(
+        previous: RoomUpdateAttempts.read(root: rootURL), version: release.version, now: now()
+      ).write(root: rootURL)
       log("update to \(release.version) stopped: \(outcome.rawValue): \(reason)")
       return .stopped(outcome, reason: reason)
     }
@@ -509,9 +708,13 @@ public struct RoomUpdater: Sendable {
     } catch {
       return stop(.expandFailed, "the swap script could not be written")
     }
+    // F3. BEFORE the spawn, not after: the moment the script exists and runs, the restarted app
+    // must already be able to see that a handover is in flight.
+    RoomUpdateHandover(version: release.version, at: now()).write(root: rootURL)
     do {
       try runner.spawnDetached("/bin/bash", [scriptURL.path])
     } catch {
+      RoomUpdateHandover.clear(root: rootURL)
       return stop(.expandFailed, "the swap script could not be started")
     }
     // THE LAST THING THIS PROCESS SAYS. From here the script owns the bundle and the restart, and
@@ -540,6 +743,36 @@ public enum RoomSwapScript {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
+  /// The BODY of a JSON string — no surrounding quotes — with everything JSON requires escaped.
+  ///
+  /// F8. The swap script writes `update-result.json` from a bash heredoc, and bash has no idea what
+  /// JSON is. A version containing `"` or `\\` would close or corrupt the string and produce a
+  /// receipt the app cannot decode, losing the very outcome the receipt exists to carry. Escaping
+  /// happens here, in Swift, and the script copies the finished bytes.
+  ///
+  /// Backslash FIRST — escaping it after the quotes would double-escape what the quote rule added.
+  public static func jsonStringBody(_ value: String) -> String {
+    var out = ""
+    out.reserveCapacity(value.count + 8)
+    for scalar in value.unicodeScalars {
+      switch scalar {
+      case "\\": out += "\\\\"
+      case "\"": out += "\\\""
+      case "\n": out += "\\n"
+      case "\r": out += "\\r"
+      case "\t": out += "\\t"
+      default:
+        // Every other C0 control has to be escaped too; JSON forbids them raw in a string.
+        if scalar.value < 0x20 {
+          out += String(format: "\\u%04x", scalar.value)
+        } else {
+          out.unicodeScalars.append(scalar)
+        }
+      }
+    }
+    return out
+  }
+
   public static func render(
     residentBundleURL: URL,
     stagedBundleURL: URL,
@@ -555,9 +788,16 @@ public enum RoomSwapScript {
     let logPath = quoted(RoomSelfUpdate.logURL(root: rootURL).path)
     let label = quoted(RoomSelfUpdate.launchAgentLabel)
     let requirement = quoted(RoomSelfUpdate.pinnedRequirement)
-    // The version reaches shell only inside a single-quoted assignment and a JSON string. It comes
-    // from the server, so it is quoted like everything else rather than trusted.
+    // The version reaches shell twice, and the two need different escaping.
+    //
+    // ─── F8: THE JSON FORM IS ESCAPED IN SWIFT, NOT HOPED FOR IN BASH ────────────────────────
+    // `record()` interpolates the version into a JSON string literal in a heredoc. A version
+    // carrying a `"` or a `\` — it comes off the server, so it can carry anything — produced a
+    // receipt `RoomUpdateResult.read` could not decode, and the outcome it was recording was lost
+    // silently: exactly the failure the receipt exists to prevent. So the JSON-escaped form is
+    // computed here, where a real escaper exists, and the shell only copies bytes.
     let versionLiteral = quoted(version)
+    let versionJSONLiteral = quoted(jsonStringBody(version))
 
     return """
       #!/bin/bash
@@ -581,6 +821,8 @@ public enum RoomSwapScript {
       RESULT=\(result)
       LOG=\(logPath)
       VERSION=\(versionLiteral)
+      # The same version, pre-escaped for the JSON string in record(). See F8.
+      VERSION_JSON=\(versionJSONLiteral)
       REQUIREMENT=\(requirement)
       DOMAIN="gui/$(/usr/bin/id -u)"
 
@@ -594,7 +836,7 @@ public enum RoomSwapScript {
         /bin/cat > "${RESULT}.tmp" <<JSON
       {
         "outcome": "$1",
-        "version": "${VERSION}",
+        "version": "${VERSION_JSON}",
         "reason": $2,
         "at": "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
       }

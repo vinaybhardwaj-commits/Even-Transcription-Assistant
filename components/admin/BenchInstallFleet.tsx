@@ -31,6 +31,7 @@ import {
   deriveRow,
   deriveSteps,
   fmtSeen,
+  releaseForRow,
   type FleetPayload,
   type FleetRow,
   type InstallView,
@@ -96,7 +97,11 @@ export function BenchInstallFleet() {
     return () => clearInterval(t);
   }, []);
 
+  // The header's release is the STABLE one and stays that way (§5.8: the header is unchanged).
   const release = fleet?.latest_release ?? null;
+  // Each ROW, though, is measured against its own channel's release (Fix 1, F6) — Home Office on
+  // `test` is not behind because `stable` moved.
+  const releases = fleet?.releases ?? null;
   const rows = fleet?.rows ?? [];
 
   // ── Copy install command ──────────────────────────────────────────────────────────────────
@@ -279,7 +284,7 @@ export function BenchInstallFleet() {
               <FleetRowView
                 key={row.room_id}
                 row={row}
-                view={deriveRow({ row, latestRelease: release, nowMs })}
+                view={deriveRow({ row, latestRelease: releaseForRow(row, releases), nowMs })}
                 release={release}
                 nowMs={nowMs}
                 busy={busy}

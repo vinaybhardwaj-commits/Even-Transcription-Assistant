@@ -709,8 +709,8 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
              hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
-             session_open, update_channel, last_update_result, last_update_error,
-             last_update_at, disk_free_bytes
+             session_open, update_channel, last_update_result, last_update_version,
+             last_update_error, last_update_at, disk_free_bytes
     `) as InstallView[];
     return rows[0] ? normaliseInstall(rows[0]) : null;
   } catch (e) {
@@ -743,6 +743,8 @@ export type InstallPollFields = {
   update_channel?: string | null;
   /** From update-result.json, written by the swap script and read once by the new copy. */
   last_update_result?: string | null;
+  /** The version that attempt was reaching for. Its own column since Fix 1 (V, 9 Sep). */
+  last_update_version?: string | null;
   last_update_error?: string | null;
   last_update_at?: string | null;
   /** V, 9 Sep. Free bytes on the captures volume. Never 0 or -1 — absent when unreadable. */
@@ -782,6 +784,7 @@ export function cleanPollFields(raw: InstallPollFields): {
   session_open: boolean | null;
   update_channel: string | null;
   last_update_result: string | null;
+  last_update_version: string | null;
   last_update_error: string | null;
   last_update_at: string | null;
   disk_free_bytes: string | null;
@@ -830,6 +833,13 @@ export function cleanPollFields(raw: InstallPollFields): {
     update_channel: updateChannel && UPDATE_CHANNELS.has(updateChannel) ? updateChannel : null,
     last_update_result:
       updateResult && UPDATE_RESULTS.has(updateResult) ? updateResult : null,
+    // A VERSION OR NOTHING. 64 to match app_version, which holds the same kind of string. The
+    // card renders this inside a sentence, so a value that is not version-shaped is dropped
+    // rather than printed — a Mac cannot put arbitrary text on a clinical screen through it.
+    last_update_version: (() => {
+      const v = str(raw.last_update_version, 64);
+      return v && /^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$/.test(v) ? v : null;
+    })(),
     // 300 to match the app's own bounded error strings, which are cut at 500 before they are ever
     // written to disk. Long enough for the sentence the card renders, short enough that a garbled
     // file cannot put a paragraph on a clinical screen.
@@ -908,6 +918,7 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              session_open   = ${f.session_open}::boolean,
              update_channel = COALESCE(${f.update_channel}::text, update_channel),
              last_update_result = COALESCE(${f.last_update_result}::text, last_update_result),
+             last_update_version = COALESCE(${f.last_update_version}::text, last_update_version),
              last_update_error  = COALESCE(${f.last_update_error}::text,  last_update_error),
              last_update_at     = COALESCE(${f.last_update_at}::timestamptz, last_update_at),
              disk_free_bytes    = COALESCE(${f.disk_free_bytes}::bigint, disk_free_bytes)
@@ -1010,8 +1021,8 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
-             session_open, update_channel, last_update_result, last_update_error,
-             last_update_at, disk_free_bytes
+             session_open, update_channel, last_update_result, last_update_version,
+             last_update_error, last_update_at, disk_free_bytes
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500
@@ -1022,13 +1033,28 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     degraded.push(`installs_unavailable:${err.code}`);
   }
 
-  let release: ReleaseView | null = null;
-  try {
-    release = await latestRelease("stable");
-  } catch (e) {
-    const err = classifyInstallError(e);
-    degraded.push(`release_unavailable:${err.code}`);
+  // ─── BOTH CHANNELS, BECAUSE A ROW IS ONLY BEHIND ON ITS OWN SHELF (Fix 1, F6) ────────────
+  //
+  // This read was `latestRelease("stable")` alone, and `deriveRow` compared every row against it.
+  // Home Office sits on `test` (R3-8), so it would have worn `update pending` for ever against a
+  // release it is not asking for and will never be offered — and the approved mockup's state E
+  // draws it with no such pill. Two reads, guarded separately like every other section here, so a
+  // fault on one channel still leaves the other's rows correct.
+  const releases: { stable: ReleaseView | null; test: ReleaseView | null } = {
+    stable: null,
+    test: null,
+  };
+  for (const channel of ["stable", "test"] as const) {
+    try {
+      releases[channel] = await latestRelease(channel);
+    } catch (e) {
+      const err = classifyInstallError(e);
+      degraded.push(`release_unavailable_${channel}:${err.code}`);
+    }
   }
+  // The card HEADER is the stable release and stays the stable release — §5.8 of the main kickoff
+  // is explicit that the header does not change in R3.
+  const release = releases.stable;
 
   const nowMs = now.getTime();
   const tokenTtlMs = TOKEN_TTL_MINUTES * 60_000;
@@ -1061,7 +1087,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     };
   });
 
-  return { now: now.toISOString(), rows, latest_release: release, degraded };
+  return { now: now.toISOString(), rows, latest_release: release, releases, degraded };
 }
 
 // ---------------------------------------------------------------------------

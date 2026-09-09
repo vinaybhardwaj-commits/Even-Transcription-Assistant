@@ -43,6 +43,7 @@ export async function GET(req: NextRequest) {
         now: new Date().toISOString(),
         rows: [],
         latest_release: null,
+        releases: { stable: null, test: null },
         degraded: [`fleet_unavailable:${String((e as Error)?.message ?? e).slice(0, 120)}`],
       },
       NO_STORE,

@@ -53,7 +53,9 @@ export type InstallView = {
   update_channel: UpdateChannel | null;
   /** The last self-update outcome this Mac reported. NULL = none ever attempted. */
   last_update_result: UpdateResult | null;
-  /** The reason line that went with it. */
+  /** The version that attempt was reaching for. Its own column since Fix 1 (V, 9 Sep). */
+  last_update_version: string | null;
+  /** What went wrong, in one sentence. The version is NOT in here — see above. */
   last_update_error: string | null;
   /** When the swap script recorded that outcome, by the Mac's clock. */
   last_update_at: string | null;
@@ -104,9 +106,28 @@ export type FleetRow = {
 export type FleetPayload = {
   now: string;
   rows: FleetRow[];
+  /** The STABLE release. The card header shows this and only this — §5.8: the header is unchanged. */
   latest_release: ReleaseView | null;
+  /**
+   * The newest non-withdrawn release on each channel (Fix 1, F6). A row is only "behind" against
+   * the shelf it actually asks for: Home Office on `test` must not be measured against `stable`.
+   * Null for a channel with nothing published, which means the row shows no version word at all.
+   */
+  releases: { stable: ReleaseView | null; test: ReleaseView | null };
   degraded: string[];
 };
+
+/** PURE — the release a row should be measured against: the one on its own channel (F6). */
+export function releaseForRow(
+  row: FleetRow,
+  releases: { stable: ReleaseView | null; test: ReleaseView | null } | null | undefined,
+): ReleaseView | null {
+  if (!releases) return null;
+  // A row with no install, or an install below 0.1.8 that reports no channel, is on stable by
+  // construction — every install that predates R3 is.
+  const channel = row.install?.update_channel ?? "stable";
+  return releases[channel] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -208,29 +229,6 @@ export const UPDATE_FAILURE_REASON: Record<Exclude<UpdateResult, "ok">, string> 
   swap_failed:
     "The new version did not verify once it was in place, so the previous one was put back.",
 };
-
-/**
- * The separator the app puts between the version it was attempting and what it measured.
- *
- * ─── WHY THE VERSION TRAVELS INSIDE THE REASON LINE ──────────────────────────────────────
- * §13.4 fixes the R3 columns at five, and V's 9 September addition made six. NONE of them is the
- * version an update was attempting, and the mockup's sentence names it: "Update to 0.1.8 stopped
- * at 09:14." Rather than invent a seventh column against a ratified list, the app writes the
- * version at the head of `last_update_error`, which §13.4 calls "the reason line", and this module
- * reads it back. Writer and reader ship in the same build.
- *
- * A LINE THAT DOES NOT MATCH IS STILL RENDERED, whole, as the reason, with no version in the
- * sentence. A truncated or hand-edited value must degrade to a shorter true sentence, never to a
- * crash and never to a version this module made up. FLAGGED in the build report for V.
- */
-export const UPDATE_ERROR_SEPARATOR = " — ";
-
-/** PURE — the version an update was attempting, out of the reason line. Null when unreadable. */
-export function attemptedVersion(lastUpdateError: string | null): string | null {
-  if (!lastUpdateError) return null;
-  const head = lastUpdateError.split(UPDATE_ERROR_SEPARATOR)[0]?.trim() ?? "";
-  return /^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$/.test(head) ? head : null;
-}
 
 /** Whole days until the session expires. Negative once it has. */
 export function daysUntil(iso: string | null, nowMs: number): number | null {
@@ -481,6 +479,10 @@ export type RowView = {
  */
 export function deriveRow(input: {
   row: FleetRow;
+  /**
+   * The newest non-withdrawn release ON THIS ROW'S CHANNEL — use `releaseForRow`. Null means that
+   * channel has nothing published, and a row measured against nothing wears no version word.
+   */
   latestRelease: ReleaseView | null;
   nowMs: number;
 }): RowView {
@@ -510,12 +512,19 @@ export function deriveRow(input: {
   // STATE C. `ok` shows nothing; absent shows nothing. Only a failure speaks (R3-7).
   const failure =
     i && i.last_update_result && i.last_update_result !== "ok" ? i.last_update_result : null;
+  // THE VERSION COMES FROM ITS OWN COLUMN (Fix 1, V's ruling of 9 September). The first cut of R3
+  // had no column for it, so the app packed it into the head of `last_update_error` and this
+  // function parsed it back out on a delimiter. That made a free-text column load-bearing — one
+  // hand-edit, one truncation, and the sentence lost its subject. `last_update_version` is read
+  // here and nothing is parsed.
   const updateNote = !failure
     ? null
     : [
-        attemptedVersion(i!.last_update_error) === null
-          ? `Update stopped at ${fmtClock(i!.last_update_at)}.`
-          : `Update to ${attemptedVersion(i!.last_update_error)} stopped at ${fmtClock(i!.last_update_at)}.`,
+        i!.last_update_version
+          ? `Update to ${i!.last_update_version} stopped at ${fmtClock(i!.last_update_at)}.`
+          : // A receipt with no version is still a report worth making, just a shorter one. Never
+            // an invented version.
+            `Update stopped at ${fmtClock(i!.last_update_at)}.`,
         UPDATE_FAILURE_REASON[failure] ??
           // An outcome this build does not know the words for. Say the code rather than nothing:
           // a row that names a machine-readable reason is still a report, and silence is not.
@@ -530,10 +539,17 @@ export function deriveRow(input: {
   const versionHint = !i?.app_version
     ? null
     : i.update_channel === "test"
-      ? "test channel"
-      : latestRelease && i.app_version !== latestRelease.version
-        ? `latest ${latestRelease.version}`
-        : "latest";
+      ? // STATE E of the approved mockup: a Mac on `test` reads `test channel` under its version.
+        // The card's header release is stable, and "latest 0.1.8" beside a test build answers a
+        // question nobody asked.
+        "test channel"
+      : !latestRelease
+        ? // This row's channel has nothing published. Saying "latest" would assert the Mac is up
+          // to date against a shelf that is empty (F6).
+          null
+        : i.app_version !== latestRelease.version
+          ? `latest ${latestRelease.version}`
+          : "latest";
   const r3 = {
     tape_label: tapeLabel,
     update_note: updateNote,
@@ -570,6 +586,10 @@ export function deriveRow(input: {
   words.push("installed");
 
   // `update pending` is a WORD, never a state — see the doc comment above.
+  //
+  // `latestRelease` here is THIS ROW'S CHANNEL's release (F6). It used to be the stable release for
+  // every row, which would have left Home Office on `test` wearing this word for ever against a
+  // build it is never offered. A channel with nothing published gives null and no word.
   if (
     latestRelease &&
     !latestRelease.withdrawn_at &&

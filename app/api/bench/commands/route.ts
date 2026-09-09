@@ -7,11 +7,13 @@
  * pending commands oldest first. If another tab polled this room more recently than this tab
  * last did → { superseded:true } and this tab should stop.
  *
- * INSTALL AND FLEET §4.3 adds seven OPTIONAL query fields for the native Room Recorder:
+ * INSTALL AND FLEET §4.3 adds OPTIONAL query fields for the native Room Recorder:
  * install_id · app_version · build_sha · mic_state · tape_advancing · never_sleep · launched_by
- * · input_device_name
- * (plus hostname / hardware_model / os_version, which §6 step 2 renders). A poll carrying
- * install_id also writes last_seen_at and the six state columns on that room_install row; a poll
+ * · input_device_name (plus hostname / hardware_model / os_version, which §6 step 2 renders), and
+ * since Build R3 §13.4: session_open · update_channel · last_update_result · last_update_version ·
+ * last_update_error · last_update_at · disk_free_bytes.
+ *
+ * A poll carrying install_id writes last_seen_at and those columns on that room_install row; a poll
  * WITHOUT it behaves exactly as it behaves today, which is why the browser kiosk is untouched by
  * this build. A poll from a RETIRED install is answered 409 RETIRED (§4.5 rule 3) and stops.
  *
@@ -60,13 +62,13 @@ export async function GET(req: NextRequest) {
   const spareDeviceRaw = sp.get("spare_device");
   const spareDevice = spareDeviceRaw === "true" ? true : spareDeviceRaw === "false" ? false : null;
 
-  // Install and Fleet §4.3 — SEVEN OPTIONAL FIELDS, and the emphasis is on optional.
+  // Install and Fleet §4.3 — OPTIONAL FIELDS, and the emphasis is on optional.
   //
   // `install_id` is the switch. Absent, this whole block yields undefined and the poll runs
   // exactly as it ran before this build — same query, same upsert, same response. Present, it
   // carries the native Room Recorder's report of itself onto its room_install row.
   //
-  // THE THREE MACHINE FACTS (hostname, model, OS) ARE NOT AMONG THE SEVEN. They are read here
+  // THE THREE MACHINE FACTS (hostname, model, OS) ARE NOT AMONG §4.3's EIGHT. They are read here
   // because §6 step 2 renders them and the app has nowhere else to put them; they are COALESCEd
   // like everything else, so a poll that omits them never erases what the first poll said.
   const installId = (sp.get("install_id") ?? "").trim();
@@ -74,6 +76,31 @@ export async function GET(req: NextRequest) {
     const v = sp.get(key);
     return v === "true" ? true : v === "false" ? false : null;
   };
+  // ─── BUILD R3 (§13.4) ADDS SEVEN MORE, AND THIS BLOCK IS WHERE THEY WERE MISSED ───────────
+  //
+  // Fix 1, F1. The app sent them and `applyInstallPoll` wrote them; this list in the middle read
+  // none of them, so every one arrived as `undefined` and every column stayed NULL for ever. The
+  // consequence was not a cosmetic gap: `session_open` NULL means `sessionOpen === true` is never
+  // true, so R3-3 would not have FIXED the "Tape not advancing" warning, it would have DELETED it
+  // — a room with a patient in it and a dead microphone cable would have read healthy.
+  //
+  // Every one of them keeps §5.5's rule: read what the Mac said, or read nothing. No defaults, no
+  // zeroes, no coercion. `applyInstallPoll` COALESCEs all but `session_open`, so an omitted field
+  // leaves the last good value in place and a fabricated one would overwrite a true reading.
+
+  /** A whole positive number of bytes, or nothing. NEVER 0 — see the column comment on 0078. */
+  const bigint = (key: string): string | null => {
+    const raw = (sp.get(key) ?? "").trim();
+    return /^[0-9]{1,19}$/.test(raw) && raw !== "0" ? raw : null;
+  };
+  /** An instant, or nothing. The Mac's clock wrote it, so it can be anything at all. */
+  const instant = (key: string): string | null => {
+    const raw = (sp.get(key) ?? "").trim();
+    if (!raw) return null;
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  };
+
   const install = installId
     ? {
         install_id: installId.slice(0, 64),
@@ -87,6 +114,16 @@ export async function GET(req: NextRequest) {
         hardware_model: sp.get("hardware_model"),
         os_version: sp.get("os_version"),
         input_device_name: sp.get("input_device_name"),
+        // R3-6. `tri` and not a truthiness test: absent must stay absent. Every install below
+        // 0.1.8 omits this for ever, and NULL reads as "not reported", never as "idle".
+        session_open: tri("session_open"),
+        // R3-8. `cleanPollFields` accepts only `stable` and `test` and coerces nothing.
+        update_channel: sp.get("update_channel"),
+        last_update_result: sp.get("last_update_result"),
+        last_update_version: sp.get("last_update_version"),
+        last_update_error: sp.get("last_update_error"),
+        last_update_at: instant("last_update_at"),
+        disk_free_bytes: bigint("disk_free_bytes"),
       }
     : undefined;
 

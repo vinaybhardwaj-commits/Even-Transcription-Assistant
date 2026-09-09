@@ -1131,3 +1131,44 @@ Recorded here so §13 is the whole of the R3 contract and no reader has to hold 
 3. **No configurable check interval.** The interval is 6 hours and is not a knob. Acceptance forces a
    check with `launchctl kickstart -k gui/$(id -u)/com.evenscribe.room-recorder`, which is a manual
    acceptance step and not a feature. A knob added here would exist in every clinic room for ever.
+
+### 13.9 Fix 1, 9 September 2026 — what the review of the first R3 cut changed
+
+R3-1 to R3-12 were all correctly implemented in the first cut and none is reopened. Eight items came
+out of the review; four of them blocked the trip.
+
+1. **The six new poll fields never reached the database.** The app sent them and `applyInstallPoll`
+   wrote them, but `app/api/bench/commands/route.ts` built its `install` object from a hard-coded
+   list of eleven keys and read none of them. **`session_open` would have stayed NULL for ever, so
+   R3-3 would not have FIXED the "Tape not advancing" warning — it would have DELETED it**, and a
+   room with a patient in it and a dead microphone cable would have read healthy. That route was on
+   neither the editable nor the untouched list of the build's file contract; **[V-9SEP] it is
+   editable**, and `lib/bench-commands.ts` remains untouched.
+2. **A repeatable `swap_failed` was an unbounded download-and-swap loop.** The attempt schedule lived
+   only in memory and was rebuilt on every process start, so a resident-verify failure restored
+   `.previous`, launchd started the old app, and about eighty seconds later the whole cycle ran
+   again — for ever, each pass crossing the window where the resident bundle does not exist. A
+   publish whose `version` disagreed with the `CFBundleShortVersionString` inside its own zip would
+   do the same with no failure at all. **One retry, then hold**, recorded on disk and keyed by
+   version, cleared the moment a different version is offered.
+3. **The restarted app deleted the staging directory the swap script was running from.**
+   `ThrottleInterval` does not protect this — it is a minimum interval between *starts*, and a
+   resident app that has run for hours has spent it, so exiting 64 gets an immediate respawn. A
+   handover marker is written before the script is spawned and the startup sweep honours it.
+4. **The acceptance-item-6 test proved nothing.** It asserted every outcome except an empty path and
+   signalled after a guessed delay against a script whose sleep had been patched to zero, so it
+   passed identically against a script with no trap. It now signals through a FIFO rendezvous at the
+   exact instant the script is between the two moves, and asserts the specific recovery.
+5. **`last_update_version` is a seventh column in 0078.** The first cut packed the version into the
+   head of `last_update_error` and parsed it back out, which made a free-text column load-bearing.
+6. **`update pending` is measured against the row's own channel.** `readFleet` read only the stable
+   release, so Home Office on `test` would have worn the word for ever against a build it is never
+   offered — and the approved mockup's state E draws it with no such pill. The mockup governs.
+7. The handover exit code is a named constant rather than a bare `64`.
+8. The swap script's receipt JSON-escapes the version it interpolates, so a version carrying a quote
+   or a backslash cannot produce a receipt the app is unable to decode.
+
+**The SIGKILL window between the two moves stands as a documented limit.** `renamex_np` was
+considered and ruled out; items 2 and 3 above shrink the exposure by far more than an atomic swap
+would, because they remove the repetition rather than narrowing one pass. Acceptance item 6 is run
+with `kill`, never `kill -9`.

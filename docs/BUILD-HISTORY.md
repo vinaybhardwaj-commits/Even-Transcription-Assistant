@@ -310,3 +310,17 @@ room takes one paste, ever, rather than one now and another to reach the first s
 
 **Not yet acceptance-tested.** Migration 0078 has not been run anywhere, and the seven §13.5
 acceptance items all need a Mac. See `ETA-INSTALL-BUILD-R3-REPORT-9-SEP-2026.md`.
+
+**Fix 1, same day.** Review of the first R3 cut found the app's six new poll fields never reached the
+database: `app/api/bench/commands/route.ts` built its `install` object from a hard-coded key list and
+read none of them, so `session_open` would have stayed NULL and R3-3 would have deleted the "Tape not
+advancing" warning rather than fixing it. Also closed: a repeatable `swap_failed` looped
+download-and-swap roughly every eighty seconds for ever (the attempt ledger is now on disk — one
+retry, then hold, keyed by version); the restarted app deleted the staging directory the swap script
+was still running from (a handover marker now guards it, and the claim that `ThrottleInterval`
+protected the swap was a misreading of launchd, corrected in place); and the acceptance-item-6 test
+asserted every outcome except an empty path, so it passed against a script with no `trap` — it now
+signals through a FIFO at the exact instant the script sits between the two moves. `last_update_version`
+became a seventh column in 0078 instead of being packed into a free-text one, `update pending` is
+measured against each row's own channel, the handover exit code is named, and the swap script
+JSON-escapes the version it writes into its receipt.

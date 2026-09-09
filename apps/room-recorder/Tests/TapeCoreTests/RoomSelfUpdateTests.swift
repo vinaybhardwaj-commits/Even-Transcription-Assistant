@@ -93,7 +93,10 @@ import Testing
     stagedBundle: URL,
     version: String,
     codesignExit: Int32 = 0,
-    signal: Int32? = nil
+    /// F4. Inject a FIFO rendezvous immediately before the SECOND move and SIGTERM the script the
+    /// instant it reaches it, so the signal lands inside the two-move window every time rather
+    /// than after a guessed delay.
+    killInsideTheWindow: Bool = false
   ) throws -> (status: Int32, toolLog: String) {
     let toolLog = fixture.root.appendingPathComponent("tools.log", isDirectory: false)
     FileManager.default.createFile(atPath: toolLog.path, contents: nil)
@@ -115,6 +118,33 @@ import Testing
     // Three seconds of `sleep` per test is real time nobody needs; the wait exists for launchd.
     script = script.replacingOccurrences(of: "/bin/sleep 3", with: "/bin/sleep 0")
 
+    // F4. The rendezvous, injected between the two moves and nowhere else. The anchor is the
+    // second move's own line, so if that line is ever reworded this harness fails loudly rather
+    // than silently going back to testing nothing.
+    var fifoURL: URL?
+    if killInsideTheWindow {
+      // NO leading indent: Swift strips the multiline literal's indentation relative to its
+      // closing delimiter, so the rendered script's lines start at column zero.
+      let anchor = "if ! /bin/mv -f \"$STAGED\" \"$RESIDENT\"; then"
+      guard script.contains(anchor) else {
+        throw SwapHarnessError.anchorMissing(anchor)
+      }
+      let fifo = fixture.root.appendingPathComponent("window.fifo", isDirectory: false)
+      guard mkfifo(fifo.path, 0o600) == 0 else { throw SwapHarnessError.fifoFailed }
+      fifoURL = fifo
+      script = script.replacingOccurrences(
+        of: anchor,
+        with: """
+          # ── injected by the test harness (F4) ──────────────────────────────────────────────
+          # The resident bundle is at .previous and the staged one has NOT moved in: this is
+          # exactly the window acceptance item 6 kills the script in. Tell the test we are here,
+          # then hold still long enough to be signalled.
+          /bin/echo in-window > '\(fifo.path)'
+          /bin/sleep 30
+          \(anchor)
+          """)
+    }
+
     let scriptURL = fixture.root.appendingPathComponent("swap.sh", isDirectory: false)
     try script.write(to: scriptURL, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
@@ -125,14 +155,26 @@ import Testing
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try process.run()
-    if let signal {
-      // Give the script time to get past the moves, then signal it where acceptance item 6 does.
-      Thread.sleep(forTimeInterval: 0.35)
-      kill(process.processIdentifier, signal)
+
+    if let fifoURL {
+      // Opening a FIFO for reading blocks until a writer opens it, so this returns at the moment
+      // the script reaches the window — and not a millisecond before.
+      let reader = FileHandle(forReadingAtPath: fifoURL.path)
+      _ = reader?.readData(ofLength: 1)
+      try? reader?.close()
+      kill(process.processIdentifier, SIGTERM)
     }
+
     process.waitUntilExit()
     let log = (try? String(contentsOf: toolLog, encoding: .utf8)) ?? ""
     return (process.terminationStatus, log)
+  }
+
+  enum SwapHarnessError: Error {
+    /// The line the F4 rendezvous is injected against is gone. Fail loudly: silently skipping the
+    /// injection is how acceptance item 6 came to be tested by a test that could not fail.
+    case anchorMissing(String)
+    case fifoFailed
   }
 
   static func readResult(_ fixture: Fixture) -> RoomUpdateResult? {
@@ -253,7 +295,10 @@ import Testing
     let result = try #require(Self.readResult(fixture))
     #expect(result.outcome == .checksumMismatch)
     #expect(result.version == "0.1.8")
-    #expect(result.reportedErrorLine?.hasPrefix("0.1.8 — ") == true)
+    // Fix 1, F5: the reason is a plain sentence and the version has its own field. Nothing is
+    // packed into a delimiter and nothing is parsed back out.
+    #expect(result.reportedErrorLine == "the downloaded file did not match its checksum")
+    #expect(!(result.reportedErrorLine ?? "").contains("0.1.8"))
   }
 
   @Test func aTruncatedDownloadIsCaughtByWeightBeforeItIsHashed() async throws {
@@ -432,28 +477,239 @@ import Testing
     #expect(names.sorted() == ["EvenScribe Room Recorder.app", "EvenScribe Room Recorder.app.previous"])
   }
 
-  @Test func aScriptKilledDuringTheSwapLeavesAWorkingBundleAtTheResidentPath() throws {
-    // ─── ACCEPTANCE ITEM 6 ────────────────────────────────────────────────────────────────────
+  @Test func aScriptKilledBetweenTheTwoMovesRestoresThePreviousBundle() throws {
+    // ─── ACCEPTANCE ITEM 6, AND THIS TIME IT IS PROVED ────────────────────────────────────────
     // "A swap script killed between the two moves. The resident path holds a working bundle
-    // afterwards, and the room polls again without a visit."
+    // afterwards, and the room polls again without a visit." §13.5 singles this out as the item
+    // that must be proven rather than argued.
     //
-    // The script traps INT/TERM/HUP/QUIT: if it is interrupted with the resident path empty, it
-    // puts `.previous` back and bootstraps the agent in again. THIS DOES NOT COVER `kill -9`,
-    // which is not trappable — see the build report, where that residual window is flagged.
+    // THE FIRST VERSION OF THIS TEST PROVED NOTHING (Fix 1, F4). It signalled 0.35 s after start
+    // against a script whose `sleep` had been patched to zero, so the script had almost always
+    // already finished; and it then asserted `resident == "0.1.7" || resident == "0.1.8"`, which
+    // is every outcome except an empty path. It passed identically against a script with no trap.
+    //
+    // A FIFO MAKES THE WINDOW DETERMINISTIC. The harness injects, immediately before the SECOND
+    // move, a write to a named pipe and then a long sleep. The test blocks reading that pipe, so
+    // it unblocks at the exact instant the script is inside the window — resident already moved to
+    // `.previous`, staged not yet moved in — and signals there. No timing guess.
+    //
+    // THIS DOES NOT COVER `kill -9`, which is not trappable. That residual window is flagged in
+    // the build report and V has accepted it as a documented limit.
     let fixture = try Fixture.make()
     defer { fixture.tearDown() }
     let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
     try fixture.writeBundle(at: staged, version: "0.1.8")
 
-    _ = try Self.runSwapScript(
-      fixture, stagedBundle: staged, version: "0.1.8", signal: SIGTERM)
+    let run = try Self.runSwapScript(
+      fixture, stagedBundle: staged, version: "0.1.8", killInsideTheWindow: true)
 
-    // Whichever side of the moves the signal landed, SOMETHING runnable is resident.
-    let resident = fixture.version(of: fixture.resident)
-    #expect(resident == "0.1.7" || resident == "0.1.8")
+    // 1. The room is back on the version it was recording with — not empty, and not half-swapped.
+    #expect(fixture.version(of: fixture.resident) == "0.1.7")
     #expect(
       FileManager.default.isExecutableFile(
         atPath: fixture.resident.appendingPathComponent("Contents/MacOS/room-recorder").path))
+    // 2. `.previous` was consumed by the restore, not left behind as a second copy.
+    #expect(!FileManager.default.fileExists(atPath: fixture.previous.path))
+    // 3. The failure is on the record, so the fleet card can say why the version did not change.
+    let result = try #require(Self.readResult(fixture))
+    #expect(result.outcome == .swapFailed)
+    #expect(result.version == "0.1.8")
+    #expect(result.reason?.contains("interrupted") == true)
+    // 4. The agent is running again — "the room polls again without a visit" is the whole ask.
+    #expect(run.toolLog.contains("launchctl bootstrap"))
+  }
+
+  // MARK: - F2: a repeatable failure must not loop
+
+  @Test func twoFailedSwapsOfOneVersionGiveExactlyOneRetryThenNoFurtherDownload() async throws {
+    // ─── THE LOOP THIS CLOSES ─────────────────────────────────────────────────────────────────
+    // A resident-verify failure restores `.previous`, launchd starts the old app, and a second and
+    // a half later it asks again, is offered the same version, downloads ~90 MB again — the STAGED
+    // check passed last time; it was the RESIDENT check that failed — spawns again and exits 64
+    // again. Every eighty seconds or so, for ever, each cycle passing through the window where the
+    // resident bundle does not exist.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let bytes = Data("a plausible zip".utf8)
+
+    /// One whole process lifetime: read whatever the last one left on disk, try, hand over.
+    func oneBoot() async -> RoomUpdateAttempt {
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+      let updater = RoomUpdater(
+        rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
+        channel: "stable",
+        fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: bytes)),
+        downloader: StubDownloader(bytes: bytes), runner: runner, log: { _ in })
+      let attempt = await updater.check(sessionIsOpen: false)
+      if case .handedOver = attempt {
+        // The swap script would now fail its resident verify and write this. The NEXT process is
+        // what counts it — exactly as RoomEngine.init does.
+        RoomUpdateResult(
+          outcome: .swapFailed, version: "0.1.8",
+          reason: "the new version did not satisfy the pinned signing requirement", at: Date()
+        ).write(root: fixture.root)
+        roomUpdateRecordFailure(
+          previous: RoomUpdateAttempts.read(root: fixture.root), version: "0.1.8", now: Date()
+        ).write(root: fixture.root)
+        RoomUpdateResult.delete(root: fixture.root)
+      }
+      return attempt
+    }
+
+    // Boot 1: the first attempt. Boot 2: the ONE retry. Boot 3 onwards: held.
+    #expect(await oneBoot() == .handedOver(version: "0.1.8"))
+    #expect(await oneBoot() == .handedOver(version: "0.1.8"))
+    #expect(await oneBoot() == .heldAfterRepeatedFailure(version: "0.1.8"))
+    #expect(await oneBoot() == .heldAfterRepeatedFailure(version: "0.1.8"))
+  }
+
+  @Test func aHeldVersionDownloadsNothingAtAll() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    RoomUpdateAttempts(version: "0.1.8", failures: 2, holdUntil: Date().addingTimeInterval(3600))
+      .write(root: fixture.root)
+    let downloader = CountingDownloader()
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
+      channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: Data([0x01]))),
+      downloader: downloader, runner: RecordingRunner(), log: { _ in })
+
+    #expect(await updater.check(sessionIsOpen: false) == .heldAfterRepeatedFailure(version: "0.1.8"))
+    #expect(await downloader.count == 0)
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
+  }
+
+  @Test func aDifferentVersionIsNeverHeldByTheOneBeforeIt() async throws {
+    // Withdrawing the bad release and publishing a good one must reach the room AT ONCE, without
+    // waiting out a backoff earned by the build it replaces. This is also what makes rollback work
+    // after a failure — the previous version is a different version.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    RoomUpdateAttempts(version: "0.1.8", failures: 2, holdUntil: Date().addingTimeInterval(3600))
+      .write(root: fixture.root)
+    let bytes = Data("a plausible zip".utf8)
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
+      channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.9", bytes: bytes)),
+      downloader: StubDownloader(bytes: bytes), runner: runner, log: { _ in })
+
+    #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: "0.1.9"))
+  }
+
+  @Test func theLedgerIsPureAboutCountingAndHolding() {
+    let t0 = Date(timeIntervalSince1970: 1_757_400_000)
+    let first = roomUpdateRecordFailure(previous: nil, version: "0.1.8", now: t0)
+    #expect(first.failures == 1)
+    #expect(first.holdUntil == nil)  // one retry still owed
+
+    let second = roomUpdateRecordFailure(previous: first, version: "0.1.8", now: t0)
+    #expect(second.failures == 2)
+    #expect(second.holdUntil == t0.addingTimeInterval(RoomSelfUpdate.retryHold))
+
+    // A failure on a DIFFERENT version starts its own count from one.
+    let other = roomUpdateRecordFailure(previous: second, version: "0.1.9", now: t0)
+    #expect(other.version == "0.1.9")
+    #expect(other.failures == 1)
+    #expect(other.holdUntil == nil)
+
+    #expect(roomUpdateIsHeld(attempts: second, version: "0.1.8", now: t0))
+    #expect(!roomUpdateIsHeld(attempts: second, version: "0.1.9", now: t0))
+    #expect(!roomUpdateIsHeld(attempts: first, version: "0.1.8", now: t0))  // retry still owed
+    // The hold expires. It is a pause, not a tombstone.
+    #expect(
+      !roomUpdateIsHeld(
+        attempts: second, version: "0.1.8",
+        now: t0.addingTimeInterval(RoomSelfUpdate.retryHold + 1)))
+  }
+
+  @Test func aVersionMatchClearsTheLedger() async throws {
+    // The Mac is now running what its channel offers, so whatever went wrong before is spent.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    RoomUpdateAttempts(version: "0.1.8", failures: 2, holdUntil: Date().addingTimeInterval(3600))
+      .write(root: fixture.root)
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.8",
+      channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: Data([0x01]))),
+      downloader: CountingDownloader(), runner: RecordingRunner(), log: { _ in })
+
+    #expect(await updater.check(sessionIsOpen: false) == .upToDate)
+    #expect(RoomUpdateAttempts.read(root: fixture.root) == nil)
+  }
+
+  // MARK: - F3: the restarted app must not delete the running script's staging directory
+
+  @Test func staginIsLeftAloneWhileAHandoverIsInFlight() {
+    let t0 = Date(timeIntervalSince1970: 1_757_400_000)
+    // No marker: nothing is in flight, sweep freely.
+    #expect(roomUpdateMayClearStaging(handover: nil, now: t0))
+    // Fresh marker: the swap script is running out of that directory RIGHT NOW.
+    let fresh = RoomUpdateHandover(version: "0.1.8", at: t0)
+    #expect(!roomUpdateMayClearStaging(handover: fresh, now: t0))
+    #expect(!roomUpdateMayClearStaging(handover: fresh, now: t0.addingTimeInterval(60)))
+    // Stale marker: the script died without writing a result. ~90 MB must not sit there for ever.
+    #expect(
+      roomUpdateMayClearStaging(
+        handover: fresh, now: t0.addingTimeInterval(RoomSelfUpdate.handoverGrace + 1)))
+  }
+
+  @Test func theHandoverMarkerIsWrittenBeforeTheScriptIsSpawned() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let bytes = Data("a plausible zip".utf8)
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    // The marker has to exist by the time the script can run, so the runner checks AT SPAWN.
+    runner.markerPathAtSpawn = RoomSelfUpdate.handoverMarkerURL(root: fixture.root).path
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.7",
+      channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: bytes)),
+      downloader: StubDownloader(bytes: bytes), runner: runner, log: { _ in })
+
+    #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: "0.1.8"))
+    #expect(runner.markerExistedAtSpawn == true)
+    let marker = try #require(RoomUpdateHandover.read(root: fixture.root))
+    #expect(marker.version == "0.1.8")
+    // And the staging directory the script needs is still there.
+    #expect(FileManager.default.fileExists(atPath: fixture.staging.path))
+  }
+
+  // MARK: - F8: the receipt survives a version that is not JSON-safe
+
+  @Test func aVersionCarryingQuotesOrBackslashesStillProducesAReadableReceipt() throws {
+    // The version comes off the server. A `"` in it used to close the JSON string in the swap
+    // script's heredoc and produce a receipt the app could not decode — losing the very outcome
+    // the receipt exists to carry.
+    for nasty in ["0.1.8\"evil", "0.1.8\\evil", "0.1.8\"; rm -rf /; \""] {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+      try fixture.writeBundle(at: staged, version: "0.1.8")
+      _ = try Self.runSwapScript(
+        fixture, stagedBundle: staged, version: nasty, codesignExit: 1)
+      let decoded = try #require(
+        Self.readResult(fixture), "a receipt for version \(nasty) could not be decoded")
+      #expect(decoded.version == nasty)
+      #expect(decoded.outcome == .swapFailed)
+    }
+  }
+
+  @Test func theJSONEscaperHandlesWhatJSONRequires() {
+    #expect(RoomSwapScript.jsonStringBody("0.1.8") == "0.1.8")
+    #expect(RoomSwapScript.jsonStringBody("a\"b") == #"a\"b"#)
+    #expect(RoomSwapScript.jsonStringBody("a\\b") == #"a\\b"#)
+    #expect(RoomSwapScript.jsonStringBody("a\nb") == #"a\nb"#)
+    // Backslash first, or the quote rule's own backslash gets escaped twice.
+    #expect(RoomSwapScript.jsonStringBody("\\\"") == #"\\\""#)
+    // C0 controls are not allowed raw inside a JSON string.
+    #expect(RoomSwapScript.jsonStringBody("a\u{01}b") == #"a\u0001b"#)
   }
 
   // MARK: - Quoting
@@ -518,7 +774,8 @@ import Testing
     #expect(written.write(root: fixture.root))
     #expect(
       RoomUpdateResult.read(root: fixture.root)?.reportedErrorLine
-        == "0.1.8 — the downloaded file did not match its checksum")
+        == "the downloaded file did not match its checksum")
+    #expect(RoomUpdateResult.read(root: fixture.root)?.version == "0.1.8")
     RoomUpdateResult.delete(root: fixture.root)
     #expect(RoomUpdateResult.read(root: fixture.root) == nil)
   }
@@ -545,8 +802,8 @@ import Testing
 
     let full = InstallPollFields(
       installID: "install_a", tapeAdvancing: true, sessionOpen: false, updateChannel: "test",
-      lastUpdateResult: "checksum_mismatch",
-      lastUpdateError: "0.1.8 — the downloaded file did not match its checksum",
+      lastUpdateResult: "checksum_mismatch", lastUpdateVersion: "0.1.8",
+      lastUpdateError: "the downloaded file did not match its checksum",
       lastUpdateAt: "2026-09-09T09:14:00Z", diskFreeBytes: 412_300_000_000)
     let items = Dictionary(
       uniqueKeysWithValues: full.queryItems().map { ($0.name, $0.value ?? "") })
@@ -554,6 +811,7 @@ import Testing
     #expect(items["update_channel"] == "test")
     #expect(items["disk_free_bytes"] == "412300000000")
     #expect(items["last_update_result"] == "checksum_mismatch")
+    #expect(items["last_update_version"] == "0.1.8")
     // AND `spare_device` IS NOT HERE, and never was on this type — it was a literal in BenchClient
     // and §5.7 removed it.
     #expect(items["spare_device"] == nil)
@@ -676,6 +934,10 @@ private final class RecordingRunner: RoomUpdateCommandRunning, @unchecked Sendab
   /// When set, the `ditto` stub creates a directory of this name in its destination, so the step
   /// that looks for a `.app` finds one.
   var dittoProducesBundleNamed: String?
+  /// F3. When set, `spawnDetached` records whether this path existed at the moment of the spawn —
+  /// the marker has to be on disk BEFORE the script can run, not after.
+  var markerPathAtSpawn: String?
+  private(set) var markerExistedAtSpawn: Bool?
 
   init(exitCodes: [String: Int32] = [:]) { self.exitCodes = exitCodes }
 
@@ -694,6 +956,9 @@ private final class RecordingRunner: RoomUpdateCommandRunning, @unchecked Sendab
   }
 
   func spawnDetached(_ executable: String, _ arguments: [String]) throws {
+    if let markerPathAtSpawn {
+      markerExistedAtSpawn = FileManager.default.fileExists(atPath: markerPathAtSpawn)
+    }
     lock.withLock { _spawned.append((executable, arguments)) }
   }
 }

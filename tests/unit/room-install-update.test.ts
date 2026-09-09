@@ -134,7 +134,7 @@ describe("applyInstallPoll and the R3 columns (§13.4)", () => {
   });
 
   it("the fleet read selects every R3 column, or the card cannot render them", async () => {
-    responses = [[], [], []];
+    responses = [[], [], [], []];
     await M.readFleet(new Date("2026-09-09T10:00:00.000Z"));
     const installQuery = calls.find((c) => c.text.includes("LIMIT 500"));
     expect(installQuery).toBeDefined();
@@ -142,12 +142,24 @@ describe("applyInstallPoll and the R3 columns (§13.4)", () => {
       "session_open",
       "update_channel",
       "last_update_result",
+      "last_update_version",
       "last_update_error",
       "last_update_at",
       "disk_free_bytes",
     ]) {
       expect(installQuery!.text).toContain(column);
     }
+  });
+
+  it("reads BOTH channels' releases, not just stable (Fix 1, F6)", async () => {
+    responses = [[], [], [], []];
+    const payload = await M.readFleet(new Date("2026-09-09T10:00:00.000Z"));
+    const releaseQueries = calls.filter((c) => c.text.includes("FROM app_release"));
+    expect(releaseQueries).toHaveLength(2);
+    expect(releaseQueries.flatMap((c) => c.values)).toEqual(
+      expect.arrayContaining(["stable", "test"]),
+    );
+    expect(payload.releases).toEqual({ stable: null, test: null });
   });
 });
 
@@ -167,7 +179,7 @@ describe("migration 0078", () => {
   it("is additive and idempotent — every column is ADD COLUMN IF NOT EXISTS", () => {
     const ddl = sqlText.split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n");
     const adds = ddl.match(/ADD COLUMN IF NOT EXISTS/g) ?? [];
-    expect(adds).toHaveLength(6);
+    expect(adds).toHaveLength(7);
     // Nothing is dropped, retyped or constrained. A migration that is safe whatever the applied
     // state of 0075-0077 turns out to be — which is not confirmed in production.
     expect(ddl).not.toMatch(/DROP |ALTER COLUMN |NOT VALID|CREATE UNIQUE/);
@@ -221,6 +233,7 @@ const install = (over: Partial<V.InstallView> = {}): V.InstallView => ({
   session_open: null,
   update_channel: "stable",
   last_update_result: null,
+  last_update_version: null,
   last_update_error: null,
   last_update_at: null,
   disk_free_bytes: null,
@@ -290,7 +303,8 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
         session_open: false,
         tape_advancing: true,
         last_update_result: "checksum_mismatch",
-        last_update_error: "0.1.8 — the downloaded file did not match its checksum",
+        last_update_version: "0.1.8",
+        last_update_error: "the downloaded file did not match its checksum",
         last_update_at: "2026-09-09T09:14:00.000Z",
         ...over,
       }),
@@ -317,7 +331,7 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
   it("uses the mockup's own words for an unsigned download", () => {
     const view = failed({
       last_update_result: "signature_mismatch",
-      last_update_error: "0.1.8 — the downloaded app was not signed by Even",
+      last_update_error: "the downloaded app was not signed by Even",
     });
     expect(view.update_note).toContain("The downloaded app was not signed by Even.");
   });
@@ -331,10 +345,10 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
     }
   });
 
-  it("degrades to a shorter TRUE sentence when the version cannot be read back", () => {
-    // The version rides at the head of the reason line. A truncated or hand-edited value must lose
-    // the version, never invent one and never crash.
-    const view = failed({ last_update_error: "something went wrong" });
+  it("degrades to a shorter TRUE sentence when no version was recorded", () => {
+    // A receipt from before Fix 1, or one whose version the server rejected as not version-shaped,
+    // still deserves a report — just a shorter one. Never an invented version.
+    const view = failed({ last_update_version: null });
     expect(view.update_note).toContain("Update stopped at");
     expect(view.update_note).not.toMatch(/Update to \S+ stopped/);
   });
@@ -354,8 +368,6 @@ describe("state E — the channel valve (R3-8)", () => {
   });
 
   it("does not tell a test-channel Mac it is behind the STABLE release", () => {
-    // The card's header release is stable. "latest 0.1.8" on a Mac that asks the test channel is an
-    // answer to a question nobody asked.
     const rel = { version: "0.1.8", withdrawn_at: null } as V.ReleaseView;
     expect(derive(install({ update_channel: "test", app_version: "0.1.9-test" }), rel).version_hint)
       .toBe("test channel");
@@ -363,6 +375,56 @@ describe("state E — the channel valve (R3-8)", () => {
       .toBe("latest 0.1.8");
     expect(derive(install({ update_channel: "stable", app_version: "0.1.8" }), rel).version_hint)
       .toBe("latest");
+  });
+
+  it("says nothing at all about the version when the row's channel has no release (F6)", () => {
+    // "latest" against an empty shelf would assert the Mac is up to date with nothing.
+    expect(derive(install({ update_channel: "stable", app_version: "0.1.7" }), null).version_hint)
+      .toBeNull();
+  });
+});
+
+describe("update pending is measured against the row's OWN channel (Fix 1, F6)", () => {
+  const stable = { version: "0.1.8", withdrawn_at: null } as V.ReleaseView;
+  const test = { version: "0.1.9-test", withdrawn_at: null } as V.ReleaseView;
+
+  it("does NOT fire on a test-channel Mac just because stable moved", () => {
+    // THE BUG THIS CLOSES: `readFleet` read only `latestRelease("stable")` and `deriveRow`
+    // compared every row against it, so Home Office on `test` would have worn `update pending`
+    // for ever against a build it is never offered. The approved mockup's state E draws it with
+    // no such pill.
+    const homeOffice = row(install({ update_channel: "test", app_version: "0.1.9-test" }));
+    const forRow = V.releaseForRow(homeOffice, { stable, test });
+    const view = V.deriveRow({ row: homeOffice, latestRelease: forRow, nowMs });
+    expect(view.words).not.toContain("update pending");
+  });
+
+  it("DOES fire on a test-channel Mac that is behind its own channel", () => {
+    const homeOffice = row(install({ update_channel: "test", app_version: "0.1.8-test" }));
+    const forRow = V.releaseForRow(homeOffice, { stable, test });
+    expect(V.deriveRow({ row: homeOffice, latestRelease: forRow, nowMs }).words)
+      .toContain("update pending");
+  });
+
+  it("still fires on a stable Mac that is behind stable", () => {
+    const clinic = row(install({ update_channel: "stable", app_version: "0.1.7" }));
+    const forRow = V.releaseForRow(clinic, { stable, test });
+    expect(V.deriveRow({ row: clinic, latestRelease: forRow, nowMs }).words)
+      .toContain("update pending");
+  });
+
+  it("never fires when the row's channel has nothing published", () => {
+    const homeOffice = row(install({ update_channel: "test", app_version: "0.1.8-test" }));
+    const forRow = V.releaseForRow(homeOffice, { stable, test: null });
+    expect(forRow).toBeNull();
+    expect(V.deriveRow({ row: homeOffice, latestRelease: forRow, nowMs }).words)
+      .not.toContain("update pending");
+  });
+
+  it("picks stable for a row with no install and for one that reports no channel", () => {
+    // Every install predating R3 is on stable by construction.
+    expect(V.releaseForRow(row(null), { stable, test })).toBe(stable);
+    expect(V.releaseForRow(row(install({ update_channel: null })), { stable, test })).toBe(stable);
   });
 });
 
@@ -378,12 +440,29 @@ describe("free disk in the Machine cell (V, 9 Sep)", () => {
   });
 });
 
-describe("the version at the head of the reason line", () => {
-  it("reads back what the app wrote, and refuses anything that is not a version", () => {
-    expect(V.attemptedVersion("0.1.8 — the downloaded file did not match its checksum")).toBe("0.1.8");
-    expect(V.attemptedVersion("0.1.9-test — the download did not finish")).toBe("0.1.9-test");
-    expect(V.attemptedVersion("the download did not finish")).toBeNull();
-    expect(V.attemptedVersion(null)).toBeNull();
-    expect(V.attemptedVersion("")).toBeNull();
+describe("the attempted version is a column, not a parsed prefix (Fix 1, F5)", () => {
+  it("is sanitised to something version-shaped, or dropped", () => {
+    // The card renders it inside a sentence, so a Mac must not be able to put arbitrary text on a
+    // clinical screen through it.
+    for (const ok of ["0.1.8", "0.1.9-test", "1.0", "10.20.30.40"]) {
+      expect(M.cleanPollFields({ install_id: "i", last_update_version: ok }).last_update_version)
+        .toBe(ok);
+    }
+    for (const bad of ["", "latest", "0.1.8; DROP", "<b>0.1.8</b>", "v0.1.8", "0"]) {
+      expect(M.cleanPollFields({ install_id: "i", last_update_version: bad }).last_update_version)
+        .toBeNull();
+    }
+  });
+
+  it("COALESCEs like the rest of the receipt", async () => {
+    responses = [[{ install_id: "install_a" }]];
+    await M.applyInstallPoll({ install_id: "install_a" });
+    expect(calls[0].text).toMatch(/last_update_version\s*=\s*COALESCE/);
+  });
+
+  it("the reason line no longer carries a packed version", () => {
+    // The delimiter and its reader are gone. Nothing parses free text any more.
+    expect((V as Record<string, unknown>).attemptedVersion).toBeUndefined();
+    expect((V as Record<string, unknown>).UPDATE_ERROR_SEPARATOR).toBeUndefined();
   });
 });

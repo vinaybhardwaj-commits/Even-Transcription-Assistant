@@ -636,10 +636,55 @@ public actor RoomEngine {
     // first poll are the other half of the same evidence, and the fleet card showing both change
     // together is the ONLY proof the update landed.
     pendingUpdateResult = RoomUpdateResult.read(root: persistence.root)
-    // Whatever the last attempt left staged is dead weight — the bundle it held has either been
-    // moved into place or been abandoned. Removed here rather than by the script, which would
-    // have been deleting the directory it was running out of.
-    try? FileManager.default.removeItem(at: RoomSelfUpdate.stagingURL(root: persistence.root))
+
+    // ─── DO NOT DELETE STAGING WHILE A HANDOVER IS IN FLIGHT (Fix 1, F3) ─────────────────────
+    //
+    // This line used to be unconditional, and it was a race the swap script could lose. The app
+    // exits 64; launchd restarts it AT ONCE — `ThrottleInterval` is a minimum interval between
+    // *starts* and this process had been running for hours, so there is no throttle left to spend;
+    // the new process reaches here and deletes `update-staging`, which is where `swap.sh` and the
+    // expanded bundle the script is about to move both live.
+    //
+    // The marker says "a handover is in flight". It is cleared when the outcome is read, and it
+    // goes stale after `handoverGrace` so a script that died without writing a result cannot leave
+    // ~90 MB parked on a clinic Mac for ever.
+    let handover = RoomUpdateHandover.read(root: persistence.root)
+    if roomUpdateMayClearStaging(handover: handover, now: Date()) {
+      // Whatever the last attempt left staged is dead weight — the bundle it held has either been
+      // moved into place or been abandoned.
+      try? FileManager.default.removeItem(at: RoomSelfUpdate.stagingURL(root: persistence.root))
+      // A stale marker goes with it; keeping it would suppress the next sweep too.
+      if handover != nil { RoomUpdateHandover.clear(root: persistence.root) }
+    }
+    // The receipt is the handover's end. Reading one means the script got far enough to say what
+    // happened, so the marker has done its job.
+    if pendingUpdateResult != nil { RoomUpdateHandover.clear(root: persistence.root) }
+
+    // ─── COUNT A FAILED SWAP AGAINST THE VERSION THAT FAILED (Fix 1, F2) ────────────────────
+    //
+    // The process that attempted the swap is gone; THIS one is its replacement, and this is the
+    // only moment the failure can be counted. Without it the ledger would never see a
+    // `swap_failed` — which is exactly the failure that loops, because the STAGED check passed and
+    // only the RESIDENT check did not.
+    if let receipt = pendingUpdateResult, receipt.outcome != .ok {
+      let ledger = roomUpdateRecordFailure(
+        previous: RoomUpdateAttempts.read(root: persistence.root),
+        version: receipt.version,
+        now: Date())
+      ledger.write(root: persistence.root)
+      // SAY SO ON THE CARD when the hold begins. The row already keeps the reason for ever (the
+      // update columns COALESCE), but "and it has stopped trying" is a fact this app measured by
+      // counting, and an operator reading the row deserves it rather than having to infer it from
+      // a version that stops changing.
+      if ledger.holdUntil != nil, let reason = receipt.reason {
+        pendingUpdateResult = RoomUpdateResult(
+          outcome: receipt.outcome,
+          version: receipt.version,
+          reason: reason
+            + " This Mac has stopped retrying that version; publish a different one to clear it.",
+          at: receipt.at)
+      }
+    }
     residentCaptureOwner = nil
     residentControlJournal = nil
     residentControlCommands = [:]
@@ -742,6 +787,11 @@ public actor RoomEngine {
     case .deferredWhileRecording:
       // R3-10 arms here and fires at the end of the session, not six hours from now.
       updateSchedule.deferredWhileRecording = true
+      return nil
+    case .heldAfterRepeatedFailure:
+      // F2. Nothing was downloaded and nothing is on the card that was not already there. The
+      // hold lives on disk, so it survives the restarts that got us here.
+      updateSchedule.deferredWhileRecording = false
       return nil
     case .stopped(_, _):
       // R3-9 and acceptance item 5. `update-result.json` is on disk; the next poll carries it and
@@ -868,6 +918,7 @@ public actor RoomEngine {
             sessionOpen: sessionIsOpen,
             updateChannel: configuration.updateChannel,
             lastUpdateResult: reportedResult?.outcome.rawValue,
+            lastUpdateVersion: reportedResult?.version,
             lastUpdateError: reportedResult?.reportedErrorLine,
             lastUpdateAt: reportedResult.map { Self.iso8601($0.at) },
             // V, 9 Sep. The volume the CAPTURES live on, which is the one that fills.
