@@ -127,6 +127,9 @@ import Testing
     /// proves a fail-safe must be shown to fail without it, or it is proving nothing.
     withoutTheRescueTrap: Bool = false,
     canary: CanaryBehaviour = .acknowledged(after: 0),
+    /// H1. Delete `.previous` the instant the canary is armed, so the watchdog reaches its
+    /// rollback with nothing to restore — the state a first-ever swap leaves behind.
+    removePreviousOnceArmed: Bool = false,
     /// The watchdog's window, rewritten in the rendered script exactly the way `/bin/sleep 3` is.
     /// Three minutes of real time per test is not a thing anybody can run.
     canarySeconds: Int = 4,
@@ -183,15 +186,18 @@ import Testing
       // NO leading indent: Swift strips the multiline literal's indentation relative to its
       // closing delimiter, so the rendered script's lines start at column zero.
       //
-      // The rollback's own `mv "$PREVIOUS" "$RESIDENT"` is not unique — three failure paths in
-      // this script make the same move — so the anchor there is the line ABOVE it, which is, and
-      // the rendezvous goes between the two.
-      let rollbackHead = "say \"deleted ${VERSION}\""
-      let rollbackTail = "/bin/mv -f \"$PREVIOUS\" \"$RESIDENT\" 2>/dev/null"
+      // The rollback's own restore is not reachable by its `mv` alone — three failure paths in
+      // this script move `$PREVIOUS` back — so the anchor is the line ABOVE it, which is unique,
+      // and the rendezvous goes between the two.
+      //
+      // H1 MOVED THIS WINDOW. The rollback used to delete the failed bundle before attempting the
+      // restore; now `.failed` outlives the restore and the empty-resident window sits between
+      // `mv resident→.failed` and the checked `mv previous→resident`. The anchor guard below is
+      // what caught the drift the moment the order changed, which is the whole reason it exists.
       let anchor =
         killInsideTheWindow
         ? "if ! /bin/mv -f \"$STAGED\" \"$RESIDENT\"; then"
-        : rollbackHead + "\n" + rollbackTail
+        : "if ! /bin/mv -f \"$PREVIOUS\" \"$RESIDENT\"; then"
       guard script.contains(anchor) else {
         throw SwapHarnessError.anchorMissing(anchor)
       }
@@ -213,11 +219,10 @@ import Testing
         # window that closes at the same instant the reader gives up is a race nobody needs.
         for _ in $(/usr/bin/seq 1 400); do /bin/sleep 0.05; done
         """
-      script = script.replacingOccurrences(
-        of: anchor,
-        with: killInsideTheWindow
-          ? rendezvous + "\n" + anchor
-          : rollbackHead + "\n" + rendezvous + "\n" + rollbackTail)
+      // Both windows are entered by a checked `mv` whose own line is unique, so the rendezvous
+      // goes immediately before it in either case: resident already moved aside, replacement not
+      // yet moved in.
+      script = script.replacingOccurrences(of: anchor, with: rendezvous + "\n" + anchor)
     }
 
     let scriptURL = fixture.root.appendingPathComponent("swap.sh", isDirectory: false)
@@ -239,8 +244,11 @@ import Testing
     let observed = CanaryObservation()
     let started = Date()
     try process.run()
-    if case .acknowledged(let after) = canary {
+    let acknowledges: Bool
+    if case .acknowledged = canary { acknowledges = true } else { acknowledges = false }
+    if acknowledges || removePreviousOnceArmed {
       let canaryURL = RoomSelfUpdate.canaryURL(root: fixture.root)
+      let previousURL = fixture.previous
       Thread.detachNewThread {
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
@@ -248,8 +256,14 @@ import Testing
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             observed.store(try? decoder.decode(RoomUpdateCanary.self, from: data))
-            Thread.sleep(forTimeInterval: after)
-            try? FileManager.default.removeItem(at: canaryURL)
+            // H1. Take `.previous` away at the one moment it matters: the canary is armed, so the
+            // swap is done and the watchdog is counting, and the rollback that follows will find
+            // nothing to go back to.
+            if removePreviousOnceArmed { try? FileManager.default.removeItem(at: previousURL) }
+            if case .acknowledged(let after) = canary {
+              Thread.sleep(forTimeInterval: after)
+              try? FileManager.default.removeItem(at: canaryURL)
+            }
             return
           }
           if observed.isStopped { return }
@@ -717,6 +731,10 @@ import Testing
     let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
     try fixture.writeBundle(at: staged, version: "0.1.11")
 
+    // What the app wrote before it exited 64. It has to be here for the assertion below to mean
+    // anything.
+    RoomUpdateHandover(version: "0.1.11", at: Date()).write(root: fixture.root)
+
     let run = try Self.runSwapScript(
       fixture, stagedBundle: staged, version: "0.1.11", canary: .acknowledged(after: 1))
 
@@ -742,6 +760,10 @@ import Testing
     #expect(result.outcome == .ok)
     #expect(fixture.updateLog.contains("armed the canary for 0.1.11"))
     #expect(fixture.updateLog.contains("acknowledged the canary"))
+    // H2's counterpart: on the SUCCESS path the marker is the app's to clear, not the script's.
+    // Clearing it here would let the restarted app sweep the staging directory this script is
+    // still running out of.
+    #expect(RoomUpdateHandover.read(root: fixture.root) != nil)
   }
 
   @Test func theWatchdogTakesAnAcknowledgementInTheFinalSlice() throws {
@@ -778,6 +800,8 @@ import Testing
     defer { fixture.tearDown() }
     let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
     try fixture.writeBundle(at: staged, version: "0.1.11")
+    // What the app wrote before it exited 64, and what keeps the staging directory alive.
+    RoomUpdateHandover(version: "0.1.11", at: Date()).write(root: fixture.root)
 
     let run = try Self.runSwapScript(
       fixture, stagedBundle: staged, version: "0.1.11", canary: .ignored)
@@ -806,8 +830,13 @@ import Testing
     #expect(verbs.suffix(2) == ["bootout", "bootstrap"])
 
     // Every step of §14.2.3 said so where an operator can read it afterwards.
+    // H2. The handover is over: the room is back on the old version, the canary the app would
+    // have acknowledged is gone, and nothing else will ever clear this.
+    #expect(RoomUpdateHandover.read(root: fixture.root) == nil)
+
     let log = fixture.updateLog
-    #expect(log.contains("0.1.11 did not poll within 4s — rolling back"))
+    #expect(log.contains("0.1.11 did not poll within 4s"))
+    #expect(log.contains("rolling back to 0.1.7"))
     #expect(log.contains("booted the agent out"))
     #expect(log.contains("moved 0.1.11 aside"))
     #expect(log.contains("deleted 0.1.11"))
@@ -816,9 +845,58 @@ import Testing
     #expect(log.contains("rolled back to 0.1.7 and bootstrapped"))
   }
 
+  @Test func theRollbackRefusesWhenThereIsNoPreviousBundle() throws {
+    // ─── H1: THE ROLLBACK MUST NOT BE THE THING THAT BRICKS A ROOM ───────────────────────────
+    // The first cut moved the resident bundle aside, DELETED it, and then ran an unchecked
+    // `mv "$PREVIOUS"`. With no `.previous` on disk the room ended with an empty resident path and
+    // launchd pointed at nothing — a visit, caused by the code that exists to prevent visits.
+    //
+    // A room left running a broken build still thrashes under KeepAlive, still holds after its
+    // retry, and still takes a republish the moment it can poll. A room with no bundle takes a
+    // drive. So the guard keeps the new version and says so.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.11")
+
+    // `.previous` is taken away the instant the canary is armed — after the swap, while the
+    // watchdog is counting — which is the state a Mac whose first-ever swap this is would be in.
+    let run = try Self.runSwapScript(
+      fixture, stagedBundle: staged, version: "0.1.11",
+      canary: .ignored, removePreviousOnceArmed: true)
+
+    #expect(run.status == 1)
+    // THE ROOM STILL HAS A BUNDLE, and it is the new one — nothing was moved, nothing deleted.
+    #expect(fixture.version(of: fixture.resident) == "0.1.11")
+    #expect(
+      FileManager.default.isExecutableFile(
+        atPath: fixture.resident.appendingPathComponent("Contents/MacOS/room-recorder").path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.resident.path + ".failed"))
+    #expect(!FileManager.default.fileExists(atPath: fixture.previous.path))
+
+    // The receipt says which of the two failures this was, so the card does not read as a
+    // successful rollback that it was not.
+    let result = try #require(Self.readResult(fixture))
+    #expect(result.outcome == .swapFailed)
+    #expect(result.version == "0.1.11")
+    #expect(result.reason?.contains("no previous bundle was present to restore") == true)
+    #expect(!FileManager.default.fileExists(atPath: RoomSelfUpdate.canaryURL(root: fixture.root).path))
+
+    // THE AGENT IS LEFT RUNNING, NOT BOOTSTRAPPED AGAIN. The guard returns before the rollback's
+    // `bootout`, so the agent is still loaded from step 8.8 and still restarting the broken build:
+    // there is nothing to put back, and a `bootstrap` of a loaded job is at best a no-op. Only the
+    // swap's own pair — 8.1's bootout and 8.8's bootstrap — appears; the rollback adds neither.
+    let verbs = run.toolLog.split(separator: "\n")
+      .filter { $0.hasPrefix("launchctl ") }
+      .compactMap { $0.split(separator: " ").dropFirst().first.map(String.init) }
+    #expect(verbs == ["bootout", "bootstrap"], "saw \(verbs)")
+    #expect(fixture.updateLog.contains("no previous bundle to restore; leaving 0.1.11 in place"))
+    #expect(!fixture.updateLog.contains("rolling back"))
+  }
+
   @Test func aScriptKilledInsideTheRollbackRestoresThePreviousBundle() throws {
     // The rollback opens a SECOND window in which the resident path does not exist — between
-    // deleting the failed bundle and putting the previous one back. It is new in B1, it runs
+    // moving the failed bundle aside and putting the previous one back. It is new in B1, it runs
     // unattended three minutes after everybody has stopped watching, and a script killed inside it
     // would leave launchd with nothing to start. The same trap that covers the swap covers this;
     // the same FIFO rendezvous proves it.
@@ -838,6 +916,12 @@ import Testing
         atPath: fixture.resident.appendingPathComponent("Contents/MacOS/room-recorder").path))
     // 2. `.previous` was consumed by the restore.
     #expect(!FileManager.default.fileExists(atPath: fixture.previous.path))
+    // 2a. AND `<resident>.failed` IS STILL THERE — ~90 MB of the build that could not poll, which
+    //     nothing in this script or the app ever deletes. A consequence of H1's reordering (the
+    //     failed bundle now outlives the restore), not of the kill; flagged in the Fix 1 report
+    //     for a ruling. If the ruling is to sweep it, this expectation flips rather than quietly
+    //     going stale.
+    #expect(FileManager.default.fileExists(atPath: fixture.resident.path + ".failed"))
     // 3. The interruption is on the record — the rescue's own sentence, not the watchdog's, since
     //    the script died before it could write its own.
     let result = try #require(Self.readResult(fixture))

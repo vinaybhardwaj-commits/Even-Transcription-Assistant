@@ -1017,6 +1017,13 @@ public enum RoomSwapScript {
     // one. The number is the constant, not a second copy of it.
     let canaryReasonLiteral = quoted(
       jsonStringBody("the new version did not poll within \(canarySeconds) s; restored "))
+    // H1. The other half of the same sentence, for the rollback that could not put the old bundle
+    // back. Escaped in Swift for the same reason; the two versions are appended in shell.
+    let canaryKeptReasonLiteral = quoted(
+      jsonStringBody("the new version did not poll within \(canarySeconds) s; restore of "))
+    // H2. The marker the rollback clears, at the one path `RoomUpdateHandover` uses. Passed in
+    // rather than rebuilt in shell, so the two cannot drift apart.
+    let handoverMarker = quoted(RoomSelfUpdate.handoverMarkerURL(root: rootURL).path)
 
     return """
       #!/bin/bash
@@ -1051,6 +1058,8 @@ public enum RoomSwapScript {
       # Pre-escaped for the JSON string in record(); the version it restored is appended at the
       # moment of the rollback.
       CANARY_REASON=\(canaryReasonLiteral)
+      CANARY_KEPT_REASON=\(canaryKeptReasonLiteral)
+      HANDOVER_MARKER=\(handoverMarker)
 
       say() {
         /bin/echo "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ') room-recorder-swap: $*" >> "$LOG" 2>/dev/null
@@ -1232,26 +1241,67 @@ public enum RoomSwapScript {
         exit 0
       fi
 
-      # ── 8.9a…8.9g The rollback, in the order §14.2.3 sets out ─────────────────────────────
+      say "${VERSION} did not poll within ${CANARY_SECONDS}s"
+
+      # ── 8.9a NOTHING IS DESTROYED UNTIL THERE IS SOMETHING TO GO BACK TO (H1) ─────────────
+      # The first cut of this rolled back unconditionally: resident aside, resident deleted, then
+      # an UNCHECKED `mv "$PREVIOUS"`. With no `.previous` on disk — a Mac whose first swap is
+      # this one, or one where step 8.2's `rm -rf` was the last thing to touch that path — the
+      # room ended with an empty resident path and launchd pointed at nothing. A bricked room,
+      # produced by the code whose whole purpose is to prevent one.
+      #
+      # A room left running a broken build is recoverable: it thrashes under KeepAlive, the ledger
+      # holds after the retry, and a republish reaches it the moment it can poll again. A room
+      # with no bundle needs somebody to walk to it. So when there is nothing to restore, the new
+      # version stays where it is and the receipt says exactly that.
+      #
+      # NO `bootout` HAS HAPPENED YET at this point, so the agent is still loaded and still
+      # restarting the broken build; there is nothing to bootstrap and nothing to undo.
+      if [ ! -d "$PREVIOUS" ]; then
+        say "no previous bundle to restore; leaving ${VERSION} in place"
+        record swap_failed "\\"the new version did not poll within ${CANARY_SECONDS} s and no previous bundle was present to restore\\""
+        /bin/rm -f "$CANARY"
+        exit 1
+      fi
+
+      # ── 8.9b…8.9h The rollback, in the order §14.2.3 sets out ─────────────────────────────
       # Each step says so in update.log: this runs unattended, minutes after the operator's last
       # keystroke, and the log is the only account of it anybody will ever get.
-      say "${VERSION} did not poll within ${CANARY_SECONDS}s — rolling back"
+      say "rolling back to ${OLD_VERSION}"
       /bin/launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null
       say "booted the agent out"
 
-      # The failed bundle is moved aside and THEN deleted, rather than deleted in place: from here
-      # until the restore the resident path is empty, and that is exactly the window the rescue
-      # trap covers — resident absent, previous present, put it back.
+      # The failed bundle is moved aside rather than deleted in place: from here until the restore
+      # the resident path is empty, and that is exactly the window the rescue trap covers —
+      # resident absent, previous present, put it back.
       /bin/mv -f "$RESIDENT" "${RESIDENT}.failed" 2>/dev/null
       say "moved ${VERSION} aside"
+
+      # ── THE RESTORE IS CHECKED, AND THE FAILED BUNDLE OUTLIVES IT (H1) ───────────────────
+      # `.failed` is deleted AFTER the restore succeeds, not before it is attempted. Until that
+      # `rm` there are two bundles on disk and the room can end up on either one; the old order
+      # had a moment with neither.
+      if ! /bin/mv -f "$PREVIOUS" "$RESIDENT"; then
+        say "the previous bundle could not be put back — keeping ${VERSION}"
+        /bin/mv -f "${RESIDENT}.failed" "$RESIDENT" 2>/dev/null
+        record swap_failed "\\"${CANARY_KEPT_REASON}${OLD_VERSION} failed; kept ${VERSION_JSON}\\""
+        /bin/rm -f "$CANARY"
+        bootstrap_agent
+        say "kept ${VERSION} and bootstrapped"
+        exit 1
+      fi
+      say "restored ${OLD_VERSION}"
       /bin/rm -rf "${RESIDENT}.failed"
       say "deleted ${VERSION}"
-      /bin/mv -f "$PREVIOUS" "$RESIDENT" 2>/dev/null
-      say "restored ${OLD_VERSION}"
 
       record swap_failed "\\"${CANARY_REASON}${OLD_VERSION}\\""
       say "recorded swap_failed"
       /bin/rm -f "$CANARY"
+      # H2. The handover is over and the room is back on the old version, so the marker that keeps
+      # the staging directory alive has done its job. The app can no longer clear it — the canary
+      # it would have acknowledged is gone — and leaving it would park ~90 MB on the Mac until the
+      # grace expires half an hour later.
+      /bin/rm -f "$HANDOVER_MARKER"
       bootstrap_agent
       say "rolled back to ${OLD_VERSION} and bootstrapped"
       exit 1

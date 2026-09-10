@@ -369,3 +369,15 @@ since Build R3 are gone: they were never the locked login keychain over SSH, the
 standing engines up against the developer's own keychain, and they now inject the same
 `enrolmentReader:` stub `RoomSessionFromKeychainTests` has always used. 520 tests, 0 issues.
 Ships as 0.1.11.
+
+**Fix 1, same day.** Review of the canary found the rollback able to do the one thing it exists to prevent. It moved
+the resident bundle aside, **deleted it**, and then ran an unchecked `mv "$PREVIOUS" "$RESIDENT"` — so a Mac with no
+`.previous` on disk (a first-ever swap, or one where step 8.2's `rm -rf` was the last thing to touch that path) ended
+with an empty resident path and launchd pointed at nothing: a room that needs a visit, produced by the code whose whole
+purpose is to prevent one. The rollback now refuses before it touches anything when there is nothing to restore, leaves
+the new version in place and says so on the card; the restore itself is checked, and the failed bundle is deleted only
+after it succeeds, so there is never a moment with neither bundle on disk. The rollback also clears the handover marker
+now that the app cannot — the canary it would have acknowledged is gone by then — instead of parking ~90 MB of staging
+until the thirty-minute grace expires. Two residuals were ruled accepted and written into §14.3: a link down for the
+whole window rolls back a healthy build at the cost of a re-offer, and a rollback with no previous bundle leaves the
+room thrashing on a build the ledger will hold. 521 tests, 0 issues.

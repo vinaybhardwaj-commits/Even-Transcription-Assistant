@@ -148,9 +148,11 @@ filename; the other seven untracked `docs/handoff/` papers left untracked.
 
 **No SQL was written and nothing server-side changed (B1-D6).** One INFERRED assumption stands, carried from R3 rather
 than introduced here: the rollback receipt reaches the fleet row through the existing poll fields, so
-`last_update_result` must accept `swap_failed`, `last_update_version` the failed version, and `last_update_error` the
-free text `the new version did not poll within 180 s; restored 0.1.11`. All three shipped in 0078 and already carry R3
-values in production; I have no database here to confirm it.
+`last_update_result` must accept `swap_failed`, `last_update_version` the version that FAILED, and `last_update_error`
+a sentence naming the OLD version it went back to — in §14.4's acceptance run those are 0.1.12 and
+`the new version did not poll within 180 s; restored 0.1.11` respectively. All three shipped in 0078 and already carry
+R3 values in production; I have no database here to confirm it. [Corrected in Fix 1: the first cut of this paragraph
+gave one version for both roles.]
 
 ## Flags — what the kickoff did not settle
 
@@ -191,3 +193,98 @@ None to run: nothing to migrate, no bundle built, nothing signed — signing and
 One Opus reviewer, read-only, over the working-tree diff against the kickoff contract and the rendered shell. It found
 the last-look defect and the anchored-grep case; both are fixed above and both now have tests. Advisory only — the
 external Refuter still runs.
+
+---
+
+# Fix 1
+
+**10 September 2026.** New commit on `6e8ed69`, same branch, not amended, not pushed, `main` untouched; the sha is the
+single new commit (a commit cannot quote its own). Pre-flight matched: `HEAD 6e8ed69`, one tracked modification —
+the orchestrator's `CLAUDE.md`, staged unedited, which closes flag 8. The B1-1 block above is the `6e8ed69` rollback
+and is superseded by this one. **The Fix 1 kickoff is committed with the work** under the repo `CLAUDE.md`'s standing
+rule for kickoffs, though this kickoff's editable list — unlike B1's — does not name it; say so if that was deliberate.
+
+## H1 — the rollback no longer destroys the only bundle it has
+
+`RoomSelfUpdate.swift`: guard `:1246-1265`, checked restore `:1280-1295`, new constants `:1022-1026`
+(`CANARY_KEPT_REASON`, `HANDOVER_MARKER`), script variables `:1061-1062`. Order: guard → bootout → `mv resident→.failed`
+→ checked `mv previous→resident` → `rm -rf .failed` → record → rm canary → rm marker → bootstrap. Rendered verbatim,
+comments elided; `bash -n` passes. The kept-version sentence uses `VERSION_JSON`, not `VERSION` — that string comes off
+the server and lands in a JSON literal.
+
+```bash
+say "${VERSION} did not poll within ${CANARY_SECONDS}s"
+if [ ! -d "$PREVIOUS" ]; then
+  say "no previous bundle to restore; leaving ${VERSION} in place"
+  record swap_failed "\"the new version did not poll within ${CANARY_SECONDS} s and no previous bundle was present to restore\""
+  /bin/rm -f "$CANARY"
+  exit 1
+fi
+say "rolling back to ${OLD_VERSION}"
+/bin/launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null
+say "booted the agent out"
+/bin/mv -f "$RESIDENT" "${RESIDENT}.failed" 2>/dev/null
+say "moved ${VERSION} aside"
+if ! /bin/mv -f "$PREVIOUS" "$RESIDENT"; then
+  say "the previous bundle could not be put back — keeping ${VERSION}"
+  /bin/mv -f "${RESIDENT}.failed" "$RESIDENT" 2>/dev/null
+  record swap_failed "\"${CANARY_KEPT_REASON}${OLD_VERSION} failed; kept ${VERSION_JSON}\""
+  /bin/rm -f "$CANARY"
+  bootstrap_agent
+  say "kept ${VERSION} and bootstrapped"
+  exit 1
+fi
+say "restored ${OLD_VERSION}"
+/bin/rm -rf "${RESIDENT}.failed"
+say "deleted ${VERSION}"
+record swap_failed "\"${CANARY_REASON}${OLD_VERSION}\""
+say "recorded swap_failed"
+/bin/rm -f "$CANARY"
+/bin/rm -f "$HANDOVER_MARKER"
+bootstrap_agent
+say "rolled back to ${OLD_VERSION} and bootstrapped"
+exit 1
+```
+
+**Test** `theRollbackRefusesWhenThereIsNoPreviousBundle` `:848`, with `.previous` taken away the instant the canary is
+armed (`removePreviousOnceArmed:` `:132`): executable 0.1.11 still resident, `.failed` absent, the no-previous receipt,
+canary gone, log line. **The agent is left running, not bootstrapped again** — the guard returns before the rollback's
+`bootout`, so it is still loaded from 8.8 and still restarting the broken build; bootstrapping a loaded job is a no-op,
+and `verbs == ["bootout", "bootstrap"]` pins that only the swap's own pair appears. Against `6e8ed69` it fails with the
+blocker visible — an EMPTY resident path:
+
+```
+✘ …:868:5: Expectation failed: fixture.version(of: fixture.resident) == "0.1.11"
+✘ …:869:5: Expectation failed: FileManager.default.isExecutableFile(atPath: …/Contents/MacOS/room-recorder)
+✘ Test theRollbackRefusesWhenThereIsNoPreviousBundle() failed after 4.997 seconds with 6 issues.
+✔ Test theRollbackRefusesWhenThereIsNoPreviousBundle() passed after 5.363 seconds.
+```
+
+## H2, H3
+
+`/bin/rm -f "$HANDOVER_MARKER"` after a successful restore `:1300-1305`, path rendered from
+`RoomSelfUpdate.handoverMarkerURL` so the two cannot drift. `:793` writes a marker and asserts it is gone; `:726`
+asserts the opposite on the success path, where clearing it early would let the restarted app sweep the staging
+directory the script is still running out of. H3: §14.3 gains the outage and no-previous bullets, `BUILD-HISTORY.md` a
+Fix 1 paragraph, and the schema paragraph above now names both versions (0.1.12 failed, 0.1.11 restored).
+
+## Gates
+
+`typecheck` clean; `npm test` 67 files / 1572 tests; `build` completed; `check:silent` `Found 9` — the accepted nine,
+untouched; `swift build` `Build complete!`; **`swift test` over SSH `✔ Test run with 521 tests in 42 suites passed
+after 16.243 seconds.`**, 0 issues, plus `RoomSelfUpdateTests` three more times alone, 55 green each. Nothing signed.
+
+## Flags
+
+1. **A killed rollback now leaves `<resident>.failed` on disk for ever** — the failed bundle outlives the restore, so a
+   script killed in the empty-resident window is rescued but nothing deletes the ~90 MB copy. Not fixed: `rescue()` and
+   step 8.2 are outside this brief; one idempotent `/bin/rm -rf "${RESIDENT}.failed"` in either closes it. `:915`
+   asserts the leak so it cannot be forgotten, and flips when you rule.
+2. **The no-previous sentence names the harness's window under test** ("within 4 s"): the kickoff specifies
+   `${CANARY_SECONDS}` in shell where the other reason uses the Swift constant. Production reads 180 s. As ordered.
+3. **The restore-failed branch has no test** — making that `mv` fail needs a read-only parent, which breaks the move
+   before it too. It is the branch that keeps a broken-but-present bundle rather than an empty path.
+4. **The FIFO anchor moved** to the unique `if ! /bin/mv -f "$PREVIOUS" "$RESIDENT"; then` because H1 reordered the
+   rollback; the old two-line anchor failed loudly rather than silently testing nothing. **This section is ~30 lines
+   over its 60-line cap, a third of it the verbatim block the kickoff asks for.**
+

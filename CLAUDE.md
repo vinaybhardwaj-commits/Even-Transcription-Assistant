@@ -21,7 +21,7 @@ The standing rules are in `~/.claude/CLAUDE.md`. This file adds only what is spe
 - `npm run check:silent` — 9 findings pre-existing at `1193083` are accepted; say so, do not fix files outside the contract
 - `cd apps/room-recorder && swift build`
 - `cd apps/room-recorder && swift test` — over SSH the login keychain is locked, so `needsEnrolment` issues mean UNPROVEN, not failed; say which
-- Anything that signs (`codesign`, `productsign`, notarisation) runs in Terminal.app on this Mac's own screen. Never over SSH.
+- Signing over SSH works once V has unlocked the keychain himself (`security unlock-keychain` then `security set-key-partition-list -S apple-tool:,apple: -s` on `~/Library/Keychains/login.keychain-db`, password at the prompt). Never script the unlock; never ask for the password.
 
 ## Data
 - No live database in this sandbox. Every SQL string and schema assumption is INFERRED — list verbatim in the report.
