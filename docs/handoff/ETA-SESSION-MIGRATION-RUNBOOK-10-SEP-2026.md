@@ -59,7 +59,9 @@ saving. A migration cannot invent them, so the file carries the five real fields
 
 1. `ssh <room-user>@<room-host>` (Tailscale name; Remote Login is off on all rooms but ECHO — see the R3 acceptance
    verdict for the two commands that enable it).
-2. Paste the block. Type that room's login password at `security`'s prompt.
+2. Paste the block. Type that room's login password at `security`'s prompt. **If it aborts, the `exit 1` ends the SSH
+   shell along with it** — that is what `exit` does to an interactive session. Reconnect and run it again; nothing was
+   changed, so re-running is safe.
 3. Expect one line: `room-session.json written: install_id=…, room_slug=…, token length …`. Check the ids against the
    room's row on the fleet card **before** moving to the next room.
 4. `ls -l "$ROOT/room-session.json"` shows `-rw-------`.

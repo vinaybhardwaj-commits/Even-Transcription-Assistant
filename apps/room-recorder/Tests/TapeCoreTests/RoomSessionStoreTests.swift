@@ -151,6 +151,80 @@ import Testing
     #expect(RoomSessionStore.load(root: root, keychainReader: spy.read, log: { _ in }) == nil)
   }
 
+  // MARK: - Fix 1, K1: the fallback cannot hang
+
+  @Test func aKeychainThatNeverAnswersIsAbandonedAtTheDeadline() throws {
+    // ─── THE LAST LINE OF DEFENCE ────────────────────────────────────────────────────────────
+    // `kSecUseAuthenticationUIFail` is documented for data-protection items and
+    // `SecKeychainSetUserInteractionAllowed(false)` for the legacy prompt, and both are set. This
+    // test assumes neither works. A reader that simply never returns — which is precisely what
+    // 0.1.11 met on Home Office — must not take the launch down with it.
+    let root = try Self.makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let spy = KeychainSpy(answer: {
+      Thread.sleep(forTimeInterval: 8)
+      return Self.record()
+    })
+
+    var lines: [String] = []
+    let started = Date()
+    let loaded = RoomSessionStore.load(root: root, keychainReader: spy.read, log: { lines.append($0) })
+    let elapsed = Date().timeIntervalSince(started)
+
+    #expect(loaded == nil)
+    // Gave up at the deadline, not at eight seconds.
+    #expect(elapsed >= RoomSessionStore.keychainDeadline)
+    #expect(elapsed < RoomSessionStore.keychainDeadline + 2, "took \(elapsed)s")
+    #expect(lines.contains("keychain fallback timed out; treating as unenrolled"))
+    // Nothing written on the way out — no half-file for the next launch to trip over.
+    #expect(!FileManager.default.fileExists(atPath: RoomSessionStore.url(root: root).path))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
+
+  @Test func theDeadlineIsFiveSeconds() {
+    #expect(RoomSessionStore.keychainDeadline == 5)
+  }
+
+  // MARK: - Fix 1, K3: what `save` leaves behind
+
+  @Test func savingOverAWorldReadableFileYields0600() throws {
+    // The case this is really about: a room whose file was written wrongly once — by a hand-rolled
+    // migration, say — must not keep that mode for ever because `replaceItemAt` inherited it.
+    let root = try Self.makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = RoomSessionStore.url(root: root)
+    try Data("{}".utf8).write(to: url)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: 0o644)], ofItemAtPath: url.path)
+    #expect(Self.mode(of: url) == 0o644)
+
+    try RoomSessionStore.save(Self.record(), root: root)
+    #expect(Self.mode(of: url) == 0o600)
+    #expect(RoomSessionStore.load(root: root, keychainReader: { throw RoomKeychainError.notFound },
+      log: { _ in })?.session == "a.session.jwt")
+  }
+
+  @Test func aFailedSaveLeavesNoTemporaryFileBehind() throws {
+    // Forced with the immutable flag. `replaceItemAt` turned out to replace a directory — empty or
+    // not — without complaint, so the failure has to come from the kernel: `uchg` defeats the
+    // rename and the unlink both. The temporary is created before that fails, and a `.tmp` left in
+    // the room root would be a copy of the session sitting where nothing will ever clean it up.
+    let root = try Self.makeRoot()
+    let destination = RoomSessionStore.url(root: root)
+    try Data("{}".utf8).write(to: destination)
+    #expect(chflags(destination.path, UInt32(UF_IMMUTABLE)) == 0)
+    defer {
+      chflags(destination.path, 0)
+      try? FileManager.default.removeItem(at: root)
+    }
+
+    #expect(throws: (any Error).self) { try RoomSessionStore.save(Self.record(), root: root) }
+
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+      .filter { $0.hasSuffix(".tmp") }
+    #expect(leftovers.isEmpty, "left behind \(leftovers)")
+  }
+
   // MARK: - §15.2's rejections
 
   @Test func aWorldReadableSessionFileIsRefused() throws {

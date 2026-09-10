@@ -151,21 +151,26 @@ private enum RoomRecorderCLI {
         let client = BenchClient(configuration: try persistence.loadConfiguration())  // SESSION_EXEMPT
         let response = try await client.login(pin: pin)
         let loggedIn = await client.currentConfiguration()
-        // The session goes to the keychain, not to config.json — `saveConfiguration` strips it
-        // now, so writing it there would silently lose it. This verb predates §5.3's enrol and
+        // The session goes to the session store, not to config.json — `saveConfiguration` strips
+        // it now, so writing it there would silently lose it. This verb predates §5.3's enrol and
         // is kept working rather than left to fail quietly.
+        //
+        // ─── AND TO THE FILE, NOT THE KEYCHAIN (B1.5 Fix 1, K2) ─────────────────────────────
+        // B1.5 left this one writing the keychain, which made it worse than useless: the app reads
+        // `room-session.json` first, so a `login` would have refreshed a session nothing would ever
+        // read and reported success for it.
         guard let installID = loggedIn.installID, let session = loggedIn.etaRoomSession else {
           throw CLIError(
             "login succeeded but this room has no install id to bind the session to. Enrol this Mac with the install command from /admin/bench.")
         }
-        try RoomKeychain.save(
+        try RoomSessionStore.save(
           RoomKeychainRecord(
             session: session,
             installID: installID,
             roomSlug: loggedIn.roomSlug,
             roomName: response.room.name,
             origin: loggedIn.origin.absoluteString
-          ))
+          ), root: root)
         try persistence.saveConfiguration(loggedIn)
         print("Logged in to \(response.room.name)")
 

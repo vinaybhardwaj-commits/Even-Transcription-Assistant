@@ -67,11 +67,19 @@ public enum RoomSessionStore {
   /// nil promptly, and `RoomEngine.startingConfiguration` turns that into a loud `needs_enrol` and
   /// a process that stops. A room that cannot authenticate must say so, not hang with the
   /// microphone light off and nothing in the log.
+  /// How long the keychain fallback gets before it is abandoned (B1.5 Fix 1, K1).
+  ///
+  /// FIVE SECONDS, because the only correct answers here are "immediately" and "never". A read
+  /// that is going to succeed takes microseconds; one that is going to raise a dialog takes as long
+  /// as the room stays empty. Anything in between is macOS being slow, and a room that waits five
+  /// seconds and then says `needs_enrol` is recoverable in a way that one which hangs is not.
+  public static let keychainDeadline: TimeInterval = 5
+
   public static func load(
     root: URL,
     /// Injected so a test can prove the fallback without touching the machine's real keychain —
     /// the live room's session lives in it and must not be disturbed.
-    keychainReader: () throws -> RoomKeychainRecord = { try RoomKeychain.load() },
+    keychainReader: @escaping () throws -> RoomKeychainRecord = { try RoomKeychain.load() },
     log: (String) -> Void = { message in
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
     }
@@ -88,14 +96,42 @@ public enum RoomSessionStore {
       break
     }
 
+    // ─── THE FALLBACK IS RUN WITH A DEADLINE, NOT TRUSTED TO RETURN (Fix 1, K1) ──────────────
+    //
+    // `kSecUseAuthenticationUIFail` is documented for data-protection items and
+    // `SecKeychainSetUserInteractionAllowed(false)` for the legacy prompt, and `RoomKeychain.load`
+    // now sets both. Neither is a promise. The failure this build exists to end is a launch that
+    // never finishes, so the last line of defence is not to ask securityd nicely but to stop
+    // waiting for it: the read happens on its own thread and this one gives up after five seconds.
+    //
+    // A TIMED-OUT THREAD IS LEFT WHERE IT IS. It is parked inside securityd and cannot be killed;
+    // what happens next is `needs_enrol` and a process that exits, which takes the thread with it.
+    // Leaking a thread on the way out beats hanging on the way in.
+    let outcome = Outcome()
+    let semaphore = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+      outcome.store(Result { try keychainReader() })
+      semaphore.signal()
+    }
+    guard semaphore.wait(timeout: .now() + keychainDeadline) == .success else {
+      log("keychain fallback timed out; treating as unenrolled")
+      return nil
+    }
+
     let record: RoomKeychainRecord
-    do {
-      record = try keychainReader()
-    } catch {
+    switch outcome.value {
+    case .success(let read):
+      record = read
+    case .failure(let error):
       // errSecInteractionNotAllowed is the ordinary case on an unmigrated room, not an emergency:
-      // it is `kSecUseAuthenticationUIFail` doing its job. Everything else lands here too, and all
-      // of it means the same thing to the caller.
+      // it is the two attributes doing their job. Everything else lands here too, and all of it
+      // means the same thing to the caller.
       log("no usable room session: \(error.localizedDescription)")
+      return nil
+    case nil:
+      // Signalled without a result: impossible unless the thread was torn down mid-flight, and
+      // "nothing to report" is the safe reading of it.
+      log("no usable room session")
       return nil
     }
 
@@ -131,13 +167,38 @@ public enum RoomSessionStore {
     let temporary = root.appendingPathComponent(
       "room-session.json.\(UUID().uuidString).tmp", isDirectory: false)
     try data.write(to: temporary, options: [.atomic])
+    // K1's sibling: the temporary goes away on EVERY exit from here, not just the one failure that
+    // was thought of. A `.tmp` left in the room root is a copy of the session at whatever mode the
+    // failure happened to leave it, sitting where nothing will ever clean it up.
+    defer { try? FileManager.default.removeItem(at: temporary) }
     try FileManager.default.setAttributes(
       [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: temporary.path)
-    do {
-      _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-    } catch {
-      try? FileManager.default.removeItem(at: temporary)
-      throw error
+    // `.usingNewMetadataOnly` so the replacement keeps the mode set two lines up rather than
+    // inheriting the mode of whatever it replaced — which, on a room whose file was once written
+    // wrongly, would be the 0644 this store exists to refuse.
+    _ = try FileManager.default.replaceItemAt(
+      destination, withItemAt: temporary, backupItemName: nil, options: .usingNewMetadataOnly)
+    // And again on the destination, because the guarantee is about the path the app reads, not
+    // about the path it wrote. Cheap, and it holds however `replaceItemAt` chose to do the swap.
+    try FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: destination.path)
+  }
+
+  /// Carries the fallback's answer back across the thread boundary.
+  final class Outcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Result<RoomKeychainRecord, Error>?
+
+    func store(_ result: Result<RoomKeychainRecord, Error>) {
+      lock.lock()
+      defer { lock.unlock() }
+      stored = result
+    }
+
+    var value: Result<RoomKeychainRecord, Error>? {
+      lock.lock()
+      defer { lock.unlock() }
+      return stored
     }
   }
 

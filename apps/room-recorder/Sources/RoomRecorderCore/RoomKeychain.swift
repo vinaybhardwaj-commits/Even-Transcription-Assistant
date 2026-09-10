@@ -123,6 +123,36 @@ public enum RoomKeychain {
   ///
   /// This is now a FALLBACK. `RoomSessionStore` is what the app reads; this runs once, on a room
   /// that still has its session only in the keychain, and its result is written to a file.
+  /// Belt and braces for the same prompt (B1.5 Fix 1, K1).
+  ///
+  /// `kSecUseAuthenticationUIFail` is documented for DATA-PROTECTION items, and the dialog this
+  /// item raises is the legacy file-based keychain's partition prompt — a different code path that
+  /// may not honour the attribute at all. `SecKeychainSetUserInteractionAllowed(false)` is the
+  /// switch that governs THAT prompt. It is deprecated and still functional, and a deprecated API
+  /// that returns an error beats a supported one that waits for ever on a Mac nobody is sitting at.
+  ///
+  /// The previous value is read and restored, because this is process-global state and `enrol`
+  /// runs interactively in the same binary.
+  ///
+  /// Deprecated by declaration ON PURPOSE: Swift does not warn about calling a deprecated API from
+  /// a deprecated context, which is how the two `SecKeychain…` calls stay warning-free without a
+  /// blanket suppression. Ordered by the B1.5 Fix 1 kickoff, K1.
+  @available(
+    macOS, deprecated: 10.10,
+    message: "SecKeychainSetUserInteractionAllowed is the only switch for the legacy partition prompt (B1.5 Fix 1, K1)"
+  )
+  private static func withoutUserInteraction<T>(_ body: () -> T) -> T {
+    var previous: DarwinBoolean = true
+    let read = SecKeychainGetUserInteractionAllowed(&previous)
+    SecKeychainSetUserInteractionAllowed(false)
+    defer {
+      // Only restore what was actually read. If the getter failed we leave interaction disabled
+      // rather than guessing "true" and re-arming the very dialog this exists to prevent.
+      if read == errSecSuccess { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+    }
+    return body()
+  }
+
   public static func load() throws -> RoomKeychainRecord {
     var query = baseQuery()
     query[kSecReturnData as String] = true
@@ -130,7 +160,7 @@ public enum RoomKeychain {
     query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
 
     var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    let status = withoutUserInteraction { SecItemCopyMatching(query as CFDictionary, &item) }
     if status == errSecItemNotFound { throw RoomKeychainError.notFound }
     guard status == errSecSuccess else { throw RoomKeychainError.status(status) }
     guard let data = item as? Data else { throw RoomKeychainError.malformed }

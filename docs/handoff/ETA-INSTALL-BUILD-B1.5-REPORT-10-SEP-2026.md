@@ -115,3 +115,61 @@ contract; `swift build` `Build complete!`; **`swift test` over SSH `✔ Test run
 8. **Not proven here:** that a real room's item returns `errSecInteractionNotAllowed` rather than blocking. That is
    §15.3 item 2 and needs 0.1.13 on a Mac whose partition list lacks its cdhash. The tests prove what the app does with
    the error; producing it is Apple's part.
+
+---
+
+# Fix 1
+
+**10 September 2026.** New commit on `0ca7d71`, same branch, not amended, not pushed, `main` untouched; the sha is the
+single new commit. Pre-flight matched: `HEAD 0ca7d71`, clean tree, eight untracked bus papers.
+
+## K1 — the fallback cannot block, whichever gate macOS honours
+
+`RoomKeychain.swift`: `withoutUserInteraction` `:144`, the attribute `:160`, the wrapped call `:163`, verbatim:
+
+```swift
+    let status = withoutUserInteraction { SecItemCopyMatching(query as CFDictionary, &item) }
+```
+
+It reads the previous value, sets false, and restores in a `defer` — process-global state, and `enrol` runs
+interactively in the same binary — restoring **only if the getter succeeded**, since guessing `true` would re-arm the
+dialog this exists to prevent.
+
+`RoomSessionStore.swift`: `keychainDeadline = 5` `:76`, the detached read `:110-119`; on timeout it logs `keychain
+fallback timed out; treating as unenrolled`, returns nil and writes nothing. **The timed-out thread is left parked in
+securityd** — it cannot be killed, and the process is on its way to `needs_enrol` and exit, which takes it.
+
+**Timing, measured:** `aKeychainThatNeverAnswersIsAbandonedAtTheDeadline` `:156` uses a reader that sleeps 8 s —
+`✔ passed after 5.011 seconds`, asserting `elapsed >= 5` and `< 7`, the log line, and an empty room root.
+`theDeadlineIsFiveSeconds` `:184` pins the number; the `errSecInteractionNotAllowed` test still returns in under a
+second.
+
+## K2, K3, K4
+
+**K2:** `main.swift:166` — `login` now calls `RoomSessionStore.save(…, root: root)`. `grep -rn "RoomKeychain.save"
+Sources/` returns **nothing**: no code path writes the keychain any more. Nothing else in `login` changed.
+
+**K3:** `save` — `defer` removes the temporary on every exit `:173`; `.usingNewMetadataOnly` `:180`; the destination is
+chmod 0600 again after the replace `:184`, the guarantee being about the path the app reads.
+`savingOverAWorldReadableFileYields0600` `:190` writes over a 0644 file and gets 0600.
+`aFailedSaveLeavesNoTemporaryFileBehind` `:207` forces the failure with `chflags uchg` — **`replaceItemAt` replaces a
+directory, empty or not, without complaint**, so it had to come from the kernel. With the `defer` removed it fails on
+`leftovers.isEmpty`; with it, green.
+
+**K4:** the runbook's step 2 now says the abort's `exit 1` ends the SSH shell when pasted interactively, and that
+re-running after reconnecting is safe because nothing was changed.
+
+## Gates
+
+`typecheck` exit 0; `npm test` `Test Files  67 passed (67)` / `Tests  1572 passed (1572)`; `build` exit 0;
+`check:silent` `Found 9` — the accepted nine, untouched; `swift build` `Build complete!`; **`swift test` over SSH
+`✔ Test run with 535 tests in 43 suites passed after 17.940 seconds.`, 0 issues** (four new). Nothing signed.
+
+## Flags
+
+1. **Two deprecation warnings remain in `RoomKeychain.swift`, both deliberate:** `kSecUseAuthenticationUIFail` `:160`
+   (unchanged from `0ca7d71`) and the call to `withoutUserInteraction` `:163`. Marking `load()` deprecated would silence
+   the second but push a false deprecation onto our own API and move three warnings into `RoomSessionStore`, so the
+   deprecation is confined to the private wrapper, whose comment cites this kickoff.
+2. **The deadline is now the only real guarantee.** Both attributes are documented; neither is proven against a live
+   partition mismatch (§15.3 item 2). The test that matters assumes both fail.
