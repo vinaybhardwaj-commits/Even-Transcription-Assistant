@@ -1099,6 +1099,11 @@ public enum RoomSwapScript {
         if [ ! -d "$RESIDENT" ] && [ -d "$PREVIOUS" ]; then
           say "interrupted with the resident path empty — putting the previous bundle back"
           /bin/mv -f "$PREVIOUS" "$RESIDENT" 2>/dev/null
+          # A rescue inside the ROLLBACK arrives with the failed bundle still parked at `.failed`,
+          # because B1 Fix 1 made it outlive the restore. Nothing else would ever delete it: ~90 MB
+          # on a Mac that also holds a clinic day of audio. Idempotent, and a no-op on the swap
+          # path where that path never existed (V, 10 Sep, ruling on Fix 1 flag 1).
+          /bin/rm -rf "${RESIDENT}.failed"
           record swap_failed '"the swap was interrupted and the previous version was put back"'
         fi
         bootstrap_agent
@@ -1118,6 +1123,9 @@ public enum RoomSwapScript {
 
       # ── 8.2 One previous bundle, never two (R3-12) ─────────────────────────────────────────
       /bin/rm -rf "$PREVIOUS"
+      # And no failed bundle from a rollback that was killed before its own cleanup could run. The
+      # next swap is the last chance anything has to notice it (V, 10 Sep, ruling on Fix 1 flag 1).
+      /bin/rm -rf "${RESIDENT}.failed"
 
       # ── 8.3 and 8.4 — THE TWO MOVES, adjacent, with nothing between them ───────────────────
       if ! /bin/mv -f "$RESIDENT" "$PREVIOUS"; then

@@ -288,3 +288,26 @@ after 16.243 seconds.`**, 0 issues, plus `RoomSelfUpdateTests` three more times 
    rollback; the old two-line anchor failed loudly rather than silently testing nothing. **This section is ~30 lines
    over its 60-line cap, a third of it the verbatim block the kickoff asks for.**
 
+---
+
+# Fix 2
+
+**10 September 2026.** New commit on `4503639`, same branch, not amended, not pushed, `main` untouched; the sha is the
+single new commit. Pre-flight matched: `HEAD 4503639`, no tracked modifications, seven untracked bus papers. Flag 1's
+ruling [V-10SEP] and nothing else — the two sweeps, verbatim (the `#` labels are mine, not source):
+
+```bash
+# rescue(), immediately after its restore mv — RoomSelfUpdate.swift:1106
+/bin/rm -rf "${RESIDENT}.failed"
+# step 8.2, beside the existing rm -rf "$PREVIOUS" — RoomSelfUpdate.swift:1128
+/bin/rm -rf "${RESIDENT}.failed"
+```
+
+`RoomSelfUpdateTests.swift:923` is flipped to assert `.failed` is ABSENT after a killed rollback. It discriminates:
+with the `rescue()` sweep removed it fails on that exact line, and passes with it restored. Both sweeps are no-ops
+where the path never existed — the swap-window kill, and every ordinary swap — which
+`aScriptKilledBetweenTheTwoMovesRestoresThePreviousBundle` and `exactlyOnePreviousBundleIsKept` still prove.
+
+**Gates.** `swift test` over SSH **`✔ Test run with 521 tests in 42 suites passed after 16.010 seconds.`**, 0 issues.
+The other five re-run green: typecheck clean, `npm test` 67 files / 1572 tests, build completed, `check:silent` the
+accepted nine, `swift build` complete. No bundle, nothing signed. Nothing flagged.

@@ -916,12 +916,11 @@ import Testing
         atPath: fixture.resident.appendingPathComponent("Contents/MacOS/room-recorder").path))
     // 2. `.previous` was consumed by the restore.
     #expect(!FileManager.default.fileExists(atPath: fixture.previous.path))
-    // 2a. AND `<resident>.failed` IS STILL THERE — ~90 MB of the build that could not poll, which
-    //     nothing in this script or the app ever deletes. A consequence of H1's reordering (the
-    //     failed bundle now outlives the restore), not of the kill; flagged in the Fix 1 report
-    //     for a ruling. If the ruling is to sweep it, this expectation flips rather than quietly
-    //     going stale.
-    #expect(FileManager.default.fileExists(atPath: fixture.resident.path + ".failed"))
+    // 2a. AND `<resident>.failed` IS GONE. Fix 1 made the failed bundle outlive the restore, so a
+    //     kill in this window used to leave ~90 MB of a build that could not poll parked on a Mac
+    //     that also holds a clinic day of audio, with nothing on any path to delete it. `rescue()`
+    //     now sweeps it immediately after putting the old bundle back (V, 10 Sep, Fix 1 flag 1).
+    #expect(!FileManager.default.fileExists(atPath: fixture.resident.path + ".failed"))
     // 3. The interruption is on the record — the rescue's own sentence, not the watchdog's, since
     //    the script died before it could write its own.
     let result = try #require(Self.readResult(fixture))
