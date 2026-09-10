@@ -96,17 +96,16 @@ private enum RoomRecorderCLI {
         let origin = try RoomEnrolment.validate(origin: try arguments.require("--origin"))
         let enrolled = try await RoomEnrolment.exchange(token: token, origin: origin)
 
-        // Keychain FIRST, config second. If the keychain write fails the verb must exit non-zero
+        // SESSION FIRST, config second. If the session write fails the verb must exit non-zero
         // with no config written, so the script's `set -e` stops the paste before the LaunchAgent
         // is installed — a resident app with no session would poll into 401s for ever.
-        try RoomKeychain.save(
-          RoomKeychainRecord(
-            session: enrolled.session.token,
-            installID: enrolled.installID,
-            roomSlug: enrolled.roomSlug,
-            roomName: enrolled.roomName,
-            origin: origin.absoluteString
-          ))
+        //
+        // ─── AND IT IS A FILE NOW, NOT THE KEYCHAIN (Release B1.5, B1.5-D3) ──────────────────
+        // The keychain item this used to write is the one macOS keys by cdhash, so the NEXT build
+        // to launch could not read what this one wrote without a human clicking Allow. A room
+        // enrolled today would have been unable to update itself tomorrow. `RoomSessionStore`
+        // writes `<root>/room-session.json` at 0600 instead, and nothing here touches securityd.
+        try RoomSessionStore.save(enrolled.record(origin: origin), root: root)
 
         let persistence = RoomPersistence(root: root)
         var configuration: RoomConfiguration

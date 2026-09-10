@@ -106,10 +106,28 @@ public enum RoomKeychain {
     guard status == errSecSuccess else { throw RoomKeychainError.status(status) }
   }
 
+  /// Read the item — **and never wait for a human** (Release B1.5, B1.5-D2).
+  ///
+  /// ─── THE ONE ATTRIBUTE THIS BUILD EXISTS FOR ───────────────────────────────────────────────
+  /// The ACL on this item is by designated requirement and matches every build we sign. The
+  /// PARTITION LIST is not: with no Apple Team ID on the signing identity, macOS keys it by cdhash,
+  /// so every new version is a stranger and securityd raises a dialog. On a clinic Mac at 3 a.m.
+  /// there is nobody to click it, and this call blocked for ever — 0.1.11 died that way on Home
+  /// Office, and every room's list holds only `[0.1.8]`, so the first update of any of them would
+  /// have done the same.
+  ///
+  /// `kSecUseAuthenticationUIFail` makes the mismatch RETURN instead of waiting:
+  /// `errSecInteractionNotAllowed`, in microseconds. It grants nothing and hides nothing; it turns
+  /// a hang into an error a caller can act on, which is the whole of B1.5-D2's "no code path may
+  /// block on securityd".
+  ///
+  /// This is now a FALLBACK. `RoomSessionStore` is what the app reads; this runs once, on a room
+  /// that still has its session only in the keychain, and its result is written to a file.
   public static func load() throws -> RoomKeychainRecord {
     var query = baseQuery()
     query[kSecReturnData as String] = true
     query[kSecMatchLimit as String] = kSecMatchLimitOne
+    query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
 
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)

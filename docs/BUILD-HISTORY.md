@@ -381,3 +381,25 @@ now that the app cannot — the canary it would have acknowledged is gone by the
 until the thirty-minute grace expires. Two residuals were ruled accepted and written into §14.3: a link down for the
 whole window rolls back a healthy build at the cost of a re-offer, and a rollback with no previous bundle leaves the
 room thrashing on a build the ledger will hold. 521 tests, 0 issues.
+
+## Release B1.5 — the session store (10 September 2026)
+
+The canary was built to stop a broken build stranding a room, and then the thing that stranded a room turned out to be
+the keychain. The room session was a login-keychain item whose ACL is by designated requirement — which matched every
+build we sign, and which is what §5.4 reasoned about. But securityd keeps a second gate, the **partition list**, and
+with no Apple Team ID on the signing identity macOS keys it by **cdhash**: a hash of the exact binary. Every new version
+is therefore a stranger to the item and securityd raises a dialog. Home Office's list read `[0.1.8, 0.1.9, 0.1.10]`
+because a human clicked Allow twice on the Mini's own screen at 05:21 and 05:40 — which is why R3 acceptance items 1
+and 2 are now marked NOT PROVEN REMOTE. 0.1.11 launched with nobody at the screen and blocked for ever inside the
+keychain read. Every clinic Mac's list holds `[0.1.8]` alone, so the first self-update of any of those rooms, to any
+version, would have hung the same way.
+
+The session now lives in `<root>/room-session.json`, mode 0600, written atomically, beside `config.json` — the same
+protection an auto-login kiosk with a permanently unlocked login keychain was ever giving it. `RoomSessionStore` reads
+the file first and falls back to the keychain exactly once, with `kSecUseAuthenticationUI = kSecUseAuthenticationUIFail`
+so a partition mismatch returns an error in microseconds instead of waiting for a click; a successful fallback writes
+the file, so the next launch never asks again. `enrol` writes the file and no longer writes the keychain, and the
+legacy item is never deleted by the app. A second keychain read inside `RoomEngine.init`, which would have hung after
+the session had already been read from the file, goes through the store too — "no code path may block on securityd"
+means all of them. The seven existing rooms are migrated by one SSH command each, run before 0.1.13 reaches them.
+Ships as 0.1.13; 0.1.11 and 0.1.12 stay withdrawn.

@@ -495,11 +495,13 @@ public actor RoomEngine {
   /// THE SESSION IS IN MEMORY ONLY — `saveConfiguration` strips it on the way to disk.
   public static func startingConfiguration(
     rootURL: URL = defaultRootURL,
-    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() }
+    /// Nil means the real one: `RoomSessionStore.load(root:)`. It cannot be spelled as a default
+    /// value because a default cannot see another parameter, and this one needs `rootURL`.
+    enrolmentReader: (@Sendable () -> RoomKeychainRecord?)? = nil
   ) throws -> RoomConfiguration {
     let persistence = RoomPersistence(root: rootURL)
     var configuration = try persistence.loadConfiguration()
-    let enrolment = enrolmentReader()
+    let enrolment = (enrolmentReader ?? { RoomSessionStore.load(root: rootURL) })()
     guard let session = enrolment?.session, !session.isEmpty else {
       // REFUSE LOUDLY AND STOP. Polling unauthenticated in a loop cannot succeed, buries the real
       // cause under a retry backoff, and on the server looks like a room that is merely offline.
@@ -508,15 +510,15 @@ public actor RoomEngine {
           state: .needsEnrol,
           sessionID: nil,
           pendingPieceCount: 0,
-          lastError: "no session in the keychain; this install is not enrolled",
+          lastError: "no session in room-session.json or the keychain; this install is not enrolled",
           updatedAt: Date()))
       FileHandle.standardError.write(
         Data(
           """
-          room-recorder: no room session in the keychain (service \
+          room-recorder: no room session in room-session.json or the keychain (service \
           \(RoomKeychain.service)). This install cannot authenticate and will not poll. \
           Re-run the install command for this room from /admin/bench — enrolment is what writes \
-          the session.
+          the session — or run the migration command for this room if it enrolled before 0.1.13.
 
           """.utf8))
       throw RoomEngineError.needsEnrolment
@@ -528,8 +530,9 @@ public actor RoomEngine {
   public static func load(
     rootURL: URL = defaultRootURL,
     /// Where the session comes from. Injected so a test can prove the read without touching the
-    /// real login keychain — the live room's session lives in it and must not be disturbed.
-    enrolmentReader: @Sendable () -> RoomKeychainRecord? = { try? RoomKeychain.load() },
+    /// real login keychain — the live room's session lives in it and must not be disturbed. Nil
+    /// means `RoomSessionStore.load(root:)`, which needs the root a default value cannot see.
+    enrolmentReader: (@Sendable () -> RoomKeychainRecord?)? = nil,
     remoteFactory: @Sendable (RoomConfiguration) -> any RoomEngineRemote = {
       BenchClient(configuration: $0)
     },
@@ -722,11 +725,18 @@ public actor RoomEngine {
     residentCaptureOwner = nil
     residentControlJournal = nil
     residentControlCommands = [:]
-    // §5.5: install_id is "read from the keychain item written at enrolment". The keychain is the
-    // authority, not config.json — a config copied between Macs would otherwise carry an install
-    // id that belongs to another machine, and the fleet card would show one Mac's facts under
-    // another's row. config.json's copy is a convenience for `status`, never the source.
-    let enrolled = try? RoomKeychain.load()
+    // §5.5: install_id is "read from the enrolment record". That record is the authority, not
+    // config.json — a config copied between Macs would otherwise carry an install id that belongs
+    // to another machine, and the fleet card would show one Mac's facts under another's row.
+    // config.json's copy is a convenience for `status`, never the source.
+    //
+    // ─── B1.5: THIS WAS A SECOND KEYCHAIN READ, AND IT WOULD HAVE HUNG TOO ──────────────────
+    // `startingConfiguration` is not the only place the app asked securityd. This line ran on
+    // every launch, inside `init`, and on an unmigrated room it would have blocked exactly the way
+    // 0.1.11 did — after the session had already been read successfully from the file. B1.5-D2 is
+    // "no code path may block on securityd", and this is one of the paths. It reads the store now,
+    // which answers from the file and never waits.
+    let enrolled = RoomSessionStore.load(root: persistence.root, log: { _ in })
     installID = enrolled?.installID ?? configuration.installID
     // §4.5 rule 1: the app writes `app_<install_id>` and no other form.
     listenerTabID =

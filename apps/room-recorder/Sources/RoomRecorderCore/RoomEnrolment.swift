@@ -34,6 +34,21 @@ public struct RoomEnrolmentResponse: Decodable, Equatable, Sendable {
   }
 }
 
+extension RoomEnrolmentResponse {
+  /// The record `enrol` persists once the exchange has succeeded.
+  ///
+  /// Extracted from `main.swift` in B1.5 so the thing the verb writes can be built and checked
+  /// without a server: the verb now does nothing to it but hand it to `RoomSessionStore.save`.
+  public func record(origin: URL) -> RoomKeychainRecord {
+    RoomKeychainRecord(
+      session: session.token,
+      installID: installID,
+      roomSlug: roomSlug,
+      roomName: roomName,
+      origin: origin.absoluteString)
+  }
+}
+
 public enum RoomEnrolmentError: Error, LocalizedError, Equatable {
   case originNotHTTPS(String)
   case originHostNotAllowed(String)
