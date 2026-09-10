@@ -123,6 +123,35 @@ public enum RoomSelfUpdate {
     root.appendingPathComponent("update-attempts.json", isDirectory: false)
   }
 
+  /// ─── THE LAUNCH CANARY (Release B1, §14.2, B1-D4) ──────────────────────────────────────────
+  /// Written by the swap script immediately after `record ok null`, deleted by the NEW copy of the
+  /// app on its first successful poll. Its presence 180 seconds after the agent was bootstrapped
+  /// means the version that was just swapped in cannot poll, and the script puts the old one back.
+  ///
+  /// WHAT IT PROTECTS AGAINST is the one remaining way a room can need a physical visit: a build
+  /// that installs cleanly — checksum, signature, plist and the resident-verify all pass — and then
+  /// cannot run. `KeepAlive = {SuccessfulExit: false}` restarts it for ever, and the updater lives
+  /// INSIDE the app, so a room that cannot poll can never be told to go back. Nothing outside the
+  /// swap script is in a position to notice, because by then the app that started it is gone.
+  ///
+  /// DELETION IS THE ACKNOWLEDGEMENT, not a field written into it. A delete is atomic, needs no
+  /// parsing by the script, and cannot half-succeed; the app has to be running well enough to have
+  /// completed a poll before it can perform one.
+  public static func canaryURL(root: URL) -> URL {
+    root.appendingPathComponent("update-canary.json", isDirectory: false)
+  }
+
+  /// How long the new version has to complete one poll. THREE MINUTES (V, 10 September 2026,
+  /// B1-D1). Long enough for a cold launch behind a busy disk and a first poll on a slow clinic
+  /// link; short enough that a room that cannot run its new build is back on the old one before
+  /// anybody notices. A literal in the rendered script (`CANARY_SECONDS`), and stated once here so
+  /// the sentence the receipt carries and the loop that times it cannot drift apart.
+  public static let canaryWindow: TimeInterval = 180
+
+  /// How often the watchdog looks. Two seconds: 90 `stat`s across the whole window, and an
+  /// acknowledgement is noticed within two seconds of the app making it.
+  public static let canarySlice: TimeInterval = 2
+
   /// How long a version is held after its SECOND failure. One check interval: the room tries again
   /// tomorrow morning rather than every eighty seconds for ever.
   ///
@@ -274,6 +303,56 @@ public struct RoomUpdateHandover: Codable, Equatable, Sendable {
   }
 }
 
+/// `update-canary.json`, written by the swap script in shell and read by this file in Swift
+/// (Release B1, §14.2.1).
+///
+/// LIKE THE RECEIPT, THIS IS A WIRE FORMAT BETWEEN A BASH HEREDOC AND A `JSONDecoder`. The script
+/// writes these three keys literally; a rename on one side alone produces a file the app cannot
+/// decode, and the app would then fail to acknowledge a canary it had every right to — which the
+/// watchdog would read as "the new version cannot poll" and roll back a build that was working.
+public struct RoomUpdateCanary: Codable, Equatable, Sendable {
+  /// The version that was just swapped in — the one on trial.
+  public let version: String
+  /// The version at `.previous`, read out of its own Info.plist by the script. Nil when the script
+  /// could not read it; the receipt then says `unknown` rather than inventing a number.
+  public let previous: String?
+  public let armedAt: Date
+
+  public init(version: String, previous: String?, armedAt: Date) {
+    self.version = version
+    self.previous = previous
+    self.armedAt = armedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case version, previous
+    case armedAt = "armed_at"
+  }
+
+  public static func read(root: URL) -> RoomUpdateCanary? {
+    guard let data = try? Data(contentsOf: RoomSelfUpdate.canaryURL(root: root)) else { return nil }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try? decoder.decode(RoomUpdateCanary.self, from: data)
+  }
+
+  /// NOTHING IN PRODUCTION CALLS THIS. The swap script writes the real canary, in shell, because
+  /// the app that would have written it exited 64 before the swap began. This exists so a test can
+  /// stand up the state a script leaves behind, and to keep the type symmetrical with the receipt
+  /// and the handover marker. Read the shell in `RoomSwapScript.render` for the authority.
+  @discardableResult
+  public func write(root: URL) -> Bool {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(self) else { return false }
+    let url = RoomSelfUpdate.canaryURL(root: root)
+    guard (try? data.write(to: url, options: [.atomic])) != nil else { return false }
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return true
+  }
+}
+
 /// The attempt ledger (Fix 1, F2) — how many times this Mac has failed on one version.
 ///
 /// ─── WHY THIS HAS TO SURVIVE A RESTART ─────────────────────────────────────────────────────────
@@ -296,16 +375,32 @@ public struct RoomUpdateAttempts: Codable, Equatable, Sendable {
   public var failures: Int
   /// Set when the hold begins. Nil while retries remain.
   public var holdUntil: Date?
+  /// ─── THE STAMP THAT MAKES A RECEIPT COUNTABLE EXACTLY ONCE (Release B1, B1-D8) ────────────
+  /// The `at` of the last `swap_failed` receipt this ledger counted at startup.
+  ///
+  /// G2's residual, now closed. A receipt lives on disk until a poll carries it away, and every
+  /// restart before that poll walked back into `roomUpdateCountStartupReceipt` with the SAME
+  /// receipt and counted it again. Two counts is the hold, so a room could be held after one real
+  /// failure having never had the retry the design promises it. The receipt's own timestamp is the
+  /// identity: the swap script writes it once, and no two failures share it.
+  ///
+  /// Nil on a ledger written by `stop()`, which counts a failure it is watching happen and has no
+  /// receipt to stamp.
+  public var countedReceiptAt: Date?
 
-  public init(version: String, failures: Int, holdUntil: Date? = nil) {
+  public init(
+    version: String, failures: Int, holdUntil: Date? = nil, countedReceiptAt: Date? = nil
+  ) {
     self.version = version
     self.failures = failures
     self.holdUntil = holdUntil
+    self.countedReceiptAt = countedReceiptAt
   }
 
   enum CodingKeys: String, CodingKey {
     case version, failures
     case holdUntil = "hold_until"
+    case countedReceiptAt = "counted_receipt_at"
   }
 
   public static func read(root: URL) -> RoomUpdateAttempts? {
@@ -341,12 +436,19 @@ public struct RoomUpdateAttempts: Codable, Equatable, Sendable {
 public func roomUpdateRecordFailure(
   previous: RoomUpdateAttempts?, version: String, now: Date
 ) -> RoomUpdateAttempts {
-  let failures = (previous?.version == version ? (previous?.failures ?? 0) : 0) + 1
+  let sameVersion = previous?.version == version
+  let failures = (sameVersion ? (previous?.failures ?? 0) : 0) + 1
   let hold =
     failures >= RoomSelfUpdate.failuresBeforeHold
     ? now.addingTimeInterval(RoomSelfUpdate.retryHold)
     : nil
-  return RoomUpdateAttempts(version: version, failures: failures, holdUntil: hold)
+  // B1-D8. The stamp travels with the count it belongs to. Dropping it here would let the next
+  // restart count a receipt this ledger has already counted — the exact double count D8 closes —
+  // because `stop()` rewrites the whole ledger on any failure. A DIFFERENT version resets the
+  // count, so it resets the stamp with it: the new count has never seen a receipt.
+  return RoomUpdateAttempts(
+    version: version, failures: failures, holdUntil: hold,
+    countedReceiptAt: sameVersion ? previous?.countedReceiptAt : nil)
 }
 
 /// PURE — is this Mac currently refusing to attempt `version` again? (Fix 1, F2.)
@@ -376,14 +478,30 @@ public func roomUpdateIsHeld(
 /// — came back, found its own receipt, and counted the same failure a second time. Two counts is
 /// the hold, so a room could be held after ONE real failure having never had its retry.
 ///
+/// ─── AND EXACTLY ONCE ACROSS RESTARTS (Release B1, B1-D8) ──────────────────────────────────────
+/// The narrow `.swapFailed` test above fixed the outcomes that were never this function's to
+/// count. It did not fix the one that IS: the receipt stays on disk until a poll carries it away,
+/// so every restart inside that window — and the launch canary now makes a restart inside it
+/// ordinary, since a rolled-back room comes straight back up with the receipt still there — saw the
+/// same receipt again and counted it again. Two counts is the hold.
+///
+/// The receipt's own `at` is the identity. A ledger that has already counted a receipt carries its
+/// timestamp, and a receipt whose timestamp matches is one this Mac has already paid for.
+///
 /// Returns the ledger it wrote, or nil when there was nothing for this process to count.
 @discardableResult
 public func roomUpdateCountStartupReceipt(
   root: URL, receipt: RoomUpdateResult?, now: Date
 ) -> RoomUpdateAttempts? {
   guard let receipt, receipt.outcome == .swapFailed else { return nil }
-  let ledger = roomUpdateRecordFailure(
-    previous: RoomUpdateAttempts.read(root: root), version: receipt.version, now: now)
+  let previous = RoomUpdateAttempts.read(root: root)
+  // ALREADY COUNTED. Nothing is written: rewriting an identical ledger would be harmless today and
+  // is exactly the kind of "harmless" that stops being so when something else starts reading the
+  // file's mtime.
+  guard receipt.at != previous?.countedReceiptAt else { return nil }
+  var ledger = roomUpdateRecordFailure(
+    previous: previous, version: receipt.version, now: now)
+  ledger.countedReceiptAt = receipt.at
   ledger.write(root: root)
   return ledger
 }
@@ -890,6 +1008,15 @@ public enum RoomSwapScript {
     // computed here, where a real escaper exists, and the shell only copies bytes.
     let versionLiteral = quoted(version)
     let versionJSONLiteral = quoted(jsonStringBody(version))
+    let canary = quoted(RoomSelfUpdate.canaryURL(root: rootURL).path)
+    let canarySeconds = Int(RoomSelfUpdate.canaryWindow)
+    let canarySlice = Int(RoomSelfUpdate.canarySlice)
+    // The rollback receipt's sentence, up to the version it restored — which only the script can
+    // know, because only the script has read the canary file. Escaped HERE for the same reason the
+    // version is (F8): `record` interpolates it into a JSON string literal and bash cannot escape
+    // one. The number is the constant, not a second copy of it.
+    let canaryReasonLiteral = quoted(
+      jsonStringBody("the new version did not poll within \(canarySeconds) s; restored "))
 
     return """
       #!/bin/bash
@@ -917,6 +1044,13 @@ public enum RoomSwapScript {
       VERSION_JSON=\(versionJSONLiteral)
       REQUIREMENT=\(requirement)
       DOMAIN="gui/$(/usr/bin/id -u)"
+      # ── Release B1, §14.2: the launch canary ────────────────────────────────────────────────
+      CANARY=\(canary)
+      CANARY_SECONDS=\(canarySeconds)
+      CANARY_SLICE=\(canarySlice)
+      # Pre-escaped for the JSON string in record(); the version it restored is appended at the
+      # moment of the rollback.
+      CANARY_REASON=\(canaryReasonLiteral)
 
       say() {
         /bin/echo "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ') room-recorder-swap: $*" >> "$LOG" 2>/dev/null
@@ -1006,6 +1140,40 @@ public enum RoomSwapScript {
       # ── 8.6 Say it worked, before anything else can fail ──────────────────────────────────
       record ok null
 
+      # ── 8.6a Arm the launch canary (§14.2 step 1, B1-D1/B1-D4) ────────────────────────────
+      # From here the script is a WATCHDOG, not a swap: it stays alive until the version it just
+      # put in place has proved it can poll, and puts the old one back if it cannot. The app
+      # acknowledges by deleting this file (step 8.9).
+      #
+      # The version at .previous is read from its own Info.plist, because that is the only place
+      # that knows what the room was running a moment ago — the receipt names it so the fleet card
+      # can say what the room went back to. `plutil -extract ... raw` prints the bare string.
+      #
+      # `tr` KEEPS THE JSON WELL-FORMED. This value goes into a JSON string and, unlike VERSION,
+      # it has not been through the Swift escaper — it came off a plist on disk. Restricting it to
+      # the characters a version string is made of means a plist carrying a quote or a backslash
+      # cannot produce a canary file the app is unable to decode.
+      PREVIOUS_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "${PREVIOUS}/Contents/Info.plist" 2>/dev/null | /usr/bin/tr -cd 'A-Za-z0-9._+-')"
+      if [ -z "$PREVIOUS_VERSION" ]; then
+        say "the previous bundle would not say what version it is; the canary records null"
+        PREVIOUS_JSON=null
+      else
+        PREVIOUS_JSON="\\"${PREVIOUS_VERSION}\\""
+      fi
+      /bin/cat > "${CANARY}.tmp" <<JSON
+      {
+        "version": "${VERSION_JSON}",
+        "previous": ${PREVIOUS_JSON},
+        "armed_at": "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      }
+      JSON
+      /bin/chmod 600 "${CANARY}.tmp" 2>/dev/null
+      /bin/mv -f "${CANARY}.tmp" "$CANARY" 2>/dev/null
+      say "armed the canary for ${VERSION}"
+      # THE HANDOVER MARKER STAYS (B1-D5). Staging must outlive this script: the rollback below
+      # touches only the two bundles, but a marker cleared here would let the restarted app sweep
+      # the directory this script is still running out of.
+
       # ── 8.7 The NEW bundle writes the plist, so a plist change ships with the app (R3-11) ──
       # --root is passed because the plist's own ProgramArguments carry it, and an
       # install-launch-agent that defaulted would point a custom-rooted install at the wrong place.
@@ -1016,7 +1184,77 @@ public enum RoomSwapScript {
       # ── 8.8 Start it again ────────────────────────────────────────────────────────────────
       bootstrap_agent
       say "swapped to ${VERSION} and bootstrapped"
-      exit 0
+
+      # ── 8.9 THE WATCHDOG (§14.2 step 3, B1-D1) ────────────────────────────────────────────
+      # The swap is done and the agent is running. This script now waits, up to CANARY_SECONDS,
+      # for the new version to delete the canary — which it does on its first successful poll, and
+      # which it can only do if it launched, read its keychain, reached the server and got an
+      # answer. That is the whole of "the new build works" as far as a room is concerned.
+      #
+      # A build that installs cleanly and then cannot poll is the one failure left that needed
+      # somebody to walk to the room: launchd restarts it for ever, and the updater lives inside
+      # the app, so a room that cannot poll can never be told to go back.
+      say "waiting up to ${CANARY_SECONDS}s for ${VERSION} to poll"
+      CANARY_WAITED=0
+      while [ "$CANARY_WAITED" -lt "$CANARY_SECONDS" ]; do
+        # Checked BEFORE the first sleep, so an app that acknowledges instantly is not made to
+        # wait out a slice for the privilege.
+        if [ ! -f "$CANARY" ]; then
+          say "${VERSION} acknowledged the canary after ${CANARY_WAITED}s"
+          exit 0
+        fi
+        /bin/sleep "$CANARY_SLICE"
+        CANARY_WAITED=$((CANARY_WAITED + CANARY_SLICE))
+      done
+
+      # The version to name in the receipt, read from the canary while it is still there.
+      #
+      # NOT A JSON PARSER — cut on the quote character. This script wrote that file itself two
+      # steps up, one key to a line, so the fourth quote-delimited field of the `previous` line is
+      # the version and nothing else. `"previous": null` has no fourth field, which falls through
+      # to `unknown` rather than to a sentence that trails off. The pattern is anchored to the line
+      # because a version string is server-supplied and could contain the bytes `"previous"`.
+      OLD_VERSION="$(/usr/bin/grep '^  "previous"' "$CANARY" 2>/dev/null | /usr/bin/head -n 1 | /usr/bin/cut -d '"' -f 4 | /usr/bin/tr -cd 'A-Za-z0-9._+-')"
+      if [ -z "$OLD_VERSION" ]; then OLD_VERSION=unknown; fi
+
+      # ── THE LAST LOOK, AT EXACTLY CANARY_SECONDS ──────────────────────────────────────────
+      # The loop above takes its final look one slice BEFORE the window closes — at 178 s, not at
+      # 180 — and then sleeps. Without this line an app that acknowledged anywhere in that last
+      # two seconds, which is exactly where a slow cold launch on a busy clinic Mac lands, would
+      # have a WORKING build deleted and a failure written against it. §14.2.3 says "if still
+      # present at 180 s", and this is 180 s.
+      #
+      # It sits immediately before the bootout for the second reason too: everything between a
+      # check and the first destructive step is a window in which an acknowledgement can arrive
+      # and be ignored, so there is nothing between them but this `say`.
+      if [ ! -f "$CANARY" ]; then
+        say "${VERSION} acknowledged the canary after ${CANARY_WAITED}s"
+        exit 0
+      fi
+
+      # ── 8.9a…8.9g The rollback, in the order §14.2.3 sets out ─────────────────────────────
+      # Each step says so in update.log: this runs unattended, minutes after the operator's last
+      # keystroke, and the log is the only account of it anybody will ever get.
+      say "${VERSION} did not poll within ${CANARY_SECONDS}s — rolling back"
+      /bin/launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null
+      say "booted the agent out"
+
+      # The failed bundle is moved aside and THEN deleted, rather than deleted in place: from here
+      # until the restore the resident path is empty, and that is exactly the window the rescue
+      # trap covers — resident absent, previous present, put it back.
+      /bin/mv -f "$RESIDENT" "${RESIDENT}.failed" 2>/dev/null
+      say "moved ${VERSION} aside"
+      /bin/rm -rf "${RESIDENT}.failed"
+      say "deleted ${VERSION}"
+      /bin/mv -f "$PREVIOUS" "$RESIDENT" 2>/dev/null
+      say "restored ${OLD_VERSION}"
+
+      record swap_failed "\\"${CANARY_REASON}${OLD_VERSION}\\""
+      say "recorded swap_failed"
+      /bin/rm -f "$CANARY"
+      bootstrap_agent
+      say "rolled back to ${OLD_VERSION} and bootstrapped"
+      exit 1
       """
   }
 }

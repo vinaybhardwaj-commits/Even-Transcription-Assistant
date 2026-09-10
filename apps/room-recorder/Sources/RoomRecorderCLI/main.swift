@@ -172,6 +172,29 @@ private enum RoomRecorderCLI {
 
       case "run":
         try arguments.rejectOptions(except: ["--root"])
+        // ─── THE BREAK-ON-LAUNCH HOOK (Release B1 §14.2 step 7, B1-D7) ────────────────────────
+        // A build that installs cleanly and then cannot run is the failure the launch canary
+        // exists for, and it is the one failure that cannot be staged on real hardware without
+        // deliberately shipping a broken build. This file is how acceptance stages it: the
+        // operator touches `break-on-launch` in the room's root, the next version to be swapped in
+        // exits 1 on every launch, launchd restarts it for ever, nothing ever deletes the canary,
+        // and at 180 seconds the swap script puts the previous version back — on a real Mac,
+        // watched from the study.
+        //
+        // FIRST, AND EXIT 1. Before the enrolment read, which exits ZERO by design and would leave
+        // an unenrolled Mac stopped instead of thrashing; before `RoomEngine.load`, which opens the
+        // instance lock and the spool. The whole point is a process that starts and dies, so
+        // nothing that could succeed may run ahead of it.
+        //
+        // Operator-created only. Nothing in this app ever writes it, so a room that has not been
+        // deliberately broken cannot find one.
+        if FileManager.default.fileExists(
+          atPath: root.appendingPathComponent("break-on-launch", isDirectory: false).path)
+        {
+          FileHandle.standardError.write(
+            Data("room-recorder: break-on-launch present; exiting 1\n".utf8))
+          exit(1)
+        }
         // Refuses with needs_enrol and exits 0 if the keychain holds no session — before any
         // application is created, so a Mac that was never enrolled does not sit in a run loop.
         let configuration = try RoomEngine.startingConfiguration(rootURL: root)

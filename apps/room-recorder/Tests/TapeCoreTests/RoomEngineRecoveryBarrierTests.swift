@@ -10,6 +10,7 @@ import Testing
     let recovery = PendingRecovery()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       retainedArchiveRecovery: recovery
     )
@@ -27,7 +28,8 @@ import Testing
     let root = try configuredRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let remote = RecoveryBarrierRemote()
-    let engine = try await RoomEngine.load(rootURL: root, remoteFactory: { _ in remote })
+    let engine = try await RoomEngine.load(
+      rootURL: root, enrolmentReader: enrolledForTests, remoteFactory: { _ in remote })
 
     let task = Task { try await engine.run() }
     try await waitForPoll(remote)
@@ -139,4 +141,24 @@ private actor RecoveryBarrierRemote: RoomEngineRemote {
 
 private enum RecoveryBarrierStubError: Error {
   case unexpectedCall
+}
+
+/// ─── D9: THESE TESTS BUILD ENGINES AGAINST A STUB ENROLMENT, NEVER A REAL KEYCHAIN ───────────
+/// `RoomEngine.load` refuses without a session (`startingConfiguration`, and rightly: polling
+/// unauthenticated in a loop cannot succeed and reads on the server as a room that is merely
+/// offline). The keychain it reads by default is the one belonging to whoever is running the
+/// suite, and a developer Mac is not an enrolled room — so every test in this file that stood an
+/// engine up failed with `.needsEnrolment`, on the console and over SSH alike.
+///
+/// That set of failures was read for a week as a locked login keychain over SSH. It was never the
+/// lock: it is the wrong keychain to be asking, and `RoomSessionFromKeychainTests` has injected
+/// this same reader since the day the refusal was written. Nothing in production changes for this;
+/// the injection point already existed.
+private let enrolledForTests: @Sendable () -> RoomKeychainRecord? = {
+  RoomKeychainRecord(
+    session: "test.session.jwt",
+    installID: "install_testfixture",
+    roomSlug: "home-office",
+    roomName: "Home Office",
+    origin: "https://eta.test")
 }

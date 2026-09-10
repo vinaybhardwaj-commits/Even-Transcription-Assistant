@@ -100,10 +100,8 @@ TRIAL="$(/usr/bin/mktemp -d)/trial"
 /bin/chmod u+w "$TRIAL"
 if ! codesign --force --timestamp=none --sign "$SIGNING_IDENTITY" "$TRIAL" 2>/dev/null; then
   /bin/rm -rf "$(/usr/bin/dirname "$TRIAL")"
-  die "the signing key is present but UNUSABLE in this session.
-  Almost always this means an SSH session: the login keychain is locked and there is no
-  SecurityAgent to unlock it. Run this script from Terminal.app on the Mac's own screen
-  (ratified 8 Sep: builds happen at the console, no scripted unlock-keychain)."
+  die "the signing key is present but unusable in this session. Over SSH run: security unlock-keychain ~/Library/Keychains/login.keychain-db
+  then security set-key-partition-list -S apple-tool:,apple: -s ~/Library/Keychains/login.keychain-db (password at the prompt), and retry."
 fi
 /bin/rm -rf "$(/usr/bin/dirname "$TRIAL")"
 

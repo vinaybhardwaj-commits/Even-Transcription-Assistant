@@ -422,6 +422,11 @@ public actor RoomEngine {
   private let instanceLock: RoomEngineInstanceLock
   private let retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?
   private let residentRuntimeFactory: RoomResidentRuntimeFactory?
+  /// Release B1. Where `canary passed for <version>` goes. Defaulted to the same stderr line every
+  /// other engine message uses — launchd routes it to `launchd.log`, which is where §14.4's
+  /// acceptance reads it — and injected in tests, which cannot capture a process-wide descriptor
+  /// without taking every other test's output with it.
+  private let log: @Sendable (String) -> Void
   private var residentCaptureOwner: (any RoomResidentCaptureOwning)?
   private var residentControlJournal: (any RoomControlJournalOwning)?
   private var residentRuntimeRoomID: String?
@@ -537,6 +542,10 @@ public actor RoomEngine {
     /// `.app` with a version — see `defaultUpdater`.
     updaterFactory: @Sendable (RoomConfiguration, any RoomEngineRemote, URL) -> RoomUpdater? = {
       RoomEngine.defaultUpdater(configuration: $0, remote: $1, rootURL: $2)
+    },
+    /// Release B1 (§14.2 step 5). Stderr by default, which launchd writes into `launchd.log`.
+    log: @escaping @Sendable (String) -> Void = { message in
+      FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
     }
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
@@ -578,7 +587,8 @@ public actor RoomEngine {
       instanceLock: lock,
       retainedArchiveRecovery: retainedArchiveRecovery,
       residentRuntimeFactory: eligibility == .eligible ? residentRuntimeFactory : nil,
-      updater: updaterFactory(configuration, remote, persistence.root)
+      updater: updaterFactory(configuration, remote, persistence.root),
+      log: log
     )
   }
 
@@ -618,7 +628,10 @@ public actor RoomEngine {
     instanceLock: RoomEngineInstanceLock,
     retainedArchiveRecovery: (any RoomRetainedArchiveRecovering)?,
     residentRuntimeFactory: RoomResidentRuntimeFactory?,
-    updater: RoomUpdater? = nil
+    updater: RoomUpdater? = nil,
+    log: @escaping @Sendable (String) -> Void = { message in
+      FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+    }
   ) {
     self.persistence = persistence
     self.configuration = configuration
@@ -631,6 +644,7 @@ public actor RoomEngine {
     self.retainedArchiveRecovery = retainedArchiveRecovery
     self.residentRuntimeFactory = residentRuntimeFactory
     self.updater = updater
+    self.log = log
     // §13.3 step 10, at the earliest moment there is anywhere to put it. The swap script wrote
     // this file and then started this process; the version and build sha this copy reports on its
     // first poll are the other half of the same evidence, and the fleet card showing both change
@@ -656,9 +670,18 @@ public actor RoomEngine {
       // A stale marker goes with it; keeping it would suppress the next sweep too.
       if handover != nil { RoomUpdateHandover.clear(root: persistence.root) }
     }
-    // The receipt is the handover's end. Reading one means the script got far enough to say what
-    // happened, so the marker has done its job.
-    if pendingUpdateResult != nil { RoomUpdateHandover.clear(root: persistence.root) }
+    // ─── THE RECEIPT IS NO LONGER THE HANDOVER'S END (Release B1, B1-D5) ────────────────────
+    //
+    // This used to clear the marker on any receipt, on the reasoning that a script that got far
+    // enough to write one had finished. Under the launch canary it has not: the script writes
+    // `record ok null` and then stays alive for up to three minutes watching whether this very
+    // process can poll, and it is still running out of the staging directory the whole time.
+    // Clearing here would have unsuppressed the sweep above on the NEXT restart inside that
+    // window — the F3 race, reopened by the thing that made the script outlive the swap.
+    //
+    // The marker is cleared where the handover actually ends now: at the acknowledgement, on the
+    // first successful poll (`roomCanaryAcknowledge`). It still goes stale after `handoverGrace`,
+    // so a script that died without either outcome cannot wedge staging for ever.
 
     // ─── COUNT A FAILED SWAP, AND ONLY A FAILED SWAP (Fix 1 F2, corrected by Fix 2 G2) ──────
     //
@@ -944,6 +967,21 @@ public actor RoomEngine {
           primaryLevels: currentLevels(),
           install: installFields
         )
+        // ─── THE CANARY IS ACKNOWLEDGED HERE (Release B1, §14.2 step 5, B1-D3) ─────────────
+        //
+        // `pollCommands` RETURNED. That is the definition of a working build, and it is the whole
+        // acknowledgement: this process launched, read its session out of the keychain, reached
+        // the server and was answered. Before anything below can throw — a superseded response, a
+        // missing room id — because every one of those is the SERVER answering, and a build that
+        // was answered has proved the thing the watchdog is waiting on.
+        //
+        // Costs one `stat` per poll on the ordinary path, where the file is not there.
+        if let acknowledged = roomCanaryAcknowledge(root: persistence.root) {
+          log("canary passed for \(acknowledged)")
+          // B1-D5. The handover ends here, not at the receipt: the swap script is watching for
+          // exactly this deletion and exits the moment it sees it, so staging is now free.
+          RoomUpdateHandover.clear(root: persistence.root)
+        }
         previousPollAt = response.now ?? previousPollAt
         if let polledRoomID = response.roomID, !polledRoomID.isEmpty {
           roomID = polledRoomID
@@ -2751,6 +2789,32 @@ private func createPrivateDirectory(_ url: URL) throws {
   }
   try FileManager.default.setAttributes(
     [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: url.path)
+}
+
+/// The app's half of the launch canary (Release B1, §14.2 step 5, B1-D4).
+///
+/// ─── DELETING THE FILE IS THE ACKNOWLEDGEMENT ────────────────────────────────────────────────
+/// The swap script is at this moment sitting in a two-second loop watching for this file to
+/// disappear, and will put the previous bundle back if it is still there 180 seconds after the
+/// agent was bootstrapped. Deleting it says the one thing the script needs to know and cannot
+/// find out for itself: the version it installed can talk to the server.
+///
+/// Returns the version the canary named, or nil when there was no canary — which is every poll but
+/// the first one after an update, and every poll a room that has never updated will ever make.
+///
+/// IT DELETES EVEN WHEN IT CANNOT DECODE, and returns nil. A canary this app cannot parse would
+/// otherwise sit there until the watchdog rolled back a version that was in fact polling perfectly
+/// well — an update undone by a JSON error. The acknowledgement is the load-bearing half and it
+/// happens either way; what is lost is the version, which costs a log line and the early clearing
+/// of the handover marker, and the marker goes stale on its own half an hour later.
+public func roomCanaryAcknowledge(root: URL) -> String? {
+  let url = RoomSelfUpdate.canaryURL(root: root)
+  guard let data = try? Data(contentsOf: url) else { return nil }
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  let version = (try? decoder.decode(RoomUpdateCanary.self, from: data))?.version
+  try? FileManager.default.removeItem(at: url)
+  return version
 }
 
 private func regularFileSizeIfPresent(_ url: URL) throws -> Int64? {

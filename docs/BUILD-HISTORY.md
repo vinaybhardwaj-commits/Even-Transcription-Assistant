@@ -340,3 +340,32 @@ poll, holding a room after ONE real failure with no retry; `handoverGrace` is 30
 poll route's `instant()` accepts only a full ISO-8601 instant, where bare `Date.parse` had read
 `"12"` as December 2001; the acceptance-item-6 FIFO reader takes a 10-second deadline instead of
 blocking for ever; and the repo's `CLAUDE.md` is committed.
+
+## Release B1 — the launch canary (10 September 2026)
+
+The last failure that could still need somebody to walk to a clinic room: a build that installs
+cleanly — checksum, signature, plist and the resident-verify all pass — and then cannot poll.
+`KeepAlive={SuccessfulExit:false}` restarts it for ever, and the updater lives inside the app, so a
+room that cannot poll can never be told to go back.
+
+The swap script now stays alive after it bootstraps the agent. It writes `update-canary.json`
+naming the new version and the one at `.previous`, then watches for up to **180 s** in 2-second
+slices for the app to delete it. The app deletes it on its first successful `pollCommands` return —
+which it can only reach by launching, reading its keychain, and being answered by the server — logs
+`canary passed for <version>`, and clears the handover marker there rather than at the receipt
+(staging must outlive the watchdog now that the script does). If the file is still there at 180 s
+the script boots the agent out, deletes the new bundle, restores `.previous`, and writes
+`swap_failed … the new version did not poll within 180 s; restored <old>`, which the existing ledger
+counts into one retry and then a six-hour hold. The rescue trap covers the rollback's own
+resident-empty window, proved by a FIFO rendezvous injected inside it and by the same test failing
+with the trap removed.
+
+Also: the attempt ledger stamps `counted_receipt_at`, closing G2's documented residual — a
+`swap_failed` receipt lives on disk until a poll carries it away, and every restart inside that
+window used to count the same failure again, which the canary makes an ordinary event rather than a
+rare one. `main.swift` exits 1 when `break-on-launch` exists in the room root, which is how
+acceptance stages a broken build on real hardware. And the 46 `swift test` issues that had stood
+since Build R3 are gone: they were never the locked login keychain over SSH, they were tests
+standing engines up against the developer's own keychain, and they now inject the same
+`enrolmentReader:` stub `RoomSessionFromKeychainTests` has always used. 520 tests, 0 issues.
+Ships as 0.1.11.

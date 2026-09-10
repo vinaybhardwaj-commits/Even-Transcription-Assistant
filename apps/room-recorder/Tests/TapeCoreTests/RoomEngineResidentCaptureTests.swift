@@ -12,6 +12,7 @@ import Testing
 
     _ = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       residentRuntimeFactory: { _, _ in probe.makeRuntime() }
     )
 
@@ -25,6 +26,7 @@ import Testing
     do {
       _ = try await RoomEngine.load(
         rootURL: missingRoot,
+        enrolmentReader: enrolledForTests,
         residentRuntimeFactory: { _, _ in missingProbe.makeRuntime() }
       )
       Issue.record("expected missing preflight refusal")
@@ -41,6 +43,7 @@ import Testing
     do {
       _ = try await RoomEngine.load(
         rootURL: mismatchRoot,
+        enrolmentReader: enrolledForTests,
         residentRuntimeFactory: { _, _ in missingProbe.makeRuntime() }
       )
       Issue.record("expected mismatched preflight refusal")
@@ -59,6 +62,7 @@ import Testing
     do {
       _ = try await RoomEngine.load(
         rootURL: root,
+        enrolmentReader: enrolledForTests,
         retainedArchiveRecovery: EncoderCapableRecovery())
       Issue.record("expected unavailable runtime refusal")
     } catch {
@@ -119,6 +123,7 @@ import Testing
       do {
         _ = try await RoomEngine.load(
           rootURL: root,
+          enrolmentReader: enrolledForTests,
           retainedArchiveRecovery: recovery,
           residentRuntimeFactory: { _, _ in probe.makeRuntime() })
         Issue.record("expected encoder-capable recovery refusal")
@@ -139,6 +144,7 @@ import Testing
     let launcher = RefusingCaptureLauncher()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: launcher,
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -182,6 +188,7 @@ import Testing
     let remote = ResidentCommandRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -259,6 +266,7 @@ import Testing
         #"[{"id":"cmd_pause","kind":"pause_day","args":{},"created_at":null}]"#)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -295,6 +303,7 @@ import Testing
     )
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -338,6 +347,7 @@ import Testing
       pollRoomID: nil)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: launcher,
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -372,6 +382,7 @@ import Testing
     let remote = ResidentCommandRemote(commandsJSON: "[]")
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -411,6 +422,7 @@ import Testing
     let remote = ResidentCommandRemote(commandsJSON: "[]")
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -454,6 +466,7 @@ import Testing
     let remote = ResidentCommandRemote(commandsJSON: "[]", acknowledgementMode: .notPending)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -485,6 +498,7 @@ import Testing
     )
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -521,6 +535,7 @@ import Testing
         #"[{"id":"cmd_end","kind":"end_day","args":{},"created_at":null}]"#)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -563,6 +578,7 @@ import Testing
     )
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -608,6 +624,7 @@ import Testing
     let remote = ResidentCommandRemote(commandsJSON: "[]")
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -765,7 +782,8 @@ import Testing
         state: .endIntent, failure: nil, atMonoNS: 1, atWallNS: 1))
     let remote = ResidentCommandRemote(commandsJSON: "[]")
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -797,7 +815,8 @@ import Testing
         state: .endIntent, failure: nil, atMonoNS: 2, atWallNS: 2))
     let remote = ResidentCommandRemote(commandsJSON: "[]")
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -829,7 +848,8 @@ import Testing
         #"{"ok":true,"resumable":false,"session":null,"next_idx":{"primary":0,"backup":0},"reason":null,"handover_pending":false,"tab_gone":false}"#
     )
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -858,7 +878,8 @@ import Testing
         #"{"ok":true,"resumable":true,"session":{"id":"bs_resident","room_id":"room_1","label":null,"mic_label":"device-stable-1","status":"paused","started_at":null,"last_any_chunk_at":null},"next_idx":{"primary":12,"backup":34},"reason":null,"handover_pending":false,"tab_gone":false}"#
     )
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -892,7 +913,8 @@ import Testing
     let firstRemote = ResidentCommandRemote(
       commandsJSON: "[]", activeSessionJSON: pausedSession)
     var firstEngine: RoomEngine? = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in firstRemote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in firstRemote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -908,7 +930,8 @@ import Testing
     let secondRemote = ResidentCommandRemote(
       commandsJSON: "[]", activeSessionJSON: pausedSession)
     let secondEngine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in secondRemote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in secondRemote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -938,7 +961,8 @@ import Testing
         state: .captureDurable, failure: nil, atMonoNS: 1, atWallNS: 1))
     let remote = ResidentCommandRemote(commandsJSON: "[]", activeSessionJSON: noSession)
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -967,7 +991,8 @@ import Testing
         state: .captureDurable, failure: nil, atMonoNS: 1, atWallNS: 1))
     let remote = ResidentCommandRemote(commandsJSON: "[]", activeSessionJSON: pausedSession)
     let engine = try await RoomEngine.load(
-      rootURL: root, remoteFactory: { _ in remote },
+      rootURL: root,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in probe.makeRuntime() })
@@ -1022,6 +1047,7 @@ import Testing
         #"[{"id":"cmd_start","kind":"start_day","args":{},"created_at":null}]"#)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1057,6 +1083,7 @@ import Testing
     )
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1088,6 +1115,7 @@ import Testing
     let remote = ResidentCaptureRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1118,6 +1146,7 @@ import Testing
     let remote = ResidentCaptureRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1148,6 +1177,7 @@ import Testing
     let remote = ResidentCaptureRemote(serverEndsAfterFirstActiveLookup: true)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1197,6 +1227,7 @@ import Testing
         """)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1302,6 +1333,7 @@ import Testing
         """)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1344,6 +1376,7 @@ import Testing
         """)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1373,7 +1406,8 @@ import Testing
     matchingProbe.owner.seedRetainedUnfinalizedSessionID("bs_resident")
     let matchingRemote = ResidentCaptureRemote()
     let matchingEngine = try await RoomEngine.load(
-      rootURL: matchingRoot, remoteFactory: { _ in matchingRemote },
+      rootURL: matchingRoot,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in matchingRemote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in matchingProbe.makeRuntime() })
@@ -1392,7 +1426,8 @@ import Testing
     conflictingProbe.owner.seedRetainedUnfinalizedSessionID("bs_old")
     let conflictingRemote = ResidentCaptureRemote()
     let conflictingEngine = try await RoomEngine.load(
-      rootURL: conflictingRoot, remoteFactory: { _ in conflictingRemote },
+      rootURL: conflictingRoot,
+      enrolmentReader: enrolledForTests, remoteFactory: { _ in conflictingRemote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
       residentRuntimeFactory: { _, _ in conflictingProbe.makeRuntime() })
@@ -1419,6 +1454,7 @@ import Testing
     let remote = ResidentCommandRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1459,6 +1495,7 @@ import Testing
     let remote = ResidentRetryEndRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1493,6 +1530,7 @@ import Testing
     let remote = ResidentCaptureRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1523,6 +1561,7 @@ import Testing
     let remote = ResidentSupersededRemote()
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -1647,6 +1686,7 @@ import Testing
       commandsJSON: "[]", activeSessionJSON: activeSessionJSON, patchesFail: patchesFail)
     let engine = try await RoomEngine.load(
       rootURL: root,
+      enrolmentReader: enrolledForTests,
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
@@ -2310,4 +2350,24 @@ private enum ResidentCaptureTestError: Error, Equatable {
   case restartFailed
   case serviceFailed
   case verificationFailed
+}
+
+/// ─── D9: THESE TESTS BUILD ENGINES AGAINST A STUB ENROLMENT, NEVER A REAL KEYCHAIN ───────────
+/// `RoomEngine.load` refuses without a session (`startingConfiguration`, and rightly: polling
+/// unauthenticated in a loop cannot succeed and reads on the server as a room that is merely
+/// offline). The keychain it reads by default is the one belonging to whoever is running the
+/// suite, and a developer Mac is not an enrolled room — so every test in this file that stood an
+/// engine up failed with `.needsEnrolment`, on the console and over SSH alike.
+///
+/// That set of failures was read for a week as a locked login keychain over SSH. It was never the
+/// lock: it is the wrong keychain to be asking, and `RoomSessionFromKeychainTests` has injected
+/// this same reader since the day the refusal was written. Nothing in production changes for this;
+/// the injection point already existed.
+private let enrolledForTests: @Sendable () -> RoomKeychainRecord? = {
+  RoomKeychainRecord(
+    session: "test.session.jwt",
+    installID: "install_testfixture",
+    roomSlug: "home-office",
+    roomName: "Home Office",
+    origin: "https://eta.test")
 }
