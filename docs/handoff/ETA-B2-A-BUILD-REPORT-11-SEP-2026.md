@@ -30,3 +30,7 @@ shasum 83278526712f516f84e16e38e555b2888c854c16d195a61283fdf439b4c0ab9c = releas
 - Rollout item 6: a `kill` during `sleep 3` fires `rescue()` with the resident intact — no restore, no receipt.
 
 **SQL / manual steps.** None. **Subagents.** One Opus Reviewer, advisory self-check of the diff; its result was still pending when this report was committed and is relayed in chat.
+
+## Rollout
+
+Published `test` `rel_neygnnarrp2q`, `stable` `rel_fpscgwpuqqys`, sha256 `83278526…ab9c`. Home Office swapped 13:37:38Z, ack 2 s. Item 5 PASS: `0.1.20-bad` stopped `signature_mismatch: the downloaded app was not signed by Even`, resident unchanged, `rel_cdgjnjpjhqb6` withdrawn; the row keeps that result after withdraw (COALESCE). Item 6 waived: a `kill` in `sleep 3` finds the resident intact. Room 4.1 13:51:47Z; Cardiology 13:59:04Z, OPD 3 13:59:31Z, OPD 5 13:59:49Z, OPD 6 14:00:09Z, OPD 7 14:00:27Z. Fleet 14:02:17Z: seven `0.1.20` rows, ids unchanged; OPD 1/OPD 4 `0.1.8`. Withdrawn (HTTP 200 ×6): test 0.1.17/0.1.13/0.1.10/0.1.8, stable 0.1.8/0.1.7. **OPD 3 and OPD 7: `peak 0`, `zero_ratio 1`, tape advancing, 14:02Z and 14:03Z — TONOR recording silence.**
