@@ -33,7 +33,15 @@ import { sql } from "@/lib/db";
 import { signRoomJwt } from "@/lib/room-auth";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
-import type { FleetPayload, FleetRow, InstallView, ReleaseView } from "@/lib/room-install-view";
+import {
+  groupFleet,
+  type FleetPayload,
+  type FleetRoom,
+  type FleetRow,
+  type InputDevice,
+  type InstallView,
+  type ReleaseView,
+} from "@/lib/room-install-view";
 
 export type { FleetPayload, FleetRow, InstallView, ReleaseView };
 
@@ -58,6 +66,7 @@ export type InstallErrorCode =
   | "ENROL_RATE_LIMITED"
   | "NOT_FOUND"
   | "RETIRED"
+  | "BAD_CHANNEL"
   | "STORE_UNAVAILABLE";
 
 export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
@@ -71,6 +80,8 @@ export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
   ENROL_RATE_LIMITED: 429,
   NOT_FOUND: 404,
   RETIRED: 409,
+  // B2-D5. The assign route admits `stable` and nothing else; anything else is the caller's error.
+  BAD_CHANNEL: 400,
   STORE_UNAVAILABLE: 503,
 };
 
@@ -710,7 +721,8 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
              session_open, update_channel, last_update_result, last_update_version,
-             last_update_error, last_update_at, disk_free_bytes
+             last_update_error, last_update_at, disk_free_bytes,
+             assigned_channel, peak, zero_ratio, input_devices
     `) as InstallView[];
     return rows[0] ? normaliseInstall(rows[0]) : null;
   } catch (e) {
@@ -749,6 +761,13 @@ export type InstallPollFields = {
   last_update_at?: string | null;
   /** V, 9 Sep. Free bytes on the captures volume. Never 0 or -1 — absent when unreadable. */
   disk_free_bytes?: string | number | null;
+  // ── Release B2 (0079). Sent by 0.1.20 and later; every earlier app omits all three. ─────────
+  /** B2-D7. Highest absolute sample over the last piece window, 0..1. */
+  peak?: string | number | null;
+  /** B2-D7. Fraction of bit-exact zero samples over the same window, 0..1. */
+  zero_ratio?: string | number | null;
+  /** B2-D10. The device list, as the JSON text the query string carried (or already parsed). */
+  input_devices?: string | unknown[] | null;
 };
 
 export type InstallPollResult = { ok: true } | { ok: false; code: "RETIRED" | "NOT_FOUND" };
@@ -789,6 +808,10 @@ export function cleanPollFields(raw: InstallPollFields): {
   last_update_error: string | null;
   last_update_at: string | null;
   disk_free_bytes: string | null;
+  peak: number | null;
+  zero_ratio: number | null;
+  /** Normalised JSON text for the `::jsonb` cast, or null. */
+  input_devices: string | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -847,7 +870,62 @@ export function cleanPollFields(raw: InstallPollFields): {
     last_update_error: str(raw.last_update_error, 300),
     last_update_at: Number.isFinite(updateAtMs) ? new Date(updateAtMs).toISOString() : null,
     disk_free_bytes: /^[0-9]{1,19}$/.test(diskDigits) && diskDigits !== "0" ? diskDigits : null,
+    // ── Release B2 ─────────────────────────────────────────────────────────────────────────
+    peak: unitRatio(raw.peak),
+    zero_ratio: unitRatio(raw.zero_ratio),
+    input_devices: cleanInputDevices(raw.input_devices),
   };
+}
+
+/**
+ * PURE — B2-D7. A number in 0..1, or nothing. Out of range is DROPPED, never clamped: a clamped
+ * value is indistinguishable from a real one (the `cleanLevels` rule). Exponent form is accepted
+ * because Swift prints a small Double as `1e-05`; `NaN`, `Infinity`, hex and empty are not.
+ */
+export function unitRatio(v: unknown): number | null {
+  const s = typeof v === "number" ? String(v) : typeof v === "string" ? v.trim() : "";
+  if (!/^(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
+}
+
+/** B2-D10 bounds, as the kickoff fixed them. */
+export const INPUT_DEVICES_MAX = 16;
+export const INPUT_DEVICE_FIELD_MAX = 64;
+
+/**
+ * PURE — B2-D10. The device list, bounded, as JSON text for the `::jsonb` cast — or null.
+ *
+ * ALL OR NOTHING. One malformed entry drops the whole list and the COALESCE keeps the last good
+ * one. Dropping only the bad entry would render a shorter list that looks complete, and "the TONOR
+ * is not plugged in" is exactly the wrong thing to tell an operator when it is. More than one
+ * default is also malformed: CoreAudio has at most one default input.
+ *
+ * An EMPTY array is kept — it is a measurement ("nothing is plugged in"), not an absence.
+ */
+export function cleanInputDevices(v: unknown): string | null {
+  let parsed: unknown = v;
+  if (typeof v === "string") {
+    if (v.length > 16_384) return null;
+    try {
+      parsed = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length > INPUT_DEVICES_MAX) return null;
+  const out: InputDevice[] = [];
+  for (const d of parsed) {
+    if (!d || typeof d !== "object") return null;
+    const { name, uid, is_default } = d as Record<string, unknown>;
+    if (typeof name !== "string" || typeof uid !== "string" || typeof is_default !== "boolean") return null;
+    const n = name.trim();
+    const u = uid.trim();
+    if (!n || !u || n.length > INPUT_DEVICE_FIELD_MAX || u.length > INPUT_DEVICE_FIELD_MAX) return null;
+    out.push({ name: n, uid: u, is_default });
+  }
+  if (out.filter((d) => d.is_default).length > 1) return null;
+  return JSON.stringify(out);
 }
 
 /**
@@ -922,7 +1000,12 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              last_update_version = COALESCE(${f.last_update_version}::text, last_update_version),
              last_update_error  = COALESCE(${f.last_update_error}::text,  last_update_error),
              last_update_at     = COALESCE(${f.last_update_at}::timestamptz, last_update_at),
-             disk_free_bytes    = COALESCE(${f.disk_free_bytes}::bigint, disk_free_bytes)
+             disk_free_bytes    = COALESCE(${f.disk_free_bytes}::bigint, disk_free_bytes),
+             -- Release B2 (0079). COALESCE like the rest: every app below 0.1.20 omits all three,
+             -- and its polls must leave a newer app's last reading exactly where it was.
+             peak               = COALESCE(${f.peak}::real, peak),
+             zero_ratio         = COALESCE(${f.zero_ratio}::real, zero_ratio),
+             input_devices      = COALESCE(${f.input_devices}::jsonb, input_devices)
        WHERE install_id = ${f.install_id}
          AND retired_at IS NULL
       RETURNING install_id
@@ -966,6 +1049,24 @@ function normaliseInstall(r: InstallView): InstallView {
       r.disk_free_bytes === null || r.disk_free_bytes === undefined
         ? null
         : Number(r.disk_free_bytes),
+    // Release B2 (0079). `real` can arrive as a string from some drivers; jsonb normally arrives
+    // parsed, but a string is parsed here rather than rendered as one. Anything else is null.
+    assigned_channel: r.assigned_channel === "stable" ? "stable" : null,
+    peak: r.peak === null || r.peak === undefined ? null : Number(r.peak),
+    zero_ratio: r.zero_ratio === null || r.zero_ratio === undefined ? null : Number(r.zero_ratio),
+    input_devices: (() => {
+      const v = r.input_devices as unknown;
+      if (Array.isArray(v)) return v as InputDevice[];
+      if (typeof v === "string") {
+        try {
+          const p = JSON.parse(v);
+          return Array.isArray(p) ? (p as InputDevice[]) : null;
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    })(),
   };
 }
 
@@ -980,7 +1081,8 @@ function normaliseInstall(r: InstallView): InstallView {
 export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
   const degraded: string[] = [];
 
-  let rooms: Array<{ id: string; slug: string; name: string; disabled_at: string | null }> = [];
+  let rooms: FleetRoom[] = [];
+  let roomsRead = false;
   try {
     // WHICH ROOMS ARE ON THIS CARD, and the second half of the predicate is the important half.
     //
@@ -1006,6 +1108,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              )
        ORDER BY name ASC
     `) as typeof rooms;
+    roomsRead = true;
   } catch (e) {
     degraded.push(`rooms_unavailable:${String((e as Error)?.message ?? e).slice(0, 120)}`);
   }
@@ -1023,7 +1126,8 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
              session_open, update_channel, last_update_result, last_update_version,
-             last_update_error, last_update_at, disk_free_bytes
+             last_update_error, last_update_at, disk_free_bytes,
+             assigned_channel, peak, zero_ratio, input_devices
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500
@@ -1057,38 +1161,75 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
   // is explicit that the header does not change in R3.
   const release = releases.stable;
 
-  const nowMs = now.getTime();
-  const tokenTtlMs = TOKEN_TTL_MINUTES * 60_000;
-
-  const rows: FleetRow[] = rooms.map((room) => {
-    const mine = installs.filter((i) => i.room_id === room.id);
-    // The bound install: enrolled and not retired. At most one — the partial unique index says so,
-    // and taking [0] of a created_at-descending list is the same answer if it ever were not.
-    const bound = mine.find((i) => i.enrolled_at && !i.retired_at) ?? null;
-    // An outstanding token's install: minted, never enrolled, not retired, and still inside the
-    // 30-minute TTL. Past the TTL it is not "enrolling" any more, it is abandoned, and the
-    // nightly cleanup takes it away.
-    const pending =
-      mine.find(
-        (i) =>
-          !i.enrolled_at &&
-          !i.retired_at &&
-          nowMs - new Date(i.created_at).getTime() < tokenTtlMs,
-      ) ?? null;
-    const lastRetired = bound ? null : (mine.find((i) => i.retired_at && i.enrolled_at) ?? null);
-
-    return {
-      room_id: room.id,
-      room_slug: room.slug,
-      room_name: room.name,
-      disabled: Boolean(room.disabled_at),
-      install: bound,
-      pending,
-      last_retired: lastRetired,
-    };
+  // ─── ONE ROW PER ROOM (B2-D3) ─────────────────────────────────────────────────────────────
+  // `groupFleet` (lib/room-install-view.ts) is where bound / pending / last_retired are decided —
+  // the same three rules that lived inline here, moved so they can be tested without a database —
+  // plus the retired count on each row and the Unassigned list.
+  //
+  // UNASSIGNED ONLY WHEN THE ROOM LIST IS TRUE. If the room read failed, every install would look
+  // room-less, and a card that listed the whole fleet as "Unassigned" would be a louder lie than the
+  // `rooms_unavailable` line it already shows.
+  const grouped = groupFleet({
+    rooms,
+    installs,
+    nowMs: now.getTime(),
+    tokenTtlMs: TOKEN_TTL_MINUTES * 60_000,
   });
+  const rows: FleetRow[] = grouped.rows;
 
-  return { now: now.toISOString(), rows, latest_release: release, releases, degraded };
+  return {
+    now: now.toISOString(),
+    rows,
+    latest_release: release,
+    releases,
+    degraded,
+    unassigned: roomsRead ? grouped.unassigned : [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The server-assigned channel (B2-D5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Assign `stable` to one install. ONE-WAY by type and by the 0079 CHECK: there is no way to pass
+ * `test` here, and the column would refuse it if there were. Null when the install is unknown or
+ * retired — the route answers 404 for both, as the retire route does.
+ */
+export async function assignInstallChannel(
+  installId: string,
+  channel: "stable",
+): Promise<{ install_id: string; assigned_channel: "stable" } | null> {
+  try {
+    const rows = (await sql`
+      UPDATE room_install
+         SET assigned_channel = ${channel}
+       WHERE install_id = ${installId} AND retired_at IS NULL
+      RETURNING install_id, assigned_channel
+    `) as Array<{ install_id: string; assigned_channel: "stable" }>;
+    return rows[0] ?? null;
+  } catch (e) {
+    throw classifyInstallError(e);
+  }
+}
+
+/**
+ * The value the poll response carries as `assigned_channel`. FAIL-SAFE TO NULL, never a throw:
+ * this runs on every native poll, and "nothing assigned" is always a safe answer — the Mac keeps
+ * the channel its own config.json names. That includes the minutes between a deploy and
+ * migration 0079, when the column does not exist yet.
+ */
+export async function readAssignedChannel(installId: string): Promise<"stable" | null> {
+  try {
+    const rows = (await sql`
+      SELECT assigned_channel FROM room_install
+       WHERE install_id = ${installId} AND retired_at IS NULL
+       LIMIT 1
+    `) as Array<{ assigned_channel: string | null }>;
+    return rows[0]?.assigned_channel === "stable" ? "stable" : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

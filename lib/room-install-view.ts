@@ -61,7 +61,19 @@ export type InstallView = {
   last_update_at: string | null;
   /** V, 9 Sep. Free bytes on the captures volume. NULL = not reported. NEVER 0. */
   disk_free_bytes: number | null;
+  // ── Release B2 (0079). NULL on every row until migration 0079 runs, and on every app below 0.1.20.
+  /** B2-D5. `stable` when an admin pressed "Move to stable"; NULL when nothing is assigned. */
+  assigned_channel?: "stable" | null;
+  /** B2-D7. Highest absolute sample, 0..1, over the last piece window. NULL = not reported. */
+  peak?: number | null;
+  /** B2-D7. Fraction of bit-exact zero samples, 0..1, same window. NULL = not reported. */
+  zero_ratio?: number | null;
+  /** B2-D10. Every input CoreAudio listed, default marked. READ-ONLY. NULL = never reported. */
+  input_devices?: InputDevice[] | null;
 };
+
+/** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
+export type InputDevice = { name: string; uid: string; is_default: boolean };
 
 export type UpdateChannel = "stable" | "test";
 
@@ -102,6 +114,35 @@ export type FleetRow = {
   /** The most recently retired install, when nothing is bound. Gives §6's `retired` state its
    *  meaning: a room that HAD a Mac and no longer does reads differently from one that never did. */
   last_retired: InstallView | null;
+  /**
+   * B2-D3. How many retired installs this room has had, newest first in `earlier`. A COUNT on the
+   * row, never a row of its own: every re-enrolment paste retires one, and a card with a line per
+   * paste stops answering "which Mac runs which room". Optional so a payload from before B2 reads
+   * as zero.
+   */
+  earlier_installs?: number;
+  earlier?: EarlierInstall[];
+};
+
+/** B2-D3 — what the "N earlier installs" disclosure lists: the id and when it was retired. */
+export type EarlierInstall = { install_id: string; retired_at: string };
+
+/**
+ * B2-D3 — an install the card cannot put on a room row, listed ONCE under "Unassigned" rather than
+ * dropped. Three ways in:
+ *   · `room_not_on_card` — its room is disabled or a scratch room and nothing live holds it there;
+ *   · `never_enrolled`   — minted, never pasted, past the 30-minute TTL (the nightly cleanup takes
+ *                          it a day later). Every machine column on it is null;
+ *   · `second_bound`     — a second enrolled, un-retired install in one room. The partial unique
+ *                          index forbids it; if it ever existed, grouping must not hide it.
+ */
+export type UnassignedInstall = {
+  install_id: string;
+  room_id: string;
+  hostname: string | null;
+  created_at: string;
+  retired_at: string | null;
+  why: "room_not_on_card" | "never_enrolled" | "second_bound";
 };
 
 export type FleetPayload = {
@@ -116,7 +157,83 @@ export type FleetPayload = {
    */
   releases: { stable: ReleaseView | null; test: ReleaseView | null };
   degraded: string[];
+  /** B2-D3. Installs that belong on no row of this card. Optional: absent before B2 reads as none. */
+  unassigned?: UnassignedInstall[];
 };
+
+/** A room as `readFleet` reads it — the only four columns grouping needs. */
+export type FleetRoom = { id: string; slug: string; name: string; disabled_at: string | null };
+
+/**
+ * PURE — B2-D3. One row per room on the card, the bound install as the row, retired installs as a
+ * count on it, and everything that fits no row under "Unassigned".
+ *
+ * THE FIRST THREE FIELDS OF EACH ROW ARE WHAT `readFleet` ALREADY COMPUTED, moved here unchanged so
+ * they can be tested without a database: `install` is the bound Mac, `pending` an in-TTL mint, and
+ * `last_retired` the newest enrolled-then-retired install when nothing is bound — which is what
+ * keeps the `retired` row state meaning "this room HAD a Mac". `deriveRow` reads none of the new
+ * fields and is unchanged by grouping.
+ *
+ * NOTHING ENROLLED AND UN-RETIRED CAN DISAPPEAR. The partial unique index allows one per room; if a
+ * second ever existed it would not be `install`, `pending` or retired, so it goes to Unassigned as
+ * `second_bound` rather than off the card. `installs` must be newest first, as `readFleet` reads it.
+ */
+export function groupFleet(input: {
+  rooms: FleetRoom[];
+  installs: InstallView[];
+  nowMs: number;
+  tokenTtlMs: number;
+}): { rows: FleetRow[]; unassigned: UnassignedInstall[] } {
+  const { rooms, installs, nowMs, tokenTtlMs } = input;
+  const onCard = new Set(rooms.map((r) => r.id));
+  const unassigned: UnassignedInstall[] = [];
+  const park = (i: InstallView, why: UnassignedInstall["why"]) =>
+    unassigned.push({
+      install_id: i.install_id,
+      room_id: i.room_id,
+      hostname: i.hostname,
+      created_at: i.created_at,
+      retired_at: i.retired_at,
+      why,
+    });
+
+  const rows: FleetRow[] = rooms.map((room) => {
+    const mine = installs.filter((i) => i.room_id === room.id);
+    const bound = mine.find((i) => i.enrolled_at && !i.retired_at) ?? null;
+    const pending =
+      mine.find(
+        (i) =>
+          !i.enrolled_at && !i.retired_at && nowMs - new Date(i.created_at).getTime() < tokenTtlMs,
+      ) ?? null;
+    const lastRetired = bound ? null : (mine.find((i) => i.retired_at && i.enrolled_at) ?? null);
+    const earlier = mine
+      .filter((i) => i.retired_at)
+      .map((i) => ({ install_id: i.install_id, retired_at: i.retired_at! }));
+
+    for (const i of mine) {
+      if (i.retired_at || i === bound || i === pending) continue;
+      if (i.enrolled_at) park(i, "second_bound");
+      else if (nowMs - new Date(i.created_at).getTime() >= tokenTtlMs) park(i, "never_enrolled");
+      // An in-TTL mint that is not `pending` is a second copy of the command for the same room;
+      // it is normal, it expires in minutes, and it is not a Mac.
+    }
+
+    return {
+      room_id: room.id,
+      room_slug: room.slug,
+      room_name: room.name,
+      disabled: Boolean(room.disabled_at),
+      install: bound,
+      pending,
+      last_retired: lastRetired,
+      earlier_installs: earlier.length,
+      earlier,
+    };
+  });
+
+  for (const i of installs) if (!onCard.has(i.room_id)) park(i, "room_not_on_card");
+  return { rows, unassigned };
+}
 
 /** PURE — the release a row should be measured against: the one on its own channel (F6). */
 export function releaseForRow(
@@ -466,7 +583,63 @@ export type RowView = {
   version_hint: string | null;
   /** V, 9 Sep. "412.3 GB free" for the Machine cell. Null when the app could not read it. */
   disk_label: string | null;
+  // ── Release B2 ────────────────────────────────────────────────────────────────────────────
+  /**
+   * B2-D6. Headroom on the captures volume: `red` under 5 GB, `amber` under 20 GB, `ok` above, and
+   * `unknown` when the app did not report it. NEVER `ok` on a missing number — a card that shows
+   * green for "we do not know" is the failure this field exists to prevent. Warn only: nothing is
+   * deleted in B2.
+   */
+  disk_level: DiskLevel;
+  /** B2-D6. Always GB with one decimal ("18.4 GB free"), or "disk not reported". */
+  disk_text: string;
+  /** B2-D7, passed through. Null when not reported. */
+  peak: number | null;
+  zero_ratio: number | null;
+  /** B2-D10, passed through, read-only. Null when never reported. */
+  input_devices: InputDevice[] | null;
+  /**
+   * B2-D5. True while an admin's "Move to stable" is waiting for the Mac to report `stable` itself.
+   * The card shows the assignment until then, and after that says nothing: the Mac's own report is
+   * the only proof it moved.
+   */
+  assigned_pending: boolean;
+  /** B2-D5. Whether the card offers "Move to stable": a bound Mac that reports `test`, not yet assigned. */
+  can_move_to_stable: boolean;
 };
+
+export type DiskLevel = "ok" | "amber" | "red" | "unknown";
+
+/** B2-D6 thresholds, decimal GB as `fmtBytes` uses them. */
+export const DISK_AMBER_BYTES = 20_000_000_000;
+export const DISK_RED_BYTES = 5_000_000_000;
+
+/** PURE — B2-D6. The colour a disk reading earns. Null, 0 or negative is `unknown`, never `ok`. */
+export function diskLevel(bytes: number | null | undefined): DiskLevel {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) return "unknown";
+  if (bytes < DISK_RED_BYTES) return "red";
+  if (bytes < DISK_AMBER_BYTES) return "amber";
+  return "ok";
+}
+
+/** PURE — B2-D6. "18.4 GB free", one decimal, whatever the size; "disk not reported" otherwise. */
+export function diskText(bytes: number | null | undefined): string {
+  return diskLevel(bytes) === "unknown"
+    ? "disk not reported"
+    : `${(bytes! / 1_000_000_000).toFixed(1)} GB free`;
+}
+
+/**
+ * PURE — B2-D4. The receipt's own sentence, as the card prints it: first letter up, one full stop.
+ * Null when the Mac sent none. It is already bounded to 300 characters by `cleanPollFields`, and
+ * React escapes it, so it is text on a screen and nothing else.
+ */
+export function receiptSentence(raw: string | null | undefined): string | null {
+  const t = (raw ?? "").trim();
+  if (!t) return null;
+  const s = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(s) ? s : `${s}.`;
+}
 
 /**
  * PURE — one row's state, words and reasons.
@@ -531,7 +704,14 @@ export function deriveRow(input: {
           : // A receipt with no version is still a report worth making, just a shorter one. Never
             // an invented version.
             `Update stopped at ${fmtClock(i!.last_update_at)}.`,
-        UPDATE_FAILURE_REASON[failure] ??
+        // ─── B2-D4: THE RECEIPT'S OWN SENTENCE, AND THIS IS THE LINK THAT USED TO DROP IT ──────
+        // The Mac wrote why it stopped into update-result.json, the poll carried it as
+        // `last_update_error`, the row stored it — and this line printed the outcome's stock
+        // sentence instead, so a canary rollback read "did not verify once it was in place" on a
+        // build that verified perfectly and simply never polled. The stock sentence is now the
+        // fallback for a receipt with no reason in it, which is every pre-R3 receipt.
+        receiptSentence(i!.last_update_error) ??
+          UPDATE_FAILURE_REASON[failure] ??
           // An outcome this build does not know the words for. Say the code rather than nothing:
           // a row that names a machine-readable reason is still a report, and silence is not.
           `The update stopped with ${failure}.`,
@@ -563,6 +743,16 @@ export function deriveRow(input: {
     channel_label: channelLabel,
     disk_label: diskLabel,
     version_hint: versionHint,
+    // ── Release B2 ──────────────────────────────────────────────────────────────────────────
+    disk_level: diskLevel(i?.disk_free_bytes ?? null),
+    disk_text: diskText(i?.disk_free_bytes ?? null),
+    peak: i?.peak ?? null,
+    zero_ratio: i?.zero_ratio ?? null,
+    input_devices: i?.input_devices ?? null,
+    assigned_pending: Boolean(i && i.assigned_channel === "stable" && i.update_channel !== "stable"),
+    can_move_to_stable: Boolean(
+      i && !i.retired_at && i.update_channel === "test" && i.assigned_channel !== "stable",
+    ),
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────

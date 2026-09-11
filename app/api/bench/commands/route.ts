@@ -11,7 +11,8 @@
  * install_id · app_version · build_sha · mic_state · tape_advancing · never_sleep · launched_by
  * · input_device_name (plus hostname / hardware_model / os_version, which §6 step 2 renders), and
  * since Build R3 §13.4: session_open · update_channel · last_update_result · last_update_version ·
- * last_update_error · last_update_at · disk_free_bytes.
+ * last_update_error · last_update_at · disk_free_bytes; since Release B2: peak · zero_ratio ·
+ * input_devices. A native poll's 200 also carries `assigned_channel` (B2-D5): `stable` or null.
  *
  * A poll carrying install_id writes last_seen_at and those columns on that room_install row; a poll
  * WITHOUT it behaves exactly as it behaves today, which is why the browser kiosk is untouched by
@@ -25,6 +26,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
 import { classifyBusError, cleanLevels, pollCommands } from "@/lib/bench-commands";
+import { readAssignedChannel } from "@/lib/room-install";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -137,6 +139,11 @@ export async function GET(req: NextRequest) {
         last_update_error: sp.get("last_update_error"),
         last_update_at: instant("last_update_at"),
         disk_free_bytes: bigint("disk_free_bytes"),
+        // ── Release B2 (0079). Sent by 0.1.20 and later, all optional. `cleanPollFields` bounds
+        // them (0..1, or a ≤16-entry device list) and drops anything else to "not reported".
+        peak: sp.get("peak"),
+        zero_ratio: sp.get("zero_ratio"),
+        input_devices: sp.get("input_devices"),
       }
     : undefined;
 
@@ -149,6 +156,17 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(
         { ok: false, error: "RETIRED", room_id: claims.room_id, now: out.now },
         { status: 409, headers: NO_STORE },
+      );
+    }
+    // B2-D5. A native poll is told what channel the server assigned — `stable` or null. Only a
+    // poll that carried install_id gets the key at all, so the browser kiosk's response is exactly
+    // what it was. An app that does not know the key ignores it (a keyed decoder reads the keys it
+    // names); `readAssignedChannel` answers null on any fault, so this line cannot fail a poll.
+    if (install) {
+      const assigned_channel = await readAssignedChannel(install.install_id);
+      return NextResponse.json(
+        { ok: true, room_id: claims.room_id, ...out, assigned_channel },
+        { headers: NO_STORE },
       );
     }
     return NextResponse.json({ ok: true, room_id: claims.room_id, ...out }, { headers: NO_STORE });

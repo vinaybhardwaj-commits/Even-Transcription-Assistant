@@ -341,15 +341,22 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
   it("renders the version_mismatch sentence too (Fix 2, G1)", () => {
     // The fault is on the shelf, not on the Mac: the bundle is authentic and correctly signed, it
     // is simply labelled wrong. The sentence says so without calling the download broken.
-    const view = failed({
-      last_update_result: "version_mismatch",
-      last_update_error: "the downloaded app calls itself 0.1.9 but the release is named 0.1.8",
-    });
+    // B2-D4: the stock sentence is the words for a receipt that carries NO reason of its own.
+    const view = failed({ last_update_result: "version_mismatch", last_update_error: null });
     expect(view.update_note).toBe(
       "Update to 0.1.8 stopped at 14:44. The downloaded app was published as a different version "
         + "from the one it says it is. This Mac still runs 0.1.7 and is still recording.",
     );
     expect(view.update_failed).toBe(true);
+    // …and when the receipt does carry one, the Mac's own sentence is what the card says (B2-D4).
+    const said = failed({
+      last_update_result: "version_mismatch",
+      last_update_error: "the downloaded app calls itself 0.1.9 but the release is named 0.1.8",
+    });
+    expect(said.update_note).toBe(
+      "Update to 0.1.8 stopped at 14:44. The downloaded app calls itself 0.1.9 but the release is "
+        + "named 0.1.8. This Mac still runs 0.1.7 and is still recording.",
+    );
   });
 
   it("shows NOTHING new when the last update worked, or when none was attempted", () => {
@@ -370,7 +377,8 @@ describe("state C — a failed update names itself in the App cell (R3-7)", () =
   });
 
   it("still reports an outcome this build has no words for", () => {
-    const view = failed({ last_update_result: "moon_phase_wrong" as never });
+    // With no receipt sentence (B2-D4) the code itself is the last resort; silence never is.
+    const view = failed({ last_update_result: "moon_phase_wrong" as never, last_update_error: null });
     expect(view.update_note).toContain("moon_phase_wrong");
     expect(view.update_failed).toBe(true);
   });

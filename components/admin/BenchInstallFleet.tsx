@@ -32,12 +32,14 @@ import {
   deriveSteps,
   fmtSeen,
   releaseForRow,
+  type DiskLevel,
   type FleetPayload,
   type FleetRow,
   type InstallView,
   type ReleaseView,
   type RowView,
   type Step,
+  type UnassignedInstall,
 } from "@/lib/room-install-view";
 
 /** A3 — the in-table action class BenchClient already uses. 44px minimum touch target. */
@@ -98,10 +100,8 @@ export function BenchInstallFleet() {
   }, []);
 
   // The header's release is the STABLE one and stays that way (§5.8: the header is unchanged).
+  // Each ROW is measured against its own channel's release inside FleetTable (Fix 1, F6).
   const release = fleet?.latest_release ?? null;
-  // Each ROW, though, is measured against its own channel's release (Fix 1, F6) — Home Office on
-  // `test` is not behind because `stable` moved.
-  const releases = fleet?.releases ?? null;
   const rows = fleet?.rows ?? [];
 
   // ── Copy install command ──────────────────────────────────────────────────────────────────
@@ -158,6 +158,33 @@ export function BenchInstallFleet() {
         });
         const j = await res.json();
         if (!res.ok) throw new Error(j?.error?.message ?? "retire failed");
+        void load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [load],
+  );
+
+  // B2-D5. "Move to stable" writes `assigned_channel` and nothing else. The row keeps saying
+  // `channel test` until the Mac itself reports `stable` — no optimistic state, the rule this
+  // component is built around.
+  const onAssignStable = React.useCallback(
+    async (install: InstallView) => {
+      setBusy(install.install_id);
+      try {
+        const res = await fetch(
+          `/api/admin/installs/${encodeURIComponent(install.install_id)}/assign-channel`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ channel: "stable" }),
+          },
+        );
+        const j = await res.json();
+        if (!res.ok) throw new Error(j?.error?.message ?? "could not assign stable");
         void load();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -253,6 +280,54 @@ export function BenchInstallFleet() {
         </div>
       )}
 
+      <FleetTable
+        fleet={fleet}
+        nowMs={nowMs}
+        busy={busy}
+        onCopy={onCopy}
+        onRetire={onRetire}
+        onAssignStable={onAssignStable}
+      />
+
+      <p className="mt-3 text-caption text-even-ink-400">
+        {rows.length} room{rows.length === 1 ? "" : "s"} · {installCount} install
+        {installCount === 1 ? "" : "s"}
+        {fleet ? ` · read ${fmtSeen(fleet.now, nowMs)}` : ""}
+      </p>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The table (exported so a fixture can render it without a fetch)
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet table plus the Unassigned list (B2-D3). One `<tr data-fleet-row>` per room — the bound
+ * install is the row, retired installs are a count on it — and one `<li data-unassigned>` per
+ * install that fits no room. PRESENTATIONAL: every word comes from `deriveRow`.
+ */
+export function FleetTable({
+  fleet,
+  nowMs,
+  busy,
+  onCopy,
+  onRetire,
+  onAssignStable,
+}: {
+  fleet: FleetPayload | null;
+  nowMs: number;
+  busy: string | null;
+  onCopy: (r: FleetRow) => void;
+  onRetire: (i: InstallView) => void;
+  onAssignStable: (i: InstallView) => void;
+}) {
+  const release = fleet?.latest_release ?? null;
+  const releases = fleet?.releases ?? null;
+  const rows = fleet?.rows ?? [];
+  const unassigned = fleet?.unassigned ?? [];
+  return (
+    <>
       <table className="w-full text-body">
         <thead>
           <tr className="text-left border-b border-even-ink-100">
@@ -290,20 +365,50 @@ export function BenchInstallFleet() {
                 busy={busy}
                 onCopy={onCopy}
                 onRetire={onRetire}
+                onAssignStable={onAssignStable}
               />
             ))
           )}
         </tbody>
       </table>
-
-      <p className="mt-3 text-caption text-even-ink-400">
-        {rows.length} room{rows.length === 1 ? "" : "s"} · {installCount} install
-        {installCount === 1 ? "" : "s"}
-        {fleet ? ` · read ${fmtSeen(fleet.now, nowMs)}` : ""}
-      </p>
-    </section>
+      {unassigned.length > 0 && <UnassignedList items={unassigned} />}
+    </>
   );
 }
+
+const UNASSIGNED_WHY: Record<UnassignedInstall["why"], string> = {
+  room_not_on_card: "room not on this card",
+  never_enrolled: "command never pasted",
+  second_bound: "second live install in one room",
+};
+
+/** B2-D3. Installs that belong on no row, each listed once. Read-only: nothing here acts. */
+function UnassignedList({ items }: { items: UnassignedInstall[] }) {
+  return (
+    <div className="mt-4 rounded-xl border border-even-ink-100 px-4 py-3">
+      <p className="text-label text-even-navy-800">Unassigned ({items.length})</p>
+      <ul className="mt-1">
+        {items.map((u) => (
+          <li key={u.install_id} data-unassigned className="text-caption text-even-ink-500">
+            <span className="font-mono">{u.install_id}</span> · {u.hostname ?? "hostname not reported"} ·{" "}
+            {UNASSIGNED_WHY[u.why]}
+            {u.retired_at ? ` · retired ${fmtDay(u.retired_at)}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const fmtDay = (iso: string): string =>
+  new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+const DISK_TONE: Record<DiskLevel, string> = {
+  ok: "text-success-700",
+  amber: "text-warning-700",
+  red: "text-danger-700",
+  unknown: "text-even-ink-400",
+};
 
 // ---------------------------------------------------------------------------
 // Header
@@ -389,6 +494,7 @@ function FleetRowView({
   busy,
   onCopy,
   onRetire,
+  onAssignStable,
 }: {
   row: FleetRow;
   view: RowView;
@@ -397,18 +503,37 @@ function FleetRowView({
   busy: string | null;
   onCopy: (r: FleetRow) => void;
   onRetire: (i: InstallView) => void;
+  onAssignStable: (i: InstallView) => void;
 }) {
   const i = row.install;
   const attn = view.state === "needs_attention";
   const seenMs = i?.last_seen_at ? nowMs - new Date(i.last_seen_at).getTime() : null;
   const seenTone =
     seenMs === null ? "text-even-ink-400" : seenMs > 10 * 60_000 ? "text-danger-700" : "text-success-700";
+  const earlier = row.earlier ?? [];
 
   return (
-    <tr className={`border-b border-even-ink-50 align-top ${attn ? "bg-warning-50" : ""}`}>
+    <tr data-fleet-row className={`border-b border-even-ink-50 align-top ${attn ? "bg-warning-50" : ""}`}>
       <td className="py-2.5 px-2.5">
         <p className="font-semibold text-even-navy-800">{row.room_name}</p>
         <p className="text-caption text-even-ink-400">{row.room_slug}</p>
+        {/* B2-D3. Every re-enrolment paste retires one install. They are a count on the row, with
+            the ids behind a disclosure, never a row each — the card answers "which Mac runs which
+            room", and twelve retired lines under nine rooms stopped answering it. */}
+        {earlier.length > 0 && (
+          <details data-earlier className="mt-1 text-caption text-even-ink-400">
+            <summary className="cursor-pointer">
+              {earlier.length} earlier install{earlier.length === 1 ? "" : "s"}
+            </summary>
+            <ul className="mt-1">
+              {earlier.map((e) => (
+                <li key={e.install_id}>
+                  <span className="font-mono">{e.install_id}</span> · retired {fmtDay(e.retired_at)}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         <div className="mt-1 flex flex-wrap gap-1">
           {view.words.map((w) => (
             <Pill key={w} tone={wordTone(w)}>
@@ -443,14 +568,12 @@ function FleetRowView({
                 {view.session_label}
               </p>
             )}
-            {/* V, 9 September 2026. Free disk, UNDER the existing lines, as a plain size. No
-                column, no control, no colour and no threshold — nothing enforces retention yet
-                at about 115 MB per recorded hour, and a number an operator can read is the
-                honest amount to say before something does. Absent when the app could not read
-                the volume; it never sends 0. */}
-            {view.disk_label && (
-              <p className="text-caption text-even-ink-400">{view.disk_label}</p>
-            )}
+            {/* B2-D6. Free disk in GB with one decimal, coloured: amber under 20 GB, red under 5.
+                WARN ONLY — nothing is deleted in B2. A missing reading says so in grey and is never
+                green: the app omits the field when it cannot read the volume and never sends 0. */}
+            <p data-disk={view.disk_level} className={`text-caption ${DISK_TONE[view.disk_level]}`}>
+              {view.disk_text}
+            </p>
           </>
         ) : (
           <p className="text-caption text-even-ink-400">
@@ -483,6 +606,24 @@ function FleetRowView({
             {view.update_note}
           </p>
         )}
+        {/* B2-D5. One-way: offered only on a Mac that reports `test`. Once pressed, the row says
+            so until the Mac itself reports `stable` — the card never claims the move happened. */}
+        {i && view.assigned_pending && (
+          <p className="mt-1 text-caption text-warning-700 whitespace-nowrap">
+            assigned stable · waiting for the Mac
+          </p>
+        )}
+        {i && view.can_move_to_stable && (
+          <button
+            type="button"
+            onClick={() => onAssignStable(i)}
+            disabled={busy === i.install_id}
+            className={ROW_BTN}
+            title="Tells this Mac to take its builds from stable at its next poll. The server never moves a Mac onto test."
+          >
+            {busy === i.install_id ? "Assigning…" : "Move to stable"}
+          </button>
+        )}
       </td>
 
       <td className={`py-2.5 px-2.5 whitespace-nowrap text-caption ${seenTone}`}>
@@ -507,6 +648,26 @@ function FleetRowView({
           <span className="block text-even-ink-400">
             {i.input_device_name ?? "device not reported"}
           </span>
+        )}
+        {/* B2-D7. Two read-only numbers beside the device: the loudest sample and how much of the
+            window was bit-exact zero. No threshold, no colour — OPD 3 read 45.8 % zero and nobody
+            could see it; seeing it is the whole of B2. Absent until the app reports them. */}
+        {i && (view.peak !== null || view.zero_ratio !== null) && (
+          <span data-levels className="block text-even-ink-400 tabular-nums whitespace-nowrap">
+            peak {view.peak === null ? "—" : view.peak.toFixed(2)} · zero{" "}
+            {view.zero_ratio === null ? "—" : `${(view.zero_ratio * 100).toFixed(1)} %`}
+          </span>
+        )}
+        {/* B2-D10. Every input the Mac can see, the default marked. READ-ONLY: R4 owns choosing. */}
+        {i && view.input_devices && view.input_devices.length > 0 && (
+          <ul data-devices className="mt-0.5 text-even-ink-400">
+            {view.input_devices.map((d) => (
+              <li key={d.uid}>
+                {d.name}
+                {d.is_default ? " (default)" : ""}
+              </li>
+            ))}
+          </ul>
         )}
       </td>
 
