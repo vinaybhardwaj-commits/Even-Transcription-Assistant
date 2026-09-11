@@ -187,6 +187,50 @@ import Testing
   }
 
   // -------------------------------------------------------------------------
+  // Release R4 (D4) — input volume and whether it can be set
+  // -------------------------------------------------------------------------
+
+  @Test func inputVolumeAndItsSettabilityRideThePollBesideTheDeviceName() {
+    let measured = Self.query(
+      InstallPollFields(
+        installID: "install_1", tapeAdvancing: true, inputDeviceName: "C270 HD WEBCAM",
+        inputVolume: 0.73456, inputVolumeSettable: true))
+    #expect(measured["input_volume"] == "0.7346")
+    #expect(measured["input_volume_settable"] == "true")
+    #expect(measured["input_device_name"] == "C270 HD WEBCAM")
+
+    // A device with no volume control macOS can reach: no volume, and a MEASURED "not settable".
+    let knobOnly = Self.query(
+      InstallPollFields(
+        installID: "install_1", tapeAdvancing: true, inputVolume: nil, inputVolumeSettable: false))
+    #expect(knobOnly["input_volume"] == nil)
+    #expect(knobOnly["input_volume_settable"] == "false")
+
+    // Device absent: both ABSENT, so the server's COALESCE keeps the last reading. A value outside
+    // 0–1 is dropped, never clamped.
+    for bad in [nil, -0.01, 1.01, .nan] as [Double?] {
+      let items = Self.query(
+        InstallPollFields(installID: "install_1", tapeAdvancing: true, inputVolume: bad))
+      #expect(items["input_volume"] == nil, "input_volume \(String(describing: bad))")
+      #expect(items["input_volume_settable"] == nil)
+    }
+  }
+
+  @Test func factsCarryTheInputVolumeIntoThePoll() {
+    let facts = MachineFacts(
+      micState: "authorized", neverSleep: true, launchedBy: "launchd", launchAgentLoaded: true,
+      hostname: "mini", hardwareModel: "Mac mini", osVersion: "macOS 15.0",
+      inputDeviceName: "C270 HD WEBCAM", inputVolume: 0.5, inputVolumeSettable: true)
+    let fields = InstallPollFields(installID: "install_1", facts: facts, tapeAdvancing: true)
+    #expect(fields.inputVolume == 0.5)
+    #expect(fields.inputVolumeSettable == true)
+    // No configured device, or one not attached: nothing is read, nothing is claimed.
+    #expect(MachineFactsReader.inputVolume(forUID: nil) == nil)
+    #expect(MachineFactsReader.inputVolume(forUID: "") == nil)
+    #expect(MachineFactsReader.inputVolume(forUID: "no-such-device-uid-8f2a") == nil)
+  }
+
+  // -------------------------------------------------------------------------
   // The name is MEASURED, never invented
   // -------------------------------------------------------------------------
 

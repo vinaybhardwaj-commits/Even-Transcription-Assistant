@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import TapeCapture
 import TapeCore
 
 public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
@@ -101,6 +102,10 @@ public enum RoomCommandDecider {
     case .endDay:
       return phase == .recording || phase == .paused || phase == .failed
         ? .end : .refuse("no_active_session")
+    case .setAudioInput, .unknown:
+      // Not a day-lifecycle command. `RoomEngine.handle` dispatches these before it asks here
+      // (R4); a caller that asks anyway is refused rather than handed a phase decision.
+      return .refuse("unsupported_kind")
     }
   }
 }
@@ -154,6 +159,11 @@ public protocol RoomEngineRemote: Sendable {
   ) async throws -> CommandPollResponse
   func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
     -> CommandAcknowledgement
+  /// Release R4 (D1). The same ack, carrying the `set_audio_input` fields when there are any.
+  func acknowledge(
+    commandID: String, ok: Bool, sessionID: String?, error: String?,
+    audioInput: AudioInputAcknowledgement?
+  ) async throws -> CommandAcknowledgement
   func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse
   func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
     -> ImmutablePieceUploadResult
@@ -166,6 +176,38 @@ extension RoomEngineRemote {
   /// that keeps every existing test double compiling unchanged. `BenchClient` provides the real
   /// implementation and its witness wins; nothing else in this package needs to.
   public func fetchRelease(channel: String) async -> RoomReleaseDescriptor? { nil }
+
+  /// R4 — same shape as `fetchRelease` above: a remote that does not speak R4 sends the plain ack
+  /// and drops the audio fields. `BenchClient`'s witness sends them.
+  public func acknowledge(
+    commandID: String, ok: Bool, sessionID: String?, error: String?,
+    audioInput: AudioInputAcknowledgement?
+  ) async throws -> CommandAcknowledgement {
+    try await acknowledge(commandID: commandID, ok: ok, sessionID: sessionID, error: error)
+  }
+}
+
+/// Release R4 (D3, D4) — the audio inputs a `set_audio_input` reads and writes. A seam so the
+/// engine's switch and volume logic can be proven against a device table; `CoreAudioInputControl`
+/// is the only production implementation.
+public protocol RoomAudioInputControlling: Sendable {
+  /// Every input attached now, or nil when CoreAudio could not be asked.
+  func inputDevices() -> [AudioInputDeviceEntry]?
+  /// The device's input volume now, or nil when it is absent or would not answer.
+  func inputVolume(uid: String) -> AudioInputVolume?
+  /// Writes the device's input volume, clamped to 0–1. Throws when absent or not settable.
+  func setInputVolume(uid: String, value: Double) throws
+}
+
+public struct CoreAudioInputControl: RoomAudioInputControlling {
+  public init() {}
+  public func inputDevices() -> [AudioInputDeviceEntry]? { AudioInputDevices.list() }
+  public func inputVolume(uid: String) -> AudioInputVolume? {
+    AudioInputDevices.inputVolume(forUID: uid)
+  }
+  public func setInputVolume(uid: String, value: Double) throws {
+    try AudioInputDevices.setInputVolume(forUID: uid, to: value)
+  }
 }
 
 extension BenchClient: RoomEngineRemote {}
@@ -419,6 +461,8 @@ public actor RoomEngine {
     let ok: Bool
     let sessionID: String?
     let error: String?
+    /// R4. Only a `set_audio_input` result carries this.
+    var audioInput: AudioInputAcknowledgement? = nil
   }
 
   private let persistence: RoomPersistence
@@ -438,6 +482,11 @@ public actor RoomEngine {
   /// acceptance reads it — and injected in tests, which cannot capture a process-wide descriptor
   /// without taking every other test's output with it.
   private let log: @Sendable (String) -> Void
+  /// Release R4. What `set_audio_input` switches between and sets the volume of.
+  private let audioInputs: any RoomAudioInputControlling
+  /// Release R4. The §5.5 machine reading for the poll, for the device config.json names now.
+  /// `MachineFactsReader.read` in production; injected so a test can see the poll follow a switch.
+  private let machineFacts: @Sendable (String?) -> MachineFacts
   private var residentCaptureOwner: (any RoomResidentCaptureOwning)?
   private var residentControlJournal: (any RoomControlJournalOwning)?
   private var residentRuntimeRoomID: String?
@@ -582,6 +631,11 @@ public actor RoomEngine {
     /// Release B1 (§14.2 step 5). Stderr by default, which launchd writes into `launchd.log`.
     log: @escaping @Sendable (String) -> Void = { message in
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+    },
+    /// Release R4. CoreAudio by default.
+    audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
+      MachineFactsReader.read(inputDeviceUID: $0)
     }
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
@@ -624,7 +678,9 @@ public actor RoomEngine {
       retainedArchiveRecovery: retainedArchiveRecovery,
       residentRuntimeFactory: eligibility == .eligible ? residentRuntimeFactory : nil,
       updater: updaterFactory(configuration, remote, persistence.root),
-      log: log
+      log: log,
+      audioInputs: audioInputs,
+      machineFacts: machineFacts
     )
   }
 
@@ -667,9 +723,15 @@ public actor RoomEngine {
     updater: RoomUpdater? = nil,
     log: @escaping @Sendable (String) -> Void = { message in
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+    },
+    audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
+      MachineFactsReader.read(inputDeviceUID: $0)
     }
   ) {
     self.persistence = persistence
+    self.audioInputs = audioInputs
+    self.machineFacts = machineFacts
     self.configuration = configuration
     self.remote = remote
     self.captureLauncher = captureLauncher
@@ -1129,7 +1191,8 @@ public actor RoomEngine {
             // The device the CONFIG says this room records from — the same string RoomEngine
             // hands `tapewriter --device`. The reader turns it into the name CoreAudio reports
             // for it right now, or nil when it is not attached.
-            facts: MachineFactsReader.read(inputDeviceUID: configuration.deviceUID),
+            // R4: read AFTER any switch the previous poll applied, so the card follows it.
+            facts: machineFacts(configuration.deviceUID),
             tapeAdvancing: tapeIsAdvancing(),
             // R3-6. THE ENGINE'S OWN STATE, read here at the moment of the poll — the same
             // expression that decides `recordingSessionID` two lines below, so the two can never
@@ -1474,6 +1537,26 @@ public actor RoomEngine {
       await acknowledge(command, result: result)
       return
     }
+    // ─── R4: THE TWO KINDS THAT ARE NOT THE DAY ─────────────────────────────────────────────
+    // Neither touches the session, the phase decider or the resident control journal, which knows
+    // four kinds and no others. Each is decided once, remembered, and acked; a re-delivery of the
+    // same id acks the remembered result above and applies nothing twice.
+    switch command.kind {
+    case .startDay, .pauseDay, .resumeDay, .endDay:
+      break
+    case .setAudioInput:
+      let result = applyAudioInput(command)
+      completedCommands[command.id] = result
+      await acknowledge(command, result: result)
+      return
+    case .unknown(let raw):
+      // R4-D2. Refused by name and never fatal: the commands beside it still run.
+      log("command \(command.id) has a kind this build does not know (\(raw.prefix(64))); refused")
+      let result = CommandResult(ok: false, sessionID: nil, error: "unsupported_kind")
+      completedCommands[command.id] = result
+      await acknowledge(command, result: result)
+      return
+    }
     if let recovered = residentControlCommands[command.id] {
       unacknowledgeableControlCommands.remove(command.id)
       if await resumeRecoveredAcknowledgement(command, recovered: recovered) { return }
@@ -1534,9 +1617,10 @@ public actor RoomEngine {
     _ command: BenchCommand,
     recovered: RoomRecoveredControlCommand
   ) async -> Bool {
-    guard let recoveredKind = benchCommandKind(recovered.commandKind) else { return false }
-    let successStates = acknowledgementStates(kind: recoveredKind, success: true)
-    let failureStates = acknowledgementStates(kind: recoveredKind, success: false)
+    guard let recoveredKind = benchCommandKind(recovered.commandKind),
+      let successStates = acknowledgementStates(kind: recoveredKind, success: true),
+      let failureStates = acknowledgementStates(kind: recoveredKind, success: false)
+    else { return false }
     if recovered.state == successStates.observed || recovered.state == failureStates.observed
       || recovered.state == successStates.outcomeUnobservable
       || recovered.state == failureStates.outcomeUnobservable
@@ -1556,7 +1640,7 @@ public actor RoomEngine {
     if recovered.state == .commandNoop || recovered.state == .commandRefused {
       let success = recovered.state == .commandNoop
       do {
-        let states = acknowledgementStates(kind: recoveredKind, success: success)
+        let states = success ? successStates : failureStates
         try advanceControl(
           commandID: command.id,
           commandKind: recovered.commandKind,
@@ -1901,7 +1985,11 @@ public actor RoomEngine {
   }
 
   private func acknowledge(_ command: BenchCommand, result: CommandResult) async {
-    if residentControlJournal != nil {
+    // R4. Only the four day kinds are journaled. A `set_audio_input` or an unknown kind has no
+    // durable intent to find and no state to advance, so the gate below would never let it be
+    // acked; it is acked plainly instead.
+    let journaled = archiveCommandKind(command.kind) != nil
+    if residentControlJournal != nil, journaled {
       guard !unacknowledgeableControlCommands.contains(command.id) else { return }
       guard let recovered = residentControlCommands[command.id] else {
         lastError = "control journal has no durable command intent"
@@ -1909,7 +1997,9 @@ public actor RoomEngine {
         return
       }
       let controlKind = benchCommandKind(recovered.commandKind) ?? command.kind
-      let states = acknowledgementStates(kind: controlKind, success: result.ok)
+      guard let states = acknowledgementStates(kind: controlKind, success: result.ok) else {
+        return
+      }
       if recovered.state == states.observed || recovered.state == states.outcomeUnobservable {
         return
       }
@@ -1925,41 +2015,21 @@ public actor RoomEngine {
           commandID: command.id,
           ok: result.ok,
           sessionID: result.sessionID,
-          error: result.error)
+          error: result.error,
+          audioInput: result.audioInput)
         let expectedStatus = result.ok ? "acked" : "failed"
         guard acknowledgement.ok, acknowledgement.id == command.id,
           acknowledgement.status == expectedStatus
         else {
           throw RoomEngineError.io("invalid command acknowledgement response")
         }
+        guard journaled else { return }
         do {
           let recovered = residentControlCommands[command.id]
           let controlKind = recovered.flatMap { benchCommandKind($0.commandKind) } ?? command.kind
-          let states = acknowledgementStates(kind: controlKind, success: result.ok)
-          let journalSessionID: String?
-          if let recovered = residentControlCommands[command.id] {
-            journalSessionID = recovered.sessionID
-          } else {
-            journalSessionID = result.sessionID
-          }
-          try advanceControl(
-            commandID: command.id,
-            commandKind: recovered?.commandKind ?? archiveCommandKind(command.kind),
-            sessionID: journalSessionID,
-            priorState: states.ready,
-            newState: states.observed)
-        } catch {
-          lastError = bounded(error)
-          try? saveStatus(preferred: .offline)
-        }
-        return
-      } catch {
-        lastError = bounded(error)
-        if commandNotPending(error) {
-          let recovered = residentControlCommands[command.id]
-          let controlKind = recovered.flatMap { benchCommandKind($0.commandKind) } ?? command.kind
-          let states = acknowledgementStates(kind: controlKind, success: result.ok)
-          do {
+          if let states = acknowledgementStates(kind: controlKind, success: result.ok),
+            let journalKind = recovered?.commandKind ?? archiveCommandKind(command.kind)
+          {
             let journalSessionID: String?
             if let recovered = residentControlCommands[command.id] {
               journalSessionID = recovered.sessionID
@@ -1968,11 +2038,40 @@ public actor RoomEngine {
             }
             try advanceControl(
               commandID: command.id,
-              commandKind: recovered?.commandKind ?? archiveCommandKind(command.kind),
+              commandKind: journalKind,
               sessionID: journalSessionID,
               priorState: states.ready,
-              newState: states.outcomeUnobservable,
-              failure: .ackOutcomeUnobservable)
+              newState: states.observed)
+          }
+        } catch {
+          lastError = bounded(error)
+          try? saveStatus(preferred: .offline)
+        }
+        return
+      } catch {
+        lastError = bounded(error)
+        if commandNotPending(error) {
+          guard journaled else { return }
+          let recovered = residentControlCommands[command.id]
+          let controlKind = recovered.flatMap { benchCommandKind($0.commandKind) } ?? command.kind
+          do {
+            if let states = acknowledgementStates(kind: controlKind, success: result.ok),
+              let journalKind = recovered?.commandKind ?? archiveCommandKind(command.kind)
+            {
+              let journalSessionID: String?
+              if let recovered = residentControlCommands[command.id] {
+                journalSessionID = recovered.sessionID
+              } else {
+                journalSessionID = result.sessionID
+              }
+              try advanceControl(
+                commandID: command.id,
+                commandKind: journalKind,
+                sessionID: journalSessionID,
+                priorState: states.ready,
+                newState: states.outcomeUnobservable,
+                failure: .ackOutcomeUnobservable)
+            }
           } catch {
             lastError = bounded(error)
             try? saveStatus(preferred: .offline)
@@ -2007,12 +2106,14 @@ public actor RoomEngine {
     residentControlCommands[commandID] = recovered
   }
 
-  private func archiveCommandKind(_ kind: BenchCommandKind) -> ArchiveControlCommandKind {
+  /// The journal's name for a day kind; nil for the two R4 kinds, which are never journaled.
+  private func archiveCommandKind(_ kind: BenchCommandKind) -> ArchiveControlCommandKind? {
     switch kind {
     case .startDay: return .startDay
     case .pauseDay: return .pauseDay
     case .resumeDay: return .resumeDay
     case .endDay: return .endDay
+    case .setAudioInput, .unknown: return nil
     }
   }
 
@@ -2118,12 +2219,15 @@ public actor RoomEngine {
     }
   }
 
+  /// Nil for the two R4 kinds: they have no journal states.
   private func acknowledgementStates(kind: BenchCommandKind, success: Bool) -> (
     ready: ArchiveControlState,
     observed: ArchiveControlState,
     outcomeUnobservable: ArchiveControlState
-  ) {
+  )? {
     switch (kind, success) {
+    case (.setAudioInput, _), (.unknown, _):
+      return nil
     case (.startDay, true):
       return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
     case (.startDay, false):
@@ -2160,9 +2264,9 @@ public actor RoomEngine {
     result: CommandResult
   ) -> Bool {
     guard let recovered = residentControlCommands[command.id],
-      let kind = benchCommandKind(recovered.commandKind)
+      let kind = benchCommandKind(recovered.commandKind),
+      let states = acknowledgementStates(kind: kind, success: result.ok)
     else { return false }
-    let states = acknowledgementStates(kind: kind, success: result.ok)
     return recovered.state == states.ready || recovered.state == states.observed
       || recovered.state == states.outcomeUnobservable
   }
@@ -2171,13 +2275,11 @@ public actor RoomEngine {
     _ command: BenchCommand,
     success: Bool
   ) throws {
-    guard residentControlJournal != nil else { return }
-    let kind = archiveCommandKind(command.kind)
-    let journalSessionID: String?
-    switch command.kind {
-    case .startDay: journalSessionID = nil
-    case .pauseDay, .resumeDay, .endDay: journalSessionID = sessionID
-    }
+    guard residentControlJournal != nil,
+      let kind = archiveCommandKind(command.kind),
+      let states = acknowledgementStates(kind: command.kind, success: success)
+    else { return }
+    let journalSessionID: String? = command.kind == .startDay ? nil : sessionID
     let decisionState: ArchiveControlState = success ? .commandNoop : .commandRefused
     let failure: ArchiveControlFailure? = success ? nil : .commandRefused
     try advanceControl(
@@ -2187,7 +2289,6 @@ public actor RoomEngine {
       priorState: nil,
       newState: decisionState,
       failure: failure)
-    let states = acknowledgementStates(kind: command.kind, success: success)
     try advanceControl(
       commandID: command.id,
       commandKind: kind,
@@ -2529,6 +2630,179 @@ public actor RoomEngine {
     try advanceControl(
       commandID: commandID, commandKind: .endDay, sessionID: id,
       priorState: .sessionEndPatched, newState: .endAckReady)
+  }
+
+  // MARK: - Release R4: set_audio_input (D3, D4)
+
+  /// What a `set_audio_input` asks for, parsed from `args` (R4-D1).
+  struct AudioInputRequest: Equatable {
+    var deviceUID: String?
+    var inputVolume: Double?
+
+    /// Nil — `bad_args` — for anything the server's own validation refuses: not an object, a
+    /// `device_uid` that is not a 1–256-character string, an `input_volume` that is not a finite
+    /// number, or neither one present. A volume outside 0–1 is clamped, not refused (kickoff §3).
+    static func parse(_ args: JSONValue) -> AudioInputRequest? {
+      guard case .object(let object) = args else { return nil }
+      var request = AudioInputRequest()
+      switch object["device_uid"] {
+      case .none, .some(.null):
+        break
+      case .some(.string(let uid)):
+        guard !uid.isEmpty, uid.count <= 256 else { return nil }
+        request.deviceUID = uid
+      case .some:
+        return nil
+      }
+      switch object["input_volume"] {
+      case .none, .some(.null):
+        break
+      case .some(.number(let volume)):
+        guard volume.isFinite else { return nil }
+        request.inputVolume = min(max(volume, 0), 1)
+      case .some:
+        return nil
+      }
+      guard request.deviceUID != nil || request.inputVolume != nil else { return nil }
+      return request
+    }
+  }
+
+  /// R4-D3 and D4, in that order: validate everything, move the device, then set the volume.
+  ///
+  /// ─── NOTHING IS APPLIED UNTIL EVERYTHING IS KNOWN TO BE APPLICABLE ────────────────────────
+  /// The device is checked present, and — when a volume was asked for — the volume on the device
+  /// that WILL be recorded from is checked settable, before anything moves. So `device_not_present`
+  /// and `volume_not_settable` leave config.json and the capture exactly as they were. Only a
+  /// failure that CoreAudio or tapewriter produces after that point can leave a half-applied
+  /// command, and its ack says which half landed.
+  private func applyAudioInput(_ command: BenchCommand) -> CommandResult {
+    guard let request = AudioInputRequest.parse(command.args) else {
+      return audioInputFailure("bad_args")
+    }
+    // The resident-archive lane (off on every Mac) seals the device into its archive context and
+    // its preflight receipt; a config write there would make the next launch refuse to start
+    // (`preflightReceiptMismatch`). Refused whole, never half-applied.
+    if residentRuntimeFactory != nil || residentCaptureOwner != nil {
+      return audioInputFailure("resident_archive_unsupported")
+    }
+    if let uid = request.deviceUID {
+      guard audioInputs.inputDevices()?.contains(where: { $0.uid == uid }) == true else {
+        return audioInputFailure("device_not_present")
+      }
+    }
+    let targetUID = request.deviceUID ?? configuration.deviceUID
+    if request.inputVolume != nil {
+      guard let reading = audioInputs.inputVolume(uid: targetUID) else {
+        return audioInputFailure("device_not_present")
+      }
+      guard reading.settable else {
+        return audioInputFailure(
+          "volume_not_settable", audioInput: AudioInputAcknowledgement(inputVolumeSettable: false))
+      }
+    }
+
+    var applied = AudioInputAcknowledgement()
+    if let uid = request.deviceUID {
+      if let failure = switchRecordingDevice(to: uid, commandID: command.id) { return failure }
+      applied.appliedDeviceUID = uid
+    }
+    if let volume = request.inputVolume {
+      do {
+        try audioInputs.setInputVolume(uid: targetUID, value: volume)
+      } catch {
+        return audioInputFailure(
+          "volume_set_failed: \(bounded(error, limit: 120))", audioInput: applied)
+      }
+      // The value the device holds NOW, re-read, not the value that was asked for.
+      let reread = audioInputs.inputVolume(uid: targetUID)
+      applied.appliedInputVolume = reread?.value.map { ($0 * 10_000).rounded() / 10_000 }
+      applied.inputVolumeSettable = reread?.settable
+      log("input volume on \(targetUID) set by the desk")
+    } else {
+      applied.inputVolumeSettable = audioInputs.inputVolume(uid: configuration.deviceUID)?.settable
+    }
+    return CommandResult(ok: true, sessionID: sessionID, error: nil, audioInput: applied)
+  }
+
+  /// R4-D3. Nil when the room now records from `uid`; otherwise the failure to ack.
+  ///
+  /// ─── ONE CAPTURE AT A TIME, ONE SESSION THROUGHOUT ────────────────────────────────────────
+  /// The running segment is closed exactly as a pause closes it — tapewriter interrupted and
+  /// drained, its last piece cut — and a new `seg_` directory of the SAME session opens on the new
+  /// device. No `end_day`, no session PATCH, no new session: `sessionID` is never assigned here, and
+  /// the piece index carries on from the closed segment. The old capture is fully stopped before
+  /// the new one is launched, so two are never open at once.
+  ///
+  /// ─── A SWITCH THAT CANNOT OPEN PUTS THE ROOM BACK ─────────────────────────────────────────
+  /// If the new device will not produce durable audio (unplugged mid-switch, a bad format), the
+  /// config goes back to the old device and the capture reopens there. If even that fails, the
+  /// phase is `failed` with reconciliation armed — the same state a crashed tapewriter leaves —
+  /// and the next loop reopens the session's capture on the restored device.
+  private func switchRecordingDevice(to uid: String, commandID: String) -> CommandResult? {
+    let previousUID = configuration.deviceUID
+    guard uid != previousUID else { return nil }
+    do {
+      try saveDeviceUID(uid)
+    } catch {
+      return audioInputFailure("config_write_failed: \(bounded(error, limit: 120))")
+    }
+    log("recording device set to \(uid) by the desk (was \(previousUID))")
+    // Idle, paused, or nothing running: the next capture opens on the new device by itself.
+    guard let running = capture, running.process.isRunning else { return nil }
+    do {
+      try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
+      try startCapture(trigger: .reconciliation)
+      return nil
+    } catch {
+      let switchError = bounded(error, limit: 120)
+      log("device switch to \(uid) failed (\(switchError)); back to \(previousUID)")
+      restoreDeviceUID(previousUID)
+      // Only when no segment is retained: a retained one is a dead capture whose audio has not
+      // been cut yet, and `finishUnexpectedCaptureIfNeeded` must cut it before anything replaces it.
+      if capture == nil {
+        do {
+          try startCapture(trigger: .reconciliation)
+        } catch {
+          lastError = bounded(error)
+        }
+      }
+      if !hasActiveCapture {
+        phase = .failed
+        needsActiveReconciliation = true
+      }
+      try? saveStatus()
+      return audioInputFailure("device_switch_failed: \(switchError)")
+    }
+  }
+
+  /// Disk first, then memory — `applyServerAssignedChannel`'s order, for its reason: a failed write
+  /// moves nothing. config.json is re-read and written back through the one existing writer
+  /// (atomic, 0600, session stripped), so no other key changes.
+  private func saveDeviceUID(_ uid: String) throws {
+    var onDisk = try persistence.loadConfiguration()
+    _ = try onDisk.applyAudioInputDevice(uid)
+    try persistence.saveConfiguration(onDisk)
+    var moved = configuration
+    _ = try moved.applyAudioInputDevice(uid)
+    configuration = moved
+  }
+
+  /// The rollback. Memory goes back even when the file cannot, so this process records from the
+  /// device it was recording from; the failure is logged for the next launch's sake.
+  private func restoreDeviceUID(_ uid: String) {
+    do {
+      try saveDeviceUID(uid)
+    } catch {
+      log("recording device NOT restored to \(uid) in config.json: \(bounded(error))")
+      configuration.deviceUID = uid
+    }
+  }
+
+  private func audioInputFailure(
+    _ reason: String, audioInput: AudioInputAcknowledgement? = nil
+  ) -> CommandResult {
+    CommandResult(ok: false, sessionID: nil, error: reason, audioInput: audioInput)
   }
 
   private func startCapture(trigger: RoomResidentCaptureStartContext.Trigger) throws {

@@ -120,6 +120,81 @@ enum AudioDevices {
   }
 }
 
+// MARK: - Input volume (Release R4, D4)
+//
+// `kAudioDevicePropertyVolumeScalar` on the INPUT scope — never the output scope, never global —
+// at the master element, or channel 1 when the device has no master. No `osascript`. A device with
+// neither element has no input volume macOS can reach, which is a measured "not settable" (the
+// TM20 has a physical gain knob, and the 9 Sep flag was that macOS may not expose it).
+
+extension AudioDevices {
+  static func inputVolumeAddress(element: AudioObjectPropertyElement)
+    -> AudioObjectPropertyAddress
+  {
+    AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyVolumeScalar,
+      mScope: kAudioDevicePropertyScopeInput,
+      mElement: element
+    )
+  }
+
+  /// The element the input volume lives on: master, else channel 1, else nil.
+  static func inputVolumeElement(id: AudioDeviceID) -> AudioObjectPropertyElement? {
+    for element: AudioObjectPropertyElement in [kAudioObjectPropertyElementMain, 1] {
+      var address = inputVolumeAddress(element: element)
+      if AudioObjectHasProperty(id, &address) { return element }
+    }
+    return nil
+  }
+
+  /// 0–1, or nil for a value that is not a number. Nothing outside 0–1 is ever written.
+  static func clampedVolume(_ value: Float) -> Float? {
+    guard value.isFinite else { return nil }
+    return min(max(value, 0), 1)
+  }
+
+  /// Nil when the device is not present or CoreAudio would not say whether the volume is
+  /// settable. `value` nil with `settable` false: the device is present and has no input volume.
+  static func inputVolume(uid: String) -> (value: Float?, settable: Bool)? {
+    guard let device = try? selected(uid: uid) else { return nil }
+    guard let element = inputVolumeElement(id: device.id) else { return (nil, false) }
+    var address = inputVolumeAddress(element: element)
+    var settable: DarwinBoolean = false
+    guard AudioObjectIsPropertySettable(device.id, &address, &settable) == noErr else {
+      return nil
+    }
+    var scalar: Float32 = 0
+    var size = UInt32(MemoryLayout<Float32>.size)
+    let status = AudioObjectGetPropertyData(device.id, &address, 0, nil, &size, &scalar)
+    let value: Float? =
+      status == noErr && scalar.isFinite && (0...1).contains(scalar) ? scalar : nil
+    return (value, settable.boolValue)
+  }
+
+  static func setInputVolume(uid: String, value: Float) throws {
+    guard let clamped = clampedVolume(value) else {
+      throw RecorderError("input volume is not a finite number")
+    }
+    let device = try selected(uid: uid)
+    guard let element = inputVolumeElement(id: device.id) else {
+      throw RecorderError("input device has no input volume control: \(uid)")
+    }
+    var address = inputVolumeAddress(element: element)
+    var settable: DarwinBoolean = false
+    guard AudioObjectIsPropertySettable(device.id, &address, &settable) == noErr,
+      settable.boolValue
+    else {
+      throw RecorderError("input volume is not settable: \(uid)")
+    }
+    var scalar = Float32(clamped)
+    let status = AudioObjectSetPropertyData(
+      device.id, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &scalar)
+    guard status == noErr else {
+      throw RecorderError("cannot set input volume on \(uid) (OSStatus \(status))")
+    }
+  }
+}
+
 func selectDevice(_ device: AudioDeviceInfo, on engine: AVAudioEngine) throws {
   guard let audioUnit = engine.inputNode.audioUnit else {
     throw RecorderError("audio input unit is unavailable")
@@ -189,6 +264,33 @@ public enum AudioInputDevices {
     return devices.map {
       AudioInputDeviceEntry(name: $0.name, uid: $0.uid, isDefault: $0.id == defaultID)
     }
+  }
+}
+
+/// Release R4 (D4). A device's input volume, read now. `value` is nil when the device has no input
+/// volume control at all; `settable` is what CoreAudio says about that control, false without one.
+public struct AudioInputVolume: Equatable, Sendable {
+  public let value: Double?
+  public let settable: Bool
+
+  public init(value: Double?, settable: Bool) {
+    self.value = value
+    self.settable = settable
+  }
+}
+
+extension AudioInputDevices {
+  /// Release R4 (D4). Nil when the device is not attached or CoreAudio would not answer — sent as
+  /// absence, like every other reading here.
+  public static func inputVolume(forUID uid: String) -> AudioInputVolume? {
+    guard !uid.isEmpty, let reading = AudioDevices.inputVolume(uid: uid) else { return nil }
+    return AudioInputVolume(value: reading.value.map(Double.init), settable: reading.settable)
+  }
+
+  /// Release R4 (D4). The ONE write in this façade, and it changes a device's input volume — it
+  /// selects nothing. Clamped to 0–1; throws when the device is absent or the volume not settable.
+  public static func setInputVolume(forUID uid: String, to value: Double) throws {
+    try AudioDevices.setInputVolume(uid: uid, value: Float(value))
   }
 }
 

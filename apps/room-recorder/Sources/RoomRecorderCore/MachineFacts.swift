@@ -36,6 +36,12 @@ public struct MachineFacts: Equatable, Sendable {
   /// Release B2 (D10). Every input device attached now, the system default marked. Nil when
   /// CoreAudio could not be asked. Read-only: the app reports the list and changes nothing.
   public var inputDevices: [AudioInputDeviceEntry]?
+  /// Release R4 (D4). The configured device's input volume, 0–1. Nil when the device is not
+  /// attached, CoreAudio would not answer, or the device has no input volume control.
+  public var inputVolume: Double?
+  /// Release R4 (D4). Whether that volume is settable. Nil when the device is not attached or
+  /// CoreAudio would not answer; false — measured — when the device has no input volume control.
+  public var inputVolumeSettable: Bool?
 
   public init(
     micState: String,
@@ -46,7 +52,9 @@ public struct MachineFacts: Equatable, Sendable {
     hardwareModel: String?,
     osVersion: String?,
     inputDeviceName: String?,
-    inputDevices: [AudioInputDeviceEntry]? = nil
+    inputDevices: [AudioInputDeviceEntry]? = nil,
+    inputVolume: Double? = nil,
+    inputVolumeSettable: Bool? = nil
   ) {
     self.micState = micState
     self.neverSleep = neverSleep
@@ -57,6 +65,8 @@ public struct MachineFacts: Equatable, Sendable {
     self.osVersion = osVersion
     self.inputDeviceName = inputDeviceName
     self.inputDevices = inputDevices
+    self.inputVolume = inputVolume
+    self.inputVolumeSettable = inputVolumeSettable
   }
 }
 
@@ -71,7 +81,8 @@ public enum MachineFactsReader {
   /// default of nil would let a future call site silently stop reporting the device — the same
   /// shape of mistake the `install:` parameter was given no default to prevent.
   public static func read(inputDeviceUID: String?) -> MachineFacts {
-    MachineFacts(
+    let volume = inputVolume(forUID: inputDeviceUID)
+    return MachineFacts(
       micState: microphoneState(),
       neverSleep: neverSleep(),
       launchedBy: launchedBy(),
@@ -80,8 +91,17 @@ public enum MachineFactsReader {
       hardwareModel: hardwareModel(),
       osVersion: osVersion(),
       inputDeviceName: inputDeviceName(forUID: inputDeviceUID),
-      inputDevices: AudioInputDevices.list()
+      inputDevices: AudioInputDevices.list(),
+      inputVolume: volume?.value,
+      inputVolumeSettable: volume?.settable
     )
+  }
+
+  /// Release R4 (D4) — the configured device's input volume and whether it can be set, read now
+  /// from CoreAudio. Nil for no configured device or one that is not attached.
+  public static func inputVolume(forUID uid: String?) -> AudioInputVolume? {
+    guard let uid, !uid.isEmpty else { return nil }
+    return AudioInputDevices.inputVolume(forUID: uid)
   }
 
   // ---------------------------------------------------------------------------

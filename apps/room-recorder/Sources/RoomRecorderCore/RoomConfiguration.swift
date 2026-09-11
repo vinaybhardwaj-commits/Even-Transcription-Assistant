@@ -561,4 +561,18 @@ extension RoomConfiguration {
     updateChannel = "stable"
     return true
   }
+
+  /// Release R4 (D3) — the ONE path that changes `deviceUID` after enrol: a `set_audio_input`
+  /// from the desk. Returns true when this configuration moved.
+  ///
+  /// Enrol still never touches it (`applyEnrolment` above). This touches nothing else: the caller
+  /// re-reads config.json, applies this, and writes it back through `saveConfiguration`, so every
+  /// other key — including one hand-edited while the app ran — is kept. The same bounds the
+  /// initializer enforces, so a value that could not have been loaded can never be saved.
+  public mutating func applyAudioInputDevice(_ uid: String) throws -> Bool {
+    guard !uid.isEmpty, uid.count <= 256 else { throw RoomConfigurationError.invalidDeviceUID }
+    guard uid != deviceUID else { return false }
+    deviceUID = uid
+    return true
+  }
 }

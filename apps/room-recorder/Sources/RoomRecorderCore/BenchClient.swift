@@ -168,11 +168,53 @@ public struct BenchLevelPair: Equatable, Sendable {
   }
 }
 
-public enum BenchCommandKind: String, Codable, Sendable {
-  case startDay = "start_day"
-  case pauseDay = "pause_day"
-  case resumeDay = "resume_day"
-  case endDay = "end_day"
+/// The command bus's kinds (`lib/bench-commands.ts` `COMMAND_KINDS`, the 0044/0080 CHECK).
+///
+/// ─── AN UNKNOWN KIND IS A VALUE, NOT A DECODE FAILURE (R4-D2) ─────────────────────────────
+/// This used to be `enum BenchCommandKind: String, Codable`, and a string it did not list failed
+/// the WHOLE poll: `CommandPollResponse` could not decode, so the start or stop beside it never
+/// ran and the Mac went deaf to the bus until the stranger expired. That is 0.1.7's failure mode.
+/// Any string now decodes; one this build does not know is `.unknown(raw)`, which the engine acks
+/// `failed: unsupported_kind` and polls on.
+public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
+  case startDay
+  case pauseDay
+  case resumeDay
+  case endDay
+  /// R4-D1. Switch the recording device and/or set its input volume.
+  case setAudioInput
+  case unknown(String)
+
+  public init(rawValue: String) {
+    switch rawValue {
+    case "start_day": self = .startDay
+    case "pause_day": self = .pauseDay
+    case "resume_day": self = .resumeDay
+    case "end_day": self = .endDay
+    case "set_audio_input": self = .setAudioInput
+    default: self = .unknown(rawValue)
+    }
+  }
+
+  public var rawValue: String {
+    switch self {
+    case .startDay: return "start_day"
+    case .pauseDay: return "pause_day"
+    case .resumeDay: return "resume_day"
+    case .endDay: return "end_day"
+    case .setAudioInput: return "set_audio_input"
+    case .unknown(let raw): return raw
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var value = encoder.singleValueContainer()
+    try value.encode(rawValue)
+  }
 }
 
 public struct BenchCommand: Codable, Equatable, Sendable {
@@ -184,6 +226,48 @@ public struct BenchCommand: Codable, Equatable, Sendable {
   enum CodingKeys: String, CodingKey {
     case id, kind, args
     case createdAt = "created_at"
+  }
+}
+
+extension BenchCommand {
+  /// In an extension so the memberwise initializer survives. `args` absent is `.null`, not a
+  /// decode failure: R4-D2 is that nothing about one command's shape can cost the rest of the poll.
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      id: try values.decode(String.self, forKey: .id),
+      kind: try values.decode(BenchCommandKind.self, forKey: .kind),
+      args: try values.decodeIfPresent(JSONValue.self, forKey: .args) ?? .null,
+      createdAt: try? values.decodeIfPresent(String.self, forKey: .createdAt))
+  }
+}
+
+/// One element of `commands`, decoded on its own. A command that cannot be decoded at all — no
+/// id, a kind that is not a string — is dropped here, and the commands beside it still run. The
+/// server expires what nobody acks; a Mac that cannot read the bus has no such way back.
+private struct DecodedBenchCommand: Decodable {
+  let command: BenchCommand?
+
+  init(from decoder: Decoder) throws {
+    command = try? BenchCommand(from: decoder)
+  }
+}
+
+/// R4-D1 — what a `set_audio_input` ack carries beside `ok`/`error`. Each field is sent only when
+/// it was measured or applied; nil is absence on the wire, never a stand-in value.
+public struct AudioInputAcknowledgement: Equatable, Sendable {
+  public var appliedDeviceUID: String?
+  public var appliedInputVolume: Double?
+  public var inputVolumeSettable: Bool?
+
+  public init(
+    appliedDeviceUID: String? = nil,
+    appliedInputVolume: Double? = nil,
+    inputVolumeSettable: Bool? = nil
+  ) {
+    self.appliedDeviceUID = appliedDeviceUID
+    self.appliedInputVolume = appliedInputVolume
+    self.inputVolumeSettable = inputVolumeSettable
   }
 }
 
@@ -210,7 +294,9 @@ public struct CommandPollResponse: Codable, Equatable, Sendable {
     roomID = try values.decodeIfPresent(String.self, forKey: .roomID)
     superseded = try values.decodeIfPresent(Bool.self, forKey: .superseded) ?? false
     now = try values.decodeIfPresent(String.self, forKey: .now)
-    commands = try values.decodeIfPresent([BenchCommand].self, forKey: .commands) ?? []
+    commands =
+      try values.decodeIfPresent([DecodedBenchCommand].self, forKey: .commands)?
+      .compactMap(\.command) ?? []
     // `try?`, NOT `try`. A value of the wrong TYPE must cost this one field, not the poll: the
     // commands in the same answer — a stop, a start — still have to run.
     assignedChannel = (try? values.decodeIfPresent(String.self, forKey: .assignedChannel)) ?? nil
@@ -503,20 +589,48 @@ public actor BenchClient {
     sessionID: String? = nil,
     error: String? = nil
   ) async throws -> CommandAcknowledgement {
+    try await acknowledge(
+      commandID: commandID, ok: ok, sessionID: sessionID, error: error, audioInput: nil)
+  }
+
+  /// R4-D1. The `set_audio_input` fields ride the same body, top level, beside `ok` — and only
+  /// when present, so every other kind's ack carries exactly the keys it did before. Nil optionals
+  /// are omitted, as the synthesized encoder this replaces omitted them.
+  public func acknowledge(
+    commandID: String,
+    ok: Bool,
+    sessionID: String?,
+    error: String?,
+    audioInput: AudioInputAcknowledgement?
+  ) async throws -> CommandAcknowledgement {
     struct Body: Encodable {
       let ok: Bool
       let sessionID: String?
       let error: String?
+      let audioInput: AudioInputAcknowledgement?
       enum CodingKeys: String, CodingKey {
         case ok, error
         case sessionID = "session_id"
+        case appliedDeviceUID = "applied_device_uid"
+        case appliedInputVolume = "applied_input_volume"
+        case inputVolumeSettable = "input_volume_settable"
+      }
+      func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(ok, forKey: .ok)
+        try values.encodeIfPresent(sessionID, forKey: .sessionID)
+        try values.encodeIfPresent(error, forKey: .error)
+        try values.encodeIfPresent(audioInput?.appliedDeviceUID, forKey: .appliedDeviceUID)
+        try values.encodeIfPresent(audioInput?.appliedInputVolume, forKey: .appliedInputVolume)
+        try values.encodeIfPresent(audioInput?.inputVolumeSettable, forKey: .inputVolumeSettable)
       }
     }
     var request = try request(
       path: "/api/bench/commands/\(pathComponent(commandID))/ack",
       method: "POST"
     )
-    request.httpBody = try encoder.encode(Body(ok: ok, sessionID: sessionID, error: error))
+    request.httpBody = try encoder.encode(
+      Body(ok: ok, sessionID: sessionID, error: error, audioInput: audioInput))
     return try await decoded(request, as: CommandAcknowledgement.self)
   }
 

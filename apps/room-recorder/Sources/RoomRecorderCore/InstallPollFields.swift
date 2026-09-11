@@ -65,6 +65,13 @@ public struct InstallPollFields: Equatable, Sendable {
   /// D10. Every input device attached now, the default marked. Read-only.
   public var inputDevices: [AudioInputDeviceEntry]?
 
+  // ─── RELEASE R4 (D4) ──────────────────────────────────────────────────────────────────────
+  /// The input volume, 0–1, of the device this app records from (`deviceUID`). Nil when that
+  /// device is absent or has no input volume control.
+  public var inputVolume: Double?
+  /// Whether that volume can be set from the desk. Nil when the device is absent.
+  public var inputVolumeSettable: Bool?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -86,7 +93,9 @@ public struct InstallPollFields: Equatable, Sendable {
     diskFreeBytes: Int64? = nil,
     peak: Double? = nil,
     zeroRatio: Double? = nil,
-    inputDevices: [AudioInputDeviceEntry]? = nil
+    inputDevices: [AudioInputDeviceEntry]? = nil,
+    inputVolume: Double? = nil,
+    inputVolumeSettable: Bool? = nil
   ) {
     self.installID = installID
     self.appVersion = appVersion
@@ -109,6 +118,8 @@ public struct InstallPollFields: Equatable, Sendable {
     self.peak = peak
     self.zeroRatio = zeroRatio
     self.inputDevices = inputDevices
+    self.inputVolume = inputVolume
+    self.inputVolumeSettable = inputVolumeSettable
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -150,7 +161,9 @@ public struct InstallPollFields: Equatable, Sendable {
       diskFreeBytes: diskFreeBytes,
       peak: peak,
       zeroRatio: zeroRatio,
-      inputDevices: facts.inputDevices
+      inputDevices: facts.inputDevices,
+      inputVolume: facts.inputVolume,
+      inputVolumeSettable: facts.inputVolumeSettable
     )
   }
 
@@ -227,6 +240,14 @@ public struct InstallPollFields: Equatable, Sendable {
     add("zero_ratio", Self.unitString(zeroRatio))
     // D10. One JSON array, beside `input_device_name`, not instead of it.
     add("input_devices", inputDevices.flatMap(Self.inputDevicesJSON))
+    // ── Release R4 (D4) ─────────────────────────────────────────────────────────────────────
+    // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
+    // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
+    add("input_volume", Self.unitString(inputVolume))
+    if let inputVolumeSettable {
+      items.append(
+        URLQueryItem(name: "input_volume_settable", value: inputVolumeSettable ? "true" : "false"))
+    }
     return items
   }
 
