@@ -18,6 +18,8 @@
  * live session, no second tape; paused → room_paused unless override_pause, which is audited)
  * → INSERT bench_command → wait up to 8 s for the kiosk's ack → return it verbatim. Bus not
  * migrated / down → error bus_not_migrated / bus_down (never a 500).
+ * scribe_set_audio_input (R4-D6) — the same path with args {device_uid?, input_volume?}, validated
+ * before the room is resolved (bad_args); executed by the native app only.
  *
  * S3:
  * scribe_mark_consult (write)    — durable-first mirror of the kiosk consult mark: room's active
@@ -141,6 +143,7 @@ import {
   ACK_WAIT_MS,
   BusError,
   classifyBusError,
+  CommandArgsError,
   decideStart,
   findActiveSession,
   getListener,
@@ -148,9 +151,11 @@ import {
   isListening,
   LISTENER_FRESH_MS,
   listCommands,
+  parseSetAudioInputArgs,
   waitForAck,
   type CommandKind,
   type ListenerRow,
+  type SetAudioInputArgs,
 } from "@/lib/bench-commands";
 import { argBool, argDate, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, postBrainCue, resolveRoom, type CueSource, type RoomRef } from "./brain";
@@ -567,6 +572,55 @@ const stopRecording = simpleVerb(
   "end_day",
   "End the room's day via the kiosk (command end_day): the kiosk flushes the last chunk, ends the session, then acks. Requires a listener. May answer ack_timeout if the flush outlasts the 8 s wait — check scribe_get_session. DOES NOTHING to a session whose kiosk is GONE — the kiosk ends its OWN session and a replacement tab holds none; use scribe_close_orphaned_session for that.",
 );
+
+/**
+ * R4-D6 — the MCP door onto `set_audio_input`, for driving OPD 3 / OPD 7 from the desk (the fleet
+ * route is proxy-blocked from Cowork; this door is not). Not a simpleVerb: it carries args, and
+ * they are validated BEFORE the room is looked up, so a bad call touches nothing.
+ */
+const setAudioInput: McpTool = {
+  name: "scribe_set_audio_input",
+  description:
+    "Switch the room's recording device and/or set its input volume via the native Room Recorder (command set_audio_input, app 0.1.21+). Give device_uid (a uid from the fleet card's input_devices) and/or input_volume (0..1); at least one. Requires a listener (app polled within 10 s) else kiosk_not_listening — no command row is written. Waits up to 8 s for the ack and returns it: failures are named by the app (device_not_present, volume_not_settable, unsupported_kind, bad_args). A browser kiosk ignores this kind, so a room recording in a browser answers ack_timeout. A recording in progress continues in a new segment of the same session. The device and volume the room now reports arrive on its next poll (the fleet card), not in this answer.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...ROOM_WRITE_ARGS,
+      device_uid: { type: "string", description: "CoreAudio uid of an input the room reports in input_devices" },
+      input_volume: { type: "number", minimum: 0, maximum: 1, description: "input volume, 0..1; refused by the app when the device's volume is not settable" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) => {
+    // Only the two command fields go to the validator; JSON-RPC clients may send a number as a string.
+    const raw: Record<string, unknown> = {};
+    if (args.device_uid !== undefined) raw.device_uid = args.device_uid;
+    if (args.input_volume !== undefined) {
+      const v = args.input_volume;
+      raw.input_volume = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
+    }
+    let cmdArgs: SetAudioInputArgs;
+    try {
+      cmdArgs = parseSetAudioInputArgs(raw);
+    } catch (e) {
+      if (e instanceof CommandArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+      throw e;
+    }
+    const r = await resolveForWrite(args);
+    if ("error" in r) return r.error;
+    const room = r.room;
+    const now = new Date();
+    try {
+      const listener = await getListener(room.id);
+      const ctx = { room: { id: room.id, slug: room.slug, name: room.name }, listener: listenerView(listener, now) };
+      if (!isListening(listener, now)) return { ok: false, error: "kiosk_not_listening", ...ctx };
+      return await sendAndWait(room, "set_audio_input", cmdArgs, listener);
+    } catch (e) {
+      return busErrorResult(e, { room: { id: room.id, slug: room.slug, name: room.name } });
+    }
+  },
+};
 
 /**
  * K5 A2 — the second door onto the orphan repair. Deliberately NOT a simpleVerb: every one of
@@ -2802,6 +2856,7 @@ export const BENCH_TOOLS: McpTool[] = [
   pauseRecording,
   resumeRecording,
   stopRecording,
+  setAudioInput,
   markConsult,
   extractAudio,
   transcribeRange,

@@ -33,7 +33,12 @@ const BACKOFF_MAX_MS = 30_000;
 const ACK_RETRIES = 3;
 const ACTION_BANNER_MS = 60_000;
 
-export type CommandKind = "start_day" | "pause_day" | "resume_day" | "end_day";
+/**
+ * R4-D7 — `set_audio_input` is in the union because the bus can carry it to any room, but it is the
+ * NATIVE app's to execute: a browser has no say over the Mac's CoreAudio device. The dispatch below
+ * ignores it — and any kind this build does not know — without acking, and keeps polling.
+ */
+export type CommandKind = "start_day" | "pause_day" | "resume_day" | "end_day" | "set_audio_input";
 
 export type CommandActions = {
   getSnapshot: () => { state: RoomRecorderState; sessionId: string | null };
@@ -85,7 +90,8 @@ function makeTabId(): string {
   }
 }
 
-const ACTION_LABEL: Record<CommandKind, string> = {
+// Partial: an ignored kind never reaches the label (R4-D7).
+const ACTION_LABEL: Partial<Record<CommandKind, string>> = {
   start_day: "Started from operator",
   pause_day: "Paused from operator",
   resume_day: "Resumed from operator",
@@ -210,8 +216,13 @@ export function useCommandPoll(opts: { enabled: boolean; actions: CommandActions
             }
             break;
           }
-          default:
-            result = { ok: false, error: "unknown_kind" };
+          default: {
+            // R4-D7. `set_audio_input`, or a kind newer than this page. NOT ACKED and not refused:
+            // the native app owns audio, and a refusal from a browser tab would land on the desk as
+            // the room's answer. No label, no count — the chip keeps saying what the room is doing.
+            log("command_ignored", { id: cmd.id, kind: String(cmd.kind) });
+            return;
+          }
         }
       } catch (e) {
         result = { ok: false, error: String((e as Error)?.message ?? e).slice(0, 160) };

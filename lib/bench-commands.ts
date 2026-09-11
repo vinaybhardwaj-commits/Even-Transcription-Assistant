@@ -18,10 +18,55 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { parseMicLevels, type MicLevels } from "@/lib/bench-levels";
-import { applyInstallPoll, type InstallPollFields } from "@/lib/room-install";
+import { applyInstallPoll, INPUT_DEVICE_UID_MAX, type InstallPollFields } from "@/lib/room-install";
 
-export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day"] as const;
+/**
+ * R4-D1 adds the fifth, `set_audio_input`. Three definitions move together: this list, migration
+ * 0080's CHECK, and the app's `BenchCommandKind`. The browser kiosk ignores it (R4-D7) — the native
+ * app owns audio — so a room listening from a browser never acks it and the caller sees a timeout.
+ */
+export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day", "set_audio_input"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
+
+/** R4-D1. At least one of the two; the app applies whichever is present. */
+export type SetAudioInputArgs = { device_uid?: string; input_volume?: number };
+
+export class CommandArgsError extends Error {
+  readonly code = "BAD_ARGS" as const;
+  constructor(public reason: string) {
+    super(`BAD_ARGS: ${reason}`);
+  }
+}
+
+/**
+ * PURE — R4-S item 2. A `set_audio_input` body, or a CommandArgsError. The one validator: the admin
+ * route and the MCP tool call it for their own answer, and `insertCommand` calls it again so no path
+ * onto the bus can skip it.
+ *
+ * STRICT, because the app acts on a Mac with a patient in the room: an object naming `device_uid`
+ * (a string, trimmed, 1..256 — the fleet's bound on a CoreAudio uid) and/or `input_volume` (a
+ * number in 0..1), and nothing else. Out of range is refused, never clamped: a clamped 1.5 would set
+ * full volume on a request nobody made.
+ */
+export function parseSetAudioInputArgs(raw: unknown): SetAudioInputArgs {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new CommandArgsError("args must be an object");
+  const o = raw as Record<string, unknown>;
+  const extra = Object.keys(o).filter((k) => k !== "device_uid" && k !== "input_volume");
+  if (extra.length) throw new CommandArgsError(`unknown field ${extra[0]!.slice(0, 32)}`);
+  const out: SetAudioInputArgs = {};
+  if (o.device_uid !== undefined) {
+    const u = typeof o.device_uid === "string" ? o.device_uid.trim() : "";
+    if (!u || u.length > INPUT_DEVICE_UID_MAX) throw new CommandArgsError(`device_uid must be a string of 1..${INPUT_DEVICE_UID_MAX} characters`);
+    out.device_uid = u;
+  }
+  if (o.input_volume !== undefined) {
+    const v = o.input_volume;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) throw new CommandArgsError("input_volume must be a number in 0..1");
+    out.input_volume = v;
+  }
+  if (out.device_uid === undefined && out.input_volume === undefined) throw new CommandArgsError("name device_uid or input_volume");
+  return out;
+}
 // S3-2: the timing constants live in the pure lib/bench-bus-constants.ts (kiosk-bundle safe);
 // re-exported here so every existing caller keeps working unchanged.
 export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
@@ -350,9 +395,12 @@ export function isListening(l: ListenerRow | null, now: Date = new Date()): bool
 }
 
 export async function insertCommand(input: { roomId: string; kind: CommandKind; args?: unknown; source?: string }): Promise<string> {
+  // R4-S item 2. Validated OUTSIDE `guarded`, so the throw stays a CommandArgsError and no SQL runs.
+  // The four existing kinds are not validated here, exactly as before.
+  const checked = input.kind === "set_audio_input" ? parseSetAudioInputArgs(input.args) : input.args;
   return guarded(async () => {
     const id = newCommandId();
-    const args = input.args === undefined || input.args === null ? null : JSON.stringify(input.args);
+    const args = checked === undefined || checked === null ? null : JSON.stringify(checked);
     await sql`
       INSERT INTO bench_command (id, room_id, kind, args, status, source)
       VALUES (${id}, ${input.roomId}, ${input.kind}, ${args}::jsonb, 'pending', ${input.source ?? "mcp"})

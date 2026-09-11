@@ -423,7 +423,7 @@ describe("the card renders today's fleet as one row per room", () => {
     };
     const html = renderToStaticMarkup(
       React.createElement(FleetTable, {
-        fleet, nowMs, busy: null, onCopy: () => {}, onRetire: () => {}, onAssignStable: () => {},
+        fleet, nowMs, busy: null, onCopy: () => {}, onRetire: () => {}, onAssignStable: () => {}, onSetAudioInput: () => {},
       }),
     );
     const count = (re: RegExp) => (html.match(re) ?? []).length;

@@ -67,6 +67,8 @@ export type InstallErrorCode =
   | "NOT_FOUND"
   | "RETIRED"
   | "BAD_CHANNEL"
+  | "BAD_ARGS"
+  | "ACK_TIMEOUT"
   | "STORE_UNAVAILABLE";
 
 export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
@@ -82,6 +84,10 @@ export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
   RETIRED: 409,
   // B2-D5. The assign route admits `stable` and nothing else; anything else is the caller's error.
   BAD_CHANNEL: 400,
+  // R4-D5. The audio-input route: a body that is not `{device_uid?, input_volume?}`, and no ack from
+  // the room inside the bus's wait (the command stays pending; the answer carries its id).
+  BAD_ARGS: 400,
+  ACK_TIMEOUT: 504,
   STORE_UNAVAILABLE: 503,
 };
 
@@ -722,7 +728,8 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
              session_open, update_channel, last_update_result, last_update_version,
              last_update_error, last_update_at, disk_free_bytes,
-             assigned_channel, peak, zero_ratio, input_devices
+             assigned_channel, peak, zero_ratio, input_devices,
+             input_volume, input_volume_settable
     `) as InstallView[];
     return rows[0] ? normaliseInstall(rows[0]) : null;
   } catch (e) {
@@ -768,6 +775,11 @@ export type InstallPollFields = {
   zero_ratio?: string | number | null;
   /** B2-D10. The device list, as the JSON text the query string carried (or already parsed). */
   input_devices?: string | unknown[] | null;
+  // ── Release R4 (0080). Sent by 0.1.21 and later; every earlier app omits both. ──────────────
+  /** R4-D4. Input volume of the recording device, 0..1. */
+  input_volume?: string | number | null;
+  /** R4-D4. Whether that volume can be set from software. */
+  input_volume_settable?: boolean | null;
 };
 
 /**
@@ -818,6 +830,8 @@ export function cleanPollFields(raw: InstallPollFields): {
   zero_ratio: number | null;
   /** Normalised JSON text for the `::jsonb` cast, or null. */
   input_devices: string | null;
+  input_volume: number | null;
+  input_volume_settable: boolean | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -880,6 +894,11 @@ export function cleanPollFields(raw: InstallPollFields): {
     peak: unitRatio(raw.peak),
     zero_ratio: unitRatio(raw.zero_ratio),
     input_devices: cleanInputDevices(raw.input_devices),
+    // ── Release R4 ─────────────────────────────────────────────────────────────────────────
+    // `unitRatio`: 0..1 or nothing, dropped and never clamped, the peak rule. A clamped 1.0 would
+    // read as a device turned fully up that nobody measured.
+    input_volume: unitRatio(raw.input_volume),
+    input_volume_settable: typeof raw.input_volume_settable === "boolean" ? raw.input_volume_settable : null,
   };
 }
 
@@ -1017,6 +1036,10 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              peak               = COALESCE(${f.peak}::real, peak),
              zero_ratio         = COALESCE(${f.zero_ratio}::real, zero_ratio),
              input_devices      = COALESCE(${f.input_devices}::jsonb, input_devices),
+             -- Release R4 (0080). COALESCE like B2: every app below 0.1.21 omits both, and its polls
+             -- must leave a newer app's last reading where it was. FALSE is a value and is written.
+             input_volume          = COALESCE(${f.input_volume}::real, input_volume),
+             input_volume_settable = COALESCE(${f.input_volume_settable}::boolean, input_volume_settable),
              -- B2-D5, orchestrator fix-up ruling 3. THE ASSIGNMENT CLEARS ITSELF the moment the Mac
              -- reports stable of its own accord: it has done what it was told, and a value left
              -- standing would drag it back off test after a later hand move — undoing the one move
@@ -1085,6 +1108,9 @@ function normaliseInstall(r: InstallView): InstallView {
       }
       return null;
     })(),
+    // Release R4 (0080). `real` may arrive as a string; the flag is a boolean or nothing.
+    input_volume: r.input_volume === null || r.input_volume === undefined ? null : Number(r.input_volume),
+    input_volume_settable: typeof r.input_volume_settable === "boolean" ? r.input_volume_settable : null,
   };
 }
 
@@ -1145,7 +1171,8 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              tape_advancing, tape_poll_streak, tape_advancing_since, never_sleep, retired_at,
              session_open, update_channel, last_update_result, last_update_version,
              last_update_error, last_update_at, disk_free_bytes,
-             assigned_channel, peak, zero_ratio, input_devices
+             assigned_channel, peak, zero_ratio, input_devices,
+             input_volume, input_volume_settable
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500
@@ -1225,6 +1252,33 @@ export async function assignInstallChannel(
        WHERE install_id = ${installId} AND retired_at IS NULL
       RETURNING install_id, assigned_channel
     `) as Array<{ install_id: string; assigned_channel: "stable" }>;
+    return rows[0] ?? null;
+  } catch (e) {
+    throw classifyInstallError(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The audio-input route's room (R4-D5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The room a BOUND install records for — enrolled and not retired, the row the fleet card draws.
+ * Null for an unknown, unenrolled or retired install: the route answers 404 for all three and writes
+ * no command, so a command can only ever be addressed to the room a live Mac is bound to.
+ */
+export async function boundInstallRoom(
+  installId: string,
+): Promise<{ install_id: string; room_id: string } | null> {
+  try {
+    const rows = (await sql`
+      SELECT install_id, room_id
+        FROM room_install
+       WHERE install_id = ${installId}
+         AND enrolled_at IS NOT NULL
+         AND retired_at IS NULL
+       LIMIT 1
+    `) as Array<{ install_id: string; room_id: string }>;
     return rows[0] ?? null;
   } catch (e) {
     throw classifyInstallError(e);

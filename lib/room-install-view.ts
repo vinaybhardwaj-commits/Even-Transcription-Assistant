@@ -70,6 +70,11 @@ export type InstallView = {
   zero_ratio?: number | null;
   /** B2-D10. Every input CoreAudio listed, default marked. READ-ONLY. NULL = never reported. */
   input_devices?: InputDevice[] | null;
+  // ── Release R4 (0080). NULL on every row until 0080 runs, and on every app below 0.1.21. ────
+  /** R4-D4. Input volume, 0..1, of the device the app records from. NULL = not reported. */
+  input_volume?: number | null;
+  /** R4-D4. Whether that volume can be set from software. FALSE greys the slider; NULL = not reported. */
+  input_volume_settable?: boolean | null;
 };
 
 /** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
@@ -606,6 +611,14 @@ export type RowView = {
   assigned_pending: boolean;
   /** B2-D5. Whether the card offers "Move to stable": a bound Mac that reports `test`, not yet assigned. */
   can_move_to_stable: boolean;
+  // ── Release R4 ────────────────────────────────────────────────────────────────────────────
+  /** R4-D4, passed through. Null when not reported. */
+  input_volume: number | null;
+  input_volume_settable: boolean | null;
+  /** R4-D4. "62%", "not settable", or "—" — see `volumeText`. */
+  volume_text: string;
+  /** R4-D5. Whether the card offers the device select and volume slider: a bound Mac, and only that. */
+  can_set_audio_input: boolean;
 };
 
 export type DiskLevel = "ok" | "amber" | "red" | "unknown";
@@ -627,6 +640,17 @@ export function diskText(bytes: number | null | undefined): string {
   return diskLevel(bytes) === "unknown"
     ? "disk not reported"
     : `${(bytes! / 1_000_000_000).toFixed(1)} GB free`;
+}
+
+/**
+ * PURE — R4-D4. The volume beside the device name: a whole percentage, `not settable` when the app
+ * said the device has no settable volume (whatever number it last reported), and `—` when nothing
+ * was reported. NEVER "0%" for a missing reading — that would read as a muted input.
+ */
+export function volumeText(volume: number | null | undefined, settable: boolean | null | undefined): string {
+  if (settable === false) return "not settable";
+  if (volume === null || volume === undefined || !Number.isFinite(volume)) return "—";
+  return `${Math.round(volume * 100)}%`;
 }
 
 /**
@@ -753,6 +777,11 @@ export function deriveRow(input: {
     can_move_to_stable: Boolean(
       i && !i.retired_at && i.update_channel === "test" && i.assigned_channel !== "stable",
     ),
+    // ── Release R4 ──────────────────────────────────────────────────────────────────────────
+    input_volume: i?.input_volume ?? null,
+    input_volume_settable: i?.input_volume_settable ?? null,
+    volume_text: volumeText(i?.input_volume ?? null, i?.input_volume_settable ?? null),
+    can_set_audio_input: Boolean(i && i.enrolled_at && !i.retired_at),
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────

@@ -58,6 +58,9 @@ type Minted = {
   clipboard_ok: boolean;
 };
 
+/** R4-D5. The audio-input route's body: exactly one of the two, per control. */
+export type AudioInputBody = { device_uid: string } | { input_volume: number };
+
 export function BenchInstallFleet() {
   const [fleet, setFleet] = React.useState<FleetPayload | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -195,6 +198,35 @@ export function BenchInstallFleet() {
     [load],
   );
 
+  // R4-D5. One POST per change, the command's args as the body; the route waits for the Mac's ack.
+  // A failure prints the app's own reason. Success changes nothing here by itself: the device and
+  // volume the row shows come from the Mac's next poll, which the `load()` below reads — no
+  // optimistic state, the rule this component is built around.
+  const onSetAudioInput = React.useCallback(
+    async (install: InstallView, body: AudioInputBody) => {
+      setBusy(install.install_id);
+      setError(null);
+      try {
+        const res = await fetch(`/api/admin/installs/${encodeURIComponent(install.install_id)}/audio-input`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const j = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(j?.error?.message ?? "could not change the audio input");
+        if (j?.command?.status !== "acked") {
+          throw new Error(`Audio input not changed: ${j?.command?.error ?? j?.command?.status ?? "no answer"}`);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+        void load();
+      }
+    },
+    [load],
+  );
+
   const onWithdraw = React.useCallback(
     async (rel: ReleaseView) => {
       setBusy(rel.id);
@@ -287,6 +319,7 @@ export function BenchInstallFleet() {
         onCopy={onCopy}
         onRetire={onRetire}
         onAssignStable={onAssignStable}
+        onSetAudioInput={onSetAudioInput}
       />
 
       <p className="mt-3 text-caption text-even-ink-400">
@@ -314,6 +347,7 @@ export function FleetTable({
   onCopy,
   onRetire,
   onAssignStable,
+  onSetAudioInput,
 }: {
   fleet: FleetPayload | null;
   nowMs: number;
@@ -321,6 +355,7 @@ export function FleetTable({
   onCopy: (r: FleetRow) => void;
   onRetire: (i: InstallView) => void;
   onAssignStable: (i: InstallView) => void;
+  onSetAudioInput: (i: InstallView, body: AudioInputBody) => void;
 }) {
   const release = fleet?.latest_release ?? null;
   const releases = fleet?.releases ?? null;
@@ -366,6 +401,7 @@ export function FleetTable({
                 onCopy={onCopy}
                 onRetire={onRetire}
                 onAssignStable={onAssignStable}
+                onSetAudioInput={onSetAudioInput}
               />
             ))
           )}
@@ -495,6 +531,7 @@ function FleetRowView({
   onCopy,
   onRetire,
   onAssignStable,
+  onSetAudioInput,
 }: {
   row: FleetRow;
   view: RowView;
@@ -504,6 +541,7 @@ function FleetRowView({
   onCopy: (r: FleetRow) => void;
   onRetire: (i: InstallView) => void;
   onAssignStable: (i: InstallView) => void;
+  onSetAudioInput: (i: InstallView, body: AudioInputBody) => void;
 }) {
   const i = row.install;
   const attn = view.state === "needs_attention";
@@ -647,6 +685,11 @@ function FleetRowView({
         {i && (
           <span className="block text-even-ink-400">
             {i.input_device_name ?? "device not reported"}
+            {/* R4-D4. The volume beside the device it belongs to: "62%", "not settable", or "—". */}
+            {" · "}
+            <span data-volume-text className="tabular-nums whitespace-nowrap">
+              {view.volume_text}
+            </span>
           </span>
         )}
         {/* B2-D7. Two read-only numbers beside the device: the loudest sample and how much of the
@@ -668,6 +711,10 @@ function FleetRowView({
               </li>
             ))}
           </ul>
+        )}
+        {/* R4-D5. The control. Offered on a bound Mac only; each change is one command. */}
+        {i && view.can_set_audio_input && (
+          <AudioInputControl install={i} view={view} busy={busy === i.install_id} onSet={onSetAudioInput} />
         )}
       </td>
 
@@ -727,6 +774,101 @@ function FleetRowView({
 // ---------------------------------------------------------------------------
 // The checklist view
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// R4-D5 — the audio-input control
+// ---------------------------------------------------------------------------
+
+/**
+ * A device select and a volume slider for one bound Mac.
+ *
+ * BOTH SHOW WHAT THE MAC REPORTED, NOT WHAT WAS CLICKED. The select's value is the device the app says
+ * it records from (matched by name — the poll carries the name of the recording device, the list
+ * carries uids); picking another fires one command and the select stays where the Mac is until the
+ * next poll says otherwise. The slider starts at the reported volume and is disabled unless the app
+ * said the device's volume is settable — `false` and "not reported" both grey it.
+ */
+function AudioInputControl({
+  install,
+  view,
+  busy,
+  onSet,
+}: {
+  install: InstallView;
+  view: RowView;
+  busy: boolean;
+  onSet: (i: InstallView, body: AudioInputBody) => void;
+}) {
+  const devices = view.input_devices ?? [];
+  const current = devices.find((d) => d.name === install.input_device_name) ?? null;
+  const settable = view.input_volume_settable === true;
+  const reported = view.input_volume === null ? 0 : Math.round(view.input_volume * 100);
+  return (
+    <span className="mt-1.5 flex flex-col items-start gap-1">
+      {devices.length > 0 && (
+        <select
+          data-audio-device
+          value={current?.uid ?? ""}
+          disabled={busy}
+          onChange={(e) => {
+            const uid = e.target.value;
+            if (uid && uid !== current?.uid) onSet(install, { device_uid: uid });
+          }}
+          aria-label="Recording input"
+          title="Switches the input this Mac records from at once. A recording in progress continues in a new segment of the same session."
+          className="max-w-[28ch] rounded-lg border border-even-ink-100 bg-white px-2 py-1 text-caption text-even-navy-800 disabled:opacity-40"
+        >
+          {!current && <option value="">choose an input…</option>}
+          {devices.map((d) => (
+            <option key={d.uid} value={d.uid}>
+              {`${d.name}${d.is_default ? " (default)" : ""}${d === current ? " · recording" : ""}`}
+            </option>
+          ))}
+        </select>
+      )}
+      {/* Keyed on the report, so a new reading from the Mac resets the slider to it. */}
+      <VolumeSlider
+        key={`${install.install_id}:${reported}:${String(view.input_volume_settable)}`}
+        reported={reported}
+        enabled={settable && !busy}
+        onCommit={(pct) => onSet(install, { input_volume: pct / 100 })}
+      />
+    </span>
+  );
+}
+
+/** Fires once on release (pointer up or key up), never on every step of a drag. */
+function VolumeSlider({
+  reported,
+  enabled,
+  onCommit,
+}: {
+  reported: number;
+  enabled: boolean;
+  onCommit: (pct: number) => void;
+}) {
+  const [pct, setPct] = React.useState(reported);
+  const commit = () => {
+    if (enabled && pct !== reported) onCommit(pct);
+  };
+  return (
+    <input
+      data-audio-volume
+      type="range"
+      min={0}
+      max={100}
+      step={1}
+      value={pct}
+      disabled={!enabled}
+      onChange={(e) => setPct(Number(e.target.value))}
+      onPointerUp={commit}
+      onKeyUp={commit}
+      aria-label="Input volume"
+      title={enabled ? "Sets this Mac's input volume on release." : "This input's volume cannot be set from software."}
+      className="w-32 disabled:opacity-40"
+    />
+  );
+}
 
 function InstallHead({ roomName, onBack }: { roomName: string; onBack: () => void }) {
   return (

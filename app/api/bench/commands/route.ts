@@ -12,7 +12,8 @@
  * · input_device_name (plus hostname / hardware_model / os_version, which §6 step 2 renders), and
  * since Build R3 §13.4: session_open · update_channel · last_update_result · last_update_version ·
  * last_update_error · last_update_at · disk_free_bytes; since Release B2: peak · zero_ratio ·
- * input_devices. A native poll's 200 also carries `assigned_channel` (B2-D5): `stable` or null.
+ * input_devices; since Release R4: input_volume · input_volume_settable. A native poll's 200 also
+ * carries `assigned_channel` (B2-D5): `stable` or null.
  *
  * A poll carrying install_id writes last_seen_at and those columns on that room_install row; a poll
  * WITHOUT it behaves exactly as it behaves today, which is why the browser kiosk is untouched by
@@ -143,6 +144,10 @@ export async function GET(req: NextRequest) {
         peak: sp.get("peak"),
         zero_ratio: sp.get("zero_ratio"),
         input_devices: sp.get("input_devices"),
+        // ── Release R4 (0080). Sent by 0.1.21 and later, both optional. `cleanPollFields` drops a
+        // volume outside 0..1; `tri` keeps absent absent, so a 0.1.20 poll writes neither.
+        input_volume: sp.get("input_volume"),
+        input_volume_settable: tri("input_volume_settable"),
       }
     : undefined;
 
