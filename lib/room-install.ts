@@ -770,7 +770,13 @@ export type InstallPollFields = {
   input_devices?: string | unknown[] | null;
 };
 
-export type InstallPollResult = { ok: true } | { ok: false; code: "RETIRED" | "NOT_FOUND" };
+/**
+ * `assigned_channel` rides back on the poll's own UPDATE (B2-D5), AFTER that UPDATE — so a poll that
+ * just reported `stable` and cleared the assignment is told null on the same round trip.
+ */
+export type InstallPollResult =
+  | { ok: true; assigned_channel: "stable" | null }
+  | { ok: false; code: "RETIRED" | "NOT_FOUND" };
 
 const MIC_STATES = new Set(["authorized", "denied", "not_determined", "unknown"]);
 
@@ -889,9 +895,14 @@ export function unitRatio(v: unknown): number | null {
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
 }
 
-/** B2-D10 bounds, as the kickoff fixed them. */
+/**
+ * B2-D10 bounds (orchestrator fix-up ruling 4). The UID is the long one: 0077's own example, the
+ * TONOR's `AppleUSBAudioEngine:…:TONOR TM20 Audio Device:20200918:1`, is 81 characters, so the
+ * kickoff's first bound of 64 would have dropped every list that contained it.
+ */
 export const INPUT_DEVICES_MAX = 16;
-export const INPUT_DEVICE_FIELD_MAX = 64;
+export const INPUT_DEVICE_NAME_MAX = 128;
+export const INPUT_DEVICE_UID_MAX = 256;
 
 /**
  * PURE — B2-D10. The device list, bounded, as JSON text for the `::jsonb` cast — or null.
@@ -921,7 +932,7 @@ export function cleanInputDevices(v: unknown): string | null {
     if (typeof name !== "string" || typeof uid !== "string" || typeof is_default !== "boolean") return null;
     const n = name.trim();
     const u = uid.trim();
-    if (!n || !u || n.length > INPUT_DEVICE_FIELD_MAX || u.length > INPUT_DEVICE_FIELD_MAX) return null;
+    if (!n || !u || n.length > INPUT_DEVICE_NAME_MAX || u.length > INPUT_DEVICE_UID_MAX) return null;
     out.push({ name: n, uid: u, is_default });
   }
   if (out.filter((d) => d.is_default).length > 1) return null;
@@ -1005,13 +1016,20 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              -- and its polls must leave a newer app's last reading exactly where it was.
              peak               = COALESCE(${f.peak}::real, peak),
              zero_ratio         = COALESCE(${f.zero_ratio}::real, zero_ratio),
-             input_devices      = COALESCE(${f.input_devices}::jsonb, input_devices)
+             input_devices      = COALESCE(${f.input_devices}::jsonb, input_devices),
+             -- B2-D5, orchestrator fix-up ruling 3. THE ASSIGNMENT CLEARS ITSELF the moment the Mac
+             -- reports stable of its own accord: it has done what it was told, and a value left
+             -- standing would drag it back off test after a later hand move — undoing the one move
+             -- R3-8 reserves for a person at the Mac. A poll that omits the channel clears nothing.
+             assigned_channel   = CASE WHEN ${f.update_channel}::text = 'stable' THEN NULL ELSE assigned_channel END
        WHERE install_id = ${f.install_id}
          AND retired_at IS NULL
-      RETURNING install_id
-    `) as Array<{ install_id: string }>;
+      RETURNING install_id, assigned_channel
+    `) as Array<{ install_id: string; assigned_channel: string | null }>;
 
-    if (rows.length > 0) return { ok: true };
+    if (rows.length > 0) {
+      return { ok: true, assigned_channel: rows[0]!.assigned_channel === "stable" ? "stable" : null };
+    }
 
     // Nothing updated: either the row is retired, or there is no such install. Distinguished
     // because they mean different things to the app — stop for ever, or you were never enrolled.
@@ -1210,25 +1228,6 @@ export async function assignInstallChannel(
     return rows[0] ?? null;
   } catch (e) {
     throw classifyInstallError(e);
-  }
-}
-
-/**
- * The value the poll response carries as `assigned_channel`. FAIL-SAFE TO NULL, never a throw:
- * this runs on every native poll, and "nothing assigned" is always a safe answer — the Mac keeps
- * the channel its own config.json names. That includes the minutes between a deploy and
- * migration 0079, when the column does not exist yet.
- */
-export async function readAssignedChannel(installId: string): Promise<"stable" | null> {
-  try {
-    const rows = (await sql`
-      SELECT assigned_channel FROM room_install
-       WHERE install_id = ${installId} AND retired_at IS NULL
-       LIMIT 1
-    `) as Array<{ assigned_channel: string | null }>;
-    return rows[0]?.assigned_channel === "stable" ? "stable" : null;
-  } catch {
-    return null;
   }
 }
 

@@ -141,7 +141,13 @@ export function cleanLevels(v: unknown): MicLevels | null {
 export type PollResult =
   | { superseded: true; now: string; owner_tab_id: string }
   | { retired: true; now: string }
-  | { superseded: false; now: string; commands: PendingCommand[] };
+  | {
+      superseded: false;
+      now: string;
+      commands: PendingCommand[];
+      /** B2-D5. Native polls only — from applyInstallPoll's own RETURNING, no extra read. */
+      assigned_channel?: "stable" | null;
+    };
 
 /**
  * One kiosk poll: D4 supersede check → upsert listener → lazy-expire → pending commands
@@ -156,10 +162,14 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // the room back from the install that just replaced it for one more beat.
     //
     // THE BROWSER KIOSK NEVER ENTERS THIS BLOCK. `install` is undefined on every poll it sends.
+    // B2-D5: what the install row's UPDATE returned, carried to the response. Null on any fault —
+    // "nothing assigned" leaves the Mac on the channel its own config.json names.
+    let assignedChannel: "stable" | null = null;
     if (input.install?.install_id) {
       let applied: Awaited<ReturnType<typeof applyInstallPoll>> | null = null;
       try {
         applied = await applyInstallPoll(input.install);
+        if (applied.ok) assignedChannel = applied.assigned_channel;
       } catch (e) {
         // FAIL OPEN, LOUDLY. The install registry is bookkeeping; the tape is not. A room that
         // is recording must not stop because the fleet card cannot be updated, and the card
@@ -272,6 +282,8 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
       superseded: false,
       now: new Date().toISOString(),
       commands: rows.map((r) => ({ id: r.id, kind: r.kind, args: r.args ?? null, created_at: new Date(r.created_at).toISOString() })),
+      // The browser kiosk never gets the key: its response is exactly what it was before B2.
+      ...(input.install?.install_id ? { assigned_channel: assignedChannel } : {}),
     };
   });
 }

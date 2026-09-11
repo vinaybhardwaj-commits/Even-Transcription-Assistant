@@ -26,7 +26,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
 import { classifyBusError, cleanLevels, pollCommands } from "@/lib/bench-commands";
-import { readAssignedChannel } from "@/lib/room-install";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -158,17 +157,10 @@ export async function GET(req: NextRequest) {
         { status: 409, headers: NO_STORE },
       );
     }
-    // B2-D5. A native poll is told what channel the server assigned — `stable` or null. Only a
-    // poll that carried install_id gets the key at all, so the browser kiosk's response is exactly
-    // what it was. An app that does not know the key ignores it (a keyed decoder reads the keys it
-    // names); `readAssignedChannel` answers null on any fault, so this line cannot fail a poll.
-    if (install) {
-      const assigned_channel = await readAssignedChannel(install.install_id);
-      return NextResponse.json(
-        { ok: true, room_id: claims.room_id, ...out, assigned_channel },
-        { headers: NO_STORE },
-      );
-    }
+    // B2-D5. A native poll's `out` carries `assigned_channel` — `stable` or null — straight from the
+    // install row's own UPDATE … RETURNING, so it costs no extra read. The browser kiosk's `out`
+    // has no such key and its response is exactly what it was. An app that does not know the key
+    // ignores it (a keyed decoder reads only the keys it names).
     return NextResponse.json({ ok: true, room_id: claims.room_id, ...out }, { headers: NO_STORE });
   } catch (e) {
     const b = classifyBusError(e);

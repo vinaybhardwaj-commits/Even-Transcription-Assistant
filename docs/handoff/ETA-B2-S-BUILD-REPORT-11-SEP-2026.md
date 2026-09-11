@@ -27,3 +27,11 @@ New SQL: `UPDATE room_install SET assigned_channel = $1 WHERE install_id = $2 AN
 - `assigned_channel` costs one SELECT per native poll; `bench-commands.ts` is outside the contract.
 - The fleet was already one row per room (nine bound, not seven).
 - Addendum uncommitted. Built by Opus.
+
+## Fix-up
+
+Commit: the one carrying this section (sha in the chat reply). `npm test` `Tests 1621 passed (1621)`; typecheck and build exit 0.
+- (3) `lib/room-install.ts:1024`: `assigned_channel = CASE WHEN …update_channel = 'stable' THEN NULL …`; route test assign → `test` → `stable` → row null.
+- (4) `lib/room-install.ts:904-905`: name ≤128, uid ≤256; TONOR's 81-char id tested.
+- (5) `lib/bench-commands.ts:172,286`: `assigned_channel` from `applyInstallPoll`'s `RETURNING`; lookup removed.
+- (8) Addendum committed.

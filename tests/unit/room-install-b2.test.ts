@@ -288,8 +288,8 @@ describe("B2-D10 — cleanInputDevices", () => {
       JSON.stringify({ name: "x" }),
       JSON.stringify([dev(), { name: "C270", uid: "c270" }]),
       JSON.stringify([dev({ name: "" })]),
-      JSON.stringify([dev({ name: "x".repeat(65) })]),
-      JSON.stringify([dev({ uid: "u".repeat(65) })]),
+      JSON.stringify([dev({ name: "x".repeat(129) })]),
+      JSON.stringify([dev({ uid: "u".repeat(257) })]),
       JSON.stringify([dev({ is_default: "true" })]),
       JSON.stringify([dev(), dev({ uid: "second" })]), // two defaults
       JSON.stringify(Array.from({ length: 17 }, (_, n) => dev({ uid: `u${n}`, is_default: false }))),
@@ -299,9 +299,18 @@ describe("B2-D10 — cleanInputDevices", () => {
     expect(M.cleanInputDevices(null)).toBeNull();
   });
 
-  it("admits exactly 16 entries and 64-character fields", () => {
-    const sixteen = Array.from({ length: 16 }, (_, n) => dev({ uid: `u${n}`.padEnd(64, "x"), is_default: n === 0 }));
+  it("admits exactly 16 entries, 128-character names and 256-character ids (ruling 4)", () => {
+    const sixteen = Array.from({ length: 16 }, (_, n) =>
+      dev({ name: `n${n}`.padEnd(128, "x"), uid: `u${n}`.padEnd(256, "x"), is_default: n === 0 }),
+    );
     expect(M.cleanInputDevices(JSON.stringify(sixteen))).not.toBeNull();
+  });
+
+  it("keeps the TONOR's real 81-character CoreAudio id — the one 0077 quotes", () => {
+    const uid = "AppleUSBAudioEngine:FuZhou Kingwayinfo CO.,LTD:TONOR TM20 Audio Device:20200918:1";
+    expect(uid).toHaveLength(81);
+    const out = M.cleanInputDevices(JSON.stringify([dev({ uid }), dev({ name: "C270 HD WEBCAM", uid: "c270", is_default: false })]));
+    expect(JSON.parse(out!)[0].uid).toBe(uid);
   });
 });
 
@@ -313,8 +322,10 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     expect(up).toMatch(/peak\s*=\s*COALESCE\(\?::real, peak\)/);
     expect(up).toMatch(/zero_ratio\s*=\s*COALESCE\(\?::real, zero_ratio\)/);
     expect(up).toMatch(/input_devices\s*=\s*COALESCE\(\?::jsonb, input_devices\)/);
-    // assigned_channel is written by the admin route and NOTHING ELSE — never by a poll.
-    expect(up).not.toContain("assigned_channel");
+    // A poll may CLEAR the assignment (ruling 3) and can never SET one: the only assignment of the
+    // column in this statement yields NULL or leaves it as it was. Setting stays the admin route's.
+    const sets = up.match(/assigned_channel\s*=\s*[^,]*?END/g) ?? [];
+    expect(sets).toEqual(["assigned_channel = CASE WHEN ?::text = 'stable' THEN NULL ELSE assigned_channel END"]);
   });
 
   it("the fleet read and retire both select the four 0079 columns", () => {
@@ -323,13 +334,24 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     expect(projections).toHaveLength(2);
   });
 
-  it("readAssignedChannel answers null on any fault — a poll never fails for it", async () => {
-    responses = [new Error('column "assigned_channel" does not exist')];
-    expect(await M.readAssignedChannel("install_a")).toBeNull();
-    responses = [[{ assigned_channel: "stable" }]];
-    expect(await M.readAssignedChannel("install_a")).toBe("stable");
-    responses = [[{ assigned_channel: "test" }]];
-    expect(await M.readAssignedChannel("install_a")).toBeNull();
+  it("clears assigned_channel in the SAME UPDATE when the Mac reports stable (ruling 3)", async () => {
+    responses = [[{ install_id: "install_a", assigned_channel: null }]];
+    await M.applyInstallPoll({ install_id: "install_a", update_channel: "stable" });
+    const up = calls[0]!;
+    expect(up.text).toMatch(
+      /assigned_channel = CASE WHEN \?::text = 'stable' THEN NULL ELSE assigned_channel END/,
+    );
+    expect(up.text).toMatch(/RETURNING install_id, assigned_channel$/);
+    expect(calls).toHaveLength(1); // one statement: no separate read of the assignment (ruling 5)
+  });
+
+  it("returns the post-UPDATE assignment, and only ever `stable` or null", async () => {
+    responses = [[{ install_id: "install_a", assigned_channel: "stable" }]];
+    expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: "stable" });
+    responses = [[{ install_id: "install_a", assigned_channel: null }]];
+    expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: null });
+    responses = [[{ install_id: "install_a", assigned_channel: "test" }]];
+    expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: null });
   });
 });
 

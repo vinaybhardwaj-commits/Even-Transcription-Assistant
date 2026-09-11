@@ -17,7 +17,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 type Row = Record<string, unknown>;
 const store: { rooms: Row[]; installs: Row[] } = { rooms: [], installs: [] };
 
-/** `UPDATE room_install SET a = COALESCE(?, a), b = ? … WHERE install_id = ? AND …` */
+/**
+ * `UPDATE room_install SET a = COALESCE(?, a), b = ?, c = CASE WHEN ?::text = 'x' THEN NULL ELSE c
+ * END … WHERE install_id = ? AND … RETURNING …` — each form read off the statement's own text.
+ */
 function applyUpdate(strings: TemplateStringsArray, values: unknown[]): Row[] {
   const where = strings.findIndex((s) => /WHERE\s+install_id\s*=\s*$/.test(s));
   const id = values[where];
@@ -27,16 +30,24 @@ function applyUpdate(strings: TemplateStringsArray, values: unknown[]): Row[] {
   for (let k = 0; k < values.length; k++) {
     if (k === where) continue;
     const before = strings[k]!;
+    const after = strings[k + 1] ?? "";
     const coalesced = /(\w+)\s*=\s*COALESCE\(\s*$/.exec(before);
-    const raw = /,\s*(\w+)\s*=\s*$/.exec(before);
+    const clearedOn = /(\w+)\s*=\s*CASE WHEN\s*$/.exec(before);
+    const raw = /(?:,|SET)\s*(\w+)\s*=\s*$/.exec(before);
     if (coalesced) {
       if (values[k] !== null && values[k] !== undefined) next[coalesced[1]!] = values[k];
+    } else if (clearedOn) {
+      const col = clearedOn[1]!;
+      const m = new RegExp(`^::text = '(\\w+)' THEN NULL ELSE ${col} END`).exec(after);
+      if (m && values[k] === m[1]) next[col] = null;
     } else if (raw) {
       next[raw[1]!] = values[k] ?? null;
     }
   }
   Object.assign(row, next);
-  return [{ install_id: row.install_id }];
+  const returning = /RETURNING\s+([\w,\s]+?)\s*$/.exec(strings[strings.length - 1]!);
+  const cols = returning ? returning[1]!.split(",").map((c) => c.trim()) : ["install_id"];
+  return [Object.fromEntries(cols.map((c) => [c, row[c] ?? null]))];
 }
 
 /** `SELECT a, b, c FROM room_install …` — only the named columns come back, as in Postgres. */
@@ -50,7 +61,7 @@ function selectInstalls(text: string): Row[] {
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?").replace(/\s+/g, " ").trim();
-    if (/^UPDATE room_install SET last_seen_at/.test(text)) {
+    if (/^UPDATE room_install SET /.test(text)) {
       return Promise.resolve(applyUpdate(strings, values));
     }
     if (/^SELECT id, slug, name, disabled_at FROM room /.test(text)) {
@@ -75,6 +86,7 @@ vi.mock("@/lib/room-auth", () => ({ readRoomClaims: async () => ({ room_id: "roo
 process.env.MIGRATION_SECRET = "test-secret";
 const commands = await import("@/app/api/bench/commands/route");
 const fleet = await import("@/app/api/admin/bench/fleet/route");
+const assign = await import("@/app/api/admin/installs/[installId]/assign-channel/route");
 const V = await import("@/lib/room-install-view");
 
 const SENTENCE = "the new version did not poll within 180 s; restored 0.1.18";
@@ -174,6 +186,31 @@ describe("B2-D5 — the poll response carries assigned_channel", () => {
     const json = (await (await commands.GET(req as never)).json()) as Row;
     expect(json.ok).toBe(true);
     expect("assigned_channel" in json).toBe(false);
+  });
+
+  it("CLEARS ITSELF once the Mac reports stable — a later hand move to test is never undone", async () => {
+    const req = new Request("https://www.evenscribe.app/api/admin/installs/x/assign-channel", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ channel: "stable" }),
+    });
+    const res = await assign.POST(req as never, {
+      params: Promise.resolve({ installId: "install_539avu7gqzz5" }),
+    });
+    expect(res.status).toBe(200);
+
+    // Still on test: the Mac is told stable, and the card shows the assignment.
+    expect((await poll({ update_channel: "test" })).json.assigned_channel).toBe("stable");
+    // A poll that says nothing about its channel clears nothing.
+    expect((await poll({ app_version: "0.1.20" })).json.assigned_channel).toBe("stable");
+    // The Mac reports stable of its own accord: the same round trip is told null…
+    expect((await poll({ update_channel: "stable" })).json.assigned_channel).toBeNull();
+    // …the row holds null…
+    const { row, view } = await readRow();
+    expect(row.install?.assigned_channel).toBeNull();
+    expect(view.assigned_pending).toBe(false);
+    // …and a person later putting the Mac back on test by hand is left there.
+    expect((await poll({ update_channel: "test" })).json.assigned_channel).toBeNull();
   });
 
   it("is not told to a retired install, which gets 409 and nothing else", async () => {
