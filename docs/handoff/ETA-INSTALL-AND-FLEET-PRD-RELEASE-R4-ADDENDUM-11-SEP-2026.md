@@ -33,3 +33,10 @@ room. Nobody can enter a room tomorrow. R4 makes "switch the input to the C270" 
 `RoomConfiguration.swift` (`deviceUID` becomes writable via one method) · `tapewriter/AudioDevices.swift` (volume read/set, settable) ·
 `tapewriter/Recorder.swift` (reopen on a new device, new segment) · `InstallPollFields.swift` + `MachineFacts.swift` (two fields) ·
 `Tests/**` · `Packaging/VERSION` 0.1.21 · `CHANGELOG.md`. Untouched: `build-bundle.sh`, `RoomSelfUpdate.swift`, enrol path, `TapeFormat.swift`.
+
+## Ratification
+**V ratified D1–D10 as written, 11 Sep 2026, 20:05 IST** (both builds started on his word). **R4-D11 (orchestrator ruling 20:12):** the
+audio-input route and `scribe_set_audio_input` refuse with 409 `APP_TOO_OLD` unless the bound install's reported `app_version` is ≥ 0.1.21 —
+a row delivered to an older app is undecodable and never expires, blocking that room's bus. **R4-D12:** the ack route
+(`app/api/bench/commands/[id]/ack/route.ts`) joins the R4-S contract so `applied_device_uid`, `applied_input_volume`, `input_volume_settable`
+reach `bench_command.result`.

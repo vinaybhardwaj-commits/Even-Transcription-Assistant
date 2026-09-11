@@ -63,7 +63,7 @@ vi.mock("@/lib/db", () => {
     if (fault) return Promise.reject(fault);
     if (/^UPDATE room_install SET /.test(text)) return Promise.resolve(applyUpdate(strings, values));
     if (/^SELECT id, slug, name, disabled_at FROM room /.test(text)) return Promise.resolve(store.rooms);
-    if (/^SELECT install_id, room_id FROM room_install WHERE install_id = \?/.test(text)) {
+    if (/^SELECT install_id, room_id, app_version FROM room_install WHERE install_id = \?/.test(text)) {
       // The route's lookup. Its two filters are asserted on the text below; here they are applied.
       const r = store.installs.find((i) => i.install_id === values[0] && i.enrolled_at && !i.retired_at);
       return Promise.resolve(r ? [pick(text, "room_install", r)] : []);
@@ -195,7 +195,7 @@ describe("R4-D5 — POST …/audio-input", () => {
     }
     expect(commandInserts()).toHaveLength(0);
     // The two filters that make "bound" mean bound are in the lookup's own text.
-    const lookup = calls.find((c) => /^SELECT install_id, room_id FROM room_install/.test(c.text))!;
+    const lookup = calls.find((c) => /^SELECT install_id, room_id, app_version FROM room_install/.test(c.text))!;
     expect(lookup.text).toContain("AND enrolled_at IS NOT NULL");
     expect(lookup.text).toContain("AND retired_at IS NULL");
   });
@@ -230,6 +230,31 @@ describe("R4-D5 — POST …/audio-input", () => {
     const id = commandInserts()[0]!.values[0];
     expect(j.command).toEqual({ id, status: "pending", result: null, error: null });
     expect(j.error.message).toContain(String(id));
+  });
+
+  // ── R4-D11 — an app that cannot decode the kind is never sent it ────────────────────────────
+  it("D11: refuses 409 APP_TOO_OLD for 0.1.20 and for a Mac that never reported a version — nothing inserted", async () => {
+    for (const v of ["0.1.20", null, "0.1.3", "garbage", ""]) {
+      calls.length = 0;
+      store.installs[0]!.app_version = v;
+      const { status, json } = await post({ device_uid: "c270-1" });
+      expect(status, String(v)).toBe(409);
+      const err = (json as { error: { code: string; app_version: string | null } }).error;
+      expect(err.code).toBe("APP_TOO_OLD");
+      expect(err.app_version).toBe(v === "" ? null : v);
+      expect(commandInserts()).toHaveLength(0);
+    }
+  });
+
+  it("D11: inserts for 0.1.21 and anything numerically above it (0.1.100 is above, not below)", async () => {
+    app = ackAs("acked", null, { ok: true });
+    for (const v of ["0.1.21", "0.1.100", "0.2", "1.0.0"]) {
+      calls.length = 0;
+      store.installs[0]!.app_version = v;
+      const { status } = await post({ input_volume: 0.5 });
+      expect(status, v).toBe(200);
+      expect(commandInserts()).toHaveLength(1);
+    }
   });
 
   it("answers a store fault as 503 STORE_UNAVAILABLE, never a 500", async () => {

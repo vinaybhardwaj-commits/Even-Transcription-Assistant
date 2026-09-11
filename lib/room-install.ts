@@ -69,6 +69,7 @@ export type InstallErrorCode =
   | "BAD_CHANNEL"
   | "BAD_ARGS"
   | "ACK_TIMEOUT"
+  | "APP_TOO_OLD"
   | "STORE_UNAVAILABLE";
 
 export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
@@ -88,6 +89,8 @@ export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
   // the room inside the bus's wait (the command stays pending; the answer carries its id).
   BAD_ARGS: 400,
   ACK_TIMEOUT: 504,
+  // R4-D11. The bound Mac reports an app below 0.1.21 (or none): it cannot decode the command.
+  APP_TOO_OLD: 409,
   STORE_UNAVAILABLE: 503,
 };
 
@@ -1266,19 +1269,44 @@ export async function assignInstallChannel(
  * The room a BOUND install records for — enrolled and not retired, the row the fleet card draws.
  * Null for an unknown, unenrolled or retired install: the route answers 404 for all three and writes
  * no command, so a command can only ever be addressed to the room a live Mac is bound to.
+ * `app_version` rides along for R4-D11's floor.
  */
 export async function boundInstallRoom(
   installId: string,
-): Promise<{ install_id: string; room_id: string } | null> {
+): Promise<{ install_id: string; room_id: string; app_version: string | null } | null> {
   try {
     const rows = (await sql`
-      SELECT install_id, room_id
+      SELECT install_id, room_id, app_version
         FROM room_install
        WHERE install_id = ${installId}
          AND enrolled_at IS NOT NULL
          AND retired_at IS NULL
        LIMIT 1
-    `) as Array<{ install_id: string; room_id: string }>;
+    `) as Array<{ install_id: string; room_id: string; app_version: string | null }>;
+    return rows[0] ?? null;
+  } catch (e) {
+    throw classifyInstallError(e);
+  }
+}
+
+/**
+ * R4-D11, the MCP door's side: the install BOUND to a room, for its reported `app_version`. Null when
+ * no Mac is bound — a browser-kiosk room, which cannot execute the command either. The partial unique
+ * index allows one; `ORDER BY created_at DESC` makes the answer stable if that were ever broken.
+ */
+export async function boundInstallForRoom(
+  roomId: string,
+): Promise<{ install_id: string; app_version: string | null } | null> {
+  try {
+    const rows = (await sql`
+      SELECT install_id, app_version
+        FROM room_install
+       WHERE room_id = ${roomId}
+         AND enrolled_at IS NOT NULL
+         AND retired_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1
+    `) as Array<{ install_id: string; app_version: string | null }>;
     return rows[0] ?? null;
   } catch (e) {
     throw classifyInstallError(e);

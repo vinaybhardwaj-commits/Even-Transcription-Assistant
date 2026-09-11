@@ -7,7 +7,8 @@
  * and `insertCommand` use. Anything else is 400 BAD_ARGS and the database is never touched.
  *
  * IT DOES NOT TALK TO A MAC. It resolves the install's room (404 for an unknown, unenrolled or retired
- * install — no command is written), puts ONE `set_audio_input` on the bench bus with source `admin`,
+ * install — no command is written), refuses 409 APP_TOO_OLD `{ error: { code, message, app_version } }`
+ * unless that install reports 0.1.21 or later (R4-D11 — again, nothing written), puts ONE `set_audio_input` on the bench bus with source `admin`,
  * and waits up to ACK_WAIT_MS for the room's app to ack it:
  *   · acked or failed → 200 `{ command: { id, status, result, error } }`; a failure's `error` is the
  *     app's own reason (`device_not_present`, `volume_not_settable`, …) and the card prints it
@@ -24,6 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   ACK_WAIT_MS,
+  audioInputRefusal,
   BusError,
   CommandArgsError,
   insertCommand,
@@ -31,7 +33,13 @@ import {
   waitForAck,
   type SetAudioInputArgs,
 } from "@/lib/bench-commands";
-import { boundInstallRoom, installAdminGuard, installError, installErrorFrom } from "@/lib/room-install";
+import {
+  boundInstallRoom,
+  INSTALL_ERROR_STATUS,
+  installAdminGuard,
+  installError,
+  installErrorFrom,
+} from "@/lib/room-install";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,6 +75,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ installId:
   try {
     const bound = await boundInstallRoom(installId);
     if (!bound) return installError("NOT_FOUND", "no such install, or it is not bound (never enrolled, or retired)");
+
+    // R4-D11. An app below 0.1.21 cannot decode the kind; a row handed to it blocks the room's bus.
+    // Refused here, before the insert, with the version the Mac last reported.
+    const tooOld = audioInputRefusal(bound.app_version);
+    if (tooOld) return NextResponse.json({ error: tooOld }, { status: INSTALL_ERROR_STATUS.APP_TOO_OLD, ...NO_STORE });
 
     const id = await insertCommand({ roomId: bound.room_id, kind: "set_audio_input", args, source: "admin" });
     const row = await waitForAck(id, { timeoutMs: ACK_WAIT_MS });

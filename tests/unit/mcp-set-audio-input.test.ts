@@ -36,10 +36,21 @@ const ROOM = { id: "room_opd3", slug: "opd-3-x1y2", name: "OPD 3", disabled_at: 
 const ctx = { origin: "https://preview.example" };
 const inserts = () => calls.filter((c) => /INSERT INTO bench_command/.test(c.text));
 
-/** A room whose app polled `ageMs` ago, and which acks whatever it is sent with `ack`. */
-function room(ageMs: number | null, ack: Row | null = { status: "acked", result: { ok: true }, error: null }) {
+/**
+ * A room whose app polled `ageMs` ago, whose bound install reports `appVersion` (NO_INSTALL = no
+ * bound install at all), and which acks whatever it is sent with `ack`.
+ */
+const NO_INSTALL = Symbol("no bound install");
+function room(
+  ageMs: number | null,
+  ack: Row | null = { status: "acked", result: { ok: true }, error: null },
+  appVersion: string | null | typeof NO_INSTALL = "0.1.21",
+) {
   responder = (text, values) => {
     if (/FROM room WHERE/.test(text)) return [ROOM];
+    if (/FROM room_install WHERE room_id = \?/.test(text)) {
+      return appVersion === NO_INSTALL ? [] : [{ install_id: "install_opd3", app_version: appVersion }];
+    }
     if (/FROM bench_listener WHERE room_id/.test(text)) {
       return ageMs === null ? [] : [{ room_id: ROOM.id, tab_id: "app_install_1", last_poll_at: new Date(Date.now() - ageMs).toISOString(), recording_session_id: "bs_live", paused: false }];
     }
@@ -106,6 +117,32 @@ describe("R4-D6 — scribe_set_audio_input", () => {
     room(1_000);
     await tool!.handler({ room: "OPD 3", input_volume: "0.25" }, ctx as never);
     expect(inserts()[0]!.values[3]).toBe(JSON.stringify({ input_volume: 0.25 }));
+  });
+
+  // ── R4-D11 ─────────────────────────────────────────────────────────────────────────────────
+  it("D11: refuses 0.1.20, a null version and a room with no bound Mac with APP_TOO_OLD — nothing inserted", async () => {
+    for (const v of ["0.1.20", null, NO_INSTALL] as const) {
+      calls.length = 0;
+      room(1_000, undefined, v);
+      const out = (await tool!.handler({ room: "OPD 3", device_uid: "c270-1" }, ctx as never)) as Row;
+      expect(out.ok, String(v)).toBe(false);
+      expect(out.error).toEqual({
+        code: "APP_TOO_OLD",
+        message: expect.stringContaining("0.1.21"),
+        app_version: typeof v === "string" ? v : null,
+      });
+      expect(inserts()).toHaveLength(0);
+    }
+    const lookup = calls.find((c) => /FROM room_install WHERE room_id = \?/.test(c.text))!;
+    expect(lookup.text).toContain("AND enrolled_at IS NOT NULL");
+    expect(lookup.text).toContain("AND retired_at IS NULL");
+  });
+
+  it("D11: sends to 0.1.21", async () => {
+    room(1_000, undefined, "0.1.21");
+    const out = (await tool!.handler({ room: "OPD 3", device_uid: "c270-1" }, ctx as never)) as Row;
+    expect(out).toMatchObject({ ok: true, status: "acked" });
+    expect(inserts()).toHaveLength(1);
   });
 
   it("answers unknown_room for a room that does not exist", async () => {

@@ -19,7 +19,8 @@
  * → INSERT bench_command → wait up to 8 s for the kiosk's ack → return it verbatim. Bus not
  * migrated / down → error bus_not_migrated / bus_down (never a 500).
  * scribe_set_audio_input (R4-D6) — the same path with args {device_uid?, input_volume?}, validated
- * before the room is resolved (bad_args); executed by the native app only.
+ * before the room is resolved (bad_args), refused APP_TOO_OLD below app 0.1.21 (R4-D11); executed by
+ * the native app only.
  *
  * S3:
  * scribe_mark_consult (write)    — durable-first mirror of the kiosk consult mark: room's active
@@ -139,8 +140,10 @@ import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TI
 import { parseMicLevelPair } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+import { boundInstallForRoom, InstallError } from "@/lib/room-install";
 import {
   ACK_WAIT_MS,
+  audioInputRefusal,
   BusError,
   classifyBusError,
   CommandArgsError,
@@ -581,7 +584,7 @@ const stopRecording = simpleVerb(
 const setAudioInput: McpTool = {
   name: "scribe_set_audio_input",
   description:
-    "Switch the room's recording device and/or set its input volume via the native Room Recorder (command set_audio_input, app 0.1.21+). Give device_uid (a uid from the fleet card's input_devices) and/or input_volume (0..1); at least one. Requires a listener (app polled within 10 s) else kiosk_not_listening — no command row is written. Waits up to 8 s for the ack and returns it: failures are named by the app (device_not_present, volume_not_settable, unsupported_kind, bad_args). A browser kiosk ignores this kind, so a room recording in a browser answers ack_timeout. A recording in progress continues in a new segment of the same session. The device and volume the room now reports arrive on its next poll (the fleet card), not in this answer.",
+    "Switch the room's recording device and/or set its input volume via the native Room Recorder (command set_audio_input, app 0.1.21+). Give device_uid (a uid from the fleet card's input_devices) and/or input_volume (0..1); at least one. Refused with error {code:\"APP_TOO_OLD\", app_version} unless the room's bound Mac reports 0.1.21 or later (an older app cannot decode the command). Requires a listener (app polled within 10 s) else kiosk_not_listening — no command row is written. Waits up to 8 s for the ack and returns it: failures are named by the app (device_not_present, volume_not_settable, unsupported_kind, bad_args). A browser kiosk ignores this kind, so a room recording in a browser answers ack_timeout. A recording in progress continues in a new segment of the same session. The device and volume the room now reports arrive on its next poll (the fleet card), not in this answer.",
   scope: "write",
   inputSchema: {
     type: "object",
@@ -610,14 +613,21 @@ const setAudioInput: McpTool = {
     const r = await resolveForWrite(args);
     if ("error" in r) return r.error;
     const room = r.room;
+    const roomRef = { id: room.id, slug: room.slug, name: room.name };
     const now = new Date();
     try {
+      // R4-D11. The room's bound Mac must report 0.1.21 or later; no bound Mac (a browser-kiosk room)
+      // is refused the same way. Same error object as the route's 409, and nothing is inserted.
+      const bound = await boundInstallForRoom(room.id);
+      const tooOld = audioInputRefusal(bound?.app_version ?? null);
+      if (tooOld) return { ok: false, error: tooOld, room: roomRef };
       const listener = await getListener(room.id);
-      const ctx = { room: { id: room.id, slug: room.slug, name: room.name }, listener: listenerView(listener, now) };
+      const ctx = { room: roomRef, listener: listenerView(listener, now) };
       if (!isListening(listener, now)) return { ok: false, error: "kiosk_not_listening", ...ctx };
       return await sendAndWait(room, "set_audio_input", cmdArgs, listener);
     } catch (e) {
-      return busErrorResult(e, { room: { id: room.id, slug: room.slug, name: room.name } });
+      if (e instanceof InstallError) return { ok: false, error: "install_lookup_failed", detail: e.message.slice(0, 160), room: roomRef };
+      return busErrorResult(e, { room: roomRef });
     }
   },
 };

@@ -67,6 +67,74 @@ export function parseSetAudioInputArgs(raw: unknown): SetAudioInputArgs {
   if (out.device_uid === undefined && out.input_volume === undefined) throw new CommandArgsError("name device_uid or input_volume");
   return out;
 }
+
+/**
+ * R4-D11. The first app that decodes `set_audio_input`. An older one fails its WHOLE poll on the kind
+ * (R4-D2's reason), and a row it has been handed never expires — so that room's bus would stay
+ * blocked. The route and the tool refuse below this, before anything is inserted.
+ */
+export const SET_AUDIO_INPUT_MIN_APP_VERSION = "0.1.21";
+
+/**
+ * PURE — R4-D11. `version >= min`, comparing dotted integers numerically (0.1.100 is above 0.1.21;
+ * 0.1.3 is below it — the two cases a string compare gets wrong). Missing parts count as 0.
+ *
+ * ANYTHING ELSE IS "TOO OLD": null, blank, a `v` prefix, a pre-release suffix, a letter. The app
+ * reports `Packaging/VERSION`, which is plain digits and dots; a value that is not is not something
+ * this check should guess about, and refusing costs one retry while guessing wrong blocks a room.
+ */
+export function appVersionAtLeast(version: string | null | undefined, min: string): boolean {
+  const parse = (v: string | null | undefined): number[] | null => {
+    const t = typeof v === "string" ? v.trim() : "";
+    return /^\d+(\.\d+){0,3}$/.test(t) ? t.split(".").map(Number) : null;
+  };
+  const a = parse(version);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let k = 0; k < Math.max(a.length, b.length); k++) {
+    const x = a[k] ?? 0;
+    const y = b[k] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+export type AppTooOld = { code: "APP_TOO_OLD"; message: string; app_version: string | null };
+
+/**
+ * PURE — R4-D11. Null when the bound install's reported version may receive `set_audio_input`;
+ * otherwise the one error object both the route (409) and the MCP tool return.
+ */
+export function audioInputRefusal(appVersion: string | null | undefined): AppTooOld | null {
+  if (appVersionAtLeast(appVersion, SET_AUDIO_INPUT_MIN_APP_VERSION)) return null;
+  const reported = typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : null;
+  return {
+    code: "APP_TOO_OLD",
+    message: `this room's app reports ${reported ?? "no version"}; set_audio_input needs ${SET_AUDIO_INPUT_MIN_APP_VERSION} or later`,
+    app_version: reported,
+  };
+}
+
+/** R4-D12. What a 0.1.21 app says it applied, carried into `bench_command.result`. */
+export type AckApplied = { applied_device_uid?: string; applied_input_volume?: number; input_volume_settable?: boolean };
+
+/**
+ * PURE — R4-D12. The three applied fields of an ack body, each validated on its own and DROPPED if
+ * malformed — an ack is never refused for them, because a refused ack leaves the command pending.
+ * Every other key is dropped. A body without them yields `{}`, so the four day verbs' results are
+ * unchanged.
+ */
+export function cleanAckApplied(body: unknown): AckApplied {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const o = body as Record<string, unknown>;
+  const out: AckApplied = {};
+  const uid = typeof o.applied_device_uid === "string" ? o.applied_device_uid.trim() : "";
+  if (uid && uid.length <= INPUT_DEVICE_UID_MAX) out.applied_device_uid = uid;
+  const v = o.applied_input_volume;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1) out.applied_input_volume = v;
+  if (typeof o.input_volume_settable === "boolean") out.input_volume_settable = o.input_volume_settable;
+  return out;
+}
 // S3-2: the timing constants live in the pure lib/bench-bus-constants.ts (kiosk-bundle safe);
 // re-exported here so every existing caller keeps working unchanged.
 export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
@@ -333,13 +401,26 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
   });
 }
 
-export type AckInput = { roomId: string; commandId: string; ok: boolean; sessionId?: string | null; error?: string | null };
+export type AckInput = {
+  roomId: string;
+  commandId: string;
+  ok: boolean;
+  sessionId?: string | null;
+  error?: string | null;
+  /** R4-D12 — already through `cleanAckApplied`. Absent or `{}` leaves `result` exactly as before. */
+  applied?: AckApplied;
+};
 
 /** Ack (or fail) a pending command that belongs to this room. Returns the new status, or null when no such pending row. */
 export async function ackCommand(input: AckInput): Promise<"acked" | "failed" | null> {
   return guarded(async () => {
     const status = input.ok ? "acked" : "failed";
-    const result = JSON.stringify({ ok: input.ok, ...(input.sessionId ? { session_id: input.sessionId } : {}), ...(input.error ? { error: input.error } : {}) });
+    const result = JSON.stringify({
+      ok: input.ok,
+      ...(input.sessionId ? { session_id: input.sessionId } : {}),
+      ...(input.error ? { error: input.error } : {}),
+      ...(input.applied ?? {}),
+    });
     const rows = (await sql`
       UPDATE bench_command
          SET status = ${status},

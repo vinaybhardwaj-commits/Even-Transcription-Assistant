@@ -3,13 +3,17 @@
  *
  * ROOM COOKIE; the command must belong to this room and still be `pending`.
  * Body { ok:boolean, session_id?, error? } → status acked (+result) | failed (+error), acked_at=now().
+ * R4-D12: a 0.1.21 app's set_audio_input ack may add applied_device_uid (string ≤256),
+ * applied_input_volume (0..1) and input_volume_settable (bool). Each is validated on its own by
+ * `cleanAckApplied` and dropped if malformed — never a refusal — and every other key is dropped. An
+ * ack without them writes exactly the result it wrote before.
  * 404 command_not_pending when no such pending row for this room (already acked/expired/other room).
  * D10: DB error → 503 bus_down / bus_not_migrated.
  */
 import { NextRequest, NextResponse, after } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
-import { ackCommand, classifyBusError, getCommand } from "@/lib/bench-commands";
+import { ackCommand, classifyBusError, cleanAckApplied, getCommand } from "@/lib/bench-commands";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { istDate } from "@/lib/brain/state";
 
@@ -34,9 +38,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (typeof body?.ok !== "boolean") return respondError("VALIDATION_FAILED", "ok_required");
   const sessionId = typeof body.session_id === "string" && body.session_id.startsWith("bs_") ? body.session_id.slice(0, 64) : null;
   const error = typeof body.error === "string" ? body.error.slice(0, 200) : null;
+  const applied = cleanAckApplied(body);
 
   try {
-    const status = await ackCommand({ roomId: claims.room_id, commandId: id, ok: body.ok, sessionId, error });
+    const status = await ackCommand({ roomId: claims.room_id, commandId: id, ok: body.ok, sessionId, error, applied });
     if (!status) return respondError("NOT_FOUND", "command_not_pending");
 
     // D39 (Build 3 §2.3) — on a successful START_DAY ack, open today's day record so it exists

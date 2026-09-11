@@ -134,6 +134,53 @@ describe("R4-S item 2 — BAD_ARGS, thrown before any SQL", () => {
 });
 
 // ---------------------------------------------------------------------------
+// R4-D11 — the version floor
+// ---------------------------------------------------------------------------
+
+describe("R4-D11 — appVersionAtLeast / audioInputRefusal", () => {
+  it("compares dotted versions numerically, not as strings", () => {
+    expect(B.SET_AUDIO_INPUT_MIN_APP_VERSION).toBe("0.1.21");
+    const at = (v: string) => B.appVersionAtLeast(v, "0.1.21");
+    for (const ok of ["0.1.21", "0.1.22", "0.1.100", "0.2", "0.2.0", "1.0.0", " 0.1.21 "]) expect(at(ok), ok).toBe(true);
+    // "0.1.3" > "0.1.21" and "0.1.100" < "0.1.21" as STRINGS — both wrong, both caught here.
+    for (const no of ["0.1.20", "0.1.3", "0.1", "0.0.99", "0.1.8"]) expect(at(no), no).toBe(false);
+  });
+
+  it("treats a missing or unparseable version as too old — refuse, never guess", () => {
+    for (const bad of [null, undefined, "", "  ", "v0.1.21", "0.1.21-rc1", "0.1.x", "latest", "0..21"]) {
+      expect(B.appVersionAtLeast(bad, "0.1.21"), String(bad)).toBe(false);
+    }
+  });
+
+  it("the refusal carries the code, a message naming the floor, and the version as reported", () => {
+    expect(B.audioInputRefusal("0.1.21")).toBeNull();
+    expect(B.audioInputRefusal("0.1.20")).toEqual({ code: "APP_TOO_OLD", message: expect.stringContaining("0.1.21"), app_version: "0.1.20" });
+    expect(B.audioInputRefusal("  ")).toMatchObject({ code: "APP_TOO_OLD", app_version: null });
+    expect(B.audioInputRefusal(null)).toMatchObject({ code: "APP_TOO_OLD", app_version: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R4-D12 — cleanAckApplied
+// ---------------------------------------------------------------------------
+
+describe("R4-D12 — cleanAckApplied", () => {
+  it("keeps the three fields when each is well formed", () => {
+    expect(B.cleanAckApplied({ ok: true, applied_device_uid: " c270-1 ", applied_input_volume: 0.5, input_volume_settable: true })).toEqual({
+      applied_device_uid: "c270-1", applied_input_volume: 0.5, input_volume_settable: true,
+    });
+    expect(B.cleanAckApplied({ input_volume_settable: false })).toEqual({ input_volume_settable: false });
+  });
+
+  it("drops each malformed field on its own, and every unknown key", () => {
+    expect(B.cleanAckApplied({ applied_device_uid: "u".repeat(257), applied_input_volume: 1.5, input_volume_settable: "true", gain: 3 })).toEqual({});
+    expect(B.cleanAckApplied({ applied_device_uid: "", applied_input_volume: "0.5", input_volume_settable: 1 })).toEqual({});
+    expect(B.cleanAckApplied({ applied_device_uid: "u".repeat(256), applied_input_volume: -0.1 })).toEqual({ applied_device_uid: "u".repeat(256) });
+    for (const none of [null, undefined, "x", [1], {}]) expect(B.cleanAckApplied(none)).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Migration 0080
 // ---------------------------------------------------------------------------
 
