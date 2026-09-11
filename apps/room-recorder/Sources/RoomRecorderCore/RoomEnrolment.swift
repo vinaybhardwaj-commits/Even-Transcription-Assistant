@@ -49,6 +49,63 @@ extension RoomEnrolmentResponse {
   }
 }
 
+extension RoomEnrolment {
+  /// Everything `enrol` writes once the exchange has succeeded: the session file, then config.json.
+  ///
+  /// ─── ENROL OWNS THE SESSION FILE (0.1.17) ────────────────────────────────────────────────
+  /// On 11 Sep four bootstrap pastes on Home Office died the same way. The paste installs 0.1.8,
+  /// whose enrol predates `room-session.json` and wrote only config.json; the next build read the
+  /// file an EARLIER install had left behind, polled as that retired id, took a 409 and stopped for
+  /// ever. So an enrol that writes a new install id into config.json must write the same id into
+  /// the session file in the same breath, over whatever is there.
+  ///
+  /// Moved out of `main.swift` so that rule is a test and not a comment. The order is the one the
+  /// verb already had — session first, config second — for the reason written there.
+  ///
+  /// NOTHING HERE DELETES. It runs only after `exchange` returned, so a refused, expired or
+  /// unreachable enrol never gets this far and leaves the room's session exactly as it was. And the
+  /// response cannot arrive without a token: `RoomEnrolmentResponse` requires one, so a body that
+  /// lacks it is `malformedResponse` before anything is written.
+  @discardableResult
+  public static func persist(
+    _ enrolled: RoomEnrolmentResponse,
+    origin: URL,
+    root: URL,
+    tapewriterPath: String?,
+    ffmpegPath: String?,
+    /// Only called on the first enrol on a Mac, when there is no config.json to re-point.
+    firstEnrolConfiguration: () throws -> RoomConfiguration
+  ) throws -> RoomConfiguration {
+    try RoomSessionStore.save(enrolled.record(origin: origin), root: root)
+
+    let persistence = RoomPersistence(root: root)
+    var configuration: RoomConfiguration
+    if let existing = try? persistence.loadConfiguration() {
+      // MIGRATION KEEPS THE ROOM'S DEVICE (V's ruling, 8 Sep). A re-enrol on a Mac that is
+      // already recording must not silently move the room onto whatever input happens to be
+      // the system default today — someone may have plugged in a headset an hour ago. The
+      // fields below are re-pointed on every enrol; `deviceUID` is deliberately not one of
+      // them, and this comment is here so it does not get "tidied" into the list.
+      configuration = existing
+    } else {
+      // First enrol on this Mac: take the current system default input. §5.3 has no --device
+      // argument and asks the operator nothing, so the machine's own default is the answer.
+      configuration = try firstEnrolConfiguration()
+    }
+    // One named mutation, tested in RoomEnrolmentConfigurationTests. `deviceUID` is not among
+    // the fields it touches, which is the migration rule V ruled on.
+    configuration.applyEnrolment(
+      origin: origin,
+      roomSlug: enrolled.roomSlug,
+      installID: enrolled.installID,
+      tapewriterPath: tapewriterPath,
+      ffmpegPath: ffmpegPath
+    )
+    try persistence.saveConfiguration(configuration)
+    return configuration
+  }
+}
+
 public enum RoomEnrolmentError: Error, LocalizedError, Equatable {
   case originNotHTTPS(String)
   case originHostNotAllowed(String)

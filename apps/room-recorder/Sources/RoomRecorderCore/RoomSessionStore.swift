@@ -184,6 +184,21 @@ public enum RoomSessionStore {
       [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: destination.path)
   }
 
+  /// 0.1.17 — remove the file, but only while it still names `installID`.
+  ///
+  /// The engine calls this when the server has just refused `installID` as retired. The file is
+  /// the stale one only if it still carries that id: a re-enrol running while this process was up
+  /// may already have written a NEW file, with a new token, and deleting that would strand the Mac
+  /// on its next launch. So the id is checked first, and a file naming anything else is left alone.
+  /// The contents are never used for anything but that comparison.
+  @discardableResult
+  public static func discard(root: URL, ifInstallID installID: String) -> Bool {
+    guard case .ok(let record) = readFile(root: root), record.installID == installID else {
+      return false
+    }
+    return (try? FileManager.default.removeItem(at: url(root: root))) != nil
+  }
+
   /// Carries the fallback's answer back across the thread boundary.
   final class Outcome: @unchecked Sendable {
     private let lock = NSLock()

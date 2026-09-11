@@ -105,33 +105,18 @@ private enum RoomRecorderCLI {
         // to launch could not read what this one wrote without a human clicking Allow. A room
         // enrolled today would have been unable to update itself tomorrow. `RoomSessionStore`
         // writes `<root>/room-session.json` at 0600 instead, and nothing here touches securityd.
-        try RoomSessionStore.save(enrolled.record(origin: origin), root: root)
-
-        let persistence = RoomPersistence(root: root)
-        var configuration: RoomConfiguration
-        if let existing = try? persistence.loadConfiguration() {
-          // MIGRATION KEEPS THE ROOM'S DEVICE (V's ruling, 8 Sep). A re-enrol on a Mac that is
-          // already recording must not silently move the room onto whatever input happens to be
-          // the system default today — someone may have plugged in a headset an hour ago. The
-          // fields below are re-pointed on every enrol; `deviceUID` is deliberately not one of
-          // them, and this comment is here so it does not get "tidied" into the list.
-          configuration = existing
-        } else {
-          // First enrol on this Mac: take the current system default input. §5.3 has no --device
-          // argument and asks the operator nothing, so the machine's own default is the answer.
-          configuration = try RoomConfiguration.residentDefault(
-            origin: origin, roomSlug: enrolled.roomSlug)
-        }
-        // One named mutation, tested in RoomEnrolmentConfigurationTests. `deviceUID` is not among
-        // the fields it touches, which is the migration rule V ruled on.
-        configuration.applyEnrolment(
+        //
+        // 0.1.17: both writes live in `RoomEnrolment.persist`, so "enrol leaves the session file
+        // and config.json naming the same install" is a test rather than a hope.
+        try RoomEnrolment.persist(
+          enrolled,
           origin: origin,
-          roomSlug: enrolled.roomSlug,
-          installID: enrolled.installID,
+          root: root,
           tapewriterPath: BuildInfo.bundledHelper("tapewriter"),
-          ffmpegPath: BuildInfo.bundledHelper("ffmpeg")
-        )
-        try persistence.saveConfiguration(configuration)
+          ffmpegPath: BuildInfo.bundledHelper("ffmpeg"),
+          firstEnrolConfiguration: {
+            try RoomConfiguration.residentDefault(origin: origin, roomSlug: enrolled.roomSlug)
+          })
 
         // The token is NOT echoed. The room name is what tells V the paste bound the right room.
         print("Enrolled as \(enrolled.roomName) (\(enrolled.roomSlug)), install \(enrolled.installID)")

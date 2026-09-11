@@ -173,8 +173,13 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// Mac. PER MAC, in `config.json`, because the alternative — a channel the server assigns — puts
   /// the valve on the same side of the wire as the thing it is meant to protect against.
   ///
-  /// It survives a re-enrol: `applyEnrolment` mutates a named list of fields and this is not one of
-  /// them, so a second paste on Home Office does not quietly move it back to `stable`.
+  /// ─── A RE-ENROL PUTS IT BACK ON `stable` (0.1.17) ────────────────────────────────────────
+  /// It used to survive a re-enrol, on the reasoning that a second paste on Home Office should not
+  /// quietly move it off `test`. On 11 Sep that is exactly what went wrong: a repair paste
+  /// installed 0.1.8, the preserved `test` sent it straight into a self-update to a build nobody
+  /// had proven on that Mac, and the repair became the failure. A paste is a repair, and a repair
+  /// lands on the proven shelf. `applyEnrolment` sets `stable`; putting Home Office back on `test`
+  /// is a deliberate hand edit afterwards, as it was the first time.
   public var updateChannel: String
 
   enum CodingKeys: String, CodingKey {
@@ -532,5 +537,8 @@ extension RoomConfiguration {
     // §5.4: config.json holds no token. The session lives in the keychain from here on, and this
     // line is what guarantees a re-enrol leaves no earlier token behind on disk.
     self.etaRoomSession = nil
+    // 0.1.17. A paste lands on the proven shelf, whatever the Mac was on before — see the
+    // comment on `updateChannel` for the 11 Sep repair that turned into an unproven self-update.
+    self.updateChannel = "stable"
   }
 }

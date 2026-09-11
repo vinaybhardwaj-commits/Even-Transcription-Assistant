@@ -1719,18 +1719,21 @@ import Testing
     #expect(try channel("") == "stable")
   }
 
-  @Test func theChannelSurvivesAReEnrolment() throws {
-    // A second paste on Home Office must not quietly move it back to `stable`. `applyEnrolment`
-    // mutates a named list of fields and this is not one of them — the same rule that protects the
-    // room's audio device.
-    var configuration = try RoomConfiguration(
-      origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "home-office",
-      deviceUID: "AppleUSB:mic", tapewriterPath: "/x/tapewriter", ffmpegPath: "/x/ffmpeg",
-      updateChannel: "test")
-    configuration.applyEnrolment(
-      origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "home-office",
-      installID: "install_gd9tnfgqazvh", tapewriterPath: nil, ffmpegPath: nil)
-    #expect(configuration.updateChannel == "test")
+  @Test func aReEnrolmentPutsTheChannelBackOnStable() throws {
+    // 0.1.17, and the reverse of the rule this test used to hold. On 11 Sep a repair paste on Home
+    // Office kept `test`, and the 0.1.8 it installed walked straight into an unproven self-update.
+    // A paste is a repair; it lands on `stable`, from either shelf. Home Office goes back on `test`
+    // by hand, deliberately.
+    for prior in ["test", "stable"] {
+      var configuration = try RoomConfiguration(
+        origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "home-office",
+        deviceUID: "AppleUSB:mic", tapewriterPath: "/x/tapewriter", ffmpegPath: "/x/ffmpeg",
+        updateChannel: prior)
+      configuration.applyEnrolment(
+        origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "home-office",
+        installID: "install_gd9tnfgqazvh", tapewriterPath: nil, ffmpegPath: nil)
+      #expect(configuration.updateChannel == "stable", "prior channel \(prior)")
+    }
   }
 
   // MARK: - Helpers

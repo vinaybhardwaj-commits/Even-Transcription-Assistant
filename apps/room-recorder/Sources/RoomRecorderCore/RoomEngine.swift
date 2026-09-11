@@ -179,6 +179,15 @@ struct RoomEngineReleaseFetcher: RoomReleaseFetching {
   }
 }
 
+/// 0.1.17 — which file the engine's install id came from.
+enum RoomInstallIDSource: Equatable, Sendable {
+  /// `room-session.json` (or the keychain record it was migrated from), agreeing with config.json
+  /// or with config.json naming none.
+  case sessionFile
+  /// config.json: no session record, or the record disagreed and lost.
+  case configuration
+}
+
 /// What `run()` decided the process should do when it returned (§13.3 steps 7 and 9).
 public enum RoomEngineExit: Equatable, Sendable {
   /// The ordinary stop: retired, superseded, cancelled. Exit 0 and stay stopped.
@@ -446,10 +455,22 @@ public actor RoomEngine {
   private var reconciledServerStateKnown = false
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
-  private let listenerTabID: String
+  /// `var` since 0.1.17, for one reason: the single RETIRED retry re-points it (see `installID`).
+  private var listenerTabID: String
   /// The server-minted install id from the keychain, when this build is enrolled (§5.3). Nil for
   /// an unenrolled build, and nil is what keeps the seven fields off the wire entirely.
-  private let installID: String?
+  ///
+  /// `var` since 0.1.17, and it changes at most once in a process's life: `retryAfterRetired`.
+  private var installID: String?
+  /// 0.1.17 — which file `installID` came from. Only a session-file id earns the RETIRED retry.
+  private var installIDSource: RoomInstallIDSource
+  /// 0.1.17 — the session record read at launch, kept so a successful retry can write the file
+  /// back from memory. The file is never read again after the retry discards it.
+  private let enrolmentRecord: RoomKeychainRecord?
+  /// 0.1.17 — set by the one RETIRED retry. Never cleared, so there can never be a second.
+  private var retiredRetryTaken = false
+  /// 0.1.17 — a retry is in flight: the next poll that returns proves config's id is live.
+  private var retiredRetryAwaitingPoll = false
   /// The durable sample index at the previous poll. §5.5 defines `tape_advancing` as this index
   /// GROWING, so one reading is never enough — the first poll of a session reports false, and
   /// that is correct rather than pessimistic: nothing has been shown to advance yet.
@@ -736,8 +757,17 @@ public actor RoomEngine {
     // 0.1.11 did — after the session had already been read successfully from the file. B1.5-D2 is
     // "no code path may block on securityd", and this is one of the paths. It reads the store now,
     // which answers from the file and never waits.
+    //
+    // ─── 0.1.17: WHEN THE TWO DISAGREE, CONFIG WINS ─────────────────────────────────────────
+    // The paragraph above made the enrolment record the authority, and on 11 Sep that record was
+    // the stale one: a paste wrote a new id into config.json and left an older install's
+    // `room-session.json` in place. See `resolveInstallIdentity`.
     let enrolled = RoomSessionStore.load(root: persistence.root, log: { _ in })
-    installID = enrolled?.installID ?? configuration.installID
+    let identity = Self.resolveInstallIdentity(
+      record: enrolled, configuration: configuration, root: persistence.root, log: log)
+    installID = identity.installID
+    installIDSource = identity.source
+    enrolmentRecord = enrolled
     // §4.5 rule 1: the app writes `app_<install_id>` and no other form.
     listenerTabID =
       installID.map { "app_\($0)" }
@@ -774,6 +804,104 @@ public actor RoomEngine {
     }
     if let owner = residentCaptureOwner, owner.isActive { return Int64(owner.nextPrimaryIndex) }
     return nil
+  }
+
+  /// 0.1.17 — which install id this process polls as, and where it came from.
+  ///
+  /// ─── THE 11 SEP LOOP ────────────────────────────────────────────────────────────────────
+  /// Bootstrap installs 0.1.8. Its enrol writes the new id into config.json and knows nothing of
+  /// `room-session.json`, so a file an EARLIER install left behind survives it. 0.1.8 self-updates;
+  /// the new build reads that file, which used to outrank config.json, polls as a retired id, takes
+  /// a 409 and stops for ever. Four pastes on Home Office died exactly that way.
+  ///
+  /// So a disagreement means the file is stale. config.json is what the last enrol wrote, on every
+  /// build that has an enrol at all; the file is only what the last build to SAVE a session wrote.
+  /// Config's id is used, and the file is rewritten with it — the token kept, since a room session
+  /// is the room's and not the install's (the 11 Sep hand fix changed the id alone, and the room
+  /// came back) — so the next launch finds them agreeing.
+  ///
+  /// When they agree, or there is no record, or config.json names no install, nothing changes.
+  static func resolveInstallIdentity(
+    record: RoomKeychainRecord?,
+    configuration: RoomConfiguration,
+    root: URL,
+    log: (String) -> Void
+  ) -> (installID: String?, source: RoomInstallIDSource) {
+    guard let record else { return (configuration.installID, .configuration) }
+    guard let configured = configuration.installID, configured != record.installID else {
+      return (record.installID, .sessionFile)
+    }
+    var rewritten = record
+    rewritten.installID = configured
+    do {
+      try RoomSessionStore.save(rewritten, root: root)
+      log(
+        "room session install id \(record.installID) disagrees with config \(configured); config wins, session file rewritten"
+      )
+    } catch {
+      // Still config's id. A file that could not be rewritten is found disagreeing again on the
+      // next launch and gets the same answer; polling as the stale id is the one wrong answer.
+      log(
+        "room session install id \(record.installID) disagrees with config \(configured); config wins, session file NOT rewritten: \(error.localizedDescription)"
+      )
+    }
+    return (configured, .configuration)
+  }
+
+  /// 0.1.17 — the single retry a RETIRED answer earns, or nil for "stop as before".
+  ///
+  /// ONLY FOR AN ID THAT CAME FROM THE SESSION FILE, and only when config.json — read NOW, not the
+  /// copy from launch — names a different one. After `resolveInstallIdentity` that is the case
+  /// launch could not see: a re-enrol that rewrote config.json while this process was running.
+  /// When the file and config.json still agree, the server has refused the id both of them name;
+  /// the Mac really has lost the room, and nothing is discarded.
+  ///
+  /// CANNOT LOOP. `retiredRetryTaken` is set before anything else and never cleared, and the id
+  /// retried comes from config.json. The session file is read once more, by `discard`, only to
+  /// check it still names the refused id before removing it — never to choose the next id.
+  private func retryAfterRetired() -> String? {
+    guard !retiredRetryTaken, installIDSource == .sessionFile, let refused = installID else {
+      return nil
+    }
+    retiredRetryTaken = true
+    let configured = (try? persistence.loadConfiguration())?.installID ?? configuration.installID
+    guard let configured, configured != refused else {
+      log("poll refused (409 RETIRED) for install \(refused); config.json names no other install, not retrying")
+      return nil
+    }
+    let discarded = RoomSessionStore.discard(root: persistence.root, ifInstallID: refused)
+    installID = configured
+    listenerTabID = "app_\(configured)"
+    installIDSource = .configuration
+    retiredRetryAwaitingPoll = true
+    log(
+      "poll refused (409 RETIRED) for install \(refused) from room-session.json; "
+        + (discarded ? "file discarded" : "file left alone: it no longer names that install")
+        + "; retrying once as config install \(configured)")
+    return configured
+  }
+
+  /// 0.1.17 — the retry's poll came back, so config's id is live. If the retry discarded the file
+  /// and nothing has written one since, write it from memory: without it the next launch would
+  /// find no file, fall back to a keychain it cannot read, and stop at `needs_enrol`.
+  private func retryAfterRetiredAccepted() {
+    guard retiredRetryAwaitingPoll, let accepted = installID else { return }
+    retiredRetryAwaitingPoll = false
+    let file = RoomSessionStore.url(root: persistence.root)
+    guard !FileManager.default.fileExists(atPath: file.path), var record = enrolmentRecord else {
+      log("retry as install \(accepted) accepted")
+      return
+    }
+    record.installID = accepted
+    record.session = configuration.etaRoomSession ?? record.session
+    do {
+      try RoomSessionStore.save(record, root: persistence.root)
+      log("retry as install \(accepted) accepted; session file rewritten")
+    } catch {
+      log(
+        "retry as install \(accepted) accepted; session file NOT rewritten: \(error.localizedDescription)"
+      )
+    }
   }
 
   /// PURE — is this the server telling us the install is retired (§4.5 rule 3)?
@@ -977,6 +1105,9 @@ public actor RoomEngine {
           primaryLevels: currentLevels(),
           install: installFields
         )
+        // 0.1.17. A no-op unless the one RETIRED retry is in flight, in which case this poll
+        // returning is what proves config's id is live.
+        retryAfterRetiredAccepted()
         // ─── THE CANARY IS ACKNOWLEDGED HERE (Release B1, §14.2 step 5, B1-D3) ─────────────
         //
         // `pollCommands` RETURNED. That is the definition of a working build, and it is the whole
@@ -1049,6 +1180,12 @@ public actor RoomEngine {
         // §4.5 rule 3. NOT the generic backoff below: a retired install is not a transient fault
         // and retrying it is how a superseded copy keeps taking the room back from the install
         // that replaced it. Stop, say why, and let the process exit.
+        //
+        // 0.1.17: ONE exception, and only once — see `retryAfterRetired`.
+        if retryAfterRetired() != nil { continue }
+        if retiredRetryAwaitingPoll, let refused = installID {
+          log("retry as install \(refused) also refused (409 RETIRED); stopping")
+        }
         retiredByServer = true
         lastError = "retired: this install was superseded by a newer enrolment"
         FileHandle.standardError.write(
