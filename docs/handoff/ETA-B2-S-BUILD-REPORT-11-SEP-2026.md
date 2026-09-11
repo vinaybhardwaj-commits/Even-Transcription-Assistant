@@ -35,3 +35,7 @@ Commit: the one carrying this section (sha in the chat reply). `npm test` `Tests
 - (4) `lib/room-install.ts:904-905`: name ≤128, uid ≤256; TONOR's 81-char id tested.
 - (5) `lib/bench-commands.ts:172,286`: `assigned_channel` from `applyInstallPoll`'s `RETURNING`; lookup removed.
 - (8) Addendum committed.
+
+## Production
+
+0079 applied 12:42:49Z via the preview's `/api/run-migrations`. Promoted 12:47Z; `/api/health` sha `e908b84`. Fleet http=200, 9 rows, `degraded: []`: seven `0.1.19 / ok`, OPD 1 and OPD 4 on 0.1.8. Every `last_update_error` and `assigned_channel` null. 28 earlier installs; 1 Unassigned (retired, `room_not_on_card`).
