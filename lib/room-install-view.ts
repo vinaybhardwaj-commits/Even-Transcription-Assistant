@@ -14,7 +14,12 @@
  *
  * That is why `deriveSteps` takes `copiedAt` as its only page-side input and reads everything
  * else off the install row. A step cannot turn done here without a Mac having said so.
+ *
+ * Tier 1 adds ONE TYPE-ONLY import, from the equally import-free lib/bench-bus-constants.ts. It is
+ * erased at compile time, so the bundle this file joins is exactly what it was.
  */
+
+import type { InstallStateFlag } from "./bench-bus-constants";
 
 // ---------------------------------------------------------------------------
 // Wire types — what GET /api/admin/bench/fleet returns
@@ -75,6 +80,13 @@ export type InstallView = {
   input_volume?: number | null;
   /** R4-D4. Whether that volume can be set from software. FALSE greys the slider; NULL = not reported. */
   input_volume_settable?: boolean | null;
+  // ── Tier 1 §2 (0081). NULL on every row until 0081 runs and a poll reaches it. ───────────────
+  /** The named states at the last evaluation, canonical order. [] = none; NULL = never evaluated. */
+  state_flags?: InstallStateFlag[] | null;
+  /** When the SET of flags last changed. */
+  state_changed_at?: string | null;
+  /** The input this room should record from — adopted at first report, set by a desk switch. */
+  expected_device_name?: string | null;
 };
 
 /** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
@@ -619,6 +631,9 @@ export type RowView = {
   volume_text: string;
   /** R4-D5. Whether the card offers the device select and volume slider: a bound Mac, and only that. */
   can_set_audio_input: boolean;
+  // ── Tier 1 §2 ─────────────────────────────────────────────────────────────────────────────
+  /** The install's named states, passed through for the chip. [] when none or never evaluated. */
+  state_flags: InstallStateFlag[];
 };
 
 export type DiskLevel = "ok" | "amber" | "red" | "unknown";
@@ -782,6 +797,9 @@ export function deriveRow(input: {
     input_volume_settable: i?.input_volume_settable ?? null,
     volume_text: volumeText(i?.input_volume ?? null, i?.input_volume_settable ?? null),
     can_set_audio_input: Boolean(i && i.enrolled_at && !i.retired_at),
+    // ── Tier 1 §2 ──────────────────────────────────────────────────────────────────────────
+    // A retired row's last flags describe a Mac that no longer serves the room: not shown.
+    state_flags: i && !i.retired_at ? (i.state_flags ?? []) : [],
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────

@@ -353,3 +353,298 @@ export function roomState(input: {
     start_available: false,
   };
 }
+
+// ---------------------------------------------------------------------------
+// TIER 1 §2 — NAMED INSTALL STATES, evaluated on every native poll
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT THESE ARE, AND WHAT THEY ARE NOT.
+ *
+ * On 11 September OPD 3 and OPD 7 recorded bit-exact silence for days from two dead TONOR TM20s, and
+ * the fleet card showed it only to someone who knew to read `zero_ratio 1` as a dead microphone. Every
+ * fact needed to say "this room is recording silence" was already on the install row. These are those
+ * facts, named: seven COARSE ALARMS over fields the app already sends, evaluated per poll and stored
+ * on `room_install.state_flags` (0081).
+ *
+ * NOT A ROOM STATE IN THE SENSE OF `roomState()` ABOVE. That is a precedence chain where the first
+ * match wins, about what the operator can do. These are ORTHOGONAL and several can hold at once — a
+ * room can be clipping on the wrong device with a filling disk — so they are a set, never a chain.
+ *
+ * NOT CALIBRATED. The 9 September finding is that rooms differ in their noise floor; per-room floors
+ * are R2.5. Until then these thresholds are deliberately coarse: each one is a condition no working
+ * room meets, so a flag means "go and look", never "this is the diagnosis".
+ */
+export type InstallStateFlag =
+  | "SILENT_WHILE_RECORDING"
+  | "CLIPPING"
+  | "DEVICE_MISSING"
+  | "DEVICE_CHANGED"
+  | "ENCODER_STALLED"
+  | "DISK_LOW"
+  | "CHANNEL_DRIFT";
+
+/** The one order flags are listed in, everywhere. The spec's table order. */
+export const INSTALL_STATE_FLAGS: readonly InstallStateFlag[] = [
+  "SILENT_WHILE_RECORDING",
+  "CLIPPING",
+  "DEVICE_MISSING",
+  "DEVICE_CHANGED",
+  "ENCODER_STALLED",
+  "DISK_LOW",
+  "CHANNEL_DRIFT",
+];
+
+/**
+ * The poll ring's length (§2: "the last 10 polls"). CLIPPING's window, and long enough to hold
+ * ENCODER_STALLED's four. NOT long enough for SILENT_WHILE_RECORDING's eighty, which is why silence
+ * is carried as a COUNT on the ring's head rather than read off the ring — see `silent_polls`.
+ */
+export const POLL_RING_SIZE = 10;
+
+/**
+ * SILENT_WHILE_RECORDING — eighty consecutive polls, about two minutes at the recording cadence.
+ *
+ * `zero_ratio` is BIT-EXACT zeros (B2-D7), not quiet: a quiet room still has a noise floor and reads
+ * near zero here, while a dead input reads 1. 0.98 rather than 1 so a device that emits the odd
+ * non-zero glitch is still called dead. Two minutes so a room is not called silent for the length of
+ * a pause between patients — the tape runs through those.
+ */
+export const SILENT_POLLS = 80;
+export const SILENT_ZERO_RATIO = 0.98;
+/**
+ * The same two minutes, measured by the app itself (0.1.22 `silence_ms`): time since the last sample
+ * above −55 dBFS. DERIVED from the poll count and the recording cadence, so the two paths name the
+ * same duration and cannot drift.
+ */
+export const SILENT_MS = SILENT_POLLS * POLL_VISIBLE_MS;
+
+/**
+ * CLIPPING — a peak at or above 0.99 of full scale in at least three of the last ten recording polls.
+ * Three, not one: a single slammed door is not a gain problem. Where the app reports `clip_count`
+ * (0.1.22) a poll counts when it saw ANY full-scale sample, and `peak` is not consulted for that poll.
+ */
+export const CLIP_PEAK = 0.99;
+export const CLIP_POLLS_MIN = 3;
+
+/**
+ * ENCODER_STALLED — recording, and the durable tape index has not grown for four polls in a row.
+ * The first poll of every session reports `tape_advancing` false by construction (nothing has been
+ * shown to advance yet), and a checkpoint (1.25 s) can land just after a poll (1.5 s): one false is
+ * normal. Four is six seconds of a tape that is not moving while a patient is in the room.
+ */
+export const STALLED_POLLS = 4;
+
+/**
+ * DISK_LOW — under 2 GiB free on the captures volume. BINARY GiB, unlike the card's decimal-GB disk
+ * colours (B2-D6: amber 20 GB, red 5 GB), which stay as they are: those are headroom warnings, this
+ * is "the next hours of tape may not fit".
+ */
+export const DISK_LOW_BYTES = 2 * 1024 ** 3;
+
+/**
+ * CHANNEL_DRIFT — an admin assigned a channel and the Mac has reported a different one for more than
+ * thirty minutes. A Mac that obeys moves on its next poll, so a short gap is the move in flight; half
+ * an hour is a Mac that will not (an older app, a locked channel, a config write that keeps failing).
+ */
+export const CHANNEL_DRIFT_MS = 30 * 60_000;
+
+/** What a person reads on the card and in the MCP. Short: they sit in a chip. */
+export const INSTALL_STATE_LABEL: Record<InstallStateFlag, string> = {
+  SILENT_WHILE_RECORDING: "silent while recording",
+  CLIPPING: "clipping",
+  DEVICE_MISSING: "device missing",
+  DEVICE_CHANGED: "device changed",
+  ENCODER_STALLED: "encoder stalled",
+  DISK_LOW: "disk low",
+  CHANNEL_DRIFT: "channel drift",
+};
+
+/**
+ * One poll, as the ring stores it. Newest first. Raw readings only — the rules are applied when the
+ * ring is READ, so a threshold can change without rewriting stored history.
+ *
+ * `rec` is this poll's own answer to "recording": a session id reported AND not paused. PAUSED IS
+ * NOT RECORDING here, deliberately — a room paused for consent is silent because it was asked to be,
+ * and SILENT_WHILE_RECORDING on it would be an alarm about the consent working.
+ *
+ * `silent_polls` is the consecutive-silent count INCLUDING this poll, carried from the previous head
+ * in SQL (`applyInstallPoll`): the ring holds ten polls and silence needs eighty.
+ */
+export type PollRingEntry = {
+  at: string;
+  peak: number | null;
+  zero_ratio: number | null;
+  tape_advancing: boolean | null;
+  rec: boolean;
+  silent_polls: number;
+  /** 0.1.22 heartbeat; absent on every earlier app. */
+  clip_count?: number | null;
+  silence_ms?: number | null;
+};
+
+/** What `state_flags` holds. `drift_since` is CHANNEL_DRIFT's clock: when the mismatch began. */
+export type InstallStateRecord = { flags: InstallStateFlag[]; drift_since: string | null };
+
+export const EMPTY_INSTALL_STATE: InstallStateRecord = { flags: [], drift_since: null };
+
+const finiteOrNull = (v: unknown): number | null => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * PURE — `state_flags` as stored, or anything else, as a record. A value this build cannot read is the
+ * empty state: an unreadable column must never raise a flag, and it is rewritten on the next change.
+ */
+export function parseInstallState(raw: unknown): InstallStateRecord {
+  let v: unknown = raw;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return { ...EMPTY_INSTALL_STATE };
+    }
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { ...EMPTY_INSTALL_STATE };
+  const o = v as Record<string, unknown>;
+  const flags = Array.isArray(o.flags) ? INSTALL_STATE_FLAGS.filter((f) => (o.flags as unknown[]).includes(f)) : [];
+  const since = typeof o.drift_since === "string" && Number.isFinite(Date.parse(o.drift_since)) ? o.drift_since : null;
+  return { flags, drift_since: since };
+}
+
+/** PURE — the stored ring, newest first, or []. Entries this build cannot read are dropped. */
+export function parsePollRing(raw: unknown): PollRingEntry[] {
+  let v: unknown = raw;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(v)) return [];
+  const out: PollRingEntry[] = [];
+  for (const e of v.slice(0, POLL_RING_SIZE)) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const o = e as Record<string, unknown>;
+    out.push({
+      at: typeof o.at === "string" ? o.at : "",
+      peak: finiteOrNull(o.peak),
+      zero_ratio: finiteOrNull(o.zero_ratio),
+      tape_advancing: typeof o.tape_advancing === "boolean" ? o.tape_advancing : null,
+      rec: o.rec === true,
+      silent_polls: Math.max(0, Math.trunc(finiteOrNull(o.silent_polls) ?? 0)),
+      ...(o.clip_count !== undefined ? { clip_count: finiteOrNull(o.clip_count) } : {}),
+      ...(o.silence_ms !== undefined ? { silence_ms: finiteOrNull(o.silence_ms) } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * PURE — is THIS poll a silent one, for the carried count? Only this poll's own readings: the history
+ * is the count the SQL carries, and a poll that did not report `zero_ratio` breaks the run (it made
+ * no claim, and "two minutes of silence" must be two minutes of MEASURED silence).
+ */
+export function pollIsSilent(p: { rec: boolean; tape_advancing: boolean | null; zero_ratio: number | null }): boolean {
+  return p.rec && p.tape_advancing === true && p.zero_ratio !== null && p.zero_ratio >= SILENT_ZERO_RATIO;
+}
+
+/** PURE — did this ring entry see clipping? `clip_count` when the app sent one, else `peak`. */
+export function pollClipped(e: PollRingEntry): boolean {
+  if (typeof e.clip_count === "number") return e.clip_count > 0;
+  return e.peak !== null && e.peak >= CLIP_PEAK;
+}
+
+/**
+ * PURE — the seven rules of §2, over one install's state AFTER this poll's write.
+ *
+ * `ring` is the post-write ring (this poll at [0]). The row fields are the post-COALESCE values the
+ * UPDATE returned, so a poll that omitted a field is judged on the last value the row holds — the same
+ * value the card shows. `recording` and `tapeAdvancing` are THIS poll's.
+ *
+ * `silenceMs` is the 0.1.22 heartbeat. PRESENT, it decides SILENT_WHILE_RECORDING on its own; ABSENT
+ * (every 0.1.21 app), the carried `zero_ratio` count decides. The fallback is the spec's, not a guess.
+ *
+ * Returns the new record. The caller writes it only when it differs from `prev`.
+ */
+export function evaluateInstallStates(input: {
+  ring: readonly PollRingEntry[];
+  recording: boolean;
+  tapeAdvancing: boolean | null;
+  inputDeviceName: string | null;
+  inputDevices: ReadonlyArray<{ name: string }> | null;
+  expectedDeviceName: string | null;
+  diskFreeBytes: number | null;
+  updateChannel: string | null;
+  assignedChannel: string | null;
+  silenceMs?: number | null;
+  prev: InstallStateRecord;
+  nowMs: number;
+}): InstallStateRecord {
+  const flags = new Set<InstallStateFlag>();
+  const head = input.ring[0];
+
+  if (input.recording && input.tapeAdvancing === true) {
+    const ms = typeof input.silenceMs === "number" && Number.isFinite(input.silenceMs) ? input.silenceMs : null;
+    if (ms !== null ? ms >= SILENT_MS : (head?.silent_polls ?? 0) >= SILENT_POLLS) {
+      flags.add("SILENT_WHILE_RECORDING");
+    }
+  }
+
+  if (input.recording && input.ring.filter((e) => e.rec && pollClipped(e)).length >= CLIP_POLLS_MIN) {
+    flags.add("CLIPPING");
+  }
+
+  // Both halves must be MEASURED. No device list (an app below 0.1.20) says nothing about presence,
+  // and no name says nothing about which device to look for.
+  if (
+    input.inputDeviceName &&
+    Array.isArray(input.inputDevices) &&
+    !input.inputDevices.some((d) => d && d.name === input.inputDeviceName)
+  ) {
+    flags.add("DEVICE_MISSING");
+  }
+
+  if (input.expectedDeviceName && input.inputDeviceName && input.expectedDeviceName !== input.inputDeviceName) {
+    flags.add("DEVICE_CHANGED");
+  }
+
+  if (
+    input.recording &&
+    input.ring.length >= STALLED_POLLS &&
+    input.ring.slice(0, STALLED_POLLS).every((e) => e.rec && e.tape_advancing === false)
+  ) {
+    flags.add("ENCODER_STALLED");
+  }
+
+  if (input.diskFreeBytes !== null && Number.isFinite(input.diskFreeBytes) && input.diskFreeBytes > 0 && input.diskFreeBytes < DISK_LOW_BYTES) {
+    flags.add("DISK_LOW");
+  }
+
+  // A Mac that does not report its channel (below 0.1.8) cannot be said to disagree with anything.
+  const drifting =
+    input.assignedChannel !== null && input.updateChannel !== null && input.updateChannel !== input.assignedChannel;
+  const driftSince = drifting ? (input.prev.drift_since ?? new Date(input.nowMs).toISOString()) : null;
+  if (drifting && driftSince !== null && input.nowMs - Date.parse(driftSince) > CHANNEL_DRIFT_MS) {
+    flags.add("CHANNEL_DRIFT");
+  }
+
+  return { flags: INSTALL_STATE_FLAGS.filter((f) => flags.has(f)), drift_since: driftSince };
+}
+
+/** PURE — two records the same? Flags compare as sets in the canonical order. */
+export function sameInstallState(a: InstallStateRecord, b: InstallStateRecord): boolean {
+  return a.drift_since === b.drift_since && a.flags.length === b.flags.length && a.flags.every((f, k) => b.flags[k] === f);
+}
+
+/** PURE — did the SET of flags change? What moves `state_changed_at`; `drift_since` alone does not. */
+export function installFlagsChanged(a: InstallStateRecord, b: InstallStateRecord): boolean {
+  return a.flags.length !== b.flags.length || a.flags.some((f, k) => b.flags[k] !== f);
+}
+
+/** PURE — the flags array a reader shows, from whatever `state_flags` holds. */
+export function installStateFlags(raw: unknown): InstallStateFlag[] {
+  return parseInstallState(raw).flags;
+}

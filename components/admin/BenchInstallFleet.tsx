@@ -41,6 +41,7 @@ import {
   type Step,
   type UnassignedInstall,
 } from "@/lib/room-install-view";
+import { INSTALL_STATE_LABEL } from "@/lib/bench-bus-constants";
 
 /** A3 — the in-table action class BenchClient already uses. 44px minimum touch target. */
 const ROW_BTN =
@@ -590,6 +591,14 @@ function FleetRowView({
               {view.channel_label}
             </span>
           )}
+          {/* Tier 1 §2. The server's named states for this Mac, one chip each, in the one order
+              lib/bench-bus-constants.ts lists them. Coarse alarms, so they colour nothing else: the
+              row's state is still the row's. */}
+          {view.state_flags.map((f) => (
+            <span key={f} data-state-flag={f}>
+              <Pill tone="bad">{INSTALL_STATE_LABEL[f]}</Pill>
+            </span>
+          ))}
         </div>
       </td>
 

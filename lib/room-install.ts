@@ -42,6 +42,16 @@ import {
   type InstallView,
   type ReleaseView,
 } from "@/lib/room-install-view";
+import {
+  POLL_RING_SIZE,
+  evaluateInstallStates,
+  installFlagsChanged,
+  installStateFlags,
+  parseInstallState,
+  parsePollRing,
+  pollIsSilent,
+  sameInstallState,
+} from "@/lib/bench-bus-constants";
 
 export type { FleetPayload, FleetRow, InstallView, ReleaseView };
 
@@ -988,9 +998,114 @@ export function cleanInputDevices(v: unknown): string | null {
  *
  * A RETIRED INSTALL IS TOLD SO (§4.5 rule 3). The route turns this into 409 RETIRED and the app
  * stops polling, which is what makes the last writer of `bench_listener` the new install.
+ *
+ * ─── TIER 1 §2: THE RING RIDES THIS UPDATE; THE FLAGS ARE WRITTEN ONLY WHEN THEY CHANGE ────────
+ * `poll_ring` is appended and capped INSIDE this statement, from the row's own previous ring, so a
+ * poll costs no extra round trip for it (the B2-S fix-up rule). The one thing the ring cannot hold
+ * is SILENT_WHILE_RECORDING's eighty-poll run, so the head entry carries the count: this poll's
+ * `silent_polls` is the previous head's plus one when this poll is silent, else zero — the
+ * `tape_poll_streak` pattern, on the ring. Whether THIS poll is silent is decided here in TypeScript
+ * from this poll's own readings (`pollIsSilent`); the SQL only carries the number.
+ *
+ * The seven rules then run on what the UPDATE RETURNED — the post-COALESCE row, the value the card
+ * shows — in `evaluateInstallStates`, which is pure and tested at every boundary. Its answer is
+ * written by a SECOND statement, and only when it differs from what the row holds: a poll where
+ * nothing changed, which is nearly every poll, is still exactly one statement. The second write is
+ * best-effort: a failure is logged and the poll carries on, because a stale flag is a card that is
+ * one poll behind, while a thrown poll is a room that stops hearing its commands.
+ *
+ * `expected_device_name` is ADOPTED here while it is NULL (a new enrolment, or a row older than
+ * 0081): the first name the room reports is the one it is expected to keep. A desk switch
+ * (`set_audio_input` acked) sets it; see `ackCommand`.
  */
-export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallPollResult> {
+export type InstallPollContext = {
+  /** This poll's own "recording": the listener reported a session id and is not paused. */
+  recording?: boolean;
+  now?: Date;
+};
+
+type InstallPollReturn = {
+  install_id: string;
+  assigned_channel: string | null;
+  poll_ring?: unknown;
+  state_flags?: unknown;
+  input_device_name?: string | null;
+  input_devices?: unknown;
+  expected_device_name?: string | null;
+  disk_free_bytes?: string | number | null;
+  update_channel?: string | null;
+};
+
+/** The device list as a RETURNING or SELECT yields it — parsed jsonb, jsonb text, or anything else. */
+function devicesOf(v: unknown): InputDevice[] | null {
+  if (Array.isArray(v)) return v as InputDevice[];
+  if (typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      return Array.isArray(p) ? (p as InputDevice[]) : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function writeInstallState(
+  row: InstallPollReturn,
+  poll: { recording: boolean; tapeAdvancing: boolean | null; silenceMs?: number | null; now: Date },
+): Promise<void> {
+  try {
+    // A RETURNING that did not carry the column is a row this build cannot judge; say nothing.
+    if (row.state_flags === undefined) return;
+    const prev = parseInstallState(row.state_flags);
+    const disk = row.disk_free_bytes === null || row.disk_free_bytes === undefined ? null : Number(row.disk_free_bytes);
+    const next = evaluateInstallStates({
+      ring: parsePollRing(row.poll_ring),
+      recording: poll.recording,
+      tapeAdvancing: poll.tapeAdvancing,
+      inputDeviceName: row.input_device_name ?? null,
+      inputDevices: devicesOf(row.input_devices),
+      expectedDeviceName: row.expected_device_name ?? null,
+      diskFreeBytes: disk !== null && Number.isFinite(disk) ? disk : null,
+      updateChannel: row.update_channel ?? null,
+      assignedChannel: row.assigned_channel ?? null,
+      silenceMs: poll.silenceMs ?? null,
+      prev,
+      nowMs: poll.now.getTime(),
+    });
+    // NULL is "never evaluated", so the first evaluation is written even when it finds nothing.
+    if (row.state_flags !== null && sameInstallState(prev, next)) return;
+    await sql`
+      UPDATE room_install
+         SET state_flags      = ${JSON.stringify(next)}::jsonb,
+             state_changed_at = CASE WHEN ${installFlagsChanged(prev, next)}::boolean THEN now() ELSE state_changed_at END
+       WHERE install_id = ${row.install_id}
+         AND retired_at IS NULL
+    `;
+  } catch (e) {
+    console.warn(
+      "[room-install] state write failed",
+      JSON.stringify({ install_id: row.install_id, err: String((e as Error)?.message ?? e).slice(0, 200) }),
+    );
+  }
+}
+
+export async function applyInstallPoll(
+  raw: InstallPollFields,
+  ctx: InstallPollContext = {},
+): Promise<InstallPollResult> {
   const f = cleanPollFields(raw);
+  const now = ctx.now ?? new Date();
+  const recording = ctx.recording === true;
+  // Tier 1 §2 — this poll's ring entry, raw readings only. `silent_polls` is added in SQL.
+  const ringEntry = JSON.stringify({
+    at: now.toISOString(),
+    peak: f.peak,
+    zero_ratio: f.zero_ratio,
+    tape_advancing: f.tape_advancing,
+    rec: recording,
+  });
+  const silentNow = pollIsSilent({ rec: recording, tape_advancing: f.tape_advancing, zero_ratio: f.zero_ratio });
   try {
     const rows = (await sql`
       UPDATE room_install
@@ -1047,13 +1162,38 @@ export async function applyInstallPoll(raw: InstallPollFields): Promise<InstallP
              -- reports stable of its own accord: it has done what it was told, and a value left
              -- standing would drag it back off test after a later hand move — undoing the one move
              -- R3-8 reserves for a person at the Mac. A poll that omits the channel clears nothing.
-             assigned_channel   = CASE WHEN ${f.update_channel}::text = 'stable' THEN NULL ELSE assigned_channel END
+             assigned_channel   = CASE WHEN ${f.update_channel}::text = 'stable' THEN NULL ELSE assigned_channel END,
+             -- Tier 1 §2 (0081). Adopted while NULL: this poll's name, else the name the row holds.
+             expected_device_name = COALESCE(expected_device_name, ${f.input_device_name}::text, input_device_name),
+             -- Tier 1 §2 (0081). This poll at the head, the previous ring behind it, cut to the ring
+             -- size. The head carries the consecutive-silent count forward from the previous head.
+             poll_ring = (
+               SELECT COALESCE(jsonb_agg(r.e ORDER BY r.n), '[]'::jsonb)
+                 FROM jsonb_array_elements(
+                        jsonb_build_array(
+                          ${ringEntry}::jsonb || jsonb_build_object(
+                            'silent_polls',
+                            CASE WHEN ${silentNow}::boolean
+                                 THEN COALESCE((room_install.poll_ring -> 0 ->> 'silent_polls')::int, 0) + 1
+                                 ELSE 0
+                            END
+                          )
+                        )
+                        || CASE WHEN jsonb_typeof(room_install.poll_ring) = 'array'
+                                THEN room_install.poll_ring
+                                ELSE '[]'::jsonb
+                           END
+                      ) WITH ORDINALITY AS r(e, n)
+                WHERE r.n <= ${POLL_RING_SIZE}::int
+             )
        WHERE install_id = ${f.install_id}
          AND retired_at IS NULL
-      RETURNING install_id, assigned_channel
-    `) as Array<{ install_id: string; assigned_channel: string | null }>;
+      RETURNING install_id, assigned_channel, poll_ring, state_flags, input_device_name, input_devices,
+                expected_device_name, disk_free_bytes, update_channel
+    `) as InstallPollReturn[];
 
     if (rows.length > 0) {
+      await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, now });
       return { ok: true, assigned_channel: rows[0]!.assigned_channel === "stable" ? "stable" : null };
     }
 
@@ -1114,6 +1254,12 @@ function normaliseInstall(r: InstallView): InstallView {
     // Release R4 (0080). `real` may arrive as a string; the flag is a boolean or nothing.
     input_volume: r.input_volume === null || r.input_volume === undefined ? null : Number(r.input_volume),
     input_volume_settable: typeof r.input_volume_settable === "boolean" ? r.input_volume_settable : null,
+    // Tier 1 §2 (0081). The stored record is {flags, drift_since}; the row shows the flags. NULL stays
+    // NULL — "never evaluated" is not "no flags".
+    state_flags:
+      r.state_flags === null || r.state_flags === undefined ? null : installStateFlags(r.state_flags as unknown),
+    state_changed_at: iso(r.state_changed_at ?? null),
+    expected_device_name: r.expected_device_name ?? null,
   };
 }
 
@@ -1175,7 +1321,8 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              session_open, update_channel, last_update_result, last_update_version,
              last_update_error, last_update_at, disk_free_bytes,
              assigned_channel, peak, zero_ratio, input_devices,
-             input_volume, input_volume_settable
+             input_volume, input_volume_settable,
+             state_flags, state_changed_at, expected_device_name
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500

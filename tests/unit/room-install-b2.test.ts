@@ -341,7 +341,9 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     expect(up.text).toMatch(
       /assigned_channel = CASE WHEN \?::text = 'stable' THEN NULL ELSE assigned_channel END/,
     );
-    expect(up.text).toMatch(/RETURNING install_id, assigned_channel$/);
+    // Tier 1 §2 returns the ring and the judged columns after these two; the assignment still rides
+    // back on this same UPDATE.
+    expect(up.text).toMatch(/RETURNING install_id, assigned_channel\b/);
     expect(calls).toHaveLength(1); // one statement: no separate read of the assignment (ruling 5)
   });
 

@@ -281,7 +281,12 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     if (input.install?.install_id) {
       let applied: Awaited<ReturnType<typeof applyInstallPoll>> | null = null;
       try {
-        applied = await applyInstallPoll(input.install);
+        // Tier 1 §2. "Recording" for the named states is THIS poll's listener answer: a session id
+        // reported and not paused. A consent pause is silence on purpose and must not read as a
+        // dead microphone.
+        applied = await applyInstallPoll(input.install, {
+          recording: input.recordingSessionId !== null && !input.paused,
+        });
         if (applied.ok) assignedChannel = applied.assigned_channel;
       } catch (e) {
         // FAIL OPEN, LOUDLY. The install registry is bookkeeping; the tape is not. A room that
@@ -428,10 +433,48 @@ export async function ackCommand(input: AckInput): Promise<"acked" | "failed" | 
              error = ${input.ok ? null : (input.error ?? "failed")},
              acked_at = now()
        WHERE id = ${input.commandId} AND room_id = ${input.roomId} AND status = 'pending'
-       RETURNING id
-    `) as Array<{ id: string }>;
-    return rows.length ? status : null;
+       RETURNING id, kind
+    `) as Array<{ id: string; kind?: string }>;
+    if (!rows.length) return null;
+    if (rows[0]!.kind === "set_audio_input" && input.ok && input.applied?.applied_device_uid) {
+      await recordExpectedDevice(input.roomId, input.applied.applied_device_uid);
+    }
+    return status;
   });
+}
+
+/**
+ * Tier 1 §2, DEVICE_CHANGED. A desk switch the app has acked is the device the room is now EXPECTED
+ * to record from. The name comes from the room's own last-reported device list, by the uid the app
+ * says it applied; a uid the list does not carry sets NULL, and the next poll adopts the name it
+ * reports (`applyInstallPoll`), which is the switched-to device by then.
+ *
+ * BEST-EFFORT, AFTER THE ACK HAS LANDED. The command's status is already written; a failure here is
+ * logged and the ack still answers success, because a refused ack leaves the command pending and the
+ * app acking it again. INFERRED against 0079 (`input_devices`) and 0081 (`expected_device_name`).
+ */
+async function recordExpectedDevice(roomId: string, uid: string): Promise<void> {
+  try {
+    await sql`
+      UPDATE room_install
+         SET expected_device_name = (
+               SELECT d ->> 'name'
+                 FROM jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(input_devices) = 'array' THEN input_devices ELSE '[]'::jsonb END
+                      ) AS d
+                WHERE d ->> 'uid' = ${uid}
+                LIMIT 1
+             )
+       WHERE room_id = ${roomId}
+         AND enrolled_at IS NOT NULL
+         AND retired_at IS NULL
+    `;
+  } catch (e) {
+    console.warn(
+      "[bench-commands] expected device not recorded",
+      JSON.stringify({ room_id: roomId, err: String((e as Error)?.message ?? e).slice(0, 200) }),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
