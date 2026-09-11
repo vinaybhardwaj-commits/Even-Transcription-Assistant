@@ -168,7 +168,7 @@ public struct BenchLevelPair: Equatable, Sendable {
   }
 }
 
-/// The command bus's kinds (`lib/bench-commands.ts` `COMMAND_KINDS`, the 0044/0080 CHECK).
+/// The command bus's kinds (`lib/bench-commands.ts` `COMMAND_KINDS`, the 0044/0080/0081 CHECK).
 ///
 /// ─── AN UNKNOWN KIND IS A VALUE, NOT A DECODE FAILURE (R4-D2) ─────────────────────────────
 /// This used to be `enum BenchCommandKind: String, Codable`, and a string it did not list failed
@@ -183,6 +183,12 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
   case endDay
   /// R4-D1. Switch the recording device and/or set its input volume.
   case setAudioInput
+  /// Tier 1 §3. Run the self-update check now: the six-hour interval is bypassed, nothing else is.
+  case checkUpdateNow
+  /// Tier 1 §3. Report what this Mac is, runs and has logged, in the ack's `diag`.
+  case reportDiag
+  /// Tier 1 §3. Ack, then exit for launchd to relaunch this app.
+  case restartEngine
   case unknown(String)
 
   public init(rawValue: String) {
@@ -192,6 +198,9 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case "resume_day": self = .resumeDay
     case "end_day": self = .endDay
     case "set_audio_input": self = .setAudioInput
+    case "check_update_now": self = .checkUpdateNow
+    case "report_diag": self = .reportDiag
+    case "restart_engine": self = .restartEngine
     default: self = .unknown(rawValue)
     }
   }
@@ -203,6 +212,9 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case .resumeDay: return "resume_day"
     case .endDay: return "end_day"
     case .setAudioInput: return "set_audio_input"
+    case .checkUpdateNow: return "check_update_now"
+    case .reportDiag: return "report_diag"
+    case .restartEngine: return "restart_engine"
     case .unknown(let raw): return raw
     }
   }
@@ -268,6 +280,36 @@ public struct AudioInputAcknowledgement: Equatable, Sendable {
     self.appliedDeviceUID = appliedDeviceUID
     self.appliedInputVolume = appliedInputVolume
     self.inputVolumeSettable = inputVolumeSettable
+  }
+}
+
+/// Tier 1 §3 — what an operator verb's ack carries beside `ok`/`error`. Each field is sent only when
+/// the verb produced it, top level in the ack body, exactly as the R4 audio fields are: the server's
+/// `cleanAckApplied` keeps each well-formed one and drops the rest.
+public struct OperatorVerbAcknowledgement: Equatable, Sendable {
+  /// check_update_now: when the release route was asked, ISO-8601.
+  public var checkedAt: String?
+  /// check_update_now: the version the channel offers, when it differs from the running one.
+  public var offeredVersion: String?
+  /// check_update_now: a session was open, so nothing was downloaded (R3-10's deferral, unchanged).
+  public var deferred: Bool?
+  /// check_update_now: this version has failed twice here and is held (F2).
+  public var held: Bool?
+  /// restart_engine: the app is about to exit for launchd to relaunch it.
+  public var restarting: Bool?
+  /// report_diag: the whole report.
+  public var diag: JSONValue?
+
+  public init(
+    checkedAt: String? = nil, offeredVersion: String? = nil, deferred: Bool? = nil,
+    held: Bool? = nil, restarting: Bool? = nil, diag: JSONValue? = nil
+  ) {
+    self.checkedAt = checkedAt
+    self.offeredVersion = offeredVersion
+    self.deferred = deferred
+    self.held = held
+    self.restarting = restarting
+    self.diag = diag
   }
 }
 
@@ -603,17 +645,35 @@ public actor BenchClient {
     error: String?,
     audioInput: AudioInputAcknowledgement?
   ) async throws -> CommandAcknowledgement {
+    try await acknowledge(
+      commandID: commandID, ok: ok, sessionID: sessionID, error: error, audioInput: audioInput,
+      verb: nil)
+  }
+
+  /// Tier 1 §3. The same body again, with an operator verb's fields beside the audio ones — each
+  /// only when present, so every earlier kind's ack carries exactly the keys it did before.
+  public func acknowledge(
+    commandID: String,
+    ok: Bool,
+    sessionID: String?,
+    error: String?,
+    audioInput: AudioInputAcknowledgement?,
+    verb: OperatorVerbAcknowledgement?
+  ) async throws -> CommandAcknowledgement {
     struct Body: Encodable {
       let ok: Bool
       let sessionID: String?
       let error: String?
       let audioInput: AudioInputAcknowledgement?
+      let verb: OperatorVerbAcknowledgement?
       enum CodingKeys: String, CodingKey {
-        case ok, error
+        case ok, error, deferred, held, restarting, diag
         case sessionID = "session_id"
         case appliedDeviceUID = "applied_device_uid"
         case appliedInputVolume = "applied_input_volume"
         case inputVolumeSettable = "input_volume_settable"
+        case checkedAt = "checked_at"
+        case offeredVersion = "offered_version"
       }
       func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
@@ -623,6 +683,12 @@ public actor BenchClient {
         try values.encodeIfPresent(audioInput?.appliedDeviceUID, forKey: .appliedDeviceUID)
         try values.encodeIfPresent(audioInput?.appliedInputVolume, forKey: .appliedInputVolume)
         try values.encodeIfPresent(audioInput?.inputVolumeSettable, forKey: .inputVolumeSettable)
+        try values.encodeIfPresent(verb?.checkedAt, forKey: .checkedAt)
+        try values.encodeIfPresent(verb?.offeredVersion, forKey: .offeredVersion)
+        try values.encodeIfPresent(verb?.deferred, forKey: .deferred)
+        try values.encodeIfPresent(verb?.held, forKey: .held)
+        try values.encodeIfPresent(verb?.restarting, forKey: .restarting)
+        try values.encodeIfPresent(verb?.diag, forKey: .diag)
       }
     }
     var request = try request(
@@ -630,7 +696,7 @@ public actor BenchClient {
       method: "POST"
     )
     request.httpBody = try encoder.encode(
-      Body(ok: ok, sessionID: sessionID, error: error, audioInput: audioInput))
+      Body(ok: ok, sessionID: sessionID, error: error, audioInput: audioInput, verb: verb))
     return try await decoded(request, as: CommandAcknowledgement.self)
   }
 

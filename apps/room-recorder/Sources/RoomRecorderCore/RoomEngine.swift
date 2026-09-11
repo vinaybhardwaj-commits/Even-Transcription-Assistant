@@ -102,9 +102,9 @@ public enum RoomCommandDecider {
     case .endDay:
       return phase == .recording || phase == .paused || phase == .failed
         ? .end : .refuse("no_active_session")
-    case .setAudioInput, .unknown:
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown:
       // Not a day-lifecycle command. `RoomEngine.handle` dispatches these before it asks here
-      // (R4); a caller that asks anyway is refused rather than handed a phase decision.
+      // (R4, Tier 1 §3); a caller that asks anyway is refused rather than handed a phase decision.
       return .refuse("unsupported_kind")
     }
   }
@@ -164,6 +164,11 @@ public protocol RoomEngineRemote: Sendable {
     commandID: String, ok: Bool, sessionID: String?, error: String?,
     audioInput: AudioInputAcknowledgement?
   ) async throws -> CommandAcknowledgement
+  /// Tier 1 §3. The same ack, carrying an operator verb's fields when there are any.
+  func acknowledge(
+    commandID: String, ok: Bool, sessionID: String?, error: String?,
+    audioInput: AudioInputAcknowledgement?, verb: OperatorVerbAcknowledgement?
+  ) async throws -> CommandAcknowledgement
   func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse
   func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
     -> ImmutablePieceUploadResult
@@ -184,6 +189,16 @@ extension RoomEngineRemote {
     audioInput: AudioInputAcknowledgement?
   ) async throws -> CommandAcknowledgement {
     try await acknowledge(commandID: commandID, ok: ok, sessionID: sessionID, error: error)
+  }
+
+  /// Tier 1 §3 — the same again: a remote that does not speak Tier 1 drops the verb's fields and
+  /// sends the ack it already knows. `BenchClient`'s witness sends them.
+  public func acknowledge(
+    commandID: String, ok: Bool, sessionID: String?, error: String?,
+    audioInput: AudioInputAcknowledgement?, verb: OperatorVerbAcknowledgement?
+  ) async throws -> CommandAcknowledgement {
+    try await acknowledge(
+      commandID: commandID, ok: ok, sessionID: sessionID, error: error, audioInput: audioInput)
   }
 }
 
@@ -463,6 +478,8 @@ public actor RoomEngine {
     let error: String?
     /// R4. Only a `set_audio_input` result carries this.
     var audioInput: AudioInputAcknowledgement? = nil
+    /// Tier 1 §3. Only an operator verb's result carries this.
+    var verb: OperatorVerbAcknowledgement? = nil
   }
 
   private let persistence: RoomPersistence
@@ -487,6 +504,18 @@ public actor RoomEngine {
   /// Release R4. The §5.5 machine reading for the poll, for the device config.json names now.
   /// `MachineFactsReader.read` in production; injected so a test can see the poll follow a switch.
   private let machineFacts: @Sendable (String?) -> MachineFacts
+  /// Tier 1 §3. How the process ends for `restart_engine`. `Darwin.exit` in production; injected so
+  /// a test can see the exit code without ending the test process.
+  private let processExit: @Sendable (Int32) -> Void
+  /// Tier 1 §3. One line of a helper's version answer (`report_diag`), or nil. Runs the helper in
+  /// production; injected so a test does not depend on what is installed.
+  private let helperVersion: @Sendable (String, [String]) -> String?
+  /// Tier 1 §3. Set once a `restart_engine` ack has landed; `run()` stops and exits on it.
+  private var restartRequested = false
+  /// Tier 1 §3. The PCM reader behind `clip_count` and `silence_ms`, for the running plain capture.
+  private var pcmMeter: PCMTailMeter?
+  /// Tier 1 §3. A locked channel's refusal of an assignment is said once, not every 1.5 s.
+  private var channelLockLogged = false
   private var residentCaptureOwner: (any RoomResidentCaptureOwning)?
   private var residentControlJournal: (any RoomControlJournalOwning)?
   private var residentRuntimeRoomID: String?
@@ -636,6 +665,12 @@ public actor RoomEngine {
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
+    },
+    /// Tier 1 §3. `Darwin.exit` by default.
+    processExit: @escaping @Sendable (Int32) -> Void = { Darwin.exit($0) },
+    /// Tier 1 §3. Runs the helper by default.
+    helperVersion: @escaping @Sendable (String, [String]) -> String? = {
+      RoomEngine.runHelperVersion($0, $1)
     }
   ) async throws -> RoomEngine {
     let persistence = RoomPersistence(root: rootURL)
@@ -680,7 +715,9 @@ public actor RoomEngine {
       updater: updaterFactory(configuration, remote, persistence.root),
       log: log,
       audioInputs: audioInputs,
-      machineFacts: machineFacts
+      machineFacts: machineFacts,
+      processExit: processExit,
+      helperVersion: helperVersion
     )
   }
 
@@ -727,11 +764,17 @@ public actor RoomEngine {
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
+    },
+    processExit: @escaping @Sendable (Int32) -> Void = { Darwin.exit($0) },
+    helperVersion: @escaping @Sendable (String, [String]) -> String? = {
+      RoomEngine.runHelperVersion($0, $1)
     }
   ) {
     self.persistence = persistence
     self.audioInputs = audioInputs
     self.machineFacts = machineFacts
+    self.processExit = processExit
+    self.helperVersion = helperVersion
     self.configuration = configuration
     self.remote = remote
     self.captureLauncher = captureLauncher
@@ -1019,6 +1062,15 @@ public actor RoomEngine {
   /// was running is not undone by a change to one field.
   private func applyServerAssignedChannel(_ assigned: String?) {
     var moved = configuration
+    // Tier 1 §3. A locked Mac says once why it is not moving; the poll's `channel_locked` says it
+    // to the card every time.
+    if configuration.channelLocked, let assigned, assigned != configuration.updateChannel {
+      if !channelLockLogged {
+        channelLockLogged = true
+        log("channel locked in config.json; ignoring the server's assignment of \(assigned.prefix(16))")
+      }
+      return
+    }
     guard moved.applyServerAssignedChannel(assigned) else { return }
     do {
       var onDisk = try persistence.loadConfiguration()
@@ -1028,14 +1080,14 @@ public actor RoomEngine {
       if !channelMoveFailureLogged {
         channelMoveFailureLogged = true
         log(
-          "channel move to stable not saved; staying on \(configuration.updateChannel): "
+          "channel move to \(moved.updateChannel) not saved; staying on \(configuration.updateChannel): "
             + bounded(error))
       }
       return
     }
     configuration = moved
     updater?.channel = moved.updateChannel
-    log("channel moved to stable by the server")
+    log("channel moved to \(moved.updateChannel) by the server")
   }
 
   /// One whole update check, when one is due. Returns the version handed over to, or nil.
@@ -1044,7 +1096,15 @@ public actor RoomEngine {
   /// check deferred at 09:10 would otherwise wait until 15:10 — most of a day after the last
   /// patient left, on a Mac that has been idle the whole time.
   private func checkForUpdateIfDue() async -> String? {
-    guard let updater else { return nil }
+    await runUpdateCheck(force: false, willStage: nil).handedOver
+  }
+
+  /// The one update check, scheduled or forced (Tier 1 §3, `check_update_now`). `force` reaches
+  /// `isDue` and nothing else; the attempt is returned so a forced check can say what it found.
+  private func runUpdateCheck(
+    force: Bool, willStage: (@Sendable (String) async -> Void)?
+  ) async -> (handedOver: String?, attempt: RoomUpdateAttempt?) {
+    guard let updater else { return (nil, nil) }
 
     // The transition, not the state. A session that was open on the previous poll and is not open
     // now is the moment R3-10 names, and it is observable only by remembering the previous answer.
@@ -1054,35 +1114,38 @@ public actor RoomEngine {
     if justEnded { sessionEndedSinceUpdateCheck = true }
 
     let now = Date()
-    guard updateSchedule.isDue(now: now, sessionJustEnded: sessionEndedSinceUpdateCheck) else {
-      return nil
+    guard
+      updateSchedule.isDue(now: now, sessionJustEnded: sessionEndedSinceUpdateCheck, force: force)
+    else {
+      return (nil, nil)
     }
     sessionEndedSinceUpdateCheck = false
     updateSchedule.lastCheckedAt = now
 
-    switch await updater.check(sessionIsOpen: open) {
+    let attempt = await updater.check(sessionIsOpen: open, willStage: willStage)
+    switch attempt {
     case .upToDate:
       updateSchedule.deferredWhileRecording = false
-      return nil
+      return (nil, attempt)
     case .deferredWhileRecording:
       // R3-10 arms here and fires at the end of the session, not six hours from now.
       updateSchedule.deferredWhileRecording = true
-      return nil
+      return (nil, attempt)
     case .heldAfterRepeatedFailure:
       // F2. Nothing was downloaded and nothing is on the card that was not already there. The
       // hold lives on disk, so it survives the restarts that got us here.
       updateSchedule.deferredWhileRecording = false
-      return nil
+      return (nil, attempt)
     case .stopped(_, _):
       // R3-9 and acceptance item 5. `update-result.json` is on disk; the next poll carries it and
       // the fleet card names the reason. NOTHING resident was touched, so the room is recording on
       // the version it has and there is nothing to recover from.
       updateSchedule.deferredWhileRecording = false
       pendingUpdateResult = RoomUpdateResult.read(root: persistence.root)
-      return nil
+      return (nil, attempt)
     case .handedOver(let version):
       updateSchedule.deferredWhileRecording = false
-      return version
+      return (version, attempt)
     }
   }
 
@@ -1185,6 +1248,7 @@ public actor RoomEngine {
         // MachineFactsReader measures on each call and reports nil for anything it cannot read.
         let reportedResult = pendingUpdateResult
         let signal = currentSignal()
+        let heartbeat = currentHeartbeat()
         let installFields = installID.map {
           InstallPollFields(
             installID: $0,
@@ -1207,7 +1271,12 @@ public actor RoomEngine {
             diskFreeBytes: InstallPollFields.freeBytes(onVolumeHolding: capturesURL),
             // Release B2 (D7). The latest checkpoint's, beside the level pair below.
             peak: signal.peak,
-            zeroRatio: signal.zeroRatio
+            zeroRatio: signal.zeroRatio,
+            // Tier 1 §3. Read from the durable PCM since the previous poll; nil when no plain
+            // capture runs. The lock is config.json's own.
+            clipCount: heartbeat?.clipCount,
+            silenceMS: heartbeat?.silenceMS,
+            channelLocked: configuration.channelLocked
           )
         }
         let response = try await remote.pollCommands(
@@ -1272,6 +1341,10 @@ public actor RoomEngine {
         }
         try saveStatus()
         backoffNanoseconds = 5_000_000_000
+        // Tier 1 §3. A forced check that handed over, or a restart whose ack landed, ends the loop
+        // here — before the scheduled check below, and before another poll can hand this process
+        // more work it will not live to finish.
+        if handedOverToUpdateVersion != nil || restartRequested { break }
 
         // ─── BUILD R3 — the update check (§13.3 steps 1 to 7) ────────────────────────────────
         //
@@ -1329,6 +1402,22 @@ public actor RoomEngine {
     if let version = handedOverToUpdateVersion {
       exitReason = .handedOverToUpdate(version: version)
       await stopRetainedArchiveRecovery()
+      return
+    }
+
+    // Tier 1 §3 — `restart_engine`, after its ack landed. The capture stops WITHOUT ending the
+    // session, exactly as a launchd stop would leave it, so the relaunched process reconciles and
+    // records on. Then a NON-ZERO exit: the LaunchAgent is `KeepAlive: {SuccessfulExit: false}`, so
+    // exit 0 is a deliberate stop that launchd honours by NOT relaunching — the room would go dark.
+    if restartRequested {
+      do {
+        try await stopWithoutEnding(reason: .cancelled)
+      } catch {
+        log("restart: capture did not stop cleanly (\(bounded(error, limit: 120))); exiting anyway")
+      }
+      await stopRetainedArchiveRecovery()
+      log("restarting for the desk: exit \(Self.restartExitCode), launchd relaunches")
+      processExit(Self.restartExitCode)
       return
     }
 
@@ -1534,7 +1623,13 @@ public actor RoomEngine {
 
   private func handle(_ command: BenchCommand) async {
     if let result = completedCommands[command.id] {
-      await acknowledge(command, result: result)
+      // Tier 1 §3. A verb re-delivered because its ack did not land is finished the same way the
+      // first time would have been — a restart whose ack now lands still restarts.
+      if Self.isOperatorVerb(command.kind) {
+        await finishOperatorVerb(command, result: result)
+      } else {
+        await acknowledge(command, result: result)
+      }
       return
     }
     // ─── R4: THE TWO KINDS THAT ARE NOT THE DAY ─────────────────────────────────────────────
@@ -1548,6 +1643,10 @@ public actor RoomEngine {
       let result = applyAudioInput(command)
       completedCommands[command.id] = result
       await acknowledge(command, result: result)
+      return
+    case .checkUpdateNow, .reportDiag, .restartEngine:
+      // Tier 1 §3. Like set_audio_input: not the day, not journaled, decided once and remembered.
+      await handleOperatorVerb(command)
       return
     case .unknown(let raw):
       // R4-D2. Refused by name and never fatal: the commands beside it still run.
@@ -2016,7 +2115,8 @@ public actor RoomEngine {
           ok: result.ok,
           sessionID: result.sessionID,
           error: result.error,
-          audioInput: result.audioInput)
+          audioInput: result.audioInput,
+          verb: result.verb)
         let expectedStatus = result.ok ? "acked" : "failed"
         guard acknowledgement.ok, acknowledgement.id == command.id,
           acknowledgement.status == expectedStatus
@@ -2113,7 +2213,7 @@ public actor RoomEngine {
     case .pauseDay: return .pauseDay
     case .resumeDay: return .resumeDay
     case .endDay: return .endDay
-    case .setAudioInput, .unknown: return nil
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown: return nil
     }
   }
 
@@ -2226,7 +2326,8 @@ public actor RoomEngine {
     outcomeUnobservable: ArchiveControlState
   )? {
     switch (kind, success) {
-    case (.setAudioInput, _), (.unknown, _):
+    case (.setAudioInput, _), (.checkUpdateNow, _), (.reportDiag, _), (.restartEngine, _),
+      (.unknown, _):
       return nil
     case (.startDay, true):
       return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
@@ -2630,6 +2731,307 @@ public actor RoomEngine {
     try advanceControl(
       commandID: commandID, commandKind: .endDay, sessionID: id,
       priorState: .sessionEndPatched, newState: .endAckReady)
+  }
+
+  // MARK: - Tier 1 §3: the three operator verbs
+
+  /// `restart_engine`'s exit. NOT 0: the LaunchAgent relaunches only on a non-zero exit
+  /// (`KeepAlive: {SuccessfulExit: false}`, R2 §2.4). NOT 1, which is any error, and NOT 64, which is
+  /// the self-update handover (`RoomSelfUpdate.handoverExitCode`). 75 is sysexits' EX_TEMPFAIL —
+  /// "try again" — and is distinct in launchd.log.
+  public static let restartExitCode: Int32 = 75
+  /// `report_diag`'s default when `log_lines` is absent (Tier 1 §4 acceptance 4), and its bound.
+  static let reportDiagDefaultLines = 100
+  static let reportDiagMaxLines = 500
+  /// One log line in a report, at most. The server stores 256 KB; 500 lines of this fit twice.
+  static let reportDiagLineMax = 300
+  /// Words a log line in a report must not carry. The four the Refuter greps for, and the two
+  /// headers a session could ride in. A line carrying one is replaced, not trimmed.
+  static let reportDiagForbidden = [
+    "eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN",
+    "authorization", "cookie",
+  ]
+
+  static func isOperatorVerb(_ kind: BenchCommandKind) -> Bool {
+    switch kind {
+    case .checkUpdateNow, .reportDiag, .restartEngine: return true
+    default: return false
+    }
+  }
+
+  private func verbFailure(_ error: String) -> CommandResult {
+    CommandResult(ok: false, sessionID: sessionID, error: error)
+  }
+
+  private func handleOperatorVerb(_ command: BenchCommand) async {
+    let result: CommandResult
+    switch command.kind {
+    case .checkUpdateNow:
+      if let ackedBeforeStaging = await checkUpdateNow(command) {
+        // The ack already went out, before the swap script could boot this process out.
+        completedCommands[command.id] = ackedBeforeStaging
+        return
+      }
+      result = completedCommands[command.id] ?? verbFailure("check_failed")
+    case .reportDiag:
+      result = reportDiag(command)
+    case .restartEngine:
+      result = restartEngine(command)
+    default:
+      return
+    }
+    completedCommands[command.id] = result
+    await finishOperatorVerb(command, result: result)
+  }
+
+  /// Ack a verb; a `restart_engine` whose ack LANDED arms the restart. One that did not land does
+  /// not restart: the command would still be pending, the relaunched process would be handed it
+  /// again, and a room would restart in a loop for as long as its acks fail.
+  private func finishOperatorVerb(_ command: BenchCommand, result: CommandResult) async {
+    let landed = await acknowledgeVerb(command, result: result)
+    if landed, command.kind == .restartEngine, result.ok {
+      restartRequested = true
+    }
+  }
+
+  /// The verbs are never journaled, so their ack is the plain three-attempt send, and the caller
+  /// learns whether it landed. `command_not_pending` counts as landed: an earlier attempt got there,
+  /// or the row expired — either way it will not be handed out again.
+  private func acknowledgeVerb(_ command: BenchCommand, result: CommandResult) async -> Bool {
+    for _ in 1...3 {
+      do {
+        let acknowledgement = try await remote.acknowledge(
+          commandID: command.id, ok: result.ok, sessionID: result.sessionID, error: result.error,
+          audioInput: nil, verb: result.verb)
+        guard acknowledgement.ok, acknowledgement.id == command.id,
+          acknowledgement.status == (result.ok ? "acked" : "failed")
+        else {
+          throw RoomEngineError.io("invalid command acknowledgement response")
+        }
+        return true
+      } catch {
+        lastError = bounded(error)
+        if commandNotPending(error) { return true }
+      }
+    }
+    return false
+  }
+
+  /// `check_update_now` — the scheduled check, made due now (`force` bypasses the interval only).
+  /// Returns the result when the ack was sent from inside the check, just before staging; nil when
+  /// the result is in `completedCommands` for the caller to ack.
+  private func checkUpdateNow(_ command: BenchCommand) async -> CommandResult? {
+    guard case .null = command.args else { return storeVerb(command, verbFailure("bad_args")) }
+    guard updater != nil else {
+      // An unbundled build has no release identity and no bundle to replace (R3's three guards).
+      return storeVerb(command, verbFailure("update_unavailable"))
+    }
+    let checkedAt = Self.iso8601(Date())
+    let commandID = command.id
+    let outcome = await runUpdateCheck(
+      force: true,
+      willStage: { [weak self] version in
+        await self?.ackBeforeStaging(commandID: commandID, checkedAt: checkedAt, version: version)
+      })
+    if let handedOver = outcome.handedOver {
+      handedOverToUpdateVersion = handedOver
+    }
+    if earlyAcknowledged.contains(commandID), let early = completedCommands[commandID] {
+      return early
+    }
+    var verb = OperatorVerbAcknowledgement(checkedAt: checkedAt, deferred: false)
+    switch outcome.attempt {
+    case .deferredWhileRecording(let version):
+      verb.offeredVersion = version
+      verb.deferred = true
+    case .heldAfterRepeatedFailure(let version):
+      verb.offeredVersion = version
+      verb.held = true
+    case .upToDate, .none, .stopped, .handedOver:
+      break
+    }
+    completedCommands[commandID] = CommandResult(ok: true, sessionID: sessionID, error: nil, verb: verb)
+    return nil
+  }
+
+  /// Ids whose ack went out from inside the update check (`ackBeforeStaging`).
+  private var earlyAcknowledged: Set<String> = []
+
+  private func storeVerb(_ command: BenchCommand, _ result: CommandResult) -> CommandResult? {
+    completedCommands[command.id] = result
+    return nil
+  }
+
+  /// Called by `RoomUpdater.check` once every guard has passed and before the download: the update
+  /// is going ahead, and this process may be booted out by the swap script at any moment after.
+  private func ackBeforeStaging(commandID: String, checkedAt: String, version: String) async {
+    let result = CommandResult(
+      ok: true, sessionID: sessionID, error: nil,
+      verb: OperatorVerbAcknowledgement(checkedAt: checkedAt, offeredVersion: version, deferred: false))
+    completedCommands[commandID] = result
+    earlyAcknowledged.insert(commandID)
+    let command = BenchCommand(id: commandID, kind: .checkUpdateNow, args: .null, createdAt: nil)
+    _ = await acknowledgeVerb(command, result: result)
+  }
+
+  /// `restart_engine` — refused while a session is open unless `force`. The exit itself happens in
+  /// `run()`, after the ack has landed (`finishOperatorVerb`).
+  private func restartEngine(_ command: BenchCommand) -> CommandResult {
+    var force = false
+    switch command.args {
+    case .null:
+      break
+    case .object(let object):
+      guard object.keys.allSatisfy({ $0 == "force" }) else { return verbFailure("bad_args") }
+      switch object["force"] {
+      case .none, .some(.null): break
+      case .some(.bool(let value)): force = value
+      case .some: return verbFailure("bad_args")
+      }
+    default:
+      return verbFailure("bad_args")
+    }
+    if sessionIsOpen && !force {
+      return verbFailure("session_open")
+    }
+    log("restart requested by the desk\(force && sessionIsOpen ? " over an open session" : "")")
+    return CommandResult(
+      ok: true, sessionID: sessionID, error: nil,
+      verb: OperatorVerbAcknowledgement(restarting: true))
+  }
+
+  /// `report_diag` — what this Mac is, runs and has logged, as one JSON object in the ack.
+  ///
+  /// ─── WHAT IS NEVER IN IT ──────────────────────────────────────────────────────────────────
+  /// The room session. `config` is encoded from a copy with `etaRoomSession` set to nil — the same
+  /// strip `saveConfiguration` applies on the way to disk — and nothing here reads the keychain or
+  /// `room-session.json`. A log line naming any of `reportDiagForbidden` is replaced whole by
+  /// `[redacted]`, and the server checks the payload for the same four words again before storing it.
+  private func reportDiag(_ command: BenchCommand) -> CommandResult {
+    var lines = Self.reportDiagDefaultLines
+    switch command.args {
+    case .null:
+      break
+    case .object(let object):
+      guard object.keys.allSatisfy({ $0 == "log_lines" }) else { return verbFailure("bad_args") }
+      switch object["log_lines"] {
+      case .none, .some(.null): break
+      case .some(.number(let value)):
+        guard value.isFinite, value == value.rounded(), value >= 0,
+          value <= Double(Self.reportDiagMaxLines)
+        else { return verbFailure("bad_args") }
+        lines = Int(value)
+      case .some: return verbFailure("bad_args")
+      }
+    default:
+      return verbFailure("bad_args")
+    }
+
+    var report: [String: JSONValue] = [:]
+    report["generated_at"] = .string(Self.iso8601(Date()))
+    report["app_version"] = BuildInfo.appVersion.map(JSONValue.string) ?? .null
+    report["build_sha"] = BuildInfo.buildSHA.map(JSONValue.string) ?? .null
+    var shown = configuration
+    shown.etaRoomSession = nil
+    report["config"] = Self.jsonValue(of: shown) ?? .null
+    report["tapewriter_version"] =
+      helperVersion(configuration.tapewriterPath, ["--version"]).map(JSONValue.string) ?? .null
+    // ffmpeg spells it with one dash.
+    report["ffmpeg_version"] =
+      helperVersion(configuration.ffmpegPath, ["-version"]).map(JSONValue.string) ?? .null
+    if let devices = audioInputs.inputDevices() {
+      report["input_devices"] = .array(
+        devices.map {
+          .object(["name": .string($0.name), "uid": .string($0.uid), "is_default": .bool($0.isDefault)])
+        })
+    } else {
+      report["input_devices"] = .null
+    }
+    report["disk_free_bytes"] =
+      InstallPollFields.freeBytes(onVolumeHolding: capturesURL).map { .number(Double($0)) } ?? .null
+    report["log_lines"] = .array(
+      Self.logTail(persistence.root.appendingPathComponent("launchd.log"), lines: lines)
+        .map(JSONValue.string))
+    report["update_ledger"] =
+      RoomUpdateAttempts.read(root: persistence.root).flatMap { Self.jsonValue(of: $0) } ?? .null
+    report["update_channel"] = .string(configuration.updateChannel)
+    report["channel_locked"] = .bool(configuration.channelLocked)
+    report["session_open"] = .bool(sessionIsOpen)
+    return CommandResult(
+      ok: true, sessionID: sessionID, error: nil,
+      verb: OperatorVerbAcknowledgement(diag: .object(report)))
+  }
+
+  /// PURE-ish — the last `lines` lines of a log file, each bounded and redacted. Reads at most the
+  /// file's last 256 KB, so a log of any size costs the same.
+  static func logTail(_ url: URL, lines: Int) -> [String] {
+    guard lines > 0, let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+    defer { try? handle.close() }
+    let size = (try? handle.seekToEnd()) ?? 0
+    let window: UInt64 = 262_144
+    let start = size > window ? size - window : 0
+    guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else {
+      return []
+    }
+    var all = String(decoding: data, as: UTF8.self)
+      .split(separator: "\n", omittingEmptySubsequences: true)
+      .map(String.init)
+    // A window that began mid-line has a partial first line; it is not a line the app wrote.
+    if start > 0, !all.isEmpty { all.removeFirst() }
+    return all.suffix(lines).map(redactedLogLine)
+  }
+
+  static func redactedLogLine(_ line: String) -> String {
+    let lower = line.lowercased()
+    if reportDiagForbidden.contains(where: { lower.contains($0.lowercased()) }) { return "[redacted]" }
+    return String(line.prefix(reportDiagLineMax))
+  }
+
+  /// Any Encodable as a `JSONValue`, through the same encoder the wire uses. Nil on failure.
+  static func jsonValue<T: Encodable>(of value: T) -> JSONValue? {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(value) else { return nil }
+    return try? JSONDecoder().decode(JSONValue.self, from: data)
+  }
+
+  /// The production `helperVersion`: the helper's first non-empty output line and its exit status,
+  /// bounded, or nil when it could not be run. Five seconds at most — it must not hold a report up.
+  public static func runHelperVersion(_ path: String, _ arguments: [String]) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = arguments
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    do {
+      try process.run()
+    } catch {
+      return nil
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+    if process.isRunning {
+      process.terminate()
+      return "no answer within 5 s"
+    }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    let first = String(decoding: data, as: UTF8.self)
+      .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+      .first { !$0.isEmpty } ?? ""
+    return "\(first.prefix(200)) (exit \(process.terminationStatus))"
+  }
+
+  // MARK: - Tier 1 §3: the heartbeat
+
+  /// `clip_count` and `silence_ms` for this poll, from the running plain capture's durable PCM.
+  /// Nil when there is no plain capture — the resident lane, idle, paused — so both are omitted.
+  private func currentHeartbeat() -> PCMTailMeter.Reading? {
+    guard residentCaptureOwner == nil, let capture, capture.process.isRunning else { return nil }
+    if pcmMeter?.url != capture.pcmURL { pcmMeter = PCMTailMeter(url: capture.pcmURL) }
+    let durable = refreshedIndexTail(for: capture).lastSamples
+    return pcmMeter?.measure(durableSamples: durable)
   }
 
   // MARK: - Release R4: set_audio_input (D3, D4)
@@ -3417,6 +3819,82 @@ final class TapeIndexTail {
     lastRMS = nil
     lastPeak = nil
     lastZeroRatio = nil
+  }
+}
+
+/// Tier 1 §3 — `clip_count` and `silence_ms`, read from the plain capture's own PCM.
+///
+/// ─── WHY HERE AND NOT IN THE TAPEWRITER ──────────────────────────────────────────────────────
+/// The tapewriter already touches every sample (B2-D7's `CheckpointLevels`) and would be the cheaper
+/// place to count, but its index record is TapeCore's format and Tier 1's file contract opens
+/// neither. So the engine reads what the tapewriter has made DURABLE — up to the latest index
+/// record's `samples`, never past it — once per poll, from where the last read stopped: 1.5 s of
+/// 16 kHz mono Int16 is 48 KB. A read never covers more than the last 30 s; after a longer gap
+/// (the first read of a segment, a stalled loop) the skipped audio is not counted and the silence
+/// clock starts again at the window, so `silence_ms` can under-state and never over-state.
+///
+/// ─── THE TWO MEASURES ────────────────────────────────────────────────────────────────────────
+/// A full-scale sample is exactly +32767 or −32768, the two values a clipped converter emits.
+/// "Above −55 dBFS" is |sample| ≥ 59: 32768 × 10^(−55/20) = 58.3. `silence_ms` is the time since the
+/// last such sample, in tape time (samples ÷ 16 per ms), not wall time.
+final class PCMTailMeter {
+  struct Reading: Equatable, Sendable {
+    let clipCount: Int
+    let silenceMS: Int64
+  }
+
+  static let loudThreshold: Int32 = 59
+  static let maxReadBytes: UInt64 = UInt64(30 * TapeConstants.bytesPerSecond)
+  static let samplesPerMS = TapeConstants.sampleRate / 1_000
+
+  let url: URL
+  private var consumedBytes: UInt64 = 0
+  private var samplesSinceLoud: Int64 = 0
+
+  init(url: URL) { self.url = url }
+
+  /// Everything durable since the previous call. Nil when the index has not said how much is
+  /// durable, or the file cannot be read — not measured, never "clean" or "silent".
+  func measure(durableSamples: Int64?) -> Reading? {
+    guard let durableSamples, durableSamples >= 0 else { return nil }
+    let durableBytes = UInt64(durableSamples) * UInt64(TapeConstants.bytesPerSample)
+    if durableBytes < consumedBytes {
+      // Shorter than what was read: not the file this offset belongs to. Start again.
+      consumedBytes = 0
+      samplesSinceLoud = 0
+    }
+    var start = consumedBytes
+    if durableBytes - start > Self.maxReadBytes {
+      start = durableBytes - Self.maxReadBytes
+      samplesSinceLoud = 0
+    }
+    guard durableBytes > start else {
+      return Reading(clipCount: 0, silenceMS: samplesSinceLoud / Self.samplesPerMS)
+    }
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard (try? handle.seek(toOffset: start)) != nil,
+      let data = try? handle.read(upToCount: Int(durableBytes - start))
+    else { return nil }
+    let scanned = Self.scan(data, samplesSinceLoud: samplesSinceLoud)
+    consumedBytes = start + UInt64(data.count - data.count % 2)
+    samplesSinceLoud = scanned.samplesSinceLoud
+    return Reading(clipCount: scanned.clips, silenceMS: samplesSinceLoud / Self.samplesPerMS)
+  }
+
+  /// PURE — the full-scale samples in `data` (Int16, little-endian), and the samples since the last
+  /// sample above −55 dBFS, carried forward from `samplesSinceLoud`. A trailing odd byte is ignored.
+  static func scan(_ data: Data, samplesSinceLoud: Int64) -> (clips: Int, samplesSinceLoud: Int64) {
+    var clips = 0
+    var since = samplesSinceLoud
+    data.withUnsafeBytes { raw in
+      for offset in stride(from: 0, to: raw.count - 1, by: 2) {
+        let sample = Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self))
+        if sample == Int16.max || sample == Int16.min { clips += 1 }
+        if abs(Int32(sample)) >= loudThreshold { since = 0 } else { since += 1 }
+      }
+    }
+    return (clips, since)
   }
 }
 

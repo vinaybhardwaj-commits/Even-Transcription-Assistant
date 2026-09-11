@@ -72,6 +72,16 @@ public struct InstallPollFields: Equatable, Sendable {
   /// Whether that volume can be set from the desk. Nil when the device is absent.
   public var inputVolumeSettable: Bool?
 
+  // ─── TIER 1 §3 — THE 0.1.22 HEARTBEAT ─────────────────────────────────────────────────────
+  /// Full-scale samples (±32767/−32768) in the durable tape since the previous poll. Nil when no
+  /// plain capture is running: nothing was measured, and 0 would claim a clean interval.
+  public var clipCount: Int?
+  /// Milliseconds of durable tape since the last sample above −55 dBFS. Nil when no plain capture
+  /// is running. Measured over the audio this app has READ, so it can under-state, never over-state.
+  public var silenceMS: Int64?
+  /// The config.json lock (D1 amended): this Mac ignores `assigned_channel`.
+  public var channelLocked: Bool?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -95,7 +105,10 @@ public struct InstallPollFields: Equatable, Sendable {
     zeroRatio: Double? = nil,
     inputDevices: [AudioInputDeviceEntry]? = nil,
     inputVolume: Double? = nil,
-    inputVolumeSettable: Bool? = nil
+    inputVolumeSettable: Bool? = nil,
+    clipCount: Int? = nil,
+    silenceMS: Int64? = nil,
+    channelLocked: Bool? = nil
   ) {
     self.installID = installID
     self.appVersion = appVersion
@@ -120,6 +133,9 @@ public struct InstallPollFields: Equatable, Sendable {
     self.inputDevices = inputDevices
     self.inputVolume = inputVolume
     self.inputVolumeSettable = inputVolumeSettable
+    self.clipCount = clipCount
+    self.silenceMS = silenceMS
+    self.channelLocked = channelLocked
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -138,7 +154,10 @@ public struct InstallPollFields: Equatable, Sendable {
     lastUpdateAt: String? = nil,
     diskFreeBytes: Int64? = nil,
     peak: Double? = nil,
-    zeroRatio: Double? = nil
+    zeroRatio: Double? = nil,
+    clipCount: Int? = nil,
+    silenceMS: Int64? = nil,
+    channelLocked: Bool? = nil
   ) {
     self.init(
       installID: installID,
@@ -163,7 +182,10 @@ public struct InstallPollFields: Equatable, Sendable {
       zeroRatio: zeroRatio,
       inputDevices: facts.inputDevices,
       inputVolume: facts.inputVolume,
-      inputVolumeSettable: facts.inputVolumeSettable
+      inputVolumeSettable: facts.inputVolumeSettable,
+      clipCount: clipCount,
+      silenceMS: silenceMS,
+      channelLocked: channelLocked
     )
   }
 
@@ -247,6 +269,18 @@ public struct InstallPollFields: Equatable, Sendable {
     if let inputVolumeSettable {
       items.append(
         URLQueryItem(name: "input_volume_settable", value: inputVolumeSettable ? "true" : "false"))
+    }
+    // ── Tier 1 §3 ───────────────────────────────────────────────────────────────────────────
+    // Whole numbers as digits, dropped when negative (the server keeps digits or nothing); the
+    // lock as `"true"`/`"false"`. Absent when not measured, like everything above.
+    if let clipCount, clipCount >= 0 {
+      items.append(URLQueryItem(name: "clip_count", value: String(clipCount)))
+    }
+    if let silenceMS, silenceMS >= 0 {
+      items.append(URLQueryItem(name: "silence_ms", value: String(silenceMS)))
+    }
+    if let channelLocked {
+      items.append(URLQueryItem(name: "channel_locked", value: channelLocked ? "true" : "false"))
     }
     return items
   }

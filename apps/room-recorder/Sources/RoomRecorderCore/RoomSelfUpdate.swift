@@ -568,7 +568,13 @@ public struct RoomUpdateSchedule: Equatable, Sendable {
   /// THE DEFERRAL STILL HOLDS. `sessionJustEnded` is true only on the poll where the session has
   /// already closed, so this never makes a check due while one is open; and a check that does run
   /// with a session open still stands down before downloading anything (`RoomUpdater.check`).
-  public func isDue(now: Date, sessionJustEnded: Bool) -> Bool {
+  ///
+  /// ─── TIER 1 §3: `force` BYPASSES THE INTERVAL, AND ONLY THE INTERVAL ─────────────────────
+  /// `check_update_now` makes a check due now. It is the six-hour wait it skips, nothing else: the
+  /// check that runs still stands down before downloading while a session is open (R3-10's guard
+  /// lives in `RoomUpdater.check`, which `force` never reaches), and the F2 hold still holds.
+  public func isDue(now: Date, sessionJustEnded: Bool, force: Bool = false) -> Bool {
+    if force { return true }
     guard let last = lastCheckedAt else { return true }  // on launch
     if sessionJustEnded { return true }
     return now.timeIntervalSince(last) >= RoomSelfUpdate.checkInterval
@@ -781,7 +787,14 @@ public struct RoomUpdater: Sendable {
   /// `sessionIsOpen` IS PASSED IN AND READ ONCE, at the top. The engine owns that fact and this
   /// type must not guess at it; taking it as a parameter is what makes step 3 provable without a
   /// recorder.
-  public func check(sessionIsOpen: Bool) async -> RoomUpdateAttempt {
+  ///
+  /// `willStage` (Tier 1 §3) is told the version the moment every guard has passed and BEFORE the
+  /// first byte is downloaded — the last instant this process is certainly still running. A
+  /// `check_update_now` acks there, because the swap script that `stage` spawns boots this app out
+  /// at once and an ack sent after it would be killed in flight.
+  public func check(
+    sessionIsOpen: Bool, willStage: (@Sendable (String) async -> Void)? = nil
+  ) async -> RoomUpdateAttempt {
     guard let release = await fetcher.fetchRelease(channel: channel) else {
       // R3-9, and the whole of it. 404, 401, a timeout, a dead network: log, change nothing,
       // look again next tick. NOT an outcome, not a result file, not a card line — a room that
@@ -811,6 +824,7 @@ public struct RoomUpdater: Sendable {
       log("update to \(release.version) deferred: a recording session is open")
       return .deferredWhileRecording(version: release.version)
     }
+    await willStage?(release.version)
     return await stage(release)
   }
 

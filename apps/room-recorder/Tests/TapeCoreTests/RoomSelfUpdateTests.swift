@@ -1814,14 +1814,16 @@ import Testing
     let movedAgain = onTest.applyServerAssignedChannel("stable")
     #expect(!movedAgain)
 
-    // Everything else is ignored. The R3-8 valve: a Mac reaches `test` by a hand on that Mac only.
+    // Everything else is ignored. Tier 1 §3 (D1 amended) lets the server assign `test` as well —
+    // the valve is now `channelLocked`, covered in RoomOperatorVerbTests — so `test` is no longer
+    // in the stable Mac's list below; what is left is the part of B2's rule that still holds.
     for assigned in ["test", nil, "", "Stable", "stable ", "beta"] as [String?] {
       var mac = try configuration("test")
       let changed = mac.applyServerAssignedChannel(assigned)
       #expect(!changed, "assigned \(assigned ?? "nil")")
       #expect(mac.updateChannel == "test")
     }
-    for assigned in ["stable", "test", nil] as [String?] {
+    for assigned in ["stable", nil, "", "Test", "test "] as [String?] {
       var mac = try configuration("stable")
       let changed = mac.applyServerAssignedChannel(assigned)
       #expect(!changed, "assigned \(assigned ?? "nil")")
@@ -1906,9 +1908,10 @@ import Testing
   }
 
   @Test func aServerAnswerThatIsNotAMoveToStableChangesNothing() async throws {
-    // B2-D5's other half, and the refuter's first question: nothing the server says can move a
-    // Mac to `test`, and nothing but `stable` can move one off it.
-    for (channel, assigned) in [("stable", "test"), ("test", nil), ("test", "junk"), ("stable", "stable")]
+    // B2-D5's other half: nothing but a real channel moves a Mac. Tier 1 §3 (D1 amended) takes
+    // ("stable", "test") out of this list — the server may now assign `test`, and the case that
+    // must change nothing is a LOCKED Mac, in RoomOperatorVerbTests.
+    for (channel, assigned) in [("test", nil), ("test", "junk"), ("stable", "stable"), ("stable", "beta")]
       as [(String, String?)]
     {
       let fixture = try Fixture.make()

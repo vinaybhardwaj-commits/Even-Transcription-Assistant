@@ -181,10 +181,16 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// lands on the proven shelf. `applyEnrolment` sets `stable`; putting Home Office back on `test`
   /// is a deliberate hand edit afterwards, as it was the first time.
   ///
-  /// ─── RELEASE B2 (D5): THE SERVER MAY MOVE IT TO `stable`, AND ONLY THERE ─────────────────
-  /// See `applyServerAssignedChannel`. The valve above is untouched: nothing the server says can
-  /// put a Mac on `test`.
+  /// ─── RELEASE B2 (D5): THE SERVER MAY MOVE IT TO `stable` ─────────────────────────────────
+  /// ─── TIER 1 §3 (D1 AMENDED): …AND TO `test`, UNLESS `channelLocked` ─────────────────────────
+  /// See `applyServerAssignedChannel`. The valve is now `channelLocked`, which is still a hand on
+  /// this Mac: nothing the server says can move a locked Mac.
   public var updateChannel: String
+  /// Tier 1 §3, D1 amended — THE VALVE, PER MAC, IN config.json. True: this Mac ignores every
+  /// `assigned_channel` the server sends and reports `channel_locked=true` on its poll, so the
+  /// fleet card can say why an assignment is not taking. Absent means false. Nothing but a hand on
+  /// this Mac sets it: no command, no enrol, no server field writes it.
+  public var channelLocked: Bool
 
   enum CodingKeys: String, CodingKey {
     case origin
@@ -199,6 +205,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     case residentArchiveCaptureEnabled = "resident_archive_capture_enabled"
     case archivePreflightReceipt = "archive_preflight_receipt"
     case updateChannel = "update_channel"
+    case channelLocked = "channel_locked"
   }
 
   /// The two channels that exist. Stated once, so the app and the route cannot disagree.
@@ -255,7 +262,8 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     retainedArchiveRecoveryEnabled: Bool = false,
     residentArchiveCaptureEnabled: Bool = false,
     archivePreflightReceipt: RoomArchivePreflightReceipt? = nil,
-    updateChannel: String = "stable"
+    updateChannel: String = "stable",
+    channelLocked: Bool = false
   ) throws {
     guard
       let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
@@ -312,6 +320,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
     // there must leave the Mac on the safe shelf rather than refusing to start a clinic room.
     self.updateChannel =
       Self.updateChannels.contains(updateChannel) ? updateChannel : "stable"
+    self.channelLocked = channelLocked
   }
 
   public init(from decoder: Decoder) throws {
@@ -334,7 +343,10 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       // ABSENT MEANS STABLE. Every config.json written before Build R3 lacks this key, and every
       // one of those Macs is on stable by construction. decodeIfPresent rather than decode so a
       // 0.1.7 config keeps working the moment 0.1.8 lands on top of it.
-      updateChannel: values.decodeIfPresent(String.self, forKey: .updateChannel) ?? "stable"
+      updateChannel: values.decodeIfPresent(String.self, forKey: .updateChannel) ?? "stable",
+      // ABSENT MEANS UNLOCKED — every config.json written before 0.1.22 — and a value that is not
+      // a JSON boolean is refused with the file, as every other typed key here is.
+      channelLocked: values.decodeIfPresent(Bool.self, forKey: .channelLocked) ?? false
     )
   }
 
@@ -546,19 +558,21 @@ extension RoomConfiguration {
     self.updateChannel = "stable"
   }
 
-  /// Release B2 (D5) — the server may move this Mac to `stable`, and to nothing else. Returns true
-  /// when this configuration moved.
+  /// Release B2 (D5), widened by Tier 1 §3 (D1 amended) — the server may move this Mac to `stable`
+  /// or to `test`. Returns true when this configuration moved.
   ///
-  /// ─── ONE WAY, AND THE ONE WAY IS THE SAFE SHELF ─────────────────────────────────────────
-  /// `updateChannel`'s own comment says why the channel is per Mac: a channel the server assigns
-  /// would put the valve on the same side of the wire as the thing it protects against. So the
-  /// server gets exactly one move, the one that can only reduce risk. The value must be exactly
-  /// `"stable"` — not `"Stable"`, not `"stable "` — and the Mac must be on something else. `test`,
-  /// nil, and anything unrecognised change nothing: a Mac reaches `test` only by a hand on that
-  /// Mac (R3-8), exactly as before.
+  /// ─── THE VALVE MOVED; IT DID NOT GO AWAY ─────────────────────────────────────────────────
+  /// B2 gave the server one move, to `stable`, because a server-assigned channel puts the valve on
+  /// the same side of the wire as the thing it protects against. D1 amended gives the server `test`
+  /// too, and puts the valve back on this Mac as `channelLocked`: a locked Mac moves for nothing
+  /// the server says. The value must be exactly `"stable"` or `"test"` — not `"Stable"`, not
+  /// `"test "` — and different from the channel the Mac is on. Nil and anything unrecognised
+  /// change nothing.
   public mutating func applyServerAssignedChannel(_ assigned: String?) -> Bool {
-    guard assigned == "stable", updateChannel != "stable" else { return false }
-    updateChannel = "stable"
+    guard !channelLocked, let assigned, Self.updateChannels.contains(assigned),
+      updateChannel != assigned
+    else { return false }
+    updateChannel = assigned
     return true
   }
 
