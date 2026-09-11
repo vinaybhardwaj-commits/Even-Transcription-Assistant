@@ -24,3 +24,16 @@ shasum 727fe4ac0e9f53a4206d70b04b39f0c9650156d58cc3bfc42eb6fb696a21056e = releas
 - Built by Opus (the 0.1.18 Refuter session), not Sonnet.
 
 **SQL / manual steps / subagents.** None.
+
+## Fleet after rollout
+
+`GET /api/admin/bench/fleet` http=200, 11:49:49Z. Install ids unchanged; OPD 1, OPD 4 still 0.1.8.
+```
+Home Office  install_539avu7gqzz5  0.1.19  test    ok  11:30:09Z
+Room 4.1     install_d3sy3ufas8jv  0.1.19  test    ok  11:33:23Z
+Cardiology   install_pgrped6322ss  0.1.19  stable  ok  11:46:13Z
+OPD 3        install_fc2jt2zs4x8v  0.1.19  stable  ok  11:46:42Z
+OPD 5        install_e3yjw3ut698x  0.1.19  stable  ok  11:47:02Z
+OPD 6        install_d2nkvqcnqb7k  0.1.19  stable  ok  11:47:21Z
+OPD 7        install_6m45w69ux7tj  0.1.19  stable  ok  11:47:42Z
+```
