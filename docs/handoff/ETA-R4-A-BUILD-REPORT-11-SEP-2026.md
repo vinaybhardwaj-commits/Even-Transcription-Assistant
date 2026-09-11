@@ -35,3 +35,7 @@ release.json: `0.1.21`, **`build_sha 55be1d1`**. Not published.
 - Untested: stop-throws, restart-throws, resident refusal.
 
 **Manual steps.** None. **Subagents.** One Opus Reviewer, advisory: no FAIL.
+
+## Rollout
+
+0.1.21 went to `test` as `rel_n2ybgcahwvxm` at 15:17Z; Home Office acked the canary after 2 s. D9 passed on Home Office while recording, 15:20–15:23Z: two device switches (TM20 → Teams loopback → TM20), three `seg_` directories in one session, volume 0.5 set and re-read 0.4995, then restored, and `nope` refused `device_not_present`. Room 4.1 on 0.1.21 at 15:27:05Z. `stable` as `rel_6wudscmm73ff` at 15:27:56Z; OPD 3, 5, 6 and 7 on 0.1.21 15:28:58–15:30:39Z. OPD 3 and OPD 7 switched to their C270s from the desk at 15:33Z and 15:34Z; peak left zero (0.0163, 0.0118). Both TM20s are dead: input_volume > 0 with zero_ratio 1.
