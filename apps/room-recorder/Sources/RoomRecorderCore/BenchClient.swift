@@ -193,10 +193,15 @@ public struct CommandPollResponse: Codable, Equatable, Sendable {
   public let superseded: Bool
   public let now: String?
   public let commands: [BenchCommand]
+  /// Release B2 (D5). The channel the server has assigned this install — `"stable"` or nil — as
+  /// the poll's own UPDATE returned it. What the app does with it is `applyServerAssignedChannel`;
+  /// this only carries the string.
+  public let assignedChannel: String?
 
   enum CodingKeys: String, CodingKey {
     case ok, superseded, now, commands
     case roomID = "room_id"
+    case assignedChannel = "assigned_channel"
   }
 
   public init(from decoder: Decoder) throws {
@@ -206,6 +211,9 @@ public struct CommandPollResponse: Codable, Equatable, Sendable {
     superseded = try values.decodeIfPresent(Bool.self, forKey: .superseded) ?? false
     now = try values.decodeIfPresent(String.self, forKey: .now)
     commands = try values.decodeIfPresent([BenchCommand].self, forKey: .commands) ?? []
+    // `try?`, NOT `try`. A value of the wrong TYPE must cost this one field, not the poll: the
+    // commands in the same answer — a stop, a start — still have to run.
+    assignedChannel = (try? values.decodeIfPresent(String.self, forKey: .assignedChannel)) ?? nil
   }
 }
 

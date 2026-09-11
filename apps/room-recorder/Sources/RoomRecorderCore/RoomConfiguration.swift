@@ -180,6 +180,10 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// had proven on that Mac, and the repair became the failure. A paste is a repair, and a repair
   /// lands on the proven shelf. `applyEnrolment` sets `stable`; putting Home Office back on `test`
   /// is a deliberate hand edit afterwards, as it was the first time.
+  ///
+  /// ─── RELEASE B2 (D5): THE SERVER MAY MOVE IT TO `stable`, AND ONLY THERE ─────────────────
+  /// See `applyServerAssignedChannel`. The valve above is untouched: nothing the server says can
+  /// put a Mac on `test`.
   public var updateChannel: String
 
   enum CodingKeys: String, CodingKey {
@@ -540,5 +544,21 @@ extension RoomConfiguration {
     // 0.1.17. A paste lands on the proven shelf, whatever the Mac was on before — see the
     // comment on `updateChannel` for the 11 Sep repair that turned into an unproven self-update.
     self.updateChannel = "stable"
+  }
+
+  /// Release B2 (D5) — the server may move this Mac to `stable`, and to nothing else. Returns true
+  /// when this configuration moved.
+  ///
+  /// ─── ONE WAY, AND THE ONE WAY IS THE SAFE SHELF ─────────────────────────────────────────
+  /// `updateChannel`'s own comment says why the channel is per Mac: a channel the server assigns
+  /// would put the valve on the same side of the wire as the thing it protects against. So the
+  /// server gets exactly one move, the one that can only reduce risk. The value must be exactly
+  /// `"stable"` — not `"Stable"`, not `"stable "` — and the Mac must be on something else. `test`,
+  /// nil, and anything unrecognised change nothing: a Mac reaches `test` only by a hand on that
+  /// Mac (R3-8), exactly as before.
+  public mutating func applyServerAssignedChannel(_ assigned: String?) -> Bool {
+    guard assigned == "stable", updateChannel != "stable" else { return false }
+    updateChannel = "stable"
+    return true
   }
 }

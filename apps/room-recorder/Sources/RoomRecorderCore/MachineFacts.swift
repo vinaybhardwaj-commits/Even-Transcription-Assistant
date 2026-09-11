@@ -33,6 +33,9 @@ public struct MachineFacts: Equatable, Sendable {
   /// The display name of the configured input device, read now. Nil when that device is not
   /// currently attached — an unplugged mic is not a renamed one.
   public var inputDeviceName: String?
+  /// Release B2 (D10). Every input device attached now, the system default marked. Nil when
+  /// CoreAudio could not be asked. Read-only: the app reports the list and changes nothing.
+  public var inputDevices: [AudioInputDeviceEntry]?
 
   public init(
     micState: String,
@@ -42,7 +45,8 @@ public struct MachineFacts: Equatable, Sendable {
     hostname: String?,
     hardwareModel: String?,
     osVersion: String?,
-    inputDeviceName: String?
+    inputDeviceName: String?,
+    inputDevices: [AudioInputDeviceEntry]? = nil
   ) {
     self.micState = micState
     self.neverSleep = neverSleep
@@ -52,6 +56,7 @@ public struct MachineFacts: Equatable, Sendable {
     self.hardwareModel = hardwareModel
     self.osVersion = osVersion
     self.inputDeviceName = inputDeviceName
+    self.inputDevices = inputDevices
   }
 }
 
@@ -74,7 +79,8 @@ public enum MachineFactsReader {
       hostname: hostname(),
       hardwareModel: hardwareModel(),
       osVersion: osVersion(),
-      inputDeviceName: inputDeviceName(forUID: inputDeviceUID)
+      inputDeviceName: inputDeviceName(forUID: inputDeviceUID),
+      inputDevices: AudioInputDevices.list()
     )
   }
 

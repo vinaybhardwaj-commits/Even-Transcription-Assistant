@@ -413,10 +413,25 @@ import Testing
     #expect(!schedule.isDue(now: oneMinuteLater, sessionJustEnded: false))
     #expect(schedule.isDue(now: oneMinuteLater, sessionJustEnded: true))
 
-    // A check that was NOT deferred does not get the early re-run; a session ending is not by
-    // itself a reason to ask again.
+    // Release B2 (D2) reversed the rule this line used to hold. A session ending IS by itself a
+    // reason to ask again, deferred or not: on 11 Sep `stable` moved while five rooms were
+    // recording, nothing had been deferred, and ending their tapes checked nothing.
     schedule.deferredWhileRecording = false
-    #expect(!schedule.isDue(now: oneMinuteLater, sessionJustEnded: true))
+    #expect(schedule.isDue(now: oneMinuteLater, sessionJustEnded: true))
+  }
+
+  @Test func aSessionEndMakesTheCheckDueEvenWhenNothingWasDeferred() {
+    // B2-D2. 11 Sep 11:42Z: `stable` moved at 11:35:45Z while five rooms were mid-session. None had
+    // checked during the session, so none had deferred, and R3-10's early re-run never fired —
+    // all five needed `kickstart -k`. Every session end is a check now.
+    let start = Date(timeIntervalSince1970: 1_757_400_000)
+    let schedule = RoomUpdateSchedule(lastCheckedAt: start, deferredWhileRecording: false)
+    let oneMinuteLater = start.addingTimeInterval(60)
+    #expect(schedule.isDue(now: oneMinuteLater, sessionJustEnded: true))
+    // The six-hour interval still governs every poll that is not a session end, which is what
+    // keeps a check from firing while a session is open: `sessionJustEnded` is only ever true on
+    // the poll where the session has already closed.
+    #expect(!schedule.isDue(now: oneMinuteLater, sessionJustEnded: false))
   }
 
   @Test func aSessionInProgressDefersBeforeAnythingIsDownloaded() async throws {
@@ -709,8 +724,12 @@ import Testing
     // the build report and V has accepted it as a documented limit.
     let fixture = try Fixture.make()
     defer { fixture.tearDown() }
-    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    // B2-D12. Staged where the app stages it — `update-staging/expanded/` beside the zip — so the
+    // sweep below is tested against the real shape: the ~90 MB the B1 report found left behind.
+    let staged = fixture.staging.appendingPathComponent("expanded/EvenScribe Room Recorder.app")
     try fixture.writeBundle(at: staged, version: "0.1.8")
+    try Data("a plausible zip".utf8).write(
+      to: fixture.staging.appendingPathComponent("app.zip", isDirectory: false))
 
     let run = try Self.runSwapScript(
       fixture, stagedBundle: staged, version: "0.1.8", killInsideTheWindow: true)
@@ -729,6 +748,9 @@ import Testing
     #expect(result.reason?.contains("interrupted") == true)
     // 4. The agent is running again — "the room polls again without a visit" is the whole ask.
     #expect(run.toolLog.contains("launchctl bootstrap"))
+    // 5. B2-D12. THE STAGED COPY IS GONE. `rescue()` put the old bundle back and then swept the
+    //    staging directory, zip and unmoved bundle with it; before 0.1.20 nothing on any path did.
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
   }
 
   // MARK: - Release B1: the launch canary (§14.2)
@@ -922,6 +944,10 @@ import Testing
     defer { fixture.tearDown() }
     let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
     try fixture.writeBundle(at: staged, version: "0.1.11")
+    // What the app left in staging before it exited 64; the rescue in the rollback sweeps it too.
+    try FileManager.default.createDirectory(at: fixture.staging, withIntermediateDirectories: true)
+    try Data("a plausible zip".utf8).write(
+      to: fixture.staging.appendingPathComponent("app.zip", isDirectory: false))
 
     let run = try Self.runSwapScript(
       fixture, stagedBundle: staged, version: "0.1.11",
@@ -948,6 +974,8 @@ import Testing
     // 4. And the agent is running again.
     #expect(run.toolLog.contains("launchctl bootstrap"))
     #expect(fixture.updateLog.contains("putting the previous bundle back"))
+    // 5. B2-D12 — staging swept after the restore, as in the swap-window kill.
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
   }
 
   @Test func theRollbackKillIsNotSurvivedWithoutTheRescueTrap() throws {
@@ -1754,6 +1782,157 @@ import Testing
     }
   }
 
+  // MARK: - Release B2 (D5): the server may move a Mac to stable, and only to stable
+
+  @Test func aPollResponseCarriesTheServerAssignedChannel() throws {
+    func decode(_ json: String) throws -> CommandPollResponse {
+      try JSONDecoder().decode(CommandPollResponse.self, from: Data(json.utf8))
+    }
+    let base = #""ok":true,"superseded":false,"commands":[]"#
+    #expect(try decode("{\(base),\"assigned_channel\":\"stable\"}").assignedChannel == "stable")
+    #expect(try decode("{\(base),\"assigned_channel\":null}").assignedChannel == nil)
+    #expect(try decode("{\(base)}").assignedChannel == nil)
+    // A junk VALUE must not cost the poll: the commands in the same answer still have to run.
+    let junk = try decode(#"{"ok":true,"superseded":false,"commands":[],"assigned_channel":42}"#)
+    #expect(junk.assignedChannel == nil)
+    #expect(junk.ok)
+  }
+
+  @Test func onlyAServerMoveToStableFromAnotherChannelIsApplied() throws {
+    func configuration(_ channel: String) throws -> RoomConfiguration {
+      try RoomConfiguration(
+        origin: #require(URL(string: "https://www.evenscribe.app")), roomSlug: "home-office",
+        deviceUID: "AppleUSB:mic", tapewriterPath: "/x/tapewriter", ffmpegPath: "/x/ffmpeg",
+        updateChannel: channel)
+    }
+    // Applied, once: a second identical answer (the server clears only after the app reports
+    // `stable`) finds nothing left to move.
+    var onTest = try configuration("test")
+    let moved = onTest.applyServerAssignedChannel("stable")
+    #expect(moved)
+    #expect(onTest.updateChannel == "stable")
+    let movedAgain = onTest.applyServerAssignedChannel("stable")
+    #expect(!movedAgain)
+
+    // Everything else is ignored. The R3-8 valve: a Mac reaches `test` by a hand on that Mac only.
+    for assigned in ["test", nil, "", "Stable", "stable ", "beta"] as [String?] {
+      var mac = try configuration("test")
+      let changed = mac.applyServerAssignedChannel(assigned)
+      #expect(!changed, "assigned \(assigned ?? "nil")")
+      #expect(mac.updateChannel == "test")
+    }
+    for assigned in ["stable", "test", nil] as [String?] {
+      var mac = try configuration("stable")
+      let changed = mac.applyServerAssignedChannel(assigned)
+      #expect(!changed, "assigned \(assigned ?? "nil")")
+      #expect(mac.updateChannel == "stable")
+    }
+  }
+
+  /// A room root on `channel`, ready for a real engine to load.
+  static func writeConfiguration(_ fixture: Fixture, channel: String) throws {
+    let configuration = try RoomConfiguration(
+      origin: #require(URL(string: "https://eta.test")),
+      roomSlug: "home-office",
+      deviceUID: "device-canary-1",
+      tapewriterPath: "/usr/bin/false",
+      ffmpegPath: "/usr/bin/false",
+      updateChannel: channel)
+    try RoomPersistence(root: fixture.root).saveConfiguration(configuration)
+    // And the session file an enrolled Mac has, so the engine polls WITH its install fields —
+    // `update_channel` rides in them — and never falls back to the machine's real keychain.
+    try RoomSessionStore.save(try #require(Self.enrolledForTests()), root: fixture.root)
+  }
+
+  /// Run a real engine against `remote` until it has polled `polls` times. The updater is built
+  /// the way `defaultUpdater` builds one — from the configuration it is handed — around `fetcher`.
+  private static func runEngine(
+    _ fixture: Fixture, polls: Int, remote: AssigningPollRemote,
+    fetcher: ChannelRecordingFetcher, logged: LoggedLines, builtOn: ChannelBox
+  ) async throws {
+    let resident = fixture.resident
+    let engine = try await RoomEngine.load(
+      rootURL: fixture.root,
+      enrolmentReader: Self.enrolledForTests,
+      remoteFactory: { _ in remote },
+      updaterFactory: { configuration, _, root in
+        builtOn.set(configuration.updateChannel)
+        return RoomUpdater(
+          rootURL: root, residentBundleURL: resident, runningVersion: "0.1.19",
+          channel: configuration.updateChannel, fetcher: fetcher, runner: RecordingRunner(),
+          log: { _ in })
+      },
+      log: { logged.append($0) })
+    let task = Task { try await engine.run() }
+    for _ in 0..<400 {
+      if await remote.pollCalls() >= polls { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    task.cancel()
+    try await task.value
+  }
+
+  @Test func aServerMoveToStableReachesTheNextReleaseFetchWithoutARestart() async throws {
+    // B2-D5 and the orchestrator's ruling (b), 11 Sep 18:30. The updater is built once, at load,
+    // from config.json's channel. Moving config alone would report `stable` on the card while the
+    // Mac went on asking `test` for builds until its next restart.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    try Self.writeConfiguration(fixture, channel: "test")
+    let remote = AssigningPollRemote(assigned: "stable")
+    let fetcher = ChannelRecordingFetcher()
+    let logged = LoggedLines()
+    let builtOn = ChannelBox()
+
+    try await Self.runEngine(
+      fixture, polls: 3, remote: remote, fetcher: fetcher, logged: logged,
+      builtOn: builtOn)
+
+    #expect(await remote.pollCalls() >= 3, "the engine never reached three polls")
+    // Built on `test` — this is the same process, not a restarted one.
+    #expect(builtOn.value == "test")
+    // The launch check runs after the first poll's answer is applied, so it is already on stable.
+    #expect(await fetcher.channels.first == "stable")
+    #expect(await fetcher.channels.allSatisfy { $0 == "stable" })
+    // Persisted, so a restart does not put the Mac back on `test` behind the server's back.
+    #expect(try RoomPersistence(root: fixture.root).loadConfiguration().updateChannel == "stable")
+    // The first poll reported the channel the Mac was on; every poll after it reports `stable`,
+    // which is what lets the server clear the assignment.
+    let reported = await remote.reportedChannels
+    #expect(reported.first == "test")
+    #expect(reported.dropFirst().allSatisfy { $0 == "stable" })
+    // Once, although the server kept sending `stable` on every poll.
+    #expect(logged.all.filter { $0 == "channel moved to stable by the server" }.count == 1)
+  }
+
+  @Test func aServerAnswerThatIsNotAMoveToStableChangesNothing() async throws {
+    // B2-D5's other half, and the refuter's first question: nothing the server says can move a
+    // Mac to `test`, and nothing but `stable` can move one off it.
+    for (channel, assigned) in [("stable", "test"), ("test", nil), ("test", "junk"), ("stable", "stable")]
+      as [(String, String?)]
+    {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      try Self.writeConfiguration(fixture, channel: channel)
+      let remote = AssigningPollRemote(assigned: assigned)
+      let fetcher = ChannelRecordingFetcher()
+      let logged = LoggedLines()
+
+      try await Self.runEngine(
+        fixture, polls: 2, remote: remote, fetcher: fetcher, logged: logged,
+        builtOn: ChannelBox())
+
+      let label = "\(channel) ← \(assigned ?? "nil")"
+      #expect(await remote.pollCalls() >= 2, "\(label): the engine never reached two polls")
+      #expect(await fetcher.channels.allSatisfy { $0 == channel }, "\(label)")
+      #expect(
+        try RoomPersistence(root: fixture.root).loadConfiguration().updateChannel == channel,
+        "\(label)")
+      #expect(await remote.reportedChannels.allSatisfy { $0 == channel }, "\(label)")
+      #expect(!logged.all.contains { $0.contains("channel moved") }, "\(label)")
+    }
+  }
+
   // MARK: - Helpers
 
   private func descriptor(version: String, bytes: Data) -> RoomReleaseDescriptor {
@@ -1913,3 +2092,68 @@ private actor CanaryPollRemote: RoomEngineRemote {
 }
 
 private enum CanaryStubError: Error { case unexpectedCall }
+
+/// B2-D5. Answers every poll with the same `assigned_channel` (omitted when nil), and records the
+/// `update_channel` each poll reported.
+private actor AssigningPollRemote: RoomEngineRemote {
+  private let assigned: String?
+  private var polls = 0
+  private(set) var reportedChannels: [String?] = []
+
+  init(assigned: String?) { self.assigned = assigned }
+
+  func pollCalls() -> Int { polls }
+
+  func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
+    try JSONDecoder().decode(
+      ActiveSessionResponse.self,
+      from: Data(
+        #"{"ok":true,"resumable":false,"session":null,"next_idx":{"primary":0,"backup":0},"reason":null,"handover_pending":false,"tab_gone":false}"#
+          .utf8))
+  }
+
+  func pollCommands(
+    tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
+    primaryLevels: BenchLevelPair?, install: InstallPollFields?
+  ) async throws -> CommandPollResponse {
+    polls += 1
+    reportedChannels.append(install?.updateChannel)
+    let field = assigned.map { #","assigned_channel":"\#($0)""# } ?? ""
+    return try JSONDecoder().decode(
+      CommandPollResponse.self,
+      from: Data(#"{"ok":true,"superseded":false,"commands":[]\#(field)}"#.utf8))
+  }
+
+  func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
+    throw CanaryStubError.unexpectedCall
+  }
+  func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws
+    -> BenchOKResponse
+  { throw CanaryStubError.unexpectedCall }
+  func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
+    -> CommandAcknowledgement
+  { throw CanaryStubError.unexpectedCall }
+  func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse {
+    throw CanaryStubError.unexpectedCall
+  }
+  func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
+    -> ImmutablePieceUploadResult
+  { throw CanaryStubError.unexpectedCall }
+}
+
+/// B2-D5. Records the channel of every release fetch and offers nothing, so a check is a no-op.
+private actor ChannelRecordingFetcher: RoomReleaseFetching {
+  private(set) var channels: [String] = []
+  func fetchRelease(channel: String) async -> RoomReleaseDescriptor? {
+    channels.append(channel)
+    return nil
+  }
+}
+
+/// The channel `updaterFactory` was handed, carried out of the factory closure.
+private final class ChannelBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: String?
+  func set(_ value: String) { lock.withLock { stored = value } }
+  var value: String? { lock.withLock { stored } }
+}

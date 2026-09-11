@@ -454,6 +454,54 @@ import Testing
       try IndexLog.read(url: url, pcmSize: 96_000)
     }
   }
+
+  // MARK: - Release B2 (D7): `peak` and `zero_ratio` beside `rms`
+
+  @Test func aCheckpointWrittenBefore020WithoutPeakOrZeroRatioStillDecodes() throws {
+    // Every tape on every clinic Mac today was written by 0.1.19 or earlier, and 0.1.20 has to
+    // read them: after an update, a room resumes onto the index its previous version wrote.
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("tape.idx")
+    try committedJSONL([
+      #"{"byte_offset":0,"device":"fixture","input_frames":0,"input_sample_rate":48000,"mono_ns":1,"rms":0.25,"samples":0,"wall_ns":1}"#
+    ]).write(to: url)
+
+    let record = try #require(IndexLog.read(url: url).records.first)
+    #expect(record.rms == 0.25)
+    #expect(record.peak == nil)
+    #expect(record.zeroRatio == nil)
+  }
+
+  @Test func aCheckpointWithPeakAndZeroRatioRoundTrips() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("tape.idx")
+    let line =
+      #"{"byte_offset":32000,"device":"fixture","mono_ns":1,"peak":0.5,"rms":0.25,"samples":16000,"wall_ns":1,"zero_ratio":0.4576}"#
+    try committedJSONL([line]).write(to: url)
+
+    let record = try #require(IndexLog.read(url: url).records.first)
+    #expect(record.peak == 0.5)
+    #expect(record.zeroRatio == 0.4576)
+    // The writer's own encoding gives back the same bytes, keys named exactly as the poll names
+    // them, so nothing between tapewriter and the card renames a field.
+    #expect(try IndexLog.encodedLine(record) == Data((line + "\n").utf8))
+  }
+
+  @Test func peakOrZeroRatioOutsideZeroToOneIsRejectedTheWayRmsIs() throws {
+    let base = #"{"byte_offset":2,"samples":1,"mono_ns":2,"wall_ns":2,"device":"fixture","rms":0"#
+    for (name, extra) in [
+      ("peak below zero", #","peak":-0.0001"#),
+      ("peak above one", #","peak":1.0001"#),
+      ("zero_ratio below zero", #","zero_ratio":-0.0001"#),
+      ("zero_ratio above one", #","zero_ratio":1.0001"#),
+    ] {
+      try expectRawIndexFailure(
+        RawIndexFailure(name, 1, .invalid, base + extra + "}"),
+        data: committedJSONL([base + extra + "}"]))
+    }
+  }
 }
 
 private enum RawIndexFailureKind {

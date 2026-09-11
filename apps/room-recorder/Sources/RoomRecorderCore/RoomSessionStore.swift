@@ -86,7 +86,12 @@ public enum RoomSessionStore {
   ) -> RoomKeychainRecord? {
     switch readFile(root: root) {
     case .ok(let record):
-      log("room session read from room-session.json")
+      // B2-D11. Launch reads this file twice — `main.swift` before microphone authorisation,
+      // `RoomEngine.load` after it — and every `launchd.log` tail carried the line twice. Logged
+      // once per record per root now; a file that changes under a running app logs again.
+      if readsLogged.isNew(root: root, record: record) {
+        log("room session read from room-session.json")
+      }
       return record
     case .refused(let why):
       // A file that exists and is not usable is worth a line: the fallback below may well succeed
@@ -197,6 +202,35 @@ public enum RoomSessionStore {
       return false
     }
     return (try? FileManager.default.removeItem(at: url(root: root))) != nil
+  }
+
+  /// B2-D11. Which record each root last logged a read of, for this process only.
+  ///
+  /// A HASH, NOT THE RECORD: the record carries the session token, and a second in-memory copy of
+  /// it kept for a log line's sake is one more place it can leak from. Per root so that two
+  /// installs in one process — every test in this suite — do not silence each other.
+  static let readsLogged = ReadLogMemory()
+
+  final class ReadLogMemory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastLogged: [String: Int] = [:]
+
+    /// True, and remembered, when `record` differs from the last one logged for `root`.
+    func isNew(root: URL, record: RoomKeychainRecord) -> Bool {
+      var hasher = Hasher()
+      hasher.combine(record.session)
+      hasher.combine(record.installID)
+      hasher.combine(record.roomSlug)
+      hasher.combine(record.roomName)
+      hasher.combine(record.origin)
+      let fingerprint = hasher.finalize()
+      let key = root.standardizedFileURL.path
+      return lock.withLock {
+        guard lastLogged[key] != fingerprint else { return false }
+        lastLogged[key] = fingerprint
+        return true
+      }
+    }
   }
 
   /// Carries the fallback's answer back across the thread boundary.

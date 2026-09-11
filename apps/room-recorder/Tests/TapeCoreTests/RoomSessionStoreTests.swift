@@ -75,6 +75,27 @@ import Testing
     #expect(spy.callCount == 0)
   }
 
+  @Test func twoReadsOfOneUnchangedFileLogTheReadOnce() throws {
+    // B2-D11. Launch reads the file twice — `main.swift` before microphone authorisation, then
+    // `RoomEngine.load` after it — and every `launchd.log` tail showed the same line twice.
+    let root = try Self.makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try RoomSessionStore.save(Self.record(), root: root)
+    let line = "room session read from room-session.json"
+
+    var lines: [String] = []
+    let first = RoomSessionStore.load(root: root, log: { lines.append($0) })
+    let second = RoomSessionStore.load(root: root, log: { lines.append($0) })
+    #expect(first == Self.record())
+    #expect(second == Self.record())
+    #expect(lines.filter { $0 == line }.count == 1, "logged \(lines)")
+
+    // A file that CHANGED is worth the line again: a re-enrol while the app is up is news.
+    try RoomSessionStore.save(Self.record(session: "b.session.jwt"), root: root)
+    _ = RoomSessionStore.load(root: root, log: { lines.append($0) })
+    #expect(lines.filter { $0 == line }.count == 2, "logged \(lines)")
+  }
+
   @Test func theFileIsWritten0600AndRoundTrips() throws {
     let root = try Self.makeRoot()
     defer { try? FileManager.default.removeItem(at: root) }

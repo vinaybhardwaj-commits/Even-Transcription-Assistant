@@ -1,4 +1,5 @@
 import Foundation
+import TapeCapture
 
 /// The EIGHT poll fields of Install and Fleet PRD §4.3, plus the three machine facts §6 step 2
 /// renders, assembled from a `MachineFacts` reading at the moment of the poll.
@@ -55,6 +56,15 @@ public struct InstallPollFields: Equatable, Sendable {
   /// able to invent from a failed `resourceValues` call.
   public var diskFreeBytes: Int64?
 
+  // ─── RELEASE B2 ───────────────────────────────────────────────────────────────────────────
+  /// D7. The largest absolute sample in the latest checkpoint window, 0–1. Nil when no window with
+  /// audio in it has been written yet.
+  public var peak: Double?
+  /// D7. The share of samples in the latest checkpoint window that were exactly zero, 0–1.
+  public var zeroRatio: Double?
+  /// D10. Every input device attached now, the default marked. Read-only.
+  public var inputDevices: [AudioInputDeviceEntry]?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -73,7 +83,10 @@ public struct InstallPollFields: Equatable, Sendable {
     lastUpdateVersion: String? = nil,
     lastUpdateError: String? = nil,
     lastUpdateAt: String? = nil,
-    diskFreeBytes: Int64? = nil
+    diskFreeBytes: Int64? = nil,
+    peak: Double? = nil,
+    zeroRatio: Double? = nil,
+    inputDevices: [AudioInputDeviceEntry]? = nil
   ) {
     self.installID = installID
     self.appVersion = appVersion
@@ -93,6 +106,9 @@ public struct InstallPollFields: Equatable, Sendable {
     self.lastUpdateError = lastUpdateError
     self.lastUpdateAt = lastUpdateAt
     self.diskFreeBytes = diskFreeBytes
+    self.peak = peak
+    self.zeroRatio = zeroRatio
+    self.inputDevices = inputDevices
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -109,7 +125,9 @@ public struct InstallPollFields: Equatable, Sendable {
     lastUpdateVersion: String? = nil,
     lastUpdateError: String? = nil,
     lastUpdateAt: String? = nil,
-    diskFreeBytes: Int64? = nil
+    diskFreeBytes: Int64? = nil,
+    peak: Double? = nil,
+    zeroRatio: Double? = nil
   ) {
     self.init(
       installID: installID,
@@ -129,7 +147,10 @@ public struct InstallPollFields: Equatable, Sendable {
       lastUpdateVersion: lastUpdateVersion,
       lastUpdateError: lastUpdateError,
       lastUpdateAt: lastUpdateAt,
-      diskFreeBytes: diskFreeBytes
+      diskFreeBytes: diskFreeBytes,
+      peak: peak,
+      zeroRatio: zeroRatio,
+      inputDevices: facts.inputDevices
     )
   }
 
@@ -198,7 +219,66 @@ public struct InstallPollFields: Equatable, Sendable {
     if let diskFreeBytes, diskFreeBytes > 0 {
       items.append(URLQueryItem(name: "disk_free_bytes", value: String(diskFreeBytes)))
     }
+    // ── Release B2 ──────────────────────────────────────────────────────────────────────────
+    // D7. Named exactly `peak` and `zero_ratio`, NOT `mic_peak`: that pair is the bench
+    // listener's and keeps its meaning. A value outside 0–1, or not finite, is dropped rather than
+    // clamped — the server drops it too, and a clamped 1.0 is indistinguishable from a real one.
+    add("peak", Self.unitString(peak))
+    add("zero_ratio", Self.unitString(zeroRatio))
+    // D10. One JSON array, beside `input_device_name`, not instead of it.
+    add("input_devices", inputDevices.flatMap(Self.inputDevicesJSON))
     return items
+  }
+
+  /// Four decimals, POSIX locale — the same shape the bench level pair is sent in.
+  static func unitString(_ value: Double?) -> String? {
+    guard let value, value.isFinite, (0...1).contains(value) else { return nil }
+    return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
+  }
+
+  /// B2-D10's bounds, stated once. They are the server's (`lib/room-install.ts`,
+  /// `INPUT_DEVICES_MAX` and the two beside it), and they are counted the way the server counts:
+  /// in UTF-16 units, after trimming.
+  static let inputDevicesMax = 16
+  static let inputDeviceNameMax = 128
+  static let inputDeviceUIDMax = 256
+
+  /// The device list as the JSON string the poll carries, or nil.
+  ///
+  /// ─── BAD ENTRIES ARE DROPPED HERE, BECAUSE THE SERVER DROPS THE WHOLE LIST ────────────────
+  /// `cleanInputDevices` refuses the entire array for one entry it does not like, so a single
+  /// aggregate device with a 300-character name would blank a room's list on the card. The app
+  /// drops that one entry instead (orchestrator ruling (d), 11 Sep): an empty name or uid after
+  /// trimming, either one over its bound in UTF-16 units, and any default after the first. Then
+  /// the first sixteen are kept, in CoreAudio's order.
+  ///
+  /// NIL, NOT `[]`, WHEN EVERY ENTRY WAS DROPPED. The machine reported devices; "no input
+  /// devices" would be a claim it never made. A machine that reported none sends `[]`.
+  static func inputDevicesJSON(_ devices: [AudioInputDeviceEntry]) -> String? {
+    struct Wire: Encodable {
+      let name: String
+      let uid: String
+      let is_default: Bool
+    }
+    var kept: [Wire] = []
+    var defaultKept = false
+    for device in devices {
+      let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
+      let uid = device.uid.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !name.isEmpty, !uid.isEmpty,
+        name.utf16.count <= inputDeviceNameMax, uid.utf16.count <= inputDeviceUIDMax,
+        !(device.isDefault && defaultKept)
+      else { continue }
+      if device.isDefault { defaultKept = true }
+      kept.append(Wire(name: name, uid: uid, is_default: device.isDefault))
+      if kept.count == inputDevicesMax { break }
+    }
+    if kept.isEmpty && !devices.isEmpty { return nil }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    guard let data = try? encoder.encode(kept), let json = String(data: data, encoding: .utf8)
+    else { return nil }
+    return json
   }
 }
 

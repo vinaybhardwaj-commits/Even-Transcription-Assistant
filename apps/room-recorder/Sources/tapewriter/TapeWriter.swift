@@ -141,8 +141,7 @@ final class TapeWriter: @unchecked Sendable {
     defer { close(indexFD) }
     try synchronizeDirectory(directory)
 
-    var squaredSum = 0.0
-    var rmsSampleCount: Int64 = 0
+    var levels = CheckpointLevels()
     var lastSyncScheduleNS = monotonicNowNS()
     var latestAudioMonoNS: UInt64?
     var latestAudioWallNS: UInt64?
@@ -209,7 +208,7 @@ final class TapeWriter: @unchecked Sendable {
 
     func checkpoint(monoNS: UInt64, wallNS: UInt64) throws {
       try fullSyncTape(.checkpoint)
-      let rms = rmsSampleCount == 0 ? 0 : min(1, sqrt(squaredSum / Double(rmsSampleCount)))
+      let rms = levels.rms
       try archiveWriter?.mirrorDurablePCM(
         fileDescriptor: pcmFD,
         durableByteEnd: bytesWritten,
@@ -225,7 +224,9 @@ final class TapeWriter: @unchecked Sendable {
           device: deviceUID,
           rms: rms,
           inputFrames: currentInputSampleRate == nil ? nil : totalInputFrames,
-          inputSampleRate: currentInputSampleRate
+          inputSampleRate: currentInputSampleRate,
+          peak: levels.peak,
+          zeroRatio: levels.zeroRatio
         ),
         context: .checkpoint
       )
@@ -237,8 +238,7 @@ final class TapeWriter: @unchecked Sendable {
         firstDurableCaptureCompletedNS.store(monotonicNowNS(), ordering: .relaxed)
         durableCaptureGeneration.store(latestCaptureGeneration, ordering: .releasing)
       }
-      squaredSum = 0
-      rmsSampleCount = 0
+      levels.reset()
       lastSyncScheduleNS = monotonicNowNS()
     }
 
@@ -253,11 +253,7 @@ final class TapeWriter: @unchecked Sendable {
         offset: targetOffset,
         faultPlan: faultPlan
       )
-      for index in 0..<count {
-        let normalized = Double(output[index]) / 32_768
-        squaredSum += normalized * normalized
-      }
-      rmsSampleCount += Int64(count)
+      levels.add(output, count: count)
       bytesWritten = targetOffset
       faultPlan?.perform(.afterPCMAppend, offset: bytesWritten)
     }
@@ -270,7 +266,7 @@ final class TapeWriter: @unchecked Sendable {
 
     func discontinuity(_ item: StreamItem) throws {
       try finishConversion()
-      if rmsSampleCount > 0, let mono = latestAudioMonoNS, let wall = latestAudioWallNS {
+      if levels.sampleCount > 0, let mono = latestAudioMonoNS, let wall = latestAudioWallNS {
         try checkpoint(monoNS: mono, wallNS: wall)
       } else {
         try fullSyncTape(.discontinuity)
@@ -357,7 +353,7 @@ final class TapeWriter: @unchecked Sendable {
       }
 
       let now = monotonicNowNS()
-      if rmsSampleCount > 0, now - lastSyncScheduleNS >= checkpointIntervalNS,
+      if levels.sampleCount > 0, now - lastSyncScheduleNS >= checkpointIntervalNS,
         let mono = latestAudioMonoNS, let wall = latestAudioWallNS
       {
         try checkpoint(monoNS: mono, wallNS: wall)
@@ -366,7 +362,7 @@ final class TapeWriter: @unchecked Sendable {
     }
 
     try finishConversion()
-    if rmsSampleCount > 0, let mono = latestAudioMonoNS, let wall = latestAudioWallNS {
+    if levels.sampleCount > 0, let mono = latestAudioMonoNS, let wall = latestAudioWallNS {
       try checkpoint(monoNS: mono, wallNS: wall)
     } else if bytesWritten > lastRecordOffset {
       try checkpoint(monoNS: monotonicNowNS(), wallNS: wallNowNS())
@@ -385,6 +381,57 @@ final class TapeWriter: @unchecked Sendable {
       ),
       context: .stopped
     )
+  }
+}
+
+/// The level measurements one checkpoint carries, accumulated over the samples written since the
+/// previous checkpoint and reset by it.
+///
+/// ─── RELEASE B2 (D7): PEAK AND EXACT ZERO, IN THE LOOP THAT ALREADY TOUCHES EVERY SAMPLE ─────
+/// On 9 Sep OPD 3 was 45.76 % bit-exact zero and nobody could see it: rms alone averages a dead
+/// input and a clipping one into the same plausible number. Both are measured here, in the one
+/// per-sample loop the writer already runs for rms, so neither costs a second pass.
+///
+/// The rms arithmetic is unchanged from 0.1.19, operation for operation.
+struct CheckpointLevels {
+  private var squaredSum = 0.0
+  private var peakAbs = 0.0
+  private var zeroCount: Int64 = 0
+  private(set) var sampleCount: Int64 = 0
+
+  mutating func add(_ output: UnsafePointer<Int16>, count: Int) {
+    for index in 0..<count {
+      let sample = output[index]
+      let normalized = Double(sample) / 32_768
+      squaredSum += normalized * normalized
+      // |Int16.min| / 32 768 is exactly 1, so the peak can never leave 0…1.
+      peakAbs = max(peakAbs, abs(normalized))
+      if sample == 0 { zeroCount += 1 }
+    }
+    sampleCount += Int64(count)
+  }
+
+  var rms: Double {
+    sampleCount == 0 ? 0 : min(1, sqrt(squaredSum / Double(sampleCount)))
+  }
+
+  /// Nil for a window with no samples — the anchor checkpoint written before any audio — rather
+  /// than a 0 that would read as "silent".
+  var peak: Double? {
+    sampleCount == 0 ? nil : peakAbs
+  }
+
+  /// Nil for a window with no samples: there is nothing to divide by, and the record says so by
+  /// leaving the key out.
+  var zeroRatio: Double? {
+    sampleCount == 0 ? nil : Double(zeroCount) / Double(sampleCount)
+  }
+
+  mutating func reset() {
+    squaredSum = 0
+    peakAbs = 0
+    zeroCount = 0
+    sampleCount = 0
   }
 }
 

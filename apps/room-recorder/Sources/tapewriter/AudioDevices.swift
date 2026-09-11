@@ -41,7 +41,7 @@ enum AudioDevices {
     return devices.contains { $0.uid == uid }
   }
 
-  private static func all() throws -> [AudioDeviceInfo] {
+  fileprivate static func all() throws -> [AudioDeviceInfo] {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDevices,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -66,7 +66,7 @@ enum AudioDevices {
     }
   }
 
-  private static func defaultInputID() throws -> AudioDeviceID {
+  fileprivate static func defaultInputID() throws -> AudioDeviceID {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDefaultInputDevice,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -140,10 +140,11 @@ func selectDevice(_ device: AudioDeviceInfo, on engine: AVAudioEngine) throws {
 
 // MARK: - Public façade for the resident app (Install and Fleet PRD §5.5)
 //
-// The app needs two facts about audio input that only CoreAudio can answer: which device the
-// machine currently defaults to (read once, at enrol) and what a device UID is called right now
-// (read on every poll). Everything above stays internal to the capture target; only these two
-// readings cross the module boundary.
+// The app needs three facts about audio input that only CoreAudio can answer: which device the
+// machine currently defaults to (read once, at enrol), what a device UID is called right now
+// (read on every poll), and — Release B2, D10 — every input attached now (also every poll).
+// Everything above stays internal to the capture target; only these readings cross the module
+// boundary, and none of them selects a device.
 //
 // BOTH MEASURE, NEITHER DEFAULTS. Nil means "the machine did not answer", which the poll sends as
 // absence so the server's COALESCE keeps the last true value. §5.5's invariant, same as the rest.
@@ -175,5 +176,31 @@ public enum AudioInputDevices {
   public static func name(forUID uid: String) -> String? {
     guard !uid.isEmpty, let info = try? AudioDevices.selected(uid: uid) else { return nil }
     return info.name
+  }
+
+  /// Release B2 (D10). Every input device attached right now, in CoreAudio's order, with the
+  /// system default marked. Read-only: nothing here selects a device.
+  ///
+  /// Nil when the machine could not be asked, which the poll sends as absence. An empty array is
+  /// a real answer — a Mac with no input attached — and is reported as one.
+  public static func list() -> [AudioInputDeviceEntry]? {
+    guard let devices = try? AudioDevices.all() else { return nil }
+    let defaultID = try? AudioDevices.defaultInputID()
+    return devices.map {
+      AudioInputDeviceEntry(name: $0.name, uid: $0.uid, isDefault: $0.id == defaultID)
+    }
+  }
+}
+
+/// One row of the input-device list the poll reports (Release B2, D10).
+public struct AudioInputDeviceEntry: Equatable, Sendable {
+  public let name: String
+  public let uid: String
+  public let isDefault: Bool
+
+  public init(name: String, uid: String, isDefault: Bool) {
+    self.name = name
+    self.uid = uid
+    self.isDefault = isDefault
   }
 }

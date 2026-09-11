@@ -541,7 +541,10 @@ public struct RoomUpdateSchedule: Equatable, Sendable {
   /// When the last check actually reached the route, whatever it answered. Nil = never checked.
   public var lastCheckedAt: Date?
   /// A check happened, found an update, and stood down because a session was open (§13.3 step 3).
-  /// R3-10: that one re-checks the moment the session ends rather than in six hours.
+  ///
+  /// Release B2 (D2): no longer read by `isDue` — every session end is a check now, deferred or
+  /// not. Kept because it still says something true about the last check: the engine sets it from
+  /// the check's answer, and the deferral itself (`check`'s `sessionIsOpen` guard) is unchanged.
   public var deferredWhileRecording: Bool
 
   public init(lastCheckedAt: Date? = nil, deferredWhileRecording: Bool = false) {
@@ -549,14 +552,25 @@ public struct RoomUpdateSchedule: Equatable, Sendable {
     self.deferredWhileRecording = deferredWhileRecording
   }
 
-  /// True when the app should call the release route now.
+  /// True when the app should call the release route now: on launch, at EVERY session end, and
+  /// otherwise once the six-hour interval has passed.
   ///
   /// `sessionJustEnded` is R3-10 and is the whole reason this is not a plain interval. A clinic day
   /// is close to continuous recording, so an update deferred at 09:10 would otherwise wait until
   /// 15:10 — most of a day after the last patient left.
+  ///
+  /// ─── RELEASE B2 (D2): EVERY SESSION END, NOT ONLY A DEFERRED ONE ───────────────────────────
+  /// R3-10 used to re-check at a session end only if a check had already been deferred during it.
+  /// On 11 Sep `stable` moved at 11:35:45Z while five rooms were mid-session; none of them had
+  /// checked during the session, so none had deferred, and stopping their tapes checked nothing —
+  /// all five needed `kickstart -k`. The cost is one release-route GET per session end.
+  ///
+  /// THE DEFERRAL STILL HOLDS. `sessionJustEnded` is true only on the poll where the session has
+  /// already closed, so this never makes a check due while one is open; and a check that does run
+  /// with a session open still stands down before downloading anything (`RoomUpdater.check`).
   public func isDue(now: Date, sessionJustEnded: Bool) -> Bool {
     guard let last = lastCheckedAt else { return true }  // on launch
-    if deferredWhileRecording && sessionJustEnded { return true }
+    if sessionJustEnded { return true }
     return now.timeIntervalSince(last) >= RoomSelfUpdate.checkInterval
   }
 }
@@ -701,7 +715,10 @@ public struct RoomUpdater: Sendable {
   /// Where the running app lives. `Bundle.main.bundleURL` in production; a temp dir in a test.
   public let residentBundleURL: URL
   public let runningVersion: String?
-  public let channel: String
+  /// `var` since Release B2 (D5), for one reason: a server move to `stable` switches the RUNNING
+  /// updater, in the same step as the config write, so the next release fetch goes to `stable`
+  /// without waiting for a restart. Nothing else assigns it.
+  public var channel: String
   let fetcher: any RoomReleaseFetching
   let downloader: any RoomUpdateDownloading
   let runner: any RoomUpdateCommandRunning
@@ -1038,6 +1055,9 @@ public enum RoomSwapScript {
     // H2. The marker the rollback clears, at the one path `RoomUpdateHandover` uses. Passed in
     // rather than rebuilt in shell, so the two cannot drift apart.
     let handoverMarker = quoted(RoomSelfUpdate.handoverMarkerURL(root: rootURL).path)
+    // B2-D12. The directory `rescue()` sweeps, at the one path `stage()` fills. Passed in rather
+    // than derived from `$STAGED` in shell, for the same reason as the marker above.
+    let staging = quoted(RoomSelfUpdate.stagingURL(root: rootURL).path)
 
     return """
       #!/bin/bash
@@ -1074,6 +1094,8 @@ public enum RoomSwapScript {
       CANARY_REASON=\(canaryReasonLiteral)
       CANARY_KEPT_REASON=\(canaryKeptReasonLiteral)
       HANDOVER_MARKER=\(handoverMarker)
+      # ── Release B2, D12: what rescue() sweeps once the old bundle is back ─────────────────
+      STAGING=\(staging)
 
       say() {
         /bin/echo "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ') room-recorder-swap: $*" >> "$LOG" 2>/dev/null
@@ -1118,6 +1140,20 @@ public enum RoomSwapScript {
           # on a Mac that also holds a clinic day of audio. Idempotent, and a no-op on the swap
           # path where that path never existed (V, 10 Sep, ruling on Fix 1 flag 1).
           /bin/rm -rf "${RESIDENT}.failed"
+          # B2-D12. And the ~90 MB staged copy — the zip and the bundle that never moved in —
+          # which nothing else would delete until the handover marker went stale half an hour
+          # later. ONLY once the restore has put a bundle back, and never a directory that holds,
+          # or sits inside, the resident bundle or `.previous`: those three checks are what make
+          # this sweep unable to reach either one.
+          if [ -d "$RESIDENT" ]; then
+            case "$RESIDENT/" in "$STAGING"/*) ;; *)
+              case "$STAGING/" in "$RESIDENT"/* | "$PREVIOUS"/*) ;; *)
+                /bin/rm -rf "$STAGING"
+                ;;
+              esac
+              ;;
+            esac
+          fi
           record swap_failed '"the swap was interrupted and the previous version was put back"'
         fi
         bootstrap_agent

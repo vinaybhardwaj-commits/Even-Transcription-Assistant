@@ -23,6 +23,13 @@ public struct IndexRecord: Codable, Equatable, Sendable {
   public var droppedInputFrames: UInt64?
   public var inputFrames: Int64?
   public var inputSampleRate: Double?
+  /// Release B2 (D7). The largest absolute sample in this checkpoint's window, 0–1, beside `rms`.
+  /// Absent on every record written before 0.1.20 and on a checkpoint whose window held no
+  /// samples; both decode as nil.
+  public var peak: Double?
+  /// Release B2 (D7). The share of this window's samples that were exactly zero, 0–1. A dead input
+  /// reads 1 here while `rms` reads a plausible 0.
+  public var zeroRatio: Double?
 
   enum CodingKeys: String, CodingKey {
     case byteOffset = "byte_offset"
@@ -38,6 +45,8 @@ public struct IndexRecord: Codable, Equatable, Sendable {
     case droppedInputFrames = "dropped_input_frames"
     case inputFrames = "input_frames"
     case inputSampleRate = "input_sample_rate"
+    case peak
+    case zeroRatio = "zero_ratio"
   }
 
   public init(
@@ -53,7 +62,9 @@ public struct IndexRecord: Codable, Equatable, Sendable {
     survivingTailBytes: Int64? = nil,
     droppedInputFrames: UInt64? = nil,
     inputFrames: Int64? = nil,
-    inputSampleRate: Double? = nil
+    inputSampleRate: Double? = nil,
+    peak: Double? = nil,
+    zeroRatio: Double? = nil
   ) {
     self.byteOffset = byteOffset
     self.samples = samples
@@ -68,6 +79,8 @@ public struct IndexRecord: Codable, Equatable, Sendable {
     self.droppedInputFrames = droppedInputFrames
     self.inputFrames = inputFrames
     self.inputSampleRate = inputSampleRate
+    self.peak = peak
+    self.zeroRatio = zeroRatio
   }
 
   public var isCheckpoint: Bool {
@@ -205,6 +218,13 @@ public enum IndexLog {
       }
       if let rms = record.rms, !(0...1).contains(rms) {
         throw TapeError.invalidIndex(line: lineNumber, detail: "rms must be between 0 and 1")
+      }
+      if let peak = record.peak, !(0...1).contains(peak) {
+        throw TapeError.invalidIndex(line: lineNumber, detail: "peak must be between 0 and 1")
+      }
+      if let zeroRatio = record.zeroRatio, !(0...1).contains(zeroRatio) {
+        throw TapeError.invalidIndex(
+          line: lineNumber, detail: "zero_ratio must be between 0 and 1")
       }
       if record.inputFrames != nil || record.inputSampleRate != nil {
         guard let frames = record.inputFrames, frames >= 0,

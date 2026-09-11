@@ -422,7 +422,9 @@ public actor RoomEngine {
   }
 
   private let persistence: RoomPersistence
-  private let configuration: RoomConfiguration
+  /// `var` since Release B2, for one field and one writer: `applyServerAssignedChannel` moves
+  /// `updateChannel` to `stable` when the server says so (D5). Nothing else assigns it.
+  private var configuration: RoomConfiguration
   private let remote: any RoomEngineRemote
   private let captureLauncher: any RoomCaptureLaunching
   private let pieceRunner: any RoomPieceProcessRunning
@@ -481,14 +483,24 @@ public actor RoomEngine {
   // ─── BUILD R3 (§13.3) ──────────────────────────────────────────────────────────────────────
   /// Injected, and nil on every path that is not the resident app. A `swift run` binary, a test
   /// and an unbundled build all have no bundle to replace and must never try.
-  private let updater: RoomUpdater?
+  ///
+  /// `var` since Release B2 (D5): its `channel` follows a server move to `stable` in the same step
+  /// as the config write, so the next release fetch asks `stable` without a restart.
+  private var updater: RoomUpdater?
   private var updateSchedule = RoomUpdateSchedule()
   /// Set once, by the check that spawned the swap script. `run()` returns on the next line after
   /// it is set, and the CLI turns it into exit 64.
   private var handedOverToUpdateVersion: String?
-  /// R3-10 — a session ended since the last update check, so a deferred check is due NOW rather
-  /// than in six hours. Set on the transition, cleared by the check that consumes it.
+  /// R3-10 — a session ended since the last update check, so a check is due NOW rather than in
+  /// six hours (since Release B2, D2, whether or not one was deferred). Set on the transition,
+  /// cleared by the check that consumes it.
   private var sessionEndedSinceUpdateCheck = false
+  /// Release B2 (D9). The plain capture's tape index, read from where the last read stopped.
+  /// Rebuilt when the capture's index path changes; nil when there is no plain capture.
+  private var indexTail: TapeIndexTail?
+  /// Release B2 (D5). A failed config write is said once, not every 1.5 s while the server keeps
+  /// sending the move.
+  private var channelMoveFailureLogged = false
   /// §13.3 step 10. Read once at startup, carried until a poll has actually delivered it, and
   /// only then is the file deleted. Held rather than deleted-on-read because the app that would
   /// have reported it is the one that just started: a crash between the read and the first
@@ -792,15 +804,16 @@ public actor RoomEngine {
       // still read `tape=false/streak=0`.
       //
       // The durable frontier is the index tapewriter appends to. A record lands there only after
-      // its audio is durably on disk, so the file growing IS the durable sample index growing —
-      // §5.5's signal, measured rather than inferred, and one `stat` rather than re-reading a
-      // file that reaches tens of megabytes over a clinic day.
-      if let durable = try? regularFileSizeIfPresent(capture.indexURL), durable > 0 {
-        return durable
-      }
-      // No index yet: capture has started but nothing is durable. Fall back to the cursor so a
-      // freshly cut piece still counts rather than reading as a gap.
-      return capture.nextSample
+      // its audio is durably on disk, so the last record's `samples` IS the durable sample index
+      // — §5.5's signal, measured rather than inferred.
+      //
+      // ─── RELEASE B2 (D8): IN SAMPLES, ON BOTH SIDES ───────────────────────────────────────
+      // This used to return the index FILE'S BYTE LENGTH when there was one and the cursor — a
+      // SAMPLE COUNT — when there was not, and `tapeIsAdvancing` compares one poll's answer with
+      // the next. A poll that crossed from one branch to the other compared bytes with samples. It
+      // read the file's size to avoid re-reading tens of megabytes; D9's tail reader reads only
+      // what was appended since the last poll, so the real sample count now costs the same.
+      return Self.durableSampleIndex(tail: indexTail(for: capture), cursor: capture.nextSample)
     }
     if let owner = residentCaptureOwner, owner.isActive { return Int64(owner.nextPrimaryIndex) }
     return nil
@@ -928,6 +941,39 @@ public actor RoomEngine {
     defer { lastDurableSampleIndex = current }
     guard let current, let previous = lastDurableSampleIndex else { return false }
     return current > previous
+  }
+
+  /// Release B2 (D5) — a server move to `stable`, applied to config.json, to this process and to
+  /// the running updater, in that order and in one step. Anything but a move is a no-op; the rule
+  /// itself is `RoomConfiguration.applyServerAssignedChannel`.
+  ///
+  /// ─── DISK FIRST, AND A FAILED WRITE MOVES NOTHING ───────────────────────────────────────
+  /// Were memory to move without the file, the next poll would report `stable`, the server would
+  /// clear its assignment, and the next restart would put the Mac back on `test` with nobody
+  /// having asked for it. So on a failed write the Mac stays where it is, keeps reporting its old
+  /// channel, and the server — which has not cleared anything — sends the move again next poll.
+  ///
+  /// The file is re-read rather than overwritten from memory, so a hand edit made while the app
+  /// was running is not undone by a change to one field.
+  private func applyServerAssignedChannel(_ assigned: String?) {
+    var moved = configuration
+    guard moved.applyServerAssignedChannel(assigned) else { return }
+    do {
+      var onDisk = try persistence.loadConfiguration()
+      onDisk.updateChannel = moved.updateChannel
+      try persistence.saveConfiguration(onDisk)
+    } catch {
+      if !channelMoveFailureLogged {
+        channelMoveFailureLogged = true
+        log(
+          "channel move to stable not saved; staying on \(configuration.updateChannel): "
+            + bounded(error))
+      }
+      return
+    }
+    configuration = moved
+    updater?.channel = moved.updateChannel
+    log("channel moved to stable by the server")
   }
 
   /// One whole update check, when one is due. Returns the version handed over to, or nil.
@@ -1076,6 +1122,7 @@ public actor RoomEngine {
         // Install and Fleet §4.3/§5.5. Every value is read HERE, at the moment of the poll —
         // MachineFactsReader measures on each call and reports nil for anything it cannot read.
         let reportedResult = pendingUpdateResult
+        let signal = currentSignal()
         let installFields = installID.map {
           InstallPollFields(
             installID: $0,
@@ -1094,7 +1141,10 @@ public actor RoomEngine {
             lastUpdateError: reportedResult?.reportedErrorLine,
             lastUpdateAt: reportedResult.map { Self.iso8601($0.at) },
             // V, 9 Sep. The volume the CAPTURES live on, which is the one that fills.
-            diskFreeBytes: InstallPollFields.freeBytes(onVolumeHolding: capturesURL)
+            diskFreeBytes: InstallPollFields.freeBytes(onVolumeHolding: capturesURL),
+            // Release B2 (D7). The latest checkpoint's, beside the level pair below.
+            peak: signal.peak,
+            zeroRatio: signal.zeroRatio
           )
         }
         let response = try await remote.pollCommands(
@@ -1123,6 +1173,9 @@ public actor RoomEngine {
           // exactly this deletion and exits the moment it sees it, so staging is now free.
           RoomUpdateHandover.clear(root: persistence.root)
         }
+        // Release B2 (D5). BEFORE the update check at the bottom of this iteration, so a move that
+        // arrives on this poll is the channel that check asks.
+        applyServerAssignedChannel(response.assignedChannel)
         previousPollAt = response.now ?? previousPollAt
         if let polledRoomID = response.roomID, !polledRoomID.isEmpty {
           roomID = polledRoomID
@@ -2843,13 +2896,40 @@ public actor RoomEngine {
     residentControlCommands[commandID] = recovered
   }
 
+  /// The bench-listener level pair. Release B2 (D9): read from the tail reader, not by reparsing
+  /// the whole index every 1.5 s — the same value, the latest record carrying an `rms`.
   private func currentLevels() -> BenchLevelPair? {
     if let residentCaptureOwner { return residentCaptureOwner.currentLevels() }
-    guard let capture,
-      let records = try? IndexLog.read(url: capture.indexURL).records,
-      let rms = records.reversed().compactMap(\.rms).first
-    else { return nil }
+    guard let capture, let rms = refreshedIndexTail(for: capture).lastRMS else { return nil }
     return BenchLevelPair(peak: rms, average: rms)
+  }
+
+  /// Release B2 (D7). The latest checkpoint's true peak and exact-zero ratio, for the poll.
+  ///
+  /// The PLAIN capture path only, which is the path every clinic Mac runs. The resident-archive
+  /// lane (`resident_archive_capture_enabled`, off everywhere) measures its levels in-process and
+  /// reports neither here: both are sent as absence, which the server keeps as the last reading.
+  private func currentSignal() -> (peak: Double?, zeroRatio: Double?) {
+    guard residentCaptureOwner == nil, let capture else { return (nil, nil) }
+    let tail = refreshedIndexTail(for: capture)
+    return (tail.lastPeak, tail.lastZeroRatio)
+  }
+
+  /// The tail reader for this capture's index. A capture on a different index path gets a fresh
+  /// reader: an offset into one file must never be applied to another.
+  private func indexTail(for capture: Segment) -> TapeIndexTail {
+    if let existing = indexTail, existing.url == capture.indexURL { return existing }
+    let tail = TapeIndexTail(url: capture.indexURL)
+    indexTail = tail
+    return tail
+  }
+
+  /// The same reader, brought up to date. A second refresh on one poll finds nothing appended and
+  /// costs one `stat`.
+  private func refreshedIndexTail(for capture: Segment) -> TapeIndexTail {
+    let tail = indexTail(for: capture)
+    tail.refresh()
+    return tail
   }
 
   private var hasActiveCapture: Bool {
@@ -2962,6 +3042,119 @@ public func roomCanaryAcknowledge(root: URL) -> String? {
   let version = (try? decoder.decode(RoomUpdateCanary.self, from: data))?.version
   try? FileManager.default.removeItem(at: url)
   return version
+}
+
+/// Release B2 (D9) — the tape index, read from where the last read stopped.
+///
+/// `currentLevels()` used to call `IndexLog.read` on the whole of `tape.idx` every 1.5 s. A
+/// checkpoint lands every 1.25 s, so by the end of a seven-hour clinic day that is some twenty
+/// thousand records decoded to find the last one, a thousand times an hour. This keeps an offset
+/// and decodes only the complete lines appended since.
+///
+/// ─── THE SAME OUTPUT, FOR EVERY INDEX TAPEWRITER WRITES ─────────────────────────────────────
+/// `lastRMS` is the latest record carrying an `rms` — what `records.reversed().compactMap(\.rms)
+/// .first` gave — and `lastPeak` / `lastZeroRatio` the same for the two B2 fields. A half-written
+/// last line is left for the next read, exactly as `IndexLog.read` ignores an uncommitted tail.
+/// One difference, on an index tapewriter never writes: a line that does not decode is skipped
+/// here, where the whole-file read validated every line and returned nothing at all.
+///
+/// ─── AN OFFSET NEVER CROSSES FROM ONE FILE TO ANOTHER ──────────────────────────────────────
+/// Before reading on, it checks that the file is still the one it was reading: the same inode,
+/// at least as long as what was consumed, and holding, just before the offset, the exact bytes of
+/// the last line consumed. Any of those failing — rotated, truncated, rewritten in place — starts
+/// again from the top. A missing file forgets everything, so nothing reports a dead file's numbers.
+final class TapeIndexTail {
+  let url: URL
+  private(set) var lastSamples: Int64?
+  private(set) var lastRMS: Double?
+  private(set) var lastPeak: Double?
+  private(set) var lastZeroRatio: Double?
+  /// Records decoded over this reader's life. The D9 test counts it; nothing else reads it.
+  private(set) var decodedRecordCount = 0
+
+  /// Bytes of complete lines consumed so far.
+  private var consumed: UInt64 = 0
+  /// The last complete line consumed, newline included: the anchor the next read checks.
+  private var anchor = Data()
+  private var fileNumber: UInt64?
+
+  init(url: URL) { self.url = url }
+
+  func refresh() {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      attributes[.type] as? FileAttributeType == .typeRegular,
+      let size = (attributes[.size] as? NSNumber)?.uint64Value
+    else {
+      forget()
+      return
+    }
+    let number = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+    if number != fileNumber || size < consumed {
+      forget()
+      fileNumber = number
+    }
+    guard size > consumed, let handle = try? FileHandle(forReadingFrom: url) else { return }
+    defer { try? handle.close() }
+
+    // Read from the start of the anchor, so the same read both proves the file is the one this
+    // offset belongs to and fetches what follows it.
+    let start = consumed - UInt64(anchor.count)
+    guard (try? handle.seek(toOffset: start)) != nil,
+      var data = try? handle.readToEnd()
+    else { return }
+    if !anchor.isEmpty {
+      guard data.starts(with: anchor) else {
+        // Same inode, long enough, different bytes: rewritten in place. Start again.
+        forget()
+        fileNumber = number
+        refresh()
+        return
+      }
+      data.removeFirst(anchor.count)
+    }
+    // Only complete lines. A partial last line is still being written and is read next time.
+    guard let lastNewline = data.lastIndex(of: 0x0A) else { return }
+    let committed = data[data.startIndex...lastNewline]
+    consumed += UInt64(committed.count)
+
+    let decoder = JSONDecoder()
+    var lineStart = committed.startIndex
+    var lastLineStart = committed.startIndex
+    for index in committed.indices where committed[index] == 0x0A {
+      let line = committed[lineStart..<index]
+      if !line.isEmpty, let record = try? decoder.decode(IndexRecord.self, from: Data(line)) {
+        decodedRecordCount += 1
+        if let samples = record.samples { lastSamples = samples }
+        if let rms = record.rms { lastRMS = rms }
+        if let peak = record.peak { lastPeak = peak }
+        if let zeroRatio = record.zeroRatio { lastZeroRatio = zeroRatio }
+      }
+      lastLineStart = lineStart
+      lineStart = committed.index(after: index)
+    }
+    anchor = Data(committed[lastLineStart...lastNewline])
+  }
+
+  private func forget() {
+    consumed = 0
+    anchor = Data()
+    fileNumber = nil
+    lastSamples = nil
+    lastRMS = nil
+    lastPeak = nil
+    lastZeroRatio = nil
+  }
+}
+
+extension RoomEngine {
+  /// Release B2 (D8) — the durable sample index of a plain capture, IN SAMPLES whichever way it
+  /// is found: the last indexed record's `samples` when the index has one, and the piece cursor
+  /// (also samples) when nothing is durable yet. Before 0.1.20 the first branch returned the
+  /// index file's byte length, and `tapeIsAdvancing` compared the two across polls.
+  static func durableSampleIndex(tail: TapeIndexTail, cursor: Int64) -> Int64 {
+    tail.refresh()
+    return tail.lastSamples ?? cursor
+  }
 }
 
 private func regularFileSizeIfPresent(_ url: URL) throws -> Int64? {

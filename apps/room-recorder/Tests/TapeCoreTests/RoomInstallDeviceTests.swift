@@ -44,6 +44,132 @@ import Testing
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Release B2 — peak, exact-zero ratio (D7) and the input-device list (D10)
+  // -------------------------------------------------------------------------
+
+  static func query(_ fields: InstallPollFields) -> [String: String] {
+    Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
+  }
+
+  @Test func peakAndZeroRatioRideThePollUnderExactlyThoseNames() {
+    let measured = Self.query(
+      InstallPollFields(
+        installID: "install_1", tapeAdvancing: true, peak: 0.8123, zeroRatio: 0.4576))
+    #expect(measured["peak"] == "0.8123")
+    #expect(measured["zero_ratio"] == "0.4576")
+    // The bench-listener level pair keeps its own names; these are not those.
+    #expect(measured["mic_peak"] == nil)
+
+    // Not measured, or not a 0–1 number: ABSENT, so the server's COALESCE keeps the last reading.
+    // A clamped 1.0 would be indistinguishable from a real full-scale peak.
+    for bad in [nil, -0.01, 1.01, .nan, .infinity] as [Double?] {
+      let items = Self.query(
+        InstallPollFields(installID: "install_1", tapeAdvancing: true, peak: bad, zeroRatio: bad))
+      #expect(items["peak"] == nil, "peak \(String(describing: bad))")
+      #expect(items["zero_ratio"] == nil, "zero_ratio \(String(describing: bad))")
+    }
+  }
+
+  /// What the server stores, decoded back out of the query string.
+  struct SentDevice: Decodable, Equatable {
+    let name: String
+    let uid: String
+    let is_default: Bool
+  }
+
+  static func sentDevices(_ fields: InstallPollFields) throws -> [SentDevice]? {
+    guard let json = query(fields)["input_devices"] else { return nil }
+    return try JSONDecoder().decode([SentDevice].self, from: Data(json.utf8))
+  }
+
+  @Test func theInputDeviceListIsSentWithTheDefaultMarked() throws {
+    // OPD 7 has both a TONOR and a C270 attached, and until 0.1.20 nobody could see which was
+    // live without SSH.
+    let tonor = "AppleUSBAudioEngine:TONOR:TONOR TM20 Audio Device:20200918:1"
+    let fields = InstallPollFields(
+      installID: "install_1", tapeAdvancing: true,
+      inputDevices: [
+        AudioInputDeviceEntry(name: "TONOR TM20 Audio Device", uid: tonor, isDefault: true),
+        AudioInputDeviceEntry(
+          name: "C270 HD WEBCAM", uid: "AppleUSBAudioEngine:Unknown:C270:1", isDefault: false),
+      ])
+    let sent = try #require(try Self.sentDevices(fields))
+    #expect(
+      sent == [
+        SentDevice(name: "TONOR TM20 Audio Device", uid: tonor, is_default: true),
+        SentDevice(name: "C270 HD WEBCAM", uid: "AppleUSBAudioEngine:Unknown:C270:1", is_default: false),
+      ])
+    // Beside the existing field, not instead of it.
+    #expect(
+      Self.query(
+        InstallPollFields(
+          installID: "install_1", tapeAdvancing: true, inputDeviceName: "TONOR TM20 Audio Device",
+          inputDevices: fields.inputDevices))["input_device_name"] == "TONOR TM20 Audio Device")
+
+    // Could not ask CoreAudio: absent. No devices at all: an honest empty list.
+    #expect(try Self.sentDevices(InstallPollFields(installID: "install_1", tapeAdvancing: true)) == nil)
+    #expect(
+      try Self.sentDevices(
+        InstallPollFields(installID: "install_1", tapeAdvancing: true, inputDevices: [])) == [])
+  }
+
+  @Test func theInputDeviceListDropsWhatTheServerWouldRejectAndCapsAtSixteen() throws {
+    // `cleanInputDevices` (lib/room-install.ts) throws the WHOLE list away for one bad entry, and
+    // measures in UTF-16 units after trimming. The app drops the bad entry instead, by the same
+    // measure, so one odd aggregate device cannot blank a room's list.
+    func device(_ name: String, _ uid: String, _ isDefault: Bool = false) -> AudioInputDeviceEntry {
+      AudioInputDeviceEntry(name: name, uid: uid, isDefault: isDefault)
+    }
+    let emoji64 = String(repeating: "🎙", count: 64)  // 64 characters, 128 UTF-16 units
+    let emoji65 = String(repeating: "🎙", count: 65)  // 65 characters, 130 UTF-16 units
+    let fields = InstallPollFields(
+      installID: "install_1", tapeAdvancing: true,
+      inputDevices: [
+        device("Good", "uid-good", true),
+        device("  ", "uid-blank-name"),
+        device("No uid", " "),
+        device(emoji64, "uid-emoji-64"),
+        device(emoji65, "uid-emoji-65"),
+        device("Long uid", String(repeating: "u", count: 257)),
+        device("Longest uid", String(repeating: "u", count: 256)),
+        device("A second default", "uid-second-default", true),
+        device("  Padded  ", "  uid-padded  "),
+      ])
+    let sent = try #require(try Self.sentDevices(fields))
+    #expect(
+      sent.map(\.uid) == [
+        "uid-good", "uid-emoji-64", String(repeating: "u", count: 256), "uid-padded",
+      ])
+    #expect(sent.map(\.name).contains(emoji64))
+    #expect(sent.filter(\.is_default).count == 1)
+    #expect(sent.first { $0.uid == "uid-padded" }?.name == "Padded")
+
+    // Never more than sixteen.
+    let many = InstallPollFields(
+      installID: "install_1", tapeAdvancing: true,
+      inputDevices: (0..<20).map { device("Mic \($0)", "uid-\($0)", $0 == 0) })
+    let capped = try #require(try Self.sentDevices(many))
+    #expect(capped.count == 16)
+    #expect(capped.map(\.uid) == (0..<16).map { "uid-\($0)" })
+
+    // Devices were reported and every one was unusable: absent, NOT an empty list — "no input
+    // devices" would be a claim the machine never made.
+    let allBad = InstallPollFields(
+      installID: "install_1", tapeAdvancing: true, inputDevices: [device(" ", "uid")])
+    #expect(try Self.sentDevices(allBad) == nil)
+  }
+
+  @Test func factsCarryTheDeviceListIntoThePoll() {
+    let list = [AudioInputDeviceEntry(name: "MacBook Air Microphone", uid: "BuiltIn", isDefault: true)]
+    let facts = MachineFacts(
+      micState: "authorized", neverSleep: true, launchedBy: "launchd", launchAgentLoaded: true,
+      hostname: "mini", hardwareModel: "Mac mini", osVersion: "macOS 15.0",
+      inputDeviceName: "MacBook Air Microphone", inputDevices: list)
+    let fields = InstallPollFields(installID: "install_1", facts: facts, tapeAdvancing: true)
+    #expect(fields.inputDevices == list)
+  }
+
   @Test func factsCarryTheDeviceNameIntoThePoll() {
     let facts = MachineFacts(
       micState: "authorized",
