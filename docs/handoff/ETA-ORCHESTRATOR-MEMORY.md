@@ -108,3 +108,21 @@ Verdicts, design decisions and sign-off are never delegated.
     fresh `curl … | bash` → `sleep 12` + check line (new install id, `channel=stable`, `app=`, `-rw-------` file, `microphone
     authorized`) → `scribe_start_recording`. Each paste mints a new install id and retires the old row; card hygiene is B2's.
     Rule 19 and the partition-step runbook are obsolete for the 0.1.18 line.
+
+## Rules added 11 Sep 2026, evening (B2 day). Rule 19 is RETIRED — 0.1.17+ enrol writes the session file only.
+
+27. **A session end only re-checked an update that had already been deferred (0.1.19 and earlier).** A release published mid-recording
+    waited for the 6 h timer; stopping five tapes at 11:42Z fired nothing. The rollout move is stop tape via MCP → `launchctl kickstart -k
+    gui/$(id -u)/com.evenscribe.room-recorder` over SSH → start tape via MCP (≈ 60 s gap, canary ack 2 s every time, ×12 today).
+    0.1.20 (B2-D2) checks at every session end; the kickstart walk stays the deterministic path.
+28. **The partition step accepts the password over SSH when typed at its own prompt.** 0.1.18's "refused" was type-ahead: `cd` and
+    `unlock-keychain` lines pasted before the ssh password prompt are eaten by it. Paste one command at a time after login; `exit=0` ends it.
+29. **A `kill` in the swap script's `sleep 3` rescues with the resident still in place** — no `.previous` restore, no receipt. Item 6 live
+    can only land between the two moves (microseconds); the FIFO test is the proof, waived live.
+30. **Vercel promote runs from the dashboard.** No CLI on the Mini, no token in `.env.local`. A Sonnet browser agent in the Cowork browser
+    (signed in) promotes the named preview; verify with `/api/health` sha and `scribe_system_map` `health.sha`. Run 0079-style migrations
+    from the preview URL's `/api/run-migrations` BEFORE promoting (Builder's order, 11 Sep 18:10).
+31. **Every Claude Code paste names its tmux window and says whether to `/clear`.** Two sessions on the Mini: `scribe` = Builder, `scribe2` =
+    Refuter; the Refuter is never the session that built the diff. Pastes go in one fenced code block (V, 11 Sep 17:50).
+32. **Rule 2 bit again on B2-A:** `TapeCore/TapeFormat.swift` was on neither list and the Builder stopped correctly. Walk the data path
+    through every module the poll field touches — writer → index format → reader → poll → route → row → card — before naming the contract.
