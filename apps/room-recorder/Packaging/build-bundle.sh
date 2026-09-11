@@ -228,7 +228,7 @@ say "Signing the bundle"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier "$BUNDLE_ID" --sign "$SIGNING_IDENTITY" "$APP"
 
-# ─── Verify, pinned to our anchor ────────────────────────────────────────────────────────────
+# ─── Verify, pinned to our leaf ──────────────────────────────────────────────────────────────
 # The same requirement string R3 uses. Verified 8 Sep to discriminate: pinned to a different leaf
 # it fails, so this is a check and not a formality.
 say "Verifying"
