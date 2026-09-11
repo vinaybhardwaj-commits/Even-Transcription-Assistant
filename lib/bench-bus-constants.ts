@@ -23,6 +23,16 @@ export const LISTENER_FRESH_MS = 10_000; // last_poll_at within 10 s = listening
 export const LISTENER_OFFLINE_MS = 10 * 60_000;
 export const ACK_WAIT_MS = 8_000; // MCP tools wait this long for the kiosk ack (PRD §8.2)
 export const ACK_POLL_MS = 400;
+/**
+ * Tier 1 §3. `report_diag` runs two helper processes and reads a log tail before it can answer, so
+ * it gets its own wait. EVERY OTHER KIND KEEPS ACK_WAIT_MS, unchanged: this is a second number for
+ * one kind, not a longer wait for all of them.
+ */
+export const REPORT_DIAG_ACK_WAIT_MS = 20_000;
+/** PURE — how long a caller waits for this kind's ack. */
+export function ackWaitMsFor(kind: string): number {
+  return kind === "report_diag" ? REPORT_DIAG_ACK_WAIT_MS : ACK_WAIT_MS;
+}
 // S4-2: the kiosk poll cadence, moved here UNCHANGED from lib/use-command-poll.ts (which
 // re-exports them) so the handover probe can be DERIVED from the hidden round instead of a
 // number typed twice.

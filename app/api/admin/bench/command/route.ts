@@ -1,7 +1,9 @@
 /**
  * POST /api/admin/bench/command — the monitor's ONLY write.
  *
- * Queues one kiosk command (start_day | pause_day | resume_day | end_day) on the existing bus.
+ * Queues one kiosk command (start_day | pause_day | resume_day | end_day) on the existing bus, and
+ * since Tier 1 §3 one of the native app's three verbs (check_update_now | report_diag |
+ * restart_engine), zod-validated and refused below app 0.1.22.
  * It does not talk to a kiosk, does not touch bench_session, and does not decide anything on its
  * own: `start` is put through decideStart from lib/bench-commands.ts, which is the same function
  * scribe_start_recording uses. A second implementation of that decision is how the admin surface
@@ -27,14 +29,20 @@ import { sql } from "@/lib/db";
 import {
   COMMAND_KINDS,
   BusError,
+  CommandArgsError,
+  ackWaitMsFor,
   classifyBusError,
   decideStart,
   findActiveSession,
   getListener,
   insertCommand,
+  isTier1Verb,
+  parseVerbArgs,
+  verbRefusal,
   type CommandKind,
 } from "@/lib/bench-commands";
 import { closeOrphanedSession, CLOSE_ORPHAN_KIND } from "@/lib/bench-orphan";
+import { boundInstallForRoom } from "@/lib/room-install";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -145,6 +153,30 @@ export async function POST(req: Request) {
       const id = await insertCommand({ roomId, kind, args: decision.args ?? undefined, source: "admin" });
       await auditCommand(adminId, roomId, kind, overridePause, { queued: true, command_id: id });
       return NextResponse.json({ ok: true, command_id: id, kind, room_id: roomId, queued: true }, noStore);
+    }
+
+    // ---- Tier 1 §3: check_update_now | report_diag | restart_engine ------------------------
+    // Args through the zod schemas in lib/bench-commands.ts (400 bad_args, nothing inserted), then
+    // D11's floor for 0.1.22 against the room's bound Mac (409 APP_TOO_OLD, nothing inserted — a
+    // room with no bound Mac is refused the same way, since a browser kiosk cannot run these).
+    // Queued, not waited on, like pause / resume / end: the ack lands in `bench_command.result`.
+    if (isTier1Verb(kind)) {
+      let args: Record<string, unknown> | null;
+      try {
+        args = parseVerbArgs(kind, body.args);
+      } catch (e) {
+        if (e instanceof CommandArgsError) return fail(400, "bad_args", { detail: e.reason });
+        throw e;
+      }
+      const bound = await boundInstallForRoom(roomId);
+      const tooOld = verbRefusal(kind, bound?.app_version ?? null);
+      if (tooOld) return fail(409, tooOld.code, { message: tooOld.message, app_version: tooOld.app_version });
+      const id = await insertCommand({ roomId, kind, args: args ?? undefined, source: "admin" });
+      await auditCommand(adminId, roomId, kind, overridePause, { queued: true, command_id: id, ...(args ? { args } : {}) });
+      return NextResponse.json(
+        { ok: true, command_id: id, kind, room_id: roomId, queued: true, ack_wait_ms: ackWaitMsFor(kind) },
+        noStore,
+      );
     }
 
     // pause / resume / end carry no pre-check: the kiosk is the authority on its own tape, and

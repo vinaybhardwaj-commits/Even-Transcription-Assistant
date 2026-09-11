@@ -17,6 +17,7 @@
 
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
+import { z } from "zod";
 import { parseMicLevels, type MicLevels } from "@/lib/bench-levels";
 import { applyInstallPoll, INPUT_DEVICE_UID_MAX, type InstallPollFields } from "@/lib/room-install";
 
@@ -25,8 +26,58 @@ import { applyInstallPoll, INPUT_DEVICE_UID_MAX, type InstallPollFields } from "
  * 0080's CHECK, and the app's `BenchCommandKind`. The browser kiosk ignores it (R4-D7) — the native
  * app owns audio — so a room listening from a browser never acks it and the caller sees a timeout.
  */
-export const COMMAND_KINDS = ["start_day", "pause_day", "resume_day", "end_day", "set_audio_input"] as const;
+export const COMMAND_KINDS = [
+  "start_day",
+  "pause_day",
+  "resume_day",
+  "end_day",
+  "set_audio_input",
+  "check_update_now",
+  "report_diag",
+  "restart_engine",
+] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
+
+/**
+ * Tier 1 §3 — the three operator verbs, in lock-step with migration 0081's CHECK and the app's
+ * `BenchCommandKind`. Like `set_audio_input` they are the NATIVE app's alone: the browser kiosk
+ * ignores them without acking (R4-D7), and the server refuses them below 0.1.22.
+ */
+export const TIER1_VERBS = ["check_update_now", "report_diag", "restart_engine"] as const;
+export type Tier1Verb = (typeof TIER1_VERBS)[number];
+export const isTier1Verb = (k: unknown): k is Tier1Verb => (TIER1_VERBS as readonly unknown[]).includes(k);
+
+/** Tier 1 §3. How many log lines `report_diag` may ask for. The app's default is 100. */
+export const REPORT_DIAG_MAX_LINES = 500;
+
+/**
+ * Tier 1 §3 — the args each verb takes, STRICT, for the reason `parseSetAudioInputArgs` gives: the
+ * app acts on a Mac with a patient in the room, so an unknown key is refused rather than ignored.
+ * Absent and `null` are the same thing; `{}` is "no options" for the two that take options.
+ */
+const VERB_ARGS = {
+  check_update_now: z.null(),
+  report_diag: z
+    .object({ log_lines: z.number().int().min(0).max(REPORT_DIAG_MAX_LINES).optional() })
+    .strict()
+    .nullable(),
+  restart_engine: z.object({ force: z.boolean().optional() }).strict().nullable(),
+} satisfies Record<Tier1Verb, z.ZodTypeAny>;
+
+/**
+ * PURE — a verb's args, or a CommandArgsError. The admin route, the MCP tool and `insertCommand` all
+ * call it, so no path onto the bus can skip it. Returns what is stored: null for no options.
+ */
+export function parseVerbArgs(kind: Tier1Verb, raw: unknown): Record<string, unknown> | null {
+  const parsed = VERB_ARGS[kind].safeParse(raw === undefined ? null : raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.length ? `${issue.path.join(".")}: ` : "";
+    throw new CommandArgsError(`${kind} ${where}${(issue?.message ?? "invalid args").slice(0, 120)}`);
+  }
+  const out = parsed.data as Record<string, unknown> | null;
+  return out && Object.keys(out).length > 0 ? out : null;
+}
 
 /** R4-D1. At least one of the two; the app applies whichever is present. */
 export type SetAudioInputArgs = { device_uid?: string; input_volume?: number };
@@ -115,8 +166,50 @@ export function audioInputRefusal(appVersion: string | null | undefined): AppToo
   };
 }
 
-/** R4-D12. What a 0.1.21 app says it applied, carried into `bench_command.result`. */
-export type AckApplied = { applied_device_uid?: string; applied_input_volume?: number; input_volume_settable?: boolean };
+/**
+ * Tier 1 §3 — the floor for the three verbs, D11's rule for them: an app below it cannot decode the
+ * kind (0.1.21 acks it `unsupported_kind`; anything older fails the poll), so the route and the tool
+ * refuse before inserting.
+ */
+export const VERBS_MIN_APP_VERSION = "0.1.22";
+
+/** PURE — Tier 1 §3. Null when the bound install may receive `kind`; else the one error object. */
+export function verbRefusal(kind: Tier1Verb, appVersion: string | null | undefined): AppTooOld | null {
+  if (appVersionAtLeast(appVersion, VERBS_MIN_APP_VERSION)) return null;
+  const reported = typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : null;
+  return {
+    code: "APP_TOO_OLD",
+    message: `this room's app reports ${reported ?? "no version"}; ${kind} needs ${VERBS_MIN_APP_VERSION} or later`,
+    app_version: reported,
+  };
+}
+
+/**
+ * R4-D12. What a 0.1.21 app says it applied, carried into `bench_command.result`.
+ * Tier 1 §3 adds the three verbs' results: `check_update_now` {checked_at, offered_version?, deferred,
+ * held?}, `restart_engine` {restarting}, `report_diag` {diag}.
+ */
+export type AckApplied = {
+  applied_device_uid?: string;
+  applied_input_volume?: number;
+  input_volume_settable?: boolean;
+  checked_at?: string;
+  offered_version?: string;
+  deferred?: boolean;
+  held?: boolean;
+  restarting?: boolean;
+  diag?: Record<string, unknown>;
+};
+
+/** Tier 1 §3. The largest `report_diag` payload stored, as JSON text. 500 lines of 300 fit twice. */
+export const DIAG_MAX_CHARS = 262_144;
+
+/**
+ * Tier 1 §3 — words a diagnostic payload must never contain. The app strips the session and redacts
+ * any log line carrying one of these; this is the server's second look, and a payload that still
+ * carries one is NOT STORED (`diag_withheld`), because `result` is readable by every operator door.
+ */
+export const DIAG_FORBIDDEN = ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN"] as const;
 
 /**
  * PURE — R4-D12. The three applied fields of an ack body, each validated on its own and DROPPED if
@@ -133,11 +226,36 @@ export function cleanAckApplied(body: unknown): AckApplied {
   const v = o.applied_input_volume;
   if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1) out.applied_input_volume = v;
   if (typeof o.input_volume_settable === "boolean") out.input_volume_settable = o.input_volume_settable;
+  // ── Tier 1 §3. Same rule: each field on its own, dropped if malformed, never a refusal. ──────
+  if (typeof o.checked_at === "string" && o.checked_at.length <= 40 && Number.isFinite(Date.parse(o.checked_at))) {
+    out.checked_at = new Date(Date.parse(o.checked_at)).toISOString();
+  }
+  if (typeof o.offered_version === "string" && /^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$/.test(o.offered_version) && o.offered_version.length <= 64) {
+    out.offered_version = o.offered_version;
+  }
+  if (typeof o.deferred === "boolean") out.deferred = o.deferred;
+  if (typeof o.held === "boolean") out.held = o.held;
+  if (typeof o.restarting === "boolean") out.restarting = o.restarting;
+  if (o.diag && typeof o.diag === "object" && !Array.isArray(o.diag)) {
+    let text = "";
+    try {
+      text = JSON.stringify(o.diag);
+    } catch {
+      text = "";
+    }
+    if (text && text.length <= DIAG_MAX_CHARS) {
+      if (DIAG_FORBIDDEN.some((w) => text.includes(w))) {
+        out.diag = { diag_withheld: "the payload named a secret and was not stored" };
+      } else {
+        out.diag = o.diag as Record<string, unknown>;
+      }
+    }
+  }
   return out;
 }
 // S3-2: the timing constants live in the pure lib/bench-bus-constants.ts (kiosk-bundle safe);
 // re-exported here so every existing caller keeps working unchanged.
-export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
+export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS, REPORT_DIAG_ACK_WAIT_MS, ackWaitMsFor } from "./bench-bus-constants";
 import { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
 
 const cmdId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
@@ -259,7 +377,7 @@ export type PollResult =
       now: string;
       commands: PendingCommand[];
       /** B2-D5. Native polls only — from applyInstallPoll's own RETURNING, no extra read. */
-      assigned_channel?: "stable" | null;
+      assigned_channel?: "stable" | "test" | null;
     };
 
 /**
@@ -277,7 +395,7 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // THE BROWSER KIOSK NEVER ENTERS THIS BLOCK. `install` is undefined on every poll it sends.
     // B2-D5: what the install row's UPDATE returned, carried to the response. Null on any fault —
     // "nothing assigned" leaves the Mac on the channel its own config.json names.
-    let assignedChannel: "stable" | null = null;
+    let assignedChannel: "stable" | "test" | null = null;
     if (input.install?.install_id) {
       let applied: Awaited<ReturnType<typeof applyInstallPoll>> | null = null;
       try {
@@ -520,8 +638,14 @@ export function isListening(l: ListenerRow | null, now: Date = new Date()): bool
 
 export async function insertCommand(input: { roomId: string; kind: CommandKind; args?: unknown; source?: string }): Promise<string> {
   // R4-S item 2. Validated OUTSIDE `guarded`, so the throw stays a CommandArgsError and no SQL runs.
-  // The four existing kinds are not validated here, exactly as before.
-  const checked = input.kind === "set_audio_input" ? parseSetAudioInputArgs(input.args) : input.args;
+  // The four existing kinds are not validated here, exactly as before. Tier 1 §3: the three verbs
+  // are, by the same zod schemas the route and the tool use.
+  const checked =
+    input.kind === "set_audio_input"
+      ? parseSetAudioInputArgs(input.args)
+      : isTier1Verb(input.kind)
+        ? parseVerbArgs(input.kind, input.args)
+        : input.args;
   return guarded(async () => {
     const id = newCommandId();
     const args = checked === undefined || checked === null ? null : JSON.stringify(checked);

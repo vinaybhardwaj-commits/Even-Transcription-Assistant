@@ -793,15 +793,25 @@ export type InstallPollFields = {
   input_volume?: string | number | null;
   /** R4-D4. Whether that volume can be set from software. */
   input_volume_settable?: boolean | null;
+  // ── Tier 1 §3 (0081). Sent by 0.1.22 and later; every earlier app omits all three. ──────────
+  /** Full-scale samples counted since the previous poll. */
+  clip_count?: string | number | null;
+  /** Milliseconds since the last sample above −55 dBFS. */
+  silence_ms?: string | number | null;
+  /** The Mac's config.json pins its channel; it ignores `assigned_channel`. */
+  channel_locked?: boolean | null;
 };
 
 /**
  * `assigned_channel` rides back on the poll's own UPDATE (B2-D5), AFTER that UPDATE — so a poll that
- * just reported `stable` and cleared the assignment is told null on the same round trip.
+ * just reported the assigned channel and cleared the assignment is told null on the same round trip.
  */
 export type InstallPollResult =
-  | { ok: true; assigned_channel: "stable" | null }
+  | { ok: true; assigned_channel: "stable" | "test" | null }
   | { ok: false; code: "RETIRED" | "NOT_FOUND" };
+
+/** Tier 1 §3 bounds. A poll interval is 1.5 s of 16 kHz audio; the bound is far above that. */
+export const CLIP_COUNT_MAX = 10_000_000;
 
 const MIC_STATES = new Set(["authorized", "denied", "not_determined", "unknown"]);
 
@@ -845,6 +855,9 @@ export function cleanPollFields(raw: InstallPollFields): {
   input_devices: string | null;
   input_volume: number | null;
   input_volume_settable: boolean | null;
+  clip_count: number | null;
+  silence_ms: number | null;
+  channel_locked: boolean | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -912,7 +925,21 @@ export function cleanPollFields(raw: InstallPollFields): {
     // read as a device turned fully up that nobody measured.
     input_volume: unitRatio(raw.input_volume),
     input_volume_settable: typeof raw.input_volume_settable === "boolean" ? raw.input_volume_settable : null,
+    // ── Tier 1 §3 ──────────────────────────────────────────────────────────────────────────
+    // Whole non-negative numbers or nothing, the disk rule: a malformed count is "not reported",
+    // never a 0 that would read as "no clipping" or "sound just now".
+    clip_count: wholeNumber(raw.clip_count, CLIP_COUNT_MAX),
+    silence_ms: wholeNumber(raw.silence_ms, Number.MAX_SAFE_INTEGER),
+    channel_locked: typeof raw.channel_locked === "boolean" ? raw.channel_locked : null,
   };
+}
+
+/** PURE — Tier 1 §3. A whole number in 0..max, as digits or a number, or null. */
+export function wholeNumber(v: unknown, max: number): number | null {
+  const s = typeof v === "number" ? (Number.isSafeInteger(v) ? String(v) : "") : typeof v === "string" ? v.trim() : "";
+  if (!/^[0-9]{1,16}$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) && n <= max ? n : null;
 }
 
 /**
@@ -1104,6 +1131,10 @@ export async function applyInstallPoll(
     zero_ratio: f.zero_ratio,
     tape_advancing: f.tape_advancing,
     rec: recording,
+    // Tier 1 §3 — the 0.1.22 heartbeat, on the entry only when this poll carried it, so a 0.1.21
+    // entry reads exactly as it did and the rules fall back to peak / zero_ratio for it.
+    ...(f.clip_count !== null ? { clip_count: f.clip_count } : {}),
+    ...(f.silence_ms !== null ? { silence_ms: f.silence_ms } : {}),
   });
   const silentNow = pollIsSilent({ rec: recording, tape_advancing: f.tape_advancing, zero_ratio: f.zero_ratio });
   try {
@@ -1158,11 +1189,17 @@ export async function applyInstallPoll(
              -- must leave a newer app's last reading where it was. FALSE is a value and is written.
              input_volume          = COALESCE(${f.input_volume}::real, input_volume),
              input_volume_settable = COALESCE(${f.input_volume_settable}::boolean, input_volume_settable),
-             -- B2-D5, orchestrator fix-up ruling 3. THE ASSIGNMENT CLEARS ITSELF the moment the Mac
-             -- reports stable of its own accord: it has done what it was told, and a value left
-             -- standing would drag it back off test after a later hand move — undoing the one move
-             -- R3-8 reserves for a person at the Mac. A poll that omits the channel clears nothing.
-             assigned_channel   = CASE WHEN ${f.update_channel}::text = 'stable' THEN NULL ELSE assigned_channel END,
+             -- Tier 1 §3 (0081). The 0.1.22 heartbeat, COALESCEd like every measurement.
+             clip_count         = COALESCE(${f.clip_count}::integer, clip_count),
+             silence_ms         = COALESCE(${f.silence_ms}::bigint, silence_ms),
+             channel_locked     = COALESCE(${f.channel_locked}::boolean, channel_locked),
+             -- B2-D5, orchestrator fix-up ruling 3, generalised by Tier 1 §3. THE ASSIGNMENT CLEARS
+             -- ITSELF the moment the Mac reports the ASSIGNED channel of its own accord: it has done
+             -- what it was told, and a value left standing would drag it back after a later hand move.
+             -- Before Tier 1 the only assignable value was stable, so this is the same rule; now that
+             -- test is assignable, a stable Mac reporting stable must NOT clear a test assignment it
+             -- has not yet applied. A poll that omits the channel clears nothing.
+             assigned_channel   = CASE WHEN ${f.update_channel}::text = assigned_channel THEN NULL ELSE assigned_channel END,
              -- Tier 1 §2 (0081). Adopted while NULL: this poll's name, else the name the row holds.
              expected_device_name = COALESCE(expected_device_name, ${f.input_device_name}::text, input_device_name),
              -- Tier 1 §2 (0081). This poll at the head, the previous ring behind it, cut to the ring
@@ -1193,8 +1230,9 @@ export async function applyInstallPoll(
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {
-      await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, now });
-      return { ok: true, assigned_channel: rows[0]!.assigned_channel === "stable" ? "stable" : null };
+      await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, silenceMs: f.silence_ms, now });
+      const assigned = rows[0]!.assigned_channel;
+      return { ok: true, assigned_channel: assigned === "stable" || assigned === "test" ? assigned : null };
     }
 
     // Nothing updated: either the row is retired, or there is no such install. Distinguished
@@ -1235,7 +1273,8 @@ function normaliseInstall(r: InstallView): InstallView {
         : Number(r.disk_free_bytes),
     // Release B2 (0079). `real` can arrive as a string from some drivers; jsonb normally arrives
     // parsed, but a string is parsed here rather than rendered as one. Anything else is null.
-    assigned_channel: r.assigned_channel === "stable" ? "stable" : null,
+    // Tier 1 §3: `test` is an assignment too. Anything else is nothing assigned.
+    assigned_channel: r.assigned_channel === "stable" || r.assigned_channel === "test" ? r.assigned_channel : null,
     peak: r.peak === null || r.peak === undefined ? null : Number(r.peak),
     zero_ratio: r.zero_ratio === null || r.zero_ratio === undefined ? null : Number(r.zero_ratio),
     input_devices: (() => {
@@ -1260,6 +1299,8 @@ function normaliseInstall(r: InstallView): InstallView {
       r.state_flags === null || r.state_flags === undefined ? null : installStateFlags(r.state_flags as unknown),
     state_changed_at: iso(r.state_changed_at ?? null),
     expected_device_name: r.expected_device_name ?? null,
+    // Tier 1 §3 (0081). A boolean or nothing — NULL is every app below 0.1.22.
+    channel_locked: typeof r.channel_locked === "boolean" ? r.channel_locked : null,
   };
 }
 
@@ -1322,7 +1363,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
              last_update_error, last_update_at, disk_free_bytes,
              assigned_channel, peak, zero_ratio, input_devices,
              input_volume, input_volume_settable,
-             state_flags, state_changed_at, expected_device_name
+             state_flags, state_changed_at, expected_device_name, channel_locked
           FROM room_install
          ORDER BY created_at DESC
          LIMIT 500
@@ -1387,21 +1428,23 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
 // ---------------------------------------------------------------------------
 
 /**
- * Assign `stable` to one install. ONE-WAY by type and by the 0079 CHECK: there is no way to pass
- * `test` here, and the column would refuse it if there were. Null when the install is unknown or
- * retired — the route answers 404 for both, as the retire route does.
+ * Assign a channel to one install. B2 made this one-way (`stable` only); Tier 1 §3 (D1 amended)
+ * admits `test` as well, and 0081's CHECK admits exactly those two. It moves nothing by itself: the
+ * poll carries it back, a 0.1.22 app applies it unless its config.json locks the channel, and a
+ * 0.1.21 app applies only `stable`. Null when the install is unknown or retired — the route answers
+ * 404 for both, as the retire route does.
  */
 export async function assignInstallChannel(
   installId: string,
-  channel: "stable",
-): Promise<{ install_id: string; assigned_channel: "stable" } | null> {
+  channel: "stable" | "test",
+): Promise<{ install_id: string; assigned_channel: "stable" | "test" } | null> {
   try {
     const rows = (await sql`
       UPDATE room_install
          SET assigned_channel = ${channel}
        WHERE install_id = ${installId} AND retired_at IS NULL
       RETURNING install_id, assigned_channel
-    `) as Array<{ install_id: string; assigned_channel: "stable" }>;
+    `) as Array<{ install_id: string; assigned_channel: "stable" | "test" }>;
     return rows[0] ?? null;
   } catch (e) {
     throw classifyInstallError(e);

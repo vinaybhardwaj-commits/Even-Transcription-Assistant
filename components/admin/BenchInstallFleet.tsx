@@ -599,6 +599,12 @@ function FleetRowView({
               <Pill tone="bad">{INSTALL_STATE_LABEL[f]}</Pill>
             </span>
           ))}
+          {/* Tier 1 §3. Why an assignment is not taking: the Mac's own config.json pins its channel. */}
+          {view.channel_locked && (
+            <span data-channel-locked>
+              <Pill tone="warn">channel locked</Pill>
+            </span>
+          )}
         </div>
       </td>
 

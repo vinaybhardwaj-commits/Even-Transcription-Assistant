@@ -143,6 +143,7 @@ import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { boundInstallForRoom, InstallError } from "@/lib/room-install";
 import {
   ACK_WAIT_MS,
+  ackWaitMsFor,
   audioInputRefusal,
   BusError,
   classifyBusError,
@@ -152,9 +153,13 @@ import {
   getListener,
   insertCommand,
   isListening,
+  isTier1Verb,
   LISTENER_FRESH_MS,
   listCommands,
   parseSetAudioInputArgs,
+  parseVerbArgs,
+  TIER1_VERBS,
+  verbRefusal,
   waitForAck,
   type CommandKind,
   type ListenerRow,
@@ -625,6 +630,81 @@ const setAudioInput: McpTool = {
       const ctx = { room: roomRef, listener: listenerView(listener, now) };
       if (!isListening(listener, now)) return { ok: false, error: "kiosk_not_listening", ...ctx };
       return await sendAndWait(room, "set_audio_input", cmdArgs, listener);
+    } catch (e) {
+      if (e instanceof InstallError) return { ok: false, error: "install_lookup_failed", detail: e.message.slice(0, 160), room: roomRef };
+      return busErrorResult(e, { room: roomRef });
+    }
+  },
+};
+
+/**
+ * Tier 1 §3 — the MCP door onto the native app's three operator verbs, and the ONE tool Tier 1 adds
+ * here. Args are validated before the room is resolved (bad_args touches nothing), then D11's floor
+ * at 0.1.22, then the listener. NOT sendAndWait: that helper's 8 s and its hint belong to the day
+ * verbs, and `report_diag` waits 20 s. The wait below is sendAndWait's, with the kind's own timeout.
+ */
+const roomCommand: McpTool = {
+  name: "scribe_room_command",
+  description:
+    "Send one of the native Room Recorder's operator verbs to a room (app 0.1.22+) and wait for its ack. kind: check_update_now — run the self-update check now, bypassing the six-hour interval only; it still defers while a session is open (result {checked_at, offered_version?, deferred, held?}); report_diag — the app's version, build sha, config without its session, tapewriter/ffmpeg versions, input devices, free disk, the last N log lines (args {log_lines?: 0..500}, default 100) and the update ledger, in result.diag (waits 20 s); restart_engine — the app acks, then exits for launchd to relaunch it (result {restarting:true}); refused session_open while a session is open unless args {force:true}. Every refusal is ok:false with the app's error name. Refused with error {code:\"APP_TOO_OLD\", app_version} unless the room's bound Mac reports 0.1.22 or later — nothing is inserted. Requires a listener (app polled within 10 s) else kiosk_not_listening. A browser kiosk ignores these kinds.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...ROOM_WRITE_ARGS,
+      kind: { type: "string", enum: [...TIER1_VERBS] },
+      args: { type: "object", description: "report_diag: {log_lines?: integer 0..500}; restart_engine: {force?: boolean}; check_update_now: omit" },
+    },
+    required: ["kind"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) => {
+    const kind = args.kind;
+    if (!isTier1Verb(kind)) return { ok: false, error: "unknown_kind", allowed: [...TIER1_VERBS] };
+    let cmdArgs: Record<string, unknown> | null;
+    try {
+      cmdArgs = parseVerbArgs(kind, args.args);
+    } catch (e) {
+      if (e instanceof CommandArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+      throw e;
+    }
+    const r = await resolveForWrite(args);
+    if ("error" in r) return r.error;
+    const room = r.room;
+    const roomRef = { id: room.id, slug: room.slug, name: room.name };
+    const now = new Date();
+    try {
+      const bound = await boundInstallForRoom(room.id);
+      const tooOld = verbRefusal(kind, bound?.app_version ?? null);
+      if (tooOld) return { ok: false, error: tooOld, room: roomRef };
+      const listener = await getListener(room.id);
+      if (!isListening(listener, now)) return { ok: false, error: "kiosk_not_listening", room: roomRef, listener: listenerView(listener, now) };
+      const timeoutMs = ackWaitMsFor(kind);
+      const insertedAt = Date.now();
+      const commandId = await insertCommand({ roomId: room.id, kind, args: cmdArgs ?? undefined, source: "mcp" });
+      const row = await waitForAck(commandId, { timeoutMs });
+      const base = { room: roomRef, kind, command_id: commandId };
+      if (!row) {
+        let delivered = false;
+        try {
+          const l = await getListener(room.id);
+          delivered = !!l && new Date(l.last_poll_at).getTime() >= insertedAt - 1_000;
+        } catch {
+          /* fall through: not shown to have been delivered */
+        }
+        return delivered
+          ? { ok: false, error: "ack_timeout", ...base, hint: `the app received the command but has not acked within ${timeoutMs / 1000} s — check scribe_list_commands` }
+          : { ok: false, error: "kiosk_not_listening", ...base };
+      }
+      const result = (typeof row.result === "object" && row.result !== null ? row.result : {}) as Record<string, unknown>;
+      return {
+        ok: row.status === "acked",
+        status: row.status,
+        ...base,
+        result,
+        ...(row.error ? { error: row.error } : {}),
+        acked_at: row.acked_at ? new Date(row.acked_at).toISOString() : null,
+      };
     } catch (e) {
       if (e instanceof InstallError) return { ok: false, error: "install_lookup_failed", detail: e.message.slice(0, 160), room: roomRef };
       return busErrorResult(e, { room: roomRef });
@@ -2867,6 +2947,7 @@ export const BENCH_TOOLS: McpTool[] = [
   resumeRecording,
   stopRecording,
   setAudioInput,
+  roomCommand,
   markConsult,
   extractAudio,
   transcribeRange,

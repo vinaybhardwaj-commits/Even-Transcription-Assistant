@@ -109,7 +109,10 @@ describe("A2 — the repair is not a kiosk command", () => {
     expect(CLOSE_ORPHAN_KIND).toBe("close_orphan");
   });
 
-  it("R4-D1: the kiosk vocabulary is the four day verbs plus set_audio_input, and nothing else", () => {
-    expect([...COMMAND_KINDS]).toEqual(["start_day", "pause_day", "resume_day", "end_day", "set_audio_input"]);
+  it("R4-D1: the kiosk vocabulary is the four day verbs plus set_audio_input — and Tier 1's three verbs — and nothing else", () => {
+    expect([...COMMAND_KINDS]).toEqual([
+      "start_day", "pause_day", "resume_day", "end_day", "set_audio_input",
+      "check_update_now", "report_diag", "restart_engine",
+    ]);
   });
 });

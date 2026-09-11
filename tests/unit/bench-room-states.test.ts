@@ -488,7 +488,7 @@ describe("the fleet read carries the flags; the card shows a chip each", () => {
     };
     const fleet = await RI.readFleet(new Date(NOW_MS));
     const sel = calls.find((c) => /FROM room_install ORDER BY created_at DESC/.test(c.text))!;
-    expect(sel.text).toMatch(/input_volume, input_volume_settable, state_flags, state_changed_at, expected_device_name FROM room_install/);
+    expect(sel.text).toMatch(/input_volume, input_volume_settable, state_flags, state_changed_at, expected_device_name, channel_locked FROM room_install/);
     const inst = fleet.rows[0]!.install!;
     expect(inst.state_flags).toEqual(["SILENT_WHILE_RECORDING"]);
     expect(inst.state_changed_at).toBe("2026-09-11T15:00:00.000Z");

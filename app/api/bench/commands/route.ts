@@ -148,6 +148,11 @@ export async function GET(req: NextRequest) {
         // volume outside 0..1; `tri` keeps absent absent, so a 0.1.20 poll writes neither.
         input_volume: sp.get("input_volume"),
         input_volume_settable: tri("input_volume_settable"),
+        // ── Tier 1 §3 (0081). Sent by 0.1.22 and later, all optional. `cleanPollFields` keeps a
+        // whole number or nothing; `tri` keeps an absent lock absent.
+        clip_count: sp.get("clip_count"),
+        silence_ms: sp.get("silence_ms"),
+        channel_locked: tri("channel_locked"),
       }
     : undefined;
 
@@ -162,7 +167,7 @@ export async function GET(req: NextRequest) {
         { status: 409, headers: NO_STORE },
       );
     }
-    // B2-D5. A native poll's `out` carries `assigned_channel` — `stable` or null — straight from the
+    // B2-D5. A native poll's `out` carries `assigned_channel` — `stable`, `test` (Tier 1 §3) or null — straight from the
     // install row's own UPDATE … RETURNING, so it costs no extra read. The browser kiosk's `out`
     // has no such key and its response is exactly what it was. An app that does not know the key
     // ignores it (a keyed decoder reads only the keys it names).

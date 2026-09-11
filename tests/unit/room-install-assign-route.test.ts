@@ -4,9 +4,10 @@
  * ─── THE PROPERTIES ARE NEGATIVE, LIKE THE RELEASE ROUTE'S ────────────────────────────────────
  * This route lets a desk change which builds a clinic Mac takes. So what it refuses matters most:
  *   · no admin cookie and no migration secret → 401, and the database is never touched
- *   · `test`, an empty body, a malformed body → 400 BAD_CHANNEL, and the database is never touched
+ *   · an empty body, a malformed body → 400 BAD_CHANNEL, and the database is never touched
  *   · an unknown or retired install → 404, as the retire route answers
- *   · the only value it can ever write is `stable`
+ *   · the only values it can ever write are `stable` and — since Tier 1 §3 (D1 amended) — `test`;
+ *     the test-channel cases are in room-install-assign-test-channel.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -57,11 +58,12 @@ describe("assign-channel (B2-D5)", () => {
     expect(calls[0]!.values).toEqual(["stable", "install_d3sy3ufas8jv"]);
   });
 
-  it("REFUSES test with 400 — the server never puts a Mac on test", async () => {
+  it("Tier 1 §3: accepts test as well — B2's refusal of test is superseded by D1 (amended)", async () => {
+    responses = [[{ install_id: "install_d3sy3ufas8jv", assigned_channel: "test" }]];
     const { status, json } = await post({ channel: "test" });
-    expect(status).toBe(400);
-    expect((json as { error: { code: string } }).error.code).toBe("BAD_CHANNEL");
-    expect(calls).toHaveLength(0);
+    expect(status).toBe(200);
+    expect(json).toEqual({ install_id: "install_d3sy3ufas8jv", assigned_channel: "test" });
+    expect(calls[0]!.values).toEqual(["test", "install_d3sy3ufas8jv"]);
   });
 
   it("refuses every other body with 400, without touching the database", async () => {

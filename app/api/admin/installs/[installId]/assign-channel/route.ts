@@ -1,16 +1,18 @@
 /**
  * POST /api/admin/installs/{installId}/assign-channel — "Move to stable" from the fleet card
- * (Install and Fleet PRD, Release B2 addendum, B2-D5).
+ * (Install and Fleet PRD, Release B2 addendum, B2-D5), and since Tier 1 §3 "move to test".
  *
- * ONE-WAY, AND THE BODY IS HOW IT SAYS SO. `{ "channel": "stable" }` is the only body this route
- * accepts; `test`, an empty body, or anything else is 400 BAD_CHANNEL. The server may take a Mac off
- * `test` but never put one on it — that stays a hand on the Mac (R3-8's valve, per Mac), and
- * migration 0079's CHECK refuses any other value even if this route were bypassed.
+ * TWO BODIES, AND ONLY TWO. `{ "channel": "stable" }` or `{ "channel": "test" }`; an empty body or
+ * anything else is 400 BAD_CHANNEL, and migration 0081's CHECK refuses any other value even if this
+ * route were bypassed. B2 made this one-way; Tier 1's D1 (amended) lets the server assign `test`,
+ * and puts the valve back on the Mac as `channel_locked` in its own config.json — a locked Mac
+ * ignores every assignment and says so on its poll.
  *
  * IT MOVES NOTHING BY ITSELF. It writes `assigned_channel` on the install row; the next native poll
- * carries it back in its response, and the app (0.1.20 and later) applies it when its own channel
- * is not already `stable`. The card shows the assignment until the Mac reports `stable` itself —
- * the Mac's own report is the only proof it moved. An app below 0.1.20 ignores the key.
+ * carries it back in its response. A 0.1.22 app applies either value unless its channel is locked;
+ * a 0.1.20 or 0.1.21 app applies only `stable`, so `test` is inert there (and CHANNEL_DRIFT names
+ * it after thirty minutes); an app below 0.1.20 ignores the key. The assignment clears itself on the
+ * poll where the Mac reports the assigned channel — the Mac's own report is the only proof it moved.
  *
  * Same guard and same 404 as the retire route: an unknown or retired install is NOT_FOUND.
  */
@@ -43,13 +45,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ installId:
     body = null;
   }
   const channel = (body as { channel?: unknown } | null)?.channel;
-  if (channel !== "stable") {
-    return installError("BAD_CHANNEL", "channel must be \"stable\" — the server never assigns test");
+  if (channel !== "stable" && channel !== "test") {
+    return installError("BAD_CHANNEL", "channel must be \"stable\" or \"test\"");
   }
 
   const { installId } = await ctx.params;
   try {
-    const assigned = await assignInstallChannel(installId, "stable");
+    const assigned = await assignInstallChannel(installId, channel);
     if (!assigned) return installError("NOT_FOUND", "no such install, or it is already retired");
     return NextResponse.json(assigned, NO_STORE);
   } catch (e) {

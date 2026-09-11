@@ -324,8 +324,9 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     expect(up).toMatch(/input_devices\s*=\s*COALESCE\(\?::jsonb, input_devices\)/);
     // A poll may CLEAR the assignment (ruling 3) and can never SET one: the only assignment of the
     // column in this statement yields NULL or leaves it as it was. Setting stays the admin route's.
+    // Tier 1 §3 generalises the clear to "the Mac reports the assigned channel"; still clear-or-keep.
     const sets = up.match(/assigned_channel\s*=\s*[^,]*?END/g) ?? [];
-    expect(sets).toEqual(["assigned_channel = CASE WHEN ?::text = 'stable' THEN NULL ELSE assigned_channel END"]);
+    expect(sets).toEqual(["assigned_channel = CASE WHEN ?::text = assigned_channel THEN NULL ELSE assigned_channel END"]);
   });
 
   it("the fleet read and retire both select the four 0079 columns", () => {
@@ -338,8 +339,10 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     responses = [[{ install_id: "install_a", assigned_channel: null }]];
     await M.applyInstallPoll({ install_id: "install_a", update_channel: "stable" });
     const up = calls[0]!;
+    // Tier 1 §3: the clear compares against the assignment itself, so stable-assigned + stable-reported
+    // still clears here, and a test assignment is not cleared by a Mac still reporting stable.
     expect(up.text).toMatch(
-      /assigned_channel = CASE WHEN \?::text = 'stable' THEN NULL ELSE assigned_channel END/,
+      /assigned_channel = CASE WHEN \?::text = assigned_channel THEN NULL ELSE assigned_channel END/,
     );
     // Tier 1 §2 returns the ring and the judged columns after these two; the assignment still rides
     // back on this same UPDATE.
@@ -347,12 +350,14 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     expect(calls).toHaveLength(1); // one statement: no separate read of the assignment (ruling 5)
   });
 
-  it("returns the post-UPDATE assignment, and only ever `stable` or null", async () => {
+  it("returns the post-UPDATE assignment, and only ever `stable`, `test` (Tier 1 §3) or null", async () => {
     responses = [[{ install_id: "install_a", assigned_channel: "stable" }]];
     expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: "stable" });
     responses = [[{ install_id: "install_a", assigned_channel: null }]];
     expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: null });
     responses = [[{ install_id: "install_a", assigned_channel: "test" }]];
+    expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: "test" });
+    responses = [[{ install_id: "install_a", assigned_channel: "beta" }]];
     expect(await M.applyInstallPoll({ install_id: "install_a" })).toEqual({ ok: true, assigned_channel: null });
   });
 });

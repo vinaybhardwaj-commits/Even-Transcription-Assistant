@@ -67,8 +67,8 @@ export type InstallView = {
   /** V, 9 Sep. Free bytes on the captures volume. NULL = not reported. NEVER 0. */
   disk_free_bytes: number | null;
   // ── Release B2 (0079). NULL on every row until migration 0079 runs, and on every app below 0.1.20.
-  /** B2-D5. `stable` when an admin pressed "Move to stable"; NULL when nothing is assigned. */
-  assigned_channel?: "stable" | null;
+  /** B2-D5 / Tier 1 §3. What an admin assigned — `stable` or `test`; NULL when nothing is assigned. */
+  assigned_channel?: "stable" | "test" | null;
   /** B2-D7. Highest absolute sample, 0..1, over the last piece window. NULL = not reported. */
   peak?: number | null;
   /** B2-D7. Fraction of bit-exact zero samples, 0..1, same window. NULL = not reported. */
@@ -87,6 +87,8 @@ export type InstallView = {
   state_changed_at?: string | null;
   /** The input this room should record from — adopted at first report, set by a desk switch. */
   expected_device_name?: string | null;
+  /** Tier 1 §3. The Mac's config.json pins its channel and it ignores an assignment. NULL = not reported. */
+  channel_locked?: boolean | null;
 };
 
 /** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
@@ -634,6 +636,8 @@ export type RowView = {
   // ── Tier 1 §2 ─────────────────────────────────────────────────────────────────────────────
   /** The install's named states, passed through for the chip. [] when none or never evaluated. */
   state_flags: InstallStateFlag[];
+  /** Tier 1 §3. The Mac reports a locked channel: an assignment will not move it. Shown as a chip. */
+  channel_locked: boolean;
 };
 
 export type DiskLevel = "ok" | "amber" | "red" | "unknown";
@@ -800,6 +804,7 @@ export function deriveRow(input: {
     // ── Tier 1 §2 ──────────────────────────────────────────────────────────────────────────
     // A retired row's last flags describe a Mac that no longer serves the room: not shown.
     state_flags: i && !i.retired_at ? (i.state_flags ?? []) : [],
+    channel_locked: Boolean(i && !i.retired_at && i.channel_locked === true),
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────

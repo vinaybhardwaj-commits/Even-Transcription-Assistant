@@ -39,7 +39,11 @@ function applyUpdate(strings: TemplateStringsArray, values: unknown[]): Row[] {
     } else if (clearedOn) {
       const col = clearedOn[1]!;
       const m = new RegExp(`^::text = '(\\w+)' THEN NULL ELSE ${col} END`).exec(after);
+      // Tier 1 §3: `CASE WHEN ?::text = col THEN NULL ELSE col END` — cleared when the value equals
+      // what the column held before this statement (SQL NULL never equals anything).
+      const same = new RegExp(`^::text = ${col} THEN NULL ELSE ${col} END`).exec(after);
       if (m && values[k] === m[1]) next[col] = null;
+      else if (same && values[k] !== null && values[k] !== undefined && values[k] === row[col]) next[col] = null;
     } else if (raw) {
       next[raw[1]!] = values[k] ?? null;
     }
