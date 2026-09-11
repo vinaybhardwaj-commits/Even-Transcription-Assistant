@@ -1,68 +1,75 @@
-# ETA — room session migration runbook (Release B1.5, B1.5-D5)
+> OBSOLETE as of 11 Sep 2026 — applied only to the 0.1.8/0.1.13 keychain line; 0.1.17+ enrol writes room-session.json only (carryover 11 Sep, orchestrator rule 26). Kept as history.
+# ETA — room session migration runbook, v2 (Release B1.5, B1.5-D5)
 
-**10 September 2026.** One command per room, run **by V over SSH as the room user**, **before 0.1.13 is offered to that
-room**. It copies the session out of the login keychain into `room-session.json`, which is what 0.1.13 and everything
-after it reads. Rooms without sshd get this at the next visit.
+**10 September 2026, 19:35 IST. Replaces v1 of the same date.** v1 read the keychain with
+`security find-generic-password -w`; that command returns `exit=36` (errSecAuthFailed) silently over SSH, because the
+item's ACL — by designated requirement — trusts only our signed app and cannot admit the `security` tool without a GUI
+click. **Nothing in v2 reads the token.** Proven on Home Office 10 Sep 18:25 IST (verdict: B1-B1.5 acceptance, §15.3 item 2).
 
-## Why it has to happen before the update, not after
+## What actually migrates a room
 
-The keychain item's partition list is keyed by **cdhash**, so a new build is a stranger to it and securityd asks a human
-for permission. Every clinic Mac's list holds `[0.1.8]` only. A room that updates before it is migrated launches a build
-that cannot read its own session; 0.1.13 will say `needs_enrol` and stop rather than hang (that is B1.5-D2), but the room
-is then down until somebody runs this anyway. **Migrate first.**
+`RoomSessionStore.load` reads `room-session.json` first; when it is absent it reads the keychain **once** and, on success,
+writes the file itself (`RoomSessionStore.swift:138`). The keychain read succeeds only if the launching build's **cdhash is
+on the item's partition list**; every clinic Mac's list is `[0.1.8]` (the version that enrolled it). So the migration is:
 
-## The command
+1. over SSH, add the new build's cdhash to the partition list (login-keychain password typed at the prompt);
+2. offer the build; its first launch reads the keychain, writes `room-session.json` (0600), and never uses the keychain again.
 
-Paste as one block. It prompts for the **login-keychain password of that room's user** — `security` asks, not this
-script, and nothing here reads or stores it. The session token is never printed; only its length.
+**Once per room, for the first 0.1.13-line build it receives.** Later builds read the file; the partition list is then
+irrelevant. Order matters: a build offered *before* step 1 fails clean (0.2 s), rolls back at 180 s, retries once, and
+holds that version 6 h — clearing the hold means withdrawing that version, so **a wrong-order rollout burns a version.**
+
+## The cdhash of the build being offered
+
+Read it on the Mini from the bundle `build-bundle.sh` produced — the swap installs the same bytes, so the cdhash is the same:
 
 ```bash
-ROOT="$HOME/Library/Application Support/EvenScribe/RoomRecorder"
-TMP="$(/usr/bin/mktemp "$ROOT/room-session.json.XXXXXX")" || exit 1
-trap '/bin/rm -f "$TMP"' EXIT
-/usr/bin/security find-generic-password -s com.evenscribe.room-recorder.room-token -a room-session -w \
-  | /usr/bin/sed -e 's/"session":/"session_token":/' \
-      -e 's/}[[:space:]]*$/,"written_by":"ssh-migration","written_at":"'"$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"'"}/' \
-  > "$TMP"
-/bin/chmod 600 "$TMP"
-LEN="$(/usr/bin/plutil -extract session_token raw -o - "$TMP" 2>/dev/null | /usr/bin/awk '{printf "%d", length($0)}')"
-if [ -z "$LEN" ] || [ "$LEN" -lt 20 ]; then
-  /bin/echo "MIGRATION ABORTED: no session token was read (wrong password, or no keychain item). Nothing was changed." >&2
-  exit 1
-fi
-/bin/mv -f "$TMP" "$ROOT/room-session.json"
-/bin/echo "room-session.json written: install_id=$(/usr/bin/plutil -extract install_id raw -o - "$ROOT/room-session.json"), room_slug=$(/usr/bin/plutil -extract room_slug raw -o - "$ROOT/room-session.json"), token length $LEN"
+codesign -dvvv "apps/room-recorder/.build/release-bundle/stage/EvenScribe Room Recorder.app" 2>&1 | awk -F= '/^CDHash=/{print $2}'
 ```
 
-## What it does, and what it deliberately does not
+0.1.13 (`5cc6931`): `c95246f0c7fb0ab41ec3784ad3836be0d98ef61a`. Any new version has a new cdhash; read it, never reuse.
 
-- Reads the item with `security find-generic-password … -w`. The stored blob **is** the JSON of `RoomKeychainRecord`, so
-  the only transformation needed is the rename of `session` to §15.2's `session_token`, plus the two metadata fields.
-- **Nothing but `security`, `sed`, `chmod`, `plutil`, `awk` and `mv`** — all present on a bare clinic Mac. No `python3`:
-  `/usr/bin/python3` is a stub that demands the Command Line Tools, which a clinic Mac does not have.
-- Writes to a temporary name in the same directory, `chmod 600` **before** the rename, then renames over the
-  destination — the same atomicity `RoomSessionStore.save` uses, so no reader can see a partial or 0644 file.
-- **Aborts without touching `room-session.json`** when the read fails: a wrong password produces an empty pipe, the
-  token-length gate refuses it, and the existing file (if any) is left exactly as it was. `set -e` is deliberately not
-  relied on — its behaviour differs between bash and zsh, and this must be safe under either.
-- **Never deletes the keychain item** (B1.5-D4). Cleanup is a separate, optional step, later.
-- The token is never echoed, never put in a variable, and never written anywhere but the 0600 file.
+## The per-room command
 
-## Fields, exactly as they exist today
+`ssh <room-user>@<tailscale-ip>` as the room's own user, then paste as one line, replacing `NEW` with the cdhash above. It
+prompts for **that room's login-keychain password** — `security` asks; nothing here stores it. Keeps the resident 0.1.8's
+own cdhash on the list so a rollback still launches clean.
 
-`RoomKeychainRecord` carries **`session`, `install_id`, `room_slug`, `room_name`, `origin`** — those five and no others,
-since R2. §15.2 also names `room_id` and `expires_at`: **neither exists.** There is no room id anywhere in the app (the
-room is identified by `room_slug`), and `expires_at` arrives in the enrolment response and is dropped at the point of
-saving. A migration cannot invent them, so the file carries the five real fields plus `written_by` and `written_at`.
+```bash
+NEW=c95246f0c7fb0ab41ec3784ad3836be0d98ef61a; CD=$(codesign -dvvv "$HOME/Applications/EvenScribe Room Recorder.app" 2>&1 | awk -F= '/^CDHash=/{print $2}'); echo "resident cdhash=$CD"; [ -n "$CD" ] && security set-generic-password-partition-list -S "apple-tool:,apple:,cdhash:$CD,cdhash:$NEW" -s com.evenscribe.room-recorder.room-token -a room-session ~/Library/Keychains/login.keychain-db >/dev/null && echo "partition list: resident + $NEW admitted"
+```
 
-## Per-room checklist
+Expect `resident cdhash=<40 hex>` then `partition list: resident + … admitted`. If the first line is empty, stop — the
+resident bundle is not where the runbook expects it.
 
-1. `ssh <room-user>@<room-host>` (Tailscale name; Remote Login is off on all rooms but ECHO — see the R3 acceptance
-   verdict for the two commands that enable it).
-2. Paste the block. Type that room's login password at `security`'s prompt. **If it aborts, the `exit 1` ends the SSH
-   shell along with it** — that is what `exit` does to an interactive session. Reconnect and run it again; nothing was
-   changed, so re-running is safe.
-3. Expect one line: `room-session.json written: install_id=…, room_slug=…, token length …`. Check the ids against the
-   room's row on the fleet card **before** moving to the next room.
-4. `ls -l "$ROOT/room-session.json"` shows `-rw-------`.
-5. Only when every room a release will reach has been migrated: publish 0.1.13.
+`-S` **replaces** the list; the entries are `apple-tool:` (lets this command itself be re-run), `apple:`, the resident's
+cdhash, the new cdhash. It does not touch the item's data or ACL (B1.5-D4: the keychain item is never deleted).
+
+## After the offer — what "migrated" looks like
+
+```bash
+tail -3 "$HOME/Library/Application Support/EvenScribe/RoomRecorder/launchd.log"; ls -l "$HOME/Library/Application Support/EvenScribe/RoomRecorder/room-session.json"
+```
+
+Want `room session read from the keychain; writing room-session.json` on the first launch of the new build, then
+`room session read from room-session.json`, and a `-rw-------` file. On the fleet card the row shows the new version.
+If instead the log says `keychain error -25293` / `cannot authenticate and will not poll`, the cdhash on the list is not
+the one that launched — re-read it from the bundle and repeat step 1 before the ledger's retry (about 30 s after rollback).
+
+## Rooms without sshd (OPD 3, OPD 5, OPD 6, OPD 7, Room 4.1 as of 10 Sep)
+
+Same command in Terminal at the console; or first enable Remote Login from the console so the rest is remote:
+
+```bash
+sudo launchctl enable system/com.openssh.sshd; sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist; sudo launchctl kickstart -k system/com.openssh.sshd
+```
+
+(`systemsetup -setremotelogin on` fails without Full Disk Access; the three-liner does not.) Cardiology (ECHO,
+`100.74.103.103`) already has sshd.
+
+## Order of a clinic rollout
+
+1. Partition step on every room the channel reaches (all six for `stable`), checking each fleet row's install id.
+2. Publish the build to `stable` (same `release.json`, second blob key — rule 11).
+3. Each room takes it at its next check (first poll after launch, session end, or 6 h); watch `last_update_result` per row.
+4. A room that shows `swap_failed`: read its `update.log` and `launchd.log` over SSH before doing anything else.
