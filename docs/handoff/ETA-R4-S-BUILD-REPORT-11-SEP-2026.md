@@ -28,3 +28,9 @@ New SQL: `SELECT install_id, room_id FROM room_install WHERE install_id=$1 AND e
 4. A volume outside 0..1 is dropped, never clamped.
 
 **V.** Apply 0080 before promote. Subagents: none.
+
+## Fix-up
+
+`9f11bbd`. `npm test` `Tests 1678 passed (1678)`, 13 new, first seen failing; `typecheck`, `build` exit 0.
+- D11: route 409 `{error:{code:"APP_TOO_OLD", message, app_version}}`; tool the same object. Numeric compare against 0.1.21; null, unparseable or no bound Mac is refused, nothing inserted. New SQL: `SELECT install_id, app_version FROM room_install WHERE room_id=$1 AND enrolled_at IS NOT NULL AND retired_at IS NULL ORDER BY created_at DESC LIMIT 1`.
+- D12: the three fields reach `result`; malformed fields are dropped.
