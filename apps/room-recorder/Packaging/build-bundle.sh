@@ -233,7 +233,7 @@ codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
 # it fails, so this is a check and not a formality.
 say "Verifying"
 codesign --verify --strict --verbose=4 \
-  -R "= anchor trusted and certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
+  -R "= certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
   "$APP" || die "the signed bundle does not satisfy the pinned requirement"
 for helper in ffmpeg tapewriter; do
   codesign --verify --strict "${APP}/Contents/Helpers/${helper}" \
@@ -270,7 +270,7 @@ say "Verifying the unpacked zip"
 ROUNDTRIP="$(/usr/bin/mktemp -d)"
 /usr/bin/ditto -x -k "$ZIP" "$ROUNDTRIP"
 codesign --verify --strict --deep \
-  -R "= anchor trusted and certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
+  -R "= certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
   "${ROUNDTRIP}/${APP_NAME}" || { /bin/rm -rf "$ROUNDTRIP"; /bin/rm -f "$ZIP"; die "the ZIP does not verify. It has been deleted; nothing publishable was left behind."; }
 /bin/rm -rf "$ROUNDTRIP"
 

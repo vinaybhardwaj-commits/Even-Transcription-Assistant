@@ -560,8 +560,26 @@ import Testing
     // Packaging/build-bundle.sh has always pinned — including the leading `= `, without which
     // codesign reads the argument as a FILENAME and the check passes everything.
     #expect(codesign.1.contains(RoomSelfUpdate.pinnedRequirement))
-    #expect(RoomSelfUpdate.pinnedRequirement.hasPrefix("= anchor trusted"))
+    // 0.1.18: the leaf hash alone. `anchor trusted` asked the Mac's trust settings a question a
+    // clinic Mac cannot answer without a click at its screen (Room 4.1, 11 Sep).
+    #expect(RoomSelfUpdate.pinnedRequirement.hasPrefix("= certificate leaf"))
+    #expect(!RoomSelfUpdate.pinnedRequirement.contains("anchor trusted"))
     #expect(RoomSelfUpdate.pinnedLeafSHA1 == "187dd424fb866204111113d60c6f88a21d098edb")
+  }
+
+  @Test func theRenderedSwapScriptVerifiesAgainstTheLeafOnlyRequirement() {
+    // 0.1.18. Step 8.5 of the swap script re-verifies the bundle at the resident path with the same
+    // constant. Were it still asking `anchor trusted`, a clinic Mac that passed step 6b would put
+    // the previous version back at the swap.
+    let script = RoomSwapScript.render(
+      residentBundleURL: URL(fileURLWithPath: "/Applications/EvenScribe Room Recorder.app"),
+      stagedBundleURL: URL(fileURLWithPath: "/tmp/staged/EvenScribe Room Recorder.app"),
+      rootURL: URL(fileURLWithPath: "/tmp/room-root"),
+      version: "0.1.18")
+    #expect(
+      script.contains(
+        #"REQUIREMENT='= certificate leaf = H"187dd424fb866204111113d60c6f88a21d098edb"'"#))
+    #expect(!script.contains("anchor trusted"))
   }
 
   @Test func aCleanStagingEndsInADetachedSpawnAndAHandover() async throws {

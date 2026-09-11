@@ -47,8 +47,22 @@ public enum RoomSelfUpdate {
   /// check and not a formality. §13.3 step 6 quotes the string without it. This uses the form the
   /// packaging script has actually proved, because a requirement that silently reads as a filename
   /// is a check that passes everything. FLAGGED in the build report.
+  ///
+  /// ─── NO `anchor trusted` (0.1.18, R3-5 amended 11 Sep) ─────────────────────────────────────
+  /// Until 0.1.18 this read `= anchor trusted and certificate leaf = H"…"`. The certificate is
+  /// self-signed — subject and issuer are both `EvenScribe Room Recorder Code Signing 1` — so the
+  /// leaf IS the anchor, and the leaf hash already names the one certificate allowed to sign.
+  /// What `anchor trusted` added was a second question, put to THIS Mac's trust settings, and a
+  /// clinic Mac cannot be made to answer it without someone clicking at its screen: over SSH,
+  /// `security add-trusted-cert` is refused with "no user interaction was possible". On 11 Sep
+  /// Room 4.1 refused 0.1.17 as `signature_mismatch` for exactly that reason; on its own bundle
+  /// the full requirement failed and the same command without the clause passed.
+  ///
+  /// R3-5 itself is unchanged: the expected signer is compiled into this binary, never served. The
+  /// release route says where the bytes are and what they hash to, and cannot name a certificate.
+  /// The sha256, the size and `--strict --deep` all still run; only the trust-store question goes.
   public static let pinnedRequirement =
-    "= anchor trusted and certificate leaf = H\"\(pinnedLeafSHA1)\""
+    "= certificate leaf = H\"\(pinnedLeafSHA1)\""
 
   /// §13.3 step 1. Not configurable, and deliberately so (V, 9 September 2026): acceptance forces
   /// a check with `launchctl kickstart -k`, and a knob added here would exist in every clinic room
