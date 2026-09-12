@@ -44,6 +44,9 @@ export const ROUTE_TOO_LONG_FOR_SYNC = "route_sync_limit_exceeded";
 
 export const ROUTE_ADAPTER_KEY = "route";
 
+/** Env first, literal behind it — the indicconformer.ts:11 idiom, shared with lib/stt/eta-router.ts. */
+const ROUTER_BASE = () => (process.env.ETA_ROUTER_URL || "https://route.llmvinayminihome.uk").replace(/\/+$/, "");
+
 /**
  * PURE. The router's answer, in the flat shape `SttAdapter` speaks, plus the timeline.
  *
@@ -113,18 +116,15 @@ export const routeAdapter: SttAdapter = {
   },
 
   /**
-   * ENV ONLY, WITH NO LITERAL FALLBACK — and that is a repo rule, not a preference. This repo is
-   * public and a pre-commit hook refuses any staged file naming the unauthenticated tunnel host.
-   * `lib/stt/eta-router.ts` carries that literal from before the rule and production depends on
-   * it, so it is left exactly as it is; this file may not repeat it. The consequence is worth
-   * stating plainly: until ETA_ROUTER_URL is set in the environment, `health()` reports
-   * not-configured while `transcribe()` still works through the existing client's own default.
-   * Flagged in the build report as the one manual step this slice needs.
+   * Same shape as every other local-tunnel adapter (indicconformer.ts:11): env var first, literal
+   * default behind it, so health() and transcribe() agree about where the router is without
+   * anything having to be configured. C1 shipped this env-only, which left health() reporting
+   * not-configured while transcribe() worked through the client's own default — an asymmetry
+   * caused by a pre-commit hook, now retired, and not by any design intent.
    */
   async health() {
     const t0 = Date.now();
-    const base = (process.env.ETA_ROUTER_URL ?? "").replace(/\/+$/, "");
-    if (!base) return { ok: false, latencyMs: 0, error: "route_health_needs_eta_router_url" };
+    const base = ROUTER_BASE();
     try {
       const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(8000), cache: "no-store" });
       // Parsed `ok` is the authority. A body that does not parse, or parses without an `ok`, is

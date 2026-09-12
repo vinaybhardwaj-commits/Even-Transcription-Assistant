@@ -101,14 +101,28 @@ describe("C1 step 2 — the mapping", () => {
   });
 });
 
-describe("C1 step 2 — health, and the host this repo may not name", () => {
-  it("without ETA_ROUTER_URL it reports not-configured rather than guessing a host", async () => {
+describe("C1b — health has the same base URL as transcribe", () => {
+  it("with ETA_ROUTER_URL unset it still probes the literal default, like indicconformer", async () => {
     const { routeAdapter } = await import("@/lib/stt/adapters/route");
     vi.stubEnv("ETA_ROUTER_URL", "");
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => { seen.push(String(u)); return new Response("{}", { status: 500 }); });
     const h = await routeAdapter.health();
-    expect(h.ok).toBe(false);
-    expect(h.error).toBe("route_health_needs_eta_router_url");
-    vi.unstubAllEnvs();
+    expect(seen, "no env, but still a real probe — not a not-configured refusal").toHaveLength(1);
+    expect(seen[0]).toMatch(/^https:\/\/.+\/health$/);
+    expect(h.ok, "a body with no ok:true is not a healthy router").toBe(false);
+    vi.unstubAllGlobals(); vi.unstubAllEnvs();
+  });
+
+  it("ETA_ROUTER_URL overrides it, and a trailing slash does not double up", async () => {
+    const { routeAdapter } = await import("@/lib/stt/adapters/route");
+    vi.stubEnv("ETA_ROUTER_URL", "https://router.test/");
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => { seen.push(String(u)); return new Response(JSON.stringify({ ok: true }), { status: 200 }); });
+    const h = await routeAdapter.health();
+    expect(seen[0]).toBe("https://router.test/health");
+    expect(h.ok).toBe(true);
+    vi.unstubAllGlobals(); vi.unstubAllEnvs();
   });
 });
 
