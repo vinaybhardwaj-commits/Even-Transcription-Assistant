@@ -37,3 +37,14 @@ Blob: `https://p2rwhyh5dghotpi6.public.blob.vercel-storage.com/room-recorder/Eve
 2. Home Office picks 0.1.22 up on its next 6 h check or session end. 0.1.21 has no `check_update_now`, so nothing can or should be forced.
 3. **Look at OPD 7 and Cardiology OPD** — they stopped polling before the promote and have been silent 18 and 12 minutes against a fleet that polls every few seconds. Their `state_flags` stay null until they poll.
 4. `stable` stays at 0.1.21 until the partition steps.
+
+## 8. 0.1.22 on Home Office — swap CONFIRMED; acceptance 3/5 did NOT run
+**The swap.** V ended the session via MCP at 04:30:09Z. `update.log`, verbatim: `2026-09-12T04:30:10Z room-recorder-swap: swapping to 0.1.22` → `valid on disk` / `satisfies its Designated Requirement` / `explicit requirement satisfied` → `04:30:13Z armed the canary for 0.1.22` → `04:30:13Z swapped to 0.1.22 and bootstrapped` → `04:30:13Z waiting up to 180s for 0.1.22 to poll` → **`04:30:15Z 0.1.22 acknowledged the canary after 2s`**. One second from session end to check: B2-D2's "every session end is a check", working exactly as written, with nothing forced.
+Running bundle `CFBundleShortVersionString`/`CFBundleVersion` = **0.1.22**; LaunchAgent pid **13857** (was 21396) — a new pid, so the swap relaunched it; `runs = 1`, never exited, state `ready`. Server agrees: `app_version 0.1.22`, `session_open false`, channel `test`.
+**Seam 1 verified live in production** (read-only, through the MCP door): `scribe_diff_room` on Home Office returns `room_state: { state:"finished", …, "flags":[], "drift_since":null }` — the Tier 1 fields are on the door, and `[]` means evaluated and well.
+
+**Why the three verbs did not run.** Both write paths are shut to the Builder:
+- `POST /api/admin/bench/command` → **HTTP 401 `AUTH_REQUIRED "Sign in required"`**. `benchAdminGuard` (`lib/bench.ts:75`) reads an admin cookie and verifies an admin JWT; it has no migration-secret path, unlike `installAdminGuard` on the assign-channel route. The migration secret is not an admin session.
+- MCP `scribe_room_command` is **not exposed by the Scribe connector** — its manifest is stale (its `scribe_diff_room` description is still the pre-Tier-1 text, while the server itself returns the new fields).
+So `report_diag`, `check_update_now` and `restart_engine` were never queued; no command row was written. I did not go looking for admin credentials. Acceptance items 3, 4 and 5 remain **UNPROVEN**, as the Refuter already had them.
+Note for whoever runs them: item 5's second half ("restart_engine refused while a session is open") needs a session open on Home Office, i.e. a real recording started for the test.
