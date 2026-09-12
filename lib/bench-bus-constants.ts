@@ -455,7 +455,13 @@ export const DISK_LOW_BYTES = 2 * 1024 ** 3;
 /**
  * CHANNEL_DRIFT — an admin assigned a channel and the Mac has reported a different one for more than
  * thirty minutes. A Mac that obeys moves on its next poll, so a short gap is the move in flight; half
- * an hour is a Mac that will not (an older app, a locked channel, a config write that keeps failing).
+ * an hour is a Mac that will not (an older app, or a config write that keeps failing).
+ *
+ * NOT A LOCKED MAC (orchestrator ruling, seam 8). `channel_locked` is the D1 override: the Mac's own
+ * config.json pins its channel and the app is DOING WHAT IT WAS CONFIGURED TO DO. An alarm there names
+ * a deliberate setting as a fault, and the card already says `channel locked` beside the assignment.
+ * The clock is not merely held: it is not started, so unlocking gives the Mac the full thirty minutes
+ * to move rather than firing on the first poll after the lock comes off.
  */
 export const CHANNEL_DRIFT_MS = 30 * 60_000;
 
@@ -589,6 +595,8 @@ export function evaluateInstallStates(input: {
   diskFreeBytes: number | null;
   updateChannel: string | null;
   assignedChannel: string | null;
+  /** Tier 1 §3. The 0.1.22 heartbeat's lock. Absent on every earlier app, and absent is not locked. */
+  channelLocked?: boolean | null;
   silenceMs?: number | null;
   prev: InstallStateRecord;
   nowMs: number;
@@ -633,9 +641,13 @@ export function evaluateInstallStates(input: {
     flags.add("DISK_LOW");
   }
 
-  // A Mac that does not report its channel (below 0.1.8) cannot be said to disagree with anything.
+  // A Mac that does not report its channel (below 0.1.8) cannot be said to disagree with anything,
+  // and a Mac that reports `channel_locked` is obeying its own config rather than drifting.
   const drifting =
-    input.assignedChannel !== null && input.updateChannel !== null && input.updateChannel !== input.assignedChannel;
+    input.channelLocked !== true &&
+    input.assignedChannel !== null &&
+    input.updateChannel !== null &&
+    input.updateChannel !== input.assignedChannel;
   const driftSince = drifting ? (input.prev.drift_since ?? new Date(input.nowMs).toISOString()) : null;
   if (drifting && driftSince !== null && input.nowMs - Date.parse(driftSince) > CHANNEL_DRIFT_MS) {
     flags.add("CHANNEL_DRIFT");

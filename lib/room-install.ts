@@ -1061,6 +1061,7 @@ type InstallPollReturn = {
   expected_device_name?: string | null;
   disk_free_bytes?: string | number | null;
   update_channel?: string | null;
+  channel_locked?: boolean | null;
 };
 
 /** The device list as a RETURNING or SELECT yields it — parsed jsonb, jsonb text, or anything else. */
@@ -1096,6 +1097,9 @@ async function writeInstallState(
       diskFreeBytes: disk !== null && Number.isFinite(disk) ? disk : null,
       updateChannel: row.update_channel ?? null,
       assignedChannel: row.assigned_channel ?? null,
+      // Orchestrator ruling, seam 8 — a Mac that pins its own channel is not drifting. The value is
+      // the post-COALESCE one the UPDATE returned, so a poll that omitted the field keeps the lock.
+      channelLocked: row.channel_locked ?? null,
       silenceMs: poll.silenceMs ?? null,
       prev,
       nowMs: poll.now.getTime(),
@@ -1226,7 +1230,7 @@ export async function applyInstallPoll(
        WHERE install_id = ${f.install_id}
          AND retired_at IS NULL
       RETURNING install_id, assigned_channel, poll_ring, state_flags, input_device_name, input_devices,
-                expected_device_name, disk_free_bytes, update_channel
+                expected_device_name, disk_free_bytes, update_channel, channel_locked
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {

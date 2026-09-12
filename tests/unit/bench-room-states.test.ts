@@ -226,6 +226,40 @@ describe("CHANNEL_DRIFT", () => {
   it("a Mac that does not report its channel cannot drift", () => {
     expect(base({ assignedChannel: "stable", updateChannel: null }).drift_since).toBeNull();
   });
+
+  // ── orchestrator fix-up ruling, seam 8 ──────────────────────────────────────────────────
+  // A locked Mac is obeying its own config.json. The ruling is that this is NOT an alarm.
+  it("a Mac that reports channel_locked never raises CHANNEL_DRIFT, however long the mismatch", () => {
+    const long = { flags: ["CHANNEL_DRIFT" as const], drift_since: new Date(NOW_MS - 86_400_000).toISOString() };
+    const r = base({ assignedChannel: "test", updateChannel: "stable", channelLocked: true, prev: long });
+    expect(r.flags).not.toContain("CHANNEL_DRIFT");
+    // The clock is not merely held, it is not started: unlocking must give the Mac the full
+    // thirty minutes to move rather than firing on the first poll after the lock comes off.
+    expect(r.drift_since).toBeNull();
+  });
+
+  it("the same install, unlocked, is drift again — the lock is the only thing suppressing it", () => {
+    const locked = base({ assignedChannel: "test", updateChannel: "stable", channelLocked: true });
+    expect(locked).toEqual({ flags: [], drift_since: null });
+    const unlocked = base({ assignedChannel: "test", updateChannel: "stable", channelLocked: false, prev: locked });
+    expect(unlocked.drift_since).toBe(new Date(NOW_MS).toISOString());
+    expect(base({
+      assignedChannel: "test", updateChannel: "stable", channelLocked: false,
+      prev: { flags: [], drift_since: new Date(NOW_MS - C.CHANNEL_DRIFT_MS - 1).toISOString() },
+    }).flags).toContain("CHANNEL_DRIFT");
+  });
+
+  it("null and undefined are not locked — every app below 0.1.22 omits the field", () => {
+    const over = { assignedChannel: "test", updateChannel: "stable", prev: { flags: [], drift_since: new Date(NOW_MS - C.CHANNEL_DRIFT_MS - 1).toISOString() } };
+    for (const channelLocked of [null, undefined, false] as const) {
+      expect(base({ ...over, channelLocked }).flags, String(channelLocked)).toContain("CHANNEL_DRIFT");
+    }
+  });
+
+  it("the lock silences CHANNEL_DRIFT and nothing else — a locked Mac still reports its other faults", () => {
+    const r = base({ assignedChannel: "test", updateChannel: "stable", channelLocked: true, diskFreeBytes: 1 });
+    expect(r.flags).toEqual(["DISK_LOW"]);
+  });
 });
 
 describe("the record itself", () => {
@@ -330,6 +364,29 @@ describe("applyInstallPoll writes the ring in the same UPDATE (no extra round tr
     expect(JSON.parse(w.values[0] as string)).toEqual({ flags: ["SILENT_WHILE_RECORDING"], drift_since: null });
     expect(w.values[1]).toBe(true);
     expect(w.values[2]).toBe("install_a");
+  });
+
+  it("RETURNs channel_locked and lets it suppress CHANNEL_DRIFT end to end (ruling, seam 8)", async () => {
+    const row = (channel_locked: boolean) => ({
+      install_id: "install_a",
+      assigned_channel: "test",
+      poll_ring: [entry()],
+      state_flags: { flags: [], drift_since: new Date(NOW_MS - C.CHANNEL_DRIFT_MS - 1).toISOString() },
+      disk_free_bytes: "400000000000",
+      update_channel: "stable",
+      channel_locked,
+    });
+    const runWith = async (channel_locked: boolean) => {
+      calls.length = 0;
+      responder = (t) => (/^UPDATE room_install SET last_seen_at/.test(t) ? [row(channel_locked)] : []);
+      await RI.applyInstallPoll({ install_id: "install_a" }, { now: new Date(NOW_MS) });
+      const w = calls.find((c) => /SET state_flags/.test(c.text));
+      return w ? (JSON.parse(w.values[0] as string) as import("@/lib/bench-bus-constants").InstallStateRecord) : null;
+    };
+    // The column has to come back from the poll UPDATE, or the evaluation cannot see the lock.
+    expect(await runWith(false)).toEqual({ flags: ["CHANNEL_DRIFT"], drift_since: new Date(NOW_MS - C.CHANNEL_DRIFT_MS - 1).toISOString() });
+    expect(calls[0]!.text).toMatch(/RETURNING [^$]*\bchannel_locked\b/);
+    expect(await runWith(true)).toEqual({ flags: [], drift_since: null });
   });
 
   it("writes NOTHING more when the evaluation matches what the row holds — one statement per poll", async () => {
