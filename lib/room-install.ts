@@ -44,6 +44,7 @@ import {
 } from "@/lib/room-install-view";
 import {
   POLL_RING_SIZE,
+  assignChannelRefusal,
   evaluateInstallStates,
   installFlagsChanged,
   installStateFlags,
@@ -1062,6 +1063,9 @@ type InstallPollReturn = {
   disk_free_bytes?: string | number | null;
   update_channel?: string | null;
   channel_locked?: boolean | null;
+  /** Tier 2 §2.2 — the PRE-update assignment, from the FROM subquery. Absent on older callers. */
+  prev_assigned_channel?: string | null;
+  prev_room_id?: string | null;
 };
 
 /** The device list as a RETURNING or SELECT yields it — parsed jsonb, jsonb text, or anything else. */
@@ -1227,14 +1231,39 @@ export async function applyInstallPoll(
                       ) WITH ORDINALITY AS r(e, n)
                 WHERE r.n <= ${POLL_RING_SIZE}::int
              )
-       WHERE install_id = ${f.install_id}
-         AND retired_at IS NULL
-      RETURNING install_id, assigned_channel, poll_ring, state_flags, input_device_name, input_devices,
-                expected_device_name, disk_free_bytes, update_channel, channel_locked
+        -- Tier 2 §2.2. THE ONE VALUE RETURNING CANNOT GIVE. Postgres' RETURNING sees the NEW row,
+        -- so the assignment this poll just cleared is invisible to it; this subquery is evaluated
+        -- against the statement's snapshot and carries the PRE-update value out. It adds no round
+        -- trip and no second statement, which is the B2-S rule for this UPDATE. The SET list, and
+        -- therefore every existing pin on it, is untouched.
+        FROM (
+               SELECT assigned_channel AS prev_assigned_channel, room_id AS prev_room_id
+                 FROM room_install
+                WHERE install_id = ${f.install_id}
+             ) AS prev
+       WHERE room_install.install_id = ${f.install_id}
+         AND room_install.retired_at IS NULL
+      RETURNING room_install.install_id, room_install.assigned_channel, room_install.poll_ring,
+                room_install.state_flags, room_install.input_device_name, room_install.input_devices,
+                room_install.expected_device_name, room_install.disk_free_bytes,
+                room_install.update_channel, room_install.channel_locked,
+                prev.prev_assigned_channel, prev.prev_room_id
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {
       await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, silenceMs: f.silence_ms, now });
+      // Tier 2 §2.2 — ONCE PER TRANSITION, not once per poll. The clear fires on exactly the poll
+      // where the Mac first reports the channel it was assigned, so this is that poll and no other:
+      // it was set before, it is null now. A poll that changes nothing writes nothing.
+      const wasAssigned = rows[0]!.prev_assigned_channel ?? null;
+      if (wasAssigned !== null && rows[0]!.assigned_channel === null) {
+        void auditInstall("install.channel_reported", rows[0]!.prev_room_id ?? null, {
+          install_id: f.install_id,
+          channel: f.update_channel ?? rows[0]!.update_channel ?? null,
+          cleared: wasAssigned,
+          actor: "install",
+        });
+      }
       const assigned = rows[0]!.assigned_channel;
       return { ok: true, assigned_channel: assigned === "stable" || assigned === "test" ? assigned : null };
     }
@@ -1432,6 +1461,39 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Tier 2 §2.2 — one `audit_log` row for a channel decision, best-effort.
+ *
+ * WHY CHANNEL ASSIGNMENT NEEDED AN AUDIT AT ALL. On 12 Sep the question "was OPD 6 ever assigned
+ * stable, when, and by whom" could not be answered: this was the one admin action that moved a Mac
+ * onto different software and left no trace, while reading a processing switch left one. The route
+ * wrote a bare UPDATE and nothing else.
+ *
+ * SHAPE follows lib/mcp/audit.ts: `audit_log.actor_type` is an enum with no `install` member, so
+ * 'system' + a named `actor_id`; the action names the transition and the metadata carries only ids
+ * and channel names — no hostname, no device name, nothing free-text.
+ *
+ * NEVER FAILS THE CALLER. A missing audit row must not block a Mac from moving channel.
+ */
+async function auditInstall(
+  action: "install.assign_channel" | "install.channel_reported",
+  roomId: string | null,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${String(meta.actor ?? "install")}, ${action}, 'room_install',
+              ${String(meta.install_id ?? "")}, ${JSON.stringify({ ...meta, room_id: roomId })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn(
+      "[room-install] audit insert failed",
+      JSON.stringify({ action, install_id: meta.install_id, err: String((e as Error)?.message ?? e).slice(0, 160) }),
+    );
+  }
+}
+
+/**
  * Assign a channel to one install. B2 made this one-way (`stable` only); Tier 1 §3 (D1 amended)
  * admits `test` as well, and 0081's CHECK admits exactly those two. It moves nothing by itself: the
  * poll carries it back, a 0.1.22 app applies it unless its config.json locks the channel, and a
@@ -1441,15 +1503,45 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
 export async function assignInstallChannel(
   installId: string,
   channel: "stable" | "test",
+  actor = "unknown",
 ): Promise<{ install_id: string; assigned_channel: "stable" | "test" } | null> {
   try {
+    // Tier 2 §2.1 and §2.2. READ FIRST, and the read earns its round trip twice over: the floor
+    // needs the reported app_version, and the audit row needs the value being replaced. The row is
+    // written about once a week, so a second statement costs nothing that matters.
+    const before = (await sql`
+      SELECT install_id, room_id, app_version, assigned_channel
+        FROM room_install
+       WHERE install_id = ${installId} AND retired_at IS NULL
+       LIMIT 1
+    `) as Array<{ install_id: string; room_id: string; app_version: string | null; assigned_channel: string | null }>;
+    const row = before[0];
+    if (!row) return null;
+
+    // §2.1 — refuse `test` below the floor BEFORE writing anything. An inert assignment is worse
+    // than a refusal: it looks accepted and only surfaces as CHANNEL_DRIFT half an hour later.
+    const refusal = assignChannelRefusal(channel, row.app_version);
+    if (refusal) throw new InstallError(refusal.code, refusal.message);
+
     const rows = (await sql`
       UPDATE room_install
          SET assigned_channel = ${channel}
        WHERE install_id = ${installId} AND retired_at IS NULL
       RETURNING install_id, assigned_channel
     `) as Array<{ install_id: string; assigned_channel: "stable" | "test" }>;
-    return rows[0] ?? null;
+    const written = rows[0] ?? null;
+    if (written) {
+      // §2.2 — best-effort, never fails the assignment. `from` is what the row held, which is how a
+      // reader tells "an operator changed their mind" from "the first assignment of the day".
+      void auditInstall("install.assign_channel", row.room_id, {
+        install_id: installId,
+        room_id: row.room_id,
+        from: row.assigned_channel,
+        to: channel,
+        actor,
+      });
+    }
+    return written;
   } catch (e) {
     throw classifyInstallError(e);
   }

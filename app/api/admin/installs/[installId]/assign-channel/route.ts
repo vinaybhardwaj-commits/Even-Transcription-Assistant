@@ -15,6 +15,12 @@
  * poll where the Mac reports the assigned channel — the Mac's own report is the only proof it moved.
  *
  * Same guard and same 404 as the retire route: an unknown or retired install is NOT_FOUND.
+ *
+ * TIER 2 §2.1 — `test` is refused with 409 APP_TOO_OLD when the bound Mac reports below 0.1.22,
+ * because a 0.1.20/0.1.21 app applies only `stable` and the assignment would sit inert (OPD 6,
+ * 12 Sep: taken at 04:57:30Z, never consumed, cleared by hand at 05:08:47Z). `stable` is never
+ * gated — the rollback path must not depend on a version floor. §2.2 — the guard's `adminId` is
+ * carried into the `install.assign_channel` audit row as the actor.
  */
 import { NextRequest, NextResponse } from "next/server";
 import {
@@ -51,7 +57,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ installId:
 
   const { installId } = await ctx.params;
   try {
-    const assigned = await assignInstallChannel(installId, channel);
+    const assigned = await assignInstallChannel(installId, channel, guard.adminId);
     if (!assigned) return installError("NOT_FOUND", "no such install, or it is already retired");
     return NextResponse.json(assigned, NO_STORE);
   } catch (e) {

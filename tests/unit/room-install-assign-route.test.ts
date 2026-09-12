@@ -49,21 +49,23 @@ beforeEach(() => {
 
 describe("assign-channel (B2-D5)", () => {
   it("writes stable on a live install and answers with it", async () => {
-    responses = [[{ install_id: "install_d3sy3ufas8jv", assigned_channel: "stable" }]];
+    // Tier 2 §2.1/§2.2: a pre-read (floor + audit `from`), then the UPDATE, then the audit row.
+    responses = [[{ install_id: "install_d3sy3ufas8jv", room_id: "room_1", app_version: "0.1.22", assigned_channel: null }], [{ install_id: "install_d3sy3ufas8jv", assigned_channel: "stable" }], []];
     const { status, json } = await post({ channel: "stable" });
     expect(status).toBe(200);
     expect(json).toEqual({ install_id: "install_d3sy3ufas8jv", assigned_channel: "stable" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.text).toMatch(/UPDATE room_install SET assigned_channel = \? WHERE install_id = \? AND retired_at IS NULL/);
-    expect(calls[0]!.values).toEqual(["stable", "install_d3sy3ufas8jv"]);
+    const up = calls.find((c) => /UPDATE room_install SET assigned_channel/.test(c.text))!;
+    expect(up.text).toMatch(/UPDATE room_install SET assigned_channel = \? WHERE install_id = \? AND retired_at IS NULL/);
+    expect(up.values).toEqual(["stable", "install_d3sy3ufas8jv"]);
   });
 
   it("Tier 1 §3: accepts test as well — B2's refusal of test is superseded by D1 (amended)", async () => {
-    responses = [[{ install_id: "install_d3sy3ufas8jv", assigned_channel: "test" }]];
+    responses = [[{ install_id: "install_d3sy3ufas8jv", room_id: "room_1", app_version: "0.1.22", assigned_channel: null }], [{ install_id: "install_d3sy3ufas8jv", assigned_channel: "test" }], []];
     const { status, json } = await post({ channel: "test" });
     expect(status).toBe(200);
     expect(json).toEqual({ install_id: "install_d3sy3ufas8jv", assigned_channel: "test" });
-    expect(calls[0]!.values).toEqual(["test", "install_d3sy3ufas8jv"]);
+    const up = calls.find((c) => /UPDATE room_install SET assigned_channel/.test(c.text))!;
+    expect(up.values).toEqual(["test", "install_d3sy3ufas8jv"]);
   });
 
   it("refuses every other body with 400, without touching the database", async () => {

@@ -126,31 +126,10 @@ export function parseSetAudioInputArgs(raw: unknown): SetAudioInputArgs {
  */
 export const SET_AUDIO_INPUT_MIN_APP_VERSION = "0.1.21";
 
-/**
- * PURE — R4-D11. `version >= min`, comparing dotted integers numerically (0.1.100 is above 0.1.21;
- * 0.1.3 is below it — the two cases a string compare gets wrong). Missing parts count as 0.
- *
- * ANYTHING ELSE IS "TOO OLD": null, blank, a `v` prefix, a pre-release suffix, a letter. The app
- * reports `Packaging/VERSION`, which is plain digits and dots; a value that is not is not something
- * this check should guess about, and refusing costs one retry while guessing wrong blocks a room.
- */
-export function appVersionAtLeast(version: string | null | undefined, min: string): boolean {
-  const parse = (v: string | null | undefined): number[] | null => {
-    const t = typeof v === "string" ? v.trim() : "";
-    return /^\d+(\.\d+){0,3}$/.test(t) ? t.split(".").map(Number) : null;
-  };
-  const a = parse(version);
-  const b = parse(min);
-  if (!a || !b) return false;
-  for (let k = 0; k < Math.max(a.length, b.length); k++) {
-    const x = a[k] ?? 0;
-    const y = b[k] ?? 0;
-    if (x !== y) return x > y;
-  }
-  return true;
-}
-
-export type AppTooOld = { code: "APP_TOO_OLD"; message: string; app_version: string | null };
+// Tier 2 §2.1 — `appVersionAtLeast` and `AppTooOld` moved to the pure constants module so
+// lib/room-install.ts can reach them without importing this file (which imports IT). Re-exported
+// here so every existing caller and test keeps its import path.
+export { appVersionAtLeast, type AppTooOld } from "./bench-bus-constants";
 
 /**
  * PURE — R4-D11. Null when the bound install's reported version may receive `set_audio_input`;
@@ -262,7 +241,7 @@ export function cleanAckApplied(body: unknown): AckApplied {
 // S3-2: the timing constants live in the pure lib/bench-bus-constants.ts (kiosk-bundle safe);
 // re-exported here so every existing caller keeps working unchanged.
 export { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS, REPORT_DIAG_ACK_WAIT_MS, ackWaitMsFor } from "./bench-bus-constants";
-import { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS } from "./bench-bus-constants";
+import { COMMAND_EXPIRY_SECONDS, LISTENER_FRESH_MS, ACK_WAIT_MS, ACK_POLL_MS, appVersionAtLeast, type AppTooOld } from "./bench-bus-constants";
 
 const cmdId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
 export const newCommandId = (): string => `cmd_${cmdId()}`;

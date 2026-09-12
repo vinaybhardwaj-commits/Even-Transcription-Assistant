@@ -365,7 +365,9 @@ describe("B2 — the poll's UPDATE and the fleet read", () => {
     );
     // Tier 1 §2 returns the ring and the judged columns after these two; the assignment still rides
     // back on this same UPDATE.
-    expect(up.text).toMatch(/RETURNING install_id, assigned_channel\b/);
+    // Tier 2 §2.2 qualified the RETURNING list (the FROM subquery made bare names ambiguous);
+    // the assignment still rides back on this same UPDATE, which is what this pins.
+    expect(up.text).toMatch(/RETURNING room_install\.install_id, room_install\.assigned_channel\b/);
     expect(calls).toHaveLength(1); // one statement: no separate read of the assignment (ruling 5)
   });
 

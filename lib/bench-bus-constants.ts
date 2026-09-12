@@ -670,3 +670,67 @@ export function installFlagsChanged(a: InstallStateRecord, b: InstallStateRecord
 export function installStateFlags(raw: unknown): InstallStateFlag[] {
   return parseInstallState(raw).flags;
 }
+
+// ---------------------------------------------------------------------------
+// Version floors (Tier 2 §2.1) — pure, and here rather than in bench-commands because
+// lib/room-install.ts needs them and bench-commands already imports room-install. A constants
+// module with no imports of its own is the only place both sides can reach without a cycle.
+// ---------------------------------------------------------------------------
+
+export type AppTooOld = { code: "APP_TOO_OLD"; message: string; app_version: string | null };
+
+/**
+ * PURE — R4-D11. `version >= min`, comparing dotted integers numerically (0.1.100 is above 0.1.21;
+ * 0.1.3 is below it — the two cases a string compare gets wrong). Missing parts count as 0.
+ *
+ * ANYTHING ELSE IS "TOO OLD": null, blank, a `v` prefix, a pre-release suffix, a letter. The app
+ * reports `Packaging/VERSION`, which is plain digits and dots; a value that is not is not something
+ * this check should guess about, and refusing costs one retry while guessing wrong blocks a room.
+ */
+export function appVersionAtLeast(version: string | null | undefined, min: string): boolean {
+  const parse = (v: string | null | undefined): number[] | null => {
+    const t = typeof v === "string" ? v.trim() : "";
+    return /^\d+(\.\d+){0,3}$/.test(t) ? t.split(".").map(Number) : null;
+  };
+  const a = parse(version);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let k = 0; k < Math.max(a.length, b.length); k++) {
+    const x = a[k] ?? 0;
+    const y = b[k] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+/**
+ * Tier 2 §2.1 — the floor for ASSIGNING `test`.
+ *
+ * WHY THIS EXISTS, from 12 Sep. OPD 6 (0.1.21) was assigned `test` at 04:57:30Z. The route took it,
+ * the row held it, and nothing happened: a 0.1.20/0.1.21 app applies only `stable`, so `test` is
+ * inert on it. The assignment sat unconsumed until it was cleared by hand at 05:08:47Z, and the only
+ * thing that would ever have named it was CHANNEL_DRIFT, thirty minutes later. A silent no-op that
+ * takes half an hour to become visible is worse than a refusal, so this refuses at assign time.
+ *
+ * `stable` is UNAFFECTED and always assignable: every app from 0.1.20 applies it, and the rollback
+ * path (withdraw a release, walk the fleet back) must never be gated on a version floor.
+ */
+export const TEST_CHANNEL_MIN_APP_VERSION = "0.1.22";
+
+/**
+ * PURE — Tier 2 §2.1. Null when this install may be assigned `channel`; else the one error object
+ * the route renders as 409 APP_TOO_OLD. Only `test` is gated.
+ */
+export function assignChannelRefusal(
+  channel: "stable" | "test",
+  appVersion: string | null | undefined,
+): AppTooOld | null {
+  if (channel !== "test") return null;
+  if (appVersionAtLeast(appVersion, TEST_CHANNEL_MIN_APP_VERSION)) return null;
+  const reported = typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : null;
+  return {
+    code: "APP_TOO_OLD",
+    message: `this room's app reports ${reported ?? "no version"}; assigning the test channel needs ${TEST_CHANNEL_MIN_APP_VERSION} or later (an earlier app applies only stable, so the assignment would sit inert)`,
+    app_version: reported,
+  };
+}

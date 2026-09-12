@@ -48,10 +48,18 @@ function applyUpdate(strings: TemplateStringsArray, values: unknown[]): Row[] {
       next[raw[1]!] = values[k] ?? null;
     }
   }
+  // Tier 2 §2.2 — the statement's FROM subquery carries PRE-update values out as prev_*, so the
+  // pre-image has to be kept before the assign. Columns are now table-qualified; strip the prefix.
+  const before: Row = { ...row };
   Object.assign(row, next);
-  const returning = /RETURNING\s+([\w,\s]+?)\s*$/.exec(strings[strings.length - 1]!);
-  const cols = returning ? returning[1]!.split(",").map((c) => c.trim()) : ["install_id"];
-  return [Object.fromEntries(cols.map((c) => [c, row[c] ?? null]))];
+  const returning = /RETURNING\s+([\w.,\s]+?)\s*$/.exec(strings[strings.length - 1]!);
+  const cols = returning ? returning[1]!.split(",").map((c) => c.trim().replace(/^[\w]+\./, "")) : ["install_id"];
+  const valueOf = (c: string): unknown => {
+    if (c === "prev_assigned_channel") return before.assigned_channel ?? null;
+    if (c === "prev_room_id") return before.room_id ?? null;
+    return row[c] ?? null;
+  };
+  return [Object.fromEntries(cols.map((c) => [c, valueOf(c)]))];
 }
 
 /** `SELECT a, b, c FROM room_install …` — only the named columns come back, as in Postgres. */

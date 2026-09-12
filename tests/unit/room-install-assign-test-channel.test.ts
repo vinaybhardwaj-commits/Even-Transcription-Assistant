@@ -31,7 +31,13 @@ function applyPollUpdate(strings: TemplateStringsArray, values: unknown[]): Row[
     }
     if (/update_channel\s*=\s*COALESCE\(\s*$/.test(pre) && values[k] != null) store.install.update_channel = values[k];
   }
-  return [{ install_id: store.install.install_id, assigned_channel: store.install.assigned_channel ?? null }];
+  // Tier 2 §2.2 — the FROM subquery carries the PRE-update assignment out beside the new row.
+  return [{
+    install_id: store.install.install_id,
+    assigned_channel: store.install.assigned_channel ?? null,
+    prev_assigned_channel: (before.assigned_channel as string | null) ?? null,
+    prev_room_id: "room_home",
+  }];
 }
 
 vi.mock("@/lib/db", () => {
@@ -39,11 +45,22 @@ vi.mock("@/lib/db", () => {
     const text = strings.join("?").replace(/\s+/g, " ").trim();
     calls.push({ text, values });
     if (/^UPDATE room_install SET last_seen_at/.test(text)) return Promise.resolve(applyPollUpdate(strings, values));
+    // Tier 2 §2.1/§2.2 — assignInstallChannel reads the row first (floor + audit `from`).
+    if (/^SELECT install_id, room_id, app_version, assigned_channel FROM room_install/.test(text)) {
+      if (store.install.retired_at || values[0] !== store.install.install_id) return Promise.resolve([]);
+      return Promise.resolve([{
+        install_id: store.install.install_id,
+        room_id: "room_home",
+        app_version: (store.install.app_version as string | undefined) ?? "0.1.22",
+        assigned_channel: store.install.assigned_channel ?? null,
+      }]);
+    }
     if (/^UPDATE room_install SET assigned_channel = \?/.test(text)) {
       if (store.install.retired_at || values[1] !== store.install.install_id) return Promise.resolve([]);
       store.install.assigned_channel = values[0];
       return Promise.resolve([{ install_id: store.install.install_id, assigned_channel: values[0] }]);
     }
+    if (/^INSERT INTO audit_log/.test(text)) return Promise.resolve([]);
     return Promise.resolve([]);
   };
   sql.transaction = async () => [];
