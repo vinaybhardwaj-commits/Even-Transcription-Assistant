@@ -177,7 +177,12 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
       const protocolVersion = (PROTOCOL_VERSIONS as readonly string[]).includes(requested) ? requested : LATEST_PROTOCOL;
       return rpcResult(id, {
         protocolVersion,
-        capabilities: { tools: { listChanged: false } },
+        // Tier 2 §2.6 — the server will re-advertise its tool set. The tool list is built at module
+        // load from the registry, so a deploy changes it; a client that honours listChanged picks
+        // the new set up without a reconnect. Clients that cache their manifest regardless still
+        // need reconnecting — stated in docs/operator-mcp/TOOL-NOTES.md, because on 12 Sep a cached
+        // manifest hid scribe_room_command from an operator while the server was serving it.
+        capabilities: { tools: { listChanged: true } },
         serverInfo: { name: SERVER_NAME, version: version() },
         instructions:
           "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores; plus remote tape control (scribe_start/pause/resume/stop_recording) through the room kiosk's listener — start needs a listening kiosk, is idempotent, and refuses a consent-paused room unless override_pause. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
@@ -232,7 +237,7 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
     result = { error: String((e as Error)?.message ?? e).slice(0, 200), degraded: true };
   }
   const ms = Date.now() - t0;
-  void auditToolCall({ tool: name, args, ok: !isError, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent") });
+  void auditToolCall({ tool: name, args, ok: !isError, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id });
 
   let text: string;
   try {

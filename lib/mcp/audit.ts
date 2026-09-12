@@ -15,6 +15,13 @@ import { sql } from "@/lib/db";
 
 export const MCP_AUDIT_ACTOR = "mcp:operator-v1";
 
+/** Tier 2 §2.3 — `mcp:<actor>`, the one shape every MCP audit row's actor_id takes. */
+export function mcpActorId(actor: string | null | undefined): string {
+  const t = typeof actor === "string" ? actor.trim() : "";
+  if (!t) return MCP_AUDIT_ACTOR;
+  return t.startsWith("mcp:") ? t.slice(0, 64) : `mcp:${t}`.slice(0, 64);
+}
+
 // Keys that may be echoed into the audit row (ids, dates, filters, flags — nothing free-text).
 const SAFE_ARG_KEYS = new Set([
   "room_id", "room_slug", "session_id", "encounter_id", "trace_id", "clinician_id", "engine_id",
@@ -47,12 +54,15 @@ export async function auditToolCall(input: {
   ms: number;
   ip?: string | null;
   userAgent?: string | null;
+  /** Tier 2 §2.3 — the RESOLVED token's actor. Absent falls back to the single-token id, so a
+   *  deployment with no token map records exactly what it recorded before. */
+  actor?: string | null;
 }): Promise<void> {
   const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms };
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json, ip, user_agent)
-      VALUES ('system', ${MCP_AUDIT_ACTOR}, 'mcp.tools/call', 'mcp_tool', ${input.tool},
+      VALUES ('system', ${mcpActorId(input.actor)}, 'mcp.tools/call', 'mcp_tool', ${input.tool},
               ${JSON.stringify(meta)}::jsonb, ${input.ip ?? null}::inet, ${input.userAgent ? input.userAgent.slice(0, 256) : null})
     `;
   } catch (e) {

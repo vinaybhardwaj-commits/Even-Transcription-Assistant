@@ -119,7 +119,17 @@ describe("scribe_diff_room carries the install's named states", () => {
   });
 
   it("the tool description names the new fields, so a caller is not reading an undocumented key", () => {
-    expect(diffRoom.description).toContain("room_state also carries flags and drift_since");
-    expect(diffRoom.description).toContain("channel_locked");
+    // Tier 2 §2.4 cut this description to <= 150 words and moved the long text to
+    // docs/operator-mcp/TOOL-NOTES.md. What must survive the cut is the CONTRACT: the two field
+    // names, the seven flags, and the null-vs-[] rule a caller would otherwise get wrong.
+    expect(diffRoom.description).toContain("flags and drift_since");
+    expect(diffRoom.description).toContain("SILENT_WHILE_RECORDING");
+    expect(diffRoom.description).toMatch(/NULL, never \[\]/);
+    expect(diffRoom.description).toContain("TOOL-NOTES");
+  });
+
+  it("§2.4 — the description is at most 150 words", () => {
+    const words = (diffRoom.description ?? "").trim().split(/\s+/).length;
+    expect(words, `description is ${words} words`).toBeLessThanOrEqual(150);
   });
 });

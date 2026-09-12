@@ -140,7 +140,8 @@ import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TI
 import { parseMicLevelPair } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
-import { boundInstallForRoom, InstallError } from "@/lib/room-install";
+import { boundInstallForRoom, InstallError, readFleet } from "@/lib/room-install";
+import { deriveRow } from "@/lib/room-install-view";
 import {
   ACK_WAIT_MS,
   ackWaitMsFor,
@@ -165,7 +166,7 @@ import {
   type ListenerRow,
   type SetAudioInputArgs,
 } from "@/lib/bench-commands";
-import { argBool, argDate, argInt, argStr, failSafe, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+import { argBool, argDate, argDetail, argInt, argStr, DETAIL_SCHEMA, failSafe, pickSummary, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, postBrainCue, resolveRoom, type CueSource, type RoomRef } from "./brain";
 
 const PRESIGN_SECONDS = 3600; // 1 h family (matches manifest route)
@@ -2424,14 +2425,27 @@ async function liveMonitorExtras(
   };
 }
 
+/**
+ * Tier 2 §2.4 — what `detail:"summary"` keeps. The question this answers is "what is wrong right
+ * now, and can I act": the room's identity, whether anyone is listening, whether tape is moving,
+ * the operator-language state with its install flags, and the two clocks an operator checks next.
+ * Everything omitted is still one `detail:"full"` away — see docs/operator-mcp/TOOL-NOTES.md.
+ */
+export const SUMMARY_ROOM_FIELDS = [
+  "room", "page_open", "listener_state", "recording", "recording_session_id",
+  "room_state", "tape_lane", "paused_listener", "paused_session", "paused_disagrees",
+  "last_piece_at", "last_cue", "stalled_age_ms", "flags", "degraded",
+] as const;
+
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
   description:
-    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused — AND unless a genuine warehouse-typed cue exists on the room-day. There is no fallback to the session's own start on either surface any more: with no cue the answer is null, because the number that fallback produced was the length of the recording wearing a clock gap's label, and it turned every room amber at fifteen minutes and red at thirty. has_doctor_clock says whether the vital has any input at all. BUILD 1 §3.6 — THE DOOR NOW SAYS EVERYTHING THE SCREEN SAYS, IN THE SAME WORDS, from the same shared module (lib/room-facts.ts): transcript_enabled / visits_enabled, the two processing switches, which this tool could not report at all before — so a watcher could not warn that a room was recording into nothing (null, never false, where the read failed); lanes.transcript and lanes.visits plus tape_lane, the three lane lines exactly as the card renders them; transcript_counts and visit_counts behind them; has_room_day_today (null where the brain read failed, never false); stranded_audio — MINUTES THAT CANNOT CURRENTLY BE TURNED INTO WORDS, split into waiting for someone to run it / no day record / never closed, measured in fifteen-minute slots, which is NOT the measure audio_recorded_ms uses (that sums the pieces themselves) so the two do not subtract; and ended_disagrees with its sessions and chunk counts, the capture-clock alarm the screen has always had and this tool could not raise. room_state gains a seventh state, `finished` — the most recent session today is ended and nothing is recording (D30) — placed after paused and recording and before ready, dropped and offline, and never amber; and every room_state now carries start_available, which answers whether a start would succeed rather than making the caller infer it from the state word. TIER 1 §2 — room_state also carries flags and drift_since, THE NAMED INSTALL STATES OF THE MAC BOUND TO THIS ROOM, which are not a precedence chain and not about what the operator can do next: they are a SET over what the app's heartbeat already reports, and several hold at once — SILENT_WHILE_RECORDING (the tape is running and the input has been bit-exact zero for about two minutes; the 11 September dead-TONOR failure, named), CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT (an assignment the Mac has ignored for over thirty minutes — never raised while the Mac reports channel_locked, which is a deliberate config, not a fault). flags is NULL, NEVER [], where no Mac is bound to the room, where the install has not been evaluated since migration 0081, or where the read failed — an empty list means the Mac was looked at and is well. THESE ARE COARSE ALARMS OVER UNCALIBRATED THRESHOLDS: a flag means go and look, never a diagnosis. drift_since is CHANNEL_DRIFT's clock and is non-null from the first poll of a mismatch, so a caller can see a move in flight before the flag is earned.",
+    "The now-picture for one room or every enabled room: is the kiosk listening, is anything recording, the last cue and the last piece today, plus room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level, start_available } with state one of cant_tell | paused | recording | finished | ready | dropped | offline, in that precedence. Same function the admin page uses, so door and screen cannot disagree. room_state also carries flags and drift_since: the bound Mac's named install states (SILENT_WHILE_RECORDING, CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT) as a SET — several hold at once. flags is NULL, never [], where no Mac is bound, the install was never evaluated, or the read failed; [] means looked at and well: a flag means go and look, never a diagnosis. detail:\"full\" adds lanes, counts and clocks — see docs/operator-mcp/TOOL-NOTES.md. Read-only.",
   scope: "read",
   inputSchema: {
     type: "object",
     properties: {
+      detail: DETAIL_SCHEMA,
       room: { type: "string", description: "optional: one room by id, slug, or exact name" },
       room_id: { type: "string" },
       room_slug: { type: "string" },
@@ -2469,6 +2483,7 @@ const diffRoom: McpTool = {
         targets = rows.map((r) => ({ id: r.id, slug: r.slug, name: r.name, enabled: true }));
       }
 
+      const detail = argDetail(args);
       const rooms = await Promise.all(
         targets.map(async (room) => {
           const reasons: string[] = [];
@@ -2562,7 +2577,7 @@ const diffRoom: McpTool = {
             sessions.map((sn) => sn.id), reasons, listener,
           );
 
-          return {
+          const full = {
             room: { id: room.id, slug: room.slug, name: room.name },
             page_open: pageOpen,
             listener_age_ms: listener ? now.getTime() - new Date(listener.last_poll_at).getTime() : null,
@@ -2618,6 +2633,11 @@ const diffRoom: McpTool = {
             ...(liars.length ? { ended_at_lies_sessions: liars.map((s) => s.id) } : {}),
             ...(reasons.length ? { degraded: reasons } : {}),
           };
+          // Tier 2 §2.4 — summary is the default and is a NARROWER SELECTION OF THE SAME FACTS.
+          // Nothing is computed differently and nothing new appears in `full`; the wide payload is
+          // one argument away. `degraded` rides both, because a caller must never be told a room is
+          // fine when a section of the read failed.
+          return detail === "full" ? full : pickSummary(full, SUMMARY_ROOM_FIELDS);
         }),
       );
       return {
@@ -2968,6 +2988,86 @@ const replayWrite: McpTool = {
     }),
 };
 
+
+/**
+ * Tier 2 §2.7 — `scribe_fleet`. The fleet card's own payload, through the MCP door.
+ *
+ * WHY IT EXISTS. `/api/admin/bench/fleet` is the only place the install rows live — app version,
+ * channel, assignment, disk, device, the Tier 1 `state_flags` — and it is reachable only with an
+ * admin cookie from a browser. An agent shell has no cookie, so the one surface that answers
+ * "which Mac runs which room, on what build, and is it healthy" was unreachable from here. This is
+ * the SAME function the page calls (`readFleet`), so the door and the screen cannot disagree.
+ *
+ * READ SCOPE, and it carries no identity: hostnames and device names describe machines, not people.
+ */
+const fleet: McpTool = {
+  name: "scribe_fleet",
+  description:
+    "The room-recorder fleet: one row per room with its bound Mac — app_version, build_sha, update_channel, assigned_channel (and whether an assignment is still pending), channel_locked, last_seen_at, mic_state, input_device_name, disk, and the Tier 1 state_flags (SILENT_WHILE_RECORDING, CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT — a SET, null where never evaluated, [] where looked at and well). Also the newest release on each channel, so a row is measured against the shelf it actually asks for. Computed by the same function the admin fleet card calls, so the two cannot disagree. detail:\"summary\" (default) gives the identity/version/channel/health fields; detail:\"full\" gives the card's whole payload. Read-only.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      detail: DETAIL_SCHEMA,
+      room: { type: "string", description: "optional: one room by id, slug, or exact name" },
+    },
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ rooms: [] as unknown[] }, async () => {
+      const detail = argDetail(args);
+      const want = argStr(args, "room", 128);
+      const payload = await readFleet(new Date());
+      const rows = payload.rows.filter((r) =>
+        !want ||
+        r.room_id === want ||
+        r.room_slug === want ||
+        (r.room_name ?? "").toLowerCase() === want.toLowerCase(),
+      );
+      const view = rows.map((row) => {
+        const derived = deriveRow({ row, latestRelease: payload.latest_release, nowMs: Date.now() });
+        const full = {
+          room: { id: row.room_id, slug: row.room_slug, name: row.room_name },
+          disabled: row.disabled,
+          install: row.install ?? null,
+          derived,
+        };
+        if (detail === "full") return full;
+        const i = row.install;
+        return {
+          room: full.room,
+          // The install fields an operator reads first. Null install = no Mac bound to this room,
+          // which is a different answer from a Mac that is bound and silent.
+          install: i
+            ? {
+                install_id: i.install_id,
+                app_version: i.app_version,
+                build_sha: i.build_sha,
+                update_channel: i.update_channel,
+                assigned_channel: i.assigned_channel,
+                channel_locked: i.channel_locked,
+                state_flags: i.state_flags,
+                session_open: i.session_open,
+                last_seen_at: i.last_seen_at,
+                mic_state: i.mic_state,
+                input_device_name: i.input_device_name,
+              }
+            : null,
+          state: derived.state,
+          assigned_pending: derived.assigned_pending,
+          disk_level: derived.disk_level,
+          version_hint: derived.version_hint,
+        };
+      });
+      return {
+        now: payload.now,
+        releases: payload.releases,
+        rooms: view,
+        ...(payload.degraded.length ? { degraded: payload.degraded } : {}),
+      };
+    }),
+};
+
 export const BENCH_TOOLS: McpTool[] = [
   closeOrphaned,
   listSessions,
@@ -2983,6 +3083,7 @@ export const BENCH_TOOLS: McpTool[] = [
   extractAudio,
   transcribeRange,
   listCommandsTool,
+  fleet,
   dayReport,
   diffRoom,
   replaySession,

@@ -91,3 +91,34 @@ export function argDate(args: ToolArgs, key: string): Date | null {
 }
 
 export const IST_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Tier 2 §2.4 — `detail`. Every wide read tool takes it; `summary` is the DEFAULT and is what an
+ * operator reads first. `full` is exactly today's payload, so nothing that parses these tools
+ * breaks: a caller that wants the old shape asks for it by name.
+ *
+ * WHY THE DEFAULT MOVED. `scribe_diff_room` returns ~40 fields per room across every enabled room;
+ * an operator asking "what is wrong right now" pays for all of it and then reads six of them. The
+ * summary is those six-ish, and the full payload is one argument away.
+ */
+export type McpDetail = "summary" | "full";
+
+export function argDetail(args: ToolArgs): McpDetail {
+  return argStr(args, "detail", 16) === "full" ? "full" : "summary";
+}
+
+/** The schema fragment every tool with `detail` shares, so the wording cannot drift between them. */
+export const DETAIL_SCHEMA = {
+  type: "string",
+  enum: ["summary", "full"],
+  default: "summary",
+  description:
+    "summary (default) = the fields an operator reads first; full = the complete payload this tool returned before Tier 2. Nothing is removed by summary — it is a narrower selection of the same facts.",
+} as const;
+
+/** PURE — §2.4. Keep only `keys` from each row of a payload's list, leaving everything else alone. */
+export function pickSummary<T extends Record<string, unknown>>(row: T, keys: readonly string[]): Partial<T> {
+  const out: Record<string, unknown> = {};
+  for (const k of keys) if (k in row) out[k] = row[k];
+  return out as Partial<T>;
+}
