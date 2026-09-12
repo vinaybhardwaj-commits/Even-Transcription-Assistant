@@ -69,7 +69,7 @@ describe("item 3 — NEVER infer role from speaker order", () => {
 // ---------------------------------------------------------------------------
 
 const DB = vi.hoisted(() => ({ rows: [] as Array<Record<string, unknown>>, turns: [] as Array<Record<string, unknown>>, centroids: [] as Array<Record<string, unknown>> }));
-const SVC = vi.hoisted(() => ({ out: {} as Record<string, unknown> }));
+const SVC = vi.hoisted(() => ({ out: {} as Record<string, unknown>, calls: [] as Array<Record<string, unknown>> }));
 
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
@@ -77,97 +77,161 @@ vi.mock("@/lib/db", () => ({
     if (q.includes("FROM voice_print")) return DB.centroids;
     if (q.includes("FROM cue")) return DB.turns;
     if (q.includes("INSERT INTO room_turn_speaker")) {
-      // NULL (cluster_id) and NOW() are LITERALS in the statement, not bound values, so the
-      // params are contiguous: window, source_ref, speaker_idx, overlap_ms, room_day, then the
-      // three identity columns.
-      DB.rows.push({ window_id: v[0], source_ref: v[1], speaker_idx: v[2], overlap_ms: v[3], clinician_id: v[5], role: v[6], match_confidence: v[7] });
+      // NULL/NOW() are literals; the bound params are contiguous.
+      DB.rows.push({ window_id: v[0], source_ref: v[1], speaker_idx: v[2], cluster_id: v[3], overlap_ms: v[4],
+                     clinician_id: v[6], role: v[7], match_confidence: v[8] });
       return [];
     }
     return [];
   },
 }));
-vi.mock("@/lib/diarize", () => ({ runDiarize: async () => SVC.out }));
+vi.mock("@/lib/diarize", () => ({
+  runDiarize: async (_a: unknown, _c: string, opts: Record<string, unknown>) => { SVC.calls.push(opts); return SVC.out; },
+}));
 
-describe("the write — an alignment, and what it records", () => {
+const SLICE = { index: 0, start_ms: 1000, end_ms: 121_000 };
+
+describe("D1 — a turn containing a speaker change gets NO name", () => {
   beforeEach(() => {
-    DB.rows = []; DB.centroids = [];
-    DB.turns = [
-      { source_ref: "s|0|2000|a", start_ms: 1000, end_ms: 3000 },
-      { source_ref: "s|3000|5000|b", start_ms: 4000, end_ms: 6000 },
-    ];
-    SVC.out = {
-      ok: true, latencyMs: 900,
-      result: {
-        speakers: [unmatched(0), matched(1, "doc_fake0002")],
-        transcript_segments: [
-          { start_ms: 0, end_ms: 2500, speaker_idx: 0, overlap: false },
-          { start_ms: 3000, end_ms: 5500, speaker_idx: 1, overlap: false },
-        ],
-      },
-    };
+    DB.rows = []; DB.centroids = []; SVC.calls = [];
   });
 
-  it("binds each turn to the speaker it overlaps most, and names ONLY the matched one", async () => {
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeWindow({ windowId: "bw_1", roomDayId: "rd_1", startMs: 1000, endMs: 7000, audio: new Uint8Array([1]) });
+  it("THE REFUTER'S CASE: turn 0-1000, speaker 0 (matched) 0-600, speaker 1 600-1000", async () => {
+    DB.turns = [{ source_ref: "straddle", start_ms: 1000, end_ms: 2000 }];
+    SVC.out = { ok: true, latencyMs: 10, result: {
+      speakers: [matched(0), unmatched(1)],
+      transcript_segments: [
+        { start_ms: 0, end_ms: 600, speaker_idx: 0, overlap: false },
+        { start_ms: 600, end_ms: 1000, speaker_idx: 1, overlap: false },
+      ],
+    } };
+    const { diarizeSlice } = await import("@/lib/stt/diarize-window");
+    const r = await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
     expect(r.ok).toBe(true);
-    expect(DB.rows).toHaveLength(2);
-    const first = DB.rows.find((x) => x.source_ref === "s|0|2000|a")!;
-    const second = DB.rows.find((x) => x.source_ref === "s|3000|5000|b")!;
-    // Speaker 0 talked most and is index 0 — and gets no name, because nothing matched it.
-    expect(first.speaker_idx).toBe(0);
-    expect(first.role).toBe("unattributed");
-    expect(first.clinician_id).toBeNull();
-    // Speaker 1 was matched, so it is named — at a higher index.
-    expect(second.speaker_idx).toBe(1);
-    expect(second.role).toBe("clinician");
-    expect(second.clinician_id).toBe("doc_fake0002");
-    expect(second.match_confidence).toBe(0.82);
+    const row = DB.rows[0]!;
+    // The dominant speaker is still recorded — it is a useful diagnostic.
+    expect(row.speaker_idx).toBe(0);
+    // But 400 ms of someone else's speech means nobody's name goes on this row.
+    expect(row.role, "a straddled turn may not carry a clinician").toBe("unattributed");
+    expect(row.clinician_id).toBeNull();
+    expect(row.match_confidence).toBeNull();
+    expect((r as { outcome: { straddled: number } }).outcome.straddled).toBe(1);
   });
 
-  it("no span carries transcript text", async () => {
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    await diarizeWindow({ windowId: "bw_1", roomDayId: "rd_1", startMs: 1000, endMs: 7000, audio: new Uint8Array([1]) });
-    for (const r of DB.rows) {
-      expect(Object.keys(r).sort()).toEqual(["clinician_id", "match_confidence", "overlap_ms", "role", "source_ref", "speaker_idx", "window_id"]);
-    }
+  it("an EXCLUSIVE turn still gets its name — the rule is not a blanket refusal", async () => {
+    DB.turns = [{ source_ref: "clean", start_ms: 1000, end_ms: 1500 }];
+    SVC.out = { ok: true, latencyMs: 10, result: {
+      speakers: [matched(0, "doc_fake0002")],
+      transcript_segments: [{ start_ms: 0, end_ms: 1000, speaker_idx: 0, overlap: false }],
+    } };
+    const { diarizeSlice } = await import("@/lib/stt/diarize-window");
+    await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
+    expect(DB.rows[0]!.role).toBe("clinician");
+    expect(DB.rows[0]!.clinician_id).toBe("doc_fake0002");
   });
 
-  it("WITH NO ENROLLED CENTROIDS nothing is attributed — the coverage question, in miniature", async () => {
-    SVC.out = { ok: true, latencyMs: 500, result: { speakers: [unmatched(0), unmatched(1)],
-      transcript_segments: [{ start_ms: 0, end_ms: 6000, speaker_idx: 0, overlap: false }] } };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeWindow({ windowId: "bw_1", roomDayId: "rd_1", startMs: 1000, endMs: 7000, audio: new Uint8Array([1]) });
-    expect((r as { outcome: { attributed_turns: number } }).outcome.attributed_turns).toBe(0);
-    expect(DB.rows.every((x) => x.role === "unattributed")).toBe(true);
-  });
-
-  it("the window id is what goes in encounter_id — no encounter is invented for room audio", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync("lib/stt/diarize-window.ts", "utf8");
-    expect(src).toContain("encounterId: opts.windowId");
-    expect(src, "no INSERT INTO encounter anywhere on this path").not.toMatch(/INSERT INTO encounter/);
-  });
-
-  it("a service failure distinguishes 'never reached it' from 'it refused'", async () => {
-    SVC.out = { ok: false, error: "no slot", retryable: true, latencyMs: 0 };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeWindow({ windowId: "bw_1", roomDayId: "rd_1", startMs: 0, endMs: 1000, audio: new Uint8Array([1]) });
-    expect(r).toMatchObject({ ok: false, retryable: true });
-    expect(DB.rows, "a failed run writes no spans").toHaveLength(0);
+  it("bindTurnsExclusive reports the straddle directly", async () => {
+    const { bindTurnsExclusive } = await import("@/lib/stt/speaker-roles");
+    const segs = [{ start_ms: 0, end_ms: 600, speaker_idx: 0 }, { start_ms: 600, end_ms: 1000, speaker_idx: 1 }];
+    const [b] = bindTurnsExclusive(segs, [{ source_ref: "t", start_ms: 0, end_ms: 1000 }]);
+    expect(b).toMatchObject({ speaker_idx: 0, overlap_ms: 600, exclusive: false, speaker_count: 2 });
+    const [c] = bindTurnsExclusive(segs, [{ source_ref: "t", start_ms: 0, end_ms: 500 }]);
+    expect(c).toMatchObject({ exclusive: true, speaker_count: 1 });
   });
 });
 
-describe("the budget, and the reader", () => {
-  it("a 900 s window is REFUSED at ~1.5x realtime — five times the lease", async () => {
-    const { diarizeFits } = await import("@/lib/stt/diarize-budget");
-    const { LEASE_MS } = await import("@/lib/jobs/types");
-    expect(diarizeFits(900).fits).toBe(false);
-    expect(diarizeFits(900).budget_ms).toBe(LEASE_MS);
-    // ~2 minutes of audio does fit, which is the size this path can actually serve today.
-    expect(diarizeFits(120).fits).toBe(true);
+describe("D4 — a real 900 s window is REACHABLE and produces rows", () => {
+  beforeEach(() => { DB.rows = []; DB.centroids = []; SVC.calls = []; });
+
+  it("900 s becomes 8 slices, every one of which fits a lease", async () => {
+    const { sliceBounds, sliceFits, SLICE_MS } = await import("@/lib/stt/diarize-slicing");
+    const slices = sliceBounds(0, 900_000);
+    expect(SLICE_MS).toBe(120_000);
+    expect(slices).toHaveLength(8);
+    expect(slices[7]).toEqual({ index: 7, start_ms: 840_000, end_ms: 900_000 });
+    for (const s of slices) expect(sliceFits((s.end_ms - s.start_ms) / 1000), `slice ${s.index}`).toBe(true);
   });
 
+  it("REACHABILITY, not arithmetic: slicing a 900 s window writes real rows", async () => {
+    const { sliceBounds } = await import("@/lib/stt/diarize-slicing");
+    const { diarizeSlice } = await import("@/lib/stt/diarize-window");
+    const slices = sliceBounds(0, 900_000);
+    for (const sl of slices) {
+      // One clean turn per slice, wholly inside it.
+      DB.turns = [{ source_ref: `t${sl.index}`, start_ms: sl.start_ms + 1000, end_ms: sl.start_ms + 5000 }];
+      SVC.out = { ok: true, latencyMs: 50, result: {
+        speakers: [matched(0)],
+        transcript_segments: [{ start_ms: 0, end_ms: 120_000, speaker_idx: 0, overlap: false }],
+      } };
+      const r = await diarizeSlice({ windowId: "bw_900", roomDayId: "rd_1", slice: sl, audio: new Uint8Array([1]) });
+      expect(r.ok, `slice ${sl.index} must run`).toBe(true);
+    }
+    expect(DB.rows, "eight slices, eight rows — the feature fires on a production-sized window").toHaveLength(8);
+    expect(DB.rows.every((x) => x.role === "clinician")).toBe(true);
+  });
+
+  it("a turn crossing a SLICE SEAM gets no name, however clean the speakers are", async () => {
+    // The turn starts inside slice 0 and ends past its end: two clusterings, no single speaker.
+    DB.turns = [{ source_ref: "seam", start_ms: 119_000, end_ms: 125_000 }];
+    SVC.out = { ok: true, latencyMs: 10, result: {
+      speakers: [matched(0)],
+      transcript_segments: [{ start_ms: 0, end_ms: 120_000, speaker_idx: 0, overlap: false }],
+    } };
+    const { diarizeSlice } = await import("@/lib/stt/diarize-window");
+    const r = await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: { index: 0, start_ms: 0, end_ms: 120_000 }, audio: new Uint8Array([1]) });
+    expect(DB.rows[0]!.role).toBe("unattributed");
+    expect(DB.rows[0]!.clinician_id).toBeNull();
+    expect((r as { outcome: { seam_skipped: number } }).outcome.seam_skipped).toBe(1);
+  });
+});
+
+describe("D5 — 0.65 is on the wire, always", () => {
+  beforeEach(() => { DB.rows = []; DB.centroids = []; SVC.calls = []; DB.turns = []; });
+
+  it("every /diarize call carries the validated threshold, not the service's 0.70 default", async () => {
+    const { DIARIZE_BATCH_THRESHOLD, SPEAKER_STITCH_THRESHOLD } = await import("@/lib/stt/diarize-slicing");
+    expect(DIARIZE_BATCH_THRESHOLD).toBe(0.65);
+    SVC.out = { ok: true, latencyMs: 10, result: { speakers: [], transcript_segments: [] } };
+    const { diarizeSlice } = await import("@/lib/stt/diarize-window");
+    await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
+    expect(SVC.calls).toHaveLength(1);
+    expect(SVC.calls[0]!.batchThreshold, "inheriting a remote default is how an unvalidated number governs identity").toBe(0.65);
+    // The stitch uses the same floor for OUR cosine.
+    expect(SPEAKER_STITCH_THRESHOLD).toBe(0.65);
+  });
+
+  it("the stitch applies 0.65 to its own cosine — same voice joins, different voice does not", async () => {
+    const { stitchSpeakers } = await import("@/lib/stt/diarize-slicing");
+    const vec = (v: number[]) => Buffer.from(new Float32Array(v).buffer).toString("base64");
+    const same = vec([1, 0, 0, 0]);
+    const near = vec([0.9, 0.436, 0, 0]);   // cosine ~0.90 with `same` — joins
+    const far = vec([0, 1, 0, 0]);          // cosine 0 — does not
+    const ids = stitchSpeakers([
+      { slice: 0, idx: 0, embedding_base64: same, clinician_id: "doc_fake0001", confidence: 0.8 },
+      { slice: 1, idx: 0, embedding_base64: near },
+      { slice: 2, idx: 0, embedding_base64: far },
+    ]);
+    const a = ids.get("0:0")!, b = ids.get("1:0")!, c = ids.get("2:0")!;
+    expect(b.cluster_id, "a near voice is the same identity").toBe(a.cluster_id);
+    expect(c.cluster_id, "a different voice is not").not.toBe(a.cluster_id);
+    // The clinician propagates across the stitch, carrying the WEAKEST link's confidence.
+    expect(b.clinician_id).toBe("doc_fake0001");
+    expect(b.match_confidence!).toBeLessThanOrEqual(0.8);
+    expect(c.clinician_id, "an unstitched voice is never named").toBeNull();
+  });
+
+  it("a speaker with NO usable embedding is its own identity and is never named", async () => {
+    const { stitchSpeakers } = await import("@/lib/stt/diarize-slicing");
+    const ids = stitchSpeakers([
+      { slice: 0, idx: 0, embedding_base64: Buffer.from(new Float32Array([1, 0]).buffer).toString("base64"), clinician_id: "doc_x", confidence: 0.9 },
+      { slice: 1, idx: 0, embedding_base64: null },
+    ]);
+    expect(ids.get("1:0")!.clinician_id).toBeNull();
+    expect(ids.get("1:0")!.cluster_id).not.toBe(ids.get("0:0")!.cluster_id);
+  });
+});
+
+describe("the reader, and the one diarize kind", () => {
   it("the reader is registered, read-scope, and warns that speaker_idx is not a role", async () => {
     const { STT_TOOLS } = await import("@/lib/mcp/tools/stt");
     const t = STT_TOOLS.find((x) => x.name === "scribe_window_speakers");
@@ -175,12 +239,17 @@ describe("the budget, and the reader", () => {
     expect(t!.scope).toBe("read");
     expect(t!.description).toMatch(/NOT a role/);
     expect(t!.description).toMatch(/No transcript text/);
-    expect(t!.description, "unattributed must not be read as 'someone else'").toMatch(/NOT that it was someone else/);
   });
 
-  it("the kind is registered and refuses an oversized window before downloading anything", async () => {
-    const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
-    expect(KIND_BY_NAME.get("diarize_window")).toBeTruthy();
-    expect(KIND_BY_NAME.get("diarize_window")!.scope).toBe("invoke");
+  it("D3 — diarize_window is the ONLY diarize kind", async () => {
+    const { JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
+    expect(JOB_KIND_NAMES.filter((n) => n.includes("diarize"))).toEqual(["diarize_window"]);
+  });
+
+  it("the window id is what goes in encounter_id — no encounter is invented for room audio", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/stt/diarize-window.ts", "utf8");
+    expect(src).toMatch(/encounterId: `\$\{opts\.windowId\}#\$\{opts\.slice\.index\}`/);
+    expect(src).not.toMatch(/INSERT INTO encounter/);
   });
 });

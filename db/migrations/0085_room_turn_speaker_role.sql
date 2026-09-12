@@ -10,11 +10,20 @@
 -- service's cosine match against an enrolled voiceprint — and so that a reader can tell the
 -- difference between "this is Dr X" and "this is the voice that talked most".
 --
--- THE CHECK IS THE RULE, IN THE SCHEMA. A row may claim role='clinician' only if it also names a
--- clinician_id and carries the confidence the match was made at. A future writer that infers a
--- clinician from speaker order cannot store the result: it has no id to put here, and the row is
--- rejected by the database rather than accepted and believed. Attributing a patient's words to
--- their doctor — or the reverse — is worse than leaving the span unlabelled.
+-- THE CHECKS ARE THE RULE, IN THE SCHEMA, AND THEY RUN BOTH WAYS.
+--   * role='clinician' REQUIRES a non-empty clinician_id and a match_confidence in [0,1];
+--   * an identity REQUIRES the claim: clinician_id may be present only when role='clinician',
+--     so no row can carry a name it does not assert — a name with no claim beside it is exactly
+--     what a later reader would mistake for an attribution;
+--   * match_confidence may be present only with that claim, and only as a real cosine.
+--
+-- A writer that inferred a clinician from speaker order has no id to put here and is rejected by
+-- the database rather than accepted and believed. Attributing a patient's words to their doctor —
+-- or the reverse — is worse than leaving the span unlabelled.
+--
+-- The first version of this migration stated the rule and enforced only half of it: an
+-- 'unattributed' row carrying a clinician_id was accepted, as was a confidence of -5. Tightened
+-- in place because 0085 has not been applied anywhere.
 --
 -- Additive and idempotent; no backfill, because there is nothing to backfill (the table is empty).
 -- =====================================================================
@@ -41,7 +50,28 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_clinician_ck') THEN
     ALTER TABLE room_turn_speaker
       ADD CONSTRAINT room_turn_speaker_clinician_ck
-      CHECK (role <> 'clinician' OR (clinician_id IS NOT NULL AND match_confidence IS NOT NULL));
+      CHECK (role <> 'clinician' OR (clinician_id IS NOT NULL AND btrim(clinician_id) <> '' AND match_confidence IS NOT NULL));
+  END IF;
+END $$;
+
+-- THE CONVERSE. An identity may exist only where it is claimed, and a confidence only where there
+-- is something for it to be the confidence OF.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_identity_ck') THEN
+    ALTER TABLE room_turn_speaker
+      ADD CONSTRAINT room_turn_speaker_identity_ck
+      CHECK ((clinician_id IS NULL AND match_confidence IS NULL) OR role = 'clinician');
+  END IF;
+END $$;
+
+-- A cosine is a number in [0,1]. -5 is not a weak match; it is a bug that reached the table.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_confidence_ck') THEN
+    ALTER TABLE room_turn_speaker
+      ADD CONSTRAINT room_turn_speaker_confidence_ck
+      CHECK (match_confidence IS NULL OR (match_confidence >= 0 AND match_confidence <= 1));
   END IF;
 END $$;
 

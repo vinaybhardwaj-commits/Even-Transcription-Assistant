@@ -7,19 +7,21 @@
  * Nothing re-transcribes, and no audio or text crosses a step boundary.
  *
  * THE JOIN IS ON THE TURNS, and the turns are whisper's. `stt_turn` cues carry `start_ms`/`end_ms`
- * derived from whisper's SEGMENT timings today; the spec prefers WORD-level timings, and whisper's
- * verbose_json does return them (`{word, start, end, t_dtw, probability}`). Word timings matter
- * exactly where a speaker changes mid-segment, because a segment that straddles the change smears
- * across both and the overlap-max rule below then binds the whole thing to whoever held more of it.
- * The cue is the unit this table is keyed by (`source_ref`), so word timings are a REFINEMENT OF
- * THE CUE BOUNDARY, not a new row type — and they are not available on the cue today. Flagged in
- * the build report rather than faked: binding to a boundary we do not have would be a precision
- * claim with nothing behind it.
+ * derived from whisper's SEGMENT timings; word-level timings exist in whisper's verbose_json but
+ * are not persisted on the cue, so the cue is the finest boundary available here.
+ *
+ * THAT LIMIT IS NOW HANDLED RATHER THAN ADMITTED. Where a speaker boundary falls inside a turn, the
+ * earlier version bound the whole turn to whoever held more of it and wrote a name across the lot —
+ * so 400 ms of a patient's speech could be recorded as the doctor's. A turn containing a speaker
+ * change now gets its `speaker_idx` (the dominant one, still useful) and NO role at all. The same
+ * rule covers a turn crossing a SLICE seam: two slices are two separate clusterings, so a turn
+ * spanning them has no single speaker to name.
  */
 import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
-import { parseDiarizeSegments, bindTurnsToSpeakers, type TurnSpan } from "./speaker-clusters";
-import { rolesByIndex, UNATTRIBUTED, type SpanRole } from "./speaker-roles";
+import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
+import { rolesByIndex, UNATTRIBUTED, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
+import { DIARIZE_BATCH_THRESHOLD, type StitchedIdentity } from "./diarize-slicing";
 
 /** The two clinicians with live centroids today. Loaded, never typed — see loadClinicianCentroids. */
 export type ClinicianCentroid = { clinician_id: string; full_name: string; centroid_base64: string };
@@ -65,66 +67,86 @@ export async function loadWindowTurns(roomDayId: string, startMs: number, endMs:
     .filter((t) => Number.isFinite(t.start_ms) && Number.isFinite(t.end_ms));
 }
 
-export type DiarizeWindowOutcome = {
+export type DiarizeSliceOutcome = {
+  slice: number;
   spans: number;
   turns: number;
   bound: number;
+  named: number;
+  straddled: number;
+  seam_skipped: number;
   speakers: number;
-  attributed_speakers: number;
-  attributed_turns: number;
   latency_ms: number | null;
 };
 
+/** PURE. A turn crossing a slice boundary belongs to two clusterings and can be named by neither. */
+export function crossesSeam(turn: { start_ms: number; end_ms: number }, slice: { start_ms: number; end_ms: number }): boolean {
+  return turn.start_ms < slice.start_ms || turn.end_ms > slice.end_ms;
+}
+
 /**
- * Run the service, align, and write. `encounter_id` carries the WINDOW ID, deliberately.
+ * Diarize ONE SLICE of a window and write its spans.
  *
- * The service treats that field as opaque: it is a required Form value (`server.py:131`) echoed
- * back in the response (`:295`) and used nowhere else — it touches no database and persists
- * nothing. So passing the window id is honest labelling, and inventing an `encounter` row for room
- * audio to satisfy a field name would be creating clinical records to please a string.
+ * `encounter_id` carries the WINDOW id (plus the slice), deliberately. The service treats that
+ * field as opaque — a required Form value echoed back and used nowhere else, touching no database —
+ * so inventing an `encounter` row for room audio to satisfy a field name would be creating clinical
+ * records to please a string.
  */
-export async function diarizeWindow(opts: {
+export async function diarizeSlice(opts: {
   windowId: string;
   roomDayId: string;
-  startMs: number;
-  endMs: number;
+  slice: { index: number; start_ms: number; end_ms: number };
   audio: Uint8Array;
   contentType?: string;
   centroids?: ClinicianCentroid[];
-}): Promise<{ ok: true; outcome: DiarizeWindowOutcome } | { ok: false; error: string; retryable: boolean }> {
+}): Promise<
+  | { ok: true; outcome: DiarizeSliceOutcome; speakers: DiarizeSpeaker[] }
+  | { ok: false; error: string; retryable: boolean }
+> {
   const centroids = opts.centroids ?? (await loadClinicianCentroids());
 
   const res = await runDiarize(opts.audio, opts.contentType ?? "audio/webm", {
-    encounterId: opts.windowId,
+    encounterId: `${opts.windowId}#${opts.slice.index}`,
     clinicianCentroids: centroids,
+    // D5 — the validated floor, on the wire, every time. The service's own default is 0.70 and is
+    // not ours; a stricter remote default fails quietly, which is how an unvalidated number
+    // governs identity for months.
+    batchThreshold: DIARIZE_BATCH_THRESHOLD,
   });
-  // Branch on `ok`. /diarize returns real 4xx, but its sibling /enroll answers 200 with ok:false,
-  // and a client that reads status learns the wrong lesson from whichever it meets first.
   if (!res.ok) return { ok: false, error: res.error, retryable: res.retryable === true };
 
   const speakers = (res.result.speakers ?? []) as DiarizeSpeaker[];
   const roles = rolesByIndex(speakers);
   const segments = parseDiarizeSegments(res.result.transcript_segments);
-  const turns = await loadWindowTurns(opts.roomDayId, opts.startMs, opts.endMs);
+  const turns = await loadWindowTurns(opts.roomDayId, opts.slice.start_ms, opts.slice.end_ms);
 
-  // Clip-relative → wall clock, once, here: the service times from the start of the audio it was
-  // given, the cues are stamped on the day's clock.
-  const onClock = segments.map((s) => ({ ...s, start_ms: opts.startMs + s.start_ms, end_ms: opts.startMs + s.end_ms }));
-  const bindings = bindTurnsToSpeakers(onClock, turns);
+  // Slice-relative → wall clock, once, here.
+  const onClock = segments.map((sg) => ({ ...sg, start_ms: opts.slice.start_ms + sg.start_ms, end_ms: opts.slice.start_ms + sg.end_ms }));
+  const bindings = bindTurnsExclusive(onClock, turns);
+  const byRef = new Map(turns.map((t) => [t.source_ref, t]));
 
-  let attributedTurns = 0;
+  let named = 0, straddled = 0, seamSkipped = 0;
   for (const b of bindings) {
-    const r: SpanRole = roles.get(b.speaker_idx) ?? UNATTRIBUTED;
-    if (r.role === "clinician") attributedTurns += 1;
+    const turn = byRef.get(b.source_ref)!;
+    const seam = crossesSeam(turn, opts.slice);
+    // THREE conditions, all required, before a name may be written. Any one failing leaves the
+    // span with its speaker_idx and nothing else.
+    const r: SpanRole = !b.exclusive || seam ? UNATTRIBUTED : (roles.get(b.speaker_idx) ?? UNATTRIBUTED);
+    if (!b.exclusive) straddled += 1;
+    if (seam) seamSkipped += 1;
+    if (r.role === "clinician") named += 1;
     await sql`
       INSERT INTO room_turn_speaker
         (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
          clinician_id, role, match_confidence, created_at)
       VALUES
-        (${opts.windowId}, ${b.source_ref}, ${b.speaker_idx}, NULL, ${b.overlap_ms}, ${opts.roomDayId},
+        (${opts.windowId}, ${b.source_ref}, ${b.speaker_idx}, ${`s${opts.slice.index}:${b.speaker_idx}`}, ${b.overlap_ms}, ${opts.roomDayId},
          ${r.clinician_id}, ${r.role}, ${r.match_confidence}, NOW())
       ON CONFLICT (window_id, source_ref) DO UPDATE
         SET speaker_idx = EXCLUDED.speaker_idx,
+            -- D9: cluster_id travels with speaker_idx. Replacing one and keeping the other leaves
+            -- a row whose cluster came from a different clustering than its index.
+            cluster_id = EXCLUDED.cluster_id,
             overlap_ms = EXCLUDED.overlap_ms,
             clinician_id = EXCLUDED.clinician_id,
             role = EXCLUDED.role,
@@ -132,19 +154,50 @@ export async function diarizeWindow(opts: {
     `;
   }
 
-  let attributedSpeakers = 0;
-  for (const r of roles.values()) if (r.role === "clinician") attributedSpeakers += 1;
-
   return {
     ok: true,
+    speakers,
     outcome: {
+      slice: opts.slice.index,
       spans: segments.length,
       turns: turns.length,
       bound: bindings.length,
+      named,
+      straddled,
+      seam_skipped: seamSkipped,
       speakers: roles.size,
-      attributed_speakers: attributedSpeakers,
-      attributed_turns: attributedTurns,
       latency_ms: res.latencyMs ?? null,
     },
   };
+}
+
+/**
+ * Apply the cross-slice stitch: give every span its identity's cluster_id, and propagate a
+ * clinician to slices where the service did not match it itself.
+ *
+ * A propagated name is still a name granted by a cosine match — the service's, then ours, both at
+ * the same floor — and it carries the WEAKEST confidence in that chain rather than the last hop's.
+ * A straddled or seam-crossing span is never given one: those rows were disqualified for a reason
+ * the stitch does not address.
+ */
+export async function applyStitch(windowId: string, identities: Map<string, StitchedIdentity>): Promise<number> {
+  let updated = 0;
+  for (const [k, id] of identities) {
+    const [sliceStr, idxStr] = k.split(":");
+    const clusterKey = `s${sliceStr}:${idxStr}`;
+    const rows = (await sql`
+      UPDATE room_turn_speaker
+         SET cluster_id = ${id.cluster_id},
+             clinician_id = CASE WHEN role = 'clinician' THEN clinician_id
+                                 WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN ${id.clinician_id}
+                                 ELSE clinician_id END,
+             role = CASE WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN 'clinician' ELSE role END,
+             match_confidence = CASE WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN ${id.match_confidence}
+                                     ELSE match_confidence END
+       WHERE window_id = ${windowId} AND cluster_id = ${clusterKey}
+       RETURNING source_ref
+    `) as Array<{ source_ref: string }>;
+    updated += rows.length;
+  }
+  return updated;
 }

@@ -15,17 +15,11 @@ vi.mock("@/lib/stt/eta-router", () => ({
 beforeEach(() => { R.on = true; R.urls = []; R.sub = { ok: true, job_id: "rj_1" }; R.poll = { ok: true, state: "running" }; });
 
 describe("the interface, not the client", () => {
-  /**
-   * `ekascribe` DECLARES async:true and implements neither — the invariant's first violation, and
-   * it is pre-existing: the adapter has always been a job/poll provider in its capabilities and a
-   * synchronous stub in code, and it ships `enabled:false` (0018_stt_engine.sql:37). Implementing
-   * its API is not this slice's work and would be guesswork. It is named here rather than excused,
-   * and the test below proves the runtime refuses it LOUDLY instead of degrading to the sync path.
-   */
-  const DECLARES_ASYNC_WITHOUT_IMPLEMENTING = new Set(["ekascribe"]);
-
   it("an adapter that declares async implements submit/poll — both or neither", async () => {
     const { ADAPTERS } = await import("@/lib/stt/registry");
+    // NO EXCEPTION LIST. ekascribe used to be one: it declared async:true and implemented neither,
+    // which made this invariant unenforceable by the only means that matters — being true. Its
+    // DECLARATION was corrected (it is a synchronous shim), so the rule now stands unqualified.
     const violations: string[] = [];
     for (const [key, a] of Object.entries(ADAPTERS)) {
       const declares = a.capabilities.async === true;
@@ -33,16 +27,14 @@ describe("the interface, not the client", () => {
       if (declares && !implementsBoth) violations.push(key);
       if (!declares) expect(typeof a.submit, `${key} must not implement submit without declaring async`).toBe("undefined");
     }
-    // Exactly the known set — a NEW violation fails here, and fixing ekascribe fails here too,
-    // which is the point: the exception has to be deleted deliberately, not decay into the rule.
-    expect(new Set(violations)).toEqual(DECLARES_ASYNC_WITHOUT_IMPLEMENTING);
+    expect(violations, "an engine that says it is async must be able to be").toEqual([]);
     expect(ADAPTERS.route!.capabilities.async).toBe(true);
     expect(typeof ADAPTERS.route!.submit).toBe("function");
+    expect(ADAPTERS.ekascribe!.capabilities.async, "corrected in C2 D2").toBe(false);
   });
 
   it("a declared-but-unimplemented async engine is REFUSED, never silently run synchronously", async () => {
-    // A 900 s window on the synchronous path is the timeout this whole seam exists to avoid, so
-    // the drain must stop rather than fall back. The refusal string is the contract.
+    // A 900 s window on the synchronous path is the timeout this whole seam exists to avoid.
     const drain = readFileSync("lib/stt/room-drain.ts", "utf8");
     expect(drain).toContain("async_engine_missing_submit_poll");
     expect(drain).toMatch(/typeof adapter\.submit !== "function" \|\| typeof adapter\.poll !== "function"/);
@@ -84,6 +76,14 @@ describe("the interface, not the client", () => {
     const r = (done as { result: { original: string | null; languageTimeline: unknown[] | null } }).result;
     expect(r.original).toBe("words");
     expect(r.languageTimeline).toHaveLength(1);
+  });
+});
+
+describe("D8 — the kill switch stays legible on the row", () => {
+  it("a disabled router records router_job_disabled, not a generic submit failure", () => {
+    const drain = readFileSync("lib/stt/room-drain.ts", "utf8");
+    // "we turned it off" and "it broke" must not share a code: one is a decision, the other a fault.
+    expect(drain).toMatch(/sub\.error === "router_job_disabled" \? "router_job_disabled" : "async_submit_failed"/);
   });
 });
 

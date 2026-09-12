@@ -70,3 +70,72 @@ export function attributionCoverage(speakers: readonly DiarizeSpeaker[]): { spea
   for (const r of roles.values()) if (r.role === "clinician") attributed += 1;
   return { speakers: roles.size, attributed };
 }
+
+
+// ---------------------------------------------------------------------------
+// D1 — WHERE A SPEAKER CHANGES INSIDE A TURN, THE TURN GETS NO NAME
+// ---------------------------------------------------------------------------
+
+/**
+ * The defect this closes, concretely. A turn spanning 0-1000 ms, with the service reporting speaker
+ * 0 from 0-600 (matched to a clinician) and speaker 1 from 600-1000 (unmatched), used to be bound
+ * by pure overlap-max: speaker 0 wins 600 ms to 400 ms, and the whole turn is written
+ * `role='clinician'`. Four hundred milliseconds of someone else's speech is then on the record as
+ * the doctor's.
+ *
+ * Overlap-max is the right answer for "which cluster does this turn mostly belong to" — it stays,
+ * and `speaker_idx` still carries it, because a diagnostic reader wants it. It is the WRONG answer
+ * for "may this turn carry a person's name", and those two questions had been answered by one
+ * number. A turn that contains a speaker boundary is a turn nobody can attribute without splitting
+ * it, and splitting a turn is not something a speaker-diarizer's timings license.
+ *
+ * So: `exclusive` is false whenever more than one speaker holds any of the turn, and the caller
+ * must not grant a role when it is false. The invariant is enforced ON THE ROW, not inside
+ * `roleForSpeaker` — that function answers "who is this speaker", which is a different question
+ * from "does this turn belong to exactly one speaker".
+ */
+export type ExclusiveBinding = {
+  source_ref: string;
+  speaker_idx: number;
+  overlap_ms: number;
+  /** True only when ONE speaker overlaps this turn at all. */
+  exclusive: boolean;
+  /** How many distinct speakers touched it. >1 is the straddle. */
+  speaker_count: number;
+};
+
+type Span = { start_ms: number; end_ms: number };
+const overlapMs = (a: Span, b: Span) => Math.max(0, Math.min(a.end_ms, b.end_ms) - Math.max(a.start_ms, b.start_ms));
+
+/**
+ * PURE. Overlap-max binding, plus the fact the caller actually needs to decide about a name.
+ *
+ * Ties break on the LOWER speaker index so the answer does not depend on iteration order, exactly
+ * as the original does — a turn split down the middle is a straddle anyway and gets no role.
+ */
+export function bindTurnsExclusive(
+  segments: readonly (Span & { speaker_idx: number })[],
+  turns: readonly (Span & { source_ref: string })[],
+): ExclusiveBinding[] {
+  const out: ExclusiveBinding[] = [];
+  for (const t of turns) {
+    const totals = new Map<number, number>();
+    for (const s of segments) {
+      const ms = overlapMs(t, s);
+      if (ms > 0) totals.set(s.speaker_idx, (totals.get(s.speaker_idx) ?? 0) + ms);
+    }
+    let best: { idx: number; ms: number } | null = null;
+    for (const [idx, ms] of totals) {
+      if (!best || ms > best.ms || (ms === best.ms && idx < best.idx)) best = { idx, ms };
+    }
+    if (!best) continue;
+    out.push({
+      source_ref: t.source_ref,
+      speaker_idx: best.idx,
+      overlap_ms: best.ms,
+      exclusive: totals.size === 1,
+      speaker_count: totals.size,
+    });
+  }
+  return out;
+}

@@ -1114,12 +1114,16 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
       const attempts = await recordFailure(windowId, "engine_failed", `presign_failed: ${String(e).slice(0, 80)}`);
       return { ...out, step: "engine_failed", detail: "presign_failed", attempts };
     }
+    // D8 — "we turned it off" and "it broke" are different facts and must not share a code. The
+    // adapter reports the kill switch by name; the row keeps that name instead of flattening it
+    // into a generic submit failure.
     const sub = await adapter.submit({ audioUrl, durationMs: Math.round(audioSeconds * 1000), translate: false, ...(languageSent ? { language: languageSent } : {}) });
     if (!sub.ok) {
       // The provider's message can quote a path or the audio; it goes to the log, not the row.
       console.error("[drain] async submit failed", JSON.stringify({ window: windowId, engine: engineId, err: String(sub.error).slice(0, 200) }));
-      const attempts = await recordFailure(windowId, "engine_failed", "async_submit_failed");
-      return { ...out, step: "engine_failed", detail: "async_submit_failed", attempts };
+      const detail = sub.error === "router_job_disabled" ? "router_job_disabled" : "async_submit_failed";
+      const attempts = await recordFailure(windowId, "engine_failed", detail);
+      return { ...out, step: "engine_failed", detail, attempts };
     }
     // Persisted BEFORE anything else can fail, so a retry finds it and polls instead of resubmitting.
     return {
