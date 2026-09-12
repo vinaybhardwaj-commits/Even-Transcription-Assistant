@@ -31,6 +31,22 @@ export interface SttTranscribeResult {
    * until its API returns a model identifier.
    */
   engineVersion?: string | null;
+  /**
+   * Slice C1 — the router's PER-SPAN timeline, carried verbatim, or null/absent for every engine
+   * that has no such thing.
+   *
+   * OPTIONAL for the same reason `engineVersion` is: nine adapters exist and none of them should
+   * have to change to add a tenth. `SttTranscribeResult` is otherwise flat — one language, one
+   * string — and that flatness is precisely what makes a code-mixed consultation unreadable from
+   * a run row: "the language" of a Kannada/English OPD window is not a fact.
+   *
+   * VERBATIM, and that word is load-bearing. The router already emits per span
+   * `{start_s, end_s, lang, engine, chars}`. Reconstructing that from our side would mean
+   * reimplementing per-span language selection across five candidate languages and three engines,
+   * and any reconstruction could disagree with what the router actually did — which is the one
+   * thing this field exists to record. It is copied, never rebuilt.
+   */
+  languageTimeline?: unknown[] | null;
   error: string | null;
 }
 
@@ -52,7 +68,13 @@ export interface SttAdapter {
    * OPTIONAL and absent by default, so every existing caller keeps the behaviour it had: only
    * the room drain passes it. An adapter with one product ignores it.
    */
-  transcribe(audio: Buffer, opts: { contentType: string; language?: string; longForm?: boolean; mode?: "transcribe" | "translate" }): Promise<SttTranscribeResult>;
+  /**
+   * `durationMs` (Slice C1) — how much AUDIO this buffer holds, when the caller knows. OPTIONAL and
+   * absent by default. It exists because one engine's transport depends on it: the router answers
+   * a short clip synchronously and needs a submit-and-poll job for a long one, and byte length is
+   * not a duration for a compressed container. An adapter with one transport ignores it.
+   */
+  transcribe(audio: Buffer, opts: { contentType: string; language?: string; longForm?: boolean; mode?: "transcribe" | "translate"; durationMs?: number }): Promise<SttTranscribeResult>;
   generateNote?(audio: Buffer, opts: { contentType: string; language?: string; template?: string }): Promise<SttNoteResult>;
   health(): Promise<SttHealth>;
 }

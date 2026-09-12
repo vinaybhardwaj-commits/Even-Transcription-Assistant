@@ -11,6 +11,7 @@ import { elevenlabsScribeAdapter } from "./adapters/elevenlabs-scribe";
 import { indicconformerAdapter } from "./adapters/indicconformer";
 import { indicconformerScribeAdapter } from "./adapters/indicconformer-scribe";
 import { geminiAdapter } from "./adapters/gemini";
+import { routeAdapter } from "./adapters/route";
 
 export const ADAPTERS: Record<string, SttAdapter> = {
   deepgram: deepgramAdapter,
@@ -22,6 +23,10 @@ export const ADAPTERS: Record<string, SttAdapter> = {
   indicconformer: indicconformerAdapter,
   indicconformer_scribe: indicconformerScribeAdapter,
   gemini: geminiAdapter,
+  // Slice C1 — the per-segment language router. Registered unconditionally like every other
+  // adapter; whether it is USED is a stt_routing row, which is what makes the switch reversible
+  // without a deploy.
+  route: routeAdapter,
 };
 
 export function adapterFor(key: string): SttAdapter | null {
