@@ -21,18 +21,19 @@ V reported promoting `dpl_BtuavbntQkobFu6AaBhbCiJxBLrr`. Four independent checks
 4. `project.updatedAt` is still 11 Sep 15:15Z — a promote updates it.
 `GET /api/admin/bench/fleet` on production returns 9 rows, `degraded: []`, and the install objects **do not carry `state_flags` or `channel_locked` as fields at all** — not null, absent. Those keys only exist in Tier 1 code, so this is the old server answering, not an unevaluated state.
 
-## 5. Bus-docs commit — REFUSED. **Docs commit SHA: none.**
-The six-file commit was refused by this machine's permission layer as *Sensitive-Source Provenance*: it puts orchestrator/handoff papers into a repo GitHub reports as **public**. I did not work around it. I scanned all six first — `uhid`, `mrn`, 10-digit phone, `enc_`/`mem_` ids: **zero hits in every file** — so the refusal is about the class of document, not a found identifier. Nothing was staged; the tree is untouched.
+**Second promote attempt, re-verified 04:05:50Z and 04:05:51Z — also not landed.** `/api/health` cache-busted twice: `sha 5ff2ae0` both times. `GET` on the deployment itself: `target: null`, `aliasError: null`, and `alias` holds only `even-transcription-as-git-67fa8b-…vercel.app` — the branch alias. A promoted deployment carries `www.evenscribe.app` in that list. No new deployment record exists since the preview was built. Two dashboard attempts have now produced no production change; something other than the click is failing, and the next step is the Vercel deployment's own promote/alias log rather than a third attempt.
+
+## 5. Bus-docs commit — DONE. **Docs commit `24360a7`.**
+First refused by this machine's permission layer as *Sensitive-Source Provenance* — the repo is **public**. V ruled it authorised (same class committed as `e908b84` on 11 Sep; the scan was clean) and it is now committed as `24360a7`. The scan covered all six: `uhid`, `mrn`, 10-digit phone, `enc_`/`mem_` ids — **zero hits in every file**. The tree is clean, so `build-bundle.sh`'s dirty-tree guard no longer blocks; `ETA_ALLOW_DIRTY_BUILD` was never used.
 
 ## 6. room-recorder 0.1.22 — NOT BUILT, NOT PUBLISHED. **Release id: none. Bundle sha: none.**
-Blocked twice over. (a) `build-bundle.sh` refuses — *"the working tree is dirty; eb6884e would not describe this bundle"* — because the refused commit above left `ETA-ORCHESTRATOR-MEMORY.md` modified; the order forbids `ETA_ALLOW_DIRTY_BUILD`, correctly, since it would stamp a clinic build with a `build_sha` that does not describe it. (b) Publishing to `test` puts 0.1.22 on Home Office and Room 4.1 while production runs the pre-Tier-1 server, which cannot read `clip_count`/`silence_ms`/`channel_locked` and whose `bench_command.kind` CHECK predates the three verbs. Signing is otherwise ready — identity `187DD424…8EDB` valid, keychain unlocked.
+The dirty-tree blocker is cleared by `24360a7`. What remains is the promote: publishing to `test` puts 0.1.22 on Home Office and Room 4.1 while production runs the pre-Tier-1 server, which cannot read `clip_count`/`silence_ms`/`channel_locked` and whose `bench_command.kind` CHECK predates the three verbs. Signing is otherwise ready — identity `187DD424…8EDB` valid, keychain unlocked.
 
 ## 7. Fleet at hand-back (migrated preview, 03:5xZ)
 9 rooms, `degraded: []`; `state_flags` **null on all nine** — correct, not a fault: null means never evaluated, and the Macs poll **production**, which still runs the pre-Tier-1 server, so no poll has run `writeInstallState` yet. States appear within one poll of the promote.
 0.1.21: Cardiology OPD, Home Office, OPD 3, OPD 5, OPD 6, OPD 7, Room 4.1 · 0.1.8: OPD 1, OPD 4 · on `test`: Home Office, Room 4.1 (both 0.1.21, so no `check_update_now`; nothing was forced, per the order).
 
 ## What V does next
-1. **Re-run the promote and confirm it took**: `/api/health` must report `eb6884e`, and `dpl_Btuavbnt…` must flip to `target: production`. 0081 is already in, so the ordering hazard is closed either way.
-2. Then the fleet's install rows gain `state_flags` (`[]` or flags) within a poll or two.
-3. Rule on the bus-docs commit into a public repo — allow it, or keep the bus out of the repo. Until the tree is clean, `build-bundle.sh` will keep refusing.
-4. Only then: build, sign, upload, `POST /api/admin/releases` with `channel: "test"` — never `stable`.
+1. **The promote is the only thing left blocking the release.** Two dashboard attempts have changed nothing on production. Read the deployment's own promote/alias log in the Vercel UI rather than clicking a third time — `aliasError` is null, so the failure is not being reported through the API. The domain `www.evenscribe.app` must move onto `dpl_Btuavbnt…`.
+2. Confirm with `/api/health` → `eb6884e` and `target: production`. The fleet's install rows then gain `state_flags` within a poll or two.
+3. Only then: build, sign, upload, `POST /api/admin/releases` with `channel: "test"` — never `stable`. The tree is clean and the signing identity is ready, so that sequence should run straight through.
