@@ -249,9 +249,15 @@ describe("scribe_extract_audio / scribe_transcribe_range", () => {
     const none = (await tool("scribe_extract_audio").handler({ session_id: "bs_a", start: "12:00", end: "12:01" }, ctx)) as Row;
     expect(none.error).toBe("no_audio_in_range");
   });
-  it("transcribe: whisper only; returns whole-chunk text + the honest note", async () => {
-    const bad = (await tool("scribe_transcribe_range").handler({ session_id: "bs_a", start: "10:36", end: "10:38", engine: "deepgram" }, ctx)) as Row;
-    expect(bad.error).toBe("engine_not_supported_v1");
+  it("transcribe: engine comes from the REGISTRY; returns whole-chunk text + the honest note", async () => {
+    // C1b Part B replaced the old "whisper only" refusal: every registry key is now selectable,
+    // and what controls a PAID engine is the derived guard, not this enum. The subject of the
+    // original assertion — that engine selection is controlled, not free-for-all — is kept by
+    // pinning the two things that are still refused.
+    const unknown = (await tool("scribe_transcribe_range").handler({ session_id: "bs_a", start: "10:36", end: "10:38", engine: "not_an_engine" }, ctx)) as Row;
+    expect(unknown.error).toBe("unknown_engine");
+    const auto = (await tool("scribe_transcribe_range").handler({ session_id: "bs_a", start: "10:36", end: "10:38", engine: "auto" }, ctx)) as Row;
+    expect(auto.error, "'auto' is a routing value, never a selection").toBe("engine_auto_not_allowed");
     const out = (await tool("scribe_transcribe_range").handler({ session_id: "bs_a", start: "10:36", end: "10:38" }, ctx)) as Row;
     expect(out.ok).toBe(true);
     expect(out.text).toBe("hello from the chunk");

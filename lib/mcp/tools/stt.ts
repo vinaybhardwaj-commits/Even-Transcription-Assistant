@@ -10,6 +10,7 @@
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
+import { charsPerAudioSecond } from "@/lib/stt/route-run";
 import { failSafe, argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
 
 export type EngineHealth = {
@@ -231,4 +232,140 @@ const getSttRun: McpTool = {
     }),
 };
 
-export const STT_TOOLS: McpTool[] = [listSttEngines, sttHealth, sttRouting, listSttRuns, getSttRun];
+
+/**
+ * Slice C1 step 4 — THE FOUR TRIPWIRES.
+ *
+ * This slice switches the room engine on a PRIOR, not on a comparison: an English-only model on
+ * code-mixed OPD speech is wrong by construction, and the Indic gold corpus that would settle it
+ * empirically does not exist (stt_gold: 3 rows, 0 Indic) and cannot be built by writing code.
+ * Shipping on a prior is only defensible if the prior is cheap to DISPROVE, so these four signals
+ * exist to find out — within a day — whether the switch was inert or harmful. None of them needs
+ * ground truth:
+ *
+ *  1. ENGINE MIX, per span. If spans are overwhelmingly `whisper`, the router is picking the same
+ *     engine we already had and the switch is INERT. That is the cheapest possible refutation.
+ *  2. LANGUAGE MIX, per span. The first real measurement of how much non-English is actually
+ *     spoken in these rooms. If it is ~all `en`, the premise of the whole slice is wrong.
+ *  3. EMPTY-TRANSCRIPT RATE. A regression against the history already in the table: the same
+ *     measure is computable for the engine that ran before, so the comparison is free.
+ *  4. CHARACTERS PER AUDIO-SECOND. A crude yield. Nobody knows the right value, but a sharp drop
+ *     against the previous engine is a red flag that needs no reference text.
+ *
+ * It reports per ENGINE, side by side, because every one of these is only meaningful as a
+ * before-and-after — a number for `route` alone answers nothing.
+ */
+const routeTripwires: McpTool = {
+  name: "scribe_route_tripwires",
+  description:
+    "The four Slice C1 tripwires for the room-engine switch, per engine, side by side: per-span engine mix, per-span language mix, empty-transcript rate, and characters per audio-second. Room windows only (transcription_run subject_type='bench_window', mode='batch', tier='asr'). The mixes come from metrics_json.language_timeline, which only the `route` engine writes, so they are null for every other engine — that is the point: the yield and empty-rate columns ARE comparable across engines and are how you tell a harmful switch from an inert one. Counts and rates only; no transcript text, no patient label. Pass days to widen the window (default 7).",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      days: { type: "integer", minimum: 1, maximum: 90, default: 7 },
+      engine: { type: "string", description: "restrict to one engine id" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ days: 7, engines: [] as unknown[] }, async () => {
+      const days = argInt(args, "days", 7, 1, 90);
+      const engine = argStr(args, "engine");
+
+      // Per engine, over room windows only. `chars` is measured on the stored transcript rather
+      // than on the timeline, so the yield column means the same thing for an engine that writes
+      // no timeline — otherwise the one number meant to be comparable would not be.
+      //
+      // audio_seconds is read out of metrics_json, where the room drain has always written it.
+      const rows = (await sql`
+        SELECT tr.engine,
+               COUNT(*)::int AS runs,
+               COUNT(*) FILTER (WHERE tr.error IS NOT NULL)::int AS errors,
+               COUNT(*) FILTER (WHERE tr.error IS NULL
+                                  AND COALESCE(length(COALESCE(tr.transcript_original, tr.transcript_english, '')), 0) = 0)::int AS empty_runs,
+               SUM(COALESCE(length(COALESCE(tr.transcript_original, tr.transcript_english, '')), 0))::bigint AS chars,
+               SUM(COALESCE((tr.metrics_json->>'audio_seconds')::float8, 0))::float8 AS audio_seconds,
+               COUNT(*) FILTER (WHERE tr.metrics_json ? 'language_timeline')::int AS runs_with_timeline
+          FROM transcription_run tr
+         WHERE tr.subject_type = 'bench_window'
+           AND tr.mode = 'batch' AND tr.tier = 'asr'
+           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
+           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+         GROUP BY tr.engine
+         ORDER BY tr.engine
+      `) as Array<{ engine: string; runs: number; errors: number; empty_runs: number; chars: string | number; audio_seconds: number | null; runs_with_timeline: number }>;
+
+      // The two per-span mixes. Precomputed at write time into the same key, so this sums small
+      // objects instead of unnesting every span of every run in the window.
+      const mixes = (await sql`
+        SELECT tr.engine,
+               COALESCE(SUM((tr.metrics_json->'language_timeline'->>'span_count')::int), 0)::int AS spans,
+               jsonb_object_agg(k.key, k.total) FILTER (WHERE k.key IS NOT NULL) AS engine_mix
+          FROM transcription_run tr
+          LEFT JOIN LATERAL (
+                 SELECT e.key, SUM(e.value::int)::int AS total
+                   FROM jsonb_each_text(COALESCE(tr.metrics_json->'language_timeline'->'engine_mix', '{}'::jsonb)) e
+                  GROUP BY e.key
+               ) k ON TRUE
+         WHERE tr.subject_type = 'bench_window'
+           AND tr.mode = 'batch' AND tr.tier = 'asr'
+           AND tr.metrics_json ? 'language_timeline'
+           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
+           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+         GROUP BY tr.engine
+      `) as Array<{ engine: string; spans: number; engine_mix: Record<string, number> | null }>;
+
+      const langMixes = (await sql`
+        SELECT tr.engine,
+               jsonb_object_agg(k.key, k.total) FILTER (WHERE k.key IS NOT NULL) AS language_mix
+          FROM transcription_run tr
+          LEFT JOIN LATERAL (
+                 SELECT e.key, SUM(e.value::int)::int AS total
+                   FROM jsonb_each_text(COALESCE(tr.metrics_json->'language_timeline'->'language_mix', '{}'::jsonb)) e
+                  GROUP BY e.key
+               ) k ON TRUE
+         WHERE tr.subject_type = 'bench_window'
+           AND tr.mode = 'batch' AND tr.tier = 'asr'
+           AND tr.metrics_json ? 'language_timeline'
+           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
+           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+         GROUP BY tr.engine
+      `) as Array<{ engine: string; language_mix: Record<string, number> | null }>;
+
+      const spanBy = new Map(mixes.map((m) => [m.engine, m]));
+      const langBy = new Map(langMixes.map((m) => [m.engine, m.language_mix]));
+
+      return {
+        days,
+        engines: rows.map((r) => {
+          const chars = Number(r.chars ?? 0);
+          const secs = Number(r.audio_seconds ?? 0);
+          const scored = r.runs - r.errors;
+          const m = spanBy.get(r.engine);
+          return {
+            engine: r.engine,
+            runs: r.runs,
+            errors: r.errors,
+            // TRIPWIRE 3. Over runs that did not error — an engine that is DOWN is a different
+            // fault from an engine that is UP and hearing nothing, and averaging them together
+            // is how an outage reads as a quiet room.
+            empty_transcript_rate: scored > 0 ? Math.round((r.empty_runs / scored) * 1000) / 1000 : null,
+            empty_runs: r.empty_runs,
+            // TRIPWIRE 4. Null, not zero, when there is no audio to divide by.
+            chars_per_audio_second: charsPerAudioSecond(chars, secs > 0 ? secs : null),
+            chars,
+            audio_seconds: Math.round(secs * 10) / 10,
+            runs_with_timeline: r.runs_with_timeline,
+            // TRIPWIRES 1 and 2. Null for an engine that writes no timeline, which is every engine
+            // but `route` — stated in the description so a null is never read as "zero spans".
+            spans: m?.spans ?? null,
+            engine_mix: m?.engine_mix ?? null,
+            language_mix: langBy.get(r.engine) ?? null,
+          };
+        }),
+      };
+    }),
+};
+
+export const STT_TOOLS: McpTool[] = [listSttEngines, sttHealth, sttRouting, listSttRuns, getSttRun, routeTripwires];

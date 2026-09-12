@@ -83,11 +83,18 @@ import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEven
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
-import { transcribeWithWhisper, type WhisperSegment } from "@/lib/whisper";
+import { transcribeWithWhisper, type WhisperSegment, type WhisperResult } from "@/lib/whisper";
 import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
 // T3 — the operator path's transcriber, named by the adapter rather than typed into a payload.
 import { whisperAdapter } from "@/lib/stt/adapters/whisper";
+import type { SttAdapter } from "@/lib/stt/types";
+import { ADAPTERS, adapterFor } from "@/lib/stt/registry";
+import { guardPaidEngine, PAID_MAX_DURATION_MS } from "@/lib/stt/paid-engines";
+import { guardedTranscribe } from "@/lib/stt/guarded-transcribe";
+
+/** Every engine the registry can actually run. Derived, so a new adapter is selectable at once. */
+const STT_ENGINE_KEYS = Object.keys(ADAPTERS).sort();
 // U2: the joining half — the 30-minute limit, the recording guard, the clip key/provenance and
 // the client of the joining service (D2, D14, D15, D3/D4, D10).
 import {
@@ -1629,19 +1636,79 @@ type TurnAnswer = Record<string, unknown>;
  * refusal in every direction — the transcription itself has already succeeded by the time this
  * runs, and a failure to record it must never take the text away from the caller.
  */
+
+/**
+ * C1b Part B — ONE TRANSCRIPTION CALL, WHATEVER THE ENGINE, returned in whisper's shape.
+ *
+ * The branch inside is on whisper's CLIENT, not on policy, and it exists for one reason:
+ * `SttAdapter.transcribe` returns a flat `{original, english, language}` with NO SEGMENTS, while
+ * `buildTurns` needs timings. whisper.cpp gives them through `lib/whisper.ts`, so that path keeps
+ * using it; every other engine can only offer the text.
+ *
+ * For those engines the answer is ONE segment covering the requested range — not invented timings
+ * split by guesswork. A single honest turn that says "this is what was said between these two
+ * times" is right; fabricated per-sentence boundaries would be a lie with decimal places on it.
+ *
+ * Slice C2's first task is giving SttAdapter a real long-form result (submit/poll AND segments),
+ * at which point this whole function collapses into `adapter.transcribe`.
+ */
+/** Set by the last guardedTranscribe call so the handler can return the spend it caused. */
+let lastSpend: { engine: string; paid: boolean; estimated_cost_usd?: number | null; cost_per_min_usd?: number | null; rate_is_default?: boolean; audio_minutes?: number } | null = null;
+
+async function transcribeWithEngine(
+  adapter: SttAdapter,
+  bytes: Uint8Array | Buffer,
+  contentType: string,
+  opts: { language?: string | null; timeoutMs?: number; durationMs: number; explicitlyNamed: boolean; actor: string; subject?: string | null },
+): Promise<WhisperResult> {
+  lastSpend = { engine: adapter.key, paid: false };
+  if (adapter.key === whisperAdapter.key) {
+    const w = await transcribeWithWhisper(Buffer.from(bytes), contentType, {
+      ...(opts.language ? { language: opts.language } : {}),
+      ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    return w;
+  }
+  // CHOKEPOINT. The adapter is never called directly here — `guardedTranscribe` decides whether
+  // this engine bills, refuses an unattended or over-long paid call, and audits it first.
+  // `durationMs` is the AUDIO ACTUALLY SENT, which on the single-chunk branch is the whole chunk
+  // and not the shorter window that was asked for; billing the smaller number under-reported the
+  // spend by up to 30x.
+  const g = await guardedTranscribe({
+    adapter, engineId: adapter.key, audio: Buffer.from(bytes),
+    durationMs: opts.durationMs, explicitlyNamed: opts.explicitlyNamed, actor: opts.actor,
+    subject: opts.subject ?? null,
+    transcribeOpts: { contentType, longForm: true, mode: "transcribe", durationMs: opts.durationMs, ...(opts.language ? { language: opts.language } : {}) },
+  });
+  if (!g.ok) return { ok: false, error: `${g.refusal.error}`, latency_ms: 0, attempts: 1 };
+  const r = g.result;
+  lastSpend = g.spend;
+  if (r.error) return { ok: false, error: r.error, latency_ms: r.latencyMs, attempts: 1 };
+  const text = (r.original ?? r.english ?? "").trim();
+  // A quiet room reads the same on every engine: the shared constant, not a per-engine spelling.
+  if (!text) return { ok: false, error: EMPTY_TRANSCRIPT, latency_ms: r.latencyMs, attempts: 1 };
+  return {
+    ok: true, transcript: text, ...(r.language ? { language: r.language } : {}),
+    duration_seconds: Math.max(0, opts.durationMs) / 1000,
+    latency_ms: r.latencyMs, attempts: 1, engineVersion: r.engineVersion ?? null,
+    segments: [{ start_s: 0, end_s: Math.max(0, opts.durationMs) / 1000, text }],
+  };
+}
+
 async function turnsAnswer(
   ctx: ToolContext,
   session: { id: string; room_id: string; room_slug: string; room_name: string; started_at: string | Date },
   build: TurnBuild,
   dryRun: boolean,
-  win: { startMs: number; endMs: number; language: string | null; sourceUsed: string | null },
+  /** `engine` is the RESOLVED adapter key — the cue must name what actually ran. */
+  win: { startMs: number; endMs: number; language: string | null; sourceUsed: string | null; engine: string },
 ): Promise<TurnAnswer> {
   // The completeness cue for THIS window, complete or not. Built here rather than by the caller
   // so both the success and the refusal shape it identically — the only difference between them
   // is the two fields the writer sets.
   const windowCueFor = (complete: boolean, stoppedEarly: string | null) =>
     buildWindowCue({
-      engine: whisperAdapter.key,
+      engine: win.engine,
       sessionId: session.id,
       windowStartMs: win.startMs,
       windowEndMs: win.endMs,
@@ -1739,7 +1806,7 @@ async function whisperNotOkAnswer(
   session: { id: string; room_id: string; room_slug: string; room_name: string; started_at: string | Date },
   w: { error: string; latency_ms: number },
   dryRun: boolean,
-  win: { startMs: number; endMs: number; sourceUsed: string | null },
+  win: { startMs: number; endMs: number; sourceUsed: string | null; engine: string },
   base: Record<string, unknown>,
   extra: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -1749,7 +1816,7 @@ async function whisperNotOkAnswer(
     // ONE stt_silence covering exactly what was asked for. Nothing special-cased, so a silent
     // window and a window whose every segment was blank produce the identical row.
     const build = buildTurns({
-      engine: whisperAdapter.key,
+      engine: win.engine,
       sessionId: session.id,
       clipStartMs: win.startMs,
       windowStartMs: win.startMs,
@@ -1758,7 +1825,7 @@ async function whisperNotOkAnswer(
       language: null,
       sourceUsed: win.sourceUsed,
     });
-    const written = await turnsAnswer(ctx, session, build, dryRun, { startMs: win.startMs, endMs: win.endMs, language: null, sourceUsed: win.sourceUsed });
+    const written = await turnsAnswer(ctx, session, build, dryRun, { startMs: win.startMs, endMs: win.endMs, language: null, sourceUsed: win.sourceUsed, engine: win.engine });
     return {
       ok: true,
       ...base,
@@ -1793,7 +1860,7 @@ async function whisperNotOkAnswer(
   };
   const markerFor = () =>
     buildWindowCue({
-      engine: whisperAdapter.key,
+      engine: win.engine,
       sessionId: session.id,
       windowStartMs: win.startMs,
       windowEndMs: win.endMs,
@@ -1847,7 +1914,15 @@ const transcribeRange: McpTool = {
       async: { type: "boolean", default: false, description: "Tier 2 §3 — submit the equivalent job and return {job_id} instead of waiting. Default false keeps today's behaviour for one release." },
 
       ...RANGE_ARGS,
-      engine: { type: "string", enum: ["whisper"], default: "whisper" },
+      /**
+       * C1b Part B — the registry's keys, not a typed list, so a newly registered engine is
+       * selectable the moment it exists. THERE IS NO `default` HERE ON PURPOSE: a default is one
+       * of the three ways a PAID engine could be reached without anyone naming it (the others
+       * being 'auto' and an inherited routing row), and `guardPaidEngine` refuses all three.
+       * Omitting it still means whisper — the free local engine — but that fallback is applied in
+       * the handler, where it can be told apart from an explicit choice.
+       */
+      engine: { type: "string", enum: STT_ENGINE_KEYS, description: "engine key from the registry; omit for whisper. A PAID engine must be named explicitly and is capped per call." },
       language: { type: "string", description: "optional Whisper language hint, e.g. en" },
       dry_run: { type: "boolean", default: true, description: "default TRUE — return the turns without writing them; false writes them into the scratch graph" },
     },
@@ -1859,6 +1934,17 @@ const transcribeRange: McpTool = {
     // path below is UNCHANGED and stays the default for one release, so nothing that calls this
     // tool today sees a different answer.
     if (argBool(args, "async")) {
+      // ── THE ASYNC PATH DOES NOT CARRY AN ENGINE YET, AND SAYS SO ────────────────────────────
+      // `transcribe_range`'s parseArgs has no `engine` key, so an engine named here would be
+      // DROPPED and the job would transcribe with whisper while the caller believed they had
+      // asked for something else — a silent wrong-engine result, and for a paid engine a silent
+      // free one that quietly ignores the guard. Refused explicitly until the job kind carries
+      // the selection (C2, with the same paid guard applied at submit).
+      const asyncEngine = argStr(args, "engine", 32);
+      if (asyncEngine && asyncEngine !== whisperAdapter.key) {
+        return { ok: false, error: "engine_not_supported_on_async", engine: asyncEngine,
+                 detail: "the job path transcribes with whisper only; drop async, or drop engine" };
+      }
       const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
       try {
         const job = await submitJob({ kind: "transcribe_range", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
@@ -1870,8 +1956,18 @@ const transcribeRange: McpTool = {
         throw e;
       }
     }
-    const engine = argStr(args, "engine", 32) ?? "whisper";
-    if (engine !== "whisper") return { ok: false, error: "engine_not_supported_v1", engine, allowed: ["whisper"] };
+    // ── ENGINE SELECTION, AND THE PAID GUARD ────────────────────────────────────────────────
+    // `namedEngine` is what the REQUEST carried. Everything downstream distinguishes that from the
+    // whisper fallback, because "the operator asked for sarvam" and "nobody said" must never be
+    // the same value by the time money is involved.
+    const namedEngine = argStr(args, "engine", 32);
+    const explicitlyNamed = typeof namedEngine === "string" && namedEngine.trim() !== "" && namedEngine !== "auto";
+    const engine = explicitlyNamed ? namedEngine!.trim() : whisperAdapter.key;
+    // 'auto' is not an engine. It is the routing table's word for "decide for me", and honouring it
+    // here would be the inherited-routing path the guard exists to close.
+    if (namedEngine === "auto") return { ok: false, error: "engine_auto_not_allowed", detail: "name an engine; 'auto' is a routing value, not a selection" };
+    const engineAdapter = adapterFor(engine);
+    if (!engineAdapter) return { ok: false, error: "unknown_engine", engine, allowed: STT_ENGINE_KEYS };
     // `dry_run` defaults TRUE, and it FAILS DRY: only an explicit false turns writing on.
     // Reading it as `args.dry_run === undefined ? true : argBool(...)` would make every value
     // argBool does not recognise — a typo, a string, a null from a client that serialises
@@ -1882,6 +1978,22 @@ const transcribeRange: McpTool = {
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
+
+    // ── THE PAID GUARD — BEFORE ANY AUDIO MOVES ──────────────────────────────────────────────
+    // PRD §1.6: attended, explicit, bounded, attributable. "Paid" is DERIVED from
+    // stt_engine.cost_per_min_usd > 0, never from a name list here, so the next paid engine
+    // anyone registers is caught by this same call without a code change.
+    const rangeMs = r.endMs - r.startMs;
+    const paid = await guardPaidEngine({ engine, explicitlyNamed, durationMs: rangeMs });
+    if (!paid.ok) return { ...paid, cap_ms: PAID_MAX_DURATION_MS };
+    // This is an EARLY refusal only — cheap, before the clip is joined, so an unattended or
+    // over-long paid ask costs nothing. It does NOT audit and does NOT price: `guardedTranscribe`
+    // does both, against the audio ACTUALLY SENT. On the single-chunk branch the whole 5-minute
+    // chunk goes to the engine while a shorter window was requested, so pricing `rangeMs` here
+    // would under-report the spend by up to 30x. One number, measured where the bytes leave.
+    void paid;
+    const subject = `${r.session.id}:${r.startMs}-${r.endMs}`;
+
     // U4: same disclosure as extract — which microphone answered, and why, on every branch.
     const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine, ...sourceAnswer(r.decision), ...(r.micDegraded ? { degraded_reads: [r.micDegraded] } : {}) };
     const language = argStr(args, "language", 8) ?? undefined;
@@ -1909,13 +2021,13 @@ const transcribeRange: McpTool = {
         return { ok: false, error: "clip_download_failed", degraded: true, ...base, r2_key: attempt.key, detail: String((e as Error)?.message ?? e).slice(0, 160) };
       }
       if (!clipBytes) return { ok: false, error: "clip_missing_in_r2", ...base, r2_key: attempt.key };
-      const wj = await transcribeWithWhisper(clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms) });
+      const wj = await transcribeWithEngine(engineAdapter, clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms), durationMs: attempt.duration_ms, explicitlyNamed, actor: ctx.actor, subject });
       // K5 — empty_transcript is a SILENT window, not a failure; every other error is a failed
       // ask. Both are answered here, and both now leave a record of having been asked.
       if (!wj.ok) {
         return await whisperNotOkAnswer(
           ctx, r.session, wj, dryRun,
-          { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source },
+          { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source, engine },
           base,
           { joined: true, r2_key: attempt.key, clip: { r2_key: attempt.key, bytes: attempt.bytes, duration_ms: attempt.duration_ms }, total_ms: Date.now() - t0 },
         );
@@ -1925,8 +2037,8 @@ const transcribeRange: McpTool = {
       // window the operator asked for — a window that starts before the first covering piece
       // trims to zero and the clip starts at the piece instead.
       const joinedClipStartMs = Date.parse(res.covering[0]!.chunk_bounds.started_at) + Math.round(res.covering[0]!.offset_in_chunk_s * 1000);
-      const jBuild = buildTurns({ engine: whisperAdapter.key, sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
-      const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: wj.language ?? null, sourceUsed: r.decision.source });
+      const jBuild = buildTurns({ engine, sessionId: r.session.id, clipStartMs: joinedClipStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: wj.segments, language: wj.language ?? null, sourceUsed: r.decision.source });
+      const jTurns = await turnsAnswer(ctx, r.session, jBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: wj.language ?? null, sourceUsed: r.decision.source, engine });
       return {
         ok: true,
         joined: true,
@@ -1935,6 +2047,9 @@ const transcribeRange: McpTool = {
         pieces: res.covering.map((c) => ({ chunk_idx: c.chunk.idx, source: c.chunk.source ?? "primary", chunk_bounds: c.chunk_bounds, offset_in_chunk_s: c.offset_in_chunk_s, duration_s: c.duration_s })),
         text: wj.transcript,
         language: wj.language ?? null,
+        // C1b Part B — what this call cost, returned so the operator sees the spend at the moment
+        // they cause it rather than on a bill at the end of the month.
+        spend: lastSpend,
         audio_seconds: wj.duration_seconds ?? null,
         whisper_latency_ms: wj.latency_ms,
         total_ms: Date.now() - t0,
@@ -1953,12 +2068,12 @@ const transcribeRange: McpTool = {
       return { ok: false, error: "chunk_download_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: String((e as Error)?.message ?? e).slice(0, 160) };
     }
     if (!bytes) return { ok: false, error: "chunk_missing_in_r2", ...base, chunk_idx: c.chunk.idx, r2_key: c.chunk.r2_key };
-    const w = await transcribeWithWhisper(bytes, c.chunk.content_type || "audio/webm", { language });
+    const w = await transcribeWithEngine(engineAdapter, bytes, c.chunk.content_type || "audio/webm", { language, durationMs: c.chunk.duration_ms ?? (r.endMs - r.startMs), explicitlyNamed, actor: ctx.actor, subject });
     // K5 — same two situations on the single-piece branch.
     if (!w.ok) {
       return await whisperNotOkAnswer(
         ctx, r.session, w, dryRun,
-        { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source },
+        { startMs: r.startMs, endMs: r.endMs, sourceUsed: r.decision.source, engine },
         base,
         { chunk_idx: c.chunk.idx, chunk_bounds: c.chunk_bounds, r2_key: c.chunk.r2_key, total_ms: Date.now() - t0 },
       );
@@ -1967,8 +2082,8 @@ const transcribeRange: McpTool = {
     // the chunk's own start — not the window, which is why the turns below are then filtered to
     // the window while the `text` above still covers the whole chunk.
     const chunkStartMs = Date.parse(c.chunk_bounds.started_at);
-    const sBuild = buildTurns({ engine: whisperAdapter.key, sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
-    const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: w.language ?? null, sourceUsed: r.decision.source });
+    const sBuild = buildTurns({ engine, sessionId: r.session.id, clipStartMs: chunkStartMs, windowStartMs: r.startMs, windowEndMs: r.endMs, segments: w.segments, language: w.language ?? null, sourceUsed: r.decision.source });
+    const sTurns = await turnsAnswer(ctx, r.session, sBuild, dryRun, { startMs: r.startMs, endMs: r.endMs, language: w.language ?? null, sourceUsed: r.decision.source, engine });
     return {
       ok: true,
       ...base,
@@ -1978,6 +2093,7 @@ const transcribeRange: McpTool = {
       duration_s: c.duration_s,
       text: w.transcript,
       language: w.language ?? null,
+      spend: lastSpend,
       audio_seconds: w.duration_seconds ?? null,
       whisper_latency_ms: w.latency_ms,
       total_ms: Date.now() - t0,

@@ -53,7 +53,10 @@ describe("every other engine is untouched", () => {
 
   it("the second join happens ONLY inside the Gemini branch", () => {
     const branchStart = drain.indexOf("adapter.key === GEMINI_ADAPTER_KEY");
-    const transcribeAt = drain.indexOf("await adapter.transcribe(Buffer.from(audioBytes)");
+    // C1b fix-up 3 routed every adapter call through guardedTranscribe, so the engine is no
+    // longer invoked by a literal `adapter.transcribe(...)` here. The subject is unchanged: the
+    // ogg join must happen BEFORE the engine is handed anything.
+    const transcribeAt = drain.indexOf("await guardedTranscribe({");
     const oggJoinAt = drain.indexOf("callJoinService(oggReq)");
     expect(oggJoinAt).toBeGreaterThan(branchStart);
     expect(oggJoinAt).toBeLessThan(transcribeAt);
@@ -65,16 +68,32 @@ describe("every other engine is untouched", () => {
   });
 
   it("the engine is handed the resolved buffer and content type, not a hardcoded webm", () => {
-    expect(drain).toContain("await adapter.transcribe(Buffer.from(audioBytes)");
+    // Still the resolved buffer and the resolved type — now passed through the chokepoint, which
+    // is the only thing that calls an adapter.
+    expect(drain).toContain("audio: Buffer.from(audioBytes)");
     expect(drain).toContain("contentType: audioContentType");
     expect(drain).not.toContain('contentType: "audio/webm",\n      longForm: true');
   });
 });
 
 describe("the receipt describes the bytes actually sent", () => {
-  it("the drain fingerprints the resolved buffer and key, not the webm download", () => {
-    expect(drain).toContain("audioReceipt(audioKey, audioBytes)");
-    expect(drain).not.toContain("audioReceipt(join.key, bytes)");
+  it("the ROUTED RUN fingerprints the resolved buffer and key, not the webm download", () => {
+    // Slice C1 added a SECOND receipt further down, for the shadow control run, and that one
+    // legitimately fingerprints `join.key`/`bytes` — whisper really was handed the webm. A
+    // file-wide "never audioReceipt(join.key, bytes)" can no longer tell the two apart, so the
+    // assertion is scoped to its actual subject: the receipt that feeds the ROUTED engine's run.
+    // It still bites — swapping audioKey/audioBytes back to join.key/bytes here fails it.
+    // (`codeOf` strips comments, so the region is anchored on CODE at both ends.)
+    // C1b moved this into the engine PHASE. The region is the phase itself, bounded by the two
+    // function declarations either side, which is a tighter subject than before: the shadow run's
+    // own receipt now lives in an earlier phase and is excluded by construction.
+    const region = drain.slice(
+      drain.indexOf("export async function roomWindowEngine"),
+      drain.indexOf("export async function roomWindowPoll"),
+    );
+    expect(region.length, "the region must exist, or this test is asserting on an empty string").toBeGreaterThan(200);
+    expect(region).toContain("audioReceipt(audioKey, audioBytes)");
+    expect(region, "the routed run must not fingerprint the clip it may not have been sent").not.toContain("audioReceipt(join.key, bytes)");
   });
 
   it("a different container yields a different hash — so the receipt distinguishes them", () => {

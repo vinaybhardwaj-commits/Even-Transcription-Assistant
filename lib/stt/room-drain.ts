@@ -53,6 +53,16 @@ import {
 import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from "./receipt";
+import { signGetUrl } from "@/lib/r2";
+import { submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "./eta-router";
+import { toSttResult } from "./adapters/route";
+import { guardedTranscribe } from "./guarded-transcribe";
+import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
+import { LEASE_MS } from "@/lib/jobs/types";
+import type { McpScope } from "@/lib/mcp/auth";
+import type { SttTranscribeResult } from "./types";
+import { buildRouteMetrics } from "./route-run";
+import { shouldShadow } from "./shadow";
 
 /**
  * PURE — did this window's turns actually land AS A SET?
@@ -74,6 +84,62 @@ export function cueWriteFailed(counts: { complete?: boolean }): boolean {
 
 /** C7 — three attempts, then park with a reason. Never retried again by this module. */
 export const DRAIN_MAX_ATTEMPTS = 3;
+
+/**
+ * C1b fix-up 1 — how much of the window the CONTROL run covers. Two minutes, deliberately.
+ *
+ * The shadow exists to compare engines, not to produce a second production transcript of every
+ * sampled window. Two minutes is long enough to hold several exchanges of a consultation — enough
+ * to see whether an engine is mis-detecting the language or dropping code-mixed speech — and short
+ * enough that the row is obviously a sample rather than a rival transcript.
+ *
+ * Every shadow row carries this value as `shadow_window_ms` alongside `shadow_bounded: true` and
+ * `covers_full_window: false`, because a bounded row compared against a 900 s routed run as if
+ * they were like for like would make the routed engine look seven times more productive on any
+ * chars-per-audio-second measure. The tripwire divides by the SAMPLE's own audio_seconds.
+ */
+export const SHADOW_WINDOW_MS = 120_000;
+
+/**
+ * C1b fix-up 6 — PRE-FLIGHT SIZING FOR THE `segment` STEP.
+ *
+ * WHAT ACTUALLY BOUNDS THIS STEP, since the obvious answer is wrong: `MAX_STEP_MS` is NEVER
+ * enforced on a running step — its only use is admission control in the runner (runner.ts:149), so
+ * nothing kills `segment` at 200 s. The ceilings that are real are whisper's own `timeoutMs`
+ * (180 s, and a timeout is deliberately not retried) and `LEASE_MS` (240 s), past which another
+ * runner may re-claim the row and REDO the work. The write is safe — a stale owner writes nothing —
+ * but the inference is paid for twice.
+ *
+ * So the budget below is LEASE_MS, not MAX_STEP_MS: overrunning the lease is the thing with a
+ * consequence. The margin covers what happens around the inference — an R2 GET of the whole clip,
+ * buildTurns, writeWindowCues (an HTTP call to our own origin) and one INSERT — none of which
+ * whisper's own timeout covers.
+ *
+ * The factor is whisper's realtime ratio. 0.2 is the figure this codebase has been asserting in
+ * comments without a measurement behind it, so it is an ENV VAR: when someone measures the Mini
+ * properly, this moves without a deploy. At 0.2 the refusal bites above ~975 s of audio, which
+ * admits the 900 s production window with about 15 s of headroom and refuses the longer,
+ * non-standard windows that would otherwise fail as a lease-expiry mystery instead of a named
+ * error at admission.
+ */
+export const SEGMENT_IO_MARGIN_MS = 45_000;
+export const SEGMENT_REALTIME_FACTOR_ENV = "ETA_WHISPER_REALTIME_FACTOR";
+export const DEFAULT_WHISPER_REALTIME_FACTOR = 0.2;
+
+/** PURE. The factor, from the environment, clamped to something a typo cannot make absurd. */
+export function whisperRealtimeFactor(raw: string | undefined = process.env[SEGMENT_REALTIME_FACTOR_ENV]): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_WHISPER_REALTIME_FACTOR;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WHISPER_REALTIME_FACTOR;
+  return Math.min(5, n);
+}
+
+/** PURE. What `segment` is projected to cost, and whether that fits before the lease expires. */
+export function segmentFits(audioSeconds: number, factor: number = whisperRealtimeFactor()): { fits: boolean; projected_ms: number; budget_ms: number } {
+  const projected_ms = Math.round(audioSeconds * factor * 1000) + SEGMENT_IO_MARGIN_MS;
+  return { fits: projected_ms <= LEASE_MS, projected_ms, budget_ms: LEASE_MS };
+}
+
 
 /** C3 — the probe length. A STARTING VALUE, not a measured one; T5 reports whether it holds. */
 export const PROBE_SECONDS = 30;
@@ -244,7 +310,26 @@ export type DrainStep =
    * named, BEFORE the paid call, exactly like the MIME refusal it replaces on this path.
    */
   | "ogg_join_unavailable"
-  | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok";
+  | "no_engine" | "engine_failed" | "cues_refused" | "attempts_exhausted" | "ok"
+  /**
+   * C1b - the drain accepted the window and handed it to a job. The work has NOT happened yet:
+   * this is the DRAIN's success, not the window's. The window reaches "transcribed" only when the
+   * job's last step runs, which is why the state transition moved there.
+   */
+  | "enqueued"
+  /**
+   * C1b fix-up 4 — the routed engine costs money and NOBODY NAMED IT. This path reaches its
+   * engine from a routing row alone, over a 900 s window, which is exactly the unattended spend
+   * PRD §1.6 forbids. A paid engine on this path is a configuration mistake, not a transient
+   * fault, so it is named rather than folded into `engine_failed`.
+   */
+  | "paid_engine_refused"
+  /**
+   * C1b fix-up 6 — refused at admission because this window cannot finish inside the LEASE.
+   * Named, because the alternative is a window that runs, overruns, gets re-claimed and re-run,
+   * and shows up as nothing at all except a Mini that did the same work twice.
+   */
+  | "segment_would_exceed_budget";
 
 export type DrainOutcome = {
   window_id: string;
@@ -269,6 +354,10 @@ export type DrainOutcome = {
   turn_write_error?: string;
   window_recorded?: boolean;
   run_id?: string | null;
+  /** C1 step 5 — the control run's id when this window was sampled for a shadow, else absent. */
+  shadow_run_id?: string | null;
+  /** C1b - the scribe_job this window was handed to. */
+  job_id?: string | null;
   attempts?: number;
   sarvam_ms?: number | null;
   /**
@@ -404,17 +493,148 @@ export async function drainRoomWindow(
        WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'
     `;
 
-    const chunks = (await sql`
-      SELECT idx, source, r2_key, content_type, started_at, ended_at, upload_state
-        FROM bench_chunk WHERE session_id = ${w.session_id} ORDER BY source, idx
-    `) as RangeChunk[];
-    const res = resolveRange(chunks, startMs, endMs, source);
-    if (res.kind === "none") {
-      const attempts = await recordFailure(windowId, "no_chunks", "no covering chunks");
-      return { ...out, step: "no_chunks", attempts };
+    // ── C1b. ENQUEUE, AND RETURN ─────────────────────────────────────────────────────────────
+    // Everything expensive now belongs to a job: the join, whisper, the routed engine and the
+    // run. This function's remaining cost is the guards and the claim above, so the 300 s ceiling
+    // is unreachable from here by construction rather than by budgeting.
+    // IMPORTED LAZILY, and it has to be. The kind registry imports the room_window kind, which
+    // imports this file for its phases — a static import here would close that cycle and leave the
+    // registry holding an undefined kind at module-load time. The dynamic import defers it to the
+    // first enqueue, by which point every module is built.
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const job = await submitJob({
+      kind: ROOM_WINDOW_KIND,
+      args: { window_id: windowId, origin, actor: opts.actor, via: opts.via },
+      actor: opts.actor,
+      origin,
+      scopes: new Set<McpScope>(["invoke"]),
+    });
+    out.job_id = job.id;
+    return { ...out, ok: true, step: "enqueued", job_id: job.id };
+  } catch (e) {
+    const detail = String((e as Error)?.message ?? e).slice(0, 200);
+    try {
+      const attempts = await recordFailure(windowId, "engine_failed", detail);
+      return { ...out, step: "engine_failed", detail, attempts };
+    } catch {
+      return { ...out, step: "engine_failed", detail };
     }
-    const covering = res.kind === "single" ? [res.covering] : res.covering;
-    const audioSeconds = Math.round(covering.reduce((a, c) => a + c.duration_s, 0) * 100) / 100;
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// C1b — THE DRAIN ENQUEUES; THE JOB DOES THE WORK.
+//
+// WHY. A room window is 900 s of audio (WINDOW_MS). The drain ran inside one request under a 300 s
+// ceiling, and the router is ~1.3x realtime — so `route` could never have worked inline, and the
+// whisper pass alone (capped at 180 s) already put the old path within sight of the ceiling on a
+// slow join. The fix is not a larger ceiling. It is that no single request does the work.
+//
+// ONE PATH FOR EVERY ENGINE. whisper and sarvam go through exactly the same steps as route. There
+// is no inline-vs-async branch on engine identity, because two control flows selected by engine is
+// the shape that produced the silent-window defect — the sync path handled a case the job path had
+// dropped. What DOES differ is transport, and it is chosen by a declared CAPABILITY
+// (`adapter.capabilities.async`), never by an engine name: an async adapter submits and polls, a
+// synchronous one returns in its step. A new engine declares what it is and needs no edit here.
+//
+// EACH STEP IS BOUNDED AND RESUMABLE. The phases below re-derive their own context from the window
+// row rather than trusting anything expensive to survive in `progress`, and NO TRANSCRIPT TEXT ever
+// crosses a step boundary — which is why whisper's segments and the turns they become are produced
+// and consumed inside one step.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/** A phase returns a DrainOutcome; on success it also says what the next step must be handed. */
+export type PhaseOutcome = DrainOutcome & { next_progress?: Record<string, unknown> };
+
+/** Everything every phase re-derives for itself, so a step is resumable from the window id alone. */
+type WindowContext = {
+  // room_day_id is NON-NULL here: the loader refuses a window without one, exactly as the drain
+  // did, so every phase downstream can write cues without re-proving it.
+  w: WindowRow & { room_id: string; room_day_id: string };
+  startMs: number;
+  endMs: number;
+  source: "primary" | "backup";
+  covering: CoveringChunk<RangeChunk>[];
+  audioSeconds: number;
+};
+
+/**
+ * Re-read the window and re-resolve its covering chunks. Three cheap reads, paid once per step,
+ * and the price of steps that do not depend on a process that may no longer exist.
+ */
+async function loadWindowContext(windowId: string): Promise<WindowContext | { error: DrainStep; detail?: string }> {
+  const wr = (await sql`
+    SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic,
+           w.clip_r2_key, w.grid_aligned, w.state, s.room_id
+      FROM bench_window w JOIN bench_session s ON s.id = w.session_id
+     WHERE w.id = ${windowId} LIMIT 1
+  `) as Array<WindowRow & { room_id: string }>;
+  const w = wr[0];
+  if (!w) return { error: "not_found" };
+  if (!w.room_day_id) return { error: "no_room_day" };
+  const wd = w as WindowRow & { room_id: string; room_day_id: string };
+  const startMs = Number(w.start_ms);
+  const endMs = Number(w.end_ms);
+  const source = w.source_mic === "backup" ? "backup" : "primary";
+  const chunks = (await sql`
+    SELECT idx, source, r2_key, content_type, started_at, ended_at, upload_state
+      FROM bench_chunk WHERE session_id = ${w.session_id} ORDER BY source, idx
+  `) as RangeChunk[];
+  const res = resolveRange(chunks, startMs, endMs, source);
+  if (res.kind === "none") return { error: "no_chunks", detail: "no covering chunks" };
+  const covering = res.kind === "single" ? [res.covering] : res.covering;
+  return { w: wd, startMs, endMs, source, covering, audioSeconds: Math.round(covering.reduce((a, c) => a + c.duration_s, 0) * 100) / 100 };
+}
+
+/** What every phase after `prepare` reads off the job row. Counts, ids and labels only. */
+export type WindowProgress = {
+  clip_r2_key: string;
+  audio_seconds: number;
+  probe_language: string | null;
+  probe_seconds: number | null;
+  whisper_probe_ms: number | null;
+  whisper_probe_attempts: number | null;
+  full_language: string | null;
+  whisper_full_ms: number | null;
+  whisper_full_attempts: number | null;
+  whisper_model_reported: string | null;
+  segment_count: number;
+  activity: WindowActivity | null;
+  decided_language: string | null;
+  router_job_id: string | null;
+};
+
+export function readWindowProgress(raw: Record<string, unknown>): WindowProgress {
+  const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const s = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  return {
+    clip_r2_key: String(raw.clip_r2_key ?? ""),
+    audio_seconds: n(raw.audio_seconds) ?? 0,
+    probe_language: s(raw.probe_language),
+    probe_seconds: n(raw.probe_seconds),
+    whisper_probe_ms: n(raw.whisper_probe_ms),
+    whisper_probe_attempts: n(raw.whisper_probe_attempts),
+    full_language: s(raw.full_language),
+    whisper_full_ms: n(raw.whisper_full_ms),
+    whisper_full_attempts: n(raw.whisper_full_attempts),
+    whisper_model_reported: s(raw.whisper_model_reported),
+    segment_count: n(raw.segment_count) ?? 0,
+    activity: (s(raw.activity) as WindowActivity | null),
+    decided_language: s(raw.decided_language),
+    router_job_id: s(raw.router_job_id),
+  };
+}
+
+/** PHASE 1 — join the clip and read one language off its first seconds. No engine work. */
+export async function roomWindowPrepare(windowId: string, opts: RunActor): Promise<PhaseOutcome> {
+  const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
+  const ctx = await loadWindowContext(windowId);
+  if ("error" in ctx) {
+    if (ctx.error === "no_chunks") { const attempts = await recordFailure(windowId, "no_chunks", ctx.detail ?? ""); return { ...out, step: "no_chunks", attempts }; }
+    return { ...out, step: ctx.error, ...(ctx.detail ? { detail: ctx.detail } : {}) };
+  }
+  const { w, startMs, endMs, source, covering, audioSeconds } = ctx;
 
     // --- C2. JOIN -------------------------------------------------------------------------
     const join = await callJoinService(buildJoinRequest(w.session_id, covering, startMs, endMs, source));
@@ -456,6 +676,50 @@ export async function drainRoomWindow(
     out.whisper_probe_ms = whisperProbeMs;
     out.whisper_probe_attempts = whisperProbeAttempts;
 
+  return {
+    ...out, ok: true, step: "ok",
+    next_progress: {
+      clip_r2_key: join.key,
+      audio_seconds: audioSeconds,
+      probe_language: probeLanguage,
+      probe_seconds: slice.seconds,
+      whisper_probe_ms: whisperProbeMs,
+      whisper_probe_attempts: whisperProbeAttempts,
+    },
+  };
+}
+
+/**
+ * PHASE 2 — whisper on the full window, and the turns it becomes.
+ *
+ * THESE TWO BELONG TOGETHER AND CANNOT BE SPLIT. Whisper's segments carry TEXT, and a job's
+ * progress may never carry text, so the segments are produced and consumed in one step. Everything
+ * that leaves here is a count, a label or a language code.
+ *
+ * The turns now land BEFORE the routed engine runs, where they used to land after it. That is a
+ * deliberate consequence and an improvement: the turns are whisper's product, so a paid engine
+ * failing no longer erases the transcript from the day view. `cues_refused` still stops the window.
+ */
+export async function roomWindowSegment(windowId: string, origin: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
+  const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
+  const p = readWindowProgress(progress);
+  const ctx = await loadWindowContext(windowId);
+  if ("error" in ctx) return { ...out, step: ctx.error, ...(ctx.detail ? { detail: ctx.detail } : {}) };
+  const { w, startMs, endMs, source, audioSeconds } = ctx;
+  const join = { key: p.clip_r2_key };
+  const probeLanguage = p.probe_language;
+  if (!join.key) return { ...out, step: "clip_missing", detail: "no clip key on the job row" };
+
+  // PRE-FLIGHT. `audio_seconds` is already on the row from `prepare`, so this costs one comparison
+  // and happens before the clip is downloaded or whisper is touched. A window too long to finish
+  // inside the lease is refused HERE, with a name, instead of being discovered as a silent re-run
+  // when a second runner reclaims the row.
+  const fit = segmentFits(p.audio_seconds);
+  if (!fit.fits) {
+    const detail = `projected ${Math.round(fit.projected_ms / 1000)}s > ${Math.round(fit.budget_ms / 1000)}s for ${p.audio_seconds}s of audio`;
+    const attempts = await recordFailure(windowId, "segment_would_exceed_budget", detail);
+    return { ...out, step: "segment_would_exceed_budget", detail, attempts };
+  }
     // --- Whisper on the FULL window: segments, timing, and a second language opinion --------
     const bytes = await getObjectBytes(join.key);
     if (!bytes) {
@@ -483,158 +747,108 @@ export async function drainRoomWindow(
     }
     out.full_language = full.language ?? null;
 
-    // --- C4. TRANSCRIBE, with the language FORCED ------------------------------------------
-    const decided = probeLanguage ?? full.language ?? null;
-    const engineId = await resolveRouting(DRAIN_STAGE, bucketFor(decided));
-    const adapter = engineId ? adapterFor(engineId) : null;
-    if (!engineId || !adapter) {
-      const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
-      return { ...out, step: "no_engine", attempts };
-    }
-    // §C.1 — THE GUARD THAT USED TO PASS SILENTLY. `decided` is whisper.cpp's answer, which is a
-    // full language NAME. A name with no Sarvam locale behind it stops the window here instead
-    // of proceeding with no language forced, which is the failure mode the probe exists to
-    // prevent and which would have fired on the first Indic window ever drained.
-    const resolution = resolveSarvamLanguage(decided);
-    if (resolution.kind === "unmapped") {
-      const attempts = await recordFailure(windowId, "language_unmapped", resolution.answer);
-      return { ...out, step: "language_unmapped", detail: resolution.answer, attempts };
-    }
-    const languageSent = resolution.kind === "ok" ? resolution.code : null;
-    out.language_sent = languageSent;
 
-    // --- Build 3.1. THE CONTAINER THE ROUTED ENGINE CAN ACTUALLY READ -----------------------
+  const decided = probeLanguage ?? full.language ?? null;
+  const segments = full.segments ?? [];
+  const activity = describeWindowActivity(segments.length, endMs - startMs, segments.map((s) => s.text));
+  const segmentCount = segments.length;
+  out.segment_count = segmentCount;
+  out.activity = activity;
+
+  // The routing answer is read here ONLY to label the control run and to apply the
+  // cannot-be-its-own-control rule. The engine step resolves it again, authoritatively.
+  // C1b fix-up 2 — RESOLVED ONCE, HERE, AND PERSISTED. This is the earliest step that can resolve
+  // it: the bucket comes from `decided`, which needs whisper's answer. The engine step used to
+  // resolve it a second time, authoritatively, which meant a routing row edited mid-job produced a
+  // shadow labelled with one engine and a run written by another. It now reads what this step
+  // wrote, so a job has one routing truth for its whole life.
+  const routed = await resolveRouting(DRAIN_STAGE, bucketFor(decided));
+  // ── AMENDMENT A: A NULL ROUTE IS A LOUD FAILURE, NOT A SILENT SUBSTITUTION ───────────────────
+  // Migration 0083 would have added a (room,'default') row to "catch" this. That was the wrong
+  // instinct and it is deleted: room resolves to sarvam, so the catch-all would have been a PAID
+  // engine quietly absorbing a misconfiguration — exactly the unattended spend the guard exists to
+  // stop, dressed as resilience. No stage has a default row in live data, and that is correct.
+  //
+  // So the refusal happens HERE, before the shadow row and before the turns, which is where the
+  // pre-C1b inline drain raised it too. Nothing downstream gets to treat a null route as "skip
+  // this window": the job fails, named, with the bucket that found nothing.
+  if (!routed) {
+    const bucket = bucketFor(decided);
+    const attempts = await recordFailure(windowId, "no_engine", `stage=${DRAIN_STAGE} bucket=${bucket}`);
+    return { ...out, step: "no_engine", detail: `stage=${DRAIN_STAGE} bucket=${bucket}`, attempts };
+  }
+  const engineKey = routed;
+    // --- C1 step 5. THE SHADOW RUN --------------------------------------------------------------
     //
-    // Gemini accepts ogg and not webm; every other engine takes the webm clip that was already
-    // joined, downloaded and handed to Whisper. So this is a SECOND join for one engine, not a
-    // change to the clip everything else uses — the webm clip and its Whisper segments are
-    // untouched, and a window routed to Sarvam does exactly what it did yesterday.
+    // A SECOND transcription_run over the SAME audio, by the engine the room used before, on a
+    // sampled minority of windows — so the switch can be refuted against a side-by-side instead of
+    // against nothing.
     //
-    // WHY A SECOND JOIN RATHER THAN A CONVERSION. Vercel has no ffmpeg. The join service is the
-    // only thing in this system that can mux audio, and it is already being asked for this
-    // window's bytes — asking it once more with `format: "ogg"` costs one container call and
-    // produces a clip with its own R2 key, so the two containers coexist rather than one
-    // overwriting the other under a deterministic key.
+    // IT COSTS NO EXTRA ENGINE PASS HERE, and that is worth stating because the spec budgeted for
+    // one. Whisper has ALREADY transcribed this whole window a few lines above: the drain needs its
+    // segments for the turns and its language as a second opinion, whatever engine is routed. So
+    // `full` is in hand and the shadow is one INSERT, not one inference. The sampling rate is kept
+    // anyway: the rows are not free, and a rate is the dial that exists when they stop being cheap.
     //
-    // THE RECEIPT FOLLOWS THE BYTES. `audioBytes` and `audioKey` below are what the engine was
-    // actually handed, so `audio_sha256` fingerprints the ogg for a Gemini run and the webm for
-    // every other — never the clip we happened to download first.
-    let audioBytes: Uint8Array = bytes;
-    let audioKey: string = join.key;
-    let audioContentType = "audio/webm";
-
-    if (adapter.key === GEMINI_ADAPTER_KEY) {
-      // `now` is positional and defaults, so it is passed explicitly to reach `format` — the
-      // parameter order is left alone rather than reshuffled under the existing callers.
-      const oggReq = buildJoinRequest(w.session_id, covering, startMs, endMs, source, new Date(), GEMINI_PREFERRED_JOIN_FORMAT);
-      const oggJoin = await callJoinService(oggReq);
-      if (!oggJoin.ok) {
-        // No spend. A join service that is down, or a box still running the pre-3.1 image, must
-        // not become a paid call against a container the engine will reject.
-        const attempts = await recordFailure(windowId, "ogg_join_unavailable", oggJoin.error);
-        return { ...out, step: "ogg_join_unavailable", detail: oggJoin.error, attempts };
-      }
-      const oggBytes = await getObjectBytes(oggJoin.key);
-      if (!oggBytes) {
-        const attempts = await recordFailure(windowId, "ogg_join_unavailable", `clip_missing:${oggJoin.key}`);
-        return { ...out, step: "ogg_join_unavailable", detail: `clip_missing:${oggJoin.key}`, attempts };
-      }
-      audioBytes = oggBytes;
-      audioKey = oggJoin.key;
-      audioContentType = GEMINI_PREFERRED_CONTENT_TYPE;
+    // ONE RUN PER (WINDOW x ENGINE) — the leaderboard groups by tr.engine, so two rows with two
+    // different engine values aggregate correctly and the existing query needs no change. Skipped
+    // when the routed engine IS whisper, because a window cannot be its own control.
+    if (full.ok && engineKey !== whisperAdapter.key && shouldShadow(windowId)) {
+      const shadowId = runId();
+      const shadowReceipt = audioReceipt(join.key, bytes);
+      // C1b fix-up 1 — THE CONTROL IS A BOUNDED SAMPLE, NOT A SECOND PRODUCTION TRANSCRIPT.
+      // It covers the first SHADOW_WINDOW_MS of the window and no more. The shadow exists to
+      // compare engines; a full second transcript of every sampled window is a cost with no extra
+      // comparison in it.
+      //
+      // TAKEN BY TRUNCATION, not by a second inference, and that is strictly cheaper than it
+      // sounds: whisper has already read the whole window for the turns, so selecting the
+      // segments inside the bound costs nothing and puts NO additional load on a Mini that is
+      // concurrently recording — which was the ruling's own reason. A fresh 120 s whisper call
+      // would have added load to remove some.
+      // WhisperSegment times are SECONDS and are relative to the clip, which starts at the
+      // window's own start — so this is literally "the segments inside the first two minutes".
+      const shadowSegments = segments.filter((sg) => sg.end_s <= SHADOW_WINDOW_MS / 1000);
+      const shadowText = shadowSegments.map((sg) => sg.text).join(" ").trim();
+      const shadowEndMs = Math.min(endMs, startMs + SHADOW_WINDOW_MS);
+      const shadowSeconds = Math.round(((shadowEndMs - startMs) / 1000) * 100) / 100;
+      await sql`
+        INSERT INTO transcription_run
+          (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
+           detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
+           error, metrics_json, created_at,
+           initiated_by, initiated_via, engine_version_reported,
+           audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
+        VALUES
+          (${shadowId}, NULL, 'bench_window', ${windowId}, ${whisperAdapter.key}, ${whisperAdapter.key}, 'batch', 'asr',
+           ${full.language ?? null}, ${shadowText || null}, NULL, ${full.latency_ms}, 0,
+           NULL, ${JSON.stringify({
+             shadow_of_engine: engineKey,
+             shadow_sampled: true,
+             // ── THIS ROW IS NOT A FULL-WINDOW RUN. Three keys say so, because one that a reader
+             // has to notice is one a reader will miss, and comparing this to a 900 s routed run
+             // as if they were like for like would make the routed engine look 7x more productive
+             // on every chars-per-second chart.
+             shadow_bounded: true,
+             shadow_window_ms: SHADOW_WINDOW_MS,
+             covers_full_window: false,
+             // audio_seconds is what the yield tripwire divides by, so it MUST be the sample's
+             // own duration, not the window's. This is the single number that makes the bounded
+             // row comparable at all.
+             audio_seconds: shadowSeconds,
+             full_window_audio_seconds: audioSeconds,
+             segment_count: shadowSegments.length,
+             full_window_segment_count: segmentCount,
+             clip_r2_key: join.key,
+             whisper_model_reported: full.engineVersion ?? null,
+             window: { start_ms: startMs, end_ms: shadowEndMs, source_mic: source },
+           })}::jsonb, NOW(),
+           ${opts.actor}, ${opts.via}, ${full.engineVersion ?? null},
+           ${shadowReceipt.audio_r2_key}, ${shadowReceipt.audio_byte_start}, ${shadowReceipt.audio_byte_end},
+           ${shadowReceipt.audio_sha256})
+      `;
+      out.shadow_run_id = shadowId;
     }
-
-    const asr = await adapter.transcribe(Buffer.from(audioBytes), {
-      contentType: audioContentType,
-      longForm: true,
-      mode: "transcribe",
-      ...(languageSent ? { language: languageSent } : {}),
-    });
-    out.sarvam_ms = asr.latencyMs;
-    out.audio_seconds = audioSeconds;
-    // §B — the receipt for THESE bytes: the key they came from, the range sent (the whole
-    // object), and their sha256. Taken from `bytes`, the same buffer just handed to the adapter,
-    // so the fingerprint cannot drift from what was actually transcribed.
-    const receipt = audioReceipt(audioKey, audioBytes);
-    const engineVersion = providerEngineVersion(asr);
-    out.audio_sha256 = receipt.audio_sha256;
-    out.engine_version_reported = engineVersion;
-    out.receipt_complete = engineVersion !== null;
-    // §3.10 — the per-window cost report. Characters and cost come from what the engine actually
-    // returned on THIS call, not from a re-read, so they cannot drift from the run just written.
-    out.cost_usd = asr.costUsd ?? null;
-    out.transcript_chars = typeof asr.original === "string" ? asr.original.length : null;
-
-    // C5 — THE ENGINE ID IS READ FROM THE ADAPTER THAT WAS CALLED. `adapter.key` is the object
-    // whose transcribe() just ran; nothing here re-derives it from a string the caller supplied.
-    const engineKey = adapter.key;
-    out.engine = engineKey;
-
-    if (asr.error) {
-      const attempts = await recordFailure(windowId, "engine_failed", asr.error);
-      return { ...out, step: "engine_failed", detail: asr.error, attempts };
-    }
-
-    // --- C5. STORE --------------------------------------------------------------------------
-    const segments = full.segments ?? [];
-    const activity = describeWindowActivity(segments.length, endMs - startMs, segments.map((s) => s.text));
-    out.segment_count = segments.length;
-    out.activity = activity;
-    // A re-transcription REPLACES the previous run for this subject, exactly as the turns are
-    // replaced. Two runs for one window would make "the window's transcript" ambiguous, and the
-    // STT lab groups on (subject_type, subject_id).
-    await sql`DELETE FROM transcription_run WHERE subject_type = 'bench_window' AND subject_id = ${windowId}`;
-    const id = runId();
-    await sql`
-      INSERT INTO transcription_run
-        (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
-         detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
-         error, metrics_json, created_at,
-         initiated_by, initiated_via, engine_version_reported,
-         audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
-      VALUES
-        (${id}, NULL, 'bench_window', ${windowId}, ${engineKey}, ${engineId}, 'batch', 'asr',
-         ${asr.language ?? decided}, ${asr.original}, ${asr.english}, ${asr.latencyMs}, ${asr.costUsd},
-         NULL, ${JSON.stringify({
-           // C3 — the probe's language AND its length, on the run, so T4/T5 are answerable from
-           // the row rather than from a log line.
-           probe_language: probeLanguage,
-           probe_seconds: slice.seconds,
-           probe_engine: whisperAdapter.key,
-           full_window_language: full.language ?? null,
-           language_sent: languageSent,
-           sarvam_language: asr.language ?? null,
-           segment_count: segments.length,
-           activity,
-           // §C.2 — WHISPER'S LATENCY, on the run, at last. Grounding §A5: metrics_json carried
-           // probe_engine, probe_seconds and segment_count but no whisper_ms, so the room path's
-           // local-compute time was unobservable from the database while Whisper was
-           // simultaneously its hard single point of failure. Placed here rather than on a new
-           // column because this blob is already the run's provenance record and a reader
-           // holding the run has the numbers in the same fetch.
-           whisper_probe_ms: whisperProbeMs,
-           whisper_probe_attempts: whisperProbeAttempts,
-           whisper_full_ms: full.latency_ms,
-           whisper_full_attempts: full.attempts ?? 1,
-           // Build 3 (PRD §5 amendment) — the model whisper.cpp reported, when it reports one.
-           //
-           // WHY HERE AND NOT IN engine_version_reported. That column belongs to the engine the
-           // ROW NAMES, which on this path is the paid engine (Sarvam today, Gemini when routed).
-           // Whisper is the segmenter and the language arbitrator on the same window, not the
-           // run's engine, so its version rides in metrics_json beside its latency — exactly
-           // where Build 1 put `whisper_probe_ms`. Writing it into engine_version_reported would
-           // caption a Sarvam run with Whisper's version, which is the typed-provider-label
-           // failure wearing a new hat.
-           whisper_model_reported: full.engineVersion ?? null,
-           audio_seconds: audioSeconds,
-           clip_r2_key: join.key,
-           window: { start_ms: startMs, end_ms: endMs, source_mic: source },
-         })}::jsonb, NOW(),
-         ${opts.actor}, ${opts.via}, ${engineVersion},
-         ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},
-         ${receipt.audio_sha256})
-    `;
-    out.run_id = id;
 
     // --- C6. TURNS --------------------------------------------------------------------------
     // Whisper's segments, so the engine on the cue is Whisper — derived from the adapter, never
@@ -682,6 +896,319 @@ export async function drainRoomWindow(
       return { ...out, step: "cues_refused", detail: why, attempts };
     }
 
+
+  return {
+    ...out, ok: true, step: "ok",
+    next_progress: {
+      ...progress,
+      full_language: full.language ?? null,
+      whisper_full_ms: full.latency_ms,
+      whisper_full_attempts: full.attempts ?? 1,
+      whisper_model_reported: full.engineVersion ?? null,
+      segment_count: segmentCount,
+      activity,
+      decided_language: decided,
+      // fix-up 2 — the one routing truth, read by every later step.
+      engine_id: engineKey || null,
+      ...(out.shadow_run_id ? { shadow_run_id: out.shadow_run_id } : {}),
+    },
+  };
+}
+
+/**
+ * The routed engine's run. ONE WRITER, reached by both transports — the synchronous adapter path
+ * and the router's poll path — so the two cannot drift into writing different rows for the same
+ * window. That drift is exactly what produced the silent-window defect one slice ago.
+ */
+async function writeRoutedRun(
+  windowId: string, ctx: WindowContext, p: WindowProgress, opts: RunActor,
+  asr: SttTranscribeResult, receipt: { audio_r2_key: string | null; audio_byte_start: number | null; audio_byte_end: number | null; audio_sha256: string | null },
+  engineId: string, engineKey: string, engineVersion: string | null,
+  /** What the engine was actually told to expect. Belongs to the caller that resolved it. */
+  languageSent: string | null,
+): Promise<string> {
+  const { startMs, endMs, source, audioSeconds } = ctx;
+  const join = { key: p.clip_r2_key };
+  const decided = p.decided_language;
+  const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found" };
+  void out;
+    // --- C5. STORE --------------------------------------------------------------------------
+    // C1b — whisper's segments never leave the step that produced them (no text in progress),
+    // so the two facts this row needs from them, the COUNT and the activity label, are carried.
+    const activity = p.activity;
+    // A re-transcription REPLACES the previous run for this subject, exactly as the turns are
+    // replaced. Two runs for one window would make "the window's transcript" ambiguous, and the
+    // STT lab groups on (subject_type, subject_id).
+    await sql`DELETE FROM transcription_run WHERE subject_type = 'bench_window' AND subject_id = ${windowId}`;
+    const id = runId();
+    await sql`
+      INSERT INTO transcription_run
+        (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
+         detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
+         error, metrics_json, created_at,
+         initiated_by, initiated_via, engine_version_reported,
+         audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
+      VALUES
+        (${id}, NULL, 'bench_window', ${windowId}, ${engineKey}, ${engineId}, 'batch', 'asr',
+         ${asr.language ?? decided}, ${asr.original}, ${asr.english}, ${asr.latencyMs}, ${asr.costUsd},
+         NULL, ${JSON.stringify({
+           // C3 — the probe's language AND its length, on the run, so T4/T5 are answerable from
+           // the row rather than from a log line.
+           probe_language: p.probe_language,
+           probe_seconds: p.probe_seconds,
+           probe_engine: whisperAdapter.key,
+           full_window_language: p.full_language,
+           language_sent: languageSent,
+           sarvam_language: asr.language ?? null,
+           segment_count: p.segment_count,
+           activity,
+           // §C.2 — WHISPER'S LATENCY, on the run, at last. Grounding §A5: metrics_json carried
+           // probe_engine, probe_seconds and segment_count but no whisper_ms, so the room path's
+           // local-compute time was unobservable from the database while Whisper was
+           // simultaneously its hard single point of failure. Placed here rather than on a new
+           // column because this blob is already the run's provenance record and a reader
+           // holding the run has the numbers in the same fetch.
+           whisper_probe_ms: p.whisper_probe_ms,
+           whisper_probe_attempts: p.whisper_probe_attempts,
+           whisper_full_ms: p.whisper_full_ms,
+           whisper_full_attempts: p.whisper_full_attempts,
+           // Build 3 (PRD §5 amendment) — the model whisper.cpp reported, when it reports one.
+           //
+           // WHY HERE AND NOT IN engine_version_reported. That column belongs to the engine the
+           // ROW NAMES, which on this path is the paid engine (Sarvam today, Gemini when routed).
+           // Whisper is the segmenter and the language arbitrator on the same window, not the
+           // run's engine, so its version rides in metrics_json beside its latency — exactly
+           // where Build 1 put `whisper_probe_ms`. Writing it into engine_version_reported would
+           // caption a Sarvam run with Whisper's version, which is the typed-provider-label
+           // failure wearing a new hat.
+           whisper_model_reported: p.whisper_model_reported,
+           audio_seconds: audioSeconds,
+           clip_r2_key: join.key,
+           window: { start_ms: startMs, end_ms: endMs, source_mic: source },
+           // Slice C1 step 3 — the router's per-span timeline, VERBATIM, under one key. Spread
+           // conditionally so a run by any other engine is byte-identical to what it wrote before:
+           // nine adapters return no timeline and must not acquire an empty one.
+           ...(asr.languageTimeline ? buildRouteMetrics(asr.languageTimeline) : {}),
+         })}::jsonb, NOW(),
+         ${opts.actor}, ${opts.via}, ${engineVersion},
+         ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},
+         ${receipt.audio_sha256})
+    `;
+
+
+  return id;
+}
+
+/**
+ * PHASE 3 — resolve the engine and start it.
+ *
+ * THE ONLY BRANCH IS ON A DECLARED CAPABILITY, never on an engine name. An adapter that says
+ * `capabilities.async` is handed the router's submit/poll protocol; one that does not is called
+ * and answers inside this step. Adding an engine means declaring what it is, not editing this.
+ */
+export async function roomWindowEngine(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
+  const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
+  const p = readWindowProgress(progress);
+  const ctxOrErr = await loadWindowContext(windowId);
+  if ("error" in ctxOrErr) return { ...out, step: ctxOrErr.error, ...(ctxOrErr.detail ? { detail: ctxOrErr.detail } : {}) };
+  const ctx = ctxOrErr;
+  const { w, startMs, endMs, source, covering, audioSeconds } = ctx;
+  const join = { key: p.clip_r2_key };
+  const probeLanguage = p.probe_language;
+  // C1b fix-up 3, ACCEPTED AND DELIBERATE: this is the SECOND download of this clip — the segment
+  // step downloaded it too. It is inherent to steps that cannot pass bytes. A job's progress is a
+  // database column read by operators and may carry no audio and no transcript, and the process
+  // that ran the previous step may no longer exist, so the only alternatives are smuggling bytes
+  // through state or keeping one giant step that reintroduces the ceiling this slice removed.
+  // DO NOT "fix" this by caching the buffer somewhere global: an R2 GET is cheap and a step that
+  // depends on another step's memory is a step that breaks the first time a runner is recycled.
+  const bytes = await getObjectBytes(join.key);
+  if (!bytes) { const attempts = await recordFailure(windowId, "clip_missing", join.key); return { ...out, step: "clip_missing", attempts }; }
+    // --- C4. TRANSCRIBE, with the language FORCED ------------------------------------------
+    // C1b — decided ONCE, in the segment step, and carried on the row. Re-deriving it here
+    // would need whisper's answer, which this step no longer holds.
+    const decided = p.decided_language;
+    // fix-up 2 — READ, NOT RESOLVED. The segment step resolved this and wrote it on the job; a
+    // second resolution here could disagree with the one the shadow row was labelled from if an
+    // operator edited stt_routing while the job was in flight. One resolution, one truth.
+    const engineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
+    const adapter = engineId ? adapterFor(engineId) : null;
+    if (!engineId || !adapter) {
+      const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
+      return { ...out, step: "no_engine", attempts };
+    }
+    // §C.1 — THE GUARD THAT USED TO PASS SILENTLY. `decided` is whisper.cpp's answer, which is a
+    // full language NAME. A name with no Sarvam locale behind it stops the window here instead
+    // of proceeding with no language forced, which is the failure mode the probe exists to
+    // prevent and which would have fired on the first Indic window ever drained.
+    const resolution = resolveSarvamLanguage(decided);
+    if (resolution.kind === "unmapped") {
+      const attempts = await recordFailure(windowId, "language_unmapped", resolution.answer);
+      return { ...out, step: "language_unmapped", detail: resolution.answer, attempts };
+    }
+    const languageSent = resolution.kind === "ok" ? resolution.code : null;
+    out.language_sent = languageSent;
+    // C5's rule, unchanged: the engine id is READ FROM THE ADAPTER that will run, never re-derived
+    // from a string the caller supplied.
+    const engineKey = adapter.key;
+    out.engine = engineKey;
+
+    // --- Build 3.1. THE CONTAINER THE ROUTED ENGINE CAN ACTUALLY READ -----------------------
+    //
+    // Gemini accepts ogg and not webm; every other engine takes the webm clip that was already
+    // joined, downloaded and handed to Whisper. So this is a SECOND join for one engine, not a
+    // change to the clip everything else uses — the webm clip and its Whisper segments are
+    // untouched, and a window routed to Sarvam does exactly what it did yesterday.
+    //
+    // WHY A SECOND JOIN RATHER THAN A CONVERSION. Vercel has no ffmpeg. The join service is the
+    // only thing in this system that can mux audio, and it is already being asked for this
+    // window's bytes — asking it once more with `format: "ogg"` costs one container call and
+    // produces a clip with its own R2 key, so the two containers coexist rather than one
+    // overwriting the other under a deterministic key.
+    //
+    // THE RECEIPT FOLLOWS THE BYTES. `audioBytes` and `audioKey` below are what the engine was
+    // actually handed, so `audio_sha256` fingerprints the ogg for a Gemini run and the webm for
+    // every other — never the clip we happened to download first.
+    let audioBytes: Uint8Array = bytes;
+    let audioKey: string = join.key;
+    let audioContentType = "audio/webm";
+
+    if (adapter.key === GEMINI_ADAPTER_KEY) {
+      // `now` is positional and defaults, so it is passed explicitly to reach `format` — the
+      // parameter order is left alone rather than reshuffled under the existing callers.
+      const oggReq = buildJoinRequest(w.session_id, covering, startMs, endMs, source, new Date(), GEMINI_PREFERRED_JOIN_FORMAT);
+      const oggJoin = await callJoinService(oggReq);
+      if (!oggJoin.ok) {
+        // No spend. A join service that is down, or a box still running the pre-3.1 image, must
+        // not become a paid call against a container the engine will reject.
+        const attempts = await recordFailure(windowId, "ogg_join_unavailable", oggJoin.error);
+        return { ...out, step: "ogg_join_unavailable", detail: oggJoin.error, attempts };
+      }
+      const oggBytes = await getObjectBytes(oggJoin.key);
+      if (!oggBytes) {
+        const attempts = await recordFailure(windowId, "ogg_join_unavailable", `clip_missing:${oggJoin.key}`);
+        return { ...out, step: "ogg_join_unavailable", detail: `clip_missing:${oggJoin.key}`, attempts };
+      }
+      audioBytes = oggBytes;
+      audioKey = oggJoin.key;
+      audioContentType = GEMINI_PREFERRED_CONTENT_TYPE;
+    }
+
+  // ── TRANSPORT, CHOSEN BY CAPABILITY ──────────────────────────────────────────────────────────
+  if (adapter.capabilities.async) {
+    // IDEMPOTENCE IS OURS, because the router has none. If this row already carries a router job
+    // id, a previous attempt already submitted — poll that one. Resubmitting would mint a second
+    // job over the same audio and do the whole thing twice.
+    if (p.router_job_id) {
+      return { ...out, ok: true, step: "ok", next_progress: { ...progress, engine_id: engineId, engine_key: engineKey, language_sent: languageSent } };
+    }
+    if (!ROUTER_JOB_ON()) { const attempts = await recordFailure(windowId, "engine_failed", "router_job_disabled"); return { ...out, step: "engine_failed", detail: "router_job_disabled", attempts }; }
+    let audioUrl: string;
+    try {
+      audioUrl = await signGetUrl({ key: audioKey, expiresInSeconds: routerPresignTtlSeconds(audioSeconds) });
+    } catch (e) {
+      const attempts = await recordFailure(windowId, "engine_failed", `presign_failed: ${String(e).slice(0, 80)}`);
+      return { ...out, step: "engine_failed", detail: "presign_failed", attempts };
+    }
+    const sub = await submitRouteJob(audioUrl, { translate: false });
+    if (!sub.ok || !sub.job_id) {
+      console.error("[drain] route submit failed", JSON.stringify({ window: windowId, err: String(sub.error ?? "unknown").slice(0, 200) }));
+      const attempts = await recordFailure(windowId, "engine_failed", "route_submit_failed");
+      return { ...out, step: "engine_failed", detail: "route_submit_failed", attempts };
+    }
+    // Persisted BEFORE anything else can fail, so a retry finds it and polls instead of resubmitting.
+    return {
+      ...out, ok: true, step: "ok",
+      next_progress: { ...progress, router_job_id: sub.job_id, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
+    };
+  }
+
+  // ── ITEM 4: ROUTING INHERITANCE MAY NOT REACH A PAID ENGINE ──────────────────────────────────
+  // This path picks its engine purely from `stt_routing` — nobody named it in a request, and the
+  // window is 900 s, well past the per-call cap. That is the textbook unattended spend: a config
+  // row, times twelve windows a press, with no audit trail. `explicitlyNamed: false` is therefore
+  // a LITERAL here, not a variable: there is no way for this call site to ever be a naming, and
+  // writing it as a literal means no future edit can quietly make it one.
+  const g = await guardedTranscribe({
+    adapter, engineId, audio: Buffer.from(audioBytes),
+    durationMs: Math.round(audioSeconds * 1000),
+    explicitlyNamed: false,
+    actor: opts.actor,
+    subject: `bench_window:${windowId}`,
+    transcribeOpts: {
+      contentType: audioContentType, longForm: true, mode: "transcribe",
+      durationMs: Math.round(audioSeconds * 1000),
+      ...(languageSent ? { language: languageSent } : {}),
+    },
+  });
+  if (!g.ok) {
+    // Named, so an operator reading the window sees WHY it stopped rather than a generic failure.
+    const attempts = await recordFailure(windowId, "paid_engine_refused", g.refusal.error);
+    return { ...out, step: "paid_engine_refused", detail: g.refusal.error, attempts };
+  }
+  const asr = g.result;
+  if (asr.error) { const attempts = await recordFailure(windowId, "engine_failed", asr.error); return { ...out, step: "engine_failed", detail: asr.error, attempts }; }
+  const receipt = audioReceipt(audioKey, audioBytes);
+  const engineVersion = providerEngineVersion(asr);
+  const runIdWritten = await writeRoutedRun(windowId, ctx, p, opts, asr, receipt, engineId, engineKey, engineVersion, languageSent);
+  out.run_id = runIdWritten;
+  out.cost_usd = asr.costUsd ?? null;
+  out.transcript_chars = typeof asr.original === "string" ? asr.original.length : null;
+  return { ...out, ok: true, step: "ok", next_progress: { ...progress, engine_id: engineId, engine_key: engineKey, run_id: runIdWritten, done_engine: true } };
+}
+
+/**
+ * PHASE 4 — poll the router job this window already owns.
+ *
+ * IT NEVER SUBMITS. The id was persisted by phase 3 and is the only thing this step acts on: a
+ * retry, a crash, a re-claim after a lost lease all land here and poll the SAME job. The router
+ * has no idempotency key and its job files expire after an hour, so if we resubmitted on retry we
+ * would pay for the same 900 s twice and have two answers with no way to say which was used.
+ */
+export async function roomWindowPoll(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome & { still_running?: boolean }> {
+  const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
+  const p = readWindowProgress(progress);
+  if (!p.router_job_id) return { ...out, step: "engine_failed", detail: "no router job id on the row" };
+  const ctxOrErr = await loadWindowContext(windowId);
+  if ("error" in ctxOrErr) return { ...out, step: ctxOrErr.error, ...(ctxOrErr.detail ? { detail: ctxOrErr.detail } : {}) };
+  const ctx = ctxOrErr;
+
+  const st = await pollRouteJob(p.router_job_id);
+  if (!st.ok && /unknown job/i.test(String(st.error ?? ""))) {
+    const attempts = await recordFailure(windowId, "engine_failed", "route_job_unknown");
+    return { ...out, step: "engine_failed", detail: "route_job_unknown", attempts };
+  }
+  if (st.state === "failed" || (st.ok === false && st.state === undefined)) {
+    console.error("[drain] route job failed", JSON.stringify({ window: windowId, job: p.router_job_id, err: String(st.error ?? "unknown").slice(0, 200) }));
+    const attempts = await recordFailure(windowId, "engine_failed", "route_job_failed");
+    return { ...out, step: "engine_failed", detail: "route_job_failed", attempts };
+  }
+  if (st.state !== "done") {
+    // Still working. The row goes back to the queue; the next claim polls the same id.
+    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: st.state ?? "unknown" } };
+  }
+
+  const engineId = String(progress.engine_id ?? "");
+  const engineKey = String(progress.engine_key ?? "");
+  const asr = toSttResult(st as RouterResult, typeof st.sec === "number" ? Math.round(st.sec * 1000) : 0);
+  if (asr.error) { const attempts = await recordFailure(windowId, "engine_failed", asr.error); return { ...out, step: "engine_failed", detail: asr.error, attempts }; }
+  // The receipt describes the bytes the ROUTER was given — the same object the presigned URL named.
+  const bytes = await getObjectBytes(p.clip_r2_key);
+  if (!bytes) { const attempts = await recordFailure(windowId, "clip_missing", p.clip_r2_key); return { ...out, step: "clip_missing", attempts }; }
+  const receipt = audioReceipt(p.clip_r2_key, bytes);
+  const runIdWritten = await writeRoutedRun(windowId, ctx, p, opts, asr, receipt, engineId, engineKey, providerEngineVersion(asr), typeof progress.language_sent === "string" ? progress.language_sent : null);
+  out.run_id = runIdWritten;
+  out.transcript_chars = typeof asr.original === "string" ? asr.original.length : null;
+  return { ...out, ok: true, step: "ok", next_progress: { ...progress, run_id: runIdWritten, done_engine: true } };
+}
+
+/** PHASE 5 — the window is transcribed. Only reached once a run exists. */
+export async function roomWindowFinish(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
+  const out: DrainOutcome = {
+    window_id: windowId, ok: false, step: "not_found",
+    initiated_by: opts.actor, initiated_via: opts.via,
+    run_id: typeof progress.run_id === "string" ? progress.run_id : null,
+  };
     // --- C7. STATE --------------------------------------------------------------------------
     await sql`UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'`;
     await sql`
@@ -689,16 +1216,14 @@ export async function drainRoomWindow(
        WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'
     `;
     return { ...out, ok: true, step: "ok" };
-  } catch (e) {
-    const detail = String((e as Error)?.message ?? e).slice(0, 200);
-    try {
-      const attempts = await recordFailure(windowId, "engine_failed", detail);
-      return { ...out, step: "engine_failed", detail, attempts };
-    } catch {
-      return { ...out, step: "engine_failed", detail };
-    }
-  }
 }
+
+/** TTL for the router's presigned pull: 2x an expectation of 3x realtime, floor ten minutes. */
+export function routerPresignTtlSeconds(audioSeconds: number): number {
+  if (!Number.isFinite(audioSeconds) || audioSeconds <= 0) return 600;
+  return Math.max(600, Math.ceil(audioSeconds * 3 * 2));
+}
+
 
 /**
  * Drain queued room windows, oldest first. Manual only — nothing schedules this.
