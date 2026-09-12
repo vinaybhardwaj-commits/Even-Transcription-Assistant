@@ -1,0 +1,18 @@
+#!/bin/sh
+# Refuse staged content naming the unauthenticated home inference domain.
+# This repo is PUBLIC. Ruling: V, 12 Sep 2026.
+# The needle is assembled at runtime so this file never matches itself;
+# the enforcement files are excluded from the scan as well.
+NEEDLE="llmvinay""minihome"
+FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -v "^\.githooks/" | grep -v "^\.gitignore$")
+BAD=""
+for f in $FILES; do
+  if git show ":$f" 2>/dev/null | grep -q "$NEEDLE"; then BAD="$BAD $f"; fi
+done
+if [ -n "$BAD" ]; then
+  echo "pre-commit REFUSED: this repo is public and these staged files name the unauthenticated tunnel host:"
+  for f in $BAD; do echo "  $f"; done
+  echo "Keep the file in docs/handoff/ on disk, add it to .gitignore, or redact the hostname."
+  exit 1
+fi
+exit 0
