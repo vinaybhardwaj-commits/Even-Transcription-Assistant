@@ -2083,7 +2083,7 @@ export function buildDaySession(
   s: DaySessionRow,
   chunks: ReadonlyArray<Pick<BenchChunkRow, "source" | "started_at" | "ended_at" | "upload_state">>,
   events: ReadonlyArray<DayEventRow>,
-): Record<string, unknown> {
+) {
   const primary = chunks.filter((c) => c.source !== "backup");
   const backup = chunks.filter((c) => c.source === "backup");
   const tapeMs = tapeEndMs(chunks);
@@ -2455,6 +2455,12 @@ export const SUMMARY_ROOM_OPTIONAL = ["degraded"] as const;
  * clocks agree. TYPED AGAINST THE REAL ROW: `satisfies readonly (keyof DaySessionRow)[]` makes a
  * name `buildDaySession` does not return a tsc error here, at the list, rather than a field that
  * silently vanishes from the answer. The Refuter's (d): six of these were wrong and nothing failed.
+ *
+ * THIS ONLY WORKS BECAUSE `buildDaySession` HAS NO RETURN ANNOTATION. It used to be declared
+ * `): Record<string, unknown>`, which makes `keyof` collapse to `string` — so both this `satisfies`
+ * and `pickSummary`'s `readonly (keyof T)[]` accepted anything and the guard was theatre. Do not
+ * re-add one. Verified by adding "id" to the list: tsc fails TS2322 here and TS2345 at the call
+ * site, naming every real key.
  */
 type DayReportSession = ReturnType<typeof buildDaySession>;
 export const SUMMARY_DAY_SESSION_FIELDS = [
