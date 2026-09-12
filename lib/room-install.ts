@@ -1088,6 +1088,13 @@ type InstallPollReturn = {
  */
 export const POLL_WRITE_FAIL_AUDIT = { max: 1, windowMs: 5 * 60_000 };
 
+/**
+ * Tier 2 Slice B addition (2) — one `install.channel_reported` per (install_id, channel, minute).
+ * The bucket key carries the minute, so the window only has to outlive one minute's worth of polls;
+ * a genuine second transition in the next minute writes its own row.
+ */
+export const CHANNEL_REPORTED_AUDIT = { max: 1, windowMs: 2 * 60_000 };
+
 export async function notePollWriteFailure(input: {
   installId: string;
   roomId: string | null;
@@ -1298,12 +1305,20 @@ export async function applyInstallPoll(
       // it was set before, it is null now. A poll that changes nothing writes nothing.
       const wasAssigned = rows[0]!.prev_assigned_channel ?? null;
       if (wasAssigned !== null && rows[0]!.assigned_channel === null) {
-        void auditInstall("install.channel_reported", rows[0]!.prev_room_id ?? null, {
-          install_id: f.install_id,
-          channel: f.update_channel ?? rows[0]!.update_channel ?? null,
-          cleared: wasAssigned,
-          actor: "install",
-        });
+        const channel = f.update_channel ?? rows[0]!.update_channel ?? null;
+        // Tier 2 Slice B addition (2) — DEDUPE to one row per (install_id, channel, minute).
+        // The transition itself fires once, but a redelivered poll, a retried request or two
+        // app instances racing the same clear would each write one; the audit table is meant to
+        // be readable, and a burst of identical rows for one event is how that stops being true.
+        // The minute is the grain because that is the resolution a human reads this at.
+        if (!rateLimited(`channel_reported:${f.install_id}:${channel ?? "none"}:${Math.floor(now.getTime() / 60_000)}`, CHANNEL_REPORTED_AUDIT, now.getTime())) {
+          void auditInstall("install.channel_reported", rows[0]!.prev_room_id ?? null, {
+            install_id: f.install_id,
+            channel,
+            cleared: wasAssigned,
+            actor: "install",
+          });
+        }
       }
       const assigned = rows[0]!.assigned_channel;
       return { ok: true, assigned_channel: assigned === "stable" || assigned === "test" ? assigned : null };

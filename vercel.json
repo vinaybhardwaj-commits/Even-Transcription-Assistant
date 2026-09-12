@@ -20,6 +20,10 @@
     {
       "path": "/api/admin/diarize-windows",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/jobs/run",
+      "schedule": "* * * * *"
     }
   ]
 }

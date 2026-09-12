@@ -1006,8 +1006,30 @@ const extractAudio: McpTool = {
   name: "scribe_extract_audio",
   description: "Audio by clock time (PRD §10 + U2 + U4): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → the pieces are JOINED into one kept clip and answered with a single 1 h link plus the window asked for. Refused by name over 30 minutes (window_too_long) and while any room is recording (room_recording). If the joining service is unreachable or refuses, the answer degrades to the multi-piece response listing every covering piece with its own link — never an error page. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is answered from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins, silence and all. Nothing listens to the audio to judge silence. Where no backup piece covers the window → no_audio_in_range; audio is never invented. Never inline bytes.",
   scope: "invoke",
-  inputSchema: { type: "object", properties: RANGE_ARGS, required: ["start", "end"], additionalProperties: false },
-  handler: async (args: ToolArgs) => {
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...RANGE_ARGS,
+      async: { type: "boolean", default: false, description: "Tier 2 §3 — submit the equivalent `stitch` job and return {job_id} instead of waiting. Default false keeps today's behaviour for one release." },
+    },
+    required: ["start", "end"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous
+    // path below is UNCHANGED and stays the default for one release, so nothing that calls this
+    // tool today sees a different answer.
+    if (argBool(args, "async")) {
+      const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
+      try {
+        const job = await submitJob({ kind: "stitch", args: args as Record<string, unknown>, actor: null, origin: ctx.origin });
+        return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
+      } catch (e) {
+        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
+        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        throw e;
+      }
+    }
     const r = await resolveRangeArgs(args);
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
@@ -1817,6 +1839,8 @@ const transcribeRange: McpTool = {
   inputSchema: {
     type: "object",
     properties: {
+      async: { type: "boolean", default: false, description: "Tier 2 §3 — submit the equivalent job and return {job_id} instead of waiting. Default false keeps today's behaviour for one release." },
+
       ...RANGE_ARGS,
       engine: { type: "string", enum: ["whisper"], default: "whisper" },
       language: { type: "string", description: "optional Whisper language hint, e.g. en" },
@@ -1826,6 +1850,20 @@ const transcribeRange: McpTool = {
     additionalProperties: false,
   },
   handler: async (args: ToolArgs, ctx: ToolContext) => {
+    // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous
+    // path below is UNCHANGED and stays the default for one release, so nothing that calls this
+    // tool today sees a different answer.
+    if (argBool(args, "async")) {
+      const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
+      try {
+        const job = await submitJob({ kind: "transcribe_range", args: args as Record<string, unknown>, actor: null, origin: ctx.origin });
+        return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
+      } catch (e) {
+        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
+        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        throw e;
+      }
+    }
     const engine = argStr(args, "engine", 32) ?? "whisper";
     if (engine !== "whisper") return { ok: false, error: "engine_not_supported_v1", engine, allowed: ["whisper"] };
     // `dry_run` defaults TRUE, and it FAILS DRY: only an explicit false turns writing on.

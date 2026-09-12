@@ -1,0 +1,176 @@
+/**
+ * lib/mcp/tools/jobs.ts — Tier 2 §3's four job tools, plus §-rollout's audit reader.
+ *
+ * The job tools are deliberately THIN. Everything that decides anything lives in lib/jobs; these
+ * validate an argument, call it, and shape the answer — so the same job behaves identically however
+ * it was submitted.
+ */
+
+import { JOB_STATUSES, type JobStatus } from "@/lib/jobs/types";
+import { cancelJob, listJobs, readJob } from "@/lib/jobs/store";
+import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib/jobs/submit";
+import { KIND_BY_NAME } from "@/lib/jobs/kinds";
+import { readRecentAudit, AUDIT_ACTIONS_HINT } from "@/lib/jobs/audit-read";
+import { argInt, argStr, argBool, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+
+/** PURE — the row a caller sees. `result` is withheld unless asked for: it can be large. */
+function jobView(j: NonNullable<Awaited<ReturnType<typeof readJob>>>, includeResult: boolean) {
+  return {
+    job_id: j.id,
+    kind: j.kind,
+    status: j.status,
+    step: j.step,
+    attempts: j.attempts,
+    progress: j.progress,
+    error: j.error,
+    actor: j.actor,
+    created_at: j.created_at,
+    started_at: j.started_at,
+    updated_at: j.updated_at,
+    finished_at: j.finished_at,
+    lease_until: j.lease_until,
+    ...(includeResult ? { result: j.result } : {}),
+    ...(!includeResult && j.result ? { has_result: true } : {}),
+  };
+}
+
+const submit: McpTool = {
+  name: "scribe_job_submit",
+  description:
+    "Queue long work and get an id back in under two seconds (Tier 2 §3). kind is one of transcribe_range, stitch, audio_measure, emotion_clip, diarize_clip, stt_fanout, day_manifest; args are validated by the kind at submit, so a job that cannot run is refused here rather than queued. Five of the seven kinds are registered but not yet implemented and will fail with not_implemented — that is 'not yet', not 'unknown kind'. Returns {job_id, kind, status}. Ask scribe_job_status about it; nothing is waited on here.",
+  scope: "invoke",
+  inputSchema: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: JOB_KIND_NAMES, description: "which step machine to run" },
+      args: { type: "object", description: "the kind's own arguments; validated at submit" },
+    },
+    required: ["kind"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
+    failSafe({ ok: false }, async () => {
+      const kind = argStr(args, "kind", 64) ?? "";
+      try {
+        const job = await submitJob({
+          kind,
+          args: (args as Record<string, unknown>).args ?? {},
+          actor: null,
+          origin: ctx.origin,
+        });
+        return { ok: true, job_id: job.id, kind: job.kind, status: job.status };
+      } catch (e) {
+        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind, allowed: JOB_KIND_NAMES };
+        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", kind, detail: e.reason };
+        throw e;
+      }
+    }),
+};
+
+const status: McpTool = {
+  name: "scribe_job_status",
+  description:
+    "One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts, progress, error and timings. `progress` carries ids, counts, keys and ms — never audio and never transcript text, because this column is readable by every token with `read`. include_result:true adds the job's result, which for a transcription DOES carry text; it is withheld by default for that reason.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      job_id: { type: "string" },
+      include_result: { type: "boolean", default: false },
+    },
+    required: ["job_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ok: false }, async () => {
+      const id = argStr(args, "job_id", 64);
+      if (!id) return { ok: false, error: "job_id_required" };
+      const job = await readJob(id);
+      if (!job) return { ok: false, error: "unknown_job", job_id: id };
+      return { ok: true, ...jobView(job, argBool(args, "include_result")) };
+    }),
+};
+
+const list: McpTool = {
+  name: "scribe_job_list",
+  description:
+    "The job queue, newest first: id, kind, status, step, attempts and timings. Filter by status and/or kind. Results are never included here — ask scribe_job_status for one.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: [...JOB_STATUSES] },
+      kind: { type: "string", enum: JOB_KIND_NAMES },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ jobs: [] as unknown[] }, async () => {
+      const s = argStr(args, "status", 16);
+      const jobs = await listJobs({
+        status: (JOB_STATUSES as readonly string[]).includes(s ?? "") ? (s as JobStatus) : null,
+        kind: argStr(args, "kind", 64),
+        limit: argInt(args, "limit", 50, 1, 200),
+      });
+      return { jobs: jobs.map((j) => jobView(j, false)) };
+    }),
+};
+
+const cancel: McpTool = {
+  name: "scribe_job_cancel",
+  description:
+    "Cancel a queued or running job. A QUEUED job stops immediately. A RUNNING job is honoured at its next step boundary: the step already in flight finishes its work and its outcome is then discarded rather than being torn in half, so nothing is left half-written. A job that is already done, failed or cancelled is left exactly as it is.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: { job_id: { type: "string" } },
+    required: ["job_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ok: false }, async () => {
+      const id = argStr(args, "job_id", 64);
+      if (!id) return { ok: false, error: "job_id_required" };
+      const job = await cancelJob(id);
+      if (!job) {
+        const existing = await readJob(id);
+        return existing
+          ? { ok: false, error: "not_cancellable", job_id: id, status: existing.status }
+          : { ok: false, error: "unknown_job", job_id: id };
+      }
+      return { ok: true, job_id: job.id, status: job.status, step: job.step };
+    }),
+};
+
+/**
+ * Slice A's rollout found this gap: §2.2 and §2.3 write audit rows that NOBODY CAN READ. The only
+ * routed `SELECT … FROM audit_log` needs an admin cookie, so the one question the rows exist to
+ * answer — "did the poll write fail, when, and how often" — could not be asked from an agent shell.
+ */
+const auditRecent: McpTool = {
+  name: "scribe_audit_recent",
+  description: `Recent audit_log rows, newest first: action, actor, target and the stored metadata. ${AUDIT_ACTIONS_HINT} Filter by action and/or a since time. Metadata is returned AS STORED — the writers already restrict it to ids, counts and flags — and no free-text field is exposed: there is no query argument and no message body. Read-only.`,
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", description: "exact action, e.g. install.poll_write_failed" },
+      since: { type: "string", description: "ISO time; defaults to the last 24 hours" },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ rows: [] as unknown[] }, async () => {
+      const since = argStr(args, "since", 40);
+      return readRecentAudit({
+        action: argStr(args, "action", 64),
+        since: since && Number.isFinite(Date.parse(since)) ? new Date(Date.parse(since)).toISOString() : null,
+        limit: argInt(args, "limit", 50, 1, 200),
+      });
+    }),
+};
+
+export const JOB_TOOLS: McpTool[] = [submit, status, list, cancel, auditRecent];
+export { KIND_BY_NAME };
