@@ -53,13 +53,3 @@ fixtures/warehouse/*.json
 # Vendored service dependencies — services/*/node_modules is install output, never source.
 # (One of these is a 134 MB workerd binary that GitHub refuses outright.)
 services/*/node_modules/
-
-# --- Tunnel-facing handoff docs: NEVER commit ---
-# This repo is PUBLIC and the home inference endpoints have no auth.
-# These live in docs/handoff/ on disk (the bus) but must not enter git.
-# Enforced by .githooks/pre-commit. Ruling: V, 12 Sep 2026.
-docs/handoff/ETA-LLM-TUNNEL-API-MANUAL-*.md
-docs/handoff/ETA-AUDIT-B-AUDIO-STT-TUNNEL-*.md
-docs/handoff/ETA-RESEARCH-ROUTER-RELAY-EMOTION-*.md
-docs/handoff/ETA-TIER2-SPEC-v1.0-MCP-REDESIGN-*.md
-docs/handoff/ETA-TIER2-SPEC-SLICE-C-*.md
