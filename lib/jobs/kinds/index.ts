@@ -13,8 +13,9 @@ import { transcribeRangeKind } from "./transcribe-range";
 import { stitchKind } from "./stitch";
 import { routeTranscribeKind } from "./route-transcribe";
 import { roomWindowKind } from "./room-window";
+import { diarizeWindowKind } from "./diarize-window";
 import { STUB_KINDS } from "./stubs";
 
-export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, ...STUB_KINDS];
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, ...STUB_KINDS];
 export const KIND_BY_NAME = new Map(JOB_KINDS.map((k) => [k.name, k]));
 export const JOB_KIND_NAMES = JOB_KINDS.map((k) => k.name);

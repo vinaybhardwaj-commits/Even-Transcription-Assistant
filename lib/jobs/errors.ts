@@ -38,6 +38,10 @@ export const JOB_ERROR_CODES = [
   "presign_failed",
   // room_window (Slice C1b) — detail is a DrainStep, a closed union of our own names.
   "room_window_failed",
+  // diarize_window (Slice C2)
+  "diarize_failed",
+  "diarize_unavailable",
+  "diarize_would_exceed_budget",
   // the five stubs
   "not_implemented",
 ] as const;

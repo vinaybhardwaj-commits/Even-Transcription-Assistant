@@ -368,4 +368,67 @@ const routeTripwires: McpTool = {
     }),
 };
 
-export const STT_TOOLS: McpTool[] = [listSttEngines, sttHealth, sttRouting, listSttRuns, getSttRun, routeTripwires];
+
+/**
+ * C2 item 4 — THE FIRST READER `room_turn_speaker` HAS EVER HAD.
+ *
+ * The table was created by migration 0074 and has exactly one writer, behind two env gates that
+ * have never been on; nothing in app/ or lib/ has ever read it. So this tool is not "another view"
+ * — it is the first time speaker attribution is answerable at all.
+ *
+ * WHAT IT WILL NOT DO. It returns no transcript text: a span is a timing and a speaker, and joining
+ * it to the words would turn a diagnostic into a transcript with names attached. And it reports a
+ * clinician ONLY where one was matched against an enrolled voiceprint — `role: "unattributed"`
+ * means "we do not know", never "someone else". A reader that wants to guess from speaker_idx has
+ * the index and can do so knowingly; this tool will not do it for them.
+ */
+const roomTurnSpeakers: McpTool = {
+  name: "scribe_window_speakers",
+  description:
+    "Speaker spans for a room window (room_turn_speaker): per bound turn, its speaker_idx, overlap_ms, and — ONLY where the diarize service matched an enrolled voiceprint — clinician_id, role and match_confidence. role is 'clinician' or 'unattributed'; unattributed means the voice was not identified, NOT that it was someone else. speaker_idx is the service's cluster order (sorted by total speaking time), so it is NOT a role and must not be read as one. No transcript text. Pass window_id, or room_day_id for a whole day.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      window_id: { type: "string" },
+      room_day_id: { type: "string" },
+      limit: { type: "integer", minimum: 1, maximum: 500, default: 200 },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ spans: [] as unknown[], summary: {} }, async () => {
+      const windowId = argStr(args, "window_id", 64);
+      const roomDayId = argStr(args, "room_day_id", 64);
+      const limit = argInt(args, "limit", 200, 1, 500);
+      if (!windowId && !roomDayId) return { error: "window_id or room_day_id is required", spans: [], summary: {} };
+
+      const spans = (await sql`
+        SELECT window_id, source_ref, speaker_idx, overlap_ms, room_day_id,
+               clinician_id, role, match_confidence, created_at
+          FROM room_turn_speaker
+         WHERE (${windowId ?? null}::text IS NULL OR window_id = ${windowId ?? null})
+           AND (${roomDayId ?? null}::text IS NULL OR room_day_id = ${roomDayId ?? null})
+         ORDER BY window_id, source_ref
+         LIMIT ${limit}
+      `) as Array<{ speaker_idx: number; role: string | null; clinician_id: string | null }>;
+
+      // The summary answers the question the table exists for: how much of this is attributed?
+      const attributed = spans.filter((r) => r.role === "clinician").length;
+      const byClinician: Record<string, number> = {};
+      for (const r of spans) if (r.clinician_id) byClinician[r.clinician_id] = (byClinician[r.clinician_id] ?? 0) + 1;
+      return {
+        spans,
+        summary: {
+          turns: spans.length,
+          attributed_turns: attributed,
+          unattributed_turns: spans.length - attributed,
+          attribution_rate: spans.length ? Math.round((attributed / spans.length) * 1000) / 1000 : null,
+          by_clinician: byClinician,
+          distinct_speaker_idx: new Set(spans.map((r) => r.speaker_idx)).size,
+        },
+      };
+    }),
+};
+
+export const STT_TOOLS: McpTool[] = [listSttEngines, sttHealth, sttRouting, listSttRuns, getSttRun, routeTripwires, roomTurnSpeakers];

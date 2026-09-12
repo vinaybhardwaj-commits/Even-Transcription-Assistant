@@ -1,0 +1,72 @@
+/**
+ * lib/stt/speaker-roles.ts — C2 item 3. WHEN A SPAN MAY CARRY A NAME.
+ *
+ * ─── THE RULE ──────────────────────────────────────────────────────────────────────────────────
+ * A span is labelled with a clinician ONLY when the diarize service's cosine match against an
+ * ENROLLED centroid succeeded. Where no centroid matched, the span keeps its `speaker_idx` and
+ * gets no role. Role is NEVER derived from speaker order.
+ *
+ * ─── WHY THE ORDER IS THE TEMPTING WRONG ANSWER ────────────────────────────────────────────────
+ * `server.py:191` sorts clusters by total speaking time, descending. So `speaker_idx: 0` means "the
+ * voice that talked most in this window" — nothing else. In an OPD consultation that is usually the
+ * doctor, which is precisely the trap: the heuristic would be right often enough to look correct
+ * and wrong often enough to matter. And the service's own `type` field is no better. With an empty
+ * centroid list it labels the longest-speaking cluster `Patient` by a first-match cascade
+ * (`server.py:218-252`) — a label produced by the same ordering, wearing a clinical word.
+ *
+ * The cost of being wrong is not symmetric with the cost of saying nothing. An unlabelled span is
+ * a span someone can still read. A span that attributes a patient's distress to their clinician,
+ * or a clinician's instruction to the patient, is a false clinical record — and it is worse than
+ * no label precisely because it looks like an answer.
+ *
+ * So this module reads exactly two things from a speaker: `clinician_id` and `confidence`, both of
+ * which the service sets ONLY on a successful match (`server.py:219-225`). It never reads `idx`,
+ * `label`, `type` or `total_speech_sec` — and a test asserts that reordering or relabelling the
+ * speakers changes nothing about who gets a name.
+ */
+import type { DiarizeSpeaker } from "@/lib/diarize";
+
+export type SpanRole =
+  | { role: "clinician"; clinician_id: string; match_confidence: number }
+  | { role: "unattributed"; clinician_id: null; match_confidence: null };
+
+/** The one shape a span may claim an identity with. Everything else is unattributed. */
+export const UNATTRIBUTED: SpanRole = { role: "unattributed", clinician_id: null, match_confidence: null };
+
+/**
+ * PURE. The role for one speaker index, from the service's own match and nothing else.
+ *
+ * A speaker carries `clinician_id` and `confidence` if and only if a centroid matched at or above
+ * `batch_threshold`. Both must be present and well-formed: a `clinician_id` with no confidence is
+ * not a match this system will assert, because the number is what a reviewer needs to judge it.
+ */
+export function roleForSpeaker(speaker: DiarizeSpeaker | undefined): SpanRole {
+  if (!speaker) return UNATTRIBUTED;
+  const id = typeof speaker.clinician_id === "string" ? speaker.clinician_id.trim() : "";
+  const conf = typeof speaker.confidence === "number" && Number.isFinite(speaker.confidence) ? speaker.confidence : null;
+  if (!id || conf === null) return UNATTRIBUTED;
+  return { role: "clinician", clinician_id: id, match_confidence: conf };
+}
+
+/**
+ * PURE. Roles for every speaker in a window, keyed by index.
+ *
+ * The index is used ONLY as a lookup key — it is how a span says which speaker it belongs to. It is
+ * never an input to the decision: `roleForSpeaker` cannot see it.
+ */
+export function rolesByIndex(speakers: readonly DiarizeSpeaker[]): Map<number, SpanRole> {
+  const out = new Map<number, SpanRole>();
+  for (const s of speakers) {
+    if (typeof s.idx !== "number" || !Number.isFinite(s.idx)) continue;
+    out.set(s.idx, roleForSpeaker(s));
+  }
+  return out;
+}
+
+/** How many of a window's speakers were actually named. The coverage question, per window. */
+export function attributionCoverage(speakers: readonly DiarizeSpeaker[]): { speakers: number; attributed: number } {
+  const roles = rolesByIndex(speakers);
+  let attributed = 0;
+  for (const r of roles.values()) if (r.role === "clinician") attributed += 1;
+  return { speakers: roles.size, attributed };
+}

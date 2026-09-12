@@ -406,11 +406,11 @@ describe("submit", () => {
 });
 
 describe("the seven kinds", () => {
-  it("all nine are registered, and the five stubs fail not_implemented", async () => {
+  it("all ten are registered, and the five stubs fail not_implemented", async () => {
     // Slice C1 adds route_transcribe — the router's long transport. The list stays EXACT (toEqual,
     // not a contains) so a kind that appears without being intended still fails here.
     expect(JOB_KIND_NAMES.sort()).toEqual(
-      ["audio_measure", "day_manifest", "diarize_clip", "emotion_clip", "room_window", "route_transcribe", "stitch", "stt_fanout", "transcribe_range"].sort(),
+      ["audio_measure", "day_manifest", "diarize_clip", "diarize_window", "emotion_clip", "room_window", "route_transcribe", "stitch", "stt_fanout", "transcribe_range"].sort(),
     );
     for (const name of ["audio_measure", "emotion_clip", "diarize_clip", "stt_fanout", "day_manifest"]) {
       const k = KIND_BY_NAME.get(name)!;
