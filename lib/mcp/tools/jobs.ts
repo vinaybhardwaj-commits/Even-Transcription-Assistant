@@ -55,7 +55,8 @@ const submit: McpTool = {
         const job = await submitJob({
           kind,
           args: (args as Record<string, unknown>).args ?? {},
-          actor: null,
+          // Fix-up (3): the resolved token's actor, so a job row says who asked for it.
+          actor: ctx.actor,
           origin: ctx.origin,
         });
         return { ok: true, job_id: job.id, kind: job.kind, status: job.status };

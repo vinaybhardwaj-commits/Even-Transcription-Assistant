@@ -162,3 +162,72 @@ describe("scribe_audit_recent — the Slice A gap", () => {
     expect(q.values).toContain(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice B fix-up (3) — the resolved principal reaches the job row
+// ---------------------------------------------------------------------------
+
+/** handleMcpRpc reads NextRequest.nextUrl; a plain Request has none. */
+const withNextUrl = (req: Request) =>
+  Object.assign(req, { nextUrl: new URL(req.url) }) as never;
+
+describe("ctx.actor — who asked for this job", () => {
+  it("a SCRIBE_MCP_TOKENS actor lands on scribe_job.actor, end to end", async () => {
+    const { createHash } = await import("node:crypto");
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    process.env.SCRIBE_MCP_TOKENS = JSON.stringify({
+      [sha("watcher-tok")]: { actor: "operator-v", scopes: ["read", "invoke", "write"] },
+    });
+    process.env.SCRIBE_MCP_TOKEN = "legacy";
+
+    const { checkMcpBearer } = await import("@/lib/mcp/auth");
+    const { handleMcpRpc } = await import("@/lib/mcp/handler");
+    const req = new Request("https://x/api/mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer watcher-tok", "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "scribe_job_submit", arguments: { kind: "stitch", args: { session_id: "bs_1", start: 1000, end: 2000 } } },
+      }),
+    });
+    const auth = checkMcpBearer(req);
+    expect(auth.ok).toBe(true);
+    if (!auth.ok) return;
+    expect(auth.principal.token_id).toBe("operator-v");
+
+    await handleMcpRpc(withNextUrl(req), auth.principal);
+
+    // The INSERT's fourth parameter is `actor` — prefixed once, from the token map, not null.
+    const ins = calls.find((c) => /^INSERT INTO scribe_job/.test(c.text));
+    expect(ins, "no job was inserted").toBeTruthy();
+    expect(ins!.values[3]).toBe("mcp:operator-v");
+  });
+
+  it("the single-token fallback records mcp:operator-v1, never null", async () => {
+    delete process.env.SCRIBE_MCP_TOKENS;
+    process.env.SCRIBE_MCP_TOKEN = "legacy";
+    const { checkMcpBearer } = await import("@/lib/mcp/auth");
+    const { handleMcpRpc } = await import("@/lib/mcp/handler");
+    const req = new Request("https://x/api/mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer legacy", "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "scribe_job_submit", arguments: { kind: "stitch", args: { session_id: "bs_1", start: 1000, end: 2000 } } },
+      }),
+    });
+    const auth = checkMcpBearer(req);
+    if (!auth.ok) throw new Error("fallback token did not authorise");
+    await handleMcpRpc(withNextUrl(req), auth.principal);
+    const ins = calls.find((c) => /^INSERT INTO scribe_job/.test(c.text));
+    expect(ins!.values[3]).toBe("mcp:operator-v1");
+  });
+
+  it("ToolContext carries actor as a required string, so no tool can forget it", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/mcp/registry.ts", "utf8");
+    expect(src).toMatch(/export type ToolContext = \{ origin: string; actor: string \}/);
+    const handler = readFileSync("lib/mcp/handler.ts", "utf8");
+    expect(handler).toMatch(/actor: mcpActorId\(principal\.token_id\)/);
+  });
+});

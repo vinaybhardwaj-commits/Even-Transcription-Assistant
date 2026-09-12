@@ -22,7 +22,19 @@ export type JsonSchema = {
 export type ToolArgs = Record<string, unknown>;
 
 /** Per-call context the door hands every handler (S3): the request origin for same-origin hops. */
-export type ToolContext = { origin: string };
+/**
+ * What every tool handler is told about the call it is serving.
+ *
+ * `actor` is the RESOLVED principal (Tier 2 §2.3): the `actor` of the matching `SCRIBE_MCP_TOKENS`
+ * entry, prefixed `mcp:`, or `mcp:operator-v1` for the single-token fallback. It is here rather
+ * than re-derived per tool because a tool that writes a durable row — a job, an audit entry — must
+ * record WHO asked, and nothing else in the handler's arguments can say. Slice B's job rows carried
+ * `actor: null` until this existed.
+ *
+ * ALWAYS A STRING. A missing principal defaults to the single-token id rather than null, so a
+ * `scribe_job.actor` is never blank and "who ran this" is never unanswerable.
+ */
+export type ToolContext = { origin: string; actor: string };
 
 export type McpTool = {
   name: string;

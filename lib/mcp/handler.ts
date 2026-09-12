@@ -24,7 +24,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
-import { auditToolCall } from "@/lib/mcp/audit";
+import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { HEALTH_TOOLS } from "@/lib/mcp/tools/health";
 import { BRAIN_TOOLS } from "@/lib/mcp/tools/brain";
@@ -226,7 +226,9 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const t0 = Date.now();
   let result: unknown;
   let isError = false;
-  const ctx: ToolContext = { origin: requestOrigin(req) };
+  // Tier 2 Slice B fix-up (3) — the resolved principal reaches the handler, so a tool that writes
+  // a durable row can record who asked for it. `mcpActorId` applies the one `mcp:` prefix rule.
+  const ctx: ToolContext = { origin: requestOrigin(req), actor: mcpActorId(principal.token_id) };
   const timeoutMs = tool.scope === "invoke" ? INVOKE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
   try {
     result = await Promise.race([
