@@ -32,7 +32,7 @@ import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { DEFAULT_ARM, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_TURN_CUE_COUNTS, SQL_VISITS_FOR_DAY, TURN_CUE_TYPES, WINDOW_CUE_TYPE, type RoomDayByIdRow } from "@/lib/brain/state";
 import { ALL_RULES_REASONS, LAST_MARK_WINDOW_MS } from "@/lib/brain/fuse/rules";
-import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { argBool, argDetail, argStr, DETAIL_SCHEMA, failSafe, type McpTool, type ToolArgs } from "../registry";
 
 /**
  * How long the warehouse must say nothing before it counts as a SILENCE.
@@ -95,6 +95,7 @@ const fuseReport: McpTool = {
       room_day_id: { type: "string", description: "rd_… — scratch or live" },
       arm: { type: "string", description: "which arm's visits to report; default rules" },
       include_identity: { type: "boolean", default: false, description: "include individual_uid" },
+      detail: DETAIL_SCHEMA,
     },
     required: ["room_day_id"],
     additionalProperties: false,
@@ -504,7 +505,11 @@ const fuseReport: McpTool = {
       }
       const unknownTokens = Object.keys(ambiguityCounts).filter((t) => !ALL_RULES_REASONS.includes(t));
 
-      return {
+      // Tier 2 §2.4. Summary is the SCOREBOARD — the counts and the disagreements an operator
+      // reads to answer "did this day reconcile". `full` adds the per-row lists (visits, marks,
+      // silence spans, sessions) behind those counts. `ok`, `degraded` and `parameters` ride both:
+      // a number is not readable without the constants that produced it.
+      const full = {
         ok: true,
         room_day_id: roomDayId,
         ist_date: day.ist_date,
@@ -584,6 +589,34 @@ const fuseReport: McpTool = {
           silence,
         },
         ...(degraded.length ? { degraded: true, degraded_reads: degraded } : {}),
+      };
+      if (argDetail(args) === "full") return full;
+      // The per-row lists become counts; everything else rides as it is. `len` reads a list
+      // wherever it sits — an array, or an object with a `spans` array — without asserting a shape.
+      const asRecord = full as unknown as Record<string, unknown>;
+      const len = (v: unknown): number => {
+        if (Array.isArray(v)) return v.length;
+        const spans = (v as { spans?: unknown })?.spans;
+        return Array.isArray(spans) ? spans.length : 0;
+      };
+      const tapeOut = asRecord.tape as Record<string, unknown> | undefined;
+      const { visits: _v, marks: _m, silence: _s, tape: _t, ...scoreboard } = asRecord;
+      void _v; void _m; void _s; void _t;
+      return {
+        ...scoreboard,
+        counts: {
+          visits: len(asRecord.visits),
+          marks: len(asRecord.marks),
+          silence_spans: len(asRecord.silence),
+          sessions: len(tapeOut?.sessions),
+        },
+        tape: tapeOut
+          ? {
+              first_piece_at: tapeOut.first_piece_at,
+              last_piece_at: tapeOut.last_piece_at,
+              total_recorded_ms: tapeOut.total_recorded_ms,
+            }
+          : null,
       };
     }),
 };

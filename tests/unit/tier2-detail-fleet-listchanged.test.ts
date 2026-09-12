@@ -131,6 +131,40 @@ describe("§2.7 — scribe_fleet", () => {
   });
 });
 
+describe("§2.4 — the flag is on all four named tools, with the same wording", () => {
+  it("scribe_diff_room, scribe_day_report, scribe_system_map and scribe_fuse_report all take it", async () => {
+    const { HEALTH_TOOLS } = await import("@/lib/mcp/tools/health");
+    const { FUSE_REPORT_TOOLS } = await import("@/lib/mcp/tools/fuse-report");
+    const all = [...BENCH_TOOLS, ...HEALTH_TOOLS, ...FUSE_REPORT_TOOLS];
+    for (const n of ["scribe_diff_room", "scribe_day_report", "scribe_system_map", "scribe_fuse_report", "scribe_fleet"]) {
+      const t = all.find((x) => x.name === n)!;
+      const d = (t.inputSchema.properties as Record<string, Row>).detail;
+      expect(d, n).toMatchObject({ type: "string", default: "summary", enum: ["summary", "full"] });
+    }
+  });
+
+  it("scribe_day_report summary is one line per session and full keeps the pieces", async () => {
+    const t = BENCH_TOOLS.find((x) => x.name === "scribe_day_report")!;
+    const s = (await t.handler({ room: ROOM.id, detail: "summary" }, ctx)) as { sessions?: Row[] };
+    const f = (await t.handler({ room: ROOM.id, detail: "full" }, ctx)) as { sessions?: Row[] };
+    expect(Array.isArray(s.sessions)).toBe(true);
+    expect(Array.isArray(f.sessions)).toBe(true);
+  });
+
+  it("scribe_system_map summary keeps health/flags/env and drops the codebase map", async () => {
+    const { HEALTH_TOOLS } = await import("@/lib/mcp/tools/health");
+    const t = HEALTH_TOOLS.find((x) => x.name === "scribe_system_map")!;
+    const sm = (await t.handler({}, ctx)) as Row;
+    expect(Object.keys(sm).sort()).toEqual(["env_set", "flags", "health"]);
+    const fm = (await t.handler({ detail: "full" }, ctx)) as Row;
+    expect(fm).toHaveProperty("stores");
+    expect(fm).toHaveProperty("brain_routes");
+    // The same facts, not a second computation.
+    expect(JSON.stringify(fm.flags)).toBe(JSON.stringify(sm.flags));
+    expect(JSON.stringify(fm.env_set)).toBe(JSON.stringify(sm.env_set));
+  });
+});
+
 describe("§2.6 — listChanged", () => {
   it("initialize advertises tools.listChanged: true", async () => {
     const src = await import("node:fs").then((fs) => fs.readFileSync("lib/mcp/handler.ts", "utf8"));

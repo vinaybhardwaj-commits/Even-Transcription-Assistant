@@ -2140,6 +2140,7 @@ const dayReport: McpTool = {
   inputSchema: {
     type: "object",
     properties: {
+      detail: DETAIL_SCHEMA,
       room: { type: "string", description: "room id, slug, or exact name" },
       room_id: { type: "string" },
       room_slug: { type: "string" },
@@ -2182,11 +2183,15 @@ const dayReport: McpTool = {
           return buildDaySession(s, chunks, events);
         }),
       );
+      // Tier 2 §2.4. Summary is the day's shape — one line per session; `full` keeps every
+      // chunk and event, which is what makes this tool large on a busy day. `degraded_reads`
+      // rides both: a session whose chunks failed to read must not look like a quiet session.
+      const detail = argDetail(args);
       return {
         room: { id: room.id, slug: room.slug, name: room.name },
         ist_date: day,
         note: "tape_ended_at is the last piece recorded (either microphone) — the stored ended_at is not the end of the recording and is shown only where it differs",
-        sessions,
+        sessions: detail === "full" ? sessions : sessions.map((x) => pickSummary(x as Record<string, unknown>, SUMMARY_DAY_SESSION_FIELDS)),
         ...(degraded.length ? { degraded_reads: degraded } : {}),
       };
     }),
@@ -2435,6 +2440,12 @@ export const SUMMARY_ROOM_FIELDS = [
   "room", "page_open", "listener_state", "recording", "recording_session_id",
   "room_state", "tape_lane", "paused_listener", "paused_session", "paused_disagrees",
   "last_piece_at", "last_cue", "stalled_age_ms", "flags", "degraded",
+] as const;
+
+/** Tier 2 §2.4 — one line per session: what happened, when, how much, and whether it is sound. */
+export const SUMMARY_DAY_SESSION_FIELDS = [
+  "id", "status", "started_at", "ended_at", "tape_ended_at", "chunk_count", "backup_chunk_count",
+  "audio_ms", "ended_disagrees", "stalled",
 ] as const;
 
 const diffRoom: McpTool = {

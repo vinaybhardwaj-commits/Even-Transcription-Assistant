@@ -51,7 +51,10 @@ import { ALL_RULES_REASONS, LAST_MARK_WINDOW_MS, RULES_REASONS } from "@/lib/bra
 import { SCRATCH_ROOM_PREFIX, realRoomIdFor, scratchRoomIdFor } from "@/lib/brain/scratch";
 
 const tool = FUSE_REPORT_TOOLS.find((t) => t.name === "scribe_fuse_report")!;
-const run = (args: Row) => tool.handler(args, { origin: "https://preview.example" }) as Promise<Row>;
+// Tier 2 §2.4 made `summary` the default; this suite asserts the SCOREBOARD'S CONTENT — the
+// per-row lists behind the counts — so it asks for the full report by name. The summary
+// projection itself is covered in tests/unit/tier2-detail-fleet-listchanged.test.ts.
+const run = (args: Row) => tool.handler({ detail: "full", ...args }, { origin: "https://preview.example" }) as Promise<Row>;
 
 // ---------------------------------------------------------------------------
 // the world

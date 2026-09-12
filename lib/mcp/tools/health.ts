@@ -16,7 +16,7 @@
 import { GET as appHealthGET } from "@/app/api/health/route";
 import { GET as brainHealthGET } from "@/app/api/brain/health/route";
 import * as flags from "@/lib/live-flags";
-import { probe, type McpTool } from "../registry";
+import { probe, type McpTool, argDetail, DETAIL_SCHEMA, type ToolArgs } from "../registry";
 import { probeSttEngines, type EngineHealth } from "./stt";
 import { classifyBusError, listListeners } from "@/lib/bench-commands";
 
@@ -149,8 +149,8 @@ const scribeSystemMap: McpTool = {
   name: "scribe_system_map",
   description: "System map as JSON: the scribe_health picture + client flag states + which env NAMES are set (booleans only, never values) + store/route topology. No secrets.",
   scope: "read",
-  inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  handler: async () => {
+  inputSchema: { type: "object", properties: { detail: DETAIL_SCHEMA }, additionalProperties: false },
+  handler: async (args: ToolArgs) => {
     const health = await composeHealth();
     const flagStates = {
       NEXT_PUBLIC_ETA_LIVE_SINK: flags.LIVE_SINK,
@@ -167,6 +167,9 @@ const scribeSystemMap: McpTool = {
       NEXT_PUBLIC_ETA_SAFARI_STREAMING_GUARD: flags.SAFARI_STREAMING_GUARD,
     };
     const env = Object.fromEntries(ENV_NAMES.map((n) => [n, Boolean(process.env[n])]));
+    // Tier 2 §2.4. Summary answers "is the system up and what is switched on"; the store/route
+    // catalogue below is a map of the codebase, which an operator reads once and a watcher never.
+    if (argDetail(args) === "summary") return { health, flags: flagStates, env_set: env };
     return {
       health,
       flags: flagStates,
