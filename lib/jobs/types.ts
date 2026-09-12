@@ -25,6 +25,13 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
  * This used to bound on `attempts`, which counts CLAIMS. A healthy multi-step job raises attempts
  * once per step: a 61-minute stitch is one resolve plus three joins, so the fourth claim would have
  * been refused and the job failed while succeeding. The cap must count only steps that THREW.
+ *
+ * `failures` IS LIFETIME AND IS NEVER RESET (ruling, fix-up 3). A step that succeeds does not
+ * forgive an earlier throw, so three flaky steps spread across a long job exhaust the budget just
+ * as three consecutive ones do. That is deliberate: the counter bounds how much repair this job is
+ * worth in total, not how much it is worth per step, and a job that has thrown three times has
+ * earned a person's attention whether or not it limped forward in between. A caller who disagrees
+ * re-submits, which mints a fresh row with a fresh count — and leaves the failed one on the record.
  */
 export const MAX_FAILURES = 3;
 /** §3 — the lease a claim takes. Longer than any step, shorter than a human's patience. */

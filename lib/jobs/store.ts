@@ -135,13 +135,27 @@ export async function finishJob(id: string, result: Record<string, unknown>): Pr
   `;
 }
 
-export async function failJob(id: string, error: string): Promise<void> {
-  await sql`
+/**
+ * Fix-up 3 item 1 — `AND status = 'running'` is the guard, and it is the same one `finishJob` and
+ * `saveStep` carry. A runner whose lease expired mid-step is still holding a `JobRow` it fetched
+ * minutes ago; by the time it decides to fail the job, another runner may have reclaimed it (now
+ * `running` again, at a later step) or a person may have cancelled it. Without this predicate that
+ * stale runner could stamp `failed` over live work or over a cancel, and the LAST WRITER WOULD WIN.
+ *
+ * There is no per-runner lease TOKEN to match on — `lease_until` is a time, not an owner — so the
+ * status guard is the strongest owner check available without a schema change. Flagged in the
+ * report: a true owner match wants a `lease_owner` column, which is a migration this slice may not
+ * write.
+ */
+export async function failJob(id: string, error: string): Promise<number> {
+  const rows = (await sql`
     UPDATE scribe_job
        SET status = 'failed', error = ${error.slice(0, 2000)},
            lease_until = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id}
-  `;
+     WHERE id = ${id} AND status = 'running'
+    RETURNING id
+  `) as Array<Record<string, unknown>>;
+  return rows.length;
 }
 
 /**
@@ -190,15 +204,40 @@ export async function readJob(id: string): Promise<JobRow | null> {
  */
 export const overFailureCap = (job: JobRow): boolean => job.failures >= MAX_FAILURES;
 
-/** A step threw. Count it, release the lease, and leave the job claimable at the same step. */
-export async function recordFailure(id: string, step: string, progress: Record<string, unknown>): Promise<void> {
-  await sql`
+/**
+ * A step threw. Fix-up 3 item 2 — COUNT IT AND DECIDE TERMINALITY IN ONE STATEMENT.
+ *
+ * The bug this replaces: the runner branched on `job.failures + 1 >= cap` and, on the terminal
+ * throw, called `failJob` — which sets `status` but never touches `failures`. So the third throw
+ * was the one throw never counted and the row rested at `failures = 2, status = 'failed'`, which
+ * reads as "it gave up early" rather than "it used its three".
+ *
+ * Incrementing first and then failing in a second statement would fix the count but open a window
+ * where the row is `running` with a full failure count and another runner could claim it. So the
+ * increment and the verdict are one UPDATE: `failures + 1` is computed once by Postgres and both
+ * the new count and the resulting status are read off the same expression. Returns what the row
+ * now holds, so the caller reports the truth rather than its own arithmetic.
+ */
+export async function recordFailure(input: {
+  id: string;
+  step: string;
+  progress: Record<string, unknown>;
+  error: string;
+  maxFailures: number;
+}): Promise<{ failures: number; status: JobStatus } | null> {
+  const rows = (await sql`
     UPDATE scribe_job
-       SET failures = failures + 1,
-           step = ${step},
-           progress = ${JSON.stringify(progress)}::jsonb,
+       SET failures    = failures + 1,
+           step        = ${input.step},
+           progress    = ${JSON.stringify(input.progress)}::jsonb,
            lease_until = NULL,
-           updated_at = now()
-     WHERE id = ${id} AND status = 'running'
-  `;
+           status      = CASE WHEN failures + 1 >= ${input.maxFailures} THEN 'failed' ELSE 'running' END,
+           error       = CASE WHEN failures + 1 >= ${input.maxFailures} THEN ${input.error.slice(0, 2000)} ELSE error END,
+           finished_at = CASE WHEN failures + 1 >= ${input.maxFailures} THEN now() ELSE finished_at END,
+           updated_at  = now()
+     WHERE id = ${input.id} AND status = 'running'
+    RETURNING failures, status
+  `) as Array<Record<string, unknown>>;
+  const r = rows[0];
+  return r ? { failures: Number(r.failures), status: String(r.status) as JobStatus } : null;
 }

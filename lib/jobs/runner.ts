@@ -23,6 +23,8 @@ export type StepReport = {
   job_id: string;
   kind: string;
   step: string | null;
+  /** What the row now holds, when a step threw. */
+  failures?: number;
   outcome: "advanced" | "done" | "failed" | "cancelled" | "failures_exceeded" | "unknown_kind";
   ms: number;
 };
@@ -44,7 +46,7 @@ export async function runOneStep(job: JobRow): Promise<StepReport> {
 
   // The cap reads FAILURES, never attempts. A long job is claimed many times while succeeding.
   if (overFailureCap(job)) {
-    await failJob(job.id, `failed ${job.failures} times (cap ${MAX_FAILURES}) at step ${job.step ?? "start"}`);
+    await failJob(job.id, `failed after ${job.failures} attempts at step ${job.step ?? "start"}`);
     return { ...base, outcome: "failures_exceeded", ms: Date.now() - started };
   }
 
@@ -59,15 +61,19 @@ export async function runOneStep(job: JobRow): Promise<StepReport> {
   try {
     outcome = await kind.run({ job, step, args: job.args, progress: job.progress });
   } catch (e) {
-    // A throwing step is a FAILURE, counted, not a failed job: the lease is released and the next
-    // claim retries the same step, up to the cap. That is what makes a transient fault survivable.
+    // A throwing step is a FAILURE, counted, not (yet) a failed job: the lease is released and the
+    // next claim retries the same step, up to the cap. ONE statement both counts it and decides
+    // whether that count is terminal, so the throw that ends a job is counted like any other —
+    // the branch this replaces called failJob, which never incremented, and lost it.
     const msg = String((e as Error)?.message ?? e).slice(0, 500);
-    if (job.failures + 1 >= MAX_FAILURES) {
-      await failJob(job.id, `step ${step} threw for the ${job.failures + 1}th time: ${msg}`);
-      return { ...base, step, outcome: "failed", ms: Date.now() - started };
-    }
-    await recordFailure(job.id, step, job.progress);
-    return { ...base, step, outcome: "failed", ms: Date.now() - started };
+    const after = await recordFailure({
+      id: job.id,
+      step,
+      progress: job.progress,
+      error: `step ${step} failed after ${job.failures + 1} attempts: ${msg}`,
+      maxFailures: MAX_FAILURES,
+    });
+    return { ...base, step, outcome: "failed", ms: Date.now() - started, ...(after ? { failures: after.failures } : {}) };
   }
 
   // The cancel boundary. Re-read rather than trust the row we were handed.

@@ -70,11 +70,18 @@ vi.mock("@/lib/db", () => {
 
     const find = (id: unknown) => TABLE.find((r) => r.id === id);
 
+    // Fix-up 3 item 2 — one statement counts the failure AND decides terminality. Parameters, in
+    // order: step, progress, cap (status CASE), cap (error CASE), error, cap (finished_at), id.
     if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
-      const [step, progress, id] = values as [string, string, string];
+      const [step, progress, cap, , err, , id] = values as [string, string, number, number, string, number, string];
       const r = find(id);
-      if (r && r.status === "running") { r.failures = Number(r.failures) + 1; r.step = step; r.progress = progress; r.lease_until = null; }
-      return Promise.resolve([]);
+      if (!r || r.status !== "running") return Promise.resolve([]);
+      r.failures = Number(r.failures) + 1;
+      r.step = step;
+      r.progress = progress;
+      r.lease_until = null;
+      if (Number(r.failures) >= Number(cap)) { r.status = "failed"; r.error = err; r.finished_at = nowIso(); }
+      return Promise.resolve([{ failures: r.failures, status: r.status }]);
     }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
       const [step, progress, id] = values as [string, string, string];
@@ -91,10 +98,15 @@ vi.mock("@/lib/db", () => {
       if (r && (!guarded || r.status === "running")) { r.status = "done"; r.result = result; r.lease_until = null; r.finished_at = nowIso(); }
       return Promise.resolve([]);
     }
+    // Fix-up 3 item 1 — guarded by `AND status = 'running'`, and RETURNS the rows it changed.
     if (/^UPDATE scribe_job SET status = 'failed'/.test(text)) {
       const [err, id] = values as [string, string];
       const r = find(id);
-      if (r) { r.status = "failed"; r.error = err; r.lease_until = null; r.finished_at = nowIso(); }
+      const guarded = /AND status = 'running'/.test(text);
+      if (r && (!guarded || r.status === "running")) {
+        r.status = "failed"; r.error = err; r.lease_until = null; r.finished_at = nowIso();
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET status = 'cancelled'/.test(text)) {
@@ -286,7 +298,7 @@ describe("runOneStep", () => {
     await runner.runOneStep(claimed);
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
-    expect(String(row!.error)).toMatch(/failed 3 times/);
+    expect(String(row!.error)).toMatch(/failed after 3 attempts/);
     expect(ran, "the kind was never run on the over-cap claim").toBe(0);
   });
 
@@ -454,5 +466,114 @@ describe("item 5 — the two-runner test is semantic", () => {
     expect(new Set(ids).size, "a job was claimed twice").toBe(ids.length);
     expect(a.map((j) => j.id)).toEqual(["job_0", "job_1", "job_2"]);
     expect(b.map((j) => j.id)).toEqual(["job_3", "job_4", "job_5"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-up 3 — the failJob guard and the failure count
+// ---------------------------------------------------------------------------
+
+describe("item 1 — failJob cannot touch a job it no longer owns", () => {
+  it("a job already `done` is NOT failed by a stale runner: zero rows, status unchanged", async () => {
+    queue({ status: "done", result: '{"fin":true}' });
+    const changed = await store.failJob("job_0", "stale runner says so");
+    expect(changed, "the UPDATE matched a row it should not have").toBe(0);
+    const row = await store.readJob("job_0");
+    expect(row!.status).toBe("done");
+    expect(row!.error).toBeNull();
+    expect(row!.result).toEqual({ fin: true });
+  });
+
+  it("likewise for cancelled and for a job another runner has reclaimed", async () => {
+    queue({ status: "cancelled" });
+    expect(await store.failJob("job_0", "x")).toBe(0);
+    expect((await store.readJob("job_0"))!.status).toBe("cancelled");
+    // Reclaimed: still `running`, so the guard alone cannot tell — this is the documented limit.
+    // What it DOES stop is the terminal-status case above, which is the one that loses work.
+    queue({ status: "running", lease_until: new Date(NOW + 60_000).toISOString() });
+    expect(await store.failJob("job_1", "x")).toBe(1);
+  });
+
+  it("the statement carries the guard", async () => {
+    queue({ status: "running" });
+    await store.failJob("job_0", "x");
+    const c = calls.find((x) => /SET status = 'failed'/.test(x.text))!;
+    expect(c.text).toMatch(/AND status = 'running'/);
+  });
+});
+
+describe("item 2 — three consecutive throws persist failures = 3", () => {
+  it("throw x3 leaves failures 3 and status failed — the terminal throw is counted like any other", async () => {
+    KIND_BY_NAME.set("always_throws", {
+      name: "always_throws", first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => { throw new Error("boom"); },
+    });
+    queue({ kind: "always_throws" });
+    for (let k = 0; k < 3; k++) {
+      const c = await store.claimJobs();
+      expect(c.length, `claim ${k + 1} found nothing`).toBe(1);
+      await runner.runOneStep(c[0]!);
+    }
+    const row = await store.readJob("job_0");
+    expect(row!.failures, "the third throw must be counted, not swallowed by the terminal write").toBe(3);
+    expect(row!.status).toBe("failed");
+    expect(String(row!.error)).toMatch(/failed after 3 attempts/);
+    expect(String(row!.error)).toMatch(/boom/);
+    // And it stops there: a fourth claim finds nothing, because the row is terminal.
+    expect(await store.claimJobs()).toHaveLength(0);
+  });
+
+  it("the count rises one per throw, visible at each step", async () => {
+    KIND_BY_NAME.set("always_throws2", {
+      name: "always_throws2", first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => { throw new Error("boom"); },
+    });
+    queue({ kind: "always_throws2" });
+    const seen: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      const c = await store.claimJobs();
+      if (!c.length) break;
+      await runner.runOneStep(c[0]!);
+      seen.push((await store.readJob("job_0"))!.failures);
+    }
+    expect(seen, "no throw is lost and none is double-counted").toEqual([1, 2, 3]);
+  });
+
+  it("no ordinal wording — the message reads as prose", async () => {
+    KIND_BY_NAME.set("t3", { name: "t3", first: "one", scope: "invoke", parseArgs: () => ({}), run: async () => { throw new Error("boom"); } });
+    queue({ kind: "t3" });
+    for (let k = 0; k < 3; k++) {
+      const c = await store.claimJobs();
+      if (c.length) await runner.runOneStep(c[0]!);
+    }
+    const err = String((await store.readJob("job_0"))!.error);
+    expect(err).not.toMatch(/\d+(th|st|nd|rd)\b/);
+  });
+});
+
+describe("item 4 — the cap is lifetime", () => {
+  it("a success between throws does not forgive them", async () => {
+    let n = 0;
+    KIND_BY_NAME.set("flaky", {
+      name: "flaky", first: "one", scope: "invoke", parseArgs: () => ({}),
+      // throw, succeed, throw, succeed, throw -> three failures spread out
+      run: async () => { n++; if (n % 2 === 1) throw new Error("flake"); return T.nextStep("one", { n }); },
+    });
+    queue({ kind: "flaky" });
+    for (let k = 0; k < 5; k++) {
+      const c = await store.claimJobs();
+      if (!c.length) break;
+      await runner.runOneStep(c[0]!);
+    }
+    const row = await store.readJob("job_0");
+    expect(row!.failures).toBe(3);
+    expect(row!.status, "three flaky failures exhaust the budget just as three consecutive ones do").toBe("failed");
+  });
+
+  it("the constant's comment states the lifetime rule", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/jobs/types.ts", "utf8");
+    const block = src.slice(0, src.indexOf("export const MAX_FAILURES"));
+    expect(block).toMatch(/LIFETIME AND IS NEVER RESET/);
   });
 });
