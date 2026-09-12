@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { probeWhisperTranscription } from "@/lib/health/whisper-probe";
 
 /**
  * GET /api/health
@@ -42,14 +43,14 @@ export async function GET() {
       });
       if (!r.ok) throw new Error(`Ollama probe failed: ${r.status}`);
     }),
+    // Hotfix defect 2 — this used to be a GET that the Mini's shim answered with a static 404
+    // without contacting whisper.cpp, so it could not have failed if transcription were dead.
+    // It now POSTs a half-second WAV and requires a parseable 200: the same request shape
+    // transcribeWithWhisper makes. The reason is carried through so `false` says WHICH way.
     probe(async () => {
-      const base = process.env.WHISPER_BASE_URL;
-      if (!base) throw new Error("WHISPER_BASE_URL not set");
-      const r = await fetch(`${base}/inference`, {
-        method: "GET",
-        signal: AbortSignal.timeout(8000),
-      });
-      if (r.status >= 500 && r.status !== 501) throw new Error(`Whisper probe ${r.status}`);
+      const r = await probeWhisperTranscription();
+      if (!r.ok) throw new Error(`whisper_probe_${r.reason ?? "failed"}${r.status ? `_${r.status}` : ""}`);
+      return { transcription: true, probe_ms: r.elapsed_ms };
     }),
     probe(async () => {
       const key = process.env.RESEND_API_KEY;
