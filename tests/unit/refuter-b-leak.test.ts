@@ -8,9 +8,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const SECRET = "the patient reports crushing chest pain radiating to the left arm";
 
 type Row = Record<string, unknown>;
-/** Fix-up 4 — model `AND lease_owner IS NOT DISTINCT FROM ?`: the write must be the holder's. */
-const owns = (text: string, r: Row, runner: string | null | undefined): boolean =>
-  !/lease_owner IS NOT DISTINCT FROM/.test(text) || (r.lease_owner ?? null) === (runner ?? null);
+/**
+ * Fix-up 5 — model `AND lease_owner = ?`: PLAIN EQUALITY, so a NULL owner matches nothing. The
+ * previous `IS NOT DISTINCT FROM` matched NULL against NULL, which is how a caller with no runner
+ * could write to a row it never claimed.
+ */
+const owns = (text: string, r: Row, runner: string | null | undefined): boolean => {
+  if (!/lease_owner = \?/.test(text)) return true;
+  const owner = (r.lease_owner ?? null) as string | null;
+  return owner !== null && runner != null && owner === runner;
+};
 let TABLE: Row[] = [];
 let NOW = Date.parse("2026-09-12T07:00:00.000Z");
 const nowIso = () => new Date(NOW).toISOString();
@@ -153,5 +160,80 @@ describe("(e) a read token gets pointers, never the words", () => {
     expect(row.status).toBe("failed");
     const out = await tool("scribe_job_status").handler({ job_id: row.id }, readCtx as never);
     expect(JSON.stringify(out)).not.toContain("crushing chest pain");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-up 5 item 2 — the error gate, tested against ARBITRARY PROSE in the column
+// ---------------------------------------------------------------------------
+
+describe("(e2) the error channel is gated on scope, not on the write side behaving", () => {
+  const PROSE = "crushing chest pain radiating to the jaw since Tuesday";
+  const invokeCtx = { ...readCtx, scopes: new Set(["read", "invoke"]) as ReadonlySet<"read" | "invoke" | "write"> };
+
+  /** Put a row in the table by hand, with whatever `error` we like. */
+  const seed = (error: string) => {
+    const row = {
+      id: "job_seeded", kind: "transcribe_range", args: "{}", status: "failed", step: "transcribe",
+      progress: "{}", result: null, error, actor: "mcp:operator-v",
+      created_at: "t", started_at: "t", updated_at: "t", finished_at: "t",
+      lease_until: null, lease_owner: null, attempts: 1, failures: 1,
+    };
+    TABLE.length = 0;
+    TABLE.push(row);
+    return row;
+  };
+
+  it("a read token never sees the prose, for EVERY published code", async () => {
+    const { JOB_ERROR_CODES } = await import("@/lib/jobs/errors");
+    for (const code of JOB_ERROR_CODES) {
+      seed(`${code}: ${PROSE}`);
+      const out = await tool("scribe_job_status").handler({ job_id: "job_seeded" }, readCtx as never);
+      const s = JSON.stringify(out);
+      expect(s, `${code} leaked the prose`).not.toContain(PROSE);
+      expect(s, `${code} was not reported`).toContain(code);
+      expect((out as Record<string, unknown>).error, `${code} returned the raw column`).toBeUndefined();
+    }
+  });
+
+  it("an UNMAPPED error is reported as unknown_error, never passed through", async () => {
+    // The gate must not trust the write side. A row written by an older build, a future kind, or
+    // a hand carries prose with no code at all — and must still be redacted.
+    seed(`something nobody enumerated: ${PROSE}`);
+    const out = await tool("scribe_job_status").handler({ job_id: "job_seeded" }, readCtx as never);
+    const s = JSON.stringify(out);
+    expect(s).not.toContain(PROSE);
+    expect(s).not.toContain("something nobody enumerated");
+    expect(out).toMatchObject({ error_code: "unknown_error" });
+  });
+
+  it("an invoke token DOES get the prose — the gate is scope, not redaction-at-rest", async () => {
+    seed(`whisper_failed: ${PROSE}`);
+    const out = await tool("scribe_job_status").handler({ job_id: "job_seeded" }, invokeCtx as never);
+    expect(JSON.stringify(out)).toContain(PROSE);
+    expect(out).toMatchObject({ error_code: "whisper_failed" });
+  });
+
+  it("scribe_job_list is gated the same way — a listing must not be a side door", async () => {
+    seed(`whisper_failed: ${PROSE}`);
+    const asRead = await tool("scribe_job_list").handler({ limit: 50 }, readCtx as never);
+    expect(JSON.stringify(asRead)).not.toContain(PROSE);
+    expect(JSON.stringify(asRead)).toContain("whisper_failed");
+    const asInvoke = await tool("scribe_job_list").handler({ limit: 50 }, invokeCtx as never);
+    expect(JSON.stringify(asInvoke)).toContain(PROSE);
+  });
+
+  it("a read and an invoke token do NOT get byte-identical answers any more", async () => {
+    seed(`join_failed: ${PROSE}`);
+    const a = JSON.stringify(await tool("scribe_job_status").handler({ job_id: "job_seeded" }, readCtx as never));
+    const b = JSON.stringify(await tool("scribe_job_status").handler({ job_id: "job_seeded" }, invokeCtx as never));
+    expect(a).not.toBe(b);
+  });
+
+  it("a row with no error at all reports error_code null, not a spurious code", async () => {
+    const row = seed("x");
+    row.error = null as unknown as string;
+    const out = await tool("scribe_job_status").handler({ job_id: "job_seeded" }, readCtx as never);
+    expect((out as Record<string, unknown>).error_code).toBeNull();
   });
 });

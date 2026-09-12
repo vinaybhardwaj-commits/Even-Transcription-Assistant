@@ -42,26 +42,33 @@ export type StepReport = {
  *     honoured at the next step boundary"): a cancel that arrived while the step was in flight is
  *     seen here, and the step's outcome is discarded rather than overwriting `cancelled`.
  */
-export async function runOneStep(job: JobRow, runner: string | null = null): Promise<StepReport> {
+/**
+ * Fix-up 5 item 3 — `runner` is REQUIRED here too. It is the token every write matches on, so a
+ * default would reintroduce the backdoor one caller at a time.
+ */
+export async function runOneStep(job: JobRow, runner: string): Promise<StepReport> {
   const started = Date.now();
   const base = { job_id: job.id, kind: job.kind, step: job.step };
 
   // The cap reads FAILURES, never attempts. A long job is claimed many times while succeeding.
   if (overFailureCap(job)) {
-    await failJob(job.id, jobError("failures_exceeded", `after ${job.failures} attempts at step ${job.step ?? "start"}`), runner);
-    return { ...base, outcome: "failures_exceeded", ms: Date.now() - started };
+    // Report what actually happened: zero rows means the lease was lost and this runner wrote
+    // nothing, which is `lease_lost`, not `failures_exceeded`. The verdict's "two reports lie
+    // about writes they did not make" — the only place "no best-effort branch" was not literal.
+    const rows = await failJob(job.id, jobError("failures_exceeded", `after ${job.failures} attempts at step ${job.step ?? "start"}`), runner);
+    return { ...base, outcome: rows === 0 ? "lease_lost" : "failures_exceeded", ms: Date.now() - started };
   }
 
   const kind = KIND_BY_NAME.get(job.kind);
   if (!kind) {
-    await failJob(job.id, jobError("unknown_kind", job.kind), runner);
-    return { ...base, outcome: "unknown_kind", ms: Date.now() - started };
+    const rows = await failJob(job.id, jobError("unknown_kind", job.kind), runner);
+    return { ...base, outcome: rows === 0 ? "lease_lost" : "unknown_kind", ms: Date.now() - started };
   }
 
   const step = job.step ?? kind.first;
   let outcome;
   try {
-    outcome = await kind.run({ job, step, args: job.args, progress: job.progress, runner: runner ?? undefined });
+    outcome = await kind.run({ job, step, args: job.args, progress: job.progress, runner });
   } catch (e) {
     // A throwing step is a FAILURE, counted, not (yet) a failed job: the lease is released and the
     // next claim retries the same step, up to the cap. ONE statement both counts it and decides

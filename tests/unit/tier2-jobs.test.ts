@@ -9,9 +9,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 type Row = Record<string, unknown>;
-/** Fix-up 4 — model `AND lease_owner IS NOT DISTINCT FROM ?`. */
-const owns = (text: string, r: Row, runner: string | null | undefined): boolean =>
-  !/lease_owner IS NOT DISTINCT FROM/.test(text) || (r.lease_owner ?? null) === (runner ?? null);
+/** Fix-up 5 — model `AND lease_owner = ?`: plain equality, so a NULL owner matches nothing. */
+const owns = (text: string, r: Row, runner: string | null | undefined): boolean => {
+  if (!/lease_owner = \?/.test(text)) return true;
+  const owner = (r.lease_owner ?? null) as string | null;
+  return owner !== null && runner != null && owner === runner;
+};
 type Call = { text: string; values: unknown[] };
 const calls: Call[] = [];
 
@@ -52,7 +55,16 @@ vi.mock("@/lib/db", () => {
       const skipsLocked = /FOR UPDATE SKIP LOCKED/.test(text);
       const claimable = TABLE
         .filter((r) => (skipsLocked ? !locked.has(String(r.id)) : true))
-        .filter((r) => r.status === "queued" || (r.status === "running" && (r.lease_until === null || Date.parse(String(r.lease_until)) < NOW)))
+        // Fix-up 5 — the claimable predicate is READ FROM THE STATEMENT, not hardcoded. A fake that
+        // decides for itself which rows are claimable cannot fail when the SQL stops respecting a
+        // live lease, which is exactly the bug this file exists to catch.
+        .filter((r) => {
+          if (r.status === "queued") return true;
+          if (r.status !== "running") return false;
+          const honoursLease = /lease_until IS NULL OR lease_until < now\(\)/.test(text);
+          if (!honoursLease) return true; // a store that dropped the lease check takes it anyway
+          return r.lease_until === null || Date.parse(String(r.lease_until)) < NOW;
+        })
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
         .slice(0, limit);
       for (const r of claimable) locked.add(String(r.id));
@@ -92,7 +104,7 @@ vi.mock("@/lib/db", () => {
       const [step, progress, id, runner] = values as [string, string, string, string | null];
       const r = find(id);
       if (r && r.status === "running" && owns(text, r, runner)) {
-        r.step = step; r.progress = progress; r.lease_until = null; r.lease_owner = null; r.updated_at = nowIso();
+        r.step = step; r.progress = progress; r.lease_until = null; r.updated_at = nowIso();
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -158,6 +170,19 @@ const T = await import("@/lib/jobs/types");
 const { KIND_BY_NAME, JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
 const { planPieces, STITCH_PIECE_MS } = await import("@/lib/jobs/kinds/stitch");
 const ALLS = new Set(["read", "invoke", "write"] as const) as ReadonlySet<"read" | "invoke" | "write">;
+/**
+ * Fix-up 5 — `runner` is required on every claim and every write, so a test that wants a step to
+ * land must name the runner that claimed it. `step()` keeps the two in sync; passing a DIFFERENT
+ * runner is how the stale-runner cases are expressed.
+ */
+let RUNNER_SEQ = 0;
+const claimAs = (n = 1) => store.claimJobs(n, T.LEASE_MS, `runner-${++RUNNER_SEQ}`);
+const stepOne = async (n = 1) => {
+  const id = `runner-${RUNNER_SEQ + 1}`;
+  const got = await store.claimJobs(n, T.LEASE_MS, id);
+  RUNNER_SEQ += 1;
+  return got.length ? { job: got[0]!, report: await runner.runOneStep(got[0]!, id) } : null;
+};
 
 const queue = (over: Partial<Row> = {}): Row => {
   const r: Row = {
@@ -237,8 +262,8 @@ describe("runOneStep", () => {
     const calledWith: string[] = [];
     fakeKind(async () => { throw new Error("runner died"); });
     queue({ kind: "fake" });
-    const first = (await store.claimJobs())[0]!;
-    await runner.runOneStep(first);
+    const firstOut = (await stepOne())!;
+    const first = firstOut.job;
     let row = await store.readJob(first.id);
     expect(row!.status, "still running — a throw is a counted FAILURE, not a failed job").toBe("running");
     expect(row!.step).toBe("one");
@@ -247,11 +272,11 @@ describe("runOneStep", () => {
 
     // Second claim: same step, failures still 1, attempts 2. Now let it succeed.
     fakeKind(async () => { calledWith.push("two"); return T.doneWith({ ok: true }); });
-    const second = (await store.claimJobs())[0]!;
+    const secondOut = (await stepOne())!;
+    const second = secondOut.job;
     expect(second.step, "resumed at the step the row named").toBe("one");
     expect(second.attempts).toBe(2);
     expect(second.failures).toBe(1);
-    await runner.runOneStep(second);
     row = await store.readJob(first.id);
     expect(row!.status).toBe("done");
     expect(calledWith).toEqual(["two"]);
@@ -263,9 +288,8 @@ describe("runOneStep", () => {
     fakeKind(async () => (++n < 6 ? T.nextStep("one", { n }) : T.doneWith({ n })));
     queue({ kind: "fake" });
     for (let k = 0; k < 6; k++) {
-      const claimed = (await store.claimJobs())[0];
-      expect(claimed, `claim ${k} found nothing — the job became unclaimable`).toBeTruthy();
-      await runner.runOneStep(claimed!);
+      const out = await stepOne();
+      expect(out, `claim ${k} found nothing — the job became unclaimable`).toBeTruthy();
     }
     const row = await store.readJob("job_0");
     expect(row!.status, "six successful claims must not trip the cap").toBe("done");
@@ -276,12 +300,12 @@ describe("runOneStep", () => {
   it("persists step and progress after EVERY step", async () => {
     fakeKind(async (ctx) => (ctx.step === "one" ? T.nextStep("two", { seen: 1 }) : T.doneWith({ fin: true })));
     queue({ kind: "fake" });
-    await runner.runOneStep((await store.claimJobs())[0]!);
+    await stepOne();
     let row = await store.readJob("job_0");
     expect(row!.step).toBe("two");
     expect(row!.progress).toEqual({ seen: 1 });
     expect(row!.lease_until, "the lease is released so the next claim can take it").toBeNull();
-    await runner.runOneStep((await store.claimJobs())[0]!);
+    await stepOne();
     row = await store.readJob("job_0");
     expect(row!.status).toBe("done");
     expect(row!.result).toEqual({ fin: true });
@@ -294,7 +318,7 @@ describe("runOneStep", () => {
       return T.nextStep("two", { should_not: "persist" });
     });
     queue({ kind: "fake" });
-    await runner.runOneStep((await store.claimJobs())[0]!);
+    await stepOne();
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("cancelled");
     expect(row!.step, "the in-flight step's outcome was discarded").toBeNull();
@@ -305,8 +329,7 @@ describe("runOneStep", () => {
     let ran = 0;
     fakeKind(async () => { ran++; return T.nextStep("one", {}); });
     queue({ kind: "fake", failures: T.MAX_FAILURES });
-    const claimed = (await store.claimJobs())[0]!;
-    await runner.runOneStep(claimed);
+    await stepOne();
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
     expect(String(row!.error)).toMatch(/failures_exceeded/);
@@ -315,7 +338,7 @@ describe("runOneStep", () => {
 
   it("an unknown kind fails the job by name rather than looping", async () => {
     queue({ kind: "no_such_kind" });
-    await runner.runOneStep((await store.claimJobs())[0]!);
+    await stepOne();
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
     expect(String(row!.error)).toMatch(/unknown_kind/);
@@ -421,9 +444,8 @@ describe("item 1 — a 61-minute stitch completes (3 pieces = 4 claims)", () => 
     });
     queue({ kind: "fake_stitch" });
     for (let k = 0; k < 8; k++) {
-      const c = await store.claimJobs();
-      if (!c.length) break;
-      await runner.runOneStep(c[0]!);
+      const out = await stepOne();
+      if (!out) break;
       if ((await store.readJob("job_0"))!.status !== "running") break;
     }
     const row = await store.readJob("job_0");
@@ -444,7 +466,7 @@ describe("item 3 — a cancel landing mid-step wins at the boundary", () => {
       },
     });
     queue({ kind: "fake_done" });
-    await runner.runOneStep((await store.claimJobs())[0]!);
+    await stepOne();
     const row = await store.readJob("job_0");
     expect(row!.status, "the last writer must NOT win — the cancel does").toBe("cancelled");
     expect(row!.result).toBeNull();
@@ -452,8 +474,8 @@ describe("item 3 — a cancel landing mid-step wins at the boundary", () => {
 
   it("finishJob and saveStep both carry AND status = 'running'", async () => {
     queue();
-    await store.finishJob("job_0", { x: 1 });
-    await store.saveStep("job_0", "s", {});
+    await store.finishJob("job_0", { x: 1 }, "runner-X");
+    await store.saveStep("job_0", "s", {}, "runner-X");
     const fin = calls.find((c) => /SET status = 'done'/.test(c.text))!;
     const step = calls.find((c) => /SET step = \?/.test(c.text))!;
     expect(fin.text).toMatch(/AND status = 'running'/);
@@ -488,7 +510,7 @@ describe("item 5 — the two-runner test is semantic", () => {
 describe("item 1 — failJob cannot touch a job it no longer owns", () => {
   it("a job already `done` is NOT failed by a stale runner: zero rows, status unchanged", async () => {
     queue({ status: "done", result: '{"fin":true}' });
-    const changed = await store.failJob("job_0", "stale runner says so");
+    const changed = await store.failJob("job_0", "stale runner says so", "runner-X");
     expect(changed, "the UPDATE matched a row it should not have").toBe(0);
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("done");
@@ -498,17 +520,21 @@ describe("item 1 — failJob cannot touch a job it no longer owns", () => {
 
   it("likewise for cancelled and for a job another runner has reclaimed", async () => {
     queue({ status: "cancelled" });
-    expect(await store.failJob("job_0", "x")).toBe(0);
+    expect(await store.failJob("job_0", "x", "runner-X")).toBe(0);
     expect((await store.readJob("job_0"))!.status).toBe("cancelled");
-    // Reclaimed: still `running`, so the guard alone cannot tell — this is the documented limit.
-    // What it DOES stop is the terminal-status case above, which is the one that loses work.
+    // Fix-up 5 closed the limit this used to document. A row whose lease_owner is NULL matches
+    // NOTHING — the guard is plain equality, not IS NOT DISTINCT FROM — so an unclaimed row cannot
+    // be failed by anyone, and a row owned by runner-A cannot be failed by runner-B.
     queue({ status: "running", lease_until: new Date(NOW + 60_000).toISOString() });
-    expect(await store.failJob("job_1", "x")).toBe(1);
+    expect(await store.failJob("job_1", "x", "runner-Y"), "a NULL owner must match nothing").toBe(0);
+    queue({ status: "running", lease_until: new Date(NOW + 60_000).toISOString(), lease_owner: "runner-A" });
+    expect(await store.failJob("job_2", "x", "runner-B"), "another runner's row must match nothing").toBe(0);
+    expect(await store.failJob("job_2", "x", "runner-A"), "its own owner may write").toBe(1);
   });
 
   it("the statement carries the guard", async () => {
     queue({ status: "running" });
-    await store.failJob("job_0", "x");
+    await store.failJob("job_0", "x", "runner-X");
     const c = calls.find((x) => /SET status = 'failed'/.test(x.text))!;
     expect(c.text).toMatch(/AND status = 'running'/);
   });
@@ -522,9 +548,8 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
     });
     queue({ kind: "always_throws" });
     for (let k = 0; k < 3; k++) {
-      const c = await store.claimJobs();
-      expect(c.length, `claim ${k + 1} found nothing`).toBe(1);
-      await runner.runOneStep(c[0]!);
+      const out = await stepOne();
+      expect(out, `claim ${k + 1} found nothing`).toBeTruthy();
     }
     const row = await store.readJob("job_0");
     expect(row!.failures, "the third throw must be counted, not swallowed by the terminal write").toBe(3);
@@ -545,9 +570,8 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
     queue({ kind: "always_throws2" });
     const seen: number[] = [];
     for (let k = 0; k < 3; k++) {
-      const c = await store.claimJobs();
-      if (!c.length) break;
-      await runner.runOneStep(c[0]!);
+      const out = await stepOne();
+      if (!out) break;
       seen.push((await store.readJob("job_0"))!.failures);
     }
     expect(seen, "no throw is lost and none is double-counted").toEqual([1, 2, 3]);
@@ -557,8 +581,7 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
     KIND_BY_NAME.set("t3", { name: "t3", first: "one", scope: "invoke", parseArgs: () => ({}), run: async () => { throw new Error("boom"); } });
     queue({ kind: "t3" });
     for (let k = 0; k < 3; k++) {
-      const c = await store.claimJobs();
-      if (c.length) await runner.runOneStep(c[0]!);
+      await stepOne();
     }
     const err = String((await store.readJob("job_0"))!.error);
     expect(err).not.toMatch(/\d+(th|st|nd|rd)\b/);
@@ -575,9 +598,7 @@ describe("item 4 — the cap is lifetime", () => {
     });
     queue({ kind: "flaky" });
     for (let k = 0; k < 5; k++) {
-      const c = await store.claimJobs();
-      if (!c.length) break;
-      await runner.runOneStep(c[0]!);
+      if (!(await stepOne())) break;
     }
     const row = await store.readJob("job_0");
     expect(row!.failures).toBe(3);

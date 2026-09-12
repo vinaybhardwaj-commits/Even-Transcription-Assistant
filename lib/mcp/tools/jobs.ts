@@ -15,7 +15,26 @@ import { errorCodeOf, JOB_ERROR_CODES } from "@/lib/jobs/errors";
 import { argInt, argStr, argBool, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 /** PURE — the row a caller sees. `result` is withheld unless asked for: it can be large. */
-function jobView(j: NonNullable<Awaited<ReturnType<typeof readJob>>>, includeResult: boolean) {
+/**
+ * Fix-up 5 item 2 — THE ERROR GATE, actually wired this time.
+ *
+ * Fix-up 4 claimed this existed and it did not: `errorCodeOf` was imported here and called
+ * nowhere, `error` went out raw, and the tool's own description told callers they were getting a
+ * code. A published security claim that the code does not honour is worse than no claim, because
+ * a reader stops looking.
+ *
+ * THE GATE DOES NOT TRUST THE WRITE SIDE. Every `failWith` call site does pass a code today, but
+ * this must hold for a row whose `error` column contains arbitrary prose — one written by an older
+ * build, by a future kind, or by a hand. So the column is never returned to a `read` token at all:
+ * it is mapped through `errorCodeOf`, which yields a published code or `unknown_error`, and the
+ * raw string is emitted only when the caller holds `invoke`.
+ */
+function jobView(
+  j: NonNullable<Awaited<ReturnType<typeof readJob>>>,
+  includeResult: boolean,
+  /** True only for a caller holding `invoke`. Read scope gets the code and nothing else. */
+  includeErrorDetail = false,
+) {
   return {
     job_id: j.id,
     kind: j.kind,
@@ -24,7 +43,10 @@ function jobView(j: NonNullable<Awaited<ReturnType<typeof readJob>>>, includeRes
     attempts: j.attempts,
     failures: j.failures,
     progress: j.progress,
-    error: j.error,
+    // The code always; the prose only for invoke. An unmapped string maps to `unknown_error`
+    // rather than falling back to the original — a "helpful" fallback is how the leak returns.
+    error_code: errorCodeOf(j.error),
+    ...(includeErrorDetail && j.error ? { error: j.error } : {}),
     actor: j.actor,
     created_at: j.created_at,
     started_at: j.started_at,
@@ -100,7 +122,7 @@ const CLIP_URL_SECONDS = 3600;
 const status: McpTool = {
   name: "scribe_job_status",
   description:
-    `One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts (claims), failures (steps that threw), progress, error_code and timings. error_code is one of ${JOB_ERROR_CODES.join(", ")}. The free-text error behind it is CONTENT — built from a downstream failure that can quote the audio — so it needs invoke scope, like include_urls. NEITHER progress NOR result EVER CARRIES TRANSCRIPT TEXT: a transcription job's result carries a transcription_run_id, character and segment counts and the detected language, and whoever wants the words goes to the run, where identity rules apply. include_result:true adds that pointer set. include_urls:true mints presigned links for the clip keys and REQUIRES invoke scope, because a link fetches audio.`,
+    `One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts (claims), failures (steps that threw), progress, error_code and timings. error_code is one of ${JOB_ERROR_CODES.join(", ")}, or unknown_error for anything this build does not publish — the raw error column is NEVER returned to a read token, including when it holds text no code maps to. The free-text error behind the code needs invoke scope, like include_urls, because it is built from a downstream failure that can quote the audio. NEITHER progress NOR result EVER CARRIES TRANSCRIPT TEXT: a transcription job's result carries a transcription_run_id, character and segment counts and the detected language, and whoever wants the words goes to the run, where identity rules apply. include_result:true adds that pointer set. include_urls:true mints presigned links for the clip keys and REQUIRES invoke scope, because a link fetches audio.`,
   scope: "read",
   inputSchema: {
     type: "object",
@@ -122,7 +144,7 @@ const status: McpTool = {
       if (wantUrls && !ctx.scopes.has("invoke")) {
         throw new ToolScopeError("invoke", { reason: "include_urls mints presigned audio links" });
       }
-      const view = jobView(job, argBool(args, "include_result"));
+      const view = jobView(job, argBool(args, "include_result"), ctx.scopes.has("invoke"));
       return { ok: true, ...view, ...(wantUrls ? { urls: await mintUrls(job.result) } : {}) };
     }),
 };
@@ -141,7 +163,7 @@ const list: McpTool = {
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) =>
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ jobs: [] as unknown[] }, async () => {
       const s = argStr(args, "status", 16);
       const jobs = await listJobs({
@@ -149,7 +171,8 @@ const list: McpTool = {
         kind: argStr(args, "kind", 64),
         limit: argInt(args, "limit", 50, 1, 200),
       });
-      return { jobs: jobs.map((j) => jobView(j, false)) };
+      // Same gate on the listing: a read token must not get by listing what it cannot get by asking.
+      return { jobs: jobs.map((j) => jobView(j, false, ctx.scopes.has("invoke"))) };
     }),
 };
 

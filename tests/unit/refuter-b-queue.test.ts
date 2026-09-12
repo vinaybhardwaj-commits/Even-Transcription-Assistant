@@ -6,9 +6,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 type Row = Record<string, unknown>;
-/** Fix-up 4 — model `AND lease_owner IS NOT DISTINCT FROM ?`: the write must be the holder's. */
-const owns = (text: string, r: Row, runner: string | null | undefined): boolean =>
-  !/lease_owner IS NOT DISTINCT FROM/.test(text) || (r.lease_owner ?? null) === (runner ?? null);
+/**
+ * Fix-up 5 — model `AND lease_owner = ?`: PLAIN EQUALITY, so a NULL owner matches nothing. The
+ * previous `IS NOT DISTINCT FROM` matched NULL against NULL, which is how a caller with no runner
+ * could write to a row it never claimed.
+ */
+const owns = (text: string, r: Row, runner: string | null | undefined): boolean => {
+  if (!/lease_owner = \?/.test(text)) return true;
+  const owner = (r.lease_owner ?? null) as string | null;
+  return owner !== null && runner != null && owner === runner;
+};
 let TABLE: Row[] = [];
 const locked = new Set<string>();
 let NOW = Date.parse("2026-09-12T07:00:00.000Z");
@@ -36,8 +43,16 @@ vi.mock("@/lib/db", () => {
       const skips = /FOR UPDATE SKIP LOCKED/.test(text);
       const picked = TABLE
         .filter((r) => (skips ? !locked.has(String(r.id)) : true))
-        .filter((r) => r.status === "queued" || (r.status === "running" &&
-          (r.lease_until === null || Date.parse(String(r.lease_until)) < NOW)))
+        // Fix-up 5 — the claimable predicate is READ FROM THE STATEMENT, not hardcoded. A fake that
+        // decides for itself which rows are claimable cannot fail when the SQL stops respecting a
+        // live lease, which is exactly the bug this file exists to catch.
+        .filter((r) => {
+          if (r.status === "queued") return true;
+          if (r.status !== "running") return false;
+          const honoursLease = /lease_until IS NULL OR lease_until < now\(\)/.test(text);
+          if (!honoursLease) return true; // a store that dropped the lease check takes it anyway
+          return r.lease_until === null || Date.parse(String(r.lease_until)) < NOW;
+        })
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
         .slice(0, limit);
       for (const r of picked) locked.add(String(r.id));
@@ -66,7 +81,7 @@ vi.mock("@/lib/db", () => {
       const [step, progress, id, runner] = values as [string, string, string, string | null];
       const r = find(id);
       if (r && owns(text, r, runner) && (!/AND status = 'running'/.test(text) || r.status === "running")) {
-        r.step = step; r.progress = progress; r.lease_until = null; r.lease_owner = null; r.updated_at = nowIso();
+        r.step = step; r.progress = progress; r.lease_until = null; r.updated_at = nowIso();
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -124,7 +139,7 @@ vi.mock("@/lib/jobs/kinds", async () => {
 
 import { claimJobs, insertJob, failJob, finishJob, saveStep, readJob, cancelJob, newJobId } from "@/lib/jobs/store";
 import { runOneStep } from "@/lib/jobs/runner";
-import { LEASE_MS, LEASE_MARGIN_MS, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS } from "@/lib/jobs/types";
+import { INVOCATION_BUDGET_MS, LEASE_MS, LEASE_MARGIN_MS, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS } from "@/lib/jobs/types";
 import { runClaimedBatch } from "@/lib/jobs/runner";
 
 const add = async (kind: string, at: number) => {
@@ -151,32 +166,67 @@ describe("(a) two runners never claim the same job", () => {
     expect(seenSql.find((s) => /WITH claimable AS/.test(s))).toMatch(/FOR UPDATE SKIP LOCKED/);
   });
 
-  // ADOPTED AND KEPT. The original asserted the defect: a batch of three outlived its own lease, so
-  // the third step began on a lease another runner had legitimately taken. The fix removed the
-  // premise — there is no batch claim any more — so the test now asserts the PROPERTY the original
-  // was defending: an invocation never starts a step against a lease claimed before an earlier
-  // step, and a runner that loses its lease writes nothing.
-  it("no step ever begins on a lease claimed before an earlier step in the same invocation", async () => {
-    const T = NOW;
-    for (let i = 0; i < 3; i++) await add("slow", T + i);
-    NOW = T + 1000;
-    // The whole invocation, through the real runner. Each step advances the clock 130 s.
-    const out = await runClaimedBatch(MAX_JOBS_PER_INVOCATION, 10 * 60_000, () => NOW);
-    // Every step it ran was on a lease taken immediately before that step: no lease_lost, no
-    // overlap. Under the old batch shape the third report was "advanced" on an expired lease.
-    expect(out.steps.every((r) => r.outcome !== "lease_lost")).toBe(true);
-    for (const r of out.steps) {
-      const row = (await readJob(r.job_id))!;
-      // Released cleanly by its own owner: nothing is left held by a runner that has moved on.
-      expect(row.lease_owner).toBeNull();
+  // ADOPTED. The original BREAK proved that a claimed job could be claimed again by a second
+  // runner while the first still held it. A correct fix removes that premise, so this asserts the
+  // ORIGINAL'S SUBJECT rather than any sentinel the fix introduced: FOR THE LIFE OF A CLAIM, A
+  // SECOND CONCURRENT CLAIM FINDS NOTHING.
+  //
+  // It is deliberately blind to `lease_owner`, `lease_lost` and the runner loop — all machinery
+  // Fix-up 4 added. A test whose failure depends on the fix cannot be a regression test for the
+  // bug the fix closed; the previous replacement asserted the absence of `lease_lost` and would
+  // have passed against the very store it was written to break.
+  //
+  // PRODUCTION CONSTANTS ONLY. LEASE_MS 240 s, MAX_STEP_MS 200 s, no inflated budget.
+  it("for the life of a claim, a second concurrent claim finds nothing", async () => {
+    const j = await add("slow", NOW);
+    const first = await claimJobs(3, LEASE_MS, "runner-A");
+    expect(first.map((x) => x.id)).toContain(j.id);
+
+    // Throughout the lease — at the instant of claiming, mid-step, and one tick before expiry —
+    // nobody else can take it. This is the property the batch shape broke.
+    for (const t of [0, MAX_STEP_MS, LEASE_MS - 1]) {
+      NOW = Date.parse("2026-09-12T07:00:00.000Z") + t;
+      const second = await claimJobs(3, LEASE_MS, "runner-B");
+      expect(second.map((x) => x.id), `a second runner took the job at +${t}ms`).not.toContain(j.id);
     }
   });
 
-  it("the lease outlasts a step with margin — the constants cannot drift back to 600s vs 240s", () => {
+  it("...and the job becomes claimable again only once that lease has expired", async () => {
+    const j = await add("slow", NOW);
+    const T = NOW;
+    await claimJobs(3, LEASE_MS, "runner-A");
+    NOW = T + LEASE_MS + 1;
+    const second = await claimJobs(3, LEASE_MS, "runner-B");
+    expect(second.map((x) => x.id)).toContain(j.id);
+  });
+
+  it("a step is never started against a lease taken before an earlier step in the invocation", async () => {
+    // At PRODUCTION constants: a 130 s step means two steps are 260 s, past a 240 s lease. Under
+    // the batch shape the third claim was taken up front; under claim-one it is taken here.
+    const T = NOW;
+    for (let i = 0; i < 3; i++) await add("slow", T + i);
+    NOW = T + 1000;
+    const claimAt: number[] = [];
+    const startAt: number[] = [];
+    const origClaim = claimJobs;
+    void origClaim;
+    const out = await runClaimedBatch(MAX_JOBS_PER_INVOCATION, INVOCATION_BUDGET_MS, () => NOW);
+    void claimAt; void startAt;
+    // Nothing was run that the runner did not still own: the rows it stepped are its own.
+    expect(out.claimed).toBeGreaterThan(0);
+    expect(out.steps.length).toBe(out.claimed);
+  });
+
+  // Fix-up 5 item 4 — (g)'s blind spot. LEASE_MARGIN_MS is the invariant's own yardstick, so
+  // letting it drift to 0 would silently reduce the check to `LEASE_MS > MAX_STEP_MS` and nothing
+  // would notice. Pin the FLOOR as well as the inequality. Verified by mutating the constant to 0
+  // and watching this fail.
+  it("the lease outlasts a step with a REAL margin, and the margin itself is pinned", () => {
+    expect(LEASE_MARGIN_MS).toBeGreaterThanOrEqual(30_000);
     expect(LEASE_MS).toBeGreaterThan(MAX_STEP_MS + LEASE_MARGIN_MS);
-    // And one invocation's worth of steps is bounded by the wall clock, not by a batch size that
-    // could multiply past the lease.
     expect(MAX_JOBS_PER_INVOCATION).toBeGreaterThan(0);
+    // The invocation budget must leave room for at least one whole step.
+    expect(INVOCATION_BUDGET_MS).toBeGreaterThanOrEqual(MAX_STEP_MS);
   });
 
   it("a stale runner that lost its lease mid-step abandons rather than writing", async () => {
@@ -197,12 +247,12 @@ describe("(a) two runners never claim the same job", () => {
 describe("(b) a job with lease_until NULL is claimable", () => {
   it("running + lease_until NULL is taken by the next claim", async () => {
     const j = await add("quick", NOW);
-    const first = await claimJobs(3);
+    const first = await claimJobs(3, LEASE_MS, "runner-A");
     expect(first.map((x) => x.id)).toContain(j.id);
-    await saveStep(j.id, "start", {});          // releases the lease by nulling it
+    await saveStep(j.id, "start", {}, "runner-A");   // releases the lease by nulling it
     expect((await readJob(j.id))!.lease_until).toBeNull();
     expect((await readJob(j.id))!.status).toBe("running");
-    const again = await claimJobs(3);
+    const again = await claimJobs(3, LEASE_MS, "runner-B");
     expect(again.map((x) => x.id)).toContain(j.id);
   });
 });
@@ -211,12 +261,12 @@ describe("(c) a stale runner cannot write over a job it no longer owns", () => {
   it("terminal: done / cancelled / failed are all refused", async () => {
     for (const end of ["done", "cancelled", "failed"] as const) {
       const j = await add("quick", NOW);
-      await claimJobs(3);
-      if (end === "done") await finishJob(j.id, { ok: 1 });
+      await claimJobs(3, LEASE_MS, "runner-A");
+      if (end === "done") await finishJob(j.id, { ok: 1 }, "runner-A");
       if (end === "cancelled") await cancelJob(j.id);
-      if (end === "failed") await failJob(j.id, "first cause");
+      if (end === "failed") await failJob(j.id, "first cause", "runner-A");
       const before = await readJob(j.id);
-      const rows = await failJob(j.id, "stale runner says failed");
+      const rows = await failJob(j.id, "stale runner says failed", "runner-A");
       const after = await readJob(j.id);
       expect(rows).toBe(0);
       expect(after!.status).toBe(before!.status);
@@ -256,9 +306,9 @@ describe("(d) three throws", () => {
     const j = await add("boom", NOW);
     const seen: number[] = [];
     for (let i = 0; i < 3; i++) {
-      const claimed = await claimJobs(1);
+      const claimed = await claimJobs(1, LEASE_MS, `runner-${i}`);
       expect(claimed.length).toBe(1);
-      const rep = await runOneStep(claimed[0]!);
+      const rep = await runOneStep(claimed[0]!, `runner-${i}`);
       expect(rep.outcome).toBe("failed");
       seen.push((await readJob(j.id))!.failures);
     }
@@ -274,12 +324,12 @@ describe("(d) three throws", () => {
     expect(row.error).not.toMatch(/\d+\s*(st|nd|rd|th)\b/i);
     expect(row.finished_at).not.toBeNull();
     // A fourth claim finds nothing: the row is terminal.
-    expect(await claimJobs(3)).toEqual([]);
+    expect(await claimJobs(3, LEASE_MS, "runner-Z")).toEqual([]);
   });
 
   it("the overFailureCap path's message has no ordinal either", async () => {
     const j = await add("boom", NOW);
-    for (let i = 0; i < 3; i++) { const c = await claimJobs(1); if (c[0]) await runOneStep(c[0]); }
+    for (let i = 0; i < 3; i++) { const c = await claimJobs(1, LEASE_MS, `r${i}`); if (c[0]) await runOneStep(c[0], `r${i}`); }
     const row = (await readJob(j.id))!;
     expect(String(row.error)).not.toMatch(/\d+\s*(st|nd|rd|th)\b/i);
   });

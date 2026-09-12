@@ -119,17 +119,25 @@ export async function claimJobs(limit = 1, leaseMs = LEASE_MS, runner: string | 
  * of them is the same accident.
  *
  * Zero rows is not an error to swallow: it means the lease was lost, and the caller must abandon.
+ *
+ * `runner` IS REQUIRED AND THE MATCH IS PLAIN EQUALITY. It used to default to null and compare with
+ * `IS NOT DISTINCT FROM`, which matches NULL — so a caller that simply forgot the argument matched
+ * any unowned row and stamped over it. `= ${runner}` means a NULL owner matches NOTHING, ever, and
+ * a required parameter means forgetting it is a compile error rather than a silent backdoor.
+ *
+ * `saveStep` KEEPS THE OWNER. A job between steps is still `running` and still this runner's; only
+ * `lease_until` is released so the next claim may take it. Clearing the owner here is what made a
+ * between-steps row match a null-runner write.
  */
-export async function saveStep(id: string, step: string, progress: Record<string, unknown>, runner: string | null = null): Promise<number> {
+export async function saveStep(id: string, step: string, progress: Record<string, unknown>, runner: string): Promise<number> {
   const rows = (await sql`
     UPDATE scribe_job
        SET step        = ${step},
            progress    = ${JSON.stringify(progress)}::jsonb,
            lease_until = NULL,
-           lease_owner = NULL,
            status      = 'running',
            updated_at  = now()
-     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
+     WHERE id = ${id} AND status = 'running' AND lease_owner = ${runner}
     RETURNING id
   `) as Array<Record<string, unknown>>;
   return rows.length;
@@ -142,12 +150,12 @@ export async function saveStep(id: string, step: string, progress: Record<string
  * own write would then set `done` over it and the cancel would be silently lost. With it, the write
  * matches no row and the cancel stands: the LAST WRITER DOES NOT WIN, the cancel does.
  */
-export async function finishJob(id: string, result: Record<string, unknown>, runner: string | null = null): Promise<number> {
+export async function finishJob(id: string, result: Record<string, unknown>, runner: string): Promise<number> {
   const rows = (await sql`
     UPDATE scribe_job
        SET status = 'done', result = ${JSON.stringify(result)}::jsonb,
            lease_until = NULL, lease_owner = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
+     WHERE id = ${id} AND status = 'running' AND lease_owner = ${runner}
     RETURNING id
   `) as Array<Record<string, unknown>>;
   return rows.length;
@@ -165,12 +173,12 @@ export async function finishJob(id: string, result: Record<string, unknown>, run
  * report: a true owner match wants a `lease_owner` column, which is a migration this slice may not
  * write.
  */
-export async function failJob(id: string, error: string, runner: string | null = null): Promise<number> {
+export async function failJob(id: string, error: string, runner: string): Promise<number> {
   const rows = (await sql`
     UPDATE scribe_job
        SET status = 'failed', error = ${error.slice(0, 2000)},
            lease_until = NULL, lease_owner = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
+     WHERE id = ${id} AND status = 'running' AND lease_owner = ${runner}
     RETURNING id
   `) as Array<Record<string, unknown>>;
   return rows.length;
@@ -242,7 +250,7 @@ export async function recordFailure(input: {
   progress: Record<string, unknown>;
   error: string;
   maxFailures: number;
-  runner?: string | null;
+  runner: string;
 }): Promise<{ failures: number; status: JobStatus } | null> {
   const rows = (await sql`
     UPDATE scribe_job
@@ -256,7 +264,7 @@ export async function recordFailure(input: {
            finished_at = CASE WHEN failures + 1 >= ${input.maxFailures} THEN now() ELSE finished_at END,
            updated_at  = now()
      WHERE id = ${input.id} AND status = 'running'
-       AND lease_owner IS NOT DISTINCT FROM ${input.runner ?? null}
+       AND lease_owner = ${input.runner}
     RETURNING failures, status
   `) as Array<Record<string, unknown>>;
   const r = rows[0];
