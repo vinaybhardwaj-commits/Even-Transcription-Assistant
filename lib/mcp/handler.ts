@@ -24,8 +24,9 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
-import { auditToolCall } from "@/lib/mcp/audit";
+import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
+import { ToolScopeError } from "@/lib/mcp/registry";
 import { HEALTH_TOOLS } from "@/lib/mcp/tools/health";
 import { BRAIN_TOOLS } from "@/lib/mcp/tools/brain";
 import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";
@@ -36,6 +37,7 @@ import { STORE_TOOLS } from "@/lib/mcp/tools/stores";
 import { LLM_TOOLS } from "./tools/llm";
 import { FUSE_TOOLS } from "./tools/fuse";
 import { FUSE_REPORT_TOOLS } from "./tools/fuse-report";
+import { JOB_TOOLS } from "./tools/jobs";
 
 const SERVER_NAME = "even-scribe-mcp";
 const SLICE = "S3";
@@ -46,7 +48,7 @@ const INVOKE_TOOL_TIMEOUT_MS = 115_000; // invoke tools (extract/transcribe) may
 const MAX_BODY_BYTES = 256 * 1024;
 
 // Registry (PRD §12): S1 read tools + S2 remote-tape write tools. Names are the contract.
-const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS, ...FUSE_REPORT_TOOLS];
+const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS, ...FUSE_REPORT_TOOLS, ...JOB_TOOLS];
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 type JsonRpcId = string | number | null;
@@ -225,7 +227,9 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const t0 = Date.now();
   let result: unknown;
   let isError = false;
-  const ctx: ToolContext = { origin: requestOrigin(req) };
+  // Tier 2 Slice B fix-up (3) — the resolved principal reaches the handler, so a tool that writes
+  // a durable row can record who asked for it. `mcpActorId` applies the one `mcp:` prefix rule.
+  const ctx: ToolContext = { origin: requestOrigin(req), actor: mcpActorId(principal.token_id), scopes: principal.scopes };
   const timeoutMs = tool.scope === "invoke" ? INVOKE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
   try {
     result = await Promise.race([
@@ -233,6 +237,12 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`tool_timeout_${timeoutMs}ms`)), timeoutMs)),
     ]);
   } catch (e) {
+    // A per-KIND scope refusal is the same answer an unregistered tool gets: one -32001, not two
+    // different shapes for "you may not do that".
+    if (e instanceof ToolScopeError) {
+      const se = e as ToolScopeError;
+      throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, needed: se.needed, ...se.detail }));
+    }
     isError = true;
     result = { error: String((e as Error)?.message ?? e).slice(0, 200), degraded: true };
   }

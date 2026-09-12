@@ -174,6 +174,9 @@ describe("install.assign_channel audit row", () => {
 });
 
 describe("install.channel_reported — written once, on the poll where the assignment clears", () => {
+  // Slice B addition (2) dedupes to one row per (install_id, channel, minute), so each case here
+  // starts from an empty bucket — otherwise the suite would be testing the dedupe, not the rule.
+  beforeEach(() => RI.__resetRateLimits());
   const run = async (prev: string | null, now: string | null, reported: string | null) => {
     calls.length = 0;
     store.install = null; // this suite drives applyInstallPoll, not the route

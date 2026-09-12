@@ -22,7 +22,37 @@ export type JsonSchema = {
 export type ToolArgs = Record<string, unknown>;
 
 /** Per-call context the door hands every handler (S3): the request origin for same-origin hops. */
-export type ToolContext = { origin: string };
+/**
+ * What every tool handler is told about the call it is serving.
+ *
+ * `actor` is the RESOLVED principal (Tier 2 §2.3): the `actor` of the matching `SCRIBE_MCP_TOKENS`
+ * entry, prefixed `mcp:`, or `mcp:operator-v1` for the single-token fallback. It is here rather
+ * than re-derived per tool because a tool that writes a durable row — a job, an audit entry — must
+ * record WHO asked, and nothing else in the handler's arguments can say. Slice B's job rows carried
+ * `actor: null` until this existed.
+ *
+ * ALWAYS A STRING. A missing principal defaults to the single-token id rather than null, so a
+ * `scribe_job.actor` is never blank and "who ran this" is never unanswerable.
+ */
+export type ToolContext = {
+  origin: string;
+  actor: string;
+  /** The caller's scopes. A tool whose OPTIONS differ by scope (scribe_job_status's include_urls,
+   *  scribe_job_submit's per-kind check) reads this; the tool's own scope is still checked first
+   *  by the handler, so this narrows within a tool, it never widens access to one. */
+  scopes: ReadonlySet<McpScope>;
+};
+
+/**
+ * Thrown by a handler that needs a scope its caller has not got — a per-KIND requirement the tool's
+ * own single `scope` cannot express. `callTool` turns it into the same -32001
+ * `scope_or_tool_unavailable` an unregistered tool gets, so a caller sees one refusal, not two.
+ */
+export class ToolScopeError extends Error {
+  constructor(public needed: McpScope, public detail: Record<string, unknown> = {}) {
+    super(`scope_or_tool_unavailable: needs ${needed}`);
+  }
+}
 
 export type McpTool = {
   name: string;
@@ -39,6 +69,11 @@ export async function failSafe(empty: ToolResult, fn: () => Promise<ToolResult>)
   try {
     return await fn();
   } catch (e) {
+    // A SCOPE REFUSAL IS NOT A DEGRADED ANSWER. Everything else here becomes `{degraded:true}` so
+    // a read that failed answers rather than 500s — but flattening "you may not do that" into that
+    // shape would tell a caller the data was unavailable when it was in fact withheld, and would
+    // turn a 403 into a 200. It goes up to the handler, which renders it as -32001.
+    if (e instanceof ToolScopeError) throw e;
     return { ...empty, degraded: true, error: String((e as Error)?.message ?? e).slice(0, 200) };
   }
 }

@@ -13,9 +13,10 @@
     "db:studio": "drizzle-kit studio",
     "smoke": "node scripts/smoke.mjs",
     "check:silent": "node scripts/check-silent-failures.mjs",
-    "test": "vitest run",
+    "test": "npm run typecheck:tests && vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.703.0",

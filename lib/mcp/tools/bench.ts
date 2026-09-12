@@ -1006,8 +1006,30 @@ const extractAudio: McpTool = {
   name: "scribe_extract_audio",
   description: "Audio by clock time (PRD §10 + U2 + U4): map an IST window onto the session's chunk rows. Inside ONE chunk → one short-lived presigned GET + { offset_in_chunk_s, duration_s, chunk_idx, chunk_bounds }. Spanning chunks → the pieces are JOINED into one kept clip and answered with a single 1 h link plus the window asked for. Refused by name over 30 minutes (window_too_long) and while any room is recording (room_recording). If the joining service is unreachable or refuses, the answer degrades to the multi-piece response listing every covering piece with its own link — never an error page. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is answered from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins, silence and all. Nothing listens to the audio to judge silence. Where no backup piece covers the window → no_audio_in_range; audio is never invented. Never inline bytes.",
   scope: "invoke",
-  inputSchema: { type: "object", properties: RANGE_ARGS, required: ["start", "end"], additionalProperties: false },
-  handler: async (args: ToolArgs) => {
+  inputSchema: {
+    type: "object",
+    properties: {
+      ...RANGE_ARGS,
+      async: { type: "boolean", default: false, description: "Tier 2 §3 — submit the equivalent `stitch` job and return {job_id} instead of waiting. Default false keeps today's behaviour for one release." },
+    },
+    required: ["start", "end"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous
+    // path below is UNCHANGED and stays the default for one release, so nothing that calls this
+    // tool today sees a different answer.
+    if (argBool(args, "async")) {
+      const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
+      try {
+        const job = await submitJob({ kind: "stitch", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
+        return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
+      } catch (e) {
+        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
+        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        throw e;
+      }
+    }
     const r = await resolveRangeArgs(args);
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
@@ -1812,11 +1834,14 @@ async function whisperNotOkAnswer(
 
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
-  description: "Hear the tape (PRD §11.1 + U2 + U4): resolve the window to the pieces that cover it. ONE piece → today's answer, Mini Whisper on that whole chunk. MORE than one → the pieces are joined and trimmed to the window first (D9) and the text covers the WINDOW asked for, not a five-minute slab. Refused by name over 30 minutes and while any room is recording; with joining unavailable the answer degrades to the multi-piece response. MICROPHONE (U4): with `source` omitted, a window overlapping a period the recording's own events say the primary was lost is transcribed from the BACKUP, and the answer carries source_used:'backup', reason:'primary_lost' and the lost interval it met with the overlap; naming `source` explicitly always wins. No backup piece over the window → no_audio_in_range. Text only, never bytes. v1: engine=whisper only. SPEECH TURNS (slice A): the answer also carries `turns` — Whisper's own segments placed on the clock, offset onto the CLIP'S TRUE START (the whole chunk on the single-piece branch, the trimmed clip on the joined one) with Math.floor on both ends, then kept by OVERLAP with the window asked for and NOT by start (K2): a phrase that begins just before the window or runs past its end was still spoken partly inside it, so it is kept WHOLE with its true bounds — never clamped, never dropped for starting early. The same turn recovered from the adjacent window produces the identical source_ref and dedupes, so nothing is double counted and no speech is lost at a boundary; the guarantee is that a window emits no segment that fails to overlap it. Blank text is dropped. A window that survives nothing comes back as ONE stt_silence covering it, because 'nothing was said' and 'nothing was looked at' must not look the same. SILENCE (K5): that now includes a window Whisper returns NO transcript for. An empty transcript on a 200 is a successful reading of a quiet room, so it answers ok:true with silent_window:true, one stt_silence, and a completeness marker saying complete:true with segment_count 0 — the ask finished. It is never counted as `failed` and no speech is inferred. Every OTHER Whisper error (http_*, timeout, malformed) is a FAILED ask: no silence and no turns, because what the window held is unknown, and one stt_window with complete:false naming the cause. WRITING IS OFF BY DEFAULT: dry_run defaults TRUE and returns the turns without writing them; dry_run:false writes them as cues into the SCRATCH graph for the session's own IST day (never a live room-day), keyed on source_ref = '{session_id}|{start_ms}|{end_ms}|{speaker}' — four fields, pipe separated, integer epoch ms, `-` in the speaker slot until slice B — so re-transcribing a window writes nothing twice (0050, and 0051 narrows the replay key so a turn also carries its session_id on the row). Each cue's payload carries the WINDOW asked for and which microphone answered it, which is what scribe_fuse_report rolls up into the day's tape minutes. Returns written / already_existed / dropped; a drop is a bug, not a mode. A write that fails NEVER takes the text away: the transcript is returned either way and the refusal is named in turn_write_error.",
+  description:
+    "Hear the tape: resolve a window to its covering pieces, join and trim when there is more than one, transcribe. Text only, never bytes. Refused over 30 minutes and while any room records. Omit `source` and a window overlapping a lost primary is read from the BACKUP, which it says. Whisper only in v1. `turns` keeps segments by overlap, so a phrase starting early stays whole. An empty transcript on a 200 is a quiet room: one stt_silence, complete:true, never counted as `failed`; any other Whisper error is a failed ask. dry_run defaults TRUE; false writes turn cues. ASYNC (§3): async:true returns {job_id, status_pointer}, NEVER text; transcription_run_id is NULL and no turn cues are written until Slice C.",
   scope: "invoke",
   inputSchema: {
     type: "object",
     properties: {
+      async: { type: "boolean", default: false, description: "Tier 2 §3 — submit the equivalent job and return {job_id} instead of waiting. Default false keeps today's behaviour for one release." },
+
       ...RANGE_ARGS,
       engine: { type: "string", enum: ["whisper"], default: "whisper" },
       language: { type: "string", description: "optional Whisper language hint, e.g. en" },
@@ -1826,6 +1851,21 @@ const transcribeRange: McpTool = {
     additionalProperties: false,
   },
   handler: async (args: ToolArgs, ctx: ToolContext) => {
+    // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous
+    // path below is UNCHANGED and stays the default for one release, so nothing that calls this
+    // tool today sees a different answer.
+    if (argBool(args, "async")) {
+      const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
+      try {
+        const job = await submitJob({ kind: "transcribe_range", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
+        // The description promises {job_id, status_pointer} and no text: this is that shape.
+        return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status, status_pointer: { tool: "scribe_job_status", job_id: job.id } };
+      } catch (e) {
+        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
+        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        throw e;
+      }
+    }
     const engine = argStr(args, "engine", 32) ?? "whisper";
     if (engine !== "whisper") return { ok: false, error: "engine_not_supported_v1", engine, allowed: ["whisper"] };
     // `dry_run` defaults TRUE, and it FAILS DRY: only an explicit false turns writing on.
