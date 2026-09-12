@@ -58,3 +58,5 @@ Issued by curl against `POST /api/mcp` (`scribe_room_command`), not the MCP clie
 **End state:** Home Office idle, `state: ready`, 0.1.22, pid 19106, `update.log` 274 lines. Acceptance items 3, 4 and 5 move from UNPROVEN to PASS; items 1 and 2 already passed.
 
 OPD 6 assigned test at 2026-09-12T04:57:30Z; swap expected at session end (assigned_channel `test`, update_channel still `stable`, session_open true, 0.1.21 — nothing forced).
+
+OPD 6 test assignment cleared at 2026-09-12T05:08:47Z — a 0.1.21 app applies only stable; test assignment requires ≥0.1.22 on the Mac (config.json edit at the OPD visit). Tier 2: assign-channel must refuse test below 0.1.22 (APP_TOO_OLD). Evidence: drift_since ran 04:57:30.512Z→null, assigned_channel test→null on the first poll reporting stable, state_flags [] throughout, no flag ever raised (the 30-min CHANNEL_DRIFT window was not reached).
