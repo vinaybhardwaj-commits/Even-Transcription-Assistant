@@ -152,7 +152,7 @@ const status: McpTool = {
 const list: McpTool = {
   name: "scribe_job_list",
   description:
-    "The job queue, newest first: id, kind, status, step, attempts and timings. Filter by status and/or kind. Results are never included here — ask scribe_job_status for one.",
+    "The job queue, newest first: id, kind, status, step, attempts (claims), failures (steps that threw), error_code and timings. Filter by status and/or kind. Gated exactly as scribe_job_status is: the raw error column is NEVER returned to a read token — it is mapped to error_code, or unknown_error for anything this build does not publish — and the free-text error behind it appears only for an invoke token, because it is built from a downstream failure that can quote the audio. A listing must not be a side door to what asking for one job will not give you. Job RESULTS are never included here at all; ask scribe_job_status for one.",
   scope: "read",
   inputSchema: {
     type: "object",

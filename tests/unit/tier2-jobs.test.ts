@@ -65,7 +65,11 @@ vi.mock("@/lib/db", () => {
           if (!honoursLease) return true; // a store that dropped the lease check takes it anyway
           return r.lease_until === null || Date.parse(String(r.lease_until)) < NOW;
         })
-        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+        // A5 — FIFO only if the statement asks for it. Sorting on the fake's own authority meant
+        // deleting ORDER BY from the claim changed nothing.
+        .sort((a, b) => (/ORDER BY created_at/.test(text)
+          ? String(a.created_at).localeCompare(String(b.created_at))
+          : 0))
         .slice(0, limit);
       for (const r of claimable) locked.add(String(r.id));
       return (async () => {
@@ -74,6 +78,8 @@ vi.mock("@/lib/db", () => {
         for (const r of claimable) {
           r.status = "running";
           r.attempts = Number(r.attempts) + 1;
+          // A6 — the expiry comes from the statement's own interval parameter, so widening
+          // `make_interval(secs => ?)` changes what the fake stores and is observable.
           r.lease_until = new Date(NOW + secs * 1000).toISOString();
           r.lease_owner = runner;
           r.started_at = r.started_at ?? nowIso();
@@ -92,19 +98,28 @@ vi.mock("@/lib/db", () => {
     if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
       const [step, progress, cap, , err, , id, runner] = values as [string, string, number, number, string, number, string, string | null];
       const r = find(id);
-      if (!r || r.status !== "running" || !owns(text, r, runner)) return Promise.resolve([]);
+      // A1 — the `AND status = 'running'` clause is READ from the statement, like the done/failed
+      // branches beside it. Hardcoding it meant deleting it from store.ts changed nothing.
+      const rfGuarded = /AND status = 'running'/.test(text);
+      if (!r || (rfGuarded && r.status !== "running") || !owns(text, r, runner)) return Promise.resolve([]);
       r.failures = Number(r.failures) + 1;
       r.step = step;
       r.progress = progress;
       r.lease_until = null;
-      if (Number(r.failures) >= Number(cap)) { r.status = "failed"; r.error = err; r.finished_at = nowIso(); }
+      // A2 — the comparator is READ from the statement. `>=` vs `>` is an off-by-one in the cap,
+      // and computing it here meant the fake, not the SQL, decided when a job became terminal.
+      const gte = /failures \+ 1 >= \?/.test(text);
+      const terminal = gte ? Number(r.failures) >= Number(cap) : Number(r.failures) > Number(cap);
+      if (terminal) { r.status = "failed"; r.error = err; r.finished_at = nowIso(); }
       return Promise.resolve([{ failures: r.failures, status: r.status }]);
     }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
       const [step, progress, id, runner] = values as [string, string, string, string | null];
       const r = find(id);
       if (r && r.status === "running" && owns(text, r, runner)) {
-        r.step = step; r.progress = progress; r.lease_until = null; r.updated_at = nowIso();
+        // A3 — release the lease only if the statement does.
+        r.step = step; r.progress = progress; r.updated_at = nowIso();
+        if (/lease_until = NULL/.test(text)) r.lease_until = null;
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -115,7 +130,10 @@ vi.mock("@/lib/db", () => {
       // Refuter item 3: `AND status = 'running'`, so a cancel that landed mid-step wins.
       const guarded = /AND status = 'running'/.test(text);
       if (r && (!guarded || r.status === "running") && owns(text, r, runner)) {
-        r.status = "done"; r.result = result; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
+        r.status = "done"; r.result = result; r.finished_at = nowIso();
+        if (/lease_until = NULL/.test(text)) r.lease_until = null;
+        // A4 — clear the owner only if the statement clears it.
+        if (/lease_owner = NULL/.test(text)) r.lease_owner = null;
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -170,6 +188,7 @@ const T = await import("@/lib/jobs/types");
 const { KIND_BY_NAME, JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
 const { planPieces, STITCH_PIECE_MS } = await import("@/lib/jobs/kinds/stitch");
 const ALLS = new Set(["read", "invoke", "write"] as const) as ReadonlySet<"read" | "invoke" | "write">;
+type JobKindT = import("@/lib/jobs/types").JobKind;
 /**
  * Fix-up 5 — `runner` is required on every claim and every write, so a test that wants a step to
  * land must name the runner that claimed it. `step()` keeps the two in sync; passing a DIFFERENT
@@ -252,8 +271,10 @@ describe("claim", () => {
 // ---------------------------------------------------------------------------
 
 describe("runOneStep", () => {
-  const fakeKind = (impl: () => Promise<T.StepOutcome>) => {
-    const k: T.JobKind = { name: "fake", first: "one", scope: "invoke", parseArgs: () => ({}), run: impl };
+  // `T` is a runtime import, so its members are values, not a type namespace — the types come
+  // from the module's own type position. (Surfaced by the new test-tree typecheck, fix-up 6.)
+  const fakeKind = (impl: JobKindT["run"]) => {
+    const k: JobKindT = { name: "fake", first: "one", scope: "invoke", parseArgs: () => ({}), run: impl };
     KIND_BY_NAME.set("fake", k);
     return k;
   };
@@ -610,5 +631,106 @@ describe("item 4 — the cap is lifetime", () => {
     const src = readFileSync("lib/jobs/types.ts", "utf8");
     const block = src.slice(0, src.indexOf("export const MAX_FAILURES"));
     expect(block).toMatch(/LIFETIME AND IS NEVER RESET/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-up 6 item 3 — one test per clause the Refuter proved could be deleted with
+// the whole suite green. Each asserts the PROPERTY the clause exists to provide.
+// ---------------------------------------------------------------------------
+
+describe("mutation survivors (A1–A6): every clause of the claim and the writes is load-bearing", () => {
+  const kindThatThrows = (name: string) => {
+    KIND_BY_NAME.set(name, {
+      name, first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => { throw new Error("boom"); },
+    } as JobKindT);
+  };
+
+  it("A1 — a CANCELLED job's failure counter does not climb (recordFailure's status guard)", async () => {
+    kindThatThrows("a1");
+    queue({ kind: "a1" });
+    const claimed = (await store.claimJobs(1, T.LEASE_MS, "r1"))[0]!;
+    // The cancel lands before the step's failure is recorded.
+    await store.cancelJob("job_0");
+    await runner.runOneStep(claimed, "r1");
+    const row = await store.readJob("job_0");
+    expect(row!.status, "the cancel must stand").toBe("cancelled");
+    expect(row!.failures, "a cancelled job must not accumulate failures").toBe(0);
+  });
+
+  it("A2 — the cap fires at exactly MAX_FAILURES, not one later (the >= comparison)", async () => {
+    kindThatThrows("a2");
+    queue({ kind: "a2" });
+    for (let k = 0; k < T.MAX_FAILURES; k++) {
+      const c = await store.claimJobs(1, T.LEASE_MS, `r${k}`);
+      if (!c.length) break;
+      await runner.runOneStep(c[0]!, `r${k}`);
+    }
+    const row = await store.readJob("job_0");
+    expect(row!.failures, "exactly the cap, not one more").toBe(T.MAX_FAILURES);
+    expect(row!.status, "terminal AT the cap — `>` instead of `>=` would leave it running").toBe("failed");
+    expect(await store.claimJobs(1, T.LEASE_MS, "rZ"), "and it is not claimable again").toHaveLength(0);
+  });
+
+  it("A3 — after a step the lease is released, so the next claim can take the job", async () => {
+    KIND_BY_NAME.set("a3", {
+      name: "a3", first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => T.nextStep("two", {}),
+    } as JobKindT);
+    queue({ kind: "a3" });
+    const c = (await store.claimJobs(1, T.LEASE_MS, "r1"))[0]!;
+    await runner.runOneStep(c, "r1");
+    const row = await store.readJob("job_0");
+    expect(row!.status).toBe("running");
+    expect(row!.lease_until, "saveStep must release the lease").toBeNull();
+    // The property that release exists for: the very next claim takes it, with no waiting.
+    const again = await store.claimJobs(1, T.LEASE_MS, "r2");
+    expect(again.map((j) => j.id), "a released row must be immediately claimable").toContain("job_0");
+  });
+
+  it("A4 — a finished job holds no owner, so nothing can be written to it afterwards", async () => {
+    KIND_BY_NAME.set("a4", {
+      name: "a4", first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => T.doneWith({ ok: 1 }),
+    } as JobKindT);
+    queue({ kind: "a4" });
+    const c = (await store.claimJobs(1, T.LEASE_MS, "r1"))[0]!;
+    await runner.runOneStep(c, "r1");
+    const row = await store.readJob("job_0");
+    expect(row!.status).toBe("done");
+    expect(row!.lease_owner, "finishJob must release the owner").toBeNull();
+    // The property: the runner that finished it cannot then write to it again.
+    expect(await store.failJob("job_0", "late", "r1")).toBe(0);
+    expect((await store.readJob("job_0"))!.status).toBe("done");
+  });
+
+  it("A5 — the claim is FIFO: the oldest queued job is taken first", async () => {
+    // Inserted newest-first on purpose, so an unordered claim would take the wrong one.
+    const base = Date.parse("2026-09-12T07:00:00.000Z");
+    TABLE.length = 0;
+    for (const [id, t] of [["job_new", base + 5_000], ["job_mid", base + 1_000], ["job_old", base]] as const) {
+      TABLE.push({
+        id, kind: "stitch", args: "{}", status: "queued", step: null, progress: "{}", result: null,
+        error: null, actor: null, created_at: new Date(t).toISOString(), started_at: null,
+        updated_at: nowIso(), finished_at: null, lease_until: null, lease_owner: null, attempts: 0, failures: 0,
+      });
+    }
+    const got = await store.claimJobs(1, T.LEASE_MS, "r1");
+    expect(got.map((j) => j.id), "without ORDER BY created_at this takes whatever the table yields").toEqual(["job_old"]);
+    const next = await store.claimJobs(1, T.LEASE_MS, "r2");
+    expect(next.map((j) => j.id)).toEqual(["job_mid"]);
+  });
+
+  it("A6 — the claim stamps a lease of exactly LEASE_MS, by value", async () => {
+    queue();
+    const got = await store.claimJobs(1, T.LEASE_MS, "r1");
+    // Not "a second claim finds nothing" — the VALUE. Widening make_interval to an hour would
+    // leave that weaker assertion green; this one reads what was actually stored.
+    expect(Date.parse(got[0]!.lease_until!) - NOW).toBe(T.LEASE_MS);
+    // And the statement asks for it in seconds, from the parameter, not a literal.
+    const c = calls.find((x) => /WITH claimable AS/.test(x.text))!;
+    expect(c.text).toMatch(/make_interval\(secs => \?\)/);
+    expect(c.values).toContain(Math.round(T.LEASE_MS / 1000));
   });
 });

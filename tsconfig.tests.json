@@ -1,0 +1,43 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "lib/**/*.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.tsx",
+    "next-env.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tests/e2e",
+    "tests/unit/audio-join-service.test.ts",
+    "tests/unit/bench-commands.test.ts",
+    "tests/unit/bench-stitch.test.ts",
+    "tests/unit/ended-disagrees-monitor.test.ts",
+    "tests/unit/fuse-arms.test.ts",
+    "tests/unit/fuse-report.test.ts",
+    "tests/unit/fuse-scratch-write.test.ts",
+    "tests/unit/join-format.test.ts",
+    "tests/unit/llm-provider-truth.test.ts",
+    "tests/unit/mcp-diff-room-install-states.test.ts",
+    "tests/unit/mcp-s3.test.ts",
+    "tests/unit/room-controls.test.ts",
+    "tests/unit/room-install-assign-route.test.ts",
+    "tests/unit/room-install-audio-input.test.ts",
+    "tests/unit/room-install-b2.test.ts",
+    "tests/unit/room-install-card.test.ts",
+    "tests/unit/room-install-reason-route.test.ts",
+    "tests/unit/room-install-update.test.ts",
+    "tests/unit/room-release-route.test.ts",
+    "tests/unit/rooms-live.test.ts",
+    "tests/unit/scratch-room-hidden.test.ts",
+    "tests/unit/speaker-clusters.test.ts",
+    "tests/unit/speech-turns-k5.test.ts",
+    "tests/unit/speech-turns.test.ts",
+    "tests/unit/tier2-detail-fleet-listchanged.test.ts",
+    "tests/unit/tier2-mcp-guards.test.ts",
+    "tests/unit/warehouse-join.test.ts"
+  ]
+}

@@ -34,27 +34,39 @@ vi.mock("@/lib/db", () => {
       TABLE.push(row); return Promise.resolve([row]);
     }
     if (/WITH claimable AS/.test(text)) {
+      const runner = (values[2] ?? null) as string | null;
       const picked = TABLE.filter((r) => r.status === "queued" ||
         (r.status === "running" && (r.lease_until === null || Date.parse(String(r.lease_until)) < NOW)))
         .slice(0, Number(values[0] ?? 3));
       for (const r of picked) { r.status = "running"; r.attempts = Number(r.attempts) + 1;
-        r.lease_until = new Date(NOW + 240_000).toISOString(); }
+        r.lease_until = new Date(NOW + 240_000).toISOString(); r.lease_owner = runner; }
       return Promise.resolve(picked.map((r) => ({ ...r })));
     }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
-      const [step, progress, id] = values as [string, string, string];
-      const r = find(id); if (r && r.status === "running") { r.step = step; r.progress = progress; r.lease_until = null; }
+      const [step, progress, id, runner] = values as [string, string, string, string | null];
+      const r = find(id);
+      if (r && r.status === "running" && owns(text, r, runner)) {
+        r.step = step; r.progress = progress; r.lease_until = null;
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET status = 'done'/.test(text)) {
-      const [result, id] = values as [string, string];
-      const r = find(id); if (r && r.status === "running") { r.status = "done"; r.result = result; r.lease_until = null; r.finished_at = nowIso(); }
+      const [result, id, runner] = values as [string, string, string | null];
+      const r = find(id);
+      if (r && r.status === "running" && owns(text, r, runner)) {
+        r.status = "done"; r.result = result; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET status = 'failed'/.test(text)) {
-      const [err, id] = values as [string, string];
+      const [err, id, runner] = values as [string, string, string | null];
       const r = find(id);
-      if (r && r.status === "running") { r.status = "failed"; r.error = err; r.lease_until = null; r.finished_at = nowIso(); return Promise.resolve([{ id: r.id }]); }
+      if (r && r.status === "running" && owns(text, r, runner)) {
+        r.status = "failed"; r.error = err; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
@@ -99,15 +111,27 @@ import { ToolScopeError } from "@/lib/mcp/registry";
 const tool = (n: string) => JOB_TOOLS.find((t) => t.name === n)!;
 const readCtx = { origin: "https://x", actor: "mcp:watcher", scopes: new Set(["read"]) as ReadonlySet<"read" | "invoke" | "write"> };
 
+/**
+ * Fix-up 6 item 1 — THE PRODUCTION CALL SHAPE. `runner` is required on every claim and every
+ * write since Fix-up 5, and this file was still calling `runOneStep(job)` with none: every write
+ * then matched zero rows, the runner reported `lease_lost` throughout, and the four assertions
+ * about a completed transcription were being satisfied by the fake's own mutations rather than by
+ * the flow they describe. A fresh runner id per claim, as `runClaimedBatch` mints one.
+ */
+let RUNNER_N = 0;
 async function runToDone() {
   const j = await insertJob({ id: newJobId(), kind: "transcribe_range", args: {
     session_id: "sess_1", start: Date.parse("2026-09-12T06:01:00.000Z"),
     end: Date.parse("2026-09-12T06:04:00.000Z"), source: "primary", dry_run: false,
   }, actor: "mcp:operator-v" });
   for (let i = 0; i < 5; i++) {
-    const c = await claimJobs(3);
+    const runner = `runner-${++RUNNER_N}`;
+    const c = await claimJobs(3, 240_000, runner);
     if (!c.length) break;
-    const rep = await runOneStep(c[0]!);
+    const rep = await runOneStep(c[0]!, runner);
+    // A lease_lost here would mean the harness, not the code, is wrong — say so loudly rather
+    // than looping until the assertions below quietly pass on a half-run job.
+    expect(rep.outcome, `unexpected lease_lost at step ${c[0]!.step ?? "start"}`).not.toBe("lease_lost");
     if (rep.outcome === "done" || rep.outcome === "failed") break;
   }
   return (await readJob(j.id))!;
@@ -235,5 +259,19 @@ describe("(e2) the error channel is gated on scope, not on the write side behavi
     row.error = null as unknown as string;
     const out = await tool("scribe_job_status").handler({ job_id: "job_seeded" }, readCtx as never);
     expect((out as Record<string, unknown>).error_code).toBeNull();
+  });
+});
+
+describe("(e3) both tools' descriptions match the code that enforces the gate", () => {
+  it("scribe_job_list names error_code and the invoke gate, as scribe_job_status does", () => {
+    const list = tool("scribe_job_list").description;
+    const status = tool("scribe_job_status").description;
+    for (const d of [list, status]) {
+      expect(d).toMatch(/error_code/);
+      expect(d).toMatch(/unknown_error/);
+      expect(d).toMatch(/invoke/);
+    }
+    // The one claim a description must not make is one the code does not honour.
+    expect(list).not.toMatch(/never returned to any caller/i);
   });
 });

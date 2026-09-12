@@ -53,13 +53,19 @@ vi.mock("@/lib/db", () => {
           if (!honoursLease) return true; // a store that dropped the lease check takes it anyway
           return r.lease_until === null || Date.parse(String(r.lease_until)) < NOW;
         })
-        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+        // A5 — FIFO only if the statement asks for it. Sorting on the fake's own authority meant
+        // deleting ORDER BY from the claim changed nothing.
+        .sort((a, b) => (/ORDER BY created_at/.test(text)
+          ? String(a.created_at).localeCompare(String(b.created_at))
+          : 0))
         .slice(0, limit);
       for (const r of picked) locked.add(String(r.id));
       return (async () => {
         await Promise.resolve();
         for (const r of picked) {
           r.status = "running"; r.attempts = Number(r.attempts) + 1;
+          // A6 — the expiry comes from the statement's own interval parameter, so widening
+          // `make_interval(secs => ?)` changes what the fake stores and is observable.
           r.lease_until = new Date(NOW + secs * 1000).toISOString();
           r.lease_owner = runner;
           r.started_at = r.started_at ?? nowIso(); r.updated_at = nowIso();
@@ -72,16 +78,25 @@ vi.mock("@/lib/db", () => {
     if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
       const [step, progress, cap, , err, , id, runner] = values as [string, string, number, number, string, number, string, string | null];
       const r = find(id);
-      if (!r || r.status !== "running" || !owns(text, r, runner)) return Promise.resolve([]);
+      // A1 — the `AND status = 'running'` clause is READ from the statement, like the done/failed
+      // branches beside it. Hardcoding it meant deleting it from store.ts changed nothing.
+      const rfGuarded = /AND status = 'running'/.test(text);
+      if (!r || (rfGuarded && r.status !== "running") || !owns(text, r, runner)) return Promise.resolve([]);
       r.failures = Number(r.failures) + 1; r.step = step; r.progress = progress; r.lease_until = null; r.lease_owner = null;
-      if (Number(r.failures) >= Number(cap)) { r.status = "failed"; r.error = err; r.finished_at = nowIso(); }
+      // A2 — the comparator is READ from the statement. `>=` vs `>` is an off-by-one in the cap,
+      // and computing it here meant the fake, not the SQL, decided when a job became terminal.
+      const gte = /failures \+ 1 >= \?/.test(text);
+      const terminal = gte ? Number(r.failures) >= Number(cap) : Number(r.failures) > Number(cap);
+      if (terminal) { r.status = "failed"; r.error = err; r.finished_at = nowIso(); }
       return Promise.resolve([{ failures: r.failures, status: r.status }]);
     }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
       const [step, progress, id, runner] = values as [string, string, string, string | null];
       const r = find(id);
       if (r && owns(text, r, runner) && (!/AND status = 'running'/.test(text) || r.status === "running")) {
-        r.step = step; r.progress = progress; r.lease_until = null; r.updated_at = nowIso();
+        // A3 — release the lease only if the statement does.
+        r.step = step; r.progress = progress; r.updated_at = nowIso();
+        if (/lease_until = NULL/.test(text)) r.lease_until = null;
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -90,7 +105,10 @@ vi.mock("@/lib/db", () => {
       const [result, id, runner] = values as [string, string, string | null];
       const r = find(id);
       if (r && owns(text, r, runner) && (!/AND status = 'running'/.test(text) || r.status === "running")) {
-        r.status = "done"; r.result = result; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
+        r.status = "done"; r.result = result; r.finished_at = nowIso();
+        if (/lease_until = NULL/.test(text)) r.lease_until = null;
+        // A4 — clear the owner only if the statement clears it.
+        if (/lease_owner = NULL/.test(text)) r.lease_owner = null;
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
