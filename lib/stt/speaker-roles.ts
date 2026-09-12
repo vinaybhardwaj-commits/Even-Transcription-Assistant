@@ -50,6 +50,23 @@ export const noRole = (reason: NoRoleReason): SpanRole =>
 export const UNATTRIBUTED: SpanRole = noRole("no_match");
 
 /**
+ * THE ONE TEST FOR A USABLE MATCH CONFIDENCE, shared by every gate that reads the field.
+ *
+ * There were two, and they disagreed on exactly one value. `roleForSpeaker` required
+ * `Number.isFinite`; `stitchSpeakers` accepted anything with `typeof === "number"`, which NaN
+ * satisfies. So a NaN confidence was refused a role by one gate and admitted as a named identity by
+ * the other, and since `applyStitch` has no try/catch it would surface as a CHECK violation from
+ * Postgres — a database constraint doing a code gate's job, which is the wrong order. The database
+ * is the tripwire for what the code failed to think of; it is not the first line.
+ *
+ * Range, not just finiteness: a cosine outside [0,1] is not a weak match, it is a bug, and 0085's
+ * `room_turn_speaker_confidence_ck` says so. Refusing it here means that check never has to fire.
+ */
+export function usableConfidence(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+}
+
+/**
  * PURE. The role for one speaker index, from the service's own match and nothing else.
  *
  * A speaker carries `clinician_id` and `confidence` if and only if a centroid matched at or above
@@ -59,7 +76,7 @@ export const UNATTRIBUTED: SpanRole = noRole("no_match");
 export function roleForSpeaker(speaker: DiarizeSpeaker | undefined): SpanRole {
   if (!speaker) return UNATTRIBUTED;
   const id = typeof speaker.clinician_id === "string" ? speaker.clinician_id.trim() : "";
-  const conf = typeof speaker.confidence === "number" && Number.isFinite(speaker.confidence) ? speaker.confidence : null;
+  const conf = usableConfidence(speaker.confidence) ? speaker.confidence : null;
   if (!id || conf === null) return UNATTRIBUTED;
   return { role: "clinician", clinician_id: id, match_confidence: conf, no_role_reason: null };
 }

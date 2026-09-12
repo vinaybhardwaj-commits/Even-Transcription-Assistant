@@ -21,6 +21,7 @@
 import { LEASE_MS } from "@/lib/jobs/types";
 import { DIARIZE_IO_MARGIN_MS, DIARIZE_REALTIME_FACTOR } from "./diarize-budget";
 import { sliceStart, sliceEnd, type SliceStartMs, type SliceEndMs } from "./window-bounds";
+import { usableConfidence } from "./speaker-roles";
 
 /** One slice of audio. 120 s keeps a step inside its lease with room to spare. */
 export const SLICE_MS = 120_000;
@@ -210,7 +211,10 @@ export function stitchSpeakers(
     // The identity's clinician is whichever member the SERVICE named. If two members disagree the
     // identity is left unnamed: two different enrolled voices matched into one cluster means the
     // cluster is wrong, and picking one of them would be guessing which.
-    const named = g.members.filter((m) => typeof m.clinician_id === "string" && m.clinician_id && typeof m.confidence === "number");
+    // ONE PREDICATE, shared with roleForSpeaker. This used to read `typeof === "number"`, which
+    // NaN passes — so a NaN confidence was refused a role by one gate and turned into a named
+    // identity by this one, reaching Postgres as a CHECK violation instead of a code refusal.
+    const named = g.members.filter((m) => typeof m.clinician_id === "string" && m.clinician_id.trim() !== "" && usableConfidence(m.confidence));
     const ids = new Set(named.map((m) => m.clinician_id));
     const clinician = ids.size === 1 ? (named[0]!.clinician_id as string) : null;
     const sourceConf = ids.size === 1 ? Math.min(...named.map((m) => m.confidence as number)) : null;
@@ -223,11 +227,17 @@ export function stitchSpeakers(
     const weakestNamedHop = namedHops.length ? Math.min(...namedHops) : null;
     g.members.forEach((m, i) => {
       const ownHop = g.cosines[i] ?? 0;
-      const usable = clinician !== null && sourceConf !== null && weakestNamedHop !== null;
+      const haveClaim = clinician !== null && sourceConf !== null && weakestNamedHop !== null;
+      // A NAME AND ITS CONFIDENCE TRAVEL TOGETHER OR NOT AT ALL. 0085 refuses role='clinician'
+      // without a confidence, so a claim whose number does not survive `usableConfidence` — a NaN
+      // hop, a cosine outside [0,1] — drops the NAME too rather than reaching the database as a
+      // constraint violation. The code refuses; the CHECK stays a tripwire.
+      const conf = haveClaim ? Math.min(sourceConf, weakestNamedHop, ownHop) : null;
+      const ok = conf !== null && usableConfidence(conf);
       out.set(key(m.slice, m.idx), {
         cluster_id: g.id,
-        clinician_id: clinician,
-        match_confidence: usable ? Math.min(sourceConf, weakestNamedHop, ownHop) : null,
+        clinician_id: ok ? clinician : null,
+        match_confidence: ok ? conf : null,
       });
     });
   }

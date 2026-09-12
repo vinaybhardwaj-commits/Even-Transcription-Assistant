@@ -54,11 +54,24 @@ const clusterId = () => `sc_${Math.random().toString(36).slice(2, 12)}`;
 
 type Logger = (msg: string) => void;
 
-async function safeRead<T>(what: string, fallback: T, log: Logger, run: () => Promise<T>): Promise<{ ok: boolean; value: T }> {
+/**
+ * A read that degrades to empty rather than throwing — and now SAYS SO where the caller can see it.
+ *
+ * The sink was optional before: it logged and returned the fallback, so a failed read of a window's
+ * turns produced an empty list, `bindTurns` returned early, `turns_bound` stayed 0, `errors` stayed
+ * empty, and the route answered 200. Exactly the shape of the defect this round is fixing, reached
+ * through a different door — and invisible to the route's new failure check, which reads `errors`.
+ *
+ * `sink` is REQUIRED at every call site rather than optional, so a future read cannot quietly
+ * rejoin the silent set by forgetting it.
+ */
+async function safeRead<T>(what: string, fallback: T, log: Logger, sink: string[], run: () => Promise<T>): Promise<{ ok: boolean; value: T }> {
   try {
     return { ok: true, value: await run() };
   } catch (e) {
-    log(`[room-diarize] read failed (${what}): ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty, nothing written`);
+    const msg = `[room-diarize] read failed (${what}): ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty, nothing written`;
+    log(msg);
+    sink.push(msg);
     return { ok: false, value: fallback };
   }
 }
@@ -124,7 +137,7 @@ export async function runRoomDiarizePass(
   // INFERRED SQL #1 — closed windows with verified audio, a room_day, a joined clip, and no
   // diarize row yet. `clip_r2_key IS NOT NULL` is what "verified audio" means operationally here:
   // the clip exists because the drain joined it, and the drain only joins covering chunks.
-  const windows = await safeRead<DiarizeWindowRow[]>("bench_window scan", [], log, async () =>
+  const windows = await safeRead<DiarizeWindowRow[]>("bench_window scan", [], log, result.errors, async () =>
     (await sql`
       SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key
         FROM bench_window w
@@ -249,7 +262,7 @@ async function writeClusters(
   // counts from the ledger. LEFT JOIN so a cluster with no ledger rows (an older writer, a merge)
   // still participates rather than vanishing from the match.
   const existing = await safeRead<Array<{ id: string; centroid: unknown; n: number }>>(
-    `clusters for ${w.room_day_id}`, [], log, async () =>
+    `clusters for ${w.room_day_id}`, [], log, result.errors, async () =>
       (await sql`
         SELECT c.id, c.centroid, COALESCE(m.n, 0)::int AS n
           FROM speaker_cluster c
@@ -349,7 +362,7 @@ async function bindTurns(
   // numbers, and comparing them as text would make 1755576000000 and 1.755576e12 different
   // windows. A row with no window in its payload yields NULL and is left alone.
   const turns = await safeRead<Array<{ source_ref: string; start_ms: string | number; end_ms: string | number }>>(
-    `turn cues for ${w.id}`, [], log, async () =>
+    `turn cues for ${w.id}`, [], log, result.errors, async () =>
       (await sql`
         SELECT source_ref,
                (payload->>'start_ms')::bigint AS start_ms,
@@ -374,9 +387,23 @@ async function bindTurns(
   for (const b of bindTurnsToSpeakers(onClock, spans)) {
     try {
       // INFERRED SQL #7 — idempotent per (window, turn).
+      //
+      // ─── role AND no_role_reason ARE MANDATORY SINCE 0085 ────────────────────────────────
+      // This writer predates that migration and sent neither, which `room_turn_speaker_no_role_ck`
+      // — `(role IS NULL) = (no_role_reason IS NOT NULL)` — rejects outright: both NULL makes the
+      // equality FALSE and EVERY row bounced. Verified in a real postgres.
+      //
+      // `no_match` is the honest value here and not a placeholder. This path never attempts
+      // identification at all: it binds a turn to whichever cluster held most of it and stores no
+      // clinician. So every row it writes is unnamed, which is exactly what `role NULL` +
+      // `no_match` says. It also means the C2 stitch cannot touch these rows — that predicate is
+      // scoped to the per-slice cluster keys this writer does not use — so a legacy row cannot be
+      // promoted by machinery that never measured it.
       await sql`
-        INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, created_at)
-        VALUES (${w.id}, ${b.source_ref}, ${b.speaker_idx}, ${byIdx.get(b.speaker_idx) ?? null}, ${b.overlap_ms}, ${w.room_day_id}, NOW())
+        INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
+                                       role, no_role_reason, created_at)
+        VALUES (${w.id}, ${b.source_ref}, ${b.speaker_idx}, ${byIdx.get(b.speaker_idx) ?? null}, ${b.overlap_ms}, ${w.room_day_id},
+                NULL, 'no_match', NOW())
         ON CONFLICT (window_id, source_ref) DO NOTHING
       `;
       result.turns_bound++;

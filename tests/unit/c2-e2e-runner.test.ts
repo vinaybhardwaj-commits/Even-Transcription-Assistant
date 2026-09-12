@@ -151,15 +151,18 @@ function seed(): void {
   exec(`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES ${rows.join(",")};`);
 }
 
-describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres", () => {
-  beforeAll(() => {
-    startPg();
-    G.__pgsql = makeSql((q) => QUERIES.push(q));
-    schema();
-    seed();
-  }, 180_000);
-  afterAll(() => stopPg());
+// ONE CONTAINER FOR THE FILE. Every suite below needs the same schema, and starting a postgres
+// per describe would triple the run for no extra proof.
+beforeAll(() => {
+  if (!HAVE_DOCKER) return;
+  startPg();
+  G.__pgsql = makeSql((q) => QUERIES.push(q));
+  schema();
+  seed();
+}, 180_000);
+afterAll(() => { if (HAVE_DOCKER) stopPg(); });
 
+describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres", () => {
   it("runs every slice step then the stitch, writes rows, and stitches some of them", async () => {
     const { insertJob, claimJobs } = await import("@/lib/jobs/store");
     const { runOneStep } = await import("@/lib/jobs/runner");
@@ -224,4 +227,63 @@ describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, rea
       else expect(r.no_role_reason, "an unnamed row always says why").toBeTruthy();
     }
   }, 300_000);
+});
+
+describe.skipIf(!HAVE_DOCKER)("R4 D1 — the legacy writer's rows land, and a rejected write cannot read as success", () => {
+  it("the legacy INSERT satisfies 0085 as shipped, and the pre-0085 shape is refused", async () => {
+    const sql = G.__pgsql;
+    await sql`DELETE FROM room_turn_speaker WHERE window_id = 'bw_legacy'`;
+
+    // THE SHIPPED STATEMENT, copied in shape from lib/stt/diarize-job.ts's bindTurns.
+    await sql`
+      INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
+                                     role, no_role_reason, created_at)
+      VALUES ('bw_legacy', 'sess|0|1000|w', 0, 'sc_abc', 900, 'rd_1', NULL, 'no_match', NOW())
+      ON CONFLICT (window_id, source_ref) DO NOTHING
+    `;
+    const landed = (await sql`SELECT source_ref, role, no_role_reason, clinician_id FROM room_turn_speaker WHERE window_id = 'bw_legacy'`) as Array<Record<string, unknown>>;
+    expect(landed, "the legacy path must be able to write at all").toHaveLength(1);
+    expect(landed[0]!.role).toBeNull();
+    expect(landed[0]!.no_role_reason, "it never attempts identification, so no_match is the honest value").toBe("no_match");
+    expect(landed[0]!.clinician_id, "and it may never name anyone").toBeNull();
+
+    // THE PRE-FIX SHAPE: neither column sent. no_role_ck is (role IS NULL) = (reason IS NOT NULL);
+    // both NULL makes that FALSE and every row bounced — silently, because the caller caught it.
+    let refused = "";
+    try {
+      await sql`
+        INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, created_at)
+        VALUES ('bw_legacy', 'sess|0|2000|w', 0, 'sc_abc', 900, 'rd_1', NOW())
+      `;
+    } catch (e) { refused = String(e); }
+    expect(refused, "the old statement must still be rejected by the real constraint").toContain("room_turn_speaker_no_role_ck");
+  }, 120_000);
+
+  it("a pass with errors is NOT success-shaped — the route returns a non-2xx", async () => {
+    // Drive the real route handler with a pass that reports failures, exactly as a rejected write
+    // would. The bug was that `errors` was populated and the route returned 200 with turns_bound: 0
+    // — indistinguishable from a healthy quiet pass.
+    vi.resetModules();
+    vi.doMock("@/lib/stt/diarize-job", () => ({
+      DIARIZE_BATCH_LIMIT: 4,
+      runRoomDiarizePass: async () => ({
+        enabled: true, scanned: 1, diarized: 1, failed: 0,
+        clusters_created: 0, clusters_updated: 0, turns_bound: 0, dry: false,
+        errors: ["[room-diarize] bw_x: turn binding failed: violates check constraint"],
+      }),
+    }));
+    // The GET door authorises on the cron header alone. The POST door reads an admin cookie,
+    // which needs a Next request scope this harness does not have — and the branch under test is
+    // the shared `run`, reached identically by both.
+    const { GET } = await import("@/app/api/admin/diarize-windows/route");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } });
+    const res = await GET(req);
+    expect(res.status, "a caught exception must not produce success-shaped output").not.toBe(200);
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    expect(body.error?.code).toBe("PIPELINE_FAILED");
+    expect(body.error?.message, "and it must say the zero is not a clean zero").toMatch(/turns_bound=0/);
+    vi.doUnmock("@/lib/stt/diarize-job");
+    vi.resetModules();
+  }, 60_000);
 });

@@ -577,3 +577,41 @@ describe("R3 close-out — the ten adversarial layouts", () => {
     expect(aggregate).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("R4 D5 — one predicate for confidence, and the code refuses before the database does", () => {
+  it("usableConfidence is the single gate: NaN, out-of-range and non-numbers all fail it", async () => {
+    const { usableConfidence } = await import("@/lib/stt/speaker-roles");
+    for (const bad of [Number.NaN, Infinity, -Infinity, -0.01, 1.01, "0.8", null, undefined, {}]) {
+      expect(usableConfidence(bad), `${String(bad)} must not pass`).toBe(false);
+    }
+    for (const good of [0, 0.65, 1]) expect(usableConfidence(good)).toBe(true);
+  });
+
+  it("a NaN confidence is refused by BOTH gates — it used to pass one and fail the other", async () => {
+    const { roleForSpeaker } = await import("@/lib/stt/speaker-roles");
+    const { stitchSpeakers } = await import("@/lib/stt/diarize-slicing");
+    const nan = { idx: 0, label: "x", type: "clinician", clinician_id: "doc_x", confidence: Number.NaN } as never;
+    // Gate 1 — the per-speaker role.
+    expect(roleForSpeaker(nan).role).toBeNull();
+    expect(roleForSpeaker(nan).no_role_reason).toBe("no_match");
+    // Gate 2 — the cross-slice identity. This one used to accept NaN and hand it to an UPDATE,
+    // where 0085's confidence CHECK would have refused it: a database doing a code gate's job.
+    const vec = Buffer.from(new Float32Array([1, 0]).buffer).toString("base64");
+    const ids = stitchSpeakers([{ slice: 0, idx: 0, embedding_base64: vec, clinician_id: "doc_x", confidence: Number.NaN }]);
+    const id = ids.get("0:0")!;
+    expect(id.clinician_id, "no name may be claimed on an unusable number").toBeNull();
+    expect(id.match_confidence).toBeNull();
+  });
+
+  it("applyStitch never issues an UPDATE for an identity with no usable claim", async () => {
+    const seen: string[] = [];
+    vi.resetModules();
+    vi.doMock("@/lib/db", () => ({ sql: async (s: TemplateStringsArray) => { seen.push(s.join("?")); return []; } }));
+    const { applyStitch } = await import("@/lib/stt/diarize-window");
+    const n = await applyStitch("bw_1", new Map([["0:0", { cluster_id: "rsc_0", clinician_id: null, match_confidence: null }]]));
+    expect(n).toBe(0);
+    expect(seen, "a claimless identity must not reach the database at all").toHaveLength(0);
+    vi.doUnmock("@/lib/db");
+    vi.resetModules();
+  });
+});

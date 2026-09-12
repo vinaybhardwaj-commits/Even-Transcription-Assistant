@@ -67,6 +67,24 @@ async function run(req: NextRequest) {
   // `dry` diarizes and stores, but clusters nothing — the data the threshold is chosen from.
   const dry = p.get("dry") === "1";
   const result = await runRoomDiarizePass({ limit, dry, origin: req.nextUrl.origin });
+  // ─── A CAUGHT EXCEPTION MUST NOT PRODUCE SUCCESS-SHAPED OUTPUT ─────────────────────────────
+  // `runRoomDiarizePass` never throws: it catches per-window and per-row failures, appends them to
+  // `errors`, and returns. Handing that straight to respondOk produced a 200 whose body read
+  // `turns_bound: 0` — indistinguishable from "there was simply nothing to bind", which is the
+  // shape a healthy quiet pass has. Every row of every window was being REJECTED by an 0085 CHECK
+  // and the route said fine. A failure that looks like a success is worse than a crash, because
+  // nobody goes looking.
+  if (result.errors.length > 0) {
+    // PIPELINE_FAILED is the house code for this shape and maps to 500. Counts only in the
+    // message — the underlying strings can quote a database or a service and this route is read
+    // by a cron, not a person who will redact them. The detail stays in the server log, where
+    // runRoomDiarizePass already put it.
+    return respondError(
+      "PIPELINE_FAILED",
+      `diarize pass had ${result.errors.length} failure(s): scanned=${result.scanned} diarized=${result.diarized} ` +
+      `failed=${result.failed} turns_bound=${result.turns_bound} — turns_bound is NOT a clean zero, rows were refused`,
+    );
+  }
   return respondOk(result);
 }
 
