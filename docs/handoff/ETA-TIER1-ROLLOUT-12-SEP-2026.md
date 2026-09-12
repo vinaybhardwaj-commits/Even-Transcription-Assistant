@@ -13,7 +13,7 @@ Before: 79 applied, last `0080_bench_command_set_audio_input`; 0081 absent. `POS
 `{"applied":["0081_room_states_and_verbs"],"skipped":[…80 rows…],"errored":null}`
 Re-read: 80 applied, `0081_room_states_and_verbs` at **2026-09-12 03:49:40.63966+00**. Beyond the response: `GET /api/admin/bench/fleet` on the migrated preview returns 9 rows with **`degraded: []`** — the Tier 1 fleet SELECT names `state_flags, state_changed_at, expected_device_name, channel_locked`, so an unmigrated database would have failed that section. It did not.
 
-## 4. Promote to production — DONE. **Promote time 2026-09-12T04:07:30Z.**
+## 4. Promote to production — DONE. **Promote 2026-09-12T04:07:30Z (deployment record created); V reports it completing 04:08:50Z — 80 s apart, the record's birth vs. the alias switching over.**
 `dpl_6K9SZodcbyb9ypGwY1fQnc5kEVCf` — `target: production`, `action: promote`, `originalDeploymentId: dpl_BtuavbntQkobFu6AaBhbCiJxBLrr`, sha `eb6884e`, `isRollbackCandidate: true`. A Vercel promote mints a NEW deployment record rather than mutating the original, so `dpl_Btuavbnt…` correctly still reads `target: null` — checking only that record is how two earlier passes read the promote as missing. `/api/health` cache-busted ×3: `sha eb6884e`, region bom1, ok true. Two earlier checks at 03:55Z and 04:05:50Z read `5ff2ae0` because they genuinely preceded the promote.
 
 ## 5. Bus-docs commit — DONE. **Docs commit `24360a7`.**
@@ -28,10 +28,12 @@ Blob: `https://p2rwhyh5dghotpi6.public.blob.vercel-storage.com/room-recorder/Eve
 ## 7. Fleet after the promote (production, 04:10Z) — Slice A LIVE
 `state_flags` and `channel_locked` are now present as fields (they were absent before, which is how the un-promoted server was identified). 9 rows, `degraded: []`.
 **7 of 9 already evaluated to `[]`** — looked at and well: Home Office, OPD 1, OPD 3, OPD 4, OPD 5, OPD 6, Room 4.1. **2 still null** — Cardiology OPD and OPD 7 had not polled yet; null means never evaluated and flips within a poll.
+**Two rooms are not polling — raised here because `state_flags` cannot be read for them.** At 04:15Z the other seven polled 1–5 s ago; **OPD 7 last polled 03:57:09Z (18 min) and Cardiology OPD 04:02:59Z (12 min)**, both BEFORE the 04:07:30Z promote. Their null flags are a SYMPTOM, not a Tier 1 fault: a Mac that does not poll never runs `writeInstallState`, and the promote did not cause it — they went quiet first. This is the offline/`kiosk_not_listening` layer, not the named states, and it wants a look independently of this release.
+
 **Room 4.1 reports `update_channel: stable` (assigned_channel null).** It read `test` at 03:55Z and `stable` at 04:10Z, so it moved during this window — not by anything done here. **0.1.22 therefore reaches Home Office only.** Nothing was forced and no channel was assigned: moving a Mac onto `test` is a decision for V, not the Builder.
 
 ## What V does next
 1. **Rule on Room 4.1.** If it is meant to be a `test` room, assign it `test` (the card's pending line now renders for a `test` assignment — that was this pass's fix-up). Until then only Home Office will take 0.1.22.
 2. Home Office picks 0.1.22 up on its next 6 h check or session end. 0.1.21 has no `check_update_now`, so nothing can or should be forced.
-3. Watch the two null rooms flip to `[]`, and watch for the first real flag.
+3. **Look at OPD 7 and Cardiology OPD** — they stopped polling before the promote and have been silent 18 and 12 minutes against a fleet that polls every few seconds. Their `state_flags` stay null until they poll.
 4. `stable` stays at 0.1.21 until the partition steps.
