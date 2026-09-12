@@ -39,7 +39,22 @@ import type { SttAdapter, SttTranscribeResult } from "../types";
  */
 export const ROUTE_SYNC_MAX_MS = 30_000;
 
-/** Returned when the caller states a duration this transport cannot serve. Named, not a timeout. */
+/**
+ * Returned when the caller states a duration this transport cannot serve.
+ *
+ * IT IS A REFUSAL, AND IT MUST STAY ONE. There is no fallback behind it — not a truncated call,
+ * not a best-effort attempt at the first thirty seconds, not a null result that a caller could
+ * read as "nothing was said". A silent fallback here would produce a partial transcript of a
+ * consultation that reads exactly like a complete one, which is the worst failure this system has.
+ *
+ * ─── C2 WILL REMOVE THE NEED FOR THIS ──────────────────────────────────────────────────────────
+ * The real problem is that `SttAdapter` cannot express submit-and-poll: it is
+ * `transcribe(Buffer) => result`, so an engine whose long form is asynchronous has nowhere to put
+ * that, and the room job calls the router's client directly while using this adapter only for its
+ * DECLARED CAPABILITY (`capabilities.async`). Extending the interface is the FIRST task of Slice
+ * C2, before diarize and emotion exist to work around it. Until then this constant is the seam,
+ * and it is deliberately loud. Do not widen the ceiling here to make a caller's life easier.
+ */
 export const ROUTE_TOO_LONG_FOR_SYNC = "route_sync_limit_exceeded";
 
 export const ROUTE_ADAPTER_KEY = "route";

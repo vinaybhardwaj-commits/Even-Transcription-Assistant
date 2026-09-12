@@ -33,6 +33,10 @@ describe("C1 step 2 — transport by duration", () => {
     expect(out.error, "a named refusal, not a timeout").toContain(ROUTE_TOO_LONG_FOR_SYNC);
     expect(out.original).toBeNull();
     expect(ROUTER.calls, "it must not start a call it cannot finish").toHaveLength(0);
+    // fix-up 4 — a REFUSAL, never a silent fallback. `error` set and no text is the only shape a
+    // caller can read correctly; a null error with a partial transcript would look complete.
+    expect(out.english).toBeNull();
+    expect(out.languageTimeline).toBeNull();
   });
 
   it("a room window (15 minutes) is refused by that rule — the drain's real case", async () => {

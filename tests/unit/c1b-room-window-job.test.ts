@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const DB = vi.hoisted(() => ({
-  runs: [] as Array<{ id: string; window: string; engine: string }>,
+  runs: [] as Array<{ id: string; window: string; engine: string; text?: string; metrics: Record<string, unknown> }>,
   windowState: "closed",
   deletes: 0,
   routing: "route",
@@ -33,7 +33,12 @@ vi.mock("@/lib/db", () => ({
     if (q.includes("FROM stt_engine")) return [{ enabled: true }];
     if (q.includes("DELETE FROM transcription_run")) { DB.deletes += 1; return []; }
     if (q.includes("INSERT INTO transcription_run")) {
-      DB.runs.push({ id: String(v[0]), window: String(v[1]), engine: String(v[2]) });
+      // Keep every bound value so a test can read the row's metrics_json without counting
+      // parameter positions, which differ between the routed insert and the shadow insert.
+      const metricsRaw = v.find((x) => typeof x === "string" && /[{]/.test(x) && /audio_seconds|language_timeline/.test(x));
+      DB.runs.push({ id: String(v[0]), window: String(v[1]), engine: String(v[2]),
+                     text: v.find((x, i) => i > 3 && typeof x === "string" && / /.test(x) && !/[{]/.test(x)) as string | undefined,
+                     metrics: metricsRaw ? JSON.parse(String(metricsRaw)) as Record<string, unknown> : {} });
       return [];
     }
     if (q.includes("UPDATE stt_subject_job")) return [{ attempts: 1 }];
@@ -48,7 +53,10 @@ vi.mock("@/lib/whisper", () => ({
   transcribeWithWhisper: async () => {
     WHISPER.calls += 1;
     return { ok: true, transcript: "whisper words", language: "kn", latency_ms: 120, attempts: 1,
-             segments: [{ start_ms: 0, end_ms: 1000, text: "whisper words" }], engineVersion: "large-v3-turbo" };
+             // The REAL WhisperSegment shape: seconds, not milliseconds. One segment inside the
+    // 120 s shadow bound and one outside it, so the bounding is observable.
+             segments: [{ start_s: 0, end_s: 10, text: "inside the sample" }, { start_s: 300, end_s: 310, text: "outside the sample" }],
+             engineVersion: "large-v3-turbo" };
   },
 }));
 vi.mock("@/lib/bench-join", async (orig) => ({
@@ -211,5 +219,64 @@ describe("C1b — the 300 s ceiling is unreachable by any path", () => {
     expect(DB.runs, "and must write no run").toHaveLength(0);
     vi.doUnmock("@/lib/jobs/submit");
     vi.resetModules();
+  });
+});
+
+
+describe("C1b fix-up 1 — the control run is a BOUNDED SAMPLE, and says so", () => {
+  it("covers only the first SHADOW_WINDOW_MS, and is marked so nobody compares it like for like", async () => {
+    const { SHADOW_WINDOW_MS } = await import("@/lib/stt/room-drain");
+    // Force the sample: rate 1 shadows every window.
+    vi.stubEnv("ETA_ROOM_SHADOW_SAMPLE", "1");
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "router words", language_timeline: [], sec: 5 }];
+    await drive();
+    const shadow = DB.runs.find((r) => r.engine === "whisper");
+    expect(shadow, "a control run must exist at rate 1").toBeTruthy();
+
+    expect(SHADOW_WINDOW_MS).toBe(120_000);
+    // THE MARKING. Three independent keys, because one a reader must notice is one they will miss.
+    expect(shadow!.metrics.shadow_bounded).toBe(true);
+    expect(shadow!.metrics.covers_full_window).toBe(false);
+    expect(shadow!.metrics.shadow_window_ms).toBe(SHADOW_WINDOW_MS);
+
+    // The yield tripwire divides by audio_seconds, so it must be the SAMPLE's duration (120 s),
+    // never the window's (900 s) — otherwise the control looks 7.5x less productive than it is.
+    expect(shadow!.metrics.audio_seconds).toBe(120);
+    expect(shadow!.metrics.full_window_audio_seconds).toBe(900);
+
+    // And the text is actually truncated: the segment at 300 s is outside the bound.
+    expect(shadow!.metrics.segment_count, "only the segment inside 120 s").toBe(1);
+    expect(shadow!.metrics.full_window_segment_count).toBe(2);
+    expect(shadow!.text).toContain("inside the sample");
+    expect(shadow!.text, "a segment past the bound must not be in the control").not.toContain("outside the sample");
+    vi.unstubAllEnvs();
+  });
+
+  it("the ROUTED run is unbounded — only the control is a sample", async () => {
+    vi.stubEnv("ETA_ROOM_SHADOW_SAMPLE", "1");
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "router words", language_timeline: [], sec: 5 }];
+    await drive();
+    const routed = DB.runs.find((r) => r.engine === "route")!;
+    expect(routed.metrics.shadow_bounded).toBeUndefined();
+    expect(routed.metrics.audio_seconds, "the routed run covers the whole window").toBe(900);
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("C1b fix-up 2 — routing is resolved ONCE per job", () => {
+  it("one stt_routing read across the whole job, and the engine step uses what was persisted", async () => {
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "w", language_timeline: [], sec: 1 }];
+    const r = await drive();
+    const reads = DB.log.filter((q) => q.includes("FROM stt_routing")).length;
+    expect(reads, "a second resolution could disagree with the one the shadow was labelled from").toBe(1);
+    expect(r.progress.engine_id, "persisted on the row").toBe("route");
+    expect(DB.runs.find((x) => x.engine === "route"), "and the run was written by it").toBeTruthy();
+  });
+
+  it("if the persisted engine is missing the step refuses — it does not silently re-resolve", async () => {
+    const { roomWindowEngine } = await import("@/lib/stt/room-drain");
+    const out = await roomWindowEngine("bw_1", ACTOR, { clip_r2_key: "clips/joined.webm", decided_language: "kn" });
+    expect(out.ok).toBe(false);
+    expect(out.step).toBe("no_engine");
   });
 });

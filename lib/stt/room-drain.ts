@@ -83,6 +83,21 @@ export function cueWriteFailed(counts: { complete?: boolean }): boolean {
 /** C7 — three attempts, then park with a reason. Never retried again by this module. */
 export const DRAIN_MAX_ATTEMPTS = 3;
 
+/**
+ * C1b fix-up 1 — how much of the window the CONTROL run covers. Two minutes, deliberately.
+ *
+ * The shadow exists to compare engines, not to produce a second production transcript of every
+ * sampled window. Two minutes is long enough to hold several exchanges of a consultation — enough
+ * to see whether an engine is mis-detecting the language or dropping code-mixed speech — and short
+ * enough that the row is obviously a sample rather than a rival transcript.
+ *
+ * Every shadow row carries this value as `shadow_window_ms` alongside `shadow_bounded: true` and
+ * `covers_full_window: false`, because a bounded row compared against a 900 s routed run as if
+ * they were like for like would make the routed engine look seven times more productive on any
+ * chars-per-audio-second measure. The tripwire divides by the SAMPLE's own audio_seconds.
+ */
+export const SHADOW_WINDOW_MS = 120_000;
+
 /** C3 — the probe length. A STARTING VALUE, not a measured one; T5 reports whether it holds. */
 export const PROBE_SECONDS = 30;
 
@@ -675,6 +690,11 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
 
   // The routing answer is read here ONLY to label the control run and to apply the
   // cannot-be-its-own-control rule. The engine step resolves it again, authoritatively.
+  // C1b fix-up 2 — RESOLVED ONCE, HERE, AND PERSISTED. This is the earliest step that can resolve
+  // it: the bucket comes from `decided`, which needs whisper's answer. The engine step used to
+  // resolve it a second time, authoritatively, which meant a routing row edited mid-job produced a
+  // shadow labelled with one engine and a run written by another. It now reads what this step
+  // wrote, so a job has one routing truth for its whole life.
   const engineKey = (await resolveRouting(DRAIN_STAGE, bucketFor(decided))) ?? "";
     // --- C1 step 5. THE SHADOW RUN --------------------------------------------------------------
     //
@@ -694,6 +714,22 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
     if (full.ok && engineKey !== whisperAdapter.key && shouldShadow(windowId)) {
       const shadowId = runId();
       const shadowReceipt = audioReceipt(join.key, bytes);
+      // C1b fix-up 1 — THE CONTROL IS A BOUNDED SAMPLE, NOT A SECOND PRODUCTION TRANSCRIPT.
+      // It covers the first SHADOW_WINDOW_MS of the window and no more. The shadow exists to
+      // compare engines; a full second transcript of every sampled window is a cost with no extra
+      // comparison in it.
+      //
+      // TAKEN BY TRUNCATION, not by a second inference, and that is strictly cheaper than it
+      // sounds: whisper has already read the whole window for the turns, so selecting the
+      // segments inside the bound costs nothing and puts NO additional load on a Mini that is
+      // concurrently recording — which was the ruling's own reason. A fresh 120 s whisper call
+      // would have added load to remove some.
+      // WhisperSegment times are SECONDS and are relative to the clip, which starts at the
+      // window's own start — so this is literally "the segments inside the first two minutes".
+      const shadowSegments = segments.filter((sg) => sg.end_s <= SHADOW_WINDOW_MS / 1000);
+      const shadowText = shadowSegments.map((sg) => sg.text).join(" ").trim();
+      const shadowEndMs = Math.min(endMs, startMs + SHADOW_WINDOW_MS);
+      const shadowSeconds = Math.round(((shadowEndMs - startMs) / 1000) * 100) / 100;
       await sql`
         INSERT INTO transcription_run
           (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
@@ -703,17 +739,27 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
            audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
         VALUES
           (${shadowId}, NULL, 'bench_window', ${windowId}, ${whisperAdapter.key}, ${whisperAdapter.key}, 'batch', 'asr',
-           ${full.language ?? null}, ${full.transcript ?? null}, NULL, ${full.latency_ms}, 0,
+           ${full.language ?? null}, ${shadowText || null}, NULL, ${full.latency_ms}, 0,
            NULL, ${JSON.stringify({
              shadow_of_engine: engineKey,
              shadow_sampled: true,
-             // audio_seconds is what the yield tripwire divides by. Without it the control row
-             // would have no chars-per-second and the comparison would be one-sided.
-             audio_seconds: audioSeconds,
-             segment_count: segmentCount,
+             // ── THIS ROW IS NOT A FULL-WINDOW RUN. Three keys say so, because one that a reader
+             // has to notice is one a reader will miss, and comparing this to a 900 s routed run
+             // as if they were like for like would make the routed engine look 7x more productive
+             // on every chars-per-second chart.
+             shadow_bounded: true,
+             shadow_window_ms: SHADOW_WINDOW_MS,
+             covers_full_window: false,
+             // audio_seconds is what the yield tripwire divides by, so it MUST be the sample's
+             // own duration, not the window's. This is the single number that makes the bounded
+             // row comparable at all.
+             audio_seconds: shadowSeconds,
+             full_window_audio_seconds: audioSeconds,
+             segment_count: shadowSegments.length,
+             full_window_segment_count: segmentCount,
              clip_r2_key: join.key,
              whisper_model_reported: full.engineVersion ?? null,
-             window: { start_ms: startMs, end_ms: endMs, source_mic: source },
+             window: { start_ms: startMs, end_ms: shadowEndMs, source_mic: source },
            })}::jsonb, NOW(),
            ${opts.actor}, ${opts.via}, ${full.engineVersion ?? null},
            ${shadowReceipt.audio_r2_key}, ${shadowReceipt.audio_byte_start}, ${shadowReceipt.audio_byte_end},
@@ -780,6 +826,9 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
       segment_count: segmentCount,
       activity,
       decided_language: decided,
+      // fix-up 2 — the one routing truth, read by every later step.
+      engine_id: engineKey || null,
+      ...(out.shadow_run_id ? { shadow_run_id: out.shadow_run_id } : {}),
     },
   };
 }
@@ -884,13 +933,23 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
   const { w, startMs, endMs, source, covering, audioSeconds } = ctx;
   const join = { key: p.clip_r2_key };
   const probeLanguage = p.probe_language;
+  // C1b fix-up 3, ACCEPTED AND DELIBERATE: this is the SECOND download of this clip — the segment
+  // step downloaded it too. It is inherent to steps that cannot pass bytes. A job's progress is a
+  // database column read by operators and may carry no audio and no transcript, and the process
+  // that ran the previous step may no longer exist, so the only alternatives are smuggling bytes
+  // through state or keeping one giant step that reintroduces the ceiling this slice removed.
+  // DO NOT "fix" this by caching the buffer somewhere global: an R2 GET is cheap and a step that
+  // depends on another step's memory is a step that breaks the first time a runner is recycled.
   const bytes = await getObjectBytes(join.key);
   if (!bytes) { const attempts = await recordFailure(windowId, "clip_missing", join.key); return { ...out, step: "clip_missing", attempts }; }
     // --- C4. TRANSCRIBE, with the language FORCED ------------------------------------------
     // C1b — decided ONCE, in the segment step, and carried on the row. Re-deriving it here
     // would need whisper's answer, which this step no longer holds.
     const decided = p.decided_language;
-    const engineId = await resolveRouting(DRAIN_STAGE, bucketFor(decided));
+    // fix-up 2 — READ, NOT RESOLVED. The segment step resolved this and wrote it on the job; a
+    // second resolution here could disagree with the one the shadow row was labelled from if an
+    // operator edited stt_routing while the job was in flight. One resolution, one truth.
+    const engineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
     const adapter = engineId ? adapterFor(engineId) : null;
     if (!engineId || !adapter) {
       const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
