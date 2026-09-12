@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { probeWhisperTranscription } from "@/lib/health/whisper-probe";
 
 /**
  * GET /api/health
@@ -42,14 +43,25 @@ export async function GET() {
       });
       if (!r.ok) throw new Error(`Ollama probe failed: ${r.status}`);
     }),
+    // Hotfix defect 2 — this used to be a GET that the Mini's shim answered with a static 404
+    // without contacting whisper.cpp, so it could not have failed if transcription were dead.
+    // It now POSTs a half-second WAV and requires a parseable 200: the same request shape
+    // transcribeWithWhisper makes. The reason is carried through so `false` says WHICH way.
     probe(async () => {
-      const base = process.env.WHISPER_BASE_URL;
-      if (!base) throw new Error("WHISPER_BASE_URL not set");
-      const r = await fetch(`${base}/inference`, {
-        method: "GET",
-        signal: AbortSignal.timeout(8000),
-      });
-      if (r.status >= 500 && r.status !== 501) throw new Error(`Whisper probe ${r.status}`);
+      const r = await probeWhisperTranscription();
+      if (!r.ok) throw new Error(`whisper_probe_${r.reason ?? "failed"}${r.status ? `_${r.status}` : ""}`);
+      // The verdict is cached (one real inference a minute at most), so the payload says WHEN it
+      // was measured and how old that is. An `ok` that does not carry its age invites a reader to
+      // assume it is fresh, which on a cached probe it usually is not.
+      return {
+        transcription: true,
+        probe_ms: r.elapsed_ms,
+        checked_at: r.checked_at,
+        age_s: r.age_s,
+        cached: r.cached,
+        ...(r.reason ? { reason: r.reason } : {}),
+        ...(r.last_ok_age_s !== undefined ? { last_ok_age_s: r.last_ok_age_s } : {}),
+      };
     }),
     probe(async () => {
       const key = process.env.RESEND_API_KEY;

@@ -47,6 +47,10 @@
  * Never wall-clock: the caller owns that mapping because only the caller knows the clip's
  * true start.
  */
+// One declaration, in a module nothing needs to mock — see lib/whisper-constants.ts.
+import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
+export { EMPTY_TRANSCRIPT };
+
 export type WhisperSegment = {
   start_s: number;
   end_s: number;
@@ -317,7 +321,7 @@ async function whisperAttempt(
     // the segments, so widening the request cannot narrow the answer.
     const transcript = ((json.text ?? '').trim() || segments.map((s) => s.text).filter(Boolean).join(' ')).trim();
     if (!transcript) {
-      return { ok: false, error: 'empty_transcript', latency_ms };
+      return { ok: false, error: EMPTY_TRANSCRIPT, latency_ms };
     }
 
     return {

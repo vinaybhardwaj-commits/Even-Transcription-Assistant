@@ -84,6 +84,7 @@ import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { transcribeWithWhisper, type WhisperSegment } from "@/lib/whisper";
+import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChunk } from "@/lib/bench-range";
 // T3 — the operator path's transcriber, named by the adapter rather than typed into a payload.
 import { whisperAdapter } from "@/lib/stt/adapters/whisper";
@@ -1559,7 +1560,10 @@ export async function writeWindowCues(
  * encounter pipeline an empty transcript really is a failure, because no note can be made from
  * silence. Only the caller knows what it asked for, so only the caller may decide.
  */
-export const EMPTY_TRANSCRIPT = "empty_transcript";
+// Re-exported, NOT re-declared (hotfix fix-up, item 3): the name is owned by lib/whisper.ts, the
+// module that produces it. Consumers that import it from here keep working and get the same value
+// by identity, so the two can no longer drift.
+export { EMPTY_TRANSCRIPT };
 
 type ScratchTarget =
   | { ok: true; ist: string; roomId: string; dayId: string; roomCreated: boolean; dayCreated: boolean }

@@ -18,6 +18,9 @@ import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/be
 import { buildJoinRequest, callJoinService, refuseIfTooLong, whisperTimeoutForClip } from "@/lib/bench-join";
 import { getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
+// The one name for "a 200 with no speech" — one declaration, shared by the producer and both
+// consumers, so they cannot disagree about what it means.
+import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 
@@ -163,6 +166,23 @@ async function joinStep(ctx: StepContext) {
 }
 
 /**
+ * PURE — the fields BOTH outcomes of step 3 carry, so a silent window and a spoken one differ only
+ * in their counts. Defined once: two hand-built literals is exactly how the two paths drift apart,
+ * which is the defect this hotfix closes one level up.
+ */
+function silentOrSpokenBase(ctx: StepContext, clipKey: string, durationMs: number): Record<string, unknown> {
+  return {
+    transcription_run_id: null,
+    session_id: ctx.progress.session_id ?? null,
+    clip_key: clipKey,
+    clip_kind: ctx.progress.clip_kind ?? null,
+    piece_count: ctx.progress.piece_count ?? null,
+    duration_ms: durationMs,
+    dry_run: ctx.args.dry_run !== false,
+  };
+}
+
+/**
  * Step 3 — transcribe, and write in the same step when asked.
  *
  * THE TEXT NEVER TOUCHES `progress`. It goes straight into the job's `result`, which is returned
@@ -183,6 +203,27 @@ async function transcribeStep(ctx: StepContext) {
     timeoutMs: whisperTimeoutForClip(durationMs),
   });
   if (!w.ok) {
+    // ─── A QUIET ROOM IS NOT A FAILED READ ──────────────────────────────────────────────────
+    // `lib/whisper.ts` maps a 200 with no speech to `{ok:false, error:'empty_transcript'}` — an
+    // `ok:false` that means "the read finished and there was nothing to hear". The synchronous
+    // tool has always known this (`whisperNotOkAnswer`, bench.ts, `EMPTY_TRANSCRIPT`); this path
+    // did not, and reported every `!w.ok` as `whisper_failed`. A window of silence then looked
+    // identical to an unreachable Whisper, which is the one distinction the K5 rule exists to
+    // keep: "nothing was said" and "nothing was looked at" must never read the same.
+    //
+    // So `empty_transcript` short-circuits to SUCCESS here, with the same facts the sync path
+    // reports: zero segments, zero characters, `silent_window: true`. It is deliberately NOT a
+    // member of JOB_ERROR_CODES — putting it there would make it an error again by another name.
+    if (w.error === EMPTY_TRANSCRIPT) {
+      return doneWith({
+        ...silentOrSpokenBase(ctx, clipKey, durationMs),
+        silent_window: true,
+        chars: 0,
+        segments: 0,
+        language: null,
+        note: "SILENT WINDOW. Whisper read this window successfully and it held no speech; the client reports that as `empty_transcript`, which is a fact about the room and not a failure.",
+      });
+    }
     // (e): lib/whisper.ts builds `error` from up to 200 chars of the service's RESPONSE BODY,
     // which can echo the audio. It goes to the log; the row gets the code alone.
     console.error("[jobs] whisper failed", JSON.stringify({ err: String(w.error ?? "unknown").slice(0, 200) }));
@@ -205,17 +246,13 @@ async function transcribeStep(ctx: StepContext) {
   // fills it in — a caller written today keeps working. Null means "not persisted yet", and the
   // counts beside it are real either way.
   return doneWith({
-    transcription_run_id: null,
-    session_id: ctx.progress.session_id ?? null,
-    clip_key: clipKey,
-    clip_kind: ctx.progress.clip_kind ?? null,
-    piece_count: ctx.progress.piece_count ?? null,
-    duration_ms: durationMs,
+    ...silentOrSpokenBase(ctx, clipKey, durationMs),
     // "A quiet room" and "a failed read" must not look the same — the tool's K5 rule, kept here.
+    // This branch is a transcript Whisper DID return; the empty case is handled above, where the
+    // client reports `empty_transcript` and never reaches here with an empty string.
     silent_window: text.trim().length === 0,
     chars: text.length,
     language: (w as { language?: string }).language ?? null,
     segments,
-    dry_run: ctx.args.dry_run !== false,
   });
 }
