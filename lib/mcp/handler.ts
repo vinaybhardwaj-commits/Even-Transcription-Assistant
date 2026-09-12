@@ -26,6 +26,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
 import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
+import { ToolScopeError } from "@/lib/mcp/registry";
 import { HEALTH_TOOLS } from "@/lib/mcp/tools/health";
 import { BRAIN_TOOLS } from "@/lib/mcp/tools/brain";
 import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";
@@ -228,7 +229,7 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   let isError = false;
   // Tier 2 Slice B fix-up (3) — the resolved principal reaches the handler, so a tool that writes
   // a durable row can record who asked for it. `mcpActorId` applies the one `mcp:` prefix rule.
-  const ctx: ToolContext = { origin: requestOrigin(req), actor: mcpActorId(principal.token_id) };
+  const ctx: ToolContext = { origin: requestOrigin(req), actor: mcpActorId(principal.token_id), scopes: principal.scopes };
   const timeoutMs = tool.scope === "invoke" ? INVOKE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
   try {
     result = await Promise.race([
@@ -236,6 +237,12 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`tool_timeout_${timeoutMs}ms`)), timeoutMs)),
     ]);
   } catch (e) {
+    // A per-KIND scope refusal is the same answer an unregistered tool gets: one -32001, not two
+    // different shapes for "you may not do that".
+    if (e instanceof ToolScopeError) {
+      const se = e as ToolScopeError;
+      throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, needed: se.needed, ...se.detail }));
+    }
     isError = true;
     result = { error: String((e as Error)?.message ?? e).slice(0, 200), degraded: true };
   }

@@ -19,10 +19,14 @@
 -- lives renews it by finishing its step. Claiming is `FOR UPDATE SKIP LOCKED`, so two runners on the
 -- same minute take disjoint sets rather than blocking on each other or double-running a step.
 --
--- `attempts` IS THE BOUND ON REPAIR. Each claim increments it; above three the job is failed rather
--- than retried for ever. A job that fails four times is not a transient fault and grinding it
--- against the same error costs the Mini real work — the R3 self-update loop (Fix 2, G1) is the
--- house precedent for bounding a retry with a counter on disk rather than hoping.
+-- TWO COUNTERS, AND CONFLATING THEM WAS A BUG. `attempts` counts CLAIMS — how many times a runner
+-- has picked this row up — and a healthy multi-step job raises it once per step by construction: a
+-- 61-minute stitch is one resolve plus three joins, so four claims, entirely successfully. Bounding
+-- repair on `attempts` would therefore FAIL EVERY JOB LONGER THAN THREE STEPS, which is precisely
+-- the work jobs exist for. `failures` counts only steps that THREW, and it is the one the cap reads.
+-- A job that fails four times is not a transient fault and grinding it against the same error costs
+-- the Mini real work — the R3 self-update loop (Fix 2, G1) is the house precedent for bounding a
+-- retry with a counter on disk rather than hoping.
 --
 -- NOTHING HERE IS WIRED TO AUDIO YET. The table is the contract; Slices C and D fill in the kinds.
 -- =====================================================================
@@ -52,7 +56,11 @@ CREATE TABLE IF NOT EXISTS scribe_job (
   finished_at    timestamptz,
   -- Held by the runner that is working this row. Past = claimable again, whatever `status` says.
   lease_until    timestamptz,
-  attempts       integer     NOT NULL DEFAULT 0
+  -- How many times a runner has CLAIMED this row. Rises once per step on a healthy job; it is a
+  -- progress measure and a liveness signal, NOT a retry budget.
+  attempts       integer     NOT NULL DEFAULT 0,
+  -- How many steps have THROWN. The cap reads this and only this.
+  failures       integer     NOT NULL DEFAULT 0
 );
 
 -- The claim query's index: "the oldest queued or expired-lease job". Both columns, in that order,
@@ -72,7 +80,10 @@ COMMENT ON COLUMN scribe_job.lease_until IS
   'Set 240 s ahead when claimed. A runner that dies lets it expire and the job becomes claimable again; this is the only thing that distinguishes "being worked" from "abandoned".';
 
 COMMENT ON COLUMN scribe_job.attempts IS
-  'Incremented on every claim. Above three the job is failed rather than retried for ever — a bound on repair, not a retry budget for one step.';
+  'Incremented on every CLAIM. A healthy multi-step job raises it once per step — a 61-minute stitch is four claims and four successes — so this is progress and liveness, never a retry budget. The cap does not read it.';
+
+COMMENT ON COLUMN scribe_job.failures IS
+  'Incremented only when a step THREW. Above three the job is failed rather than retried for ever. Bounding on attempts instead would fail every job longer than three steps, which is the work jobs exist for.';
 
 INSERT INTO schema_migrations (version, name)
 VALUES (82, '0082_scribe_job')

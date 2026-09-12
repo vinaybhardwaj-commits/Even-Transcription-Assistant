@@ -26,7 +26,9 @@ const route = await import("@/app/api/jobs/run/route");
 const { JOB_TOOLS } = await import("@/lib/mcp/tools/jobs");
 const { READABLE_ACTIONS } = await import("@/lib/jobs/audit-read");
 const tool = (n: string) => JOB_TOOLS.find((t) => t.name === n)!;
-const ctx = { origin: "https://x" };
+const ALL = new Set(["read", "invoke", "write"] as const);
+const ctx = { origin: "https://x", actor: "mcp:t", scopes: ALL } as never;
+const readOnlyCtx = { origin: "https://x", actor: "mcp:w", scopes: new Set(["read"] as const) } as never;
 
 const ENV = { ...process.env };
 beforeEach(() => {
@@ -101,13 +103,13 @@ describe("the four job tools", () => {
     expect(calls.filter((c) => /^INSERT INTO scribe_job/.test(c.text))).toHaveLength(0);
   });
 
-  it("status withholds the result unless asked — a transcript result carries text", async () => {
-    jobRow = { id: "job_1", kind: "transcribe_range", args: "{}", status: "done", step: null, progress: "{}", result: '{"transcript":"…"}', error: null, actor: "a", created_at: "t", started_at: "t", updated_at: "t", finished_at: "t", lease_until: null, attempts: 1 };
+  it("status withholds the result unless asked", async () => {
+    jobRow = { id: "job_1", kind: "transcribe_range", args: "{}", status: "done", step: null, progress: "{}", result: '{"chars":42}', error: null, actor: "a", created_at: "t", started_at: "t", updated_at: "t", finished_at: "t", lease_until: null, attempts: 1, failures: 0 };
     const withheld = (await tool("scribe_job_status").handler({ job_id: "job_1" }, ctx)) as Row;
     expect(withheld.result).toBeUndefined();
     expect(withheld.has_result).toBe(true);
     const asked = (await tool("scribe_job_status").handler({ job_id: "job_1", include_result: true }, ctx)) as Row;
-    expect(asked.result).toEqual({ transcript: "…" });
+    expect(asked.result).toEqual({ chars: 42 });
   });
 
   it("status on an unknown id says so rather than inventing a job", async () => {
@@ -116,7 +118,7 @@ describe("the four job tools", () => {
   });
 
   it("cancel distinguishes not_cancellable from unknown_job", async () => {
-    jobRow = { id: "job_9", kind: "stitch", args: "{}", status: "done", step: null, progress: "{}", result: null, error: null, actor: null, created_at: "t", started_at: null, updated_at: "t", finished_at: "t", lease_until: null, attempts: 1 };
+    jobRow = { id: "job_9", kind: "stitch", args: "{}", status: "done", step: null, progress: "{}", result: null, error: null, actor: null, created_at: "t", started_at: null, updated_at: "t", finished_at: "t", lease_until: null, attempts: 1, failures: 0 };
     const done = (await tool("scribe_job_cancel").handler({ job_id: "job_9" }, ctx)) as Row;
     expect(done).toMatchObject({ ok: false, error: "not_cancellable", status: "done" });
     jobRow = null;
@@ -226,8 +228,80 @@ describe("ctx.actor — who asked for this job", () => {
   it("ToolContext carries actor as a required string, so no tool can forget it", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync("lib/mcp/registry.ts", "utf8");
-    expect(src).toMatch(/export type ToolContext = \{ origin: string; actor: string \}/);
+    expect(src).toMatch(/actor: string;/);
+    expect(src).toMatch(/scopes: ReadonlySet<McpScope>;/);
     const handler = readFileSync("lib/mcp/handler.ts", "utf8");
     expect(handler).toMatch(/actor: mcpActorId\(principal\.token_id\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-up 2, item 2 — no transcript text can reach scribe_job_status
+// ---------------------------------------------------------------------------
+
+describe("item 2 — the status payload never contains transcript text", () => {
+  /** The words a real Whisper answer for this fixture would contain. */
+  const FIXTURE_WORDS = ["cough", "paracetamol", "breathless", "since Tuesday", "prescription"];
+
+  it("a completed transcribe job's status carries POINTERS, and none of the fixture's words", async () => {
+    // What the kind now writes: counts and a run pointer. No `transcript` key at all.
+    const result = {
+      transcription_run_id: null, session_id: "bs_1", clip_key: "bench/x/clip.webm",
+      clip_kind: "joined", piece_count: 2, duration_ms: 120000,
+      silent_window: false, chars: 412, language: "en", segments: 9, dry_run: true,
+    };
+    jobRow = {
+      id: "job_t", kind: "transcribe_range", args: "{}", status: "done", step: null,
+      progress: JSON.stringify({ session_id: "bs_1", clip_key: "bench/x/clip.webm", piece_count: 2 }),
+      result: JSON.stringify(result), error: null, actor: "mcp:t",
+      created_at: "t", started_at: "t", updated_at: "t", finished_at: "t", lease_until: null, attempts: 3, failures: 0,
+    };
+    const out = (await tool("scribe_job_status").handler({ job_id: "job_t", include_result: true }, ctx)) as Row;
+    const payload = JSON.stringify(out).toLowerCase();
+    for (const w of FIXTURE_WORDS) {
+      expect(payload, `the status payload leaked "${w}"`).not.toContain(w.toLowerCase());
+    }
+    // And it is not empty of meaning: the pointers a caller actually needs are all there.
+    expect(out.result).toMatchObject({ chars: 412, language: "en", segments: 9 });
+    expect(out.result).toHaveProperty("transcription_run_id");
+    expect(JSON.stringify(out)).not.toContain("transcript\":");
+  });
+
+  it("the kind's own result shape carries no transcript key", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/jobs/kinds/transcribe-range.ts", "utf8");
+    const doneBlock = src.slice(src.indexOf("return doneWith({"));
+    expect(doneBlock).not.toMatch(/^\s*transcript:/m);
+    expect(doneBlock).toMatch(/transcription_run_id/);
+    expect(doneBlock).toMatch(/chars:/);
+    expect(doneBlock).toMatch(/segments,/);
+  });
+
+  it("include_urls REQUIRES invoke — a read-only token is refused, not quietly given links", async () => {
+    jobRow = { id: "job_s", kind: "stitch", args: "{}", status: "done", step: null, progress: "{}", result: JSON.stringify({ pieces: [{ start: 1, end: 2, clip_key: "k1" }] }), error: null, actor: null, created_at: "t", started_at: "t", updated_at: "t", finished_at: "t", lease_until: null, attempts: 2, failures: 0 };
+    await expect(tool("scribe_job_status").handler({ job_id: "job_s", include_urls: true }, readOnlyCtx)).rejects.toThrow(/scope_or_tool_unavailable/);
+    // …and without the flag the same token reads the row perfectly well.
+    const ok = (await tool("scribe_job_status").handler({ job_id: "job_s" }, readOnlyCtx)) as Row;
+    expect(ok.ok).toBe(true);
+    expect(ok.urls).toBeUndefined();
+  });
+});
+
+describe("item 4 — each kind's declared scope is enforced at submit", () => {
+  it("a read-only token submitting transcribe_range is refused with the scope error", async () => {
+    await expect(
+      tool("scribe_job_submit").handler({ kind: "transcribe_range", args: { session_id: "s", start: 1, end: 2 } }, readOnlyCtx),
+    ).rejects.toThrow(/scope_or_tool_unavailable/);
+    expect(calls.filter((c) => /^INSERT INTO scribe_job/.test(c.text))).toHaveLength(0);
+  });
+
+  it("the error names the scope the KIND needs, not the tool's", async () => {
+    try {
+      await tool("scribe_job_submit").handler({ kind: "stitch", args: { session_id: "s", start: 1, end: 2 } }, readOnlyCtx);
+      throw new Error("should have refused");
+    } catch (e) {
+      expect((e as { needed?: string }).needed).toBe("invoke");
+      expect((e as { detail?: Record<string, unknown> }).detail).toMatchObject({ kind: "stitch", kind_scope: "invoke" });
+    }
   });
 });

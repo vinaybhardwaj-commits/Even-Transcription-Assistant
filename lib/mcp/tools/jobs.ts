@@ -11,7 +11,7 @@ import { cancelJob, listJobs, readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib/jobs/submit";
 import { KIND_BY_NAME } from "@/lib/jobs/kinds";
 import { readRecentAudit, AUDIT_ACTIONS_HINT } from "@/lib/jobs/audit-read";
-import { argInt, argStr, argBool, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+import { argInt, argStr, argBool, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 /** PURE — the row a caller sees. `result` is withheld unless asked for: it can be large. */
 function jobView(j: NonNullable<Awaited<ReturnType<typeof readJob>>>, includeResult: boolean) {
@@ -21,6 +21,7 @@ function jobView(j: NonNullable<Awaited<ReturnType<typeof readJob>>>, includeRes
     status: j.status,
     step: j.step,
     attempts: j.attempts,
+    failures: j.failures,
     progress: j.progress,
     error: j.error,
     actor: j.actor,
@@ -51,6 +52,14 @@ const submit: McpTool = {
   handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ ok: false }, async () => {
       const kind = argStr(args, "kind", 64) ?? "";
+      // Refuter item 4 — EACH KIND CARRIES ITS OWN SCOPE, and submit is the only place that can
+      // enforce it. This tool is `invoke` so a read-only token cannot reach it at all today; the
+      // check matters the moment a read-scope kind (day_manifest) makes a lower tool scope
+      // sensible, and it keeps the rule where the kind declares it rather than in the tool's name.
+      const declared = KIND_BY_NAME.get(kind);
+      if (declared && !ctx.scopes.has(declared.scope)) {
+        throw new ToolScopeError(declared.scope, { kind, kind_scope: declared.scope });
+      }
       try {
         const job = await submitJob({
           kind,
@@ -68,27 +77,56 @@ const submit: McpTool = {
     }),
 };
 
+/**
+ * Refuter item 2 — links are minted HERE, on demand, and never stored on the row. A key in a result
+ * is inert; a presigned URL is a way to fetch the audio, so it is a stronger permission than reading
+ * the row and is gated on `invoke`.
+ */
+async function mintUrls(result: Record<string, unknown> | null): Promise<Array<Record<string, unknown>>> {
+  if (!result) return [];
+  const { signGetUrl } = await import("@/lib/r2");
+  const keys: Array<{ clip_key: string; start?: unknown; end?: unknown }> = [];
+  if (typeof result.clip_key === "string") keys.push({ clip_key: result.clip_key });
+  if (Array.isArray(result.pieces)) {
+    for (const p of result.pieces as Array<Record<string, unknown>>) {
+      if (typeof p.clip_key === "string") keys.push({ clip_key: p.clip_key, start: p.start, end: p.end });
+    }
+  }
+  return Promise.all(
+    keys.map(async (k) => ({ ...k, url: await signGetUrl({ key: k.clip_key, expiresInSeconds: CLIP_URL_SECONDS }) })),
+  );
+}
+
+/** An hour, the same window scribe_extract_audio's joined clips use. */
+const CLIP_URL_SECONDS = 3600;
+
 const status: McpTool = {
   name: "scribe_job_status",
   description:
-    "One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts, progress, error and timings. `progress` carries ids, counts, keys and ms — never audio and never transcript text, because this column is readable by every token with `read`. include_result:true adds the job's result, which for a transcription DOES carry text; it is withheld by default for that reason.",
+    "One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts (claims), failures (steps that threw), progress, error and timings. NEITHER `progress` NOR `result` EVER CARRIES TRANSCRIPT TEXT — a transcription job's result carries a transcription_run_id, character and segment counts and the detected language, and whoever wants the words goes to the run, where identity rules apply. include_result:true adds that pointer set. include_urls:true mints presigned links for the clip keys and REQUIRES invoke scope, because a link fetches audio.",
   scope: "read",
   inputSchema: {
     type: "object",
     properties: {
       job_id: { type: "string" },
       include_result: { type: "boolean", default: false },
+      include_urls: { type: "boolean", default: false, description: "mint presigned URLs for the clip keys in the result. REQUIRES invoke scope: a link is a way to fetch the audio, so it is a stronger permission than reading the row." },
     },
     required: ["job_id"],
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) =>
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ ok: false }, async () => {
       const id = argStr(args, "job_id", 64);
       if (!id) return { ok: false, error: "job_id_required" };
       const job = await readJob(id);
       if (!job) return { ok: false, error: "unknown_job", job_id: id };
-      return { ok: true, ...jobView(job, argBool(args, "include_result")) };
+      const wantUrls = argBool(args, "include_urls");
+      if (wantUrls && !ctx.scopes.has("invoke")) {
+        throw new ToolScopeError("invoke", { reason: "include_urls mints presigned audio links" });
+      }
+      const view = jobView(job, argBool(args, "include_result"));
+      return { ok: true, ...view, ...(wantUrls ? { urls: await mintUrls(job.result) } : {}) };
     }),
 };
 

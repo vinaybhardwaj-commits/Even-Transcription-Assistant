@@ -91,7 +91,14 @@ async function joinStep(ctx: StepContext) {
   const i = done.length;
 
   if (i >= pieces.length) {
-    return doneWith({ session_id, pieces: done, total_ms: ctx.progress.total_ms ?? null, piece_count: done.length });
+    // POINTERS ONLY (Refuter item 2): {start, end, clip_key} per piece. Bytes and durations stay
+    // out; a presigned URL is minted on demand by scribe_job_status, never stored on the row.
+    return doneWith({
+      session_id,
+      pieces: done.map((d) => ({ start: d.start, end: d.end, clip_key: d.clip_key ?? null })),
+      total_ms: ctx.progress.total_ms ?? null,
+      piece_count: done.length,
+    });
   }
 
   const piece = pieces[i]!;

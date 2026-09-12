@@ -7,7 +7,7 @@
 
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
-import { CLAIM_BATCH, LEASE_MS, MAX_ATTEMPTS, type JobRow, type JobStatus } from "./types";
+import { CLAIM_BATCH, LEASE_MS, MAX_FAILURES, type JobRow, type JobStatus } from "./types";
 
 const nano = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 12);
 export const newJobId = (): string => `job_${nano()}`;
@@ -46,6 +46,7 @@ export function normaliseJob(r: Record<string, unknown>): JobRow {
     finished_at: iso(r.finished_at),
     lease_until: iso(r.lease_until),
     attempts: Number(r.attempts ?? 0),
+    failures: Number(r.failures ?? 0),
   };
 }
 
@@ -59,7 +60,7 @@ export async function insertJob(input: {
     INSERT INTO scribe_job (id, kind, args, actor)
     VALUES (${input.id}, ${input.kind}, ${JSON.stringify(input.args)}::jsonb, ${input.actor})
     RETURNING id, kind, args, status, step, progress, result, error, actor,
-              created_at, started_at, updated_at, finished_at, lease_until, attempts
+              created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
   `) as Array<Record<string, unknown>>;
   return normaliseJob(rows[0]!);
 }
@@ -100,7 +101,7 @@ export async function claimJobs(limit = CLAIM_BATCH, leaseMs = LEASE_MS): Promis
       FROM claimable c
      WHERE j.id = c.id
     RETURNING j.id, j.kind, j.args, j.status, j.step, j.progress, j.result, j.error, j.actor,
-              j.created_at, j.started_at, j.updated_at, j.finished_at, j.lease_until, j.attempts
+              j.created_at, j.started_at, j.updated_at, j.finished_at, j.lease_until, j.attempts, j.failures
   `) as Array<Record<string, unknown>>;
   return rows.map(normaliseJob);
 }
@@ -118,12 +119,19 @@ export async function saveStep(id: string, step: string, progress: Record<string
   `;
 }
 
+/**
+ * §3, hardened by the Refuter — `AND status = 'running'` is the cancel boundary, in SQL.
+ *
+ * A cancel that lands while a step is in flight sets `cancelled`. Without this predicate the step's
+ * own write would then set `done` over it and the cancel would be silently lost. With it, the write
+ * matches no row and the cancel stands: the LAST WRITER DOES NOT WIN, the cancel does.
+ */
 export async function finishJob(id: string, result: Record<string, unknown>): Promise<void> {
   await sql`
     UPDATE scribe_job
        SET status = 'done', result = ${JSON.stringify(result)}::jsonb,
            lease_until = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id}
+     WHERE id = ${id} AND status = 'running'
   `;
 }
 
@@ -147,7 +155,7 @@ export async function cancelJob(id: string): Promise<JobRow | null> {
        SET status = 'cancelled', lease_until = NULL, finished_at = now(), updated_at = now()
      WHERE id = ${id} AND status IN ('queued', 'running')
     RETURNING id, kind, args, status, step, progress, result, error, actor,
-              created_at, started_at, updated_at, finished_at, lease_until, attempts
+              created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
   `) as Array<Record<string, unknown>>;
   return rows[0] ? normaliseJob(rows[0]) : null;
 }
@@ -155,7 +163,7 @@ export async function cancelJob(id: string): Promise<JobRow | null> {
 export async function listJobs(filter: { status?: JobStatus | null; kind?: string | null; limit: number }): Promise<JobRow[]> {
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
-           created_at, started_at, updated_at, finished_at, lease_until, attempts
+           created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
       FROM scribe_job
      WHERE (${filter.status ?? null}::text IS NULL OR status = ${filter.status ?? null}::text)
        AND (${filter.kind ?? null}::text IS NULL OR kind = ${filter.kind ?? null}::text)
@@ -168,7 +176,7 @@ export async function listJobs(filter: { status?: JobStatus | null; kind?: strin
 export async function readJob(id: string): Promise<JobRow | null> {
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
-           created_at, started_at, updated_at, finished_at, lease_until, attempts
+           created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
       FROM scribe_job
      WHERE id = ${id}
      LIMIT 1
@@ -176,5 +184,21 @@ export async function readJob(id: string): Promise<JobRow | null> {
   return rows[0] ? normaliseJob(rows[0]) : null;
 }
 
-/** PURE — §3's bound. The claim that would be the fourth is refused, not run. */
-export const overAttemptCap = (job: JobRow): boolean => job.attempts > MAX_ATTEMPTS;
+/**
+ * PURE — §3's bound, on FAILURES. A job that has already thrown three times is failed rather than
+ * run a fourth; a job that has merely been claimed many times is a long job and is left alone.
+ */
+export const overFailureCap = (job: JobRow): boolean => job.failures >= MAX_FAILURES;
+
+/** A step threw. Count it, release the lease, and leave the job claimable at the same step. */
+export async function recordFailure(id: string, step: string, progress: Record<string, unknown>): Promise<void> {
+  await sql`
+    UPDATE scribe_job
+       SET failures = failures + 1,
+           step = ${step},
+           progress = ${JSON.stringify(progress)}::jsonb,
+           lease_until = NULL,
+           updated_at = now()
+     WHERE id = ${id} AND status = 'running'
+  `;
+}

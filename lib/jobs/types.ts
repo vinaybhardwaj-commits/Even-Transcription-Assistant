@@ -19,8 +19,14 @@
 export const JOB_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
-/** §3 — three attempts of repair, then stop. The fourth claim fails the job instead of running it. */
-export const MAX_ATTEMPTS = 3;
+/**
+ * §3, corrected by the Slice B Refuter — three FAILURES of repair, then stop.
+ *
+ * This used to bound on `attempts`, which counts CLAIMS. A healthy multi-step job raises attempts
+ * once per step: a 61-minute stitch is one resolve plus three joins, so the fourth claim would have
+ * been refused and the job failed while succeeding. The cap must count only steps that THREW.
+ */
+export const MAX_FAILURES = 3;
 /** §3 — the lease a claim takes. Longer than any step, shorter than a human's patience. */
 export const LEASE_MS = 240_000;
 /** §3 — claims per runner invocation. Three steps of ~200 s never approach the route ceiling. */
@@ -43,7 +49,10 @@ export type JobRow = {
   updated_at: string;
   finished_at: string | null;
   lease_until: string | null;
+  /** Claims. Rises once per step on a healthy job — progress, not a retry budget. */
   attempts: number;
+  /** Steps that threw. The cap reads this. */
+  failures: number;
 };
 
 /** What one step returns. `next` continues the machine; `result` ends it; `fail` stops it for good. */

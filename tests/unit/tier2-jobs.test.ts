@@ -29,36 +29,53 @@ vi.mock("@/lib/db", () => {
       const row: Row = {
         id, kind, args, status: "queued", step: null, progress: "{}", result: null, error: null,
         actor, created_at: nowIso(), started_at: null, updated_at: nowIso(), finished_at: null,
-        lease_until: null, attempts: 0,
+        lease_until: null, attempts: 0, failures: 0,
       };
       TABLE.push(row);
       return Promise.resolve([row]);
     }
 
-    // THE CLAIM. queued, or running with an expired lease; skip what another claim holds.
+    // THE CLAIM — and this fake is SEMANTIC, not cosmetic (Refuter item 5).
+    //
+    // Rows chosen by an in-flight claim are held in `locked` ACROSS AN AWAIT, so a second claim
+    // that overlaps it really does meet them held. Whether it skips them is read FROM THE
+    // STATEMENT: with `FOR UPDATE SKIP LOCKED` present it steps over them, without it it takes
+    // them too — which is exactly what Postgres would do (block, then read the committed row and
+    // run the same step again). Delete the clause from store.ts and the two-runner test fails.
     if (/WITH claimable AS/.test(text)) {
       const limit = Number(values[0] ?? 3);
       const secs = Number(values[1] ?? 240);
+      const skipsLocked = /FOR UPDATE SKIP LOCKED/.test(text);
       const claimable = TABLE
-        .filter((r) => !locked.has(String(r.id)))
+        .filter((r) => (skipsLocked ? !locked.has(String(r.id)) : true))
         .filter((r) => r.status === "queued" || (r.status === "running" && (r.lease_until === null || Date.parse(String(r.lease_until)) < NOW)))
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
         .slice(0, limit);
-      for (const r of claimable) {
-        locked.add(String(r.id));
-        r.status = "running";
-        r.attempts = Number(r.attempts) + 1;
-        r.lease_until = new Date(NOW + secs * 1000).toISOString();
-        r.started_at = r.started_at ?? nowIso();
-        r.updated_at = nowIso();
-      }
-      // The lock is released when the claiming statement commits, which for this fake is now.
-      for (const r of claimable) locked.delete(String(r.id));
-      return Promise.resolve(claimable.map((r) => ({ ...r })));
+      for (const r of claimable) locked.add(String(r.id));
+      return (async () => {
+        // The window in which the rows are held but not yet committed.
+        await Promise.resolve();
+        for (const r of claimable) {
+          r.status = "running";
+          r.attempts = Number(r.attempts) + 1;
+          r.lease_until = new Date(NOW + secs * 1000).toISOString();
+          r.started_at = r.started_at ?? nowIso();
+          r.updated_at = nowIso();
+        }
+        const snapshot = claimable.map((r) => ({ ...r }));
+        for (const r of claimable) locked.delete(String(r.id));
+        return snapshot;
+      })();
     }
 
     const find = (id: unknown) => TABLE.find((r) => r.id === id);
 
+    if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
+      const [step, progress, id] = values as [string, string, string];
+      const r = find(id);
+      if (r && r.status === "running") { r.failures = Number(r.failures) + 1; r.step = step; r.progress = progress; r.lease_until = null; }
+      return Promise.resolve([]);
+    }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
       const [step, progress, id] = values as [string, string, string];
       const r = find(id);
@@ -68,7 +85,10 @@ vi.mock("@/lib/db", () => {
     if (/^UPDATE scribe_job SET status = 'done'/.test(text)) {
       const [result, id] = values as [string, string];
       const r = find(id);
-      if (r) { r.status = "done"; r.result = result; r.lease_until = null; r.finished_at = nowIso(); }
+      // Refuter item 3: the statement carries `AND status = 'running'`, so a cancel that landed
+      // mid-step wins — this write matches no row.
+      const guarded = /AND status = 'running'/.test(text);
+      if (r && (!guarded || r.status === "running")) { r.status = "done"; r.result = result; r.lease_until = null; r.finished_at = nowIso(); }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET status = 'failed'/.test(text)) {
@@ -120,7 +140,7 @@ const queue = (over: Partial<Row> = {}): Row => {
   const r: Row = {
     id: `job_${TABLE.length}`, kind: "stitch", args: "{}", status: "queued", step: null,
     progress: "{}", result: null, error: null, actor: "t", created_at: new Date(NOW + TABLE.length).toISOString(),
-    started_at: null, updated_at: nowIso(), finished_at: null, lease_until: null, attempts: 0, ...over,
+    started_at: null, updated_at: nowIso(), finished_at: null, lease_until: null, attempts: 0, failures: 0, ...over,
   };
   TABLE.push(r);
   return r;
@@ -190,26 +210,44 @@ describe("runOneStep", () => {
     return k;
   };
 
-  it("CRASH MID-STEP: the job resumes at the same step with attempts +1, and finishes", async () => {
-    let calledWith: string[] = [];
+  it("CRASH MID-STEP: the job resumes at the same step with failures +1, and finishes", async () => {
+    const calledWith: string[] = [];
     fakeKind(async () => { throw new Error("runner died"); });
     queue({ kind: "fake" });
     const first = (await store.claimJobs())[0]!;
     await runner.runOneStep(first);
     let row = await store.readJob(first.id);
-    expect(row!.status, "still running — a throw is a failed ATTEMPT, not a failed job").toBe("running");
+    expect(row!.status, "still running — a throw is a counted FAILURE, not a failed job").toBe("running");
     expect(row!.step).toBe("one");
-    expect(row!.attempts).toBe(1);
+    expect(row!.failures).toBe(1);
+    expect(row!.attempts, "the claim still counted").toBe(1);
 
-    // Second claim: same step, attempts 2. Now let it succeed.
-    fakeKind(async (ctx?: unknown) => { void ctx; calledWith.push("two"); return T.doneWith({ ok: true }); });
+    // Second claim: same step, failures still 1, attempts 2. Now let it succeed.
+    fakeKind(async () => { calledWith.push("two"); return T.doneWith({ ok: true }); });
     const second = (await store.claimJobs())[0]!;
     expect(second.step, "resumed at the step the row named").toBe("one");
     expect(second.attempts).toBe(2);
+    expect(second.failures).toBe(1);
     await runner.runOneStep(second);
     row = await store.readJob(first.id);
     expect(row!.status).toBe("done");
     expect(calledWith).toEqual(["two"]);
+  });
+
+  it("A LONG JOB IS NOT A FAILING ONE: many claims, zero failures, still running", async () => {
+    // The bug this replaces: bounding on `attempts` failed every job longer than three steps.
+    let n = 0;
+    fakeKind(async () => (++n < 6 ? T.nextStep("one", { n }) : T.doneWith({ n })));
+    queue({ kind: "fake" });
+    for (let k = 0; k < 6; k++) {
+      const claimed = (await store.claimJobs())[0];
+      expect(claimed, `claim ${k} found nothing — the job became unclaimable`).toBeTruthy();
+      await runner.runOneStep(claimed!);
+    }
+    const row = await store.readJob("job_0");
+    expect(row!.status, "six successful claims must not trip the cap").toBe("done");
+    expect(row!.attempts).toBe(6);
+    expect(row!.failures).toBe(0);
   });
 
   it("persists step and progress after EVERY step", async () => {
@@ -240,16 +278,15 @@ describe("runOneStep", () => {
     expect(row!.progress).toEqual({});
   });
 
-  it("ATTEMPTS CAP: the claim past MAX_ATTEMPTS fails the job instead of running it", async () => {
+  it("FAILURE CAP: a job that has thrown MAX_FAILURES times is failed, not run again", async () => {
     let ran = 0;
     fakeKind(async () => { ran++; return T.nextStep("one", {}); });
-    queue({ kind: "fake", attempts: T.MAX_ATTEMPTS });
+    queue({ kind: "fake", failures: T.MAX_FAILURES });
     const claimed = (await store.claimJobs())[0]!;
-    expect(claimed.attempts).toBe(T.MAX_ATTEMPTS + 1);
     await runner.runOneStep(claimed);
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
-    expect(String(row!.error)).toMatch(/attempts exceeded/);
+    expect(String(row!.error)).toMatch(/failed 3 times/);
     expect(ran, "the kind was never run on the over-cap claim").toBe(0);
   });
 
@@ -333,5 +370,89 @@ describe("stitch piece maths (§4.3's boundaries)", () => {
     expect(three[2]).toEqual({ start: t0 + 2 * STITCH_PIECE_MS, end: t0 + min(61) });
     // The pieces tile the range exactly: no gap, no overlap.
     for (let i = 1; i < three.length; i++) expect(three[i]!.start).toBe(three[i - 1]!.end);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-up 2 — the Refuter's five
+// ---------------------------------------------------------------------------
+
+describe("item 1 — a 61-minute stitch completes (3 pieces = 4 claims)", () => {
+  it("resolve + three joins, all successful, and the cap never fires", async () => {
+    // The kind's own steps, driven through the real runner. Under the old attempts-based cap the
+    // fourth claim would have failed this job while it was succeeding.
+    const min = (n: number) => n * 60_000;
+    const t0 = Date.parse("2026-09-12T03:00:00Z");
+    const joined: string[] = [];
+    KIND_BY_NAME.set("fake_stitch", {
+      name: "fake_stitch", first: "resolve", scope: "invoke", parseArgs: () => ({}),
+      run: async (c) => {
+        if (c.step === "resolve") return T.nextStep("join", { pieces: planPieces(t0, t0 + min(61)), done: [] });
+        const pieces = c.progress.pieces as Array<Record<string, unknown>>;
+        const done = c.progress.done as unknown[];
+        if (done.length >= pieces.length) return T.doneWith({ piece_count: done.length });
+        joined.push(`p${done.length}`);
+        return T.nextStep("join", { ...c.progress, done: [...done, { clip_key: `k${done.length}` }] });
+      },
+    });
+    queue({ kind: "fake_stitch" });
+    for (let k = 0; k < 8; k++) {
+      const c = await store.claimJobs();
+      if (!c.length) break;
+      await runner.runOneStep(c[0]!);
+      if ((await store.readJob("job_0"))!.status !== "running") break;
+    }
+    const row = await store.readJob("job_0");
+    expect(row!.status, `61 minutes must complete; error=${row!.error}`).toBe("done");
+    expect(joined, "three pieces were joined, one per claim").toEqual(["p0", "p1", "p2"]);
+    expect(row!.attempts).toBeGreaterThan(T.MAX_FAILURES);
+    expect(row!.failures).toBe(0);
+  });
+});
+
+describe("item 3 — a cancel landing mid-step wins at the boundary", () => {
+  it("the step's `done` write matches no row, so the job stays cancelled", async () => {
+    KIND_BY_NAME.set("fake_done", {
+      name: "fake_done", first: "one", scope: "invoke", parseArgs: () => ({}),
+      run: async () => {
+        await store.cancelJob("job_0"); // the cancel lands while this step is in flight
+        return T.doneWith({ should_not: "land" });
+      },
+    });
+    queue({ kind: "fake_done" });
+    await runner.runOneStep((await store.claimJobs())[0]!);
+    const row = await store.readJob("job_0");
+    expect(row!.status, "the last writer must NOT win — the cancel does").toBe("cancelled");
+    expect(row!.result).toBeNull();
+  });
+
+  it("finishJob and saveStep both carry AND status = 'running'", async () => {
+    queue();
+    await store.finishJob("job_0", { x: 1 });
+    await store.saveStep("job_0", "s", {});
+    const fin = calls.find((c) => /SET status = 'done'/.test(c.text))!;
+    const step = calls.find((c) => /SET step = \?/.test(c.text))!;
+    expect(fin.text).toMatch(/AND status = 'running'/);
+    expect(step.text).toMatch(/AND status = 'running'/);
+  });
+});
+
+describe("item 5 — the two-runner test is semantic", () => {
+  it("the fake reads SKIP LOCKED from the statement, so deleting it fails the test", async () => {
+    // Guard on the guard: if store.ts loses the clause, the fake stops skipping and the
+    // disjointness assertion above breaks. This pins that the fake is reading it at all.
+    for (let i = 0; i < 6; i++) queue();
+    await store.claimJobs();
+    const c = calls.find((x) => /WITH claimable AS/.test(x.text))!;
+    expect(c.text).toMatch(/FOR UPDATE SKIP LOCKED/);
+  });
+
+  it("rows held by an in-flight claim are skipped, not taken twice", async () => {
+    for (let i = 0; i < 6; i++) queue();
+    const [a, b] = await Promise.all([store.claimJobs(), store.claimJobs()]);
+    const ids = [...a.map((j) => j.id), ...b.map((j) => j.id)];
+    expect(new Set(ids).size, "a job was claimed twice").toBe(ids.length);
+    expect(a.map((j) => j.id)).toEqual(["job_0", "job_1", "job_2"]);
+    expect(b.map((j) => j.id)).toEqual(["job_3", "job_4", "job_5"]);
   });
 });

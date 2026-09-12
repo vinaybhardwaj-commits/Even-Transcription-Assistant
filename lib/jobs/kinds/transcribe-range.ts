@@ -182,7 +182,22 @@ async function transcribeStep(ctx: StepContext) {
   if (!w.ok) return failWith(`whisper_failed: ${String(w.error ?? "unknown").slice(0, 160)}`);
 
   const text = typeof w.transcript === "string" ? w.transcript : "";
+  const segments = Array.isArray((w as { segments?: unknown[] }).segments) ? (w as { segments: unknown[] }).segments.length : 0;
+
+  // ─── POINTERS ONLY (Slice B Refuter, item 2) ─────────────────────────────────────────────────
+  // `scribe_job.result` is a durable column read by `scribe_job_status`, and the transcript is
+  // patient speech. An earlier version put the text here, which meant a `read` token could pull a
+  // consultation out of the job table — the exact leak keeping it out of `progress` was meant to
+  // prevent, one column over. The result now carries a POINTER to the stored run and the facts you
+  // can count without reading a word: how long, how many characters, which language, how many
+  // segments. Whoever wants the words goes to the transcription_run, where identity rules apply.
+  // `transcription_run_id` is NULL in Slice B and that is not an oversight: §4.5 gives the
+  // `transcription_run` write to Slice C, and every writer lives in lib/stt/**, outside this
+  // slice's files. The key is here from the start so the result SHAPE does not change when C
+  // fills it in — a caller written today keeps working. Null means "not persisted yet", and the
+  // counts beside it are real either way.
   return doneWith({
+    transcription_run_id: null,
     session_id: ctx.progress.session_id ?? null,
     clip_key: clipKey,
     clip_kind: ctx.progress.clip_kind ?? null,
@@ -191,7 +206,8 @@ async function transcribeStep(ctx: StepContext) {
     // "A quiet room" and "a failed read" must not look the same — the tool's K5 rule, kept here.
     silent_window: text.trim().length === 0,
     chars: text.length,
-    transcript: text,
+    language: (w as { language?: string }).language ?? null,
+    segments,
     dry_run: ctx.args.dry_run !== false,
   });
 }

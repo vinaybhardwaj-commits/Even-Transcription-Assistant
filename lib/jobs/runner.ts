@@ -12,17 +12,18 @@ import {
   claimJobs,
   failJob,
   finishJob,
-  overAttemptCap,
+  overFailureCap,
+  recordFailure,
   readJob,
   saveStep,
 } from "./store";
-import { MAX_ATTEMPTS, type JobRow } from "./types";
+import { MAX_FAILURES, type JobRow } from "./types";
 
 export type StepReport = {
   job_id: string;
   kind: string;
   step: string | null;
-  outcome: "advanced" | "done" | "failed" | "cancelled" | "attempts_exceeded" | "unknown_kind";
+  outcome: "advanced" | "done" | "failed" | "cancelled" | "failures_exceeded" | "unknown_kind";
   ms: number;
 };
 
@@ -41,9 +42,10 @@ export async function runOneStep(job: JobRow): Promise<StepReport> {
   const started = Date.now();
   const base = { job_id: job.id, kind: job.kind, step: job.step };
 
-  if (overAttemptCap(job)) {
-    await failJob(job.id, `attempts exceeded (${job.attempts} > ${MAX_ATTEMPTS}) at step ${job.step ?? "start"}`);
-    return { ...base, outcome: "attempts_exceeded", ms: Date.now() - started };
+  // The cap reads FAILURES, never attempts. A long job is claimed many times while succeeding.
+  if (overFailureCap(job)) {
+    await failJob(job.id, `failed ${job.failures} times (cap ${MAX_FAILURES}) at step ${job.step ?? "start"}`);
+    return { ...base, outcome: "failures_exceeded", ms: Date.now() - started };
   }
 
   const kind = KIND_BY_NAME.get(job.kind);
@@ -57,15 +59,15 @@ export async function runOneStep(job: JobRow): Promise<StepReport> {
   try {
     outcome = await kind.run({ job, step, args: job.args, progress: job.progress });
   } catch (e) {
-    // A throwing step is a failed ATTEMPT, not a failed job: the lease is released and the next
+    // A throwing step is a FAILURE, counted, not a failed job: the lease is released and the next
     // claim retries the same step, up to the cap. That is what makes a transient fault survivable.
     const msg = String((e as Error)?.message ?? e).slice(0, 500);
-    if (job.attempts >= MAX_ATTEMPTS) {
-      await failJob(job.id, `step ${step} threw on the last attempt: ${msg}`);
+    if (job.failures + 1 >= MAX_FAILURES) {
+      await failJob(job.id, `step ${step} threw for the ${job.failures + 1}th time: ${msg}`);
       return { ...base, step, outcome: "failed", ms: Date.now() - started };
     }
-    await saveStep(job.id, step, job.progress);
-    return { ...base, step, outcome: "advanced", ms: Date.now() - started };
+    await recordFailure(job.id, step, job.progress);
+    return { ...base, step, outcome: "failed", ms: Date.now() - started };
   }
 
   // The cancel boundary. Re-read rather than trust the row we were handed.
