@@ -39,3 +39,13 @@
 **V's manual steps.** None. Nothing to migrate, nothing to publish. To use §2.3, set `SCRIBE_MCP_TOKENS` on the deployment; until then the single token behaves exactly as it does today.
 
 **Subagents:** none.
+
+## Fix-up — on the three Slice A rulings
+
+**Rulings 1 and 2 need no code**: the fleet-card "Move to test" control is dropped (seam 1 closed), and §2.5 module-only is accepted as built (seam 3 closed).
+**Ruling 3** — `c43bbcb`. `pollCommands`' fail-open catch was a `console.warn`. It is now `console.error` every time (a log that drops repeats hides how long the fault has run) plus one best-effort `install.poll_write_failed` audit row per install per five minutes, through the existing `rateLimited` bucket. Unbounded at the 1.5 s poll cadence that would be ~2,400 rows per room per hour into the table meant to make this readable. The poll still fails OPEN — the registry is bookkeeping, the tape is not.
+New SQL (INFERRED): the same `INSERT INTO audit_log … VALUES ('system', 'install', 'install.poll_write_failed', 'room_install', ?, ?::jsonb)` shape as §2.2's two rows.
+**Tests +4**, in `tier2-assign-channel-guard`: ten rapid polls on one install write **exactly one** audit row while `console.error` fires **ten** times; a second install in the same window gets its own row (the limit is per install); the window is pinned at 5 min with the next window writing again; and a throwing poll still returns a normal result.
+**Gates rerun, all four**: `tsc --noEmit` 0 · `npm test` **1825 passed (1825)**, 82 files (was 1821) · `build` 0 · `check:silent` the same 9, none in a changed file.
+**One thing the fix-up changed beyond the ruling**: the five minutes is written `5 * 60_000`, not `300_000`. B3's guard test forbids a re-typed `300000` anywhere in `app|lib|components|db|scripts` — the house rule is that numbers are named and derived, not re-typed. Writing it in minutes × ms matches `CHANNEL_DRIFT_MS` next door.
+Branch `vinay/tier2-a` pushed. Slice B not started.
