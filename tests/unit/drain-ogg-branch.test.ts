@@ -79,9 +79,12 @@ describe("the receipt describes the bytes actually sent", () => {
     // assertion is scoped to its actual subject: the receipt that feeds the ROUTED engine's run.
     // It still bites — swapping audioKey/audioBytes back to join.key/bytes here fails it.
     // (`codeOf` strips comments, so the region is anchored on CODE at both ends.)
+    // C1b moved this into the engine PHASE. The region is the phase itself, bounded by the two
+    // function declarations either side, which is a tighter subject than before: the shadow run's
+    // own receipt now lives in an earlier phase and is excluded by construction.
     const region = drain.slice(
-      drain.indexOf("await adapter.transcribe(Buffer.from(audioBytes)"),
-      drain.indexOf("shouldShadow(windowId)"),
+      drain.indexOf("export async function roomWindowEngine"),
+      drain.indexOf("export async function roomWindowPoll"),
     );
     expect(region.length, "the region must exist, or this test is asserting on an empty string").toBeGreaterThan(200);
     expect(region).toContain("audioReceipt(audioKey, audioBytes)");

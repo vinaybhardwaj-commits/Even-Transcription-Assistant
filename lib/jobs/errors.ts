@@ -36,6 +36,8 @@ export const JOB_ERROR_CODES = [
   "route_job_unknown",
   "route_empty_transcript",
   "presign_failed",
+  // room_window (Slice C1b) — detail is a DrainStep, a closed union of our own names.
+  "room_window_failed",
   // the five stubs
   "not_implemented",
 ] as const;
