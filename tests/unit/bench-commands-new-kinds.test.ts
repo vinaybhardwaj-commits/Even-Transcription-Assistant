@@ -119,11 +119,25 @@ describe("the verbs' ack results reach bench_command.result", () => {
     expect(B.cleanAckApplied({ ok: true, diag: huge })).toEqual({});
   });
 
-  it("report_diag: a payload naming any of the four secret words is withheld, not stored", () => {
-    for (const w of ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN"]) {
+  it("report_diag: a payload naming ANY word on the forbidden list is withheld, not stored", () => {
+    // Driven off DIAG_FORBIDDEN itself, so a word added to the list is guarded by this test the
+    // moment it is added, and a word removed from it fails here rather than silently.
+    expect(B.DIAG_FORBIDDEN.length).toBeGreaterThan(0);
+    for (const w of B.DIAG_FORBIDDEN) {
       const out = B.cleanAckApplied({ ok: true, diag: { log_lines: [`line with ${w}=abc`] } });
-      expect(JSON.stringify(out)).not.toContain(w);
-      expect(out.diag).toEqual({ diag_withheld: "the payload named a secret and was not stored" });
+      expect(JSON.stringify(out), w).not.toContain(w);
+      expect(out.diag, w).toEqual({ diag_withheld: "the payload named a secret and was not stored" });
+    }
+  });
+
+  it("the forbidden list names MIGRATION_SECRET (12 Sep ruling on the Refuter's naming gap)", () => {
+    // Nothing in apps/room-recorder reads it today — it is a server-only env var — so this guards
+    // nothing yet. The list is the name of every secret that must not come back from a Mac, and the
+    // day a diagnostic starts quoting the server's environment must not depend on someone adding it.
+    expect(B.DIAG_FORBIDDEN).toContain("MIGRATION_SECRET");
+    // The kickoff's original four are all still there.
+    for (const w of ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN"]) {
+      expect(B.DIAG_FORBIDDEN, w).toContain(w);
     }
   });
 

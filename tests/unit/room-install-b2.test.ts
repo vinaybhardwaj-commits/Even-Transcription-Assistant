@@ -250,6 +250,25 @@ describe("B2-D5 — Move to stable, as deriveRow decides it", () => {
     const moved = view({ update_channel: "stable", assigned_channel: "stable" });
     expect(moved.assigned_pending).toBe(false);
   });
+
+  // ── 12 Sep ruling on the Refuter's first carry ──────────────────────────────────────────
+  // The rule is now "any assignment the Mac has not reported", not "stable". B2's two cases
+  // above are unchanged by it; these are the ones that rendered nothing before.
+  it("a pending TEST assignment is pending too — it rendered nothing under the stable-only rule", () => {
+    expect(view({ update_channel: "stable", assigned_channel: "test" }).assigned_pending).toBe(true);
+    expect(view({ update_channel: "test", assigned_channel: "test" }).assigned_pending).toBe(false);
+  });
+
+  it("a Mac that reports no channel at all has not reported the assigned one either", () => {
+    expect(view({ update_channel: null, assigned_channel: "test" }).assigned_pending).toBe(true);
+    expect(view({ update_channel: null, assigned_channel: "stable" }).assigned_pending).toBe(true);
+  });
+
+  it("no assignment is never pending, whatever the Mac reports", () => {
+    for (const update_channel of ["stable", "test", null] as const) {
+      expect(view({ update_channel, assigned_channel: null }).assigned_pending, String(update_channel)).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

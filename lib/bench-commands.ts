@@ -208,8 +208,14 @@ export const DIAG_MAX_CHARS = 262_144;
  * Tier 1 §3 — words a diagnostic payload must never contain. The app strips the session and redacts
  * any log line carrying one of these; this is the server's second look, and a payload that still
  * carries one is NOT STORED (`diag_withheld`), because `result` is readable by every operator door.
+ *
+ * MIGRATION_SECRET added by the 12 Sep ruling on the Refuter's naming gap (f). Nothing in
+ * `apps/room-recorder` reads it — it is a server-only env var — so today this guards nothing. It is
+ * here because this list is the NAME OF EVERY SECRET THAT MUST NOT COME BACK FROM A MAC, not a list
+ * of the ones that currently could: the day a diagnostic starts quoting the server's own environment
+ * is the day it is needed, and that day must not depend on somebody remembering to add it.
  */
-export const DIAG_FORBIDDEN = ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN"] as const;
+export const DIAG_FORBIDDEN = ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN", "MIGRATION_SECRET"] as const;
 
 /**
  * PURE — R4-D12. The three applied fields of an ack body, each validated on its own and DROPPED if

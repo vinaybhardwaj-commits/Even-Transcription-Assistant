@@ -155,6 +155,11 @@ describe("the card", () => {
     const rows = [mk({ assigned_channel: "stable", update_channel: "test" }), mk({ assigned_channel: null, update_channel: "test" })];
     expect(V.deriveRow({ row: rows[0]!, latestRelease: null, nowMs: Date.now() }).assigned_pending).toBe(true);
     expect(V.deriveRow({ row: rows[1]!, latestRelease: null, nowMs: Date.now() }).can_move_to_stable).toBe(true);
+    // 12 Sep ruling: the line the neutral wording was written for. A pending TEST assignment now
+    // renders it too — under the stable-only rule this row said nothing at all.
+    const pendingTest = mk({ assigned_channel: "test", update_channel: "stable" });
+    expect(V.deriveRow({ row: pendingTest, latestRelease: null, nowMs: Date.now() }).assigned_pending).toBe(true);
+    rows.push(pendingTest);
     const html = renderToStaticMarkup(
       React.createElement(FleetTable, {
         fleet: { now: new Date().toISOString(), rows, latest_release: null, releases: { stable: null, test: null }, degraded: [] } as import("@/lib/room-install-view").FleetPayload,

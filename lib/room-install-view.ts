@@ -618,9 +618,10 @@ export type RowView = {
   /** B2-D10, passed through, read-only. Null when never reported. */
   input_devices: InputDevice[] | null;
   /**
-   * B2-D5. True while an admin's "Move to stable" is waiting for the Mac to report `stable` itself.
-   * The card shows the assignment until then, and after that says nothing: the Mac's own report is
-   * the only proof it moved.
+   * B2-D5, generalised 12 Sep. True while ANY assigned channel is waiting for the Mac to report it —
+   * `test` as well as `stable`, since Tier 1 §3 made both assignable. The card shows that an
+   * assignment is outstanding until then, and after that says nothing: the Mac's own report is the
+   * only proof it moved, and the card never names the destination it cannot verify.
    */
   assigned_pending: boolean;
   /** B2-D5. Whether the card offers "Move to stable": a bound Mac that reports `test`, not yet assigned. */
@@ -792,7 +793,13 @@ export function deriveRow(input: {
     peak: i?.peak ?? null,
     zero_ratio: i?.zero_ratio ?? null,
     input_devices: i?.input_devices ?? null,
-    assigned_pending: Boolean(i && i.assigned_channel === "stable" && i.update_channel !== "stable"),
+    // B2-D5, generalised by the 12 Sep ruling. WAS `assigned_channel === "stable"`, written when
+    // stable was the only assignable value; Tier 1 §3 made `test` assignable through the API and the
+    // MCP, and under the old test a pending `test` assignment rendered NOTHING — the one case where
+    // a card that says nothing is worse than one that says the wrong channel. Any assignment the Mac
+    // has not yet reported is pending. A Mac that reports no channel at all (below 0.1.8) has not
+    // reported the assigned one either, so its assignment is pending too.
+    assigned_pending: Boolean(i && i.assigned_channel && i.update_channel !== i.assigned_channel),
     can_move_to_stable: Boolean(
       i && !i.retired_at && i.update_channel === "test" && i.assigned_channel !== "stable",
     ),
