@@ -1,0 +1,61 @@
+=== npm test ===
+ ✓ tests/unit/room-switches.test.ts (18 tests) 170ms
+ ✓ tests/unit/bench-dual.test.ts (17 tests) 12ms
+ ✓ tests/unit/bench-replay.test.ts (17 tests) 21ms
+ ✓ tests/unit/drain-ogg-branch.test.ts (15 tests) 5ms
+ ✓ tests/unit/mcp-room-command.test.ts (9 tests) 35ms
+ ✓ tests/unit/tier2-mcp-guards.test.ts (14 tests) 10ms
+ ✓ tests/unit/room-rename.test.ts (13 tests) 20ms
+ ✓ tests/unit/join-format.test.ts (22 tests) 6ms
+ ✓ tests/unit/bench-day-report.test.ts (12 tests) 3ms
+ ✓ tests/unit/mcp-set-audio-input.test.ts (9 tests) 7ms
+ ✓ tests/unit/measure-job.test.ts (12 tests) 5ms
+ ✓ tests/unit/whisper-retry.test.ts (16 tests) 29ms
+ ✓ tests/unit/room-release-route.test.ts (10 tests) 10ms
+ ✓ tests/unit/c1-route-adapter.test.ts (13 tests) 307ms
+ ✓ tests/unit/whisper-segments.test.ts (9 tests) 5ms
+ ✓ tests/unit/tuning-fork.test.ts (12 tests) 5ms
+ ✓ tests/unit/room-install-assign-route.test.ts (6 tests) 7ms
+ ✓ tests/unit/migrations-self-record.test.ts (86 tests) 8ms
+ ✓ tests/unit/ended-disagrees-monitor.test.ts (12 tests) 3ms
+ ✓ tests/unit/mcp-diff-room-install-states.test.ts (8 tests) 4ms
+ ✓ tests/unit/refuter-b-scope.test.ts (12 tests) 8ms
+ ✓ tests/unit/c2-async-seam.test.ts (9 tests) 244ms
+ ✓ tests/unit/language-route.test.ts (13 tests) 2ms
+ ✓ tests/unit/bench-orphan.test.ts (14 tests) 3ms
+ ✓ tests/unit/service-worker.test.ts (7 tests) 5ms
+ ✓ tests/unit/diarize-encounter-only.test.ts (8 tests) 3ms
+ ✓ tests/unit/c1b-no-engine-is-loud.test.ts (3 tests) 130ms
+ ✓ tests/unit/process-step-claim.test.ts (3 tests) 2ms
+ ✓ tests/unit/live-window.test.ts (5 tests) 1ms
+ ✓ tests/unit/bench-ack-applied.test.ts (4 tests) 4ms
+ ✓ tests/unit/whisper-language-map.test.ts (22 tests) 4ms
+ ✓ tests/unit/c1-shadow-and-tripwires.test.ts (10 tests) 232ms
+ ✓ tests/unit/platform.test.ts (7 tests) 1ms
+ ✓ tests/unit/transcript-quality.test.ts (6 tests) 3ms
+ ✓ tests/unit/wer.test.ts (6 tests) 3ms
+ ✓ tests/unit/doctor-slug.test.ts (3 tests) 3ms
+ ✓ tests/unit/webm-header.test.ts (3 tests) 1ms
+ ✓ tests/unit/mcp-path-key.test.ts (6 tests) 10ms
+ ✓ tests/unit/room-stage-migration.test.ts (9 tests) 2ms
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a missing diarize_slot table admits the call rather than failing diarization
+[diarize-gate] diarize_slot missing — run migration 0063 via /api/run-migrations. Admitting UNGATED (depth-1 not enforced) rather than failing diarization.
+
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass
+[diarize-gate] claim failed (treating as busy): connection terminated
+
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass
+[diarize-gate] claim failed (treating as busy): connection terminated
+
+ ✓ tests/unit/diarize-dispatch.test.ts (15 tests) 5422ms
+   ✓ B2 — the caller is held at depth 1 > three requests offered at once never overlap in flight 1656ms
+   ✓ B2 — the caller is held at depth 1 > the second caller's wait is reported as queue wait, not as service time 907ms
+   ✓ B2 — the caller is held at depth 1 > a caller that never gets the slot is retryable, and never reached the service 782ms
+   ✓ B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass 961ms
+   ✓ B1 — the timeout budget belongs to the dispatched call > time spent queued does not shorten the budget of the call that follows it 879ms
+
+ Test Files  97 passed (97)
+      Tests  2066 passed (2066)
+   Start at  20:00:59
+   Duration  7.01s (transform 2.85s, setup 0ms, collect 17.13s, tests 9.23s, environment 9ms, prepare 3.07s)
+

@@ -20,6 +20,7 @@
  */
 import { LEASE_MS } from "@/lib/jobs/types";
 import { DIARIZE_IO_MARGIN_MS, DIARIZE_REALTIME_FACTOR } from "./diarize-budget";
+import { sliceStart, sliceEnd, type SliceStartMs, type SliceEndMs } from "./window-bounds";
 
 /** One slice of audio. 120 s keeps a step inside its lease with room to spare. */
 export const SLICE_MS = 120_000;
@@ -38,15 +39,71 @@ export const DIARIZE_BATCH_THRESHOLD = 0.65;
 /** The same floor, applied to OUR cosine when deciding two slices heard the same voice. */
 export const SPEAKER_STITCH_THRESHOLD = 0.65;
 
-export type SliceBound = { index: number; start_ms: number; end_ms: number };
+export type SliceBound = { index: number; start: SliceStartMs; end: SliceEndMs };
 
-/** PURE. The sub-windows a window becomes. The last one is short; none is ever empty. */
+/** PURE. The sub-windows a window becomes, cutting on the clock. The last one is short. */
 export function sliceBounds(startMs: number, endMs: number, sliceMs: number = SLICE_MS): SliceBound[] {
   const out: SliceBound[] = [];
   if (!(endMs > startMs)) return out;
   let i = 0;
   for (let t = startMs; t < endMs; t += sliceMs, i += 1) {
-    out.push({ index: i, start_ms: t, end_ms: Math.min(endMs, t + sliceMs) });
+    out.push({ index: i, start: sliceStart(t), end: sliceEnd(Math.min(endMs, t + sliceMs)) });
+  }
+  return out;
+}
+
+/** How far a nominal boundary may move to find a gap between turns. */
+export const SNAP_WINDOW_MS = 10_000;
+
+/**
+ * PURE. Slice boundaries that try not to cut a turn in half.
+ *
+ * ─── WHY ───────────────────────────────────────────────────────────────────────────────────────
+ * Every boundary that lands inside a turn costs that turn its attribution, permanently: a turn
+ * spanning two slices belongs to two clusterings and can be named by neither. At 120 s slices that
+ * is a few percent of turns and roughly twice that share of SPEECH SECONDS, because longer turns
+ * are likelier to be cut. We already know where the turns are — `stt_turn` exists before diarize
+ * runs — so donating those seconds to an arbitrary clock is a choice, not a constraint.
+ *
+ * ─── THE ALGORITHM, AND THE CAP THAT OUTRANKS IT ───────────────────────────────────────────────
+ * Walk the nominal 120 s marks. For each, look for a turn BOUNDARY (a gap between turns) within
+ * ±SNAP_WINDOW_MS and take the nearest. The hard cap wins every argument: a slice may never exceed
+ * SLICE_MS, because 120 x 1.5 x 1000 + 45 000 = 225 000 against a 240 000 ms lease is the whole
+ * reason slicing works, so a snap that would lengthen a slice past the cap is only taken EARLIER,
+ * never later. With no usable boundary the cut stays on the clock and whatever it crosses is
+ * marked `seam` — named, not hidden.
+ */
+export function snappedSliceBounds(
+  startMs: number,
+  endMs: number,
+  turns: readonly { start_ms: number; end_ms: number }[],
+  sliceMs: number = SLICE_MS,
+  snapMs: number = SNAP_WINDOW_MS,
+): SliceBound[] {
+  if (!(endMs > startMs)) return [];
+  // Candidate cut points: every turn edge. A cut ON an edge splits nothing.
+  const edges = [...new Set(turns.flatMap((t) => [t.start_ms, t.end_ms]))].sort((a, b) => a - b);
+  const cutsNothing = (at: number) => !turns.some((t) => t.start_ms < at && t.end_ms > at);
+
+  const out: SliceBound[] = [];
+  let from = startMs;
+  let i = 0;
+  while (from < endMs) {
+    const nominal = Math.min(endMs, from + sliceMs);
+    if (nominal >= endMs) { out.push({ index: i, start: sliceStart(from), end: sliceEnd(endMs) }); break; }
+    // Only candidates that keep the slice inside the cap, and leave something after it.
+    const lo = Math.max(from + 1, nominal - snapMs);
+    const hi = Math.min(from + sliceMs, nominal + snapMs);
+    let best: number | null = null;
+    for (const e of edges) {
+      if (e < lo || e > hi || e >= endMs) continue;
+      if (!cutsNothing(e)) continue;
+      if (best === null || Math.abs(e - nominal) < Math.abs(best - nominal)) best = e;
+    }
+    const cut = best ?? nominal;
+    out.push({ index: i, start: sliceStart(from), end: sliceEnd(cut) });
+    from = cut;
+    i += 1;
   }
   return out;
 }
@@ -106,8 +163,8 @@ const key = (s: number, i: number) => `${s}:${i}`;
 /**
  * PURE. Group speakers across slices into identities, greedily, at `threshold`.
  *
- * Each speaker joins the first existing identity whose OPENING member it matches at or above the
- * threshold; otherwise it opens one. Greedy and order-dependent by construction — it walks slices
+ * Each speaker joins the BEST-matching existing identity whose OPENING member it meets at or above
+ * the threshold; otherwise it opens one. Greedy and order-dependent by construction — it walks slices
  * in order, which is the only order that exists — and deliberately compares against the opener
  * rather than a running mean, so one weak member cannot drag an identity onto a different voice.
  *
@@ -132,7 +189,9 @@ export function stitchSpeakers(
       }
     }
     if (joined) { joined.g.members.push(sp); joined.g.cosines.push(joined.cos); }
-    else groups.push({ id: clusterIdFor(groups.length), opener: emb, members: [sp], cosines: [1] });
+    // The opener's hop is its REAL cosine with itself, computed, not assumed — 1 for a usable
+    // vector and null for one we could not decode. A hard-coded 1 hid the case below.
+    else groups.push({ id: clusterIdFor(groups.length), opener: emb, members: [sp], cosines: [cosine(emb, emb) ?? 0] });
   }
 
   for (const g of groups) {
@@ -144,12 +203,19 @@ export function stitchSpeakers(
     const clinician = ids.size === 1 ? (named[0]!.clinician_id as string) : null;
     const sourceConf = ids.size === 1 ? Math.min(...named.map((m) => m.confidence as number)) : null;
 
+    // THE CLAIM IS ONLY AS GOOD AS THE WEAKEST LINK ON ITS PATH, and the path runs through the
+    // opener: named member --hop--> opener --hop--> this member. Taking only a member's own hop let
+    // an OPENER record the service's full confidence for a name that reached it through a 0.66
+    // joiner — the exact overstatement this comment block claims to prevent.
+    const namedHops = g.members.map((m, i) => (named.includes(m) ? (g.cosines[i] ?? 0) : null)).filter((x): x is number => x !== null);
+    const weakestNamedHop = namedHops.length ? Math.min(...namedHops) : null;
     g.members.forEach((m, i) => {
-      const hop = g.cosines[i] ?? 1;
+      const ownHop = g.cosines[i] ?? 0;
+      const usable = clinician !== null && sourceConf !== null && weakestNamedHop !== null;
       out.set(key(m.slice, m.idx), {
         cluster_id: g.id,
         clinician_id: clinician,
-        match_confidence: clinician === null || sourceConf === null ? null : Math.min(sourceConf, hop),
+        match_confidence: usable ? Math.min(sourceConf, weakestNamedHop, ownHop) : null,
       });
     });
   }

@@ -6,6 +6,7 @@
  * tempting wrong answer. These tests fail if role is ever derived from it.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { windowStart, windowEnd, sliceStart, sliceEnd } from "@/lib/stt/window-bounds";
 import { roleForSpeaker, rolesByIndex, attributionCoverage } from "@/lib/stt/speaker-roles";
 import type { DiarizeSpeaker } from "@/lib/diarize";
 
@@ -18,11 +19,11 @@ describe("item 3 — NEVER infer role from speaker order", () => {
   it("speaker_idx 0 with no match gets NO role, however much it talked", () => {
     // The exact trap: the longest-speaking cluster, labelled "Patient" by the service's own
     // cascade, at index 0. No centroid matched, so nothing is claimed.
-    expect(roleForSpeaker(unmatched(0))).toEqual({ role: "unattributed", clinician_id: null, match_confidence: null });
+    expect(roleForSpeaker(unmatched(0))).toEqual({ role: null, clinician_id: null, match_confidence: null, no_role_reason: "no_match" });
   });
 
   it("a matched speaker at a HIGH index is still the clinician — order is not evidence either way", () => {
-    expect(roleForSpeaker(matched(3))).toEqual({ role: "clinician", clinician_id: "doc_fake0001", match_confidence: 0.82 });
+    expect(roleForSpeaker(matched(3))).toEqual({ role: "clinician", clinician_id: "doc_fake0001", match_confidence: 0.82, no_role_reason: null });
   });
 
   it("REORDERING the speakers changes nothing — the decision cannot see the index", () => {
@@ -31,21 +32,21 @@ describe("item 3 — NEVER infer role from speaker order", () => {
     const b = rolesByIndex([...speakers].reverse());
     for (const idx of [0, 1, 2]) expect(b.get(idx)).toEqual(a.get(idx));
     expect(a.get(1)!.role).toBe("clinician");
-    expect(a.get(0)!.role).toBe("unattributed");
+    expect(a.get(0)!.role).toBeNull();
   });
 
   it("the service's own `type` and `label` are NOT evidence — with no centroids it invents them", () => {
     // With an empty centroid list the cascade labels the longest cluster "Patient" and, in other
     // shapes, could say "clinician" from a heuristic. Neither may create an attribution.
-    expect(roleForSpeaker(unmatched(0, { type: "clinician", label: "Dr Someone", source: "heuristic" })).role).toBe("unattributed");
-    expect(roleForSpeaker(unmatched(1, { type: "patient" })).role).toBe("unattributed");
+    expect(roleForSpeaker(unmatched(0, { type: "clinician", label: "Dr Someone", source: "heuristic" })).role).toBeNull();
+    expect(roleForSpeaker(unmatched(1, { type: "patient" })).role).toBeNull();
   });
 
   it("a clinician_id with NO confidence is not a match this system will assert", () => {
     const half = { idx: 0, label: "x", type: "clinician", clinician_id: "doc_fake0001" } as DiarizeSpeaker;
-    expect(roleForSpeaker(half).role, "the number is what a reviewer needs to judge it").toBe("unattributed");
+    expect(roleForSpeaker(half).role, "the number is what a reviewer needs to judge it").toBeNull();
     const blank = { idx: 0, label: "x", type: "clinician", clinician_id: "   ", confidence: 0.9 } as DiarizeSpeaker;
-    expect(roleForSpeaker(blank).role).toBe("unattributed");
+    expect(roleForSpeaker(blank).role).toBeNull();
   });
 
   it("STRUCTURAL: the role module never reads idx, label, type or speaking time", async () => {
@@ -75,11 +76,24 @@ vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ");
     if (q.includes("FROM voice_print")) return DB.centroids;
-    if (q.includes("FROM cue")) return DB.turns;
+    if (q.includes("FROM cue")) {
+      // HONOURS THE PREDICATE. The round-1 fake returned every turn for any query containing
+      // "FROM cue", which is exactly why it passed while production loaded zero: the real WHERE
+      // could never match. Window bounds identify the window; the turn's own bounds select.
+      const wS = Number(v[1]), wE = Number(v[2]);
+      const hasSlice = q.includes("payload->>'start_ms')::bigint <");
+      const sE = hasSlice ? Number(v[3]) : Infinity;
+      const sS = hasSlice ? Number(v[4]) : -Infinity;
+      return DB.turns.filter((t) => {
+        const win = (t as { window?: { start_ms: number; end_ms: number } }).window ?? { start_ms: wS, end_ms: wE };
+        if (win.start_ms !== wS || win.end_ms !== wE) return false;
+        return Number(t.start_ms) < sE && Number(t.end_ms) > sS;
+      });
+    }
     if (q.includes("INSERT INTO room_turn_speaker")) {
       // NULL/NOW() are literals; the bound params are contiguous.
       DB.rows.push({ window_id: v[0], source_ref: v[1], speaker_idx: v[2], cluster_id: v[3], overlap_ms: v[4],
-                     clinician_id: v[6], role: v[7], match_confidence: v[8] });
+                     clinician_id: v[6], role: v[7], match_confidence: v[8], no_role_reason: v[9] });
       return [];
     }
     return [];
@@ -89,7 +103,10 @@ vi.mock("@/lib/diarize", () => ({
   runDiarize: async (_a: unknown, _c: string, opts: Record<string, unknown>) => { SVC.calls.push(opts); return SVC.out; },
 }));
 
-const SLICE = { index: 0, start_ms: 1000, end_ms: 121_000 };
+const WIN = { start: windowStart(1000), end: windowEnd(901_000) };
+const SLICE = { index: 0, start: sliceStart(1000), end: sliceEnd(121_000) };
+const call = (over: Record<string, unknown> = {}) =>
+  ({ windowId: "bw_1", roomDayId: "rd_1", window: WIN, slice: SLICE, audio: new Uint8Array([1]), ...over });
 
 describe("D1 — a turn containing a speaker change gets NO name", () => {
   beforeEach(() => {
@@ -106,13 +123,14 @@ describe("D1 — a turn containing a speaker change gets NO name", () => {
       ],
     } };
     const { diarizeSlice } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
+    const r = await diarizeSlice(call());
     expect(r.ok).toBe(true);
     const row = DB.rows[0]!;
     // The dominant speaker is still recorded — it is a useful diagnostic.
     expect(row.speaker_idx).toBe(0);
     // But 400 ms of someone else's speech means nobody's name goes on this row.
-    expect(row.role, "a straddled turn may not carry a clinician").toBe("unattributed");
+    expect(row.role, "a straddled turn may not carry a clinician").toBeNull();
+    expect(row.no_role_reason, "and the row records WHY, so the stitch cannot undo it").toBe("straddle");
     expect(row.clinician_id).toBeNull();
     expect(row.match_confidence).toBeNull();
     expect((r as { outcome: { straddled: number } }).outcome.straddled).toBe(1);
@@ -125,7 +143,7 @@ describe("D1 — a turn containing a speaker change gets NO name", () => {
       transcript_segments: [{ start_ms: 0, end_ms: 1000, speaker_idx: 0, overlap: false }],
     } };
     const { diarizeSlice } = await import("@/lib/stt/diarize-window");
-    await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
+    await diarizeSlice(call());
     expect(DB.rows[0]!.role).toBe("clinician");
     expect(DB.rows[0]!.clinician_id).toBe("doc_fake0002");
   });
@@ -148,8 +166,8 @@ describe("D4 — a real 900 s window is REACHABLE and produces rows", () => {
     const slices = sliceBounds(0, 900_000);
     expect(SLICE_MS).toBe(120_000);
     expect(slices).toHaveLength(8);
-    expect(slices[7]).toEqual({ index: 7, start_ms: 840_000, end_ms: 900_000 });
-    for (const s of slices) expect(sliceFits((s.end_ms - s.start_ms) / 1000), `slice ${s.index}`).toBe(true);
+    expect(slices[7]).toEqual({ index: 7, start: 840_000, end: 900_000 });
+    for (const s of slices) expect(sliceFits((s.end - s.start) / 1000), `slice ${s.index}`).toBe(true);
   });
 
   it("REACHABILITY, not arithmetic: slicing a 900 s window writes real rows", async () => {
@@ -158,12 +176,12 @@ describe("D4 — a real 900 s window is REACHABLE and produces rows", () => {
     const slices = sliceBounds(0, 900_000);
     for (const sl of slices) {
       // One clean turn per slice, wholly inside it.
-      DB.turns = [{ source_ref: `t${sl.index}`, start_ms: sl.start_ms + 1000, end_ms: sl.start_ms + 5000 }];
+      DB.turns = [{ source_ref: `t${sl.index}`, start_ms: sl.start + 1000, end_ms: sl.start + 5000 }];
       SVC.out = { ok: true, latencyMs: 50, result: {
         speakers: [matched(0)],
         transcript_segments: [{ start_ms: 0, end_ms: 120_000, speaker_idx: 0, overlap: false }],
       } };
-      const r = await diarizeSlice({ windowId: "bw_900", roomDayId: "rd_1", slice: sl, audio: new Uint8Array([1]) });
+      const r = await diarizeSlice(call({ windowId: "bw_900", window: { start: windowStart(0), end: windowEnd(900_000) }, slice: sl }));
       expect(r.ok, `slice ${sl.index} must run`).toBe(true);
     }
     expect(DB.rows, "eight slices, eight rows — the feature fires on a production-sized window").toHaveLength(8);
@@ -178,8 +196,9 @@ describe("D4 — a real 900 s window is REACHABLE and produces rows", () => {
       transcript_segments: [{ start_ms: 0, end_ms: 120_000, speaker_idx: 0, overlap: false }],
     } };
     const { diarizeSlice } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: { index: 0, start_ms: 0, end_ms: 120_000 }, audio: new Uint8Array([1]) });
-    expect(DB.rows[0]!.role).toBe("unattributed");
+    const r = await diarizeSlice(call({ window: { start: windowStart(0), end: windowEnd(900_000) }, slice: { index: 0, start: sliceStart(0), end: sliceEnd(120_000) } }));
+    expect(DB.rows[0]!.role).toBeNull();
+    expect(DB.rows[0]!.no_role_reason).toBe("seam");
     expect(DB.rows[0]!.clinician_id).toBeNull();
     expect((r as { outcome: { seam_skipped: number } }).outcome.seam_skipped).toBe(1);
   });
@@ -193,7 +212,7 @@ describe("D5 — 0.65 is on the wire, always", () => {
     expect(DIARIZE_BATCH_THRESHOLD).toBe(0.65);
     SVC.out = { ok: true, latencyMs: 10, result: { speakers: [], transcript_segments: [] } };
     const { diarizeSlice } = await import("@/lib/stt/diarize-window");
-    await diarizeSlice({ windowId: "bw_1", roomDayId: "rd_1", slice: SLICE, audio: new Uint8Array([1]) });
+    await diarizeSlice(call());
     expect(SVC.calls).toHaveLength(1);
     expect(SVC.calls[0]!.batchThreshold, "inheriting a remote default is how an unvalidated number governs identity").toBe(0.65);
     // The stitch uses the same floor for OUR cosine.
@@ -251,5 +270,171 @@ describe("the reader, and the one diarize kind", () => {
     const src = readFileSync("lib/stt/diarize-window.ts", "utf8");
     expect(src).toMatch(/encounterId: `\$\{opts\.windowId\}#\$\{opts\.slice\.index\}`/);
     expect(src).not.toMatch(/INSERT INTO encounter/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2 — the defects this round closed, each asserted where it actually lives
+// ---------------------------------------------------------------------------
+
+describe("R2 D2 — turns are LOADED per slice, with a count", () => {
+  beforeEach(() => { DB.rows = []; DB.centroids = []; SVC.calls = []; });
+
+  it("40 turns in a 900 s window are loaded BY SLICE, not lost to a window/slice bound mix-up", async () => {
+    const { loadSliceTurns, loadWindowTurns } = await import("@/lib/stt/diarize-window");
+    // 40 turns spread across the window, each stamped with the 900 s WINDOW bounds, as buildTurns does.
+    DB.turns = Array.from({ length: 40 }, (_, i) => ({
+      source_ref: `t${i}`, start_ms: i * 22_000, end_ms: i * 22_000 + 4_000,
+      window: { start_ms: 0, end_ms: 900_000 },
+    }));
+    const win = { start: windowStart(0), end: windowEnd(900_000) };
+    expect(await loadWindowTurns("rd_1", win), "the control: the whole window").toHaveLength(40);
+
+    const { snappedSliceBounds } = await import("@/lib/stt/diarize-slicing");
+    const slices = snappedSliceBounds(0, 900_000, DB.turns.map((t) => ({ start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) })));
+    const seen = new Set<string>();
+    let nonEmpty = 0;
+    for (const sl of slices) {
+      const got = await loadSliceTurns("rd_1", win, sl);
+      if (got.length > 0) nonEmpty += 1;
+      for (const t of got) seen.add(t.source_ref);
+    }
+    // THE COUNT IS THE ASSERTION. Production loaded ZERO here; the fake now honours the predicate,
+    // so a regression to window-vs-slice bounds makes this read 0 rather than 40.
+    expect(seen.size, "every turn must be reachable by some slice").toBe(40);
+    expect(nonEmpty, "and the work must be spread across slices, not landing in one").toBeGreaterThan(5);
+  });
+});
+
+describe("R2 D1 — the stitch may fill only 'no_match'", () => {
+  const UPDATES = vi.hoisted(() => ({ sql: [] as string[] }));
+  it("straddle and seam rows survive a stitch untouched; a no_match row is filled", async () => {
+    // Drive the REAL UPDATE against a tiny row store that applies its WHERE clause.
+    const rows: Array<Record<string, unknown>> = [
+      { source_ref: "straddle", cluster_id: "s0:0", role: null, no_role_reason: "straddle", clinician_id: null, match_confidence: null },
+      { source_ref: "seam", cluster_id: "s0:0", role: null, no_role_reason: "seam", clinician_id: null, match_confidence: null },
+      { source_ref: "nomatch", cluster_id: "s0:0", role: null, no_role_reason: "no_match", clinician_id: null, match_confidence: null },
+    ];
+    vi.resetModules();
+    vi.doMock("@/lib/db", () => ({
+      sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
+        const q = strings.join("?").replace(/\s+/g, " ");
+        UPDATES.sql.push(q);
+        if (!q.includes("UPDATE room_turn_speaker") || !q.includes("SET cluster_id") || !q.includes("no_role_reason = 'no_match'")) return [];
+        const hit = rows.filter((r) => r.cluster_id === "s0:0" && r.role === null && r.no_role_reason === "no_match");
+        for (const r of hit) { r.role = "clinician"; r.clinician_id = v[1]; r.match_confidence = v[2]; r.no_role_reason = null; }
+        return hit.map((r) => ({ source_ref: r.source_ref }));
+      },
+    }));
+    const { applyStitch } = await import("@/lib/stt/diarize-window");
+    await applyStitch("bw_1", new Map([["0:0", { cluster_id: "rsc_0", clinician_id: "doc_x", match_confidence: 0.66 }]]));
+
+    // ASSERTED ON THE ROW, after the UPDATE — not on the function's return value.
+    const byRef = new Map(rows.map((r) => [r.source_ref, r]));
+    expect(byRef.get("straddle")!.role, "structural: two speakers really did hold this turn").toBeNull();
+    expect(byRef.get("straddle")!.clinician_id).toBeNull();
+    expect(byRef.get("seam")!.role, "structural: it belongs to two clusterings").toBeNull();
+    expect(byRef.get("seam")!.clinician_id).toBeNull();
+    expect(byRef.get("nomatch")!.role, "unresolved, so the stitch may resolve it").toBe("clinician");
+    expect(byRef.get("nomatch")!.clinician_id).toBe("doc_x");
+    vi.doUnmock("@/lib/db");
+    vi.resetModules();
+  });
+});
+
+describe("R2 D3 — no synthetic 1.0 at the opener", () => {
+  it("an opener named through a 0.66 joiner records 0.66, not the service's 0.9", async () => {
+    const { stitchSpeakers } = await import("@/lib/stt/diarize-slicing");
+    const vec = (v: number[]) => Buffer.from(new Float32Array(v).buffer).toString("base64");
+    // Two vectors ~0.66 apart. The OPENER is unmatched; the NAME arrives from the joiner.
+    const a = vec([1, 0]);
+    const b = vec([0.66, 0.7513]);
+    const ids = stitchSpeakers([
+      { slice: 0, idx: 0, embedding_base64: a },
+      { slice: 1, idx: 0, embedding_base64: b, clinician_id: "doc_x", confidence: 0.9 },
+    ]);
+    const opener = ids.get("0:0")!;
+    expect(opener.clinician_id).toBe("doc_x");
+    expect(opener.match_confidence!, "its link runs through a 0.66 hop and cannot be worth 0.9").toBeLessThanOrEqual(0.67);
+  });
+});
+
+describe("R2 ruling — snapping cuts between turns", () => {
+  it("a window with known turn bounds is cut without splitting any of them, all slices <= 120 s", async () => {
+    const { snappedSliceBounds, SLICE_MS } = await import("@/lib/stt/diarize-slicing");
+    // Turns every 20 s, 15 s long — so there is always a gap near the nominal 120 s marks.
+    const turns = Array.from({ length: 45 }, (_, i) => ({ start_ms: i * 20_000, end_ms: i * 20_000 + 15_000 }));
+    const slices = snappedSliceBounds(0, 900_000, turns);
+    for (const sl of slices) {
+      expect(sl.end - sl.start, `slice ${sl.index} exceeds the cap`).toBeLessThanOrEqual(SLICE_MS);
+      const cutsATurn = turns.some((t) => t.start_ms < sl.end && t.end_ms > sl.end && sl.end !== 900_000);
+      expect(cutsATurn, `slice ${sl.index} ends inside a turn`).toBe(false);
+    }
+    expect(slices[slices.length - 1]!.end).toBe(900_000);
+  });
+
+  it("with NO turn boundary available it falls back to the hard cut, never past the cap", async () => {
+    const { snappedSliceBounds, SLICE_MS } = await import("@/lib/stt/diarize-slicing");
+    // One continuous 900 s turn: nowhere to snap to.
+    const slices = snappedSliceBounds(0, 900_000, [{ start_ms: 0, end_ms: 900_000 }]);
+    expect(slices).toHaveLength(8);
+    for (const sl of slices) expect(sl.end - sl.start).toBeLessThanOrEqual(SLICE_MS);
+  });
+});
+
+describe("R2 D5 — the job door enumerates the live registry", () => {
+  it("the submit tool's enum and its prose both equal JOB_KIND_NAMES", async () => {
+    const { JOB_TOOLS } = await import("@/lib/mcp/tools/jobs");
+    const { JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
+    const t = JOB_TOOLS.find((x) => x.name === "scribe_job_submit")!;
+    const enumList = ((t.inputSchema as unknown as { properties: { kind: { enum: string[] } } }).properties.kind.enum);
+    expect([...enumList].sort()).toEqual([...JOB_KIND_NAMES].sort());
+    for (const k of JOB_KIND_NAMES) expect(t.description, `the door must name ${k}`).toContain(k);
+    expect(t.description, "a kind that no longer exists must not be advertised").not.toContain("diarize_clip");
+  });
+});
+
+describe("R2 rulings — the stitch verifies its inputs; a re-run does not duplicate", () => {
+  it("the stitch REFUSES a partial window and names the missing slices", async () => {
+    const STORE = { slices: [] as Array<{ index: number; speakers: unknown[] }> };
+    vi.resetModules();
+    vi.doMock("@/lib/db", () => ({
+      sql: async (strings: TemplateStringsArray) => {
+        const q = strings.join("?").replace(/\s+/g, " ");
+        if (q.includes("FROM bench_window")) return [{ id: "bw_1", session_id: "s1", room_day_id: "rd_1", start_ms: 0, end_ms: 900_000, source_mic: "primary" }];
+        if (q.includes("FROM cue")) return [];
+        if (q.includes("speakers_json FROM room_diarize_window")) return [{ speakers_json: STORE }];
+        return [];
+      },
+    }));
+    const { diarizeWindowKind } = await import("@/lib/jobs/kinds/diarize-window");
+    // 7 of 8 present: slice 3 never landed.
+    STORE.slices = [0, 1, 2, 4, 5, 6, 7].map((i) => ({ index: i, speakers: [] }));
+    const out = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
+    expect(out.kind, "a stitch over a partial window produces identities that are quietly wrong").toBe("fail");
+    expect((out as { error: string }).error).toContain("3");
+    expect((out as { error: string }).error).toContain("missing");
+
+    // With all eight it proceeds, and reports the OBSERVED count.
+    STORE.slices = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ index: i, speakers: [] }));
+    const ok = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
+    expect(ok.kind).toBe("done");
+    expect((ok as { result: Record<string, unknown> }).result.slices, "observed, never planned").toBe(8);
+    vi.doUnmock("@/lib/db");
+    vi.resetModules();
+  });
+
+  it("the slice write REPLACES its index — running slice 0 twice leaves ONE entry", async () => {
+    // The statement is asserted directly: it must strip index i before appending it.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
+    expect(src, "append-only is how a lease loss produced indices [0,0]").toContain("WHERE (e->>'index')::int <> ");
+    expect(src).toContain("jsonb_array_elements");
+    // And the shape it produces: strip-then-append is idempotent for a repeated index.
+    const strip = (entries: Array<{ index: number }>, i: number) => entries.filter((e) => e.index !== i);
+    let entries = [{ index: 0 }, { index: 1 }];
+    entries = [...strip(entries, 0), { index: 0 }];
+    entries = [...strip(entries, 0), { index: 0 }];
+    expect(entries.filter((e) => e.index === 0), "one entry per index, however many re-runs").toHaveLength(1);
   });
 });

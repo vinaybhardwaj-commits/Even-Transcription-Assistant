@@ -31,7 +31,13 @@
 ALTER TABLE room_turn_speaker
   ADD COLUMN IF NOT EXISTS clinician_id     text,
   ADD COLUMN IF NOT EXISTS role             text,
-  ADD COLUMN IF NOT EXISTS match_confidence double precision;
+  ADD COLUMN IF NOT EXISTS match_confidence double precision,
+  -- WHY a span has no name. Two of these are STRUCTURAL and permanent — 'straddle' (two speakers
+  -- held this turn) and 'seam' (it crosses a slice boundary, so it belongs to two clusterings).
+  -- 'no_match' is merely unresolved: nobody was recognised THIS time. Without the distinction the
+  -- cross-slice stitch cannot tell them apart, and it filled all three alike, putting a straddled
+  -- turn's other speaker back on the record as the clinician one step after the slice refused it.
+  ADD COLUMN IF NOT EXISTS no_role_reason   text;
 
 -- `role` is a closed vocabulary. 'clinician' is the only value that asserts an identity; every
 -- other value describes what the service could tell WITHOUT one.
@@ -40,7 +46,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_role_ck') THEN
     ALTER TABLE room_turn_speaker
       ADD CONSTRAINT room_turn_speaker_role_ck
-      CHECK (role IS NULL OR role IN ('clinician', 'unattributed'));
+      CHECK (role IS NULL OR role = 'clinician');
   END IF;
 END $$;
 
@@ -62,6 +68,26 @@ BEGIN
     ALTER TABLE room_turn_speaker
       ADD CONSTRAINT room_turn_speaker_identity_ck
       CHECK ((clinician_id IS NULL AND match_confidence IS NULL) OR role = 'clinician');
+  END IF;
+END $$;
+
+-- A ROW EITHER CLAIMS A NAME OR SAYS WHY IT DOES NOT. Exactly one of the two, never both, never
+-- neither — so no row can be silently unattributed for a reason nobody recorded.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_no_role_ck') THEN
+    ALTER TABLE room_turn_speaker
+      ADD CONSTRAINT room_turn_speaker_no_role_ck
+      CHECK ((role IS NULL) = (no_role_reason IS NOT NULL));
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_reason_ck') THEN
+    ALTER TABLE room_turn_speaker
+      ADD CONSTRAINT room_turn_speaker_reason_ck
+      CHECK (no_role_reason IS NULL OR no_role_reason IN ('straddle', 'seam', 'no_match'));
   END IF;
 END $$;
 

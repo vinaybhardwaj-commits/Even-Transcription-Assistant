@@ -29,7 +29,7 @@
 -- change to lib/stt/room-drain.ts that this slice's order did not cover, so it is reported rather
 -- than improvised. APPLY 0084 ONLY AFTER THAT LANDS.
 --
--- Everything else in C1 is already useful without this file: 0083's safety net, the adapter, the
+-- Everything else in C1 is already useful without this file: the adapter, the
 -- job kind (reachable today through the MCP job path), the timeline persistence, the tripwires and
 -- the shadow runs all work while the room rows still say `sarvam`.
 --

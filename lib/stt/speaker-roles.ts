@@ -26,12 +26,28 @@
  */
 import type { DiarizeSpeaker } from "@/lib/diarize";
 
-export type SpanRole =
-  | { role: "clinician"; clinician_id: string; match_confidence: number }
-  | { role: "unattributed"; clinician_id: null; match_confidence: null };
+/**
+ * WHY a span has no name, recorded ON THE ROW.
+ *
+ * This is not bookkeeping. Two of these are STRUCTURAL and permanent — a turn held by two speakers,
+ * or crossing a slice seam, can never be attributed by anything downstream, because the audio
+ * really does contain more than one person. The third is merely UNRESOLVED: the service matched
+ * nobody this time, and a later step legitimately may. Without this distinction the cross-slice
+ * stitch cannot tell them apart, and it filled all three alike — putting the straddled row's 400 ms
+ * of patient speech back on the record as the doctor's, one step after the slice step refused it.
+ */
+export type NoRoleReason = "straddle" | "seam" | "no_match";
 
-/** The one shape a span may claim an identity with. Everything else is unattributed. */
-export const UNATTRIBUTED: SpanRole = { role: "unattributed", clinician_id: null, match_confidence: null };
+export type SpanRole =
+  | { role: "clinician"; clinician_id: string; match_confidence: number; no_role_reason: null }
+  | { role: null; clinician_id: null; match_confidence: null; no_role_reason: NoRoleReason };
+
+/** No name, and the reason it may not have one. */
+export const noRole = (reason: NoRoleReason): SpanRole =>
+  ({ role: null, clinician_id: null, match_confidence: null, no_role_reason: reason });
+
+/** The service matched nobody. UNRESOLVED, not structural — the stitch may still fill this. */
+export const UNATTRIBUTED: SpanRole = noRole("no_match");
 
 /**
  * PURE. The role for one speaker index, from the service's own match and nothing else.
@@ -45,7 +61,7 @@ export function roleForSpeaker(speaker: DiarizeSpeaker | undefined): SpanRole {
   const id = typeof speaker.clinician_id === "string" ? speaker.clinician_id.trim() : "";
   const conf = typeof speaker.confidence === "number" && Number.isFinite(speaker.confidence) ? speaker.confidence : null;
   if (!id || conf === null) return UNATTRIBUTED;
-  return { role: "clinician", clinician_id: id, match_confidence: conf };
+  return { role: "clinician", clinician_id: id, match_confidence: conf, no_role_reason: null };
 }
 
 /**

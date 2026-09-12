@@ -9,7 +9,7 @@
 import { JOB_STATUSES, type JobStatus } from "@/lib/jobs/types";
 import { cancelJob, listJobs, readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib/jobs/submit";
-import { KIND_BY_NAME } from "@/lib/jobs/kinds";
+import { KIND_BY_NAME, STUB_KIND_NAMES } from "@/lib/jobs/kinds";
 import { readRecentAudit, AUDIT_ACTIONS_HINT } from "@/lib/jobs/audit-read";
 import { errorCodeOf, JOB_ERROR_CODES } from "@/lib/jobs/errors";
 import { argInt, argStr, argBool, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
@@ -60,8 +60,13 @@ function jobView(
 
 const submit: McpTool = {
   name: "scribe_job_submit",
+  // DERIVED FROM THE REGISTRY, never hand-kept. The previous description listed `diarize_clip`
+  // months after it existed and omitted three kinds that did — including diarize_window, which is
+  // operator-submitted by design and so is invisible work if the door does not name it. The enum
+  // below was already JOB_KIND_NAMES; only the prose had drifted, which is the whole argument for
+  // not writing the prose by hand either.
   description:
-    "Queue long work and get an id back in under two seconds (Tier 2 §3). kind is one of transcribe_range, stitch, audio_measure, emotion_clip, diarize_clip, stt_fanout, day_manifest; args are validated by the kind at submit, so a job that cannot run is refused here rather than queued. Five of the seven kinds are registered but not yet implemented and will fail with not_implemented — that is 'not yet', not 'unknown kind'. Returns {job_id, kind, status}. Ask scribe_job_status about it; nothing is waited on here.",
+    `Queue long work and get an id back in under two seconds (Tier 2 §3). kind is one of ${JOB_KIND_NAMES.join(", ")}; args are validated by the kind at submit, so a job that cannot run is refused here rather than queued. ${STUB_KIND_NAMES.length} of the ${JOB_KIND_NAMES.length} kinds are registered but not yet implemented and will fail with not_implemented — that is 'not yet', not 'unknown kind'${STUB_KIND_NAMES.length ? ` (${STUB_KIND_NAMES.join(", ")})` : ""}. Returns {job_id, kind, status}. Ask scribe_job_status about it; nothing is waited on here.`,
   scope: "invoke",
   inputSchema: {
     type: "object",

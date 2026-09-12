@@ -20,7 +20,8 @@
 import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
 import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
-import { rolesByIndex, UNATTRIBUTED, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
+import { rolesByIndex, UNATTRIBUTED, noRole, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
+import { ms, type WindowStartMs, type WindowEndMs, type SliceStartMs, type SliceEndMs } from "./window-bounds";
 import { DIARIZE_BATCH_THRESHOLD, type StitchedIdentity } from "./diarize-slicing";
 
 /** The two clinicians with live centroids today. Loaded, never typed — see loadClinicianCentroids. */
@@ -49,8 +50,24 @@ export async function loadClinicianCentroids(): Promise<ClinicianCentroid[]> {
     .map((r) => ({ clinician_id: r.clinician_id, full_name: r.full_name ?? r.clinician_id, centroid_base64: r.centroid_base64! }));
 }
 
-/** This window's turn cues — the rows the spans are joined onto. Same query shape as the cron path. */
-export async function loadWindowTurns(roomDayId: string, startMs: number, endMs: number): Promise<TurnSpan[]> {
+/**
+ * The turns overlapping ONE SLICE of a window.
+ *
+ * TWO DIFFERENT QUANTITIES, AND THAT WAS THE BUG. `payload->'window'` holds the 900 s WINDOW bounds
+ * that `buildTurns` stamps on every cue; the turn's OWN bounds are `payload->>'start_ms'/'end_ms'`.
+ * The first version filtered the window object against slice bounds, which can never match, so
+ * every slice loaded zero turns and wrote nothing while still calling the Mini eight times. The
+ * window bounds identify WHICH WINDOW's turns these are; the turn's own bounds are what a slice
+ * selects on. `lib/stt/measure-job.ts:280` is the second witness for the window half of the join.
+ *
+ * Overlap, not containment: a turn crossing the slice edge is LOADED (so the seam rule can see it
+ * and refuse it by name) rather than silently dropped by the query.
+ */
+export async function loadSliceTurns(
+  roomDayId: string,
+  window: { start: WindowStartMs; end: WindowEndMs },
+  slice: { start: SliceStartMs; end: SliceEndMs },
+): Promise<TurnSpan[]> {
   const rows = (await sql`
     SELECT source_ref,
            (payload->>'start_ms')::bigint AS start_ms,
@@ -58,8 +75,28 @@ export async function loadWindowTurns(roomDayId: string, startMs: number, endMs:
       FROM cue
      WHERE room_day_id = ${roomDayId}
        AND type = 'stt_turn'
-       AND (payload->'window'->>'start_ms')::bigint = ${startMs}
-       AND (payload->'window'->>'end_ms')::bigint = ${endMs}
+       AND (payload->'window'->>'start_ms')::bigint = ${ms(window.start)}
+       AND (payload->'window'->>'end_ms')::bigint = ${ms(window.end)}
+       AND (payload->>'start_ms')::bigint < ${ms(slice.end)}
+       AND (payload->>'end_ms')::bigint > ${ms(slice.start)}
+       AND source_ref IS NOT NULL
+  `) as Array<{ source_ref: string; start_ms: string | number; end_ms: string | number }>;
+  return rows
+    .map((t) => ({ source_ref: String(t.source_ref), start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) }))
+    .filter((t) => Number.isFinite(t.start_ms) && Number.isFinite(t.end_ms));
+}
+
+/** EVERY turn of a window, for planning the cuts. No slice exists yet, so none is asked for. */
+export async function loadWindowTurns(roomDayId: string, window: { start: WindowStartMs; end: WindowEndMs }): Promise<TurnSpan[]> {
+  const rows = (await sql`
+    SELECT source_ref,
+           (payload->>'start_ms')::bigint AS start_ms,
+           (payload->>'end_ms')::bigint AS end_ms
+      FROM cue
+     WHERE room_day_id = ${roomDayId}
+       AND type = 'stt_turn'
+       AND (payload->'window'->>'start_ms')::bigint = ${ms(window.start)}
+       AND (payload->'window'->>'end_ms')::bigint = ${ms(window.end)}
        AND source_ref IS NOT NULL
   `) as Array<{ source_ref: string; start_ms: string | number; end_ms: string | number }>;
   return rows
@@ -95,7 +132,10 @@ export function crossesSeam(turn: { start_ms: number; end_ms: number }, slice: {
 export async function diarizeSlice(opts: {
   windowId: string;
   roomDayId: string;
-  slice: { index: number; start_ms: number; end_ms: number };
+  /** The window these slices belong to — what identifies the turns. */
+  window: { start: WindowStartMs; end: WindowEndMs };
+  /** This slice — what selects among them. Branded so the two cannot be swapped again. */
+  slice: { index: number; start: SliceStartMs; end: SliceEndMs };
   audio: Uint8Array;
   contentType?: string;
   centroids?: ClinicianCentroid[];
@@ -118,30 +158,33 @@ export async function diarizeSlice(opts: {
   const speakers = (res.result.speakers ?? []) as DiarizeSpeaker[];
   const roles = rolesByIndex(speakers);
   const segments = parseDiarizeSegments(res.result.transcript_segments);
-  const turns = await loadWindowTurns(opts.roomDayId, opts.slice.start_ms, opts.slice.end_ms);
+  const turns = await loadSliceTurns(opts.roomDayId, opts.window, opts.slice);
 
   // Slice-relative → wall clock, once, here.
-  const onClock = segments.map((sg) => ({ ...sg, start_ms: opts.slice.start_ms + sg.start_ms, end_ms: opts.slice.start_ms + sg.end_ms }));
+  const onClock = segments.map((sg) => ({ ...sg, start_ms: ms(opts.slice.start) + sg.start_ms, end_ms: ms(opts.slice.start) + sg.end_ms }));
   const bindings = bindTurnsExclusive(onClock, turns);
   const byRef = new Map(turns.map((t) => [t.source_ref, t]));
 
   let named = 0, straddled = 0, seamSkipped = 0;
   for (const b of bindings) {
     const turn = byRef.get(b.source_ref)!;
-    const seam = crossesSeam(turn, opts.slice);
-    // THREE conditions, all required, before a name may be written. Any one failing leaves the
-    // span with its speaker_idx and nothing else.
-    const r: SpanRole = !b.exclusive || seam ? UNATTRIBUTED : (roles.get(b.speaker_idx) ?? UNATTRIBUTED);
+    const seam = crossesSeam(turn, { start_ms: ms(opts.slice.start), end_ms: ms(opts.slice.end) });
+    // THREE conditions, and the row records WHICH one failed. `straddle` and `seam` are structural
+    // facts about the audio and are permanent; `no_match` merely means nobody was recognised this
+    // time. The stitch is allowed to revisit the third and forbidden the first two.
+    const r: SpanRole = !b.exclusive ? noRole("straddle")
+      : seam ? noRole("seam")
+      : (roles.get(b.speaker_idx) ?? UNATTRIBUTED);
     if (!b.exclusive) straddled += 1;
     if (seam) seamSkipped += 1;
     if (r.role === "clinician") named += 1;
     await sql`
       INSERT INTO room_turn_speaker
         (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
-         clinician_id, role, match_confidence, created_at)
+         clinician_id, role, match_confidence, no_role_reason, created_at)
       VALUES
         (${opts.windowId}, ${b.source_ref}, ${b.speaker_idx}, ${`s${opts.slice.index}:${b.speaker_idx}`}, ${b.overlap_ms}, ${opts.roomDayId},
-         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, NOW())
+         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, ${r.no_role_reason}, NOW())
       ON CONFLICT (window_id, source_ref) DO UPDATE
         SET speaker_idx = EXCLUDED.speaker_idx,
             -- D9: cluster_id travels with speaker_idx. Replacing one and keeping the other leaves
@@ -150,7 +193,8 @@ export async function diarizeSlice(opts: {
             overlap_ms = EXCLUDED.overlap_ms,
             clinician_id = EXCLUDED.clinician_id,
             role = EXCLUDED.role,
-            match_confidence = EXCLUDED.match_confidence
+            match_confidence = EXCLUDED.match_confidence,
+            no_role_reason = EXCLUDED.no_role_reason
     `;
   }
 
@@ -183,21 +227,44 @@ export async function diarizeSlice(opts: {
 export async function applyStitch(windowId: string, identities: Map<string, StitchedIdentity>): Promise<number> {
   let updated = 0;
   for (const [k, id] of identities) {
+    if (!id.clinician_id) continue;
     const [sliceStr, idxStr] = k.split(":");
     const clusterKey = `s${sliceStr}:${idxStr}`;
+    // ── ONLY `no_match` MAY BE FILLED ────────────────────────────────────────────────────────
+    // A straddled or seam-crossing row is refused for a STRUCTURAL reason: the audio behind it
+    // holds more than one person, or belongs to two clusterings. No amount of cross-slice identity
+    // changes that, and filling it anyway is how the round-1 smear came back one step later. The
+    // predicate is on the reason, not on `role IS NULL`, because those three rows are identical in
+    // every other column.
     const rows = (await sql`
       UPDATE room_turn_speaker
          SET cluster_id = ${id.cluster_id},
-             clinician_id = CASE WHEN role = 'clinician' THEN clinician_id
-                                 WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN ${id.clinician_id}
-                                 ELSE clinician_id END,
-             role = CASE WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN 'clinician' ELSE role END,
-             match_confidence = CASE WHEN role = 'unattributed' AND ${id.clinician_id}::text IS NOT NULL THEN ${id.match_confidence}
-                                     ELSE match_confidence END
-       WHERE window_id = ${windowId} AND cluster_id = ${clusterKey}
+             clinician_id = ${id.clinician_id},
+             role = 'clinician',
+             match_confidence = ${id.match_confidence},
+             no_role_reason = NULL
+       WHERE window_id = ${windowId}
+         AND cluster_id = ${clusterKey}
+         AND role IS NULL
+         AND no_role_reason = 'no_match'
        RETURNING source_ref
     `) as Array<{ source_ref: string }>;
     updated += rows.length;
   }
   return updated;
+}
+
+/** Give every span of an identity its stitched cluster_id, whether or not it gained a name. */
+export async function applyClusterIds(windowId: string, identities: Map<string, StitchedIdentity>): Promise<number> {
+  let touched = 0;
+  for (const [k, id] of identities) {
+    const [sliceStr, idxStr] = k.split(":");
+    const rows = (await sql`
+      UPDATE room_turn_speaker SET cluster_id = ${id.cluster_id}
+       WHERE window_id = ${windowId} AND cluster_id = ${`s${sliceStr}:${idxStr}`}
+       RETURNING source_ref
+    `) as Array<{ source_ref: string }>;
+    touched += rows.length;
+  }
+  return touched;
 }
