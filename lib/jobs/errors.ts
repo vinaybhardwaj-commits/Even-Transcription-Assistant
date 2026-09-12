@@ -30,6 +30,12 @@ export const JOB_ERROR_CODES = [
   "step_threw",
   "failures_exceeded",
   "lease_lost",
+  // route_transcribe (Slice C1)
+  "route_submit_failed",
+  "route_job_failed",
+  "route_job_unknown",
+  "route_empty_transcript",
+  "presign_failed",
   // the five stubs
   "not_implemented",
 ] as const;
