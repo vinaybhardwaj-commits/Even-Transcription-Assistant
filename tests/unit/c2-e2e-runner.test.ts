@@ -20,6 +20,34 @@ import { readFileSync } from "node:fs";
 import { dockerAvailable, startPg, stopPg, exec, makeSql } from "../support/pg-harness";
 
 const HAVE_DOCKER = dockerAvailable();
+/**
+ * ─── A PROOF THAT CAN SILENTLY SKIP IS NOT A PROOF ─────────────────────────────────────────────
+ *
+ * This suite is the only thing in the repo that exercises the diarize path end to end against a
+ * real database. `describe.skipIf` made it evaporate on any machine without Docker while `npm test`
+ * still printed green — which is precisely the failure mode that let three inert paths ship: the
+ * lease that made diarize unreachable, the join that loaded zero turns, and the stitch that matched
+ * a key another statement had consumed. Each of those was green in CI the whole time.
+ *
+ * So a skip is now a FAILURE. Not a warning, not a console line: the run exits non-zero and names
+ * the proof that did not run. Local convenience still exists, but it has to be asked for on
+ * purpose — ETA_ALLOW_SKIP_E2E=1 — which is a thing a person types, unlike a missing binary.
+ */
+const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
+
+describe("REQUIRED PROOF — the diarize end-to-end suite", () => {
+  it("ran, or was skipped deliberately", () => {
+    if (HAVE_DOCKER) return;
+    if (ALLOW_SKIP) return;
+    throw new Error(
+      "REQUIRED PROOF NOT RUN: tests/unit/c2-e2e-runner.test.ts needs Docker to start an ephemeral " +
+      "postgres:16, and Docker is not available here. This suite is the ONLY end-to-end cover for " +
+      "the diarize job (real runner, real claims and leases, real 0074/0085 constraints); three " +
+      "inert paths have already shipped green without it. Install/start Docker, or set " +
+      "ETA_ALLOW_SKIP_E2E=1 to accept that this proof did not run.",
+    );
+  });
+});
 
 const QUERIES: string[] = [];
 type PgSql = (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>;

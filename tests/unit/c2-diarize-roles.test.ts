@@ -538,3 +538,42 @@ describe("R3 D5 — the plan is frozen on the row", () => {
     expect(stitchBranch, "the stitch must not re-plan").not.toContain("snappedSliceBounds(");
   });
 });
+
+describe("R3 close-out — the ten adversarial layouts", () => {
+  it("every invariant holds on all ten, and the split count is REPORTED per layout", async () => {
+    const { snappedSliceBounds, SLICE_MS } = await import("@/lib/stt/diarize-slicing");
+    const { SNAP_LAYOUTS, SNAP_WINDOW_END } = await import("../support/snap-layouts");
+
+    let aggregate = 0;
+    const lines: string[] = [];
+    for (const L of SNAP_LAYOUTS) {
+      const sl = snappedSliceBounds(0, SNAP_WINDOW_END, L.turns);
+      // ── cap ──────────────────────────────────────────────────────────────────────────────
+      for (const s of sl) {
+        expect((s.end as number) - (s.start as number), `${L.id}: slice ${s.index} exceeds the cap`).toBeLessThanOrEqual(SLICE_MS);
+        expect((s.end as number) - (s.start as number), `${L.id}: slice ${s.index} is empty`).toBeGreaterThan(0);
+      }
+      // ── monotonic, tiling, no hole, sequential indices ───────────────────────────────────
+      expect(sl[0]!.start as number, `${L.id}: does not start at the window start`).toBe(0);
+      expect(sl[sl.length - 1]!.end as number, `${L.id}: does not reach the window end`).toBe(SNAP_WINDOW_END);
+      for (let i = 1; i < sl.length; i += 1) {
+        expect(sl[i]!.start as number, `${L.id}: hole or overlap at slice ${i}`).toBe(sl[i - 1]!.end as number);
+        expect(sl[i]!.index, `${L.id}: indices not sequential`).toBe(sl[i - 1]!.index + 1);
+      }
+      // ── splits, counted, not tuned ───────────────────────────────────────────────────────
+      let splits = 0;
+      for (let i = 0; i < sl.length - 1; i += 1) {
+        const at = sl[i]!.end as number;
+        if (L.turns.some((t) => t.start_ms < at && t.end_ms > at)) splits += 1;
+      }
+      aggregate += splits;
+      lines.push(`  ${L.id} slices=${String(sl.length).padStart(2)} cuts=${String(sl.length - 1).padStart(2)} splits=${splits}  ${L.what}`);
+    }
+    // eslint-disable-next-line no-console
+    console.log(`TEN LAYOUTS (aggregate splits = ${aggregate})\n${lines.join("\n")}`);
+    // NO assertion on the split count. These layouts are built to be unsatisfiable in places —
+    // B has no clean edge anywhere, I has none at all — so a threshold here would be a number
+    // chosen to pass rather than a fact. The invariants above are what must hold.
+    expect(aggregate).toBeGreaterThanOrEqual(0);
+  });
+});
