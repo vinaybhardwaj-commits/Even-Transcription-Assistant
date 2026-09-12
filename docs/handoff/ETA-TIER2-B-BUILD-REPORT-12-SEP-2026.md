@@ -39,3 +39,10 @@
 **V's manual steps.** Apply 0082 to the preview before promoting, the way 0081 was: `curl -X POST -H "Authorization: Bearer $MIGRATION_SECRET" https://<preview-host>/api/run-migrations`. Set `JOBS_RUNNER_SECRET` on the deployment — **until it is set the runner answers 503 and no job ever runs**, which is the safe failure but is silent. `CRON_SECRET` optional.
 
 **Subagents:** none.
+
+## Fix-up 1 — on the three rulings
+**(1) and (2) accepted as built**; seams 1 and 2 close. (2) is now stated where a caller will read it: `scribe_transcribe_range`'s description says `async:true` returns text and a `transcription_run` and **writes no turn cues — those arrive with Slice C**.
+**(3)** `ToolContext` gains `actor: string` — the resolved `SCRIBE_MCP_TOKENS` actor, `mcp:`-prefixed once by `mcpActorId`, defaulting to `mcp:operator-v1` for the single-token fallback so a job's actor is never blank. `handler.ts` fills it from the principal it had already verified, and `scribe_job_submit` plus both `async:true` paths record it — replacing the `actor: null` seam 5 flagged.
+**Tests +3** (1874, was 1871): a `SCRIBE_MCP_TOKENS` actor lands on the INSERT's actor parameter **end to end** (`checkMcpBearer` → `handleMcpRpc` → `submitJob` → `insertJob`) as `mcp:operator-v`; the fallback records `mcp:operator-v1`, never null; and the `ToolContext` shape is pinned.
+**Worth knowing**: `tsconfig.json` EXCLUDES `tests`, so adding a required field to `ToolContext` was not a compile error in any test file — the existing `ctx` literals still pass `undefined` for it silently. The new test pins the type by reading the source instead. Gates: tsc 0 · **1874 passed (1874)** · build 0 · check:silent the same 9. Branch `vinay/tier2-b` pushed.
+
