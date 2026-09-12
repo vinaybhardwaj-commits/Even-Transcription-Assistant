@@ -1068,6 +1068,47 @@ type InstallPollReturn = {
   prev_room_id?: string | null;
 };
 
+/**
+ * Tier 2 Slice A fix-up (ruling 3) — the poll write failed, and it must not be silent.
+ *
+ * WHY THIS IS NOT A `console.warn`. `pollCommands` fails OPEN on this deliberately: the install
+ * registry is bookkeeping, the tape is not, and a recording room must not stop because the fleet
+ * card cannot be updated. But the Refuter's Tier 1 hazard is exactly this path — a poll UPDATE that
+ * throws (a column the database has not got, a subquery that does not resolve) leaves every install
+ * row frozen fleet-wide while every room keeps recording and every response still looks healthy.
+ * A warning in a log nobody reads is how that stays invisible for a day.
+ *
+ * So: `console.error`, and one audit row that outlives the log. The row is what a later question
+ * ("when did the fleet card stop updating, and from when") can actually be answered from.
+ *
+ * ONE PER INSTALL PER FIVE MINUTES. Every room polls about every 1.5 s, so an unrate-limited row
+ * per failure would write ~2,400 rows per room per hour into the table this is meant to make
+ * readable — the alarm would bury its own evidence. The first failure in a window is the signal;
+ * the next two hundred say the same thing.
+ */
+export const POLL_WRITE_FAIL_AUDIT = { max: 1, windowMs: 5 * 60_000 };
+
+export async function notePollWriteFailure(input: {
+  installId: string;
+  roomId: string | null;
+  error: unknown;
+  nowMs?: number;
+}): Promise<void> {
+  const detail = String((input.error as Error)?.message ?? input.error).slice(0, 200);
+  // LOUD, and every time — the console line is not rate-limited, because a log that drops the
+  // repeats hides how long the fault has been running.
+  console.error(
+    "[room-install] poll write FAILED — install rows are not being updated",
+    JSON.stringify({ install_id: input.installId, room_id: input.roomId, err: detail }),
+  );
+  if (rateLimited(`poll_write_fail:${input.installId}`, POLL_WRITE_FAIL_AUDIT, input.nowMs ?? Date.now())) return;
+  await auditInstall("install.poll_write_failed", input.roomId, {
+    install_id: input.installId,
+    error: detail,
+    actor: "install",
+  });
+}
+
 /** The device list as a RETURNING or SELECT yields it — parsed jsonb, jsonb text, or anything else. */
 function devicesOf(v: unknown): InputDevice[] | null {
   if (Array.isArray(v)) return v as InputDevice[];
@@ -1475,7 +1516,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
  * NEVER FAILS THE CALLER. A missing audit row must not block a Mac from moving channel.
  */
 async function auditInstall(
-  action: "install.assign_channel" | "install.channel_reported",
+  action: "install.assign_channel" | "install.channel_reported" | "install.poll_write_failed",
   roomId: string | null,
   meta: Record<string, unknown>,
 ): Promise<void> {

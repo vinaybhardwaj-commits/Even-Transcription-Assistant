@@ -19,7 +19,7 @@ import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { parseMicLevels, type MicLevels } from "@/lib/bench-levels";
-import { applyInstallPoll, INPUT_DEVICE_UID_MAX, type InstallPollFields } from "@/lib/room-install";
+import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
 
 /**
  * R4-D1 adds the fifth, `set_audio_input`. Three definitions move together: this list, migration
@@ -395,14 +395,17 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
         // FAIL OPEN, LOUDLY. The install registry is bookkeeping; the tape is not. A room that
         // is recording must not stop because the fleet card cannot be updated, and the card
         // shows the consequence anyway — the Mac goes stale and the row asks for attention.
-        console.warn(
-          "[bench-commands] install poll write failed",
-          JSON.stringify({
-            room_id: input.roomId,
-            install_id: input.install.install_id,
-            err: String((e as Error)?.message ?? e).slice(0, 200),
-          }),
-        );
+        //
+        // Tier 2 Slice A fix-up (ruling 3): "loudly" now means console.error AND one audit row per
+        // install per five minutes, not a warn nobody reads. This is the Refuter's Tier 1 hazard —
+        // a throwing poll UPDATE freezes every install row fleet-wide while every room keeps
+        // recording and every response still looks healthy. Awaited so the row is written before
+        // the response returns; it is best-effort inside and cannot throw back out.
+        await notePollWriteFailure({
+          installId: input.install.install_id,
+          roomId: input.roomId,
+          error: e,
+        });
       }
       if (applied && !applied.ok && applied.code === "RETIRED") {
         return { retired: true, now: new Date().toISOString() };

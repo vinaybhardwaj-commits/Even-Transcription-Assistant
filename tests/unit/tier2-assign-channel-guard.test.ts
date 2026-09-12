@@ -17,6 +17,8 @@ const calls: Call[] = [];
 const store: { install: Row | null } = { install: null };
 /** What the poll UPDATE returns when this suite drives applyInstallPoll. */
 let pollRow: Row | null = null;
+/** Slice A fix-up — make the poll UPDATE throw, as a missing column would. */
+let throwPoll = false;
 
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -28,7 +30,10 @@ vi.mock("@/lib/db", () => {
     if (/^UPDATE room_install SET assigned_channel/.test(text)) {
       return Promise.resolve(store.install ? [{ install_id: values[1], assigned_channel: values[0] }] : []);
     }
-    if (/^UPDATE room_install SET last_seen_at/.test(text)) return Promise.resolve(pollRow ? [pollRow] : []);
+    if (/^UPDATE room_install SET last_seen_at/.test(text)) {
+      if (throwPoll) return Promise.reject(new Error('column poll_ring does not exist'));
+      return Promise.resolve(pollRow ? [pollRow] : []);
+    }
     return Promise.resolve([]);
   };
   sql.transaction = async () => [];
@@ -40,6 +45,7 @@ process.env.MIGRATION_SECRET = "test-secret";
 const C = await import("@/lib/bench-bus-constants");
 const RI = await import("@/lib/room-install");
 const route = await import("@/app/api/admin/installs/[installId]/assign-channel/route");
+const BC = await import("@/lib/bench-commands");
 
 const ID = "install_opd6";
 beforeEach(() => {
@@ -195,5 +201,88 @@ describe("install.channel_reported — written once, on the poll where the assig
     expect(await run("test", null, "test")).toHaveLength(1);
     expect(await run(null, null, "test")).toHaveLength(0);
     expect(await run(null, null, "test")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice A fix-up, ruling 3 — the fail-open poll write is loud, and bounded
+// ---------------------------------------------------------------------------
+
+describe("install.poll_write_failed — loud, and one row per install per five minutes", () => {
+  /** Make the poll UPDATE throw, the way a column the database has not got would. */
+  const withThrowingPoll = async (fn: () => Promise<void>) => {
+    throwPoll = true;
+    try {
+      await fn();
+    } finally {
+      throwPoll = false;
+    }
+  };
+
+  beforeEach(() => {
+    RI.__resetRateLimits();
+  });
+
+  it("ten rapid polls on one install write exactly ONE audit row", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    await withThrowingPoll(async () => {
+      for (let k = 0; k < 10; k++) {
+        await BC.pollCommands({
+          roomId: "room_opd6", tabId: "app_install_opd6", prevPollAt: null,
+          recordingSessionId: null, paused: false, install: { install_id: ID },
+        } as never);
+      }
+    });
+    const rows = calls.filter((c) => /^INSERT INTO audit_log/.test(c.text) && String(c.values[1]) === "install.poll_write_failed");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.values[0]).toBe("install");
+    expect(rows[0]!.values[2]).toBe(ID);
+    const meta = JSON.parse(String(rows[0]!.values[3])) as Row;
+    expect(meta.install_id).toBe(ID);
+    expect(String(meta.error)).toContain("column poll_ring does not exist");
+    // The CONSOLE line is not rate-limited: a log that drops the repeats hides how long the
+    // fault has been running. Ten failures, ten console.error calls.
+    expect(err).toHaveBeenCalledTimes(10);
+    err.mockRestore();
+  });
+
+  it("a second install in the same window gets its own row — the limit is per install", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    await withThrowingPoll(async () => {
+      for (const id of [ID, "install_other", ID, "install_other"]) {
+        await BC.pollCommands({
+          roomId: "room_opd6", tabId: `app_${id}`, prevPollAt: null,
+          recordingSessionId: null, paused: false, install: { install_id: id },
+        } as never);
+      }
+    });
+    const rows = calls.filter((c) => /^INSERT INTO audit_log/.test(c.text) && String(c.values[1]) === "install.poll_write_failed");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.values[2]).sort()).toEqual([ID, "install_other"].sort());
+    err.mockRestore();
+  });
+
+  it("the window is five minutes, and the next window writes again", () => {
+    expect(RI.POLL_WRITE_FAIL_AUDIT).toEqual({ max: 1, windowMs: 300_000 });
+    const t0 = 1_000_000;
+    const key = "poll_write_fail:install_x";
+    expect(RI.rateLimited(key, RI.POLL_WRITE_FAIL_AUDIT, t0)).toBe(false);      // first: writes
+    expect(RI.rateLimited(key, RI.POLL_WRITE_FAIL_AUDIT, t0 + 1_000)).toBe(true);  // suppressed
+    expect(RI.rateLimited(key, RI.POLL_WRITE_FAIL_AUDIT, t0 + 299_999)).toBe(true);
+    expect(RI.rateLimited(key, RI.POLL_WRITE_FAIL_AUDIT, t0 + 300_001)).toBe(false); // writes again
+  });
+
+  it("the poll still fails OPEN — a recording room is never stopped by a bookkeeping fault", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    let out: unknown;
+    await withThrowingPoll(async () => {
+      out = await BC.pollCommands({
+        roomId: "room_opd6", tabId: "app_install_opd6", prevPollAt: null,
+        recordingSessionId: "bs_1", paused: false, install: { install_id: ID },
+      } as never);
+    });
+    expect(out).toBeTruthy();
+    expect((out as Row).retired).toBeUndefined();
+    err.mockRestore();
   });
 });
