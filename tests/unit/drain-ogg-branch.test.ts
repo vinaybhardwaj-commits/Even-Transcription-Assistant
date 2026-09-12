@@ -72,9 +72,20 @@ describe("every other engine is untouched", () => {
 });
 
 describe("the receipt describes the bytes actually sent", () => {
-  it("the drain fingerprints the resolved buffer and key, not the webm download", () => {
-    expect(drain).toContain("audioReceipt(audioKey, audioBytes)");
-    expect(drain).not.toContain("audioReceipt(join.key, bytes)");
+  it("the ROUTED RUN fingerprints the resolved buffer and key, not the webm download", () => {
+    // Slice C1 added a SECOND receipt further down, for the shadow control run, and that one
+    // legitimately fingerprints `join.key`/`bytes` — whisper really was handed the webm. A
+    // file-wide "never audioReceipt(join.key, bytes)" can no longer tell the two apart, so the
+    // assertion is scoped to its actual subject: the receipt that feeds the ROUTED engine's run.
+    // It still bites — swapping audioKey/audioBytes back to join.key/bytes here fails it.
+    // (`codeOf` strips comments, so the region is anchored on CODE at both ends.)
+    const region = drain.slice(
+      drain.indexOf("await adapter.transcribe(Buffer.from(audioBytes)"),
+      drain.indexOf("shouldShadow(windowId)"),
+    );
+    expect(region.length, "the region must exist, or this test is asserting on an empty string").toBeGreaterThan(200);
+    expect(region).toContain("audioReceipt(audioKey, audioBytes)");
+    expect(region, "the routed run must not fingerprint the clip it may not have been sent").not.toContain("audioReceipt(join.key, bytes)");
   });
 
   it("a different container yields a different hash — so the receipt distinguishes them", () => {

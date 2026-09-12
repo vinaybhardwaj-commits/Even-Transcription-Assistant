@@ -29,3 +29,7 @@
 INSERT INTO stt_routing (stage, language_bucket, engine_id)
 VALUES ('room', 'default', 'sarvam')
 ON CONFLICT (stage, language_bucket) DO NOTHING;
+
+INSERT INTO schema_migrations (version, name)
+VALUES (83, '0083_stt_routing_room_default')
+ON CONFLICT DO NOTHING;

@@ -53,6 +53,8 @@ import {
 import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from "./receipt";
+import { buildRouteMetrics } from "./route-run";
+import { shouldShadow } from "./shadow";
 
 /**
  * PURE — did this window's turns actually land AS A SET?
@@ -269,6 +271,8 @@ export type DrainOutcome = {
   turn_write_error?: string;
   window_recorded?: boolean;
   run_id?: string | null;
+  /** C1 step 5 — the control run's id when this window was sampled for a shadow, else absent. */
+  shadow_run_id?: string | null;
   attempts?: number;
   sarvam_ms?: number | null;
   /**
@@ -629,12 +633,62 @@ export async function drainRoomWindow(
            audio_seconds: audioSeconds,
            clip_r2_key: join.key,
            window: { start_ms: startMs, end_ms: endMs, source_mic: source },
+           // Slice C1 step 3 — the router's per-span timeline, VERBATIM, under one key. Spread
+           // conditionally so a run by any other engine is byte-identical to what it wrote before:
+           // nine adapters return no timeline and must not acquire an empty one.
+           ...(asr.languageTimeline ? buildRouteMetrics(asr.languageTimeline) : {}),
          })}::jsonb, NOW(),
          ${opts.actor}, ${opts.via}, ${engineVersion},
          ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},
          ${receipt.audio_sha256})
     `;
     out.run_id = id;
+
+    // --- C1 step 5. THE SHADOW RUN --------------------------------------------------------------
+    //
+    // A SECOND transcription_run over the SAME audio, by the engine the room used before, on a
+    // sampled minority of windows — so the switch can be refuted against a side-by-side instead of
+    // against nothing.
+    //
+    // IT COSTS NO EXTRA ENGINE PASS HERE, and that is worth stating because the spec budgeted for
+    // one. Whisper has ALREADY transcribed this whole window a few lines above: the drain needs its
+    // segments for the turns and its language as a second opinion, whatever engine is routed. So
+    // `full` is in hand and the shadow is one INSERT, not one inference. The sampling rate is kept
+    // anyway: the rows are not free, and a rate is the dial that exists when they stop being cheap.
+    //
+    // ONE RUN PER (WINDOW x ENGINE) — the leaderboard groups by tr.engine, so two rows with two
+    // different engine values aggregate correctly and the existing query needs no change. Skipped
+    // when the routed engine IS whisper, because a window cannot be its own control.
+    if (full.ok && engineKey !== whisperAdapter.key && shouldShadow(windowId)) {
+      const shadowId = runId();
+      const shadowReceipt = audioReceipt(join.key, bytes);
+      await sql`
+        INSERT INTO transcription_run
+          (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
+           detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
+           error, metrics_json, created_at,
+           initiated_by, initiated_via, engine_version_reported,
+           audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
+        VALUES
+          (${shadowId}, NULL, 'bench_window', ${windowId}, ${whisperAdapter.key}, ${whisperAdapter.key}, 'batch', 'asr',
+           ${full.language ?? null}, ${full.transcript ?? null}, NULL, ${full.latency_ms}, 0,
+           NULL, ${JSON.stringify({
+             shadow_of_engine: engineKey,
+             shadow_sampled: true,
+             // audio_seconds is what the yield tripwire divides by. Without it the control row
+             // would have no chars-per-second and the comparison would be one-sided.
+             audio_seconds: audioSeconds,
+             segment_count: segments.length,
+             clip_r2_key: join.key,
+             whisper_model_reported: full.engineVersion ?? null,
+             window: { start_ms: startMs, end_ms: endMs, source_mic: source },
+           })}::jsonb, NOW(),
+           ${opts.actor}, ${opts.via}, ${full.engineVersion ?? null},
+           ${shadowReceipt.audio_r2_key}, ${shadowReceipt.audio_byte_start}, ${shadowReceipt.audio_byte_end},
+           ${shadowReceipt.audio_sha256})
+      `;
+      out.shadow_run_id = shadowId;
+    }
 
     // --- C6. TURNS --------------------------------------------------------------------------
     // Whisper's segments, so the engine on the cue is Whisper — derived from the adapter, never
