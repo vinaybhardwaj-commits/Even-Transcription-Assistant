@@ -62,3 +62,11 @@ Branch `vinay/tier2-a` pushed. Slice B not started.
 ## Fix-up 3 — the type guard was still theatre
 `buildDaySession` was declared `): Record<string, unknown>`, which collapses `keyof DayReportSession` to `string`, so fix-up 2's `satisfies` AND `pickSummary`'s `readonly (keyof T)[]` both accepted anything. Annotation dropped so the literal shape is inferred; a comment now forbids re-adding one.
 **Proven, not asserted**: adding `"id"` back to the list fails `tsc --noEmit` with **TS2322 at the `satisfies` (bench.ts:2461)** and TS2345 at the call site, both enumerating the eleven real keys; removed again. Gates: tsc 0 · **1837 passed (1837)** · build 0 · check:silent the same 9.
+
+## Slice A in production
+Promoted **06:37:13Z**; `/api/health` reports `42ce902`. `tools/list` now serves **45** tools, `scribe_fleet` among them.
+**The poll UPDATE is writing.** Five reads of `/api/admin/bench/fleet`, 30 s apart, 06:38:00Z → 06:40:02Z: **all 9 installs advanced their `last_seen_at` on every read**, ages 0–3 s throughout, `degraded: []` every time, `state_flags []` on every row. No row froze — the FROM subquery (the slice's highest-risk inferred SQL) is correct against the live schema.
+**Failures: 0, by construction rather than by count.** `last_seen_at` is written by the very UPDATE whose failure would raise `install.poll_write_failed`, so 9 rooms advancing across 2 minutes means it never threw. **The direct count was NOT obtainable**: `/api/admin/dashboard` (the only `SELECT … FROM audit_log` that is routed) answers 401 without an admin cookie, and no MCP tool reads `audit_log`. **Tier 2 gap: the audit rows §2.2/§2.3 write cannot be read back by an operator.** Worth a tool in Slice E.
+**§2.4 detail** on Home Office: `summary` **14 keys**, `full` **44** — every summary key present in full, `room_state.flags []` / `drift_since null` identical in both.
+**§2.1 floor** on OPD 6 (0.1.21): `{"channel":"test"}` → **HTTP 409 `APP_TOO_OLD`**, message naming 0.1.21 and 0.1.22. Row unchanged before and after (`update_channel stable`, `assigned_channel null`) — the refusal writes nothing, as designed.
+
