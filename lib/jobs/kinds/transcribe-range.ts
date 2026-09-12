@@ -18,9 +18,9 @@ import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/be
 import { buildJoinRequest, callJoinService, refuseIfTooLong, whisperTimeoutForClip } from "@/lib/bench-join";
 import { getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
-// The one name for "a 200 with no speech", shared with the synchronous tool so the two paths
-// cannot disagree about what it means.
-import { EMPTY_TRANSCRIPT } from "@/lib/mcp/tools/bench";
+// The one name for "a 200 with no speech" — one declaration, shared by the producer and both
+// consumers, so they cannot disagree about what it means.
+import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 

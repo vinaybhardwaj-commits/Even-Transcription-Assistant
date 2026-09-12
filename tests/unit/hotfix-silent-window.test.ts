@@ -67,7 +67,7 @@ vi.mock("@/lib/whisper", () => ({ transcribeWithWhisper: async () => WHISPER.val
 const { insertJob, newJobId, claimJobs, readJob } = await import("@/lib/jobs/store");
 const { runOneStep } = await import("@/lib/jobs/runner");
 const { JOB_ERROR_CODES } = await import("@/lib/jobs/errors");
-const { EMPTY_TRANSCRIPT } = await import("@/lib/mcp/tools/bench");
+const { EMPTY_TRANSCRIPT } = await import("@/lib/whisper-constants");
 
 beforeEach(() => { TABLE = []; WHISPER.value = null; });
 
@@ -117,25 +117,56 @@ describe("defect 1 — a 200 with no speech is a silent window, not a failure", 
     expect(row.result).toMatchObject({ silent_window: false, chars: 11, segments: 1, language: "en" });
   });
 
-  // ---- the test that would have caught the original -------------------------------------
-  it("the two paths agree on what empty_transcript MEANS — they cannot silently diverge again", async () => {
-    const { readFileSync } = await import("node:fs");
-    const sync = readFileSync("lib/mcp/tools/bench.ts", "utf8");
-    const job = readFileSync("lib/jobs/kinds/transcribe-range.ts", "utf8");
+  // ---- the guard, rewritten (fix-up item 3) ----------------------------------------------
+  //
+  // The first version grepped both source files. The Refuter defeated it with a revert that kept
+  // the branch, voided its body, and left the asserted strings in a comment — the guard passed and
+  // only the behavioural test caught it. A text matcher can always be satisfied by text.
+  //
+  // These assert VALUES and BEHAVIOUR instead: one constant by identity, and the kind's own `run`
+  // returning a `done` outcome for it. Neither can be satisfied by a comment, and voiding the
+  // branch body fails the second immediately.
+  it("producer and both consumers share ONE constant, by identity", async () => {
+    const source = await import("@/lib/whisper-constants");
+    const syncConsumer = await import("@/lib/mcp/tools/bench");
+    expect(source.EMPTY_TRANSCRIPT).toBe("empty_transcript");
+    // Identity, not two literals that happen to match today. bench.ts re-exports the one
+    // declaration rather than keeping its own copy, which is what the old defect was.
+    expect(syncConsumer.EMPTY_TRANSCRIPT).toBe(source.EMPTY_TRANSCRIPT);
+    // And the producer emits that same value, so the branch consumers take is reachable.
+    const whisperSrc = (await import("node:fs")).readFileSync("lib/whisper.ts", "utf8");
+    expect(whisperSrc, "the producer must not re-type the literal").toMatch(/from "@\/lib\/whisper-constants"/);
+    expect(whisperSrc).not.toMatch(/error: 'empty_transcript'/);
+  });
 
-    // The synchronous path treats EMPTY_TRANSCRIPT as ok:true with silent_window.
-    const syncBlock = sync.slice(sync.indexOf("if (w.error === EMPTY_TRANSCRIPT)"), sync.indexOf("// ---- a failed ask"));
-    expect(syncBlock).toMatch(/ok:\s*true/);
-    expect(syncBlock).toMatch(/silent_window:\s*true/);
+  it("the job kind itself decides empty_transcript is a SUCCESS — asserted on its return value", async () => {
+    const { transcribeRangeKind } = await import("@/lib/jobs/kinds/transcribe-range");
+    WHISPER.value = { ok: false, error: EMPTY_TRANSCRIPT, latency_ms: 10 };
+    const out = await transcribeRangeKind.run({
+      job: {} as never,
+      step: "transcribe",
+      args: { dry_run: true },
+      progress: { clip_key: "clips/x.webm", duration_ms: 30_000, session_id: "sess_1" },
+      runner: "r1",
+    });
+    // A voided branch falls through to failWith and this is "fail".
+    expect(out.kind, "the kind must DECIDE done, not merely mention the constant").toBe("done");
+    const result = (out as { kind: "done"; result: Record<string, unknown> }).result;
+    expect(result).toMatchObject({ silent_window: true, chars: 0, segments: 0 });
+  });
 
-    // The job path must branch on the SAME constant, before any failWith, and succeed.
-    const jobBlock = job.slice(job.indexOf("if (w.error === EMPTY_TRANSCRIPT)"), job.indexOf('jobError("whisper_failed")'));
-    expect(jobBlock, "the job path must branch on EMPTY_TRANSCRIPT before it fails").toBeTruthy();
-    expect(jobBlock).toMatch(/doneWith/);
-    expect(jobBlock).toMatch(/silent_window:\s*true/);
-
-    // And both import the one constant rather than re-typing the string.
-    expect(job).toMatch(/import \{ EMPTY_TRANSCRIPT \}/);
+  it("and the same kind still FAILS a real error, so the branch is not a blanket success", async () => {
+    const { transcribeRangeKind } = await import("@/lib/jobs/kinds/transcribe-range");
+    WHISPER.value = { ok: false, error: "http_502", latency_ms: 10 };
+    const out = await transcribeRangeKind.run({
+      job: {} as never,
+      step: "transcribe",
+      args: { dry_run: true },
+      progress: { clip_key: "clips/x.webm", duration_ms: 30_000, session_id: "sess_1" },
+      runner: "r1",
+    });
+    expect(out.kind).toBe("fail");
+    expect(String((out as { error: string }).error)).toContain("whisper_failed");
   });
 
   it("empty_transcript is NOT a job error code — it must not become an error by another name", () => {

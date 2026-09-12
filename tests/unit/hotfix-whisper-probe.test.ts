@@ -6,19 +6,24 @@
  * `whisper: true` asserted "the tunnel and a Python process are up" and could not have failed if
  * transcription were completely dead.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   probeWhisperTranscription,
+  runWhisperProbe,
+  __resetWhisperProbeCache,
   WHISPER_PROBE_BUDGET_MS,
+  WHISPER_PROBE_CACHE_MS,
   WHISPER_PROBE_FIXTURE,
+  WHISPER_RECENT_OK_MS,
 } from "@/lib/health/whisper-probe";
 
 const FIXTURE = async () => new Uint8Array([1, 2, 3, 4]);
 const res = (status: number, body: string) =>
   new Response(body, { status, headers: { "content-type": "application/json" } });
 
+// These drive the UNCACHED probe: the cache is a separate concern with its own suite below.
 const run = (fetchImpl: (u: string, i: RequestInit) => Promise<Response>, budgetMs?: number) =>
-  probeWhisperTranscription({ baseUrl: "https://whisper.example", readFixture: FIXTURE, fetchImpl, ...(budgetMs ? { budgetMs } : {}) });
+  runWhisperProbe({ baseUrl: "https://whisper.example", readFixture: FIXTURE, fetchImpl, ...(budgetMs ? { budgetMs } : {}) });
 
 describe("defect 2 — the probe transcribes, it does not merely ping", () => {
   it("TRUE only on a 200 with a parseable body", async () => {
@@ -79,19 +84,46 @@ describe("defect 2 — the probe transcribes, it does not merely ping", () => {
   });
 
   it("FALSE, not a throw, when WHISPER_BASE_URL is unset", async () => {
-    const out = await probeWhisperTranscription({ baseUrl: null, readFixture: FIXTURE, fetchImpl: async () => res(200, "{}") });
+    const out = await runWhisperProbe({ baseUrl: null, readFixture: FIXTURE, fetchImpl: async () => res(200, "{}") });
     expect(out).toMatchObject({ ok: false, reason: "not_configured" });
   });
 
-  it("POSTs multipart to /inference — the same shape transcribeWithWhisper uses", async () => {
-    let seen: { url?: string; method?: string; isForm?: boolean } = {};
+  it("POSTs multipart to /inference with EXACTLY the fields transcribeWithWhisper sends", async () => {
+    let form: FormData | null = null;
+    let seen: { url?: string; method?: string } = {};
     await run(async (u, i) => {
-      seen = { url: u, method: i.method, isForm: i.body instanceof FormData };
+      seen = { url: u, method: i.method };
+      form = i.body as FormData;
       return res(200, "{}");
     });
     expect(seen.url).toBe("https://whisper.example/inference");
     expect(seen.method, "a GET is what could not fail").toBe("POST");
-    expect(seen.isForm).toBe(true);
+    // Item 4 — the decoder configuration must be production's, or the probe exercises a path
+    // production never takes.
+    expect(form!.get("response_format")).toBe("verbose_json");
+    expect(form!.get("temperature")).toBe("0.0");
+    expect(form!.get("beam_size")).toBe("1");
+    expect(form!.get("best_of")).toBe("1");
+    // Item 2 — a WEBM, so the shim's ffmpeg transcode leg is exercised. A .wav skipped it, and
+    // broken ffmpeg would 415 every real transcription while health reported true.
+    const file = form!.get("file") as File;
+    expect(file.name).toMatch(/\.webm$/);
+    expect(file.type).toBe("audio/webm");
+  });
+
+  it("an abort DURING the body read is a timeout, not an unparseable body", async () => {
+    // Item 4 — the inner catch used to swallow this and point the operator at the service's
+    // output, when the fact is that it never finished sending.
+    const out = await run(async (_u, init) => ({
+      status: 200,
+      async text() {
+        const e = new Error("aborted"); e.name = "AbortError";
+        (init.signal as AbortSignal).dispatchEvent?.(new Event("abort"));
+        throw e;
+      },
+    } as unknown as Response));
+    expect(out.ok).toBe(false);
+    expect(out.reason, "an abort mid-body is a timeout").toBe("whisper_timeout");
   });
 
   it("the budget is well inside the health route's own, and the fixture is committed", async () => {
@@ -109,5 +141,86 @@ describe("defect 2 — the probe transcribes, it does not merely ping", () => {
     const src = readFileSync("app/api/health/route.ts", "utf8");
     expect(src).toMatch(/probeWhisperTranscription\(\)/);
     expect(src).not.toMatch(/\$\{base\}\/inference`,\s*\{\s*method:\s*"GET"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 1 — the cache, and the busy rule
+// ---------------------------------------------------------------------------
+
+describe("item 1 — at most one real inference a minute, and a busy server is not a broken one", () => {
+  const cached = (fetchImpl: (u: string, i: RequestInit) => Promise<Response>, now: () => number, budgetMs?: number) =>
+    probeWhisperTranscription({ baseUrl: "https://whisper.example", readFixture: FIXTURE, fetchImpl, now, ...(budgetMs ? { budgetMs } : {}) });
+
+  beforeEach(() => __resetWhisperProbeCache());
+
+  it("runs ONE inference per window and serves the verdict in between, with a growing age", async () => {
+    let calls = 0;
+    let t = 1_000_000;
+    const f = async () => { calls += 1; return res(200, JSON.stringify({ text: "" })); };
+
+    const first = await cached(f, () => t);
+    expect(calls).toBe(1);
+    expect(first).toMatchObject({ ok: true, cached: false, age_s: 0 });
+    expect(typeof first.checked_at).toBe("string");
+
+    t += 30_000;
+    const second = await cached(f, () => t);
+    expect(calls, "a second call inside the window must not hit the Mini").toBe(1);
+    expect(second).toMatchObject({ ok: true, cached: true, age_s: 30 });
+    expect(second.checked_at, "the cached answer keeps the ORIGINAL time").toBe(first.checked_at);
+
+    t += WHISPER_PROBE_CACHE_MS;
+    const third = await cached(f, () => t);
+    expect(calls, "past the window it measures again").toBe(2);
+    expect(third).toMatchObject({ cached: false, age_s: 0 });
+  });
+
+  it("a timeout with a recent success is BUSY, not broken", async () => {
+    let t = 2_000_000;
+    const ok = async () => res(200, JSON.stringify({ text: "" }));
+    const hang = async (_u: string, init: RequestInit) => new Promise<Response>((_, rej) => {
+      (init.signal as AbortSignal).addEventListener("abort", () => { const e = new Error("x"); e.name = "AbortError"; rej(e); });
+    });
+
+    expect((await cached(ok, () => t)).ok).toBe(true);   // evidence it transcribes
+    t += WHISPER_PROBE_CACHE_MS + 1;                      // past the cache, still inside recent-ok
+
+    vi.useFakeTimers();
+    const p = cached(hang, () => t, 5_000);
+    await vi.advanceTimersByTimeAsync(5_001);
+    const out = await p;
+    vi.useRealTimers();
+
+    expect(out.ok, "a serialised inference queue is not a fault").toBe(true);
+    expect(out.reason).toBe("busy_recent_ok");
+    expect(out.last_ok_age_s).toBeGreaterThanOrEqual(60);
+  });
+
+  it("a timeout with NO recent success stays a hard failure", async () => {
+    let t = 3_000_000;
+    const hang = async (_u: string, init: RequestInit) => new Promise<Response>((_, rej) => {
+      (init.signal as AbortSignal).addEventListener("abort", () => { const e = new Error("x"); e.name = "AbortError"; rej(e); });
+    });
+    vi.useFakeTimers();
+    const p = cached(hang, () => t, 5_000);
+    await vi.advanceTimersByTimeAsync(5_001);
+    const out = await p;
+    vi.useRealTimers();
+    expect(out).toMatchObject({ ok: false, reason: "whisper_timeout" });
+  });
+
+  it("the busy window is finite — an old success does not excuse a timeout for ever", async () => {
+    expect(WHISPER_RECENT_OK_MS).toBeGreaterThan(WHISPER_PROBE_CACHE_MS);
+    expect(WHISPER_RECENT_OK_MS).toBeLessThanOrEqual(30 * 60_000);
+  });
+
+  it("a hard failure is NOT rescued by the busy rule — only a timeout is", async () => {
+    let t = 4_000_000;
+    const ok = async () => res(200, JSON.stringify({ text: "" }));
+    expect((await cached(ok, () => t)).ok).toBe(true);
+    t += WHISPER_PROBE_CACHE_MS + 1;
+    const out = await cached(async () => res(500, "{}"), () => t);
+    expect(out).toMatchObject({ ok: false, reason: "bad_status", status: 500 });
   });
 });

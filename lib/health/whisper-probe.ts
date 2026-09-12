@@ -30,16 +30,61 @@ import path from "node:path";
 /** Well inside the health route's own budget, and far above a healthy round trip. */
 export const WHISPER_PROBE_BUDGET_MS = 12_000;
 
-export const WHISPER_PROBE_FIXTURE = "fixtures/health-probe-0.5s-16k-mono.wav";
+/**
+ * WEBM, not WAV (Refuter flag 1). The job path posts `audio/webm` and the shim transcodes it with
+ * ffmpeg before whisper.cpp sees a sample. A `.wav` probe skips that leg entirely, so a broken
+ * ffmpeg would 415 every real transcription while health reported true — the same "passed because
+ * something answered" failure this probe was written to end, one component further in.
+ */
+export const WHISPER_PROBE_FIXTURE = "fixtures/health-probe-0.5s-16k-mono.webm";
+
+/**
+ * Item 1 — ONE REAL INFERENCE PER MINUTE, AT MOST.
+ *
+ * whisper.cpp serialises inference, and the Mini is often mid-recording. A health route that ran a
+ * fresh inference on every call would queue behind a live transcription window, add load to the
+ * box it is meant to be observing, and then report the queue as a fault. The verdict is cached and
+ * the payload carries `checked_at` and `age_s`, so the answer is never mistaken for fresher than
+ * it is.
+ */
+export const WHISPER_PROBE_CACHE_MS = 60_000;
+
+/**
+ * How long a past SUCCESS stands as evidence that transcription works. Within this window a probe
+ * that times out is reported as BUSY rather than broken — see `busy_recent_ok` below.
+ */
+export const WHISPER_RECENT_OK_MS = 10 * 60_000;
 
 export type WhisperProbeResult = {
   ok: boolean;
   /** Named on every failure so an operator reads WHICH way it broke, not just `false`. */
-  reason?: "not_configured" | "whisper_timeout" | "bad_status" | "unparseable_body" | "transport";
+  reason?:
+    | "not_configured"
+    | "whisper_timeout"
+    /**
+     * Item 1 — the probe did not finish inside its budget, but a real inference SUCCEEDED within
+     * `WHISPER_RECENT_OK_MS`. whisper.cpp serialises, so a timeout while the Mini is transcribing a
+     * clinic window is contention, not death — and we hold direct evidence it transcribes. Reported
+     * `ok: true` with this reason and `last_ok_age_s`, because paging someone for a busy server is
+     * how a health signal stops being read. Without that evidence a timeout stays `whisper_timeout`
+     * and `ok: false`.
+     */
+    | "busy_recent_ok"
+    | "bad_status"
+    | "unparseable_body"
+    | "transport";
   status?: number;
   elapsed_ms: number;
   budget_ms: number;
   detail?: string;
+  /** When the underlying inference actually ran. Cached answers carry the ORIGINAL time. */
+  checked_at?: string;
+  /** Seconds since that inference. 0 on a fresh run; up to WHISPER_PROBE_CACHE_MS/1000 on a hit. */
+  age_s?: number;
+  /** Seconds since the last SUCCESSFUL inference, when one is known. */
+  last_ok_age_s?: number;
+  /** True when this verdict was served from cache rather than re-measured. */
+  cached?: boolean;
 };
 
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
@@ -48,7 +93,7 @@ type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
  * POST the fixture and require a parseable 200. Never throws: a probe that throws is a health
  * route that 500s, which tells an operator less than `whisper: false` does.
  */
-export async function probeWhisperTranscription(opts: {
+export async function runWhisperProbe(opts: {
   baseUrl?: string | null;
   budgetMs?: number;
   fetchImpl?: Fetcher;
@@ -70,9 +115,13 @@ export async function probeWhisperTranscription(opts: {
       : new Uint8Array(await readFile(path.join(process.cwd(), WHISPER_PROBE_FIXTURE)));
 
     const form = new FormData();
-    form.append("file", new Blob([bytes], { type: "audio/wav" }), "health-probe.wav");
-    form.append("response_format", "json");
-    form.append("temperature", "0");
+    form.append("file", new Blob([bytes], { type: "audio/webm" }), "health-probe.webm");
+    // Item 4 — EXACTLY what transcribeWithWhisper sends. "The same shape" has to be true, or the
+    // probe exercises a decoder configuration production never uses.
+    form.append("response_format", "verbose_json");
+    form.append("temperature", "0.0");
+    form.append("beam_size", "1");
+    form.append("best_of", "1");
 
     const res = await doFetch(`${base}/inference`, { method: "POST", body: form, signal: ac.signal });
     const elapsed_ms = now() - started;
@@ -92,7 +141,13 @@ export async function probeWhisperTranscription(opts: {
         return { ok: false, reason: "unparseable_body", status: 200, elapsed_ms, budget_ms };
       }
       return { ok: true, status: 200, elapsed_ms, budget_ms };
-    } catch {
+    } catch (e) {
+      // Item 4 — an abort DURING the body read is a timeout, not a malformed body. The inner catch
+      // used to swallow it and misname it `unparseable_body`, which points an operator at the
+      // service's output when the real fact is that it never finished sending.
+      if (ac.signal.aborted || (e as Error)?.name === "AbortError") {
+        return { ok: false, reason: "whisper_timeout", elapsed_ms: now() - started, budget_ms };
+      }
       return { ok: false, reason: "unparseable_body", status: 200, elapsed_ms, budget_ms };
     }
   } catch (e) {
@@ -104,4 +159,58 @@ export async function probeWhisperTranscription(opts: {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Item 1 — the cache, and the busy rule
+// ---------------------------------------------------------------------------
+
+type CacheEntry = { at: number; result: WhisperProbeResult };
+/** Module state: one lambda instance answers from its own last measurement. */
+let LAST: CacheEntry | null = null;
+let LAST_OK_AT: number | null = null;
+
+/** Test seam — module state must be resettable or every test inherits the last one's verdict. */
+export function __resetWhisperProbeCache(): void {
+  LAST = null;
+  LAST_OK_AT = null;
+}
+
+/**
+ * The probe the health route calls. At most ONE real inference per `WHISPER_PROBE_CACHE_MS`.
+ *
+ * Between runs the previous verdict is served verbatim, with `cached: true`, the ORIGINAL
+ * `checked_at`, and an `age_s` that grows — so a reader can always tell how old the answer is and
+ * is never invited to mistake it for a fresh one.
+ *
+ * THE BUSY RULE. A timeout with a successful inference inside `WHISPER_RECENT_OK_MS` is reported
+ * `ok: true, reason: "busy_recent_ok"` with `last_ok_age_s`. whisper.cpp serialises, so a probe
+ * queued behind a clinic window times out on a server that is provably working — we have the
+ * earlier success as evidence. Calling that `false` pages someone for load, and a health signal
+ * that cries wolf stops being read. With no recent success a timeout stays `whisper_timeout`.
+ */
+export async function probeWhisperTranscription(
+  opts: Parameters<typeof runWhisperProbe>[0] & { cacheMs?: number } = {},
+): Promise<WhisperProbeResult> {
+  const now = opts.now ?? Date.now;
+  const cacheMs = opts.cacheMs ?? WHISPER_PROBE_CACHE_MS;
+  const t = now();
+
+  if (LAST && t - LAST.at < cacheMs) {
+    return { ...LAST.result, cached: true, checked_at: new Date(LAST.at).toISOString(), age_s: Math.round((t - LAST.at) / 1000) };
+  }
+
+  const fresh = await runWhisperProbe(opts);
+  const at = now();
+  let result = fresh;
+
+  if (fresh.ok) {
+    LAST_OK_AT = at;
+  } else if (fresh.reason === "whisper_timeout" && LAST_OK_AT !== null && at - LAST_OK_AT < WHISPER_RECENT_OK_MS) {
+    result = { ...fresh, ok: true, reason: "busy_recent_ok", last_ok_age_s: Math.round((at - LAST_OK_AT) / 1000) };
+  }
+
+  result = { ...result, checked_at: new Date(at).toISOString(), age_s: 0, cached: false };
+  LAST = { at, result };
+  return result;
 }

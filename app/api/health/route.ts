@@ -50,7 +50,18 @@ export async function GET() {
     probe(async () => {
       const r = await probeWhisperTranscription();
       if (!r.ok) throw new Error(`whisper_probe_${r.reason ?? "failed"}${r.status ? `_${r.status}` : ""}`);
-      return { transcription: true, probe_ms: r.elapsed_ms };
+      // The verdict is cached (one real inference a minute at most), so the payload says WHEN it
+      // was measured and how old that is. An `ok` that does not carry its age invites a reader to
+      // assume it is fresh, which on a cached probe it usually is not.
+      return {
+        transcription: true,
+        probe_ms: r.elapsed_ms,
+        checked_at: r.checked_at,
+        age_s: r.age_s,
+        cached: r.cached,
+        ...(r.reason ? { reason: r.reason } : {}),
+        ...(r.last_ok_age_s !== undefined ? { last_ok_age_s: r.last_ok_age_s } : {}),
+      };
     }),
     probe(async () => {
       const key = process.env.RESEND_API_KEY;
