@@ -116,9 +116,43 @@ export const DETAIL_SCHEMA = {
     "summary (default) = the fields an operator reads first; full = the complete payload this tool returned before Tier 2. Nothing is removed by summary — it is a narrower selection of the same facts.",
 } as const;
 
-/** PURE — §2.4. Keep only `keys` from each row of a payload's list, leaving everything else alone. */
-export function pickSummary<T extends Record<string, unknown>>(row: T, keys: readonly string[]): Partial<T> {
+/**
+ * PURE — §2.4, hardened by the Slice A Refuter's (d). Keep only `keys` from a payload row.
+ *
+ * ─── IT THROWS ON A KEY THE PAYLOAD HAS NOT GOT ───────────────────────────────────────────────
+ * The first version did `if (k in row)` and skipped anything else. That is how six wrong field
+ * names in SUMMARY_DAY_SESSION_FIELDS shipped: `id` for `session_id`, `ended_disagrees` for
+ * `end_time_disagrees`, and four columns that never existed. Summary silently returned four fields
+ * instead of ten and every test still passed, because a projection that drops what it cannot find
+ * has no failure mode — it just answers less, and "less" is indistinguishable from "that room had
+ * nothing to report".
+ *
+ * So a missing REQUIRED key is a programming error and is thrown, loudly, naming the key and what
+ * the row actually has. `failSafe` turns it into the tool's empty envelope rather than a 500, so a
+ * mistake costs one visibly-empty answer in preview instead of a quietly-thin one in production.
+ *
+ * `optional` is the escape hatch and it is EXPLICIT: a key that is legitimately absent sometimes
+ * (day_report's `ended_at` is only present when the stored end disagrees with the tape) is listed
+ * there and skipped when missing. The only silence left is silence someone declared.
+ *
+ * The TYPE is the first line of defence: `keys` is `readonly (keyof T)[]`, so a name that is not a
+ * field of the payload fails `tsc` at the call site before any of this runs.
+ */
+export function pickSummary<T extends object>(
+  row: T,
+  keys: readonly (keyof T)[],
+  optional: readonly (keyof T)[] = [],
+): Partial<T> {
   const out: Record<string, unknown> = {};
-  for (const k of keys) if (k in row) out[k] = row[k];
+  const opt = new Set<PropertyKey>(optional as readonly PropertyKey[]);
+  for (const k of keys) {
+    if (!(k in row)) {
+      if (opt.has(k)) continue;
+      throw new Error(
+        `pickSummary: "${String(k)}" is not on this payload (has: ${Object.keys(row).sort().join(", ")})`,
+      );
+    }
+    out[k as string] = row[k];
+  }
   return out as Partial<T>;
 }

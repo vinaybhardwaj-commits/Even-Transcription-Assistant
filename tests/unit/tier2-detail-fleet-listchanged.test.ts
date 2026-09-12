@@ -10,6 +10,22 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 type Row = Record<string, unknown>;
 const ROOM = { id: "room_a", slug: "room-a", name: "Room A" };
 let installRow: Row | null = null;
+/** One ended session with two primary chunks — enough for buildDaySession to return a real row. */
+const SESSIONS: Row[] = [{
+  id: "bs_fixture1", room_id: ROOM.id, label: null, mic_label: null,
+  started_at: new Date("2026-09-12T03:00:00Z"), ended_at: new Date("2026-09-12T04:00:00Z"),
+  status: "ended", notes: null, chunk_count: 2, verified_count: 2, backup_chunk_count: 0,
+  backup_verified_count: 0, gap_ms: 0, last_any_chunk_at: new Date("2026-09-12T03:59:00Z"),
+  last_chunk_at: new Date("2026-09-12T03:59:00Z"),
+}];
+const CHUNKS: Row[] = [
+  { id: "c1", session_id: "bs_fixture1", idx: 0, source: "primary", upload_state: "verified",
+    started_at: new Date("2026-09-12T03:00:00Z"), ended_at: new Date("2026-09-12T03:30:00Z"),
+    gap_before_ms: 0, bytes: 1000, r2_key: "k1" },
+  { id: "c2", session_id: "bs_fixture1", idx: 1, source: "primary", upload_state: "verified",
+    started_at: new Date("2026-09-12T03:30:00Z"), ended_at: new Date("2026-09-12T03:59:00Z"),
+    gap_before_ms: 0, bytes: 1000, r2_key: "k2" },
+];
 
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -21,7 +37,14 @@ vi.mock("@/lib/db", () => {
     if (/^SELECT state_flags FROM room_install/.test(text)) {
       return Promise.resolve([{ state_flags: { flags: ["DISK_LOW"], drift_since: null } }]);
     }
-    if (/FROM room WHERE \(/.test(text)) return Promise.resolve([{ id: ROOM.id, slug: ROOM.slug, name: ROOM.name, disabled_at: null }]);
+    // resolveRoom — id / slug / free-text, all three branches in one statement.
+    if (/SELECT id, slug, name, disabled_at FROM room WHERE/.test(text)) {
+      return Promise.resolve([{ id: ROOM.id, slug: ROOM.slug, name: ROOM.name, disabled_at: null }]);
+    }
+    // Ruling 4: day_report must have a REAL session, or its projection assertions are vacuous.
+    if (/FROM bench_session/.test(text)) return Promise.resolve(SESSIONS);
+    if (/FROM bench_chunk/.test(text)) return Promise.resolve(CHUNKS);
+    if (/FROM bench_event/.test(text)) return Promise.resolve([]);
     if (/SELECT install_id, room_id, created_at/.test(text)) return Promise.resolve(installRow ? [installRow] : []);
     return Promise.resolve([]);
   };
@@ -170,5 +193,86 @@ describe("§2.6 — listChanged", () => {
     const src = await import("node:fs").then((fs) => fs.readFileSync("lib/mcp/handler.ts", "utf8"));
     expect(src).toMatch(/capabilities:\s*\{\s*tools:\s*\{\s*listChanged:\s*true\s*\}\s*\}/);
     expect(src).not.toMatch(/listChanged:\s*false/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice A fix-up 2, ruling 4 — one round-trip per tool, against a REAL payload
+// ---------------------------------------------------------------------------
+
+/**
+ * The assertion the Refuter's (d) asked for, in one place: build the full payload from fixtures,
+ * project the summary, and prove every key summary kept EXISTS on full and EQUALS it. A projection
+ * that silently drops what it cannot find passes any test that only counts fields; this cannot.
+ */
+const assertProjection = (summaryRow: Row, fullRow: Row, allowNew: readonly string[] = []) => {
+  // Two calls are two clocks: a payload carrying its own `now` (scribe_system_map's health probe)
+  // differs between them for a reason that has nothing to do with the projection. Blank the
+  // timestamps and compare everything else exactly.
+  const stable = (v: unknown) =>
+    JSON.stringify(v).replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, "<ts>").replace(/"latency_ms":\d+/g, '"latency_ms":0');
+  expect(Object.keys(summaryRow).length).toBeGreaterThan(0);
+  for (const k of Object.keys(summaryRow)) {
+    if (allowNew.includes(k)) continue;
+    expect(k in fullRow, `"${k}" is on summary but not on full`).toBe(true);
+    expect(stable(summaryRow[k]), `"${k}" differs between summary and full`).toBe(stable(fullRow[k]));
+  }
+};
+
+describe("ruling 4 — summary is a projection of the real payload, per tool", () => {
+  it("scribe_diff_room", async () => {
+    const t = BENCH_TOOLS.find((x) => x.name === "scribe_diff_room")!;
+    const s = ((await t.handler({ detail: "summary" }, ctx)) as { rooms: Row[] }).rooms[0]!;
+    const f = ((await t.handler({ detail: "full" }, ctx)) as { rooms: Row[] }).rooms[0]!;
+    assertProjection(s, f);
+    // and the fields that matter most actually arrived, rather than being quietly absent
+    for (const k of ["room", "room_state", "recording", "listener_state", "flags"]) {
+      expect(k in s, `${k} missing from summary`).toBe(true);
+    }
+  });
+
+  it("scribe_day_report — the six wrong names would fail here", async () => {
+    const t = BENCH_TOOLS.find((x) => x.name === "scribe_day_report")!;
+    const s = (await t.handler({ room: ROOM.id, detail: "summary" }, ctx)) as { sessions: Row[] };
+    const f = (await t.handler({ room: ROOM.id, detail: "full" }, ctx)) as { sessions: Row[] };
+    // NOT VACUOUS: the fixture yields a real session, so the loops below actually run.
+    expect(s.sessions.length).toBeGreaterThan(0);
+    expect(s.sessions.length).toBe(f.sessions.length);
+    s.sessions.forEach((row, i) => assertProjection(row, f.sessions[i]!));
+    // The real column names, from buildDaySession — not `id`/`ended_disagrees`/`chunk_count`.
+    for (const row of s.sessions) {
+      for (const k of ["session_id", "status", "started_at", "tape_ended_at", "end_time_disagrees", "chunks", "gaps"]) {
+        expect(k in row, `${k} missing from a day_report summary session`).toBe(true);
+      }
+    }
+  });
+
+  it("scribe_system_map", async () => {
+    const { HEALTH_TOOLS } = await import("@/lib/mcp/tools/health");
+    const t = HEALTH_TOOLS.find((x) => x.name === "scribe_system_map")!;
+    assertProjection((await t.handler({}, ctx)) as Row, (await t.handler({ detail: "full" }, ctx)) as Row);
+  });
+
+  it("scribe_fleet", async () => {
+    const t = BENCH_TOOLS.find((x) => x.name === "scribe_fleet")!;
+    const s = ((await t.handler({ detail: "summary" }, ctx)) as { rooms: Row[] }).rooms[0]!;
+    const f = ((await t.handler({ detail: "full" }, ctx)) as { rooms: Row[] }).rooms[0]!;
+    // fleet's summary lifts four fields out of `derived`, so those are new by design.
+    assertProjection(s, f, ["state", "assigned_pending", "disk_level", "version_hint", "install"]);
+  });
+});
+
+describe("ruling 2 — pickSummary throws rather than dropping", () => {
+  it("a name the payload has not got is an error, not a thinner answer", async () => {
+    const { pickSummary } = await import("@/lib/mcp/registry");
+    expect(() => pickSummary({ a: 1, b: 2 }, ["a", "nope"] as never)).toThrow(/nope/);
+    // and the message names what the row actually has, so the fix is obvious
+    expect(() => pickSummary({ a: 1, b: 2 }, ["nope"] as never)).toThrow(/a, b/);
+  });
+
+  it("a key declared optional is skipped when absent and kept when present", async () => {
+    const { pickSummary } = await import("@/lib/mcp/registry");
+    expect(pickSummary({ a: 1 } as { a: number; b?: number }, ["a", "b"], ["b"])).toEqual({ a: 1 });
+    expect(pickSummary({ a: 1, b: 2 } as { a: number; b?: number }, ["a", "b"], ["b"])).toEqual({ a: 1, b: 2 });
   });
 });

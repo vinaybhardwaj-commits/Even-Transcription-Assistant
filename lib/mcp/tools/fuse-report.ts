@@ -591,32 +591,31 @@ const fuseReport: McpTool = {
         ...(degraded.length ? { degraded: true, degraded_reads: degraded } : {}),
       };
       if (argDetail(args) === "full") return full;
-      // The per-row lists become counts; everything else rides as it is. `len` reads a list
-      // wherever it sits — an array, or an object with a `spans` array — without asserting a shape.
-      const asRecord = full as unknown as Record<string, unknown>;
-      const len = (v: unknown): number => {
-        if (Array.isArray(v)) return v.length;
-        const spans = (v as { spans?: unknown })?.spans;
-        return Array.isArray(spans) ? spans.length : 0;
-      };
-      const tapeOut = asRecord.tape as Record<string, unknown> | undefined;
-      const { visits: _v, marks: _m, silence: _s, tape: _t, ...scoreboard } = asRecord;
-      void _v; void _m; void _s; void _t;
+      // ─── §2.4 summary, corrected by the Refuter's (d) ────────────────────────────────────────
+      // `silence` is NOT a top-level field: it lives at `reconciliation.silence`, so the first
+      // version counted `full.silence` (always undefined) and reported silence_spans 0 on the very
+      // day the section exists for — OPD 7's six-hour hole. It also left the whole spans array
+      // riding inside `reconciliation`, so "summary" returned the widest list in the payload.
+      //
+      // The scoreboard IS the summary: every counter in `reconciliation` stays, the per-row lists
+      // (visits, marks, tape.sessions, and the silence spans) become counts, and `parameters`
+      // rides both widths because a number is not readable without the constants that produced it.
+      const { silence: silenceSpans, ...reconciliationCounts } = full.reconciliation;
+      const { visits, marks: markRows, tape: tapeFull, ...rest } = full;
       return {
-        ...scoreboard,
+        ...rest,
+        reconciliation: reconciliationCounts,
         counts: {
-          visits: len(asRecord.visits),
-          marks: len(asRecord.marks),
-          silence_spans: len(asRecord.silence),
-          sessions: len(tapeOut?.sessions),
+          visits: visits.length,
+          marks: markRows.length,
+          silence_spans: silenceSpans.length,
+          sessions: tapeFull.sessions.length,
         },
-        tape: tapeOut
-          ? {
-              first_piece_at: tapeOut.first_piece_at,
-              last_piece_at: tapeOut.last_piece_at,
-              total_recorded_ms: tapeOut.total_recorded_ms,
-            }
-          : null,
+        tape: {
+          first_piece_at: tapeFull.first_piece_at,
+          last_piece_at: tapeFull.last_piece_at,
+          total_recorded_ms: tapeFull.total_recorded_ms,
+        },
       };
     }),
 };

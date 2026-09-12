@@ -2191,7 +2191,7 @@ const dayReport: McpTool = {
         room: { id: room.id, slug: room.slug, name: room.name },
         ist_date: day,
         note: "tape_ended_at is the last piece recorded (either microphone) — the stored ended_at is not the end of the recording and is shown only where it differs",
-        sessions: detail === "full" ? sessions : sessions.map((x) => pickSummary(x as Record<string, unknown>, SUMMARY_DAY_SESSION_FIELDS)),
+        sessions: detail === "full" ? sessions : sessions.map((x) => pickSummary(x, SUMMARY_DAY_SESSION_FIELDS, SUMMARY_DAY_SESSION_OPTIONAL)),
         ...(degraded.length ? { degraded_reads: degraded } : {}),
       };
     }),
@@ -2442,11 +2442,32 @@ export const SUMMARY_ROOM_FIELDS = [
   "last_piece_at", "last_cue", "stalled_age_ms", "flags", "degraded",
 ] as const;
 
-/** Tier 2 §2.4 — one line per session: what happened, when, how much, and whether it is sound. */
+/**
+ * `degraded` is spread conditionally — it exists only when a section of the read failed, and its
+ * absence is the good news. Everything else in the list above is unconditional, so `pickSummary`
+ * throws if one goes missing. (Found by that throw: the first version of this list would have
+ * crashed every healthy room, which is exactly the signal the silent version never gave.)
+ */
+export const SUMMARY_ROOM_OPTIONAL = ["degraded"] as const;
+
+/**
+ * Tier 2 §2.4 — one line per session: what happened, when, how much tape, and whether the two
+ * clocks agree. TYPED AGAINST THE REAL ROW: `satisfies readonly (keyof DaySessionRow)[]` makes a
+ * name `buildDaySession` does not return a tsc error here, at the list, rather than a field that
+ * silently vanishes from the answer. The Refuter's (d): six of these were wrong and nothing failed.
+ */
+type DayReportSession = ReturnType<typeof buildDaySession>;
 export const SUMMARY_DAY_SESSION_FIELDS = [
-  "id", "status", "started_at", "ended_at", "tape_ended_at", "chunk_count", "backup_chunk_count",
-  "audio_ms", "ended_disagrees", "stalled",
-] as const;
+  "session_id", "status", "started_at", "tape_ended_at", "ended_at",
+  "end_time_disagrees", "chunks", "gaps",
+] as const satisfies readonly (keyof DayReportSession)[];
+
+/**
+ * `ended_at` is emitted ONLY when the stored end disagrees with the tape clock (buildDaySession
+ * spreads it conditionally), so its absence is a fact about the session, not a missing field.
+ * Everything else above is unconditional and `pickSummary` throws if one goes missing.
+ */
+export const SUMMARY_DAY_SESSION_OPTIONAL = ["ended_at"] as const satisfies readonly (keyof DayReportSession)[];
 
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
@@ -2648,7 +2669,9 @@ const diffRoom: McpTool = {
           // Nothing is computed differently and nothing new appears in `full`; the wide payload is
           // one argument away. `degraded` rides both, because a caller must never be told a room is
           // fine when a section of the read failed.
-          return detail === "full" ? full : pickSummary(full, SUMMARY_ROOM_FIELDS);
+          // `full` is the object literal built just above, so `keyof typeof full` is its real
+          // shape and pickSummary's `readonly (keyof T)[]` rejects any name that is not on it.
+          return detail === "full" ? full : pickSummary(full, SUMMARY_ROOM_FIELDS, SUMMARY_ROOM_OPTIONAL);
         }),
       );
       return {

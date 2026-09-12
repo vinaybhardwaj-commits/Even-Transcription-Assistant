@@ -814,3 +814,69 @@ describe("turn_tape — PRD §10's counters, rolled up from payload.window", () 
     expect((out.degraded_reads as string[]).some((d) => d.startsWith("cues_read_failed"))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice A fix-up 2, ruling 4 — the summary projection, against a REAL payload
+// ---------------------------------------------------------------------------
+
+describe("§2.4 summary — built from the OPD 7 fixtures, not from a hand-written shape", () => {
+  const summary = (args: Row = {}) =>
+    tool.handler({ room_day_id: DAY, detail: "summary", ...args }, { origin: "https://preview.example" }) as Promise<Row>;
+
+  it("the OPD-7-shaped day reports silence_spans 1 — the bug this ruling caught", async () => {
+    // `silence` lives at reconciliation.silence, never at the top level. The first version counted
+    // `full.silence` (always undefined) and answered 0 on the one day the section exists for.
+    const s = await summary();
+    expect((s.counts as Row).silence_spans).toBe(1);
+    const full = await run({ room_day_id: DAY });
+    expect(((full.reconciliation as Row).silence as Row[]).length).toBe(1);
+  });
+
+  it("every count equals the length of the list it replaced", async () => {
+    const s = await summary();
+    const f = await run({ room_day_id: DAY });
+    expect(s.counts).toEqual({
+      visits: (f.visits as Row[]).length,
+      marks: (f.marks as Row[]).length,
+      silence_spans: ((f.reconciliation as Row).silence as Row[]).length,
+      sessions: ((f.tape as Row).sessions as Row[]).length,
+    });
+  });
+
+  it("every field summary keeps is byte-identical to the same field under full", async () => {
+    const s = await summary();
+    const f = await run({ room_day_id: DAY });
+    for (const k of Object.keys(s)) {
+      if (k === "counts") continue;              // new in summary by design
+      if (k === "reconciliation" || k === "tape") continue; // narrowed below, checked separately
+      expect(k in f, `${k} is on summary but not on full`).toBe(true);
+      expect(JSON.stringify(s[k]), `${k} differs`).toBe(JSON.stringify(f[k]));
+    }
+  });
+
+  it("the scoreboard counters survive whole; only the spans list is dropped", async () => {
+    const s = await summary();
+    const f = await run({ room_day_id: DAY });
+    const fr = { ...(f.reconciliation as Row) };
+    delete fr.silence;
+    expect(s.reconciliation).toEqual(fr);
+    expect((s.reconciliation as Row).silence).toBeUndefined();
+  });
+
+  it("tape keeps its three clocks and drops only the per-session rows", async () => {
+    const s = await summary();
+    const f = await run({ room_day_id: DAY });
+    const ft = f.tape as Row;
+    expect(s.tape).toEqual({
+      first_piece_at: ft.first_piece_at,
+      last_piece_at: ft.last_piece_at,
+      total_recorded_ms: ft.total_recorded_ms,
+    });
+  });
+
+  it("`parameters` rides both widths — a number is unreadable without its constants", async () => {
+    const s = await summary();
+    const f = await run({ room_day_id: DAY });
+    expect(s.parameters).toEqual(f.parameters);
+  });
+});
