@@ -659,11 +659,13 @@ function FleetRowView({
             {view.update_note}
           </p>
         )}
-        {/* B2-D5. One-way: offered only on a Mac that reports `test`. Once pressed, the row says
-            so until the Mac itself reports `stable` — the card never claims the move happened. */}
+        {/* B2-D5, wording made channel-neutral by the orchestrator's seam-15 ruling. Tier 1 §3 made
+            `test` assignable too, so a line that names `stable` is a claim the card cannot make.
+            The card never claims the move happened either way: the Mac's own report is the proof,
+            and until it arrives this says only that an assignment is outstanding. */}
         {i && view.assigned_pending && (
           <p className="mt-1 text-caption text-warning-700 whitespace-nowrap">
-            assigned stable · waiting for the Mac
+            channel assigned · waiting for the Mac
           </p>
         )}
         {i && view.can_move_to_stable && (
@@ -672,7 +674,7 @@ function FleetRowView({
             onClick={() => onAssignStable(i)}
             disabled={busy === i.install_id}
             className={ROW_BTN}
-            title="Tells this Mac to take its builds from stable at its next poll. The server never moves a Mac onto test."
+            title="Tells this Mac to take its builds from stable at its next poll. Only the Mac's own report proves it moved."
           >
             {busy === i.install_id ? "Assigning…" : "Move to stable"}
           </button>

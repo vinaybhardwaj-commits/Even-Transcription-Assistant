@@ -141,4 +141,31 @@ describe("the card", () => {
     expect(html).toContain("data-channel-locked");
     expect(html).toContain("channel locked");
   });
+
+  // ── orchestrator fix-up ruling, seam 15 ─────────────────────────────────────────────────
+  // Both strings were written when `stable` was the only assignable channel. Tier 1 §3 made
+  // `test` assignable, so a line that names the destination and a tooltip that promises the
+  // server never assigns `test` are both claims the card can no longer make.
+  it("the pending line and the Move-to-stable tooltip say nothing about which channel is assignable", () => {
+    const mk = (over: Record<string, unknown>) => {
+      const install = { install_id: "install_home", room_id: "room_home", enrolled_at: "x", retired_at: null, ...over } as unknown as import("@/lib/room-install-view").InstallView;
+      return { room_id: "room_home", room_slug: "s", room_name: "Home Office", disabled: false, install, pending: null, last_retired: null } as import("@/lib/room-install-view").FleetRow;
+    };
+    // One row waiting on an assignment, one row offering the move: both strings in one render.
+    const rows = [mk({ assigned_channel: "stable", update_channel: "test" }), mk({ assigned_channel: null, update_channel: "test" })];
+    expect(V.deriveRow({ row: rows[0]!, latestRelease: null, nowMs: Date.now() }).assigned_pending).toBe(true);
+    expect(V.deriveRow({ row: rows[1]!, latestRelease: null, nowMs: Date.now() }).can_move_to_stable).toBe(true);
+    const html = renderToStaticMarkup(
+      React.createElement(FleetTable, {
+        fleet: { now: new Date().toISOString(), rows, latest_release: null, releases: { stable: null, test: null }, degraded: [] } as import("@/lib/room-install-view").FleetPayload,
+        nowMs: Date.now(), busy: null, onCopy: () => {}, onRetire: () => {}, onAssignStable: () => {}, onSetAudioInput: () => {},
+      }),
+    );
+    // The strings that are actually rendered now.
+    expect(html).toContain("channel assigned · waiting for the Mac");
+    expect(html).toContain("Only the Mac&#x27;s own report proves it moved.");
+    // The two stale ones are gone, and neither may come back.
+    expect(html).not.toContain("assigned stable · waiting for the Mac");
+    expect(html).not.toContain("The server never moves a Mac onto test");
+  });
 });
