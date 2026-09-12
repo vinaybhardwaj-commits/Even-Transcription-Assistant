@@ -126,3 +126,17 @@ Verdicts, design decisions and sign-off are never delegated.
     Refuter; the Refuter is never the session that built the diff. Pastes go in one fenced code block (V, 11 Sep 17:50).
 32. **Rule 2 bit again on B2-A:** `TapeCore/TapeFormat.swift` was on neither list and the Builder stopped correctly. Walk the data path
     through every module the poll field touches — writer → index format → reader → poll → route → row → card — before naming the contract.
+
+## Rules added 11 Sep 2026, night (R4)
+
+33. **Every command that prompts runs as `ssh -t`.** `ssh host 'security unlock-keychain …'` without `-t` gives `security` no tty, and
+    the password V types is ECHOED IN CLEAR on the line (20:24 IST — the Mini's login password went into scrollback and a screenshot;
+    rotated after). The orchestrator writes `-t` into every such paste; never a bare `ssh host 'cmd'` for anything that asks.
+34. **The Cowork Scribe-MCP connector caches its tool list.** A tool added server-side (`scribe_set_audio_input`, 15:14Z) is invisible from
+    Cowork — `RefreshMcpTools` returns the old count — until the connector is reconnected in claude.ai settings. Until then the same
+    action goes through the admin route from `scribe`. Plan MCP-tool additions for the next thread, not the same one.
+35. **Two builds can run in parallel on one branch when their file sets are disjoint; cross-refute after `/clear`.** R4-S in `scribe`,
+    R4-A in `scribe2`, then each `/clear`s and refutes the other's diff (`git diff <base>..HEAD -- <paths>`), never its own. The second
+    to commit rebases with no conflict; the build sha may then name a docs commit — accept it when `git diff` between the two is docs only.
+36. **A paste sent to both windows is harmless only when every step is idempotent.** Push, migration and publish all were tonight
+    (`Everything up-to-date`, "already applied", `allowOverwrite:false`); the deploy order was written that way on purpose. Keep it so.
