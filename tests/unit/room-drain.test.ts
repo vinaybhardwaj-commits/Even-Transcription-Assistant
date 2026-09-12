@@ -168,7 +168,10 @@ describe("the DO NOTs, held by the source itself", () => {
   it("calls ONE routed engine, never a fan-out", () => {
     expect(src).not.toContain("runFanoutForEncounter");
     expect(src).not.toContain("enqueueFanout");
-    expect(src.match(/adapter\.transcribe\(/g) ?? []).toHaveLength(1);
+    // ONE routed engine call, still — it is just made through the paid chokepoint now, which is
+    // the only place in the repo that invokes an adapter on this path.
+    expect(src.match(/adapter\.transcribe\(/g) ?? [], "the drain must not call an adapter directly").toHaveLength(0);
+    expect(src.match(/await guardedTranscribe\(\{/g) ?? []).toHaveLength(1);
   });
 
   it("never types an engine name into a payload or a run", () => {

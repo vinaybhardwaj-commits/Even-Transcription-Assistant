@@ -66,7 +66,9 @@ describe("the drain refuses before it spends", () => {
   it("the guard runs BEFORE the window is claimed and before any paid call", () => {
     const guardAt = drain.indexOf("actorProblem(opts)");
     const claimAt = drain.indexOf("UPDATE bench_window SET state = 'transcribing'");
-    const paidAt = drain.indexOf("adapter.transcribe");
+    // The engine is now reached only through the chokepoint; the subject — the actor check comes
+    // before anything that can spend money — is unchanged and, if anything, sharper.
+    const paidAt = drain.indexOf("await guardedTranscribe({");
     expect(guardAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(claimAt);
     expect(guardAt).toBeLessThan(paidAt);

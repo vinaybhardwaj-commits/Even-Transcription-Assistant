@@ -17,12 +17,12 @@ import { scoreEncounter, scoreScribe, renderNoteText } from "./scoring";
 const nano = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 12);
 const runId = () => `trun_${nano()}`;
 
-// Conservative placeholder rate for a PAID engine whose cost_per_min_usd hasn't
-// been set by an admin yet, so its runs still accrue toward the daily budget
-// instead of counting as free (which made the $5/day cap a no-op). Once the
-// admin sets a real cost_per_min_usd, that exact value is used. Errs slightly
-// high on purpose — the budget's job is to PAUSE runaway paid spend.
-const DEFAULT_PAID_RATE_USD_PER_MIN = 0.02;
+// The conservative rate for a PAID engine nobody has priced. This module had it right first —
+// `is_paid` for the fact, this rate for the number — while the paid guard derived "paid" from the
+// price and read every unpriced engine as free. The constant now lives in lib/stt/paid-engines.ts
+// and is imported here, so the two can never disagree about NULL again.
+import { DEFAULT_PAID_RATE_USD_PER_MIN } from "./paid-engines";
+import { guardedTranscribe } from "./guarded-transcribe";
 
 /** Best cost estimate for one run: the adapter's reported cost if any; else
  *  cost_per_min_usd × duration; else (paid, unpriced) a conservative default;
@@ -90,7 +90,15 @@ export type FanoutResult = { encounter_id: string; inserted: number; skipped: nu
 
 /** Run all eligible engines on one encounter's audio (idempotent per engine). */
 export async function runFanoutForEncounter(encounterId: string, opts?: { allowPaid?: boolean }): Promise<FanoutResult> {
-  const allowPaid = opts?.allowPaid ?? true;
+  // C1b fix-up 5 — DEFAULTS TO FALSE, and the flip is the point. This function is called on the
+  // live doctor path (encounters/[id]/process) with no options at all, so the old `?? true` meant
+  // every processed encounter fanned out to every enabled PAID engine with no budget check and
+  // nobody asking — `drainFanout` checks the daily budget, these two call sites never did.
+  //
+  // Nothing is lost by the flip: both live call sites run `enqueueFanout(id)` first, so the job
+  // stays on the queue and `drainFanout` still fans out the paid engines later, under the budget.
+  // Paid comparisons keep arriving; they just stop arriving unattended and unbudgeted.
+  const allowPaid = opts?.allowPaid ?? false;
   const rows = (await sql`
     SELECT id, audio_object_key, detected_language, duration_seconds FROM encounter WHERE id = ${encounterId} LIMIT 1
   `) as EncRow[];
@@ -133,7 +141,23 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   const results = await Promise.all(todo.map(async (e) => {
     const adapter = adapterFor(e.adapter_key)!;
     try {
-      const r = await adapter.transcribe(bytes as Buffer, { contentType, longForm: true, language: enc.detected_language ?? undefined });
+      // CHOKEPOINT (fix-up item 3). Fan-out reaches PAID engines by design, so it must pass the
+      // same gate as everything else: `allowPaid` IS this path's explicit opt-in — it is false by
+      // default now and `drainFanout` sets it from the daily budget, so a paid run here is always
+      // something a budget or a caller asked for. The guard adds the audit row and the per-call
+      // duration cap that this path has never had.
+      const g = await guardedTranscribe({
+        adapter, engineId: e.id, audio: bytes as Buffer,
+        durationMs: Math.round((enc.duration_seconds ?? 0) * 1000),
+        explicitlyNamed: allowPaid,
+        actor: "cron:stt_fanout",
+        subject: `encounter:${encounterId}`,
+        transcribeOpts: { contentType, longForm: true, ...(enc.detected_language ? { language: enc.detected_language } : {}) },
+      });
+      if (!g.ok) {
+        return { e, r: { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: g.refusal.error } };
+      }
+      const r = g.result;
       return { e, r };
     } catch (err) {
       return { e, r: { original: null, english: null, language: null, latencyMs: 0, costUsd: null, error: String(err).slice(0, 150) } };

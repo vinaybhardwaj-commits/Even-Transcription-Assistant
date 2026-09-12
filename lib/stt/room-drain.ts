@@ -56,7 +56,9 @@ import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from
 import { signGetUrl } from "@/lib/r2";
 import { submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "./eta-router";
 import { toSttResult } from "./adapters/route";
+import { guardedTranscribe } from "./guarded-transcribe";
 import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
+import { LEASE_MS } from "@/lib/jobs/types";
 import type { McpScope } from "@/lib/mcp/auth";
 import type { SttTranscribeResult } from "./types";
 import { buildRouteMetrics } from "./route-run";
@@ -97,6 +99,47 @@ export const DRAIN_MAX_ATTEMPTS = 3;
  * chars-per-audio-second measure. The tripwire divides by the SAMPLE's own audio_seconds.
  */
 export const SHADOW_WINDOW_MS = 120_000;
+
+/**
+ * C1b fix-up 6 — PRE-FLIGHT SIZING FOR THE `segment` STEP.
+ *
+ * WHAT ACTUALLY BOUNDS THIS STEP, since the obvious answer is wrong: `MAX_STEP_MS` is NEVER
+ * enforced on a running step — its only use is admission control in the runner (runner.ts:149), so
+ * nothing kills `segment` at 200 s. The ceilings that are real are whisper's own `timeoutMs`
+ * (180 s, and a timeout is deliberately not retried) and `LEASE_MS` (240 s), past which another
+ * runner may re-claim the row and REDO the work. The write is safe — a stale owner writes nothing —
+ * but the inference is paid for twice.
+ *
+ * So the budget below is LEASE_MS, not MAX_STEP_MS: overrunning the lease is the thing with a
+ * consequence. The margin covers what happens around the inference — an R2 GET of the whole clip,
+ * buildTurns, writeWindowCues (an HTTP call to our own origin) and one INSERT — none of which
+ * whisper's own timeout covers.
+ *
+ * The factor is whisper's realtime ratio. 0.2 is the figure this codebase has been asserting in
+ * comments without a measurement behind it, so it is an ENV VAR: when someone measures the Mini
+ * properly, this moves without a deploy. At 0.2 the refusal bites above ~975 s of audio, which
+ * admits the 900 s production window with about 15 s of headroom and refuses the longer,
+ * non-standard windows that would otherwise fail as a lease-expiry mystery instead of a named
+ * error at admission.
+ */
+export const SEGMENT_IO_MARGIN_MS = 45_000;
+export const SEGMENT_REALTIME_FACTOR_ENV = "ETA_WHISPER_REALTIME_FACTOR";
+export const DEFAULT_WHISPER_REALTIME_FACTOR = 0.2;
+
+/** PURE. The factor, from the environment, clamped to something a typo cannot make absurd. */
+export function whisperRealtimeFactor(raw: string | undefined = process.env[SEGMENT_REALTIME_FACTOR_ENV]): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_WHISPER_REALTIME_FACTOR;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WHISPER_REALTIME_FACTOR;
+  return Math.min(5, n);
+}
+
+/** PURE. What `segment` is projected to cost, and whether that fits before the lease expires. */
+export function segmentFits(audioSeconds: number, factor: number = whisperRealtimeFactor()): { fits: boolean; projected_ms: number; budget_ms: number } {
+  const projected_ms = Math.round(audioSeconds * factor * 1000) + SEGMENT_IO_MARGIN_MS;
+  return { fits: projected_ms <= LEASE_MS, projected_ms, budget_ms: LEASE_MS };
+}
+
 
 /** C3 — the probe length. A STARTING VALUE, not a measured one; T5 reports whether it holds. */
 export const PROBE_SECONDS = 30;
@@ -273,7 +316,20 @@ export type DrainStep =
    * this is the DRAIN's success, not the window's. The window reaches "transcribed" only when the
    * job's last step runs, which is why the state transition moved there.
    */
-  | "enqueued";
+  | "enqueued"
+  /**
+   * C1b fix-up 4 — the routed engine costs money and NOBODY NAMED IT. This path reaches its
+   * engine from a routing row alone, over a 900 s window, which is exactly the unattended spend
+   * PRD §1.6 forbids. A paid engine on this path is a configuration mistake, not a transient
+   * fault, so it is named rather than folded into `engine_failed`.
+   */
+  | "paid_engine_refused"
+  /**
+   * C1b fix-up 6 — refused at admission because this window cannot finish inside the LEASE.
+   * Named, because the alternative is a window that runs, overruns, gets re-claimed and re-run,
+   * and shows up as nothing at all except a Mini that did the same work twice.
+   */
+  | "segment_would_exceed_budget";
 
 export type DrainOutcome = {
   window_id: string;
@@ -653,6 +709,17 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
   const join = { key: p.clip_r2_key };
   const probeLanguage = p.probe_language;
   if (!join.key) return { ...out, step: "clip_missing", detail: "no clip key on the job row" };
+
+  // PRE-FLIGHT. `audio_seconds` is already on the row from `prepare`, so this costs one comparison
+  // and happens before the clip is downloaded or whisper is touched. A window too long to finish
+  // inside the lease is refused HERE, with a name, instead of being discovered as a silent re-run
+  // when a second runner reclaims the row.
+  const fit = segmentFits(p.audio_seconds);
+  if (!fit.fits) {
+    const detail = `projected ${Math.round(fit.projected_ms / 1000)}s > ${Math.round(fit.budget_ms / 1000)}s for ${p.audio_seconds}s of audio`;
+    const attempts = await recordFailure(windowId, "segment_would_exceed_budget", detail);
+    return { ...out, step: "segment_would_exceed_budget", detail, attempts };
+  }
     // --- Whisper on the FULL window: segments, timing, and a second language opinion --------
     const bytes = await getObjectBytes(join.key);
     if (!bytes) {
@@ -695,7 +762,22 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
   // resolve it a second time, authoritatively, which meant a routing row edited mid-job produced a
   // shadow labelled with one engine and a run written by another. It now reads what this step
   // wrote, so a job has one routing truth for its whole life.
-  const engineKey = (await resolveRouting(DRAIN_STAGE, bucketFor(decided))) ?? "";
+  const routed = await resolveRouting(DRAIN_STAGE, bucketFor(decided));
+  // ── AMENDMENT A: A NULL ROUTE IS A LOUD FAILURE, NOT A SILENT SUBSTITUTION ───────────────────
+  // Migration 0083 would have added a (room,'default') row to "catch" this. That was the wrong
+  // instinct and it is deleted: room resolves to sarvam, so the catch-all would have been a PAID
+  // engine quietly absorbing a misconfiguration — exactly the unattended spend the guard exists to
+  // stop, dressed as resilience. No stage has a default row in live data, and that is correct.
+  //
+  // So the refusal happens HERE, before the shadow row and before the turns, which is where the
+  // pre-C1b inline drain raised it too. Nothing downstream gets to treat a null route as "skip
+  // this window": the job fails, named, with the bucket that found nothing.
+  if (!routed) {
+    const bucket = bucketFor(decided);
+    const attempts = await recordFailure(windowId, "no_engine", `stage=${DRAIN_STAGE} bucket=${bucket}`);
+    return { ...out, step: "no_engine", detail: `stage=${DRAIN_STAGE} bucket=${bucket}`, attempts };
+  }
+  const engineKey = routed;
     // --- C1 step 5. THE SHADOW RUN --------------------------------------------------------------
     //
     // A SECOND transcription_run over the SAME audio, by the engine the room used before, on a
@@ -1041,13 +1123,30 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
     };
   }
 
-  const asr = await adapter.transcribe(Buffer.from(audioBytes), {
-    contentType: audioContentType,
-    longForm: true,
-    mode: "transcribe",
+  // ── ITEM 4: ROUTING INHERITANCE MAY NOT REACH A PAID ENGINE ──────────────────────────────────
+  // This path picks its engine purely from `stt_routing` — nobody named it in a request, and the
+  // window is 900 s, well past the per-call cap. That is the textbook unattended spend: a config
+  // row, times twelve windows a press, with no audit trail. `explicitlyNamed: false` is therefore
+  // a LITERAL here, not a variable: there is no way for this call site to ever be a naming, and
+  // writing it as a literal means no future edit can quietly make it one.
+  const g = await guardedTranscribe({
+    adapter, engineId, audio: Buffer.from(audioBytes),
     durationMs: Math.round(audioSeconds * 1000),
-    ...(languageSent ? { language: languageSent } : {}),
+    explicitlyNamed: false,
+    actor: opts.actor,
+    subject: `bench_window:${windowId}`,
+    transcribeOpts: {
+      contentType: audioContentType, longForm: true, mode: "transcribe",
+      durationMs: Math.round(audioSeconds * 1000),
+      ...(languageSent ? { language: languageSent } : {}),
+    },
   });
+  if (!g.ok) {
+    // Named, so an operator reading the window sees WHY it stopped rather than a generic failure.
+    const attempts = await recordFailure(windowId, "paid_engine_refused", g.refusal.error);
+    return { ...out, step: "paid_engine_refused", detail: g.refusal.error, attempts };
+  }
+  const asr = g.result;
   if (asr.error) { const attempts = await recordFailure(windowId, "engine_failed", asr.error); return { ...out, step: "engine_failed", detail: asr.error, attempts }; }
   const receipt = audioReceipt(audioKey, audioBytes);
   const engineVersion = providerEngineVersion(asr);

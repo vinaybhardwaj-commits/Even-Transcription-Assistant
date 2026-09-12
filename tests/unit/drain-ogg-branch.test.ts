@@ -53,7 +53,10 @@ describe("every other engine is untouched", () => {
 
   it("the second join happens ONLY inside the Gemini branch", () => {
     const branchStart = drain.indexOf("adapter.key === GEMINI_ADAPTER_KEY");
-    const transcribeAt = drain.indexOf("await adapter.transcribe(Buffer.from(audioBytes)");
+    // C1b fix-up 3 routed every adapter call through guardedTranscribe, so the engine is no
+    // longer invoked by a literal `adapter.transcribe(...)` here. The subject is unchanged: the
+    // ogg join must happen BEFORE the engine is handed anything.
+    const transcribeAt = drain.indexOf("await guardedTranscribe({");
     const oggJoinAt = drain.indexOf("callJoinService(oggReq)");
     expect(oggJoinAt).toBeGreaterThan(branchStart);
     expect(oggJoinAt).toBeLessThan(transcribeAt);
@@ -65,7 +68,9 @@ describe("every other engine is untouched", () => {
   });
 
   it("the engine is handed the resolved buffer and content type, not a hardcoded webm", () => {
-    expect(drain).toContain("await adapter.transcribe(Buffer.from(audioBytes)");
+    // Still the resolved buffer and the resolved type — now passed through the chokepoint, which
+    // is the only thing that calls an adapter.
+    expect(drain).toContain("audio: Buffer.from(audioBytes)");
     expect(drain).toContain("contentType: audioContentType");
     expect(drain).not.toContain('contentType: "audio/webm",\n      longForm: true');
   });

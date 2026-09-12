@@ -90,7 +90,8 @@ import { fmtIstClock, istDate, parseOperatorTime, resolveRange, type CoveringChu
 import { whisperAdapter } from "@/lib/stt/adapters/whisper";
 import type { SttAdapter } from "@/lib/stt/types";
 import { ADAPTERS, adapterFor } from "@/lib/stt/registry";
-import { guardPaidEngine, recordPaidCall, PAID_MAX_DURATION_MS } from "@/lib/stt/paid-engines";
+import { guardPaidEngine, PAID_MAX_DURATION_MS } from "@/lib/stt/paid-engines";
+import { guardedTranscribe } from "@/lib/stt/guarded-transcribe";
 
 /** Every engine the registry can actually run. Derived, so a new adapter is selectable at once. */
 const STT_ENGINE_KEYS = Object.keys(ADAPTERS).sort();
@@ -1651,12 +1652,16 @@ type TurnAnswer = Record<string, unknown>;
  * Slice C2's first task is giving SttAdapter a real long-form result (submit/poll AND segments),
  * at which point this whole function collapses into `adapter.transcribe`.
  */
+/** Set by the last guardedTranscribe call so the handler can return the spend it caused. */
+let lastSpend: { engine: string; paid: boolean; estimated_cost_usd?: number | null; cost_per_min_usd?: number | null; rate_is_default?: boolean; audio_minutes?: number } | null = null;
+
 async function transcribeWithEngine(
   adapter: SttAdapter,
   bytes: Uint8Array | Buffer,
   contentType: string,
-  opts: { language?: string | null; timeoutMs?: number; durationMs: number },
+  opts: { language?: string | null; timeoutMs?: number; durationMs: number; explicitlyNamed: boolean; actor: string; subject?: string | null },
 ): Promise<WhisperResult> {
+  lastSpend = { engine: adapter.key, paid: false };
   if (adapter.key === whisperAdapter.key) {
     const w = await transcribeWithWhisper(Buffer.from(bytes), contentType, {
       ...(opts.language ? { language: opts.language } : {}),
@@ -1664,13 +1669,20 @@ async function transcribeWithEngine(
     });
     return w;
   }
-  const r = await adapter.transcribe(Buffer.from(bytes), {
-    contentType,
-    longForm: true,
-    mode: "transcribe",
-    durationMs: opts.durationMs,
-    ...(opts.language ? { language: opts.language } : {}),
+  // CHOKEPOINT. The adapter is never called directly here — `guardedTranscribe` decides whether
+  // this engine bills, refuses an unattended or over-long paid call, and audits it first.
+  // `durationMs` is the AUDIO ACTUALLY SENT, which on the single-chunk branch is the whole chunk
+  // and not the shorter window that was asked for; billing the smaller number under-reported the
+  // spend by up to 30x.
+  const g = await guardedTranscribe({
+    adapter, engineId: adapter.key, audio: Buffer.from(bytes),
+    durationMs: opts.durationMs, explicitlyNamed: opts.explicitlyNamed, actor: opts.actor,
+    subject: opts.subject ?? null,
+    transcribeOpts: { contentType, longForm: true, mode: "transcribe", durationMs: opts.durationMs, ...(opts.language ? { language: opts.language } : {}) },
   });
+  if (!g.ok) return { ok: false, error: `${g.refusal.error}`, latency_ms: 0, attempts: 1 };
+  const r = g.result;
+  lastSpend = g.spend;
   if (r.error) return { ok: false, error: r.error, latency_ms: r.latencyMs, attempts: 1 };
   const text = (r.original ?? r.english ?? "").trim();
   // A quiet room reads the same on every engine: the shared constant, not a per-engine spelling.
@@ -1974,19 +1986,13 @@ const transcribeRange: McpTool = {
     const rangeMs = r.endMs - r.startMs;
     const paid = await guardPaidEngine({ engine, explicitlyNamed, durationMs: rangeMs });
     if (!paid.ok) return { ...paid, cap_ms: PAID_MAX_DURATION_MS };
-    // ATTRIBUTABLE, and written BEFORE the spend: a call that bills and then crashes must still
-    // have left a record of who asked for it. ctx.actor is the resolved principal from Slice A.
-    if (paid.paid) {
-      await recordPaidCall({
-        actor: ctx.actor, engine, durationMs: rangeMs,
-        estimatedCostUsd: paid.estimatedCostUsd, costPerMinUsd: paid.costPerMinUsd,
-        subject: `${r.session.id}:${r.startMs}-${r.endMs}`,
-      });
-    }
-    /** What the operator is told they just spent. Absent for a free engine, not zero. */
-    const spend = paid.paid
-      ? { engine, paid: true, estimated_cost_usd: paid.estimatedCostUsd, cost_per_min_usd: paid.costPerMinUsd, audio_minutes: Math.round((rangeMs / 60_000) * 1000) / 1000 }
-      : { engine, paid: false };
+    // This is an EARLY refusal only — cheap, before the clip is joined, so an unattended or
+    // over-long paid ask costs nothing. It does NOT audit and does NOT price: `guardedTranscribe`
+    // does both, against the audio ACTUALLY SENT. On the single-chunk branch the whole 5-minute
+    // chunk goes to the engine while a shorter window was requested, so pricing `rangeMs` here
+    // would under-report the spend by up to 30x. One number, measured where the bytes leave.
+    void paid;
+    const subject = `${r.session.id}:${r.startMs}-${r.endMs}`;
 
     // U4: same disclosure as extract — which microphone answered, and why, on every branch.
     const base = { session_id: r.session.id, room_slug: r.session.room_slug, requested_range: requested, engine, ...sourceAnswer(r.decision), ...(r.micDegraded ? { degraded_reads: [r.micDegraded] } : {}) };
@@ -2015,7 +2021,7 @@ const transcribeRange: McpTool = {
         return { ok: false, error: "clip_download_failed", degraded: true, ...base, r2_key: attempt.key, detail: String((e as Error)?.message ?? e).slice(0, 160) };
       }
       if (!clipBytes) return { ok: false, error: "clip_missing_in_r2", ...base, r2_key: attempt.key };
-      const wj = await transcribeWithEngine(engineAdapter, clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms), durationMs: attempt.duration_ms });
+      const wj = await transcribeWithEngine(engineAdapter, clipBytes, "audio/webm", { language, timeoutMs: whisperTimeoutForClip(attempt.duration_ms), durationMs: attempt.duration_ms, explicitlyNamed, actor: ctx.actor, subject });
       // K5 — empty_transcript is a SILENT window, not a failure; every other error is a failed
       // ask. Both are answered here, and both now leave a record of having been asked.
       if (!wj.ok) {
@@ -2043,7 +2049,7 @@ const transcribeRange: McpTool = {
         language: wj.language ?? null,
         // C1b Part B — what this call cost, returned so the operator sees the spend at the moment
         // they cause it rather than on a bill at the end of the month.
-        spend,
+        spend: lastSpend,
         audio_seconds: wj.duration_seconds ?? null,
         whisper_latency_ms: wj.latency_ms,
         total_ms: Date.now() - t0,
@@ -2062,7 +2068,7 @@ const transcribeRange: McpTool = {
       return { ok: false, error: "chunk_download_failed", degraded: true, ...base, chunk_idx: c.chunk.idx, detail: String((e as Error)?.message ?? e).slice(0, 160) };
     }
     if (!bytes) return { ok: false, error: "chunk_missing_in_r2", ...base, chunk_idx: c.chunk.idx, r2_key: c.chunk.r2_key };
-    const w = await transcribeWithEngine(engineAdapter, bytes, c.chunk.content_type || "audio/webm", { language, durationMs: c.chunk.duration_ms ?? (r.endMs - r.startMs) });
+    const w = await transcribeWithEngine(engineAdapter, bytes, c.chunk.content_type || "audio/webm", { language, durationMs: c.chunk.duration_ms ?? (r.endMs - r.startMs), explicitlyNamed, actor: ctx.actor, subject });
     // K5 — same two situations on the single-piece branch.
     if (!w.ok) {
       return await whisperNotOkAnswer(
@@ -2087,7 +2093,7 @@ const transcribeRange: McpTool = {
       duration_s: c.duration_s,
       text: w.transcript,
       language: w.language ?? null,
-      spend,
+      spend: lastSpend,
       audio_seconds: w.duration_seconds ?? null,
       whisper_latency_ms: w.latency_ms,
       total_ms: Date.now() - t0,
