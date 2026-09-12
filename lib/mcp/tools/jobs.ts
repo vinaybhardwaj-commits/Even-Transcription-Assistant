@@ -11,6 +11,7 @@ import { cancelJob, listJobs, readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib/jobs/submit";
 import { KIND_BY_NAME } from "@/lib/jobs/kinds";
 import { readRecentAudit, AUDIT_ACTIONS_HINT } from "@/lib/jobs/audit-read";
+import { errorCodeOf, JOB_ERROR_CODES } from "@/lib/jobs/errors";
 import { argInt, argStr, argBool, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 /** PURE — the row a caller sees. `result` is withheld unless asked for: it can be large. */
@@ -52,14 +53,9 @@ const submit: McpTool = {
   handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ ok: false }, async () => {
       const kind = argStr(args, "kind", 64) ?? "";
-      // Refuter item 4 — EACH KIND CARRIES ITS OWN SCOPE, and submit is the only place that can
-      // enforce it. This tool is `invoke` so a read-only token cannot reach it at all today; the
-      // check matters the moment a read-scope kind (day_manifest) makes a lower tool scope
-      // sensible, and it keeps the rule where the kind declares it rather than in the tool's name.
-      const declared = KIND_BY_NAME.get(kind);
-      if (declared && !ctx.scopes.has(declared.scope)) {
-        throw new ToolScopeError(declared.scope, { kind, kind_scope: declared.scope });
-      }
+      // Fix-up 4 item 6 — the per-kind scope check now lives INSIDE submitJob, which all three
+      // submit paths go through. The copy that used to sit here is gone: a rule with two homes is
+      // a rule one caller can skip, which is exactly how the async:true shims got past it.
       try {
         const job = await submitJob({
           kind,
@@ -67,6 +63,7 @@ const submit: McpTool = {
           // Fix-up (3): the resolved token's actor, so a job row says who asked for it.
           actor: ctx.actor,
           origin: ctx.origin,
+          scopes: ctx.scopes,
         });
         return { ok: true, job_id: job.id, kind: job.kind, status: job.status };
       } catch (e) {
@@ -103,7 +100,7 @@ const CLIP_URL_SECONDS = 3600;
 const status: McpTool = {
   name: "scribe_job_status",
   description:
-    "One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts (claims), failures (steps that threw), progress, error and timings. NEITHER `progress` NOR `result` EVER CARRIES TRANSCRIPT TEXT — a transcription job's result carries a transcription_run_id, character and segment counts and the detected language, and whoever wants the words goes to the run, where identity rules apply. include_result:true adds that pointer set. include_urls:true mints presigned links for the clip keys and REQUIRES invoke scope, because a link fetches audio.",
+    `One job: status (queued|running|done|failed|cancelled), the step it has reached, attempts (claims), failures (steps that threw), progress, error_code and timings. error_code is one of ${JOB_ERROR_CODES.join(", ")}. The free-text error behind it is CONTENT — built from a downstream failure that can quote the audio — so it needs invoke scope, like include_urls. NEITHER progress NOR result EVER CARRIES TRANSCRIPT TEXT: a transcription job's result carries a transcription_run_id, character and segment counts and the detected language, and whoever wants the words goes to the run, where identity rules apply. include_result:true adds that pointer set. include_urls:true mints presigned links for the clip keys and REQUIRES invoke scope, because a link fetches audio.`,
   scope: "read",
   inputSchema: {
     type: "object",

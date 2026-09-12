@@ -17,7 +17,9 @@ import {
   readJob,
   saveStep,
 } from "./store";
-import { MAX_FAILURES, type JobRow } from "./types";
+import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, type JobRow } from "./types";
+import { errorCodeOf, jobError } from "./errors";
+import { randomUUID } from "node:crypto";
 
 export type StepReport = {
   job_id: string;
@@ -25,7 +27,7 @@ export type StepReport = {
   step: string | null;
   /** What the row now holds, when a step threw. */
   failures?: number;
-  outcome: "advanced" | "done" | "failed" | "cancelled" | "failures_exceeded" | "unknown_kind";
+  outcome: "advanced" | "done" | "failed" | "cancelled" | "failures_exceeded" | "unknown_kind" | "lease_lost";
   ms: number;
 };
 
@@ -40,40 +42,46 @@ export type StepReport = {
  *     honoured at the next step boundary"): a cancel that arrived while the step was in flight is
  *     seen here, and the step's outcome is discarded rather than overwriting `cancelled`.
  */
-export async function runOneStep(job: JobRow): Promise<StepReport> {
+export async function runOneStep(job: JobRow, runner: string | null = null): Promise<StepReport> {
   const started = Date.now();
   const base = { job_id: job.id, kind: job.kind, step: job.step };
 
   // The cap reads FAILURES, never attempts. A long job is claimed many times while succeeding.
   if (overFailureCap(job)) {
-    await failJob(job.id, `failed after ${job.failures} attempts at step ${job.step ?? "start"}`);
+    await failJob(job.id, jobError("failures_exceeded", `after ${job.failures} attempts at step ${job.step ?? "start"}`), runner);
     return { ...base, outcome: "failures_exceeded", ms: Date.now() - started };
   }
 
   const kind = KIND_BY_NAME.get(job.kind);
   if (!kind) {
-    await failJob(job.id, `unknown kind "${job.kind}"`);
+    await failJob(job.id, jobError("unknown_kind", job.kind), runner);
     return { ...base, outcome: "unknown_kind", ms: Date.now() - started };
   }
 
   const step = job.step ?? kind.first;
   let outcome;
   try {
-    outcome = await kind.run({ job, step, args: job.args, progress: job.progress });
+    outcome = await kind.run({ job, step, args: job.args, progress: job.progress, runner: runner ?? undefined });
   } catch (e) {
     // A throwing step is a FAILURE, counted, not (yet) a failed job: the lease is released and the
     // next claim retries the same step, up to the cap. ONE statement both counts it and decides
     // whether that count is terminal, so the throw that ends a job is counted like any other —
     // the branch this replaces called failJob, which never incremented, and lost it.
     const msg = String((e as Error)?.message ?? e).slice(0, 500);
+    // The PROSE goes to the server log. The ROW gets a code plus a short, code-shaped summary —
+    // never the downstream body, which can echo the audio (Refuter (e)).
+    console.error("[jobs] step threw", JSON.stringify({ job_id: job.id, kind: job.kind, step, err: msg }));
     const after = await recordFailure({
       id: job.id,
       step,
       progress: job.progress,
-      error: `step ${step} failed after ${job.failures + 1} attempts: ${msg}`,
+      error: jobError("step_threw", `${step} failed after ${job.failures + 1} attempts`),
       maxFailures: MAX_FAILURES,
+      runner,
     });
-    return { ...base, step, outcome: "failed", ms: Date.now() - started, ...(after ? { failures: after.failures } : {}) };
+    // Zero rows means the lease was lost while the step ran: abandon, write nothing else.
+    if (after === null) return { ...base, step, outcome: "lease_lost", ms: Date.now() - started };
+    return { ...base, step, outcome: "failed", ms: Date.now() - started, failures: after.failures };
   }
 
   // The cancel boundary. Re-read rather than trust the row we were handed.
@@ -82,36 +90,73 @@ export async function runOneStep(job: JobRow): Promise<StepReport> {
     return { ...base, step, outcome: "cancelled", ms: Date.now() - started };
   }
 
+  // EVERY write below returns rows-changed, and zero means the lease was lost while this step ran:
+  // another runner legitimately reclaimed the row and is working it. There is no "best effort"
+  // branch — a runner that no longer owns a job writes nothing further for it and says so.
+  const lost = (rows: number): StepReport | null =>
+    rows === 0
+      ? (console.warn(
+          "[jobs] lease lost mid-step; abandoning",
+          JSON.stringify({ job_id: job.id, kind: job.kind, step, runner }),
+        ),
+        { ...base, step, outcome: "lease_lost" as const, ms: Date.now() - started })
+      : null;
+
   if (outcome.kind === "done") {
-    await finishJob(job.id, outcome.result);
-    return { ...base, step, outcome: "done", ms: Date.now() - started };
+    return lost(await finishJob(job.id, outcome.result, runner)) ?? { ...base, step, outcome: "done", ms: Date.now() - started };
   }
   if (outcome.kind === "fail") {
-    await failJob(job.id, outcome.error);
-    return { ...base, step, outcome: "failed", ms: Date.now() - started };
+    return lost(await failJob(job.id, outcome.error, runner)) ?? { ...base, step, outcome: "failed", ms: Date.now() - started };
   }
-  await saveStep(job.id, outcome.step, outcome.progress);
-  return { ...base, step, outcome: "advanced", ms: Date.now() - started };
+  return lost(await saveStep(job.id, outcome.step, outcome.progress, runner)) ?? { ...base, step, outcome: "advanced", ms: Date.now() - started };
 }
 
-/** One runner invocation: claim a batch and advance each by one step. Never throws. */
-export async function runClaimedBatch(limit?: number): Promise<{ claimed: number; steps: StepReport[] }> {
-  const jobs = await claimJobs(limit);
+/**
+ * One runner invocation — Fix-up 4 item 3, on the Refuter's (a).
+ *
+ * CLAIM ONE, RUN ONE, REPEAT. The old shape claimed three rows up front and then ran them in
+ * sequence, which meant the third job's step began against a lease taken three steps ago:
+ * `3 x MAX_STEP_MS` is 600 s against a 240 s lease, so by its own declared step budget the queue
+ * could hand one job to two runners. A step now NEVER begins against a lease claimed before an
+ * earlier step in the same invocation, because each claim happens immediately before its own step.
+ *
+ * Two budgets stop the loop: `MAX_JOBS_PER_INVOCATION`, and the wall clock. The clock matters more
+ * — three steps at the full step budget would exceed the route ceiling, so the loop stops taking
+ * new work once there is not room for another step, and the cron picks the rest up next minute.
+ *
+ * ONE RUNNER ID PER INVOCATION, generated here and passed down. Not per call and not per job: it
+ * identifies the process holding the leases, which is exactly the thing that can die.
+ */
+export async function runClaimedBatch(
+  maxJobs = MAX_JOBS_PER_INVOCATION,
+  budgetMs = INVOCATION_BUDGET_MS,
+  now: () => number = Date.now,
+): Promise<{ runner: string; claimed: number; steps: StepReport[] }> {
+  const runner = randomUUID();
+  const deadline = now() + budgetMs;
   const steps: StepReport[] = [];
-  for (const job of jobs) {
+  let claimed = 0;
+
+  for (let i = 0; i < maxJobs; i++) {
+    // Room for another step? If not, stop taking work rather than start one we cannot finish.
+    if (now() + MAX_STEP_MS > deadline && i > 0) break;
+
+    const batch = await claimJobs(1, LEASE_MS, runner);
+    const job = batch[0];
+    if (!job) break; // queue empty
+    claimed += 1;
     try {
-      steps.push(await runOneStep(job));
+      steps.push(await runOneStep(job, runner));
     } catch (e) {
-      // runOneStep already handles a throwing STEP; reaching here means the persistence itself
-      // failed. Say so and move on — one unwritable row must not stop the other two.
+      // runOneStep handles a throwing STEP; reaching here means persistence itself failed.
       console.error(
         "[jobs] step persistence failed",
-        JSON.stringify({ job_id: job.id, err: String((e as Error)?.message ?? e).slice(0, 200) }),
+        JSON.stringify({ job_id: job.id, runner, err: String((e as Error)?.message ?? e).slice(0, 200) }),
       );
       steps.push({ job_id: job.id, kind: job.kind, step: job.step, outcome: "failed", ms: 0 });
     }
   }
-  return { claimed: jobs.length, steps };
+  return { runner, claimed, steps };
 }
 
 export { cancelJob };

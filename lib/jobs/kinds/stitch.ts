@@ -15,6 +15,7 @@ import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/be
 import { buildJoinRequest, callJoinService } from "@/lib/bench-join";
 import type { BenchChunkRow } from "@/lib/bench";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
+import { jobError } from "../errors";
 
 /** §4.3's contract: the join service is never asked for more than half an hour at once. */
 export const STITCH_PIECE_MS = 30 * 60_000;
@@ -67,7 +68,7 @@ export const stitchKind: JobKind = {
   async run(ctx: StepContext) {
     if (ctx.step === STEPS.resolve) return resolveStep(ctx);
     if (ctx.step === STEPS.join) return joinStep(ctx);
-    return failWith(`unknown step "${ctx.step}" for stitch`);
+    return failWith(jobError("unknown_step", ctx.step));
   },
 };
 
@@ -75,7 +76,7 @@ export const stitchKind: JobKind = {
 async function resolveStep(ctx: StepContext) {
   const { start, end } = ctx.args as { start: number; end: number };
   const pieces = planPieces(start, end);
-  if (!pieces.length) return failWith("empty range");
+  if (!pieces.length) return failWith(jobError("empty_range"));
   return nextStep(STEPS.join, { pieces, done: [], total_ms: end - start });
 }
 
@@ -112,7 +113,10 @@ async function joinStep(ctx: StepContext) {
   }
 
   const joined = await callJoinService(buildJoinRequest(session_id, covering, piece.start, piece.end, source));
-  if (!joined.ok) return failWith(`join_failed at piece ${i}: ${joined.error}${joined.hop ? ` (${joined.hop})` : ""}`);
+  if (!joined.ok) {
+    console.error("[jobs] stitch join failed", JSON.stringify({ piece: i, err: joined.error, hop: joined.hop }));
+    return failWith(jobError("join_failed", `piece ${i}${joined.hop ? ` hop ${joined.hop}` : ""}`));
+  }
 
   const next = [...done, { start: piece.start, end: piece.end, clip_key: joined.key, bytes: joined.bytes, duration_ms: joined.duration_ms }];
   return nextStep(STEPS.join, { ...ctx.progress, done: next });

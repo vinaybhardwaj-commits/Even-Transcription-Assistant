@@ -1022,7 +1022,7 @@ const extractAudio: McpTool = {
     if (argBool(args, "async")) {
       const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
       try {
-        const job = await submitJob({ kind: "stitch", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin });
+        const job = await submitJob({ kind: "stitch", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
@@ -1857,7 +1857,7 @@ const transcribeRange: McpTool = {
     if (argBool(args, "async")) {
       const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
       try {
-        const job = await submitJob({ kind: "transcribe_range", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin });
+        const job = await submitJob({ kind: "transcribe_range", args: args as Record<string, unknown>, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
         // The description promises {job_id, status_pointer} and no text: this is that shape.
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status, status_pointer: { tool: "scribe_job_status", job_id: job.id } };
       } catch (e) {

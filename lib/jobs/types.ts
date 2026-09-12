@@ -36,10 +36,33 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
 export const MAX_FAILURES = 3;
 /** §3 — the lease a claim takes. Longer than any step, shorter than a human's patience. */
 export const LEASE_MS = 240_000;
-/** §3 — claims per runner invocation. Three steps of ~200 s never approach the route ceiling. */
-export const CLAIM_BATCH = 3;
-/** What a step may spend. Not enforced by a timer here — it is the contract a kind is written to. */
+/**
+ * §3, corrected by the Refuter's (a) — the budget is JOBS PER INVOCATION, claimed ONE AT A TIME.
+ *
+ * It used to be a batch: claim three, then run them one after another. The arithmetic defeats the
+ * lease — 3 x MAX_STEP_MS is 600 s against a 240 s lease — so by the time the third job's step
+ * began, its lease had expired, another runner had legitimately claimed it, and both ran the same
+ * step. Claiming one at a time means a lease is never older than one step when that step starts.
+ */
+export const MAX_JOBS_PER_INVOCATION = 3;
+
+/**
+ * The wall-clock an invocation may spend before it stops taking new work. Well under the route's
+ * 300 s ceiling so the last step it starts can finish and persist.
+ */
+export const INVOCATION_BUDGET_MS = 240_000;
+/**
+ * What a step may spend. Not enforced by a timer here — it is the contract a kind is written to.
+ *
+ * INVARIANT, pinned by a test: `LEASE_MS > MAX_STEP_MS` with real margin. A step that may run for
+ * longer than its own lease can have the row reclaimed underneath it while it works, which is how
+ * the 600-s-vs-240-s batch shape produced two runners on one job. If either constant moves, the
+ * test fails before the queue does.
+ */
 export const MAX_STEP_MS = 200_000;
+
+/** The margin the invariant demands: a lease must outlast a step by at least this much. */
+export const LEASE_MARGIN_MS = 30_000;
 
 export type JobRow = {
   id: string;
@@ -56,6 +79,8 @@ export type JobRow = {
   updated_at: string;
   finished_at: string | null;
   lease_until: string | null;
+  /** Which runner invocation holds it. Every mutating write matches this. */
+  lease_owner: string | null;
   /** Claims. Rises once per step on a healthy job — progress, not a retry budget. */
   attempts: number;
   /** Steps that threw. The cap reads this. */
@@ -74,6 +99,8 @@ export const failWith = (error: string): StepOutcome => ({ kind: "fail", error }
 
 export type StepContext = {
   job: JobRow;
+  /** The runner invocation working this job — the token every write must carry. */
+  runner?: string;
   /** The step the runner is executing — `job.step`, or the kind's `first` when the job is new. */
   step: string;
   args: Record<string, unknown>;

@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS scribe_job (
   finished_at    timestamptz,
   -- Held by the runner that is working this row. Past = claimable again, whatever `status` says.
   lease_until    timestamptz,
+  -- WHICH runner holds it. A time says whether a lease is live; it cannot say whose it is, and a
+  -- stale runner waking after its lease expired would otherwise write over the runner that
+  -- reclaimed the row. Every mutating write matches on this, so a lost lease means a lost write.
+  lease_owner    text,
   -- How many times a runner has CLAIMED this row. Rises once per step on a healthy job; it is a
   -- progress measure and a liveness signal, NOT a retry budget.
   attempts       integer     NOT NULL DEFAULT 0,
@@ -77,7 +81,10 @@ COMMENT ON COLUMN scribe_job.progress IS
   'What one step hands the next, and what a watcher reads. Ids, counts, keys and timings only — never audio bytes, never transcript text.';
 
 COMMENT ON COLUMN scribe_job.lease_until IS
-  'Set 240 s ahead when claimed. A runner that dies lets it expire and the job becomes claimable again; this is the only thing that distinguishes "being worked" from "abandoned".';
+  'Set 240 s ahead when claimed. A runner that dies lets it expire and the job becomes claimable again; this is what distinguishes "being worked" from "abandoned". It says WHETHER a lease is live, never whose.';
+
+COMMENT ON COLUMN scribe_job.lease_owner IS
+  'The id of the runner invocation holding this row. Every mutating write matches lease_owner AND status = running, so a runner whose lease expired cannot write over the runner that reclaimed the job. Null when nothing holds it.';
 
 COMMENT ON COLUMN scribe_job.attempts IS
   'Incremented on every CLAIM. A healthy multi-step job raises it once per step — a 61-minute stitch is four claims and four successes — so this is progress and liveness, never a retry budget. The cap does not read it.';

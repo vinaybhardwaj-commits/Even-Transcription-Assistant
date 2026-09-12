@@ -19,6 +19,7 @@ import { buildJoinRequest, callJoinService, refuseIfTooLong, whisperTimeoutForCl
 import { getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
+import { jobError } from "../errors";
 
 const STEPS = { resolve: "resolve", join: "join", transcribe: "transcribe" } as const;
 
@@ -83,7 +84,7 @@ export const transcribeRangeKind: JobKind = {
       case STEPS.transcribe:
         return transcribeStep(ctx);
       default:
-        return failWith(`unknown step "${ctx.step}" for transcribe_range`);
+        return failWith(jobError("unknown_step", ctx.step));
     }
   },
 };
@@ -103,14 +104,14 @@ async function resolveStep(ctx: StepContext) {
       const b = asMs(s.last_any_chunk_at) ?? asMs(s.ended_at);
       return a !== null && a <= end && (b === null || b >= start);
     });
-    if (!covering) return failWith("no session covers that window");
+    if (!covering) return failWith(jobError("no_session_for_window"));
     sessionId = covering.id;
   }
-  if (!sessionId) return failWith("session could not be resolved");
+  if (!sessionId) return failWith(jobError("session_unresolved"));
 
   const chunks = await listBenchChunks(sessionId);
   const covering = coveringOf(resolveRange(chunks, start, end, source));
-  if (!covering.length) return failWith("no_audio_in_range");
+  if (!covering.length) return failWith(jobError("no_audio_in_range"));
 
   return nextStep(STEPS.join, {
     session_id: sessionId,
@@ -128,11 +129,11 @@ async function resolveStep(ctx: StepContext) {
 async function joinStep(ctx: StepContext) {
   const { start, end, source } = ctx.args as { start: number; end: number; source: "primary" | "backup" };
   const sessionId = String(ctx.progress.session_id ?? "");
-  if (!sessionId) return failWith("progress lost the session id");
+  if (!sessionId) return failWith(jobError("progress_incomplete", "session id"));
 
   const chunks = await listBenchChunks(sessionId);
   const covering = coveringOf(resolveRange(chunks, start, end, source));
-  if (!covering.length) return failWith("no_audio_in_range");
+  if (!covering.length) return failWith(jobError("no_audio_in_range"));
 
   if (covering.length === 1) {
     const only = covering[0]!;
@@ -148,7 +149,9 @@ async function joinStep(ctx: StepContext) {
   const req = buildJoinRequest(sessionId, covering, start, end, source);
   const joined = await callJoinService(req);
   if (!joined.ok) {
-    return failWith(`join_failed: ${joined.error}${joined.hop ? ` (${joined.hop})` : ""}`);
+    // The hop is ours; the service's message is NOT interpolated — it can quote the audio.
+    console.error("[jobs] join failed", JSON.stringify({ err: joined.error, hop: joined.hop }));
+    return failWith(jobError("join_failed", joined.hop ? `hop ${joined.hop}` : undefined));
   }
   return nextStep(STEPS.transcribe, {
     ...ctx.progress,
@@ -169,17 +172,22 @@ async function joinStep(ctx: StepContext) {
 async function transcribeStep(ctx: StepContext) {
   const { language } = ctx.args as { language?: string };
   const clipKey = String(ctx.progress.clip_key ?? "");
-  if (!clipKey) return failWith("progress lost the clip key");
+  if (!clipKey) return failWith(jobError("progress_incomplete", "clip key"));
 
   const bytes = await getObjectBytes(clipKey);
-  if (!bytes) return failWith("clip_missing_in_r2");
+  if (!bytes) return failWith(jobError("clip_missing_in_r2"));
 
   const durationMs = Number(ctx.progress.duration_ms ?? 0) || 0;
   const w = await transcribeWithWhisper(bytes, "audio/webm", {
     ...(language ? { language } : {}),
     timeoutMs: whisperTimeoutForClip(durationMs),
   });
-  if (!w.ok) return failWith(`whisper_failed: ${String(w.error ?? "unknown").slice(0, 160)}`);
+  if (!w.ok) {
+    // (e): lib/whisper.ts builds `error` from up to 200 chars of the service's RESPONSE BODY,
+    // which can echo the audio. It goes to the log; the row gets the code alone.
+    console.error("[jobs] whisper failed", JSON.stringify({ err: String(w.error ?? "unknown").slice(0, 200) }));
+    return failWith(jobError("whisper_failed"));
+  }
 
   const text = typeof w.transcript === "string" ? w.transcript : "";
   const segments = Array.isArray((w as { segments?: unknown[] }).segments) ? (w as { segments: unknown[] }).segments.length : 0;

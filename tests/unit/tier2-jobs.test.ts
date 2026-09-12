@@ -9,6 +9,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 type Row = Record<string, unknown>;
+/** Fix-up 4 — model `AND lease_owner IS NOT DISTINCT FROM ?`. */
+const owns = (text: string, r: Row, runner: string | null | undefined): boolean =>
+  !/lease_owner IS NOT DISTINCT FROM/.test(text) || (r.lease_owner ?? null) === (runner ?? null);
 type Call = { text: string; values: unknown[] };
 const calls: Call[] = [];
 
@@ -29,7 +32,7 @@ vi.mock("@/lib/db", () => {
       const row: Row = {
         id, kind, args, status: "queued", step: null, progress: "{}", result: null, error: null,
         actor, created_at: nowIso(), started_at: null, updated_at: nowIso(), finished_at: null,
-        lease_until: null, attempts: 0, failures: 0,
+        lease_until: null, lease_owner: null, attempts: 0, failures: 0,
       };
       TABLE.push(row);
       return Promise.resolve([row]);
@@ -45,6 +48,7 @@ vi.mock("@/lib/db", () => {
     if (/WITH claimable AS/.test(text)) {
       const limit = Number(values[0] ?? 3);
       const secs = Number(values[1] ?? 240);
+      const runner = (values[2] ?? null) as string | null;
       const skipsLocked = /FOR UPDATE SKIP LOCKED/.test(text);
       const claimable = TABLE
         .filter((r) => (skipsLocked ? !locked.has(String(r.id)) : true))
@@ -59,6 +63,7 @@ vi.mock("@/lib/db", () => {
           r.status = "running";
           r.attempts = Number(r.attempts) + 1;
           r.lease_until = new Date(NOW + secs * 1000).toISOString();
+          r.lease_owner = runner;
           r.started_at = r.started_at ?? nowIso();
           r.updated_at = nowIso();
         }
@@ -73,9 +78,9 @@ vi.mock("@/lib/db", () => {
     // Fix-up 3 item 2 — one statement counts the failure AND decides terminality. Parameters, in
     // order: step, progress, cap (status CASE), cap (error CASE), error, cap (finished_at), id.
     if (/^UPDATE scribe_job SET failures = failures \+ 1/.test(text)) {
-      const [step, progress, cap, , err, , id] = values as [string, string, number, number, string, number, string];
+      const [step, progress, cap, , err, , id, runner] = values as [string, string, number, number, string, number, string, string | null];
       const r = find(id);
-      if (!r || r.status !== "running") return Promise.resolve([]);
+      if (!r || r.status !== "running" || !owns(text, r, runner)) return Promise.resolve([]);
       r.failures = Number(r.failures) + 1;
       r.step = step;
       r.progress = progress;
@@ -84,27 +89,32 @@ vi.mock("@/lib/db", () => {
       return Promise.resolve([{ failures: r.failures, status: r.status }]);
     }
     if (/^UPDATE scribe_job SET step =/.test(text)) {
-      const [step, progress, id] = values as [string, string, string];
+      const [step, progress, id, runner] = values as [string, string, string, string | null];
       const r = find(id);
-      if (r && r.status === "running") { r.step = step; r.progress = progress; r.lease_until = null; r.updated_at = nowIso(); }
+      if (r && r.status === "running" && owns(text, r, runner)) {
+        r.step = step; r.progress = progress; r.lease_until = null; r.lease_owner = null; r.updated_at = nowIso();
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     if (/^UPDATE scribe_job SET status = 'done'/.test(text)) {
-      const [result, id] = values as [string, string];
+      const [result, id, runner] = values as [string, string, string | null];
       const r = find(id);
-      // Refuter item 3: the statement carries `AND status = 'running'`, so a cancel that landed
-      // mid-step wins — this write matches no row.
+      // Refuter item 3: `AND status = 'running'`, so a cancel that landed mid-step wins.
       const guarded = /AND status = 'running'/.test(text);
-      if (r && (!guarded || r.status === "running")) { r.status = "done"; r.result = result; r.lease_until = null; r.finished_at = nowIso(); }
+      if (r && (!guarded || r.status === "running") && owns(text, r, runner)) {
+        r.status = "done"; r.result = result; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
+        return Promise.resolve([{ id: r.id }]);
+      }
       return Promise.resolve([]);
     }
     // Fix-up 3 item 1 — guarded by `AND status = 'running'`, and RETURNS the rows it changed.
     if (/^UPDATE scribe_job SET status = 'failed'/.test(text)) {
-      const [err, id] = values as [string, string];
+      const [err, id, runner] = values as [string, string, string | null];
       const r = find(id);
       const guarded = /AND status = 'running'/.test(text);
-      if (r && (!guarded || r.status === "running")) {
-        r.status = "failed"; r.error = err; r.lease_until = null; r.finished_at = nowIso();
+      if (r && (!guarded || r.status === "running") && owns(text, r, runner)) {
+        r.status = "failed"; r.error = err; r.lease_until = null; r.lease_owner = null; r.finished_at = nowIso();
         return Promise.resolve([{ id: r.id }]);
       }
       return Promise.resolve([]);
@@ -147,12 +157,13 @@ const submitMod = await import("@/lib/jobs/submit");
 const T = await import("@/lib/jobs/types");
 const { KIND_BY_NAME, JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
 const { planPieces, STITCH_PIECE_MS } = await import("@/lib/jobs/kinds/stitch");
+const ALLS = new Set(["read", "invoke", "write"] as const) as ReadonlySet<"read" | "invoke" | "write">;
 
 const queue = (over: Partial<Row> = {}): Row => {
   const r: Row = {
     id: `job_${TABLE.length}`, kind: "stitch", args: "{}", status: "queued", step: null,
     progress: "{}", result: null, error: null, actor: "t", created_at: new Date(NOW + TABLE.length).toISOString(),
-    started_at: null, updated_at: nowIso(), finished_at: null, lease_until: null, attempts: 0, failures: 0, ...over,
+    started_at: null, updated_at: nowIso(), finished_at: null, lease_until: null, lease_owner: null, attempts: 0, failures: 0, ...over,
   };
   TABLE.push(r);
   return r;
@@ -168,10 +179,10 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("claim", () => {
-  it("takes at most CLAIM_BATCH, oldest first, and stamps a lease and an attempt", async () => {
+  it("takes at most the asked-for number, oldest first, stamping a lease and an attempt", async () => {
     for (let i = 0; i < 5; i++) queue();
-    const got = await store.claimJobs();
-    expect(got).toHaveLength(T.CLAIM_BATCH);
+    const got = await store.claimJobs(3);
+    expect(got).toHaveLength(3);
     expect(got.map((j) => j.id)).toEqual(["job_0", "job_1", "job_2"]);
     for (const j of got) {
       expect(j.status).toBe("running");
@@ -182,7 +193,7 @@ describe("claim", () => {
 
   it("TWO RUNNERS NEVER DOUBLE-CLAIM — the sets are disjoint and cover each job once", async () => {
     for (let i = 0; i < 6; i++) queue();
-    const [a, b] = await Promise.all([store.claimJobs(), store.claimJobs()]);
+    const [a, b] = await Promise.all([store.claimJobs(3), store.claimJobs(3)]);
     const ids = [...a.map((j) => j.id), ...b.map((j) => j.id)];
     expect(new Set(ids).size, "a job was claimed twice").toBe(ids.length);
     expect(ids).toHaveLength(6);
@@ -198,7 +209,7 @@ describe("claim", () => {
 
   it("a held lease is NOT reclaimed; an expired one is — this is the crash path", async () => {
     queue({ status: "running", lease_until: new Date(NOW + 60_000).toISOString(), step: "join" });
-    expect(await store.claimJobs()).toHaveLength(0);
+    expect(await store.claimJobs(3)).toHaveLength(0);
     NOW += 120_000;
     const again = await store.claimJobs();
     expect(again).toHaveLength(1);
@@ -207,7 +218,7 @@ describe("claim", () => {
 
   it("done, failed and cancelled jobs are never claimed", async () => {
     for (const status of ["done", "failed", "cancelled"]) queue({ status });
-    expect(await store.claimJobs()).toHaveLength(0);
+    expect(await store.claimJobs(3)).toHaveLength(0);
   });
 });
 
@@ -298,7 +309,7 @@ describe("runOneStep", () => {
     await runner.runOneStep(claimed);
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
-    expect(String(row!.error)).toMatch(/failed after 3 attempts/);
+    expect(String(row!.error)).toMatch(/failures_exceeded/);
     expect(ran, "the kind was never run on the over-cap claim").toBe(0);
   });
 
@@ -307,7 +318,7 @@ describe("runOneStep", () => {
     await runner.runOneStep((await store.claimJobs())[0]!);
     const row = await store.readJob("job_0");
     expect(row!.status).toBe("failed");
-    expect(String(row!.error)).toMatch(/unknown kind/);
+    expect(String(row!.error)).toMatch(/unknown_kind/);
   });
 });
 
@@ -317,12 +328,12 @@ describe("runOneStep", () => {
 
 describe("submit", () => {
   it("validates args through the kind, so a bad job never queues", async () => {
-    await expect(submitMod.submitJob({ kind: "stitch", args: { session_id: "s1" }, actor: null })).rejects.toBeInstanceOf(T.JobArgsError);
+    await expect(submitMod.submitJob({ kind: "stitch", args: { session_id: "s1" }, actor: null, scopes: ALLS })).rejects.toBeInstanceOf(T.JobArgsError);
     expect(TABLE).toHaveLength(0);
   });
 
   it("an unknown kind is refused, not queued", async () => {
-    await expect(submitMod.submitJob({ kind: "nope", args: {}, actor: null })).rejects.toBeInstanceOf(submitMod.UnknownKindError);
+    await expect(submitMod.submitJob({ kind: "nope", args: {}, actor: null, scopes: ALLS })).rejects.toBeInstanceOf(submitMod.UnknownKindError);
     expect(TABLE).toHaveLength(0);
   });
 
@@ -333,6 +344,7 @@ describe("submit", () => {
       args: { session_id: "bs_1", start: 1000, end: 2000 },
       actor: "mcp:operator-v",
       origin: "https://example",
+      scopes: ALLS,
     });
     expect(job.id).toMatch(/^job_/);
     expect(job.status).toBe("queued");
@@ -343,7 +355,7 @@ describe("submit", () => {
 
   it("no kick without a runner secret — and the job still queues, because the cron covers it", async () => {
     delete process.env.JOBS_RUNNER_SECRET;
-    await submitMod.submitJob({ kind: "stitch", args: { session_id: "bs_1", start: 1000, end: 2000 }, actor: null, origin: "https://example" });
+    await submitMod.submitJob({ kind: "stitch", args: { session_id: "bs_1", start: 1000, end: 2000 }, actor: null, origin: "https://example", scopes: ALLS });
     expect(kicks).toEqual([]);
     expect(TABLE).toHaveLength(1);
   });
@@ -461,7 +473,7 @@ describe("item 5 — the two-runner test is semantic", () => {
 
   it("rows held by an in-flight claim are skipped, not taken twice", async () => {
     for (let i = 0; i < 6; i++) queue();
-    const [a, b] = await Promise.all([store.claimJobs(), store.claimJobs()]);
+    const [a, b] = await Promise.all([store.claimJobs(3), store.claimJobs(3)]);
     const ids = [...a.map((j) => j.id), ...b.map((j) => j.id)];
     expect(new Set(ids).size, "a job was claimed twice").toBe(ids.length);
     expect(a.map((j) => j.id)).toEqual(["job_0", "job_1", "job_2"]);
@@ -517,10 +529,12 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
     const row = await store.readJob("job_0");
     expect(row!.failures, "the third throw must be counted, not swallowed by the terminal write").toBe(3);
     expect(row!.status).toBe("failed");
-    expect(String(row!.error)).toMatch(/failed after 3 attempts/);
-    expect(String(row!.error)).toMatch(/boom/);
+    // The third throw's own write is what terminates it, so the code is step_threw — the
+    // failures_exceeded code belongs to the pre-run cap check on a LATER claim.
+    expect(String(row!.error)).toMatch(/step_threw/);
+    expect(String(row!.error)).not.toContain("boom");
     // And it stops there: a fourth claim finds nothing, because the row is terminal.
-    expect(await store.claimJobs()).toHaveLength(0);
+    expect(await store.claimJobs(3)).toHaveLength(0);
   });
 
   it("the count rises one per throw, visible at each step", async () => {

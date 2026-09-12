@@ -7,7 +7,7 @@
 
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
-import { CLAIM_BATCH, LEASE_MS, MAX_FAILURES, type JobRow, type JobStatus } from "./types";
+import { LEASE_MS, MAX_FAILURES, type JobRow, type JobStatus } from "./types";
 
 const nano = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 12);
 export const newJobId = (): string => `job_${nano()}`;
@@ -45,6 +45,7 @@ export function normaliseJob(r: Record<string, unknown>): JobRow {
     updated_at: iso(r.updated_at) ?? "",
     finished_at: iso(r.finished_at),
     lease_until: iso(r.lease_until),
+    lease_owner: (r.lease_owner as string | null) ?? null,
     attempts: Number(r.attempts ?? 0),
     failures: Number(r.failures ?? 0),
   };
@@ -60,7 +61,7 @@ export async function insertJob(input: {
     INSERT INTO scribe_job (id, kind, args, actor)
     VALUES (${input.id}, ${input.kind}, ${JSON.stringify(input.args)}::jsonb, ${input.actor})
     RETURNING id, kind, args, status, step, progress, result, error, actor,
-              created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
+              created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
   `) as Array<Record<string, unknown>>;
   return normaliseJob(rows[0]!);
 }
@@ -81,7 +82,7 @@ export async function insertJob(input: {
  * The UPDATE stamps a fresh lease and increments `attempts` in the same statement that selects the
  * rows, so there is no window in which a row is chosen but not yet held.
  */
-export async function claimJobs(limit = CLAIM_BATCH, leaseMs = LEASE_MS): Promise<JobRow[]> {
+export async function claimJobs(limit = 1, leaseMs = LEASE_MS, runner: string | null = null): Promise<JobRow[]> {
   const rows = (await sql`
     WITH claimable AS (
       SELECT id
@@ -96,27 +97,42 @@ export async function claimJobs(limit = CLAIM_BATCH, leaseMs = LEASE_MS): Promis
        SET status      = 'running',
            attempts    = j.attempts + 1,
            lease_until = now() + make_interval(secs => ${Math.round(leaseMs / 1000)}),
+           lease_owner = ${runner},
            started_at  = COALESCE(j.started_at, now()),
            updated_at  = now()
       FROM claimable c
      WHERE j.id = c.id
     RETURNING j.id, j.kind, j.args, j.status, j.step, j.progress, j.result, j.error, j.actor,
-              j.created_at, j.started_at, j.updated_at, j.finished_at, j.lease_until, j.attempts, j.failures
+              j.created_at, j.started_at, j.updated_at, j.finished_at, j.lease_until, j.lease_owner, j.attempts, j.failures
   `) as Array<Record<string, unknown>>;
   return rows.map(normaliseJob);
 }
 
 /** A step finished and the machine continues. The lease is RELEASED: the next claim takes it. */
-export async function saveStep(id: string, step: string, progress: Record<string, unknown>): Promise<void> {
-  await sql`
+/**
+ * Fix-up 4 — EVERY MUTATING WRITE MATCHES THE LEASE OWNER, and returns how many rows it changed.
+ *
+ * `AND status = 'running'` proves the job is not terminal; it cannot prove the job is still MINE.
+ * The Refuter's (c): with runner A's lease expired and runner B holding the row at a later step,
+ * A's write matched — `running` was true — and B's live work was overwritten. The owner token is
+ * what closes that, and it has to be on all four writes, because a stale runner reaching any one
+ * of them is the same accident.
+ *
+ * Zero rows is not an error to swallow: it means the lease was lost, and the caller must abandon.
+ */
+export async function saveStep(id: string, step: string, progress: Record<string, unknown>, runner: string | null = null): Promise<number> {
+  const rows = (await sql`
     UPDATE scribe_job
        SET step        = ${step},
            progress    = ${JSON.stringify(progress)}::jsonb,
            lease_until = NULL,
+           lease_owner = NULL,
            status      = 'running',
            updated_at  = now()
-     WHERE id = ${id} AND status = 'running'
-  `;
+     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
+    RETURNING id
+  `) as Array<Record<string, unknown>>;
+  return rows.length;
 }
 
 /**
@@ -126,13 +142,15 @@ export async function saveStep(id: string, step: string, progress: Record<string
  * own write would then set `done` over it and the cancel would be silently lost. With it, the write
  * matches no row and the cancel stands: the LAST WRITER DOES NOT WIN, the cancel does.
  */
-export async function finishJob(id: string, result: Record<string, unknown>): Promise<void> {
-  await sql`
+export async function finishJob(id: string, result: Record<string, unknown>, runner: string | null = null): Promise<number> {
+  const rows = (await sql`
     UPDATE scribe_job
        SET status = 'done', result = ${JSON.stringify(result)}::jsonb,
-           lease_until = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id} AND status = 'running'
-  `;
+           lease_until = NULL, lease_owner = NULL, finished_at = now(), updated_at = now()
+     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
+    RETURNING id
+  `) as Array<Record<string, unknown>>;
+  return rows.length;
 }
 
 /**
@@ -147,12 +165,12 @@ export async function finishJob(id: string, result: Record<string, unknown>): Pr
  * report: a true owner match wants a `lease_owner` column, which is a migration this slice may not
  * write.
  */
-export async function failJob(id: string, error: string): Promise<number> {
+export async function failJob(id: string, error: string, runner: string | null = null): Promise<number> {
   const rows = (await sql`
     UPDATE scribe_job
        SET status = 'failed', error = ${error.slice(0, 2000)},
-           lease_until = NULL, finished_at = now(), updated_at = now()
-     WHERE id = ${id} AND status = 'running'
+           lease_until = NULL, lease_owner = NULL, finished_at = now(), updated_at = now()
+     WHERE id = ${id} AND status = 'running' AND lease_owner IS NOT DISTINCT FROM ${runner}
     RETURNING id
   `) as Array<Record<string, unknown>>;
   return rows.length;
@@ -169,7 +187,7 @@ export async function cancelJob(id: string): Promise<JobRow | null> {
        SET status = 'cancelled', lease_until = NULL, finished_at = now(), updated_at = now()
      WHERE id = ${id} AND status IN ('queued', 'running')
     RETURNING id, kind, args, status, step, progress, result, error, actor,
-              created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
+              created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
   `) as Array<Record<string, unknown>>;
   return rows[0] ? normaliseJob(rows[0]) : null;
 }
@@ -177,7 +195,7 @@ export async function cancelJob(id: string): Promise<JobRow | null> {
 export async function listJobs(filter: { status?: JobStatus | null; kind?: string | null; limit: number }): Promise<JobRow[]> {
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
-           created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
+           created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
       FROM scribe_job
      WHERE (${filter.status ?? null}::text IS NULL OR status = ${filter.status ?? null}::text)
        AND (${filter.kind ?? null}::text IS NULL OR kind = ${filter.kind ?? null}::text)
@@ -190,7 +208,7 @@ export async function listJobs(filter: { status?: JobStatus | null; kind?: strin
 export async function readJob(id: string): Promise<JobRow | null> {
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
-           created_at, started_at, updated_at, finished_at, lease_until, attempts, failures
+           created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
       FROM scribe_job
      WHERE id = ${id}
      LIMIT 1
@@ -224,6 +242,7 @@ export async function recordFailure(input: {
   progress: Record<string, unknown>;
   error: string;
   maxFailures: number;
+  runner?: string | null;
 }): Promise<{ failures: number; status: JobStatus } | null> {
   const rows = (await sql`
     UPDATE scribe_job
@@ -231,11 +250,13 @@ export async function recordFailure(input: {
            step        = ${input.step},
            progress    = ${JSON.stringify(input.progress)}::jsonb,
            lease_until = NULL,
+           lease_owner = NULL,
            status      = CASE WHEN failures + 1 >= ${input.maxFailures} THEN 'failed' ELSE 'running' END,
            error       = CASE WHEN failures + 1 >= ${input.maxFailures} THEN ${input.error.slice(0, 2000)} ELSE error END,
            finished_at = CASE WHEN failures + 1 >= ${input.maxFailures} THEN now() ELSE finished_at END,
            updated_at  = now()
      WHERE id = ${input.id} AND status = 'running'
+       AND lease_owner IS NOT DISTINCT FROM ${input.runner ?? null}
     RETURNING failures, status
   `) as Array<Record<string, unknown>>;
   const r = rows[0];

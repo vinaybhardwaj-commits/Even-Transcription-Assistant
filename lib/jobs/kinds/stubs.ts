@@ -11,6 +11,7 @@
  */
 
 import { JobArgsError, failWith, type JobKind } from "../types";
+import { jobError } from "../errors";
 
 const requireString = (o: Record<string, unknown>, key: string): string => {
   const v = typeof o[key] === "string" ? (o[key] as string).trim() : "";
@@ -23,7 +24,7 @@ const stub = (name: string, scope: JobKind["scope"], parseArgs: JobKind["parseAr
   first: "start",
   scope,
   parseArgs,
-  run: async () => failWith(`not_implemented: ${name} lands in a later Tier 2 slice`),
+  run: async () => failWith(jobError("not_implemented", `${name} lands in a later Tier 2 slice`)),
 });
 
 export const STUB_KINDS: JobKind[] = [
