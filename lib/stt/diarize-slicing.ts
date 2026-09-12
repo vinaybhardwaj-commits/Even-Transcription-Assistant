@@ -66,12 +66,21 @@ export const SNAP_WINDOW_MS = 10_000;
  * runs — so donating those seconds to an arbitrary clock is a choice, not a constraint.
  *
  * ─── THE ALGORITHM, AND THE CAP THAT OUTRANKS IT ───────────────────────────────────────────────
- * Walk the nominal 120 s marks. For each, look for a turn BOUNDARY (a gap between turns) within
- * ±SNAP_WINDOW_MS and take the nearest. The hard cap wins every argument: a slice may never exceed
- * SLICE_MS, because 120 x 1.5 x 1000 + 45 000 = 225 000 against a 240 000 ms lease is the whole
- * reason slicing works, so a snap that would lengthen a slice past the cap is only taken EARLIER,
- * never later. With no usable boundary the cut stays on the clock and whatever it crosses is
- * marked `seam` — named, not hidden.
+ * Walk the nominal marks and, for each, take the NEAREST turn boundary within ±SNAP_WINDOW_MS in
+ * EITHER direction. The hard cap wins every argument: a slice may never exceed SLICE_MS, because
+ * 120 x 1.5 x 1000 + 45 000 = 225 000 against a 240 000 ms lease is the whole reason slicing works.
+ *
+ * WHICH IS WHY THE NOMINAL MARK IS `SLICE_MS - SNAP_WINDOW_MS` FROM THE LAST CUT, not SLICE_MS.
+ * The first version placed it at SLICE_MS, so the forward half of the window sat above the cap and
+ * was clipped away on every single cut: the search was advertised as ±10 s and was in fact
+ * [-10 s, 0]. Measured cost, over a 4000-layout sweep: 2732 interior cuts split a turn while a
+ * clean edge existed just AFTER the mark. Stepping the mark back by the snap width puts the whole
+ * ±10 s range under the cap, so both directions are genuinely reachable and no slice can exceed
+ * 120 s. The price is one extra slice per window (110 s nominal stride), which is a /diarize call
+ * we pay to stop donating turns to an arbitrary clock.
+ *
+ * With no usable boundary the cut stays on the nominal mark and whatever it crosses is marked
+ * `seam` — named, not hidden.
  */
 export function snappedSliceBounds(
   startMs: number,
@@ -89,9 +98,12 @@ export function snappedSliceBounds(
   let from = startMs;
   let i = 0;
   while (from < endMs) {
-    const nominal = Math.min(endMs, from + sliceMs);
-    if (nominal >= endMs) { out.push({ index: i, start: sliceStart(from), end: sliceEnd(endMs) }); break; }
-    // Only candidates that keep the slice inside the cap, and leave something after it.
+    // The mark sits a snap-width short of the cap so that BOTH halves of ±snapMs are reachable
+    // without any slice exceeding sliceMs.
+    const stride = Math.max(1, sliceMs - snapMs);
+    const nominal = Math.min(endMs, from + stride);
+    if (from + sliceMs >= endMs) { out.push({ index: i, start: sliceStart(from), end: sliceEnd(endMs) }); break; }
+    // Candidates must keep the slice inside the cap and leave something after it.
     const lo = Math.max(from + 1, nominal - snapMs);
     const hi = Math.min(from + sliceMs, nominal + snapMs);
     let best: number | null = null;

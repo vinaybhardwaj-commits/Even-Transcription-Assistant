@@ -112,6 +112,9 @@ export type DiarizeSliceOutcome = {
   named: number;
   straddled: number;
   seam_skipped: number;
+  /** The turns themselves, so the job can count DISTINCT across slices that share an edge. */
+  seam_source_refs: string[];
+  turn_source_refs: string[];
   speakers: number;
   latency_ms: number | null;
 };
@@ -166,6 +169,7 @@ export async function diarizeSlice(opts: {
   const byRef = new Map(turns.map((t) => [t.source_ref, t]));
 
   let named = 0, straddled = 0, seamSkipped = 0;
+  const seamRefs: string[] = [];
   for (const b of bindings) {
     const turn = byRef.get(b.source_ref)!;
     const seam = crossesSeam(turn, { start_ms: ms(opts.slice.start), end_ms: ms(opts.slice.end) });
@@ -176,7 +180,7 @@ export async function diarizeSlice(opts: {
       : seam ? noRole("seam")
       : (roles.get(b.speaker_idx) ?? UNATTRIBUTED);
     if (!b.exclusive) straddled += 1;
-    if (seam) seamSkipped += 1;
+    if (seam) { seamSkipped += 1; seamRefs.push(b.source_ref); }
     if (r.role === "clinician") named += 1;
     await sql`
       INSERT INTO room_turn_speaker
@@ -209,6 +213,8 @@ export async function diarizeSlice(opts: {
       named,
       straddled,
       seam_skipped: seamSkipped,
+      seam_source_refs: seamRefs,
+      turn_source_refs: turns.map((t) => t.source_ref),
       speakers: roles.size,
       latency_ms: res.latencyMs ?? null,
     },

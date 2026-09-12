@@ -14,8 +14,17 @@
 --   * role='clinician' REQUIRES a non-empty clinician_id and a match_confidence in [0,1];
 --   * an identity REQUIRES the claim: clinician_id may be present only when role='clinician',
 --     so no row can carry a name it does not assert — a name with no claim beside it is exactly
---     what a later reader would mistake for an attribution;
+--     what a later reader would mistake for an attribution. (Written with COALESCE: the bare
+--     comparison is NULL for a NULL role and a CHECK passes on NULL, which made the first version
+--     of this constraint vacuous for every row it was written for.);
 --   * match_confidence may be present only with that claim, and only as a real cosine.
+--
+-- WHAT THIS DOES NOT DO, stated because the first version of this comment claimed more than the
+-- schema delivers: postgres has no independent knowledge that a turn was straddled or crossed a
+-- seam. `no_role_reason` is a fact the CODE authors. A writer that sets role='clinician' AND
+-- clears no_role_reason in one statement satisfies every constraint here. What these checks catch
+-- is the precise regression that occurred — an UPDATE that promotes a role and leaves the reason
+-- behind — not the class. Only the code can refuse the class.
 --
 -- A writer that inferred a clinician from speaker order has no id to put here and is rejected by
 -- the database rather than accepted and believed. Attributing a patient's words to their doctor —
@@ -67,7 +76,11 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_identity_ck') THEN
     ALTER TABLE room_turn_speaker
       ADD CONSTRAINT room_turn_speaker_identity_ck
-      CHECK ((clinician_id IS NULL AND match_confidence IS NULL) OR role = 'clinician');
+      -- COALESCE, NOT A BARE COMPARISON. `role = 'clinician'` evaluates to NULL when role IS
+      -- NULL, `FALSE OR NULL` is NULL, and a CHECK PASSES on NULL — so this constraint was
+      -- vacuous for exactly the rows it exists to police, and a row could carry clinician_id
+      -- with no claim. Verified in a real postgres before and after.
+      CHECK ((clinician_id IS NULL AND match_confidence IS NULL) OR COALESCE(role, '') = 'clinician');
   END IF;
 END $$;
 

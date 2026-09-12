@@ -377,8 +377,12 @@ describe("R2 ruling — snapping cuts between turns", () => {
     const { snappedSliceBounds, SLICE_MS } = await import("@/lib/stt/diarize-slicing");
     // One continuous 900 s turn: nowhere to snap to.
     const slices = snappedSliceBounds(0, 900_000, [{ start_ms: 0, end_ms: 900_000 }]);
-    expect(slices).toHaveLength(8);
+    // The COUNT follows from the stride, which is deliberately a snap-width short of the cap so
+    // both halves of ±10 s are reachable. What must hold is the cap and full coverage, not 8.
+    expect(slices.length).toBeGreaterThanOrEqual(8);
     for (const sl of slices) expect(sl.end - sl.start).toBeLessThanOrEqual(SLICE_MS);
+    expect(slices[0]!.start).toBe(0);
+    expect(slices[slices.length - 1]!.end).toBe(900_000);
   });
 });
 
@@ -408,18 +412,34 @@ describe("R2 rulings — the stitch verifies its inputs; a re-run does not dupli
       },
     }));
     const { diarizeWindowKind } = await import("@/lib/jobs/kinds/diarize-window");
-    // 7 of 8 present: slice 3 never landed.
-    STORE.slices = [0, 1, 2, 4, 5, 6, 7].map((i) => ({ index: i, speakers: [] }));
+    // Drive the REAL planner so the geometry is whatever the algorithm says, then drop one.
+    const { snappedSliceBounds } = await import("@/lib/stt/diarize-slicing");
+    const N = snappedSliceBounds(0, 900_000, []).length;
+    STORE.slices = Array.from({ length: N }, (_, i) => i).filter((i) => i !== 3).map((i) => ({ index: i, speakers: [] }));
     const out = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
     expect(out.kind, "a stitch over a partial window produces identities that are quietly wrong").toBe("fail");
     expect((out as { error: string }).error).toContain("3");
     expect((out as { error: string }).error).toContain("missing");
 
     // With all eight it proceeds, and reports the OBSERVED count.
-    STORE.slices = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ index: i, speakers: [] }));
+    STORE.slices = Array.from({ length: N }, (_, i) => ({ index: i, speakers: [] }));
     const ok = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
     expect(ok.kind).toBe("done");
-    expect((ok as { result: Record<string, unknown> }).result.slices, "observed, never planned").toBe(8);
+    expect((ok as { result: Record<string, unknown> }).result.slices, "observed, never planned").toBe(N);
+
+    // R3 D6 — SET EQUALITY. An unplanned index and a duplicate must BOTH be refused, where
+    // presence-only checking let them through while inflating the count.
+    STORE.slices = [...Array.from({ length: N }, (_, i) => ({ index: i, speakers: [] })), { index: 99, speakers: [] }];
+    const extra = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
+    expect(extra.kind, "an index that was never planned").toBe("fail");
+    expect((extra as { error: string }).error).toContain("unplanned 99");
+
+    STORE.slices = [{ index: 0, speakers: [] }, ...Array.from({ length: N }, (_, i) => ({ index: i, speakers: [] }))];
+    const dup = await diarizeWindowKind.run({ job: {} as never, step: "stitch", args: { window_id: "bw_1" }, progress: {}, runner: "r1" });
+    expect(dup.kind, "a duplicated index — the invariant the slice write exists to maintain").toBe("fail");
+    expect((dup as { error: string }).error).toContain("duplicated 0");
+    // R3 D7 — the failure branch states the OBSERVED count, not just the planned denominator.
+    expect((dup as { error: string }).error).toMatch(/observed \d+ of \d+ planned/);
     vi.doUnmock("@/lib/db");
     vi.resetModules();
   });
@@ -436,5 +456,85 @@ describe("R2 rulings — the stitch verifies its inputs; a re-run does not dupli
     entries = [...strip(entries, 0), { index: 0 }];
     entries = [...strip(entries, 0), { index: 0 }];
     expect(entries.filter((e) => e.index === 0), "one entry per index, however many re-runs").toHaveLength(1);
+  });
+});
+
+describe("R3 D3 — the snap window is genuinely two-sided", () => {
+  /** The R2 algorithm, reimplemented here as the BEFORE oracle: nominal at +SLICE_MS. */
+  const backwardOnly = (startMs: number, endMs: number, turns: Array<{ start_ms: number; end_ms: number }>, L: number, S: number) => {
+    const edges = [...new Set(turns.flatMap((t) => [t.start_ms, t.end_ms]))].sort((a, b) => a - b);
+    const clean = (at: number) => !turns.some((t) => t.start_ms < at && t.end_ms > at);
+    const out: Array<{ start: number; end: number }> = [];
+    let from = startMs;
+    while (from < endMs) {
+      const nominal = Math.min(endMs, from + L);
+      if (nominal >= endMs) { out.push({ start: from, end: endMs }); break; }
+      const lo = Math.max(from + 1, nominal - S), hi = Math.min(from + L, nominal + S);
+      let best: number | null = null;
+      for (const e of edges) {
+        if (e < lo || e > hi || e >= endMs || !clean(e)) continue;
+        if (best === null || Math.abs(e - nominal) < Math.abs(best - nominal)) best = e;
+      }
+      const cut = best ?? nominal;
+      out.push({ start: from, end: cut });
+      from = cut;
+    }
+    return out;
+  };
+
+  it("4000 random layouts: splits fall sharply, and no slice ever exceeds the cap", async () => {
+    const { snappedSliceBounds, SLICE_MS, SNAP_WINDOW_MS } = await import("@/lib/stt/diarize-slicing");
+    let rng = 12345;
+    const rand = () => ((rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    let before = 0, after = 0, cuts = 0, overCap = 0, layouts = 0;
+    for (let n = 0; n < 4000; n += 1) {
+      const turns: Array<{ start_ms: number; end_ms: number }> = [];
+      let t = 0;
+      while (t < 900_000) {
+        const dur = 1000 + Math.floor(rand() * 12_000);
+        const gap = Math.floor(rand() * 9_000);
+        if (t + dur >= 900_000) break;
+        turns.push({ start_ms: t, end_ms: t + dur });
+        t += dur + gap;
+      }
+      if (turns.length < 5) continue;
+      layouts += 1;
+      const splitsIn = (sl: Array<{ start: number; end: number }>) => {
+        let s = 0;
+        for (let i = 0; i < sl.length - 1; i += 1) if (turns.some((x) => x.start_ms < sl[i]!.end && x.end_ms > sl[i]!.end)) s += 1;
+        return s;
+      };
+      const now = snappedSliceBounds(0, 900_000, turns).map((s) => ({ start: s.start as number, end: s.end as number }));
+      for (const s of now) { if (s.end - s.start > SLICE_MS) overCap += 1; }
+      cuts += now.length - 1;
+      after += splitsIn(now);
+      before += splitsIn(backwardOnly(0, 900_000, turns, SLICE_MS, SNAP_WINDOW_MS));
+    }
+    // eslint-disable-next-line no-console
+    console.log(`SNAP SWEEP layouts=${layouts} interior_cuts=${cuts} splits_before=${before} splits_after=${after} over_cap=${overCap}`);
+    expect(overCap, "the cap outranks the snap, always").toBe(0);
+    expect(after, "a two-sided search must split fewer turns than a one-sided one").toBeLessThan(before);
+  });
+
+  it("a clean edge AFTER the nominal mark is now reachable — it never was before", async () => {
+    const { snappedSliceBounds, SLICE_MS, SNAP_WINDOW_MS } = await import("@/lib/stt/diarize-slicing");
+    const stride = SLICE_MS - SNAP_WINDOW_MS;
+    // One long turn straddling the nominal mark, with the only clean edge 5 s AFTER it.
+    const turns = [{ start_ms: 0, end_ms: stride + 5_000 }, { start_ms: stride + 9_000, end_ms: 900_000 }];
+    const sl = snappedSliceBounds(0, 900_000, turns);
+    expect(sl[0]!.end as number, "the forward edge is inside ±10 s and under the cap").toBe(stride + 5_000);
+    expect((sl[0]!.end as number) - (sl[0]!.start as number)).toBeLessThanOrEqual(SLICE_MS);
+  });
+});
+
+describe("R3 D5 — the plan is frozen on the row", () => {
+  it("the bounds ride in progress and later steps read them, so turns moving cannot move geometry", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
+    expect(src, "the plan is read from progress before it is ever recomputed").toContain("let slices = readPlan(ctx.progress);");
+    expect(src).toContain("slice_plan: writePlan(slices)");
+    // And the stitch uses the same frozen plan — it must not call the planner itself.
+    const stitchBranch = src.slice(src.indexOf('if (ctx.step === STEPS.stitch)'), src.indexOf('if (ctx.step !== STEPS.slice)'));
+    expect(stitchBranch, "the stitch must not re-plan").not.toContain("snappedSliceBounds(");
   });
 });
