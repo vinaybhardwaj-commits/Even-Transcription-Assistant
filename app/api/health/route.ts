@@ -12,11 +12,28 @@ import { probeWhisperTranscription } from "@/lib/health/whisper-probe";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function probe(fn: () => Promise<unknown>): Promise<{ ok: boolean; latency_ms: number; error?: string }> {
+type ProbeDetail = Record<string, unknown>;
+type ProbeResult = { ok: boolean; latency_ms: number; error?: string } & ProbeDetail;
+
+/**
+ * Runs one service check and times it.
+ *
+ * THE CALLBACK'S RETURN IS PART OF THE ANSWER. This used to `await fn()` and discard the value,
+ * assembling `{ok, latency_ms}` on its own — so the whisper callback built `checked_at`, `age_s`,
+ * `cached`, `probe_ms` and `reason` and this function threw them away. The payload then could not
+ * distinguish a fresh verdict from one served out of a sixty-second cache, which is the single
+ * thing those fields exist to say. Whatever a callback returns is now merged into its block.
+ *
+ * `ok` and `latency_ms` are spread LAST, and deliberately. They are the PROBE's facts — did the
+ * check throw, and how long did it take — not the probed service's, and a callback must not be
+ * able to declare itself healthy by returning an `ok` of its own.
+ */
+async function probe(fn: () => Promise<ProbeDetail | void>): Promise<ProbeResult> {
   const t0 = Date.now();
   try {
-    await fn();
-    return { ok: true, latency_ms: Date.now() - t0 };
+    const detail = await fn();
+    const extra = detail !== null && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
+    return { ...extra, ok: true, latency_ms: Date.now() - t0 };
   } catch (e) {
     return { ok: false, latency_ms: Date.now() - t0, error: String(e) };
   }
@@ -53,6 +70,14 @@ export async function GET() {
       // The verdict is cached (one real inference a minute at most), so the payload says WHEN it
       // was measured and how old that is. An `ok` that does not carry its age invites a reader to
       // assume it is fresh, which on a cached probe it usually is not.
+      //
+      // `reason` SURVIVES ON SUCCESS, not only on failure. A failing probe throws, and its reason
+      // reaches the payload inside `error`; a succeeding one returns here, and a plain fresh pass
+      // has no reason at all. So on an `ok: true` block the PRESENCE of `reason` is the signal:
+      // this success is qualified. Today the only such reason is `busy_recent_ok` — the probe
+      // timed out and we are standing on a recent real inference instead — and it arrives with
+      // `last_ok_age_s` saying how old that evidence is. Without this a rescued busy server and a
+      // genuinely fresh pass are the same two keys, and the rescue is invisible.
       return {
         transcription: true,
         probe_ms: r.elapsed_ms,

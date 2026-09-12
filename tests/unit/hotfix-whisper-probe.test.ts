@@ -6,7 +6,7 @@
  * `whisper: true` asserted "the tunnel and a Python process are up" and could not have failed if
  * transcription were completely dead.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   probeWhisperTranscription,
   runWhisperProbe,
@@ -136,7 +136,9 @@ describe("defect 2 — the probe transcribes, it does not merely ping", () => {
     expect(st.size).toBeLessThan(64_000);
   });
 
-  it("the health route no longer GETs /inference", async () => {
+  // SUPPLEMENT ONLY. Per the standing rule this grep does not count as coverage of the route —
+  // see the GET() suite at the bottom of this file, which is what actually covers it.
+  it("the health route no longer GETs /inference (source check, supplementary)", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync("app/api/health/route.ts", "utf8");
     expect(src).toMatch(/probeWhisperTranscription\(\)/);
@@ -222,5 +224,135 @@ describe("item 1 — at most one real inference a minute, and a busy server is n
     t += WHISPER_PROBE_CACHE_MS + 1;
     const out = await cached(async () => res(500, "{}"), () => t);
     expect(out).toMatchObject({ ok: false, reason: "bad_status", status: 500 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 3 — THE ROUTE, CALLED. Not the route, read.
+//
+// The suites above prove the PROBE. None of them proved that what the probe returns ever reaches
+// a caller, and it did not: `probe()` in app/api/health/route.ts awaited the callback and threw
+// its return value away, so `checked_at`, `age_s`, `cached`, `probe_ms` and `reason` were built
+// and dropped. Every gate was green. The only route-level test was a readFileSync grep, which
+// asserted those fields are WRITTEN IN THE FILE — a thing that stayed true the whole time they
+// were being discarded one function up.
+//
+// STANDING RULE from this defect: a source-text grep may supplement a behavioural assertion and
+// may never replace one. A test that reads source can only ever prove what was typed; the bug
+// lives in what the code DOES with it. These tests call GET() and assert on returned JSON.
+// ---------------------------------------------------------------------------
+
+vi.mock("@/lib/db", () => ({ sql: async () => [{ ok: 1 }] }));
+
+describe("item 3 — GET /api/health returns the probe's fields to the caller", () => {
+  const INFERENCE_OK = async () => res(200, JSON.stringify({ text: "" }));
+  const ABORTED = () => { const e = new Error("aborted"); e.name = "AbortError"; return Promise.reject(e); };
+
+  let inferenceCalls = 0;
+
+  /**
+   * Only the whisper probe may reach the network. Every other service is turned off by emptying
+   * its env var — each of those callbacks checks and throws BEFORE it fetches — so this suite
+   * cannot make a live call to Ollama, Resend, R2 or a Neon host.
+   */
+  const armRoute = (whisper: () => Promise<Response>) => {
+    inferenceCalls = 0;
+    for (const k of ["KB_DATABASE_URL", "OLLAMA_BASE_URL", "RESEND_API_KEY", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]) {
+      vi.stubEnv(k, "");
+    }
+    vi.stubEnv("WHISPER_BASE_URL", "https://whisper.example");
+    vi.stubGlobal("fetch", (u: string) => {
+      if (String(u).includes("/inference")) { inferenceCalls += 1; return whisper(); }
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+  };
+
+  /** The route's own GET, called. `whisperBlock` is the object a monitoring client would read. */
+  const callRoute = async (): Promise<Record<string, unknown>> => {
+    const { GET } = await import("@/app/api/health/route");
+    const body = (await (await GET()).json()) as { services: { whisper: Record<string, unknown> } };
+    return body.services.whisper;
+  };
+
+  beforeEach(() => {
+    __resetWhisperProbeCache();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-12T10:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("a FRESH probe's checked_at, age_s, cached and probe_ms all reach the payload", async () => {
+    armRoute(INFERENCE_OK);
+    const w = await callRoute();
+
+    // THE REGRESSION. Each of these was assembled by the route's whisper callback and discarded
+    // by probe() before it could be serialised; the block shipped as exactly {ok, latency_ms}.
+    expect(Object.keys(w).sort(), "the callback's fields must survive probe()").toEqual(
+      ["age_s", "cached", "checked_at", "latency_ms", "ok", "probe_ms", "transcription"].sort(),
+    );
+    expect(w.ok).toBe(true);
+    expect(w.transcription).toBe(true);
+    expect(w.cached).toBe(false);
+    expect(w.age_s).toBe(0);
+    expect(w.checked_at).toBe("2026-09-12T10:00:00.000Z");
+    expect(typeof w.probe_ms).toBe("number");
+    // probe()'s OWN facts are still there and still its own.
+    expect(typeof w.latency_ms).toBe("number");
+    // A plain fresh pass carries NO reason. That absence is what makes a qualified ok legible.
+    expect(w.reason, "an unqualified success has no reason").toBeUndefined();
+    expect(inferenceCalls).toBe(1);
+  });
+
+  it("a SECOND call inside the cache window says cached: true with a non-zero age_s", async () => {
+    armRoute(INFERENCE_OK);
+    const first = await callRoute();
+    expect(first.cached).toBe(false);
+
+    vi.setSystemTime(new Date("2026-09-12T10:00:30.000Z"));
+    const second = await callRoute();
+
+    expect(second.cached, "a served verdict must admit it was served").toBe(true);
+    expect(second.age_s, "a cached answer with age 0 is a fresh answer's lie").toBe(30);
+    expect(second.age_s).toBeGreaterThan(0);
+    expect(second.checked_at, "the cached answer keeps the ORIGINAL measurement time").toBe(first.checked_at);
+    expect(inferenceCalls, "the Mini must be hit once, not twice").toBe(1);
+  });
+
+  it("a busy_recent_ok rescue is identifiable FROM THE PAYLOAD ALONE", async () => {
+    armRoute(INFERENCE_OK);
+    const fresh = await callRoute();
+    expect(fresh.ok).toBe(true);
+
+    // Past the cache window, so it measures again — and this time the inference is aborted.
+    vi.setSystemTime(new Date("2026-09-12T10:01:01.000Z"));
+    vi.stubGlobal("fetch", (u: string) => {
+      if (String(u).includes("/inference")) { inferenceCalls += 1; return ABORTED(); }
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+    const busy = await callRoute();
+
+    expect(busy.ok, "a serialised inference queue is not a fault").toBe(true);
+    expect(busy.reason, "the rescue must name itself").toBe("busy_recent_ok");
+    expect(busy.last_ok_age_s, "and say how old its evidence is").toBe(61);
+    expect(busy.cached, "it is a fresh measurement, just a rescued one").toBe(false);
+    expect(inferenceCalls).toBe(2);
+
+    // The point of the whole item: the two ok:true blocks are TELLABLE APART. Before the fix both
+    // serialised to {ok:true, latency_ms:N} and a rescued busy server read as a healthy one.
+    expect(fresh.reason).toBeUndefined();
+    expect(busy).not.toEqual(fresh);
+  });
+
+  it("a hard failure still names its reason, through error", async () => {
+    armRoute(async () => res(500, "{}"));
+    const w = await callRoute();
+    expect(w.ok).toBe(false);
+    expect(String(w.error), "a false must say WHICH way").toContain("bad_status");
+    expect(String(w.error)).toContain("500");
   });
 });
