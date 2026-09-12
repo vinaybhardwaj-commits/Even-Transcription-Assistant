@@ -136,7 +136,7 @@ import {
   type TranscriptCounts,
 } from "@/lib/room-facts";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
-import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, type InstallStateFlag } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -2427,7 +2427,7 @@ async function liveMonitorExtras(
 const diffRoom: McpTool = {
   name: "scribe_diff_room",
   description:
-    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused — AND unless a genuine warehouse-typed cue exists on the room-day. There is no fallback to the session's own start on either surface any more: with no cue the answer is null, because the number that fallback produced was the length of the recording wearing a clock gap's label, and it turned every room amber at fifteen minutes and red at thirty. has_doctor_clock says whether the vital has any input at all. BUILD 1 §3.6 — THE DOOR NOW SAYS EVERYTHING THE SCREEN SAYS, IN THE SAME WORDS, from the same shared module (lib/room-facts.ts): transcript_enabled / visits_enabled, the two processing switches, which this tool could not report at all before — so a watcher could not warn that a room was recording into nothing (null, never false, where the read failed); lanes.transcript and lanes.visits plus tape_lane, the three lane lines exactly as the card renders them; transcript_counts and visit_counts behind them; has_room_day_today (null where the brain read failed, never false); stranded_audio — MINUTES THAT CANNOT CURRENTLY BE TURNED INTO WORDS, split into waiting for someone to run it / no day record / never closed, measured in fifteen-minute slots, which is NOT the measure audio_recorded_ms uses (that sums the pieces themselves) so the two do not subtract; and ended_disagrees with its sessions and chunk counts, the capture-clock alarm the screen has always had and this tool could not raise. room_state gains a seventh state, `finished` — the most recent session today is ended and nothing is recording (D30) — placed after paused and recording and before ready, dropped and offline, and never amber; and every room_state now carries start_available, which answers whether a start would succeed rather than making the caller infer it from the state word.",
+    "The now-picture across enabled rooms (or one room, named explicitly — the all-rooms sweep skips the fuse's scratch rooms): is a page open (kiosk polled within the bus's freshness window), is anything recording, the last cue, the last piece recorded today, and four flags — kiosk_not_listening, stalled (recording but the last piece is older than the stall window), tape_without_cues (a recording exists today with no cue on the room's day), ended_at_lies (a stored end time later than the last piece by more than the stall window, with the offending session ids). Read-only; no identity. LIVE MONITOR FIELDS (additive, nothing above changed): room_state — the operator-language answer to \"what can I do about this room\", as { state, label, hint, level } with state one of cant_tell | paused | recording | ready | dropped | offline, evaluated in that precedence so the first match wins. PAUSED OUTRANKS RECORDING deliberately: a room that is paused and still recording is one where consent was withdrawn, and that is the fact to act on. READY means only that a start will succeed (listening, not recording, not paused) and claims NOTHING about the microphones, because before a session starts there are no chunks and mic health is unknown by construction. DROPPED and OFFLINE are the same measurement read for opposite actions — under ten minutes a kiosk may return and you wait, over ten minutes somebody must open the room page on the Mini. Computed by the same function the admin page uses, so the two cannot disagree. Also listener_state (never | stale | listening | unknown — a FAILED read is unknown, never 'never'), paused_listener / paused_session / paused_disagrees (the kiosk and the tape are two witnesses and a disagreement is named, not resolved; pause has no timestamp so this is a state and never a duration), last_primary_at / last_backup_at / backup_chunks_today (per microphone, on the UPLOAD clock), stalled_age_ms beside the existing boolean, marks_today / last_mark_at from the room-day's cues and marks_not_sent from bench_event, last_window_asked_at / last_window_complete (the newest stt_window marker; a marker that never says complete reads as null, NEVER as failed), and warehouse_silent_ms. THAT LAST FIELD MEASURES ONE LABELLED DOCTOR'S PULSE CLOCKS AND NOTHING ELSE: even_hospitals.doctor_opd_rooms is null on every hospital, so the warehouse holds no room. A gap means that doctor has not clocked — never that the room is empty and never that Pulse is quiet, because another doctor may be in the room seeing patients throughout. It is null unless a session is recording and the room is not paused — AND unless a genuine warehouse-typed cue exists on the room-day. There is no fallback to the session's own start on either surface any more: with no cue the answer is null, because the number that fallback produced was the length of the recording wearing a clock gap's label, and it turned every room amber at fifteen minutes and red at thirty. has_doctor_clock says whether the vital has any input at all. BUILD 1 §3.6 — THE DOOR NOW SAYS EVERYTHING THE SCREEN SAYS, IN THE SAME WORDS, from the same shared module (lib/room-facts.ts): transcript_enabled / visits_enabled, the two processing switches, which this tool could not report at all before — so a watcher could not warn that a room was recording into nothing (null, never false, where the read failed); lanes.transcript and lanes.visits plus tape_lane, the three lane lines exactly as the card renders them; transcript_counts and visit_counts behind them; has_room_day_today (null where the brain read failed, never false); stranded_audio — MINUTES THAT CANNOT CURRENTLY BE TURNED INTO WORDS, split into waiting for someone to run it / no day record / never closed, measured in fifteen-minute slots, which is NOT the measure audio_recorded_ms uses (that sums the pieces themselves) so the two do not subtract; and ended_disagrees with its sessions and chunk counts, the capture-clock alarm the screen has always had and this tool could not raise. room_state gains a seventh state, `finished` — the most recent session today is ended and nothing is recording (D30) — placed after paused and recording and before ready, dropped and offline, and never amber; and every room_state now carries start_available, which answers whether a start would succeed rather than making the caller infer it from the state word. TIER 1 §2 — room_state also carries flags and drift_since, THE NAMED INSTALL STATES OF THE MAC BOUND TO THIS ROOM, which are not a precedence chain and not about what the operator can do next: they are a SET over what the app's heartbeat already reports, and several hold at once — SILENT_WHILE_RECORDING (the tape is running and the input has been bit-exact zero for about two minutes; the 11 September dead-TONOR failure, named), CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT (an assignment the Mac has ignored for over thirty minutes — never raised while the Mac reports channel_locked, which is a deliberate config, not a fault). flags is NULL, NEVER [], where no Mac is bound to the room, where the install has not been evaluated since migration 0081, or where the read failed — an empty list means the Mac was looked at and is well. THESE ARE COARSE ALARMS OVER UNCALIBRATED THRESHOLDS: a flag means go and look, never a diagnosis. drift_since is CHANNEL_DRIFT's clock and is non-null from the first poll of a mismatch, so a caller can see a move in flight before the flag is earned.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -2533,6 +2533,30 @@ const diffRoom: McpTool = {
             newestSession?.status === "ended" && recordingSession === null && !pausedSession;
           const primaryChunks = sessions.reduce((a, sn) => a + (Number(sn.chunk_count) || 0), 0);
 
+          // Tier 1 §2, orchestrator ruling seam 1 — THE NAMED INSTALL STATES, ON THIS DOOR TOO.
+          // The card has had them since Slice A; without them here the acceptance test ("mute the
+          // TONOR three minutes and read SILENT_WHILE_RECORDING in scribe_diff_room") had no
+          // surface to read. One SELECT on the bound install; `flags` is NULL — never [] — where
+          // there is no bound Mac, where the column was never evaluated, or where the read failed,
+          // because "no flags" and "nobody looked" are different answers.
+          let installFlags: InstallStateFlag[] | null = null;
+          let driftSince: string | null = null;
+          try {
+            const st = (await sql`
+              SELECT state_flags FROM room_install
+               WHERE room_id = ${room.id} AND enrolled_at IS NOT NULL AND retired_at IS NULL
+               ORDER BY created_at DESC LIMIT 1
+            `) as Array<{ state_flags: unknown }>;
+            const raw = st[0]?.state_flags ?? null;
+            if (raw !== null && raw !== undefined) {
+              const rec = parseInstallState(raw);
+              installFlags = rec.flags;
+              driftSince = rec.drift_since;
+            }
+          } catch (e) {
+            reasons.push(`install_state_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+          }
+
           const live = await liveMonitorExtras(
             room.id, today, now, recordingSession !== null, pausedListener || pausedSession,
             sessions.map((sn) => sn.id), reasons, listener,
@@ -2550,16 +2574,23 @@ const diffRoom: McpTool = {
             listener_state: listenerStateOf(listener, pageOpen === null, now.getTime()),
             // K2 §6 — the SAME function the admin page calls, so the door and the screen cannot
             // disagree about a room. Six states, one precedence order, one place.
-            room_state: roomState({
-              listenerReadFailed: pageOpen === null,
-              listener: listener ? { last_poll_at: listener.last_poll_at, paused: Boolean(listener.paused) } : null,
-              pausedSession,
-              recording: recordingSession !== null,
-              recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
-              nowMs: now.getTime(),
-              lastSessionEnded,
-              recordedMsToday: Number(live.audio_recorded_ms) || 0,
-            }),
+            room_state: {
+              ...roomState({
+                listenerReadFailed: pageOpen === null,
+                listener: listener ? { last_poll_at: listener.last_poll_at, paused: Boolean(listener.paused) } : null,
+                pausedSession,
+                recording: recordingSession !== null,
+                recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
+                nowMs: now.getTime(),
+                lastSessionEnded,
+                recordedMsToday: Number(live.audio_recorded_ms) || 0,
+              }),
+              // Additive and ORTHOGONAL to `state` above: that is a precedence chain, these are a
+              // set and several hold at once. `drift_since` is CHANNEL_DRIFT's clock, non-null
+              // while the Mac disagrees with its assignment whether or not thirty minutes have run.
+              flags: installFlags,
+              drift_since: driftSince,
+            },
             // The Tape lane, in the screen's words. The other two are assembled in
             // liveMonitorExtras, where their counts are read.
             tape_lane: tapeLane({
