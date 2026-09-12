@@ -30,7 +30,8 @@
 
 import { signGetUrl } from "@/lib/r2";
 import { headObject } from "@/lib/r2";
-import { submitRouteJob, pollRouteJob } from "@/lib/stt/eta-router";
+import { adapterFor } from "@/lib/stt/registry";
+import { ROUTE_ADAPTER_KEY } from "@/lib/stt/adapters/route";
 import { buildRouteMetrics, charsPerAudioSecond } from "@/lib/stt/route-run";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
@@ -108,17 +109,22 @@ async function submitStep(ctx: StepContext) {
     return failWith(jobError("presign_failed"));
   }
 
-  const sub = await submitRouteJob(audioUrl, { translate, ...(candidates ? { candidates } : {}) });
+  // C2 Part A — through the REGISTRY, not the router's client. A job kind that reaches past the
+  // adapter is a job kind the registry cannot govern: engine selection, capabilities and the paid
+  // chokepoint all stop applying the moment a caller knows which service it wants.
+  const adapter = adapterFor(ROUTE_ADAPTER_KEY);
+  if (!adapter || typeof adapter.submit !== "function") return failWith(jobError("route_submit_failed", "adapter declares no async transport"));
+  const sub = await adapter.submit({ audioUrl, durationMs: durationMs ?? undefined, translate });
   // Branch on `ok`, never on status.
-  if (!sub.ok || !sub.job_id) {
-    console.error("[jobs] route submit failed", JSON.stringify({ err: String(sub.error ?? "unknown").slice(0, 200) }));
+  if (!sub.ok) {
+    console.error("[jobs] route submit failed", JSON.stringify({ err: String(sub.error).slice(0, 200) }));
     return failWith(jobError("route_submit_failed"));
   }
 
   // The id is persisted before anything else can fail. Every later claim polls it; none resubmits.
   return nextStep(STEPS.poll, {
     ...ctx.progress,
-    router_job_id: sub.job_id,
+    router_job_id: sub.jobRef,
     clip_key,
     audio_seconds: durationMs !== null ? Math.round(durationMs / 100) / 10 : null,
     submitted_at: new Date().toISOString(),
@@ -131,30 +137,35 @@ async function pollStep(ctx: StepContext) {
   if (!jobId) return failWith(jobError("progress_incomplete", "router job id"));
   const audioSeconds = typeof ctx.progress.audio_seconds === "number" ? (ctx.progress.audio_seconds as number) : null;
 
+  const adapter = adapterFor(ROUTE_ADAPTER_KEY);
+  if (!adapter || typeof adapter.poll !== "function") return failWith(jobError("route_job_failed", "adapter declares no async transport"));
   const deadline = Date.now() + POLL_BUDGET_MS;
   let polls = 0;
   for (;;) {
-    const st = await pollRouteJob(jobId);
+    const st = await adapter.poll(jobId);
     polls += 1;
 
-    // A router job vanishes after its TTL (3600 s). Say so with its own code: "unknown job" and
-    // "the job failed" send a reader to different places.
-    if (!st.ok && /unknown job/i.test(String(st.error ?? ""))) return failWith(jobError("route_job_unknown"));
-
-    if (st.state === "failed" || (st.ok === false && st.state === undefined)) {
-      // The router's error is a truncated repr of whatever threw and can quote the audio's own
-      // filename or contents. It goes to the log; the row gets the code alone.
-      console.error("[jobs] route job failed", JSON.stringify({ job: jobId, err: String(st.error ?? "unknown").slice(0, 200) }));
-      return failWith(jobError("route_job_failed"));
+    if (!st.ok) {
+      // The provider's error is a truncated repr that can quote a path or the audio itself. It
+      // goes to the log; the row gets the code alone. `terminal` distinguishes an expired ref —
+      // which can never start working — from a hop that may.
+      console.error("[jobs] route poll failed", JSON.stringify({ job: jobId, err: String(st.error).slice(0, 200), terminal: st.terminal }));
+      if (!st.terminal) {
+        if (Date.now() + POLL_INTERVAL_MS >= deadline) return nextStep(STEPS.poll, { ...ctx.progress, polls_so_far: Number(ctx.progress.polls_so_far ?? 0) + polls });
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      return failWith(jobError(/unknown/i.test(st.error) ? "route_job_unknown" : "route_job_failed"));
     }
 
     if (st.state === "done") {
-      const native = typeof st.transcript_native === "string" ? st.transcript_native : "";
-      const english = typeof st.transcript_english === "string" ? st.transcript_english : "";
+      const r = st.result;
+      const native = typeof r.original === "string" ? r.original : "";
+      const english = typeof r.english === "string" ? r.english : "";
       const chars = native.length || english.length;
-      const metrics = buildRouteMetrics(st.language_timeline, {
-        router_sec: typeof st.sec === "number" ? st.sec : null,
-        dominant_language: st.dominant_language ?? null,
+      const metrics = buildRouteMetrics(r.languageTimeline, {
+        router_sec: Math.round(r.latencyMs / 1000),
+        dominant_language: r.language ?? null,
         translated: english.length > 0,
       });
       const timeline = metrics.language_timeline as { span_count: number; engine_mix: Record<string, number>; language_mix: Record<string, number>; chars: number };
@@ -168,13 +179,13 @@ async function pollStep(ctx: StepContext) {
         span_count: timeline.span_count,
         engine_mix: timeline.engine_mix,
         language_mix: timeline.language_mix,
-        dominant_language: st.dominant_language ?? null,
+        dominant_language: r.language ?? null,
         chars_per_audio_second: charsPerAudioSecond(chars, audioSeconds),
         // `empty_transcript` on the whisper path is a FACT ABOUT THE ROOM, not a failure, and the
         // same reasoning holds here: a quiet window read correctly is a success with zero chars.
         silent_window: chars === 0,
         polls,
-        router_sec: typeof st.sec === "number" ? st.sec : null,
+        router_sec: Math.round(r.latencyMs / 1000),
       });
     }
 
@@ -183,7 +194,7 @@ async function pollStep(ctx: StepContext) {
       return nextStep(STEPS.poll, {
         ...ctx.progress,
         polls_so_far: Number(ctx.progress.polls_so_far ?? 0) + polls,
-        last_state: st.state ?? "unknown",
+        last_state: st.state,
         last_progress: st.progress ?? null,
       });
     }

@@ -29,7 +29,7 @@
  * health probe shipped for months asserting "something answered" because it read a status. Every
  * decision below reads the parsed `ok` field.
  */
-import { routeTranscribe, type RouterResult } from "../eta-router";
+import { routeTranscribe, submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "../eta-router";
 import type { SttAdapter, SttTranscribeResult } from "../types";
 
 /**
@@ -137,6 +137,50 @@ export const routeAdapter: SttAdapter = {
    * not-configured while transcribe() worked through the client's own default — an asymmetry
    * caused by a pre-commit hook, now retired, and not by any design intent.
    */
+  /**
+   * ─── THE ASYNC TRANSPORT, NOW BEHIND THE INTERFACE (C2 Part A) ───────────────────────────────
+   * The router pulls its own audio, so this takes a URL and never bytes: `audio_url` is fetched
+   * server-side (`requests.get`), which is why the caller presigns a short-lived, single-object
+   * R2 link rather than uploading fifteen minutes over the tunnel twice.
+   *
+   * ONE SUBMIT PER REF, and the caller's job is to persist the ref before anything else can fail —
+   * the router has no idempotency key, so a resubmit is a second job doing the same work and
+   * billing the same minutes of the Mini.
+   */
+  async submit(input) {
+    if (!ROUTER_JOB_ON()) return { ok: false, error: "router_job_disabled" };
+    if (!input.audioUrl) return { ok: false, error: "route_submit_needs_audio_url" };
+    const sub = await submitRouteJob(input.audioUrl, {
+      translate: input.translate === true,
+      ...(input.durationMs ? {} : {}),
+    });
+    // Branch on `ok`, never on transport.
+    if (!sub.ok || !sub.job_id) return { ok: false, error: String(sub.error ?? "route_submit_failed").slice(0, 200) };
+    return { ok: true, jobRef: sub.job_id };
+  },
+
+  async poll(jobRef) {
+    const st = await pollRouteJob(jobRef);
+    // An expired or unknown job is TERMINAL: the router's job files live an hour, and polling a
+    // ref that no longer exists can never start succeeding. Anything else is worth another claim.
+    if (!st.ok && /unknown job/i.test(String(st.error ?? ""))) {
+      return { ok: false, error: "route_job_unknown", terminal: true };
+    }
+    if (st.state === "failed" || (st.ok === false && st.state === undefined)) {
+      return { ok: false, error: String(st.error ?? "route_job_failed").slice(0, 200), terminal: st.state === "failed" };
+    }
+    if (st.state !== "done") {
+      return {
+        ok: true,
+        state: st.state === "queued" ? "queued" : "running",
+        progress: st.progress && typeof st.progress === "object"
+          ? { done: Number(st.progress.done ?? 0), total: Number(st.progress.total ?? 0) }
+          : null,
+      };
+    }
+    return { ok: true, state: "done", result: toSttResult(st as RouterResult, typeof st.sec === "number" ? Math.round(st.sec * 1000) : 0) };
+  },
+
   async health() {
     const t0 = Date.now();
     const base = ROUTER_BASE();

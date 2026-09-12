@@ -54,8 +54,6 @@ import { isEnglishCode, whisperLanguageToIso } from "@/lib/language-route";
 import { buildTurns, buildWindowCue, writeWindowCues } from "@/lib/mcp/tools/bench";
 import { actorProblem, audioReceipt, providerEngineVersion, type RunActor } from "./receipt";
 import { signGetUrl } from "@/lib/r2";
-import { submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "./eta-router";
-import { toSttResult } from "./adapters/route";
 import { guardedTranscribe } from "./guarded-transcribe";
 import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
 import { LEASE_MS } from "@/lib/jobs/types";
@@ -1102,7 +1100,13 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
     if (p.router_job_id) {
       return { ...out, ok: true, step: "ok", next_progress: { ...progress, engine_id: engineId, engine_key: engineKey, language_sent: languageSent } };
     }
-    if (!ROUTER_JOB_ON()) { const attempts = await recordFailure(windowId, "engine_failed", "router_job_disabled"); return { ...out, step: "engine_failed", detail: "router_job_disabled", attempts }; }
+    // C2 Part A — an adapter that DECLARES async must IMPLEMENT it. A missing submit/poll is a
+    // registry bug, not a reason to quietly fall back to the synchronous path: the sync path on a
+    // 900 s window is the timeout this whole seam exists to avoid.
+    if (typeof adapter.submit !== "function" || typeof adapter.poll !== "function") {
+      const attempts = await recordFailure(windowId, "engine_failed", "async_engine_missing_submit_poll");
+      return { ...out, step: "engine_failed", detail: "async_engine_missing_submit_poll", attempts };
+    }
     let audioUrl: string;
     try {
       audioUrl = await signGetUrl({ key: audioKey, expiresInSeconds: routerPresignTtlSeconds(audioSeconds) });
@@ -1110,16 +1114,17 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
       const attempts = await recordFailure(windowId, "engine_failed", `presign_failed: ${String(e).slice(0, 80)}`);
       return { ...out, step: "engine_failed", detail: "presign_failed", attempts };
     }
-    const sub = await submitRouteJob(audioUrl, { translate: false });
-    if (!sub.ok || !sub.job_id) {
-      console.error("[drain] route submit failed", JSON.stringify({ window: windowId, err: String(sub.error ?? "unknown").slice(0, 200) }));
-      const attempts = await recordFailure(windowId, "engine_failed", "route_submit_failed");
-      return { ...out, step: "engine_failed", detail: "route_submit_failed", attempts };
+    const sub = await adapter.submit({ audioUrl, durationMs: Math.round(audioSeconds * 1000), translate: false, ...(languageSent ? { language: languageSent } : {}) });
+    if (!sub.ok) {
+      // The provider's message can quote a path or the audio; it goes to the log, not the row.
+      console.error("[drain] async submit failed", JSON.stringify({ window: windowId, engine: engineId, err: String(sub.error).slice(0, 200) }));
+      const attempts = await recordFailure(windowId, "engine_failed", "async_submit_failed");
+      return { ...out, step: "engine_failed", detail: "async_submit_failed", attempts };
     }
     // Persisted BEFORE anything else can fail, so a retry finds it and polls instead of resubmitting.
     return {
       ...out, ok: true, step: "ok",
-      next_progress: { ...progress, router_job_id: sub.job_id, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
+      next_progress: { ...progress, router_job_id: sub.jobRef, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
     };
   }
 
@@ -1173,24 +1178,28 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
   if ("error" in ctxOrErr) return { ...out, step: ctxOrErr.error, ...(ctxOrErr.detail ? { detail: ctxOrErr.detail } : {}) };
   const ctx = ctxOrErr;
 
-  const st = await pollRouteJob(p.router_job_id);
-  if (!st.ok && /unknown job/i.test(String(st.error ?? ""))) {
-    const attempts = await recordFailure(windowId, "engine_failed", "route_job_unknown");
-    return { ...out, step: "engine_failed", detail: "route_job_unknown", attempts };
-  }
-  if (st.state === "failed" || (st.ok === false && st.state === undefined)) {
-    console.error("[drain] route job failed", JSON.stringify({ window: windowId, job: p.router_job_id, err: String(st.error ?? "unknown").slice(0, 200) }));
-    const attempts = await recordFailure(windowId, "engine_failed", "route_job_failed");
-    return { ...out, step: "engine_failed", detail: "route_job_failed", attempts };
-  }
-  if (st.state !== "done") {
-    // Still working. The row goes back to the queue; the next claim polls the same id.
-    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: st.state ?? "unknown" } };
-  }
-
   const engineId = String(progress.engine_id ?? "");
   const engineKey = String(progress.engine_key ?? "");
-  const asr = toSttResult(st as RouterResult, typeof st.sec === "number" ? Math.round(st.sec * 1000) : 0);
+  const adapter = engineId ? adapterFor(engineId) : null;
+  if (!adapter || typeof adapter.poll !== "function") {
+    const attempts = await recordFailure(windowId, "engine_failed", "async_engine_missing_submit_poll");
+    return { ...out, step: "engine_failed", detail: "async_engine_missing_submit_poll", attempts };
+  }
+
+  const st = await adapter.poll(p.router_job_id);
+  if (!st.ok) {
+    console.error("[drain] async poll failed", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, err: String(st.error).slice(0, 200), terminal: st.terminal }));
+    // A non-terminal failure is worth another claim: the ref is still good, the hop was not.
+    if (!st.terminal) return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: "poll_error" } };
+    const attempts = await recordFailure(windowId, "engine_failed", "async_job_failed");
+    return { ...out, step: "engine_failed", detail: "async_job_failed", attempts };
+  }
+  if (st.state !== "done") {
+    // Still working. The row goes back to the queue; the next claim polls the same ref.
+    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: st.state } };
+  }
+
+  const asr = st.result;
   if (asr.error) { const attempts = await recordFailure(windowId, "engine_failed", asr.error); return { ...out, step: "engine_failed", detail: asr.error, attempts }; }
   // The receipt describes the bytes the ROUTER was given — the same object the presigned URL named.
   const bytes = await getObjectBytes(p.clip_r2_key);
