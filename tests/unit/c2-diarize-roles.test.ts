@@ -249,3 +249,37 @@ describe("R4 D5 — one predicate for confidence, and the code refuses before th
     expect(DB.rows[0]!.match_confidence).toBeNull();
   });
 });
+
+describe("checkCentroid — exactly one 192-float32 voiceprint, byte for byte", () => {
+  const vec = (dims: number, fill = 0.1) => Buffer.from(new Float32Array(dims).fill(fill).buffer).toString("base64");
+  it("accepts 192 finite floats that re-encode identically", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    expect(checkCentroid(vec(192)).ok).toBe(true);
+  });
+  it("refuses 191 and 193 — never truncated, never padded", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    expect(checkCentroid(vec(191))).toEqual({ ok: false, reason: "centroid_dim_191_not_192" });
+    expect(checkCentroid(vec(193))).toEqual({ ok: false, reason: "centroid_dim_193_not_192" });
+  });
+  it("refuses URL-safe base64 — Node's decoder would accept it, the stored bytes would not round-trip to the sent text", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    // Force at least one '+' or '/' so the URL-safe spelling differs from the standard one.
+    const v = new Float32Array(192).fill(0.1); v[0] = -1.2345e-30; v[1] = 3.4e38;
+    const std = Buffer.from(v.buffer).toString("base64");
+    const urlSafe = std.replace(/\+/g, "-").replace(/\//g, "_");
+    expect(urlSafe, "fixture must actually differ").not.toBe(std);
+    expect(Buffer.from(urlSafe, "base64").length, "the lenient decoder takes it").toBe(768);
+    expect(checkCentroid(urlSafe)).toEqual({ ok: false, reason: "centroid_not_base64" });
+  });
+  it("refuses NaN and Infinity, junk, and a missing value", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    expect(checkCentroid(vec(192, Number.NaN))).toEqual({ ok: false, reason: "centroid_non_finite_value" });
+    expect(checkCentroid(vec(192, Infinity))).toEqual({ ok: false, reason: "centroid_non_finite_value" });
+    expect(checkCentroid("not base64!!")).toEqual({ ok: false, reason: "centroid_not_base64" });
+    expect(checkCentroid(undefined)).toEqual({ ok: false, reason: "centroid_missing" });
+  });
+  it("redact removes a base64 blob from any string", async () => {
+    const { redact } = await import("@/lib/voiceprint-load");
+    expect(redact(`boom ${vec(192)} end`)).toBe("boom [redacted] end");
+  });
+});
