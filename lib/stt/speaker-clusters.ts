@@ -185,12 +185,10 @@ export type TurnSpan = { source_ref: string; start_ms: number; end_ms: number };
 // Configuration
 // ---------------------------------------------------------------------------
 
-export const SPEAKER_CLUSTERS_ENABLED_ENV = "SPEAKER_CLUSTERS_ENABLED";
+// The on-switch that lived here gated clustering, which C2 deleted. It was renamed from
+// SPEAKER_CLUSTERS_ENABLED (renamed to ROOM_DIARIZE_ENABLED) and now lives beside the one thing it
+// controls, the room diarize enqueue: lib/stt/diarize-job.ts.
 export const SPEAKER_MATCH_THRESHOLD_ENV = "SPEAKER_MATCH_THRESHOLD";
-
-export function clustersEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env[SPEAKER_CLUSTERS_ENABLED_ENV] === "1";
-}
 
 export type ThresholdRead =
   | { ok: true; threshold: number }

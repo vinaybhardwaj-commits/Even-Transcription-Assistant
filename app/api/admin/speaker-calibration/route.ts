@@ -20,10 +20,10 @@
  * stored diarize results; it never calls the Mini, never writes a cluster, and never touches the
  * threshold it exists to inform.
  *
- * WHAT IT NEEDS FIRST. Diarize results have to exist. Run the cron once with `?dry=1`
- * (`SPEAKER_CLUSTERS_ENABLED=1`, threshold still unset) — that diarizes and stores the service's
- * answer without clustering anything. This route then reads those rows. With none stored it says
- * so by name rather than reporting an empty sweep as a finding.
+ * WHAT IT NEEDS FIRST. Diarize results have to exist. With `ROOM_DIARIZE_ENABLED=1`, the room scan
+ * enqueues diarize_window jobs, and every job stores the service's answer in room_diarize_window —
+ * there is no separate dry mode, because storing is what every run does. This route then reads
+ * those rows. With none stored it says so by name rather than reporting an empty sweep as a finding.
  *
  * ALL SQL IS INFERRED. The read fails safe to empty with a logged reason — never a 500.
  */
@@ -126,7 +126,7 @@ export async function GET(req: NextRequest) {
     threshold_env: SPEAKER_MATCH_THRESHOLD_ENV,
     // Said out loud rather than left to be inferred from an empty sweep.
     note: rows.length === 0
-      ? `no stored diarize results for ${sessionId}. With SPEAKER_CLUSTERS_ENABLED=1, POST /api/admin/diarize-windows enqueues a diarize_window job per eligible window; every job stores the service's answer here. (There is no ?dry=1 any more — storing is what every run does.)`
+      ? `no stored diarize results for ${sessionId}. With ROOM_DIARIZE_ENABLED=1, POST /api/admin/diarize-windows enqueues a diarize_window job per eligible window; every job stores the service's answer here. (There is no ?dry=1 any more — storing is what every run does.)`
       : embeddings.length === 0
         ? "diarize results exist but carry no usable embeddings — the Mini returned speakers without embedding_base64, so clustering cannot be calibrated or performed"
         : null,

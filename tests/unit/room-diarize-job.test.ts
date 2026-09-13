@@ -32,7 +32,7 @@ vi.mock("@/lib/jobs/submit", () => ({
 
 const { enqueueDiarizeWindows } = await import("@/lib/stt/diarize-job");
 
-const ENV = ["SPEAKER_CLUSTERS_ENABLED", "SPEAKER_MATCH_THRESHOLD"];
+const ENV = ["ROOM_DIARIZE_ENABLED", "SPEAKER_CLUSTERS_ENABLED", "SPEAKER_MATCH_THRESHOLD"];
 let saved: Record<string, string | undefined> = {};
 const silent = () => {};
 
@@ -65,8 +65,37 @@ describe("the gate off is a TRUE no-op", () => {
   });
 });
 
+describe("ROOM_DIARIZE_ENABLED — one name, and the retired one is ignored LOUDLY", () => {
+  it("only ROOM_DIARIZE_ENABLED=1 turns the enqueue on", async () => {
+    const { roomDiarizeEnabled } = await import("@/lib/stt/diarize-job");
+    const quiet = () => {};
+    expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: "1" }, quiet)).toBe(true);
+    for (const v of [undefined, "", "0", "true", "yes"]) {
+      expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: v }, quiet), `value ${String(v)}`).toBe(false);
+    }
+  });
+
+  it("the OLD name set to 1 does NOT turn it on — and says so, rather than being silently read", async () => {
+    const { roomDiarizeEnabled } = await import("@/lib/stt/diarize-job");
+    const lines: string[] = [];
+    const on = roomDiarizeEnabled({ SPEAKER_CLUSTERS_ENABLED: "1" }, (m) => lines.push(m));
+    expect(on, "a stale setting must not keep the path alive").toBe(false);
+    expect(lines.join("\n"), "the operator who set it must be told it is ignored").toMatch(/SPEAKER_CLUSTERS_ENABLED is set and is IGNORED/);
+    expect(lines.join("\n")).toMatch(/ROOM_DIARIZE_ENABLED/);
+  });
+
+  it("no production code reads the retired name for behaviour", () => {
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    let hits = "";
+    try { hits = execFileSync("grep", ["-rn", "SPEAKER_CLUSTERS_ENABLED", "lib", "app"], { encoding: "utf8" }); } catch { hits = ""; }
+    // The only permitted mentions are the retirement constant and comments naming the rename.
+    const offenders = hits.split("\n").filter(Boolean).filter((l) => !/RETIRED_ENV|renamed|Renamed/.test(l));
+    expect(offenders, "a behavioural read of the old name is a second switch").toEqual([]);
+  });
+});
+
 describe("the enqueue", () => {
-  beforeEach(() => { process.env.SPEAKER_CLUSTERS_ENABLED = "1"; });
+  beforeEach(() => { process.env.ROOM_DIARIZE_ENABLED = "1"; });
 
   it("one diarize_window job per eligible window, with the window id and the caller as actor", async () => {
     responses = [[{ id: "bw_1" }, { id: "bw_2" }]];

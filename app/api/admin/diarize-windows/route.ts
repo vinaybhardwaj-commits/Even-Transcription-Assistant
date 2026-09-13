@@ -10,7 +10,8 @@
  * clustering, to accumulate calibration data; the job now stores that data on every run, so the
  * mode had nothing left to be different about.
  *
- * SHIPS DARK. `SPEAKER_CLUSTERS_ENABLED` is the on-switch for the scheduled enqueue. Unset, this is
+ * SHIPS DARK. `ROOM_DIARIZE_ENABLED` is the on-switch for the scheduled enqueue.
+ * (Renamed from SPEAKER_CLUSTERS_ENABLED in C2; the old name is ignored and logged.) Unset, this is
  * a clean no-op. It exists because this route runs every five minutes and the job runner every
  * minute: without it, deploying this would start diarizing every closed window on the Mini.
  *

@@ -313,7 +313,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
   it("ONE RUN: the route enqueues, the job's write is REJECTED by postgres, and nothing reads as success", async () => {
     const sql = G.__pgsql;
     SVC.fail = false;
-    process.env.SPEAKER_CLUSTERS_ENABLED = "1";
+    process.env.ROOM_DIARIZE_ENABLED = "1";
     await seedWindow("bw_rej", "sess_rej", 4 * WINDOW_MS, true);
     exec(`ALTER TABLE room_turn_speaker ADD CONSTRAINT t_refuse_rej CHECK (window_id <> 'bw_rej');`);
     try {
@@ -339,13 +339,13 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
       expect(okRow[0]!.n, "a window whose spans were refused must not be recorded as diarized").toBe(0);
     } finally {
       exec(`ALTER TABLE room_turn_speaker DROP CONSTRAINT t_refuse_rej;`);
-      delete process.env.SPEAKER_CLUSTERS_ENABLED;
+      delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
 
   it("a failed ENQUEUE returns a non-2xx — the route never looks like success when it could not queue", async () => {
     const sql = G.__pgsql;
-    process.env.SPEAKER_CLUSTERS_ENABLED = "1";
+    process.env.ROOM_DIARIZE_ENABLED = "1";
     await seedWindow("bw_enq", "sess_enq", 5 * WINDOW_MS);
     exec(`ALTER TABLE scribe_job ADD CONSTRAINT t_refuse_enq CHECK (args->>'window_id' IS DISTINCT FROM 'bw_enq');`);
     try {
@@ -359,7 +359,54 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
       expect(rows[0]!.n).toBe(0);
     } finally {
       exec(`ALTER TABLE scribe_job DROP CONSTRAINT t_refuse_enq;`);
-      delete process.env.SPEAKER_CLUSTERS_ENABLED;
+      delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
+});
+
+describe.skipIf(!HAVE_DOCKER)("0086 — room routing resolves to `route`, and `route` is not paid", () => {
+  it("resolveRouting returns route for room/english AND room/indic against the REAL rows", async () => {
+    const sql = G.__pgsql;
+    // The engine registry and routing table, from their own migrations — not hand-written shapes.
+    const strip = (f: string) => readFileSync(f, "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, "");
+    exec(strip("db/migrations/0018_stt_engine.sql"));
+    exec(strip("db/migrations/0021_stt_routing.sql"));
+    // The two room rows were created by the admin UI, not a migration (0062 says so). Seed them as
+    // they stood before 0084, then apply 0084 and 0086 verbatim, in order.
+    await sql`INSERT INTO stt_routing (stage, language_bucket, engine_id) VALUES ('room','english','sarvam'), ('room','indic','sarvam') ON CONFLICT DO NOTHING`;
+    exec(strip("db/migrations/0084_stt_routing_room_to_route.sql"));
+
+    const { resolveRouting } = await import("@/lib/stt/routing");
+    // BEFORE 0086: the pointer says route, but there is no engine row, so it resolves to nothing.
+    expect(await resolveRouting("room", "english"), "the bug 0086 fixes").toBeNull();
+
+    exec(strip("db/migrations/0086_stt_engine_route.sql"));
+    const english = await resolveRouting("room", "english");
+    const indic = await resolveRouting("room", "indic");
+    expect(english, "room/english must resolve to the engine the registry can run").toBe("route");
+    expect(indic, "room/indic too").toBe("route");
+
+    // NOT PAID — asserted on is_paid, never on cost_per_min_usd (NULL for every paid engine).
+    const { paidEngineInfo } = await import("@/lib/stt/paid-engines");
+    const info = await paidEngineInfo(english!);
+    expect(info.paid, "the resolved room engine must not bill").toBe(false);
+    const row = (await sql`SELECT is_paid, enabled, fanout_enabled, adapter_key FROM stt_engine WHERE id = 'route'`) as Array<{ is_paid: boolean; enabled: boolean; fanout_enabled: boolean; adapter_key: string }>;
+    expect(row[0]!.is_paid).toBe(false);
+    expect(row[0]!.enabled).toBe(true);
+    // Not quietly added to live encounter fan-out, which now runs free engines by default.
+    expect(row[0]!.fanout_enabled).toBe(false);
+  }, 300_000);
+
+  it("the row's key and capabilities are what the REGISTRY resolves, not a lookalike", async () => {
+    const sql = G.__pgsql;
+    const { adapterFor } = await import("@/lib/stt/registry");
+    const row = (await sql`SELECT id, adapter_key, capabilities_json FROM stt_engine WHERE id = 'route'`) as Array<{ id: string; adapter_key: string; capabilities_json: Record<string, unknown> }>;
+    const byId = adapterFor(row[0]!.id);
+    const byAdapterKey = adapterFor(row[0]!.adapter_key);
+    expect(byId, "resolveRouting's adapterFor(id) must find a real adapter").not.toBeNull();
+    expect(byAdapterKey, "fan-out's adapterFor(adapter_key) must find the same one").toBe(byId);
+    expect(byId!.key).toBe(row[0]!.id);
+    // The table and the code declare the same engine — a drift here is a registry lying about itself.
+    expect(row[0]!.capabilities_json).toEqual(byId!.capabilities);
+  }, 120_000);
 });

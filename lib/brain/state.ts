@@ -447,7 +447,8 @@ export const SQL_TURN_CUE_COUNTS =
  *
  * `speaker_cluster` used to be read here by a SQL constant that three callers ran. Nothing has
  * ever populated it in production: its only writer lived in the room diarize pass, behind
- * SPEAKER_CLUSTERS_ENABLED (off) and SPEAKER_MATCH_THRESHOLD (unset), and the table was confirmed
+ * a gate that was off (then SPEAKER_CLUSTERS_ENABLED, now renamed ROOM_DIARIZE_ENABLED) and
+ * SPEAKER_MATCH_THRESHOLD (unset), and the table was confirmed
  * EMPTY on the two heaviest room-days on record (OPD 3 on 9 Sep, OPD 7 on 10 Sep, 301 s of speech).
  * C2 deleted that writer. So every caller was receiving `[]` by accidentally querying a table no
  * code fills — indistinguishable from "clustering ran and found nobody", which is a real and

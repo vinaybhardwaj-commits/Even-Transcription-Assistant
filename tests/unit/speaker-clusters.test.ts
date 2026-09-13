@@ -16,7 +16,6 @@ import {
   matchCluster,
   runningMean,
   parseDiarizeSegments,
-  clustersEnabled,
   readThreshold,
   sweepThreshold,
   describeDistribution,
@@ -147,12 +146,6 @@ describe("the running mean", () => {
 });
 
 describe("the gate and the threshold", () => {
-  it('only the exact string "1" arms the slice', () => {
-    expect(clustersEnabled({ SPEAKER_CLUSTERS_ENABLED: "1" })).toBe(true);
-    for (const v of ["0", "true", "yes", "", undefined]) {
-      expect(clustersEnabled({ SPEAKER_CLUSTERS_ENABLED: v })).toBe(false);
-    }
-  });
 
   it("UNSET IS A LOUD REFUSAL, never a default", () => {
     expect(readThreshold({})).toEqual({ ok: false, error: "threshold_unset", raw: null });

@@ -19,14 +19,30 @@
  * `/api/admin/diarize-windows` runs on a five-minute cron and `/api/jobs/run` every minute. With no
  * gate, this would start diarizing every closed window within minutes of deploy — putting a
  * pyannote call on the Mini's single diarize slot, continuously, while STT is on hold. So
- * SPEAKER_CLUSTERS_ENABLED still decides whether the scheduled enqueue runs at all. It chooses
- * between "enqueue" and "do nothing", never between two ways of writing. (The name now says more
- * than the switch does — it no longer enables clustering — and renaming a production env var is a
- * deploy decision, not a code one.)
+ * ROOM_DIARIZE_ENABLED decides whether the scheduled enqueue runs at all. It chooses between
+ * "enqueue" and "do nothing", never between two ways of writing.
  */
 
 import { sql } from "@/lib/db";
-import { clustersEnabled } from "./speaker-clusters";
+
+/**
+ * THE ON-SWITCH. Renamed from SPEAKER_CLUSTERS_ENABLED in C2: clustering is deleted, and a name that
+ * promises clustering on a switch that only enqueues diarize jobs is a name that gets set for the
+ * wrong reason.
+ *
+ * ONE NAME. The old variable is never read for behaviour — reading both would let a stale setting
+ * quietly keep a path alive. If it is still present in an environment it is IGNORED, and that is
+ * logged loudly, because the operator who set it believes something is on that is not.
+ */
+export const ROOM_DIARIZE_ENABLED_ENV = "ROOM_DIARIZE_ENABLED";
+const RETIRED_ENV = "SPEAKER_CLUSTERS_ENABLED";
+
+export function roomDiarizeEnabled(env: Record<string, string | undefined> = process.env, log: (m: string) => void = console.error): boolean {
+  if ((env[RETIRED_ENV] ?? "").trim() !== "") {
+    log(`[room-diarize] ${RETIRED_ENV} is set and is IGNORED — it was renamed ${ROOM_DIARIZE_ENABLED_ENV}. Room diarize enqueue is controlled by ${ROOM_DIARIZE_ENABLED_ENV} only; move the setting.`);
+  }
+  return env[ROOM_DIARIZE_ENABLED_ENV] === "1";
+}
 
 /** Bounded so one tick enqueues a handful of windows beside the Mini's serialised service. */
 export const DIARIZE_BATCH_LIMIT = 4;
@@ -76,8 +92,8 @@ export async function enqueueDiarizeWindows(
   const log = opts.log ?? ((m: string) => console.log(m));
   const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], errors: [] };
 
-  if (!clustersEnabled()) {
-    log(`[room-diarize] SPEAKER_CLUSTERS_ENABLED is not "1" — enqueueing nothing (this is the shipped state)`);
+  if (!roomDiarizeEnabled(process.env, log)) {
+    log(`[room-diarize] ${ROOM_DIARIZE_ENABLED_ENV} is not "1" — enqueueing nothing (this is the shipped state)`);
     return result;
   }
   result.enabled = true;
