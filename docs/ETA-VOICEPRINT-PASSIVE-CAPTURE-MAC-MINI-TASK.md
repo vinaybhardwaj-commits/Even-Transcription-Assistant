@@ -16,7 +16,7 @@ In the `POST /diarize` response, add one field to every object in `speakers[]`:
 "speakers": [
   {
     "idx": 0, "label": "Clinician", "type": "clinician", "source": "auto",
-    "clinician_id": "doc_gkldkeu8", "confidence": 0.83,
+    "clinician_id": "doc_ab12cd34", "confidence": 0.83,
     "total_speech_sec": 41.2, "first_heard_at_sec": 0.4,
     "embedding_base64": "<768-byte little-endian float32[192], base64>"   // <-- ADD THIS
   }

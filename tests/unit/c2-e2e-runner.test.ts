@@ -18,6 +18,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { dockerAvailable, startPg, stopPg, exec, makeSql, PG_NAME } from "../support/pg-harness";
+import { makeFakeClinician } from "../support/fake-identity";
+import { repoFiles, textOf } from "../support/repo-files";
 
 const HAVE_DOCKER = dockerAvailable();
 /**
@@ -50,6 +52,15 @@ describe("REQUIRED PROOF — the diarize end-to-end suite", () => {
 });
 
 const QUERIES: string[] = [];
+
+/** The signed-in doctor and the Mini's /enroll answer, for the voice/identify route. */
+const IDENTIFY = vi.hoisted(() => ({ claims: null as null | { doctor_id: string; slug: string }, emb: "", enrollCalls: 0 }));
+vi.mock("@/lib/cookie", async (orig) => ({ ...(await orig<Record<string, unknown>>()), readDoctorCookie: async () => (IDENTIFY.claims ? "session" : null) }));
+vi.mock("@/lib/auth", async (orig) => ({ ...(await orig<Record<string, unknown>>()), verifyDoctorJwt: async () => IDENTIFY.claims }));
+vi.mock("@/lib/enroll", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  runEnroll: async () => { IDENTIFY.enrollCalls += 1; return { ok: true, embeddingBase64: IDENTIFY.emb }; },
+}));
 type PgSql = (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>;
 const G = globalThis as unknown as { __pgsql: PgSql };
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => G.__pgsql(s, ...v) }));
@@ -139,7 +150,7 @@ function seed(): void {
     INSERT INTO bench_window VALUES ('bw_e2e','sess_1','rd_1',0,${WINDOW_MS},'primary','clips/w.webm',true,'transcribed');
     -- The window is epoch 0..900000, so the chunk must cover THAT, not wall-clock now.
     INSERT INTO bench_chunk VALUES ('sess_1',0,'primary','chunks/a.webm','audio/webm', to_timestamp(0), to_timestamp(900), 'uploaded');
-    INSERT INTO clinician (id, full_name) VALUES ('doc_fake0001','Fake Clinician One');
+    INSERT INTO clinician (id, full_name) VALUES ('${makeFakeClinician(1).id}', '${makeFakeClinician(1).full_name}');
     INSERT INTO voice_print VALUES ('doc_fake0001', decode('${emb(1)}','base64'));
   `);
   const rows: string[] = [];
@@ -507,9 +518,9 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge blocker 3 — only ACTIVE clinicians are
   it("a DISABLED or DELETED clinician's centroid is not sent to /diarize; an active one is", async () => {
     const sql = G.__pgsql;
     await sql`INSERT INTO clinician (id, full_name, status, deleted_at) VALUES
-      ('doc_fake0201', 'Fake Active Clinician', 'active', NULL),
-      ('doc_fake0202', 'Fake Disabled Clinician', 'disabled', NULL),
-      ('doc_fake0203', 'Fake Deleted Clinician', 'active', now())`;
+      (${makeFakeClinician(201).id}, ${makeFakeClinician(201).full_name}, 'active', NULL),
+      (${makeFakeClinician(202).id}, ${makeFakeClinician(202).full_name}, 'disabled', NULL),
+      (${makeFakeClinician(203).id}, ${makeFakeClinician(203).full_name}, 'active', now())`;
     await sql`INSERT INTO voice_print VALUES ('doc_fake0201', decode(${emb(3)}, 'base64')), ('doc_fake0202', decode(${emb(4)}, 'base64')), ('doc_fake0203', decode(${emb(5)}, 'base64'))`;
     // A voiceprint with no clinician row at all — the old LEFT JOIN offered it under its bare id.
     await sql`INSERT INTO voice_print VALUES ('doc_fake0204', decode(${emb(6)}, 'base64'))`;
@@ -602,8 +613,10 @@ const FAKE_ACTIVE = ["doc_fake0101", "doc_fake0102", "doc_fake0103", "doc_fake01
 function voiceprintSchema(): void {
   const m0017 = readFileSync("db/migrations/0017_voice_sample.sql", "utf8");
   const vs = m0017.slice(m0017.indexOf("CREATE TABLE IF NOT EXISTS voice_sample"), m0017.indexOf(");", m0017.indexOf("CREATE TABLE IF NOT EXISTS voice_sample")) + 2);
-  const row = (id: string, n: string, status = "active", deleted = "NULL") =>
-    `('${id}', 'Fake Clinician ${n}', 'fake.${n}@example.test', 'dr-fake-clinician-${n}-0000', '0000', '${status}', ${deleted})`;
+  const row = (id: string, n: string, status = "active", deleted = "NULL") => {
+    const c = makeFakeClinician(Number(n));
+    return `('${c.id}', '${c.full_name}', '${c.email}', '${c.url_slug}', '${c.url_token}', '${status}', ${deleted})`;
+  };
   exec(`
     CREATE EXTENSION IF NOT EXISTS citext;
     DO $$ BEGIN CREATE TYPE clinician_type AS ENUM ('physician','dietitian','physiotherapist'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -678,9 +691,9 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint enrol — POST /api/admin/voic
   it("MERGE BLOCKER 2: the old create-a-doctor shape is REFUSED as unknown fields — nothing is minted", async () => {
     const before = await counts();
     for (const entry of [
-      { full_name: "Fake New Person", email: "fake.new@example.test", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
-      { clinician_id: FAKE_ACTIVE[0]!, full_name: "Fake Rename", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
-      { clinician_id: FAKE_ACTIVE[0]!, email: "fake.other@example.test", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { full_name: makeFakeClinician(900).full_name, email: makeFakeClinician(900).email, centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { clinician_id: FAKE_ACTIVE[0]!, full_name: makeFakeClinician(901).full_name, centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { clinician_id: FAKE_ACTIVE[0]!, email: makeFakeClinician(902).email, centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
       { clinician_id: FAKE_ACTIVE[0]!, specialty: "ENT", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
     ]) {
       const r = await postLoad({ entries: [entry] });
@@ -688,7 +701,7 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint enrol — POST /api/admin/voic
       expect(JSON.stringify(r.body)).toMatch(/unknown_field_(full_name|email|specialty)|clinician_id_required/);
     }
     expect(await counts()).toEqual(before);
-    const c = (await G.__pgsql`SELECT count(*)::int AS n FROM clinician WHERE email = 'fake.new@example.test'`) as Array<{ n: number }>;
+    const c = (await G.__pgsql`SELECT count(*)::int AS n FROM clinician WHERE email = ${makeFakeClinician(900).email}`) as Array<{ n: number }>;
     expect(c[0]!.n).toBe(0);
   }, 120_000);
 
@@ -907,7 +920,7 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint enrol — POST /api/admin/voic
     const bV = await psql(`${printSql(vecB)};`);
     await aV;
     expect(bV.ms, "B really overlapped A's open transaction and waited on its lock").toBeGreaterThan(700);
-    expect(bV.out.trim(), "B's statement returned no centroid and inserted no sample").toBe("|0");
+    expect(bV.out.trim(), "B's statement returned no centroid, inserted no sample, and wrote no audit row").toBe("|0|0");
     const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = ${target}`) as Array<{ c: string; sample_count: number }>;
     expect(vp).toHaveLength(1);
     expect(vp[0]!.c.replace(/\s+/g, ""), "A's vector exactly — never the average").toBe(vecA);
@@ -916,3 +929,226 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint enrol — POST /api/admin/voic
     expect(vs[0]!.n, "ONE voiceprint, ONE sample").toBe(1);
   }, 180_000);
 });
+
+// ---------------------------------------------------------------------------
+// C2 MERGE GATE — control characters, the audit gap, and every voiceprint reader
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!HAVE_DOCKER)("C2 merge gate 1 — no string the database cannot store, and no voiceprint without its audit row", () => {
+  const entry = (over: Record<string, unknown> = {}, prov: Record<string, unknown> = {}) =>
+    ({ clinician_id: "doc_fake0108", centroid_base64: synthVec(14), provenance: { source_file: "t.json", ...prov }, ...over });
+
+  it("a NUL, any control character, or a lone surrogate in source_file or centroid_id is a 400 with a named reason — and writes NOTHING", async () => {
+    await G.__pgsql`DELETE FROM voice_sample WHERE clinician_id = 'doc_fake0108'`;
+    await G.__pgsql`DELETE FROM voice_print WHERE doctor_id = 'doc_fake0108'`;
+    const before = await counts();
+    const cases: Array<[Record<string, unknown>, string]> = [];
+    for (const field of ["source_file", "centroid_id"]) {
+      for (const [bad, reason] of [
+        ["a\u0000b", "control_character"], ["\u0001", "control_character"], ["tab\there", "control_character"],
+        ["new\nline", "control_character"], ["\u001f", "control_character"], ["del\u007f", "control_character"],
+        ["c1\u0085", "control_character"], ["c1\u009f", "control_character"],
+        ["hi\ud800", "lone_surrogate"], ["\udc00lo", "lone_surrogate"], ["\udc00\ud800", "lone_surrogate"], ["x\udbffy", "lone_surrogate"],
+      ] as Array<[string, string]>) {
+        cases.push([{ [field]: bad }, `provenance.${field}_contains_a_${reason}`]);
+      }
+    }
+    for (const [prov, reason] of cases) {
+      const r = await postLoad({ entries: [entry({}, prov)] });
+      expect(r.status, `${JSON.stringify(prov)} -> ${JSON.stringify(r.body).slice(0, 160)}`).toBe(400);
+      expect(JSON.stringify(r.body)).toContain(reason);
+    }
+    // A control character in an unknown FIELD NAME is not echoed back.
+    const r = await postLoad({ entries: [{ ...entry(), ["x\u0000y"]: 1 }] });
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).toContain("unknown_field_(unprintable)");
+    expect(await counts(), "no voiceprint, sample or audit row").toEqual(before);
+    // A valid non-ASCII name is not a control character: it is accepted, and audited.
+    const ok = await postLoad({ entries: [entry({}, { source_file: "enrol-\u00e9t\u00e9-\ud83c\udf99.json" })] });
+    expect(ok.status, JSON.stringify(ok.body).slice(0, 200)).toBe(200);
+  }, 180_000);
+
+  it("ATOMIC: when the AUDIT row is refused by the database, NO voiceprint and NO sample land", async () => {
+    const sql = G.__pgsql;
+    const target = "doc_fake0109";
+    await sql`DELETE FROM voice_sample WHERE clinician_id = ${target}`;
+    await sql`DELETE FROM voice_print WHERE doctor_id = ${target}`;
+    const auditBefore = (await sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'voiceprint.load' AND target_id = ${target}`) as Array<{ n: number }>;
+    // NOT VALID: earlier tests' audit rows stay; every NEW voiceprint.load row is refused.
+    exec(`ALTER TABLE audit_log ADD CONSTRAINT t_refuse_audit CHECK (action <> 'voiceprint.load') NOT VALID;`);
+    try {
+      const r = await postLoad({ entries: [{ clinician_id: target, centroid_base64: synthVec(15), provenance: { source_file: "a.json" } }] });
+      expect(r.status, "a refused audit write is a failure, never success-shaped").toBe(500);
+      const vp = (await sql`SELECT count(*)::int AS n FROM voice_print WHERE doctor_id = ${target}`) as Array<{ n: number }>;
+      const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = ${target}`) as Array<{ n: number }>;
+      expect(vp[0]!.n, "a biometric write with no trail must not exist").toBe(0);
+      expect(vs[0]!.n).toBe(0);
+      const auditMid = (await sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'voiceprint.load' AND target_id = ${target}`) as Array<{ n: number }>;
+      expect(auditMid[0]!.n).toBe(auditBefore[0]!.n);
+    } finally {
+      exec(`ALTER TABLE audit_log DROP CONSTRAINT t_refuse_audit;`);
+    }
+    // With the audit table accepting again, the same request lands voiceprint AND audit row together.
+    const r2 = await postLoad({ entries: [{ clinician_id: target, centroid_base64: synthVec(15), provenance: { source_file: "a.json" } }] });
+    expect(r2.status).toBe(200);
+    const au = (await sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'voiceprint.load' AND target_id = ${target}`) as Array<{ n: number }>;
+    expect(au[0]!.n, "exactly one new audit row, in the same statement as the voiceprint").toBe(auditBefore[0]!.n + 1);
+  }, 180_000);
+
+  it("500-HUNT: every malformed input and every cap boundary answers 4xx or 200 — never 500", async () => {
+    const { LIMITS } = await import("@/lib/voiceprint-load");
+    const good = () => entry();
+    const bodies: Array<[string, unknown, string?]> = [];
+    const add = (label: string, e: unknown) => bodies.push([label, { entries: [e] }]);
+    // types, per field
+    for (const v of [12345, 1.5, true, false, null, [], ["doc_fake0108"], {}, { $ne: null }]) add(`clinician_id=${JSON.stringify(v)}`, { ...good(), clinician_id: v });
+    for (const v of [7, true, null, [], {}, [1, 2, 3]]) add(`centroid=${JSON.stringify(v)}`, { ...good(), centroid_base64: v });
+    for (const v of ["t.json", 1, true, [], null]) add(`provenance=${JSON.stringify(v)}`, { ...good(), provenance: v });
+    for (const v of [99, true, null, [], {}]) add(`source_file=${JSON.stringify(v)}`, { ...good(), provenance: { source_file: v } });
+    for (const v of [5, true, [], {}]) add(`centroid_id=${JSON.stringify(v)}`, { ...good(), provenance: { source_file: "t", centroid_id: v } });
+    for (const v of ["121", null, -1, 0, true, [], LIMITS.enroll_seconds_max + 0.01]) add(`enroll_seconds=${JSON.stringify(v)}`, { ...good(), provenance: { source_file: "t", enroll_seconds: v } });
+    for (const v of ["yes", 1, null, []]) add(`probe_only=${JSON.stringify(v)}`, { ...good(), provenance: { source_file: "t", probe_only: v } });
+    // control characters and surrogates, in every string field
+    for (const bad of ["\u0000", "a\u0007b", "\r\n", "\u007f", "\u0080", "\ud800", "\udfff", "z\ud83c"]) {
+      add(`id+${JSON.stringify(bad)}`, { ...good(), clinician_id: `doc_fake0108${bad}` });
+      add(`centroid+${JSON.stringify(bad)}`, { ...good(), centroid_base64: `${synthVec(14).slice(0, -4)}${bad}AAA` });
+      add(`source_file+${JSON.stringify(bad)}`, { ...good(), provenance: { source_file: `f${bad}` } });
+      add(`centroid_id+${JSON.stringify(bad)}`, { ...good(), provenance: { source_file: "t", centroid_id: `c${bad}` } });
+      add(`key+${JSON.stringify(bad)}`, { ...good(), [`k${bad}`]: 1 });
+    }
+    // shapes and unknowns
+    for (const e of ["a string", 42, null, true, [], { ...good(), room: "opd" }, { ...good(), full_name: makeFakeClinician(903).full_name }, { centroid_base64: synthVec(1), provenance: { source_file: "t" } }]) add(`entry=${JSON.stringify(e).slice(0, 30)}`, e);
+    // centroid content
+    for (const [label, c] of [["191", synthVec(9, 191)], ["193", synthVec(9, 193)], ["zero", Buffer.alloc(768).toString("base64")], ["nan", Buffer.from(new Float32Array(192).fill(Number.NaN).buffer).toString("base64")], ["urlsafe", synthVec(14).replace(/\+/g, "-").replace(/\//g, "_")], ["newline", `${synthVec(14).slice(0, 500)}\n${synthVec(14).slice(500)}`], ["huge", "A".repeat(LIMITS.centroid_base64 + 4)], ["767b", Buffer.alloc(767, 1).toString("base64")]] as Array<[string, string]>) {
+      add(`centroid:${label}`, { ...good(), centroid_base64: c });
+    }
+    // cap boundaries, one over each
+    add("id>cap", { ...good(), clinician_id: "d".repeat(LIMITS.clinician_id + 1) });
+    add("source_file>cap", { ...good(), provenance: { source_file: "f".repeat(LIMITS.source_file + 1) } });
+    add("centroid_id>cap", { ...good(), provenance: { source_file: "t", centroid_id: "c".repeat(LIMITS.centroid_id + 1) } });
+    add("unknown id", { ...good(), clinician_id: "doc_fake0999" });
+    add("disabled", { ...good(), clinician_id: "doc_fake0106" });
+    add("deleted", { ...good(), clinician_id: "doc_fake0107" });
+    // raw bodies
+    const raws: Array<[string, string]> = [["not json", "not json"], ["[]", "[]"], ["null", "null"], ["entries str", "{\"entries\":\"x\"}"], ["entries []", "{\"entries\":[]}"], ["51 entries", JSON.stringify({ entries: Array.from({ length: 51 }, () => good()) })], ["extra key", "{\"entries\":[],\"x\":1}"], ["lone surrogate escape in key", "{\"entries\":[],\"\\ud800\":1}"], ["too large", JSON.stringify({ entries: [{ ...good(), provenance: { source_file: "x".repeat(LIMITS.body_bytes) } }] })]];
+
+    let fiveHundreds = 0;
+    const statuses: Record<string, number> = {};
+    for (const [label, body] of bodies) {
+      const r = await postLoad(body);
+      statuses[label] = r.status;
+      if (r.status >= 500) fiveHundreds += 1;
+      expect([400, 404], `${label} -> ${r.status} ${JSON.stringify(r.body).slice(0, 160)}`).toContain(r.status);
+    }
+    for (const [label, raw] of raws) {
+      const r = await postLoad(null, undefined, raw);
+      if (r.status >= 500) fiveHundreds += 1;
+      expect(r.status, `${label} -> ${JSON.stringify(r.body).slice(0, 160)}`).toBe(400);
+    }
+    // exactly AT every cap: accepted
+    await G.__pgsql`DELETE FROM voice_sample WHERE clinician_id = 'doc_fake0110'`;
+    await G.__pgsql`DELETE FROM voice_print WHERE doctor_id = 'doc_fake0110'`;
+    const at = await postLoad({ entries: [{ clinician_id: "doc_fake0110", centroid_base64: synthVec(16), provenance: { source_file: "f".repeat(LIMITS.source_file), centroid_id: "c".repeat(LIMITS.centroid_id), enroll_seconds: LIMITS.enroll_seconds_max, probe_only: false } }] });
+    if (at.status >= 500) fiveHundreds += 1;
+    expect(at.status, JSON.stringify(at.body).slice(0, 200)).toBe(200);
+    console.log(`[500-hunt] inputs=${bodies.length + raws.length + 1} five_hundreds=${fiveHundreds}`);
+    expect(fiveHundreds).toBe(0);
+  }, 300_000);
+});
+
+describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is accounted for", () => {
+  beforeAll(async () => {
+    if (!HAVE_DOCKER) return;
+    // A disabled and a deleted clinician WITH voiceprints — written directly, as a doctor enrolled
+    // before being disabled would have them. (The enrol endpoint refuses both.)
+    for (const [id, seed] of [["doc_fake0106", 60], ["doc_fake0107", 61]] as Array<[string, number]>) {
+      await G.__pgsql`INSERT INTO voice_print (doctor_id, centroid, sample_count) VALUES (${id}, decode(${synthVec(seed)}, 'base64'), 1) ON CONFLICT (doctor_id) DO NOTHING`;
+    }
+  }, 120_000);
+
+  it("ENCOUNTER READER: loadActiveClinicianCentroid gives the active doctor's centroid, and nothing for a disabled or deleted one", async () => {
+    const { loadActiveClinicianCentroid } = await import("@/lib/stt/diarize-window");
+    const active = await loadActiveClinicianCentroid(FAKE_ACTIVE[0]!);
+    expect(active?.clinician_id).toBe(FAKE_ACTIVE[0]!);
+    expect(active?.centroid_base64.replace(/\s+/g, "")).toBe(synthVec(1));
+    expect(await loadActiveClinicianCentroid("doc_fake0106"), "disabled").toBeNull();
+    expect(await loadActiveClinicianCentroid("doc_fake0107"), "deleted").toBeNull();
+    // The process route reads through it, and reads voice_print nowhere else (a supplement to the above).
+    const route = readFileSync("app/[slug]/api/encounters/[id]/process/route.ts", "utf8");
+    expect(route).toContain("await loadActiveClinicianCentroid(row.doctor_id)");
+    expect(route).not.toMatch(/\b(FROM|JOIN)\s+voice_print\b/);
+  }, 120_000);
+
+  it("IDENTIFY: an active doctor identifies; a DISABLED or DELETED doctor with a still-valid login token is refused before any centroid is used", async () => {
+    const { POST } = await import("@/app/[slug]/api/voice/identify/route");
+    const { NextRequest } = await import("next/server");
+    const call = async (doctorId: string) => {
+      const slug = `dr-slug-${doctorId}`;
+      IDENTIFY.claims = { doctor_id: doctorId, slug };
+      const form = new FormData();
+      form.append("audio", new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" }), "a.webm");
+      const res = await POST(new NextRequest(`https://x.test/${slug}/api/voice/identify`, { method: "POST", body: form }), { params: Promise.resolve({ slug }) });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    };
+    IDENTIFY.emb = synthVec(1);
+    IDENTIFY.enrollCalls = 0;
+    const ok = await call(FAKE_ACTIVE[0]!);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ enrolled: true, identified: true });
+    expect(IDENTIFY.enrollCalls).toBe(1);
+
+    for (const id of ["doc_fake0106", "doc_fake0107"]) {
+      IDENTIFY.enrollCalls = 0;
+      const r = await call(id);
+      expect(r.status, id).toBe(403);
+      expect(JSON.stringify(r.body)).toContain("clinician_not_active");
+      expect(IDENTIFY.enrollCalls, "refused before the Mini is even asked").toBe(0);
+    }
+    // A token for a clinician row that no longer exists is refused the same way.
+    expect((await call("doc_fake0999")).status).toBe(403);
+    IDENTIFY.claims = null;
+  }, 120_000);
+
+  it("OPERATOR VIEW: scribe_list_voiceprints shows disabled and deleted doctors, marks them not matchable, and its summary says so", async () => {
+    const { VOICE_TOOLS } = await import("@/lib/mcp/tools/voice");
+    const tool = VOICE_TOOLS.find((t) => t.name === "scribe_list_voiceprints")!;
+    const out = (await tool.handler({} as never, {} as never)) as { voiceprints: Array<{ clinician_id: string; clinician_status: string | null; deleted: boolean; matchable: boolean }>; summary: { total: number; matchable: number } };
+    const byId = new Map(out.voiceprints.map((v) => [v.clinician_id, v]));
+    expect(byId.get("doc_fake0106"), "a disabled doctor's voiceprint is SHOWN").toMatchObject({ clinician_status: "disabled", deleted: false, matchable: false });
+    expect(byId.get("doc_fake0107"), "and a deleted one's").toMatchObject({ clinician_status: "active", deleted: true, matchable: false });
+    expect(byId.get(FAKE_ACTIVE[0]!)).toMatchObject({ clinician_status: "active", deleted: false, matchable: true });
+    expect(out.summary.total).toBe(out.voiceprints.length);
+    expect(out.summary.matchable, "the count cannot mislead: total and matchable differ when rows are hidden from matching").toBe(out.voiceprints.filter((v) => v.matchable).length);
+    expect(out.summary.total).toBeGreaterThan(out.summary.matchable);
+    // And the matching reader agrees with `matchable`, row for row.
+    const { loadClinicianCentroids } = await import("@/lib/stt/diarize-window");
+    const matching = new Set((await loadClinicianCentroids()).map((c) => c.clinician_id));
+    for (const v of out.voiceprints) expect(matching.has(v.clinician_id), v.clinician_id).toBe(v.matchable);
+  }, 120_000);
+
+  it("THE SWEEP: every file that reads voice_print or a voice_sample embedding is classified; a new reader fails until it is", () => {
+    // Tracked AND untracked files, so a new reader is caught before it is committed.
+    const READS = /\b(?:FROM|JOIN)\s+voice_print\b|encode\(embedding/;
+    const hits = repoFiles()
+      .filter((f) => /^(lib|app|scripts)\//.test(f) && /\.[cm]?[jt]sx?$/.test(f))
+      .filter((f) => READS.test(textOf(f) ?? ""))
+      .sort();
+    const MATCHING_FILTERED = ["app/[slug]/api/voice/identify/route.ts", "lib/stt/diarize-window.ts"];
+    const OPERATOR_UNFILTERED = [
+      "app/api/admin/doctors/[id]/voice-samples/[sampleId]/embedding/route.ts",
+      "app/api/admin/doctors/[id]/voice-samples/route.ts",
+      "app/api/admin/doctors/[id]/voiceprint/embedding/route.ts",
+      "lib/mcp/tools/voice.ts",
+    ];
+    const PRESENCE_ONLY = ["app/[slug]/page.tsx"]; // SELECT 1 — whether the signed-in doctor is enrolled; no vector
+    const WRITER_SIDE = ["lib/voice-samples.ts"]; // recomputeCentroid reads samples to write the centroid
+    const known = new Set([...MATCHING_FILTERED, ...OPERATOR_UNFILTERED, ...PRESENCE_ONLY, ...WRITER_SIDE]);
+    expect(hits.filter((f) => !known.has(f)), "an unclassified voiceprint reader").toEqual([]);
+    for (const f of MATCHING_FILTERED) {
+      const src = readFileSync(f, "utf8");
+      expect(src, f).toContain("status = 'active'");
+      expect(src, f).toContain("deleted_at IS NULL");
+    }
+  });
+});
+

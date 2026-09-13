@@ -47,7 +47,10 @@ export async function POST(req: NextRequest) {
   try { body = JSON.parse(text); } catch { return respondError("VALIDATION_FAILED", "body_not_json"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) return respondError("VALIDATION_FAILED", "body_must_be_an_object");
   const unknown = Object.keys(body).filter((k) => k !== "entries");
-  if (unknown.length) return respondError("VALIDATION_FAILED", `unknown_field_${unknown[0]!.slice(0, 40)}`);
+  if (unknown.length) {
+    const k = unknown[0]!;
+    return respondError("VALIDATION_FAILED", `unknown_field_${/^[A-Za-z0-9_.-]{1,40}$/.test(k) ? k : "(unprintable)"}`);
+  }
   const entries = (body as { entries?: unknown }).entries;
   if (!Array.isArray(entries) || entries.length === 0) return respondError("VALIDATION_FAILED", "entries_required");
   if (entries.length > LIMITS.entries) return respondError("VALIDATION_FAILED", "too_many_entries");

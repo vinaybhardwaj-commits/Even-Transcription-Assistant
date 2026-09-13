@@ -15,6 +15,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(5);
+const FAKE_OPERATOR = makeFakeOperator(1);
 
 const calls: Array<{ text: string; values: unknown[] }> = [];
 const txCalls: Array<Array<{ text: string; values: unknown[] }>> = [];
@@ -50,7 +54,7 @@ vi.mock("@/lib/db", () => {
 });
 
 vi.mock("@/lib/cookie", () => ({ readAdminCookie: async () => null }));
-vi.mock("@/lib/auth", () => ({ verifyAdminJwt: async () => ({ admin_id: "adm_1", email: "v@even.in" }) }));
+vi.mock("@/lib/auth", () => ({ verifyAdminJwt: async () => ({ admin_id: "adm_1", email: FAKE_OPERATOR.email }) }));
 
 const M = await import("@/lib/room-install");
 
@@ -99,7 +103,7 @@ describe("the bootstrap script (§4.4)", () => {
     blobUrl: "https://x.public.blob.vercel-storage.com/rr-1.0.3.zip",
     sha256: "a".repeat(64),
     version: "1.0.3",
-    roomName: "OPD 5 Dr Salanki",
+    roomName: `OPD 5 ${FAKE_DOC.label}`,
   };
 
   it("carries every line the PRD body specifies, including bootout", () => {
@@ -110,7 +114,7 @@ describe("the bootstrap script (§4.4)", () => {
     expect(s).toContain('"$DEST/$APP/Contents/MacOS/room-recorder" enrol --token "$TOKEN" --origin "$ORIGIN"');
     expect(s).toContain('"$DEST/$APP/Contents/MacOS/room-recorder" install-launch-agent');
     expect(s).toContain('launchctl bootstrap "gui/$(id -u)" "$PLIST" || launchctl load "$PLIST"');
-    expect(s).toContain("Installed and enrolled as OPD 5 Dr Salanki. Close this window.");
+    expect(s).toContain(`Installed and enrolled as OPD 5 ${FAKE_DOC.label}. Close this window.`);
   });
 
   it("substitutes the real blob url, sha and version", () => {
@@ -160,7 +164,7 @@ describe("release registration (§4.2)", () => {
         blobUrl: "https://x.public.blob.vercel-storage.com/a.zip",
         channel: "stable",
         manifest: { version: "1.0.3", build_sha: "abc1234", sha256: goodSha, size_bytes: 999 },
-        publishedBy: "adm_1",
+        publishedBy: FAKE_OPERATOR.id,
         fetchImpl: fetchOf(goodBytes),
       }),
     ).rejects.toMatchObject({ code: "SHA_MISMATCH" });
@@ -174,7 +178,7 @@ describe("release registration (§4.2)", () => {
         blobUrl: "https://x.public.blob.vercel-storage.com/a.zip",
         channel: "stable",
         manifest: { version: "1.0.3", build_sha: "abc1234", sha256: "b".repeat(64), size_bytes: goodBytes.byteLength },
-        publishedBy: "adm_1",
+        publishedBy: FAKE_OPERATOR.id,
         fetchImpl: fetchOf(goodBytes),
       }),
     ).rejects.toMatchObject({ code: "SHA_MISMATCH" });
@@ -189,7 +193,7 @@ describe("release registration (§4.2)", () => {
       blobUrl: "https://x.public.blob.vercel-storage.com/a.zip",
       channel: "stable",
       manifest: { version: "1.0.3", build_sha: "abc1234", sha256: realSha, size_bytes: goodBytes.byteLength },
-      publishedBy: "adm_1",
+      publishedBy: FAKE_OPERATOR.id,
       fetchImpl: fetchOf(goodBytes),
     });
     expect(rel.sha256).toBe(realSha);

@@ -17,6 +17,10 @@ import {
   type InstallView,
   type ReleaseView,
 } from "@/lib/room-install-view";
+import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(5);
+const FAKE_OPERATOR = makeFakeOperator(1);
 
 const NOW = new Date("2026-09-07T14:40:00.000Z");
 const nowMs = NOW.getTime();
@@ -57,7 +61,7 @@ const release = (over: Partial<ReleaseView> = {}): ReleaseView => ({
   blob_url: "https://x.public.blob.vercel-storage.com/a.zip",
   channel: "stable",
   published_at: ago(86_400_000),
-  published_by: "vinay",
+  published_by: FAKE_OPERATOR.name,
   withdrawn_at: null,
   notes: null,
   min_macos: "15.0",
@@ -66,8 +70,8 @@ const release = (over: Partial<ReleaseView> = {}): ReleaseView => ({
 
 const row = (over: Partial<FleetRow> = {}): FleetRow => ({
   room_id: "room_1",
-  room_slug: "opd-5-salanki",
-  room_name: "OPD 5 Dr Salanki",
+  room_slug: `opd-5-${FAKE_DOC.url_slug}`,
+  room_name: `OPD 5 ${FAKE_DOC.label}`,
   disabled: false,
   install: null,
   pending: null,

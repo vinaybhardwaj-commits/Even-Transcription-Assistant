@@ -7,7 +7,9 @@ import { mkdirSync } from "node:fs";
  * trigger lockout. Requires PLAYWRIGHT_DOCTOR_PIN (a CI secret).
  */
 const BASE_URL = process.env.BASE_URL || "https://www.evenscribe.app";
-const SLUG = process.env.PLAYWRIGHT_DOCTOR_SLUG || "dr-vinay-bhardwaj-cjzs";
+const SLUG = process.env.PLAYWRIGHT_DOCTOR_SLUG ?? "";
+// No default: a real doctor account is configured (CI sets it), never hard-coded in a public repo.
+if (!SLUG) throw new Error("PLAYWRIGHT_DOCTOR_SLUG env var required (the e2e doctor account)");
 const PIN = process.env.PLAYWRIGHT_DOCTOR_PIN;
 
 export default async function globalSetup() {

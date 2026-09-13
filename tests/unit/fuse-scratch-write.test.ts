@@ -61,6 +61,9 @@ import { POST } from "@/app/api/brain/cues/route";
 import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";
 import { SQL_CUE_INSERT, SQL_CUE_INSERT_SCRATCH } from "@/lib/brain/state";
 import { scratchRoomDayIdFor, scratchRoomIdFor, scratchSlugFor, SCRATCH_PIN_HASH } from "@/lib/brain/scratch";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(7);
 
 const tool = (name: string) => {
   const t = BENCH_TOOLS.find((x) => x.name === name);
@@ -88,7 +91,7 @@ let sessionStatus: "recording" | "paused" | "ended" = "ended";
 const T0 = Date.parse("2026-08-19T05:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 const EVENTS = [
-  { id: "be_1", kind: "consult_mark", at: iso(T0 + 60_000), brain_status: "sent", payload: { source: "kiosk", note: "Dr Sharma" } },
+  { id: "be_1", kind: "consult_mark", at: iso(T0 + 60_000), brain_status: "sent", payload: { source: "kiosk", note: FAKE_DOC.label } },
   { id: "be_2", kind: "mic_primary_lost", at: iso(T0 + 120_000), brain_status: "sent", payload: { reason: "silence", idx: 1 } },
   { id: "be_3", kind: "mic_primary_restored", at: iso(T0 + 180_000), brain_status: "sent", payload: { reason: "audio_resumed", idx: 1 } },
   { id: "be_4", kind: "kiosk_tab_gone", at: iso(T0 + 240_000), brain_status: "sent", payload: {} }, // not replayable

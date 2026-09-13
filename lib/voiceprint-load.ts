@@ -17,8 +17,11 @@
  * admin, in the admin UI.
  *
  * ─── WHAT IT GUARANTEES ─────────────────────────────────────────────────────────────────────────
- *   STRICT     — every field has a type and a length cap; anything else, including a field this
- *                file does not know, is a 400 with a named reason. See LIMITS.
+ *   STRICT     — every field has a type and a length cap, and no string may carry a control
+ *                character or a lone UTF-16 surrogate; anything else, including a field this file
+ *                does not know, is a 400 with a named reason. See LIMITS and badText.
+ *   AUDITED    — the voiceprint, its sample and its audit row are ONE statement. There is no state
+ *                in which a biometric write exists without its trail.
  *   EXACT      — a centroid is 192 float32 and re-encodes byte-identically to what was sent.
  *   A VOICE    — a centroid with no direction (zero or near-zero L2 norm) is refused.
  *   ACTIVE     — the clinician must exist and be active by the SAME predicate room matching uses
@@ -130,6 +133,21 @@ export type EntryLoaded = {
 
 type Resolved = { index: number; entry: LoadEntry };
 
+/**
+ * Why a string may not be stored as text: a C0/C1 control character (Postgres refuses NUL in text
+ * outright, and the rest have no business in a file name), or a lone UTF-16 surrogate (it cannot be
+ * encoded as UTF-8 at all, so Postgres refuses it — in a jsonb audit row, AFTER a voiceprint written
+ * by an earlier statement had already committed). Returns the named problem, or null.
+ */
+export function badText(v: string): "control_character" | "lone_surrogate" | null {
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(v)) return "control_character";
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v)) return "lone_surrogate";
+  return null;
+}
+
+/** A field name is echoed in a refusal only if it is plainly printable; anything else is not repeated. */
+const echoKey = (k: string) => (/^[A-Za-z0-9_.-]{1,40}$/.test(k) ? k : "(unprintable)");
+
 const ENTRY_KEYS = new Set(["clinician_id", "centroid_base64", "provenance"]);
 const PROVENANCE_KEYS = new Set(["source_file", "centroid_id", "enroll_seconds", "probe_only"]);
 const CLINICIAN_ID = /^[A-Za-z0-9_-]+$/;
@@ -145,12 +163,14 @@ const sampleIdFor = (clinicianId: string, b64: string) =>
  */
 export function checkEntryShape(entry: unknown): string | null {
   if (!isPlainObject(entry)) return "entry_must_be_an_object";
-  for (const k of Object.keys(entry)) if (!ENTRY_KEYS.has(k)) return `unknown_field_${k.slice(0, 40)}`;
+  for (const k of Object.keys(entry)) if (!ENTRY_KEYS.has(k)) return `unknown_field_${echoKey(k)}`;
 
   const id = entry.clinician_id;
   if (id === undefined || id === null) return "clinician_id_required";
   if (typeof id !== "string") return "clinician_id_must_be_a_string";
   if (id.length === 0 || id.length > LIMITS.clinician_id) return `clinician_id_length_must_be_1_to_${LIMITS.clinician_id}`;
+  // [A-Za-z0-9_-] only, so no control character or surrogate can pass. centroid_base64 is held to
+  // the base64 alphabet by checkCentroid for the same reason.
   if (!CLINICIAN_ID.test(id)) return "clinician_id_has_invalid_characters";
 
   if (entry.centroid_base64 !== undefined && entry.centroid_base64 !== null && typeof entry.centroid_base64 !== "string") {
@@ -160,11 +180,15 @@ export function checkEntryShape(entry: unknown): string | null {
   const p = entry.provenance;
   if (p === undefined || p === null) return "provenance_required";
   if (!isPlainObject(p)) return "provenance_must_be_an_object";
-  for (const k of Object.keys(p)) if (!PROVENANCE_KEYS.has(k)) return `unknown_field_provenance.${k.slice(0, 40)}`;
+  for (const k of Object.keys(p)) if (!PROVENANCE_KEYS.has(k)) return `unknown_field_provenance.${echoKey(k)}`;
   if (typeof p.source_file !== "string") return "provenance.source_file_must_be_a_string";
+  const sfBad = badText(p.source_file);
+  if (sfBad) return `provenance.source_file_contains_a_${sfBad}`;
   if (p.source_file.trim().length === 0 || p.source_file.length > LIMITS.source_file) return `provenance.source_file_length_must_be_1_to_${LIMITS.source_file}`;
   if (p.centroid_id !== undefined) {
     if (typeof p.centroid_id !== "string") return "provenance.centroid_id_must_be_a_string";
+    const ciBad = badText(p.centroid_id);
+    if (ciBad) return `provenance.centroid_id_contains_a_${ciBad}`;
     if (p.centroid_id.trim().length === 0 || p.centroid_id.length > LIMITS.centroid_id) return `provenance.centroid_id_length_must_be_1_to_${LIMITS.centroid_id}`;
   }
   if (p.enroll_seconds !== undefined) {
@@ -250,11 +274,16 @@ export async function writeEntries(resolved: Resolved[]): Promise<EntryLoaded[]>
     const sessionId = `curated:${(p.centroid_id ?? p.source_file).slice(0, 80)}${p.probe_only ? ":probe_only" : ""}`;
     const durationMs = typeof p.enroll_seconds === "number" ? Math.round(p.enroll_seconds * 1000) : null;
 
-    // ONE STATEMENT: the voiceprint and its sample land together or not at all.
+    // ONE STATEMENT: the voiceprint, its sample AND its audit row land together or not at all. The
+    // Neon HTTP driver commits every statement on its own, so an audit INSERT sent after this one
+    // could fail with the voiceprint already committed — a biometric write with no trail. Here a
+    // refused audit row refuses the voiceprint with it.
     //   vp — insert the voiceprint in exactly the row shape recomputeCentroid writes for one sample.
     //        On conflict it is kept, and RETURNED, only if it already IS this vector from one sample
     //        (the idempotent re-run). Any other existing voiceprint returns no row.
     //   vs — the sample, only when vp returned a row.
+    //   au — the audit row, only when vp returned a row; `sample` is read from vs in this statement.
+    const audit = JSON.stringify({ source_file: p.source_file, centroid_id: p.centroid_id ?? null, dim: VOICEPRINT_DIM, probe_only: p.probe_only === true });
     const res = (await sql`
       WITH vp AS (
         INSERT INTO voice_print
@@ -276,9 +305,15 @@ export async function writeEntries(resolved: Resolved[]): Promise<EntryLoaded[]>
           FROM vp
         ON CONFLICT (id) DO NOTHING
         RETURNING id
+      ), au AS (
+        INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+        SELECT 'system', 'voiceprint_load', 'voiceprint.load', 'doctor', vp.doctor_id,
+               ${audit}::jsonb || jsonb_build_object('sample', CASE WHEN EXISTS (SELECT 1 FROM vs) THEN 'inserted' ELSE 'already_present' END)
+          FROM vp
+        RETURNING 1
       )
-      SELECT (SELECT c FROM vp) AS c, (SELECT count(*)::int FROM vs) AS inserted
-    `) as Array<{ c: string | null; inserted: number }>;
+      SELECT (SELECT c FROM vp) AS c, (SELECT count(*)::int FROM vs) AS inserted, (SELECT count(*)::int FROM au) AS audited
+    `) as Array<{ c: string | null; inserted: number; audited: number }>;
 
     const back = (res[0]?.c ?? "").replace(/\s+/g, "");
     if (!back) {
@@ -290,13 +325,12 @@ export async function writeEntries(resolved: Resolved[]): Promise<EntryLoaded[]>
     if (back !== b64) {
       throw new Error(`stored centroid for entry ${r.index} does not round-trip`);
     }
+    if (Number(res[0]?.audited ?? 0) !== 1) {
+      // Unreachable while au selects FROM vp; stated so a future edit that breaks it cannot pass quietly.
+      throw new Error(`entry ${r.index}: voiceprint statement returned no audit row`);
+    }
     const sample: EntryLoaded["sample"] = Number(res[0]?.inserted ?? 0) > 0 ? "inserted" : "already_present";
 
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', 'voiceprint_load', 'voiceprint.load', 'doctor', ${clinicianId},
-              ${JSON.stringify({ source_file: p.source_file, centroid_id: p.centroid_id ?? null, dim: VOICEPRINT_DIM, sample, probe_only: p.probe_only === true })}::jsonb)
-    `;
     out.push({ index: r.index, clinician_id: clinicianId, sample, dim: VOICEPRINT_DIM, roundtrip: true });
   }
   return out;

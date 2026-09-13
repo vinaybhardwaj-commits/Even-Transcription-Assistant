@@ -69,6 +69,24 @@ export async function loadClinicianCentroids(): Promise<ClinicianCentroid[]> {
 }
 
 /**
+ * ONE clinician's voiceprint, for an ENCOUNTER — the encounter knows whose consultation it is.
+ * Same active predicate as loadClinicianCentroids: a disabled or deleted doctor's voice is not
+ * offered, and the encounter is still processed with heuristic speaker labels.
+ */
+export async function loadActiveClinicianCentroid(doctorId: string): Promise<ClinicianCentroid | null> {
+  const rows = (await sql`
+    SELECT encode(vp.centroid, 'base64') AS centroid_b64, d.full_name AS full_name
+      FROM voice_print vp JOIN clinician d ON d.id = vp.doctor_id
+     WHERE vp.doctor_id = ${doctorId}
+       AND d.status = 'active'
+       AND d.deleted_at IS NULL
+     LIMIT 1
+  `) as Array<{ centroid_b64: string | null; full_name: string }>;
+  if (!rows[0]?.centroid_b64) return null;
+  return { clinician_id: doctorId, full_name: rows[0].full_name, centroid_base64: rows[0].centroid_b64 };
+}
+
+/**
  * Every turn of a window.
  *
  * `payload->'window'` holds the WINDOW bounds `buildTurns` stamps on every cue, and it identifies

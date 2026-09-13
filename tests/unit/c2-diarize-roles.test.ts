@@ -9,6 +9,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { roleForSpeaker, rolesByIndex, attributionCoverage } from "@/lib/stt/speaker-roles";
 import type { DiarizeSpeaker } from "@/lib/diarize";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(7);
 
 const matched = (idx: number, id = "doc_fake0001"): DiarizeSpeaker =>
   ({ idx, label: "Dr X", type: "clinician", source: "auto", clinician_id: id, confidence: 0.82, total_speech_sec: 12 });
@@ -38,7 +41,7 @@ describe("item 3 — NEVER infer role from speaker order", () => {
   it("the service's own `type` and `label` are NOT evidence — with no centroids it invents them", () => {
     // With an empty centroid list the cascade labels the longest cluster "Patient" and, in other
     // shapes, could say "clinician" from a heuristic. Neither may create an attribution.
-    expect(roleForSpeaker(unmatched(0, { type: "clinician", label: "Dr Someone", source: "heuristic" })).role).toBeNull();
+    expect(roleForSpeaker(unmatched(0, { type: "clinician", label: FAKE_DOC.label, source: "heuristic" })).role).toBeNull();
     expect(roleForSpeaker(unmatched(1, { type: "patient" })).role).toBeNull();
   });
 

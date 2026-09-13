@@ -13,6 +13,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
+import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(5);
+const FAKE_OPERATOR = makeFakeOperator(1);
 
 const calls: Array<{ text: string; values: unknown[] }> = [];
 let responses: unknown[] = [];
@@ -244,8 +248,8 @@ const install = (over: Partial<V.InstallView> = {}): V.InstallView => ({
 
 const row = (i: V.InstallView | null): V.FleetRow => ({
   room_id: "room_1",
-  room_slug: "opd-5-dr-salanki-wxmp",
-  room_name: "OPD 5 Dr Salanki",
+  room_slug: `opd-5-${FAKE_DOC.url_slug}`,
+  room_name: `OPD 5 ${FAKE_DOC.label}`,
   disabled: false,
   install: i,
   pending: null,

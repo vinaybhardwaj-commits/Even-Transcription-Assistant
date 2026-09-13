@@ -215,7 +215,7 @@ Full detail: `ETA-MAC-MINI-BACKEND-HANDOVER.md`. server.py (`~/eta-diarize/serve
 - Add `OPENAI_API_KEY` in Vercel to switch medical-term extraction to cloud (`STT_GOLD_EXTRACT_MODEL` default gpt-4o-mini).
 - Re-add the two STT-Lab secret env vars as **Sensitive** in Vercel.
 - Remove the stale `doctor` pgTable from schema.ts (cosmetic).
-- Soft-deleted test clinician `doc_cqcwzd7q` still present (reset-pin refuses deleted rows, as expected).
+- A soft-deleted test clinician is still present (reset-pin refuses deleted rows, as expected).
 - Update `APP_URL` env → evenscribe.app (`canonicalAppUrl()` masks it for now).
 
 ### Candidate next builds (not started)

@@ -46,7 +46,7 @@ We're continuing **ETA — the Even Transcription Assistant**, user-facing **eve
 | Vercel region | `bom1` (Mumbai) |
 | Primary domain | `evenscribe.app` (+ `www`, + legacy `eta.llmvinayminihome.uk`) |
 | Admin login | `vinay.bhardwaj@even.in` / `<REDACTED>` |
-| Test doctor slug | `dr-vinay-bhardwaj-cjzs` (doctor id `doc_gkldkeu8`) |
+| Test doctor slug | `dr-vinay-bhardwaj-cjzs` |
 | Sarvam API key | `<REDACTED>` |
 | STT relay shared secret | `STT_RELAY_SECRET = <REDACTED>` (same on Mac relay + Vercel) |
 | Neon project | `calm-resonance-28753525` / branch `br-wild-snow-aoowura2` |
