@@ -103,7 +103,7 @@ vi.mock("@/lib/diarize", () => ({
 
 const WIN = { start: windowStart(1000), end: windowEnd(901_000) };
 const call = (over: Record<string, unknown> = {}) =>
-  ({ windowId: "bw_1", roomDayId: "rd_1", window: WIN, audio: new Uint8Array([1]), ...over });
+  ({ windowId: "bw_1", roomDayId: "rd_1", window: WIN, audio: new Uint8Array([1]), runId: "run_unit", ...over });
 
 describe("D1 — a turn containing a speaker change gets NO name", () => {
   beforeEach(() => {

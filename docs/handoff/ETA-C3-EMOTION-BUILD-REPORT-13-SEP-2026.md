@@ -24,32 +24,42 @@ its speakers from that table. Turning on `EMOTION_ENABLED` alone scores nothing.
   places to be wrong.
 
 ## Mini endpoint (additive; the existing endpoints are untouched)
-`POST https://emotion.llmvinayminihome.uk/inference/wavlm/segments` — `~/eta-emotion/app.py`, backup
-at `~/eta-emotion/app.py.bak-segments-20260913144128`. The diff against the backup removes no line.
+`POST https://emotion.llmvinayminihome.uk/inference/wavlm/segments` — `~/eta-emotion/app.py`. Backups:
+`app.py.bak-segments-20260913144128` (before the endpoint) and `app.py.bak-ssrf-*` (before the security
+fix). Lines 1–818 — every pre-existing endpoint — are byte-identical to the original.
 
-Request (JSON): `{ "audio_url": "<https presigned GET>", "segments": [{ "start_s": n, "end_s": n }, …] }`
-- `audio_url` must be https on a host ending `.r2.cloudflarestorage.com`
-  (`EMOTION_AUDIO_URL_HOST_SUFFIXES`); redirects are refused; at most 200 MB; 60 s fetch timeout. The
-  service is behind a public hostname and must not fetch arbitrary URLs.
-- 1 to 16 segments (`EMOTION_SEGMENTS_MAX`); numeric, finite, `0 <= start_s < end_s`.
+**SECURED 13 Sep 2026 (C3 security fix).** The first version fetched any https URL on any
+`*.r2.cloudflarestorage.com` host, unauthenticated: an open SSRF and a denial-of-service amplifier on a
+serialised service. It now requires, before anything is fetched:
+1. `Authorization: Bearer <EMOTION_SEGMENTS_SECRET>` — constant-time compare. Unset on the service → 503
+   `segments_endpoint_not_configured` for every request. Missing or wrong → 401 `unauthorised`.
+2. `audio_url`: https, port 443 or none, no credentials, host EXACTLY equal to `EMOTION_AUDIO_URL_HOST`
+   (our R2 bucket host, virtual-hosted, so the host names the bucket). Anything else → 400
+   `audio_url_host_not_allowed` / `audio_url_not_https` / `audio_url_has_credentials` /
+   `audio_url_port_not_allowed`.
 
-Behaviour: fetch ONCE, decode ONCE (ffmpeg → 16 kHz mono), slice in memory, score each segment with
-wavlm, answer in request order. Per segment, before inference: longer than `max_duration_s` →
-`segment_longer_than_max_duration_s` (REFUSED, never truncated); past the decoded audio (0.05 s
-slack) → `segment_beyond_audio`; under 0.1 s → `segment_too_short_for_model`. Never loads emotion2vec.
+Caps, each a named refusal, never a truncation: request body 64 KB; audio 25 MB
+(`audio_larger_than_byte_cap`, by Content-Length and while streaming); connect 5 s, read 15 s
+(`fetch_timeout`); fetch wall 30 s (`fetch_wall_clock_exceeded`); any 3xx → `fetch_redirect_refused`;
+decoded audio over 1800 s → `audio_longer_than_duration_cap` (ffmpeg stops decoding at 1801 s); whole
+request 85 s — segments not reached by then are refused `request_deadline_exceeded`. Per segment, as
+before: over `max_duration_s` refused, past the audio refused, under 0.1 s refused. WavLM only.
 
-Response: `{ ok, model_key:"wavlm", model, device, subfolder, max_duration_s, max_segments,
-audio_bytes, audio_duration_s, fetch_s, decode_s, results:[{ index, start_s, end_s, ok, labels, top,
-duration_s, inference_s } | { index, start_s, end_s, ok:false, error }] }`. 400 for a malformed request
-or a disallowed URL; 502 `fetch_failed: <ExceptionType>` (the URL is never echoed); 200 ok:false for a
-decode or inference failure.
+Configuration: `EMOTION_SEGMENTS_SECRET` and `EMOTION_AUDIO_URL_HOST` in the launchd plist
+(`~/Library/LaunchAgents/uk.llmvinayminihome.emotion.plist`, now mode 0600; pre-change copy in
+`~/eta-emotion/uk.llmvinayminihome.emotion.plist.bak-ssrf-*`). The secret was generated on the Mini
+into `~/.config/eta-emotion/segments-secret` (0600) and never printed. The app sends it from its own
+`EMOTION_SEGMENTS_SECRET`; without it the job fails `emotion_not_configured` and makes no call.
 
-**Restart:** once, deliberately, 13 Sep 2026 09:14:05Z (`launchctl kickstart -k
-gui/501/uk.llmvinayminihome.emotion`). `/health` answered `loaded:true` at t+22 s; the log shows
-wavlm ready in 8.3 s (eager, int8). Before the restart **emotion2vec was loaded** in the running
-process (not by this build); after it, emotion2vec is not loaded and available RAM rose from 1,297 MB
-to 2,362 MB. First call after restart 0.54 s inference (the model's eager load runs a dummy pass, so
-the ~35 s cold start did not recur); second call 0.11 s.
+Request (JSON): `{ "audio_url": "<https presigned GET on our bucket host>", "segments": [{ "start_s": n, "end_s": n }, …] }`,
+1–16 segments. Response: `{ ok, model_key:"wavlm", model, device, subfolder, max_duration_s, max_segments,
+audio_bytes, audio_duration_s, fetch_s, decode_s, results:[…] }`. 502 for a refused fetch (fixed code,
+the URL never echoed), 422 for a refused decode.
+
+**Restarts:** two in total, each deliberate — 09:14:05Z (endpoint added) and 10:35:34Z (security fix;
+bootout + bootstrap so launchd re-read the environment). After the second, available RAM was 1,185 MB,
+under the service's 3,500 MB eager threshold, so WavLM started LAZY; the first call loaded it (8.8 s,
+9.1 s wall), the next took 0.29 s. emotion2vec not loaded after either restart.
 
 **Live test** through the tunnel on a real 300 s session chunk (1.19 MB): fetch 1.0 s, decode 0.9 s,
 16 segments × 18.8 s scored in 8.3 s inference (max 1.46 s per segment), 10.6 s end to end. Over-cap

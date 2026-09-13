@@ -147,13 +147,36 @@ describe("the service contract — parsed strictly", () => {
     }
   });
 
-  it("health: the cap is required; `loaded` is reported as unknown when the service does not say", async () => {
+  it("health: only a 2xx with ok:true is trusted; the cap is required and must be in [10, 60]; `loaded` unknown when unsaid", async () => {
     const { emotionHealth } = await import("@/lib/emotion/client");
-    const f = (body: unknown) => async () => new Response(JSON.stringify(body), { status: 200 });
-    expect(await emotionHealth(f({ max_duration_s: 60, loaded: true, models: { wavlm: { loaded: true, subfolder: "int8" } } }))).toEqual({ ok: true, cap_s: 60, loaded: true, model: null, subfolder: "int8" });
-    expect(await emotionHealth(f({ max_duration_s: 60 }))).toMatchObject({ ok: true, loaded: "unknown" });
-    expect(await emotionHealth(f({ loaded: true }))).toEqual({ ok: false, error: "health_cap_unreadable" });
+    const f = (body: unknown, status = 200) => async () => new Response(JSON.stringify(body), { status });
+    expect(await emotionHealth(f({ ok: true, max_duration_s: 60, loaded: true, models: { wavlm: { loaded: true, subfolder: "int8" } } }))).toEqual({ ok: true, cap_s: 60, loaded: true, model: null, subfolder: "int8" });
+    expect(await emotionHealth(f({ ok: true, max_duration_s: 10 }))).toMatchObject({ ok: true, cap_s: 10, loaded: "unknown" });
+    // A 500 carrying ok:false, loaded:false AND a cap: the cap is not a cap.
+    expect(await emotionHealth(f({ ok: false, loaded: false, max_duration_s: 60 }, 500))).toEqual({ ok: false, error: "health_http_500" });
+    expect(await emotionHealth(f({ ok: false, loaded: false, max_duration_s: 60 }, 200))).toEqual({ ok: false, error: "health_not_ok" });
+    expect(await emotionHealth(f({ ok: true, loaded: true }))).toEqual({ ok: false, error: "health_cap_unreadable" });
+    for (const cap of [1.5, 9.99, 60.01, 120]) {
+      expect(await emotionHealth(f({ ok: true, max_duration_s: cap })), String(cap)).toMatchObject({ ok: false, error: expect.stringMatching(/^health_cap_out_of_range/) });
+    }
     expect(await emotionHealth(async () => { throw new TypeError("fetch failed"); })).toMatchObject({ ok: false });
+  });
+
+  it("scoreSegments makes NO call without the shared secret, and sends it when set", async () => {
+    const { scoreSegments } = await import("@/lib/emotion/client");
+    const seen: Array<Record<string, string>> = [];
+    const f = async (_u: string, init: RequestInit) => { seen.push(init.headers as Record<string, string>); return new Response(JSON.stringify({ ok: false, error: "x" }), { status: 200 }); };
+    const saved = process.env.EMOTION_SEGMENTS_SECRET;
+    try {
+      delete process.env.EMOTION_SEGMENTS_SECRET;
+      expect(await scoreSegments("https://b.r2.example/k", [{ start_s: 0, end_s: 1 }], f)).toEqual({ ok: false, error: "emotion_secret_not_configured", retryable: false });
+      expect(seen).toHaveLength(0);
+      process.env.EMOTION_SEGMENTS_SECRET = "unit-secret";
+      await scoreSegments("https://b.r2.example/k", [{ start_s: 0, end_s: 1 }], f);
+      expect(seen[0]!.authorization).toBe("Bearer unit-secret");
+    } finally {
+      if (saved === undefined) delete process.env.EMOTION_SEGMENTS_SECRET; else process.env.EMOTION_SEGMENTS_SECRET = saved;
+    }
   });
 
   it("the client only ever calls the batch wavlm path — never emotion2vec, never the bare /inference", () => {
@@ -164,6 +187,19 @@ describe("the service contract — parsed strictly", () => {
 });
 
 describe("G — nothing in C3 names, indexes or describes a speaker as a particular kind of person", () => {
+  it("the diarize service's own speaker guess is stored under a key that says what it is — never at the top level", async () => {
+    const { speakersForStorage, SERVICE_GUESS_KEY } = await import("@/lib/stt/diarize-window");
+    expect(SERVICE_GUESS_KEY).toBe("unverified_service_guess");
+    const [a, b] = speakersForStorage([
+      { idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fake0001", confidence: 0.81, embedding_base64: "AAAA" },
+      { idx: 1, label: "Guess", type: "other", source: "heuristic", role_source: "heuristic", embedding_base64: "BBBB" },
+    ]);
+    for (const sp of [a!, b!]) for (const k of ["type", "label", "source", "role_source"]) expect(sp, k).not.toHaveProperty(k);
+    expect(a).toMatchObject({ idx: 0, clinician_id: "doc_fake0001", confidence: 0.81, embedding_base64: "AAAA", unverified_service_guess: { type: "clinician", label: "Dr", source: "auto" } });
+    expect(b!.unverified_service_guess).toMatchObject({ type: "other", label: "Guess", source: "heuristic", role_source: "heuristic" });
+    expect(String((b!.unverified_service_guess as Record<string, unknown>).is)).toMatch(/not an attribution/);
+  });
+
   it("no C3 file — code, SQL, comments or descriptions — uses the word", () => {
     const WORD = ["pat", "ient"].join("");
     const files = [

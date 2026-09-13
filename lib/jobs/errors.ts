@@ -49,6 +49,8 @@ export const JOB_ERROR_CODES = [
   "diarize_not_ok",
   "diarize_changed",
   "emotion_window_failed",
+  "emotion_not_configured",
+  "emotion_cap_changed",
   // the stubs
   "not_implemented",
 ] as const;

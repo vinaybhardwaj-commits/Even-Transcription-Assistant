@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS room_emotion_window (
   window_id         text PRIMARY KEY REFERENCES bench_window(id) ON DELETE CASCADE,
   room_day_id       text,
   state             text NOT NULL,
-  -- The room_diarize_window.attempts the segments were planned from.
-  diarize_attempt   integer NOT NULL,
+  -- The diarize run (room_diarize_window.last_run_id, 0090) whose turns the segments were planned from.
+  diarize_run_id    text NOT NULL,
   attempts          integer NOT NULL DEFAULT 1,
   failure_history   jsonb NOT NULL DEFAULT '[]'::jsonb,
   error             text,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS room_emotion_window (
 
 CREATE TABLE IF NOT EXISTS room_span_emotion (
   window_id         text NOT NULL REFERENCES bench_window(id) ON DELETE CASCADE,
-  diarize_attempt   integer NOT NULL,
+  diarize_run_id    text NOT NULL,
   -- Wall-clock bounds of the run of turns this segment belongs to, and of this chunk of it.
   run_start_ms      bigint NOT NULL,
   run_end_ms        bigint NOT NULL,
@@ -77,9 +77,10 @@ CREATE TABLE IF NOT EXISTS room_span_emotion (
   device            text,
   inference_s       double precision,
   duration_s        double precision,
+  -- The cap the segment was PLANNED under; the scoring call must report the same cap or the window fails.
   cap_s             double precision,
   scored_at         timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (window_id, diarize_attempt, speaker_idx, run_start_ms, chunk_idx),
+  PRIMARY KEY (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx),
   CONSTRAINT room_span_emotion_state_chk CHECK (state IN ('scored', 'skipped', 'failed')),
   CONSTRAINT room_span_emotion_bounds_chk CHECK (segment_end_ms > segment_start_ms AND run_end_ms > run_start_ms
                                                  AND chunk_idx >= 0 AND chunk_count >= 1 AND chunk_idx < chunk_count),

@@ -21,6 +21,20 @@ export type EmotionLabel = (typeof EMOTION_LABELS)[number];
 /** Env first, literal behind it — the idiom every Mini tunnel adapter uses. */
 const BASE = () => (process.env.EMOTION_BASE_URL || "https://emotion.llmvinayminihome.uk").replace(/\/+$/, "");
 
+/**
+ * THE PLAUSIBLE CAP. The service is configured for 60 s (EMOTION_MAX_DURATION_S in its launchd
+ * plist); without that setting its code falls back to 120 s, which scored 61 s and 90 s segments.
+ * Below 10 s the chunk target falls under 9 s and a window fragments (a cap of 1.5 s produced 154
+ * segments over 11 calls). A cap outside [10, 60] is a misconfigured or misbehaving service, and the
+ * window fails by name rather than planning around it.
+ */
+export const EMOTION_CAP_MIN_S = 10;
+export const EMOTION_CAP_MAX_S = 60;
+
+/** The shared secret the Mini's batch endpoint requires. Without it no call is made. */
+export const EMOTION_SECRET_ENV = "EMOTION_SEGMENTS_SECRET";
+export const emotionSecretConfigured = (env: Record<string, string | undefined> = process.env) => Boolean((env[EMOTION_SECRET_ENV] ?? "").trim());
+
 /** Under the 100 s the tunnel allows a request. */
 export const EMOTION_CALL_TIMEOUT_MS = 90_000;
 export const EMOTION_HEALTH_TIMEOUT_MS = 10_000;
@@ -36,9 +50,14 @@ export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<Emotion
   try {
     const res = await fetchImpl(`${BASE()}/health`, { signal: AbortSignal.timeout(EMOTION_HEALTH_TIMEOUT_MS), cache: "no-store" });
     const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== "object") return { ok: false, error: `health_unparseable_http_${res.status}` };
+    // TRUST NOTHING FROM AN UNHEALTHY ANSWER. A 500 with ok:false can still carry a max_duration_s;
+    // a cap that arrives alongside a failure is not a cap.
+    if (!res.ok) return { ok: false, error: `health_http_${res.status}` };
+    if (!body || typeof body !== "object") return { ok: false, error: "health_unparseable" };
+    if (body.ok !== true) return { ok: false, error: "health_not_ok" };
     const cap = body.max_duration_s;
-    if (typeof cap !== "number" || !Number.isFinite(cap) || cap <= 1) return { ok: false, error: "health_cap_unreadable" };
+    if (typeof cap !== "number" || !Number.isFinite(cap)) return { ok: false, error: "health_cap_unreadable" };
+    if (cap < EMOTION_CAP_MIN_S || cap > EMOTION_CAP_MAX_S) return { ok: false, error: `health_cap_out_of_range: ${cap}s not in [${EMOTION_CAP_MIN_S}, ${EMOTION_CAP_MAX_S}]` };
     const models = body.models as Record<string, Record<string, unknown>> | undefined;
     const wavlm = models?.wavlm;
     const loadedRaw = wavlm && typeof wavlm.loaded === "boolean" ? wavlm.loaded : typeof body.loaded === "boolean" ? body.loaded : null;
@@ -113,11 +132,13 @@ export async function scoreSegments(
   segments: Array<{ start_s: number; end_s: number }>,
   fetchImpl: Fetcher = fetch,
 ): Promise<SegmentsResponse> {
+  const secret = (process.env[EMOTION_SECRET_ENV] ?? "").trim();
+  if (!secret) return { ok: false, error: "emotion_secret_not_configured", retryable: false };
   let res: Response;
   try {
     res = await fetchImpl(`${BASE()}/inference/wavlm/segments`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
       body: JSON.stringify({ audio_url: audioUrl, segments }),
       signal: AbortSignal.timeout(EMOTION_CALL_TIMEOUT_MS),
       cache: "no-store",
