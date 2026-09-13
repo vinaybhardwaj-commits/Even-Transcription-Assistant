@@ -1,0 +1,343 @@
+
+> even-transcription-assistant@0.1.0 test
+> npm run typecheck:tests && vitest run
+
+
+> even-transcription-assistant@0.1.0 typecheck:tests
+> tsc --noEmit -p tsconfig.tests.json
+
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/vinaybhardwaj/dev/Even-Transcription-Assistant
+
+ ✓ tests/unit/fuse-arms.test.ts (57 tests) 44ms
+ ✓ tests/unit/room-install.test.ts (38 tests) 26ms
+ ✓ tests/unit/speech-turns-k3.test.ts (41 tests) 39ms
+ ✓ tests/unit/bench-room-states.test.ts (52 tests) 17ms
+ ✓ tests/unit/warehouse-join.test.ts (33 tests) 35ms
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > dry by default: the turns come back, and NOTHING is posted
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > K3 — dry_run:false posts ONE batch: delete the window, then insert the whole set
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > K3 — the completeness cue says the window finished, and carries the window for its own delete
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > K3 — the four counts come back, and a replace reports what it deleted
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > a window with nothing in it writes ONE stt_silence, beside its completeness cue
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > K3 §4 — a brain that refuses rolls the turns back and commits ONLY the admission
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > K3 §4 — when even the admission cannot be written, nothing is claimed
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns.test.ts > scribe_transcribe_range — turns, and writing them > FAILS DRY: only an explicit false writes — a typo, a string or a null stays dry
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+ ✓ tests/unit/speech-turns.test.ts (30 tests) 13ms
+ ✓ tests/unit/fuse-scratch-write.test.ts (25 tests) 29ms
+ ✓ tests/unit/fuse-report.test.ts (68 tests) 21ms
+ ✓ tests/unit/monitoring-surface-b1.test.ts (52 tests) 16ms
+ ✓ tests/unit/rooms-live.test.ts (55 tests) 10ms
+ ✓ tests/unit/room-install-update.test.ts (38 tests) 7ms
+ ✓ tests/unit/room-install-b2.test.ts (35 tests) 29ms
+stdout | tests/unit/room-install-b2.test.ts > the card renders today's fleet as one row per room > nine rooms (seven on 0.1.19, two on 0.1.8), twelve retired, one null install → 9 rows, 12 in disclosures, 1 Unassigned
+[fixture] rows=9 disclosures=6 earlier_total=12 unassigned=1 move_to_stable=2
+
+stderr | tests/unit/tier2-jobs.test.ts > runOneStep > CRASH MID-STEP: the job resumes at the same step with failures +1, and finishes
+[jobs] step threw {"job_id":"job_0","kind":"fake","step":"one","err":"runner died"}
+
+stderr | tests/unit/tier2-jobs.test.ts > item 2 — three consecutive throws persist failures = 3 > throw x3 leaves failures 3 and status failed — the terminal throw is counted like any other
+[jobs] step threw {"job_id":"job_0","kind":"always_throws","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"always_throws","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"always_throws","step":"one","err":"boom"}
+
+stderr | tests/unit/tier2-jobs.test.ts > item 2 — three consecutive throws persist failures = 3 > the count rises one per throw, visible at each step
+[jobs] step threw {"job_id":"job_0","kind":"always_throws2","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"always_throws2","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"always_throws2","step":"one","err":"boom"}
+
+stderr | tests/unit/tier2-jobs.test.ts > item 2 — three consecutive throws persist failures = 3 > no ordinal wording — the message reads as prose
+[jobs] step threw {"job_id":"job_0","kind":"t3","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"t3","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"t3","step":"one","err":"boom"}
+
+stderr | tests/unit/tier2-jobs.test.ts > item 4 — the cap is lifetime > a success between throws does not forgive them
+[jobs] step threw {"job_id":"job_0","kind":"flaky","step":"one","err":"flake"}
+[jobs] step threw {"job_id":"job_0","kind":"flaky","step":"one","err":"flake"}
+[jobs] step threw {"job_id":"job_0","kind":"flaky","step":"one","err":"flake"}
+
+stderr | tests/unit/tier2-jobs.test.ts > mutation survivors (A1–A6): every clause of the claim and the writes is load-bearing > A1 — a CANCELLED job's failure counter does not climb (recordFailure's status guard)
+[jobs] step threw {"job_id":"job_0","kind":"a1","step":"one","err":"boom"}
+
+stderr | tests/unit/tier2-jobs.test.ts > mutation survivors (A1–A6): every clause of the claim and the writes is load-bearing > A2 — the cap fires at exactly MAX_FAILURES, not one later (the >= comparison)
+[jobs] step threw {"job_id":"job_0","kind":"a2","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"a2","step":"one","err":"boom"}
+[jobs] step threw {"job_id":"job_0","kind":"a2","step":"one","err":"boom"}
+
+ ✓ tests/unit/tier2-jobs.test.ts (37 tests) 19ms
+ ✓ tests/unit/room-install-audio-input.test.ts (19 tests) 36ms
+stderr | tests/unit/refuter-b-queue.test.ts > (a) two runners never claim the same job > a stale runner that lost its lease mid-step abandons rather than writing
+[jobs] lease lost mid-step; abandoning {"job_id":"job_94jwl798nek1","kind":"slow","step":"start","runner":"runner-A"}
+
+ ✓ tests/unit/refuter-b-queue.test.ts (13 tests) 13ms
+stderr | tests/unit/refuter-b-queue.test.ts > (d) three throws > failures reaches exactly 3, the job is terminal, the message has no ordinal
+[jobs] step threw {"job_id":"job_wcdsu1fn19y9","kind":"boom","step":"start","err":"downstream exploded"}
+[jobs] step threw {"job_id":"job_wcdsu1fn19y9","kind":"boom","step":"start","err":"downstream exploded"}
+[jobs] step threw {"job_id":"job_wcdsu1fn19y9","kind":"boom","step":"start","err":"downstream exploded"}
+
+stderr | tests/unit/refuter-b-queue.test.ts > (d) three throws > the overFailureCap path's message has no ordinal either
+[jobs] step threw {"job_id":"job_effdu498vz0i","kind":"boom","step":"start","err":"downstream exploded"}
+[jobs] step threw {"job_id":"job_effdu498vz0i","kind":"boom","step":"start","err":"downstream exploded"}
+[jobs] step threw {"job_id":"job_effdu498vz0i","kind":"boom","step":"start","err":"downstream exploded"}
+
+ ✓ tests/unit/fuse-live.test.ts (31 tests) 33ms
+ ✓ tests/unit/mic-health-b2.test.ts (43 tests) 9ms
+stderr | tests/unit/bench-stitch.test.ts > a window inside one piece > transcribe on a single piece still returns the whole-chunk text and the honest note
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/bench-stitch.test.ts > a window crossing two pieces > transcribe on a crossing window runs on the joined clip and says the text covers the window
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/bench-stitch.test.ts > over thirty minutes > transcribe refuses the same window the same way
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/bench-stitch.test.ts > the recording guard (D15) > transcribe is guarded by the same rule
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/bench-stitch.test.ts > joining unavailable (D10) > transcribe degrades to the multi-piece answer too, never a 500
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+ ✓ tests/unit/bench-stitch.test.ts (21 tests) 30ms
+stderr | tests/unit/mcp-s3.test.ts > scribe_extract_audio / scribe_transcribe_range > transcribe: engine comes from the REGISTRY; returns whole-chunk text + the honest note
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/bench-commands.test.ts > install poll additions (§4.3, §4.5 rule 3) > keeps the room recording when the install write itself fails
+[room-install] poll write FAILED — install rows are not being updated {"install_id":"install_1","room_id":"room_1","err":"install store unavailable"}
+[room-install] audit insert failed {"action":"install.poll_write_failed","install_id":"install_1","err":"install store unavailable"}
+
+ ✓ tests/unit/bench-commands.test.ts (21 tests) 7ms
+ ✓ tests/unit/mcp-s3.test.ts (21 tests) 24ms
+stderr | tests/unit/ended-disagrees.test.ts > THE DISCRIMINATOR — ended alone is not the fault > a chunk that BEGAN after the end is
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A1 — the chunk is accepted, always > stores and verifies a chunk for a session that is already ended
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > writes one bench_event on first detection
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a second, third and hundredth chunk add no further rows
+[bench-chunks] ended_disagrees session=bs_t idx=0 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a second, third and hundredth chunk add no further rows
+[bench-chunks] ended_disagrees session=bs_t idx=1 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a second, third and hundredth chunk add no further rows
+[bench-chunks] ended_disagrees session=bs_t idx=2 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a second, third and hundredth chunk add no further rows
+[bench-chunks] ended_disagrees session=bs_t idx=3 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a second, third and hundredth chunk add no further rows
+[bench-chunks] ended_disagrees session=bs_t idx=4 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A2 — recorded as an event, once per session > a failed event write costs nothing else — the chunk is already stored and answered
+[bench-chunks] ended_disagrees event write failed session=bs_t: Error: bench_event write failed
+
+stderr | tests/unit/ended-disagrees.test.ts > A3 — the kiosk is told, in the response > carries the signal beside the normal success
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+ ✓ tests/unit/bench-resume.test.ts (38 tests) 5ms
+stderr | tests/unit/ended-disagrees.test.ts > A6 — nothing was added to the request path > the same queries run before the response whether or not the session disagrees
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+stderr | tests/unit/ended-disagrees.test.ts > A6 — nothing was added to the request path > the event write is in the after() hook, never in front of the response
+[bench-chunks] ended_disagrees session=bs_t idx=7 source=primary — chunk ACCEPTED and stored; the kiosk has been told to stop
+
+ ✓ tests/unit/ended-disagrees.test.ts (24 tests) 45ms
+ ✓ tests/unit/hotfix-whisper-probe.test.ts (20 tests) 73ms
+ ✓ tests/unit/speech-turns-k4.test.ts (14 tests) 9ms
+ ✓ tests/unit/bench-window.test.ts (35 tests) 8ms
+ ✓ tests/unit/llm-provider-truth.test.ts (20 tests) 28ms
+ ✓ tests/unit/build3-recovery.test.ts (31 tests) 8ms
+stderr | tests/unit/bench-reaper.test.ts > reapBenchSessions — the sweep through an injected sql > sweep DB error → no-op with the error on the result (the cron route still returns 200)
+[bench-reaper] candidate read failed — no-op relation "bench_session" does not exist
+
+ ✓ tests/unit/bench-reaper.test.ts (23 tests) 6ms
+ ✓ tests/unit/room-controls.test.ts (41 tests) 8ms
+ ✓ tests/unit/evidence-spine.test.ts (38 tests) 7ms
+ ✓ tests/unit/window-measure.test.ts (41 tests) 5ms
+ ✓ tests/unit/gemini-stt.test.ts (35 tests) 7ms
+ ✓ tests/unit/c1b-room-window-job.test.ts (11 tests) 219ms
+ ✓ tests/unit/room-diarize-job.test.ts (26 tests) 27ms
+ ✓ tests/unit/bench-commands-new-kinds.test.ts (19 tests) 13ms
+ ✓ tests/unit/bench-source-select.test.ts (24 tests) 5ms
+stderr | tests/unit/c1b-paid-engine-guard.test.ts > THE SEEDED ROWS — the guard must fire on the values migrations actually set > an engine with NO ROW reports free, and the residual gap is named not hidden
+[stt] engine has no stt_engine row; treated as free {"engine":"never_seen_before"}
+
+ ✓ tests/unit/bench-commands-set-audio-input.test.ts (23 tests) 8ms
+ ✓ tests/unit/room-install-card.test.ts (24 tests) 4ms
+stderr | tests/unit/refuter-b-leak.test.ts > (e) a read token gets pointers, never the words > BREAK: a downstream error that echoes the audio reaches a read token through `error`
+[jobs] whisper failed {"err":"bad_input near: the patient reports crushing chest pain radiating to the left arm"}
+
+ ✓ tests/unit/refuter-b-leak.test.ts (13 tests) 7ms
+ ✓ tests/unit/tier2-detail-fleet-listchanged.test.ts (21 tests) 25ms
+ ✓ tests/unit/tier2-assign-channel-guard.test.ts (19 tests) 13ms
+ ✓ tests/unit/tier2-jobs-route-tools.test.ts (24 tests) 187ms
+ ✓ tests/unit/room-install-reason-route.test.ts (10 tests) 13ms
+stderr | tests/unit/c1b-paid-engine-guard.test.ts > item 6 — attributable, and the operator sees the spend > an audit write that FAILS never takes the transcription with it
+[stt] paid-call audit write FAILED {"engine":"sarvam","actor":"a","err":"Error: audit table gone"}
+
+ ✓ tests/unit/speaker-clusters.test.ts (33 tests) 6ms
+stderr | tests/unit/speech-turns-k5.test.ts > empty_transcript is SILENCE, not a failure > THE HEADLINE: one stt_silence, one complete marker, zero turns
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > empty_transcript is SILENCE, not a failure > is NEVER counted as failed — nothing failed
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > empty_transcript is SILENCE, not a failure > goes through the SAME window machinery: the delete, the scratch day, the replace
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > empty_transcript is SILENCE, not a failure > re-running a silent window REPLACES rather than accumulates
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > empty_transcript is SILENCE, not a failure > a DRY run returns the silence and writes nothing
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > writes NO silence and NO turns — what the window held is unknown
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > records ONE marker with complete:false naming the cause
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > sends NO replace_window — a failed ask has nothing to replace the window WITH
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > when the marker cannot be written either, it says the day holds NO record
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > a DRY run on a failed ask writes nothing and shows the marker it would write
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > every OTHER Whisper error is a failed ask > a timeout is a failed ask too, not silence
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+stderr | tests/unit/speech-turns-k5.test.ts > the guarantee the note describes is the guarantee the code has > no note claims stt_window is deleted — K4 removed it from the delete
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+[stt] engine has no stt_engine row; treated as free {"engine":"whisper"}
+
+ ✓ tests/unit/speech-turns-k5.test.ts (14 tests) 10ms
+ ✓ tests/unit/speech-turns-k2.test.ts (22 tests) 7ms
+ ✓ tests/unit/room-install-assign-test-channel.test.ts (7 tests) 14ms
+ ✓ tests/unit/scratch-room-hidden.test.ts (14 tests) 8ms
+ ✓ tests/unit/window-scoring.test.ts (34 tests) 6ms
+ ✓ tests/unit/c1b-paid-engine-guard.test.ts (17 tests) 411ms
+ ✓ tests/unit/build3-followups.test.ts (18 tests) 9ms
+ ✓ tests/unit/bench-commands-install-wire.test.ts (11 tests) 8ms
+ ✓ tests/unit/audio-join-service.test.ts (12 tests) 31ms
+stderr | tests/unit/room-switches.test.ts > a failed read fails closed and does not poison the cache > returns off, and the NEXT call retries rather than inheriting the guess
+[room-switches] read failed room=room_a: connection terminated
+
+stderr | tests/unit/c1-route-job.test.ts > C1 — submit > a presigner that throws is its own code, and no job is submitted
+[jobs] presign failed {"key":"clips/a.webm","err":"Error: kms down"}
+
+stderr | tests/unit/c1-route-job.test.ts > C1 — submit > branches on `ok`, not on transport: ok:false with no job_id is a named failure
+[jobs] route submit failed {"err":"audio_url required — /var/folders/secret.webm"}
+
+stderr | tests/unit/c1-route-job.test.ts > C1 — submit > an ok:true with NO job_id is still a failure
+[jobs] route submit failed {"err":"route_submit_failed"}
+
+ ✓ tests/unit/room-switches.test.ts (18 tests) 126ms
+stderr | tests/unit/c1-route-job.test.ts > C1 — poll > a failed router job is a named code, and the router's prose stays in the log
+[jobs] route poll failed {"job":"abc123","err":"RuntimeError('/tmp/patient-audio.webm')","terminal":true}
+
+stderr | tests/unit/c1-route-job.test.ts > C1 — poll > an expired job id is its OWN code — unknown and failed are different places to look
+[jobs] route poll failed {"job":"gone","err":"route_job_unknown","terminal":true}
+
+ ✓ tests/unit/c1-route-job.test.ts (17 tests) 326ms
+   ✓ C1 — submit > presigns ONE object with a TTL of at least ten minutes and persists the id 315ms
+ ✓ tests/unit/room-drain.test.ts (41 tests) 6ms
+stderr | tests/unit/hotfix-silent-window.test.ts > defect 1 — a 200 with no speech is a silent window, not a failure > a real transport failure still fails, with whisper_failed
+[jobs] whisper failed {"err":"http_502: upstream said no"}
+
+stderr | tests/unit/hotfix-silent-window.test.ts > defect 1 — a 200 with no speech is a silent window, not a failure > a timeout is a failure too — only empty_transcript is special
+[jobs] whisper failed {"err":"timeout"}
+
+stderr | tests/unit/hotfix-silent-window.test.ts > defect 1 — a 200 with no speech is a silent window, not a failure > and the same kind still FAILS a real error, so the branch is not a blanket success
+[jobs] whisper failed {"err":"http_502"}
+
+ ✓ tests/unit/bench-replay.test.ts (17 tests) 4ms
+ ✓ tests/unit/hotfix-silent-window.test.ts (8 tests) 5ms
+ ✓ tests/unit/c2-diarize-roles.test.ts (15 tests) 276ms
+ ✓ tests/unit/bench-dual.test.ts (17 tests) 8ms
+ ✓ tests/unit/drain-ogg-branch.test.ts (15 tests) 4ms
+ ✓ tests/unit/tier2-mcp-guards.test.ts (14 tests) 20ms
+ ✓ tests/unit/mcp-room-command.test.ts (9 tests) 15ms
+ ✓ tests/unit/join-format.test.ts (22 tests) 6ms
+ ✓ tests/unit/room-rename.test.ts (13 tests) 7ms
+ ✓ tests/unit/whisper-retry.test.ts (16 tests) 15ms
+ ✓ tests/unit/mcp-set-audio-input.test.ts (9 tests) 5ms
+ ✓ tests/unit/bench-day-report.test.ts (12 tests) 3ms
+ ✓ tests/unit/measure-job.test.ts (12 tests) 5ms
+ ✓ tests/unit/room-release-route.test.ts (10 tests) 7ms
+ ✓ tests/unit/c1-route-adapter.test.ts (13 tests) 278ms
+ ✓ tests/unit/whisper-segments.test.ts (9 tests) 6ms
+ ✓ tests/unit/room-install-assign-route.test.ts (6 tests) 7ms
+ ✓ tests/unit/tuning-fork.test.ts (12 tests) 5ms
+ ✓ tests/unit/migrations-self-record.test.ts (86 tests) 10ms
+ ✓ tests/unit/ended-disagrees-monitor.test.ts (12 tests) 3ms
+ ✓ tests/unit/mcp-diff-room-install-states.test.ts (8 tests) 4ms
+ ✓ tests/unit/refuter-b-scope.test.ts (12 tests) 8ms
+ ✓ tests/unit/c2-async-seam.test.ts (8 tests) 256ms
+ ✓ tests/unit/language-route.test.ts (13 tests) 2ms
+ ✓ tests/unit/bench-orphan.test.ts (14 tests) 3ms
+ ✓ tests/unit/service-worker.test.ts (7 tests) 4ms
+ ✓ tests/unit/diarize-encounter-only.test.ts (8 tests) 3ms
+ ✓ tests/unit/process-step-claim.test.ts (3 tests) 2ms
+ ✓ tests/unit/live-window.test.ts (5 tests) 2ms
+ ✓ tests/unit/bench-ack-applied.test.ts (4 tests) 4ms
+ ✓ tests/unit/c1b-no-engine-is-loud.test.ts (3 tests) 111ms
+ ✓ tests/unit/whisper-language-map.test.ts (22 tests) 10ms
+ ✓ tests/unit/platform.test.ts (7 tests) 1ms
+ ✓ tests/unit/transcript-quality.test.ts (6 tests) 3ms
+ ✓ tests/unit/wer.test.ts (6 tests) 2ms
+ ✓ tests/unit/doctor-slug.test.ts (3 tests) 2ms
+ ✓ tests/unit/webm-header.test.ts (3 tests) 1ms
+ ✓ tests/unit/c1-shadow-and-tripwires.test.ts (10 tests) 228ms
+ ✓ tests/unit/room-stage-migration.test.ts (9 tests) 2ms
+ ✓ tests/unit/mcp-path-key.test.ts (6 tests) 9ms
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a missing diarize_slot table admits the call rather than failing diarization
+[diarize-gate] diarize_slot missing — run migration 0063 via /api/run-migrations. Admitting UNGATED (depth-1 not enforced) rather than failing diarization.
+
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass
+[diarize-gate] claim failed (treating as busy): connection terminated
+
+stderr | tests/unit/diarize-dispatch.test.ts > B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass
+[diarize-gate] claim failed (treating as busy): connection terminated
+
+ ✓ tests/unit/diarize-dispatch.test.ts (15 tests) 6057ms
+   ✓ B2 — the caller is held at depth 1 > three requests offered at once never overlap in flight 1254ms
+   ✓ B2 — the caller is held at depth 1 > the second caller's wait is reported as queue wait, not as service time 1299ms
+   ✓ B2 — the caller is held at depth 1 > a caller that never gets the slot is retryable, and never reached the service 1087ms
+   ✓ B2 — the caller is held at depth 1 > a transient DB fault is treated as busy, not as a free pass 928ms
+   ✓ B1 — the timeout budget belongs to the dispatched call > time spent queued does not shorten the budget of the call that follows it 1233ms
+
+ Test Files  97 passed (97)
+      Tests  2061 passed (2061)
+   Start at  19:35:40
+   Duration  7.38s (transform 2.79s, setup 0ms, collect 15.75s, tests 9.56s, environment 8ms, prepare 2.74s)
+
+TEST_EXIT=0

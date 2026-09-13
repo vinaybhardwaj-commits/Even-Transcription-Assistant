@@ -22,7 +22,9 @@ test.afterEach(async ({ page }, testInfo) => {
  * Button accessible names (aria-label) are "Start recording" (idle) and
  * "Finalize recording" (while recording) — NOT the visible "Record"/"Stop".
  */
-const SLUG = process.env.PLAYWRIGHT_DOCTOR_SLUG || "dr-vinay-bhardwaj-cjzs";
+const SLUG = process.env.PLAYWRIGHT_DOCTOR_SLUG ?? "";
+// No default: a real doctor account is configured (CI sets it), never hard-coded in a public repo.
+if (!SLUG) throw new Error("PLAYWRIGHT_DOCTOR_SLUG env var required (the e2e doctor account)");
 const MOCK_R2 = "https://mock-r2.evenscribe-e2e.invalid/put";
 
 type Hits = { uploadUrl: boolean; r2PutBytes: number; finalize: boolean };

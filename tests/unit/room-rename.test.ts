@@ -25,11 +25,15 @@ vi.mock("@/lib/db", () => ({
 }));
 vi.mock("@/lib/bench", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual, benchAdminGuard: async () => ({ ok: true, claims: { email: "v@even.in" } }) };
+  return { ...actual, benchAdminGuard: async () => ({ ok: true, claims: { email: FAKE_OPERATOR.email } }) };
 });
 
 import { PATCH } from "@/app/api/bench/rooms/route";
 import { NextRequest } from "next/server";
+import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(5);
+const FAKE_OPERATOR = makeFakeOperator(1);
 
 /** The world: two live rooms and one disabled one that still holds an old name. */
 type RoomRec = { id: string; slug: string; name: string; pin_hash: string; disabled_at: string | null; failed_attempts: number; locked_until: string | null };

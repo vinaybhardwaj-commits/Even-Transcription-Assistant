@@ -16,9 +16,6 @@ import {
   matchCluster,
   runningMean,
   parseDiarizeSegments,
-  bindTurnsToSpeakers,
-  spanOverlapMs,
-  clustersEnabled,
   readThreshold,
   sweepThreshold,
   describeDistribution,
@@ -148,71 +145,7 @@ describe("the running mean", () => {
   });
 });
 
-describe("turn binding by time overlap", () => {
-  const segs = [
-    { start_ms: 0, end_ms: 10_000, speaker_idx: 0 },
-    { start_ms: 10_000, end_ms: 20_000, speaker_idx: 1 },
-  ];
-
-  it("a turn inside one speaker's span binds to that speaker", () => {
-    const b = bindTurnsToSpeakers(segs, [{ source_ref: "t1", start_ms: 2_000, end_ms: 5_000 }]);
-    expect(b).toEqual([{ source_ref: "t1", speaker_idx: 0, overlap_ms: 3_000 }]);
-  });
-
-  it("a turn straddling a change binds to the MAJORITY speaker and says how much", () => {
-    const b = bindTurnsToSpeakers(segs, [{ source_ref: "t2", start_ms: 8_000, end_ms: 14_000 }]);
-    expect(b[0]).toMatchObject({ speaker_idx: 1, overlap_ms: 4_000 });
-  });
-
-  it("A TURN THAT OVERLAPS NOTHING IS NOT BOUND — no row, no nearest-speaker guess", () => {
-    const b = bindTurnsToSpeakers(segs, [{ source_ref: "t3", start_ms: 30_000, end_ms: 40_000 }]);
-    expect(b).toEqual([]);
-  });
-
-  it("a partial overlap at the very edge still binds", () => {
-    const b = bindTurnsToSpeakers(segs, [{ source_ref: "t4", start_ms: 9_999, end_ms: 30_000 }]);
-    expect(b[0]).toMatchObject({ speaker_idx: 1, overlap_ms: 10_000 });
-  });
-
-  it("a zero-width touch is not an overlap", () => {
-    expect(spanOverlapMs({ start_ms: 0, end_ms: 10 }, { start_ms: 10, end_ms: 20 })).toBe(0);
-    expect(bindTurnsToSpeakers(segs, [{ source_ref: "t5", start_ms: 20_000, end_ms: 25_000 }])).toEqual([]);
-  });
-
-  it("an exact tie breaks on the LOWER speaker index, deterministically", () => {
-    const b = bindTurnsToSpeakers(segs, [{ source_ref: "t6", start_ms: 5_000, end_ms: 15_000 }]);
-    expect(b[0]!.speaker_idx).toBe(0);
-    // Same input, same answer, whatever the Map iteration order.
-    for (let i = 0; i < 5; i++) {
-      expect(bindTurnsToSpeakers(segs, [{ source_ref: "t6", start_ms: 5_000, end_ms: 15_000 }])[0]!.speaker_idx).toBe(0);
-    }
-  });
-
-  it("segments the service could not express are dropped individually", () => {
-    const parsed = parseDiarizeSegments([
-      { start_ms: 0, end_ms: 100, speaker_idx: 0 },
-      { start_ms: 100, end_ms: 50, speaker_idx: 1 },   // end before start
-      { start_ms: 200, end_ms: 300, speaker_idx: -1 }, // bad index
-      { start_ms: "x", end_ms: 400, speaker_idx: 0 },  // unreadable
-      null,
-    ]);
-    expect(parsed).toEqual([{ start_ms: 0, end_ms: 100, speaker_idx: 0 }]);
-  });
-
-  it("the documented Mini shape parses as-is", () => {
-    // docs/ETA-MAC-MINI-BACKEND-HANDOVER.md, verbatim.
-    expect(parseDiarizeSegments([{ start_ms: 2106, end_ms: 12974, speaker_idx: 1, overlap: false }]))
-      .toEqual([{ start_ms: 2106, end_ms: 12974, speaker_idx: 1 }]);
-  });
-});
-
 describe("the gate and the threshold", () => {
-  it('only the exact string "1" arms the slice', () => {
-    expect(clustersEnabled({ SPEAKER_CLUSTERS_ENABLED: "1" })).toBe(true);
-    for (const v of ["0", "true", "yes", "", undefined]) {
-      expect(clustersEnabled({ SPEAKER_CLUSTERS_ENABLED: v })).toBe(false);
-    }
-  });
 
   it("UNSET IS A LOUD REFUSAL, never a default", () => {
     expect(readThreshold({})).toEqual({ ok: false, error: "threshold_unset", raw: null });

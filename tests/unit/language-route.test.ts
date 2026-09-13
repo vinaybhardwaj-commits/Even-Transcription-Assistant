@@ -14,7 +14,7 @@ describe("decideEncounterLanguage — corroborated, English-biased fork", () => 
     expect(d.reason).toBe("whisper_en");
   });
 
-  it("Dr. Chandrika: English operative dictation that Sarvam TRANSLITERATED into Tamil script stays English (Whisper=en trumps Sarvam script)", () => {
+  it("a surgeon's English operative dictation that Sarvam TRANSLITERATED into Tamil script stays English (Whisper=en trumps Sarvam script)", () => {
     const d = decideEncounterLanguage({
       whisperLang: "en",
       sarvamLang: "ta-IN",

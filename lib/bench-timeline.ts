@@ -28,7 +28,7 @@
 
 import { findBenchSession, listBenchConsultMarks, listBenchEvents, type BenchSessionRow } from "@/lib/bench";
 import { query } from "@/lib/brain/db";
-import { findRoomDay, istDate, SQL_CLUSTERS_FOR_DAY, SQL_VISITS_FOR_DAY } from "@/lib/brain/state";
+import { findRoomDay, istDate, readClustersForDay, SQL_VISITS_FOR_DAY } from "@/lib/brain/state";
 
 // ---------------------------------------------------------------------------
 // Pure model
@@ -182,10 +182,10 @@ type ClusterRow = { id: string; kind: string; visit_id: string | null };
 async function loadBrainVisits(roomId: string, sessionStartedAt: Date): Promise<TimelineVisit[]> {
   const day = await findRoomDay(roomId, istDate(sessionStartedAt));
   if (!day) return [];
-  const [visits, clusters] = await Promise.all([
-    query<VisitRow>(SQL_VISITS_FOR_DAY, [day.id]),
-    query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [day.id]),
-  ]);
+  const visits = await query<VisitRow>(SQL_VISITS_FOR_DAY, [day.id]);
+  // Clustering is not running (see CLUSTERING_STATUS in lib/brain/state.ts), so no visit has voice
+  // evidence. This used to be an empty query result; it is now an empty answer on purpose.
+  const clusters = { rows: readClustersForDay(day.id).clusters as ClusterRow[] };
   const withVoice = new Set(clusters.rows.map((c) => c.visit_id).filter((x): x is string => !!x));
   return visits.rows.map((v) => {
     const updated = new Date(v.updated_at);

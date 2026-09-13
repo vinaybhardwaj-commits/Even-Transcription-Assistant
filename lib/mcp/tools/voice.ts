@@ -2,9 +2,9 @@
  * lib/mcp/tools/voice.ts — voice / Pyannote read tools (Operator MCP S1, PRD §12 11.5).
  *
  * scribe_voice_health        — the Pyannote probe alone (Mini GET /health, 5s, soft-fail).
- * scribe_list_voiceprints    — voice_print JOIN clinician (voice_print.doctor_id → clinician.id,
- *                              migration 0014): clinician id, name, sample count, enrolled/last
- *                              sample times, needs_reenrollment. NO centroid / embeddings.
+ * scribe_list_voiceprints    — voice_print LEFT JOIN clinician, every row: clinician id, name, status,
+ *                              deleted, matchable, sample count, enrolled/last sample times,
+ *                              needs_reenrollment. NO centroid / embeddings. Unfiltered on purpose.
  * scribe_list_voice_samples  — lib/voice-samples listSamples for one clinician: id, created_at,
  *                              source, duration, included, has_audio. Presigned audio URLs
  *                              (voice-samples/ prefix, 1 h) ONLY with include_urls=true.
@@ -16,7 +16,7 @@
 
 import { sql } from "@/lib/db";
 import { query } from "@/lib/brain/db";
-import { findRoomDay, roomExists, SQL_CLUSTERS_FOR_DAY } from "@/lib/brain/state";
+import { findRoomDay, roomExists, readClustersForDay, CLUSTERING_STATUS } from "@/lib/brain/state";
 import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
 import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
@@ -35,23 +35,34 @@ const voiceHealth: McpTool = {
 
 const listVoiceprints: McpTool = {
   name: "scribe_list_voiceprints",
-  description: "Enrolled clinician voiceprints (voice_print JOIN clinician): clinician_id, name, sample_count, enrolled_at, last_sample_at, needs_reenrollment. No embeddings.",
+  description: "ALL clinician voiceprints (voice_print LEFT JOIN clinician), disabled and deleted included: clinician_id, name, clinician_status (active|disabled|locked, null when no clinician row), deleted, matchable, sample_count, enrolled_at, last_sample_at, needs_reenrollment. `matchable` is what room matching and encounter diarization actually offer (active, not deleted, has a centroid); `summary.matchable` is that count, `summary.total` is every row here. No embeddings.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  // DELIBERATELY UNFILTERED. The readers that offer a voice for matching filter to active clinicians
+  // (lib/stt/diarize-window.ts, the encounter process route, voice/identify). This operator view
+  // shows every row so a disabled doctor's voiceprint is visible — and says, per row and in the
+  // summary, which rows the matchers would skip, so the two views can never be mistaken for each
+  // other by their counts.
   handler: async () =>
-    failSafe({ voiceprints: [] as unknown[] }, async () => {
+    failSafe({ voiceprints: [] as unknown[], summary: { total: 0, matchable: 0 } }, async () => {
       const rows = (await sql`
         SELECT vp.doctor_id AS clinician_id, c.full_name, c.url_slug, vp.sample_count, vp.enrolled_at,
-               vp.last_sample_at, vp.needs_reenrollment, (vp.centroid IS NOT NULL) AS has_centroid
+               vp.last_sample_at, vp.needs_reenrollment, (vp.centroid IS NOT NULL) AS has_centroid,
+               c.status::text AS clinician_status, (c.deleted_at IS NOT NULL) AS deleted,
+               (c.id IS NOT NULL AND c.status = 'active' AND c.deleted_at IS NULL AND vp.centroid IS NOT NULL) AS matchable
           FROM voice_print vp
-          JOIN clinician c ON c.id = vp.doctor_id
+          LEFT JOIN clinician c ON c.id = vp.doctor_id
          ORDER BY vp.last_sample_at DESC
-      `) as Array<{ clinician_id: string; full_name: string; url_slug: string; sample_count: number; enrolled_at: string | Date; last_sample_at: string | Date; needs_reenrollment: boolean; has_centroid: boolean }>;
+      `) as Array<{ clinician_id: string; full_name: string | null; url_slug: string | null; sample_count: number; enrolled_at: string | Date; last_sample_at: string | Date; needs_reenrollment: boolean; has_centroid: boolean; clinician_status: string | null; deleted: boolean; matchable: boolean }>;
       return {
+        summary: { total: rows.length, matchable: rows.filter((r) => r.matchable === true).length },
         voiceprints: rows.map((r) => ({
           clinician_id: r.clinician_id,
           name: r.full_name,
           url_slug: r.url_slug,
+          clinician_status: r.clinician_status,
+          deleted: r.deleted === true,
+          matchable: r.matchable === true,
           sample_count: r.sample_count,
           enrolled_at: new Date(r.enrolled_at).toISOString(),
           updated_at: new Date(r.last_sample_at).toISOString(),
@@ -114,7 +125,7 @@ type ClusterRow = { id: string; kind: string; visit_id: string | null; first_see
 
 const getClusters: McpTool = {
   name: "scribe_get_clusters",
-  description: "Same-day speaker clusters for a room-day (speaker_cluster via the brain pool): id, kind (doctor|other), visit_id, first_seen_at, last_seen_at, has_centroid. No vectors.",
+  description: "Same-day speaker clusters for a room-day: id, kind (doctor|other), visit_id, first_seen_at, last_seen_at, has_centroid. No vectors. ALWAYS read `clustering` first: while clustering is not running (running:false, reason clustering_not_running) `clusters` is empty BY DESIGN and means nothing about who spoke — it is not 'clustering ran and found nobody'.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -133,13 +144,14 @@ const getClusters: McpTool = {
       if ("error" in d) return { clusters: [], error: d.error };
       if (!(await roomExists(room.id))) return { clusters: [], error: "unknown_room" };
       const day = await findRoomDay(room.id, d.date);
-      if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clusters: [] };
-      const r = await query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [day.id]);
+      if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clustering: CLUSTERING_STATUS, clusters: [] };
+      const r = readClustersForDay(day.id);
       return {
         room_id: room.id,
         room_day_id: day.id,
         ist_date: d.date,
-        clusters: r.rows.map((c) => ({
+        clustering: r.clustering,
+        clusters: (r.clusters as ClusterRow[]).map((c) => ({
           id: c.id,
           kind: c.kind,
           visit_id: c.visit_id,

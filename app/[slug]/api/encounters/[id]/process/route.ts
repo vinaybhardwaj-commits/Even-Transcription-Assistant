@@ -25,6 +25,7 @@
  */
 import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
+import { loadActiveClinicianCentroid } from "@/lib/stt/diarize-window";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { generateNote, noteHeadline, noteTypeHasCdmss, type EncounterNote } from "@/lib/note-generation";
@@ -546,20 +547,12 @@ export async function POST(
       }
       // Load the doctor's enrolled voiceprint (if any) so /diarize can NAME them
       // (otherwise speakers stay heuristic — Patient/Attender/Nurse).
+      // ACTIVE CLINICIANS ONLY, through the same reader module room matching uses: a disabled or
+      // deleted doctor's encounter still processes; their voice is simply not offered for naming.
       let clinicianCentroids: unknown[] = [];
       try {
-        const vp = (await sql`
-          SELECT encode(vp.centroid, 'base64') AS centroid_b64, d.full_name AS full_name
-            FROM voice_print vp JOIN clinician d ON d.id = vp.doctor_id
-           WHERE vp.doctor_id = ${row.doctor_id} LIMIT 1
-        `) as Array<{ centroid_b64: string; full_name: string }>;
-        if (vp[0]?.centroid_b64) {
-          clinicianCentroids = [{
-            clinician_id: row.doctor_id,
-            full_name: vp[0].full_name,
-            centroid_base64: vp[0].centroid_b64,
-          }];
-        }
+        const centroid = await loadActiveClinicianCentroid(row.doctor_id);
+        if (centroid) clinicianCentroids = [centroid];
       } catch (e) {
         console.warn(`[process] voice_print load failed enc=${id}: ${e instanceof Error ? e.message : String(e)}`);
       }

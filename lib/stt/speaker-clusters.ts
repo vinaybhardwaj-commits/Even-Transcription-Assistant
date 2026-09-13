@@ -176,60 +176,19 @@ export function parseDiarizeSegments(raw: unknown): DiarizeSegment[] {
 }
 
 export type TurnSpan = { source_ref: string; start_ms: number; end_ms: number };
-export type TurnBinding = { source_ref: string; speaker_idx: number; overlap_ms: number };
-
-/** PURE — milliseconds two half-open spans share. */
-export function spanOverlapMs(a: { start_ms: number; end_ms: number }, b: { start_ms: number; end_ms: number }): number {
-  return Math.max(0, Math.min(a.end_ms, b.end_ms) - Math.max(a.start_ms, b.start_ms));
-}
-
-/**
- * PURE — bind turns to speakers by time overlap (PRD §7: "time-overlap join").
- *
- * `segments` must already be on the WALL CLOCK (the caller adds the window's start).
- *
- * ONE SPEAKER PER TURN, THE ONE IT SHARES MOST TIME WITH. A turn straddling a speaker change
- * genuinely belongs to two people, and this slice has one field to say so with — so it names the
- * majority speaker and records how many milliseconds that claim rests on, rather than silently
- * picking the first. `overlap_ms` beside the answer is what lets a reader see a 60/40 turn for
- * what it is.
- *
- * A TURN THAT OVERLAPS NOTHING IS NOT BOUND AT ALL. Diarization and transcription disagree about
- * where speech is; a turn in a stretch the diarizer heard as silence has no speaker, and
- * inventing the nearest one would put a name on the machine's disagreement.
- */
-export function bindTurnsToSpeakers(
-  segments: readonly DiarizeSegment[],
-  turns: readonly TurnSpan[],
-): TurnBinding[] {
-  const out: TurnBinding[] = [];
-  for (const t of turns) {
-    const totals = new Map<number, number>();
-    for (const s of segments) {
-      const ms = spanOverlapMs(t, s);
-      if (ms > 0) totals.set(s.speaker_idx, (totals.get(s.speaker_idx) ?? 0) + ms);
-    }
-    let best: { idx: number; ms: number } | null = null;
-    for (const [idx, ms] of totals) {
-      // Ties break on the LOWER speaker index, so the answer is deterministic rather than
-      // dependent on Map iteration order for a turn split exactly down the middle.
-      if (!best || ms > best.ms || (ms === best.ms && idx < best.idx)) best = { idx, ms };
-    }
-    if (best) out.push({ source_ref: t.source_ref, speaker_idx: best.idx, overlap_ms: best.ms });
-  }
-  return out;
-}
+// bindTurnsToSpeakers, TurnBinding and spanOverlapMs were DELETED in C2. They bound a whole turn to
+// whichever speaker held most of it, which wrote one person's name across another's speech; the
+// diarize_window job binds with bindTurnsExclusive (lib/stt/speaker-roles.ts), which refuses a name
+// to a turn that holds more than one speaker.
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-export const SPEAKER_CLUSTERS_ENABLED_ENV = "SPEAKER_CLUSTERS_ENABLED";
+// The on-switch that lived here gated clustering, which C2 deleted. It was renamed from
+// SPEAKER_CLUSTERS_ENABLED (renamed to ROOM_DIARIZE_ENABLED) and now lives beside the one thing it
+// controls, the room diarize enqueue: lib/stt/diarize-job.ts.
 export const SPEAKER_MATCH_THRESHOLD_ENV = "SPEAKER_MATCH_THRESHOLD";
-
-export function clustersEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env[SPEAKER_CLUSTERS_ENABLED_ENV] === "1";
-}
 
 export type ThresholdRead =
   | { ok: true; threshold: number }
@@ -247,6 +206,21 @@ export type ThresholdRead =
  * The existing live-identify threshold (0.78) and the passive-capture gate (0.82) are NOT
  * borrowed: both are thresholds against an ENROLLED clinician centroid, which is a different
  * comparison from one anonymous room sample against another.
+ */
+/**
+ * SPEAKER_MATCH_THRESHOLD IS UNSET AND STAYS UNDERIVED — and here is the route back to setting it.
+ *
+ * This is the voice-to-voice cosine for grouping one room-day's speakers into clusters. It is NOT
+ * DIARIZE_BATCH_THRESHOLD (0.65), which is the clinician-centroid-to-voice floor sent to /diarize;
+ * reading that in its place would be supplying a number measured for a different question.
+ *
+ * Clustering has no writer as of C2 (see CLUSTERING_STATUS in lib/brain/state.ts). The way back,
+ * in order, is a later slice and not this one:
+ *   1. the diarize_window job writes room_diarize_window on every run (it does, now);
+ *   2. calibration data accumulates there, and speaker-calibration/route.ts sweeps it;
+ *   3. this threshold is frozen FROM that sweep, by a person, into the environment;
+ *   4. clustering is rebuilt on the diarize_window job, reading this value.
+ * Until step 3, `threshold_unset` is the correct and only answer.
  */
 export function readThreshold(env: Record<string, string | undefined> = process.env): ThresholdRead {
   const raw = env[SPEAKER_MATCH_THRESHOLD_ENV];

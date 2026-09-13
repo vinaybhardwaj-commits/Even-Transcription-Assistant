@@ -13,6 +13,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
+import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(5);
+const FAKE_OPERATOR = makeFakeOperator(1);
 
 const calls: Array<{ text: string; values: unknown[] }> = [];
 let responses: unknown[] = [];
@@ -43,7 +47,7 @@ const release = (over: Record<string, unknown> = {}) => ({
   blob_url: "https://x.public.blob.vercel-storage.com/EvenScribe-0.1.8.zip",
   channel: "stable",
   published_at: "2026-09-09T10:20:00.000Z",
-  published_by: "vinay",
+  published_by: FAKE_OPERATOR.name,
   withdrawn_at: null,
   notes: null,
   min_macos: "15.0",

@@ -128,7 +128,11 @@ async function runJob(audio: Buffer, contentType: string, requestTemplates: stri
 
 export const ekascribeAdapter: SttAdapter = {
   key: "ekascribe",
-  capabilities: { tiers: ["scribe"], stages: ["note"], languages: ["indic", "multi"], streaming: false, translates: true, async: true },
+  capabilities: { tiers: ["scribe"], stages: ["note"], languages: ["indic", "multi"], streaming: false, translates: true, // C2 D2 — FALSE, and this is a correction rather than a downgrade. `async` on this interface now
+  // means "implements submit/poll", which this adapter never has: it is a synchronous shim for a
+  // provider whose job protocol was never wired. Declaring a transport it does not have made the
+  // registry's own invariant unenforceable, so the declaration was the thing that was wrong.
+  async: false },
   async transcribe(): Promise<SttTranscribeResult> {
     // EkaScribe is an end-to-end medical scribe. This account does NOT expose a
     // verbatim ASR transcript — transcript_template is silently unsupported

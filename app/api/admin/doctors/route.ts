@@ -23,8 +23,7 @@ type GuardResult =
 import { buildDoctorSlug } from "@/lib/doctor-slug";
 import { respondOk, respondError } from "@/lib/respond";
 import bcrypt from "bcryptjs";
-import { randomInt } from "crypto";
-import { customAlphabet } from "nanoid";
+import { mintClinicianId, generatePin } from "@/lib/clinician-mint";
 
 export const runtime = "nodejs";
 
@@ -42,7 +41,6 @@ function canonicalAppUrl(): string {
   return raw;
 }
 
-const doctorId = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 8);
 
 async function guard(): Promise<GuardResult> {
   const cookie = await readAdminCookie();
@@ -102,10 +100,6 @@ export async function GET() {
   }
 }
 
-function generatePin(): string {
-  const n = randomInt(0, 10_000); // crypto-strong (B19 P2)
-  return String(n).padStart(4, "0");
-}
 
 export async function POST(req: NextRequest) {
   const g = await guard();
@@ -131,7 +125,7 @@ export async function POST(req: NextRequest) {
   const slug = built.full;   // dr-{name}-{4char-token} — what goes into URLs
   const token = built.token; // just the 4-char tail, stored separately
   const pinHash = await bcrypt.hash(pin, 12);
-  const id = `doc_${doctorId()}`;
+  const id = mintClinicianId();
 
   try {
     await sql`

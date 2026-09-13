@@ -60,6 +60,56 @@ export interface SttNoteResult {
 
 export interface SttHealth { ok: boolean; latencyMs: number; error?: string }
 
+/**
+ * ─── THE ASYNC SEAM (Slice C2 Part A) ─────────────────────────────────────────────────────────
+ *
+ * WHY THIS EXISTS. `transcribe(Buffer) => result` cannot express submit-and-poll, so C1 shipped
+ * with the room job reaching PAST the adapter to the router's own client while using the adapter
+ * only for its `capabilities.async` flag. That is the shape this codebase keeps rediscovering it
+ * regrets: the registry says which engine runs, and something else decides how. An engine's
+ * transport is the engine's business, and it belongs behind the same interface as everything else.
+ *
+ * It is not a one-engine abstraction. `ekascribe` already declares `"async": true` in its
+ * capabilities, and any job/poll provider added later needs exactly this.
+ *
+ * OPTIONAL, so the eight synchronous adapters compile and behave unchanged. The contract is:
+ * `submit`/`poll` are present IF AND ONLY IF `capabilities.async` is true, and a caller that finds
+ * `capabilities.async` without them has found a bug, not a fallback — there is no silent
+ * degradation to the synchronous path, because a long clip on the sync path is the timeout this
+ * whole seam exists to avoid.
+ */
+
+/** What a submit needs. An adapter uses the field its service speaks and ignores the other. */
+export type SttAsyncInput = {
+  /** A URL the SERVICE can fetch. The router pulls its own audio; presigned, short-lived. */
+  audioUrl?: string;
+  /** Bytes, for a provider that wants an upload instead. */
+  audio?: Buffer;
+  contentType?: string;
+  language?: string;
+  /** How much audio, so an adapter can size its own budgets. */
+  durationMs?: number;
+  /** English out as well as the source. Off by default: it is a per-span LLM call downstream. */
+  translate?: boolean;
+};
+
+export type SttAsyncSubmit =
+  | { ok: true; jobRef: string }
+  | { ok: false; error: string };
+
+/**
+ * A poll answer. `state` is OURS, not the provider's vocabulary, so a second async engine cannot
+ * force every caller to learn a new set of strings.
+ *
+ * `terminal` on a failure says whether retrying this jobRef could ever help: an expired or unknown
+ * job is terminal, a transport blip is not. Callers that cannot tell the difference either give up
+ * too early or poll a job that no longer exists until the lease runs out.
+ */
+export type SttAsyncPoll =
+  | { ok: true; state: "queued" | "running"; progress?: { done: number; total: number } | null }
+  | { ok: true; state: "done"; result: SttTranscribeResult }
+  | { ok: false; error: string; terminal: boolean };
+
 export interface SttAdapter {
   key: string;
   capabilities: SttCapabilities;
@@ -76,5 +126,13 @@ export interface SttAdapter {
    */
   transcribe(audio: Buffer, opts: { contentType: string; language?: string; longForm?: boolean; mode?: "transcribe" | "translate"; durationMs?: number }): Promise<SttTranscribeResult>;
   generateNote?(audio: Buffer, opts: { contentType: string; language?: string; template?: string }): Promise<SttNoteResult>;
+  /**
+   * Start long-form work and return a reference to it. Present iff `capabilities.async`.
+   * Must be IDEMPOTENT-FRIENDLY from the caller's side: it returns a ref the caller persists
+   * before anything else can fail, and the caller polls that ref rather than submitting again.
+   */
+  submit?(input: SttAsyncInput): Promise<SttAsyncSubmit>;
+  /** Ask after a ref from `submit`. Never starts work. Present iff `capabilities.async`. */
+  poll?(jobRef: string): Promise<SttAsyncPoll>;
   health(): Promise<SttHealth>;
 }

@@ -20,6 +20,9 @@ import {
   tapeEndMs,
   tapeStartMs,
 } from "@/lib/mcp/tools/bench";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const FAKE_DOC = makeFakeClinician(7);
 
 const T0 = Date.parse("2026-08-19T04:00:00.000Z");
 const min = (n: number) => n * 60_000;
@@ -119,7 +122,7 @@ describe("3 — every cue carries source 'replay' and its originating row id", (
 
   it("payload fields that could carry a name are dropped and named; operational fields pass through", () => {
     const out = buildReplayCues([
-      ev("be_1", "consult_mark", T0, { source: "mcp", note: "Dr Sharma, room 7" }),
+      ev("be_1", "consult_mark", T0, { source: "mcp", note: `${FAKE_DOC.label}, room 7` }),
       ev("be_2", "mic_backup_error", T0 + min(1), { stage: "start", message: "NotFoundError: device", idx: 2 }),
     ]);
     expect(out.cues[0]!.payload).toEqual({ source: "mcp" });
@@ -128,7 +131,7 @@ describe("3 — every cue carries source 'replay' and its originating row id", (
     // a payload with nothing to drop reports nothing
     expect(buildReplayCues([ev("be_3", "consult_mark", T0, { source: "kiosk" })]).dropped_payload_fields).toEqual([]);
     // and every listed field is filtered, wherever it turns up
-    const all = Object.fromEntries(REPLAY_DROPPED_PAYLOAD_FIELDS.map((f) => [f, "Dr Sharma"]));
+    const all = Object.fromEntries(REPLAY_DROPPED_PAYLOAD_FIELDS.map((f) => [f, FAKE_DOC.label]));
     const filtered = replayPayload({ ...all, reason: "silence" });
     expect(filtered.payload).toEqual({ reason: "silence" });
     expect(filtered.dropped.sort()).toEqual([...REPLAY_DROPPED_PAYLOAD_FIELDS].sort());

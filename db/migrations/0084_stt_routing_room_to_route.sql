@@ -29,7 +29,7 @@
 -- change to lib/stt/room-drain.ts that this slice's order did not cover, so it is reported rather
 -- than improvised. APPLY 0084 ONLY AFTER THAT LANDS.
 --
--- Everything else in C1 is already useful without this file: 0083's safety net, the adapter, the
+-- Everything else in C1 is already useful without this file: the adapter, the
 -- job kind (reachable today through the MCP job path), the timeline persistence, the tripwires and
 -- the shadow runs all work while the room rows still say `sarvam`.
 --
@@ -41,8 +41,15 @@
 --   UPDATE stt_routing SET engine_id = 'sarvam', updated_at = now()
 --    WHERE stage = 'room' AND language_bucket = 'indic';
 --
--- 0083's (room,'default') row means even a DELETE of both rows falls back to sarvam rather than
--- failing every window with no_engine. That is the whole reason it was applied first.
+-- THERE IS NO CATCH-ALL BEHIND THOSE TWO UPDATEs, and the earlier version of this comment said
+-- there was. It cited "0083's (room,'default') row" as a safety net; 0083 was created and then
+-- DELETED on purpose (edf27ef), because a default row would have turned a loud `no_engine` into a
+-- silent substitution by a PAID engine quietly absorbing a misconfiguration. No migration creates
+-- a (room,'default') routing row today and none should.
+--
+-- So the reversal is the two UPDATEs above and ONLY those. DELETING the room rows is NOT a
+-- rollback: with no default to fall back to, `resolveRouting` returns null and every window fails
+-- `no_engine` — which is the correct, loud behaviour, and is not what "revert" means.
 -- =====================================================================
 
 UPDATE stt_routing SET engine_id = 'route', updated_at = now()

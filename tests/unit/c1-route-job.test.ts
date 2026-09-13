@@ -14,9 +14,15 @@ vi.mock("@/lib/r2", () => ({
     return (R2.url = `https://r2.example/${o.key}?exp=${R2.ttl}`);
   },
 }));
+// C2 Part A — the kind now reaches the router THROUGH the route adapter, so the fake must model
+// everything the adapter reads, kill-switch included. A fake that is missing a name the real
+// module exports does not fail loudly; it returns undefined and the code quietly takes a branch
+// nobody wrote a test for.
 vi.mock("@/lib/stt/eta-router", () => ({
+  ROUTER_JOB_ON: () => true,
   submitRouteJob: async (url: string) => { ROUTER.submits.push(url); return ROUTER.sub; },
   pollRouteJob: async () => ROUTER.states.shift() ?? { ok: true, state: "running" },
+  routeTranscribe: async () => ({ ok: true }),
 }));
 
 const TIMELINE = [
