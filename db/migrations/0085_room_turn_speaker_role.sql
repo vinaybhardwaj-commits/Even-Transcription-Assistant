@@ -20,11 +20,11 @@
 --   * match_confidence may be present only with that claim, and only as a real cosine.
 --
 -- WHAT THIS DOES NOT DO, stated because the first version of this comment claimed more than the
--- schema delivers: postgres has no independent knowledge that a turn was straddled or crossed a
--- seam. `no_role_reason` is a fact the CODE authors. A writer that sets role='clinician' AND
--- clears no_role_reason in one statement satisfies every constraint here. What these checks catch
--- is the precise regression that occurred — an UPDATE that promotes a role and leaves the reason
--- behind — not the class. Only the code can refuse the class.
+-- schema delivers: postgres has no independent knowledge that a turn was straddled.
+-- `no_role_reason` is a fact the CODE authors. A writer that sets role='clinician' AND clears
+-- no_role_reason in one statement satisfies every constraint here. What these checks catch is an
+-- UPDATE that promotes a role and leaves the reason behind — not the class. Only the code can
+-- refuse the class.
 --
 -- A writer that inferred a clinician from speaker order has no id to put here and is rejected by
 -- the database rather than accepted and believed. Attributing a patient's words to their doctor —
@@ -41,11 +41,8 @@ ALTER TABLE room_turn_speaker
   ADD COLUMN IF NOT EXISTS clinician_id     text,
   ADD COLUMN IF NOT EXISTS role             text,
   ADD COLUMN IF NOT EXISTS match_confidence double precision,
-  -- WHY a span has no name. Two of these are STRUCTURAL and permanent — 'straddle' (two speakers
-  -- held this turn) and 'seam' (it crosses a slice boundary, so it belongs to two clusterings).
-  -- 'no_match' is merely unresolved: nobody was recognised THIS time. Without the distinction the
-  -- cross-slice stitch cannot tell them apart, and it filled all three alike, putting a straddled
-  -- turn's other speaker back on the record as the clinician one step after the slice refused it.
+  -- WHY a span has no name. 'straddle' is STRUCTURAL and permanent — two speakers held this turn,
+  -- so nothing downstream can attribute it. 'no_match' is merely unresolved: nobody was recognised.
   ADD COLUMN IF NOT EXISTS no_role_reason   text;
 
 -- `role` is a closed vocabulary. 'clinician' is the only value that asserts an identity; every
@@ -100,7 +97,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'room_turn_speaker_reason_ck') THEN
     ALTER TABLE room_turn_speaker
       ADD CONSTRAINT room_turn_speaker_reason_ck
-      CHECK (no_role_reason IS NULL OR no_role_reason IN ('straddle', 'seam', 'no_match'));
+      CHECK (no_role_reason IS NULL OR no_role_reason IN ('straddle', 'no_match'));
   END IF;
 END $$;
 

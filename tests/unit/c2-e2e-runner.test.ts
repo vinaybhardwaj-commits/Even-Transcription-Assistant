@@ -1,5 +1,5 @@
 /**
- * C2 ITEM 0 — A 900 s WINDOW THROUGH THE REAL RUNNER, AGAINST A REAL POSTGRES.
+ * C2 — A 900 s WINDOW THROUGH THE REAL RUNNER, AGAINST A REAL POSTGRES. ONE /diarize CALL.
  *
  * Three times in this slice a core path shipped inert and every unit test stayed green: the lease
  * made diarize unreachable, the join loaded zero turns, and the stitch matched on a key another
@@ -9,8 +9,8 @@
  *
  * This drives `runOneStep` over a real `scribe_job` row — real claims, real leases, real progress
  * — against an ephemeral postgres:16 with the real 0074 and 0085 DDL. Only the outside world is
- * faked: `/diarize` (with the shape captured from a real response), R2 and the join service. The
- * database is not faked, and neither is the runner.
+ * faked: `/diarize` (with the shape captured from a real response) and R2. The database is not
+ * faked, and neither is the runner.
  *
  * EVERY COUNTER THIS FEATURE REPORTS IS ASSERTED NON-ZERO on the happy path. A counter that is
  * always zero is how `rows_stitched` stayed at 0 through an entire review round.
@@ -71,25 +71,24 @@ const emb = (seed: number) => {
   return Buffer.from(v.buffer).toString("base64");
 };
 const DIARIZE_CALLS: string[] = [];
+/** Flip to make the service fail, so the harness can prove it notices. */
+const SVC = { fail: false };
 vi.mock("@/lib/diarize", () => ({
   runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string }) => {
     DIARIZE_CALLS.push(opts.encounterId);
+    if (SVC.fail) return { ok: false, error: "service refused", retryable: false, latencyMs: 0 };
     return {
-      ok: true, latencyMs: 900,
+      ok: true, latencyMs: 68_300,
       result: {
-        // THE CASE THE STITCH EXISTS FOR. The same voice is RECOGNISED on even slices and not on
-        // odd ones — which is what a borderline cosine does in practice. Without cross-slice
-        // propagation the doctor is named in half the window and anonymous in the other half.
+        // The captured shape. idx 0 is MATCHED (clinician_id and confidence together, as a real
+        // match arrives); idx 1 is not. Speaker 0 holds the first half of the window, 1 the second.
         speakers: [
-          Number(opts.encounterId.split("#")[1]) % 2 === 0
-            ? { idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fake0001", confidence: 0.82, embedding_base64: emb(1) }
-            : { idx: 0, label: "Speaker 0", type: "other", source: "heuristic", embedding_base64: emb(1) },
+          { idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fake0001", confidence: 0.82, embedding_base64: emb(1) },
           { idx: 1, label: "Patient", type: "patient", source: "heuristic", embedding_base64: emb(2) },
         ],
-        // Speaker 0 holds the first half of each slice, speaker 1 the second.
         transcript_segments: [
-          { start_ms: 0, end_ms: 60_000, speaker_idx: 0, overlap: false },
-          { start_ms: 60_000, end_ms: 120_000, speaker_idx: 1, overlap: false },
+          { start_ms: 0, end_ms: 450_000, speaker_idx: 0, overlap: false },
+          { start_ms: 450_000, end_ms: 900_000, speaker_idx: 1, overlap: false },
         ],
         overlap_windows: [], aggregates: {}, model_versions: {},
       },
@@ -146,8 +145,8 @@ function seed(): void {
     rows.push(`('c${n}','rd_1','stt_turn','replay','sess_1|${s}|${e}|w', '{"start_ms":${s},"end_ms":${e},"window":{"start_ms":0,"end_ms":${WINDOW_MS}}}'::jsonb)`);
     n += 1;
   }
-  // THE STRADDLE: a turn wholly inside slice 0 that spans the 60 s speaker change.
-  rows.push(`('cstr','rd_1','stt_turn','replay','sess_1|55000|65000|w', '{"start_ms":55000,"end_ms":65000,"window":{"start_ms":0,"end_ms":${WINDOW_MS}}}'::jsonb)`);
+  // THE STRADDLE: a turn spanning the 450 s speaker change.
+  rows.push(`('cstr','rd_1','stt_turn','replay','sess_1|445000|455000|w', '{"start_ms":445000,"end_ms":455000,"window":{"start_ms":0,"end_ms":${WINDOW_MS}}}'::jsonb)`);
   exec(`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES ${rows.join(",")};`);
 }
 
@@ -162,70 +161,78 @@ beforeAll(() => {
 }, 180_000);
 afterAll(() => { if (HAVE_DOCKER) stopPg(); });
 
-describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres", () => {
-  it("runs every slice step then the stitch, writes rows, and stitches some of them", async () => {
-    const { insertJob, claimJobs } = await import("@/lib/jobs/store");
-    const { runOneStep } = await import("@/lib/jobs/runner");
+/** Run the job to a terminal state through the real runner, returning the steps it took. */
+async function runJob(id: string, windowId: string): Promise<{ steps: string[]; status: string; result: Record<string, unknown> | null; error: string | null }> {
+  const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+  const { runOneStep } = await import("@/lib/jobs/runner");
+  const sql = G.__pgsql;
+  await insertJob({ id, kind: "diarize_window", args: { window_id: windowId }, actor: "mcp:test" });
+  const steps: string[] = [];
+  for (let i = 0; i < 10; i += 1) {
+    const claimed = await claimJobs(1, 240_000, `runner_${id}_${i}`);
+    if (claimed.length === 0) break;
+    steps.push(String(claimed[0]!.step ?? "(first)"));
+    await runOneStep(claimed[0]!, `runner_${id}_${i}`);
+    const st = (await sql`SELECT status FROM scribe_job WHERE id = ${id}`) as Array<{ status: string }>;
+    if (st[0]?.status === "done" || st[0]?.status === "failed") break;
+  }
+  const row = (await sql`SELECT status, result, error FROM scribe_job WHERE id = ${id}`) as Array<{ status: string; result: Record<string, unknown> | null; error: string | null }>;
+  return { steps, ...row[0]! };
+}
+
+describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres, ONE call", () => {
+  it("one step, one /diarize call, rows written and counted, every counter non-zero", async () => {
     const sql = G.__pgsql;
+    DIARIZE_CALLS.length = 0;
+    SVC.fail = false;
+    const r = await runJob("job_e2e", "bw_e2e");
 
-    await insertJob({ id: "job_e2e", kind: "diarize_window", args: { window_id: "bw_e2e" }, actor: "mcp:test" });
+    // ── THE SHAPE ACTUALLY EXECUTED ────────────────────────────────────────────────────────
+    expect(r.steps, "a whole window is ONE step now").toEqual(["(first)"]);
+    expect(DIARIZE_CALLS, "ONE /diarize call for the whole 900 s window").toEqual(["bw_e2e"]);
+    expect(r.status, `job must reach done; error=${r.error}`).toBe("done");
 
-    const steps: string[] = [];
-    for (let i = 0; i < 40; i += 1) {
-      const claimed = await claimJobs(1, 240_000, `runner_${i}`);
-      if (claimed.length === 0) break;
-      const job = claimed[0]!;
-      steps.push(String(job.step ?? "(first)"));
-      await runOneStep(job, `runner_${i}`);
-      // The JOB ROW is the authority on where this got to, not the report the runner handed back.
-      const st = (await sql`SELECT status FROM scribe_job WHERE id = 'job_e2e'`) as Array<{ status: string }>;
-      if (st[0]?.status === "done" || st[0]?.status === "failed") break;
-    }
-
-    // ── THE ORDER ACTUALLY EXECUTED ────────────────────────────────────────────────────────
-    // The count is the PLANNER's answer, driven for real — not a number copied into the test.
-    const { snappedSliceBounds } = await import("@/lib/stt/diarize-slicing");
-    const turns = (await sql`SELECT (payload->>'start_ms')::bigint AS start_ms, (payload->>'end_ms')::bigint AS end_ms FROM cue WHERE type = 'stt_turn'`) as Array<{ start_ms: number; end_ms: number }>;
-    const planned = snappedSliceBounds(0, WINDOW_MS, turns.map((t) => ({ start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) })));
-    const sliceSteps = steps.filter((s) => s === "slice" || s === "(first)").length;
-    expect(planned.length, "a 900 s window must be several slices, not one").toBeGreaterThanOrEqual(8);
-    expect(sliceSteps, `every planned slice must run; saw: ${steps.join(",")}`).toBe(planned.length);
-    expect(steps[steps.length - 1], "the stitch runs last").toBe("stitch");
-
-    expect(DIARIZE_CALLS.length, "one /diarize call per slice").toBe(planned.length);
-
-    const jobRow = (await sql`SELECT status, result FROM scribe_job WHERE id = 'job_e2e'`) as Array<{ status: string; result: Record<string, unknown> }>;
-    const result = jobRow[0]!.result;
-    expect(jobRow[0]!.status).toBe("done");
-    expect(result.slices, "observed count, not planned").toBe(planned.length);
-
-    // ── ROWS, PER SLICE, COUNTED ───────────────────────────────────────────────────────────
-    const rows = (await sql`SELECT source_ref, cluster_id, role, clinician_id, no_role_reason FROM room_turn_speaker WHERE window_id = 'bw_e2e'`) as Array<{ source_ref: string; cluster_id: string; role: string | null; clinician_id: string | null; no_role_reason: string | null }>;
-    expect(rows.length, "every turn should have produced a span row").toBeGreaterThan(40);
+    // ── ROWS, COUNTED ──────────────────────────────────────────────────────────────────────
+    const rows = (await sql`SELECT source_ref, role, clinician_id, match_confidence, no_role_reason FROM room_turn_speaker WHERE window_id = 'bw_e2e'`) as Array<{ source_ref: string; role: string | null; clinician_id: string | null; match_confidence: number | null; no_role_reason: string | null }>;
+    const turnCount = (await sql`SELECT count(*)::int AS n FROM cue WHERE type = 'stt_turn'`) as Array<{ n: number }>;
+    expect(rows.length, "every turn overlapping a diarize segment must produce a span row").toBe(turnCount[0]!.n);
+    expect(Number(r.result!.bound), "and the job must report the same number it wrote").toBe(rows.length);
 
     // ── EVERY COUNTER NON-ZERO ON THE HAPPY PATH ───────────────────────────────────────────
-    expect(Number(result.rows_stitched), "rows_stitched is the whole point of the stitch step").toBeGreaterThan(0);
-    expect(Number(result.speakers_seen)).toBeGreaterThan(0);
-    expect(Number(result.identities)).toBeGreaterThan(0);
-    expect(Number(result.turns_named), "the service matched a clinician on the even slices").toBeGreaterThan(0);
-    // The odd slices' speaker 0 rows start unnamed and are filled by the stitch, which is the
-    // whole point: a voice recognised in slice 2 is the same person in slice 3.
-    const namedNow = rows.filter((r) => r.role === "clinician").length;
-    expect(namedNow, "after the stitch, more rows are named than the service named itself").toBeGreaterThan(Number(result.turns_named));
-    expect(Number(result.turns_straddled), "the seeded straddle must be counted").toBeGreaterThan(0);
+    // A counter that is always zero is how an inert stitch stayed green for a whole round.
+    for (const k of ["spans", "turns", "bound", "named", "straddled", "speakers"]) {
+      expect(Number(r.result![k]), `${k} must be non-zero on the happy path`).toBeGreaterThan(0);
+    }
 
-    // ── THE STRUCTURAL REFUSALS SURVIVE THE STITCH ─────────────────────────────────────────
-    const straddle = rows.find((r) => r.source_ref === "sess_1|55000|65000|w")!;
+    // ── THE STRADDLE IS REFUSED, BY NAME, IN THE DATABASE ──────────────────────────────────
+    const straddle = rows.find((x) => x.source_ref === "sess_1|445000|455000|w")!;
     expect(straddle.role, "a turn held by two speakers may never be named").toBeNull();
     expect(straddle.no_role_reason).toBe("straddle");
     expect(straddle.clinician_id).toBeNull();
 
-    // Some row somewhere got a name, and no row carries a name without the claim.
-    expect(rows.some((r) => r.role === "clinician" && r.clinician_id === "doc_fake0001")).toBe(true);
-    for (const r of rows) {
-      if (r.role === "clinician") expect(r.no_role_reason, "a named row states no refusal").toBeNull();
-      else expect(r.no_role_reason, "an unnamed row always says why").toBeTruthy();
+    // ── NAMES ONLY WHERE A MATCH WAS MADE ──────────────────────────────────────────────────
+    const named = rows.filter((x) => x.role === "clinician");
+    expect(named.length).toBe(Number(r.result!.named));
+    for (const x of named) {
+      expect(x.clinician_id).toBe("doc_fake0001");
+      expect(x.match_confidence).toBe(0.82);
+      expect(x.no_role_reason, "a named row states no refusal").toBeNull();
     }
+    // Speaker 1 was never matched: its exclusive turns are unnamed with no_match, never "someone else".
+    const unnamed = rows.filter((x) => x.role === null && x.no_role_reason === "no_match");
+    expect(unnamed.length, "the unmatched speaker's turns must be recorded as no_match").toBeGreaterThan(0);
+  }, 300_000);
+
+  it("FAILS FOR THE RIGHT REASON: a service refusal fails the job and writes nothing", async () => {
+    const sql = G.__pgsql;
+    await sql`DELETE FROM room_turn_speaker WHERE window_id = 'bw_e2e'`;
+    SVC.fail = true;
+    const r = await runJob("job_e2e_fail", "bw_e2e");
+    SVC.fail = false;
+    expect(r.status, "a refused /diarize must never read as done").toBe("failed");
+    expect(String(r.error)).toContain("diarize_failed");
+    const rows = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_e2e'`) as Array<{ n: number }>;
+    expect(rows[0]!.n, "a failed run writes no spans").toBe(0);
   }, 300_000);
 });
 

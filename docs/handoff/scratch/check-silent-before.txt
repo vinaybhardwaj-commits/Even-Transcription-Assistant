@@ -1,0 +1,14 @@
+
+> even-transcription-assistant@0.1.0 check:silent
+> node scripts/check-silent-failures.mjs
+
+Found 9 silent-failure handler(s) — add logging/handling or an explicit /* intentional */ comment:
+  app/[slug]/api/encounters/[id]/finalize-text/route.ts:64  await res.text().catch(() => {});
+  app/[slug]/api/encounters/[id]/finalize-upload/route.ts:92  await res.text().catch(() => {}); // ACK only; the step runs in the target's own after()
+  app/[slug]/api/encounters/[id]/process/route.ts:298  await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => {});
+  app/[slug]/api/encounters/[id]/process/route.ts:326  WHERE id = ${id}`.catch(() => {});
+  app/[slug]/api/encounters/[id]/process/route.ts:334  await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => {});
+  app/[slug]/api/encounters/[id]/process/route.ts:722  await res.text().catch(() => {}); // target ACKs fast and runs its step in its own after()
+  app/[slug]/api/encounters/[id]/process/route.ts:832  await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
+  app/[slug]/note/NoteComposerClient.tsx:85  .then((j) => { if (!cancelled) setFloor((j.fields || []) as FloorField[]); }).catch(() => {});
+  app/[slug]/note/NoteComposerClient.tsx:163  if (encIdRef.current) api(`/api/encounters/${encIdRef.current}/editor`, { method: "PUT", body: JSON.

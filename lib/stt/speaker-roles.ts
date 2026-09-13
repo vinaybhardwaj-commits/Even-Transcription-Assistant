@@ -29,14 +29,12 @@ import type { DiarizeSpeaker } from "@/lib/diarize";
 /**
  * WHY a span has no name, recorded ON THE ROW.
  *
- * This is not bookkeeping. Two of these are STRUCTURAL and permanent — a turn held by two speakers,
- * or crossing a slice seam, can never be attributed by anything downstream, because the audio
- * really does contain more than one person. The third is merely UNRESOLVED: the service matched
- * nobody this time, and a later step legitimately may. Without this distinction the cross-slice
- * stitch cannot tell them apart, and it filled all three alike — putting the straddled row's 400 ms
- * of patient speech back on the record as the doctor's, one step after the slice step refused it.
+ * `straddle` is STRUCTURAL and permanent: the turn really was held by more than one speaker, so no
+ * later step can attribute it. `no_match` is merely unresolved: the service recognised nobody this
+ * time. The distinction lives on the row so that nothing downstream has to guess which kind of
+ * unnamed a span is.
  */
-export type NoRoleReason = "straddle" | "seam" | "no_match";
+export type NoRoleReason = "straddle" | "no_match";
 
 export type SpanRole =
   | { role: "clinician"; clinician_id: string; match_confidence: number; no_role_reason: null }
@@ -46,18 +44,17 @@ export type SpanRole =
 export const noRole = (reason: NoRoleReason): SpanRole =>
   ({ role: null, clinician_id: null, match_confidence: null, no_role_reason: reason });
 
-/** The service matched nobody. UNRESOLVED, not structural — the stitch may still fill this. */
+/** The service matched nobody. UNRESOLVED, not structural. */
 export const UNATTRIBUTED: SpanRole = noRole("no_match");
 
 /**
- * THE ONE TEST FOR A USABLE MATCH CONFIDENCE, shared by every gate that reads the field.
+ * THE ONE TEST FOR A USABLE MATCH CONFIDENCE. Every gate that reads the field uses this.
  *
- * There were two, and they disagreed on exactly one value. `roleForSpeaker` required
- * `Number.isFinite`; `stitchSpeakers` accepted anything with `typeof === "number"`, which NaN
- * satisfies. So a NaN confidence was refused a role by one gate and admitted as a named identity by
- * the other, and since `applyStitch` has no try/catch it would surface as a CHECK violation from
- * Postgres — a database constraint doing a code gate's job, which is the wrong order. The database
- * is the tripwire for what the code failed to think of; it is not the first line.
+ * There used to be two gates and they disagreed on exactly one value: one required `Number.isFinite`
+ * and the other accepted anything with `typeof === "number"`, which NaN satisfies — so NaN was
+ * refused a role by one and admitted by the other, surfacing as a Postgres CHECK violation rather
+ * than a code refusal. The database is the tripwire for what the code failed to think of; it is
+ * not the first line.
  *
  * Range, not just finiteness: a cosine outside [0,1] is not a weak match, it is a bug, and 0085's
  * `room_turn_speaker_confidence_ck` says so. Refusing it here means that check never has to fire.
