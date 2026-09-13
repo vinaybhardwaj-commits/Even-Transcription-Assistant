@@ -106,25 +106,29 @@ describe("C1 step 2 — the mapping", () => {
 });
 
 describe("C1b — health has the same base URL as transcribe", () => {
+  // C2 pre-merge: these used to pin `/health`, a path the router never served (FastAPI 404 in
+  // production). The base-URL property they guard is unchanged; the path is now the real one.
   it("with ETA_ROUTER_URL unset it still probes the literal default, like indicconformer", async () => {
-    const { routeAdapter } = await import("@/lib/stt/adapters/route");
+    const { routeAdapter, __resetRouteProbeCache } = await import("@/lib/stt/adapters/route");
+    __resetRouteProbeCache();
     vi.stubEnv("ETA_ROUTER_URL", "");
     const seen: string[] = [];
     vi.stubGlobal("fetch", async (u: string) => { seen.push(String(u)); return new Response("{}", { status: 500 }); });
     const h = await routeAdapter.health();
     expect(seen, "no env, but still a real probe — not a not-configured refusal").toHaveLength(1);
-    expect(seen[0]).toMatch(/^https:\/\/.+\/health$/);
+    expect(seen[0]).toMatch(/^https:\/\/.+\/route$/);
     expect(h.ok, "a body with no ok:true is not a healthy router").toBe(false);
     vi.unstubAllGlobals(); vi.unstubAllEnvs();
   });
 
   it("ETA_ROUTER_URL overrides it, and a trailing slash does not double up", async () => {
-    const { routeAdapter } = await import("@/lib/stt/adapters/route");
+    const { routeAdapter, __resetRouteProbeCache } = await import("@/lib/stt/adapters/route");
+    __resetRouteProbeCache();
     vi.stubEnv("ETA_ROUTER_URL", "https://router.test/");
     const seen: string[] = [];
     vi.stubGlobal("fetch", async (u: string) => { seen.push(String(u)); return new Response(JSON.stringify({ ok: true }), { status: 200 }); });
     const h = await routeAdapter.health();
-    expect(seen[0]).toBe("https://router.test/health");
+    expect(seen[0]).toBe("https://router.test/route");
     expect(h.ok).toBe(true);
     vi.unstubAllGlobals(); vi.unstubAllEnvs();
   });

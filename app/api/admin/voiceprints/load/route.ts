@@ -12,6 +12,8 @@
  *   200 { loaded: [...] }                   every entry written and round-tripped from the database
  *   400 VALIDATION_FAILED                   one or more entries refused; NOTHING was written
  *   401 AUTH_REQUIRED                       no or wrong secret
+ *   400 VALIDATION_FAILED "refused at write"  another load changed the state after validation (a
+ *                                           concurrent load won); the message lists what WAS written
  *   500 PIPELINE_FAILED                     a write failed part-way; the message names how far it got
  *
  * Nothing here logs, returns or audits a vector.
@@ -19,7 +21,7 @@
 import { NextRequest } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { respondOk, respondError } from "@/lib/respond";
-import { resolveEntries, writeEntries, redact, type LoadEntry } from "@/lib/voiceprint-load";
+import { resolveEntries, writeEntries, redact, WriteRefusal, type LoadEntry } from "@/lib/voiceprint-load";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,6 +59,10 @@ export async function POST(req: NextRequest) {
     const loaded = await writeEntries(phase1.resolved);
     return respondOk({ loaded });
   } catch (e) {
+    if (e instanceof WriteRefusal) {
+      const written = e.written.map((w) => ({ index: w.index, clinician_id: w.clinician_id, sample: w.sample }));
+      return respondError("VALIDATION_FAILED", `refused at write: entry ${e.index} ${e.reason}; written before it: ${JSON.stringify(written)}`);
+    }
     const msg = redact(String((e as Error)?.message ?? e)).slice(0, 200);
     console.error("[voiceprint-load] write failed", JSON.stringify({ err: msg }));
     return respondError("PIPELINE_FAILED", `write failed part-way — re-run is safe (idempotent): ${msg}`);

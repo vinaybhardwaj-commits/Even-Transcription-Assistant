@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
-import { dockerAvailable, startPg, stopPg, exec, makeSql } from "../support/pg-harness";
+import { dockerAvailable, startPg, stopPg, exec, makeSql, PG_NAME } from "../support/pg-harness";
 
 const HAVE_DOCKER = dockerAvailable();
 /**
@@ -126,6 +126,8 @@ function schema(): void {
   exec(keep("room_turn_speaker"));
   exec(keep("room_diarize_window"));
   exec(m0085);
+  // 0088 verbatim: attempts + failure_history, the bounded-retry columns.
+  exec(readFileSync("db/migrations/0088_room_diarize_window_retry.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
 }
 
 /** A 900 s window whose turns leave a clean gap near every 120 s mark, plus one deliberate straddle. */
@@ -236,6 +238,14 @@ describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, rea
   }, 300_000);
 });
 
+/** The cron door as Vercel Cron actually calls it: `Authorization: Bearer ${CRON_SECRET}`. */
+async function cronGet(query = ""): Promise<Response> {
+  process.env.CRON_SECRET = process.env.CRON_SECRET || "test-cron-secret";
+  const { GET } = await import("@/app/api/admin/diarize-windows/route");
+  const { NextRequest } = await import("next/server");
+  return GET(new NextRequest(`https://x.test/api/admin/diarize-windows${query}`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } }));
+}
+
 /** Claim and run whatever is queued until nothing is claimable. The runner, not a shortcut. */
 async function drainQueue(tag: string): Promise<void> {
   const { claimJobs } = await import("@/lib/jobs/store");
@@ -318,9 +328,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     exec(`ALTER TABLE room_turn_speaker ADD CONSTRAINT t_refuse_rej CHECK (window_id <> 'bw_rej');`);
     try {
       // 1. THE ROUTE — the real handler, on the cron door.
-      const { GET } = await import("@/app/api/admin/diarize-windows/route");
-      const { NextRequest } = await import("next/server");
-      const res = await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } }));
+      const res = await cronGet();
       expect(res.status, "the enqueue itself succeeded, so the route says so").toBe(200);
       const body = (await res.json()) as { jobs: Array<{ window_id: string; job_id: string }> };
       const ref = body.jobs.find((j) => j.window_id === "bw_rej");
@@ -349,9 +357,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     await seedWindow("bw_enq", "sess_enq", 5 * WINDOW_MS);
     exec(`ALTER TABLE scribe_job ADD CONSTRAINT t_refuse_enq CHECK (args->>'window_id' IS DISTINCT FROM 'bw_enq');`);
     try {
-      const { GET } = await import("@/app/api/admin/diarize-windows/route");
-      const { NextRequest } = await import("next/server");
-      const res = await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } }));
+      const res = await cronGet();
       expect(res.status, "a refused enqueue must not be a 200").not.toBe(200);
       const body = (await res.json()) as { error?: { code?: string } };
       expect(body.error?.code).toBe("PIPELINE_FAILED");
@@ -359,6 +365,136 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
       expect(rows[0]!.n).toBe(0);
     } finally {
       exec(`ALTER TABLE scribe_job DROP CONSTRAINT t_refuse_enq;`);
+      delete process.env.ROOM_DIARIZE_ENABLED;
+    }
+  }, 300_000);
+});
+
+describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, the flag refuses to guess, a failed window retries BOUNDED", () => {
+  it("AUTH: a bare x-vercel-cron header is 401 and writes nothing; CRON_SECRET and MIGRATION_SECRET are 200", async () => {
+    const sql = G.__pgsql;
+    process.env.ROOM_DIARIZE_ENABLED = "1";
+    process.env.CRON_SECRET = "test-cron-secret";
+    process.env.MIGRATION_SECRET = process.env.MIGRATION_SECRET || "test-secret";
+    const { GET } = await import("@/app/api/admin/diarize-windows/route");
+    const { NextRequest } = await import("next/server");
+    const before = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
+    try {
+      for (const headers of [
+        { "x-vercel-cron": "1" },
+        { "x-vercel-cron": "1", authorization: "Bearer wrong" },
+        { authorization: "Bearer " },
+        { authorization: "bearer test-cron-secret" },
+        { authorization: "test-cron-secret" },
+      ] as Array<Record<string, string>>) {
+        const res = await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers }));
+        expect(res.status, `headers ${JSON.stringify(Object.keys(headers))} must not authorise`).toBe(401);
+      }
+      const after = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
+      expect(after[0]!.n, "a refused call enqueues nothing").toBe(before[0]!.n);
+
+      // An EMPTY CRON_SECRET must not turn "Bearer " into a key.
+      process.env.CRON_SECRET = "";
+      expect((await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { authorization: "Bearer " } }))).status).toBe(401);
+      process.env.CRON_SECRET = "test-cron-secret";
+
+      expect((await cronGet()).status, "Vercel Cron's own header").toBe(200);
+      expect((await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { authorization: `Bearer ${process.env.MIGRATION_SECRET}` } }))).status).toBe(200);
+    } finally {
+      delete process.env.ROOM_DIARIZE_ENABLED;
+    }
+  }, 300_000);
+
+  it("FLAG: an unrecognised ROOM_DIARIZE_ENABLED is a non-2xx through the real route, and enqueues nothing", async () => {
+    const sql = G.__pgsql;
+    const before = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
+    process.env.ROOM_DIARIZE_ENABLED = "enabled";
+    try {
+      const res = await cronGet();
+      expect(res.status, "a value the flag does not understand must never read as off").toBe(500);
+      const body = (await res.json()) as { error?: { code?: string; message?: string } };
+      expect(body.error?.code).toBe("PIPELINE_FAILED");
+      expect(body.error?.message).toMatch(/unrecognised value/);
+      expect(body.error?.message, "the env value itself is not echoed").not.toContain("enabled|");
+      const after = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
+      expect(after[0]!.n).toBe(before[0]!.n);
+      // " 1" and "true" — both read as OFF before — now enable it through the same route.
+      for (const v of [" 1", "true"]) {
+        process.env.ROOM_DIARIZE_ENABLED = v;
+        const ok = (await (await cronGet()).json()) as { enabled?: boolean };
+        expect(ok.enabled, `value ${JSON.stringify(v)}`).toBe(true);
+      }
+    } finally {
+      delete process.env.ROOM_DIARIZE_ENABLED;
+    }
+  }, 300_000);
+
+  it("RETRY: a failed window is re-enqueued until DIARIZE_MAX_ATTEMPTS, every failure is KEPT, and the stuck one is COUNTED", async () => {
+    const sql = G.__pgsql;
+    const { DIARIZE_MAX_ATTEMPTS } = await import("@/lib/stt/diarize-job");
+    expect(DIARIZE_MAX_ATTEMPTS).toBe(3);
+    // Only this test's windows are eligible, so every enqueue below is about them.
+    await sql`UPDATE bench_window SET grid_aligned = false`;
+    await seedWindow("bw_retry", "sess_retry", 7 * WINDOW_MS, true);
+    process.env.ROOM_DIARIZE_ENABLED = "1";
+    SVC.fail = true;
+    try {
+      const attemptsSeen: Array<number | null> = [];
+      for (let round = 1; round <= DIARIZE_MAX_ATTEMPTS; round += 1) {
+        const body = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string; retry_of_attempt: number | null }>; exhausted: number };
+        const job = body.jobs.find((j) => j.window_id === "bw_retry");
+        expect(job, `round ${round}: a failed window with attempts left must be enqueued`).toBeTruthy();
+        attemptsSeen.push(job!.retry_of_attempt);
+        await drainQueue(`retry_${round}`);
+        const row = (await sql`SELECT state, attempts, failure_history FROM room_diarize_window WHERE window_id = 'bw_retry'`) as Array<{ state: string; attempts: number; failure_history: Array<{ attempt: number; error: string }> }>;
+        expect(row[0]!.state).toBe("failed");
+        expect(row[0]!.attempts, `round ${round}`).toBe(round);
+        // THE FAILURE IS PRESERVED, NOT ERASED: each replaced attempt is in the history, in order.
+        expect(row[0]!.failure_history.map((h) => h.attempt)).toEqual(Array.from({ length: round - 1 }, (_, i) => i + 1));
+        for (const h of row[0]!.failure_history) expect(h.error).toBe("service refused");
+      }
+      expect(attemptsSeen, "the response says which attempt each retry follows").toEqual([null, 1, 2]);
+
+      // THE BOUND: attempts used up — not enqueued again, and VISIBLE on the response.
+      const DIARIZE_BEFORE = DIARIZE_CALLS.length;
+      const done = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string }>; exhausted: number };
+      expect(done.jobs.map((j) => j.window_id)).not.toContain("bw_retry");
+      expect(done.exhausted, "a window stuck at the bound is counted, never silent").toBe(1);
+      await drainQueue("retry_after");
+      expect(DIARIZE_CALLS.length, "no fourth /diarize call").toBe(DIARIZE_BEFORE);
+    } finally {
+      SVC.fail = false;
+      delete process.env.ROOM_DIARIZE_ENABLED;
+    }
+  }, 300_000);
+
+  it("RETRY THAT SUCCEEDS: the window becomes ok, keeps its failure history, and is final", async () => {
+    const sql = G.__pgsql;
+    await sql`UPDATE bench_window SET grid_aligned = false`;
+    await seedWindow("bw_retry_ok", "sess_retry_ok", 8 * WINDOW_MS, true);
+    process.env.ROOM_DIARIZE_ENABLED = "1";
+    try {
+      SVC.fail = true;
+      await cronGet(); await drainQueue("rok_1");
+      SVC.fail = false;
+      const body = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string; retry_of_attempt: number | null }> };
+      expect(body.jobs.find((j) => j.window_id === "bw_retry_ok")?.retry_of_attempt).toBe(1);
+      await drainQueue("rok_2");
+      const row = (await sql`SELECT state, attempts, error, failure_history FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number; error: string | null; failure_history: Array<{ attempt: number; error: string }> }>;
+      expect(row[0]!.state).toBe("ok");
+      expect(row[0]!.attempts).toBe(2);
+      expect(row[0]!.error).toBeNull();
+      expect(row[0]!.failure_history).toHaveLength(1);
+      expect(row[0]!.failure_history[0]!.error, "the earlier failure survives the success").toBe("service refused");
+      const again = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string }> };
+      expect(again.jobs.map((j) => j.window_id), "an ok window is final").not.toContain("bw_retry_ok");
+      // And the writer itself refuses to replace a final row.
+      const { recordDiarizeWindow } = await import("@/lib/stt/diarize-window");
+      await recordDiarizeWindow({ windowId: "bw_retry_ok", roomDayId: "rd_1", state: "failed", error: "late", speakers: null, segments: null, clipR2Key: null, timing: null });
+      const still = (await sql`SELECT state, attempts FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number }>;
+      expect(still[0]).toEqual({ state: "ok", attempts: 2 });
+    } finally {
+      SVC.fail = false;
       delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
@@ -419,7 +555,9 @@ describe.skipIf(!HAVE_DOCKER)("0086 — room routing resolves to `route`, and `r
 /** A deterministic, finite, 192-float32 vector as base64 — never a real voice. */
 const synthVec = (seed: number, dims = 192) => {
   const v = new Float32Array(dims);
-  for (let i = 0; i < dims; i += 1) v[i] = Math.cos(seed * 0.37 + i * 0.05) * 0.2;
+  // Amplitude 20 puts the norm near 200, the scale of real unnormalised ECAPA centroids — above
+  // MIN_CENTROID_L2 the way a real voice is.
+  for (let i = 0; i < dims; i += 1) v[i] = Math.cos(seed * 0.37 + i * 0.05) * 20;
   return Buffer.from(v.buffer).toString("base64");
 };
 
@@ -561,6 +699,167 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint load — POST /api/admin/voice
     expect(r.status).toBe(400);
     expect(JSON.stringify(r.body)).toContain("clinician_has_other_samples_loading_would_average");
   }, 120_000);
+
+  it("NORM: an ALL-ZERO vector — 192 finite floats, no direction — is refused, and mints no clinician", async () => {
+    const sql = G.__pgsql;
+    const zero = Buffer.alloc(768).toString("base64");
+    const r = await postLoad({ entries: [{ full_name: "Zero Vector Person", email: "zero@example.test", centroid_base64: zero, provenance: { source_file: "z.json" } }] });
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).toContain("centroid_norm_below_floor");
+    const c = (await sql`SELECT count(*)::int AS n FROM clinician WHERE email = 'zero@example.test'`) as Array<{ n: number }>;
+    expect(c[0]!.n).toBe(0);
+  }, 120_000);
+
+  it("CONCURRENT, same new doctor, same vector: two calls at once give ONE clinician, ONE voiceprint, ONE sample, and no 500", async () => {
+    const sql = G.__pgsql;
+    const body = { entries: [{ full_name: "Race Same", email: "race.same@example.test", centroid_base64: synthVec(31), provenance: { source_file: "race.json" } }] };
+    const [a, b] = await Promise.all([postLoad(body), postLoad(body)]);
+    expect([a.status, b.status], JSON.stringify([a.body, b.body]).slice(0, 300)).toEqual([200, 200]);
+    const ids = (await sql`SELECT id FROM clinician WHERE email = 'race.same@example.test'`) as Array<{ id: string }>;
+    expect(ids).toHaveLength(1);
+    const vp = (await sql`SELECT count(*)::int AS n FROM voice_print WHERE doctor_id = ${ids[0]!.id}`) as Array<{ n: number }>;
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = ${ids[0]!.id}`) as Array<{ n: number }>;
+    expect([vp[0]!.n, vs[0]!.n]).toEqual([1, 1]);
+    const creates = (await sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'doctor.create' AND target_id = ${ids[0]!.id}`) as Array<{ n: number }>;
+    expect(creates[0]!.n, "one creation, one doctor.create audit row").toBe(1);
+  }, 180_000);
+
+  // The Neon HTTP driver autocommits every statement, so ANY interleaving of two loads' statements
+  // is possible in production. These force the worst one — both validate, then both write — rather
+  // than hoping the scheduler produces it.
+  it("FORCED INTERLEAVE, same new doctor: both validate as 'create', both write — ONE clinician", async () => {
+    const sql = G.__pgsql;
+    const { resolveEntries, writeEntries } = await import("@/lib/voiceprint-load");
+    const entry = { full_name: "Interleave New", email: "inter.new@example.test", centroid_base64: synthVec(41), provenance: { source_file: "i.json" } };
+    const A = await resolveEntries([entry]);
+    const B = await resolveEntries([entry]);
+    if (!A.ok || !B.ok) throw new Error("both must validate");
+    expect(A.resolved[0]!.create && B.resolved[0]!.create, "both saw no clinician").toBeTruthy();
+    const wa = await writeEntries(A.resolved);
+    const wb = await writeEntries(B.resolved);
+    expect(wa[0]!.clinician).toBe("created");
+    expect(wb[0]!.clinician, "the second write reuses the row the first created").toBe("existing");
+    expect(wb[0]!.clinician_id).toBe(wa[0]!.clinician_id);
+    expect(wb[0]!.sample).toBe("already_present");
+    const n = (await sql`SELECT (SELECT count(*) FROM clinician WHERE email = 'inter.new@example.test')::int AS c,
+                                (SELECT count(*) FROM voice_print WHERE doctor_id = ${wa[0]!.clinician_id})::int AS v,
+                                (SELECT count(*) FROM voice_sample WHERE clinician_id = ${wa[0]!.clinician_id})::int AS s`) as Array<{ c: number; v: number; s: number }>;
+    expect(n[0]).toEqual({ c: 1, v: 1, s: 1 });
+  }, 180_000);
+
+  it("FORCED INTERLEAVE, one doctor, DIFFERENT vectors: the second is REFUSED and the stored centroid is the first, never an average", async () => {
+    const sql = G.__pgsql;
+    const { resolveEntries, writeEntries, WriteRefusal } = await import("@/lib/voiceprint-load");
+    await sql`INSERT INTO clinician (id, full_name, email, url_slug, url_token) VALUES ('doc_testexa3', 'Existing Test Three', 'existing.three@example.test', 'dr-existing-test-three-cccc', 'cccc')`;
+    const A = await resolveEntries([{ clinician_id: "doc_testexa3", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }]);
+    const B = await resolveEntries([{ clinician_id: "doc_testexa3", centroid_base64: synthVec(52), provenance: { source_file: "b.json" } }]);
+    if (!A.ok || !B.ok) throw new Error("both must validate — neither sees the other's sample yet");
+    await writeEntries(A.resolved);
+    let refused: unknown = null;
+    try { await writeEntries(B.resolved); } catch (e) { refused = e; }
+    expect(refused).toBeInstanceOf(WriteRefusal);
+    expect((refused as InstanceType<typeof WriteRefusal>).reason).toBe("clinician_already_has_a_different_voiceprint_or_samples");
+    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_testexa3'`) as Array<{ c: string; sample_count: number }>;
+    expect(vp[0]!.c.replace(/\s+/g, ""), "the first vector, byte for byte — not the mean of both").toBe(synthVec(51));
+    expect(vp[0]!.sample_count).toBe(1);
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_testexa3'`) as Array<{ n: number }>;
+    expect(vs[0]!.n, "the refused write left no sample to be averaged in later").toBe(1);
+    // A re-run of the winner is still a clean no-op — the endpoint is not wedged by the race.
+    const again = await postLoad({ entries: [{ clinician_id: "doc_testexa3", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }] });
+    expect(again.status).toBe(200);
+    expect((again.body.loaded as Array<{ sample: string }>)[0]!.sample).toBe("already_present");
+  }, 180_000);
+
+  it("FORCED INTERLEAVE, one email, two NAMES: the second is refused at write and nothing of it lands", async () => {
+    const sql = G.__pgsql;
+    const { resolveEntries, writeEntries, WriteRefusal } = await import("@/lib/voiceprint-load");
+    const A = await resolveEntries([{ full_name: "Name One", email: "two.names@example.test", centroid_base64: synthVec(61), provenance: { source_file: "a.json" } }]);
+    const B = await resolveEntries([{ full_name: "Name Two", email: "two.names@example.test", centroid_base64: synthVec(62), provenance: { source_file: "b.json" } }]);
+    if (!A.ok || !B.ok) throw new Error("both must validate");
+    await writeEntries(A.resolved);
+    await expect(writeEntries(B.resolved)).rejects.toBeInstanceOf(WriteRefusal);
+    const rows = (await sql`SELECT full_name FROM clinician WHERE email = 'two.names@example.test'`) as Array<{ full_name: string }>;
+    expect(rows.map((r) => r.full_name)).toEqual(["Name One"]);
+  }, 180_000);
+
+  it("CONCURRENT through the route, one doctor, DIFFERENT vectors: exactly one 200, one non-2xx, ONE voiceprint equal to the winner", async () => {
+    const sql = G.__pgsql;
+    await sql`INSERT INTO clinician (id, full_name, email, url_slug, url_token) VALUES ('doc_testexa4', 'Existing Test Four', 'existing.four@example.test', 'dr-existing-test-four-dddd', 'dddd')`;
+    const one = (v: number) => ({ entries: [{ clinician_id: "doc_testexa4", centroid_base64: synthVec(v), provenance: { source_file: `v${v}.json` } }] });
+    const [a, b] = await Promise.all([postLoad(one(71)), postLoad(one(72))]);
+    expect([a.status, b.status].filter((x) => x === 200), JSON.stringify([a.body, b.body]).slice(0, 300)).toHaveLength(1);
+    expect([a.status, b.status].filter((x) => x === 400)).toHaveLength(1);
+    const winner = a.status === 200 ? synthVec(71) : synthVec(72);
+    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_testexa4'`) as Array<{ c: string; sample_count: number }>;
+    expect(vp).toHaveLength(1);
+    expect(vp[0]!.c.replace(/\s+/g, "")).toBe(winner);
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_testexa4'`) as Array<{ n: number }>;
+    expect(vs[0]!.n).toBe(1);
+  }, 180_000);
+
+  // TRUE PARALLEL SESSIONS. The harness runs one statement at a time, so the tests above interleave
+  // BETWEEN statements — the Neon autocommit model — but never inside one. This runs the app's OWN
+  // write statements (captured verbatim as the loader sent them) in two psql sessions at once, with
+  // session A holding its transaction open, so B's statement genuinely meets A's uncommitted row.
+  it("TRUE PARALLEL: two sessions, one clinician — B waits on A's row lock, then gets ONE clinician and loses the voiceprint to A", async () => {
+    const sql = G.__pgsql;
+    const { writeEntries, resolveEntries } = await import("@/lib/voiceprint-load");
+    const { createHash } = await import("node:crypto");
+    const { spawn } = await import("node:child_process");
+    const sid = (c: string, b: string) => `vs_curated_${createHash("sha256").update(`${c}:${b}`).digest("hex").slice(0, 24)}`;
+    const psql = (text: string) => new Promise<{ out: string; ms: number }>((resolve, reject) => {
+      const t0 = Date.now();
+      const p = spawn("docker", ["exec", "-i", PG_NAME, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"]);
+      let out = "", err = "";
+      p.stdout.on("data", (d) => { out += String(d); });
+      p.stderr.on("data", (d) => { err += String(d); });
+      p.on("close", (code) => (code === 0 ? resolve({ out, ms: Date.now() - t0 }) : reject(new Error(err))));
+      p.stdin.end(text);
+    });
+
+    // 1. Capture the two statements for a TEMPLATE doctor, then derive A's and B's from them.
+    const tplVec = synthVec(90);
+    const pre = QUERIES.length;
+    const r = await resolveEntries([{ full_name: "Template Person", email: "tpl@example.test", centroid_base64: tplVec, provenance: { source_file: "tpl.json" } }]);
+    if (!r.ok) throw new Error("template must validate");
+    const w = await writeEntries(r.resolved);
+    const tplId = w[0]!.clinician_id;
+    const captured = QUERIES.slice(pre);
+    const cStmt = captured.find((q) => q.includes("INSERT INTO clinician"))!;
+    const vStmt = captured.find((q) => q.includes("INSERT INTO voice_print"))!;
+    expect(cStmt && vStmt, "both write statements were captured").toBeTruthy();
+    const tplSlug = /'(dr-template-person-[a-z2-9]{4})'/.exec(cStmt)![1]!;
+
+    const forA = { id: "doc_parallla", email: "par@example.test", slug: "dr-par-aaaa", vec: synthVec(91) };
+    const forB = { id: "doc_parallbb", email: "par@example.test", slug: "dr-par-bbbb", vec: synthVec(92) };
+    const clinicianSql = (x: typeof forA) => cStmt.split(tplId).join(x.id).split("tpl@example.test").join(x.email).split(tplSlug).join(x.slug);
+    const printSql = (x: typeof forA, doctor: string) =>
+      vStmt.split(sid(tplId, tplVec)).join(sid(doctor, x.vec)).split(tplVec).join(x.vec).split(tplId).join(doctor);
+
+    // 2. Clinician: A inserts and HOLDS; B's upsert on the same email must wait, then return A's row.
+    const aC = psql(`BEGIN; ${clinicianSql(forA)}; SELECT pg_sleep(1.5); COMMIT;`);
+    await new Promise((res) => setTimeout(res, 400));
+    const bC = await psql(`${clinicianSql(forB)};`);
+    await aC;
+    expect(bC.ms, "B really overlapped A's open transaction and waited on its lock").toBeGreaterThan(700);
+    expect(bC.out.trim(), "B got A's row back, inserted=false").toBe("doc_parallla|Template Person|f");
+    const cl = (await sql`SELECT id FROM clinician WHERE email = 'par@example.test'`) as Array<{ id: string }>;
+    expect(cl.map((x) => x.id), "ONE clinician").toEqual(["doc_parallla"]);
+
+    // 3. Voiceprint, different vectors: A inserts and HOLDS; B must wait, then get NO row.
+    const aV = psql(`BEGIN; ${printSql(forA, "doc_parallla")}; SELECT pg_sleep(1.5); COMMIT;`);
+    await new Promise((res) => setTimeout(res, 400));
+    const bV = await psql(`${printSql(forB, "doc_parallla")};`);
+    await aV;
+    expect(bV.ms).toBeGreaterThan(700);
+    expect(bV.out.trim(), "B's statement returned no centroid and inserted no sample").toBe("|0");
+    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_parallla'`) as Array<{ c: string; sample_count: number }>;
+    expect(vp).toHaveLength(1);
+    expect(vp[0]!.c.replace(/\s+/g, ""), "A's vector exactly — never the average").toBe(forA.vec);
+    expect(vp[0]!.sample_count).toBe(1);
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_parallla'`) as Array<{ n: number }>;
+    expect(vs[0]!.n, "ONE voiceprint, ONE sample").toBe(1);
+  }, 180_000);
 
   it("refuses a room — voiceprints are not room-scoped", async () => {
     const r = await postLoad({ entries: [

@@ -62,6 +62,26 @@ const lit = (v: unknown): string => {
 };
 
 /**
+ * Offset of the last `SELECT` at parenthesis depth 0 outside string literals, or -1. For a
+ * `WITH a AS (...), b AS (...) SELECT ...` statement that is where the final query starts.
+ */
+function lastTopLevelSelect(q: string): number {
+  let depth = 0, found = -1, inStr = false;
+  for (let i = 0; i < q.length; i += 1) {
+    const ch = q[i]!;
+    if (inStr) {
+      if (ch === "'") { if (q[i + 1] === "'") i += 1; else inStr = false; }
+      continue;
+    }
+    if (ch === "'") inStr = true;
+    else if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (depth === 0 && /^select\b/i.test(q.slice(i, i + 7)) && !/[\w]/.test(q[i - 1] ?? " ")) found = i;
+  }
+  return found;
+}
+
+/**
  * The `sql` tagged template the app uses, backed by the container.
  *
  * Values are inlined as escaped literals rather than bound, because psql has no parameter
@@ -78,7 +98,14 @@ export function makeSql(onQuery?: (q: string) => void) {
     // jsonb_agg, not json_agg, and no COPY. json_agg pretty-prints with newlines and COPY then
     // escapes them, so the text that came back was not the JSON that went in. jsonb prints compact
     // on one line, which is exactly what a line-oriented reader needs.
-    const wrapped = `WITH __q AS (${q.replace(/;\s*$/, "")}) SELECT COALESCE(jsonb_agg(__q)::text, '[]') FROM __q;`;
+    const body = q.replace(/;\s*$/, "");
+    // A statement that is ITSELF a top-level WITH keeps its WITH at the top level: Postgres refuses a
+    // data-modifying CTE nested inside another WITH ("must be at the top level"), and Neon runs the
+    // app's statement exactly as written. Its final SELECT becomes one more CTE, aggregated the same way.
+    const finalSelect = head.startsWith("with") ? lastTopLevelSelect(body) : -1;
+    const wrapped = finalSelect > 0
+      ? `${body.slice(0, finalSelect).replace(/\s+$/, "")}, __q AS (${body.slice(finalSelect)}) SELECT COALESCE(jsonb_agg(__q)::text, '[]') FROM __q;`
+      : `WITH __q AS (${body}) SELECT COALESCE(jsonb_agg(__q)::text, '[]') FROM __q;`;
     const out = sh(["exec", "-i", PG_NAME, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], wrapped);
     const text = out.trim();
     if (!text) return [];

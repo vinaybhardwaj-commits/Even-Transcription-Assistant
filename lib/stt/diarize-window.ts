@@ -185,18 +185,21 @@ export type DiarizeWindowState = "ok" | "failed" | "no_speakers";
 /**
  * THE ONLY WRITER OF room_diarize_window.
  *
- * MOVED, NOT REWRITTEN, from the room diarize pass (`markWindow`) when the pass was deleted in C2.
- * Same columns, same values, same `ON CONFLICT (window_id) DO NOTHING`, so the one live reader —
- * `app/api/admin/speaker-calibration/route.ts` — sees exactly the row shape it always has. That
- * reader is how SPEAKER_MATCH_THRESHOLD gets frozen, so feeding it is the route back to clustering.
+ * MOVED from the room diarize pass (`markWindow`) when the pass was deleted in C2. Same columns and
+ * values, so the one live reader — `app/api/admin/speaker-calibration/route.ts` — sees the row shape
+ * it always has. That reader is how SPEAKER_MATCH_THRESHOLD gets frozen.
  *
- * NO try/catch. The pass caught this and appended to an error list; on the job a throw fails the
- * step, which is the honest outcome — a state row that could not be written is not a window that
- * was diarized.
+ * FIRST WRITE INSERTS. A LATER WRITE REPLACES ONLY A `failed` ROW, and preserves it: the previous
+ * attempt's error and time are appended to `failure_history` and `attempts` goes up by one. A row
+ * in any other state is final and a second write changes nothing, exactly as the old
+ * `DO NOTHING` did. The retry BOUND is not here — it is in the enqueue scan
+ * (DIARIZE_MAX_ATTEMPTS) — so an attempt that did run is always recorded, never dropped.
  *
- * `skipped` is gone from the states this writes: the pass used it for "no slot, try next tick",
- * and on the job that case fails the step as `diarize_unavailable` instead, which the queue
- * retries. The CHECK still permits `skipped`; nothing now writes it.
+ * NO try/catch. On the job a throw fails the step, which is the honest outcome — a state row that
+ * could not be written is not a window that was diarized.
+ *
+ * `skipped` is not written: on the job "no slot" fails the step as `diarize_unavailable`, which the
+ * queue retries. The CHECK still permits it.
  */
 export async function recordDiarizeWindow(row: {
   windowId: string;
@@ -217,6 +220,19 @@ export async function recordDiarizeWindow(row: {
        ${row.segments === null ? null : JSON.stringify(row.segments)}::jsonb,
        ${row.clipR2Key}, ${row.error === null ? null : row.error.slice(0, 300)},
        ${row.timing === null || row.timing === undefined ? null : JSON.stringify(row.timing)}::jsonb, NOW())
-    ON CONFLICT (window_id) DO NOTHING
+    ON CONFLICT (window_id) DO UPDATE SET
+      state           = EXCLUDED.state,
+      speakers_json   = EXCLUDED.speakers_json,
+      segments_json   = EXCLUDED.segments_json,
+      clip_r2_key     = EXCLUDED.clip_r2_key,
+      error           = EXCLUDED.error,
+      timing_json     = EXCLUDED.timing_json,
+      diarized_at     = EXCLUDED.diarized_at,
+      attempts        = room_diarize_window.attempts + 1,
+      failure_history = room_diarize_window.failure_history || jsonb_build_array(jsonb_build_object(
+                          'attempt', room_diarize_window.attempts,
+                          'error', room_diarize_window.error,
+                          'diarized_at', room_diarize_window.diarized_at))
+    WHERE room_diarize_window.state = 'failed'
   `;
 }

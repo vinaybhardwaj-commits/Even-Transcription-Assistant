@@ -15,6 +15,8 @@
  *
  * One writer per table. What is left here reads and enqueues, and writes nothing.
  *
+ * A `failed` window is retried, BOUNDED — see DIARIZE_MAX_ATTEMPTS.
+ *
  * ─── THE ON-SWITCH STAYS, AND IT IS NOT A SECOND PATH ─────────────────────────────────────
  * `/api/admin/diarize-windows` runs on a five-minute cron and `/api/jobs/run` every minute. With no
  * gate, this would start diarizing every closed window within minutes of deploy — putting a
@@ -37,15 +39,44 @@ import { sql } from "@/lib/db";
 export const ROOM_DIARIZE_ENABLED_ENV = "ROOM_DIARIZE_ENABLED";
 const RETIRED_ENV = "SPEAKER_CLUSTERS_ENABLED";
 
+/**
+ * THE VALUES THIS FLAG UNDERSTANDS, and nothing else. Case-insensitive, surrounding whitespace
+ * trimmed. It used to be `=== "1"`, which read "true" and " 1" as OFF without a word — a flag that
+ * silently disagrees with the operator who set it is a trap, not a default.
+ */
+export const ROOM_DIARIZE_TRUTHY = ["1", "true", "yes", "on"] as const;
+export const ROOM_DIARIZE_FALSY = ["", "0", "false", "no", "off"] as const;
+
+/** Thrown for a value in neither set. The route turns it into a non-2xx; it never reads as "off". */
+export class FlagValueError extends Error {}
+
 export function roomDiarizeEnabled(env: Record<string, string | undefined> = process.env, log: (m: string) => void = console.error): boolean {
   if ((env[RETIRED_ENV] ?? "").trim() !== "") {
     log(`[room-diarize] ${RETIRED_ENV} is set and is IGNORED — it was renamed ${ROOM_DIARIZE_ENABLED_ENV}. Room diarize enqueue is controlled by ${ROOM_DIARIZE_ENABLED_ENV} only; move the setting.`);
   }
-  return env[ROOM_DIARIZE_ENABLED_ENV] === "1";
+  const raw = env[ROOM_DIARIZE_ENABLED_ENV];
+  if (raw === undefined) return false;
+  const v = raw.trim().toLowerCase();
+  if ((ROOM_DIARIZE_TRUTHY as readonly string[]).includes(v)) return true;
+  if ((ROOM_DIARIZE_FALSY as readonly string[]).includes(v)) return false;
+  // Length only: an env value is not something to echo into a response.
+  throw new FlagValueError(
+    `${ROOM_DIARIZE_ENABLED_ENV} has an unrecognised value (length ${raw.length}) — use one of ${ROOM_DIARIZE_TRUTHY.join("|")} to enable or ${ROOM_DIARIZE_FALSY.filter(Boolean).join("|")}/unset to disable. Refusing to guess.`,
+  );
 }
 
 /** Bounded so one tick enqueues a handful of windows beside the Mini's serialised service. */
 export const DIARIZE_BATCH_LIMIT = 4;
+
+/**
+ * THE RETRY BOUND. A window whose row is `failed` is re-enqueued until it has been attempted this
+ * many times in total, and then left alone. 0074 made `failed` a permanent destination so a broken
+ * clip could not hold the Mini's one diarize slot all night; that also meant a transient failure
+ * blocked a window forever. Three attempts is the middle: a flaky tunnel gets two more chances, a
+ * clip that is genuinely bad costs at most three calls. Every earlier failure is kept in
+ * `failure_history` (0088), and windows at the bound are COUNTED on every enqueue response.
+ */
+export const DIARIZE_MAX_ATTEMPTS = 3;
 
 type Logger = (msg: string) => void;
 
@@ -72,7 +103,9 @@ async function safeRead<T>(what: string, fallback: T, log: Logger, sink: string[
 export type DiarizeEnqueueResult = {
   enabled: boolean;
   scanned: number;
-  enqueued: Array<{ window_id: string; job_id: string }>;
+  enqueued: Array<{ window_id: string; job_id: string; retry_of_attempt: number | null }>;
+  /** Failed windows that have used every attempt. Visible here so a stuck window is never silent. */
+  exhausted: number;
   errors: string[];
 };
 
@@ -90,35 +123,46 @@ export async function enqueueDiarizeWindows(
   opts: { limit?: number; log?: Logger; origin?: string; actor: string },
 ): Promise<DiarizeEnqueueResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
-  const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], errors: [] };
+  const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], exhausted: 0, errors: [] };
 
   if (!roomDiarizeEnabled(process.env, log)) {
-    log(`[room-diarize] ${ROOM_DIARIZE_ENABLED_ENV} is not "1" — enqueueing nothing (this is the shipped state)`);
+    log(`[room-diarize] ${ROOM_DIARIZE_ENABLED_ENV} is off — enqueueing nothing (this is the shipped state)`);
     return result;
   }
   result.enabled = true;
 
   const limit = Math.max(1, Math.min(DIARIZE_BATCH_LIMIT, Math.trunc(opts.limit ?? DIARIZE_BATCH_LIMIT) || DIARIZE_BATCH_LIMIT));
-  const windows = await safeRead<Array<{ id: string }>>("bench_window scan", [], log, result.errors, async () =>
+  const windows = await safeRead<Array<{ id: string; attempts: number | null }>>("bench_window scan", [], log, result.errors, async () =>
     (await sql`
-      SELECT w.id
+      SELECT w.id, d.attempts
         FROM bench_window w
+        LEFT JOIN room_diarize_window d ON d.window_id = w.id
        WHERE w.state IN ('closed', 'transcribed')
          AND w.grid_aligned = TRUE
          AND w.room_day_id IS NOT NULL
          AND w.clip_r2_key IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id)
+         -- Never handled, or FAILED with attempts left. ok / no_speakers / skipped are final.
+         AND (d.window_id IS NULL OR (d.state = 'failed' AND d.attempts < ${DIARIZE_MAX_ATTEMPTS}))
          AND NOT EXISTS (
            SELECT 1 FROM scribe_job j
             WHERE j.kind = 'diarize_window'
               AND j.args->>'window_id' = w.id
               AND j.status IN ('queued', 'running')
          )
-       ORDER BY w.start_ms ASC
+       -- New windows before retries, so a failing clip never starves fresh work.
+       ORDER BY (d.window_id IS NOT NULL) ASC, w.start_ms ASC
        LIMIT ${limit}
-    `) as Array<{ id: string }>);
+    `) as Array<{ id: string; attempts: number | null }>);
   if (!windows.ok) return result;
   result.scanned = windows.value.length;
+
+  const exhausted = await safeRead<Array<{ n: number }>>("exhausted count", [], log, result.errors, async () =>
+    (await sql`
+      SELECT count(*)::int AS n FROM room_diarize_window
+       WHERE state = 'failed' AND attempts >= ${DIARIZE_MAX_ATTEMPTS}
+    `) as Array<{ n: number }>);
+  if (!exhausted.ok) return result;
+  result.exhausted = Number(exhausted.value[0]?.n ?? 0);
 
   // Imported lazily: the kind registry imports this module's neighbours, and a static import would
   // close a cycle through lib/jobs/submit.
@@ -133,8 +177,8 @@ export async function enqueueDiarizeWindows(
       ...(opts.origin ? { origin: opts.origin } : {}),
       scopes: new Set(["invoke"] as const),
     });
-    result.enqueued.push({ window_id: w.id, job_id: job.id });
+    result.enqueued.push({ window_id: w.id, job_id: job.id, retry_of_attempt: w.attempts == null ? null : Number(w.attempts) });
   }
-  log(`[room-diarize] enqueued ${result.enqueued.length} of ${result.scanned} eligible window(s)`);
+  log(`[room-diarize] enqueued ${result.enqueued.length} of ${result.scanned} eligible window(s); ${result.enqueued.filter((e) => e.retry_of_attempt !== null).length} retr(ies); ${result.exhausted} failed window(s) at the ${DIARIZE_MAX_ATTEMPTS}-attempt bound`);
   return result;
 }

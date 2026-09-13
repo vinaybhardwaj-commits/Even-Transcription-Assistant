@@ -66,13 +66,34 @@ describe("the gate off is a TRUE no-op", () => {
 });
 
 describe("ROOM_DIARIZE_ENABLED — one name, and the retired one is ignored LOUDLY", () => {
-  it("only ROOM_DIARIZE_ENABLED=1 turns the enqueue on", async () => {
+  it("the DOCUMENTED truthy values enable it — case-insensitive, whitespace trimmed", async () => {
+    const { roomDiarizeEnabled, ROOM_DIARIZE_TRUTHY } = await import("@/lib/stt/diarize-job");
+    const quiet = () => {};
+    expect([...ROOM_DIARIZE_TRUTHY]).toEqual(["1", "true", "yes", "on"]);
+    for (const v of ["1", " 1", "1\n", "true", "TRUE", " True ", "yes", "YES", "on", "On"]) {
+      expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: v }, quiet), `value ${JSON.stringify(v)}`).toBe(true);
+    }
+  });
+
+  it("the documented falsy values, and unset, disable it", async () => {
     const { roomDiarizeEnabled } = await import("@/lib/stt/diarize-job");
     const quiet = () => {};
-    expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: "1" }, quiet)).toBe(true);
-    for (const v of [undefined, "", "0", "true", "yes"]) {
-      expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: v }, quiet), `value ${String(v)}`).toBe(false);
+    for (const v of [undefined, "", "   ", "0", "false", "FALSE", "no", "off", " Off "]) {
+      expect(roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: v }, quiet), `value ${JSON.stringify(v)}`).toBe(false);
     }
+  });
+
+  it("an UNRECOGNISED value FAILS LOUDLY — it is never read as off", async () => {
+    const { roomDiarizeEnabled, FlagValueError } = await import("@/lib/stt/diarize-job");
+    const quiet = () => {};
+    for (const v of ["2", "enabled", "y", "tru", "1 1", "o n", "-1"]) {
+      expect(() => roomDiarizeEnabled({ ROOM_DIARIZE_ENABLED: v }, quiet), `value ${JSON.stringify(v)}`).toThrow(FlagValueError);
+    }
+    // The enqueue surfaces it as a throw (the route makes it a non-2xx), with no database work.
+    process.env.ROOM_DIARIZE_ENABLED = "enabled";
+    await expect(enqueueDiarizeWindows({ log: silent, actor: "cron:test" })).rejects.toThrow(/unrecognised value/);
+    expect(calls).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
   });
 
   it("the OLD name set to 1 does NOT turn it on — and says so, rather than being silently read", async () => {
@@ -100,17 +121,20 @@ describe("the enqueue", () => {
   it("one diarize_window job per eligible window, with the window id and the caller as actor", async () => {
     responses = [[{ id: "bw_1" }, { id: "bw_2" }]];
     const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
-    expect(r.enqueued).toEqual([{ window_id: "bw_1", job_id: "job_1" }, { window_id: "bw_2", job_id: "job_2" }]);
+    expect(r.enqueued).toEqual([{ window_id: "bw_1", job_id: "job_1", retry_of_attempt: null }, { window_id: "bw_2", job_id: "job_2", retry_of_attempt: null }]);
     expect(submitted.map((s) => s.kind)).toEqual(["diarize_window", "diarize_window"]);
     expect(submitted[0]!.args).toEqual({ window_id: "bw_1" });
     expect(submitted[0]!.actor).toBe("cron:test");
   });
 
-  it("the scan still means NOT YET DIARIZED, and NOT ALREADY QUEUED", async () => {
+  it("the scan means NOT YET DIARIZED or FAILED WITH ATTEMPTS LEFT, and NOT ALREADY QUEUED", async () => {
     responses = [[]];
     await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
     const scan = calls[0]!.text;
-    expect(scan).toMatch(/NOT EXISTS \(SELECT 1 FROM room_diarize_window d WHERE d\.window_id = w\.id\)/);
+    const { DIARIZE_MAX_ATTEMPTS } = await import("@/lib/stt/diarize-job");
+    expect(scan).toMatch(/d\.window_id IS NULL OR \(d\.state = 'failed' AND d\.attempts < \?\)/);
+    expect(calls[0]!.values).toContain(DIARIZE_MAX_ATTEMPTS);
+    // The behavioural proof of the bound is the real-postgres retry test in c2-e2e-runner.test.ts.
     // A job does not write its row until it finishes, so without this clause a backlog longer than
     // one tick would enqueue the same window again every five minutes.
     expect(scan).toMatch(/j\.kind = 'diarize_window'/);

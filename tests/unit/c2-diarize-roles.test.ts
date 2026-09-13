@@ -251,7 +251,8 @@ describe("R4 D5 — one predicate for confidence, and the code refuses before th
 });
 
 describe("checkCentroid — exactly one 192-float32 voiceprint, byte for byte", () => {
-  const vec = (dims: number, fill = 0.1) => Buffer.from(new Float32Array(dims).fill(fill).buffer).toString("base64");
+  // fill 16 over 192 dims is a norm of ~221.7 — the scale of the real curated centroids.
+  const vec = (dims: number, fill = 16) => Buffer.from(new Float32Array(dims).fill(fill).buffer).toString("base64");
   it("accepts 192 finite floats that re-encode identically", async () => {
     const { checkCentroid } = await import("@/lib/voiceprint-load");
     expect(checkCentroid(vec(192)).ok).toBe(true);
@@ -277,6 +278,30 @@ describe("checkCentroid — exactly one 192-float32 voiceprint, byte for byte", 
     expect(checkCentroid(vec(192, Infinity))).toEqual({ ok: false, reason: "centroid_non_finite_value" });
     expect(checkCentroid("not base64!!")).toEqual({ ok: false, reason: "centroid_not_base64" });
     expect(checkCentroid(undefined)).toEqual({ ok: false, reason: "centroid_missing" });
+  });
+  it("NORM: an all-zero vector is refused — a check on the type is not a check on the thing", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    expect(checkCentroid(vec(192, 0))).toEqual({ ok: false, reason: "centroid_norm_below_floor" });
+  });
+  it("NORM: a near-zero vector is refused, including one just under the floor", async () => {
+    const { checkCentroid, MIN_CENTROID_L2 } = await import("@/lib/voiceprint-load");
+    expect(MIN_CENTROID_L2).toBe(20);
+    expect(checkCentroid(vec(192, 1e-3))).toEqual({ ok: false, reason: "centroid_norm_below_floor" });
+    expect(checkCentroid(vec(192, 1e-30))).toEqual({ ok: false, reason: "centroid_norm_below_floor" });
+    // One non-zero component, the rest zero: finite, "not all zero", still no usable direction scale.
+    const one = new Float32Array(192); one[7] = 5;
+    expect(checkCentroid(Buffer.from(one.buffer).toString("base64"))).toEqual({ ok: false, reason: "centroid_norm_below_floor" });
+    // Just under and just over the floor: the boundary is the constant, not an accident.
+    const under = new Float32Array(192).fill(19.9 / Math.sqrt(192));
+    const over = new Float32Array(192).fill(20.1 / Math.sqrt(192));
+    expect(checkCentroid(Buffer.from(under.buffer).toString("base64")).ok).toBe(false);
+    expect(checkCentroid(Buffer.from(over.buffer).toString("base64")).ok).toBe(true);
+  });
+  it("NORM: a vector at a real ECAPA centroid's scale is accepted (synthetic — real voiceprints never enter this public repo)", async () => {
+    const { checkCentroid } = await import("@/lib/voiceprint-load");
+    const v = new Float32Array(192);
+    for (let i = 0; i < 192; i += 1) v[i] = Math.sin(i * 0.7 + 1.3) * 22.6; // L2 ~ 221, the smallest real one measured
+    expect(checkCentroid(Buffer.from(v.buffer).toString("base64")).ok).toBe(true);
   });
   it("redact removes a base64 blob from any string", async () => {
     const { redact } = await import("@/lib/voiceprint-load");

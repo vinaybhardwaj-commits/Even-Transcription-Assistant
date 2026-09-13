@@ -15,10 +15,16 @@
  * a clean no-op. It exists because this route runs every five minutes and the job runner every
  * minute: without it, deploying this would start diarizing every closed window on the Mini.
  *
- * AUTH: `x-vercel-cron`, or Bearer CRON_SECRET / MIGRATION_SECRET on GET; admin cookie or Bearer
- * MIGRATION_SECRET on POST (the manual door).
+ * AUTH: Bearer CRON_SECRET or Bearer MIGRATION_SECRET on GET; admin cookie or Bearer MIGRATION_SECRET
+ * on POST (the manual door).
+ *
+ * THE BARE `x-vercel-cron` HEADER NO LONGER AUTHORISES. It is a request header: anyone can send
+ * it, and whether Vercel strips a client-supplied copy is not something this route can check. Vercel
+ * Cron sends `Authorization: Bearer ${CRON_SECRET}` on every scheduled call when CRON_SECRET is set,
+ * which is the proof `/api/jobs/run` already requires.
  */
 import { NextRequest } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -29,21 +35,20 @@ export const dynamic = "force-dynamic";
 /** Enqueueing is a handful of inserts; nothing here waits on the Mini. */
 export const maxDuration = 60;
 
+/** Whole-header, constant-time. An empty or unset secret never authorises. */
+function bearerIs(req: NextRequest, secret: string | undefined): boolean {
+  if (!secret) return false;
+  const got = Buffer.from(req.headers.get("authorization") ?? "", "utf8");
+  const want = Buffer.from(`Bearer ${secret}`, "utf8");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
 function cronAuthorized(req: NextRequest): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const auth = req.headers.get("authorization") || "";
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
-  const migrationSecret = process.env.MIGRATION_SECRET;
-  // An EMPTY secret must never authorise.
-  if (migrationSecret && auth === `Bearer ${migrationSecret}`) return true;
-  return false;
+  return bearerIs(req, process.env.CRON_SECRET) || bearerIs(req, process.env.MIGRATION_SECRET);
 }
 
 async function adminOrSecret(req: NextRequest): Promise<boolean> {
-  const secret = process.env.MIGRATION_SECRET;
-  const auth = req.headers.get("authorization") || "";
-  if (secret && auth === `Bearer ${secret}`) return true;
+  if (bearerIs(req, process.env.MIGRATION_SECRET)) return true;
   const cookie = await readAdminCookie();
   if (cookie) {
     try { await verifyAdminJwt(cookie); return true; } catch { /* fall through */ }
@@ -74,11 +79,11 @@ async function run(req: NextRequest, actor: string) {
       `diarize enqueue had ${result.errors.length} failure(s): scanned=${result.scanned} enqueued=${result.enqueued.length} — an empty list here is NOT "nothing eligible"`,
     );
   }
-  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued });
+  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued, exhausted: result.exhausted });
 }
 
 export async function GET(req: NextRequest) {
-  if (!cronAuthorized(req)) return respondError("AUTH_REQUIRED", "cron header or secret required");
+  if (!cronAuthorized(req)) return respondError("AUTH_REQUIRED", "cron or migration secret required");
   return run(req, "cron:diarize_windows");
 }
 

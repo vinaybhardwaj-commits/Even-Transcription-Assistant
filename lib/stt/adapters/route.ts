@@ -31,6 +31,9 @@
  */
 import { routeTranscribe, submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "../eta-router";
 import type { SttAdapter, SttTranscribeResult } from "../types";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { WHISPER_PROBE_FIXTURE } from "@/lib/health/whisper-probe";
 
 /**
  * The ceiling for the synchronous transport, from the Slice C spec. Above this the router's own
@@ -181,18 +184,76 @@ export const routeAdapter: SttAdapter = {
     return { ok: true, state: "done", result: toSttResult(st as RouterResult, typeof st.sec === "number" ? Math.round(st.sec * 1000) : 0) };
   },
 
+  /**
+   * ─── THE PROBE TRANSCRIBES ───────────────────────────────────────────────────────────────────
+   * It used to GET `/health`. The router (FastAPI, eta-router 3.1) serves `/healthz`, `/route`,
+   * `/route/job` and `/route/job/{id}` — `/health` is FastAPI's 404 — so production reported
+   * `route_unhealthy_http_404` for a router that was transcribing. It could never have said true.
+   *
+   * Pointing it at `/healthz` would only prove the router process is up. This does what the
+   * whisper probe does (lib/health/whisper-probe.ts): a real multipart POST of the same half-second
+   * webm fixture to `POST /route`, exactly as routeTranscribe sends it, translation off, and a
+   * parsed `ok: true` — the router's own verdict on its pipeline, never a status code.
+   */
   async health() {
-    const t0 = Date.now();
-    const base = ROUTER_BASE();
-    try {
-      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(8000), cache: "no-store" });
-      // Parsed `ok` is the authority. A body that does not parse, or parses without an `ok`, is
-      // not a healthy router — it is something answering on the router's port.
-      const body: unknown = await res.json().catch(() => null);
-      const ok = !!(body && typeof body === "object" && !Array.isArray(body) && (body as { ok?: unknown }).ok === true);
-      return { ok, latencyMs: Date.now() - t0, ...(ok ? {} : { error: `route_unhealthy_http_${res.status}` }) };
-    } catch (e) {
-      return { ok: false, latencyMs: Date.now() - t0, error: String(e).slice(0, 120) };
-    }
+    const r = await probeRouteTranscription();
+    return { ok: r.ok, latencyMs: r.elapsed_ms, ...(r.ok ? {} : { error: r.error }) };
   },
 };
+
+// ---------------------------------------------------------------------------
+// The health probe
+// ---------------------------------------------------------------------------
+
+/** Warm, the router answers the half-second fixture in 4-5 s; a cold start or a busy Mini is slower. */
+export const ROUTE_PROBE_BUDGET_MS = 12_000;
+/** At most one probe transcription per minute per instance — the Mini is the thing being observed. */
+export const ROUTE_PROBE_CACHE_MS = 60_000;
+
+export type RouteProbeResult = { ok: boolean; elapsed_ms: number; error?: string; cached?: boolean };
+type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
+
+let LAST_PROBE: { at: number; result: RouteProbeResult } | null = null;
+/** Test seam: module state must be resettable. */
+export function __resetRouteProbeCache(): void { LAST_PROBE = null; }
+
+/** Never throws. Every failure is named. */
+export async function runRouteProbe(opts: { baseUrl?: string; fetchImpl?: Fetcher; readFixture?: () => Promise<Uint8Array>; budgetMs?: number } = {}): Promise<RouteProbeResult> {
+  const t0 = Date.now();
+  const base = (opts.baseUrl ?? ROUTER_BASE()).replace(/\/+$/, "");
+  const budget = opts.budgetMs ?? ROUTE_PROBE_BUDGET_MS;
+  const doFetch: Fetcher = opts.fetchImpl ?? ((u, i) => fetch(u, i));
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), budget);
+  try {
+    const bytes = opts.readFixture ? await opts.readFixture() : new Uint8Array(await readFile(path.join(process.cwd(), WHISPER_PROBE_FIXTURE)));
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: "audio/webm" }), "audio.webm");
+    form.append("translate", "false");
+    const res = await doFetch(`${base}/route`, { method: "POST", body: form, signal: ac.signal, cache: "no-store" });
+    const body: unknown = await res.json().catch(() => null);
+    const elapsed_ms = Date.now() - t0;
+    // Parsed `ok` is the authority. A 404 from FastAPI parses too — as {"detail":"Not Found"}.
+    if (body && typeof body === "object" && !Array.isArray(body) && (body as { ok?: unknown }).ok === true) {
+      return { ok: true, elapsed_ms };
+    }
+    if (ac.signal.aborted) return { ok: false, elapsed_ms, error: `route_probe_timeout_${budget}ms` };
+    const why = body && typeof body === "object" && "error" in (body as object) ? String((body as { error?: unknown }).error).slice(0, 80) : null;
+    return { ok: false, elapsed_ms, error: `route_probe_http_${res.status}${why ? `: ${why}` : ""}` };
+  } catch (e) {
+    const elapsed_ms = Date.now() - t0;
+    if (ac.signal.aborted || (e as Error)?.name === "AbortError") return { ok: false, elapsed_ms, error: `route_probe_timeout_${budget}ms` };
+    return { ok: false, elapsed_ms, error: `route_probe_transport: ${String((e as Error)?.message ?? e).slice(0, 100)}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function probeRouteTranscription(opts: Parameters<typeof runRouteProbe>[0] & { now?: () => number } = {}): Promise<RouteProbeResult> {
+  const now = opts.now ?? Date.now;
+  if (LAST_PROBE && now() - LAST_PROBE.at < ROUTE_PROBE_CACHE_MS) return { ...LAST_PROBE.result, cached: true };
+  const result = await runRouteProbe(opts);
+  LAST_PROBE = { at: now(), result };
+  return result;
+}
+
