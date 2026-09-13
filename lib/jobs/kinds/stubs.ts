@@ -33,11 +33,9 @@ export const STUB_KINDS: JobKind[] = [
     const o = (raw ?? {}) as Record<string, unknown>;
     return { clip_key: requireString(o, "clip_key") };
   }),
-  // §5.4 — the Mini's emotion tunnel, serialised at ≤ 110 s a piece.
-  stub("emotion_clip", "invoke", (raw) => {
-    const o = (raw ?? {}) as Record<string, unknown>;
-    return { clip_key: requireString(o, "clip_key"), ...(o.model === "emotion2vec" ? { model: "emotion2vec" } : {}) };
-  }),
+  // §5.4's `emotion_clip` is GONE, not renamed: `emotion_window` (Slice C3) implements emotion for
+  // real, scoring a diarized window's speech in one call, and two kinds for one job is two places
+  // for a caller to be wrong about which one works.
   // §5.3's `diarize_clip` is GONE, not renamed: `diarize_window` implements it for real, and two
   // kinds for one job is two places for a caller to be wrong about which one works.
   // §4.6 — N engines on one clip, N transcription_run rows.
