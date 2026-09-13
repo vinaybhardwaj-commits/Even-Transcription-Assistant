@@ -38,21 +38,29 @@ export const DIARIZE_BATCH_THRESHOLD = 0.65;
 export type ClinicianCentroid = { clinician_id: string; full_name: string; centroid_base64: string };
 
 /**
- * EVERY enrolled voiceprint, not one.
+ * EVERY enrolled voiceprint of an ACTIVE clinician, not one.
  *
  * The encounter path loads the centroid for the encounter's own doctor, because it knows whose
  * consultation it is. A room window does not: a room has whoever walked into it. So this offers
  * the service every enrolled voice and lets the cosine match decide — which is the only thing that
  * may decide (see speaker-roles.ts).
+ *
+ * ACTIVE ONLY: `status = 'active' AND deleted_at IS NULL`, the predicate the admin dashboard already
+ * counts active clinicians by. A disabled or deleted clinician's voiceprint stays on disk and is no
+ * longer offered, so a departed doctor's voice cannot be attributed to a room. A voiceprint with no
+ * clinician row at all is not offered either — the join is INNER. `locked` (the PIN lockout) is not
+ * active by this predicate; such a clinician drops out of matching until an admin resets the PIN.
  */
 export async function loadClinicianCentroids(): Promise<ClinicianCentroid[]> {
   const rows = (await sql`
     SELECT vp.doctor_id AS clinician_id,
-           COALESCE(d.full_name, vp.doctor_id) AS full_name,
+           d.full_name,
            encode(vp.centroid, 'base64') AS centroid_base64
       FROM voice_print vp
-      LEFT JOIN clinician d ON d.id = vp.doctor_id
+      JOIN clinician d ON d.id = vp.doctor_id
      WHERE vp.centroid IS NOT NULL
+       AND d.status = 'active'
+       AND d.deleted_at IS NULL
      ORDER BY vp.doctor_id
   `) as Array<{ clinician_id: string; full_name: string | null; centroid_base64: string | null }>;
   return rows

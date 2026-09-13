@@ -71,11 +71,14 @@ const emb = (seed: number) => {
   return Buffer.from(v.buffer).toString("base64");
 };
 const DIARIZE_CALLS: string[] = [];
+/** The clinician ids offered to /diarize on each call, in call order. */
+const CENTROIDS_SENT: string[][] = [];
 /** Flip to make the service fail, so the harness can prove it notices. */
 const SVC = { fail: false };
 vi.mock("@/lib/diarize", () => ({
-  runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string }) => {
+  runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string; clinicianCentroids?: Array<{ clinician_id: string }> }) => {
     DIARIZE_CALLS.push(opts.encounterId);
+    CENTROIDS_SENT.push((opts.clinicianCentroids ?? []).map((c) => c.clinician_id));
     if (SVC.fail) return { ok: false, error: "service refused", retryable: false, latencyMs: 0 };
     return {
       ok: true, latencyMs: 68_300,
@@ -120,7 +123,7 @@ function schema(): void {
     CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, source text, source_ref text,
       payload jsonb, at timestamptz DEFAULT now());
     CREATE TABLE voice_print (doctor_id text PRIMARY KEY, centroid bytea);
-    CREATE TABLE clinician (id text PRIMARY KEY, full_name text);
+    CREATE TABLE clinician (id text PRIMARY KEY, full_name text, status text NOT NULL DEFAULT 'active', deleted_at timestamptz);
   `);
   exec(m0082);
   exec(keep("room_turn_speaker"));
@@ -136,7 +139,7 @@ function seed(): void {
     INSERT INTO bench_window VALUES ('bw_e2e','sess_1','rd_1',0,${WINDOW_MS},'primary','clips/w.webm',true,'transcribed');
     -- The window is epoch 0..900000, so the chunk must cover THAT, not wall-clock now.
     INSERT INTO bench_chunk VALUES ('sess_1',0,'primary','chunks/a.webm','audio/webm', to_timestamp(0), to_timestamp(900), 'uploaded');
-    INSERT INTO clinician VALUES ('doc_fake0001','Fakedock Fakedocl');
+    INSERT INTO clinician (id, full_name) VALUES ('doc_fake0001','Fake Clinician One');
     INSERT INTO voice_print VALUES ('doc_fake0001', decode('${emb(1)}','base64'));
   `);
   const rows: string[] = [];
@@ -500,6 +503,38 @@ describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, th
   }, 300_000);
 });
 
+describe.skipIf(!HAVE_DOCKER)("C2 merge blocker 3 — only ACTIVE clinicians are offered to /diarize", () => {
+  it("a DISABLED or DELETED clinician's centroid is not sent to /diarize; an active one is", async () => {
+    const sql = G.__pgsql;
+    await sql`INSERT INTO clinician (id, full_name, status, deleted_at) VALUES
+      ('doc_fake0201', 'Fake Active Clinician', 'active', NULL),
+      ('doc_fake0202', 'Fake Disabled Clinician', 'disabled', NULL),
+      ('doc_fake0203', 'Fake Deleted Clinician', 'active', now())`;
+    await sql`INSERT INTO voice_print VALUES ('doc_fake0201', decode(${emb(3)}, 'base64')), ('doc_fake0202', decode(${emb(4)}, 'base64')), ('doc_fake0203', decode(${emb(5)}, 'base64'))`;
+    // A voiceprint with no clinician row at all — the old LEFT JOIN offered it under its bare id.
+    await sql`INSERT INTO voice_print VALUES ('doc_fake0204', decode(${emb(6)}, 'base64'))`;
+
+    const { loadClinicianCentroids } = await import("@/lib/stt/diarize-window");
+    const ids = (await loadClinicianCentroids()).map((c) => c.clinician_id);
+    expect(ids).toContain("doc_fake0201");
+    expect(ids).not.toContain("doc_fake0202");
+    expect(ids).not.toContain("doc_fake0203");
+    expect(ids).not.toContain("doc_fake0204");
+
+    // THROUGH THE JOB: what actually reaches the service.
+    SVC.fail = false;
+    await seedWindow("bw_active", "sess_active", 9 * WINDOW_MS, true);
+    CENTROIDS_SENT.length = 0;
+    const r = await runJob("job_active", "bw_active");
+    expect(r.status, `error=${r.error}`).toBe("done");
+    expect(CENTROIDS_SENT).toHaveLength(1);
+    expect(CENTROIDS_SENT[0]).toContain("doc_fake0201");
+    expect(CENTROIDS_SENT[0], "a disabled clinician's voice must not join room matching").not.toContain("doc_fake0202");
+    expect(CENTROIDS_SENT[0], "nor a deleted one's").not.toContain("doc_fake0203");
+    expect(CENTROIDS_SENT[0]).not.toContain("doc_fake0204");
+  }, 300_000);
+});
+
 describe.skipIf(!HAVE_DOCKER)("0086 — room routing resolves to `route`, and `route` is not paid", () => {
   it("resolveRouting returns route for room/english AND room/indic against the REAL rows", async () => {
     const sql = G.__pgsql;
@@ -548,8 +583,9 @@ describe.skipIf(!HAVE_DOCKER)("0086 — room routing resolves to `route`, and `r
 });
 
 // ---------------------------------------------------------------------------
-// CURATED VOICEPRINT LOAD — the route, against real Postgres. SYNTHETIC identities only: this repo
-// is public, and a test file is repo content.
+// CURATED VOICEPRINT ENROL — the route, against real Postgres. SYNTHETIC identities only: this repo
+// is public, and a test file is repo content. Every id here carries a 0 or 1, which the app's id
+// alphabet never uses, so none can ever collide with a real clinician.
 // ---------------------------------------------------------------------------
 
 /** A deterministic, finite, 192-float32 vector as base64 — never a real voice. */
@@ -561,9 +597,13 @@ const synthVec = (seed: number, dims = 192) => {
   return Buffer.from(v.buffer).toString("base64");
 };
 
+const FAKE_ACTIVE = ["doc_fake0101", "doc_fake0102", "doc_fake0103", "doc_fake0104", "doc_fake0105"];
+
 function voiceprintSchema(): void {
   const m0017 = readFileSync("db/migrations/0017_voice_sample.sql", "utf8");
   const vs = m0017.slice(m0017.indexOf("CREATE TABLE IF NOT EXISTS voice_sample"), m0017.indexOf(");", m0017.indexOf("CREATE TABLE IF NOT EXISTS voice_sample")) + 2);
+  const row = (id: string, n: string, status = "active", deleted = "NULL") =>
+    `('${id}', 'Fake Clinician ${n}', 'fake.${n}@example.test', 'dr-fake-clinician-${n}-0000', '0000', '${status}', ${deleted})`;
   exec(`
     CREATE EXTENSION IF NOT EXISTS citext;
     DO $$ BEGIN CREATE TYPE clinician_type AS ENUM ('physician','dietitian','physiotherapist'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -575,7 +615,7 @@ function voiceprintSchema(): void {
       full_name TEXT NOT NULL, email CITEXT NOT NULL UNIQUE, phone TEXT, url_slug TEXT NOT NULL UNIQUE,
       url_token TEXT NOT NULL, pin_hash TEXT, pin_plaintext TEXT, pin_set_at TIMESTAMPTZ,
       status doctor_status NOT NULL DEFAULT 'active', created_by UUID REFERENCES admin_user(id),
-      specialty TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+      deleted_at TIMESTAMPTZ, specialty TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
     CREATE TABLE voice_print (
       doctor_id TEXT PRIMARY KEY REFERENCES clinician(id) ON DELETE CASCADE, centroid BYTEA NOT NULL,
       sample_count INT NOT NULL DEFAULT 0, samples_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -583,44 +623,86 @@ function voiceprintSchema(): void {
       match_confidence_30d_avg FLOAT, needs_reenrollment BOOLEAN NOT NULL DEFAULT FALSE);
     ${vs}
     CREATE TABLE IF NOT EXISTS audit_log (actor_type text, actor_id text, action text, target_type text, target_id text, metadata_json jsonb, at timestamptz default now());
-    INSERT INTO clinician (id, full_name, email, url_slug, url_token) VALUES
-      ('doc_testexa1', 'Existing Test One', 'existing.one@example.test', 'dr-existing-test-one-aaaa', 'aaaa'),
-      ('doc_testexa2', 'Existing Test Two', 'existing.two@example.test', 'dr-existing-test-two-bbbb', 'bbbb');
+    INSERT INTO clinician (id, full_name, email, url_slug, url_token, status, deleted_at) VALUES
+      ${row("doc_fake0101", "0101")}, ${row("doc_fake0102", "0102")}, ${row("doc_fake0103", "0103")},
+      ${row("doc_fake0104", "0104")}, ${row("doc_fake0105", "0105")},
+      ${row("doc_fake0106", "0106", "disabled")}, ${row("doc_fake0107", "0107", "active", "now()")},
+      ${row("doc_fake0108", "0108")}, ${row("doc_fake0109", "0109")}, ${row("doc_fake0110", "0110")}, ${row("doc_fake0111", "0111")};
   `);
 }
 
-async function postLoad(body: unknown, auth: string | null = process.env.MIGRATION_SECRET ?? null) {
+async function postLoad(body: unknown, auth: string | null = process.env.MIGRATION_SECRET ?? null, raw?: string) {
   const { POST } = await import("@/app/api/admin/voiceprints/load/route");
   const { NextRequest } = await import("next/server");
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (auth) headers.authorization = `Bearer ${auth}`;
-  const res = await POST(new NextRequest("https://x.test/api/admin/voiceprints/load", { method: "POST", headers, body: JSON.stringify(body) }));
+  const res = await POST(new NextRequest("https://x.test/api/admin/voiceprints/load", { method: "POST", headers, body: raw ?? JSON.stringify(body) }));
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
 const FIVE = () => ({
   entries: [
-    { clinician_id: "doc_testexa1", centroid_base64: synthVec(1), provenance: { source_file: "synthetic-a.json" } },
-    { clinician_id: "doc_testexa2", centroid_base64: synthVec(2), provenance: { source_file: "synthetic-b.json", centroid_id: "synth-b", enroll_seconds: 121.44, probe_only: true } },
-    { full_name: "New Test Three", email: "new.three@example.test", specialty: "ENT", centroid_base64: synthVec(3), provenance: { source_file: "synthetic-c.json" } },
-    { full_name: "New Test Four", email: "new.four@example.test", centroid_base64: synthVec(4), provenance: { source_file: "synthetic-d.json" } },
-    { full_name: "New Test Five", email: "new.five@example.test", specialty: "UROLOGY", centroid_base64: synthVec(5), provenance: { source_file: "synthetic-e.json" } },
+    { clinician_id: FAKE_ACTIVE[0]!, centroid_base64: synthVec(1), provenance: { source_file: "synthetic-a.json" } },
+    { clinician_id: FAKE_ACTIVE[1]!, centroid_base64: synthVec(2), provenance: { source_file: "synthetic-b.json", centroid_id: "synth-b", enroll_seconds: 121.44, probe_only: true } },
+    { clinician_id: FAKE_ACTIVE[2]!, centroid_base64: synthVec(3), provenance: { source_file: "synthetic-c.json" } },
+    { clinician_id: FAKE_ACTIVE[3]!, centroid_base64: synthVec(4), provenance: { source_file: "synthetic-d.json" } },
+    { clinician_id: FAKE_ACTIVE[4]!, centroid_base64: synthVec(5), provenance: { source_file: "synthetic-e.json" } },
   ],
 });
 
-describe.skipIf(!HAVE_DOCKER)("curated voiceprint load — POST /api/admin/voiceprints/load, real postgres", () => {
+const counts = async () => {
+  const r = (await G.__pgsql`SELECT (SELECT count(*) FROM clinician)::int AS c, (SELECT count(*) FROM voice_print)::int AS v,
+                                    (SELECT count(*) FROM voice_sample)::int AS s, (SELECT count(*) FROM audit_log)::int AS a`) as Array<{ c: number; v: number; s: number; a: number }>;
+  return r[0]!;
+};
+
+describe.skipIf(!HAVE_DOCKER)("curated voiceprint enrol — POST /api/admin/voiceprints/load, real postgres", () => {
   beforeAll(() => { if (HAVE_DOCKER) voiceprintSchema(); process.env.MIGRATION_SECRET = process.env.MIGRATION_SECRET || "test-secret"; }, 120_000);
 
   it("refuses an unauthenticated call, and a wrong secret, and writes nothing", async () => {
-    const sql = G.__pgsql;
+    const before = await counts();
     expect((await postLoad(FIVE(), null)).status).toBe(401);
     expect((await postLoad(FIVE(), "not-the-secret")).status).toBe(401);
-    const n = (await sql`SELECT count(*)::int AS n FROM voice_print`) as Array<{ n: number }>;
-    expect(n[0]!.n).toBe(0);
+    expect(await counts()).toEqual(before);
+  }, 120_000);
+
+  it("MERGE BLOCKER 2: a well-formed request naming a NON-EXISTENT clinician is a 404 and creates NOTHING", async () => {
+    const before = await counts();
+    const r = await postLoad({ entries: [{ clinician_id: "doc_fake0999", centroid_base64: synthVec(9), provenance: { source_file: "x.json" } }] });
+    expect(r.status).toBe(404);
+    expect((r.body.error as { code: string }).code).toBe("NOT_FOUND");
+    expect(JSON.stringify(r.body)).toContain("clinician_not_found");
+    expect(await counts(), "no clinician, voiceprint, sample or audit row").toEqual(before);
+  }, 120_000);
+
+  it("MERGE BLOCKER 2: the old create-a-doctor shape is REFUSED as unknown fields — nothing is minted", async () => {
+    const before = await counts();
+    for (const entry of [
+      { full_name: "Fake New Person", email: "fake.new@example.test", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { clinician_id: FAKE_ACTIVE[0]!, full_name: "Fake Rename", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { clinician_id: FAKE_ACTIVE[0]!, email: "fake.other@example.test", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+      { clinician_id: FAKE_ACTIVE[0]!, specialty: "ENT", centroid_base64: synthVec(10), provenance: { source_file: "n.json" } },
+    ]) {
+      const r = await postLoad({ entries: [entry] });
+      expect(r.status, JSON.stringify(Object.keys(entry))).toBe(400);
+      expect(JSON.stringify(r.body)).toMatch(/unknown_field_(full_name|email|specialty)|clinician_id_required/);
+    }
+    expect(await counts()).toEqual(before);
+    const c = (await G.__pgsql`SELECT count(*)::int AS n FROM clinician WHERE email = 'fake.new@example.test'`) as Array<{ n: number }>;
+    expect(c[0]!.n).toBe(0);
+  }, 120_000);
+
+  it("MERGE BLOCKER 3: a DISABLED or DELETED clinician is 404 clinician_not_active, and gets no voiceprint", async () => {
+    const before = await counts();
+    for (const id of ["doc_fake0106", "doc_fake0107"]) {
+      const r = await postLoad({ entries: [{ clinician_id: id, centroid_base64: synthVec(11), provenance: { source_file: "x.json" } }] });
+      expect(r.status, id).toBe(404);
+      expect(JSON.stringify(r.body)).toContain("clinician_not_active");
+    }
+    expect(await counts()).toEqual(before);
   }, 120_000);
 
   it("refuses 191- and 193-float payloads, and a one-bad-entry batch writes NOTHING", async () => {
-    const sql = G.__pgsql;
     for (const dims of [191, 193]) {
       const bad = FIVE();
       bad.entries[3]!.centroid_base64 = synthVec(9, dims);
@@ -629,179 +711,166 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint load — POST /api/admin/voice
       expect(JSON.stringify(r.body)).toContain(`centroid_dim_${dims}_not_192`);
       expect(JSON.stringify(r.body), "a refusal never echoes the vector").not.toContain(synthVec(9, dims).slice(0, 40));
     }
-    const vp = (await sql`SELECT count(*)::int AS n FROM voice_print`) as Array<{ n: number }>;
-    const cl = (await sql`SELECT count(*)::int AS n FROM clinician`) as Array<{ n: number }>;
-    expect(vp[0]!.n, "all-or-nothing: the four good entries were not written either").toBe(0);
-    expect(cl[0]!.n, "and no clinician was minted").toBe(2);
+    // A 404 alongside a 400 is a 400: the batch is refused either way, and the shape error is named.
+    const mixed = FIVE();
+    mixed.entries[0]!.clinician_id = "doc_fake0999";
+    mixed.entries[1]!.centroid_base64 = synthVec(9, 191);
+    expect((await postLoad(mixed)).status).toBe(400);
+    const c = await counts();
+    expect(c.v, "all-or-nothing: the good entries were not written either").toBe(0);
   }, 120_000);
 
-  it("loads five, mints three clinicians with the app's functions, and every centroid ROUND-TRIPS from the database", async () => {
+  it("loads five EXISTING clinicians, creates no clinician, and every centroid ROUND-TRIPS from the database", async () => {
     const sql = G.__pgsql;
+    const before = await counts();
     const r = await postLoad(FIVE());
     expect(r.status, JSON.stringify(r.body).slice(0, 300)).toBe(200);
-    const loaded = r.body.loaded as Array<{ clinician_id: string; clinician: string; sample: string; dim: number; roundtrip: boolean }>;
-    expect(loaded).toHaveLength(5);
-    expect(loaded.filter((x) => x.clinician === "created")).toHaveLength(3);
-
-    const created = (await sql`SELECT id, url_slug, url_token, specialty, pin_hash IS NOT NULL AS has_pin FROM clinician WHERE email LIKE 'new.%'`) as Array<{ id: string; url_slug: string; url_token: string; specialty: string | null; has_pin: boolean }>;
-    for (const c of created) {
-      // THE APP'S OWN FORMAT, from its own minter: doc_ + 8 of the unambiguous alphabet.
-      expect(c.id).toMatch(/^doc_[abcdefghjkmnpqrstuvwxyz23456789]{8}$/);
-      expect(c.url_slug.endsWith(`-${c.url_token}`), "slug from buildDoctorSlug").toBe(true);
-      expect(c.has_pin).toBe(true);
-    }
-    expect(created.map((c) => c.specialty).sort()).toEqual([null, "ENT", "UROLOGY"].sort());
-
+    const loaded = r.body.loaded as Array<{ clinician_id: string; sample: string; dim: number; roundtrip: boolean }>;
+    expect(loaded.map((x) => x.clinician_id)).toEqual(FAKE_ACTIVE);
+    expect(loaded.every((x) => x.sample === "inserted" && x.dim === 192 && x.roundtrip)).toBe(true);
+    const after = await counts();
+    expect(after.c, "the endpoint never creates a clinician").toBe(before.c);
+    expect(after.v - before.v).toBe(5);
     const body = FIVE();
     for (const [i, x] of loaded.entries()) {
       const stored = (await sql`SELECT encode(centroid, 'base64') AS c FROM voice_print WHERE doctor_id = ${x.clinician_id}`) as Array<{ c: string }>;
-      const back = stored[0]!.c.replace(/\s+/g, "");
-      expect(back, `entry ${i} must be byte-identical to what was sent`).toBe(body.entries[i]!.centroid_base64);
-      expect(Buffer.from(back, "base64").length / 4).toBe(192);
+      expect(stored[0]!.c.replace(/\s+/g, ""), `entry ${i} must be byte-identical to what was sent`).toBe(body.entries[i]!.centroid_base64);
     }
-    // PROVENANCE on the sample, and no vector in any audit row.
-    const probe = (await sql`SELECT session_id, duration_ms FROM voice_sample WHERE clinician_id = 'doc_testexa2'`) as Array<{ session_id: string; duration_ms: number }>;
+    const probe = (await sql`SELECT session_id, duration_ms FROM voice_sample WHERE clinician_id = ${FAKE_ACTIVE[1]!}`) as Array<{ session_id: string; duration_ms: number }>;
     expect(probe[0]!.session_id).toBe("curated:synth-b:probe_only");
     expect(probe[0]!.duration_ms).toBe(121440);
-    const audits = (await sql`SELECT metadata_json::text AS m FROM audit_log WHERE actor_id = 'voiceprint_load'`) as Array<{ m: string }>;
+    const audits = (await sql`SELECT action, metadata_json::text AS m FROM audit_log WHERE actor_id = 'voiceprint_load'`) as Array<{ action: string; m: string }>;
     expect(audits.length).toBeGreaterThan(0);
+    expect(audits.some((a) => a.action === "doctor.create"), "no doctor.create is ever written by this endpoint").toBe(false);
     for (const a of audits) expect(a.m, "an audit row must never carry a vector").not.toMatch(/[A-Za-z0-9+/]{40,}/);
   }, 180_000);
 
-  it("IDEMPOTENT: the same body again duplicates no clinician, no sample and no voiceprint", async () => {
-    const sql = G.__pgsql;
-    const before = (await sql`SELECT (SELECT count(*) FROM clinician)::int AS c, (SELECT count(*) FROM voice_sample)::int AS s, (SELECT count(*) FROM voice_print)::int AS v`) as Array<{ c: number; s: number; v: number }>;
+  it("IDEMPOTENT: the same body again duplicates no sample and no voiceprint", async () => {
+    const before = await counts();
     const r = await postLoad(FIVE());
     expect(r.status).toBe(200);
-    const loaded = r.body.loaded as Array<{ clinician: string; sample: string }>;
-    expect(loaded.every((x) => x.clinician === "existing"), "a re-run reuses, never re-mints").toBe(true);
-    expect(loaded.every((x) => x.sample === "already_present")).toBe(true);
-    const after = (await sql`SELECT (SELECT count(*) FROM clinician)::int AS c, (SELECT count(*) FROM voice_sample)::int AS s, (SELECT count(*) FROM voice_print)::int AS v`) as Array<{ c: number; s: number; v: number }>;
-    expect(after[0]).toEqual(before[0]);
-    expect(after[0]!.v).toBe(5);
+    expect((r.body.loaded as Array<{ sample: string }>).every((x) => x.sample === "already_present")).toBe(true);
+    const after = await counts();
+    expect({ c: after.c, v: after.v, s: after.s }).toEqual({ c: before.c, v: before.v, s: before.s });
   }, 180_000);
 
-  it("NOT A BACKDOOR: an existing email under a DIFFERENT name is rejected, and nothing is written", async () => {
-    const sql = G.__pgsql;
-    const r = await postLoad({ entries: [
-      { full_name: "Someone Else Entirely", email: "existing.one@example.test", centroid_base64: synthVec(11), provenance: { source_file: "x.json" } },
-    ] });
-    expect(r.status).toBe(400);
-    expect(JSON.stringify(r.body)).toContain("email_exists_with_a_different_name");
-    const s = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_testexa1'`) as Array<{ n: number }>;
-    expect(s[0]!.n, "the existing clinician's voiceprint was not touched").toBe(1);
-  }, 120_000);
-
   it("refuses to AVERAGE: a second, different centroid for a clinician who already has one is refused", async () => {
-    const r = await postLoad({ entries: [
-      { clinician_id: "doc_testexa1", centroid_base64: synthVec(42), provenance: { source_file: "second-mic.json" } },
-    ] });
+    const r = await postLoad({ entries: [{ clinician_id: FAKE_ACTIVE[0]!, centroid_base64: synthVec(42), provenance: { source_file: "second-mic.json" } }] });
     expect(r.status).toBe(400);
     expect(JSON.stringify(r.body)).toContain("clinician_has_other_samples_loading_would_average");
   }, 120_000);
 
-  it("NORM: an ALL-ZERO vector — 192 finite floats, no direction — is refused, and mints no clinician", async () => {
-    const sql = G.__pgsql;
-    const zero = Buffer.alloc(768).toString("base64");
-    const r = await postLoad({ entries: [{ full_name: "Zero Vector Person", email: "zero@example.test", centroid_base64: zero, provenance: { source_file: "z.json" } }] });
+  it("NORM: an ALL-ZERO vector — 192 finite floats, no direction — is refused", async () => {
+    const r = await postLoad({ entries: [{ clinician_id: "doc_fake0108", centroid_base64: Buffer.alloc(768).toString("base64"), provenance: { source_file: "z.json" } }] });
     expect(r.status).toBe(400);
     expect(JSON.stringify(r.body)).toContain("centroid_norm_below_floor");
-    const c = (await sql`SELECT count(*)::int AS n FROM clinician WHERE email = 'zero@example.test'`) as Array<{ n: number }>;
-    expect(c[0]!.n).toBe(0);
   }, 120_000);
 
-  it("CONCURRENT, same new doctor, same vector: two calls at once give ONE clinician, ONE voiceprint, ONE sample, and no 500", async () => {
+  it("MERGE BLOCKER 4: wrong types are 400s with a named reason, never a 500", async () => {
+    const good = () => ({ clinician_id: "doc_fake0108", centroid_base64: synthVec(12), provenance: { source_file: "t.json" } as Record<string, unknown> });
+    const cases: Array<[unknown, string]> = [
+      [{ ...good(), clinician_id: 12345 }, "clinician_id_must_be_a_string"],
+      [{ ...good(), clinician_id: { $ne: null } }, "clinician_id_must_be_a_string"],
+      [{ ...good(), clinician_id: ["doc_fake0108"] }, "clinician_id_must_be_a_string"],
+      [{ ...good(), clinician_id: null }, "clinician_id_required"],
+      [{ ...good(), clinician_id: "doc_fake0108' OR 1=1 --" }, "clinician_id_has_invalid_characters"],
+      [{ ...good(), centroid_base64: 7 }, "centroid_base64_must_be_a_string"],
+      [{ ...good(), centroid_base64: [1, 2, 3] }, "centroid_base64_must_be_a_string"],
+      [{ ...good(), provenance: "t.json" }, "provenance_must_be_an_object"],
+      [{ ...good(), provenance: null }, "provenance_required"],
+      [{ ...good(), provenance: { source_file: 99 } }, "provenance.source_file_must_be_a_string"],
+      [{ ...good(), provenance: { source_file: "t.json", centroid_id: 5 } }, "provenance.centroid_id_must_be_a_string"],
+      [{ ...good(), provenance: { source_file: "t.json", enroll_seconds: "121" } }, "provenance.enroll_seconds_must_be_a_finite_number"],
+      [{ ...good(), provenance: { source_file: "t.json", enroll_seconds: -1 } }, "provenance.enroll_seconds_must_be_in_(0,3600]"],
+      [{ ...good(), provenance: { source_file: "t.json", probe_only: "yes" } }, "provenance.probe_only_must_be_a_boolean"],
+      [{ ...good(), provenance: { source_file: "t.json", room: "opd-3" } }, "unknown_field_provenance.room"],
+      [{ ...good(), room: "opd-3" }, "unknown_field_room"],
+      ["a string entry", "entry_must_be_an_object"],
+      [null, "entry_must_be_an_object"],
+    ];
+    const before = await counts();
+    for (const [entry, reason] of cases) {
+      const r = await postLoad({ entries: [entry] });
+      expect(r.status, `${JSON.stringify(entry).slice(0, 80)} -> ${JSON.stringify(r.body).slice(0, 200)}`).toBe(400);
+      expect(JSON.stringify(r.body)).toContain(reason);
+    }
+    // The body itself.
+    for (const [raw, reason] of [["[]", "body_must_be_an_object"], ["null", "body_must_be_an_object"], ["{\"entries\":\"x\"}", "entries_required"], ["{\"entries\":[],\"x\":1}", "unknown_field_x"], ["not json", "body_not_json"]] as Array<[string, string]>) {
+      const r = await postLoad(null, undefined, raw);
+      expect(r.status, raw).toBe(400);
+      expect(JSON.stringify(r.body)).toContain(reason);
+    }
+    expect(await counts()).toEqual(before);
+  }, 180_000);
+
+  it("MERGE BLOCKER 4: every string is capped — one over the cap is a 400 with a named reason, and nothing is stored", async () => {
+    const { LIMITS } = await import("@/lib/voiceprint-load");
+    const base = { clinician_id: "doc_fake0108", centroid_base64: synthVec(13), provenance: { source_file: "t.json" } };
+    const cases: Array<[unknown, string]> = [
+      [{ ...base, clinician_id: "d".repeat(LIMITS.clinician_id + 1) }, `clinician_id_length_must_be_1_to_${LIMITS.clinician_id}`],
+      [{ ...base, clinician_id: "" }, `clinician_id_length_must_be_1_to_${LIMITS.clinician_id}`],
+      [{ ...base, provenance: { source_file: "f".repeat(LIMITS.source_file + 1) } }, `provenance.source_file_length_must_be_1_to_${LIMITS.source_file}`],
+      [{ ...base, provenance: { source_file: "   " } }, `provenance.source_file_length_must_be_1_to_${LIMITS.source_file}`],
+      [{ ...base, provenance: { source_file: "t.json", centroid_id: "c".repeat(LIMITS.centroid_id + 1) } }, `provenance.centroid_id_length_must_be_1_to_${LIMITS.centroid_id}`],
+      [{ ...base, provenance: { source_file: "t.json", enroll_seconds: LIMITS.enroll_seconds_max + 0.01 } }, `enroll_seconds_must_be_in_(0,${LIMITS.enroll_seconds_max}]`],
+      [{ ...base, centroid_base64: "A".repeat(LIMITS.centroid_base64 + 4) }, `centroid_base64_longer_than_${LIMITS.centroid_base64}`],
+    ];
+    const before = await counts();
+    for (const [entry, reason] of cases) {
+      const r = await postLoad({ entries: [entry] });
+      expect(r.status, reason).toBe(400);
+      expect(JSON.stringify(r.body)).toContain(reason);
+    }
+    // Exactly AT the caps is accepted.
+    const atCap = await postLoad({ entries: [{ ...base, provenance: { source_file: "f".repeat(LIMITS.source_file), centroid_id: "c".repeat(LIMITS.centroid_id), enroll_seconds: LIMITS.enroll_seconds_max } }] });
+    expect(atCap.status, JSON.stringify(atCap.body).slice(0, 200)).toBe(200);
+    // The body cap: a request past 256 KB is refused before it is parsed.
+    const huge = JSON.stringify({ entries: [{ ...base, provenance: { source_file: "x".repeat(LIMITS.body_bytes) } }] });
+    const r = await postLoad(null, undefined, huge);
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).toContain(`body_larger_than_${LIMITS.body_bytes}_bytes`);
+    const after = await counts();
+    expect(after.c).toBe(before.c);
+  }, 180_000);
+
+  it("CONCURRENT, same doctor, same vector: two calls at once give ONE voiceprint and ONE sample, and no 500", async () => {
     const sql = G.__pgsql;
-    const body = { entries: [{ full_name: "Race Same", email: "race.same@example.test", centroid_base64: synthVec(31), provenance: { source_file: "race.json" } }] };
+    const body = { entries: [{ clinician_id: "doc_fake0109", centroid_base64: synthVec(31), provenance: { source_file: "race.json" } }] };
     const [a, b] = await Promise.all([postLoad(body), postLoad(body)]);
     expect([a.status, b.status], JSON.stringify([a.body, b.body]).slice(0, 300)).toEqual([200, 200]);
-    const ids = (await sql`SELECT id FROM clinician WHERE email = 'race.same@example.test'`) as Array<{ id: string }>;
-    expect(ids).toHaveLength(1);
-    const vp = (await sql`SELECT count(*)::int AS n FROM voice_print WHERE doctor_id = ${ids[0]!.id}`) as Array<{ n: number }>;
-    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = ${ids[0]!.id}`) as Array<{ n: number }>;
+    const vp = (await sql`SELECT count(*)::int AS n FROM voice_print WHERE doctor_id = 'doc_fake0109'`) as Array<{ n: number }>;
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_fake0109'`) as Array<{ n: number }>;
     expect([vp[0]!.n, vs[0]!.n]).toEqual([1, 1]);
-    const creates = (await sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'doctor.create' AND target_id = ${ids[0]!.id}`) as Array<{ n: number }>;
-    expect(creates[0]!.n, "one creation, one doctor.create audit row").toBe(1);
   }, 180_000);
 
-  // The Neon HTTP driver autocommits every statement, so ANY interleaving of two loads' statements
-  // is possible in production. These force the worst one — both validate, then both write — rather
-  // than hoping the scheduler produces it.
-  it("FORCED INTERLEAVE, same new doctor: both validate as 'create', both write — ONE clinician", async () => {
-    const sql = G.__pgsql;
-    const { resolveEntries, writeEntries } = await import("@/lib/voiceprint-load");
-    const entry = { full_name: "Interleave New", email: "inter.new@example.test", centroid_base64: synthVec(41), provenance: { source_file: "i.json" } };
-    const A = await resolveEntries([entry]);
-    const B = await resolveEntries([entry]);
-    if (!A.ok || !B.ok) throw new Error("both must validate");
-    expect(A.resolved[0]!.create && B.resolved[0]!.create, "both saw no clinician").toBeTruthy();
-    const wa = await writeEntries(A.resolved);
-    const wb = await writeEntries(B.resolved);
-    expect(wa[0]!.clinician).toBe("created");
-    expect(wb[0]!.clinician, "the second write reuses the row the first created").toBe("existing");
-    expect(wb[0]!.clinician_id).toBe(wa[0]!.clinician_id);
-    expect(wb[0]!.sample).toBe("already_present");
-    const n = (await sql`SELECT (SELECT count(*) FROM clinician WHERE email = 'inter.new@example.test')::int AS c,
-                                (SELECT count(*) FROM voice_print WHERE doctor_id = ${wa[0]!.clinician_id})::int AS v,
-                                (SELECT count(*) FROM voice_sample WHERE clinician_id = ${wa[0]!.clinician_id})::int AS s`) as Array<{ c: number; v: number; s: number }>;
-    expect(n[0]).toEqual({ c: 1, v: 1, s: 1 });
-  }, 180_000);
-
+  // The Neon HTTP driver autocommits every statement, so ANY interleaving of two loads' statements is
+  // possible in production. This forces the worst one — both validate, then both write.
   it("FORCED INTERLEAVE, one doctor, DIFFERENT vectors: the second is REFUSED and the stored centroid is the first, never an average", async () => {
     const sql = G.__pgsql;
     const { resolveEntries, writeEntries, WriteRefusal } = await import("@/lib/voiceprint-load");
-    await sql`INSERT INTO clinician (id, full_name, email, url_slug, url_token) VALUES ('doc_testexa3', 'Existing Test Three', 'existing.three@example.test', 'dr-existing-test-three-cccc', 'cccc')`;
-    const A = await resolveEntries([{ clinician_id: "doc_testexa3", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }]);
-    const B = await resolveEntries([{ clinician_id: "doc_testexa3", centroid_base64: synthVec(52), provenance: { source_file: "b.json" } }]);
+    const A = await resolveEntries([{ clinician_id: "doc_fake0110", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }]);
+    const B = await resolveEntries([{ clinician_id: "doc_fake0110", centroid_base64: synthVec(52), provenance: { source_file: "b.json" } }]);
     if (!A.ok || !B.ok) throw new Error("both must validate — neither sees the other's sample yet");
     await writeEntries(A.resolved);
     let refused: unknown = null;
     try { await writeEntries(B.resolved); } catch (e) { refused = e; }
     expect(refused).toBeInstanceOf(WriteRefusal);
     expect((refused as InstanceType<typeof WriteRefusal>).reason).toBe("clinician_already_has_a_different_voiceprint_or_samples");
-    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_testexa3'`) as Array<{ c: string; sample_count: number }>;
+    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_fake0110'`) as Array<{ c: string; sample_count: number }>;
     expect(vp[0]!.c.replace(/\s+/g, ""), "the first vector, byte for byte — not the mean of both").toBe(synthVec(51));
     expect(vp[0]!.sample_count).toBe(1);
-    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_testexa3'`) as Array<{ n: number }>;
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_fake0110'`) as Array<{ n: number }>;
     expect(vs[0]!.n, "the refused write left no sample to be averaged in later").toBe(1);
-    // A re-run of the winner is still a clean no-op — the endpoint is not wedged by the race.
-    const again = await postLoad({ entries: [{ clinician_id: "doc_testexa3", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }] });
+    const again = await postLoad({ entries: [{ clinician_id: "doc_fake0110", centroid_base64: synthVec(51), provenance: { source_file: "a.json" } }] });
     expect(again.status).toBe(200);
     expect((again.body.loaded as Array<{ sample: string }>)[0]!.sample).toBe("already_present");
   }, 180_000);
 
-  it("FORCED INTERLEAVE, one email, two NAMES: the second is refused at write and nothing of it lands", async () => {
-    const sql = G.__pgsql;
-    const { resolveEntries, writeEntries, WriteRefusal } = await import("@/lib/voiceprint-load");
-    const A = await resolveEntries([{ full_name: "Name One", email: "two.names@example.test", centroid_base64: synthVec(61), provenance: { source_file: "a.json" } }]);
-    const B = await resolveEntries([{ full_name: "Name Two", email: "two.names@example.test", centroid_base64: synthVec(62), provenance: { source_file: "b.json" } }]);
-    if (!A.ok || !B.ok) throw new Error("both must validate");
-    await writeEntries(A.resolved);
-    await expect(writeEntries(B.resolved)).rejects.toBeInstanceOf(WriteRefusal);
-    const rows = (await sql`SELECT full_name FROM clinician WHERE email = 'two.names@example.test'`) as Array<{ full_name: string }>;
-    expect(rows.map((r) => r.full_name)).toEqual(["Name One"]);
-  }, 180_000);
-
-  it("CONCURRENT through the route, one doctor, DIFFERENT vectors: exactly one 200, one non-2xx, ONE voiceprint equal to the winner", async () => {
-    const sql = G.__pgsql;
-    await sql`INSERT INTO clinician (id, full_name, email, url_slug, url_token) VALUES ('doc_testexa4', 'Existing Test Four', 'existing.four@example.test', 'dr-existing-test-four-dddd', 'dddd')`;
-    const one = (v: number) => ({ entries: [{ clinician_id: "doc_testexa4", centroid_base64: synthVec(v), provenance: { source_file: `v${v}.json` } }] });
-    const [a, b] = await Promise.all([postLoad(one(71)), postLoad(one(72))]);
-    expect([a.status, b.status].filter((x) => x === 200), JSON.stringify([a.body, b.body]).slice(0, 300)).toHaveLength(1);
-    expect([a.status, b.status].filter((x) => x === 400)).toHaveLength(1);
-    const winner = a.status === 200 ? synthVec(71) : synthVec(72);
-    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_testexa4'`) as Array<{ c: string; sample_count: number }>;
-    expect(vp).toHaveLength(1);
-    expect(vp[0]!.c.replace(/\s+/g, "")).toBe(winner);
-    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_testexa4'`) as Array<{ n: number }>;
-    expect(vs[0]!.n).toBe(1);
-  }, 180_000);
-
   // TRUE PARALLEL SESSIONS. The harness runs one statement at a time, so the tests above interleave
   // BETWEEN statements — the Neon autocommit model — but never inside one. This runs the app's OWN
-  // write statements (captured verbatim as the loader sent them) in two psql sessions at once, with
+  // voiceprint statement (captured verbatim as the loader sent it) in two psql sessions at once, with
   // session A holding its transaction open, so B's statement genuinely meets A's uncommitted row.
-  it("TRUE PARALLEL: two sessions, one clinician — B waits on A's row lock, then gets ONE clinician and loses the voiceprint to A", async () => {
+  it("TRUE PARALLEL: two sessions, one clinician, different vectors — B waits on A's row lock, then loses; ONE voiceprint, ONE sample", async () => {
     const sql = G.__pgsql;
     const { writeEntries, resolveEntries } = await import("@/lib/voiceprint-load");
     const { createHash } = await import("node:crypto");
@@ -817,56 +886,33 @@ describe.skipIf(!HAVE_DOCKER)("curated voiceprint load — POST /api/admin/voice
       p.stdin.end(text);
     });
 
-    // 1. Capture the two statements for a TEMPLATE doctor, then derive A's and B's from them.
-    const tplVec = synthVec(90);
+    // 1. Capture the statement for a TEMPLATE clinician, then derive A's and B's from it.
+    const tplId = "doc_fake0108", tplVec = synthVec(90);
+    await sql`DELETE FROM voice_sample WHERE clinician_id = ${tplId}`;
+    await sql`DELETE FROM voice_print WHERE doctor_id = ${tplId}`;
     const pre = QUERIES.length;
-    const r = await resolveEntries([{ full_name: "Template Person", email: "tpl@example.test", centroid_base64: tplVec, provenance: { source_file: "tpl.json" } }]);
-    if (!r.ok) throw new Error("template must validate");
-    const w = await writeEntries(r.resolved);
-    const tplId = w[0]!.clinician_id;
-    const captured = QUERIES.slice(pre);
-    const cStmt = captured.find((q) => q.includes("INSERT INTO clinician"))!;
-    const vStmt = captured.find((q) => q.includes("INSERT INTO voice_print"))!;
-    expect(cStmt && vStmt, "both write statements were captured").toBeTruthy();
-    const tplSlug = /'(dr-template-person-[a-z2-9]{4})'/.exec(cStmt)![1]!;
+    const r = await resolveEntries([{ clinician_id: tplId, centroid_base64: tplVec, provenance: { source_file: "tpl.json" } }]);
+    if (!r.ok) throw new Error(`template must validate: ${JSON.stringify(r.refusals)}`);
+    await writeEntries(r.resolved);
+    const vStmt = QUERIES.slice(pre).find((q) => q.includes("INSERT INTO voice_print"))!;
+    expect(vStmt, "the write statement was captured").toBeTruthy();
 
-    const forA = { id: "doc_parallla", email: "par@example.test", slug: "dr-par-aaaa", vec: synthVec(91) };
-    const forB = { id: "doc_parallbb", email: "par@example.test", slug: "dr-par-bbbb", vec: synthVec(92) };
-    const clinicianSql = (x: typeof forA) => cStmt.split(tplId).join(x.id).split("tpl@example.test").join(x.email).split(tplSlug).join(x.slug);
-    const printSql = (x: typeof forA, doctor: string) =>
-      vStmt.split(sid(tplId, tplVec)).join(sid(doctor, x.vec)).split(tplVec).join(x.vec).split(tplId).join(doctor);
+    const target = "doc_fake0111";
+    const printSql = (vec: string) => vStmt.split(sid(tplId, tplVec)).join(sid(target, vec)).split(tplVec).join(vec).split(tplId).join(target);
+    const vecA = synthVec(91), vecB = synthVec(92);
 
-    // 2. Clinician: A inserts and HOLDS; B's upsert on the same email must wait, then return A's row.
-    const aC = psql(`BEGIN; ${clinicianSql(forA)}; SELECT pg_sleep(1.5); COMMIT;`);
+    // 2. A inserts and HOLDS; B must wait on A's row, then get NO row back.
+    const aV = psql(`BEGIN; ${printSql(vecA)}; SELECT pg_sleep(1.5); COMMIT;`);
     await new Promise((res) => setTimeout(res, 400));
-    const bC = await psql(`${clinicianSql(forB)};`);
-    await aC;
-    expect(bC.ms, "B really overlapped A's open transaction and waited on its lock").toBeGreaterThan(700);
-    expect(bC.out.trim(), "B got A's row back, inserted=false").toBe("doc_parallla|Template Person|f");
-    const cl = (await sql`SELECT id FROM clinician WHERE email = 'par@example.test'`) as Array<{ id: string }>;
-    expect(cl.map((x) => x.id), "ONE clinician").toEqual(["doc_parallla"]);
-
-    // 3. Voiceprint, different vectors: A inserts and HOLDS; B must wait, then get NO row.
-    const aV = psql(`BEGIN; ${printSql(forA, "doc_parallla")}; SELECT pg_sleep(1.5); COMMIT;`);
-    await new Promise((res) => setTimeout(res, 400));
-    const bV = await psql(`${printSql(forB, "doc_parallla")};`);
+    const bV = await psql(`${printSql(vecB)};`);
     await aV;
-    expect(bV.ms).toBeGreaterThan(700);
+    expect(bV.ms, "B really overlapped A's open transaction and waited on its lock").toBeGreaterThan(700);
     expect(bV.out.trim(), "B's statement returned no centroid and inserted no sample").toBe("|0");
-    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = 'doc_parallla'`) as Array<{ c: string; sample_count: number }>;
+    const vp = (await sql`SELECT encode(centroid, 'base64') AS c, sample_count FROM voice_print WHERE doctor_id = ${target}`) as Array<{ c: string; sample_count: number }>;
     expect(vp).toHaveLength(1);
-    expect(vp[0]!.c.replace(/\s+/g, ""), "A's vector exactly — never the average").toBe(forA.vec);
+    expect(vp[0]!.c.replace(/\s+/g, ""), "A's vector exactly — never the average").toBe(vecA);
     expect(vp[0]!.sample_count).toBe(1);
-    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = 'doc_parallla'`) as Array<{ n: number }>;
+    const vs = (await sql`SELECT count(*)::int AS n FROM voice_sample WHERE clinician_id = ${target}`) as Array<{ n: number }>;
     expect(vs[0]!.n, "ONE voiceprint, ONE sample").toBe(1);
   }, 180_000);
-
-  it("refuses a room — voiceprints are not room-scoped", async () => {
-    const r = await postLoad({ entries: [
-      { clinician_id: "doc_testexa1", centroid_base64: synthVec(1), room: "opd-3", provenance: { source_file: "a.json" } },
-    ] });
-    expect(r.status).toBe(400);
-    expect(JSON.stringify(r.body)).toContain("room_not_accepted");
-  }, 120_000);
 });
-

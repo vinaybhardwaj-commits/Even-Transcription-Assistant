@@ -1,27 +1,29 @@
 /**
- * POST /api/admin/voiceprints/load — load CURATED clinician voiceprints. See lib/voiceprint-load.ts.
+ * POST /api/admin/voiceprints/load — enrol CURATED voiceprints for EXISTING clinicians. See
+ * lib/voiceprint-load.ts. It never creates a clinician.
  *
  * AUTH: `Authorization: Bearer ${MIGRATION_SECRET}` — the existing secret, compared in constant time.
- * No new secret was minted for this.
  *
- * BODY: `{ "entries": LoadEntry[] }`. Each entry names an EXISTING clinician by `clinician_id`, or a
- * NEW one by `full_name` + `email` (+ optional `specialty`), and carries one `centroid_base64` and
- * its `provenance`. The vector travels in this body over HTTPS; it is never committed anywhere.
+ * BODY: `{ "entries": [{ clinician_id, centroid_base64, provenance: { source_file, centroid_id?,
+ * enroll_seconds?, probe_only? } }] }`, 1..50 entries, at most 256 KB. Any other field, anywhere,
+ * is refused. The vector travels in this body over HTTPS; it is never committed anywhere.
  *
- * RESPONSES — a failure is never success-shaped:
- *   200 { loaded: [...] }                   every entry written and round-tripped from the database
- *   400 VALIDATION_FAILED                   one or more entries refused; NOTHING was written
- *   401 AUTH_REQUIRED                       no or wrong secret
- *   400 VALIDATION_FAILED "refused at write"  another load changed the state after validation (a
- *                                           concurrent load won); the message lists what WAS written
- *   500 PIPELINE_FAILED                     a write failed part-way; the message names how far it got
+ * RESPONSES — a failure is never success-shaped, and nothing is written unless every entry passes:
+ *   200 { loaded: [...] }          every entry written and round-tripped from the database
+ *   400 VALIDATION_FAILED          a wrong type, a field too long, an unknown field, a bad centroid,
+ *                                  or a state that would blend — each with a named reason
+ *   400 VALIDATION_FAILED          "refused at write": a concurrent load changed the state after
+ *                                  validation; the message lists what WAS written before it
+ *   401 AUTH_REQUIRED              no or wrong secret
+ *   404 NOT_FOUND                  every refusal is "no such active clinician"
+ *   500 PIPELINE_FAILED            a database failure; the message names how far it got
  *
  * Nothing here logs, returns or audits a vector.
  */
 import { NextRequest } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { respondOk, respondError } from "@/lib/respond";
-import { resolveEntries, writeEntries, redact, WriteRefusal, type LoadEntry } from "@/lib/voiceprint-load";
+import { resolveEntries, writeEntries, redact, WriteRefusal, LIMITS } from "@/lib/voiceprint-load";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,21 +40,30 @@ function authorised(req: NextRequest): boolean {
 export async function POST(req: NextRequest) {
   if (!authorised(req)) return respondError("AUTH_REQUIRED", "migration secret required");
 
+  const text = await req.text().catch(() => null);
+  if (text === null) return respondError("VALIDATION_FAILED", "body_unreadable");
+  if (Buffer.byteLength(text, "utf8") > LIMITS.body_bytes) return respondError("VALIDATION_FAILED", `body_larger_than_${LIMITS.body_bytes}_bytes`);
   let body: unknown;
-  try { body = await req.json(); } catch { return respondError("VALIDATION_FAILED", "body_not_json"); }
-  const entries = (body as { entries?: unknown })?.entries;
+  try { body = JSON.parse(text); } catch { return respondError("VALIDATION_FAILED", "body_not_json"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return respondError("VALIDATION_FAILED", "body_must_be_an_object");
+  const unknown = Object.keys(body).filter((k) => k !== "entries");
+  if (unknown.length) return respondError("VALIDATION_FAILED", `unknown_field_${unknown[0]!.slice(0, 40)}`);
+  const entries = (body as { entries?: unknown }).entries;
   if (!Array.isArray(entries) || entries.length === 0) return respondError("VALIDATION_FAILED", "entries_required");
-  if (entries.length > 50) return respondError("VALIDATION_FAILED", "too_many_entries");
+  if (entries.length > LIMITS.entries) return respondError("VALIDATION_FAILED", "too_many_entries");
 
   let phase1;
   try {
-    phase1 = await resolveEntries(entries as LoadEntry[]);
+    phase1 = await resolveEntries(entries);
   } catch (e) {
     return respondError("PIPELINE_FAILED", `validation read failed; nothing written: ${redact(String((e as Error)?.message ?? e)).slice(0, 160)}`);
   }
   if (!phase1.ok) {
-    // Index, who and why — never the vector.
-    return respondError("VALIDATION_FAILED", `refused, nothing written: ${JSON.stringify(phase1.refusals).slice(0, 900)}`);
+    // Index, id and why — never the vector.
+    const list = JSON.stringify(phase1.refusals.map(({ index, clinician_id, reason }) => ({ index, clinician_id, reason }))).slice(0, 900);
+    return phase1.refusals.every((r) => r.status === 404)
+      ? respondError("NOT_FOUND", `no such active clinician, nothing written: ${list}`)
+      : respondError("VALIDATION_FAILED", `refused, nothing written: ${list}`);
   }
 
   try {

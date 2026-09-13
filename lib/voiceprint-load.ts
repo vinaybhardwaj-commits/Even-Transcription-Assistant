@@ -1,46 +1,42 @@
 /**
- * lib/voiceprint-load.ts — load CURATED clinician voiceprints, over HTTPS, never through git.
+ * lib/voiceprint-load.ts — enrol CURATED voiceprints for EXISTING clinicians, over HTTPS, never
+ * through git.
  *
  * WHY THIS EXISTS. The curated centroids were built from clean enrolment audio with confirmed
  * windows and validated against holdouts. The only other ways to get a voiceprint in are (a) the
  * admin enrol routes, which take AUDIO and re-embed it, discarding exactly that validation, or
- * (b) a migration, which would put doctors' names, emails and biometric vectors into a PUBLIC repo.
- * This is the third way: the vector travels in a request body from an operator's machine, is
- * checked here, and is written. It is also how the multi-centroid slice will enrol later.
+ * (b) a migration, which would put doctors' biometric vectors into a PUBLIC repo. This is the third
+ * way: the vector travels in a request body from an operator's machine, is checked here, and is
+ * written.
+ *
+ * ─── WHAT IT DOES NOT DO ────────────────────────────────────────────────────────────────────────
+ * IT NEVER CREATES A CLINICIAN. It once could, from any name and email, which let a holder of the
+ * migration secret mint an active doctor without the admin cookie the doctors route requires. That
+ * capability is removed, not validated: an entry names an existing, ACTIVE clinician by id, and
+ * `full_name` / `email` / `specialty` are unknown fields like any other. Doctors are created by an
+ * admin, in the admin UI.
  *
  * ─── WHAT IT GUARANTEES ─────────────────────────────────────────────────────────────────────────
- *   EXACT      — a centroid is 192 float32 and re-encodes byte-identically to what was sent. It is
- *                refused otherwise; nothing is ever truncated or padded to fit.
- *   A VOICE    — a centroid with no direction (zero, near-zero, or not finite once normalised) is
- *                refused. Being 192 finite float32 is a check on the TYPE; cosine matching needs a
- *                direction, and an all-zero vector has none.
- *   UNAVERAGED — voice_print is written ONCE per clinician, in the shape recomputeCentroid gives a
- *                single sample, by one atomic statement that inserts it only if the clinician has no
- *                voiceprint (or has exactly this one). Two concurrent loads of different vectors
- *                cannot both land and be averaged: the primary key on voice_print.doctor_id decides,
- *                and the loser is refused. A clinician who already HAS other samples is refused too.
- *   IDEMPOTENT — the sample id is derived from (clinician, vector), so a second run inserts nothing
- *                new and creates no second clinician. A new clinician is an upsert on the UNIQUE
- *                email, so two concurrent creates produce one row.
- *   NOT A BACKDOOR — an existing clinician is NEVER modified and NEVER duplicated. A new-clinician
- *                request whose email already exists is REUSED only if the stored name is the same
- *                person; any other name is REJECTED. Identity fields are never updated here.
- *   ALL OR NOTHING AT VALIDATION — every entry is validated and resolved (reads only) before any
- *                write. One bad entry refuses the batch and nothing is written.
- *   NO ROOM    — voice_print and voice_sample have no room column, and nothing here accepts one.
- *                "Any doctor can work in any room."
+ *   STRICT     — every field has a type and a length cap; anything else, including a field this
+ *                file does not know, is a 400 with a named reason. See LIMITS.
+ *   EXACT      — a centroid is 192 float32 and re-encodes byte-identically to what was sent.
+ *   A VOICE    — a centroid with no direction (zero or near-zero L2 norm) is refused.
+ *   ACTIVE     — the clinician must exist and be active by the SAME predicate room matching uses
+ *                (status = 'active' AND deleted_at IS NULL, lib/stt/diarize-window.ts). Else 404.
+ *   UNAVERAGED — voice_print is written once per clinician by one atomic statement decided by its
+ *                primary key; a concurrent load of a different vector is refused, never blended.
+ *   IDEMPOTENT — the sample id is derived from (clinician, vector); a re-run writes nothing new.
+ *   NO ROOM    — nothing here accepts one. "Any doctor can work in any room."
  *
  * ─── THE VECTOR IS NEVER LOGGED ─────────────────────────────────────────────────────────────────
- * Not at debug, not on error, not in an audit row. Error text from the database is passed through
- * `redact` before it goes anywhere, in case a driver ever echoes a bound value.
+ * Not at debug, not on error, not in an audit row. Error text is passed through `redact`.
  */
 import { createHash } from "node:crypto";
-import bcrypt from "bcryptjs";
 import { sql } from "@/lib/db";
-import { buildDoctorSlug } from "@/lib/doctor-slug";
-import { mintClinicianId, generatePin } from "@/lib/clinician-mint";
 
 export const VOICEPRINT_DIM = 192;
+const BYTES = VOICEPRINT_DIM * 4;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /**
  * The smallest L2 norm accepted for a centroid.
@@ -53,8 +49,27 @@ export const VOICEPRINT_DIM = 192;
  * value, while an all-zero or near-zero vector — no direction, cosine undefined — lands far below it.
  */
 export const MIN_CENTROID_L2 = 20;
-const BYTES = VOICEPRINT_DIM * 4;
-const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Every string has a ceiling, so a 5 MB value cannot be stored or audited. Generous against the
+ * real values, small against abuse:
+ *   clinician_id    64 chars   ids are `doc_` + 8 today; room for a format change, not a document
+ *   centroid_base64 4096 chars a real one is exactly 1024; the cap only stops a huge string being
+ *                              decoded before the dimension check names the real problem
+ *   source_file     200 chars  a file name, not a path dump
+ *   centroid_id     100 chars
+ *   enroll_seconds  (0, 3600]  an hour of enrolment audio is already absurd
+ *   entries         1..50 per request; body 256 KB (both enforced by the route)
+ */
+export const LIMITS = {
+  clinician_id: 64,
+  centroid_base64: 4096,
+  source_file: 200,
+  centroid_id: 100,
+  enroll_seconds_max: 3600,
+  entries: 50,
+  body_bytes: 256 * 1024,
+} as const;
 
 /** Strip anything that looks like a base64 blob. The only defence a log line needs. */
 export function redact(text: string): string {
@@ -64,15 +79,15 @@ export function redact(text: string): string {
 export type CentroidCheck = { ok: true; bytes: Buffer } | { ok: false; reason: string };
 
 /**
- * PURE. Is this exactly one 192-float32 voiceprint, byte for byte?
+ * PURE. Is this exactly one 192-float32 voiceprint, byte for byte, with a direction?
  *
- * The round-trip is the real test: base64 has more than one spelling for some byte strings
- * (non-zero padding bits), and a vector that does not re-encode to the string that was sent is not
- * provably the vector that was validated upstream. Non-finite values are refused too — a NaN is a
+ * The round-trip is the real test: a vector that does not re-encode to the string that was sent is
+ * not provably the vector that was validated upstream. Non-finite values are refused — a NaN is a
  * float32, and it is also not a voice.
  */
 export function checkCentroid(b64: unknown): CentroidCheck {
   if (typeof b64 !== "string" || b64.length === 0) return { ok: false, reason: "centroid_missing" };
+  if (b64.length > LIMITS.centroid_base64) return { ok: false, reason: `centroid_base64_longer_than_${LIMITS.centroid_base64}` };
   if (b64.length % 4 !== 0 || !BASE64.test(b64)) return { ok: false, reason: "centroid_not_base64" };
   const bytes = Buffer.from(b64, "base64");
   if (bytes.length % 4 !== 0) return { ok: false, reason: `centroid_not_float32_bytes_${bytes.length}` };
@@ -96,93 +111,110 @@ export function checkCentroid(b64: unknown): CentroidCheck {
 }
 
 export type LoadEntry = {
-  /** An EXISTING clinician. When given, nothing about the clinician is created or changed. */
-  clinician_id?: string;
-  /** For a NEW clinician: minted through the app's own functions. */
-  full_name?: string;
-  email?: string;
-  specialty?: string;
+  /** An EXISTING, ACTIVE clinician. Nothing about the clinician is created or changed. */
+  clinician_id: string;
   centroid_base64: string;
   /** Recorded on the sample. File names and ids only — never the vector, never a room. */
   provenance: { source_file: string; centroid_id?: string; enroll_seconds?: number; probe_only?: boolean };
 };
 
-export type EntryRefusal = { index: number; who: string; reason: string };
+/** `status` is the HTTP answer this refusal calls for: 404 for "no such active clinician", else 400. */
+export type EntryRefusal = { index: number; clinician_id: string | null; reason: string; status: 400 | 404 };
 export type EntryLoaded = {
   index: number;
   clinician_id: string;
-  clinician: "created" | "existing";
   sample: "inserted" | "already_present";
   dim: number;
   roundtrip: true;
 };
 
-type Resolved = { index: number; entry: LoadEntry; bytesOk: Buffer; clinicianId: string | null; create: null | { fullName: string; email: string; specialty: string | null } };
+type Resolved = { index: number; entry: LoadEntry };
 
-const who = (e: LoadEntry) => e.clinician_id ?? e.email ?? "(unidentified)";
-const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+const ENTRY_KEYS = new Set(["clinician_id", "centroid_base64", "provenance"]);
+const PROVENANCE_KEYS = new Set(["source_file", "centroid_id", "enroll_seconds", "probe_only"]);
+const CLINICIAN_ID = /^[A-Za-z0-9_-]+$/;
+const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
 const sampleIdFor = (clinicianId: string, b64: string) =>
   `vs_curated_${createHash("sha256").update(`${clinicianId}:${b64}`).digest("hex").slice(0, 24)}`;
 
-/** Phase 1 — validate and resolve every entry. READS ONLY. */
-export async function resolveEntries(entries: LoadEntry[]): Promise<{ ok: true; resolved: Resolved[] } | { ok: false; refusals: EntryRefusal[] }> {
-  const refusals: EntryRefusal[] = [];
-  const resolved: Resolved[] = [];
-  const seenClinicians = new Set<string>();
+/**
+ * PURE. The shape of one entry: every field typed, every string capped, no unknown field anywhere.
+ * Returns the first problem as a named reason, or null. Runs before the centroid is decoded and
+ * before any database read, so a wrong type is a 400 and never reaches code that assumes the type.
+ */
+export function checkEntryShape(entry: unknown): string | null {
+  if (!isPlainObject(entry)) return "entry_must_be_an_object";
+  for (const k of Object.keys(entry)) if (!ENTRY_KEYS.has(k)) return `unknown_field_${k.slice(0, 40)}`;
 
-  for (const [index, entry] of entries.entries()) {
-    const c = checkCentroid(entry?.centroid_base64);
-    if (!c.ok) { refusals.push({ index, who: who(entry ?? ({} as LoadEntry)), reason: c.reason }); continue; }
-    if (!entry.provenance || typeof entry.provenance.source_file !== "string" || !entry.provenance.source_file.trim()) {
-      refusals.push({ index, who: who(entry), reason: "provenance_source_file_required" }); continue;
-    }
-    if ("room" in (entry as object) || "room" in (entry.provenance as object)) {
-      refusals.push({ index, who: who(entry), reason: "room_not_accepted_voiceprints_are_not_room_scoped" }); continue;
-    }
+  const id = entry.clinician_id;
+  if (id === undefined || id === null) return "clinician_id_required";
+  if (typeof id !== "string") return "clinician_id_must_be_a_string";
+  if (id.length === 0 || id.length > LIMITS.clinician_id) return `clinician_id_length_must_be_1_to_${LIMITS.clinician_id}`;
+  if (!CLINICIAN_ID.test(id)) return "clinician_id_has_invalid_characters";
 
-    if (entry.clinician_id) {
-      const rows = (await sql`SELECT id FROM clinician WHERE id = ${entry.clinician_id} LIMIT 1`) as Array<{ id: string }>;
-      if (!rows[0]) { refusals.push({ index, who: who(entry), reason: "clinician_not_found" }); continue; }
-      resolved.push({ index, entry, bytesOk: c.bytes, clinicianId: rows[0].id, create: null });
-    } else {
-      const fullName = (entry.full_name ?? "").trim();
-      const email = (entry.email ?? "").trim().toLowerCase();
-      if (fullName.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        refusals.push({ index, who: who(entry), reason: "new_clinician_needs_full_name_and_email" }); continue;
-      }
-      const existing = (await sql`SELECT id, full_name FROM clinician WHERE email = ${email} LIMIT 1`) as Array<{ id: string; full_name: string }>;
-      if (existing[0]) {
-        // REUSE ONLY THE SAME PERSON. Same email and same name is a re-run; same email and a
-        // different name is someone else's account, and attaching a voiceprint to it is refused.
-        if (norm(existing[0].full_name) !== norm(fullName)) {
-          refusals.push({ index, who: who(entry), reason: "email_exists_with_a_different_name" }); continue;
-        }
-        resolved.push({ index, entry, bytesOk: c.bytes, clinicianId: existing[0].id, create: null });
-      } else {
-        resolved.push({ index, entry, bytesOk: c.bytes, clinicianId: null, create: { fullName, email, specialty: entry.specialty?.trim() || null } });
-      }
-    }
-
-    const key = resolved[resolved.length - 1]!.clinicianId ?? resolved[resolved.length - 1]!.create!.email;
-    if (seenClinicians.has(key)) {
-      resolved.pop();
-      refusals.push({ index, who: who(entry), reason: "one_centroid_per_clinician_in_a_batch" });
-      continue;
-    }
-    seenClinicians.add(key);
+  if (entry.centroid_base64 !== undefined && entry.centroid_base64 !== null && typeof entry.centroid_base64 !== "string") {
+    return "centroid_base64_must_be_a_string";
   }
 
-  // An existing clinician with samples already would have them averaged in. Refuse, do not blend.
-  for (const r of resolved) {
-    if (!r.clinicianId) continue;
-    const mine = sampleIdFor(r.clinicianId, r.entry.centroid_base64);
+  const p = entry.provenance;
+  if (p === undefined || p === null) return "provenance_required";
+  if (!isPlainObject(p)) return "provenance_must_be_an_object";
+  for (const k of Object.keys(p)) if (!PROVENANCE_KEYS.has(k)) return `unknown_field_provenance.${k.slice(0, 40)}`;
+  if (typeof p.source_file !== "string") return "provenance.source_file_must_be_a_string";
+  if (p.source_file.trim().length === 0 || p.source_file.length > LIMITS.source_file) return `provenance.source_file_length_must_be_1_to_${LIMITS.source_file}`;
+  if (p.centroid_id !== undefined) {
+    if (typeof p.centroid_id !== "string") return "provenance.centroid_id_must_be_a_string";
+    if (p.centroid_id.trim().length === 0 || p.centroid_id.length > LIMITS.centroid_id) return `provenance.centroid_id_length_must_be_1_to_${LIMITS.centroid_id}`;
+  }
+  if (p.enroll_seconds !== undefined) {
+    if (typeof p.enroll_seconds !== "number" || !Number.isFinite(p.enroll_seconds)) return "provenance.enroll_seconds_must_be_a_finite_number";
+    if (p.enroll_seconds <= 0 || p.enroll_seconds > LIMITS.enroll_seconds_max) return `provenance.enroll_seconds_must_be_in_(0,${LIMITS.enroll_seconds_max}]`;
+  }
+  if (p.probe_only !== undefined && typeof p.probe_only !== "boolean") return "provenance.probe_only_must_be_a_boolean";
+  return null;
+}
+
+/** Phase 1 — validate and resolve every entry. READS ONLY. */
+export async function resolveEntries(entries: unknown[]): Promise<{ ok: true; resolved: Resolved[] } | { ok: false; refusals: EntryRefusal[] }> {
+  const refusals: EntryRefusal[] = [];
+  const resolved: Resolved[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, raw] of entries.entries()) {
+    const rawId = isPlainObject(raw) && typeof raw.clinician_id === "string" ? raw.clinician_id.slice(0, LIMITS.clinician_id) : null;
+    const shape = checkEntryShape(raw);
+    if (shape) { refusals.push({ index, clinician_id: rawId, reason: shape, status: 400 }); continue; }
+    const entry = raw as LoadEntry;
+
+    const c = checkCentroid(entry.centroid_base64);
+    if (!c.ok) { refusals.push({ index, clinician_id: entry.clinician_id, reason: c.reason, status: 400 }); continue; }
+
+    if (seen.has(entry.clinician_id)) {
+      refusals.push({ index, clinician_id: entry.clinician_id, reason: "one_centroid_per_clinician_in_a_batch", status: 400 });
+      continue;
+    }
+    seen.add(entry.clinician_id);
+
+    // EXISTING AND ACTIVE, by the predicate room matching uses. A clinician the matcher will never
+    // offer to /diarize gets no voiceprint here either.
+    const rows = (await sql`
+      SELECT id, (status = 'active' AND deleted_at IS NULL) AS active
+        FROM clinician WHERE id = ${entry.clinician_id} LIMIT 1
+    `) as Array<{ id: string; active: boolean }>;
+    if (!rows[0]) { refusals.push({ index, clinician_id: entry.clinician_id, reason: "clinician_not_found", status: 404 }); continue; }
+    if (!rows[0].active) { refusals.push({ index, clinician_id: entry.clinician_id, reason: "clinician_not_active", status: 404 }); continue; }
+
+    // A clinician who already has other samples would have them averaged in. Refuse, do not blend.
     const others = (await sql`
       SELECT count(*)::int AS n FROM voice_sample
-       WHERE clinician_id = ${r.clinicianId} AND included = true AND id <> ${mine}
+       WHERE clinician_id = ${entry.clinician_id} AND included = true AND id <> ${sampleIdFor(entry.clinician_id, entry.centroid_base64)}
     `) as Array<{ n: number }>;
     if (Number(others[0]?.n ?? 0) > 0) {
-      refusals.push({ index: r.index, who: who(r.entry), reason: "clinician_has_other_samples_loading_would_average" });
+      refusals.push({ index, clinician_id: entry.clinician_id, reason: "clinician_has_other_samples_loading_would_average", status: 400 });
+      continue;
     }
+    resolved.push({ index, entry });
   }
 
   return refusals.length ? { ok: false, refusals } : { ok: true, resolved };
@@ -202,66 +234,21 @@ export class WriteRefusal extends Error {
  * Phase 2 — write. Only ever reached with a fully validated, fully resolved batch.
  *
  * EVERY WRITE IS ONE STATEMENT. The Neon HTTP driver autocommits each statement, so phase 1's reads
- * guarantee nothing by the time we get here. Correctness therefore does not rest on them: each
- * statement below is atomic on its own and decided by a unique constraint —
- *   clinician  UNIQUE (email)          two creates of one email produce one row
- *   voice_print PRIMARY KEY (doctor_id) two different vectors for one clinician cannot both land
- * No lock, no retry.
+ * guarantee nothing by the time we get here. The voiceprint statement is atomic on its own and
+ * decided by the primary key on voice_print.doctor_id: two different vectors for one clinician
+ * cannot both land. No lock, no retry.
  */
 export async function writeEntries(resolved: Resolved[]): Promise<EntryLoaded[]> {
   const out: EntryLoaded[] = [];
   for (const r of resolved) {
-    let clinicianId = r.clinicianId;
-    let clinician: EntryLoaded["clinician"] = "existing";
-
-    if (!clinicianId && r.create) {
-      // THE APP'S OWN MINTING: id, slug, token and PIN exactly as the admin create path makes them.
-      // The PIN is stored the way that path stores it and is never returned or logged here.
-      const built = buildDoctorSlug(r.create.fullName);
-      const pin = generatePin();
-      const pinHash = await bcrypt.hash(pin, 12);
-      const mintedId = mintClinicianId();
-      // UPSERT ON THE UNIQUE EMAIL, audit in the same statement. On conflict the no-op SET makes
-      // Postgres RETURN the row that won (DO NOTHING would return nothing, and a follow-up SELECT
-      // would be a second transaction again). `xmax = 0` is true only for a row this statement
-      // inserted. The audit row is written only for that row, atomically with it.
-      const rows = (await sql`
-        WITH c AS (
-          INSERT INTO clinician (
-            id, legacy_doctor_id, clinician_type, full_name, email, phone, url_slug,
-            url_token, pin_hash, pin_plaintext, pin_set_at, status, created_by, specialty
-          ) VALUES (
-            ${mintedId}, NULL, 'physician'::clinician_type, ${r.create.fullName}, ${r.create.email}, NULL, ${built.full},
-            ${built.token}, ${pinHash}, ${pin}, NOW(), 'active', NULL, ${r.create.specialty}
-          )
-          ON CONFLICT (email) DO UPDATE SET email = clinician.email
-          RETURNING id, full_name, (xmax = 0) AS inserted
-        ), a AS (
-          INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-          SELECT 'system', 'voiceprint_load', 'doctor.create', 'doctor', c.id,
-                 ${JSON.stringify({ full_name: r.create.fullName, email: r.create.email, url_slug: built.full, via: "voiceprint_load" })}::jsonb
-            FROM c WHERE c.inserted
-        )
-        SELECT id, full_name, inserted FROM c
-      `) as Array<{ id: string; full_name: string; inserted: boolean }>;
-      const row = rows[0];
-      if (!row) throw new Error(`clinician upsert for entry ${r.index} returned no row`);
-      // The same email may have been created by a concurrent load between validation and now. Reuse
-      // it only if it is the same person — the rule phase 1 applies, applied again to the row that won.
-      if (!row.inserted && norm(row.full_name) !== norm(r.create.fullName)) {
-        throw new WriteRefusal(r.index, "email_exists_with_a_different_name", out);
-      }
-      clinicianId = row.id;
-      clinician = row.inserted ? "created" : "existing";
-    }
-
+    const clinicianId = r.entry.clinician_id;
     const b64 = r.entry.centroid_base64;
-    const id = sampleIdFor(clinicianId!, b64);
+    const id = sampleIdFor(clinicianId, b64);
     const p = r.entry.provenance;
     // session_id carries the provenance the schema has room for: which curated centroid this was,
     // and whether it came from a probe-only artefact. No column is invented for it.
     const sessionId = `curated:${(p.centroid_id ?? p.source_file).slice(0, 80)}${p.probe_only ? ":probe_only" : ""}`;
-    const durationMs = typeof p.enroll_seconds === "number" && Number.isFinite(p.enroll_seconds) ? Math.round(p.enroll_seconds * 1000) : null;
+    const durationMs = typeof p.enroll_seconds === "number" ? Math.round(p.enroll_seconds * 1000) : null;
 
     // ONE STATEMENT: the voiceprint and its sample land together or not at all.
     //   vp — insert the voiceprint in exactly the row shape recomputeCentroid writes for one sample.
@@ -310,7 +297,7 @@ export async function writeEntries(resolved: Resolved[]): Promise<EntryLoaded[]>
       VALUES ('system', 'voiceprint_load', 'voiceprint.load', 'doctor', ${clinicianId},
               ${JSON.stringify({ source_file: p.source_file, centroid_id: p.centroid_id ?? null, dim: VOICEPRINT_DIM, sample, probe_only: p.probe_only === true })}::jsonb)
     `;
-    out.push({ index: r.index, clinician_id: clinicianId!, clinician, sample, dim: VOICEPRINT_DIM, roundtrip: true });
+    out.push({ index: r.index, clinician_id: clinicianId, sample, dim: VOICEPRINT_DIM, roundtrip: true });
   }
   return out;
 }
