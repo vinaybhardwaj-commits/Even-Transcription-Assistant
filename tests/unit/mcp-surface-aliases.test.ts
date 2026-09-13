@@ -1,16 +1,23 @@
 /**
  * Slice E — the regrouped MCP surface keeps every name the door ever published.
  *
- * ─── WHERE THE OLD NAMES COME FROM ───────────────────────────────────────────────────────────
- * fixtures/mcp/live-tools-list-6b2347e.json is the raw JSON-RPC answer to `tools/list` from the
- * LIVE door (www.evenscribe.app/api/mcp, banner version 6b2347e), captured with curl on
- * 13 Sep 2026. Not the registry — a test that enumerated the registry would shrink silently with
- * the code — and not origin/main, which served 42 names while production served 51.
+ * ─── WHAT THIS PROVES, AND WHAT IT DELIBERATELY DOES NOT ─────────────────────────────────────
+ * Every one of the 51 names must RESOLVE and BEHAVE IDENTICALLY: the same handler runs, it receives
+ * the same arguments, the caller gets back exactly what that handler returned, and the same scope
+ * gates it. Descriptions are NOT frozen — they are supposed to change as tools change (Ruling A, 13
+ * Sep): an earlier version compared them byte for byte and would have failed the moment Slice C2
+ * edited one. What is frozen is the ARGUMENT CONTRACT: no argument a caller could pass may disappear,
+ * change type, lose an enum value, or become required.
  *
- * fixtures/mcp/tool-scopes-6b2347e.json is each of those names' scope as the code at 6b2347e
- * declared it. tools/list only exposes readOnlyHint (read vs not), so the write/invoke split has
- * to come from somewhere; the first test pins that file to the live readOnlyHint so it cannot
- * disagree with what the door served.
+ * ─── WHERE THE NAMES COME FROM ───────────────────────────────────────────────────────────────
+ * fixtures/mcp/live-tools-list-6b2347e.json is the raw JSON-RPC answer to `tools/list` from the
+ * LIVE door (www.evenscribe.app/api/mcp, banner version 6b2347e), captured with curl on 13 Sep
+ * 2026. Never the registry — a test that enumerated the registry would shrink silently with the
+ * code — and never origin/main, which carried 42 names while production served 51. A recaptured
+ * fixture may add names; it must never drop one of these 51.
+ *
+ * fixtures/mcp/tool-scopes-6b2347e.json is each name's scope as the code at 6b2347e declared it.
+ * tools/list exposes only readOnlyHint (read vs not); the first test pins the file to it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
@@ -31,25 +38,38 @@ vi.mock("@/lib/db", () => {
 const { NextRequest } = await import("next/server");
 const { handleMcpRpc } = await import("@/lib/mcp/handler");
 const S = await import("@/lib/mcp/surface");
+// The tool files themselves — the objects whose handlers must run. Imported here, not taken from
+// lib/mcp/surface, so a surface that swapped in a wrapper object would be caught.
+const TOOL_FILES = [
+  (await import("@/lib/mcp/tools/health")).HEALTH_TOOLS, (await import("@/lib/mcp/tools/brain")).BRAIN_TOOLS,
+  (await import("@/lib/mcp/tools/bench")).BENCH_TOOLS, (await import("@/lib/mcp/tools/stt")).STT_TOOLS,
+  (await import("@/lib/mcp/tools/voice")).VOICE_TOOLS, (await import("@/lib/mcp/tools/encounters")).ENCOUNTER_TOOLS,
+  (await import("@/lib/mcp/tools/stores")).STORE_TOOLS, (await import("@/lib/mcp/tools/llm")).LLM_TOOLS,
+  (await import("@/lib/mcp/tools/fuse")).FUSE_TOOLS, (await import("@/lib/mcp/tools/fuse-report")).FUSE_REPORT_TOOLS,
+  (await import("@/lib/mcp/tools/jobs")).JOB_TOOLS,
+].flat();
+const original = (name: string) => {
+  const hits = TOOL_FILES.filter((t) => t.name === name);
+  expect(hits, `${name} is defined ${hits.length} times in lib/mcp/tools`).toHaveLength(1);
+  return hits[0]!;
+};
 
 type Scope = "read" | "invoke" | "write";
-type LiveTool = { name: string; description: string; inputSchema: Row & { properties?: Record<string, Row>; required?: string[] }; annotations: { readOnlyHint: boolean } };
+const ALL_SCOPES: Scope[] = ["read", "invoke", "write"];
+type Frag = Row & { type?: string | string[]; enum?: unknown[]; anyOf?: Frag[] };
+type LiveTool = { name: string; inputSchema: Row & { properties?: Record<string, Frag>; required?: string[] }; annotations: { readOnlyHint: boolean } };
 
 const LIVE = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-6b2347e.json", "utf8")) as { result: { tools: LiveTool[] } };
 const LIVE_TOOLS = LIVE.result.tools;
 const SCOPES = JSON.parse(readFileSync("fixtures/mcp/tool-scopes-6b2347e.json", "utf8")) as Record<string, Scope>;
 
-/**
- * The two published names a group now answers. Every other published name must resolve to a tool
- * whose name, description, schema and scope are byte-identical to the live capture. These two
- * cannot be (their group publishes more), so they are held to the weaker, stated contract below.
- */
+/** The two published names a group now answers. Old-shaped calls must still reach the old handler. */
 const REUSED_NAMES = ["scribe_health", "scribe_room_command"] as const;
 
 /** Primary tools after Slice E commit 1. Commit 2 (stt.ts + voice.ts + window_speakers) brings it to 25. */
 const COMMIT_1_PRIMARY_COUNT = 33;
 
-const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(["read", "invoke", "write"]) };
+const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(ALL_SCOPES) };
 
 const rpc = async (body: unknown, scopes: Scope[]) => {
   const req = new NextRequest("https://x/api/mcp", {
@@ -62,6 +82,28 @@ const rpc = async (body: unknown, scopes: Scope[]) => {
 };
 const call = (name: string, args: Row, scopes: Scope[]) =>
   rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, scopes);
+
+/** One value for every argument the live schema declared — the call an old client could make. */
+function oldShapedArgs(live: LiveTool): Row {
+  const sample = (f: Frag): unknown => {
+    if (Array.isArray(f.enum) && f.enum.length) return f.enum[0];
+    switch (f.type) {
+      case "integer": case "number": return 1;
+      case "boolean": return true;
+      case "object": return {};
+      case "array": return [];
+      default: return "x";
+    }
+  };
+  return Object.fromEntries(Object.entries(live.inputSchema.properties ?? {}).map(([k, f]) => [k, sample(f)]));
+}
+
+/** Every JSON type the property accepted is still accepted (`type` may be a string or an array). */
+const typeSet = (t: Frag["type"]) => new Set(t === undefined ? [] : Array.isArray(t) ? t : [t]);
+const coversType = (now: Frag["type"], was: Frag["type"]) => was === undefined || [...typeSet(was)].every((x) => typeSet(now).has(x));
+
+/** The fragments a published property now has: itself, or each branch of an anyOf. */
+const branches = (f: Frag): Frag[] => (Array.isArray(f.anyOf) ? f.anyOf : [f]);
 
 beforeEach(() => {
   auditInserts.length = 0;
@@ -79,58 +121,57 @@ describe("the committed fixture", () => {
   });
 });
 
-describe("every one of the 51 live names still resolves", () => {
-  it.each(LIVE_TOOLS.map((t) => [t.name, t] as const))("%s", (name, live) => {
+describe("every one of the 51 live names resolves and behaves identically", () => {
+  const CASES = LIVE_TOOLS.map((t) => [t.name, t] as const);
+
+  it.each(CASES)("%s — resolves, same scope, same handler", (name) => {
     const tool = S.CALLABLE_TOOLS.get(name);
     expect(tool, `${name} is no longer callable`).toBeDefined();
     expect(tool!.scope).toBe(SCOPES[name]);
-    if ((REUSED_NAMES as readonly string[]).includes(name)) return; // held to the contract below
-    expect(tool!.name).toBe(live.name);
-    expect(tool!.description).toBe(live.description);
-    expect(JSON.parse(JSON.stringify(tool!.inputSchema))).toEqual(live.inputSchema);
-    expect(tool!.memberFor).toBeUndefined(); // an alias is the original object, not a group
-  });
-});
-
-describe("the two reused names: old-shaped calls reach the original handler, unchanged", () => {
-  const published = (n: string) => S.PUBLISHED_TOOLS.find((t) => t.name === n)!;
-
-  it.each(REUSED_NAMES.map((n) => [n]))("%s — every live property survives, required does not grow past the selector", (name) => {
-    const live = LIVE_TOOLS.find((t) => t.name === name)!;
-    const group = S.CALLABLE_TOOLS.get(name)!;
-    expect(S.GROUPS).toContain(group);
-    const props = (group.inputSchema.properties ?? {}) as Record<string, Row>;
-    for (const [key, frag] of Object.entries(live.inputSchema.properties ?? {})) {
-      const now = props[key];
-      expect(now, `${name}.${key} was dropped`).toBeDefined();
-      if (Array.isArray(frag.enum)) {
-        for (const e of frag.enum) expect(now!.enum as unknown[], `${name}.${key} lost ${String(e)}`).toContain(e);
-        continue;
-      }
-      // Same fragment; a description may only gain a leading [variant] tag.
-      const { description: liveDesc, ...liveRest } = frag;
-      const { description: nowDesc, ...nowRest } = now!;
-      expect(nowRest).toEqual(liveRest);
-      if (typeof liveDesc === "string") expect(String(nowDesc).endsWith(liveDesc)).toBe(true);
+    expect(original(name).scope).toBe(SCOPES[name]);
+    if ((REUSED_NAMES as readonly string[]).includes(name)) {
+      expect(S.GROUPS).toContain(tool); // the group answers; the call test below proves it reaches the old handler
+    } else {
+      expect(tool).toBe(original(name)); // the very object the tool file exports — not a wrapper
     }
-    for (const r of live.inputSchema.required ?? []) expect(group.inputSchema.required ?? []).toContain(r);
   });
 
-  it("scribe_health with no aspect runs scribe_health's own handler with the same arguments", async () => {
-    const orig = published("scribe_health");
-    const spy = vi.spyOn(orig, "handler").mockResolvedValue({ sentinel: "health" });
-    const out = await S.CALLABLE_TOOLS.get("scribe_health")!.handler({ anything: 1 }, ctx);
-    expect(out).toEqual({ sentinel: "health" });
-    expect(spy).toHaveBeenCalledWith({ anything: 1 }, ctx);
+  it.each(CASES)("%s — the argument contract: nothing removed, retyped, narrowed or newly required", (name, live) => {
+    const props = (S.CALLABLE_TOOLS.get(name)!.inputSchema.properties ?? {}) as Record<string, Frag>;
+    for (const [key, was] of Object.entries(live.inputSchema.properties ?? {})) {
+      const now = props[key];
+      expect(now, `${name}.${key} was removed`).toBeDefined();
+      const ok = branches(now!).some((b) =>
+        coversType(b.type, was.type) &&
+        (!Array.isArray(was.enum) || (Array.isArray(b.enum) && was.enum.every((e) => b.enum!.includes(e)))),
+      );
+      expect(ok, `${name}.${key} changed type or lost an enum value`).toBe(true);
+    }
+    const required = S.CALLABLE_TOOLS.get(name)!.inputSchema.required ?? [];
+    for (const r of required) expect(live.inputSchema.required ?? [], `${name} now requires ${r}`).toContain(r);
   });
 
-  it.each(["check_update_now", "report_diag", "restart_engine"])("scribe_room_command kind=%s passes every argument, kind included", async (kind) => {
-    const orig = published("scribe_room_command");
-    const spy = vi.spyOn(orig, "handler").mockResolvedValue({ sentinel: kind });
-    const args = { room: "opd-x", kind, args: { log_lines: 5 } };
-    const out = await S.CALLABLE_TOOLS.get("scribe_room_command")!.handler(args, ctx);
-    expect(out).toEqual({ sentinel: kind });
-    expect(spy).toHaveBeenCalledWith(args, ctx);
+  it.each(CASES)("%s — an old-shaped call through the door runs the original handler with the same arguments and returns its answer", async (name, live) => {
+    const spy = vi.spyOn(original(name), "handler").mockResolvedValue({ sentinel: name, nested: { kept: [1, 2] } });
+    const args = oldShapedArgs(live);
+    const { status, body } = await call(name, args, ALL_SCOPES);
+    expect(status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toEqual(args);
+    expect(spy.mock.calls[0]![1]).toMatchObject({ actor: "mcp:surface-test", origin: "https://x" });
+    const result = body.result as Row;
+    expect(result.structuredContent).toEqual({ sentinel: name, nested: { kept: [1, 2] } });
+    expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text)).toEqual({ sentinel: name, nested: { kept: [1, 2] } });
+    expect(result.isError).toBe(false);
+    expect((result._meta as Row).tool).toBe(name);
+  });
+
+  it.each(CASES)("%s — a token without its scope is refused at the door and nothing runs", async (name, live) => {
+    const spies = TOOL_FILES.map((t) => vi.spyOn(t, "handler").mockResolvedValue({}));
+    const { status, body } = await call(name, oldShapedArgs(live), ALL_SCOPES.filter((s) => s !== SCOPES[name]));
+    expect(status).toBe(403);
+    expect((body.error as Row).code).toBe(-32001);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
 });
 
@@ -244,17 +285,18 @@ describe("scope enforcement is unchanged per tool", () => {
 
   it("buildGroup refuses to mix scopes", () => {
     const tool = (name: string, scope: Scope) => ({ name, description: "", scope, inputSchema: { type: "object" as const }, handler: async () => ({}) });
-    expect(() => S.buildGroup({ name: "g", lead: "", selector: { key: "view", description: "" }, variants: [
+    expect(() => S.buildGroup({ name: "g", lead: "", selector: { key: "view" }, variants: [
       { value: "a", tool: tool("a", "read") }, { value: "b", tool: tool("b", "write") },
     ] })).toThrow(/mixes scopes/);
   });
 
-  const nonRead = LIVE_TOOLS.map((t) => t.name).filter((n) => SCOPES[n] !== "read");
-  const nonReadGroups = S.GROUPS.filter((g) => g.scope !== "read").map((g) => g.name);
+  // The 51 old names are each refused without their scope above; these are the group names.
+  const groupNames = S.GROUPS.map((g) => g.name);
 
-  it.each([...nonRead, ...nonReadGroups].map((n) => [n]))("a read-only token is refused %s at the door, and nothing runs", async (name) => {
+  it.each(groupNames.map((n) => [n]))("a token without its scope is refused group %s at the door, and nothing runs", async (name) => {
     const spies = S.PUBLISHED_TOOLS.map((t) => vi.spyOn(t, "handler").mockResolvedValue({}));
-    const { status, body } = await call(name, { kind: "start_day", action: "replay", room: "r1" }, ["read"]);
+    const scope = S.CALLABLE_TOOLS.get(name)!.scope;
+    const { status, body } = await call(name, { kind: "start_day", action: "replay", view: "list", source: "jobs", aspect: "all", encounter_id: "e", room: "r1" }, ALL_SCOPES.filter((s) => s !== scope));
     expect(status).toBe(403);
     expect((body.error as Row).code).toBe(-32001);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
@@ -315,18 +357,63 @@ describe("docs/operator-mcp/TOOL-NOTES.md describes the surface the door serves"
   });
 });
 
-describe("descriptions state what the code does", () => {
-  it("scribe_room_command names all nine kinds and where each executes; close_orphaned_session is a server-side repair", () => {
-    const d = S.CALLABLE_TOOLS.get("scribe_room_command")!.description;
-    for (const k of ["start_day", "pause_day", "resume_day", "end_day", "set_audio_input", "check_update_now", "report_diag", "restart_engine", "close_orphaned_session"]) {
-      expect(d).toContain(k);
-    }
-    expect(d).toMatch(/close_orphaned_session is a SERVER-SIDE REPAIR, not a stop: no command is queued and no kiosk is involved/);
-    expect(d).toMatch(/start_day, pause_day, resume_day and end_day are queued as a bench_command for the room's listening kiosk/);
-    expect(d).toMatch(/set_audio_input \(app 0\.1\.21\+\), check_update_now, report_diag and restart_engine \(app 0\.1\.22\+\) are queued as a bench_command for the native Room Recorder app/);
+describe("descriptions state what the code does — derived, and capped (Ruling B)", () => {
+  const desc = (n: string) => S.CALLABLE_TOOLS.get(n)!.description;
+  const selectorKey = (g: (typeof S.GROUPS)[number]) =>
+    ["aspect", "view", "source", "kind", "action"].find((k) => ((g.inputSchema.properties ?? {}) as Record<string, Frag>)[k]?.enum);
+
+  it.each(S.GROUPS.map((g) => [g.name, g] as const))(`%s is at most ${S.GROUP_DESCRIPTION_MAX_WORDS} words`, (_n, g) => {
+    expect(S.wordCount(g.description)).toBeLessThanOrEqual(S.GROUP_DESCRIPTION_MAX_WORDS);
   });
 
-  it("the delivery claims match the handlers: close_orphaned_session never queues a command; the other kinds do", () => {
+  it.each(S.GROUPS.map((g) => [g.name, g] as const))("%s names every value it accepts and every tool it runs, exactly as it routes them", (_n, g) => {
+    const key = selectorKey(g);
+    const values = key ? ((g.inputSchema.properties as Record<string, Frag>)[key]!.enum as string[]) : ["encounter_id", "trace_id"];
+    for (const value of values) {
+      const member = g.memberFor!(key ? { [key]: value } : { [value]: "x" })!;
+      expect(member, `${g.name} does not route ${value}`).toBeTruthy();
+      // "value → tool" or "value | other → tool": the value and the tool it actually routes to, on one row.
+      const row = g.description.split(/[;:]\s*/).filter((part) => part.includes(" → ")).find((part) => part.split(" → ")[0]!.split(" | ").map((s) => s.trim()).includes(value));
+      expect(row, `${g.name} does not list ${value}`).toBeDefined();
+      expect(row!.split(" → ")[1]!.split(/[ .]/)[0]).toBe(member);
+    }
+  });
+
+  it("the list is generated: a variant added to a group appears in its description with no prose written", () => {
+    const tool = (name: string) => ({ name, description: "long original text that must not be copied", scope: "read" as const, inputSchema: { type: "object" as const }, handler: async () => ({}) });
+    const g = S.buildGroup({ name: "g", lead: "Framing.", selector: { key: "view" }, variants: [
+      { value: "a", tool: tool("t_a") }, { value: "b", tool: tool("t_b") }, { value: "c", tool: tool("t_b") },
+    ] });
+    expect(g.description).toContain("a → t_a; b | c → t_b");
+    expect(g.description).not.toContain("long original text");
+  });
+
+  it("buildGroup refuses a description over the cap", () => {
+    const tool = (name: string) => ({ name, description: "", scope: "read" as const, inputSchema: { type: "object" as const }, handler: async () => ({}) });
+    expect(() => S.buildGroup({ name: "g", lead: "word ".repeat(S.GROUP_DESCRIPTION_MAX_WORDS), selector: { key: "view" }, variants: [
+      { value: "a", tool: tool("t_a") }, { value: "b", tool: tool("t_b") },
+    ] })).toThrow(/words \(max 150\)/);
+  });
+
+  it.each([
+    ["scribe_health", "SAME TOOL, MORE ASPECTS. scribe_health called with no `aspect` (or aspect=all) is the old scribe_health: same arguments, same behaviour, same response."],
+    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine is the old scribe_room_command: same arguments, same behaviour, same response."],
+  ])("%s opens by saying the old call shape is the old tool", (name, opening) => {
+    expect(desc(name).startsWith(opening)).toBe(true);
+  });
+
+  it("only the two reused names carry that opening", () => {
+    for (const g of S.GROUPS) expect(g.description.startsWith("SAME TOOL"), g.name).toBe((REUSED_NAMES as readonly string[]).includes(g.name));
+  });
+
+  it("scribe_room_command says where each of its nine kinds executes; close_orphaned_session is a server-side repair", () => {
+    const d = desc("scribe_room_command");
+    expect(d).toContain("start_day, pause_day, resume_day, end_day — queued as a bench_command for the room's listening kiosk.");
+    expect(d).toContain("set_audio_input, check_update_now, report_diag, restart_engine — queued as a bench_command for the native Room Recorder app, which a browser kiosk ignores.");
+    expect(d).toContain("close_orphaned_session — a SERVER-SIDE REPAIR, not a stop: no command is queued and no kiosk is involved.");
+  });
+
+  it("the execution claims match the handlers: close_orphaned_session never queues a command; the other kinds do, to the site named", () => {
     const src = readFileSync("lib/mcp/tools/bench.ts", "utf8");
     const body = (name: string) => {
       const start = src.indexOf(`const ${name}: McpTool = {`);
@@ -335,37 +422,22 @@ describe("descriptions state what the code does", () => {
     expect(body("closeOrphaned")).not.toMatch(/insertCommand|sendAndWait/);
     expect(body("closeOrphaned")).toMatch(/closeOrphanedSession\(/);
     expect(body("startRecording")).toMatch(/sendAndWait\(room, "start_day"/);
-    expect(body("setAudioInput")).toMatch(/sendAndWait\(room, "set_audio_input"/);
-    expect(body("roomCommand")).toMatch(/insertCommand\(/);
     expect(src).toMatch(/simpleVerb\(\s*"scribe_pause_recording",\s*"pause_day"/);
     expect(src).toMatch(/simpleVerb\(\s*"scribe_resume_recording",\s*"resume_day"/);
     expect(src).toMatch(/simpleVerb\(\s*"scribe_stop_recording",\s*"end_day"/);
+    // The native-app kinds are the ones gated on the bound Mac's app version.
+    expect(body("setAudioInput")).toMatch(/sendAndWait\(room, "set_audio_input"/);
+    expect(body("setAudioInput")).toMatch(/boundInstallForRoom\(/);
+    expect(body("roomCommand")).toMatch(/insertCommand\(/);
+    expect(body("roomCommand")).toMatch(/boundInstallForRoom\(/);
   });
 
-  it.each([
-    ["scribe_health", "SAME TOOL, MORE ASPECTS. scribe_health called with no `aspect` (or aspect=all) is exactly the scribe_health", ["llm → scribe_llm_health", "kb → scribe_kb_probe"]],
-    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine is exactly the scribe_room_command", [
-      "start_day → scribe_start_recording", "pause_day → scribe_pause_recording", "resume_day → scribe_resume_recording", "end_day → scribe_stop_recording",
-      "close_orphaned_session → scribe_close_orphaned_session", "set_audio_input → scribe_set_audio_input"]],
-  ] as Array<[string, string, string[]]>)("%s opens by saying the old call shape is the old tool, and names every value added", (name, opening, added) => {
-    const d = S.CALLABLE_TOOLS.get(name)!.description;
-    expect(d.startsWith(opening)).toBe(true);
-    const lead = d.slice(0, d.indexOf("\n\n"));
-    expect(lead).toContain(`${added.length} `);
-    for (const a of added) expect(lead).toContain(a);
-    // The text a cached client holds is still in the new description, word for word.
-    expect(d).toContain(LIVE_TOOLS.find((t) => t.name === name)!.description);
-  });
-
-  it("only the two reused names carry that opening", () => {
-    for (const g of S.GROUPS) expect(g.description.startsWith("SAME TOOL"), g.name).toBe((REUSED_NAMES as readonly string[]).includes(g.name));
-  });
-
-  it("every group description carries each member's own description verbatim", () => {
-    for (const g of S.GROUPS) {
-      for (const m of S.groupMembers(g)) {
-        expect(g.description, `${g.name} lost ${m}'s text`).toContain(S.PUBLISHED_TOOLS.find((t) => t.name === m)!.description);
-      }
-    }
+  it("scribe_session_tape's framing matches get_recording: manifest and chunk mint presigned links, timeline and zip do not", () => {
+    expect(desc("scribe_session_tape")).toContain("manifest and chunk return presigned audio links");
+    const live = original("scribe_get_recording").description;
+    expect(live).toMatch(/mode=manifest: manifest\.json shape with per-chunk presigned GET URLs/);
+    expect(live).toMatch(/mode=chunk: one presigned GET URL/);
+    expect(live).toMatch(/mode=timeline: generated timeline\.md text/);
+    expect(live).toMatch(/mode=zip: the admin day-zip route path .*not presignable/);
   });
 });

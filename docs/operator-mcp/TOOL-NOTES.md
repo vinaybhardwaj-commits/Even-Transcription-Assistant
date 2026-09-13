@@ -11,10 +11,16 @@ the door published at `6b2347e` — for as long as the door exists. A regroup, n
 
 **What a group is.** Nine of the 33 are groups. A group picks ONE of the original tools by an
 argument and runs **that tool's own handler** with the caller's context, so behaviour, refusals,
-scope checks and response shape are the original tool's — there is no second implementation. Its
-description opens with its purpose, then carries every member's own description word for word. An
-argument whose description starts with `[view=…]` (or `[kind=…]`, etc.) applies only to the
-variants named there. An unknown or missing selector answers `{ ok:false, error:"unknown_<key>",
+scope checks and response shape are the original tool's — there is no second implementation.
+
+**A group's description is at most 150 words, and nearly all of it is generated.** The only prose is
+one or two sentences of framing. Every value, the tool it runs and (for `scribe_room_command`) where
+it executes are generated from the same variant table that routes the call, so a variant added or
+renamed cannot leave the description behind; `lib/mcp/surface.ts` refuses at load to build a group
+over the cap. The members' own long descriptions are **not** copied in — a fresh client does not see
+them for grouped tools. They stay in `lib/mcp/tools/*`, each argument's own description still rides
+in the schema, and a client with the old cached list still shows them. An argument whose description
+starts with `[view=…]` (or `[kind=…]`, etc.) applies only to the variants named there. An unknown or missing selector answers `{ ok:false, error:"unknown_<key>",
 allowed }` and runs nothing.
 
 **One scope per group.** The door checks a token's scopes against the tool it was called by name.
@@ -52,9 +58,9 @@ a stop**: nothing is queued and no kiosk is involved.
 **Two names are both an old tool and a group: `scribe_health` and `scribe_room_command`.** Called
 the old way — `scribe_health` with no `aspect`, `scribe_room_command` with one of its three native
 kinds — each is the tool it always was, with the same arguments. The schema a fresh client sees is
-wider than the one a cached client holds; both descriptions describe the same tool. The new one opens
-`SAME TOOL, MORE ASPECTS.` / `SAME TOOL, MORE KINDS.` and names every value added and the tool it
-used to be.
+wider than the one a cached client holds; both describe the same tool. The new description opens
+`SAME TOOL, MORE ASPECTS.` / `SAME TOOL, MORE KINDS.` with the old call shape, and the generated list
+that follows names every value and the tool it runs.
 
 **Audit.** A group call's `audit_log` row has `target_id` = the group and
 `metadata_json.variant` = the published tool that ran. A call by an old name writes exactly the row
@@ -62,10 +68,19 @@ it wrote before.
 
 **Proof the old names hold.** `fixtures/mcp/live-tools-list-6b2347e.json` is `tools/list` captured
 from the live door with curl. `tests/unit/mcp-surface-aliases.test.ts` enumerates THAT file — never
-the registry, which would shrink with the code — and checks every name still resolves with its
-scope and, for all but the two reused names above, the same description and schema byte for byte. The two reused names are checked to keep every old
-property, every old enum value and every old required argument, and to reach the old handler
-unchanged.
+the registry, which would shrink with the code. For every one of the 51 names it checks behaviour,
+not wording:
+
+- it resolves, with the same scope, to the very object its tool file exports (the two reused names
+  resolve to their group);
+- a call through the door carrying every argument the old schema declared runs that object's own
+  handler with exactly those arguments, and the caller gets back exactly what the handler returned;
+- a token without the tool's scope gets `-32001` and nothing runs;
+- no argument the old schema declared is removed, retyped, narrowed to fewer enum values, or newly
+  required.
+
+**Descriptions are not frozen** — they are meant to change as tools change. A recaptured fixture may
+add names; it must never drop one of the 51.
 
 ## `detail: "summary" | "full"`
 
