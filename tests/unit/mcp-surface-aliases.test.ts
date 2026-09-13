@@ -9,6 +9,16 @@
  * lose an enum value, or become required — except a change listed, named and justified in
  * ACCEPTED_CONTRACT_CHANGES below.
  *
+ * ─── CONTRACT CHANGE, 13 Sep 2026 (C3 merge, ruling (a)): HOW A REMOVAL IS PROVEN ─────────────
+ * The first rule proved an accepted removal only by a NEWER CAPTURE in which the value was already
+ * gone. That is circular for any removal not yet deployed: the capture cannot exist until the
+ * removal ships, and the removal cannot pass this gate until the capture exists. Now: an accepted
+ * removal is proven by its RECORDED ENTRY (tool, argument, values, the capture it was last published
+ * in, a decision reference cited in the decision text), plus the value being absent from the next
+ * capture — or, when no newer capture exists yet, absent from the LIVE REGISTRY this test loads.
+ * The guard does not weaken: a removal with no entry still fails the contract test; an entry whose
+ * value is still published fails its own proof. Only a value explicitly listed with its ruling passes.
+ *
  * ─── WHERE THE NAMES COME FROM ───────────────────────────────────────────────────────────────
  * Raw JSON-RPC answers to `tools/list` from the LIVE door (www.evenscribe.app/api/mcp), captured with
  * curl on 13 Sep 2026. Never the registry — a test that enumerated the registry would shrink silently
@@ -81,20 +91,44 @@ const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes };
  * each entry is still real (published in the older capture, absent from the newer), so a stale entry
  * cannot quietly excuse some later narrowing.
  */
-const ACCEPTED_CONTRACT_CHANGES: ReadonlyArray<{ tool: string; argument: string; removedEnumValues: string[]; lastPublishedIn: string; decision: string }> = [
+const ACCEPTED_CONTRACT_CHANGES: ReadonlyArray<{ tool: string; argument: string; removedEnumValues: string[]; lastPublishedIn: string; decisionRef: string; decision: string }> = [
   ...["scribe_job_submit", "scribe_job_list"].map((tool) => ({
     tool,
     argument: "kind",
     removedEnumValues: ["diarize_clip"],
     lastPublishedIn: "6b2347e",
+    decisionRef: "Slice C2 decision D3",
     decision:
       "Slice C2 decision D3: diarize_clip is gone, not renamed — diarize_window implements it for real. At 6b2347e it was a stub " +
       "that accepted the job and then failed not_implemented; refusing at submit with unknown_kind is the better contract. " +
       "Accepted by ruling (a), 13 Sep; the stub is not to be restored.",
   })),
+  ...["scribe_job_submit", "scribe_job_list"].map((tool) => ({
+    tool,
+    argument: "kind",
+    removedEnumValues: ["emotion_clip"],
+    lastPublishedIn: "0f27b8c",
+    decisionRef: "Slice C3 decision: emotion_clip stub deleted",
+    decision:
+      "Slice C3 decision: emotion_clip stub deleted — emotion_window implements emotion for real, and two kinds for one job is two " +
+      "places for a caller to be wrong. The stub never worked: it accepted a job that then failed not_implemented; refusing at " +
+      "submit with unknown_kind is the better contract. Accepted by ruling (a), 13 Sep (C3 merge); the stub is not to be restored. " +
+      "This is the SECOND stub removal to trip this guard — diarize_clip (Slice C2 decision D3) was the first, ruled the same way " +
+      "the same morning.",
+  })),
 ];
+const captureIndex = (sha: string) => CAPTURES.findIndex((x) => x.sha === sha);
+/**
+ * The values excused when checking the contract against capture `sha`: every recorded removal whose
+ * value was still published at or after that capture. Nothing else is excused — an unrecorded
+ * removal is never in this set.
+ */
 const acceptedRemovals = (tool: string, argument: string, sha: string) =>
-  new Set(ACCEPTED_CONTRACT_CHANGES.filter((c) => c.tool === tool && c.argument === argument && c.lastPublishedIn === sha).flatMap((c) => c.removedEnumValues));
+  new Set(
+    ACCEPTED_CONTRACT_CHANGES
+      .filter((c) => c.tool === tool && c.argument === argument && captureIndex(c.lastPublishedIn) >= captureIndex(sha))
+      .flatMap((c) => c.removedEnumValues),
+  );
 
 /** The two published names a group now answers. Old-shaped calls must still reach the old handler. */
 const REUSED_NAMES = ["scribe_health", "scribe_room_command"] as const;
@@ -164,16 +198,20 @@ describe("the committed fixtures", () => {
   });
 
   it.each(ACCEPTED_CONTRACT_CHANGES.map((c) => [`${c.tool}.${c.argument} −${c.removedEnumValues.join(",")}`, c] as const))(
-    "accepted change %s is real: published at its capture, gone from the next, and cites its decision",
+    "accepted change %s is real: recorded with a decision, published at its capture, and gone from the next capture or, with none yet, from the live registry",
     (_label, c) => {
-      const older = CAPTURES.find((x) => x.sha === c.lastPublishedIn)!;
-      const newer = CAPTURES[CAPTURES.indexOf(older) + 1]!;
+      const older = CAPTURES.find((x) => x.sha === c.lastPublishedIn);
+      expect(older, `${c.lastPublishedIn} is not a committed capture`).toBeDefined();
+      const newer = CAPTURES[CAPTURES.indexOf(older!) + 1];
       const enumIn = (cap: typeof FLOOR) => (cap.tools.find((t) => t.name === c.tool)!.inputSchema.properties![c.argument]!.enum ?? []) as unknown[];
+      const liveEnum = ((S.CALLABLE_TOOLS.get(c.tool)!.inputSchema.properties ?? {}) as Record<string, Frag>)[c.argument]?.enum ?? [];
       for (const value of c.removedEnumValues) {
-        expect(enumIn(older), `${value} was never published`).toContain(value);
-        expect(enumIn(newer), `${value} is still published — this exception excuses nothing`).not.toContain(value);
+        expect(enumIn(older!), `${value} was never published at ${c.lastPublishedIn}`).toContain(value);
+        if (newer) expect(enumIn(newer), `${value} is still published at ${newer.sha} — this exception excuses nothing`).not.toContain(value);
+        else expect(liveEnum, `${value} is still in the live registry — this exception excuses nothing`).not.toContain(value);
       }
-      expect(c.decision).toMatch(/decision D3/);
+      expect(c.decisionRef.trim().length, "a recorded removal names its decision").toBeGreaterThan(0);
+      expect(c.decision).toContain(c.decisionRef);
     },
   );
 });
