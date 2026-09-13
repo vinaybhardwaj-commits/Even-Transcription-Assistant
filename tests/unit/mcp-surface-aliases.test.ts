@@ -66,8 +66,8 @@ const SCOPES = JSON.parse(readFileSync("fixtures/mcp/tool-scopes-6b2347e.json", 
 /** The two published names a group now answers. Old-shaped calls must still reach the old handler. */
 const REUSED_NAMES = ["scribe_health", "scribe_room_command"] as const;
 
-/** Primary tools after Slice E commit 1. Commit 2 (stt.ts + voice.ts + window_speakers) brings it to 25. */
-const COMMIT_1_PRIMARY_COUNT = 33;
+/** Primary tools after Slice E commit 1. Commit 2 (stt.ts + voice.ts + window_speakers) brings it to 27 as ruled on 13 Sep. */
+const COMMIT_1_PRIMARY_COUNT = 35;
 
 const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(ALL_SCOPES) };
 
@@ -196,8 +196,9 @@ describe("tools/list — the primary surface", () => {
     }
   });
 
-  it("stt.ts and voice.ts tools are untouched this commit: listed as the original objects", () => {
-    for (const n of ["scribe_list_stt_engines", "scribe_stt_health", "scribe_stt_routing", "scribe_list_stt_runs", "scribe_get_stt_run",
+  it("stt.ts, voice.ts and jobs.ts tools are ungrouped this commit, and so is scribe_list_commands: listed as the original objects", () => {
+    for (const n of ["scribe_list_commands", "scribe_job_list", "scribe_audit_recent", "scribe_job_status", "scribe_job_submit", "scribe_job_cancel",
+      "scribe_list_stt_engines", "scribe_stt_health", "scribe_stt_routing", "scribe_list_stt_runs", "scribe_get_stt_run",
       "scribe_route_tripwires", "scribe_voice_health", "scribe_list_voiceprints", "scribe_list_voice_samples", "scribe_get_clusters"]) {
       expect(S.LISTED_TOOLS).toContain(S.PUBLISHED_TOOLS.find((t) => t.name === n));
     }
@@ -225,9 +226,6 @@ describe("every group variant runs its original handler", () => {
     ["scribe_session_tape", { view: "zip", session_id: "bs_1", mode: "manifest" }, "scribe_get_recording", { session_id: "bs_1", mode: "zip" }],
     ["scribe_encounter", { encounter_id: "enc_1", include_identity: true }, "scribe_get_encounter", { encounter_id: "enc_1", include_identity: true }],
     ["scribe_encounter", { trace_id: "tr_1", include_prompts: true }, "scribe_get_trace", { trace_id: "tr_1", include_prompts: true }],
-    ["scribe_ops_log", { source: "commands", room: "r1", status: "failed" }, "scribe_list_commands", { room: "r1", status: "failed" }],
-    ["scribe_ops_log", { source: "jobs", kind: "stitch", limit: 10 }, "scribe_job_list", { kind: "stitch", limit: 10 }],
-    ["scribe_ops_log", { source: "audit", action: "bench.command", since: "2026-09-12T00:00:00Z" }, "scribe_audit_recent", { action: "bench.command", since: "2026-09-12T00:00:00Z" }],
     ["scribe_room_command", { kind: "start_day", room: "r1", override_pause: true }, "scribe_start_recording", { room: "r1", override_pause: true }],
     ["scribe_room_command", { kind: "pause_day", room: "r1" }, "scribe_pause_recording", { room: "r1" }],
     ["scribe_room_command", { kind: "resume_day", room_id: "room_1" }, "scribe_resume_recording", { room_id: "room_1" }],
@@ -267,7 +265,7 @@ describe("every group variant runs its original handler", () => {
   it("an unknown or missing selector is refused and runs nothing", async () => {
     const spies = S.PUBLISHED_TOOLS.map((t) => vi.spyOn(t, "handler").mockResolvedValue({}));
     expect(await S.CALLABLE_TOOLS.get("scribe_rooms")!.handler({ view: "everything" }, ctx)).toMatchObject({ ok: false, error: "unknown_view" });
-    expect(await S.CALLABLE_TOOLS.get("scribe_ops_log")!.handler({}, ctx)).toMatchObject({ ok: false, error: "unknown_source" });
+    expect(await S.CALLABLE_TOOLS.get("scribe_scratch")!.handler({}, ctx)).toMatchObject({ ok: false, error: "unknown_action" });
     expect(await S.CALLABLE_TOOLS.get("scribe_health")!.handler({ aspect: "stt" }, ctx)).toMatchObject({ ok: false, error: "unknown_aspect" });
     expect(await S.CALLABLE_TOOLS.get("scribe_room_command")!.handler({ kind: "reboot", room: "r1" }, ctx)).toMatchObject({ ok: false, error: "unknown_kind" });
     expect(await S.CALLABLE_TOOLS.get("scribe_encounter")!.handler({}, ctx)).toMatchObject({ ok: false, error: "one_id_required" });

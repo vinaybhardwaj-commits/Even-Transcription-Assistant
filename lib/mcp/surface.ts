@@ -24,8 +24,10 @@
  * identity or audio, argument count) was ruled per group in the Slice E proposal; it is not
  * something this file can check.
  *
- * lib/mcp/tools/stt.ts and lib/mcp/tools/voice.ts are NOT grouped in this commit: another slice
- * owns both files until it merges. Their tools are listed exactly as before.
+ * lib/mcp/tools/stt.ts, voice.ts and jobs.ts tools are NOT grouped in this commit: another slice owns
+ * those files until it merges. Their tools are listed exactly as before. scribe_list_commands is
+ * listed on its own too: the group it was in (with jobs.ts's scribe_job_list and scribe_audit_recent)
+ * was taken apart by ruling on 13 Sep.
  */
 
 import type { McpTool, ToolArgs } from "./registry";
@@ -375,16 +377,6 @@ export const GROUPS: readonly McpTool[] = [
       }
       return hasEnc ? v("encounter_id", "scribe_get_encounter") : v("trace_id", "scribe_get_trace");
     },
-  }),
-  buildGroup({
-    name: "scribe_ops_log",
-    lead: "What has been asked of the system, read-only: the operator command queue, the job queue, and the audit log.",
-    selector: { key: "source" },
-    variants: [
-      v("commands", "scribe_list_commands"),
-      v("jobs", "scribe_job_list"),
-      v("audit", "scribe_audit_recent"),
-    ],
   }),
   buildGroup({
     name: "scribe_room_command",

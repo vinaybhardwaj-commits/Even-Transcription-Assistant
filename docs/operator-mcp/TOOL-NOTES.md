@@ -4,12 +4,12 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 33 listed tools, 51 names that answer (Slice E, 13 Sep)
+## The surface: 35 listed tools, 51 names that answer (Slice E, 13 Sep)
 
-`tools/list` publishes **33** tools. `tools/call` accepts those 33 **and every one of the 51 names**
+`tools/list` publishes **35** tools. `tools/call` accepts those 35 **and every one of the 51 names**
 the door published at `6b2347e` — for as long as the door exists. A regroup, not a rename.
 
-**What a group is.** Nine of the 33 are groups. A group picks ONE of the original tools by an
+**What a group is.** Eight of the 35 are groups. A group picks ONE of the original tools by an
 argument and runs **that tool's own handler** with the caller's context, so behaviour, refusals,
 scope checks and response shape are the original tool's — there is no second implementation.
 
@@ -20,8 +20,8 @@ renamed cannot leave the description behind; `lib/mcp/surface.ts` refuses at loa
 over the cap. The members' own long descriptions are **not** copied in — a fresh client does not see
 them for grouped tools. They stay in `lib/mcp/tools/*`, each argument's own description still rides
 in the schema, and a client with the old cached list still shows them. An argument whose description
-starts with `[view=…]` (or `[kind=…]`, etc.) applies only to the variants named there. An unknown or missing selector answers `{ ok:false, error:"unknown_<key>",
-allowed }` and runs nothing.
+starts with `[view=…]` (or `[kind=…]`, etc.) applies only to the variants named there. An unknown
+or missing selector answers `{ ok:false, error:"unknown_<key>", allowed }` and runs nothing.
 
 **One scope per group.** The door checks a token's scopes against the tool it was called by name.
 `lib/mcp/surface.ts` refuses at load to build a group whose members differ in scope, so a group can
@@ -37,16 +37,16 @@ review; the code does not check it.
 | `scribe_sessions` | read | `view`: `list` → `scribe_list_sessions`; `replay` → `scribe_replay_session` |
 | `scribe_session_tape` | read | `view`: `session` → `scribe_get_session`; `manifest` / `timeline` / `chunk` / `zip` → `scribe_get_recording` with that `mode` |
 | `scribe_encounter` | read | exactly one id: `encounter_id` → `scribe_get_encounter`; `trace_id` → `scribe_get_trace`; both or neither → `one_id_required` |
-| `scribe_ops_log` | read | `source`: `commands` → `scribe_list_commands`; `jobs` → `scribe_job_list`; `audit` → `scribe_audit_recent` |
 | `scribe_room_command` | write | `kind`: `start_day` → `scribe_start_recording`; `pause_day` → `scribe_pause_recording`; `resume_day` → `scribe_resume_recording`; `end_day` → `scribe_stop_recording`; `close_orphaned_session` → `scribe_close_orphaned_session`; `set_audio_input` → `scribe_set_audio_input`; `check_update_now` / `report_diag` / `restart_engine` → `scribe_room_command` |
 | `scribe_scratch` | write | `action`: `replay` → `scribe_replay_write`; `fuse` → `scribe_fuse_run` |
 
-The other 24 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
+The other 27 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
 `scribe_pin_visit`, `scribe_mark_consult`, `scribe_extract_audio`, `scribe_transcribe_range`,
 `scribe_list_encounters`, `scribe_list_traces`, `scribe_set_visit_clinician`, `scribe_fuse_report`,
-`scribe_job_submit`, `scribe_job_status`, `scribe_job_cancel`, and — held back from grouping until
-Slice C2 merges, because C2 owns their files — `scribe_list_stt_engines`, `scribe_stt_health`,
-`scribe_stt_routing`, `scribe_list_stt_runs`, `scribe_get_stt_run`, `scribe_route_tripwires`,
+`scribe_list_commands`; the `jobs.ts` tools `scribe_job_submit`, `scribe_job_status`, `scribe_job_list`,
+`scribe_job_cancel`, `scribe_audit_recent` (by ruling, 13 Sep: no group absorbs a `jobs.ts` tool); and —
+held back from grouping until Slice C2 merges, because C2 owns their files — `scribe_list_stt_engines`,
+`scribe_stt_health`, `scribe_stt_routing`, `scribe_list_stt_runs`, `scribe_get_stt_run`, `scribe_route_tripwires`,
 `scribe_voice_health`, `scribe_list_voiceprints`, `scribe_list_voice_samples`, `scribe_get_clusters`.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
@@ -169,5 +169,5 @@ all. Tool *calls* were proxied live and returned the new fields, while the *desc
 months stale. Fresh results with stale descriptions is the signature: reconnect the integration.
 
 **After Slice E a stale client still works.** It lists the 51 old tools, and every one of those
-names still answers. What it cannot see is the 9 group names until it reconnects. Verify the surface
+names still answers. What it cannot see is the 8 group names until it reconnects. Verify the surface
 with curl against the door, never by asking a connector what it lists.
