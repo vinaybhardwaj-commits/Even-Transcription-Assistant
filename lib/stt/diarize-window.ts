@@ -136,6 +136,8 @@ export async function diarizeWindow(opts: {
   audio: Uint8Array;
   contentType?: string;
   centroids?: ClinicianCentroid[];
+  /** One id per run, stamped on every turn row this run writes (0090). */
+  runId: string;
 }): Promise<
   | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
   | { ok: false; error: string; retryable: boolean; timing: unknown }
@@ -171,12 +173,13 @@ export async function diarizeWindow(opts: {
     await sql`
       INSERT INTO room_turn_speaker
         (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
-         clinician_id, role, match_confidence, no_role_reason, created_at)
+         clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
       VALUES
         (${opts.windowId}, ${b.source_ref}, ${b.speaker_idx}, NULL, ${b.overlap_ms}, ${opts.roomDayId},
-         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, ${r.no_role_reason}, NOW())
+         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, ${r.no_role_reason}, ${opts.runId}, NOW())
       ON CONFLICT (window_id, source_ref) DO UPDATE
         SET speaker_idx = EXCLUDED.speaker_idx,
+            run_id = EXCLUDED.run_id,
             -- cluster_id travels with speaker_idx: replacing one and keeping the other would leave
             -- a row whose cluster came from a different clustering than its index.
             cluster_id = EXCLUDED.cluster_id,
@@ -204,6 +207,29 @@ export async function diarizeWindow(opts: {
       latency_ms: res.latencyMs ?? null,
     },
   };
+}
+
+/**
+ * The /diarize speakers array AS STORED. The service's heuristic `type`, `label`, `source` and
+ * `role_source` are its own guess about who a voice is — not an attribution. Stored at the top level,
+ * one join on the speaker index made an unmatched speaker read as whatever the service guessed. They
+ * are kept, nested under a key that says what they are; the embedding, index, timings and any
+ * voiceprint match (clinician_id, confidence) stay where readers expect them. A role in this system
+ * comes only from a voiceprint match (room_turn_speaker.role).
+ */
+export const SERVICE_GUESS_KEY = "unverified_service_guess";
+const GUESS_FIELDS = ["type", "label", "source", "role_source"] as const;
+export function speakersForStorage(speakers: DiarizeSpeaker[]): Array<Record<string, unknown>> {
+  return speakers.map((sp) => {
+    const rest: Record<string, unknown> = { ...(sp as unknown as Record<string, unknown>) };
+    const guess: Record<string, unknown> = {};
+    for (const f of GUESS_FIELDS) {
+      if (rest[f] !== undefined) guess[f] = rest[f];
+      delete rest[f];
+    }
+    guess.is = "the diarize service's own heuristic guess, not an attribution; a role comes only from a voiceprint match";
+    return { ...rest, [SERVICE_GUESS_KEY]: guess };
+  });
 }
 
 export type DiarizeWindowState = "ok" | "failed" | "no_speakers";
@@ -236,29 +262,38 @@ export async function recordDiarizeWindow(row: {
   segments: unknown[] | null;
   clipR2Key: string | null;
   timing: unknown;
+  /** The run's id. Recorded as last_run_id only when the run wrote turns (ok or no_speakers). */
+  runId: string;
 }): Promise<void> {
+  const wroteTurns = row.state === "ok" || row.state === "no_speakers";
+  // Every column but last_run_id is replaced only when the stored row FAILED (0088). last_run_id moves
+  // on EVERY run that wrote turns — a successful re-run of an ok window included — because that is
+  // the one signal a reader of the turns can compare against (0090).
   await sql`
     INSERT INTO room_diarize_window
-      (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, diarized_at)
+      (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id, diarized_at)
     VALUES
       (${row.windowId}, ${row.roomDayId}, ${row.state},
-       ${row.speakers === null ? null : JSON.stringify(row.speakers)}::jsonb,
+       ${row.speakers === null ? null : JSON.stringify(speakersForStorage(row.speakers))}::jsonb,
        ${row.segments === null ? null : JSON.stringify(row.segments)}::jsonb,
        ${row.clipR2Key}, ${row.error === null ? null : row.error.slice(0, 300)},
-       ${row.timing === null || row.timing === undefined ? null : JSON.stringify(row.timing)}::jsonb, NOW())
+       ${row.timing === null || row.timing === undefined ? null : JSON.stringify(row.timing)}::jsonb,
+       ${wroteTurns ? row.runId : null}, NOW())
     ON CONFLICT (window_id) DO UPDATE SET
-      state           = EXCLUDED.state,
-      speakers_json   = EXCLUDED.speakers_json,
-      segments_json   = EXCLUDED.segments_json,
-      clip_r2_key     = EXCLUDED.clip_r2_key,
-      error           = EXCLUDED.error,
-      timing_json     = EXCLUDED.timing_json,
-      diarized_at     = EXCLUDED.diarized_at,
-      attempts        = room_diarize_window.attempts + 1,
-      failure_history = room_diarize_window.failure_history || jsonb_build_array(jsonb_build_object(
-                          'attempt', room_diarize_window.attempts,
-                          'error', room_diarize_window.error,
-                          'diarized_at', room_diarize_window.diarized_at))
-    WHERE room_diarize_window.state = 'failed'
+      state           = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.state ELSE room_diarize_window.state END,
+      speakers_json   = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.speakers_json ELSE room_diarize_window.speakers_json END,
+      segments_json   = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.segments_json ELSE room_diarize_window.segments_json END,
+      clip_r2_key     = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.clip_r2_key ELSE room_diarize_window.clip_r2_key END,
+      error           = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.error ELSE room_diarize_window.error END,
+      timing_json     = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.timing_json ELSE room_diarize_window.timing_json END,
+      diarized_at     = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.diarized_at ELSE room_diarize_window.diarized_at END,
+      attempts        = CASE WHEN room_diarize_window.state = 'failed' THEN room_diarize_window.attempts + 1 ELSE room_diarize_window.attempts END,
+      failure_history = CASE WHEN room_diarize_window.state = 'failed'
+                             THEN room_diarize_window.failure_history || jsonb_build_array(jsonb_build_object(
+                                    'attempt', room_diarize_window.attempts,
+                                    'error', room_diarize_window.error,
+                                    'diarized_at', room_diarize_window.diarized_at))
+                             ELSE room_diarize_window.failure_history END,
+      last_run_id     = COALESCE(EXCLUDED.last_run_id, room_diarize_window.last_run_id)
   `;
 }

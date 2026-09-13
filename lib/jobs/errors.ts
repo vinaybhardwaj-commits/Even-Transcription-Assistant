@@ -42,7 +42,16 @@ export const JOB_ERROR_CODES = [
   "diarize_failed",
   "diarize_unavailable",
   "diarize_would_exceed_budget",
-  // the five stubs
+  // emotion_window (Slice C3)
+  "emotion_disabled",
+  "emotion_unavailable",
+  "emotion_refused",
+  "diarize_not_ok",
+  "diarize_changed",
+  "emotion_window_failed",
+  "emotion_not_configured",
+  "emotion_cap_changed",
+  // the stubs
   "not_implemented",
 ] as const;
 

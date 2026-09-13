@@ -9,6 +9,7 @@
  *
  * There is no submit/poll here because /diarize has none — it answers on the same request.
  */
+import { randomUUID } from "node:crypto";
 import { getObjectBytes } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { diarizeWindow, recordDiarizeWindow } from "@/lib/stt/diarize-window";
@@ -43,7 +44,10 @@ export const diarizeWindowKind: JobKind = {
     if (!w.room_day_id) return failWith(jobError("progress_incomplete", "window has no room_day"));
     if (!w.clip_r2_key) return failWith(jobError("clip_missing_in_r2", "window has no clip"));
 
-    const base = { windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key };
+    // ONE ID PER RUN, on every turn row and on the window row (0090). A successful re-run gets a new
+    // one, so a reader that planned from the old turns can tell they were rewritten.
+    const runId = randomUUID();
+    const base = { windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId };
 
     const bytes = await getObjectBytes(w.clip_r2_key);
     if (!bytes) {
@@ -56,6 +60,7 @@ export const diarizeWindowKind: JobKind = {
       roomDayId: w.room_day_id,
       window: { start: windowStart(Number(w.start_ms)), end: windowEnd(Number(w.end_ms)) },
       audio: bytes,
+      runId,
     });
     if (!res.ok) {
       // The service's message can describe the audio; the row gets a code. `retryable` means we

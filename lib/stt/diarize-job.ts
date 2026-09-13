@@ -26,6 +26,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { parseFlag } from "@/lib/flags";
 
 /**
  * THE ON-SWITCH. Renamed from SPEAKER_CLUSTERS_ENABLED in C2: clustering is deleted, and a name that
@@ -40,29 +41,16 @@ export const ROOM_DIARIZE_ENABLED_ENV = "ROOM_DIARIZE_ENABLED";
 const RETIRED_ENV = "SPEAKER_CLUSTERS_ENABLED";
 
 /**
- * THE VALUES THIS FLAG UNDERSTANDS, and nothing else. Case-insensitive, surrounding whitespace
- * trimmed. It used to be `=== "1"`, which read "true" and " 1" as OFF without a word — a flag that
- * silently disagrees with the operator who set it is a trap, not a default.
+ * THE VALUES THIS FLAG UNDERSTANDS are lib/flags.ts's, shared with the emotion flags so no two flags
+ * can disagree about what "true" means. Re-exported under the names C2 shipped.
  */
-export const ROOM_DIARIZE_TRUTHY = ["1", "true", "yes", "on"] as const;
-export const ROOM_DIARIZE_FALSY = ["", "0", "false", "no", "off"] as const;
-
-/** Thrown for a value in neither set. The route turns it into a non-2xx; it never reads as "off". */
-export class FlagValueError extends Error {}
+export { FLAG_TRUTHY as ROOM_DIARIZE_TRUTHY, FLAG_FALSY as ROOM_DIARIZE_FALSY, FlagValueError } from "@/lib/flags";
 
 export function roomDiarizeEnabled(env: Record<string, string | undefined> = process.env, log: (m: string) => void = console.error): boolean {
   if ((env[RETIRED_ENV] ?? "").trim() !== "") {
     log(`[room-diarize] ${RETIRED_ENV} is set and is IGNORED — it was renamed ${ROOM_DIARIZE_ENABLED_ENV}. Room diarize enqueue is controlled by ${ROOM_DIARIZE_ENABLED_ENV} only; move the setting.`);
   }
-  const raw = env[ROOM_DIARIZE_ENABLED_ENV];
-  if (raw === undefined) return false;
-  const v = raw.trim().toLowerCase();
-  if ((ROOM_DIARIZE_TRUTHY as readonly string[]).includes(v)) return true;
-  if ((ROOM_DIARIZE_FALSY as readonly string[]).includes(v)) return false;
-  // Length only: an env value is not something to echo into a response.
-  throw new FlagValueError(
-    `${ROOM_DIARIZE_ENABLED_ENV} has an unrecognised value (length ${raw.length}) — use one of ${ROOM_DIARIZE_TRUTHY.join("|")} to enable or ${ROOM_DIARIZE_FALSY.filter(Boolean).join("|")}/unset to disable. Refusing to guess.`,
-  );
+  return parseFlag(ROOM_DIARIZE_ENABLED_ENV, env);
 }
 
 /** Bounded so one tick enqueues a handful of windows beside the Mini's serialised service. */

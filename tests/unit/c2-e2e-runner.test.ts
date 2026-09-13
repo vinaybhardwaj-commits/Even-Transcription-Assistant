@@ -142,6 +142,10 @@ function schema(): void {
   exec(m0085);
   // 0088 verbatim: attempts + failure_history, the bounded-retry columns.
   exec(readFileSync("db/migrations/0088_room_diarize_window_retry.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0089 verbatim: the emotion tables.
+  exec(readFileSync("db/migrations/0089_room_emotion.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0090 verbatim: run ids, and the service's speaker guess nested.
+  exec(readFileSync("db/migrations/0090_diarize_run_id_and_service_guess.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
 }
 
 /** A 900 s window whose turns leave a clean gap near every 120 s mark, plus one deliberate straddle. */
@@ -308,6 +312,31 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     expect(body.embeddings_usable, "with usable embeddings, or calibration cannot run").toBe(2);
     expect(body.note, "a fed reader carries no 'nothing stored' note").toBeNull();
     expect(body.errors).toEqual([]);
+  }, 300_000);
+
+  it("P1 JOIN: the job stores the service's speaker guess NESTED and self-describing; 0090 rewrites a legacy row the same way", async () => {
+    const sql = G.__pgsql;
+    const stored = (await sql`SELECT speakers_json, last_run_id FROM room_diarize_window WHERE window_id = 'bw_cal'`) as Array<{ speakers_json: Array<Record<string, unknown>>; last_run_id: string | null }>;
+    expect(stored[0]!.last_run_id, "the run that wrote the turns is recorded").toMatch(/^[0-9a-f-]{36}$/);
+    const turnRuns = (await sql`SELECT DISTINCT run_id FROM room_turn_speaker WHERE window_id = 'bw_cal'`) as Array<{ run_id: string | null }>;
+    for (const t of turnRuns) expect(t.run_id).toBe(stored[0]!.last_run_id);
+    for (const sp of stored[0]!.speakers_json) {
+      for (const k of ["type", "label", "source", "role_source"]) expect(sp, `top-level ${k}`).not.toHaveProperty(k);
+      expect(sp.unverified_service_guess).toBeTruthy();
+      expect(sp.embedding_base64, "the embedding stays where the calibration reader expects it").toBeTruthy();
+    }
+    // A join on the old key finds nothing to misread.
+    const misread = (await sql`SELECT count(*)::int AS n FROM room_diarize_window d, jsonb_array_elements(d.speakers_json) sp WHERE sp->>'type' IS NOT NULL`) as Array<{ n: number }>;
+    expect(misread[0]!.n).toBe(0);
+
+    // A row written the OLD way, then 0090 applied (it is idempotent).
+    await seedWindow("bw_legacy", "sess_legacy", 12 * WINDOW_MS);
+    await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json) VALUES ('bw_legacy', 'rd_1', 'ok', ${JSON.stringify([{ idx: 0, label: "Guess", type: "other", source: "heuristic", embedding_base64: "AAAA" }, { idx: 1, label: "Dr", type: "clinician", source: "auto", clinician_id: makeFakeClinician(1).id, confidence: 0.8 }])}::jsonb)`;
+    exec(readFileSync("db/migrations/0090_diarize_run_id_and_service_guess.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+    const legacy = (await sql`SELECT speakers_json FROM room_diarize_window WHERE window_id = 'bw_legacy'`) as Array<{ speakers_json: Array<Record<string, unknown>> }>;
+    expect(legacy[0]!.speakers_json[0]).toEqual({ idx: 0, embedding_base64: "AAAA", unverified_service_guess: { type: "other", label: "Guess", source: "heuristic", is: "the diarize service's own heuristic guess, not an attribution; a role comes only from a voiceprint match" } });
+    expect(legacy[0]!.speakers_json[1]).toMatchObject({ idx: 1, clinician_id: makeFakeClinician(1).id, confidence: 0.8, unverified_service_guess: { type: "clinician", label: "Dr", source: "auto" } });
+    await sql`DELETE FROM room_diarize_window WHERE window_id = 'bw_legacy'`;
   }, 300_000);
 
   it("ONE WRITER, BEHAVIOURALLY: break the job's write and nothing else writes those tables", async () => {
@@ -504,7 +533,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, th
       expect(again.jobs.map((j) => j.window_id), "an ok window is final").not.toContain("bw_retry_ok");
       // And the writer itself refuses to replace a final row.
       const { recordDiarizeWindow } = await import("@/lib/stt/diarize-window");
-      await recordDiarizeWindow({ windowId: "bw_retry_ok", roomDayId: "rd_1", state: "failed", error: "late", speakers: null, segments: null, clipR2Key: null, timing: null });
+      await recordDiarizeWindow({ windowId: "bw_retry_ok", roomDayId: "rd_1", state: "failed", error: "late", speakers: null, segments: null, clipR2Key: null, timing: null, runId: "run_late" });
       const still = (await sql`SELECT state, attempts FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number }>;
       expect(still[0]).toEqual({ state: "ok", attempts: 2 });
     } finally {
@@ -1150,5 +1179,369 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is ac
       expect(src, f).toContain("deleted_at IS NULL");
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// C3 — EMOTION: the emotion_window job through the real runner, against real Postgres. The Mini's
+// emotion service is faked at the fetch boundary with the captured response shape.
+// ---------------------------------------------------------------------------
+
+const EMO = {
+  cap: 60 as number | undefined,
+  /** When set, the scoring call reports this cap instead of `cap`. */
+  segmentsCap: undefined as number | undefined,
+  healthStatus: 200,
+  healthOk: true,
+  lastAuth: null as string | null,
+  loaded: true as boolean | undefined,
+  healthDown: false,
+  callsDown: false,
+  refuseIndex: -1,
+  calls: [] as Array<{ segments: Array<{ start_s: number; end_s: number }> }>,
+  onCall: null as null | (() => Promise<void>),
+};
+const EMO_LABELS = ["anger", "disgust", "enthusiasm", "fear", "happiness", "neutral", "sadness"];
+function fakeEmotionFetch(real: typeof fetch) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (!url.includes("emotion.")) return real(input, init);
+    const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
+    if (url.endsWith("/health")) {
+      if (EMO.healthDown) throw new TypeError("fetch failed");
+      return json({ ok: EMO.healthOk, model: "Aniemore/wavlm-emotion-v1-crosslingual", ...(EMO.cap === undefined ? {} : { max_duration_s: EMO.cap }), ...(EMO.loaded === undefined ? {} : { loaded: EMO.loaded, models: { wavlm: { loaded: EMO.loaded, subfolder: "int8" } } }) }, EMO.healthStatus);
+    }
+    if (url.endsWith("/inference/wavlm/segments")) {
+      if (EMO.callsDown) throw new TypeError("fetch failed");
+      const body = JSON.parse(String(init?.body)) as { audio_url: string; segments: Array<{ start_s: number; end_s: number }> };
+      EMO.lastAuth = (init?.headers as Record<string, string> | undefined)?.authorization ?? null;
+      if (EMO.lastAuth !== "Bearer test-emotion-secret") return json({ ok: false, error: "unauthorised" }, 401);
+      EMO.calls.push({ segments: body.segments });
+      if (EMO.onCall) await EMO.onCall();
+      return json({
+        ok: true, model_key: "wavlm", model: "Aniemore/wavlm-emotion-v1-crosslingual", device: "mps", subfolder: "int8",
+        max_duration_s: EMO.segmentsCap ?? EMO.cap ?? 60, max_segments: 16, fetch_s: 0.9, decode_s: 0.8,
+        results: body.segments.map((sg, i) => {
+          if (i === EMO.refuseIndex) return { index: i, start_s: sg.start_s, end_s: sg.end_s, ok: false, error: "segment_too_short_for_model" };
+          if (sg.end_s - sg.start_s > (EMO.cap ?? 60)) return { index: i, ok: false, error: "segment_longer_than_max_duration_s" };
+          const raw = EMO_LABELS.map((_, k) => 1 + ((i + k) % 7));
+          const sum = raw.reduce((a, x) => a + x, 0);
+          return { index: i, start_s: sg.start_s, end_s: sg.end_s, ok: true, labels: Object.fromEntries(EMO_LABELS.map((l, k) => [l, raw[k]! / sum])), top: [], duration_s: sg.end_s - sg.start_s, inference_s: 1.1 };
+        }),
+      });
+    }
+    return json({ detail: "Not Found" }, 404);
+  };
+}
+
+/** A diarized window: an `ok` diarize row and attributed turns — one speaker's long run, a straddle, a second speaker. */
+async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?: number } = {}): Promise<void> {
+  const sql = G.__pgsql;
+  const doc = makeFakeClinician(1);
+  await sql`INSERT INTO bench_window VALUES (${id}, ${`sess_${id}`}, 'rd_emo', ${startMs}, ${startMs + WINDOW_MS}, 'primary', ${`clips/${id}.webm`}, true, 'transcribed')`;
+  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, '[]'::jsonb, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
+  const longS = opts.longRunS ?? 70;
+  // Speaker 0: turns every 5 s with 1 s gaps for `longS` seconds -> ONE run; speaker 1 after a straddle.
+  const turns: Array<[string, number, number, number, string | null, boolean]> = [];
+  for (let t = 0; t + 4000 <= longS * 1000; t += 5000) turns.push([`${id}|a${t}`, 0, t, t + 4000, null, true]);
+  const after = longS * 1000 + 2000;
+  turns.push([`${id}|straddle`, 0, after, after + 3000, "straddle", false]);
+  turns.push([`${id}|b1`, 1, after + 4000, after + 9000, "no_match", false]);
+  turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false]);
+  for (const [ref, spk, s, e, reason, named] of turns) {
+    await sql`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES (${`c_${ref}`}, 'rd_emo', 'stt_turn', 'replay', ${ref}, ${JSON.stringify({ start_ms: startMs + s, end_ms: startMs + e, window: { start_ms: startMs, end_ms: startMs + WINDOW_MS } })}::jsonb)`;
+    if (named) {
+      await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
+                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', ${doc.id}, 'clinician', 0.8, NULL, ${`run_seed_${id}`}, NOW())`;
+    } else {
+      await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
+                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', NULL, NULL, NULL, ${reason}, ${`run_seed_${id}`}, NOW())`;
+    }
+  }
+}
+
+async function runEmotionJob(jobId: string, windowId: string) {
+  const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+  const { runOneStep } = await import("@/lib/jobs/runner");
+  const sql = G.__pgsql;
+  await insertJob({ id: jobId, kind: "emotion_window", args: { window_id: windowId }, actor: "mcp:test" });
+  const steps: string[] = [];
+  for (let i = 0; i < 20; i += 1) {
+    const claimed = await claimJobs(1, 240_000, `runner_${jobId}_${i}`);
+    const mine = claimed.find((c) => c.id === jobId);
+    if (!mine) { if (claimed.length === 0) break; continue; }
+    steps.push(String(mine.step ?? "(first)"));
+    await runOneStep(mine, `runner_${jobId}_${i}`);
+    const st = (await sql`SELECT status FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string }>;
+    if (st[0]?.status === "done" || st[0]?.status === "failed") break;
+  }
+  const row = (await sql`SELECT status, result, error FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string; result: Record<string, unknown> | null; error: string | null }>;
+  return { steps, ...row[0]! };
+}
+
+describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distribution, its own failure domain", () => {
+  const realFetch = globalThis.fetch;
+  beforeAll(() => { globalThis.fetch = fakeEmotionFetch(realFetch) as typeof fetch; });
+  afterAll(() => { globalThis.fetch = realFetch; delete process.env.EMOTION_ENABLED; delete process.env.EMOTION_SEGMENTS_SECRET; });
+  const reset = () => {
+    Object.assign(EMO, { cap: 60, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
+    process.env.EMOTION_ENABLED = "1";
+    process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
+  };
+
+  it("FLAG OFF: the job fails emotion_disabled and writes nothing; an unrecognised value is not read as off", async () => {
+    reset();
+    await seedEmotionWindow("bw_emo_off", 20 * WINDOW_MS);
+    delete process.env.EMOTION_ENABLED;
+    const r = await runEmotionJob("job_emo_off", "bw_emo_off");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_disabled/);
+    process.env.EMOTION_ENABLED = "maybe";
+    const r2 = await runEmotionJob("job_emo_bad", "bw_emo_off");
+    expect(String(r2.error)).toMatch(/^emotion_disabled: EMOTION_ENABLED has an unrecognised value/);
+    const n = (await G.__pgsql`SELECT (SELECT count(*) FROM room_span_emotion WHERE window_id = 'bw_emo_off')::int AS s, (SELECT count(*) FROM room_emotion_window WHERE window_id = 'bw_emo_off')::int AS w`) as Array<{ s: number; w: number }>;
+    expect(n[0]).toEqual({ s: 0, w: 0 });
+    expect(EMO.calls).toHaveLength(0);
+  }, 300_000);
+
+  it("HAPPY PATH: warm-up first, runs merged, long run CHUNKED under the cap, straddle SKIPPED, every row carries all seven scores", async () => {
+    reset();
+    await seedEmotionWindow("bw_emo", 21 * WINDOW_MS);
+    const sql = G.__pgsql;
+    const diarizeBefore = (await sql`SELECT (SELECT count(*) FROM room_turn_speaker WHERE window_id = 'bw_emo')::int AS t, (SELECT state FROM room_diarize_window WHERE window_id = 'bw_emo') AS s`) as Array<{ t: number; s: string }>;
+    const r = await runEmotionJob("job_emo", "bw_emo");
+    expect(r.status, `error=${r.error}`).toBe("done");
+    expect(r.steps).toEqual(["(first)", "warm", "score", "finish"]);
+
+    // The warm-up is the FIRST call, a throwaway second of audio.
+    expect(EMO.calls[0]!.segments).toEqual([{ start_s: 0, end_s: 1 }]);
+    expect(EMO.calls.length, "warm-up + one batch").toBe(2);
+    expect(EMO.calls.every((c) => c.segments.length <= 16)).toBe(true);
+
+    const rows = (await sql`SELECT state, reason, speaker_idx, chunk_idx, chunk_count, segment_start_ms, segment_end_ms, clip_start_s, clip_end_s, source_refs,
+                                   anger, disgust, enthusiasm, fear, happiness, neutral, sadness, labels_json, top_label, top_score, model, model_key, subfolder, device, cap_s, duration_s, inference_s, clip_r2_key
+                              FROM room_span_emotion WHERE window_id = 'bw_emo' ORDER BY segment_start_ms`) as Array<Record<string, unknown>>;
+    const scored = rows.filter((x) => x.state === "scored");
+    const skipped = rows.filter((x) => x.state === "skipped");
+    // Speaker 0's 70 s run -> 3 chunks of <= 30 s; speaker 1's two turns merge into ONE run.
+    expect(scored.filter((x) => x.speaker_idx === 0).map((x) => [x.chunk_idx, x.chunk_count])).toEqual([[0, 3], [1, 3], [2, 3]]);
+    expect(scored.filter((x) => x.speaker_idx === 1)).toHaveLength(1);
+    expect((scored.find((x) => x.speaker_idx === 1)!.source_refs as string[]).length, "the two turns merged into one run").toBe(2);
+    for (const x of scored) {
+      expect(Number(x.segment_end_ms) - Number(x.segment_start_ms)).toBeLessThanOrEqual(30_000);
+      const seven = EMO_LABELS.map((l) => Number(x[l]));
+      expect(seven.every((v) => v >= 0 && v <= 1)).toBe(true);
+      expect(seven.reduce((a, v) => a + v, 0)).toBeCloseTo(1, 6);
+      expect(x.top_label).toBe(EMO_LABELS[seven.indexOf(Math.max(...seven))]);
+      expect(x).toMatchObject({ model: "Aniemore/wavlm-emotion-v1-crosslingual", model_key: "wavlm", subfolder: "int8", device: "mps", cap_s: 60, clip_r2_key: "clips/bw_emo.webm" });
+      expect(Number(x.clip_end_s)).toBeGreaterThan(Number(x.clip_start_s));
+    }
+    expect(skipped.map((x) => [x.reason, x.speaker_idx])).toEqual([["straddle", 0]]);
+    expect(EMO_LABELS.every((l) => skipped[0]![l] === null)).toBe(true);
+
+    const w = (await sql`SELECT state, diarize_run_id, attempts, segments_planned, segments_scored, segments_skipped, segments_failed, calls, cap_s, warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo'`) as Array<Record<string, unknown>>;
+    expect(w[0]).toMatchObject({ state: "ok", diarize_run_id: "run_seed_bw_emo", attempts: 1, segments_planned: 4, segments_scored: 4, segments_skipped: 1, segments_failed: 0, calls: 2, cap_s: 60 });
+    expect(EMO.lastAuth, "the shared secret travels on every call").toBe("Bearer test-emotion-secret");
+    expect(w[0]!.warmup_json).toMatchObject({ loaded_before: true, ok: true });
+
+    // ITS OWN FAILURE DOMAIN, even on success: the diarize tables are exactly as they were.
+    const diarizeAfter = (await sql`SELECT (SELECT count(*) FROM room_turn_speaker WHERE window_id = 'bw_emo')::int AS t, (SELECT state FROM room_diarize_window WHERE window_id = 'bw_emo') AS s`) as Array<{ t: number; s: string }>;
+    expect(diarizeAfter[0]).toEqual(diarizeBefore[0]);
+  }, 300_000);
+
+  it("IDEMPOTENT: the same job again for the same diarize attempt duplicates no row and does not rewrite the window", async () => {
+    const sql = G.__pgsql;
+    const before = (await sql`SELECT (SELECT count(*) FROM room_span_emotion WHERE window_id = 'bw_emo')::int AS n, (SELECT scored_at::text FROM room_emotion_window WHERE window_id = 'bw_emo') AS at`) as Array<{ n: number; at: string }>;
+    reset();
+    const r = await runEmotionJob("job_emo_again", "bw_emo");
+    expect(r.status).toBe("done");
+    const after = (await sql`SELECT (SELECT count(*) FROM room_span_emotion WHERE window_id = 'bw_emo')::int AS n, (SELECT scored_at::text FROM room_emotion_window WHERE window_id = 'bw_emo') AS at`) as Array<{ n: number; at: string }>;
+    expect(after[0]).toEqual(before[0]);
+  }, 300_000);
+
+  it("THE CAP IS READ FROM /health: a service reporting 12 s gets chunks of at most 11 s; a /health with no cap fails the window by name", async () => {
+    reset();
+    EMO.cap = 12;
+    await seedEmotionWindow("bw_emo_cap", 22 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_cap", "bw_emo_cap");
+    expect(r.status, `error=${r.error}`).toBe("done");
+    const lens = (await G.__pgsql`SELECT state, speaker_idx, chunk_count, (segment_end_ms - segment_start_ms)::int AS ms, cap_s FROM room_span_emotion WHERE window_id = 'bw_emo_cap' AND state <> 'skipped'`) as Array<{ state: string; speaker_idx: number; chunk_count: number; ms: number; cap_s: number }>;
+    // PLANNED under the cap, not refused by the service for exceeding it: nothing failed.
+    expect(lens.map((l) => l.state).filter((x) => x !== "scored"), "a chunk planned past the cap would come back refused").toEqual([]);
+    expect(Math.max(...lens.map((l) => l.ms))).toBeLessThanOrEqual(11_000);
+    expect(lens.filter((l) => l.speaker_idx === 0).length, "the 70 s run is split for a 12 s cap").toBeGreaterThanOrEqual(7);
+    expect(lens.every((l) => l.cap_s === 12)).toBe(true);
+
+    reset();
+    EMO.cap = undefined;
+    EMO.loaded = undefined;
+    await seedEmotionWindow("bw_emo_nocap", 23 * WINDOW_MS);
+    const r2 = await runEmotionJob("job_emo_nocap", "bw_emo_nocap");
+    expect(r2.status).toBe("failed");
+    expect(String(r2.error)).toMatch(/^emotion_unavailable: health_cap_unreadable/);
+    const w = (await G.__pgsql`SELECT state, error FROM room_emotion_window WHERE window_id = 'bw_emo_nocap'`) as Array<{ state: string; error: string }>;
+    expect(w[0]!.state).toBe("failed");
+    expect(EMO.calls, "no audio is sent when the cap is unknown").toHaveLength(0);
+  }, 300_000);
+
+  it("A SEGMENT THE SERVICE REFUSES is a failed row with its reason; the rest of the window still lands", async () => {
+    reset();
+    EMO.refuseIndex = 1;
+    await seedEmotionWindow("bw_emo_ref", 24 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_ref", "bw_emo_ref");
+    expect(r.status).toBe("done");
+    const rows = (await G.__pgsql`SELECT state, reason, top_label FROM room_span_emotion WHERE window_id = 'bw_emo_ref' AND state <> 'skipped' ORDER BY segment_start_ms`) as Array<{ state: string; reason: string | null; top_label: string | null }>;
+    expect(rows.map((x) => x.state)).toEqual(["scored", "failed", "scored", "scored"]);
+    expect(rows[1]).toEqual({ state: "failed", reason: "segment_too_short_for_model", top_label: null });
+  }, 300_000);
+
+  it("SERVICE DOWN: the window is recorded failed, the diarize tables are untouched, and the enqueue retries it to the bound", async () => {
+    reset();
+    await seedEmotionWindow("bw_emo_down", 25 * WINDOW_MS);
+    const sql = G.__pgsql;
+    const tsBefore = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_emo_down'`) as Array<{ n: number }>;
+    EMO.callsDown = true;
+    const r = await runEmotionJob("job_emo_down", "bw_emo_down");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_unavailable/);
+    const w = (await sql`SELECT state, attempts FROM room_emotion_window WHERE window_id = 'bw_emo_down'`) as Array<{ state: string; attempts: number }>;
+    expect(w[0]).toEqual({ state: "failed", attempts: 1 });
+    const d = (await sql`SELECT state FROM room_diarize_window WHERE window_id = 'bw_emo_down'`) as Array<{ state: string }>;
+    expect(d[0]!.state, "an emotion failure never touches diarize").toBe("ok");
+    const tsAfter = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_emo_down'`) as Array<{ n: number }>;
+    expect(tsAfter[0]).toEqual(tsBefore[0]);
+
+    // THE BOUND, through the real enqueue: only this window eligible.
+    await sql`UPDATE room_diarize_window SET state = 'failed', error = 'test: out of scope' WHERE window_id <> 'bw_emo_down'`;
+    const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
+    const quiet = () => {};
+    for (let attempt = 2; attempt <= 3; attempt += 1) {
+      const e = await enqueueEmotionWindows({ actor: "cron:test", log: quiet });
+      expect(e.enqueued.map((x) => x.window_id), `attempt ${attempt}`).toEqual(["bw_emo_down"]);
+      const jobId = e.enqueued[0]!.job_id;
+      const { claimJobs } = await import("@/lib/jobs/store");
+      const { runOneStep } = await import("@/lib/jobs/runner");
+      for (let i = 0; i < 6; i += 1) {
+        const c = (await claimJobs(1, 240_000, `r_${attempt}_${i}`)).find((x) => x.id === jobId);
+        if (!c) break;
+        await runOneStep(c, `r_${attempt}_${i}`);
+      }
+    }
+    const w3 = (await sql`SELECT state, attempts, jsonb_array_length(failure_history) AS h FROM room_emotion_window WHERE window_id = 'bw_emo_down'`) as Array<{ state: string; attempts: number; h: number }>;
+    expect(w3[0]).toEqual({ state: "failed", attempts: 3, h: 2 });
+    const done = await enqueueEmotionWindows({ actor: "cron:test", log: quiet });
+    expect(done.enqueued, "no fourth attempt").toEqual([]);
+    expect(done.exhausted).toBe(1);
+    EMO.callsDown = false;
+  }, 300_000);
+
+  it("DIARIZE RE-RAN UNDERNEATH — SUCCESSFULLY: a real diarize job rewrites the turns mid-job; attempts do not move, the run id does, and the job stops", async () => {
+    reset();
+    await seedEmotionWindow("bw_emo_chg", 26 * WINDOW_MS);
+    const sql = G.__pgsql;
+    const before = (await sql`SELECT state, attempts, last_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_chg'`) as Array<{ state: string; attempts: number; last_run_id: string }>;
+    // Between the warm-up and the first batch, the REAL diarize_window job runs again on this window
+    // and succeeds — the case the old attempts-counter guard could not see.
+    let n = 0;
+    EMO.onCall = async () => {
+      n += 1;
+      if (n !== 1) return;
+      const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+      const { runOneStep } = await import("@/lib/jobs/runner");
+      SVC.fail = false;
+      await insertJob({ id: "job_emo_chg_diarize", kind: "diarize_window", args: { window_id: "bw_emo_chg" }, actor: "mcp:test" });
+      for (let i = 0; i < 5; i += 1) {
+        const c = (await claimJobs(3, 240_000, `r_chg_${i}`)).find((x) => x.id === "job_emo_chg_diarize");
+        if (!c) break;
+        await runOneStep(c, `r_chg_${i}`);
+      }
+    };
+    const r = await runEmotionJob("job_emo_chg", "bw_emo_chg");
+    const dj = (await sql`SELECT status, error FROM scribe_job WHERE id = 'job_emo_chg_diarize'`) as Array<{ status: string; error: string | null }>;
+    expect(dj[0]!.status, `the re-run must succeed; error=${dj[0]!.error}`).toBe("done");
+    const after = (await sql`SELECT state, attempts, last_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_chg'`) as Array<{ state: string; attempts: number; last_run_id: string }>;
+    expect(after[0]!.state).toBe("ok");
+    expect(after[0]!.attempts, "a successful re-run does not move the attempts counter — why the old guard was blind").toBe(before[0]!.attempts);
+    expect(after[0]!.last_run_id, "the run id moves on every run that writes turns").not.toBe(before[0]!.last_run_id);
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^diarize_changed/);
+    const scored = (await sql`SELECT count(*)::int AS n FROM room_span_emotion WHERE window_id = 'bw_emo_chg' AND state = 'scored'`) as Array<{ n: number }>;
+    expect(scored[0]!.n).toBe(0);
+    // And the enqueue sees it: emotion recorded against the old run, diarize is on a new one.
+    const e = (await sql`SELECT diarize_run_id FROM room_emotion_window WHERE window_id = 'bw_emo_chg'`) as Array<{ diarize_run_id: string }>;
+    expect(e[0]!.diarize_run_id).toBe(before[0]!.last_run_id);
+  }, 300_000);
+
+  it("P1 — AN UNHEALTHY /health FAILS THE WINDOW even when it carries a cap; an implausible cap fails it by name and sends no audio", async () => {
+    const sql = G.__pgsql;
+    const cases: Array<[string, () => void, RegExp]> = [
+      ["bw_emo_h500", () => { EMO.healthStatus = 500; EMO.healthOk = false; EMO.loaded = false; EMO.cap = 60; }, /^emotion_unavailable: health_http_500/],
+      ["bw_emo_hnotok", () => { EMO.healthOk = false; EMO.cap = 60; }, /^emotion_unavailable: health_not_ok/],
+      ["bw_emo_cap15", () => { EMO.cap = 1.5; }, /^emotion_unavailable: health_cap_out_of_range: 1\.5s/],
+      ["bw_emo_cap120", () => { EMO.cap = 120; }, /^emotion_unavailable: health_cap_out_of_range: 120s/],
+    ];
+    let k = 0;
+    for (const [id, setup, want] of cases) {
+      reset();
+      setup();
+      await seedEmotionWindow(id, (30 + k++) * WINDOW_MS);
+      const r = await runEmotionJob(`job_${id}`, id);
+      expect(r.status, id).toBe("failed");
+      expect(String(r.error), id).toMatch(want);
+      expect(EMO.calls, `${id}: no audio sent`).toHaveLength(0);
+      const w = (await sql`SELECT state FROM room_emotion_window WHERE window_id = ${id}`) as Array<{ state: string }>;
+      expect(w[0]?.state, id).toBe("failed");
+    }
+  }, 300_000);
+
+  it("P1 — THE CAP ACTUALLY USED: if the scoring call reports a different cap than the plan used, the window fails and nothing is scored under it", async () => {
+    reset();
+    EMO.cap = 30;
+    EMO.segmentsCap = 60;
+    await seedEmotionWindow("bw_emo_capchg", 40 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_capchg", "bw_emo_capchg");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_cap_changed: planned under 30s, service now reports 60s/);
+    const scored = (await G.__pgsql`SELECT count(*)::int AS n FROM room_span_emotion WHERE window_id = 'bw_emo_capchg' AND state = 'scored'`) as Array<{ n: number }>;
+    expect(scored[0]!.n).toBe(0);
+  }, 300_000);
+
+  it("P0 — NO SECRET, NO CALL: the job fails emotion_not_configured before touching the service; the enqueue refuses loudly", async () => {
+    reset();
+    delete process.env.EMOTION_SEGMENTS_SECRET;
+    await seedEmotionWindow("bw_emo_nosecret", 41 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_nosecret", "bw_emo_nosecret");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_not_configured/);
+    expect(EMO.calls).toHaveLength(0);
+    const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
+    await expect(enqueueEmotionWindows({ actor: "cron:test", log: () => {} })).rejects.toThrow(/EMOTION_SEGMENTS_SECRET is not set/);
+    process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
+  }, 300_000);
+
+  it("LOADED IS REPORTED, NOT ASSUMED: a /health that does not say records 'unknown'", async () => {
+    reset();
+    EMO.loaded = undefined;
+    await seedEmotionWindow("bw_emo_unk", 27 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_unk", "bw_emo_unk");
+    expect(r.status, `error=${r.error}`).toBe("done");
+    const w = (await G.__pgsql`SELECT warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo_unk'`) as Array<{ warmup_json: { loaded_before: unknown } }>;
+    expect(w[0]!.warmup_json.loaded_before).toBe("unknown");
+  }, 300_000);
+
+  it("THE ROUTE: bare cron header is 401; flag off is a clean no-op; an unrecognised flag is a non-2xx", async () => {
+    process.env.CRON_SECRET = "test-cron-secret";
+    const { GET } = await import("@/app/api/admin/emotion-windows/route");
+    const { NextRequest } = await import("next/server");
+    const call = (headers: Record<string, string>) => GET(new NextRequest("https://x.test/api/admin/emotion-windows", { headers }));
+    expect((await call({ "x-vercel-cron": "1" })).status).toBe(401);
+    delete process.env.EMOTION_ENABLED;
+    const off = await call({ authorization: "Bearer test-cron-secret" });
+    expect(off.status).toBe(200);
+    expect(await off.json()).toMatchObject({ enabled: false, jobs: [] });
+    process.env.EMOTION_ENABLED = "sure";
+    const bad = await call({ authorization: "Bearer test-cron-secret" });
+    expect(bad.status).toBe(500);
+    delete process.env.EMOTION_ENABLED;
+  }, 120_000);
 });
 

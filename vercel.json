@@ -22,6 +22,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/admin/emotion-windows",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/jobs/run",
       "schedule": "* * * * *"
     }
