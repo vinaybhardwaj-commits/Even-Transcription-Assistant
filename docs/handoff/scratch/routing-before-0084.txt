@@ -1,0 +1,8 @@
+BEFORE stt_routing:
+   live english -> deepgram | 2026-05-31 08:35:32.579397+00
+   live indic -> sarvam | 2026-05-31 08:35:32.579397+00
+   note english -> whisper | 2026-05-31 09:18:59.070983+00
+   note indic -> sarvam | 2026-05-31 08:35:32.579397+00
+   room english -> sarvam | 2026-08-23 02:23:40.275891+00
+   room indic -> sarvam | 2026-08-23 02:23:40.275891+00
+route has stt_engine row: False | enabled: None
