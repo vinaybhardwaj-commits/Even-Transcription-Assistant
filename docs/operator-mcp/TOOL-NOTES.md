@@ -4,12 +4,13 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 35 listed tools, 51 names that answer (Slice E, 13 Sep)
+## The surface: 27 listed tools, 52 names that answer (Slice E, 13 Sep)
 
-`tools/list` publishes **35** tools. `tools/call` accepts those 35 **and every one of the 51 names**
-the door published at `6b2347e` — for as long as the door exists. A regroup, not a rename.
+`tools/list` publishes **27** tools. `tools/call` accepts those 27 **and every one of the 52 names**
+the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
+(`0f27b8c`) — for as long as the door exists. A regroup, not a rename.
 
-**What a group is.** Eight of the 35 are groups. A group picks ONE of the original tools by an
+**What a group is.** Ten of the 27 are groups. A group picks ONE of the original tools by an
 argument and runs **that tool's own handler** with the caller's context, so behaviour, refusals,
 scope checks and response shape are the original tool's — there is no second implementation.
 
@@ -17,11 +18,12 @@ scope checks and response shape are the original tool's — there is no second i
 one or two sentences of framing. Every value, the tool it runs and (for `scribe_room_command`) where
 it executes are generated from the same variant table that routes the call, so a variant added or
 renamed cannot leave the description behind; `lib/mcp/surface.ts` refuses at load to build a group
-over the cap. The members' own long descriptions are **not** copied in — a fresh client does not see
+over the cap, and routes every variant's probe at load so the list cannot claim a routing the code
+does not do. The members' own long descriptions are **not** copied in — a fresh client does not see
 them for grouped tools. They stay in `lib/mcp/tools/*`, each argument's own description still rides
-in the schema, and a client with the old cached list still shows them. An argument whose description
-starts with `[view=…]` (or `[kind=…]`, etc.) applies only to the variants named there. An unknown
-or missing selector answers `{ ok:false, error:"unknown_<key>", allowed }` and runs nothing.
+in the schema, and a client with an old cached list still shows them. An argument whose description
+starts with `[view=…]` (or `[kind=…]`, `[no id]`, etc.) applies only to the variants named there. An
+unknown or missing selector answers `{ ok:false, error:"unknown_<key>", allowed }` and runs nothing.
 
 **One scope per group.** The door checks a token's scopes against the tool it was called by name.
 `lib/mcp/surface.ts` refuses at load to build a group whose members differ in scope, so a group can
@@ -31,23 +33,23 @@ review; the code does not check it.
 
 | Listed tool | Scope | Selector → the published tool that runs |
 |---|---|---|
-| `scribe_health` | read | `aspect`: `all` (default) → `scribe_health`; `llm` → `scribe_llm_health`; `kb` → `scribe_kb_probe` |
-| `scribe_system` | read | `view`: `map` → `scribe_system_map`; `stores` → `scribe_store_stats` |
-| `scribe_rooms` | read | `view`: `list` → `scribe_list_rooms`; `now` → `scribe_diff_room`; `fleet` → `scribe_fleet`; `day_report` → `scribe_day_report` |
+| `scribe_health` | read | `aspect`: `all` (default) → `scribe_health`; `stt` → `scribe_stt_health`; `voice` → `scribe_voice_health`; `llm` → `scribe_llm_health`; `kb` → `scribe_kb_probe` |
+| `scribe_system` | read | `view`: `map` → `scribe_system_map`; `stores` → `scribe_store_stats`; `stt_engines` → `scribe_list_stt_engines`; `stt_routing` → `scribe_stt_routing`; `stt_tripwires` → `scribe_route_tripwires` |
+| `scribe_rooms` | read | `view`: `list` → `scribe_list_rooms`; `now` → `scribe_diff_room`; `fleet` → `scribe_fleet`; `day_report` → `scribe_day_report`; `clusters` → `scribe_get_clusters` |
 | `scribe_sessions` | read | `view`: `list` → `scribe_list_sessions`; `replay` → `scribe_replay_session` |
 | `scribe_session_tape` | read | `view`: `session` → `scribe_get_session`; `manifest` / `timeline` / `chunk` / `zip` → `scribe_get_recording` with that `mode` |
 | `scribe_encounter` | read | exactly one id: `encounter_id` → `scribe_get_encounter`; `trace_id` → `scribe_get_trace`; both or neither → `one_id_required` |
+| `scribe_stt_runs` | read | `subject_id` or `encounter_id` given → `scribe_get_stt_run`; neither → `scribe_list_stt_runs` |
+| `scribe_voice` | read | `view`: `prints` → `scribe_list_voiceprints`; `samples` → `scribe_list_voice_samples`; `window_speakers` → `scribe_window_speakers` |
 | `scribe_room_command` | write | `kind`: `start_day` → `scribe_start_recording`; `pause_day` → `scribe_pause_recording`; `resume_day` → `scribe_resume_recording`; `end_day` → `scribe_stop_recording`; `close_orphaned_session` → `scribe_close_orphaned_session`; `set_audio_input` → `scribe_set_audio_input`; `check_update_now` / `report_diag` / `restart_engine` → `scribe_room_command` |
 | `scribe_scratch` | write | `action`: `replay` → `scribe_replay_write`; `fuse` → `scribe_fuse_run` |
 
-The other 27 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
+The other 17 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
 `scribe_pin_visit`, `scribe_mark_consult`, `scribe_extract_audio`, `scribe_transcribe_range`,
 `scribe_list_encounters`, `scribe_list_traces`, `scribe_set_visit_clinician`, `scribe_fuse_report`,
-`scribe_list_commands`; the `jobs.ts` tools `scribe_job_submit`, `scribe_job_status`, `scribe_job_list`,
-`scribe_job_cancel`, `scribe_audit_recent` (by ruling, 13 Sep: no group absorbs a `jobs.ts` tool); and —
-held back from grouping until Slice C2 merges, because C2 owns their files — `scribe_list_stt_engines`,
-`scribe_stt_health`, `scribe_stt_routing`, `scribe_list_stt_runs`, `scribe_get_stt_run`, `scribe_route_tripwires`,
-`scribe_voice_health`, `scribe_list_voiceprints`, `scribe_list_voice_samples`, `scribe_get_clusters`.
+`scribe_list_commands`, and the `jobs.ts` tools `scribe_job_submit`, `scribe_job_status`,
+`scribe_job_list`, `scribe_job_cancel`, `scribe_audit_recent` — by ruling, 13 Sep, no group absorbs a
+`jobs.ts` tool. That ruling is why the surface is 27 and not the 25 first proposed.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app
@@ -66,18 +68,26 @@ that follows names every value and the tool it runs.
 `metadata_json.variant` = the published tool that ran. A call by an old name writes exactly the row
 it wrote before.
 
-**Proof the old names hold.** `fixtures/mcp/live-tools-list-6b2347e.json` is `tools/list` captured
-from the live door with curl. `tests/unit/mcp-surface-aliases.test.ts` enumerates THAT file — never
-the registry, which would shrink with the code. For every one of the 51 names it checks behaviour,
-not wording:
+**Proof the old names hold.** Two `tools/list` answers captured from the live door with curl:
+`fixtures/mcp/live-tools-list-6b2347e.json` (51 names — the floor, never edited) and
+`fixtures/mcp/live-tools-list-0f27b8c.json` (52 names, after C2). `tests/unit/mcp-surface-aliases.test.ts`
+enumerates THOSE files — never the registry, which would shrink with the code — requires the later
+capture to contain every name of the floor, and for every name checks behaviour, not wording:
 
 - it resolves, with the same scope, to the very object its tool file exports (the two reused names
   resolve to their group);
-- a call through the door carrying every argument the old schema declared runs that object's own
-  handler with exactly those arguments, and the caller gets back exactly what the handler returned;
+- a call through the door carrying every argument the schema declared runs that object's own handler
+  with exactly those arguments, and the caller gets back exactly what the handler returned;
 - a token without the tool's scope gets `-32001` and nothing runs;
-- no argument the old schema declared is removed, retyped, narrowed to fewer enum values, or newly
-  required.
+- against **each** capture that published it, no declared argument is removed, retyped, narrowed to
+  fewer enum values, or newly required — unless the change is listed in the test's
+  `ACCEPTED_CONTRACT_CHANGES`, which names the decision and is itself tested to still be real.
+
+**One accepted contract change.** `scribe_job_submit.kind` and `scribe_job_list.kind` no longer
+offer `diarize_clip` (Slice C2 decision D3: it is gone, not renamed; `diarize_window` implements it
+for real). At `6b2347e` it was a stub that accepted a job and then failed `not_implemented`; a caller
+now gets `unknown_kind` at submit. Ruled acceptable on 13 Sep — fail at the boundary, never accept
+what cannot be honoured — and the stub is not to be restored.
 
 **Descriptions are not frozen** — they are meant to change as tools change. A recaptured fixture may
 add names; it must never drop one of the 51.
@@ -168,6 +178,6 @@ door (production, cache-busted, path-key, branch alias) — nothing was cached o
 all. Tool *calls* were proxied live and returned the new fields, while the *descriptions* were
 months stale. Fresh results with stale descriptions is the signature: reconnect the integration.
 
-**After Slice E a stale client still works.** It lists the 51 old tools, and every one of those
-names still answers. What it cannot see is the 8 group names until it reconnects. Verify the surface
+**After Slice E a stale client still works.** It lists the old tools (51, or 52 if cached after C2), and every one
+of those names still answers. What it cannot see is the new group names until it reconnects. Verify the surface
 with curl against the door, never by asking a connector what it lists.

@@ -2,11 +2,12 @@
  * lib/mcp/surface.ts — what tools/list publishes, and every name tools/call accepts (Slice E).
  *
  * ─── A REGROUP, NOT A RENAME ─────────────────────────────────────────────────────────────────
- * The door published 51 tools at 6b2347e. Clients cache that list (the Claude.ai connector and
- * Claude Code's MCP client both do), so a name that disappears looks broken to a cached caller
- * for as long as the cache lives. So no tool object below is edited, wrapped or re-implemented:
+ * The door published 51 tools at 6b2347e and 52 at 0f27b8c (C2 added scribe_window_speakers).
+ * Clients cache that list (the Claude.ai connector and Claude Code's MCP client both do), so a name
+ * that disappears looks broken to a cached caller for as long as the cache lives. So no tool object
+ * below is edited, wrapped or re-implemented:
  *
- *   - PUBLISHED_TOOLS is the 51, exactly the objects the tool files export.
+ *   - PUBLISHED_TOOLS is every published tool, exactly the objects the tool files export.
  *   - A GROUP is a new primary whose handler picks ONE of those objects by an argument (`view`,
  *     `aspect`, `source`, `action`, `kind`, or which id was passed) and calls that object's own
  *     handler with the caller's context. Behaviour, refusals and response shape are therefore the
@@ -24,10 +25,8 @@
  * identity or audio, argument count) was ruled per group in the Slice E proposal; it is not
  * something this file can check.
  *
- * lib/mcp/tools/stt.ts, voice.ts and jobs.ts tools are NOT grouped in this commit: another slice owns
- * those files until it merges. Their tools are listed exactly as before. scribe_list_commands is
- * listed on its own too: the group it was in (with jobs.ts's scribe_job_list and scribe_audit_recent)
- * was taken apart by ruling on 13 Sep.
+ * No group absorbs a jobs.ts tool (ruling, 13 Sep), so the job tools, scribe_audit_recent and
+ * scribe_list_commands are listed on their own.
  */
 
 import type { McpTool, ToolArgs } from "./registry";
@@ -71,6 +70,12 @@ export type GroupVariant = {
   note?: string;
   /** Where this variant's work happens. Variants sharing one string are listed together. */
   executes?: string;
+  /**
+   * Arguments that pick this variant. Required on a group routed by `route` (a selector group uses
+   * `{ [key]: value }`). buildGroup routes every probe at load and throws if one lands elsewhere, so
+   * the value list in the description cannot claim a routing the code does not do.
+   */
+  probe?: ToolArgs;
 };
 
 export type GroupRefusal = { ok: false; error: string; allowed?: string[]; detail?: string };
@@ -135,6 +140,16 @@ export function buildGroup(spec: GroupSpec): McpTool {
       return hit ?? { ok: false, error: `unknown_${sel!.key}`, allowed: values };
     });
 
+  const probes = variants.map((x) => {
+    const probe = sel ? { [sel.key]: x.value } : x.probe;
+    if (!probe) throw new Error(`surface: group ${name}'s variant ${x.value} needs a probe`);
+    const landed = route(probe);
+    if (!isVariant(landed) || landed.tool !== x.tool || landed.value !== x.value) {
+      throw new Error(`surface: group ${name}'s probe for ${x.value} does not route to ${x.tool.name}`);
+    }
+    return { value: x.value, probe, member: x.tool.name };
+  });
+
   const description = describeGroup(spec);
   const words = wordCount(description);
   if (words > GROUP_DESCRIPTION_MAX_WORDS) {
@@ -158,14 +173,21 @@ export function buildGroup(spec: GroupSpec): McpTool {
     },
   };
   MEMBERS.set(group, [...new Set(variants.map((x) => x.tool.name))]);
+  PROBES.set(group, probes);
   return group;
 }
 
 const MEMBERS = new WeakMap<McpTool, string[]>();
+const PROBES = new WeakMap<McpTool, Array<{ value: string; probe: ToolArgs; member: string }>>();
 
 /** The published tool names a group built by buildGroup can run. Empty for anything else. */
 export function groupMembers(group: McpTool): readonly string[] {
   return MEMBERS.get(group) ?? [];
+}
+
+/** Every variant of a group: its value, arguments that pick it, and the tool that then runs. */
+export function groupProbes(group: McpTool): ReadonlyArray<{ value: string; probe: ToolArgs; member: string }> {
+  return PROBES.get(group) ?? [];
 }
 
 /** Tier 2 §2.4's ceiling for a description, applied to groups and enforced at module load. */
@@ -312,28 +334,34 @@ export const GROUPS: readonly McpTool[] = [
     selector: { key: "aspect", default: "all" },
     variants: [
       v("all", "scribe_health"),
+      v("stt", "scribe_stt_health"),
+      v("voice", "scribe_voice_health"),
       v("llm", "scribe_llm_health"),
       v("kb", "scribe_kb_probe"),
     ],
   }),
   buildGroup({
     name: "scribe_system",
-    lead: "System facts, read-only: the system map and the store counts.",
+    lead: "System facts, read-only: the system map, the store counts, and the STT engine registry, routing matrix and room-engine tripwires.",
     selector: { key: "view" },
     variants: [
       v("map", "scribe_system_map"),
       v("stores", "scribe_store_stats"),
+      v("stt_engines", "scribe_list_stt_engines"),
+      v("stt_routing", "scribe_stt_routing"),
+      v("stt_tripwires", "scribe_route_tripwires"),
     ],
   }),
   buildGroup({
     name: "scribe_rooms",
-    lead: "Rooms, read-only: the room list, the now-picture, the recorder fleet, and one room's day report.",
+    lead: "Rooms, read-only: the room list, the now-picture, the recorder fleet, one room's day report, and one room-day's speaker clusters.",
     selector: { key: "view" },
     variants: [
       v("list", "scribe_list_rooms"),
       v("now", "scribe_diff_room"),
       v("fleet", "scribe_fleet"),
       v("day_report", "scribe_day_report"),
+      v("clusters", "scribe_get_clusters"),
     ],
   }),
   buildGroup({
@@ -366,8 +394,8 @@ export const GROUPS: readonly McpTool[] = [
     lead:
       "One doctor-PWA encounter or one LLM trace, read-only. Pass exactly one of the two ids; both or neither is refused with one_id_required and nothing runs.",
     variants: [
-      v("encounter_id", "scribe_get_encounter"),
-      v("trace_id", "scribe_get_trace"),
+      v("encounter_id", "scribe_get_encounter", { probe: { encounter_id: "enc_probe" } }),
+      v("trace_id", "scribe_get_trace", { probe: { trace_id: "trace_probe" } }),
     ],
     route: (args) => {
       const hasEnc = args.encounter_id !== undefined && args.encounter_id !== null && args.encounter_id !== "";
@@ -377,6 +405,32 @@ export const GROUPS: readonly McpTool[] = [
       }
       return hasEnc ? v("encounter_id", "scribe_get_encounter") : v("trace_id", "scribe_get_trace");
     },
+  }),
+  buildGroup({
+    name: "scribe_stt_runs",
+    lead:
+      "Batch ASR runs, read-only, and both tools can quote identity. Pass subject_id or encounter_id for one subject's runs; pass neither for the list of subjects.",
+    variants: [
+      v("no id", "scribe_list_stt_runs", { probe: {} }),
+      v("subject_id or encounter_id", "scribe_get_stt_run", { probe: { subject_id: "subject_probe" } }),
+    ],
+    route: (args) => {
+      const given = (k: string) => args[k] !== undefined && args[k] !== null && args[k] !== "";
+      return given("subject_id") || given("encounter_id")
+        ? v("subject_id or encounter_id", "scribe_get_stt_run")
+        : v("no id", "scribe_list_stt_runs");
+    },
+  }),
+  buildGroup({
+    name: "scribe_voice",
+    lead:
+      "Clinician voice, read-only, and every view can quote: prints returns clinician names, samples returns presigned audio links with include_urls, window_speakers returns the clinician a voice matched.",
+    selector: { key: "view" },
+    variants: [
+      v("prints", "scribe_list_voiceprints"),
+      v("samples", "scribe_list_voice_samples"),
+      v("window_speakers", "scribe_window_speakers"),
+    ],
   }),
   buildGroup({
     name: "scribe_room_command",

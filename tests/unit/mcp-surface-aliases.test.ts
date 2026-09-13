@@ -2,22 +2,25 @@
  * Slice E — the regrouped MCP surface keeps every name the door ever published.
  *
  * ─── WHAT THIS PROVES, AND WHAT IT DELIBERATELY DOES NOT ─────────────────────────────────────
- * Every one of the 51 names must RESOLVE and BEHAVE IDENTICALLY: the same handler runs, it receives
- * the same arguments, the caller gets back exactly what that handler returned, and the same scope
- * gates it. Descriptions are NOT frozen — they are supposed to change as tools change (Ruling A, 13
- * Sep): an earlier version compared them byte for byte and would have failed the moment Slice C2
- * edited one. What is frozen is the ARGUMENT CONTRACT: no argument a caller could pass may disappear,
- * change type, lose an enum value, or become required.
+ * Every published name must RESOLVE and BEHAVE IDENTICALLY: the same handler runs, it receives the
+ * same arguments, the caller gets back exactly what that handler returned, and the same scope gates
+ * it. Descriptions are NOT frozen — they are supposed to change as tools change (Ruling A, 13 Sep).
+ * What is frozen is the ARGUMENT CONTRACT: no argument a caller could pass may disappear, change type,
+ * lose an enum value, or become required — except a change listed, named and justified in
+ * ACCEPTED_CONTRACT_CHANGES below.
  *
  * ─── WHERE THE NAMES COME FROM ───────────────────────────────────────────────────────────────
- * fixtures/mcp/live-tools-list-6b2347e.json is the raw JSON-RPC answer to `tools/list` from the
- * LIVE door (www.evenscribe.app/api/mcp, banner version 6b2347e), captured with curl on 13 Sep
- * 2026. Never the registry — a test that enumerated the registry would shrink silently with the
- * code — and never origin/main, which carried 42 names while production served 51. A recaptured
- * fixture may add names; it must never drop one of these 51.
+ * Raw JSON-RPC answers to `tools/list` from the LIVE door (www.evenscribe.app/api/mcp), captured with
+ * curl on 13 Sep 2026. Never the registry — a test that enumerated the registry would shrink silently
+ * with the code — and never origin/main, which carried 42 names while production served 51.
  *
- * fixtures/mcp/tool-scopes-6b2347e.json is each name's scope as the code at 6b2347e declared it.
- * tools/list exposes only readOnlyHint (read vs not); the first test pins the file to it.
+ *   fixtures/mcp/live-tools-list-6b2347e.json — THE FLOOR: the 51 names before Slice E. Never edited.
+ *   fixtures/mcp/live-tools-list-0f27b8c.json — CURRENT: 52 names after Slice C2 merged
+ *                                               (it added scribe_window_speakers).
+ *
+ * Every name in either capture is enumerated. A later capture may add names; it must contain every
+ * name of the floor. The tool-scopes-*.json files are each name's scope as that commit's code
+ * declared it; tools/list exposes only readOnlyHint, and the first tests pin each file to it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
@@ -59,15 +62,45 @@ const ALL_SCOPES: Scope[] = ["read", "invoke", "write"];
 type Frag = Row & { type?: string | string[]; enum?: unknown[]; anyOf?: Frag[] };
 type LiveTool = { name: string; inputSchema: Row & { properties?: Record<string, Frag>; required?: string[] }; annotations: { readOnlyHint: boolean } };
 
-const LIVE = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-6b2347e.json", "utf8")) as { result: { tools: LiveTool[] } };
-const LIVE_TOOLS = LIVE.result.tools;
-const SCOPES = JSON.parse(readFileSync("fixtures/mcp/tool-scopes-6b2347e.json", "utf8")) as Record<string, Scope>;
+const capture = (sha: string) => ({
+  sha,
+  tools: (JSON.parse(readFileSync(`fixtures/mcp/live-tools-list-${sha}.json`, "utf8")) as { result: { tools: LiveTool[] } }).result.tools,
+  scopes: JSON.parse(readFileSync(`fixtures/mcp/tool-scopes-${sha}.json`, "utf8")) as Record<string, Scope>,
+});
+const FLOOR = capture("6b2347e");
+const CURRENT = capture("0f27b8c");
+const CAPTURES = [FLOOR, CURRENT];
+
+/** Every name either capture published, each with the most recent schema and scope for it. */
+const LIVE_TOOLS: LiveTool[] = [...new Map([...FLOOR.tools, ...CURRENT.tools].map((t) => [t.name, t])).values()];
+const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes };
+
+/**
+ * Argument-contract changes that were RULED, not drifted into. Each names the tool, the argument, the
+ * enum values removed, the capture they were last published in, and the decision. A test below proves
+ * each entry is still real (published in the older capture, absent from the newer), so a stale entry
+ * cannot quietly excuse some later narrowing.
+ */
+const ACCEPTED_CONTRACT_CHANGES: ReadonlyArray<{ tool: string; argument: string; removedEnumValues: string[]; lastPublishedIn: string; decision: string }> = [
+  ...["scribe_job_submit", "scribe_job_list"].map((tool) => ({
+    tool,
+    argument: "kind",
+    removedEnumValues: ["diarize_clip"],
+    lastPublishedIn: "6b2347e",
+    decision:
+      "Slice C2 decision D3: diarize_clip is gone, not renamed — diarize_window implements it for real. At 6b2347e it was a stub " +
+      "that accepted the job and then failed not_implemented; refusing at submit with unknown_kind is the better contract. " +
+      "Accepted by ruling (a), 13 Sep; the stub is not to be restored.",
+  })),
+];
+const acceptedRemovals = (tool: string, argument: string, sha: string) =>
+  new Set(ACCEPTED_CONTRACT_CHANGES.filter((c) => c.tool === tool && c.argument === argument && c.lastPublishedIn === sha).flatMap((c) => c.removedEnumValues));
 
 /** The two published names a group now answers. Old-shaped calls must still reach the old handler. */
 const REUSED_NAMES = ["scribe_health", "scribe_room_command"] as const;
 
-/** Primary tools after Slice E commit 1. Commit 2 (stt.ts + voice.ts + window_speakers) brings it to 27 as ruled on 13 Sep. */
-const COMMIT_1_PRIMARY_COUNT = 35;
+/** Primary tools once stt.ts, voice.ts and scribe_window_speakers are folded in: 27, as ruled on 13 Sep. */
+const PRIMARY_COUNT = 27;
 
 const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(ALL_SCOPES) };
 
@@ -83,7 +116,7 @@ const rpc = async (body: unknown, scopes: Scope[]) => {
 const call = (name: string, args: Row, scopes: Scope[]) =>
   rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, scopes);
 
-/** One value for every argument the live schema declared — the call an old client could make. */
+/** One value for every argument the schema declared — the call a client holding that list could make. */
 function oldShapedArgs(live: LiveTool): Row {
   const sample = (f: Frag): unknown => {
     if (Array.isArray(f.enum) && f.enum.length) return f.enum[0];
@@ -112,16 +145,40 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("the committed fixture", () => {
-  it("is the 51-tool live capture, and the scope list agrees with its readOnlyHint", () => {
-    expect(LIVE_TOOLS).toHaveLength(51);
-    expect(new Set(LIVE_TOOLS.map((t) => t.name)).size).toBe(51);
-    expect(Object.keys(SCOPES).sort()).toEqual(LIVE_TOOLS.map((t) => t.name).sort());
-    for (const t of LIVE_TOOLS) expect(SCOPES[t.name] === "read", t.name).toBe(t.annotations.readOnlyHint);
+describe("the committed fixtures", () => {
+  it.each(CAPTURES.map((c) => [c.sha, c] as const))("%s — names unique, and its scope list agrees with its readOnlyHint", (_sha, c) => {
+    expect(new Set(c.tools.map((t) => t.name)).size).toBe(c.tools.length);
+    expect(Object.keys(c.scopes).sort()).toEqual(c.tools.map((t) => t.name).sort());
+    for (const t of c.tools) expect(c.scopes[t.name] === "read", t.name).toBe(t.annotations.readOnlyHint);
   });
+
+  it("the floor is the 51 names, and the current capture keeps every one of them with the same scope", () => {
+    expect(FLOOR.tools).toHaveLength(51);
+    expect(CURRENT.tools).toHaveLength(52);
+    const current = new Set(CURRENT.tools.map((t) => t.name));
+    for (const t of FLOOR.tools) {
+      expect(current.has(t.name), `${t.name} is missing from the 0f27b8c capture`).toBe(true);
+      expect(CURRENT.scopes[t.name], t.name).toBe(FLOOR.scopes[t.name]);
+    }
+    expect(LIVE_TOOLS).toHaveLength(52);
+  });
+
+  it.each(ACCEPTED_CONTRACT_CHANGES.map((c) => [`${c.tool}.${c.argument} −${c.removedEnumValues.join(",")}`, c] as const))(
+    "accepted change %s is real: published at its capture, gone from the next, and cites its decision",
+    (_label, c) => {
+      const older = CAPTURES.find((x) => x.sha === c.lastPublishedIn)!;
+      const newer = CAPTURES[CAPTURES.indexOf(older) + 1]!;
+      const enumIn = (cap: typeof FLOOR) => (cap.tools.find((t) => t.name === c.tool)!.inputSchema.properties![c.argument]!.enum ?? []) as unknown[];
+      for (const value of c.removedEnumValues) {
+        expect(enumIn(older), `${value} was never published`).toContain(value);
+        expect(enumIn(newer), `${value} is still published — this exception excuses nothing`).not.toContain(value);
+      }
+      expect(c.decision).toMatch(/decision D3/);
+    },
+  );
 });
 
-describe("every one of the 51 live names resolves and behaves identically", () => {
+describe("every published name resolves and behaves identically", () => {
   const CASES = LIVE_TOOLS.map((t) => [t.name, t] as const);
 
   it.each(CASES)("%s — resolves, same scope, same handler", (name) => {
@@ -136,14 +193,19 @@ describe("every one of the 51 live names resolves and behaves identically", () =
     }
   });
 
-  it.each(CASES)("%s — the argument contract: nothing removed, retyped, narrowed or newly required", (name, live) => {
+  // Checked against EVERY capture that published the name, so the floor's contract is kept, not just the latest.
+  const CONTRACT_CASES = CAPTURES.flatMap((c) => c.tools.map((t) => [`${t.name} @${c.sha}`, t, c.sha] as const));
+
+  it.each(CONTRACT_CASES)("%s — the argument contract: nothing removed, retyped, narrowed or newly required", (_label, live, sha) => {
+    const name = live.name;
     const props = (S.CALLABLE_TOOLS.get(name)!.inputSchema.properties ?? {}) as Record<string, Frag>;
     for (const [key, was] of Object.entries(live.inputSchema.properties ?? {})) {
       const now = props[key];
       expect(now, `${name}.${key} was removed`).toBeDefined();
+      const excused = acceptedRemovals(name, key, sha);
+      const kept = Array.isArray(was.enum) ? was.enum.filter((e) => !excused.has(e as string)) : undefined;
       const ok = branches(now!).some((b) =>
-        coversType(b.type, was.type) &&
-        (!Array.isArray(was.enum) || (Array.isArray(b.enum) && was.enum.every((e) => b.enum!.includes(e)))),
+        coversType(b.type, was.type) && (!kept || (Array.isArray(b.enum) && kept.every((e) => b.enum!.includes(e)))),
       );
       expect(ok, `${name}.${key} changed type or lost an enum value`).toBe(true);
     }
@@ -151,7 +213,7 @@ describe("every one of the 51 live names resolves and behaves identically", () =
     for (const r of required) expect(live.inputSchema.required ?? [], `${name} now requires ${r}`).toContain(r);
   });
 
-  it.each(CASES)("%s — an old-shaped call through the door runs the original handler with the same arguments and returns its answer", async (name, live) => {
+  it.each(CASES)("%s — a call through the door with every published argument runs the original handler with those arguments and returns its answer", async (name, live) => {
     const spy = vi.spyOn(original(name), "handler").mockResolvedValue({ sentinel: name, nested: { kept: [1, 2] } });
     const args = oldShapedArgs(live);
     const { status, body } = await call(name, args, ALL_SCOPES);
@@ -176,18 +238,18 @@ describe("every one of the 51 live names resolves and behaves identically", () =
 });
 
 describe("tools/list — the primary surface", () => {
-  it(`publishes ${COMMIT_1_PRIMARY_COUNT} tools, no duplicates, and no name a group has taken`, async () => {
+  it(`publishes ${PRIMARY_COUNT} tools, no duplicates, and no name a group has taken`, async () => {
     const { status, body } = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, ["read"]);
     expect(status).toBe(200);
     const names = ((body.result as Row).tools as Array<{ name: string }>).map((t) => t.name);
-    expect(names).toHaveLength(COMMIT_1_PRIMARY_COUNT);
+    expect(names).toHaveLength(PRIMARY_COUNT);
     expect(new Set(names).size).toBe(names.length);
     const taken = new Set(S.GROUPS.flatMap((g) => S.groupMembers(g)));
     for (const g of S.GROUPS) taken.delete(g.name);
     for (const n of names) expect(taken.has(n), `${n} is grouped but still listed`).toBe(false);
   });
 
-  it("every live name is listed as itself or run by exactly one group", () => {
+  it("every published name is listed as itself or run by exactly one group", () => {
     const listed = new Set(S.LISTED_TOOLS.map((t) => t.name));
     for (const t of LIVE_TOOLS) {
       const groups = S.GROUPS.filter((g) => S.groupMembers(g).includes(t.name));
@@ -196,11 +258,14 @@ describe("tools/list — the primary surface", () => {
     }
   });
 
-  it("stt.ts, voice.ts and jobs.ts tools are ungrouped this commit, and so is scribe_list_commands: listed as the original objects", () => {
-    for (const n of ["scribe_list_commands", "scribe_job_list", "scribe_audit_recent", "scribe_job_status", "scribe_job_submit", "scribe_job_cancel",
-      "scribe_list_stt_engines", "scribe_stt_health", "scribe_stt_routing", "scribe_list_stt_runs", "scribe_get_stt_run",
-      "scribe_route_tripwires", "scribe_voice_health", "scribe_list_voiceprints", "scribe_list_voice_samples", "scribe_get_clusters"]) {
-      expect(S.LISTED_TOOLS).toContain(S.PUBLISHED_TOOLS.find((t) => t.name === n));
+  it("no group runs a jobs.ts tool (ruling, 13 Sep): the job tools, audit_recent and list_commands are listed as the original objects", () => {
+    const jobsFile = readFileSync("lib/mcp/tools/jobs.ts", "utf8");
+    for (const n of ["scribe_job_submit", "scribe_job_status", "scribe_job_list", "scribe_job_cancel", "scribe_audit_recent"]) {
+      expect(jobsFile, `${n} is not in jobs.ts`).toContain(`name: "${n}"`);
+    }
+    for (const n of ["scribe_list_commands", "scribe_job_list", "scribe_audit_recent", "scribe_job_status", "scribe_job_submit", "scribe_job_cancel"]) {
+      expect(S.LISTED_TOOLS).toContain(original(n));
+      for (const g of S.GROUPS) expect(S.groupMembers(g), `${g.name} runs ${n}`).not.toContain(n);
     }
   });
 });
@@ -209,14 +274,20 @@ describe("every group variant runs its original handler", () => {
   /** [group, arguments to the group, the published tool expected to run, the arguments it must receive]. */
   const CASES: Array<[string, Row, string, Row]> = [
     ["scribe_health", { aspect: "all" }, "scribe_health", {}],
+    ["scribe_health", { aspect: "stt" }, "scribe_stt_health", {}],
+    ["scribe_health", { aspect: "voice" }, "scribe_voice_health", {}],
     ["scribe_health", { aspect: "llm" }, "scribe_llm_health", {}],
     ["scribe_health", { aspect: "kb", q: "anemia", topK: 3, include_text: true }, "scribe_kb_probe", { q: "anemia", topK: 3, include_text: true }],
     ["scribe_system", { view: "map", detail: "full" }, "scribe_system_map", { detail: "full" }],
     ["scribe_system", { view: "stores" }, "scribe_store_stats", {}],
+    ["scribe_system", { view: "stt_engines" }, "scribe_list_stt_engines", {}],
+    ["scribe_system", { view: "stt_routing" }, "scribe_stt_routing", {}],
+    ["scribe_system", { view: "stt_tripwires", days: 7, engine: "route" }, "scribe_route_tripwires", { days: 7, engine: "route" }],
     ["scribe_rooms", { view: "list", include_scratch: true }, "scribe_list_rooms", { include_scratch: true }],
     ["scribe_rooms", { view: "now", room: "r1" }, "scribe_diff_room", { room: "r1" }],
     ["scribe_rooms", { view: "fleet", detail: "full" }, "scribe_fleet", { detail: "full" }],
     ["scribe_rooms", { view: "day_report", room: "r1", ist_date: "2026-09-12" }, "scribe_day_report", { room: "r1", ist_date: "2026-09-12" }],
+    ["scribe_rooms", { view: "clusters", room_slug: "opd-1", ist_date: "2026-09-12" }, "scribe_get_clusters", { room_slug: "opd-1", ist_date: "2026-09-12" }],
     ["scribe_sessions", { view: "list", status: "ended", limit: 5 }, "scribe_list_sessions", { status: "ended", limit: 5 }],
     ["scribe_sessions", { view: "replay", session_id: "bs_1" }, "scribe_replay_session", { session_id: "bs_1" }],
     ["scribe_session_tape", { view: "session", session_id: "bs_1" }, "scribe_get_session", { session_id: "bs_1" }],
@@ -226,6 +297,12 @@ describe("every group variant runs its original handler", () => {
     ["scribe_session_tape", { view: "zip", session_id: "bs_1", mode: "manifest" }, "scribe_get_recording", { session_id: "bs_1", mode: "zip" }],
     ["scribe_encounter", { encounter_id: "enc_1", include_identity: true }, "scribe_get_encounter", { encounter_id: "enc_1", include_identity: true }],
     ["scribe_encounter", { trace_id: "tr_1", include_prompts: true }, "scribe_get_trace", { trace_id: "tr_1", include_prompts: true }],
+    ["scribe_stt_runs", { limit: 5, include_identity: true }, "scribe_list_stt_runs", { limit: 5, include_identity: true }],
+    ["scribe_stt_runs", { subject_id: "bw_1", include_text: true }, "scribe_get_stt_run", { subject_id: "bw_1", include_text: true }],
+    ["scribe_stt_runs", { encounter_id: "enc_1", limit: 5 }, "scribe_get_stt_run", { encounter_id: "enc_1", limit: 5 }],
+    ["scribe_voice", { view: "prints" }, "scribe_list_voiceprints", {}],
+    ["scribe_voice", { view: "samples", clinician_id: "c_1", include_urls: true }, "scribe_list_voice_samples", { clinician_id: "c_1", include_urls: true }],
+    ["scribe_voice", { view: "window_speakers", window_id: "bw_1", limit: 50 }, "scribe_window_speakers", { window_id: "bw_1", limit: 50 }],
     ["scribe_room_command", { kind: "start_day", room: "r1", override_pause: true }, "scribe_start_recording", { room: "r1", override_pause: true }],
     ["scribe_room_command", { kind: "pause_day", room: "r1" }, "scribe_pause_recording", { room: "r1" }],
     ["scribe_room_command", { kind: "resume_day", room_id: "room_1" }, "scribe_resume_recording", { room_id: "room_1" }],
@@ -240,14 +317,19 @@ describe("every group variant runs its original handler", () => {
   ];
 
   it("covers every variant of every group", () => {
-    const covered = new Set(CASES.map(([g, a]) => `${g}:${JSON.stringify(a.aspect ?? a.view ?? a.source ?? a.kind ?? a.action ?? (a.encounter_id ? "enc" : "trace"))}`));
-    let variants = 0;
     for (const g of S.GROUPS) {
-      const p = (g.inputSchema.properties ?? {}) as Record<string, { enum?: string[] }>;
-      const sel = ["aspect", "view", "source", "kind", "action"].find((k) => p[k]?.enum);
-      variants += sel ? p[sel]!.enum!.length : 2;
+      const probes = S.groupProbes(g);
+      expect(probes.length, g.name).toBeGreaterThanOrEqual(2);
+      for (const p of probes) {
+        // A case for this group whose arguments pick this variant: same member, and the same selector
+        // value (or, for an id-routed group, the same id keys present).
+        const hit = CASES.some(([name, args, member]) =>
+          name === g.name && member === p.member && g.memberFor!(args) === p.member &&
+          Object.keys(p.probe).every((k) => k in args) &&
+          Object.entries(p.probe).every(([k, val]) => !["aspect", "view", "kind", "action"].includes(k) || args[k] === val));
+        expect(hit, `no case exercises ${g.name} ${p.value}`).toBe(true);
+      }
     }
-    expect(covered.size).toBe(variants);
   });
 
   it.each(CASES)("%s %j → %s", async (groupName, groupArgs, member, memberArgs) => {
@@ -266,7 +348,8 @@ describe("every group variant runs its original handler", () => {
     const spies = S.PUBLISHED_TOOLS.map((t) => vi.spyOn(t, "handler").mockResolvedValue({}));
     expect(await S.CALLABLE_TOOLS.get("scribe_rooms")!.handler({ view: "everything" }, ctx)).toMatchObject({ ok: false, error: "unknown_view" });
     expect(await S.CALLABLE_TOOLS.get("scribe_scratch")!.handler({}, ctx)).toMatchObject({ ok: false, error: "unknown_action" });
-    expect(await S.CALLABLE_TOOLS.get("scribe_health")!.handler({ aspect: "stt" }, ctx)).toMatchObject({ ok: false, error: "unknown_aspect" });
+    expect(await S.CALLABLE_TOOLS.get("scribe_health")!.handler({ aspect: "disk" }, ctx)).toMatchObject({ ok: false, error: "unknown_aspect" });
+    expect(await S.CALLABLE_TOOLS.get("scribe_voice")!.handler({}, ctx)).toMatchObject({ ok: false, error: "unknown_view" });
     expect(await S.CALLABLE_TOOLS.get("scribe_room_command")!.handler({ kind: "reboot", room: "r1" }, ctx)).toMatchObject({ ok: false, error: "unknown_kind" });
     expect(await S.CALLABLE_TOOLS.get("scribe_encounter")!.handler({}, ctx)).toMatchObject({ ok: false, error: "one_id_required" });
     expect(await S.CALLABLE_TOOLS.get("scribe_encounter")!.handler({ encounter_id: "e", trace_id: "t" }, ctx)).toMatchObject({ ok: false, error: "one_id_required" });
@@ -366,9 +449,10 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
 
   it.each(S.GROUPS.map((g) => [g.name, g] as const))("%s names every value it accepts and every tool it runs, exactly as it routes them", (_n, g) => {
     const key = selectorKey(g);
-    const values = key ? ((g.inputSchema.properties as Record<string, Frag>)[key]!.enum as string[]) : ["encounter_id", "trace_id"];
-    for (const value of values) {
-      const member = g.memberFor!(key ? { [key]: value } : { [value]: "x" })!;
+    const probes = S.groupProbes(g);
+    if (key) expect(probes.map((p) => p.value)).toEqual((g.inputSchema.properties as Record<string, Frag>)[key]!.enum);
+    for (const { value, probe } of probes) {
+      const member = g.memberFor!(probe)!;
       expect(member, `${g.name} does not route ${value}`).toBeTruthy();
       // "value → tool" or "value | other → tool": the value and the tool it actually routes to, on one row.
       const row = g.description.split(/[;:]\s*/).filter((part) => part.includes(" → ")).find((part) => part.split(" → ")[0]!.split(" | ").map((s) => s.trim()).includes(value));
@@ -437,5 +521,20 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
     expect(live).toMatch(/mode=chunk: one presigned GET URL/);
     expect(live).toMatch(/mode=timeline: generated timeline\.md text/);
     expect(live).toMatch(/mode=zip: the admin day-zip route path .*not presignable/);
+  });
+
+  it("scribe_voice's framing matches its members: names, audio links only with include_urls, and a matched clinician", () => {
+    expect(desc("scribe_voice")).toContain("prints returns clinician names, samples returns presigned audio links with include_urls, window_speakers returns the clinician a voice matched");
+    expect(original("scribe_list_voiceprints").description).toMatch(/clinician_id, name,/);
+    expect(original("scribe_list_voice_samples").description).toMatch(/Presigned audio URLs \(1 h\) only with include_urls=true/);
+    expect(original("scribe_window_speakers").description).toMatch(/ONLY where the diarize service matched an enrolled voiceprint — clinician_id/);
+  });
+
+  it("scribe_stt_runs' framing matches its members: both can quote identity; an id picks one subject", () => {
+    expect(desc("scribe_stt_runs")).toContain("both tools can quote identity. Pass subject_id or encounter_id for one subject's runs; pass neither for the list of subjects");
+    for (const n of ["scribe_list_stt_runs", "scribe_get_stt_run"]) expect(original(n).inputSchema.properties).toHaveProperty("include_identity");
+    expect(original("scribe_get_stt_run").inputSchema.properties).toHaveProperty("subject_id");
+    expect(original("scribe_get_stt_run").inputSchema.properties).toHaveProperty("encounter_id");
+    expect(original("scribe_list_stt_runs").inputSchema.properties).not.toHaveProperty("subject_id");
   });
 });
