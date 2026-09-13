@@ -296,6 +296,25 @@ describe("audit — a grouped call still names the tool that ran", () => {
   });
 });
 
+describe("docs/operator-mcp/TOOL-NOTES.md describes the surface the door serves", () => {
+  const notes = readFileSync("docs/operator-mcp/TOOL-NOTES.md", "utf8");
+
+  it("states the listed count and names every listed tool", () => {
+    expect(notes).toContain(`## The surface: ${S.LISTED_TOOLS.length} listed tools, ${LIVE_TOOLS.length} names that answer`);
+    for (const t of S.LISTED_TOOLS) expect(notes, t.name).toContain(`\`${t.name}\``);
+  });
+
+  it("has one table row per group, naming its scope and every member it runs", () => {
+    for (const g of S.GROUPS) {
+      const row = notes.split("\n").find((l) => l.startsWith(`| \`${g.name}\` |`));
+      expect(row, `${g.name} has no row`).toBeDefined();
+      expect(row).toContain(`| ${g.scope} |`);
+      for (const m of S.groupMembers(g)) expect(row, `${g.name} row omits ${m}`).toContain(`\`${m}\``);
+    }
+    expect(notes.split("\n").filter((l) => /^\| `scribe_/.test(l))).toHaveLength(S.GROUPS.length);
+  });
+});
+
 describe("descriptions state what the code does", () => {
   it("scribe_room_command names all nine kinds and where each executes; close_orphaned_session is a server-side repair", () => {
     const d = S.CALLABLE_TOOLS.get("scribe_room_command")!.description;
@@ -321,6 +340,25 @@ describe("descriptions state what the code does", () => {
     expect(src).toMatch(/simpleVerb\(\s*"scribe_pause_recording",\s*"pause_day"/);
     expect(src).toMatch(/simpleVerb\(\s*"scribe_resume_recording",\s*"resume_day"/);
     expect(src).toMatch(/simpleVerb\(\s*"scribe_stop_recording",\s*"end_day"/);
+  });
+
+  it.each([
+    ["scribe_health", "SAME TOOL, MORE ASPECTS. scribe_health called with no `aspect` (or aspect=all) is exactly the scribe_health", ["llm → scribe_llm_health", "kb → scribe_kb_probe"]],
+    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine is exactly the scribe_room_command", [
+      "start_day → scribe_start_recording", "pause_day → scribe_pause_recording", "resume_day → scribe_resume_recording", "end_day → scribe_stop_recording",
+      "close_orphaned_session → scribe_close_orphaned_session", "set_audio_input → scribe_set_audio_input"]],
+  ] as Array<[string, string, string[]]>)("%s opens by saying the old call shape is the old tool, and names every value added", (name, opening, added) => {
+    const d = S.CALLABLE_TOOLS.get(name)!.description;
+    expect(d.startsWith(opening)).toBe(true);
+    const lead = d.slice(0, d.indexOf("\n\n"));
+    expect(lead).toContain(`${added.length} `);
+    for (const a of added) expect(lead).toContain(a);
+    // The text a cached client holds is still in the new description, word for word.
+    expect(d).toContain(LIVE_TOOLS.find((t) => t.name === name)!.description);
+  });
+
+  it("only the two reused names carry that opening", () => {
+    for (const g of S.GROUPS) expect(g.description.startsWith("SAME TOOL"), g.name).toBe((REUSED_NAMES as readonly string[]).includes(g.name));
   });
 
   it("every group description carries each member's own description verbatim", () => {

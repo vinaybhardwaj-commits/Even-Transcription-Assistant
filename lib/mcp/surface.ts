@@ -167,7 +167,32 @@ function describeGroup(spec: GroupSpec): string {
     const label = sel ? `${sel.key}=${v.value} → ${v.tool.name}` : `${v.value} → ${v.tool.name}`;
     return `${label}: ${v.note ? `${v.note} ` : ""}${v.tool.description}`;
   });
-  return [head, ...parts].join("\n\n");
+  const reused = sel ? reusedNameLead(spec, sel) : null;
+  return [...(reused ? [reused] : []), head, ...parts].join("\n\n");
+}
+
+/**
+ * A group that took a PUBLISHED name opens by saying so. A client that cached the old, narrower
+ * schema and a client that sees this one must agree on what the tool does — they may differ only
+ * on what it currently lists — so the first thing a cold reader sees is: the old call shape is the
+ * old tool, unchanged, and here is every value added, with the tool each one used to be.
+ */
+function reusedNameLead(spec: GroupSpec, sel: NonNullable<GroupSpec["selector"]>): string | null {
+  const own = spec.variants.filter((x) => x.tool.name === spec.name);
+  if (own.length === 0) return null;
+  const added = spec.variants.filter((x) => x.tool.name !== spec.name);
+  const oldValues = own.map((x) => x.value);
+  const oldShape =
+    sel.default !== undefined && oldValues.includes(sel.default)
+      ? `with no \`${sel.key}\` (or ${sel.key}=${sel.default})`
+      : `with ${sel.key} ${oldValues.join(" | ")}`;
+  const plural = sel.key.endsWith("s") ? `${sel.key}es` : `${sel.key}s`;
+  return (
+    `SAME TOOL, MORE ${plural.toUpperCase()}. ${spec.name} called ${oldShape} is exactly the ${spec.name} ` +
+    `this door has always published: same arguments, same behaviour, same response. ${added.length} ` +
+    `${plural} were added, each running what was a separate tool (whose name still works): ` +
+    `${added.map((x) => `${x.value} → ${x.tool.name}`).join("; ")}.`
+  );
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
