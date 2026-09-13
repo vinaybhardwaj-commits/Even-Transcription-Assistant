@@ -57,8 +57,11 @@ export async function auditToolCall(input: {
   /** Tier 2 §2.3 — the RESOLVED token's actor. Absent falls back to the single-token id, so a
    *  deployment with no token map records exactly what it recorded before. */
   actor?: string | null;
+  /** Slice E — for a GROUP, the published tool that ran (a fixed tool name, never caller text).
+   *  Absent for every other call, so a row for an ungrouped or old name is what it was before. */
+  variant?: string | null;
 }): Promise<void> {
-  const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms };
+  const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms, ...(input.variant ? { variant: input.variant } : {}) };
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json, ip, user_agent)

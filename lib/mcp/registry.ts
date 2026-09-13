@@ -60,6 +60,12 @@ export type McpTool = {
   scope: McpScope;
   inputSchema: JsonSchema;
   handler: (args: ToolArgs, ctx: ToolContext) => Promise<unknown>;
+  /**
+   * Slice E — set only on a GROUP (lib/mcp/surface): the name of the published tool these
+   * arguments would run, or null when the group would refuse them. The door records it on the
+   * audit row, so a grouped call still says which tool actually ran.
+   */
+  memberFor?: (args: ToolArgs) => string | null;
 };
 
 export type ToolResult = Record<string, unknown>;

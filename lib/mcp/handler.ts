@@ -27,17 +27,7 @@ import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
 import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError } from "@/lib/mcp/registry";
-import { HEALTH_TOOLS } from "@/lib/mcp/tools/health";
-import { BRAIN_TOOLS } from "@/lib/mcp/tools/brain";
-import { BENCH_TOOLS } from "@/lib/mcp/tools/bench";
-import { STT_TOOLS } from "@/lib/mcp/tools/stt";
-import { VOICE_TOOLS } from "@/lib/mcp/tools/voice";
-import { ENCOUNTER_TOOLS } from "@/lib/mcp/tools/encounters";
-import { STORE_TOOLS } from "@/lib/mcp/tools/stores";
-import { LLM_TOOLS } from "./tools/llm";
-import { FUSE_TOOLS } from "./tools/fuse";
-import { FUSE_REPORT_TOOLS } from "./tools/fuse-report";
-import { JOB_TOOLS } from "./tools/jobs";
+import { CALLABLE_TOOLS, LISTED_TOOLS } from "@/lib/mcp/surface";
 
 const SERVER_NAME = "even-scribe-mcp";
 const SLICE = "S3";
@@ -47,9 +37,10 @@ const TOOL_TIMEOUT_MS = 55_000;
 const INVOKE_TOOL_TIMEOUT_MS = 115_000; // invoke tools (extract/transcribe) may wait on the Mini
 const MAX_BODY_BYTES = 256 * 1024;
 
-// Registry (PRD §12): S1 read tools + S2 remote-tape write tools. Names are the contract.
-const TOOLS: McpTool[] = [...HEALTH_TOOLS, ...BRAIN_TOOLS, ...BENCH_TOOLS, ...STT_TOOLS, ...VOICE_TOOLS, ...ENCOUNTER_TOOLS, ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS, ...FUSE_REPORT_TOOLS, ...JOB_TOOLS];
-const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+// Registry (PRD §12). Names are the contract. Slice E: tools/list publishes the grouped surface;
+// tools/call still accepts every name the door ever published (lib/mcp/surface).
+const TOOLS: readonly McpTool[] = LISTED_TOOLS;
+const TOOL_BY_NAME = CALLABLE_TOOLS;
 
 type JsonRpcId = string | number | null;
 type JsonRpcRequest = { jsonrpc?: unknown; id?: JsonRpcId; method?: unknown; params?: unknown };
@@ -187,7 +178,7 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: SERVER_NAME, version: version() },
         instructions:
-          "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores; plus remote tape control (scribe_start/pause/resume/stop_recording) through the room kiosk's listener — start needs a listening kiosk, is idempotent, and refuses a consent-paused room unless override_pause. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
+          "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores, jobs and the audit log; plus room control through scribe_room_command, whose description lists every kind and where each executes. Related tools are grouped behind one selector argument; every tool name published before the grouping, scribe_start_recording included, is still accepted by tools/call. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
       });
     }
     case "ping":
@@ -247,7 +238,7 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
     result = { error: String((e as Error)?.message ?? e).slice(0, 200), degraded: true };
   }
   const ms = Date.now() - t0;
-  void auditToolCall({ tool: name, args, ok: !isError, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id });
+  void auditToolCall({ tool: name, args, ok: !isError, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant: tool.memberFor?.(args) ?? null });
 
   let text: string;
   try {
