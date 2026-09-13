@@ -111,8 +111,8 @@ export async function diarizeWindow(opts: {
   contentType?: string;
   centroids?: ClinicianCentroid[];
 }): Promise<
-  | { ok: true; outcome: DiarizeWindowOutcome }
-  | { ok: false; error: string; retryable: boolean }
+  | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
+  | { ok: false; error: string; retryable: boolean; timing: unknown }
 > {
   const centroids = opts.centroids ?? (await loadClinicianCentroids());
 
@@ -124,7 +124,7 @@ export async function diarizeWindow(opts: {
   });
   // Branch on `ok`. /diarize returns real 4xx, but its sibling /enroll answers 200 with ok:false,
   // and a client that reads status learns the wrong lesson from whichever it meets first.
-  if (!res.ok) return { ok: false, error: res.error, retryable: res.retryable === true };
+  if (!res.ok) return { ok: false, error: res.error, retryable: res.retryable === true, timing: res.timing ?? null };
 
   const speakers = (res.result.speakers ?? []) as DiarizeSpeaker[];
   const roles = rolesByIndex(speakers);
@@ -164,6 +164,10 @@ export async function diarizeWindow(opts: {
 
   return {
     ok: true,
+    // PASSED THROUGH, not derived: the exact response the caller needs for room_diarize_window.
+    speakers,
+    segments,
+    timing: res.timing ?? null,
     outcome: {
       spans: segments.length,
       turns: turns.length,
@@ -174,4 +178,45 @@ export async function diarizeWindow(opts: {
       latency_ms: res.latencyMs ?? null,
     },
   };
+}
+
+export type DiarizeWindowState = "ok" | "failed" | "no_speakers";
+
+/**
+ * THE ONLY WRITER OF room_diarize_window.
+ *
+ * MOVED, NOT REWRITTEN, from the room diarize pass (`markWindow`) when the pass was deleted in C2.
+ * Same columns, same values, same `ON CONFLICT (window_id) DO NOTHING`, so the one live reader —
+ * `app/api/admin/speaker-calibration/route.ts` — sees exactly the row shape it always has. That
+ * reader is how SPEAKER_MATCH_THRESHOLD gets frozen, so feeding it is the route back to clustering.
+ *
+ * NO try/catch. The pass caught this and appended to an error list; on the job a throw fails the
+ * step, which is the honest outcome — a state row that could not be written is not a window that
+ * was diarized.
+ *
+ * `skipped` is gone from the states this writes: the pass used it for "no slot, try next tick",
+ * and on the job that case fails the step as `diarize_unavailable` instead, which the queue
+ * retries. The CHECK still permits `skipped`; nothing now writes it.
+ */
+export async function recordDiarizeWindow(row: {
+  windowId: string;
+  roomDayId: string;
+  state: DiarizeWindowState;
+  error: string | null;
+  speakers: DiarizeSpeaker[] | null;
+  segments: unknown[] | null;
+  clipR2Key: string | null;
+  timing: unknown;
+}): Promise<void> {
+  await sql`
+    INSERT INTO room_diarize_window
+      (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, diarized_at)
+    VALUES
+      (${row.windowId}, ${row.roomDayId}, ${row.state},
+       ${row.speakers === null ? null : JSON.stringify(row.speakers)}::jsonb,
+       ${row.segments === null ? null : JSON.stringify(row.segments)}::jsonb,
+       ${row.clipR2Key}, ${row.error === null ? null : row.error.slice(0, 300)},
+       ${row.timing === null || row.timing === undefined ? null : JSON.stringify(row.timing)}::jsonb, NOW())
+    ON CONFLICT (window_id) DO NOTHING
+  `;
 }

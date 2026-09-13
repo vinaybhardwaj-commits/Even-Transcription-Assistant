@@ -11,7 +11,7 @@
  */
 import { getObjectBytes } from "@/lib/r2";
 import { sql } from "@/lib/db";
-import { diarizeWindow } from "@/lib/stt/diarize-window";
+import { diarizeWindow, recordDiarizeWindow } from "@/lib/stt/diarize-window";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
@@ -43,8 +43,13 @@ export const diarizeWindowKind: JobKind = {
     if (!w.room_day_id) return failWith(jobError("progress_incomplete", "window has no room_day"));
     if (!w.clip_r2_key) return failWith(jobError("clip_missing_in_r2", "window has no clip"));
 
+    const base = { windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key };
+
     const bytes = await getObjectBytes(w.clip_r2_key);
-    if (!bytes) return failWith(jobError("clip_missing_in_r2", w.clip_r2_key));
+    if (!bytes) {
+      await recordDiarizeWindow({ ...base, state: "failed", error: `clip_missing:${w.clip_r2_key}`, speakers: null, segments: null, timing: null });
+      return failWith(jobError("clip_missing_in_r2", w.clip_r2_key));
+    }
 
     const res = await diarizeWindow({
       windowId,
@@ -54,10 +59,23 @@ export const diarizeWindowKind: JobKind = {
     });
     if (!res.ok) {
       // The service's message can describe the audio; the row gets a code. `retryable` means we
-      // never reached it (no slot), which is a different fact from the service refusing.
+      // never reached it (no slot) — no state row, exactly as the pass did, so the window is
+      // picked up again rather than recorded as a failure it did not have.
       console.error("[jobs] diarize failed", JSON.stringify({ window: windowId, err: String(res.error).slice(0, 200), retryable: res.retryable }));
+      if (!res.retryable) {
+        await recordDiarizeWindow({ ...base, state: "failed", error: res.error, speakers: null, segments: null, timing: res.timing });
+      }
       return failWith(jobError(res.retryable ? "diarize_unavailable" : "diarize_failed"));
     }
+
+    await recordDiarizeWindow({
+      ...base,
+      state: res.speakers.length === 0 ? "no_speakers" : "ok",
+      error: null,
+      speakers: res.speakers,
+      segments: res.segments,
+      timing: res.timing,
+    });
 
     // Counts and ids only — the spans carry no text and neither does this.
     return doneWith({ window_id: windowId, ...res.outcome });

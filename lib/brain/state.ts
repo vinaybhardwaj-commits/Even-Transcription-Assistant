@@ -442,9 +442,38 @@ export const SQL_TURN_CUE_COUNTS =
   "WHERE room_day_id = $1 AND type IN ('stt_turn', 'stt_silence', 'speaker_match') " +
   "GROUP BY type";
 
-export const SQL_CLUSTERS_FOR_DAY =
-  "SELECT id, kind, visit_id, first_seen_at, last_seen_at, (centroid IS NOT NULL) AS has_centroid " +
-  "FROM speaker_cluster WHERE room_day_id = $1 ORDER BY first_seen_at ASC, id ASC";
+/**
+ * ─── SPEAKER CLUSTERING IS NOT RUNNING, AND THIS SAYS SO ─────────────────────────────────────
+ *
+ * `speaker_cluster` used to be read here by a SQL constant that three callers ran. Nothing has
+ * ever populated it in production: its only writer lived in the room diarize pass, behind
+ * SPEAKER_CLUSTERS_ENABLED (off) and SPEAKER_MATCH_THRESHOLD (unset), and the table was confirmed
+ * EMPTY on the two heaviest room-days on record (OPD 3 on 9 Sep, OPD 7 on 10 Sep, 301 s of speech).
+ * C2 deleted that writer. So every caller was receiving `[]` by accidentally querying a table no
+ * code fills — indistinguishable from "clustering ran and found nobody", which is a real and
+ * different answer.
+ *
+ * The read is now DELIBERATELY empty, with a named reason, and never touches the table. A caller
+ * that needs to know which of the two it is reads `clustering.running`. The table is NOT dropped:
+ * deleting a writer is reversible, dropping a table is its own decision.
+ *
+ * THE ROUTE BACK: the diarize_window job now writes `room_diarize_window`; calibration accumulates
+ * from that; SPEAKER_MATCH_THRESHOLD is frozen FROM that data; clustering is rebuilt on the job.
+ * When it is, this becomes a real read again and `running` becomes true.
+ */
+export const CLUSTERING_STATUS = {
+  running: false,
+  reason: "clustering_not_running",
+  detail: "no writer populates speaker_cluster: the room diarize pass that did was deleted in C2, and clustering is rebuilt on the diarize_window job only once SPEAKER_MATCH_THRESHOLD is set from calibration data",
+} as const;
+export type ClusteringStatus = typeof CLUSTERING_STATUS;
+
+export type ClusterReadRow = { id: string; kind: string; visit_id: string | null; first_seen_at: Date; last_seen_at: Date; has_centroid: boolean };
+
+/** Deliberately empty, and says why. NEVER queries speaker_cluster — see CLUSTERING_STATUS. */
+export function readClustersForDay(_roomDayId: string): { clusters: ClusterReadRow[]; clustering: ClusteringStatus } {
+  return { clusters: [], clustering: CLUSTERING_STATUS };
+}
 
 /**
  * Operator MCP S1 (GET /api/brain/rooms/:id/cues + scribe_list_cues): cues for a room_day,
@@ -536,6 +565,8 @@ export type Graph = {
   active_visit_id: string | null;
   /** the arm this picture was read at — always stated, never left for the reader to assume */
   arm: string;
+  /** Whether `clusters` is a real answer. `running:false` means EMPTY BY DESIGN, not "nobody found". */
+  clustering: ClusteringStatus;
   clusters: Array<{
     id: string;
     kind: string;
@@ -585,12 +616,10 @@ export async function resolveRoomDay(roomId: string, date: string): Promise<Room
 export async function readGraph(q: Queryable, roomId: string, date: string, roomDayId: string | null, arm: string = DEFAULT_ARM): Promise<Graph> {
   const as_of = new Date().toISOString();
   if (!roomDayId) {
-    return { room_id: roomId, room_day_id: null, ist_date: date, visits: [], active_visit_id: null, clusters: [], confidence: null, as_of, arm };
+    return { room_id: roomId, room_day_id: null, ist_date: date, visits: [], active_visit_id: null, clustering: CLUSTERING_STATUS, clusters: [], confidence: null, as_of, arm };
   }
-  const [v, c] = await Promise.all([
-    q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId, arm]),
-    q.query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [roomDayId]),
-  ]);
+  const v = await q.query<VisitRow>(SQL_VISITS_FOR_DAY, [roomDayId, arm]);
+  const c = { rows: readClustersForDay(roomDayId).clusters };
 
   const clusterIdsByVisit = new Map<string, string[]>();
   for (const row of c.rows) {
@@ -633,7 +662,7 @@ export async function readGraph(q: Queryable, roomId: string, date: string, room
     has_centroid: row.has_centroid,
   }));
 
-  return { room_id: roomId, room_day_id: roomDayId, ist_date: date, visits, active_visit_id: active?.id ?? null, clusters, confidence: null, as_of, arm };
+  return { room_id: roomId, room_day_id: roomDayId, ist_date: date, visits, active_visit_id: active?.id ?? null, clustering: CLUSTERING_STATUS, clusters, confidence: null, as_of, arm };
 }
 
 // ---------------------------------------------------------------------------

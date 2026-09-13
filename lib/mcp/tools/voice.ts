@@ -16,7 +16,7 @@
 
 import { sql } from "@/lib/db";
 import { query } from "@/lib/brain/db";
-import { findRoomDay, roomExists, SQL_CLUSTERS_FOR_DAY } from "@/lib/brain/state";
+import { findRoomDay, roomExists, readClustersForDay, CLUSTERING_STATUS } from "@/lib/brain/state";
 import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
 import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
@@ -114,7 +114,7 @@ type ClusterRow = { id: string; kind: string; visit_id: string | null; first_see
 
 const getClusters: McpTool = {
   name: "scribe_get_clusters",
-  description: "Same-day speaker clusters for a room-day (speaker_cluster via the brain pool): id, kind (doctor|other), visit_id, first_seen_at, last_seen_at, has_centroid. No vectors.",
+  description: "Same-day speaker clusters for a room-day: id, kind (doctor|other), visit_id, first_seen_at, last_seen_at, has_centroid. No vectors. ALWAYS read `clustering` first: while clustering is not running (running:false, reason clustering_not_running) `clusters` is empty BY DESIGN and means nothing about who spoke — it is not 'clustering ran and found nobody'.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -133,13 +133,14 @@ const getClusters: McpTool = {
       if ("error" in d) return { clusters: [], error: d.error };
       if (!(await roomExists(room.id))) return { clusters: [], error: "unknown_room" };
       const day = await findRoomDay(room.id, d.date);
-      if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clusters: [] };
-      const r = await query<ClusterRow>(SQL_CLUSTERS_FOR_DAY, [day.id]);
+      if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clustering: CLUSTERING_STATUS, clusters: [] };
+      const r = readClustersForDay(day.id);
       return {
         room_id: room.id,
         room_day_id: day.id,
         ist_date: d.date,
-        clusters: r.rows.map((c) => ({
+        clustering: r.clustering,
+        clusters: (r.clusters as ClusterRow[]).map((c) => ({
           id: c.id,
           kind: c.kind,
           visit_id: c.visit_id,

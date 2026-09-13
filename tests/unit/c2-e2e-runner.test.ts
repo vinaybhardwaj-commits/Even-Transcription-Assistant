@@ -236,61 +236,130 @@ describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, rea
   }, 300_000);
 });
 
-describe.skipIf(!HAVE_DOCKER)("R4 D1 — the legacy writer's rows land, and a rejected write cannot read as success", () => {
-  it("the legacy INSERT satisfies 0085 as shipped, and the pre-0085 shape is refused", async () => {
+/** Claim and run whatever is queued until nothing is claimable. The runner, not a shortcut. */
+async function drainQueue(tag: string): Promise<void> {
+  const { claimJobs } = await import("@/lib/jobs/store");
+  const { runOneStep } = await import("@/lib/jobs/runner");
+  for (let i = 0; i < 20; i += 1) {
+    const claimed = await claimJobs(1, 240_000, `runner_${tag}_${i}`);
+    if (claimed.length === 0) return;
+    await runOneStep(claimed[0]!, `runner_${tag}_${i}`);
+  }
+}
+
+/** An eligible window: closed, grid-aligned, with a room_day and a clip, nothing stored yet. */
+async function seedWindow(id: string, session: string, startMs: number, withTurn = false): Promise<void> {
+  const sql = G.__pgsql;
+  await sql`INSERT INTO bench_window VALUES (${id}, ${session}, 'rd_1', ${startMs}, ${startMs + WINDOW_MS}, 'primary', ${`clips/${id}.webm`}, true, 'closed')`;
+  if (withTurn) {
+    await sql`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload)
+              VALUES (${`c_${id}`}, 'rd_1', 'stt_turn', 'replay', ${`${session}|${startMs + 1000}|${startMs + 5000}|w`},
+                      ${JSON.stringify({ start_ms: startMs + 1000, end_ms: startMs + 5000, window: { start_ms: startMs, end_ms: startMs + WINDOW_MS } })}::jsonb)`;
+  }
+}
+
+describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the live reader is still fed", () => {
+  it("the CALIBRATION READER gets data through its own code path after a job runs", async () => {
     const sql = G.__pgsql;
-    await sql`DELETE FROM room_turn_speaker WHERE window_id = 'bw_legacy'`;
+    SVC.fail = false;
+    await seedWindow("bw_cal", "sess_cal", 2 * WINDOW_MS);
+    const r = await runJob("job_cal", "bw_cal");
+    expect(r.status, `the job must finish; error=${r.error}`).toBe("done");
 
-    // THE SHIPPED STATEMENT, copied in shape from lib/stt/diarize-job.ts's bindTurns.
-    await sql`
-      INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
-                                     role, no_role_reason, created_at)
-      VALUES ('bw_legacy', 'sess|0|1000|w', 0, 'sc_abc', 900, 'rd_1', NULL, 'no_match', NOW())
-      ON CONFLICT (window_id, source_ref) DO NOTHING
-    `;
-    const landed = (await sql`SELECT source_ref, role, no_role_reason, clinician_id FROM room_turn_speaker WHERE window_id = 'bw_legacy'`) as Array<Record<string, unknown>>;
-    expect(landed, "the legacy path must be able to write at all").toHaveLength(1);
-    expect(landed[0]!.role).toBeNull();
-    expect(landed[0]!.no_role_reason, "it never attempts identification, so no_match is the honest value").toBe("no_match");
-    expect(landed[0]!.clinician_id, "and it may never name anyone").toBeNull();
+    // The row the reader depends on, written by the job — the only writer now.
+    const stored = (await sql`SELECT state FROM room_diarize_window WHERE window_id = 'bw_cal'`) as Array<{ state: string }>;
+    expect(stored.map((x) => x.state)).toEqual(["ok"]);
 
-    // THE PRE-FIX SHAPE: neither column sent. no_role_ck is (role IS NULL) = (reason IS NOT NULL);
-    // both NULL makes that FALSE and every row bounced — silently, because the caller caught it.
-    let refused = "";
-    try {
-      await sql`
-        INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, created_at)
-        VALUES ('bw_legacy', 'sess|0|2000|w', 0, 'sc_abc', 900, 'rd_1', NOW())
-      `;
-    } catch (e) { refused = String(e); }
-    expect(refused, "the old statement must still be rejected by the real constraint").toContain("room_turn_speaker_no_role_ck");
-  }, 120_000);
-
-  it("a pass with errors is NOT success-shaped — the route returns a non-2xx", async () => {
-    // Drive the real route handler with a pass that reports failures, exactly as a rejected write
-    // would. The bug was that `errors` was populated and the route returned 200 with turns_bound: 0
-    // — indistinguishable from a healthy quiet pass.
-    vi.resetModules();
-    vi.doMock("@/lib/stt/diarize-job", () => ({
-      DIARIZE_BATCH_LIMIT: 4,
-      runRoomDiarizePass: async () => ({
-        enabled: true, scanned: 1, diarized: 1, failed: 0,
-        clusters_created: 0, clusters_updated: 0, turns_bound: 0, dry: false,
-        errors: ["[room-diarize] bw_x: turn binding failed: violates check constraint"],
-      }),
-    }));
-    // The GET door authorises on the cron header alone. The POST door reads an admin cookie,
-    // which needs a Next request scope this harness does not have — and the branch under test is
-    // the shared `run`, reached identically by both.
-    const { GET } = await import("@/app/api/admin/diarize-windows/route");
+    // THE READER'S OWN PATH: the real route handler, authorised the way an operator calls it.
+    process.env.MIGRATION_SECRET = process.env.MIGRATION_SECRET || "test-secret";
+    const { GET } = await import("@/app/api/admin/speaker-calibration/route");
     const { NextRequest } = await import("next/server");
-    const req = new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } });
-    const res = await GET(req);
-    expect(res.status, "a caught exception must not produce success-shaped output").not.toBe(200);
-    const body = (await res.json()) as { error?: { code?: string; message?: string } };
-    expect(body.error?.code).toBe("PIPELINE_FAILED");
-    expect(body.error?.message, "and it must say the zero is not a clean zero").toMatch(/turns_bound=0/);
-    vi.doUnmock("@/lib/stt/diarize-job");
-    vi.resetModules();
-  }, 60_000);
+    const res = await GET(new NextRequest("https://x.test/api/admin/speaker-calibration?session_id=sess_cal", {
+      headers: { authorization: `Bearer ${process.env.MIGRATION_SECRET}` },
+    }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.windows_with_results, "the reader must SEE the job's row").toBe(1);
+    expect(body.speakers_seen, "and the speakers inside it").toBe(2);
+    expect(body.embeddings_usable, "with usable embeddings, or calibration cannot run").toBe(2);
+    expect(body.note, "a fed reader carries no 'nothing stored' note").toBeNull();
+    expect(body.errors).toEqual([]);
+  }, 300_000);
+
+  it("ONE WRITER, BEHAVIOURALLY: break the job's write and nothing else writes those tables", async () => {
+    const sql = G.__pgsql;
+    SVC.fail = false;
+    await seedWindow("bw_one", "sess_one", 3 * WINDOW_MS, true);
+    // Refuse every row for this window at the DATABASE, on both tables the job owns.
+    exec(`ALTER TABLE room_turn_speaker ADD CONSTRAINT t_refuse_one CHECK (window_id <> 'bw_one');
+          ALTER TABLE room_diarize_window ADD CONSTRAINT t_refuse_one_d CHECK (window_id <> 'bw_one');`);
+    try {
+      const r = await runJob("job_one", "bw_one");
+      expect(r.status, "a refused write must fail the job, never read as done").toBe("failed");
+      // If ANY other code wrote these tables for this window, the CHECK would have refused that
+      // too — and the job could not have been the only thing that tried. Drain everything else
+      // queued and confirm the tables are still empty for the window.
+      await drainQueue("one");
+      const t = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_one'`) as Array<{ n: number }>;
+      const d = (await sql`SELECT count(*)::int AS n FROM room_diarize_window WHERE window_id = 'bw_one'`) as Array<{ n: number }>;
+      expect(t[0]!.n).toBe(0);
+      expect(d[0]!.n).toBe(0);
+    } finally {
+      exec(`ALTER TABLE room_turn_speaker DROP CONSTRAINT t_refuse_one;
+            ALTER TABLE room_diarize_window DROP CONSTRAINT t_refuse_one_d;`);
+    }
+  }, 300_000);
+
+  it("ONE RUN: the route enqueues, the job's write is REJECTED by postgres, and nothing reads as success", async () => {
+    const sql = G.__pgsql;
+    SVC.fail = false;
+    process.env.SPEAKER_CLUSTERS_ENABLED = "1";
+    await seedWindow("bw_rej", "sess_rej", 4 * WINDOW_MS, true);
+    exec(`ALTER TABLE room_turn_speaker ADD CONSTRAINT t_refuse_rej CHECK (window_id <> 'bw_rej');`);
+    try {
+      // 1. THE ROUTE — the real handler, on the cron door.
+      const { GET } = await import("@/app/api/admin/diarize-windows/route");
+      const { NextRequest } = await import("next/server");
+      const res = await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } }));
+      expect(res.status, "the enqueue itself succeeded, so the route says so").toBe(200);
+      const body = (await res.json()) as { jobs: Array<{ window_id: string; job_id: string }> };
+      const ref = body.jobs.find((j) => j.window_id === "bw_rej");
+      expect(ref, "the route must return the job ref for the window it queued").toBeTruthy();
+
+      // 2. THE JOB — through the real runner, where the write is refused by a real constraint.
+      await drainQueue("rej");
+      const job = (await sql`SELECT status, error FROM scribe_job WHERE id = ${ref!.job_id}`) as Array<{ status: string; error: string | null }>;
+      expect(job[0]!.status, "the rejected write must surface as a FAILED job").toBe("failed");
+      expect(String(job[0]!.error)).toMatch(/step_threw|failed/);
+
+      // 3. NOTHING reads as success: no spans, and no 'ok' state row for the calibration reader.
+      const spans = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_rej'`) as Array<{ n: number }>;
+      const okRow = (await sql`SELECT count(*)::int AS n FROM room_diarize_window WHERE window_id = 'bw_rej' AND state = 'ok'`) as Array<{ n: number }>;
+      expect(spans[0]!.n).toBe(0);
+      expect(okRow[0]!.n, "a window whose spans were refused must not be recorded as diarized").toBe(0);
+    } finally {
+      exec(`ALTER TABLE room_turn_speaker DROP CONSTRAINT t_refuse_rej;`);
+      delete process.env.SPEAKER_CLUSTERS_ENABLED;
+    }
+  }, 300_000);
+
+  it("a failed ENQUEUE returns a non-2xx — the route never looks like success when it could not queue", async () => {
+    const sql = G.__pgsql;
+    process.env.SPEAKER_CLUSTERS_ENABLED = "1";
+    await seedWindow("bw_enq", "sess_enq", 5 * WINDOW_MS);
+    exec(`ALTER TABLE scribe_job ADD CONSTRAINT t_refuse_enq CHECK (args->>'window_id' IS DISTINCT FROM 'bw_enq');`);
+    try {
+      const { GET } = await import("@/app/api/admin/diarize-windows/route");
+      const { NextRequest } = await import("next/server");
+      const res = await GET(new NextRequest("https://x.test/api/admin/diarize-windows", { headers: { "x-vercel-cron": "1" } }));
+      expect(res.status, "a refused enqueue must not be a 200").not.toBe(200);
+      const body = (await res.json()) as { error?: { code?: string } };
+      expect(body.error?.code).toBe("PIPELINE_FAILED");
+      const rows = (await sql`SELECT count(*)::int AS n FROM scribe_job WHERE args->>'window_id' = 'bw_enq'`) as Array<{ n: number }>;
+      expect(rows[0]!.n).toBe(0);
+    } finally {
+      exec(`ALTER TABLE scribe_job DROP CONSTRAINT t_refuse_enq;`);
+      delete process.env.SPEAKER_CLUSTERS_ENABLED;
+    }
+  }, 300_000);
 });
