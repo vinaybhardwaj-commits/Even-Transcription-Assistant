@@ -154,8 +154,16 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       diarize_run_id   = EXCLUDED.diarize_run_id
     WHERE room_emotion_window.state = 'failed'
        OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
-       -- COMPARED, S1 FIX4 C16: everything the segment rows can contradict, plus the facts identifying the run
-       -- that produced them - state, error, the four segment counts, model, model_key, subfolder, cap_s, room_day_id.
+       -- COMPARED, S1 FIX4 C16: state, error, the four segment counts, model, model_key, subfolder, cap_s, room_day_id.
+       -- What each identifying field protects against, corrected in S1 MERGE C19:
+       --   model, model_key - the emotion client refuses any service answer whose model or model_key is not its
+       --     own constant, lib/emotion/client.ts:91 emotion_unexpected_model, so within one deployment no segment
+       --     row can carry a different value and these never decide a write. They matter across a deploy that
+       --     changes those constants: the stored row has the old value, the new write the new one, and the row is
+       --     correctly rewritten.
+       --   subfolder - no such guard. The service resolves EMOTION_WAVLM_SUBFOLDER from auto, so it can change with
+       --     no deploy at all; this is the field by which X1 was actually reachable.
+       --   cap_s, room_day_id - carried by every segment row, so a segment row can contradict them.
        -- NOT COMPARED, each on purpose:
        --   calls, warmup_json, timing_json - per-run telemetry with no segment counterpart; comparing them
        --     would rewrite on every re-run and undo C9
