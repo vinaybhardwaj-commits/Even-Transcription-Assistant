@@ -23,6 +23,7 @@ import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
 import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
 import { rolesByIndex, UNATTRIBUTED, noRole, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
+import { shadowMatch, shadowTrusted, SCORE_BASIS_APP_RECOMPUTED } from "./losing-score";
 import { ms, type WindowStartMs, type WindowEndMs } from "./window-bounds";
 
 /**
@@ -119,6 +120,10 @@ export type DiarizeWindowOutcome = {
   straddled: number;
   speakers: number;
   latency_ms: number | null;
+  /** E20: no_match turns that got a losing score and clinician (score_basis 'app_recomputed'). */
+  losing_recorded: number;
+  /** E20: the control on the app-side recomputation, for THIS window (lib/stt/losing-score.ts). */
+  shadow: { matched_checked: number; disagreements: number; unmatched_above_threshold: number; unrecomputable: number; max_abs_diff: number | null; trusted: boolean };
 };
 
 /**
@@ -164,19 +169,36 @@ export async function diarizeWindow(opts: {
   const onClock = segments.map((sg) => ({ ...sg, start_ms: ms(opts.window.start) + sg.start_ms, end_ms: ms(opts.window.start) + sg.end_ms }));
   const bindings = bindTurnsExclusive(onClock, turns);
 
-  let named = 0, straddled = 0;
+  // E20 — THE SCORE THAT LOST. The service discards it (server.py:209-216), so it is recomputed from the
+  // embeddings it returned, against the SAME centroids this call sent, with the service's greedy exclusion.
+  // Written only when this window's control is clean: every matched speaker recomputed to the service's own
+  // clinician and 3-dp confidence, and no unmatched speaker recomputed at or above the threshold.
+  const shadow = shadowMatch(speakers, centroids, DIARIZE_BATCH_THRESHOLD);
+  const trusted = shadowTrusted(shadow.guard);
+  if (!trusted) {
+    console.warn(`[diarize-window] ${opts.windowId}: losing scores NOT written — shadow disagrees with the service ` +
+      `(matched ${shadow.guard.matched_checked}, disagreements ${shadow.guard.disagreements}, unmatched at/above threshold ${shadow.guard.unmatched_above_threshold})`);
+  }
+
+  let named = 0, straddled = 0, losingRecorded = 0;
   for (const b of bindings) {
     // A turn held by more than one speaker is refused a name, and the row records WHY.
     const r: SpanRole = !b.exclusive ? noRole("straddle") : (roles.get(b.speaker_idx) ?? UNATTRIBUTED);
     if (!b.exclusive) straddled += 1;
     if (r.role === "clinician") named += 1;
+    // ONLY an exclusive no_match turn. A named turn keeps exactly today's row; a straddle never reached the
+    // matcher as one speaker and gets nothing. 0096's CHECKs refuse either if this line is ever wrong.
+    const losing = trusted && b.exclusive && r.role === null && r.no_role_reason === "no_match" ? shadow.losingByIdx.get(b.speaker_idx) : undefined;
+    if (losing) losingRecorded += 1;
     await sql`
       INSERT INTO room_turn_speaker
         (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id,
-         clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
+         clinician_id, role, match_confidence, no_role_reason, run_id, created_at,
+         losing_clinician_id, losing_score, score_basis)
       VALUES
         (${opts.windowId}, ${b.source_ref}, ${b.speaker_idx}, NULL, ${b.overlap_ms}, ${opts.roomDayId},
-         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, ${r.no_role_reason}, ${opts.runId}, NOW())
+         ${r.clinician_id}, ${r.role}, ${r.match_confidence}, ${r.no_role_reason}, ${opts.runId}, NOW(),
+         ${losing?.clinician_id ?? null}, ${losing?.score ?? null}, ${losing ? SCORE_BASIS_APP_RECOMPUTED : null})
       ON CONFLICT (window_id, source_ref) DO UPDATE
         SET speaker_idx = EXCLUDED.speaker_idx,
             run_id = EXCLUDED.run_id,
@@ -187,9 +209,15 @@ export async function diarizeWindow(opts: {
             clinician_id = EXCLUDED.clinician_id,
             role = EXCLUDED.role,
             match_confidence = EXCLUDED.match_confidence,
-            no_role_reason = EXCLUDED.no_role_reason
+            no_role_reason = EXCLUDED.no_role_reason,
+            -- A re-run replaces the losing candidate with its own, or clears it: a turn named on the
+            -- re-run must not keep the previous run's losing score beside its name.
+            losing_clinician_id = EXCLUDED.losing_clinician_id,
+            losing_score = EXCLUDED.losing_score,
+            score_basis = EXCLUDED.score_basis
     `;
   }
+  const diffs = shadow.guard.diffs;
 
   return {
     ok: true,
@@ -205,6 +233,15 @@ export async function diarizeWindow(opts: {
       straddled,
       speakers: roles.size,
       latency_ms: res.latencyMs ?? null,
+      losing_recorded: losingRecorded,
+      shadow: {
+        matched_checked: shadow.guard.matched_checked,
+        disagreements: shadow.guard.disagreements,
+        unmatched_above_threshold: shadow.guard.unmatched_above_threshold,
+        unrecomputable: shadow.guard.unrecomputable,
+        max_abs_diff: diffs.length ? Math.max(...diffs) : null,
+        trusted,
+      },
     },
   };
 }
