@@ -177,11 +177,16 @@ async function score(ctx: StepContext): Promise<StepOutcome> {
 async function finish(ctx: StepContext): Promise<StepOutcome> {
   const p = P(ctx);
   const counts = { planned: p.segments.length, scored: p.scored, skipped: p.skipped, failed: p.failed, calls: p.calls };
+  // ZERO SCORED IS A FAILURE. Every planned segment failed: recording `ok` would be a caught failure
+  // wearing success's shape. Failed, so the enqueue scan's attempt bound governs a retry. (planned = 0
+  // never reaches here — prepare records no_segments. Some scored with some failed stays ok.)
+  const zeroScored = p.segments.length > 0 && p.scored === 0;
   await recordEmotionWindow({
-    windowId: p.window_id, roomDayId: p.room_day_id, state: "ok", diarizeRunId: p.diarize_run_id, error: null,
+    windowId: p.window_id, roomDayId: p.room_day_id, state: zeroScored ? "failed" : "ok", diarizeRunId: p.diarize_run_id, error: zeroScored ? "emotion_zero_scored" : null,
     model: p.model, model_key: EMOTION_MODEL_KEY, subfolder: p.subfolder, cap_s: p.cap_s, counts, warmup: p.warmup,
     timing: { wall_ms: Date.now() - p.started_ms },
   });
+  if (zeroScored) return failWith(jobError("emotion_window_failed", `emotion_zero_scored: ${counts.failed} of ${counts.planned} segment(s) failed`));
   return doneWith({ window_id: p.window_id, ...counts, loaded_before: p.loaded_before });
 }
 
