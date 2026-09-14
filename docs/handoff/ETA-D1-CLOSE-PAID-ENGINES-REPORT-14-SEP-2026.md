@@ -1,45 +1,57 @@
-# ETA — D1 — CLOSE THE PAID ENGINES — REPORT (STOPPED AT C26: THE ROW IS NOT THE CONTROL)
-**14 Sep 2026 · Builder `scribe` · branch `vinay/s1-auto-drain` · code read only · no DB access used · not pushed**
+# ETA — D1 — CLOSE THE PAID ENGINES — REPORT
+**14 Sep 2026 · Builder `scribe` · branch `vinay/s1-auto-drain`**
 
-**Result: §2's stop condition is met.** Deepgram is called from paths that never read `stt_engine`, so disabling its row would not stop the spend.
-- **Not done:** 0093 was not written or applied (§3), the §4 probe was not run, and I opened no database session.
-- **Unchanged:** production database, application code, flags. No Mini work, no tests.
+**Result.** 0093 is applied to production, and the read-back is verified with **`sarvam` still `enabled = t`**. **§4 was not run:** no health probe is reachable from this session. **The row is a PARTIAL control:** it stops the fan-out, routing and scribe tier, while four Deepgram paths and two health probes ignore it and still call the vendors.
 
-## C26 — every path to the three engines, and what a disabled row does
-| Path | Where | Reads the row? | If disabled |
-|---|---|---|---|
-| **Browser live consult, Deepgram** | `components/recording/RecordingScreen.tsx` → `useDeepgramLive({enabled: encounter !== null})` (`lib/use-deepgram-live.ts:79,106`) → `app/[slug]/api/transcribe/deepgram-token/route.ts` → `mintLiveToken` (`lib/deepgram-token.ts:28,54`, env `DEEPGRAM_API_KEY`) | **no** | **FAILS OPEN** — every recorded encounter still opens a paid Deepgram live stream |
-| **Encounter processing, Deepgram diarized batch** | `app/[slug]/api/encounters/[id]/process/route.ts:623` → `transcribeDiarized` (`lib/transcribe.ts:92-110`, env key) for English encounters with no Sarvam entries | **no** | **FAILS OPEN** |
-| **Voice window transcription, Deepgram** | `app/api/voice/transcribe-window/route.ts:38` and `app/[slug]/api/voice/transcribe-window/route.ts:46` → `transcribeAudio` (`lib/transcribe.ts:23-42`, env key) | **no** | **FAILS OPEN** |
-| **Four-engine browser path** | the same `RecordingScreen.tsx`: Deepgram live (above) plus Sarvam, Whisper and Indic hooks. ElevenLabs is not in it. | Deepgram: no | Deepgram part fails open |
-| **Offline fanout / STT Lab queue** | `lib/stt/fanout.ts:80,364,415` (ASR); `:364` scribe tier (Eka Scribe) | yes: `enabled AND fanout_enabled` | **fails closed** (skipped) |
-| **Routing** (room drain, note choice) | `lib/stt/routing.ts:26`; callers `room-drain.ts:763` (`room`), `finalize-upload/route.ts:179` (`note`) | yes | **fails closed** (`null`) |
-| **`stt_routing` rows** | seeded by `0021:19-23`: `('live','english','deepgram')`. **No code resolves stage `live`**: the only `resolveRouting` calls are `room` and `note`, so that row is inert. | n/a | no effect |
-| **MCP `scribe_transcribe_range`, engine named explicitly** | `lib/mcp/tools/bench.ts:1969` `adapterFor(engine)` (a map lookup, `registry.ts:32`) + `guardPaidEngine` (`paid-engines.ts:116`: named + duration cap; reads `is_paid`/cost, **not** `enabled`) | **no** | **FAILS OPEN** — an operator naming `deepgram`/`elevenlabs` can still run it, capped |
-| **Health probes** | `lib/mcp/tools/stt.ts:35-45` (feeds `health.ts`) and `app/api/admin/stt-lab/health/route.ts:18-27`: `adapter.health()` for every non-virtual engine | **no** | **probes anyway**: Deepgram `GET api.deepgram.com/v1/projects`, ElevenLabs (and Scribe, which delegates) `GET api.elevenlabs.io/v1/models` |
-| **MCP engine listings** | `lib/mcp/tools/stt.ts:54-76`, `stores.ts:94` | display only | reports the flag |
+## C26 — the row is a PARTIAL control (stop accepted by V; paths not fixed this round)
+**Read the row, skip a disabled engine (fail closed):** fan-out `lib/stt/fanout.ts:80,415` · scribe tier `fanout.ts:364` · routing `lib/stt/routing.ts:26` (room drain `room-drain.ts:763`, note choice `finalize-upload/route.ts:179`).
 
-**Why §4 would have failed too.**
-- `gemini` reports `gemini_stt_disabled` because **its adapter** checks the `GEMINI_STT` env gate (`adapters/gemini.ts:345`), not because the probe reads the row.
-- The Deepgram and ElevenLabs probes would keep reporting healthy after a row disable, and keep calling the vendors.
-- `health.ts:116` would stop *counting* them, because it filters on `enabled`, but the calls would still be made.
-- These probe calls are metadata endpoints, not billed transcription minutes. UNVERIFIED against vendor billing.
+**IGNORE the row and keep calling Deepgram (fail open), env `DEEPGRAM_API_KEY`:**
+1. **Browser live consult** — `components/recording/RecordingScreen.tsx` → `lib/use-deepgram-live.ts:79,106` → `app/[slug]/api/transcribe/deepgram-token/route.ts` → `lib/deepgram-token.ts:28,54`. Runs on every recorded encounter.
+2. **Encounter processing, diarized batch** — `app/[slug]/api/encounters/[id]/process/route.ts:623` → `lib/transcribe.ts:92-110` (English, no Sarvam segments).
+3. **Voice transcribe-window** — `app/api/voice/transcribe-window/route.ts:38` and `app/[slug]/api/voice/transcribe-window/route.ts:46` → `lib/transcribe.ts:23-42`.
+4. **MCP `scribe_transcribe_range` naming the engine** — `lib/mcp/tools/bench.ts:1969` `adapterFor(engine)`. `guardPaidEngine` (`lib/stt/paid-engines.ts:116`) checks the name and a duration cap, never `enabled`.
 
-## Known fact §8 — room path: partly corrected
-- **Confirmed:** room windows do not go through fanout. `room-drain.ts:763` resolves `resolveRouting("room", …)` only.
-- **Correction:** by the migrations, they route to **`route`**, not Sarvam. `0084` points both room rows at `route`, and `0086` adds the engine row.
-- The live `stt_routing` values were **not** read, since the database was licensed for §3 only.
-- Either way, D1's row change does not alter the room path.
+**IGNORE the row and probe anyway — the two health probes:** `lib/mcp/tools/stt.ts:35-45` (feeds `lib/mcp/tools/health.ts`) and `app/api/admin/stt-lab/health/route.ts:18-27`. Both call `adapter.health()` for every non-virtual engine: Deepgram `GET api.deepgram.com/v1/projects`; ElevenLabs and ElevenLabs-Scribe `GET api.elevenlabs.io/v1/models`.
 
-## What would make the row the control (for the ruling — nothing changed)
-- **Deepgram's three direct callers** (`deepgram-token` route, `process` route `:623`, both `transcribe-window` routes) need a gate on the engine row, or on a server flag, before calling `lib/transcribe.ts` or `lib/deepgram-token.ts`.
-- **The browser** must not start `useDeepgramLive` when the gate is closed.
-- **`guardPaidEngine`** (or `bench.ts:1969`) should refuse a disabled engine.
-- **The two health probes** should skip or mark disabled engines instead of calling `adapter.health()`.
-- All of that is application code, which D1 excluded, so it needs its own round. Alternative, V's call: remove `DEEPGRAM_API_KEY` / `ELEVENLABS_API_KEY` from Vercel. The direct callers then fail loudly with `deepgram_key_missing` / `DEEPGRAM_API_KEY not set`.
+The full per-path table, with the `stt_routing` rows (no code resolves stage `live`) and the room-path correction (room → `route` per 0084/0086), is in the `10a0894` version of this file.
+
+## C27 — migration 0093 (statements verbatim; the file header records the partial-control scope)
+```sql
+UPDATE stt_engine
+   SET enabled = false,
+       fanout_enabled = false
+ WHERE id IN ('deepgram', 'elevenlabs', 'elevenlabs_scribe', 'ekascribe')
+   AND (enabled = true OR fanout_enabled = true);
+
+INSERT INTO schema_migrations (version, name)
+VALUES (93, '0093_disable_paid_engines_except_sarvam')
+ON CONFLICT DO NOTHING;
+```
+**Applied:** `psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -c "SET lock_timeout = '3s';" -f db/migrations/0093_disable_paid_engines_except_sarvam.sql` → `SET` · `UPDATE 3` · `INSERT 0 1` · exit 0. It is `UPDATE 3`, not 4, because `ekascribe` was already `f/f` and the guard skipped it. Before, `max(version)` was 92.
+
+**Read-back** (id | enabled | fanout_enabled | is_paid), all 11 rows:
+```
+deepgram f f t · ekascribe f f t · elevenlabs f f t · elevenlabs_scribe f f t · gemini f f t
+even_pipeline t t f · indicconformer t t f · indicconformer_scribe t t f · route t f f · whisper t t f
+sarvam t t t        ← the row that proves the round
+```
+- Version `93 | 0093_disable_paid_engines_except_sarvam` recorded.
+- Pre-read, same session: `deepgram`, `elevenlabs` and `elevenlabs_scribe` were `t t t`; every other row is unchanged.
+- `scribe_system view=stt_engines` (operator MCP) independently reports the same flags.
+
+## C28 — health probe: NOT RUN
+Not reachable from this session:
+- the operator MCP's health tools are not among this session's connected tools;
+- `/api/admin/stt-lab/health` needs a production admin session, and I hold no admin secret.
+
+**Expected from the code, not observed:**
+- `deepgram`, `elevenlabs` and `elevenlabs_scribe` will **still probe, and report healthy** while their keys are set. Their adapters do not read `enabled`.
+- Only `gemini` reports disabled, through its own `GEMINI_STT` gate (`adapters/gemini.ts:345`).
+- `health.ts:116` stops *counting* them, since it filters on `enabled`, but the vendor calls continue.
+- This is the finding §4 anticipated. Whoever has the health tool should confirm it.
 
 ## Flags
-- **D1-1:** after 0093, Deepgram spend would continue on every encounter recording and English note, and nothing would show it, since the Lab would report the engine disabled.
-- **D1-2:** ElevenLabs has no direct path outside the registry, so a row disable would stop its transcription. Only its health probe would still call the vendor.
-- **D1-3:** Eka Scribe is already fail-closed.
-- **D1-4:** not pushed. §5's push was for the migration record, and there is no migration. This report and the kickoff are committed locally.
+- **D1-1:** Deepgram spend continues through paths 1–3 on doctor encounters, and path 4 on operator request. The Lab now shows the engine disabled, so the spend is less visible, not stopped. Closing it is application code (a later round), or removing `DEEPGRAM_API_KEY` in Vercel (V's call).
+- **D1-2:** ElevenLabs has no direct path outside the registry, so its transcription is stopped. Only its health probe still calls the vendor.
+- **D1-3:** `migrations-self-record` was not re-run while M7 holds the Mini; the recording line is in the required form.
