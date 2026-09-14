@@ -25,6 +25,7 @@
  * wearing the shape of "no rows".
  */
 import { execFileSync } from "node:child_process";
+import { containerName } from "./container-name";
 
 export type Sql = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>;
 
@@ -83,7 +84,12 @@ function mainStatementAt(q: string): number {
   return -1;
 }
 
-export function pgContainer(name: string) {
+/**
+ * `base` is the suite's stem (`eta-s1-emotion`, …); the container is `<base>-<worktree tag>`, so a suite in one
+ * worktree can never `rm -f` another worktree's database (tests/support/container-name.ts). `name` is returned.
+ */
+export function pgContainer(base: string) {
+  const name = containerName(base);
   const docker = (args: string[], input?: string) =>
     execFileSync("docker", args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
   const psql = (text: string) =>
@@ -133,5 +139,5 @@ export function pgContainer(name: string) {
     return JSON.parse(out) as unknown[];
   };
 
-  return { start, stop, exec, sql };
+  return { name, start, stop, exec, sql };
 }
