@@ -19,9 +19,24 @@
  *     cleared on `enqueued`. A refusal that returns before the claim leaves the window `closed`; without
  *     the cooldown the same refused window held the one slot on every tick.
  *
- * ─── ONE WINDOW PER TICK, NEWEST FIRST, SIX HOURS BACK ─────────────────────────────────────
+ * ─── ONE WINDOW PER TICK, SIX HOURS BACK ─────────────────────────────────────────────────────
  * The cap stays 1 until `route`'s realtime factor is measured on a genuine clinic-length window; it is
  * set from that measurement, not from arithmetic. Do not order oldest-first and do not raise the cap here.
+ *
+ * ─── FAIR ACROSS ROOMS, NEWEST FIRST WITHIN A ROOM (E17) ─────────────────────────────────────
+ * The order was `closed_at DESC` over all windows. Each kiosk closes its windows at a fixed offset after
+ * every grid line (sd 0.0 s within one kiosk run), so the same room was "newest" on every tick and a
+ * second room got nothing for as long as neither kiosk restarted: live, 25 of 25 slots to one room and
+ * zero to a room holding 113 windows. Now:
+ *   - ROOMS are ranked first: least recently served first. "Served" is a `room_window` job created for
+ *     one of the room's windows within AUTO_DRAIN_MAX_AGE_HOURS (the drain's own submit writes it, so no
+ *     new column; the scan is bounded by jobs in that horizon, not by the backlog). A room with no such
+ *     job ranks first.
+ *   - ONE window per room per tick, so a room cannot take two slots while another waits.
+ *   - WITHIN a room, newest first by the window's grid slot (`end_ms`), which is cut from the recorder's
+ *     own chunk timestamps. Not `closed_at`: that is stamped when the covering chunk is verified, and a
+ *     window verified 18 hours late would arrive "fresh" and jump material recorded minutes ago (R6).
+ * This redistributes the slots; it does not add any. Capacity is still one window per tick.
  *
  * SHIPS DARK behind ROOM_AUTO_DRAIN_ENABLED. Unset, this is a clean no-op: no scan, no write, no drain.
  */
@@ -67,8 +82,42 @@ export type AutoDrainResult = {
   results: Array<{ window_id: string; step: string; detail?: string; job_id?: string }>;
 };
 
+/** An eligible window as the scan returns it. Times are epoch ms; `last_served_ms` is the room's, or null. */
+export type DrainCandidate = {
+  id: string;
+  room_id: string;
+  start_ms: number;
+  end_ms: number;
+  closed_ms: number;
+  last_served_ms: number | null;
+};
+
 /**
- * Offer up to AUTO_DRAIN_BATCH_LIMIT eligible windows to `drainRoomWindow`, newest first.
+ * PURE — the E17 order. From every eligible window, the windows to offer this tick:
+ *   1. per room, the newest window by grid slot (`end_ms`, then `start_ms`; `closed_ms` and `id` only break
+ *      an exact tie, e.g. two lanes of one slot);
+ *   2. rooms least recently served first — never served (null) before any served room — then the room whose
+ *      chosen window is newest, then `room_id`, so the order is total and repeatable;
+ *   3. at most `limit` windows, one per room.
+ */
+export function orderAutoDrainOffers(candidates: DrainCandidate[], limit: number): DrainCandidate[] {
+  const newer = (a: DrainCandidate, b: DrainCandidate) =>
+    b.end_ms - a.end_ms || b.start_ms - a.start_ms || b.closed_ms - a.closed_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const perRoom = new Map<string, DrainCandidate>();
+  for (const c of candidates) {
+    const held = perRoom.get(c.room_id);
+    if (!held || newer(c, held) < 0) perRoom.set(c.room_id, c);
+  }
+  const served = (c: DrainCandidate) => (c.last_served_ms === null ? -Infinity : c.last_served_ms);
+  return [...perRoom.values()]
+    .sort((a, b) => served(a) - served(b) || newer(a, b) || (a.room_id < b.room_id ? -1 : a.room_id > b.room_id ? 1 : 0))
+    .slice(0, Math.max(0, limit));
+}
+
+const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+
+/**
+ * Offer up to AUTO_DRAIN_BATCH_LIMIT eligible windows to `drainRoomWindow`, in `orderAutoDrainOffers` order.
  *
  * ELIGIBLE: in a room with Transcript on, closed, grid-aligned, with a room_day, closed within
  * AUTO_DRAIN_MAX_AGE_HOURS, not refused within AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES, and no `room_window`
@@ -106,11 +155,28 @@ export async function enqueueAutoDrain(
   // let Transcript-off windows hold the slot again. drainRoomWindow's isTranscriptEnabled on entry stays
   // the authority; this is an optimisation on top. An unknown room drops out of the join: fail closed,
   // as the helper does.
-  const windows = (await sql`
-    SELECT w.id
+  // Every filter is applied in SQL, before any ranking, exactly as before; the scan returns all eligible
+  // windows (bounded by AUTO_DRAIN_MAX_AGE_HOURS) and orderAutoDrainOffers picks the slot(s). LAST SERVED:
+  // the newest `room_window` job per room inside the same horizon. `status IN (...)` lists 0082's five
+  // CHECKed states so the (status, created_at) index can bound the job scan to the horizon.
+  const eligible = (await sql`
+    WITH served AS (
+      SELECT ss.room_id, MAX(j.created_at) AS last_served_at
+        FROM scribe_job j
+        JOIN bench_window sw ON sw.id = j.args->>'window_id'
+        JOIN bench_session ss ON ss.id = sw.session_id
+       WHERE j.kind = ${ROOM_WINDOW_KIND}
+         AND j.status IN ('queued', 'running', 'done', 'failed', 'cancelled')
+         AND j.created_at >= NOW() - (${AUTO_DRAIN_MAX_AGE_HOURS}::int * INTERVAL '1 hour')
+       GROUP BY ss.room_id
+    )
+    SELECT w.id, s.room_id, w.start_ms, w.end_ms,
+           (EXTRACT(EPOCH FROM w.closed_at) * 1000)::float8 AS closed_ms,
+           (EXTRACT(EPOCH FROM served.last_served_at) * 1000)::float8 AS last_served_ms
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
       JOIN room r ON r.id = s.room_id AND r.transcript_enabled = TRUE
+      LEFT JOIN served ON served.room_id = s.room_id
      WHERE w.state = 'closed'
        AND w.grid_aligned = TRUE
        AND w.room_day_id IS NOT NULL
@@ -123,9 +189,15 @@ export async function enqueueAutoDrain(
             AND j.args->>'window_id' = w.id
             AND j.status IN ('queued', 'running')
        )
-     ORDER BY w.closed_at DESC
-     LIMIT ${limit}
-  `) as Array<{ id: string }>;
+  `) as Array<Record<string, unknown>>;
+  const windows = orderAutoDrainOffers(
+    eligible.map((e) => ({
+      id: String(e.id), room_id: String(e.room_id),
+      start_ms: num(e.start_ms) ?? 0, end_ms: num(e.end_ms) ?? 0, closed_ms: num(e.closed_ms) ?? 0,
+      last_served_ms: num(e.last_served_ms),
+    })),
+    limit,
+  );
   result.considered = windows.length;
 
   for (const w of windows) {

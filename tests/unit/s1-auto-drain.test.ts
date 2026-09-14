@@ -106,7 +106,7 @@ async function freshModule(env: Record<string, string>): Promise<AutoDrainModule
 }
 
 /** A recording fake: every query is logged in order; the window scan answers `rows`, everything else []. */
-function fakeSql(rows: Array<{ id: string }>): { calls: string[] } {
+function fakeSql(rows: Array<Record<string, unknown> & { id: string }>): { calls: string[] } {
   const log = { calls: [] as string[] };
   H.sql = (async (s: TemplateStringsArray) => {
     const text = s.join("?").replace(/\s+/g, " ");
@@ -241,11 +241,26 @@ describe("the env constants — defaults, clamps, and every NAME read at a non-d
   });
 
   it("the cap cannot be raised by the caller's limit", async () => {
+    // E17: the cap is applied by orderAutoDrainOffers after the scan, not as a SQL LIMIT. So the proof is
+    // behavioural: more eligible windows than the cap, in more rooms than the cap, and a caller limit above it.
     process.env[FLAG] = "1";
-    const values: unknown[][] = [];
-    H.sql = (async (_s: TemplateStringsArray, ...v: unknown[]) => { values.push(v); return []; }) as Sql;
-    await enqueueAutoDrain("https://x.test", { limit: AUTO_DRAIN_BATCH_LIMIT + 5, log: silent });
-    expect(values[0]!.at(-1)).toBe(AUTO_DRAIN_BATCH_LIMIT);
+    const n = AUTO_DRAIN_BATCH_LIMIT + 5;
+    fakeSql(Array.from({ length: n }, (_, i) => ({ id: `bw_${i}`, room_id: `room_${i}`, start_ms: i * 900_000, end_ms: (i + 1) * 900_000, closed_ms: 0, last_served_ms: null })));
+    const r = await enqueueAutoDrain("https://x.test", { limit: n, log: silent });
+    expect(r.considered).toBe(AUTO_DRAIN_BATCH_LIMIT);
+    expect(H.drained).toHaveLength(AUTO_DRAIN_BATCH_LIMIT);
+  });
+
+  it("E17: the scan's last_served_ms reaches the ranking — a recently served room with the newer window yields the slot", async () => {
+    process.env[FLAG] = "1";
+    // The scan returns numerics as strings, as the driver does for float8/bigint; the seam must convert them.
+    fakeSql([
+      { id: "bw_served_newer", room_id: "room_a", start_ms: "7200000", end_ms: "8100000", closed_ms: "8160000", last_served_ms: "8000000" },
+      { id: "bw_waiting_older", room_id: "room_b", start_ms: "900000", end_ms: "1800000", closed_ms: "1860000", last_served_ms: null },
+    ]);
+    const r = await enqueueAutoDrain("https://x.test", { log: silent });
+    expect(r.considered).toBe(1);
+    expect(H.drained.map((d) => d.windowId), "room_b was never served; room_a was, so room_b goes first despite the older slot").toEqual(["bw_waiting_older"]);
   });
 });
 
@@ -525,21 +540,66 @@ describe.skipIf(!HAVE_DOCKER)("the cap and the order", () => {
     return ages.map((_, i) => `bw_rank_${i}`);
   }
 
-  it("the shipped cap: AUTO_DRAIN_BATCH_LIMIT windows, and they are the newest", async () => {
-    const newestFirst = seedScrambled(AUTO_DRAIN_BATCH_LIMIT, AUTO_DRAIN_MAX_AGE_HOURS);
+  it("the shipped cap: AUTO_DRAIN_BATCH_LIMIT window, the NEWEST SLOT in the room — which here closed longest ago (E17 R6)", async () => {
+    const newestClosedFirst = seedScrambled(AUTO_DRAIN_BATCH_LIMIT, AUTO_DRAIN_MAX_AGE_HOURS);
+    // start_ms rises with insertion; the last inserted has the newest slot and the OLDEST closed_at.
+    const newestSlot = newestClosedFirst.at(-1)!;
     const r = await drainOnce();
     expect(r.considered).toBe(AUTO_DRAIN_BATCH_LIMIT);
-    expect(offered()).toEqual(newestFirst.slice(0, AUTO_DRAIN_BATCH_LIMIT));
+    expect(offered()).toEqual([newestSlot]);
+    expect(offered(), "closed_at DESC would have taken a different window").not.toEqual(newestClosedFirst.slice(0, 1));
   });
 
-  it("AUTO_DRAIN_BATCH_LIMIT at a NON-DEFAULT value: the whole batch, closed_at DESC, stopping at the cap", async () => {
+  it("AUTO_DRAIN_BATCH_LIMIT at a NON-DEFAULT value: one window per room, up to the cap", async () => {
     const cap = 3;
     expect(cap, "a non-default cap").not.toBe(AUTO_DRAIN_BATCH_LIMIT);
     const m = await freshModule({ [BATCH]: String(cap) });
-    const newestFirst = seedScrambled(cap, AUTO_DRAIN_MAX_AGE_HOURS);
+    pg.exec(`INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_c1', 'c1', 'C1', 'x', TRUE), ('room_c2', 'c2', 'C2', 'x', TRUE)
+             ON CONFLICT (id) DO UPDATE SET transcript_enabled = TRUE;
+             INSERT INTO bench_session (id, room_id) VALUES ('sess_c1', 'room_c1'), ('sess_c2', 'room_c2') ON CONFLICT (id) DO NOTHING;`);
+    seedScrambled(cap, AUTO_DRAIN_MAX_AGE_HOURS); // cap + 2 windows, all in room_on
+    windowRow("bw_c1", { session: "sess_c1" });
     const r = await drainOnce(m);
-    expect(r.considered).toBe(cap);
-    expect(offered()).toEqual(newestFirst.slice(0, cap));
+    expect(r.considered, "room_on holds five windows but takes one; room_c1 takes one; room_c2 has none").toBe(2);
+    expect(offered()).toContain("bw_c1");
+  });
+});
+
+describe.skipIf(!HAVE_DOCKER)("E17 — last served, derived from scribe_job, in the selector", () => {
+  beforeEach(() => {
+    resetDb();
+    pg.exec(`INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_two', 'two', 'Two', 'x', TRUE)
+             ON CONFLICT (id) DO UPDATE SET transcript_enabled = TRUE;
+             INSERT INTO bench_session (id, room_id) VALUES ('sess_two', 'room_two') ON CONFLICT (id) DO NOTHING;`);
+  });
+  const servedJob = (id: string, windowId: string, minutesAgo: number) =>
+    pg.exec(`INSERT INTO scribe_job (id, kind, args, status, created_at) VALUES ('${id}', 'room_window', '{"window_id": "${windowId}"}', 'done', NOW() - (${minutesAgo} * INTERVAL '1 minute'));`);
+
+  it("the room served more recently waits; the other room takes the slot even though its window is older", async () => {
+    windowRow("bw_on_done", { state: "transcribed" });
+    windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+    windowRow("bw_on_new", { ageMin: 5 });
+    servedJob("job_on", "bw_on_done", 5);
+    await drainOnce();
+    expect(offered()).toEqual(["bw_two_old"]);
+  });
+
+  it("a room_window job older than AUTO_DRAIN_MAX_AGE_HOURS does not count as served", async () => {
+    windowRow("bw_two_done", { session: "sess_two", state: "transcribed" });
+    windowRow("bw_on_a", { ageMin: 30 });
+    windowRow("bw_two_b", { session: "sess_two", ageMin: 5 });
+    servedJob("job_two_old", "bw_two_done", AUTO_DRAIN_MAX_AGE_HOURS * 60 + 30);
+    await drainOnce();
+    expect(offered(), "neither room served inside the horizon: the newer slot wins").toEqual(["bw_two_b"]);
+  });
+
+  it("a window verified 18 hours late, in a room never served, does not take the slot from a fresh window in another (R6)", async () => {
+    windowRow("bw_fresh_two", { session: "sess_two", ageMin: 10 });
+    pg.exec(`UPDATE bench_window SET start_ms = start_ms + 100 * 900000, end_ms = end_ms + 100 * 900000 WHERE id = 'bw_fresh_two';`);
+    windowRow("bw_late_verify", { ageMin: 1 });
+    pg.exec(`UPDATE bench_window SET start_ms = 0, end_ms = 900000 WHERE id = 'bw_late_verify';`);
+    await drainOnce();
+    expect(offered()).toEqual(["bw_fresh_two"]);
   });
 });
 
