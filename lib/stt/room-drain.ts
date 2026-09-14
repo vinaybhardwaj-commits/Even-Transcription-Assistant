@@ -38,6 +38,7 @@
 import { sql } from "@/lib/db";
 import { getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
+import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { resolveRange, type CoveringChunk, type RangeChunk } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService, refuseIfTooLong, clipKey, joinServiceConfigured } from "@/lib/bench-join";
 import { isTranscriptEnabled } from "@/lib/room-switches";
@@ -732,6 +733,75 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
     });
     out.whisper_full_ms = full.latency_ms;
     out.whisper_full_attempts = full.attempts ?? 1;
+    if (!full.ok && full.error === EMPTY_TRANSCRIPT) {
+      // ─── E11 — A QUIET ROOM IS NOT A FAILED READ, ON THE THIRD PATH ─────────────────────────
+      // `empty_transcript` is a 200 with no speech: Whisper read the window and it held nothing.
+      // The sync tool (`whisperNotOkAnswer`, bench.ts) and `transcribe_range` already finish it as
+      // K5 silence; this path mapped it to `whisper_unavailable`, so a quiet window burned all
+      // DRAIN_MAX_ATTEMPTS on the same answer and read as an outage (E10 §1: 21 of 25 drains).
+      //
+      // Finished HERE, as the sync tool finishes it: zero segments through the same buildTurns,
+      // which yields ONE stt_silence, and a complete marker with segment_count 0. No routing is
+      // resolved and no engine is called — `silent_window` sends the job from segment straight to
+      // finish — and recordFailure is not reached, so no attempt is consumed.
+      //
+      // EXACT EQUALITY, deliberately. Every other error (http_*, timeout_*, network:) is a read
+      // that did not happen and stays `whisper_unavailable` below.
+      const build = buildTurns({
+        engine: whisperAdapter.key,
+        sessionId: w.session_id,
+        clipStartMs: startMs,
+        windowStartMs: startMs,
+        windowEndMs: endMs,
+        segments: [],
+        language: null,
+        sourceUsed: source,
+      });
+      const counts = await writeWindowCues(
+        origin, w.room_id, w.room_day_id, w.session_id,
+        { startMs, endMs }, build.turns,
+        (complete, stoppedEarly) => buildWindowCue({
+          engine: whisperAdapter.key,
+          sessionId: w.session_id,
+          windowStartMs: startMs,
+          windowEndMs: endMs,
+          complete,
+          segmentCount: 0,
+          language: null,
+          sourceUsed: source,
+          stoppedEarly,
+        }),
+      );
+      out.turns_written = counts.written;
+      out.turns_deleted = counts.deleted;
+      out.turns_failed = counts.failed;
+      out.window_recorded = counts.window_recorded;
+      if (counts.failed_reason) out.turns_failed_reason = counts.failed_reason;
+      if (counts.turn_write_error) out.turn_write_error = counts.turn_write_error;
+      // The silence not landing is the same failure as turns not landing: the day would hold no
+      // record that the window was read. That one still costs an attempt, as it does for speech.
+      if (cueWriteFailed(counts)) {
+        const why = counts.turn_write_error ?? counts.failed_reason ?? "unknown";
+        const attempts = await recordFailure(windowId, "cues_refused", why);
+        return { ...out, step: "cues_refused", detail: why, attempts };
+      }
+      out.segment_count = 0;
+      out.activity = "silent";
+      return {
+        ...out, ok: true, step: "ok",
+        next_progress: {
+          ...progress,
+          full_language: null,
+          whisper_full_ms: full.latency_ms,
+          whisper_full_attempts: full.attempts ?? 1,
+          whisper_model_reported: null,
+          segment_count: 0,
+          activity: "silent",
+          decided_language: probeLanguage ?? null,
+          silent_window: true,
+        },
+      };
+    }
     if (!full.ok) {
       // §C.3 — BOTH ATTEMPTS FAILED. The client has already retried once with backoff, so
       // reaching here means Whisper did not answer twice, two seconds apart. Named
@@ -1215,7 +1285,7 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
   return { ...out, ok: true, step: "ok", next_progress: { ...progress, run_id: runIdWritten, done_engine: true } };
 }
 
-/** PHASE 5 — the window is transcribed. Only reached once a run exists. */
+/** PHASE 5 — the window is transcribed. Reached once a run exists, or from `segment` for a silent window (E11), which has none. */
 export async function roomWindowFinish(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
   const out: DrainOutcome = {
     window_id: windowId, ok: false, step: "not_found",

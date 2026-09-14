@@ -72,7 +72,11 @@ export const roomWindowKind: JobKind = {
       case STEPS.segment: {
         const o = await roomWindowSegment(windowId, origin, who, ctx.progress);
         if (!o.ok) return failFromPhase(o);
-        return nextStep(STEPS.engine, { ...(o.next_progress ?? ctx.progress) });
+        const next = { ...(o.next_progress ?? ctx.progress) };
+        // E11 — a SILENT window has nothing to route. Its silence and marker are already written, so
+        // it skips `engine` entirely: no routed-engine call, and no paid engine reading 900 s of quiet.
+        // This is a fact about the audio, not an engine branch.
+        return nextStep(next.silent_window === true ? STEPS.finish : STEPS.engine, next);
       }
 
       case STEPS.engine: {
@@ -109,6 +113,7 @@ export const roomWindowKind: JobKind = {
           shadow_run_id: ctx.progress.shadow_run_id ?? null,
           segment_count: ctx.progress.segment_count ?? null,
           audio_seconds: ctx.progress.audio_seconds ?? null,
+          silent_window: ctx.progress.silent_window === true,
         });
       }
 
