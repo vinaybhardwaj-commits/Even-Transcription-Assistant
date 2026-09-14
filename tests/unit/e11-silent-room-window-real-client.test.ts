@@ -132,7 +132,7 @@ const useServer = (s: (typeof SERVER)[number]) => {
 };
 
 describe("E11(a) — what the real client emits, per way the server can answer", () => {
-  it("covers every error the client can produce, and exactly ONE answer is the bare constant", async () => {
+  it("one scenario per LISTED producer in lib/whisper.ts (a hand-kept list, not proof of every producer), and exactly ONE answer is the bare constant", async () => {
     const errors: string[] = [];
     for (const s of SERVER) {
       process.env.WHISPER_BASE_URL = "https://whisper.test";
