@@ -1,8 +1,9 @@
 /**
  * S1 — an emotion_window whose every segment failed is a FAILURE; a RETRY of it replaces the rows and
  * records what was persisted (FIX2 N1); the window row is never left stale relative to its rows, and is
- * written if and only if it would change (FIX3b C9); and a failure's counts are the rows or NULL, never a
- * remembered number (FIX3b C10).
+ * written if and only if it would change (FIX3b C9) — where "change" covers everything the segment rows can
+ * contradict, model, model_key, subfolder, cap_s and room_day_id included (FIX4 C16); and a failure's counts
+ * are the rows or NULL, never a remembered number (FIX3b C10).
  *
  * AGAINST A REAL POSTGRES (0057, 0074's two tables, 0085, 0088, 0089, 0090 verbatim), through BOUND
  * parameters. The kind's own `run` drives every step (prepare → warm → score → finish), so step dispatch
@@ -21,6 +22,8 @@ const H = vi.hoisted(() => ({
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
   mode: "all_ok" as "all_ok" | "all_fail" | "first_ok" | "warm_fail" | "throw",
   healthOk: true,
+  /** What the service says about itself on this run (FIX4: the model, subfolder and cap it reports). */
+  svc: { model: "m", subfolder: "int8", cap: 30 },
 }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
 vi.mock("@/lib/r2", () => ({ signGetUrl: async () => "https://r2.example/clip" }));
@@ -30,13 +33,13 @@ vi.mock("@/lib/emotion/client", async (orig) => {
   return {
     ...(await orig<Record<string, unknown>>()),
     emotionSecretConfigured: () => true,
-    emotionHealth: async () => (H.healthOk ? { ok: true, cap_s: 30, loaded: true, model: "m", subfolder: "int8" } : { ok: false, error: "health_down" }),
+    emotionHealth: async () => (H.healthOk ? { ok: true, cap_s: H.svc.cap, loaded: true, model: H.svc.model, subfolder: H.svc.subfolder } : { ok: false, error: "health_down" }),
     scoreSegments: async (_url: string, segments: Array<{ start_s: number; end_s: number }>) => {
       const warm = segments.length === 1 && segments[0]!.start_s === 0 && segments[0]!.end_s === 1;
       if (warm && H.mode === "warm_fail") return { ok: false, error: "emotion_http_503", retryable: true };
       if (!warm && H.mode === "throw") throw new Error("socket hang up");
       return {
-        ok: true, model: "m", model_key: "wavlm", subfolder: "int8", device: "cpu", cap_s: 30, fetch_s: null, decode_s: null,
+        ok: true, model: H.svc.model, model_key: "wavlm", subfolder: H.svc.subfolder, device: "cpu", cap_s: H.svc.cap, fetch_s: null, decode_s: null,
         results: segments.map((sg, i) => {
           const ok = warm || H.mode === "all_ok" || (H.mode === "first_ok" && i === 0);
           return ok
@@ -50,6 +53,7 @@ vi.mock("@/lib/emotion/client", async (orig) => {
 
 const { emotionWindowKind } = await import("@/lib/jobs/kinds/emotion-window");
 const { errorCodeOf } = await import("@/lib/jobs/errors");
+const { recordEmotionWindow, finishEmotionWindow } = await import("@/lib/emotion/store");
 
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -93,12 +97,13 @@ let nextStart = 0;
  * A diarized window with two speakers' runs — so TWO planned segments — and, with `turns: false`, none.
  * Speaker 0: 0–4 s and 5–9 s (one run). Speaker 1: 12–16 s and 17–20 s (one run).
  */
-function seedWindow(id: string, opts: { turns?: boolean } = {}): void {
+function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string | null } = {}): void {
   const start = (nextStart += 900_000);
   const run = `run_${id}`;
+  const windowRoomDay = opts.windowRoomDay === undefined ? "'rd_1'" : opts.windowRoomDay === null ? "NULL" : `'${opts.windowRoomDay}'`;
   pg.exec(`
     INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key, grid_aligned, state, closed_at)
-    VALUES ('${id}', 'sess_1', 'rd_1', ${start}, ${start + 900_000}, 'primary', 'clips/${id}.webm', TRUE, 'transcribed', NOW());
+    VALUES ('${id}', 'sess_1', ${windowRoomDay}, ${start}, ${start + 900_000}, 'primary', 'clips/${id}.webm', TRUE, 'transcribed', NOW());
     INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id)
     VALUES ('${id}', 'rd_1', 'ok', '[]'::jsonb, '[]'::jsonb, 'clips/${id}.webm', NULL, NULL, '${run}');
   `);
@@ -121,9 +126,11 @@ async function runKind(
   windowId: string, mode: Mode,
   before?: { step: string; tamper: (p: Record<string, unknown>) => Record<string, unknown> },
   healthOk = true,
+  svc: Partial<typeof H.svc> = {},
 ): Promise<{ steps: string[]; out: Outcome }> {
   H.mode = mode;
   H.healthOk = healthOk;
+  H.svc = { model: "m", subfolder: "int8", cap: 30, ...svc };
   let step = emotionWindowKind.first;
   let progress: Record<string, unknown> = {};
   const steps: string[] = [];
@@ -138,12 +145,19 @@ async function runKind(
   throw new Error("the kind did not finish");
 }
 
-type WindowRow = { state: string; error: string | null; attempts: number; history: number; planned: number | null; scored: number | null; failed: number | null; skipped: number | null; calls: number | null; at: string };
+type WindowRow = {
+  state: string; error: string | null; attempts: number; history: number; planned: number | null; scored: number | null; failed: number | null;
+  skipped: number | null; calls: number | null; at: string;
+  model: string | null; model_key: string | null; subfolder: string | null; cap_s: number | null; room_day_id: string | null;
+};
 const windowRow = async (id: string) =>
   ((await pg.sql`SELECT state, error, attempts, jsonb_array_length(failure_history) AS history,
                         segments_planned AS planned, segments_scored AS scored, segments_failed AS failed, segments_skipped AS skipped,
-                        calls, scored_at::text AS at
+                        calls, scored_at::text AS at, model, model_key, subfolder, cap_s, room_day_id
                    FROM room_emotion_window WHERE window_id = ${id}`) as WindowRow[])[0]!;
+/** The same identifying facts, as every segment row of the window carries them. */
+const segmentFacts = async (id: string) =>
+  (await pg.sql`SELECT DISTINCT model, model_key, subfolder, cap_s, room_day_id FROM room_span_emotion WHERE window_id = ${id} AND state <> 'skipped'`) as Array<Record<string, unknown>>;
 const segmentStates = async (id: string) =>
   ((await pg.sql`SELECT state FROM room_span_emotion WHERE window_id = ${id} ORDER BY segment_start_ms`) as Array<{ state: string }>).map((r) => r.state);
 
@@ -299,6 +313,109 @@ const cases: Case[] = [
       expect(steps).toEqual(["prepare"]);
       expect(out.kind).toBe("done");
       expect(await windowRow("bw_quiet")).toMatchObject({ state: "no_segments", error: null, planned: 0, scored: 0 });
+    },
+  },
+  // ─── C16 (FIX4, X1): the comparison covers what the segment rows can contradict ──────────────
+  {
+    name: "C16 — X1 as reproduced: same diarize run, identical counts, model AND subfolder changed → the window row IS rewritten and names the new model",
+    fn: async () => {
+      seedWindow("bw_x1");
+      await runKind("bw_x1", "all_ok");
+      const before = await windowRow("bw_x1");
+      expect(before).toMatchObject({ model: "m", subfolder: "int8" });
+      const { out } = await runKind("bw_x1", "all_ok", undefined, true, { model: "m2", subfolder: "fp16" });
+      expect(out.result).toMatchObject({ scored: 2, failed: 0, window_row: "written" });
+      const after = await windowRow("bw_x1");
+      expect(after, "same counts, so only the model can have caused the write").toMatchObject({ state: "ok", scored: 2, failed: 0, model: "m2", subfolder: "fp16" });
+      expect(after.at).not.toBe(before.at);
+      expect(await segmentFacts("bw_x1"), "window row and segment rows now agree").toEqual([{ model: "m2", model_key: "wavlm", subfolder: "fp16", cap_s: 30, room_day_id: "rd_1" }]);
+    },
+  },
+  {
+    name: "C16 — model ALONE changed → rewritten",
+    fn: async () => {
+      seedWindow("bw_c16_model");
+      await runKind("bw_c16_model", "all_ok");
+      const before = await windowRow("bw_c16_model");
+      await runKind("bw_c16_model", "all_ok", undefined, true, { model: "m2" });
+      const after = await windowRow("bw_c16_model");
+      expect(after).toMatchObject({ model: "m2", subfolder: "int8", cap_s: 30 });
+      expect(after.at).not.toBe(before.at);
+    },
+  },
+  {
+    name: "C16 — subfolder ALONE changed → rewritten",
+    fn: async () => {
+      seedWindow("bw_c16_sub");
+      await runKind("bw_c16_sub", "all_ok");
+      const before = await windowRow("bw_c16_sub");
+      await runKind("bw_c16_sub", "all_ok", undefined, true, { subfolder: "fp16" });
+      const after = await windowRow("bw_c16_sub");
+      expect(after).toMatchObject({ model: "m", subfolder: "fp16", cap_s: 30 });
+      expect(after.at).not.toBe(before.at);
+    },
+  },
+  {
+    name: "C16 — cap_s ALONE changed (30 → 20, same two segments planned) → rewritten",
+    fn: async () => {
+      seedWindow("bw_c16_cap");
+      await runKind("bw_c16_cap", "all_ok");
+      const before = await windowRow("bw_c16_cap");
+      await runKind("bw_c16_cap", "all_ok", undefined, true, { cap: 20 });
+      const after = await windowRow("bw_c16_cap");
+      expect(after, "the plan did not change under the smaller cap").toMatchObject({ planned: 2, scored: 2, cap_s: 20, model: "m" });
+      expect(after.at).not.toBe(before.at);
+    },
+  },
+  {
+    name: "C16 — room_day_id NULL → value (a backfilled day) → rewritten; NULL against a value is a difference",
+    fn: async () => {
+      seedWindow("bw_c16_day", { windowRoomDay: null });
+      await runKind("bw_c16_day", "all_ok");
+      const before = await windowRow("bw_c16_day");
+      expect(before.room_day_id).toBeNull();
+      pg.exec("UPDATE bench_window SET room_day_id = 'rd_1' WHERE id = 'bw_c16_day';");
+      await runKind("bw_c16_day", "all_ok");
+      const after = await windowRow("bw_c16_day");
+      expect(after.room_day_id).toBe("rd_1");
+      expect(after.at).not.toBe(before.at);
+    },
+  },
+  {
+    name: "C16 — model_key ALONE changed, at the store (finish() writes a constant, so the kind cannot vary it) → rewritten; identical → not",
+    fn: async () => {
+      seedWindow("bw_c16_key", { turns: false });
+      const f = { windowId: "bw_c16_key", roomDayId: "rd_1", diarizeRunId: "run_bw_c16_key", planned: 0, calls: 1, model: "m", model_key: "wavlm", subfolder: "int8", cap_s: 30 };
+      expect((await finishEmotionWindow(f)).written_state).toBe("ok");
+      const first = await windowRow("bw_c16_key");
+      expect((await finishEmotionWindow(f)).written_state, "the control: identical, nothing written").toBeNull();
+      expect((await windowRow("bw_c16_key")).at).toBe(first.at);
+      expect((await finishEmotionWindow({ ...f, model_key: "wavlm_v2" })).written_state).toBe("ok");
+      const after = await windowRow("bw_c16_key");
+      expect(after.model_key).toBe("wavlm_v2");
+      expect(after.at).not.toBe(first.at);
+    },
+  },
+  {
+    name: "C16 — cap_s NULL ↔ value is a difference in BOTH directions; NULL ↔ NULL and value ↔ same value are not",
+    fn: async () => {
+      seedWindow("bw_c16_null", { turns: false });
+      const r = { windowId: "bw_c16_null", roomDayId: "rd_1", state: "no_segments" as const, diarizeRunId: "run_bw_c16_null", error: null,
+                  counts: { planned: 0, scored: 0, skipped: 0, failed: 0, calls: 0 } };
+      const at = async () => (await windowRow("bw_c16_null")).at;
+      await recordEmotionWindow({ ...r, cap_s: null });
+      const t0 = await at();
+      await recordEmotionWindow({ ...r, cap_s: null });
+      expect(await at(), "NULL against NULL: equal, nothing written").toBe(t0);
+      await recordEmotionWindow({ ...r, cap_s: 30 });
+      const t1 = await at();
+      expect(t1, "NULL → value: written").not.toBe(t0);
+      expect((await windowRow("bw_c16_null")).cap_s).toBe(30);
+      await recordEmotionWindow({ ...r, cap_s: 30 });
+      expect(await at(), "value against the same value: nothing written").toBe(t1);
+      await recordEmotionWindow({ ...r, cap_s: null });
+      expect(await at(), "value → NULL: written").not.toBe(t1);
+      expect((await windowRow("bw_c16_null")).cap_s).toBeNull();
     },
   },
 ];

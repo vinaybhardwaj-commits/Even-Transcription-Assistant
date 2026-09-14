@@ -96,7 +96,8 @@ export type EmotionWindowRow = {
  *     EMOTION_MAX_ATTEMPTS bound (lib/emotion/enqueue.ts) is reached. A failed row being replaced is kept
  *     in failure_history;
  *   - it belongs to an older diarize run;
- *   - or its state, error or segment counts differ from what this write derives. A settled row is never
+ *   - or anything the segment rows can contradict differs from what this write derives — state, error,
+ *     segment counts, model, model_key, subfolder, cap_s, room_day_id (S1 FIX4 C16). A settled row is never
  *     left stale under segment rows that now say something else, and a re-run that reproduces the same
  *     result writes nothing — its `attempts` and `scored_at` do not move, because nothing changed.
  * Retries against the same diarize run count up; a new diarize run starts again at 1.
@@ -153,11 +154,24 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       diarize_run_id   = EXCLUDED.diarize_run_id
     WHERE room_emotion_window.state = 'failed'
        OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
+       -- COMPARED, S1 FIX4 C16: everything the segment rows can contradict, plus the facts identifying the run
+       -- that produced them - state, error, the four segment counts, model, model_key, subfolder, cap_s, room_day_id.
+       -- NOT COMPARED, each on purpose:
+       --   calls, warmup_json, timing_json - per-run telemetry with no segment counterpart; comparing them
+       --     would rewrite on every re-run and undo C9
+       --   scored_at, attempts, failure_history - write bookkeeping, derived from this write itself
+       --   diarize_run_id - already its own arm above
+       -- IS DISTINCT FROM on the row constructor counts NULL against a value as a difference and NULL against
+       -- NULL as equal, so a nullable cap_s and the all-NULL counts of a failure with no rows compare correctly.
        OR (room_emotion_window.state, room_emotion_window.error, room_emotion_window.segments_planned,
-           room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed)
+           room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed,
+           room_emotion_window.model, room_emotion_window.model_key, room_emotion_window.subfolder,
+           room_emotion_window.cap_s, room_emotion_window.room_day_id)
           IS DISTINCT FROM
           (EXCLUDED.state, EXCLUDED.error, EXCLUDED.segments_planned,
-           EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed)
+           EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed,
+           EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
+           EXCLUDED.cap_s, EXCLUDED.room_day_id)
   `;
 }
 
@@ -245,11 +259,16 @@ export async function finishEmotionWindow(f: EmotionWindowFinish): Promise<Emoti
         diarize_run_id   = EXCLUDED.diarize_run_id
       WHERE room_emotion_window.state = 'failed'
          OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
+         -- The same comparison as recordEmotionWindow, S1 FIX4 C16 - see the comment there for what is out and why.
          OR (room_emotion_window.state, room_emotion_window.error, room_emotion_window.segments_planned,
-             room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed)
+             room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed,
+             room_emotion_window.model, room_emotion_window.model_key, room_emotion_window.subfolder,
+             room_emotion_window.cap_s, room_emotion_window.room_day_id)
             IS DISTINCT FROM
             (EXCLUDED.state, EXCLUDED.error, EXCLUDED.segments_planned,
-             EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed)
+             EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed,
+             EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
+             EXCLUDED.cap_s, EXCLUDED.room_day_id)
       RETURNING state
     )
     SELECT v.scored, v.failed, v.skipped, v.zero_scored, (SELECT state FROM rec) AS written_state FROM v
