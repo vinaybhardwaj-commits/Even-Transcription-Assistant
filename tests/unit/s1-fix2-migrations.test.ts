@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
-import { dockerAvailable, pgContainer } from "../support/s1-pg";
+import { dockerAvailable, pgContainer, UnrecognisedStatementError } from "../support/s1-pg";
 
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -72,5 +72,28 @@ describe.skipIf(!HAVE_DOCKER)("0092 — bench_window.auto_drain_refused_at / _re
     ]);
     expect(await pg.sql`SELECT auto_drain_refused_at, auto_drain_refused_reason FROM bench_window WHERE id = 'bw_m'`).toEqual([{ auto_drain_refused_at: null, auto_drain_refused_reason: null }]);
     expect(await pg.sql`SELECT version, name FROM schema_migrations WHERE version = 92`).toEqual([{ version: 92, name: "0092_bench_window_auto_drain_refusal" }]);
+  });
+});
+
+describe.skipIf(!HAVE_DOCKER)("the harness itself (FIX3b C12) — what it cannot classify THROWS, never returns no rows", () => {
+  it("a leading comment or parenthesis throws a named error; the same query without it returns its row", async () => {
+    await expect(pg.sql`-- a comment first
+      SELECT 1::int AS one`).rejects.toThrow(UnrecognisedStatementError);
+    await expect(pg.sql`(SELECT 1::int AS one)`).rejects.toThrow(UnrecognisedStatementError);
+    await expect(pg.sql`/* block */ SELECT 1::int AS one`).rejects.toThrow(UnrecognisedStatementError);
+    expect(await pg.sql`SELECT 1::int AS one`, "the control: not every statement is refused").toEqual([{ one: 1 }]);
+  });
+
+  it("a first word it does not know throws too; the known ones still run", async () => {
+    await expect(pg.sql`VALUES (1)`).rejects.toThrow(/cannot classify/);
+    await expect(pg.sql`TABLE schema_migrations`).rejects.toThrow(UnrecognisedStatementError);
+    expect(await pg.sql`WITH t AS (SELECT 2::int AS two) SELECT two FROM t`).toEqual([{ two: 2 }]);
+  });
+
+  it("WITH … INSERT … SELECT with no RETURNING is EXECUTED whole — its main statement is the INSERT, not the last SELECT", async () => {
+    pg.exec("CREATE TABLE IF NOT EXISTS harness_probe (n int);");
+    expect(await pg.sql`WITH src AS (SELECT ${41}::int + 1 AS n) INSERT INTO harness_probe (n) SELECT n FROM src`).toEqual([]);
+    expect(await pg.sql`SELECT n FROM harness_probe`, "the row landed").toEqual([{ n: 42 }]);
+    expect(await pg.sql`WITH src AS (SELECT 7::int AS n) INSERT INTO harness_probe (n) SELECT n FROM src RETURNING n`, "and with RETURNING it answers").toEqual([{ n: 7 }]);
   });
 });

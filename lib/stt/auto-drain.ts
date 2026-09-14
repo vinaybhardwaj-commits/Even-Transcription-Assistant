@@ -70,10 +70,11 @@ export type AutoDrainResult = {
 /**
  * Offer up to AUTO_DRAIN_BATCH_LIMIT eligible windows to `drainRoomWindow`, newest first.
  *
- * ELIGIBLE: closed, grid-aligned, with a room_day, closed within AUTO_DRAIN_MAX_AGE_HOURS, not refused
- * within AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES, and no `room_window` job already queued or running for it.
- * The room's Transcript switch is NOT checked here — `drainRoomWindow` checks it on entry and answers
- * `flag_off`, which the cooldown then records.
+ * ELIGIBLE: in a room with Transcript on, closed, grid-aligned, with a room_day, closed within
+ * AUTO_DRAIN_MAX_AGE_HOURS, not refused within AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES, and no `room_window`
+ * job already queued or running for it. `drainRoomWindow` still checks the Transcript switch on entry and
+ * is the authority; a switch turned off between the scan and the drain answers `flag_off`, which the
+ * cooldown records.
  *
  * ACTOR: `SYSTEM_ACTOR` through the cron door unless the caller names a person. An unusable actor is
  * refused as a batch, before anything is read or written.
@@ -98,9 +99,18 @@ export async function enqueueAutoDrain(
   if (problem) throw new Error(`auto-drain refused: ${problem}`);
 
   const limit = Math.max(1, Math.min(AUTO_DRAIN_BATCH_LIMIT, Math.trunc(opts.limit ?? AUTO_DRAIN_BATCH_LIMIT) || AUTO_DRAIN_BATCH_LIMIT));
+  // THE TRANSCRIPT FILTER (FIX3b C8) is a join, applied BEFORE the LIMIT, so a window in a room with
+  // Transcript off never takes the slot and never gets a legacy row (which would drop it out of the room
+  // card's "waiting" count). It reads room.transcript_enabled DIRECTLY — the column lib/room-switches
+  // reads — because that module has only per-room readers, and a per-room check after the LIMIT would
+  // let Transcript-off windows hold the slot again. drainRoomWindow's isTranscriptEnabled on entry stays
+  // the authority; this is an optimisation on top. An unknown room drops out of the join: fail closed,
+  // as the helper does.
   const windows = (await sql`
     SELECT w.id
       FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+      JOIN room r ON r.id = s.room_id AND r.transcript_enabled = TRUE
      WHERE w.state = 'closed'
        AND w.grid_aligned = TRUE
        AND w.room_day_id IS NOT NULL

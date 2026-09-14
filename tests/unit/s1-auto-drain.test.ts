@@ -4,8 +4,9 @@
  * TWO HALVES, TWO DATABASES.
  *   The flag, the actor and the route are proven against a recording fake: what matters there is
  *   whether the scan and the drain are reached at all, and with what.
- *   The SELECTOR, the legacy row and the refusal cooldown are proven against a REAL postgres:16 with
- *   0057, 0061, 0082 and 0092 verbatim, through BOUND parameters (tests/support/s1-pg.ts). Every
+ *   The SELECTOR, the Transcript filter, the legacy row and the refusal cooldown are proven against a REAL
+ *   postgres:16 with 0041's room and bench_session, 0057, 0061, 0065, 0082 and 0092 verbatim, through
+ *   BOUND parameters (tests/support/s1-pg.ts). Every
  *   exclusion is shown twice on the same row: refused, then — with only that one field changed — offered.
  *
  * THE ENVIRONMENT IS PART OF THE CONTRACT (FIX2 N4). A misspelt env name falls back to the default
@@ -21,6 +22,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import { readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import { dockerAvailable, pgContainer, type Sql } from "../support/s1-pg";
+import { makeFakeOperator } from "../support/fake-identity";
 
 const H = vi.hoisted(() => ({
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
@@ -31,7 +33,6 @@ const H = vi.hoisted(() => ({
   submits: 0,
   submitThrows: false,
   cookie: null as string | null,
-  claims: null as Record<string, unknown> | null,
 }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
 vi.mock("@/lib/stt/room-drain", async (orig) => {
@@ -56,10 +57,10 @@ vi.mock("@/lib/jobs/submit", () => ({
     return { id: `job_real_${H.submits}` };
   },
 }));
+// The cookie READ is the only seam: next/headers has no request here. The token in it is REAL — minted by
+// signAdminJwt and verified by the real verifyAdminJwt (FIX3b C14) — so the door is proven to open, not
+// merely to call its helpers.
 vi.mock("@/lib/cookie", () => ({ readAdminCookie: async () => H.cookie }));
-vi.mock("@/lib/auth", () => ({
-  verifyAdminJwt: async () => { if (!H.claims) throw new Error("bad token"); return H.claims; },
-}));
 
 const { enqueueAutoDrain, clampedIntEnv, AUTO_DRAIN_BATCH_LIMIT, AUTO_DRAIN_MAX_AGE_HOURS, AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES, ROOM_AUTO_DRAIN_ENABLED_ENV } = await import("@/lib/stt/auto-drain");
 const { SYSTEM_ACTOR, actorProblem } = await import("@/lib/stt/receipt");
@@ -71,12 +72,12 @@ const FLAG = "ROOM_AUTO_DRAIN_ENABLED";
 const BATCH = "AUTO_DRAIN_BATCH_LIMIT";
 const MAX_AGE = "AUTO_DRAIN_MAX_AGE_HOURS";
 const COOLDOWN = "AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES";
-const ENV_KEYS = [FLAG, BATCH, MAX_AGE, COOLDOWN, "CRON_SECRET", "MIGRATION_SECRET"];
+const ENV_KEYS = [FLAG, BATCH, MAX_AGE, COOLDOWN, "CRON_SECRET", "MIGRATION_SECRET", "JWT_SECRET_ADMIN"];
 let saved: Record<string, string | undefined> = {};
 const silent = () => {};
 
 beforeEach(() => {
-  Object.assign(H, { step: "enqueued", detail: undefined, realDrain: false, submits: 0, submitThrows: false, cookie: null, claims: null });
+  Object.assign(H, { step: "enqueued", detail: undefined, realDrain: false, submits: 0, submitThrows: false, cookie: null });
   H.drained.length = 0;
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) delete (process.env as Record<string, string | undefined>)[k];
@@ -266,7 +267,17 @@ const noRecord = (f: string) => readFileSync(f, "utf8").replace(/INSERT INTO sch
 beforeAll(() => {
   if (!HAVE_DOCKER) return;
   pg.start();
-  pg.exec("CREATE TABLE bench_session (id text PRIMARY KEY, room_id text); INSERT INTO bench_session VALUES ('sess_1', 'room_1');");
+  // room and bench_session from 0041 verbatim, room.transcript_enabled from 0065 verbatim.
+  const m0041 = readFileSync("db/migrations/0041_room_bench.sql", "utf8");
+  const keep = (name: string) => { const i = m0041.indexOf(`CREATE TABLE IF NOT EXISTS ${name} (`); return m0041.slice(i, m0041.indexOf(");", i) + 2); };
+  pg.exec("CREATE TABLE schema_migrations (version int PRIMARY KEY, name text);");
+  pg.exec(keep("room"));
+  pg.exec(noRecord("db/migrations/0065_room_processing_switches.sql"));
+  pg.exec(keep("bench_session"));
+  pg.exec(`
+    INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_on', 'on', 'On', 'x', TRUE), ('room_off', 'off', 'Off', 'x', FALSE);
+    INSERT INTO bench_session (id, room_id) VALUES ('sess_1', 'room_on'), ('sess_off', 'room_off');
+  `);
   pg.exec(noRecord("db/migrations/0057_bench_window.sql"));
   pg.exec(noRecord("db/migrations/0061_stt_subject_job.sql"));
   pg.exec(noRecord("db/migrations/0082_scribe_job.sql"));
@@ -276,11 +287,11 @@ afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
 let startMs = 0;
 /** A window eligible in every respect unless overridden. `ageMin` is minutes since close; `refusedMin` minutes since a refusal. */
-function windowRow(id: string, o: { ageMin?: number; state?: string; grid?: boolean; roomDay?: string | null; refusedMin?: number } = {}): void {
+function windowRow(id: string, o: { ageMin?: number; state?: string; grid?: boolean; roomDay?: string | null; refusedMin?: number; session?: string } = {}): void {
   startMs += 900_000;
   const q = (v: string | null) => (v === null ? "NULL" : `'${v}'`);
   pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, grid_aligned, state, closed_at, auto_drain_refused_at, auto_drain_refused_reason)
-           VALUES ('${id}', 'sess_1', ${q(o.roomDay === undefined ? "rd_1" : o.roomDay)}, ${startMs}, ${startMs + 900_000}, 'primary',
+           VALUES ('${id}', '${o.session ?? "sess_1"}', ${q(o.roomDay === undefined ? "rd_1" : o.roomDay)}, ${startMs}, ${startMs + 900_000}, 'primary',
                    ${o.grid ?? true}, '${o.state ?? "closed"}', NOW() - (${o.ageMin ?? 10} * INTERVAL '1 minute'),
                    ${o.refusedMin === undefined ? "NULL" : `NOW() - (${o.refusedMin} * INTERVAL '1 minute')`},
                    ${o.refusedMin === undefined ? "NULL" : "'flag_off'"});`);
@@ -293,7 +304,7 @@ const drainOnce = async (mod: Pick<AutoDrainModule, "enqueueAutoDrain"> = { enqu
   return mod.enqueueAutoDrain("https://x.test", { log: silent });
 };
 const resetDb = () => {
-  pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job;");
+  pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job; UPDATE room SET transcript_enabled = (id = 'room_on');");
   H.sql = pg.sql;
   process.env[FLAG] = "1";
 };
@@ -364,6 +375,45 @@ describe.skipIf(!HAVE_DOCKER)("the selector — each exclusion, then the same ro
     pg.exec(`TRUNCATE scribe_job; INSERT INTO scribe_job (id, kind, args, status) VALUES ('job_other', 'diarize_window', '{"window_id":"bw_job"}', 'queued');`);
     expect((await drainOnce()).considered).toBe(1);
     expect(offered()).toEqual(["bw_job"]);
+  });
+});
+
+describe.skipIf(!HAVE_DOCKER)("the Transcript filter (FIX3b C8) — in the selector, before the LIMIT", () => {
+  beforeEach(resetDb);
+  const legacyRows = async (id: string) =>
+    ((await pg.sql`SELECT count(*)::int AS n FROM stt_subject_job WHERE subject_type = 'bench_window' AND subject_id = ${id}`) as Array<{ n: number }>)[0]!.n;
+
+  it("a window in a Transcript-OFF room is not selected and gets NO legacy row; the identical window in a Transcript-ON room is, and does", async () => {
+    windowRow("bw_room_off", { session: "sess_off" });
+    expect((await drainOnce()).considered).toBe(0);
+    expect(offered()).toEqual([]);
+    expect(await legacyRows("bw_room_off"), "it must not leave the room card's waiting count").toBe(0);
+
+    windowRow("bw_room_on", { session: "sess_1" });
+    expect((await drainOnce()).considered).toBe(1);
+    expect(offered()).toEqual(["bw_room_on"]);
+    expect(await legacyRows("bw_room_on")).toBe(1);
+    expect(await legacyRows("bw_room_off")).toBe(0);
+  });
+
+  it("the same window is offered once its room's switch is turned on — only that one field changed", async () => {
+    windowRow("bw_flip", { session: "sess_off" });
+    expect((await drainOnce()).considered).toBe(0);
+    pg.exec("UPDATE room SET transcript_enabled = TRUE WHERE id = 'room_off';");
+    expect((await drainOnce()).considered).toBe(1);
+    expect(offered()).toEqual(["bw_flip"]);
+  });
+
+  it("a newer Transcript-off window cannot take the slot from an older Transcript-on one", async () => {
+    windowRow("bw_on_older", { session: "sess_1", ageMin: 60 });
+    windowRow("bw_off_newer", { session: "sess_off", ageMin: 1 });
+    await drainOnce();
+    expect(offered()).toEqual(["bw_on_older"]);
+  });
+
+  it("drainRoomWindow keeps its own Transcript check on entry — the selector's filter is on top, not instead", () => {
+    const drain = readFileSync("lib/stt/room-drain.ts", "utf8");
+    expect(drain).toContain(`if (!(await isTranscriptEnabled(w.room_id))) return { ...out, step: "flag_off" };`);
   });
 });
 
@@ -536,15 +586,34 @@ describe("/api/admin/drain-windows", () => {
     }
   });
 
-  it("POST with a signed-in admin SUCCEEDS and records that admin's id through admin_route", async () => {
+  /** A REAL admin token, through the repo's own signing path (lib/auth signAdminJwt). */
+  const mint = async (adminId: string, secret = "s1-test-admin-secret") => {
+    process.env.JWT_SECRET_ADMIN = secret;
+    const { signAdminJwt } = await import("@/lib/auth");
+    return signAdminJwt({ admin_id: adminId, email: makeFakeOperator(1).email });
+  };
+
+  it("POST with a REAL signed-in admin token SUCCEEDS, verified by the real verifyAdminJwt, and records that admin's id through admin_route", async () => {
     process.env[FLAG] = "1";
-    Object.assign(H, { cookie: "session", claims: { admin_id: "adm_s1_test" } });
+    H.cookie = await mint("adm_s1_test");
     fakeSql([{ id: "bw_a" }]);
     const res = await call("POST");
     expect(res.status).toBe(200);
     expect((await res.json()).enqueued).toBe(1);
     expect(H.drained[0]!.opts).toEqual({ actor: "adm_s1_test", via: "admin_route" });
     expect(actorProblem(H.drained[0]!.opts as never)).toBeNull();
+    const { verifyAdminJwt } = await import("@/lib/auth");
+    expect(vi.isMockFunction(verifyAdminJwt), "the JWT check is the real one").toBe(false);
+  });
+
+  it("POST with a token signed under a DIFFERENT secret is refused — the same minting path, only the key changed", async () => {
+    process.env[FLAG] = "1";
+    const db = fakeSql([{ id: "bw_a" }]);
+    H.cookie = await mint("adm_s1_test", "some-other-secret");
+    process.env.JWT_SECRET_ADMIN = "s1-test-admin-secret";
+    expect((await call("POST")).status).toBe(401);
+    expect(db.calls).toHaveLength(0);
+    expect(H.drained).toHaveLength(0);
   });
 
   it("POST with only MIGRATION_SECRET is refused, and says a manual drain records spend against a person", async () => {
@@ -558,14 +627,14 @@ describe("/api/admin/drain-windows", () => {
     expect(H.drained).toHaveLength(0);
   });
 
-  it("POST with a token that verifies but names nobody is refused admin_id_missing_from_token; a bad token is refused", async () => {
+  it("POST with a real token that verifies but names nobody is refused admin_id_missing_from_token; a malformed token is refused", async () => {
     process.env[FLAG] = "1";
     const db = fakeSql([{ id: "bw_a" }]);
-    Object.assign(H, { cookie: "session", claims: { admin_id: "" } });
+    H.cookie = await mint("");
     const res = await call("POST");
     expect(res.status).toBe(401);
     expect(JSON.stringify(await res.json())).toMatch(/admin_id_missing_from_token/);
-    Object.assign(H, { cookie: "session", claims: null });
+    H.cookie = "not-a-jwt";
     expect((await call("POST")).status).toBe(401);
     expect(db.calls).toHaveLength(0);
     expect(H.drained).toHaveLength(0);

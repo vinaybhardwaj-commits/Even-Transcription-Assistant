@@ -59,7 +59,16 @@ type Progress = {
 
 const P = (ctx: StepContext) => ctx.progress as unknown as Progress;
 
-async function fail(p: Pick<Progress, "window_id" | "room_day_id" | "diarize_run_id"> & Partial<Progress>, code: JobErrorCode, detail: string): Promise<StepOutcome> {
+/**
+ * WHERE A FAILURE'S COUNTS COME FROM (S1 FIX3b C10) — named at every call site, never a remembered number.
+ *   "rows": this attempt's segment rows exist (the failure came after prepare's delete-then-write), so
+ *           scored / skipped / failed are counted from them in the write. `planned` is the plan.
+ *   "none": record NULL — the failure came before this attempt's rows (any rows present are an earlier
+ *           attempt's), or it may be the write itself that failed.
+ */
+type FailCounts = "rows" | "none";
+
+async function fail(p: Pick<Progress, "window_id" | "room_day_id" | "diarize_run_id"> & Partial<Progress>, code: JobErrorCode, detail: string, counts: FailCounts): Promise<StepOutcome> {
   await recordEmotionWindow({
     windowId: p.window_id,
     roomDayId: p.room_day_id,
@@ -67,7 +76,7 @@ async function fail(p: Pick<Progress, "window_id" | "room_day_id" | "diarize_run
     diarizeRunId: p.diarize_run_id,
     error: `${code}: ${detail}`,
     cap_s: p.cap_s ?? null,
-    counts: p.segments ? { planned: p.segments.length, scored: p.scored ?? 0, skipped: p.skipped ?? 0, failed: p.failed ?? 0, calls: p.calls ?? 0 } : undefined,
+    counts: counts === "rows" && p.segments ? { fromRows: true, planned: p.segments.length, calls: p.calls ?? 0 } : undefined,
     warmup: p.warmup,
   });
   return failWith(jobError(code, detail));
@@ -93,7 +102,7 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
 
   const base = { window_id: w.id, room_day_id: w.room_day_id, diarize_run_id: w.last_run_id };
   const health = await emotionHealth();
-  if (!health.ok) return fail(base, "emotion_unavailable", health.error);
+  if (!health.ok) return fail(base, "emotion_unavailable", health.error, "none");
 
   const turns = (await sql`
     SELECT t.source_ref, t.speaker_idx, t.no_role_reason,
@@ -108,7 +117,7 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   const { runs, skipped } = buildRuns(attributed);
   const windowStart = Number(w.start_ms);
   let segments: PlannedSegment[];
-  try { segments = planSegments(runs, windowStart, health.cap_s); } catch (e) { return fail(base, "emotion_unavailable", String((e as Error).message).slice(0, 160)); }
+  try { segments = planSegments(runs, windowStart, health.cap_s); } catch (e) { return fail(base, "emotion_unavailable", String((e as Error).message).slice(0, 160), "none"); }
 
   const writeCtx: SegmentWrite = { windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id, clipR2Key: w.clip_r2_key, windowStartMs: windowStart, cap_s: health.cap_s, model: { model: null, model_key: null, subfolder: null, device: null } };
   // WINDOW-AS-UNIT: this attempt's rows replace every earlier attempt's, never merge with them. After the
@@ -136,7 +145,7 @@ async function warm(ctx: StepContext): Promise<StepOutcome> {
   const end = Math.min(1, (p.window_end_ms - p.window_start_ms) / 1000);
   const res = await scoreSegments(url, [{ start_s: 0, end_s: end }]);
   const wall_ms = Date.now() - t0;
-  if (!res.ok) return fail(p, res.retryable ? "emotion_unavailable" : "emotion_refused", `warm-up: ${res.error}`);
+  if (!res.ok) return fail(p, res.retryable ? "emotion_unavailable" : "emotion_refused", `warm-up: ${res.error}`, "rows");
   const first = res.results[0];
   const warmup = { loaded_before: p.loaded_before, ok: first?.ok === true, inference_s: first && first.ok ? first.inference_s : null, wall_ms };
   return nextStep("score", { ...p, warmup, calls: p.calls + 1, model: res.model, subfolder: res.subfolder, device: res.device } as unknown as Record<string, unknown>);
@@ -151,16 +160,16 @@ async function score(ctx: StepContext): Promise<StepOutcome> {
   // (0090); the attempts counter only moved on a failed retry and missed exactly this case.
   const now = (await sql`SELECT state, last_run_id FROM room_diarize_window WHERE window_id = ${p.window_id}`) as Array<{ state: string; last_run_id: string | null }>;
   if (!now[0] || now[0].state !== "ok" || now[0].last_run_id !== p.diarize_run_id) {
-    return fail(p, "diarize_changed", `planned against run ${p.diarize_run_id}, now ${now[0]?.last_run_id ?? "none"} (${now[0]?.state ?? "no row"})`);
+    return fail(p, "diarize_changed", `planned against run ${p.diarize_run_id}, now ${now[0]?.last_run_id ?? "none"} (${now[0]?.state ?? "no row"})`, "rows");
   }
 
   const url = await signGetUrl({ key: p.clip_r2_key, expiresInSeconds: PRESIGN_SECONDS });
   const res = await scoreSegments(url, batch.map((s) => ({ start_s: s.clip_start_s, end_s: s.clip_end_s })));
-  if (!res.ok) return fail({ ...p, calls: p.calls + 1 }, res.retryable ? "emotion_unavailable" : "emotion_refused", res.error);
+  if (!res.ok) return fail({ ...p, calls: p.calls + 1 }, res.retryable ? "emotion_unavailable" : "emotion_refused", res.error, "rows");
   // THE CAP ACTUALLY USED. Segments were planned under the cap /health reported; if the scoring call
   // reports a different one, the plan and the service disagree about what was allowed. Fail rather
   // than record one cap and have scored under another.
-  if (res.cap_s !== p.cap_s) return fail({ ...p, calls: p.calls + 1 }, "emotion_cap_changed", `planned under ${p.cap_s}s, service now reports ${res.cap_s}s`);
+  if (res.cap_s !== p.cap_s) return fail({ ...p, calls: p.calls + 1 }, "emotion_cap_changed", `planned under ${p.cap_s}s, service now reports ${res.cap_s}s`, "rows");
 
   const writeCtx: SegmentWrite = {
     windowId: p.window_id, roomDayId: p.room_day_id, diarizeRunId: p.diarize_run_id, clipR2Key: p.clip_r2_key,
@@ -191,7 +200,7 @@ async function finish(ctx: StepContext): Promise<StepOutcome> {
   });
   const counts = { planned, scored: r.scored, skipped: r.skipped, failed: r.failed, calls: p.calls };
   if (r.zero_scored) return failWith(jobError("emotion_window_failed", `emotion_zero_scored: ${counts.failed} of ${counts.planned} segment(s) failed`));
-  // A null written_state is the existing final row left as it is (a re-run for a settled diarize run).
+  // A null written_state: the stored row already said exactly this, so nothing was rewritten (C9).
   return doneWith({ window_id: p.window_id, ...counts, loaded_before: p.loaded_before, window_row: r.written_state === null ? "left_final" : "written" });
 }
 
@@ -218,7 +227,7 @@ export const emotionWindowKind: JobKind = {
       const p = ctx.progress as Partial<Progress>;
       const detail = `${ctx.step}: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
       if (p.window_id && typeof p.diarize_run_id === "string") {
-        return fail(p as Progress, "emotion_window_failed", detail);
+        return fail(p as Progress, "emotion_window_failed", detail, "none");
       }
       // prepare threw before a plan existed: record against the window id the job was given, if its
       // diarize row can still be read; otherwise the failure is the job's own.
@@ -229,7 +238,7 @@ export const emotionWindowKind: JobKind = {
       } catch (readErr) {
         console.error("[emotion_window] could not read the diarize row to record a failure", JSON.stringify({ window: windowId, err: String((readErr as Error)?.message ?? readErr).slice(0, 160) }));
       }
-      if (d[0]?.last_run_id) return fail({ window_id: windowId, room_day_id: d[0].room_day_id, diarize_run_id: d[0].last_run_id }, "emotion_window_failed", detail);
+      if (d[0]?.last_run_id) return fail({ window_id: windowId, room_day_id: d[0].room_day_id, diarize_run_id: d[0].last_run_id }, "emotion_window_failed", detail, "none");
       return failWith(jobError("emotion_window_failed", detail));
     }
   },

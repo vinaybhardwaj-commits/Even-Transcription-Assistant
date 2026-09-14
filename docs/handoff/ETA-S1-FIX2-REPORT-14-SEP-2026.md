@@ -275,7 +275,7 @@ Both migrations were applied verbatim twice to postgres:16 (0091 on top of 0018 
 **G10 — bus documents.**
 - Committed: the 13 named in §3 of the kickoff.
 - Left untracked because the kickoff does not name them: `ETA-S1-REFUTER-BRIEF-14-SEP-2026.md`, `ETA-M2-ROUTER-MEASUREMENT-CC-KICKOFF-14-SEP-2026.md`, both Slice E files, and `docs/handoff/scratch/*`.
-- Before staging, I scanned the 12 pre-existing documents for identifier shapes: `doc_xxxxxxxx`, uhid, member id, session/window/room-day ids, `Dr <Name>`, 10-digit runs, emails, name fields. Only matched shapes were printed, never text. One file had 4 hits, all `.py.bak-YYYYMMDDHHMMSS` rollback-file suffixes in the M1 report. Nothing else matched.
+- Before staging, I scanned the 12 pre-existing documents for identifier shapes: `doc_<id>`, uhid, member id, session/window/room-day ids, `Dr <Name>`, 10-digit runs, emails, name fields. Only matched shapes were printed, never text. One file had 4 hits, all `.py.bak-YYYYMMDDHHMMSS` rollback-file suffixes in the M1 report. Nothing else matched.
 
 **G11 — still open, not touched this round.** F6, the seventh Vercel cron, remains a watch on the preview deploy; `vercel.json` is unchanged. Per the rulings, `ROOM_AUTO_DRAIN_ENABLED` stays off pending the Refuter's PASS, this fix merged, and order M2's measurement of `route`.
 
