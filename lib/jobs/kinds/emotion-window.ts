@@ -27,7 +27,7 @@ import { signGetUrl } from "@/lib/r2";
 import { emotionEnabled } from "@/lib/emotion/gate";
 import { emotionHealth, scoreSegments, emotionSecretConfigured, EMOTION_MODEL_KEY, EMOTION_SECRET_ENV } from "@/lib/emotion/client";
 import { buildRuns, planSegments, SEGMENTS_PER_CALL, type AttributedTurn, type PlannedSegment } from "@/lib/emotion/segments";
-import { recordEmotionWindow, writeScoredOrFailed, writeSkipped, type SegmentWrite } from "@/lib/emotion/store";
+import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, writeScoredOrFailed, writeSkipped, type SegmentWrite } from "@/lib/emotion/store";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
 
@@ -111,6 +111,9 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   try { segments = planSegments(runs, windowStart, health.cap_s); } catch (e) { return fail(base, "emotion_unavailable", String((e as Error).message).slice(0, 160)); }
 
   const writeCtx: SegmentWrite = { windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id, clipR2Key: w.clip_r2_key, windowStartMs: windowStart, cap_s: health.cap_s, model: { model: null, model_key: null, subfolder: null, device: null } };
+  // WINDOW-AS-UNIT: this attempt's rows replace every earlier attempt's, never merge with them. After the
+  // plan exists, so an attempt that fails before planning leaves the previous rows as they were.
+  await clearWindowSegments(w.id);
   for (const s of skipped) await writeSkipped(writeCtx, s);
 
   if (segments.length === 0) {
@@ -176,18 +179,20 @@ async function score(ctx: StepContext): Promise<StepOutcome> {
 
 async function finish(ctx: StepContext): Promise<StepOutcome> {
   const p = P(ctx);
-  const counts = { planned: p.segments.length, scored: p.scored, skipped: p.skipped, failed: p.failed, calls: p.calls };
-  // ZERO SCORED IS A FAILURE. Every planned segment failed: recording `ok` would be a caught failure
-  // wearing success's shape. Failed, so the enqueue scan's attempt bound governs a retry. (planned = 0
-  // never reaches here — prepare records no_segments. Some scored with some failed stays ok.)
-  const zeroScored = p.segments.length > 0 && p.scored === 0;
-  await recordEmotionWindow({
-    windowId: p.window_id, roomDayId: p.room_day_id, state: zeroScored ? "failed" : "ok", diarizeRunId: p.diarize_run_id, error: zeroScored ? "emotion_zero_scored" : null,
-    model: p.model, model_key: EMOTION_MODEL_KEY, subfolder: p.subfolder, cap_s: p.cap_s, counts, warmup: p.warmup,
+  // THE COUNTS ARE THE ROWS. finishEmotionWindow counts room_span_emotion in the statement that writes the
+  // window, and decides zero-scored from that count — never from p.scored / p.failed, which can drift from
+  // what was persisted. ZERO SCORED IS A FAILURE, so the enqueue scan's attempt bound governs a retry.
+  // (planned = 0 never reaches here — prepare records no_segments. Some scored with some failed stays ok.)
+  const planned = p.segments.length;
+  const r = await finishEmotionWindow({
+    windowId: p.window_id, roomDayId: p.room_day_id, diarizeRunId: p.diarize_run_id, planned, calls: p.calls,
+    model: p.model, model_key: EMOTION_MODEL_KEY, subfolder: p.subfolder, cap_s: p.cap_s, warmup: p.warmup,
     timing: { wall_ms: Date.now() - p.started_ms },
   });
-  if (zeroScored) return failWith(jobError("emotion_window_failed", `emotion_zero_scored: ${counts.failed} of ${counts.planned} segment(s) failed`));
-  return doneWith({ window_id: p.window_id, ...counts, loaded_before: p.loaded_before });
+  const counts = { planned, scored: r.scored, skipped: r.skipped, failed: r.failed, calls: p.calls };
+  if (r.zero_scored) return failWith(jobError("emotion_window_failed", `emotion_zero_scored: ${counts.failed} of ${counts.planned} segment(s) failed`));
+  // A null written_state is the existing final row left as it is (a re-run for a settled diarize run).
+  return doneWith({ window_id: p.window_id, ...counts, loaded_before: p.loaded_before, window_row: r.written_state === null ? "left_final" : "written" });
 }
 
 const STEPS: Record<string, (ctx: StepContext) => Promise<StepOutcome>> = { prepare, warm, score, finish };
