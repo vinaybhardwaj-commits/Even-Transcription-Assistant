@@ -12,9 +12,11 @@
  * jsonb operators are the real ones.
  */
 import { execFileSync } from "node:child_process";
+import { containerName } from "./container-name";
 
 export const PG_IMAGE = "postgres:16";
-export const PG_NAME = "eta-c2-e2e";
+/** Unique per worktree: a fixed name let a suite in one worktree `rm -f` another worktree's database mid-run. */
+export const PG_NAME = containerName("eta-c2-e2e");
 
 export function dockerAvailable(): boolean {
   try { execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" }); return true; }
