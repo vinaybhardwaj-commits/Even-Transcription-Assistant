@@ -107,9 +107,11 @@ Search: `grep -rn "closed_at" lib app` and `grep -rn "SET state = 'closed'" lib 
 
 **R-c. `room_2qe955hy` (Home Office), noted by the kickoff as the clean first room:** consistent with Part 2, it is Transcript on with 0 recent windows. Nothing new was read about it.
 
-## 4. F3 caveat
+## 4. F3 — answered, caveat dropped
 
-The C23 counts (Part 2) and the C24 selection here assume the code defaults: `AUTO_DRAIN_MAX_AGE_HOURS` = 6, `AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES` = 60. Production's values were **not** read; this session has no Vercel access. V checks both in the Vercel dashboard at promotion. **If either is set to a non-default value, re-run both counts.** For C24, the room list and the clustering verdict would not change, but the window counts would.
+The revised kickoff (edited 12:42, after this report's first commit `95d384a`) records the answer. Neither `AUTO_DRAIN_MAX_AGE_HOURS` nor `AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES` exists in the Vercel project, so production runs the code defaults of 6 h and 60 min. **The C23 counts (Part 2) and the C24 selection here stand as calculated; no re-run.** I did not verify this myself (no Vercel access); it is the Orchestrator's and V's dashboard search.
+
+The same revision records that `fe021a3` is promoted to production, that `/api/health` serves it, and that production has seven crons including `/api/jobs/run`. Those are V's and the Orchestrator's observations, not re-checked here. The C24 read above (07:03 UTC) was taken before or around promotion; nothing in it depends on which build was live.
 
 ## 5. Flags
 
