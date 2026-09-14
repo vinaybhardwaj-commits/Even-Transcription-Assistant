@@ -976,6 +976,9 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
       segment_count: segmentCount,
       activity,
       decided_language: decided,
+      // E11 — SAID, not inherited. `...progress` above would carry a `silent_window: true` from an
+      // earlier silent result into this spoken window, and the kind would skip its engine.
+      silent_window: false,
       // fix-up 2 — the one routing truth, read by every later step.
       engine_id: engineKey || null,
       ...(out.shadow_run_id ? { shadow_run_id: out.shadow_run_id } : {}),

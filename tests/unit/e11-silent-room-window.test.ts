@@ -26,10 +26,12 @@ const DB = vi.hoisted(() => ({
   subjectDone: 0,
   routingReads: 0,
   runInserts: 0,
+  lastError: null as string | null,
 }));
 const ROUTER = vi.hoisted(() => ({ submits: 0 }));
 const WHISPER = vi.hoisted(() => ({ value: null as unknown, calls: 0 }));
-const CUES = vi.hoisted(() => ({ calls: [] as Array<{ turns: Row[]; marker: Row }> }));
+/** What the brain write answers. `complete: true` by default; a test sets a failed batch. */
+const CUES = vi.hoisted(() => ({ calls: [] as Array<{ turns: Row[]; marker: Row }>, answer: null as Row | null }));
 
 const ROOM_WINDOW_ROW = { id: "bw_1", session_id: "sess_1", room_day_id: "rd_1", start_ms: 0, end_ms: 900_000,
   source_mic: "primary", clip_r2_key: null, grid_aligned: true, room_id: "room_1" };
@@ -44,7 +46,7 @@ const benchChunk = (idx: number, s: string, e: string) => ({ id: `bc_${idx}`, id
 const BENCH_CHUNKS = [benchChunk(0, "2026-08-19T05:00:00Z", "2026-08-19T05:05:00Z"), benchChunk(1, "2026-08-19T05:05:00Z", "2026-08-19T05:10:00Z")];
 
 vi.mock("@/lib/db", () => {
-  const sql = async (strings: TemplateStringsArray, ..._v: unknown[]) => {
+  const sql = async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ");
     if (DB.mode === "bench") {
       if (/FROM room/.test(q) && !/bench_session/.test(q)) return [ROOM];
@@ -61,7 +63,8 @@ vi.mock("@/lib/db", () => {
     if (q.includes("FROM stt_routing")) { DB.routingReads += 1; return [{ engine_id: "route" }]; }
     if (q.includes("FROM stt_engine")) return [{ enabled: true }];
     if (q.includes("INSERT INTO transcription_run")) { DB.runInserts += 1; return []; }
-    if (q.includes("SET attempts = attempts + 1")) { DB.attemptWrites += 1; DB.attempts += 1; return [{ attempts: DB.attempts }]; }
+    // recordFailure binds `last_error` first; keep it so a test can say WHICH failure cost the attempt.
+    if (q.includes("SET attempts = attempts + 1")) { DB.attemptWrites += 1; DB.attempts += 1; DB.lastError = String(v[0]); return [{ attempts: DB.attempts }]; }
     if (q.includes("UPDATE stt_subject_job SET state = 'done'")) { DB.subjectDone += 1; return []; }
     return [];
   };
@@ -94,7 +97,7 @@ vi.mock("@/lib/mcp/tools/bench", async (orig) => ({
   writeWindowCues: async (_o: string, _r: string, _d: string, _s: string, _w: unknown, turns: Row[],
     cueFor: (complete: boolean, stoppedEarly: string | null) => Row) => {
     CUES.calls.push({ turns: [...turns], marker: cueFor(true, null) });
-    return { written: turns.length + 1, deleted: 0, failed: 0, complete: true, window_recorded: true };
+    return CUES.answer ?? { written: turns.length + 1, deleted: 0, failed: 0, complete: true, window_recorded: true };
   },
 }));
 vi.mock("@/lib/stt/eta-router", () => ({
@@ -130,8 +133,8 @@ async function driveRoom(maxSteps = 12, stopAt?: string) {
 const SILENT = () => ({ ok: false, error: EMPTY_TRANSCRIPT, latency_ms: 3_900, attempts: 1 });
 
 beforeEach(() => {
-  Object.assign(DB, { mode: "room", windowState: "transcribing", attempts: 0, attemptWrites: 0, subjectDone: 0, routingReads: 0, runInserts: 0 });
-  ROUTER.submits = 0; WHISPER.calls = 0; WHISPER.value = SILENT(); CUES.calls = [];
+  Object.assign(DB, { mode: "room", windowState: "transcribing", attempts: 0, attemptWrites: 0, subjectDone: 0, routingReads: 0, runInserts: 0, lastError: null });
+  ROUTER.submits = 0; WHISPER.calls = 0; WHISPER.value = SILENT(); CUES.calls = []; CUES.answer = null;
   process.env.BRAIN_SERVICE_TOKEN = "tok";
 });
 
@@ -152,9 +155,9 @@ describe("V1 — a window whose Whisper call is a 200 with no text finishes tran
 });
 
 describe("V2 — a real Whisper failure still fails whisper_unavailable, and still costs an attempt", () => {
-  for (const error of ["http_500: upstream exploded", "timeout_180000ms", "network: ECONNRESET", "whisper_failed",
-    // Contains the constant but is not it. An exact comparison must not treat it as silence.
-    `http_502: ${EMPTY_TRANSCRIPT}`]) {
+  // The guard of the EXACT comparison is not here: it is the real-client file
+  // (e11-silent-room-window-real-client.test.ts), built from what lib/whisper.ts actually emits.
+  for (const error of ["http_500: upstream exploded", "timeout_180000ms", "network: ECONNRESET", "whisper_failed"]) {
     it(`${error} → whisper_unavailable`, async () => {
       WHISPER.value = { ok: false, error, latency_ms: 40, attempts: 2 };
       const r = await driveRoom();
@@ -177,6 +180,39 @@ describe("V3 — the silent branch consumes no attempt", () => {
     expect(DB.attemptWrites, "no attempt write on either drain").toBe(0);
     expect(DB.attempts).toBe(0);
     expect(CUES.calls, "each drain replaces the window with its silence").toHaveLength(2);
+  });
+});
+
+describe("E11(b) — a silence that could not be written is NOT a finished read", () => {
+  it("the brain refuses the silence batch: one attempt, cues_refused, window back to closed, subject not done", async () => {
+    // What writeWindowCues answers when the batch POST fails (brain_timeout, brain_unreachable,
+    // permission): the turns rolled back and complete:false. Without this refusal a silent window
+    // would end `transcribed` with no record in the day and never be picked again.
+    CUES.answer = { written: 0, deleted: 0, failed: 2, complete: false, window_recorded: false, turn_write_error: "brain_timeout" };
+    const r = await driveRoom();
+    expect(r.error).toBe("room_window_failed: cues_refused");
+    expect(r.visited).toEqual(["prepare", "segment"]);
+    expect(CUES.calls, "the silence WAS attempted").toHaveLength(1);
+    expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
+    expect(DB.lastError).toBe("cues_refused: brain_timeout");
+    expect(DB.windowState, "back in the queue, not settled").toBe("closed");
+    expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
+    expect(ROUTER.submits + DB.routingReads + DB.runInserts, "and still no engine").toBe(0);
+  });
+});
+
+describe("E11(c) — silent_window is SAID on a spoken result, never inherited", () => {
+  it("segment entered with silent_window:true in progress, on a spoken window, goes to engine and clears the flag", async () => {
+    // No step order does this today. The test pins the hazard: a stale `true` carried by the
+    // speech branch's `...progress` would skip a spoken window's engine — silent data loss.
+    WHISPER.value = { ok: true, transcript: "words", language: "en", latency_ms: 90, attempts: 1,
+      segments: [{ start_s: 0, end_s: 5, text: "words" }], engineVersion: "large-v3-turbo" };
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const out = await roomWindowKind.run({ job: {} as never, step: "segment", args: ARGS, runner: "r1",
+      progress: { clip_r2_key: "clips/joined.webm", audio_seconds: 900, probe_language: "en", silent_window: true } });
+    expect(out.kind).toBe("next");
+    expect((out as { step: string }).step, "a spoken window must reach its engine").toBe("engine");
+    expect((out as { progress: Row }).progress.silent_window).toBe(false);
   });
 });
 
@@ -254,24 +290,76 @@ describe("V5 — every window reader of Whisper gives the SAME answer for the sa
     }
   }
 
-  it("THE SWEEP: every caller of transcribeWithWhisper is either a window reader in the table above, or classified as not one", () => {
-    // A supplement to the behavioural table, never a substitute (rule 2): it exists so that a FOURTH
-    // path reading a window through Whisper cannot be added without someone deciding which it is.
-    const NOT_A_WINDOW_READER: Record<string, string> = {
-      "lib/whisper.ts": "the client itself — it produces EMPTY_TRANSCRIPT",
-      "lib/stt/adapters/whisper.ts": "engine adapter; the room path only reaches it for a window with speech",
-      "lib/health/whisper-probe.ts": "health probe on a fixture",
-      "app/api/health/route.ts": "health route",
-      "lib/stt/measure-job.ts": "tuning-fork measurement on a fixed reference clip",
-      "lib/transcribe-compare.ts": "engine comparison tool",
-      "app/[slug]/api/encounters/[id]/process/route.ts": "encounter pipeline — no note can be made from silence, so empty is a failure there",
-      "app/[slug]/api/transcribe/whisper-chunk/route.ts": "live encounter chunk, not a room window",
-    };
-    const callers = execSync("git ls-files -co --exclude-standard lib app scripts", { encoding: "utf8" })
-      .split("\n").filter((f) => /\.[cm]?[jt]sx?$/.test(f))
-      .filter((f) => { try { return /\btranscribeWithWhisper\b/.test(readFileSync(f, "utf8")); } catch { return false; } })
-      .sort();
-    const known = new Set([...PATHS.map((p) => p.file), ...Object.keys(NOT_A_WINDOW_READER)]);
-    expect(callers.filter((f) => !known.has(f)), "an unclassified caller of Whisper — add it to PATHS with a behavioural run, or classify it").toEqual([]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// E11(d) — THE SWEEP CLASSIFIES CALL SITES, NOT FILES.
+//
+// A supplement to the behavioural table, never a substitute (rule 2). The first version classified
+// FILES by one identifier in three roots, and the Refuter walked four realistic readers past it: a
+// reader through the adapter, a new call inside an already-classified file, a caller under a root it
+// did not scan, and a direct POST to Whisper's /inference. So: every tracked source root; five ways
+// to reach Whisper; and an EXACT count per (file, signal), so a new site in a known file fails too.
+// Comments are stripped first, so prose that names a function is not a call site.
+// ---------------------------------------------------------------------------------------------
+
+const SWEEP_ROOTS = ["lib", "app", "scripts", "services", "components"];
+const SWEEP_SOURCE = /\.(?:[cm]?[jt]sx?|py|sh)$/;
+const SIGNALS: Record<string, RegExp> = {
+  transcribeWithWhisper: /\btranscribeWithWhisper\b/g, // the client
+  whisperAdapter: /\bwhisperAdapter\b/g, // the engine adapter, by identity
+  adapterFor: /\badapterFor\s*\(/g, // the engine adapter, by key ("whisper")
+  inference: /\/inference\b/g, // a direct POST to a whisper.cpp-shaped server
+  WHISPER_BASE_URL: /\bWHISPER_BASE_URL\b/g, // anything that knows where Whisper lives
+};
+const codeOnly = (src: string) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((l) => !/^\s*(\/\/|\*|#)/.test(l)).join("\n");
+
+type SiteClass = "window_reader" | "not_a_window_reader";
+/** Every call site that can reach Whisper, counted per (file, signal), each with the decision made about it. */
+const SITES: Array<{ file: string; counts: Record<string, number>; role: SiteClass; why: string }> = [
+  { file: "lib/mcp/tools/bench.ts", counts: { transcribeWithWhisper: 2, whisperAdapter: 4, adapterFor: 1 }, role: "window_reader", why: "sync tool scribe_transcribe_range — K5 in whisperNotOkAnswer" },
+  { file: "lib/jobs/kinds/transcribe-range.ts", counts: { transcribeWithWhisper: 2 }, role: "window_reader", why: "transcribe_range job — K5 in transcribeStep" },
+  { file: "lib/stt/room-drain.ts", counts: { transcribeWithWhisper: 3, whisperAdapter: 9, adapterFor: 2 }, role: "window_reader", why: "room_window job — K5 in roomWindowSegment (E11); the probe read may fail harmlessly" },
+  { file: "lib/whisper.ts", counts: { transcribeWithWhisper: 1, inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "the client itself — it PRODUCES EMPTY_TRANSCRIPT" },
+  { file: "lib/stt/adapters/whisper.ts", counts: { transcribeWithWhisper: 2, whisperAdapter: 1, inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "engine adapter; the room path reaches it only for a window with speech, and its health() is a GET" },
+  { file: "lib/stt/registry.ts", counts: { whisperAdapter: 2, adapterFor: 1 }, role: "not_a_window_reader", why: "the registry that maps a key to an adapter" },
+  { file: "lib/stt/routing.ts", counts: { adapterFor: 1 }, role: "not_a_window_reader", why: "checks an adapter exists for a routed engine; calls nothing" },
+  { file: "lib/stt/fanout.ts", counts: { adapterFor: 4 }, role: "not_a_window_reader", why: "encounter fan-out across engines; an adapter error is an engine run's error, not a window's silence" },
+  { file: "lib/jobs/kinds/route-transcribe.ts", counts: { adapterFor: 2 }, role: "not_a_window_reader", why: "the route adapter only, by ROUTE_ADAPTER_KEY" },
+  { file: "lib/mcp/tools/stt.ts", counts: { adapterFor: 1 }, role: "not_a_window_reader", why: "engine listing / health" },
+  { file: "app/api/admin/stt-lab/health/route.ts", counts: { adapterFor: 1 }, role: "not_a_window_reader", why: "engine health" },
+  { file: "lib/stt/measure-job.ts", counts: { transcribeWithWhisper: 2 }, role: "not_a_window_reader", why: "tuning-fork measurement on one fixed reference clip" },
+  { file: "lib/transcribe-compare.ts", counts: { transcribeWithWhisper: 2 }, role: "not_a_window_reader", why: "engine comparison tool" },
+  { file: "app/[slug]/api/encounters/[id]/process/route.ts", counts: { transcribeWithWhisper: 3 }, role: "not_a_window_reader", why: "encounter pipeline — no note can be made from silence, so empty is a failure there ON PURPOSE" },
+  { file: "app/[slug]/api/transcribe/whisper-chunk/route.ts", counts: { transcribeWithWhisper: 2 }, role: "not_a_window_reader", why: "live encounter chunk, not a room window" },
+  { file: "lib/health/whisper-probe.ts", counts: { inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "health probe on a half-second fixture" },
+  { file: "lib/admin/dashboard.ts", counts: { inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "dashboard liveness GET" },
+  { file: "lib/mcp/tools/health.ts", counts: { WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "lists env var NAMES only" },
+  { file: "lib/emotion/client.ts", counts: { inference: 1 }, role: "not_a_window_reader", why: "the emotion service's /inference/wavlm, not Whisper" },
+  { file: "lib/stt/adapters/indicconformer.ts", counts: { inference: 1 }, role: "not_a_window_reader", why: "IndicConformer's own /inference, not Whisper" },
+];
+
+describe("E11(d) — every call site that can reach Whisper is classified, by count", () => {
+  it("THE SWEEP: the live (file, signal) counts are exactly the classified ones", () => {
+    const actual: Record<string, number> = {};
+    const files = execSync(`git ls-files -co --exclude-standard ${SWEEP_ROOTS.join(" ")}`, { encoding: "utf8" })
+      .split("\n").filter((f) => SWEEP_SOURCE.test(f));
+    for (const f of files) {
+      let src: string;
+      try { src = codeOnly(readFileSync(f, "utf8")); } catch { continue; }
+      for (const [name, re] of Object.entries(SIGNALS)) {
+        const n = (src.match(re) ?? []).length;
+        if (n > 0) actual[`${f} :: ${name}`] = n;
+      }
+    }
+    const expected: Record<string, number> = {};
+    for (const s of SITES) for (const [name, n] of Object.entries(s.counts)) expected[`${s.file} :: ${name}`] = n;
+    expect(actual, "a Whisper call site was added, moved or removed. Classify it in SITES — and if it reads a window, add a behavioural row to PATHS").toEqual(expected);
+  });
+
+  it("every window reader in SITES has a behavioural row in PATHS, and every PATHS row is a classified window reader", () => {
+    const readers = SITES.filter((s) => s.role === "window_reader").map((s) => s.file).sort();
+    expect(PATHS.map((p) => p.file).sort()).toEqual(readers);
   });
 });
