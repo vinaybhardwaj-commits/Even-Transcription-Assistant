@@ -3,8 +3,22 @@
  * Called by the emotion_window job and nothing else.
  */
 import { sql } from "@/lib/db";
-import type { PlannedSegment, SkippedSpan } from "./segments";
+import type { MeasuredSegment, SkippedSpan } from "./segments";
 import type { SegmentScore } from "./client";
+
+/**
+ * E16 (0097) — where `speech_ms` came from. Every row this code writes says so explicitly; a row that
+ * does not falls to the column DEFAULT `pre_speech_fraction`, which marks it as scored without a speech
+ * measure. So a pre-fix row can never read as a post-fix one.
+ */
+export const SPEECH_BASIS = "diarize_segments";
+
+/**
+ * E16 — the reason on a span that was NEVER SENT: its speaker's diarized speech is under the service's
+ * min_speech_s. The zero-scored rule tells these apart from spans the service refused, because only a
+ * refused span is part of `planned`. One spelling, bound into the SQL, never retyped there.
+ */
+export const PREFILTER_REASON = "diarized_speech_below_min_speech_s";
 
 export type SegmentWrite = {
   windowId: string;
@@ -29,38 +43,72 @@ export async function clearWindowSegments(windowId: string): Promise<void> {
   await sql`DELETE FROM room_span_emotion WHERE window_id = ${windowId}`;
 }
 
-/** Idempotent per (window, diarize run, speaker, run start, chunk) WITHIN one attempt: a retried step writes nothing new. */
-export async function writeScoredOrFailed(w: SegmentWrite, seg: PlannedSegment, score: SegmentScore): Promise<void> {
+/** The state a service answer is written as. `unscorable` is its own state, never `failed` (E16 P5). */
+export const stateFor = (score: SegmentScore): "scored" | "unscorable" | "failed" =>
+  score.ok ? "scored" : score.unscorable === true ? "unscorable" : "failed";
+
+/**
+ * A SENT span's row. Idempotent per (window, diarize run, speaker, run start, chunk) WITHIN one attempt:
+ * a retried step writes nothing new.
+ *
+ * BOTH SPEECH NUMBERS where both exist (ETA-E16-RULING §4): `speech_ms` is the diarizer's speech for
+ * this speaker, on every row; `service_speech_ms` is the service gate's own estimate, which it returns
+ * only when it refuses. They measure different things and are kept apart on purpose.
+ */
+export async function writeScoredOrFailed(w: SegmentWrite, seg: MeasuredSegment, score: SegmentScore): Promise<void> {
   const scored = score.ok ? score : null;
+  const unscorable = !score.ok && score.unscorable === true ? score : null;
   const reason = score.ok ? null : score.reason;
+  const serviceSpeechMs = unscorable && unscorable.service_speech_s !== null ? Math.round(unscorable.service_speech_s * 1000) : null;
+  const durationS = scored ? scored.duration_s : unscorable ? unscorable.duration_s : null;
   await sql`
     INSERT INTO room_span_emotion
       (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
        room_day_id, speaker_idx, source_refs, clip_r2_key, clip_start_s, clip_end_s, state, reason,
        anger, disgust, enthusiasm, fear, happiness, neutral, sadness, labels_json, top_label, top_score,
-       model, model_key, subfolder, device, inference_s, duration_s, cap_s, scored_at)
+       model, model_key, subfolder, device, inference_s, duration_s, cap_s,
+       speech_ms, service_speech_ms, speech_basis, scored_at)
     VALUES
       (${w.windowId}, ${w.diarizeRunId}, ${seg.run_start_ms}, ${seg.run_end_ms}, ${seg.chunk_idx}, ${seg.chunk_count}, ${seg.start_ms}, ${seg.end_ms},
        ${w.roomDayId}, ${seg.speaker_idx}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(seg.source_refs)}::jsonb)), ${w.clipR2Key}, ${seg.clip_start_s}, ${seg.clip_end_s},
-       ${scored ? "scored" : "failed"}, ${reason},
+       ${stateFor(score)}, ${reason},
        ${scored?.labels.anger ?? null}, ${scored?.labels.disgust ?? null}, ${scored?.labels.enthusiasm ?? null}, ${scored?.labels.fear ?? null},
        ${scored?.labels.happiness ?? null}, ${scored?.labels.neutral ?? null}, ${scored?.labels.sadness ?? null},
        ${scored ? JSON.stringify(scored.labels) : null}::jsonb, ${scored?.top_label ?? null}, ${scored?.top_score ?? null},
        ${w.model.model}, ${w.model.model_key}, ${w.model.subfolder}, ${w.model.device},
-       ${scored?.inference_s ?? null}, ${scored?.duration_s ?? null}, ${w.cap_s}, NOW())
+       ${scored?.inference_s ?? null}, ${durationS}, ${w.cap_s},
+       ${seg.speech_ms}, ${serviceSpeechMs}, ${SPEECH_BASIS}, NOW())
     ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
   `;
 }
 
-export async function writeSkipped(w: SegmentWrite, s: SkippedSpan): Promise<void> {
+/** A span NEVER SENT: its speaker's diarized speech is under min_speech_s. Written unscorable with that speech. */
+export async function writeUnscorable(w: SegmentWrite, seg: MeasuredSegment): Promise<void> {
   await sql`
     INSERT INTO room_span_emotion
       (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
-       room_day_id, speaker_idx, source_refs, clip_r2_key, clip_start_s, clip_end_s, state, reason, cap_s, scored_at)
+       room_day_id, speaker_idx, source_refs, clip_r2_key, clip_start_s, clip_end_s, state, reason, cap_s,
+       speech_ms, service_speech_ms, speech_basis, scored_at)
+    VALUES
+      (${w.windowId}, ${w.diarizeRunId}, ${seg.run_start_ms}, ${seg.run_end_ms}, ${seg.chunk_idx}, ${seg.chunk_count}, ${seg.start_ms}, ${seg.end_ms},
+       ${w.roomDayId}, ${seg.speaker_idx}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(seg.source_refs)}::jsonb)), ${w.clipR2Key}, ${seg.clip_start_s}, ${seg.clip_end_s},
+       'unscorable', ${PREFILTER_REASON}, ${w.cap_s},
+       ${seg.speech_ms}, NULL, ${SPEECH_BASIS}, NOW())
+    ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
+  `;
+}
+
+export async function writeSkipped(w: SegmentWrite, s: SkippedSpan, speechMs: number): Promise<void> {
+  await sql`
+    INSERT INTO room_span_emotion
+      (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
+       room_day_id, speaker_idx, source_refs, clip_r2_key, clip_start_s, clip_end_s, state, reason, cap_s,
+       speech_ms, service_speech_ms, speech_basis, scored_at)
     VALUES
       (${w.windowId}, ${w.diarizeRunId}, ${s.start_ms}, ${s.end_ms}, 0, 1, ${s.start_ms}, ${s.end_ms},
        ${w.roomDayId}, ${s.speaker_idx}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(s.source_refs)}::jsonb)), ${w.clipR2Key},
-       ${(s.start_ms - w.windowStartMs) / 1000}, ${(s.end_ms - w.windowStartMs) / 1000}, 'skipped', ${s.reason}, ${w.cap_s}, NOW())
+       ${(s.start_ms - w.windowStartMs) / 1000}, ${(s.end_ms - w.windowStartMs) / 1000}, 'skipped', ${s.reason}, ${w.cap_s},
+       ${speechMs}, NULL, ${SPEECH_BASIS}, NOW())
     ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
   `;
 }
@@ -84,7 +132,7 @@ export type EmotionWindowRow = {
    *   - omitted: every count is NULL — the failure came before this attempt's rows existed, or may be the
    *     write itself.
    */
-  counts?: { planned: number; scored: number; skipped: number; failed: number; calls: number } | { fromRows: true; planned: number; calls: number };
+  counts?: { planned: number; scored: number; skipped: number; failed: number; unscorable: number; calls: number } | { fromRows: true; planned: number; calls: number };
   warmup?: unknown;
   timing?: unknown;
 };
@@ -112,19 +160,21 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
   await sql`
     INSERT INTO room_emotion_window
       (window_id, room_day_id, state, diarize_run_id, error, model, model_key, subfolder, cap_s,
-       segments_planned, segments_scored, segments_skipped, segments_failed, calls, warmup_json, timing_json, scored_at)
+       segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, warmup_json, timing_json, scored_at)
     SELECT ${r.windowId}::text, ${r.roomDayId}::text, ${r.state}::text, ${r.diarizeRunId}::text, ${r.error === null ? null : r.error.slice(0, 300)}::text,
            ${r.model ?? null}::text, ${r.model_key ?? null}::text, ${r.subfolder ?? null}::text, ${r.cap_s ?? null}::double precision,
            ${c?.planned ?? null}::int,
            CASE WHEN ${fromRows}::boolean THEN seg.scored  ELSE ${explicit?.scored ?? null}::int END,
            CASE WHEN ${fromRows}::boolean THEN seg.skipped ELSE ${explicit?.skipped ?? null}::int END,
            CASE WHEN ${fromRows}::boolean THEN seg.failed  ELSE ${explicit?.failed ?? null}::int END,
+           CASE WHEN ${fromRows}::boolean THEN seg.unscorable ELSE ${explicit?.unscorable ?? null}::int END,
            ${c?.calls ?? null}::int,
            ${r.warmup === undefined ? null : JSON.stringify(r.warmup)}::jsonb, ${r.timing === undefined ? null : JSON.stringify(r.timing)}::jsonb, NOW()
       FROM (
         SELECT count(*) FILTER (WHERE state = 'scored')::int  AS scored,
                count(*) FILTER (WHERE state = 'failed')::int  AS failed,
-               count(*) FILTER (WHERE state = 'skipped')::int AS skipped
+               count(*) FILTER (WHERE state = 'skipped')::int AS skipped,
+               count(*) FILTER (WHERE state = 'unscorable')::int AS unscorable
           FROM room_span_emotion
          WHERE window_id = ${r.windowId}::text AND diarize_run_id = ${r.diarizeRunId}::text
       ) AS seg
@@ -141,6 +191,7 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       segments_scored  = EXCLUDED.segments_scored,
       segments_skipped = EXCLUDED.segments_skipped,
       segments_failed  = EXCLUDED.segments_failed,
+      segments_unscorable = EXCLUDED.segments_unscorable,
       calls            = EXCLUDED.calls,
       warmup_json      = EXCLUDED.warmup_json,
       timing_json      = EXCLUDED.timing_json,
@@ -154,7 +205,7 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       diarize_run_id   = EXCLUDED.diarize_run_id
     WHERE room_emotion_window.state = 'failed'
        OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
-       -- COMPARED, S1 FIX4 C16: state, error, the four segment counts, model, model_key, subfolder, cap_s, room_day_id.
+       -- COMPARED, S1 FIX4 C16: state, error, the segment counts (segments_unscorable added by E16 — rule 15), model, model_key, subfolder, cap_s, room_day_id.
        -- What each identifying field protects against, corrected in S1 MERGE C19:
        --   model, model_key - the emotion client refuses any service answer whose model or model_key is not its
        --     own constant, lib/emotion/client.ts:91 emotion_unexpected_model, so within one deployment no segment
@@ -172,12 +223,12 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
        -- IS DISTINCT FROM on the row constructor counts NULL against a value as a difference and NULL against
        -- NULL as equal, so a nullable cap_s and the all-NULL counts of a failure with no rows compare correctly.
        OR (room_emotion_window.state, room_emotion_window.error, room_emotion_window.segments_planned,
-           room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed,
+           room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed, room_emotion_window.segments_unscorable,
            room_emotion_window.model, room_emotion_window.model_key, room_emotion_window.subfolder,
            room_emotion_window.cap_s, room_emotion_window.room_day_id)
           IS DISTINCT FROM
           (EXCLUDED.state, EXCLUDED.error, EXCLUDED.segments_planned,
-           EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed,
+           EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed, EXCLUDED.segments_unscorable,
            EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
            EXCLUDED.cap_s, EXCLUDED.room_day_id)
   `;
@@ -203,7 +254,9 @@ export type EmotionWindowFinished = {
   scored: number;
   failed: number;
   skipped: number;
-  /** planned > 0 and no persisted row is scored — decided in the statement, from the rows. */
+  /** E16 — rows the window recorded unscorable: never sent, or refused by the service. */
+  unscorable: number;
+  /** planned minus service-refused rows > 0, and no persisted row is scored — decided in the statement, from the rows. */
   zero_scored: boolean;
   /** The state this statement wrote, or null when the stored row already said exactly this and was left as it is. */
   written_state: "ok" | "failed" | null;
@@ -224,22 +277,29 @@ export async function finishEmotionWindow(f: EmotionWindowFinish): Promise<Emoti
     WITH seg AS (
       SELECT count(*) FILTER (WHERE state = 'scored')::int  AS scored,
              count(*) FILTER (WHERE state = 'failed')::int  AS failed,
-             count(*) FILTER (WHERE state = 'skipped')::int AS skipped
+             count(*) FILTER (WHERE state = 'skipped')::int AS skipped,
+             count(*) FILTER (WHERE state = 'unscorable')::int AS unscorable,
+             -- Unscorable rows the SERVICE refused: they were sent, so they are inside planned. Spans never
+             -- sent carry PREFILTER_REASON and were never part of planned, so they are not subtracted.
+             count(*) FILTER (WHERE state = 'unscorable' AND reason IS DISTINCT FROM ${PREFILTER_REASON}::text)::int AS unscorable_sent
         FROM room_span_emotion
        WHERE window_id = ${f.windowId}::text AND diarize_run_id = ${f.diarizeRunId}::text
     ),
-    -- THE RULE, ONCE: segments were planned and none of the persisted rows is scored.
-    v AS (SELECT seg.*, (${f.planned}::int > 0 AND seg.scored = 0) AS zero_scored FROM seg),
+    -- THE RULE, ONCE (E16): segments the service COULD score were planned, and none of the persisted rows is
+    -- scored. A span the service refused as unscorable is a fact about the audio, not a failure, so it is
+    -- taken out of planned here — a window whose every sent span came back unscorable is not zero-scored,
+    -- and does not spend an attempt. A span the service FAILED stays in, and still fails the window.
+    v AS (SELECT seg.*, (${f.planned}::int - seg.unscorable_sent > 0 AND seg.scored = 0) AS zero_scored FROM seg),
     rec AS (
       INSERT INTO room_emotion_window
         (window_id, room_day_id, state, diarize_run_id, error, model, model_key, subfolder, cap_s,
-         segments_planned, segments_scored, segments_skipped, segments_failed, calls, warmup_json, timing_json, scored_at)
+         segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, warmup_json, timing_json, scored_at)
       SELECT ${f.windowId}::text, ${f.roomDayId}::text,
              CASE WHEN v.zero_scored THEN 'failed' ELSE 'ok' END,
              ${f.diarizeRunId}::text,
              CASE WHEN v.zero_scored THEN 'emotion_zero_scored' ELSE NULL END,
              ${f.model}::text, ${f.model_key}::text, ${f.subfolder}::text, ${f.cap_s}::double precision,
-             ${f.planned}::int, v.scored, v.skipped, v.failed, ${f.calls}::int,
+             ${f.planned}::int, v.scored, v.skipped, v.failed, v.unscorable, ${f.calls}::int,
              ${f.warmup === undefined ? null : JSON.stringify(f.warmup)}::jsonb, ${f.timing === undefined ? null : JSON.stringify(f.timing)}::jsonb, NOW()
         FROM v
       ON CONFLICT (window_id) DO UPDATE SET
@@ -254,6 +314,7 @@ export async function finishEmotionWindow(f: EmotionWindowFinish): Promise<Emoti
         segments_scored  = EXCLUDED.segments_scored,
         segments_skipped = EXCLUDED.segments_skipped,
         segments_failed  = EXCLUDED.segments_failed,
+        segments_unscorable = EXCLUDED.segments_unscorable,
         calls            = EXCLUDED.calls,
         warmup_json      = EXCLUDED.warmup_json,
         timing_json      = EXCLUDED.timing_json,
@@ -269,19 +330,19 @@ export async function finishEmotionWindow(f: EmotionWindowFinish): Promise<Emoti
          OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
          -- The same comparison as recordEmotionWindow, S1 FIX4 C16 - see the comment there for what is out and why.
          OR (room_emotion_window.state, room_emotion_window.error, room_emotion_window.segments_planned,
-             room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed,
+             room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed, room_emotion_window.segments_unscorable,
              room_emotion_window.model, room_emotion_window.model_key, room_emotion_window.subfolder,
              room_emotion_window.cap_s, room_emotion_window.room_day_id)
             IS DISTINCT FROM
             (EXCLUDED.state, EXCLUDED.error, EXCLUDED.segments_planned,
-             EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed,
+             EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed, EXCLUDED.segments_unscorable,
              EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
              EXCLUDED.cap_s, EXCLUDED.room_day_id)
       RETURNING state
     )
-    SELECT v.scored, v.failed, v.skipped, v.zero_scored, (SELECT state FROM rec) AS written_state FROM v
-  `) as Array<{ scored: number; failed: number; skipped: number; zero_scored: boolean; written_state: "ok" | "failed" | null }>;
+    SELECT v.scored, v.failed, v.skipped, v.unscorable, v.zero_scored, (SELECT state FROM rec) AS written_state FROM v
+  `) as Array<{ scored: number; failed: number; skipped: number; unscorable: number; zero_scored: boolean; written_state: "ok" | "failed" | null }>;
   const r = rows[0];
   if (!r) throw new Error("finishEmotionWindow: the count returned no row");
-  return { scored: Number(r.scored), failed: Number(r.failed), skipped: Number(r.skipped), zero_scored: r.zero_scored === true, written_state: r.written_state ?? null };
+  return { scored: Number(r.scored), failed: Number(r.failed), skipped: Number(r.skipped), unscorable: Number(r.unscorable), zero_scored: r.zero_scored === true, written_state: r.written_state ?? null };
 }

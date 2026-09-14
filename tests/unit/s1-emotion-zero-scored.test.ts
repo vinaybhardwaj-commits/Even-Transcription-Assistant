@@ -17,10 +17,10 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
-type Mode = "all_ok" | "all_fail" | "first_ok" | "warm_fail" | "throw";
+type Mode = "all_ok" | "all_fail" | "first_ok" | "warm_fail" | "throw" | "all_unscorable" | "first_unscorable_rest_fail";
 const H = vi.hoisted(() => ({
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
-  mode: "all_ok" as "all_ok" | "all_fail" | "first_ok" | "warm_fail" | "throw",
+  mode: "all_ok" as "all_ok" | "all_fail" | "first_ok" | "warm_fail" | "throw" | "all_unscorable" | "first_unscorable_rest_fail",
   healthOk: true,
   /** What the service says about itself on this run (FIX4: the model, subfolder and cap it reports). */
   svc: { model: "m", subfolder: "int8", cap: 30 },
@@ -33,7 +33,7 @@ vi.mock("@/lib/emotion/client", async (orig) => {
   return {
     ...(await orig<Record<string, unknown>>()),
     emotionSecretConfigured: () => true,
-    emotionHealth: async () => (H.healthOk ? { ok: true, cap_s: H.svc.cap, loaded: true, model: H.svc.model, subfolder: H.svc.subfolder } : { ok: false, error: "health_down" }),
+    emotionHealth: async () => (H.healthOk ? { ok: true, cap_s: H.svc.cap, min_speech_s: 1.5, loaded: true, model: H.svc.model, subfolder: H.svc.subfolder } : { ok: false, error: "health_down" }),
     scoreSegments: async (_url: string, segments: Array<{ start_s: number; end_s: number }>) => {
       const warm = segments.length === 1 && segments[0]!.start_s === 0 && segments[0]!.end_s === 1;
       if (warm && H.mode === "warm_fail") return { ok: false, error: "emotion_http_503", retryable: true };
@@ -41,6 +41,10 @@ vi.mock("@/lib/emotion/client", async (orig) => {
       return {
         ok: true, model: H.svc.model, model_key: "wavlm", subfolder: H.svc.subfolder, device: "cpu", cap_s: H.svc.cap, fetch_s: null, decode_s: null,
         results: segments.map((sg, i) => {
+          // E16 — the client's parsed form of the service's gate refusal: unscorable, never failed.
+          if (!warm && (H.mode === "all_unscorable" || (H.mode === "first_unscorable_rest_fail" && i === 0))) {
+            return { index: i, ok: false, unscorable: true, reason: "insufficient_speech", service_speech_s: 0.4, duration_s: sg.end_s - sg.start_s };
+          }
           const ok = warm || H.mode === "all_ok" || (H.mode === "first_ok" && i === 0);
           return ok
             ? { index: i, ok: true, labels: Object.fromEntries(LABELS.map((l) => [l, 1 / 7])), top_label: "anger", top_score: 1 / 7, duration_s: sg.end_s - sg.start_s, inference_s: 0.1 }
@@ -85,7 +89,7 @@ beforeAll(() => {
   pg.exec(noRecord("db/migrations/0057_bench_window.sql"));
   pg.exec(keep("room_turn_speaker"));
   pg.exec(keep("room_diarize_window"));
-  for (const f of ["0085_room_turn_speaker_role", "0088_room_diarize_window_retry", "0089_room_emotion", "0090_diarize_run_id_and_service_guess"]) {
+  for (const f of ["0085_room_turn_speaker_role", "0088_room_diarize_window_retry", "0089_room_emotion", "0090_diarize_run_id_and_service_guess", "0097_room_span_emotion_speech"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
   H.sql = pg.sql;
@@ -94,10 +98,18 @@ afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
 let nextStart = 0;
 /**
+ * E16 — the diarizer's speech for the seeded turns, clip-relative ms: speaker 0 over 0–9 s, speaker 1 over
+ * 12–20 s. Each planned run then measures well over min_speech_s and is sent, as these cases assume.
+ */
+const SEGMENTS_JSON = JSON.stringify([
+  { start_ms: 0, end_ms: 9000, speaker_idx: 0 },
+  { start_ms: 12000, end_ms: 20000, speaker_idx: 1 },
+]);
+/**
  * A diarized window with two speakers' runs — so TWO planned segments — and, with `turns: false`, none.
  * Speaker 0: 0–4 s and 5–9 s (one run). Speaker 1: 12–16 s and 17–20 s (one run).
  */
-function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string | null } = {}): void {
+function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string | null; segmentsJson?: string } = {}): void {
   const start = (nextStart += 900_000);
   const run = `run_${id}`;
   const windowRoomDay = opts.windowRoomDay === undefined ? "'rd_1'" : opts.windowRoomDay === null ? "NULL" : `'${opts.windowRoomDay}'`;
@@ -105,7 +117,7 @@ function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string 
     INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key, grid_aligned, state, closed_at)
     VALUES ('${id}', 'sess_1', ${windowRoomDay}, ${start}, ${start + 900_000}, 'primary', 'clips/${id}.webm', TRUE, 'transcribed', NOW());
     INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id)
-    VALUES ('${id}', 'rd_1', 'ok', '[]'::jsonb, '[]'::jsonb, 'clips/${id}.webm', NULL, NULL, '${run}');
+    VALUES ('${id}', 'rd_1', 'ok', '[]'::jsonb, '${opts.segmentsJson ?? SEGMENTS_JSON}'::jsonb, 'clips/${id}.webm', NULL, NULL, '${run}');
   `);
   if (opts.turns === false) return;
   const turns: Array<[string, number, number, number]> = [["a1", 0, 0, 4000], ["a2", 0, 5000, 9000], ["b1", 1, 12_000, 16_000], ["b2", 1, 17_000, 20_000]];
@@ -163,6 +175,55 @@ const segmentStates = async (id: string) =>
 
 type Case = { name: string; fn: () => Promise<void> };
 const cases: Case[] = [
+  // ─── E16: unscorable is not a failure, and only SENT unscorable rows leave `planned` ─────────────────
+  {
+    name: "E16 — every sent span refused as unscorable: the window is OK, not zero-scored, and spends no retry",
+    fn: async () => {
+      seedWindow("bw_e16_unscorable");
+      const { out } = await runKind("bw_e16_unscorable", "all_unscorable");
+      expect(out.kind).toBe("done");
+      expect(await segmentStates("bw_e16_unscorable")).toEqual(["unscorable", "unscorable"]);
+      expect(await windowRow("bw_e16_unscorable")).toMatchObject({ state: "ok", error: null, attempts: 1, planned: 2, scored: 0, failed: 0 });
+      const u = (await pg.sql`SELECT segments_unscorable AS n FROM room_emotion_window WHERE window_id = ${"bw_e16_unscorable"}`) as Array<{ n: number }>;
+      expect(u[0]!.n).toBe(2);
+      const rows = (await pg.sql`SELECT speech_ms, service_speech_ms, speech_basis FROM room_span_emotion WHERE window_id = ${"bw_e16_unscorable"} ORDER BY segment_start_ms`) as Array<Record<string, unknown>>;
+      expect(rows).toEqual([{ speech_ms: 9000, service_speech_ms: 400, speech_basis: "diarize_segments" }, { speech_ms: 8000, service_speech_ms: 400, speech_basis: "diarize_segments" }]);
+    },
+  },
+  {
+    name: "E16 — one refused, one genuinely failed, none scored: still zero-scored, still FAILED",
+    fn: async () => {
+      seedWindow("bw_e16_mixed");
+      const { out } = await runKind("bw_e16_mixed", "first_unscorable_rest_fail");
+      expect(out.kind).toBe("fail");
+      expect(out.error).toContain("emotion_zero_scored");
+      expect(await windowRow("bw_e16_mixed")).toMatchObject({ state: "failed", planned: 2, scored: 0, failed: 1 });
+    },
+  },
+  {
+    name: "E16 — spans never sent are NOT subtracted from planned: a lone sent span that fails still fails the window",
+    fn: async () => {
+      // Speaker 1 has no diarized speech, so its run is recorded unscorable and never sent.
+      seedWindow("bw_e16_unsent", { segmentsJson: JSON.stringify([{ start_ms: 0, end_ms: 9000, speaker_idx: 0 }]) });
+      const { out } = await runKind("bw_e16_unsent", "all_fail");
+      expect(out.kind, "subtracting the unsent row would leave planned 0 and pass this window").toBe("fail");
+      expect(await segmentStates("bw_e16_unsent")).toEqual(["failed", "unscorable"]);
+      expect(await windowRow("bw_e16_unsent")).toMatchObject({ state: "failed", planned: 1, scored: 0, failed: 1 });
+    },
+  },
+  {
+    name: "E16 / 0097 — a row written without speech_basis reads pre_speech_fraction: a pre-fix score cannot pass as post-fix",
+    fn: async () => {
+      seedWindow("bw_e16_prefix", { turns: false });
+      pg.exec(`
+        INSERT INTO room_span_emotion (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
+          speaker_idx, source_refs, clip_start_s, clip_end_s, state, reason)
+        VALUES ('bw_e16_prefix', 'run_bw_e16_prefix', 1, 2, 0, 1, 1, 2, 0, ARRAY['x'], 0, 0.001, 'failed', 'malformed_scores');
+      `);
+      const r = (await pg.sql`SELECT speech_basis, speech_ms FROM room_span_emotion WHERE window_id = ${"bw_e16_prefix"}`) as Array<Record<string, unknown>>;
+      expect(r).toEqual([{ speech_basis: "pre_speech_fraction", speech_ms: null }]);
+    },
+  },
   // ─── N1: zero scored, and its retry ───────────────────────────────────────────────────────────
   {
     name: "N1 — zero scored: window FAILED / emotion_zero_scored from the rows, and the job fails",
@@ -401,7 +462,7 @@ const cases: Case[] = [
     fn: async () => {
       seedWindow("bw_c16_null", { turns: false });
       const r = { windowId: "bw_c16_null", roomDayId: "rd_1", state: "no_segments" as const, diarizeRunId: "run_bw_c16_null", error: null,
-                  counts: { planned: 0, scored: 0, skipped: 0, failed: 0, calls: 0 } };
+                  counts: { planned: 0, scored: 0, skipped: 0, failed: 0, unscorable: 0, calls: 0 } };
       const at = async () => (await windowRow("bw_c16_null")).at;
       await recordEmotionWindow({ ...r, cap_s: null });
       const t0 = await at();

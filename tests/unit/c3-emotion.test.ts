@@ -150,8 +150,9 @@ describe("the service contract — parsed strictly", () => {
   it("health: only a 2xx with ok:true is trusted; the cap is required and must be in [10, 60]; `loaded` unknown when unsaid", async () => {
     const { emotionHealth } = await import("@/lib/emotion/client");
     const f = (body: unknown, status = 200) => async () => new Response(JSON.stringify(body), { status });
-    expect(await emotionHealth(f({ ok: true, max_duration_s: 60, loaded: true, models: { wavlm: { loaded: true, subfolder: "int8" } } }))).toEqual({ ok: true, cap_s: 60, loaded: true, model: null, subfolder: "int8" });
-    expect(await emotionHealth(f({ ok: true, max_duration_s: 10 }))).toMatchObject({ ok: true, cap_s: 10, loaded: "unknown" });
+    // E16: /health must also carry min_speech_s (the live service reports 1.5); it is covered on its own in e16-emotion-speech-fraction.test.ts.
+    expect(await emotionHealth(f({ ok: true, max_duration_s: 60, min_speech_s: 1.5, loaded: true, models: { wavlm: { loaded: true, subfolder: "int8" } } }))).toEqual({ ok: true, cap_s: 60, min_speech_s: 1.5, loaded: true, model: null, subfolder: "int8" });
+    expect(await emotionHealth(f({ ok: true, max_duration_s: 10, min_speech_s: 1.5 }))).toMatchObject({ ok: true, cap_s: 10, loaded: "unknown" });
     // A 500 carrying ok:false, loaded:false AND a cap: the cap is not a cap.
     expect(await emotionHealth(f({ ok: false, loaded: false, max_duration_s: 60 }, 500))).toEqual({ ok: false, error: "health_http_500" });
     expect(await emotionHealth(f({ ok: false, loaded: false, max_duration_s: 60 }, 200))).toEqual({ ok: false, error: "health_not_ok" });
