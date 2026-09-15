@@ -18,19 +18,65 @@ A second heartbeat (`install_id`, `tape_advancing`, `peak`, `zero_ratio`, …) r
 
 ## Class A — recording with zero durable tape (Home Office)
 
-**Live:** `home-office-w8fb`, session `bs_hk2d7acj`, app **0.1.22** (`test`), macOS 27. `start_day` **acked** in ~5.5 s (`cmd_xmx9fwc2`). Native: `session_open=true`, `tape_advancing=true`, streak hundreds, TONOR selected, peak ~0.01–0.035 (above digital zero). Server: **0 chunks, 0 events**, `audio_recorded_ms=0`, tape lane “Says recording, silent 14m”, `stalled=true` (10-minute **chunk** stall, `STALLED_BADGE_MINUTES`).
+**Live (server, ~05:00Z):** `home-office-w8fb`, session `bs_hk2d7acj`, app **0.1.22** (`test`), macOS 27. `start_day` **acked** in ~5.5 s (`cmd_xmx9fwc2`). Native: `session_open=true`, `tape_advancing=true`. Server: **0 chunks**.
 
-**Not:** the 30-minute reaper (`lib/bench-reaper-core.ts`). That would `PATCH` ended with note `auto-ended: no chunks >30m`. The row is still `recording`.
+**Live (Mini, later):** LaunchAgent up; tapewriter writing `captures/bs_hk2d7acj/{tape.pcm,tape.idx}`; ~24 MB PCM; idx rms≈0.009 peak≈0.05; `status.json` `state=recording`, **`pending_piece_count=0`, spool empty**. Capture is alive. The break is **after** durable PCM, **before** a WebM lands in `spool/`.
 
-**Not:** silent mic. Levels are non-zero. `SILENT_WHILE_RECORDING` is **not** set. Contrast OPD 3 (Class C).
+**Duration note:** tape is **16 kHz s16le mono** after `PCMResampler` (`TapeConstants.sampleRate = 16_000`, 32 000 bytes/s). 24 MB ≈ **12.5 minutes**, not 4.6 min (that 4.6 min figure assumes 44.1 kHz). A full piece is **4 800 000 samples = 300 s @ 16 kHz = 9.6 MB of PCM** (`RoomPiecePlanner.fullPieceSamples`). 24 MB is **past two cut boundaries**. Waiting for “the first 5 minutes” no longer explains empty spool.
 
-**Root cause (verified against code + playbook):** **Fault W — wedged capture.** `startCapture` waited until tapewriter’s index showed durable growth (`waitForDurableGrowth`, 20 s cap) and then acked. After that, **5-minute piece cut + R2 verify + `POST /api/bench/chunks` never completed**. Native still reports tape advancing because the PCM/index frontier moves; the operator now-picture stalls because it clocks **uploaded** pieces (`isBenchStalled` / `last_any_chunk_at`).
+### Piece pipeline (plain capture path — this session)
 
-Healthy rooms (OPD 7 / OPD 1) had piece 0 at T+5 min (~1.1–1.3 MB). Home Office at T+15 min still had none.
+```
+tapewriter  --record-->  tape.pcm + tape.idx (checkpoint every 1.25s)
+                              |
+RoomEngine.run() loop (~1.5s)
+  1. publishAvailable(finalFlush: false)     // CUT
+  2. drainPending()                          // UPLOAD
+```
 
-**Next (ops, 0.1.22):** playbook §2.2 — `end_day` first (never `restart_engine` while `session_open`; that verb **refuses** `session_open`). Then `restart_engine`, then `start_day`. Confirm first piece at the next 5-minute boundary. If `end_day` returns `NSPOSIXErrorDomain Code=9`, that is the documented W fingerprint.
+| Step | Function | What “success” looks like |
+|---|---|---|
+| Capture | `TapeWriter.checkpoint` | idx `samples` = `byte_offset / 2`, tracks PCM |
+| Plan | `RoomPiecePlanner.plan` | one plan per **exactly** 4.8e6 samples; remainder waits until `finalFlush` or a discontinuity |
+| Encode | `FFmpegPieceEncoder.encode` | writes `spool/<session>_chunk_NNNNN.webm` via bundled ffmpeg (`libopus` 32k voip) |
+| Spool | `RoomPieceSpool.publish` | sibling `.json` manifest; **this** is what `pending_piece_count` counts |
+| Upload | `RoomEngine.drainPending` → `uploadImmutablePiece` | R2 + `POST /api/bench/chunks`; then `removeVerified` (spool empties **after** success) |
 
-**Next (builder):** inspect this Mini’s spool / tapewriter.log / upload backoff. macOS 27 + 0.1.22 is the unique pair in the fleet. Do **not** treat this as “TONOR mute” unless levels collapse to ~0 and `zero_ratio` ≥ 0.98.
+`pending_piece_count` is `spool.pending().count` (`saveStatus`). **Empty spool + growing PCM means cut never published a piece**, not “upload is slow.” A wedged **upload** would show `pending_piece_count ≥ 1` and files in `spool/`.
+
+`tape_advancing` is **not** the cutter. It compares consecutive durable idx sample counts (`currentDurableSampleIndex` / `tapeIsAdvancing`). `segment.nextSample` is the **cut cursor**, advanced only after a successful encode+publish.
+
+### What leaves spool empty while recording continues
+
+`publishAvailable(finalFlush: false)` is the only periodic cutter. It no-ops or fails without touching spool in these cases:
+
+1. **`residentCaptureOwner != nil` → immediate return** (first line of `publishAvailable`). Resident archive uses a different delivery pipeline. This session’s `captures/bs_hk2d7acj/tape.pcm` layout is the **plain** path, so this should be off. Confirm `resident_archive_capture_enabled` in a fresh `report_diag`.
+
+2. **`capture == nil`** — engine lost the `Segment` while tapewriter still runs (should not happen with the instance lock; would still look like this).
+
+3. **Planner returns `[]`** — last idx `samples` still `< 4_800_000`, or idx unreadable as empty. **Ruled out** if last idx line has `samples` ≥ 4.8e6 (24 MB PCM implies ~1.2e7 if idx is in lockstep).
+
+4. **Planner / IndexLog throws** — caught in `run()`, `lastError` set, **cursor not advanced**, retry next loop. Typical: `indexBeyondPCM`, `byte_offset must equal samples * 2`, `sample 0 is not covered by the index` (`uncoveredSample` if the first idx record’s `samples` > `nextSample`).
+
+5. **`FFmpegPieceEncoder.encode` throws** — **most likely once (3) is ruled out.** Plans exist; `spool.publish` never runs. Failures: `ffmpeg exited N: …` (spawn/hardened-runtime/libopus on macOS 27), `emptyOutput`, `destinationExists` (leftover webm — would mean spool **not** empty unless cleaned). Encode uses unique `.tmp` names then `installWithoutReplacement`; temps are deleted on `defer`.
+
+`drainPending` is **not** in the empty-spool picture: it only walks already-published spool entries. Its 5→60 s backoff only matters after a piece is sitting in `spool/`.
+
+### Next (ops — one read, then Fault W cure)
+
+On the Mini, **one** of:
+
+```
+plutil -p "$HOME/Library/Application Support/EvenScribe/RoomRecorder/status.json"
+# last_error is the cutter/ffmpeg/index exception if (4) or (5)
+tail -1 "$HOME/Library/Application Support/EvenScribe/RoomRecorder/captures/bs_hk2d7acj/tape.idx"
+# "samples" >= 4800000 ⇒ planner should have emitted a piece; empty spool ⇒ ffmpeg/index throw
+ls -la "$HOME/Library/Application Support/EvenScribe/RoomRecorder/spool"
+```
+
+Then playbook §2.2: `end_day` first (never `restart_engine` while `session_open`). Then `restart_engine`, `start_day`. If `end_day` returns `NSPOSIXErrorDomain Code=9`, that is the documented W fingerprint.
+
+**Builder:** if `last_error` is `ffmpeg exited …`, the 0.1.22 bundled encoder vs macOS 27 is the defect (cut never starts). If `samples` on the last idx line is still `< 4800000` with 24 MB PCM, idx and PCM have diverged (cut never starts). Do not treat as TONOR mute.
 
 ---
 
