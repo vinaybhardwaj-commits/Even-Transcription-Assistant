@@ -109,7 +109,7 @@ const SEGMENTS_JSON = JSON.stringify([
  * A diarized window with two speakers' runs — so TWO planned segments — and, with `turns: false`, none.
  * Speaker 0: 0–4 s and 5–9 s (one run). Speaker 1: 12–16 s and 17–20 s (one run).
  */
-function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string | null; segmentsJson?: string } = {}): void {
+function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string | null; segmentsJson?: string; storedSegmentsJson?: string } = {}): void {
   const start = (nextStart += 900_000);
   const run = `run_${id}`;
   const windowRoomDay = opts.windowRoomDay === undefined ? "'rd_1'" : opts.windowRoomDay === null ? "NULL" : `'${opts.windowRoomDay}'`;
@@ -117,9 +117,16 @@ function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string 
     INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key, grid_aligned, state, closed_at)
     VALUES ('${id}', 'sess_1', ${windowRoomDay}, ${start}, ${start + 900_000}, 'primary', 'clips/${id}.webm', TRUE, 'transcribed', NOW());
     INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id)
-    VALUES ('${id}', 'rd_1', 'ok', '[]'::jsonb, '${opts.segmentsJson ?? SEGMENTS_JSON}'::jsonb, 'clips/${id}.webm', NULL, NULL, '${run}');
+    VALUES ('${id}', 'rd_1', 'ok', '[]'::jsonb, '${opts.storedSegmentsJson ?? opts.segmentsJson ?? SEGMENTS_JSON}'::jsonb, 'clips/${id}.webm', NULL, NULL, '${run}');
   `);
   if (opts.turns === false) return;
+  // E16(i) — the stored overlap_ms must be what the seeded intervals bind the turn with, or the stale-segments
+  // guard refuses the window. Fixture arithmetic, not the code under test: each seeded turn holds ONE speaker,
+  // so its binding overlap is the plain sum of that speaker's interval overlap with the turn. `stale` swaps
+  // the speaker numbers in the intervals AFTER the overlaps are fixed — a re-run that renumbered the speakers.
+  const segs = JSON.parse(opts.segmentsJson ?? SEGMENTS_JSON) as Array<{ start_ms: number; end_ms: number; speaker_idx: number }>;
+  const overlapOf = (spk: number, s: number, e: number) =>
+    segs.filter((g) => g.speaker_idx === spk).reduce((a, g) => a + Math.max(0, Math.min(e, g.end_ms) - Math.max(s, g.start_ms)), 0);
   const turns: Array<[string, number, number, number]> = [["a1", 0, 0, 4000], ["a2", 0, 5000, 9000], ["b1", 1, 12_000, 16_000], ["b2", 1, 17_000, 20_000]];
   for (const [ref, spk, s, e] of turns) {
     const sref = `${id}|${ref}`;
@@ -127,7 +134,7 @@ function seedWindow(id: string, opts: { turns?: boolean; windowRoomDay?: string 
       INSERT INTO cue (id, room_day_id, type, source, source_ref, payload)
       VALUES ('c_${sref}', 'rd_1', 'stt_turn', 'replay', '${sref}', '{"start_ms":${start + s},"end_ms":${start + e}}'::jsonb);
       INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, overlap_ms, room_day_id, no_role_reason, run_id)
-      VALUES ('${id}', '${sref}', ${spk}, 1000, 'rd_1', 'no_match', '${run}');
+      VALUES ('${id}', '${sref}', ${spk}, ${overlapOf(spk, s, e)}, 'rd_1', 'no_match', '${run}');
     `);
   }
 }
@@ -203,12 +210,37 @@ const cases: Case[] = [
   {
     name: "E16 — spans never sent are NOT subtracted from planned: a lone sent span that fails still fails the window",
     fn: async () => {
-      // Speaker 1 has no diarized speech, so its run is recorded unscorable and never sent.
-      seedWindow("bw_e16_unsent", { segmentsJson: JSON.stringify([{ start_ms: 0, end_ms: 9000, speaker_idx: 0 }]) });
+      // Speaker 1 speaks only 900 ms inside its run (under min_speech_s), so its run is recorded unscorable and never sent.
+      // Its turns still bind to it — speaker 1 has NO interval at all would be stale segments, not a quiet speaker.
+      seedWindow("bw_e16_unsent", { segmentsJson: JSON.stringify([{ start_ms: 0, end_ms: 9000, speaker_idx: 0 }, { start_ms: 12000, end_ms: 12500, speaker_idx: 1 }, { start_ms: 17000, end_ms: 17400, speaker_idx: 1 }]) });
       const { out } = await runKind("bw_e16_unsent", "all_fail");
       expect(out.kind, "subtracting the unsent row would leave planned 0 and pass this window").toBe("fail");
       expect(await segmentStates("bw_e16_unsent")).toEqual(["failed", "unscorable"]);
       expect(await windowRow("bw_e16_unsent")).toMatchObject({ state: "failed", planned: 1, scored: 0, failed: 1 });
+    },
+  },
+  {
+    name: "E16(i) — stale segments on Postgres: speakers renumbered by a re-run fail diarize_segments_stale, with a window row, nothing written against them",
+    fn: async () => {
+      const swapped = JSON.stringify([{ start_ms: 0, end_ms: 9000, speaker_idx: 1 }, { start_ms: 12000, end_ms: 20000, speaker_idx: 0 }]);
+      seedWindow("bw_e16_stale", { storedSegmentsJson: swapped });
+      const { steps, out } = await runKind("bw_e16_stale", "all_ok");
+      expect(steps).toEqual(["prepare"]);
+      expect(out.kind).toBe("fail");
+      expect(errorCodeOf(out.error!)).toBe("diarize_segments_stale");
+      expect(await windowRow("bw_e16_stale")).toMatchObject({ state: "failed", attempts: 1 });
+      expect(await segmentStates("bw_e16_stale"), "nothing measured against another run's intervals").toEqual([]);
+    },
+  },
+  {
+    name: "E16(iii) / 0097 — the database refuses a diarize_segments row with no speech_ms",
+    fn: async () => {
+      seedWindow("bw_e16_basischk", { turns: false });
+      expect(() => pg.exec(`
+        INSERT INTO room_span_emotion (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
+          speaker_idx, source_refs, clip_start_s, clip_end_s, state, reason, speech_basis)
+        VALUES ('bw_e16_basischk', 'run_bw_e16_basischk', 1, 2, 0, 1, 1, 2, 0, ARRAY['x'], 0, 0.001, 'failed', 'x', 'diarize_segments');
+      `)).toThrow(/room_span_emotion_basis_measure_chk/);
     },
   },
   {

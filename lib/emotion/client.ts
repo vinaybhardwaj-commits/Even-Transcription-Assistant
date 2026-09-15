@@ -95,6 +95,13 @@ export type SegmentScore =
 
 /** The service's reason when it refuses without naming one. */
 export const UNSCORABLE_UNNAMED = "unscorable_unnamed";
+/**
+ * E16(iii) — `ok: true` with an EMPTY labels object and NO unscorable flag. Today's service cannot send it
+ * (every gate refusal carries the flag; labels come from the model's id2label), so if it arrives it is a
+ * model fault, and a model fault is a failure: named, counted, and it spends an attempt. Reading it as
+ * unscorable would record silence where the model broke (Refuter §2.2).
+ */
+export const EMPTY_LABELS_UNFLAGGED = "empty_labels_without_unscorable_flag";
 
 const isEmptyObject = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0;
 const finiteOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
@@ -122,10 +129,13 @@ export function parseSegmentsResponse(body: unknown, sent: number): SegmentsResp
     // E16 — UNSCORABLE, NOT MALFORMED. Since 11:46 on 14 Sep the service answers a span its gate refuses
     // with `ok: true, unscorable: true, labels: {}` (app.py score_segments). Read as "ok:true without seven
     // labels" that became `malformed_scores` — a failure — for every quiet span (E14 cause 1).
-    // Exactly two shapes mean unscorable: the explicit flag, or ok:true with an EMPTY labels object.
-    // Labels that are present but partial or out of range are still malformed: that is a model fault,
-    // and catching it here would hide one.
-    if (r.unscorable === true || isEmptyObject(r.labels)) {
+    // EXACTLY ONE shape means unscorable: the explicit flag. ok:true with an empty labels object and no
+    // flag is a model fault (EMPTY_LABELS_UNFLAGGED), and partial or out-of-range labels are malformed.
+    if (r.unscorable !== true && isEmptyObject(r.labels)) {
+      results.push({ index: i, ok: false, reason: EMPTY_LABELS_UNFLAGGED });
+      continue;
+    }
+    if (r.unscorable === true) {
       results.push({
         index: i, ok: false, unscorable: true,
         reason: typeof r.skip_reason === "string" && r.skip_reason ? reasonText(r.skip_reason) : UNSCORABLE_UNNAMED,

@@ -19,7 +19,7 @@ type Row = Record<string, unknown>;
 type Fixture = {
   window_ms: number;
   diarize_segments: Array<{ start_ms: number; end_ms: number; speaker_idx: number }>;
-  turns: Array<{ speaker_idx: number; no_role_reason: string | null; start_ms: number; end_ms: number }>;
+  turns: Array<{ speaker_idx: number; no_role_reason: string | null; overlap_ms: number; start_ms: number; end_ms: number }>;
   pre_e16_spans: Array<{ speaker_idx: number; chunk_idx: number; chunk_count: number; clip_start_s: number; clip_end_s: number; state: string; reason: string | null; has_label: boolean }>;
 };
 const A9 = JSON.parse(readFileSync("tests/fixtures/e16-a9-window.json", "utf8")) as Fixture;
@@ -57,9 +57,9 @@ vi.mock("@/lib/emotion/store", async (orig) => {
   };
 });
 
-const { EMOTION_MODEL_ID, parseSegmentsResponse, emotionHealth, UNSCORABLE_UNNAMED } = await import("@/lib/emotion/client");
-const { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech } = await import("@/lib/emotion/segments");
-const { PREFILTER_REASON, SPEECH_BASIS, writeScoredOrFailed } = await import("@/lib/emotion/store");
+const { EMOTION_MODEL_ID, parseSegmentsResponse, emotionHealth, EMPTY_LABELS_UNFLAGGED } = await import("@/lib/emotion/client");
+const { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, staleSegmentTurns } = await import("@/lib/emotion/segments");
+const { PREFILTER_REASON, PRE_FIX_BASIS, SPEECH_BASIS, writeScoredOrFailed, writeUnscorable } = await import("@/lib/emotion/store");
 const { emotionWindowKind } = await import("@/lib/jobs/kinds/emotion-window");
 
 const LABELS = { anger: 0.02, disgust: 0.01, enthusiasm: 0.05, fear: 0.02, happiness: 0.05, neutral: 0.8, sadness: 0.05 };
@@ -72,8 +72,8 @@ const gateRefused = (index: number, seg: { start_s: number; end_s: number }, spe
   labels: {}, top: [], duration_s: +(seg.end_s - seg.start_s).toFixed(3), speech_s_est, rms: 0.004, inference_s: 0.0,
 });
 
-/** The fixture's turns on the room-day clock, as room_turn_speaker ⋈ cue returns them. */
-const fixtureTurns = () => A9.turns.map((t, i) => ({ source_ref: `t${i}`, speaker_idx: t.speaker_idx, no_role_reason: t.no_role_reason, start_ms: WSTART + t.start_ms, end_ms: WSTART + t.end_ms }));
+/** The fixture's turns on the room-day clock, as room_turn_speaker ⋈ cue returns them — with the overlap_ms the diarize run stored. */
+const fixtureTurns = () => A9.turns.map((t, i) => ({ source_ref: `t${i}`, speaker_idx: t.speaker_idx, no_role_reason: t.no_role_reason, overlap_ms: t.overlap_ms, start_ms: WSTART + t.start_ms, end_ms: WSTART + t.end_ms }));
 
 let HEALTH: Row = {};
 let ANSWER: (index: number, seg: { start_s: number; end_s: number }) => Row = classified;
@@ -205,9 +205,10 @@ describe("P5 — an ok:true answer carrying no labels is unscorable, not malform
     const r = parseSegmentsResponse(env({ results: [gateRefused(0, { start_s: 0, end_s: 3.73 }, 0.42)] }), 1);
     expect(r.ok && r.results[0]).toEqual({ index: 0, ok: false, unscorable: true, reason: "insufficient_speech", service_speech_s: 0.42, duration_s: 3.73 });
   });
-  it("ok:true with an EMPTY labels object and no flag is unscorable too, by name", () => {
+  it("E16(iii): ok:true with an EMPTY labels object and NO flag is a named MODEL FAULT — a failure, not silence", () => {
+    // Today's service cannot send it: every gate refusal carries the flag. So if it arrives, the model broke.
     const r = parseSegmentsResponse(env({ results: [{ index: 0, ok: true, labels: {}, duration_s: 2, inference_s: 0 }] }), 1);
-    expect(r.ok && r.results[0]).toMatchObject({ ok: false, unscorable: true, reason: UNSCORABLE_UNNAMED, service_speech_s: null });
+    expect(r.ok && r.results[0]).toEqual({ index: 0, ok: false, reason: EMPTY_LABELS_UNFLAGGED });
   });
   it("but PARTIAL labels are still malformed_scores — a model fault is not silence", () => {
     const { sadness: _s, ...six } = LABELS; void _s;
@@ -223,7 +224,7 @@ describe("P5 — an ok:true answer carrying no labels is unscorable, not malform
 describe("V2 — a window of only unscorable spans does not trip zero-scored and spends no attempt", () => {
   it("E14's exhausted shape — one sub-1.5 s span — ends no_segments in prepare: nothing sent, no failed row", async () => {
     // The two windows that burned all three attempts each held ONE span of 0.50 s / 0.38 s.
-    DB.turns = [{ source_ref: "t0", speaker_idx: 0, no_role_reason: "no_match", start_ms: WSTART + 81_000, end_ms: WSTART + 81_500 }];
+    DB.turns = [{ source_ref: "t0", speaker_idx: 0, no_role_reason: "no_match", overlap_ms: 500, start_ms: WSTART + 81_000, end_ms: WSTART + 81_500 }];
     DB.segmentsJson = [{ start_ms: 81_000, end_ms: 81_500, speaker_idx: 0 }];
     const { steps, out } = await drive();
     expect(steps).toEqual(["prepare"]);
@@ -271,6 +272,41 @@ describe("V3 — a scorable span the service genuinely fails still fails, and st
   });
 });
 
+describe("E16(i) — stale diarize segments are a NAMED failure, never a quiet wrong speech_ms", () => {
+  it("no false positive on a real same-run window: the stored intervals reproduce A9's stored bindings exactly", () => {
+    expect(staleSegmentTurns(fixtureTurns(), A9.diarize_segments, WSTART)).toBe(0);
+  });
+
+  it("a re-run that renumbered the speaker (the Refuter's A9 case): named failure, a window row, nothing sent, nothing measured", async () => {
+    // The turns say speaker 0 (the new run); the kept intervals say speaker 1 (the old run's rank).
+    DB.segmentsJson = A9.diarize_segments.map((iv) => ({ ...iv, speaker_idx: iv.speaker_idx === 0 ? 1 : 0 }));
+    const { steps, out } = await drive();
+    expect(steps).toEqual(["prepare"]);
+    expect(out.kind).toBe("fail");
+    expect(String(out.error)).toMatch(/^diarize_segments_stale: 2 of 2 turn\(s\)/);
+    expect(REC.window[0], "a failed window row, so the attempt bound applies").toMatchObject({ state: "failed" });
+    expect(SENT).toHaveLength(0);
+    expect(REC.calls, "no span is written against intervals from another run").toHaveLength(0);
+  });
+
+  it("'[]' beside attributed turns is the same named failure, not a quiet no_segments", async () => {
+    DB.segmentsJson = [];
+    const { out } = await drive();
+    expect(String(out.error)).toMatch(/^diarize_segments_stale/);
+    expect(SENT).toHaveLength(0);
+  });
+
+  it("a stored overlap the intervals do not reproduce is stale too — the same speaker, a different run's timings", () => {
+    const shifted = A9.diarize_segments.map((iv) => ({ ...iv, start_ms: iv.start_ms + 40, end_ms: iv.end_ms + 40 }));
+    expect(staleSegmentTurns(fixtureTurns(), shifted, WSTART)).toBeGreaterThan(0);
+  });
+
+  it("a straddle the intervals no longer show is stale: exclusivity is part of the binding", () => {
+    const turns = fixtureTurns().map((t) => ({ ...t, no_role_reason: "straddle" }));
+    expect(staleSegmentTurns(turns, A9.diarize_segments, WSTART)).toBe(2);
+  });
+});
+
 describe("V4 — speech_ms reaches room_span_emotion, with both numbers where both exist", () => {
   const seg = { speaker_idx: 0, source_refs: ["t0"], run_start_ms: 1, run_end_ms: 2, chunk_idx: 0, chunk_count: 1, start_ms: 10, end_ms: 3740, clip_start_s: 0, clip_end_s: 3.73, speech_ms: 3730 };
   const w = { windowId: "bw", roomDayId: "rd", diarizeRunId: "run", clipR2Key: "k", windowStartMs: 0, cap_s: 60, model: { model: null, model_key: null, subfolder: null, device: null } };
@@ -281,6 +317,18 @@ describe("V4 — speech_ms reaches room_span_emotion, with both numbers where bo
     expect(ins.text).toMatch(/speech_ms, service_speech_ms, speech_basis/);
     expect(ins.values).toEqual(expect.arrayContaining(["unscorable", 3730, 420, SPEECH_BASIS]));
   });
+  it("E16(iii): the basis FOLLOWS the measure — a segment with no speech_ms (a job straddling the deploy) writes pre_speech_fraction and NULL", async () => {
+    DB.writes = [];
+    const { speech_ms: _drop, ...unmeasured } = seg; void _drop;
+    await writeScoredOrFailed(w, unmeasured as never, { index: 0, ok: true, labels: LABELS, top_label: "neutral", top_score: 0.8, duration_s: 3.73, inference_s: 1 });
+    expect(DB.writes[0]!.values).toContain(PRE_FIX_BASIS);
+    expect(DB.writes[0]!.values).not.toContain(SPEECH_BASIS);
+    DB.writes = [];
+    await writeUnscorable(w, unmeasured as never);
+    expect(DB.writes[0]!.values).toContain(PRE_FIX_BASIS);
+    expect(DB.writes[0]!.values).not.toContain(SPEECH_BASIS);
+  });
+
   it("a scored span writes speech_ms and no service number — the service does not return one for a score", async () => {
     DB.writes = [];
     await writeScoredOrFailed(w, seg, { index: 0, ok: true, labels: LABELS, top_label: "neutral", top_score: 0.8, duration_s: 3.73, inference_s: 1 });

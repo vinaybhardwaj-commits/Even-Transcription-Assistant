@@ -1,5 +1,5 @@
 {
- "_source": "E14's window (run A holds chunk A9), 14 Sep 2026, read-only from room_diarize_window / room_turn_speaker / room_span_emotion. TIMINGS ONLY: no ids, no text. Offsets are clip-relative ms; spans are what the pre-E16 planner produced and what the service answered.",
+ "_source": "E14's window (run A holds chunk A9), 14 Sep 2026, read-only from room_diarize_window / room_turn_speaker / room_span_emotion. TIMINGS ONLY (turns carry room_turn_speaker.overlap_ms as the diarize run stored it): no ids, no text. Offsets are clip-relative ms; spans are what the pre-E16 planner produced and what the service answered.",
  "window_ms": 900000,
  "diarize_segments": [
   {
@@ -113,13 +113,15 @@
    "speaker_idx": 0,
    "no_role_reason": "no_match",
    "start_ms": 5860,
-   "end_ms": 296560
+   "end_ms": 296560,
+   "overlap_ms": 6009
   },
   {
    "speaker_idx": 0,
    "no_role_reason": "no_match",
    "start_ms": 716140,
-   "end_ms": 799050
+   "end_ms": 799050,
+   "overlap_ms": 9837
   }
  ],
  "pre_e16_spans": [

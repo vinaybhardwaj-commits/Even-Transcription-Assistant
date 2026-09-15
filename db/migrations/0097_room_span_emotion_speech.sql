@@ -15,7 +15,8 @@
 --   speech_basis        where speech_ms came from. Existing rows AND any row written by code that
 --                       predates E16 take the DEFAULT 'pre_speech_fraction', so a pre-fix score can
 --                       never be read as a post-fix one — including rows written between this
---                       migration and the deploy. E16 code writes 'diarize_segments' explicitly.
+--                       migration and the deploy. E16 code writes 'diarize_segments' only beside a speech_ms
+--                       it measured (CHECK room_span_emotion_basis_measure_chk).
 --                       'service_speech_est' is RESERVED for the service-contract round (option D),
 --                       unwritten today; declared now so that round needs no second CHECK change.
 --
@@ -27,6 +28,17 @@
 --
 -- NO CUTOFF IS STORED OR APPLIED. The floor below which a label should not be shown is set later,
 -- from a clinic week of speech_ms (ETA-E16-RULING §2).
+--
+-- =====================================================================
+-- ⚠  ROLLBACK HAZARD — READ BEFORE RESTORING ANY app.py BACKUP ON THE MINI  ⚠
+--
+-- **E16 code requires the emotion service's /health to report `min_speech_s`.** ALL FIVE
+-- `~/eta-emotion/app.py.bak-*` files predate it. **Restoring any of them after E16 deploys makes EVERY
+-- emotion window fail `health_min_speech_unreadable` and spend an attempt — windows exhaust in three
+-- ticks where pre-E16 code would have scored.** A plain RESTART is safe: health() returns min_speech_s
+-- whether or not the model is loaded. Roll the APP back to pre-E16 before, or together with, rolling the
+-- service back to a backup. This migration itself is safe under either version of the app (the DEFAULT).
+-- =====================================================================
 --
 -- IDEMPOTENT: ADD COLUMN IF NOT EXISTS; every constraint is dropped-if-exists and re-added, or
 -- guarded by name. Existing rows are untouched except for the DEFAULT on speech_basis.
@@ -40,6 +52,11 @@ ALTER TABLE room_span_emotion ADD COLUMN IF NOT EXISTS speech_basis text NOT NUL
 ALTER TABLE room_span_emotion DROP CONSTRAINT IF EXISTS room_span_emotion_speech_basis_chk;
 ALTER TABLE room_span_emotion ADD CONSTRAINT room_span_emotion_speech_basis_chk
   CHECK (speech_basis IN ('pre_speech_fraction', 'diarize_segments', 'service_speech_est'));
+
+-- E16(iii): a row that says its speech came from the diarizer must carry that speech.
+ALTER TABLE room_span_emotion DROP CONSTRAINT IF EXISTS room_span_emotion_basis_measure_chk;
+ALTER TABLE room_span_emotion ADD CONSTRAINT room_span_emotion_basis_measure_chk
+  CHECK (speech_basis <> 'diarize_segments' OR speech_ms IS NOT NULL);
 
 ALTER TABLE room_span_emotion DROP CONSTRAINT IF EXISTS room_span_emotion_speech_ms_chk;
 ALTER TABLE room_span_emotion ADD CONSTRAINT room_span_emotion_speech_ms_chk

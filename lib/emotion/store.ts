@@ -12,6 +12,20 @@ import type { SegmentScore } from "./client";
  * measure. So a pre-fix row can never read as a post-fix one.
  */
 export const SPEECH_BASIS = "diarize_segments";
+/** The column DEFAULT, and what a row with no speech measure must say. */
+export const PRE_FIX_BASIS = "pre_speech_fraction";
+
+/**
+ * E16(iii) — THE BASIS FOLLOWS THE MEASURE, it is never stamped beside a missing one. A job whose `prepare`
+ * ran on pre-E16 code and whose `score` runs on E16 code carries segments with no speech_ms; stamping
+ * SPEECH_BASIS on those rows would label a post-fix score that has no speech measure (Refuter §2.4, the
+ * deploy straddle). 0097's CHECK refuses that combination as well.
+ */
+export function speechFields(speechMs: unknown): { speech_ms: number | null; speech_basis: string } {
+  return typeof speechMs === "number" && Number.isFinite(speechMs) && speechMs >= 0
+    ? { speech_ms: Math.round(speechMs), speech_basis: SPEECH_BASIS }
+    : { speech_ms: null, speech_basis: PRE_FIX_BASIS };
+}
 
 /**
  * E16 — the reason on a span that was NEVER SENT: its speaker's diarized speech is under the service's
@@ -61,6 +75,7 @@ export async function writeScoredOrFailed(w: SegmentWrite, seg: MeasuredSegment,
   const reason = score.ok ? null : score.reason;
   const serviceSpeechMs = unscorable && unscorable.service_speech_s !== null ? Math.round(unscorable.service_speech_s * 1000) : null;
   const durationS = scored ? scored.duration_s : unscorable ? unscorable.duration_s : null;
+  const sp = speechFields(seg.speech_ms);
   await sql`
     INSERT INTO room_span_emotion
       (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
@@ -77,13 +92,14 @@ export async function writeScoredOrFailed(w: SegmentWrite, seg: MeasuredSegment,
        ${scored ? JSON.stringify(scored.labels) : null}::jsonb, ${scored?.top_label ?? null}, ${scored?.top_score ?? null},
        ${w.model.model}, ${w.model.model_key}, ${w.model.subfolder}, ${w.model.device},
        ${scored?.inference_s ?? null}, ${durationS}, ${w.cap_s},
-       ${seg.speech_ms}, ${serviceSpeechMs}, ${SPEECH_BASIS}, NOW())
+       ${sp.speech_ms}, ${serviceSpeechMs}, ${sp.speech_basis}, NOW())
     ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
   `;
 }
 
 /** A span NEVER SENT: its speaker's diarized speech is under min_speech_s. Written unscorable with that speech. */
 export async function writeUnscorable(w: SegmentWrite, seg: MeasuredSegment): Promise<void> {
+  const sp = speechFields(seg.speech_ms);
   await sql`
     INSERT INTO room_span_emotion
       (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
@@ -93,12 +109,13 @@ export async function writeUnscorable(w: SegmentWrite, seg: MeasuredSegment): Pr
       (${w.windowId}, ${w.diarizeRunId}, ${seg.run_start_ms}, ${seg.run_end_ms}, ${seg.chunk_idx}, ${seg.chunk_count}, ${seg.start_ms}, ${seg.end_ms},
        ${w.roomDayId}, ${seg.speaker_idx}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(seg.source_refs)}::jsonb)), ${w.clipR2Key}, ${seg.clip_start_s}, ${seg.clip_end_s},
        'unscorable', ${PREFILTER_REASON}, ${w.cap_s},
-       ${seg.speech_ms}, NULL, ${SPEECH_BASIS}, NOW())
+       ${sp.speech_ms}, NULL, ${sp.speech_basis}, NOW())
     ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
   `;
 }
 
 export async function writeSkipped(w: SegmentWrite, s: SkippedSpan, speechMs: number): Promise<void> {
+  const sp = speechFields(speechMs);
   await sql`
     INSERT INTO room_span_emotion
       (window_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms,
@@ -108,7 +125,7 @@ export async function writeSkipped(w: SegmentWrite, s: SkippedSpan, speechMs: nu
       (${w.windowId}, ${w.diarizeRunId}, ${s.start_ms}, ${s.end_ms}, 0, 1, ${s.start_ms}, ${s.end_ms},
        ${w.roomDayId}, ${s.speaker_idx}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(s.source_refs)}::jsonb)), ${w.clipR2Key},
        ${(s.start_ms - w.windowStartMs) / 1000}, ${(s.end_ms - w.windowStartMs) / 1000}, 'skipped', ${s.reason}, ${w.cap_s},
-       ${speechMs}, NULL, ${SPEECH_BASIS}, NOW())
+       ${sp.speech_ms}, NULL, ${sp.speech_basis}, NOW())
     ON CONFLICT (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx) DO NOTHING
   `;
 }

@@ -48,6 +48,8 @@ export const JOB_ERROR_CODES = [
   "emotion_refused",
   "diarize_not_ok",
   "diarize_changed",
+  // E16: the stored diarize intervals do not belong to the run whose turns are being scored
+  "diarize_segments_stale",
   "emotion_window_failed",
   "emotion_not_configured",
   "emotion_cap_changed",

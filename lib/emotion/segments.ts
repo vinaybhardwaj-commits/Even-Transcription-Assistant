@@ -36,6 +36,8 @@
  * the speech that disqualified it. NO FRACTION CUTOFF is applied — the fraction is recorded, and the
  * floor is set later from a clinic week of it.
  */
+import { bindTurnsExclusive } from "@/lib/stt/speaker-roles";
+
 export const RUN_MERGE_GAP_MS = 2_000;
 export const CHUNK_TARGET_MAX_S = 30;
 export const CAP_MARGIN_S = 1;
@@ -122,6 +124,40 @@ export function speakerSpeechMs(intervals: readonly SpeechInterval[], speakerIdx
   }
   if (curB > curA) total += curB - curA;
   return Math.round(total);
+}
+
+/** A turn as room_turn_speaker stored it for one diarize run: its speaker, and the overlap that binding rested on. */
+export type StoredTurnBinding = AttributedTurn & { overlap_ms: number };
+
+/**
+ * PURE. How many of a run's stored turn bindings the stored diarize intervals CANNOT reproduce.
+ *
+ * WHY. `recordDiarizeWindow` keeps an `ok` row's segments_json when a later diarize run succeeds, while
+ * the turns are rewritten under the new run id (lib/stt/diarize-window.ts). speaker_idx is only a rank by
+ * talk time, so a re-run can renumber the speakers. The new turns then meet the old intervals, and
+ * speech_ms is measured against the wrong person, or against nobody — a confident wrong number
+ * (ETA-E16-REFUTER-VERDICT §2.6). The door is real: scribe_job_submit offers diarize_window to operators.
+ *
+ * THE TEST IS THE WRITER'S OWN. Within one run, every stored binding is exactly what
+ * `bindTurnsExclusive` (lib/stt/speaker-roles.ts) computed from these intervals: the same speaker, the
+ * same overlap_ms, and a straddle exactly when more than one speaker touched the turn. So each turn is
+ * bound again, by that same function, and compared. Any disagreement means the intervals are not the
+ * ones this run bound its turns with. `'[]'` beside attributed turns disagrees on every turn.
+ * Straddled turns are checked too: they are evidence about the intervals even though they are never scored.
+ */
+export function staleSegmentTurns(turns: readonly StoredTurnBinding[], intervals: readonly SpeechInterval[], windowStartMs: number): number {
+  const onClock = intervals.map((iv) => ({ start_ms: windowStartMs + iv.start_ms, end_ms: windowStartMs + iv.end_ms, speaker_idx: iv.speaker_idx }));
+  let stale = 0;
+  for (const t of turns) {
+    const [b] = bindTurnsExclusive(onClock, [{ source_ref: t.source_ref, start_ms: t.start_ms, end_ms: t.end_ms }]);
+    const agrees = !!b
+      && b.speaker_idx === t.speaker_idx
+      // overlap_ms is an integer column; the writer's value was rounded on the way in.
+      && Math.round(b.overlap_ms) === Math.round(t.overlap_ms)
+      && b.exclusive === (t.no_role_reason !== "straddle");
+    if (!agrees) stale += 1;
+  }
+  return stale;
 }
 
 /** A planned chunk with its speaker's measured speech. */

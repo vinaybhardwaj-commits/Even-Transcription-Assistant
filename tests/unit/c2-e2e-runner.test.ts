@@ -146,6 +146,8 @@ function schema(): void {
   exec(readFileSync("db/migrations/0089_room_emotion.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0090 verbatim: run ids, and the service's speaker guess nested.
   exec(readFileSync("db/migrations/0090_diarize_run_id_and_service_guess.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0097 verbatim (E16): speech_ms, service_speech_ms, speech_basis, the unscorable state, segments_unscorable.
+  exec(readFileSync("db/migrations/0097_room_span_emotion_speech.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
 }
 
 /** A 900 s window whose turns leave a clean gap near every 120 s mark, plus one deliberate straddle. */
@@ -1188,6 +1190,8 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is ac
 
 const EMO = {
   cap: 60 as number | undefined,
+  /** E16: the service's least scorable speech, as its /health reports it. undefined = the field is absent. */
+  minSpeech: 1.5 as number | undefined,
   /** When set, the scoring call reports this cap instead of `cap`. */
   segmentsCap: undefined as number | undefined,
   healthStatus: 200,
@@ -1208,7 +1212,7 @@ function fakeEmotionFetch(real: typeof fetch) {
     const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
     if (url.endsWith("/health")) {
       if (EMO.healthDown) throw new TypeError("fetch failed");
-      return json({ ok: EMO.healthOk, model: "Aniemore/wavlm-emotion-v1-crosslingual", ...(EMO.cap === undefined ? {} : { max_duration_s: EMO.cap }), ...(EMO.loaded === undefined ? {} : { loaded: EMO.loaded, models: { wavlm: { loaded: EMO.loaded, subfolder: "int8" } } }) }, EMO.healthStatus);
+      return json({ ok: EMO.healthOk, model: "Aniemore/wavlm-emotion-v1-crosslingual", ...(EMO.cap === undefined ? {} : { max_duration_s: EMO.cap }), ...(EMO.minSpeech === undefined ? {} : { min_speech_s: EMO.minSpeech }), ...(EMO.loaded === undefined ? {} : { loaded: EMO.loaded, models: { wavlm: { loaded: EMO.loaded, subfolder: "int8" } } }) }, EMO.healthStatus);
     }
     if (url.endsWith("/inference/wavlm/segments")) {
       if (EMO.callsDown) throw new TypeError("fetch failed");
@@ -1233,28 +1237,47 @@ function fakeEmotionFetch(real: typeof fetch) {
   };
 }
 
-/** A diarized window: an `ok` diarize row and attributed turns — one speaker's long run, a straddle, a second speaker. */
-async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?: number } = {}): Promise<void> {
+/**
+ * A diarized window: an `ok` diarize row and attributed turns — one speaker's long run, a straddle, a second speaker.
+ *
+ * E16 — THE INTERVALS COVER THE TURNS, AS ONE DIARIZE RUN WROTE THEM. The first version seeded
+ * `segments_json '[]'` beside speaker-attributed turns: every span then measured 0 ms, nothing was sent, and
+ * the window ended `done` — its SERVICE DOWN case included (Refuter, E16 §1). So each turn gets the interval
+ * the run would have bound it with, and room_turn_speaker.overlap_ms is that binding's overlap:
+ *   speaker 0's turns: one interval each, overlap = the turn (4000 ms)
+ *   the straddle:      speaker 0 for its first 2000 ms, speaker 1 for its last 1000 ms -> bound to 0, overlap 2000, not exclusive
+ *   speaker 1's turns: one interval each (5000 ms, 2500 ms)
+ * `stored: "swap"` writes the SAME intervals with the speaker numbers exchanged — a later diarize run that
+ * renumbered them, whose turns met the kept intervals.
+ */
+async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?: number; stored?: "swap" } = {}): Promise<void> {
   const sql = G.__pgsql;
   const doc = makeFakeClinician(1);
   await sql`INSERT INTO bench_window VALUES (${id}, ${`sess_${id}`}, 'rd_emo', ${startMs}, ${startMs + WINDOW_MS}, 'primary', ${`clips/${id}.webm`}, true, 'transcribed')`;
-  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, '[]'::jsonb, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
   const longS = opts.longRunS ?? 70;
   // Speaker 0: turns every 5 s with 1 s gaps for `longS` seconds -> ONE run; speaker 1 after a straddle.
-  const turns: Array<[string, number, number, number, string | null, boolean]> = [];
-  for (let t = 0; t + 4000 <= longS * 1000; t += 5000) turns.push([`${id}|a${t}`, 0, t, t + 4000, null, true]);
+  const turns: Array<[string, number, number, number, string | null, boolean, number]> = [];
+  const intervals: Array<{ start_ms: number; end_ms: number; speaker_idx: number }> = [];
+  for (let t = 0; t + 4000 <= longS * 1000; t += 5000) {
+    turns.push([`${id}|a${t}`, 0, t, t + 4000, null, true, 4000]);
+    intervals.push({ start_ms: t, end_ms: t + 4000, speaker_idx: 0 });
+  }
   const after = longS * 1000 + 2000;
-  turns.push([`${id}|straddle`, 0, after, after + 3000, "straddle", false]);
-  turns.push([`${id}|b1`, 1, after + 4000, after + 9000, "no_match", false]);
-  turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false]);
-  for (const [ref, spk, s, e, reason, named] of turns) {
+  turns.push([`${id}|straddle`, 0, after, after + 3000, "straddle", false, 2000]);
+  intervals.push({ start_ms: after, end_ms: after + 2000, speaker_idx: 0 }, { start_ms: after + 2000, end_ms: after + 3000, speaker_idx: 1 });
+  turns.push([`${id}|b1`, 1, after + 4000, after + 9000, "no_match", false, 5000]);
+  turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false, 2500]);
+  intervals.push({ start_ms: after + 4000, end_ms: after + 9000, speaker_idx: 1 }, { start_ms: after + 9500, end_ms: after + 12000, speaker_idx: 1 });
+  const stored = opts.stored === "swap" ? intervals.map((iv) => ({ ...iv, speaker_idx: 1 - iv.speaker_idx })) : intervals;
+  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, ${JSON.stringify(stored)}::jsonb, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
+  for (const [ref, spk, s, e, reason, named, overlap] of turns) {
     await sql`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES (${`c_${ref}`}, 'rd_emo', 'stt_turn', 'replay', ${ref}, ${JSON.stringify({ start_ms: startMs + s, end_ms: startMs + e, window: { start_ms: startMs, end_ms: startMs + WINDOW_MS } })}::jsonb)`;
     if (named) {
       await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
-                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', ${doc.id}, 'clinician', 0.8, NULL, ${`run_seed_${id}`}, NOW())`;
+                VALUES (${id}, ${ref}, ${spk}, NULL, ${overlap}, 'rd_emo', ${doc.id}, 'clinician', 0.8, NULL, ${`run_seed_${id}`}, NOW())`;
     } else {
       await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
-                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', NULL, NULL, NULL, ${reason}, ${`run_seed_${id}`}, NOW())`;
+                VALUES (${id}, ${ref}, ${spk}, NULL, ${overlap}, 'rd_emo', NULL, NULL, NULL, ${reason}, ${`run_seed_${id}`}, NOW())`;
     }
   }
 }
@@ -1283,7 +1306,7 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
   beforeAll(() => { globalThis.fetch = fakeEmotionFetch(realFetch) as typeof fetch; });
   afterAll(() => { globalThis.fetch = realFetch; delete process.env.EMOTION_ENABLED; delete process.env.EMOTION_SEGMENTS_SECRET; });
   const reset = () => {
-    Object.assign(EMO, { cap: 60, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
+    Object.assign(EMO, { cap: 60, minSpeech: 1.5, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
     process.env.EMOTION_ENABLED = "1";
     process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
   };
@@ -1338,8 +1361,15 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(skipped.map((x) => [x.reason, x.speaker_idx])).toEqual([["straddle", 0]]);
     expect(EMO_LABELS.every((l) => skipped[0]![l] === null)).toBe(true);
 
-    const w = (await sql`SELECT state, diarize_run_id, attempts, segments_planned, segments_scored, segments_skipped, segments_failed, calls, cap_s, warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo'`) as Array<Record<string, unknown>>;
-    expect(w[0]).toMatchObject({ state: "ok", diarize_run_id: "run_seed_bw_emo", attempts: 1, segments_planned: 4, segments_scored: 4, segments_skipped: 1, segments_failed: 0, calls: 2, cap_s: 60 });
+    const w = (await sql`SELECT state, diarize_run_id, attempts, segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, cap_s, warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo'`) as Array<Record<string, unknown>>;
+    expect(w[0]).toMatchObject({ state: "ok", diarize_run_id: "run_seed_bw_emo", attempts: 1, segments_planned: 4, segments_scored: 4, segments_skipped: 1, segments_failed: 0, segments_unscorable: 0, calls: 2, cap_s: 60 });
+
+    // E16, END TO END ON POSTGRES: every row carries its speaker's measured speech, from the intervals.
+    const speech = (await sql`SELECT state, speaker_idx, speech_ms, service_speech_ms, speech_basis FROM room_span_emotion WHERE window_id = 'bw_emo' ORDER BY segment_start_ms`) as Array<{ state: string; speaker_idx: number; speech_ms: number; service_speech_ms: number | null; speech_basis: string }>;
+    expect(speech.every((x) => x.speech_basis === "diarize_segments" && x.service_speech_ms === null)).toBe(true);
+    expect(speech.filter((x) => x.state === "scored" && x.speaker_idx === 0).reduce((a, x) => a + x.speech_ms, 0), "speaker 0's 14 turns × 4000 ms, across its 3 chunks").toBe(56_000);
+    expect(speech.find((x) => x.state === "scored" && x.speaker_idx === 1)!.speech_ms, "speaker 1's run: 5000 + 2500, not the straddle's 1000").toBe(7_500);
+    expect(speech.find((x) => x.state === "skipped")!.speech_ms, "the straddle's speaker 0 share").toBe(2_000);
     expect(EMO.lastAuth, "the shared secret travels on every call").toBe("Bearer test-emotion-secret");
     expect(w[0]!.warmup_json).toMatchObject({ loaded_before: true, ok: true });
 
@@ -1516,6 +1546,30 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
     await expect(enqueueEmotionWindows({ actor: "cron:test", log: () => {} })).rejects.toThrow(/EMOTION_SEGMENTS_SECRET is not set/);
     process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
+  }, 300_000);
+
+  it("E16 — /health WITHOUT min_speech_s fails the window by name and sends no audio (the rollback hazard in 0097's header)", async () => {
+    reset();
+    EMO.minSpeech = undefined;
+    await seedEmotionWindow("bw_emo_nomin", 42 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_nomin", "bw_emo_nomin");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_unavailable: health_min_speech_unreadable/);
+    expect(EMO.calls).toHaveLength(0);
+    const w = (await G.__pgsql`SELECT state, attempts FROM room_emotion_window WHERE window_id = 'bw_emo_nomin'`) as Array<{ state: string; attempts: number }>;
+    expect(w[0]).toEqual({ state: "failed", attempts: 1 });
+  }, 300_000);
+
+  it("E16(i) — STALE SEGMENTS, THROUGH THE RUNNER: renumbered speakers fail diarize_segments_stale with a window row; no audio, no span row", async () => {
+    reset();
+    await seedEmotionWindow("bw_emo_stale", 43 * WINDOW_MS, { stored: "swap" });
+    const r = await runEmotionJob("job_emo_stale", "bw_emo_stale");
+    expect(r.status).toBe("failed");
+    expect(r.steps).toEqual(["(first)"]);
+    expect(String(r.error)).toMatch(/^diarize_segments_stale: 17 of 17 turn\(s\)/);
+    expect(EMO.calls, "no audio is sent against another run's intervals").toHaveLength(0);
+    const n = (await G.__pgsql`SELECT (SELECT count(*) FROM room_span_emotion WHERE window_id = 'bw_emo_stale')::int AS s, (SELECT state FROM room_emotion_window WHERE window_id = 'bw_emo_stale') AS w`) as Array<{ s: number; w: string }>;
+    expect(n[0]).toEqual({ s: 0, w: "failed" });
   }, 300_000);
 
   it("LOADED IS REPORTED, NOT ASSUMED: a /health that does not say records 'unknown'", async () => {
