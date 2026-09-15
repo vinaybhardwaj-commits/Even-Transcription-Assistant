@@ -58,6 +58,24 @@ Closing Foundation `Pipe` handles after `waitUntilExit` is not a reliable Darwin
 
 Until that build is on the Mini, FDs will climb on every recording. Kickstart again only resets the counter.
 
+### Addendum — `bs_tgys4atu`: 10 min, ~26 MB PCM, still no piece, no `last_error`
+
+Tape size is **not** the cut cursor. `RoomPiecePlanner.plan` only sees **`tape.idx` `samples`**, and only emits a piece when `region.end - segment.nextSample >= 4_800_000`. Silence/`silence_ms` is **not** a gate. `spool.pending()` ignores hidden `.piece-*.tmp`, so `pending_piece_count` stays 0 until `spool.publish` after a successful encode.
+
+FDs oscillating ~1k–1.3k means the **poll loop is running**. `publishAvailable` is therefore returning quickly — not blocked in a 9.6 MB copy/ffmpeg (that would stall polls). ffmpeg is **not scheduled** unless `plan` is non-empty.
+
+Gates that match empty spool + empty `last_error`:
+
+1. **`lastError` wiped every successful poll.** After `publishAvailable` throws, `lastError` is saved, then `if retainedArchiveReady { lastError = nil }` (`RoomEngine.run` ~1338). On the plain path `refreshRetainedArchiveRecovery()` is **true** when there is no retained-archive job (`guard let retainedArchiveRecovery else { return true }`). Clinic Macs always clear cutter errors on the next heartbeat. **Absence of `last_error` does not mean the cutter succeeded.**
+
+2. **Planner returns `[]` (no throw).** Last idx `samples` still `< 4_800_000` (or idx unreadable as empty), even if `tape.pcm` is 26 MB. Confirm with `tail -1 …/tape.idx` — the planner never looks at PCM byte size.
+
+3. **Silent no-op (no throw).** `residentCaptureOwner != nil` or `capture == nil` → `publishAvailable` returns. Unlikely here (`captures/<session>/tape.pcm` + `tape_advancing`), but it would look identical in `status.json`.
+
+4. **Throw then (1).** `uncoveredSample`, `indexBeyondPCM`, ffmpeg/`writeFailed` — same empty `last_error` after the poll.
+
+Ops on that Mini: `tail -1 tape.idx` (`samples` vs 4800000), `ls -la spool` (hidden tmps), and whether `last_error` flashes between polls. Do not wait for EMFILE; the first piece is already overdue.
+
 ---
 
 ## Class B — `physical_fallback_required` after 3 empty acquisition cycles (Room 4.1)
