@@ -265,7 +265,12 @@ public enum MachineFactsReader {
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = FileHandle.nullDevice
+    defer {
+      try? pipe.fileHandleForReading.close()
+      try? pipe.fileHandleForWriting.close()
+    }
     do { try process.run() } catch { return nil }
+    try? pipe.fileHandleForWriting.close()
 
     let deadline = Date().addingTimeInterval(timeout)
     while process.isRunning && Date() < deadline {

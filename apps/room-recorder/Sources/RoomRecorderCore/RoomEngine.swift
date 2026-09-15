@@ -3005,11 +3005,16 @@ public actor RoomEngine {
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
+    defer {
+      try? pipe.fileHandleForReading.close()
+      try? pipe.fileHandleForWriting.close()
+    }
     do {
       try process.run()
     } catch {
       return nil
     }
+    try? pipe.fileHandleForWriting.close()
     let deadline = Date().addingTimeInterval(5)
     while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
     if process.isRunning {

@@ -465,7 +465,14 @@ public struct FoundationPieceProcessRunner: RoomPieceProcessRunning {
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = FileHandle.nullDevice
     process.standardError = errorPipe
+    // Home Office 15 Sep 2026: a 3-day pid leaked ~4847 PIPEs (ulimit -n 256 → EMFILE on
+    // .pcm.tmp). Foundation keeps both pipe ends unless we close them; cutter retries ~1.5s.
+    defer {
+      try? errorPipe.fileHandleForReading.close()
+      try? errorPipe.fileHandleForWriting.close()
+    }
     try process.run()
+    try? errorPipe.fileHandleForWriting.close()
     let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     return RoomPieceProcessResult(
