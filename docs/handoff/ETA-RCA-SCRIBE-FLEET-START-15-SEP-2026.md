@@ -16,83 +16,86 @@ A second heartbeat (`install_id`, `tape_advancing`, `peak`, `zero_ratio`, …) r
 
 ---
 
-## Class A — recording with zero durable tape (Home Office)
+## Class A — PIPE FD leak in a long-lived 0.1.22 `room-recorder` (Home Office)
+
+**Root cause:** one `room-recorder` pid has been running since Sat 12 Sep and leaked thousands of Foundation `Pipe()` FDs. The piece cutter then fails at `RoomPiecePipelineError.writeFailed` (**errno 24 / EMFILE**) when opening `spool/.piece-….pcm.tmp`. Tapewriter (child) still writes PCM. Spool stays empty because the write never becomes a durable WebM. `room-recorder.lock` is still held by **that same pid**, so a second engine cannot take over.
+
+**Not:** dead capture, disk full, quiet-room abort, or upload wedge.
 
 **Live (server, ~05:00Z):** `home-office-w8fb`, session `bs_hk2d7acj`, app **0.1.22** (`test`), macOS 27. `start_day` **acked** in ~5.5 s (`cmd_xmx9fwc2`). Native: `session_open=true`, `tape_advancing=true`. Server: **0 chunks**.
 
-**Live (Mini, later — confirmed, do not discard):**
+**Live (Mini — confirmed, do not discard):**
 
-- `room-recorder` pid **up since Sat 12 Sep (~3 days)**.
-- **~4885 open FDs, ~4847 of them PIPEs.**
-- `status.json` `last_error`: `cannot write …/spool/.piece-….pcm.tmp: errno 24` (**EMFILE / Too many open files**).
-- `pending_piece_count=0`, spool empty; tapewriter still writing `tape.pcm` (idx rms≈0.009, not flat zero).
+| Fact | Why it matters |
+|---|---|
+| pid up since Sat 12 Sep (~3 days) | Leak exposure is **process lifetime**, not this morning’s `start_day`. |
+| ~4885 FDs, **~4847 PIPEs** | Foundation `Pipe()`, not leftover `.pcm.tmp` REG files. |
+| `last_error` = `cannot write …/spool/.piece-….pcm.tmp: errno 24` | Exact `RoomPiecePipelineError.writeFailed(path, errno)` in `PiecePipeline.swift`. |
+| Disk **~113 GB free** | Not `ENOSPC`. Spool empty because `open()` fails **before** a durable piece exists. |
+| `room-recorder.lock` held by this pid | `RoomEngineInstanceLock`: `flock(LOCK_EX\|LOCK_NB)` for the life of the process (`deinit` unlocks). Second start → `alreadyRunning`. |
+| idx rms≈0.009, not flat zero | Quiet room, not digital silence. |
+| `pending_piece_count=0`, spool empty | Cut never reached `RoomPieceSpool.publish`. |
 
-Capture is alive. The cutter cannot open a new temp file because the **engine process has exhausted the FD table**. The `.pcm.tmp` open is the **victim**, not the leak. ~4847 PIPEs means Foundation `Pipe()` objects, not leftover `.pcm.tmp` REG files.
+### Ruled out by Mini (do not re-open)
 
-Tape is **16 kHz s16le** (32 000 B/s). A piece is **4 800 000 samples / 300 s**. Growing PCM past that boundary is expected; pieces never publish because `copyExactRange` fails at `open(…pcm.tmp)` before ffmpeg runs.
+- **Silence does not abort a cut.** `RoomPiecePlanner.fullPieceSamples = 4_800_000` (300 s @ 16 kHz). The planner only looks at idx sample ranges and discontinuities. `silence_ms` is **heartbeat only** (`PCMTailMeter`, −55 dBFS / `|sample| ≥ 59`) and is sent as `silence_ms` on the poll. It is not an input to `plan()` / `encode()`.
+- **Disk is not full.** 113 GB free; errno 24 is EMFILE, not ENOSPC.
+- **Capture is not dead.** Tapewriter keeps `tape.pcm` / `tape.idx` growing under the session dir.
+- **Upload is not wedged.** A wedged upload would leave `pending ≥ 1` and files in `spool/`.
 
-### Piece pipeline (plain capture)
+### Piece pipeline (plain capture, 0.1.22)
 
 ```
 tapewriter  --record-->  tape.pcm + tape.idx
                               |
 RoomEngine.run() loop (~1.5s)
-  1. publishAvailable(finalFlush: false)     // CUT
-  2. drainPending()                          // UPLOAD
+  1. publishAvailable(finalFlush: false)     // CUT — fails here
+  2. drainPending()                          // never sees a piece
 ```
 
-`FFmpegPieceEncoder.encode` (`PiecePipeline.swift`): unique `.piece-<uuid>.pcm.tmp` + `.webm.tmp` under `spool/`; `copyExactRange` then `FoundationPieceProcessRunner.run` (ffmpeg); `defer` unlinks both temps. `RoomPieceSpool.publish` is what increments `pending_piece_count`. Throws in `run()` set `lastError` and **do not** advance `segment.nextSample`.
+`FFmpegPieceEncoder.encode`: unique `.piece-<uuid>.pcm.tmp` + `.webm.tmp`; `copyExactRange` then `FoundationPieceProcessRunner` (ffmpeg); `defer` unlinks temps. **`writeFailed` is thrown in `copyExactRange` when `open(pcm.tmp)` returns −1.** ffmpeg is not started on the current attempt. Throws are caught in `run()`, `lastError` is saved, `segment.nextSample` is **not** advanced → tight retry every ~1.5 s.
 
-### 1. Where `.pcm.tmp` is opened — and whether that path leaks
+### Where PIPEs leak (piece pipeline + long-lived process)
 
-`copyExactRange` (`PiecePipeline.swift`):
+`copyExactRange` itself **does not leak**: source and dest FDs are `defer { close }`. If `open(pcm.tmp)` fails, no dest FD is taken. That open is the EMFILE **victim**.
 
-- `open(tape.pcm, O_RDONLY|O_CLOEXEC)` → `defer { close(sourceFD) }`
-- `open(.piece-….pcm.tmp, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC)` → **this is errno 24**
-- destination also `defer { close(destinationFD) }`
+The table is PIPEs. In the **piece pipeline** the only `Pipe()` is:
 
-If `open` fails, no destination FD is taken. On any later throw, `defer` still closes. **The piece-copy FDs do not leak across attempts.** Failed writes also hit `defer { removeItem(inputTemporary) }` in `encode`, so spool should stay empty of `.pcm.tmp` (hidden files; `ls` without `-a` would miss them anyway).
+```
+FoundationPieceProcessRunner.run
+  errorPipe = Pipe()
+  process.standardError = errorPipe
+  process.run()
+  errorPipe.fileHandleForReading.readDataToEndOfFile()
+  process.waitUntilExit()
+  // never closeFile() on read or write end
+```
 
-`writeFailed(path, errno)` is exactly the Mini string: `cannot write \(path): errno \(code)`.
+Once a 4.8e6-sample plan exists, this runs every cutter loop. Parent keeps both pipe ends; Foundation `Process` may retain the `Pipe` after exit. Without an explicit close, FDs survive into the next attempt.
 
-### 2. Long-lived PIPEs that are not closed on a failed piece
+Same missing-close pattern exists on the **poll path** (`MachineFactsReader.runTool`: `pmset` / `launchctl` / `scutil` every ~1.5 s for the whole 3-day pid). `report_diag` helpers are rare. The resident-archive encoder **does** close pipe ends — this session is the **plain** cutter (`captures/bs_hk2d7acj/tape.pcm`).
 
-The FD table is pipes. Sites that call `Pipe()` in the resident app:
+After EMFILE, `encode` throws before `runner.run`, so **that** loop adds no new ffmpeg pipe. The ~4847 PIPEs are from **earlier** `Pipe()` constructions on this pid. Tapewriter is a child with its own FD table → PCM continues.
 
-| Site | When | Close hygiene |
-|---|---|---|
-| **`FoundationPieceProcessRunner.run`** | **Every cutter attempt** (once `plan` is non-empty, every ~1.5 s) | `errorPipe = Pipe()` assigned to `process.standardError`. Reads `fileHandleForReading.readDataToEndOfFile()`, `waitUntilExit()`. **Never `closeFile()` on read or write end.** Stdin/stdout are `FileHandle.nullDevice` (shared, OK). |
-| **`MachineFactsReader.runTool`** | **Every poll** (~1.5 s): `pmset -g`, `launchctl print …`, `scutil --get ComputerName` | Same: `Pipe()` on stdout, no `closeFile()`. |
-| `RoomEngine.runHelperVersion` | `report_diag` only (`tapewriter --version`, `ffmpeg -version`) | Same pattern; not the 3-day background leak. |
-| `ArchiveFFmpegStreamingEncoder` / `FoundationArchiveStreamingProcess` | Resident-archive encode | **Does** close: parent closes unused ends after `run()`, workers `close()` in `defer`. Not this session’s `captures/…/tape.pcm` path. |
+`NSPOSIXErrorDomain Code=9` on stop (playbook Fault W) is **EBADF** — same FD-table family.
 
-Failed piece after EMFILE: `encode` throws in `copyExactRange` **before** `runner.run`, so **that** attempt adds no new ffmpeg pipe. The ~4847 PIPEs are from **earlier** `Pipe()` constructions that were never closed. Classic Foundation behaviour: parent keeps both pipe ends; `Process` may retain the `Pipe` after exit; without an explicit close the FDs survive the next loop.
+### 0.1.22
 
-`publishAvailable` catches the throw, saves `last_error`, retries next loop → immediate another `open(pcm.tmp)` → same EMFILE. `pending` stays 0. Tapewriter is a **child** with its own FD table, so PCM keeps growing.
+Home Office is the only Mini on **0.1.22** and the only one with a **3-day pid** holding the lock. `FoundationPieceProcessRunner` text is the same as 0.1.21 (`PiecePipeline.swift` diff empty vs `5af9075`). 0.1.22 did **not** add a pipe-close fix. It did add `silence_ms` / `clip_count` (`PCMTailMeter` closes its `FileHandle` — REG, not PIPE). The defect that bit today is **this long-lived 0.1.22 process** leaking PIPEs until the cutter cannot `open`.
 
-Playbook Fault W `NSPOSIXErrorDomain Code=9` is **EBADF** (bad FD). Same family as a wrecked FD table; EMFILE is the cutter’s symptom, EBADF is often the stop’s.
+### Recommended fix (product — not in this docs-only PR)
 
-### 3. 0.1.22 vs 0.1.21
+1. **Close-always** in `FoundationPieceProcessRunner` (and `runTool`): after `run()`, close the parent write end; `defer { closeFile() }` both ends after `waitUntilExit`. Prefer `FileHandle.nullDevice` for ffmpeg stderr (`-loglevel error`).
+2. Back off when `last_error` is errno 24 — do not tight-loop `Pipe()` / `open(pcm.tmp)`.
+3. **Max uptime:** recycle the engine so a leak cannot hold `room-recorder.lock` for days. Immediate ops **is** kill that pid (lock releases on `deinit` / process death).
 
-`git diff 5af9075 origin/vinay/release-b1 -- …/PiecePipeline.swift` is **empty**. `FoundationPieceProcessRunner` and `copyExactRange` are the same in 0.1.21. Changelog 0.1.22 adds operator verbs + `clip_count`/`silence_ms` (`PCMTailMeter` opens `tape.pcm` with `FileHandle` and **does** `defer { close() }` — REG files, not PIPEs).
+### Next (ops)
 
-**There is no 0.1.22-only FD-leak patch, and no 0.1.22-only pipe in the piece encoder.** Home Office is the Mini that (a) kept **one pid for ~3 days**, (b) is on **macOS 27**, (c) actually ran the cutter this morning. Clinic 0.1.21 boxes that `kickstart` or sleep more often would not accumulate thousands of PIPEs. Room 4.1 never reaches the cutter (session dies at ~16 s).
+The lock is held by the leaked pid. A second `room-recorder` will not start (`alreadyRunning`). Recycle **that** process:
 
-If `runTool` leaked 2 FDs per helper × 3 helpers × every 1.5 s for 3 days, the table would be orders of magnitude larger than 4885. So either completed `runTool` processes **do** drop pipes on deinit, or the burst is **cutter retries** once a 5-minute plan exists (plus whatever macOS 27 does not reclaim). The Mini count is still the defect: the process cannot open a piece file.
-
-### 4. Recommended fix (product — not in this docs-only PR)
-
-1. **Close-on-error / close-always** in `FoundationPieceProcessRunner` and `MachineFactsReader.runTool`: after `process.run()`, close the parent write end; after `waitUntilExit()`, `closeFile()` both ends in `defer`. Prefer `process.standardError = FileHandle.nullDevice` for ffmpeg (`-loglevel error` already); no pipe required.
-2. **Do not retry-encode in a tight loop while `last_error` is errno 24** — backoff, surface `EMFILE` as a fleet flag, stop calling `Pipe()`.
-3. **Process recycle:** `restart_engine` already exits non-zero so launchd relaunches (refuses with `session_open` unless `force`). Add a max-uptime restart (e.g. daily, idle-only) so a leak cannot run for 3 days. Immediate ops **is** recycle after `end_day`.
-
-### Next (ops) — this is Fault W with a named errno
-
-Playbook §2.2, in order:
-
-1. `end_day` (never `restart_engine` while `session_open` — it returns `session_open` unless `force`). Code=9 on stop is still W.
-2. `restart_engine` (0.1.22) — **this is the FD-table cure**; launchd starts a new pid.
-3. `start_day`. Confirm `lsof -p <pid> | rg -c PIPE` is tens, not thousands, and the first WebM within ~5 min.
+1. `end_day` first. `restart_engine` refuses `session_open` unless `force`. Code=9 on stop is still W.
+2. `restart_engine` (0.1.22) **or** `launchctl kickstart -k gui/$(id -u)/com.evenscribe.room-recorder` — new pid, new FD table, lock reacquired.
+3. `start_day`. Confirm PIPE count is tens, not thousands, and a WebM within ~5 min.
 
 Do not treat as TONOR mute. Do not `close_orphaned_session` while the listener is fresh and claims `bs_hk2d7acj`.
 
@@ -169,7 +172,7 @@ This is **not** undersized-piece health (`lib/mic-health.ts` D36): that rule nee
 |---|---|---|
 | **0.1.8** | OPD 1 (recording today), OPD 4 (offline) | Capture/upload still works (OPD 1: ~1.2 MB pieces on C270). No `peak`/`input_devices` heartbeat. **Cannot self-update to 0.1.21:** `last_update_result=signature_mismatch` (“downloaded app was not signed by Even”) — designated-requirement / Team ID check from R3. Ops: re-enrol or fix signing; do not keep clicking update. |
 | **0.1.21** | stable clinic | Fault D (tapewriter exit 1), Fault S (TONOR zeros), `SILENT_WHILE_RECORDING` via `zero_ratio`. No `check_update_now` / `restart_engine`. |
-| **0.1.22** | Home Office `test` only (Room 4.1 stayed `stable`) | Adds `silence_ms`, `clip_count`, `restart_engine`, `report_diag`. **Piece encoder Pipe/FD handling is identical to 0.1.21.** Home Office W today is **EMFILE** after ~3-day pid. `tapewriter --version` is not a real command — ignore that diag line. |
+| **0.1.22** | Home Office `test` only | Same piece `Pipe()` as 0.1.21; **this pid** leaked until EMFILE and still holds `room-recorder.lock`. `silence_ms` is heartbeat-only, not a cut abort. |
 
 Healthy today: OPD 7 (0.1.21, TONOR, ~1.2 MB), OPD 1 (0.1.8, C270, ~1.2 MB). Version is not the common factor. **Device + USB + mute + whether pieces actually upload** are.
 
@@ -185,7 +188,7 @@ Healthy today: OPD 7 (0.1.21, TONOR, ~1.2 MB), OPD 1 (0.1.8, C270, ~1.2 MB). Ver
 | Reaper 30 min auto-end | `NOTE_STALL` — **not** Room 4.1 today |
 | Chunk verify | `app/api/bench/chunks/route.ts` (HEAD R2 then row) |
 | Native start / tapewriter exit 1 / 15 s | `RoomEngine.beginOrResume` / `waitForDurableGrowth`; `CaptureReadinessPolicy.coldBoot`; error string `tapewriter exited with status \(status)` |
-| Home Office EMFILE / empty spool | `FFmpegPieceEncoder.encode` + `copyExactRange`; `FoundationPieceProcessRunner` (`Pipe` never closed); `MachineFactsReader.runTool`; `writeFailed` → `cannot write … errno 24` |
+| Home Office EMFILE / empty spool | `RoomPiecePipelineError.writeFailed`; `copyExactRange` + `FoundationPieceProcessRunner` (`Pipe` never closed); `RoomEngineInstanceLock` (`room-recorder.lock`, `flock` for process life) |
 | `tape_advancing` vs pieces | `InstallPollFields.swift`; BUILD-HISTORY 0.1.7 fix (durable index, not piece cursor) |
 | `SILENT_WHILE_RECORDING` | `evaluateInstallStates` + `SILENT_POLLS` / `SILENT_ZERO_RATIO` |
 | `restart_engine` | `RoomEngine.restartEngine` — refuses `session_open` unless `force`; then non-zero exit for launchd |
