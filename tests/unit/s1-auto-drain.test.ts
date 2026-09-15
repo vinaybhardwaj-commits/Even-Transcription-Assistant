@@ -592,6 +592,20 @@ describe.skipIf(!HAVE_DOCKER)("E17 — last served, derived from scribe_job, in 
     expect(offered()).toEqual(["bw_two_old"]);
   });
 
+  it("E22 R5 (F2): a QUEUED or RUNNING job is a turn — the state right after the drain submits, held ~20 min and four ticks by a 900 s route job", async () => {
+    for (const status of ["queued", "running", "done"]) {
+      pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job;");
+      windowRow("bw_two_done", { session: "sess_two", state: "transcribed" });
+      windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+      windowRow("bw_on_live", { state: "transcribing" });
+      windowRow("bw_on_next", { ageMin: 5 });
+      servedJob("job_two", "bw_two_done", 60);
+      pg.exec(`INSERT INTO scribe_job (id, kind, args, status, created_at) VALUES ('job_on', 'room_window', '{"window_id": "bw_on_live"}', '${status}', NOW() - INTERVAL '2 minutes');`);
+      await drainOnce();
+      expect(offered(), `${status}: room_on had its turn 2 min ago, room_two 60 min ago — room_two's older window goes first`).toEqual(["bw_two_old"]);
+    }
+  });
+
   it("a room_window job older than AUTO_DRAIN_MAX_AGE_HOURS does not count as served", async () => {
     windowRow("bw_two_done", { session: "sess_two", state: "transcribed" });
     windowRow("bw_on_a", { ageMin: 30 });

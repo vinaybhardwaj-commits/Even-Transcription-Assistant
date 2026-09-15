@@ -245,6 +245,51 @@ describe("E11(b)/(e) — a silence that could not be written is NOT a finished r
   }
 });
 
+describe("E22 R5 (F6) — SPOKEN turns that could not be written are NOT a finished read, on the brain's REAL failure shapes", () => {
+  // The block above proves the guard on the silent branch only. The speech branch has its own guard, and mutant
+  // E11-11 (that guard changed to `!counts.window_recorded`) survived: on batch_refused_marker_accepted the marker
+  // lands, window_recorded is TRUE, and the mutant marks a window transcribed whose turns were rolled back. Same
+  // REAL writeWindowCues and postTurnBatch, same fake `fetch`, spoken Whisper answer.
+  const SPOKEN = () => ({ ok: true, transcript: "one two", language: "en", latency_ms: 90, attempts: 1, engineVersion: "large-v3-turbo",
+    segments: [{ start_s: 0, end_s: 5, text: "one" }, { start_s: 30, end_s: 36, text: "two" }] });
+  for (const { mode, recorded } of [
+    { mode: "batch_refused_marker_accepted" as const, recorded: true },
+    { mode: "both_refused" as const, recorded: false },
+  ]) {
+    it(`${mode}: one attempt, cues_refused, window back to closed, subject not done, engine never reached`, async () => {
+      WHISPER.value = SPOKEN();
+      const brain: Array<{ replace: boolean; types: string[] }> = [];
+      CUES.real = true;
+      vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+        expect(String(url)).toBe("https://x.test/api/brain/cues");
+        const body = JSON.parse(String(init.body)) as { replace_window?: unknown; cues: Array<{ type: string }> };
+        const markerOnly = !body.replace_window;
+        brain.push({ replace: !markerOnly, types: body.cues.map((c) => c.type) });
+        if (mode === "both_refused" || !markerOnly) return new Response(JSON.stringify({ ok: false, error: "brain_permission_denied" }), { status: 403 });
+        return new Response(JSON.stringify({ ok: true, deleted: 0, written: 1, already_existed: 0, dropped: 0, attempted: 1 }), { status: 200 });
+      });
+      try {
+        const r = await driveRoom();
+        expect(CUES.realAnswers).toHaveLength(1);
+        expect(CUES.realAnswers[0], "the shape the real function returns — the one the guard must be right about").toMatchObject({ complete: false, window_recorded: recorded });
+        expect(Number(CUES.realAnswers[0]!.failed), "spoken turns, so every turn in the batch failed").toBeGreaterThanOrEqual(1);
+        expect(brain[0]!.replace, "the turn batch carries the window replace").toBe(true);
+        expect(brain[0]!.types).toContain("stt_turn");
+        expect(brain.at(-1), "then the marker alone, without the replace").toEqual({ replace: false, types: ["stt_window"] });
+        expect(r.error).toBe("room_window_failed: cues_refused");
+        expect(r.visited).toEqual(["prepare", "segment"]);
+        expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
+        expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
+        expect(DB.windowState, "back in the queue, not transcribed").toBe("closed");
+        expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
+        expect(ROUTER.submits, "no routed engine for a window whose turns did not land").toBe(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  }
+});
+
 describe("E11(c) — silent_window is SAID on a spoken result, never inherited", () => {
   it("segment entered with silent_window:true in progress, on a spoken window, goes to engine and clears the flag", async () => {
     // No step order does this today. The test pins the hazard: a stale `true` carried by the
