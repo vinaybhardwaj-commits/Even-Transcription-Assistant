@@ -12,7 +12,7 @@ Named faults below are the ones already in `docs/handoff/ETA-ROOM-TROUBLESHOOTIN
 
 The native Room Recorder **is** that kiosk: `tab_id = app_<install_id>`. The now-picture’s `page_open` / `listener_state` is that poll, not a Safari tab. Copy that still says “open the room page on the Mini” is leftover from the browser-kiosk era.
 
-A second heartbeat (`install_id`, `tape_advancing`, `peak`, `zero_ratio`, …) rides the same poll and updates `room_install`. **`tape_advancing` is local durable-sample growth**, not “a row exists in `bench_chunk`.” That split is load-bearing for Home Office today.
+A second heartbeat (`install_id`, `tape_advancing`, `peak`, `zero_ratio`, …) rides the same poll and updates `room_install`. **`tape_advancing` is local durable-sample growth**, not “a row exists in `bench_chunk`.” Home Office today: tape advances; pieces do not, because the **0.1.22 engine pid leaked PIPEs**.
 
 ---
 
