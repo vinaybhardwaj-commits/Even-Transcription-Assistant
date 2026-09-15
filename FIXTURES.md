@@ -72,3 +72,10 @@ Two runs of an identical ffmpeg command produce different WebM bytes; the muxer 
 container bytes** — not in U0, U1, U3 or anything downstream that is tempted to checksum a piece.
 Compare Opus packets (e.g. `ffmpeg -i piece.webm -map 0:a -c copy -f framemd5 -`) or decoded audio only.
 Piece upload verification on the Mac is size-only for the same family of reasons.
+
+## Required fixtures — `spec/required-fixtures.json`
+
+The list of every fixture a complete suite root contains, with the cases each serves and whether it is `in-repo`
+(generated into `fixtures/`, which is not committed) or `out-of-repo-audio` (real recordings adopted outside the
+repository). `conformance run` reads it (`--required`, default `spec/required-fixtures.json`) and prints
+`SUITE HOLDS` only when every listed fixture is present; otherwise `SUITE HOLDS (REDUCED)` with each missing row.

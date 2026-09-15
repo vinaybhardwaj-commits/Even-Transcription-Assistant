@@ -315,3 +315,15 @@ floor had elapsed during the outage) with **zero_ratio 0.415, peak 9.155e-05, rm
 statistically indistinguishable from a hardware mute by the signature grounded on 9 Sep (OPD 3, 45.76 % bit-exact
 zero). Any downstream mute/unplug classifier will misfire on the ~25 ms after every `resumed` record. The next record
 (line 1871) is normal: rms 0.075, peak 0.256.
+
+## Required-fixtures manifest and REDUCED ROOT (15 Sep, before step 5)
+
+Defect: a fresh clone ran 67/67 and printed SUITE HOLDS while the six rows proving the real device-loss path
+(good/u1-real-faults, out-of-repo audio) had not run. Fix: `spec/required-fixtures.json` lists every fixture a complete
+root contains (38 fixtures, 73 assertions), each `in-repo` or `out-of-repo-audio`. Every run compares it with what is
+present: absent fixtures make the root REDUCED, their rows are printed as NOT RUN, and the verdict is
+`SUITE HOLDS (REDUCED): N assertions not made` (exit 3). Unqualified `SUITE HOLDS` (exit 0) only for a complete root.
+A missing/unreadable manifest is a hard error (exit 2). A present fixture not in the list, or whose cases differ, is a
+coverage problem. New fixtures must be added to the list in the same change.
+
+Not a C-check change: the rows and assertions of C1–C10 are unchanged; this is the suite's verdict over them.

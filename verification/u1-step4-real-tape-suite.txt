@@ -1,11 +1,4 @@
-adopted /home/vinay/tapes/suite-root-step4/good/u1-real-faults serving ["C1", "C2", "C3", "C5", "C6", "C7"]
-C7 on line 11: ring_overflow at sample 163600, gap_ns 749895743, dropped_input_frames 36000
-tape: 38589200 samples = 2411.825 s, 1901 records, 6 region(s), pieces ["[0,163600)", "[163600,4963600)", "[4963600,9763600)", "[9763600,14563600)", "[14563600,19363600)", "[19363600,24163600)", "[24163600,28963600)", "[28963600,33763600)", "[33763600,38014000)", "[38014000,38269200)", "[38269200,38589200)"]
-clock, region [0,163600) lines 1..<11 anchored on line 1 (tape start): 10 checkpoints, wall_ns vs sample clock max |deviation| 0.229 ms, largest step 0.283 ms, mono drift anchor→line 10 +22.4 ppm
-clock, region [163600,38014000) lines 11..<1868 anchored on line 11 (ring_overflow): 1856 checkpoints, wall_ns vs sample clock max |deviation| 8.178 ms, largest step 1.980 ms, mono drift anchor→line 1867 +3.3 ppm
-clock, region [38014000,38269200) lines 1869..<1883 anchored on line 1869 (resumed): 13 checkpoints, wall_ns vs sample clock max |deviation| 0.327 ms, largest step 0.118 ms, mono drift anchor→line 1882 +18.7 ppm
-clock, region [38269200,38589200) lines 1883..<1901 anchored on line 1884 (restart): 17 checkpoints, wall_ns vs sample clock max |deviation| 0.552 ms, largest step 0.463 ms, mono drift anchor→line 1900 +14.2 ppm
-conformance: fixtures /home/vinay/tapes/suite-root-step4
+conformance: fixtures /home/vinay/tapes/suite-root-step4; required fixtures /home/vinay/dev/room-recorder-linux/spec/required-fixtures.json (38)
 CASE FIXTURE                               ROLE     RESULT  MUST         HOLDS
 C1   good/c7-quiet-room-ramp               good     PASS    PASS         yes
 C1   good/clean-short                      good     PASS    PASS         yes
@@ -136,7 +129,7 @@ C9   negative/c9-history-carried-across-discontinuity negative FAIL    FAIL     
       · output with resets at [52801, 100800] differs from expected-16k-mono-regions.pcm: first difference at output sample 17600: expected -775, produced 0; 16824 of 44799 samples differ
 C10  good/clean-short                      good     PASS    PASS         yes
 
-73/73 rows hold; 0 load errors; 0 coverage problems
+73/73 rows hold; 0 load errors; 0 coverage problems; 0 assertions not made
 SUITE HOLDS
 C10 encoder: running ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers / libopus 1.6.1 on Ubuntu 26.04.1 LTS: an attested pair
 C10 measurement: decoded 40000/40000 samples (Δ 0), best lag 0, correlation 0.99316, RMS Δ +0.0008 dB

@@ -24,12 +24,47 @@ public struct CaseRow {
     }
 }
 
+/// spec/required-fixtures.json: every fixture a COMPLETE suite root contains, whether or not it is present.
+public struct RequiredFixtures: Codable, Sendable {
+    public static let currentSchema = "eta.room-recorder.required-fixtures/1"
+    public struct Entry: Codable, Sendable {
+        public var id: String
+        public var role: FixtureRole
+        public var cases: [CaseID]
+        /// "in-repo" or "out-of-repo-audio".
+        public var source: String
+        public var how: String
+    }
+    public var schema: String
+    public var description: String
+    public var fixtures: [Entry]
+
+    /// A missing or unreadable manifest is a hard error, never a pass.
+    public static func load(_ url: URL) throws -> RequiredFixtures {
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch {
+            throw FixtureLoadError(fixture: url.path, reason: "required-fixtures manifest missing or unreadable: \(error)")
+        }
+        let m = try JSONDecoder().decode(RequiredFixtures.self, from: data)
+        guard m.schema == currentSchema else { throw FixtureLoadError(fixture: url.path, reason: "schema \(m.schema) is not \(currentSchema)") }
+        return m
+    }
+}
+
 public struct SuiteReport {
     public var rows: [CaseRow] = []
     public var loadErrors: [String] = []
     public var coverageProblems: [String] = []
+    /// Required fixtures absent from this root; their rows were not run.
+    public var missingRequired: [RequiredFixtures.Entry] = []
+    public var only: Set<CaseID>? = nil
 
     public var holds: Bool { loadErrors.isEmpty && coverageProblems.isEmpty && rows.allSatisfy(\.holds) }
+    public var complete: Bool { missingRequired.isEmpty }
+    /// Rows the complete root would have run that this root did not.
+    public var assertionsNotMade: [(CaseID, RequiredFixtures.Entry)] {
+        missingRequired.flatMap { e in e.cases.filter { only?.contains($0) ?? true }.map { ($0, e) } }
+    }
 
     public func render(verbose: Bool) -> String {
         var out: [String] = []
@@ -50,10 +85,19 @@ public struct SuiteReport {
         }
         for e in loadErrors { out.append("LOAD ERROR  \(e)") }
         for p in coverageProblems { out.append("COVERAGE    \(p)") }
+        let notMade = assertionsNotMade
+        if !missingRequired.isEmpty {
+            out.append("REDUCED ROOT: \(missingRequired.count) required fixture(s) absent; these rows did not run:")
+            for (c, e) in notMade {
+                out.append(pad("NOT RUN", 9) + pad(c.rawValue, 5) + pad(e.id, 38) + pad(e.role.rawValue, 9) + "(\(e.source): \(e.how))")
+            }
+        }
         let held = rows.filter(\.holds).count
         out.append("")
-        out.append("\(held)/\(rows.count) rows hold; \(loadErrors.count) load errors; \(coverageProblems.count) coverage problems")
-        out.append(holds ? "SUITE HOLDS" : "SUITE DOES NOT HOLD")
+        out.append("\(held)/\(rows.count) rows hold; \(loadErrors.count) load errors; \(coverageProblems.count) coverage problems; \(notMade.count) assertions not made")
+        if !holds { out.append("SUITE DOES NOT HOLD") }
+        else if complete { out.append("SUITE HOLDS") }
+        else { out.append("SUITE HOLDS (REDUCED): \(notMade.count) assertions not made, from \(missingRequired.map(\.id).joined(separator: ", "))") }
         return out.joined(separator: "\n")
     }
 }
@@ -64,8 +108,10 @@ public enum Suite {
     /// Cases that must each fail on at least one negative control.
     public static let mustHaveNegative: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9]
 
-    public static func run(root: URL, only: Set<CaseID>? = nil, resampler: (any Resampler)? = LinkedResampler.current) -> SuiteReport {
+    public static func run(root: URL, required: RequiredFixtures, only: Set<CaseID>? = nil,
+                           resampler: (any Resampler)? = LinkedResampler.current) -> SuiteReport {
         var report = SuiteReport()
+        report.only = only
         var fixtures: [Fixture] = []
         do {
             for dir in try FixtureLoader.discover(root: root) {
@@ -86,6 +132,23 @@ public enum Suite {
             }
             for f in fixtures where f.manifest.cases.contains(id) {
                 report.rows.append(CaseRow(caseID: id, fixture: f.id, role: f.manifest.role, verdict: Cases.run(id, f)))
+            }
+        }
+
+        // The root against the specification's list: absent required fixtures make it REDUCED; present fixtures the
+        // list does not know, or whose cases differ from it, are coverage problems (the list must stay complete).
+        let discovered = Set(((try? FixtureLoader.discover(root: root)) ?? []).map {
+            String($0.standardizedFileURL.path.dropFirst(root.standardizedFileURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        })
+        report.missingRequired = required.fixtures.filter { !discovered.contains($0.id) }
+        let requiredByID = Dictionary(uniqueKeysWithValues: required.fixtures.map { ($0.id, $0) })
+        for f in fixtures {
+            guard let e = requiredByID[f.id] else {
+                report.coverageProblems.append("fixture \(f.id) is present but not listed in spec/required-fixtures.json")
+                continue
+            }
+            if e.cases != f.manifest.cases || e.role != f.manifest.role {
+                report.coverageProblems.append("fixture \(f.id) serves \(f.manifest.cases.map(\.rawValue)) as \(f.manifest.role.rawValue); required-fixtures.json says \(e.cases.map(\.rawValue)) as \(e.role.rawValue)")
             }
         }
 

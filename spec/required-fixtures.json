@@ -1,0 +1,383 @@
+{
+  "description": "Every fixture a COMPLETE suite root contains. The suite compares this list with the fixtures present on every run: any absent fixture makes the root REDUCED, and SUITE HOLDS without a qualifier is printed only for a complete root. A missing or unreadable manifest is a hard error.",
+  "fixtures": [
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C7"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/c7-quiet-room-ramp",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/c9-direction-probe",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/c9-resample-tones",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C10"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/clean-short",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/darwin-encoder-doubles",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/device-lost-resumed",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C7"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/discontinuity",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/gap-rounding-at-and-above-half",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/gap-rounding-below-half",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C3"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/interior-blank",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C4",
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/ist-midnight",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C5",
+        "C6"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/multi-piece",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C5",
+        "C6"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/multi-piece-gap",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/restart-odd-tail-trimmed",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/torn-tail",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C5",
+        "C6",
+        "C7"
+      ],
+      "how": "tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed)",
+      "id": "good/u1-real-faults",
+      "role": "good",
+      "source": "out-of-repo-audio"
+    },
+    {
+      "cases": [
+        "C1"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c1-offset-not-twice-samples",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c1-restart-odd-tail-untrimmed",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c2-darwin-line-17-digit-double",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c2-escaped-slash",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c2-noncanonical-double",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c2-rms-on-discontinuity",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C2"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c2-unsorted-keys",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C3"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c3-blank-line-inside-torn-log",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C4"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c4-one-sample-lost",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-gap-on-preceding-piece",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-gap-on-restart",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-gap-rounded-down-at-half",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-piece-straddles-discontinuity",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-reanchored-seam",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-resumed-gap-dropped",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C6"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c6-first-piece-one-short",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C7"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c7-zero-filled-gap",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-straddle-moved-to-new-day",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-coefficient-perturbed",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-convolution-reversed",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-decimation-phase-shifted",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-history-carried-across-discontinuity",
+      "role": "negative",
+      "source": "in-repo"
+    }
+  ],
+  "schema": "eta.room-recorder.required-fixtures/1"
+}

@@ -10,4 +10,4 @@ rm -rf "$root"; mkdir -p "$root/good"
 for f in "$here"/fixtures/good/*; do ln -s "$f" "$root/good/$(basename "$f")"; done
 ln -s "$here/fixtures/negative" "$root/negative"
 "$here/.build/release/conformance" adopt-tape --tape "$tape" --fixtures "$root" --name "$name"
-"$here/.build/release/conformance" run --fixtures "$root"
+"$here/.build/release/conformance" run --fixtures "$root" --required "$here/spec/required-fixtures.json"

@@ -1,4 +1,4 @@
-conformance: fixtures /w/fixtures
+conformance: fixtures /w/fixtures; required fixtures /w/spec/required-fixtures.json (38)
 CASE FIXTURE                               ROLE     RESULT  MUST         HOLDS
 C1   good/c7-quiet-room-ramp               good     PASS    PASS         yes
 C1   good/clean-short                      good     PASS    PASS         yes
@@ -122,8 +122,15 @@ C9   negative/c9-history-carried-across-discontinuity negative FAIL    FAIL     
       · regions output is 44800 samples (manifest 44800); resets at [52801, 100800] give 44799
       · output with resets at [52801, 100800] differs from expected-16k-mono-regions.pcm: first difference at output sample 17600: expected -775, produced 0; 16824 of 44799 samples differ
 C10  good/clean-short                      good     PASS    PASS         yes
+REDUCED ROOT: 1 required fixture(s) absent; these rows did not run:
+NOT RUN  C1   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
+NOT RUN  C2   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
+NOT RUN  C3   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
+NOT RUN  C5   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
+NOT RUN  C6   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
+NOT RUN  C7   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed))
 
-67/67 rows hold; 0 load errors; 0 coverage problems
-SUITE HOLDS
+67/67 rows hold; 0 load errors; 0 coverage problems; 6 assertions not made
+SUITE HOLDS (REDUCED): 6 assertions not made, from good/u1-real-faults
 C10 encoder: running ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers / libopus 1.4 on Ubuntu 24.04.4 LTS: the reference pair
 C10 measurement: decoded 40000/40000 samples (Δ 0), best lag 0, correlation 0.99311, RMS Δ +0.0048 dB

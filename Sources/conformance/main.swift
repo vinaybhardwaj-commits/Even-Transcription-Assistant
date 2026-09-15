@@ -3,7 +3,7 @@ import Foundation
 
 let usage = """
 usage:
-  conformance run [--fixtures DIR] [--case C1,C2,…] [--verbose]
+  conformance run [--fixtures DIR] [--required FILE] [--case C1,C2,…] [--verbose]
       Runs the suite. Exit 0 only if every good fixture passes its cases, every negative
       control fails its case, and C9 is PASS or SKIPPED. Default DIR: ./fixtures
   conformance generate --out DIR [--force]
@@ -45,12 +45,16 @@ case "run":
             return id
         })
     }
-    let report = Suite.run(root: root, only: only)
-    print("conformance: fixtures \(root.path)")
+    let requiredURL = url(option("--required") ?? "spec/required-fixtures.json")
+    let required: RequiredFixtures
+    do { required = try RequiredFixtures.load(requiredURL) } catch { die("HARD ERROR: \(error)", 2) }
+    let report = Suite.run(root: root, required: required, only: only)
+    print("conformance: fixtures \(root.path); required fixtures \(requiredURL.path) (\(required.fixtures.count))")
     print(report.render(verbose: args.contains("--verbose")))
     if let env = C10Measurement.environment { print("C10 encoder: \(env)") }
     if let m = C10Measurement.last { print("C10 measurement: \(m)") }
-    exit(report.holds ? 0 : 1)
+    // 0: holds on a complete root. 3: holds on a REDUCED root. 1: does not hold.
+    exit(!report.holds ? 1 : (report.complete ? 0 : 3))
 
 case "generate":
     guard let out = option("--out") else { die(usage) }
