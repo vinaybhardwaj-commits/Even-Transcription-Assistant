@@ -2999,33 +2999,20 @@ public actor RoomEngine {
   /// The production `helperVersion`: the helper's first non-empty output line and its exit status,
   /// bounded, or nil when it could not be run. Five seconds at most — it must not hold a report up.
   public static func runHelperVersion(_ path: String, _ arguments: [String]) -> String? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    defer {
-      try? pipe.fileHandleForReading.close()
-      try? pipe.fileHandleForWriting.close()
-    }
-    do {
-      try process.run()
-    } catch {
-      return nil
-    }
-    try? pipe.fileHandleForWriting.close()
-    let deadline = Date().addingTimeInterval(5)
-    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-    if process.isRunning {
-      process.terminate()
-      return "no answer within 5 s"
-    }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let first = String(decoding: data, as: UTF8.self)
+    guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+    guard
+      let result = RoomSubprocess.run(
+        executable: URL(fileURLWithPath: path),
+        arguments: arguments,
+        timeout: 5,
+        captureStdout: true,
+        captureStderr: true)
+    else { return "no answer within 5 s" }
+    let combined = result.stdout + result.stderr
+    let first = String(decoding: combined, as: UTF8.self)
       .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
       .first { !$0.isEmpty } ?? ""
-    return "\(first.prefix(200)) (exit \(process.terminationStatus))"
+    return "\(first.prefix(200)) (exit \(result.status))"
   }
 
   // MARK: - Tier 1 §3: the heartbeat

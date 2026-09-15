@@ -458,26 +458,19 @@ public struct FoundationPieceProcessRunner: RoomPieceProcessRunning {
   public init() {}
 
   public func run(_ invocation: FFmpegEncoderInvocation) throws -> RoomPieceProcessResult {
-    let process = Process()
-    let errorPipe = Pipe()
-    process.executableURL = invocation.executableURL
-    process.arguments = invocation.arguments
-    process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = errorPipe
-    // Home Office 15 Sep 2026: a 3-day pid leaked ~4847 PIPEs (ulimit -n 256 → EMFILE on
-    // .pcm.tmp). Foundation keeps both pipe ends unless we close them; cutter retries ~1.5s.
-    defer {
-      try? errorPipe.fileHandleForReading.close()
-      try? errorPipe.fileHandleForWriting.close()
+    guard
+      let result = RoomSubprocess.run(
+        executable: invocation.executableURL,
+        arguments: invocation.arguments,
+        timeout: nil,
+        captureStdout: false,
+        captureStderr: true)
+    else {
+      throw RoomPiecePipelineError.processFailed(status: -1, stderr: "ffmpeg did not start")
     }
-    try process.run()
-    try? errorPipe.fileHandleForWriting.close()
-    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
     return RoomPieceProcessResult(
-      terminationStatus: process.terminationStatus,
-      standardError: String(decoding: errorData.prefix(4_096), as: UTF8.self)
+      terminationStatus: result.status,
+      standardError: String(decoding: result.stderr.prefix(4_096), as: UTF8.self)
     )
   }
 }
