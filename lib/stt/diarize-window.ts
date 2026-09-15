@@ -315,9 +315,14 @@ export const EMOTION_DIARIZE_STALE_STATE = "diarize_stale";
  * re-run, for a reason not yet established (ruling R10). This path is scoped to the case that rule makes
  * permanent — a window the emotion job has already recorded `diarize_stale`, whose segments are another
  * run's — and it accepts THIS run's speakers and segments for that window only, ONE statement, when:
+ *   - THIS RUN ENDED `ok` (E25 R13). A `no_speakers` run is refused, not imported: the keep-rule leaves the
+ *     row's state `ok`, and the repair never writes state, so importing its empty content would make `state`
+ *     name one run and the content another. A failed run never reaches here (the job returns first);
  *   - the diarize row is `ok` and this run is its latest (last_run_id = runId: a later run wins);
  *   - the stored segments are not already this run's;
- *   - the window's emotion row is `diarize_stale`.
+ *   - the window's emotion row is `diarize_stale` AND its mark was made against the segments stored now
+ *     (E25 R15). One mark permits one repair: once the segments are replaced, a further diarize run before
+ *     the window is rescored meets the keep-rule like any other window.
  * Any other window is untouched. Call it after `recordDiarizeWindow` for a run that wrote turns.
  * Returns whether the row was repaired. The emotion enqueue then offers the window again, because its
  * emotion row names an older run than last_run_id.
@@ -325,9 +330,12 @@ export const EMOTION_DIARIZE_STALE_STATE = "diarize_stale";
 export async function repairStaleDiarizeSegments(row: {
   windowId: string;
   runId: string;
+  /** The state THIS run ended in — the same value passed to recordDiarizeWindow. */
+  runState: DiarizeWindowState;
   speakers: DiarizeSpeaker[];
   segments: unknown[];
 }): Promise<boolean> {
+  if (row.runState !== "ok") return false;
   const rows = (await sql`
     UPDATE room_diarize_window d
        SET speakers_json   = ${JSON.stringify(speakersForStorage(row.speakers))}::jsonb,
@@ -337,7 +345,9 @@ export async function repairStaleDiarizeSegments(row: {
        AND d.state = 'ok'
        AND d.last_run_id = ${row.runId}::text
        AND d.segments_run_id IS DISTINCT FROM ${row.runId}::text
-       AND EXISTS (SELECT 1 FROM room_emotion_window e WHERE e.window_id = d.window_id AND e.state = ${EMOTION_DIARIZE_STALE_STATE}::text)
+       AND EXISTS (SELECT 1 FROM room_emotion_window e
+                    WHERE e.window_id = d.window_id AND e.state = ${EMOTION_DIARIZE_STALE_STATE}::text
+                      AND e.stale_segments_run_id IS NOT DISTINCT FROM d.segments_run_id)
     RETURNING d.window_id
   `) as Array<{ window_id: string }>;
   return rows.length === 1;

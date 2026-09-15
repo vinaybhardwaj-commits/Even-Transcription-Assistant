@@ -84,13 +84,14 @@ const emb = (seed: number) => {
 const DIARIZE_CALLS: string[] = [];
 /** The clinician ids offered to /diarize on each call, in call order. */
 const CENTROIDS_SENT: string[][] = [];
-/** Flip to make the service fail, so the harness can prove it notices. */
-const SVC = { fail: false };
+/** Flip to make the service fail, so the harness can prove it notices. `noSpeakers`: a run that ends no_speakers (E25 R13). */
+const SVC = { fail: false, noSpeakers: false };
 vi.mock("@/lib/diarize", () => ({
   runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string; clinicianCentroids?: Array<{ clinician_id: string }> }) => {
     DIARIZE_CALLS.push(opts.encounterId);
     CENTROIDS_SENT.push((opts.clinicianCentroids ?? []).map((c) => c.clinician_id));
     if (SVC.fail) return { ok: false, error: "service refused", retryable: false, latencyMs: 0 };
+    if (SVC.noSpeakers) return { ok: true, latencyMs: 1_000, result: { speakers: [], transcript_segments: [], overlap_windows: [], aggregates: {}, model_versions: {} } };
     return {
       ok: true, latencyMs: 68_300,
       result: {
@@ -1625,6 +1626,59 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(w2[0]!.state).toBe("ok");
     expect(w2[0]!.diarize_run_id).toBe(d[0]!.last_run_id);
     expect(w2[0]!.segments_scored).toBeGreaterThan(0);
+  }, 300_000);
+
+  it("E25 R13/R14/R15 — THROUGH THE RUNNER: a no_speakers run is refused; an ok run repairs speakers AND segments; a second run before the rescore meets the keep-rule", async () => {
+    reset();
+    const sql = G.__pgsql;
+    await seedEmotionWindow("bw_emo_once", 44 * WINDOW_MS, { segmentsRunId: "run_older_bw_emo_once" });
+    const r1 = await runEmotionJob("job_emo_once", "bw_emo_once");
+    expect(String(r1.error)).toMatch(/^diarize_segments_stale: /);
+    const markRow = async () => ((await sql`SELECT state, stale_segments_run_id FROM room_emotion_window WHERE window_id = 'bw_emo_once'`) as Array<{ state: string; stale_segments_run_id: string | null }>)[0]!;
+    expect(await markRow()).toEqual({ state: "diarize_stale", stale_segments_run_id: "run_older_bw_emo_once" });
+    const row = async () => ((await sql`SELECT state, speakers_json, segments_json, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_once'`) as Array<{ state: string; speakers_json: Array<Record<string, unknown>>; segments_json: unknown[]; segments_run_id: string | null; last_run_id: string }>)[0]!;
+    const seeded = await row();
+
+    const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+    const { runOneStep } = await import("@/lib/jobs/runner");
+    const diarize = async (jobId: string) => {
+      await insertJob({ id: jobId, kind: "diarize_window", args: { window_id: "bw_emo_once" }, actor: "mcp:test" });
+      for (let i = 0; i < 5; i += 1) {
+        const c = (await claimJobs(3, 240_000, `r_${jobId}_${i}`)).find((x) => x.id === jobId);
+        if (!c) break;
+        await runOneStep(c, `r_${jobId}_${i}`);
+      }
+      const j = (await sql`SELECT status, error, result FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string; error: string | null; result: Record<string, unknown> | null }>;
+      expect(j[0]!.status, `${jobId} must succeed; error=${j[0]!.error}`).toBe("done");
+      return j[0]!.result ?? {};
+    };
+
+    // 1. R13 — a NO_SPEAKERS run on the stale window: refused. The ok row keeps the ok run's state AND content.
+    SVC.fail = false; SVC.noSpeakers = true;
+    const ns = await diarize("job_once_ns");
+    SVC.noSpeakers = false;
+    expect(ns.stale_segments_repaired, "R13: a no_speakers run is never adopted").toBeUndefined();
+    const afterNs = await row();
+    expect(afterNs.last_run_id, "the no_speakers run did run").not.toBe(seeded.last_run_id);
+    expect({ state: afterNs.state, speakers_json: afterNs.speakers_json, segments_json: afterNs.segments_json, segments_run_id: afterNs.segments_run_id },
+      "R13: state and content still describe one run").toEqual({ state: "ok", speakers_json: seeded.speakers_json, segments_json: seeded.segments_json, segments_run_id: "run_older_bw_emo_once" });
+
+    // 2. The FIRST ok run after the mark repairs it — speakers included (R14): the service's two speakers, nested as the writer stores them.
+    const ok1 = await diarize("job_once_ok1");
+    expect(ok1).toMatchObject({ stale_segments_repaired: true });
+    const afterOk1 = await row();
+    expect(afterOk1.segments_run_id).toBe(afterOk1.last_run_id);
+    expect(afterOk1.speakers_json.map((sp) => sp.idx), "R14: speakers_json is the repairing run's").toEqual([0, 1]);
+    expect(afterOk1.speakers_json[0]).toMatchObject({ clinician_id: "doc_fake0001" });
+    expect(afterOk1.segments_json).toHaveLength(2);
+
+    // 3. R15 — a SECOND diarize job between the SAME stale mark and any rescore: the mark is spent; the keep-rule governs.
+    expect((await markRow()).state, "no rescore in between").toBe("diarize_stale");
+    const ok2 = await diarize("job_once_ok2");
+    expect(ok2.stale_segments_repaired, "R15: one stale mark permits one repair").toBeUndefined();
+    const afterOk2 = await row();
+    expect(afterOk2.last_run_id).not.toBe(afterOk1.last_run_id);
+    expect(afterOk2.segments_run_id, "R15: the second run's content is kept out, as for any ok window").toBe(afterOk1.last_run_id);
   }, 300_000);
 
   it("LOADED IS REPORTED, NOT ASSUMED: a /health that does not say records 'unknown'", async () => {

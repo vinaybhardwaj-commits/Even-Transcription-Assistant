@@ -73,18 +73,19 @@ export const diarizeWindowKind: JobKind = {
       return failWith(jobError(res.retryable ? "diarize_unavailable" : "diarize_failed"));
     }
 
+    const runState = res.speakers.length === 0 ? "no_speakers" : "ok";
     await recordDiarizeWindow({
       ...base,
-      state: res.speakers.length === 0 ? "no_speakers" : "ok",
+      state: runState,
       error: null,
       speakers: res.speakers,
       segments: res.segments,
       timing: res.timing,
     });
     // E24 R10 — if the emotion job already recorded this window `diarize_stale`, this fresh run is the cure:
-    // the named repair path accepts its segments for that window, and only that window. Otherwise it
-    // changes nothing and the keep-rule above stands.
-    const repaired = await repairStaleDiarizeSegments({ windowId, runId, speakers: res.speakers, segments: res.segments });
+    // the named repair path accepts its segments for that window, and only that window — and only when this
+    // run ended ok (E25 R13). Otherwise it changes nothing and the keep-rule above stands.
+    const repaired = await repairStaleDiarizeSegments({ windowId, runId, runState, speakers: res.speakers, segments: res.segments });
 
     // Counts and ids only — the spans carry no text and neither does this.
     return doneWith({ window_id: windowId, ...res.outcome, ...(repaired ? { stale_segments_repaired: true } : {}) });

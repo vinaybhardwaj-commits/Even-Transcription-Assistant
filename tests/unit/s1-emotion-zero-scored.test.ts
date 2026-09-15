@@ -234,7 +234,7 @@ const cases: Case[] = [
     },
   },
   {
-    name: "E24 — segments written before 0099 (segments_run_id NULL) are stale on Postgres: an unknown run is not trusted",
+    name: "E24 — segments with no recorded writer run (segments_run_id NULL) are stale on Postgres: an unknown run is not trusted",
     fn: async () => {
       seedWindow("bw_e24_legacy", { segmentsRunId: null });
       const { out } = await runKind("bw_e24_legacy", "all_ok");
@@ -274,31 +274,90 @@ const cases: Case[] = [
     },
   },
   {
-    name: "E24 R10 on Postgres — the keep-rule stands, and ONLY a window already diarize_stale accepts a fresh run's segments",
+    name: "E24 R10 / E25 R13 R14 R15 on Postgres — the keep-rule stands; ONLY a diarize_stale window accepts a fresh OK run, speakers included, ONCE per mark",
     fn: async () => {
-      const { recordDiarizeWindow, repairStaleDiarizeSegments } = await import("@/lib/stt/diarize-window");
+      const { recordDiarizeWindow, repairStaleDiarizeSegments, speakersForStorage } = await import("@/lib/stt/diarize-window");
+      type Speakers = Parameters<typeof speakersForStorage>[0];
       const fresh = [{ start_ms: 0, end_ms: 20000, speaker_idx: 0 }];
+      // Two runs' speakers that DIFFER, so a repair that leaves speakers_json behind is visible (E25 R14 / B5).
+      const freshSpeakers = [{ idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fresh", confidence: 0.9 }] as unknown as Speakers;
+      const laterSpeakers = [{ idx: 0, label: "Patient", type: "patient", source: "heuristic" }] as unknown as Speakers;
       const diarizeRow = async (id: string) =>
-        ((await pg.sql`SELECT segments_json, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = ${id}`) as Array<{ segments_json: unknown; segments_run_id: string | null; last_run_id: string }>)[0]!;
-      const rerun = (id: string, runId: string) => recordDiarizeWindow({ windowId: id, roomDayId: "rd_1", state: "ok", error: null, speakers: [], segments: fresh, clipR2Key: `clips/${id}.webm`, timing: null, runId });
+        ((await pg.sql`SELECT state, speakers_json, segments_json, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = ${id}`) as Array<{ state: string; speakers_json: unknown; segments_json: unknown; segments_run_id: string | null; last_run_id: string }>)[0]!;
+      const mark = async (id: string) =>
+        ((await pg.sql`SELECT state, stale_segments_run_id FROM room_emotion_window WHERE window_id = ${id}`) as Array<{ state: string; stale_segments_run_id: string | null }>)[0]!;
+      const rerun = (id: string, runId: string, speakers: Speakers = freshSpeakers, segments: unknown[] = fresh) =>
+        recordDiarizeWindow({ windowId: id, roomDayId: "rd_1", state: speakers.length === 0 ? "no_speakers" : "ok", error: null, speakers, segments, clipR2Key: `clips/${id}.webm`, timing: null, runId });
 
-      // A stale window: its emotion row says so.
+      // A stale window: its emotion row says so, and names the segments it judged.
       seedWindow("bw_e24_repair", { segmentsRunId: "run_older" });
       await runKind("bw_e24_repair", "all_ok");
-      expect(await windowRow("bw_e24_repair")).toMatchObject({ state: "diarize_stale" });
+      expect(await mark("bw_e24_repair"), "the mark records the segments it judged").toEqual({ state: "diarize_stale", stale_segments_run_id: "run_older" });
+
+      // E25 R13 — a NO_SPEAKERS run is refused, not imported: nothing of it lands in the ok row.
+      await rerun("bw_e24_repair", "run_nospeakers", [] as unknown as Speakers, []);
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_nospeakers", runState: "no_speakers", speakers: [] as unknown as Speakers, segments: [] }), "R13: a no_speakers run is never adopted").toBe(false);
+      expect(await diarizeRow("bw_e24_repair"), "R13: state, speakers, segments and their run all still describe the ok run")
+        .toMatchObject({ state: "ok", speakers_json: [], segments_run_id: "run_older", last_run_id: "run_nospeakers" });
+      expect((await diarizeRow("bw_e24_repair")).segments_json).not.toEqual([]);
+
       await rerun("bw_e24_repair", "run_fresh");
-      expect(await diarizeRow("bw_e24_repair"), "the keep-rule is unchanged: the ok row keeps its segments").toMatchObject({ segments_run_id: "run_older", last_run_id: "run_fresh" });
-      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_older_than_last", speakers: [], segments: fresh }), "only the latest run may repair").toBe(false);
-      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_fresh", speakers: [], segments: fresh })).toBe(true);
-      expect(await diarizeRow("bw_e24_repair")).toMatchObject({ segments_run_id: "run_fresh", last_run_id: "run_fresh", segments_json: fresh });
-      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_fresh", speakers: [], segments: fresh }), "segments already this run's are not repaired twice").toBe(false);
+      expect(await diarizeRow("bw_e24_repair"), "the keep-rule is unchanged: the ok row keeps its segments").toMatchObject({ segments_run_id: "run_older", last_run_id: "run_fresh", speakers_json: [] });
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_older_than_last", runState: "ok", speakers: freshSpeakers, segments: fresh }), "only the latest run may repair").toBe(false);
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_fresh", runState: "ok", speakers: freshSpeakers, segments: fresh }), "an ok run after a refused no_speakers run still cures").toBe(true);
+      expect(await diarizeRow("bw_e24_repair"), "R14: the repair replaces speakers_json with the fresh run's, beside its segments")
+        .toMatchObject({ segments_run_id: "run_fresh", last_run_id: "run_fresh", segments_json: fresh, speakers_json: speakersForStorage(freshSpeakers) });
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_fresh", runState: "ok", speakers: freshSpeakers, segments: fresh }), "segments already this run's are not repaired twice").toBe(false);
+
+      // E25 R15 — the SAME mark, a SECOND ok run before any rescore: the mark is spent, the keep-rule governs.
+      expect((await mark("bw_e24_repair")).state, "no rescore happened in between").toBe("diarize_stale");
+      await rerun("bw_e24_repair", "run_later", laterSpeakers, [{ start_ms: 0, end_ms: 9000, speaker_idx: 0 }]);
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_repair", runId: "run_later", runState: "ok", speakers: laterSpeakers, segments: [{ start_ms: 0, end_ms: 9000, speaker_idx: 0 }] }), "R15: one stale mark permits one repair").toBe(false);
+      expect(await diarizeRow("bw_e24_repair"), "R15: the second run meets the keep-rule")
+        .toMatchObject({ segments_run_id: "run_fresh", last_run_id: "run_later", segments_json: fresh, speakers_json: speakersForStorage(freshSpeakers) });
 
       // A healthy window (emotion ok): the same fresh run is NOT accepted — the keep-rule stands for it.
       seedWindow("bw_e24_norepair");
       expect((await runKind("bw_e24_norepair", "all_ok")).out.kind).toBe("done");
       await rerun("bw_e24_norepair", "run_fresh_2");
-      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_norepair", runId: "run_fresh_2", speakers: [], segments: fresh })).toBe(false);
-      expect(await diarizeRow("bw_e24_norepair")).toMatchObject({ segments_run_id: "run_bw_e24_norepair", last_run_id: "run_fresh_2" });
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e24_norepair", runId: "run_fresh_2", runState: "ok", speakers: freshSpeakers, segments: fresh })).toBe(false);
+      expect(await diarizeRow("bw_e24_norepair")).toMatchObject({ segments_run_id: "run_bw_e24_norepair", last_run_id: "run_fresh_2", speakers_json: [] });
+      expect(await mark("bw_e24_norepair"), "a finished window carries no mark").toEqual({ state: "ok", stale_segments_run_id: null });
+
+      // A window whose segments have NO recorded writer and whose emotion row is ok (scored before 0099): its NULL
+      // mark matches its NULL segments_run_id, so only the diarize_stale STATE keeps the repair out.
+      seedWindow("bw_e25_legacy_ok", { segmentsRunId: null, turns: false });
+      pg.exec(`INSERT INTO room_emotion_window (window_id, room_day_id, state, diarize_run_id) VALUES ('bw_e25_legacy_ok', 'rd_1', 'ok', 'run_bw_e25_legacy_ok')`);
+      await rerun("bw_e25_legacy_ok", "run_legacy_fresh");
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e25_legacy_ok", runId: "run_legacy_fresh", runState: "ok", speakers: freshSpeakers, segments: fresh }), "an unmarked window is never repaired, NULL provenance or not").toBe(false);
+      expect(await diarizeRow("bw_e25_legacy_ok")).toMatchObject({ segments_run_id: null, last_run_id: "run_legacy_fresh", speakers_json: [] });
+    },
+  },
+  {
+    name: "E25 R15 on Postgres — a repaired window that then FAILS on weather drops its mark: a failed row carries none",
+    fn: async () => {
+      const { recordDiarizeWindow, repairStaleDiarizeSegments } = await import("@/lib/stt/diarize-window");
+      const segs = JSON.parse(SEGMENTS_JSON) as unknown[];
+      seedWindow("bw_e25_markdrop", { segmentsRunId: "run_older" });
+      await runKind("bw_e25_markdrop", "all_ok");
+      await recordDiarizeWindow({ windowId: "bw_e25_markdrop", roomDayId: "rd_1", state: "ok", error: null, speakers: [], segments: segs, clipR2Key: "clips/bw_e25_markdrop.webm", timing: null, runId: "run_bw_e25_markdrop" });
+      pg.exec(`UPDATE room_diarize_window SET last_run_id = 'run_markdrop_fresh' WHERE window_id = 'bw_e25_markdrop'`);
+      pg.exec(`UPDATE room_turn_speaker SET run_id = 'run_markdrop_fresh' WHERE window_id = 'bw_e25_markdrop'`);
+      expect(await repairStaleDiarizeSegments({ windowId: "bw_e25_markdrop", runId: "run_markdrop_fresh", runState: "ok", speakers: [], segments: segs })).toBe(true);
+      const down = await runKind("bw_e25_markdrop", "all_ok", undefined, false);
+      expect(errorCodeOf(down.out.error!)).toBe("emotion_unavailable");
+      const m = (await pg.sql`SELECT state, stale_segments_run_id FROM room_emotion_window WHERE window_id = 'bw_e25_markdrop'`) as Array<{ state: string; stale_segments_run_id: string | null }>;
+      expect(m[0], "the failed write replaces the mark with nothing").toEqual({ state: "failed", stale_segments_run_id: null });
+    },
+  },
+  {
+    name: "E25 R15 / 0099 — the database refuses a stale mark on a row that is not diarize_stale",
+    fn: async () => {
+      seedWindow("bw_e25_markchk", { turns: false });
+      expect(() => pg.exec(`
+        INSERT INTO room_emotion_window (window_id, room_day_id, state, diarize_run_id, error, stale_segments_run_id)
+        VALUES ('bw_e25_markchk', 'rd_1', 'failed', 'run_bw_e25_markchk', 'x', 'run_x');
+      `)).toThrow(/room_emotion_window_stale_segments_chk/);
     },
   },
   {

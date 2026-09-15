@@ -113,7 +113,7 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   if (!Array.isArray(w.segments_json)) return fail(base, "diarize_not_ok", "diarize segments unreadable", "none");
   // E24 R9/R8 — WHICH RUN WROTE THE SEGMENTS IS A FACT, NOT AN INFERENCE. recordDiarizeWindow keeps an ok row's
   // segments when a later run succeeds, and moves last_run_id; segments_run_id (0099) names the run that wrote
-  // them. If it is not this run's — or is unknown, written before 0099 — every speech_ms measured from them
+  // them. If it is not this run's — or is unknown, because no writer run is recorded — every speech_ms measured from them
   // would be a confident measure of another run's speakers, or of none. So the window is recorded
   // `diarize_stale`: NAMED, TERMINAL, NOT A FAILURE, and it spends NO attempt. It is checked before /health,
   // before any turn is read and before clearWindowSegments, so an earlier run's span rows are left as they were.
@@ -121,9 +121,11 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   // segments for a window in this state, and the enqueue offers the window again because last_run_id moved.
   if (w.segments_run_id !== w.last_run_id) {
     const reason = w.segments_run_id === null
-      ? "diarize segments predate run-id recording (0099); their run is unknown"
+      // E25 R17: NULL means no writer run is recorded — NOT that the row predates 0099 (code older than E24
+      // still writes NULL after 0099 lands). Say only what is known.
+      ? "diarize segments have no recorded writer run (segments_run_id is NULL); which run wrote them is unknown"
       : "diarize segments were written by an earlier diarize run than this window's turns";
-    await recordStaleWindow({ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: w.last_run_id, reason: `diarize_segments_stale: ${reason}` });
+    await recordStaleWindow({ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: w.last_run_id, segmentsRunId: w.segments_run_id, reason: `diarize_segments_stale: ${reason}` });
     return failWith(jobError("diarize_segments_stale", reason));
   }
   const intervals = parseDiarizeSegments(w.segments_json);

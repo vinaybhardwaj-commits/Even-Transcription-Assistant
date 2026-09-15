@@ -137,6 +137,8 @@ export type EmotionWindowRow = {
   state: "ok" | "failed" | "no_segments" | "diarize_stale";
   diarizeRunId: string;
   error: string | null;
+  /** E25 R15 (0099): on a diarize_stale row, the segments_run_id the stale decision was made against. Omitted (NULL) on every other state. */
+  staleSegmentsRunId?: string | null;
   model?: string | null;
   model_key?: string | null;
   subfolder?: string | null;
@@ -178,7 +180,8 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
   await sql`
     INSERT INTO room_emotion_window
       (window_id, room_day_id, state, diarize_run_id, error, model, model_key, subfolder, cap_s,
-       segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, warmup_json, timing_json, scored_at)
+       segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, warmup_json, timing_json, scored_at,
+       stale_segments_run_id)
     SELECT ${r.windowId}::text, ${r.roomDayId}::text, ${r.state}::text, ${r.diarizeRunId}::text, ${r.error === null ? null : r.error.slice(0, 300)}::text,
            ${r.model ?? null}::text, ${r.model_key ?? null}::text, ${r.subfolder ?? null}::text, ${r.cap_s ?? null}::double precision,
            ${c?.planned ?? null}::int,
@@ -187,7 +190,8 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
            CASE WHEN ${fromRows}::boolean THEN seg.failed  ELSE ${explicit?.failed ?? null}::int END,
            CASE WHEN ${fromRows}::boolean THEN seg.unscorable ELSE ${explicit?.unscorable ?? null}::int END,
            ${c?.calls ?? null}::int,
-           ${r.warmup === undefined ? null : JSON.stringify(r.warmup)}::jsonb, ${r.timing === undefined ? null : JSON.stringify(r.timing)}::jsonb, NOW()
+           ${r.warmup === undefined ? null : JSON.stringify(r.warmup)}::jsonb, ${r.timing === undefined ? null : JSON.stringify(r.timing)}::jsonb, NOW(),
+           ${r.staleSegmentsRunId ?? null}::text
       FROM (
         SELECT count(*) FILTER (WHERE state = 'scored')::int  AS scored,
                count(*) FILTER (WHERE state = 'failed')::int  AS failed,
@@ -223,7 +227,8 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
                                      'attempt', room_emotion_window.attempts, 'diarize_run_id', room_emotion_window.diarize_run_id,
                                      'error', room_emotion_window.error, 'scored_at', room_emotion_window.scored_at))
                               ELSE room_emotion_window.failure_history END,
-      diarize_run_id   = EXCLUDED.diarize_run_id
+      diarize_run_id   = EXCLUDED.diarize_run_id,
+      stale_segments_run_id = EXCLUDED.stale_segments_run_id
     WHERE room_emotion_window.state = 'failed'
        OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
        -- COMPARED, S1 FIX4 C16: state, error, the segment counts (segments_unscorable added by E16 — rule 15), model, model_key, subfolder, cap_s, room_day_id.
@@ -257,14 +262,16 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
 
 /**
  * E24 R8/R9 — the window's diarize segments belong to another run (segments_run_id is not last_run_id), or to
- * an unknown one (NULL: written before 0099). Recorded `diarize_stale` with its reason:
+ * an unknown one (NULL: no writer run is recorded). Recorded `diarize_stale` with its reason:
  *   - NOT a failure: the enqueue scan retries only `failed` rows, so no attempt is spent and nothing is re-offered;
  *   - the window is offered again only when last_run_id moves — a fresh diarize run, which the named repair
  *     path (repairStaleDiarizeSegments) turns into the cure.
  * Counts are omitted: nothing was planned, and the earlier rows are left as they were.
+ * E25 R15: the mark records the segments it judged (`segmentsRunId`, NULL when unrecorded), so it permits
+ * exactly one repair — the one that replaces those segments.
  */
-export async function recordStaleWindow(r: { windowId: string; roomDayId: string | null; diarizeRunId: string; reason: string }): Promise<void> {
-  await recordEmotionWindow({ windowId: r.windowId, roomDayId: r.roomDayId, diarizeRunId: r.diarizeRunId, state: "diarize_stale", error: r.reason });
+export async function recordStaleWindow(r: { windowId: string; roomDayId: string | null; diarizeRunId: string; segmentsRunId: string | null; reason: string }): Promise<void> {
+  await recordEmotionWindow({ windowId: r.windowId, roomDayId: r.roomDayId, diarizeRunId: r.diarizeRunId, state: "diarize_stale", error: r.reason, staleSegmentsRunId: r.segmentsRunId });
 }
 
 export type EmotionWindowFinish = {
@@ -358,7 +365,9 @@ export async function finishEmotionWindow(f: EmotionWindowFinish): Promise<Emoti
                                        'attempt', room_emotion_window.attempts, 'diarize_run_id', room_emotion_window.diarize_run_id,
                                        'error', room_emotion_window.error, 'scored_at', room_emotion_window.scored_at))
                                 ELSE room_emotion_window.failure_history END,
-        diarize_run_id   = EXCLUDED.diarize_run_id
+        diarize_run_id   = EXCLUDED.diarize_run_id,
+        -- E25 R15: a finished window is ok or failed, never stale; the mark it replaces is spent.
+        stale_segments_run_id = NULL
       WHERE room_emotion_window.state = 'failed'
          OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
          -- The same comparison as recordEmotionWindow, S1 FIX4 C16 - see the comment there for what is out and why.

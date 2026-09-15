@@ -325,11 +325,13 @@ describe("E24 R9/R8 — stale segments are known by RUN ID, recorded diarize_sta
     expect(emotionWindowWrites()[0]!.values).toContain("diarize_stale");
   });
 
-  it("segments written before 0099 (segments_run_id NULL) are stale too: an unknown run is not trusted", async () => {
+  it("segments with no recorded writer run (segments_run_id NULL) are stale too: an unknown run is not trusted, and the reason claims no cause", async () => {
     DB.segmentsRunId = null;
     const { steps, out } = await drive();
     expect(steps).toEqual(["prepare"]);
-    expect(String(out.error)).toMatch(/^diarize_segments_stale: diarize segments predate run-id recording \(0099\)/);
+    // E25 R17: NULL says only that no writer run is recorded — pre-E24 code still writes NULL after 0099 lands.
+    expect(String(out.error)).toMatch(/^diarize_segments_stale: diarize segments have no recorded writer run \(segments_run_id is NULL\); which run wrote them is unknown$/);
+    expect(String(out.error)).not.toMatch(/predate|before 0099/);
     expect(emotionWindowWrites()[0]!.values).toContain("diarize_stale");
     expect(SENT).toHaveLength(0);
   });
