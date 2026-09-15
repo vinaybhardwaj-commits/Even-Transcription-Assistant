@@ -28,10 +28,15 @@
  * every grid line (sd 0.0 s within one kiosk run), so the same room was "newest" on every tick and a
  * second room got nothing for as long as neither kiosk restarted: live, 25 of 25 slots to one room and
  * zero to a room holding 113 windows. Now:
- *   - ROOMS are ranked first: least recently served first. "Served" is a `room_window` job created for
- *     one of the room's windows within AUTO_DRAIN_MAX_AGE_HOURS (the drain's own submit writes it, so no
- *     new column; the scan is bounded by jobs in that horizon, not by the backlog). A room with no such
- *     job ranks first.
+ *   - ROOMS are ranked first: least recently served first. "Served" means OFFERED (E22 R3): within
+ *     AUTO_DRAIN_MAX_AGE_HOURS, the room had a `room_window` job created for one of its windows (the
+ *     drain's own submit writes it) OR had a window refused (auto_drain_refused_at, written below). No new
+ *     column. A room with neither ranks first.
+ *     A room got its turn; whether it used the turn is its own business. When "served" meant a job, a room
+ *     whose every offer was refused before the claim stayed never-served, ranked first on every tick, and
+ *     took 98-100 of 117 slots in the E11/E17 refutation's S2 while five rooms got 3-4 each (F1). So
+ *     `flag_off` and `join_service_not_configured` count as served too: a room with Transcript off waits its
+ *     turn, and a global refusal refuses every room equally.
  *   - ONE window per room per tick, so a room cannot take two slots while another waits.
  *   - WITHIN a room, newest first by the window's grid slot (`end_ms`), which is cut from the recorder's
  *     own chunk timestamps. Not `closed_at`: that is stamped when the covering chunk is verified, and a
@@ -157,18 +162,27 @@ export async function enqueueAutoDrain(
   // as the helper does.
   // Every filter is applied in SQL, before any ranking, exactly as before; the scan returns all eligible
   // windows (bounded by AUTO_DRAIN_MAX_AGE_HOURS) and orderAutoDrainOffers picks the slot(s). LAST SERVED:
-  // the newest `room_window` job per room inside the same horizon. `status IN (...)` lists 0082's five
-  // CHECKed states so the (status, created_at) index can bound the job scan to the horizon.
+  // the room's newest offer inside the same horizon — a `room_window` job, or a refusal. `status IN (...)`
+  // lists 0082's five CHECKed states so the (status, created_at) index can bound the job scan to the horizon.
+  // OFFERED (E22 R3): an offer leaves exactly one of two marks — `enqueued` means the drain's submit wrote a
+  // room_window job; every other step makes the loop below stamp auto_drain_refused_at. Either is a turn.
   const eligible = (await sql`
-    WITH served AS (
-      SELECT ss.room_id, MAX(j.created_at) AS last_served_at
+    WITH offered AS (
+      SELECT ss.room_id, j.created_at AS offered_at
         FROM scribe_job j
         JOIN bench_window sw ON sw.id = j.args->>'window_id'
         JOIN bench_session ss ON ss.id = sw.session_id
        WHERE j.kind = ${ROOM_WINDOW_KIND}
          AND j.status IN ('queued', 'running', 'done', 'failed', 'cancelled')
          AND j.created_at >= NOW() - (${AUTO_DRAIN_MAX_AGE_HOURS}::int * INTERVAL '1 hour')
-       GROUP BY ss.room_id
+      UNION ALL
+      SELECT rs.room_id, rw.auto_drain_refused_at AS offered_at
+        FROM bench_window rw
+        JOIN bench_session rs ON rs.id = rw.session_id
+       WHERE rw.auto_drain_refused_at >= NOW() - (${AUTO_DRAIN_MAX_AGE_HOURS}::int * INTERVAL '1 hour')
+    ),
+    served AS (
+      SELECT room_id, MAX(offered_at) AS last_served_at FROM offered GROUP BY room_id
     )
     SELECT w.id, s.room_id, w.start_ms, w.end_ms,
            (EXTRACT(EPOCH FROM w.closed_at) * 1000)::float8 AS closed_ms,
