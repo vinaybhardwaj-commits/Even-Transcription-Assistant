@@ -235,7 +235,9 @@ export function speakersForStorage(speakers: DiarizeSpeaker[]): Array<Record<str
 export type DiarizeWindowState = "ok" | "failed" | "no_speakers";
 
 /**
- * THE ONLY WRITER OF room_diarize_window.
+ * THE ONLY WRITER OF room_diarize_window — except the one named repair path below,
+ * `repairStaleDiarizeSegments`, which may replace speakers/segments for a window whose emotion row is
+ * already `diarize_stale` (E24 R10), and nothing else.
  *
  * MOVED from the room diarize pass (`markWindow`) when the pass was deleted in C2. Same columns and
  * values, so the one live reader — `app/api/admin/speaker-calibration/route.ts` — sees the row shape
@@ -269,13 +271,17 @@ export async function recordDiarizeWindow(row: {
   // Every column but last_run_id is replaced only when the stored row FAILED (0088). last_run_id moves
   // on EVERY run that wrote turns — a successful re-run of an ok window included — because that is
   // the one signal a reader of the turns can compare against (0090).
+  // E24 R9 (0099): segments_run_id is written on EXACTLY the terms segments_json is — the same value on
+  // insert, the same CASE on conflict — so it always names the run whose segments are stored. The keep-rule
+  // itself is unchanged (R10).
   await sql`
     INSERT INTO room_diarize_window
-      (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id, diarized_at)
+      (window_id, room_day_id, state, speakers_json, segments_json, segments_run_id, clip_r2_key, error, timing_json, last_run_id, diarized_at)
     VALUES
       (${row.windowId}, ${row.roomDayId}, ${row.state},
        ${row.speakers === null ? null : JSON.stringify(speakersForStorage(row.speakers))}::jsonb,
        ${row.segments === null ? null : JSON.stringify(row.segments)}::jsonb,
+       ${row.segments === null ? null : row.runId},
        ${row.clipR2Key}, ${row.error === null ? null : row.error.slice(0, 300)},
        ${row.timing === null || row.timing === undefined ? null : JSON.stringify(row.timing)}::jsonb,
        ${wroteTurns ? row.runId : null}, NOW())
@@ -283,6 +289,7 @@ export async function recordDiarizeWindow(row: {
       state           = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.state ELSE room_diarize_window.state END,
       speakers_json   = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.speakers_json ELSE room_diarize_window.speakers_json END,
       segments_json   = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.segments_json ELSE room_diarize_window.segments_json END,
+      segments_run_id = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.segments_run_id ELSE room_diarize_window.segments_run_id END,
       clip_r2_key     = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.clip_r2_key ELSE room_diarize_window.clip_r2_key END,
       error           = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.error ELSE room_diarize_window.error END,
       timing_json     = CASE WHEN room_diarize_window.state = 'failed' THEN EXCLUDED.timing_json ELSE room_diarize_window.timing_json END,
@@ -296,4 +303,42 @@ export async function recordDiarizeWindow(row: {
                              ELSE room_diarize_window.failure_history END,
       last_run_id     = COALESCE(EXCLUDED.last_run_id, room_diarize_window.last_run_id)
   `;
+}
+
+/** The emotion window state that marks a window's diarize segments as another run's (0099). */
+export const EMOTION_DIARIZE_STALE_STATE = "diarize_stale";
+
+/**
+ * E24 R10 — THE NAMED REPAIR PATH, and the only way a newer run's segments replace an `ok` row's.
+ *
+ * The keep-rule in `recordDiarizeWindow` is NOT changed: an ok row keeps its segments on a successful
+ * re-run, for a reason not yet established (ruling R10). This path is scoped to the case that rule makes
+ * permanent — a window the emotion job has already recorded `diarize_stale`, whose segments are another
+ * run's — and it accepts THIS run's speakers and segments for that window only, ONE statement, when:
+ *   - the diarize row is `ok` and this run is its latest (last_run_id = runId: a later run wins);
+ *   - the stored segments are not already this run's;
+ *   - the window's emotion row is `diarize_stale`.
+ * Any other window is untouched. Call it after `recordDiarizeWindow` for a run that wrote turns.
+ * Returns whether the row was repaired. The emotion enqueue then offers the window again, because its
+ * emotion row names an older run than last_run_id.
+ */
+export async function repairStaleDiarizeSegments(row: {
+  windowId: string;
+  runId: string;
+  speakers: DiarizeSpeaker[];
+  segments: unknown[];
+}): Promise<boolean> {
+  const rows = (await sql`
+    UPDATE room_diarize_window d
+       SET speakers_json   = ${JSON.stringify(speakersForStorage(row.speakers))}::jsonb,
+           segments_json   = ${JSON.stringify(row.segments)}::jsonb,
+           segments_run_id = ${row.runId}::text
+     WHERE d.window_id = ${row.windowId}
+       AND d.state = 'ok'
+       AND d.last_run_id = ${row.runId}::text
+       AND d.segments_run_id IS DISTINCT FROM ${row.runId}::text
+       AND EXISTS (SELECT 1 FROM room_emotion_window e WHERE e.window_id = d.window_id AND e.state = ${EMOTION_DIARIZE_STALE_STATE}::text)
+    RETURNING d.window_id
+  `) as Array<{ window_id: string }>;
+  return rows.length === 1;
 }

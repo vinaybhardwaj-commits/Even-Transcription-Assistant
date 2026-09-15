@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { getObjectBytes } from "@/lib/r2";
 import { sql } from "@/lib/db";
-import { diarizeWindow, recordDiarizeWindow } from "@/lib/stt/diarize-window";
+import { diarizeWindow, recordDiarizeWindow, repairStaleDiarizeSegments } from "@/lib/stt/diarize-window";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
@@ -81,8 +81,12 @@ export const diarizeWindowKind: JobKind = {
       segments: res.segments,
       timing: res.timing,
     });
+    // E24 R10 — if the emotion job already recorded this window `diarize_stale`, this fresh run is the cure:
+    // the named repair path accepts its segments for that window, and only that window. Otherwise it
+    // changes nothing and the keep-rule above stands.
+    const repaired = await repairStaleDiarizeSegments({ windowId, runId, speakers: res.speakers, segments: res.segments });
 
     // Counts and ids only — the spans carry no text and neither does this.
-    return doneWith({ window_id: windowId, ...res.outcome });
+    return doneWith({ window_id: windowId, ...res.outcome, ...(repaired ? { stale_segments_repaired: true } : {}) });
   },
 };

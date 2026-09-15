@@ -133,7 +133,8 @@ export async function writeSkipped(w: SegmentWrite, s: SkippedSpan, speechMs: nu
 export type EmotionWindowRow = {
   windowId: string;
   roomDayId: string | null;
-  state: "ok" | "failed" | "no_segments";
+  /** diarize_stale (0099): the window's segments are another diarize run's. Terminal, not a failure — see recordStaleWindow. */
+  state: "ok" | "failed" | "no_segments" | "diarize_stale";
   diarizeRunId: string;
   error: string | null;
   model?: string | null;
@@ -213,7 +214,10 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       warmup_json      = EXCLUDED.warmup_json,
       timing_json      = EXCLUDED.timing_json,
       scored_at        = EXCLUDED.scored_at,
-      attempts         = CASE WHEN room_emotion_window.diarize_run_id = EXCLUDED.diarize_run_id THEN room_emotion_window.attempts + 1 ELSE 1 END,
+      -- E24 R8: a diarize_stale write spends NO attempt, even rewritten against the same run. Staleness is a fact
+      -- about our own bookkeeping that no retry can change; the attempt budget is for weather.
+      attempts         = CASE WHEN EXCLUDED.state = 'diarize_stale' THEN room_emotion_window.attempts
+                              WHEN room_emotion_window.diarize_run_id = EXCLUDED.diarize_run_id THEN room_emotion_window.attempts + 1 ELSE 1 END,
       failure_history  = CASE WHEN room_emotion_window.state = 'failed'
                               THEN room_emotion_window.failure_history || jsonb_build_array(jsonb_build_object(
                                      'attempt', room_emotion_window.attempts, 'diarize_run_id', room_emotion_window.diarize_run_id,
@@ -249,6 +253,18 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
            EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
            EXCLUDED.cap_s, EXCLUDED.room_day_id)
   `;
+}
+
+/**
+ * E24 R8/R9 — the window's diarize segments belong to another run (segments_run_id is not last_run_id), or to
+ * an unknown one (NULL: written before 0099). Recorded `diarize_stale` with its reason:
+ *   - NOT a failure: the enqueue scan retries only `failed` rows, so no attempt is spent and nothing is re-offered;
+ *   - the window is offered again only when last_run_id moves — a fresh diarize run, which the named repair
+ *     path (repairStaleDiarizeSegments) turns into the cure.
+ * Counts are omitted: nothing was planned, and the earlier rows are left as they were.
+ */
+export async function recordStaleWindow(r: { windowId: string; roomDayId: string | null; diarizeRunId: string; reason: string }): Promise<void> {
+  await recordEmotionWindow({ windowId: r.windowId, roomDayId: r.roomDayId, diarizeRunId: r.diarizeRunId, state: "diarize_stale", error: r.reason });
 }
 
 export type EmotionWindowFinish = {

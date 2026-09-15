@@ -27,6 +27,8 @@ const WSTART = 1_789_289_100_000;
 
 const DB = vi.hoisted(() => ({
   segmentsJson: null as unknown,
+  /** 0099: the diarize run that wrote segments_json. The job's turns are always run_1. */
+  segmentsRunId: "run_1" as string | null,
   turns: [] as Row[],
   writes: [] as Array<{ text: string; values: unknown[] }>,
   finishAnswer: { scored: 0, failed: 0, skipped: 0, unscorable: 0, zero_scored: false, written_state: "ok" } as Row,
@@ -37,7 +39,7 @@ vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?").replace(/\s+/g, " ");
     if (text.includes("FROM bench_window w LEFT JOIN room_diarize_window d"))
-      return [{ id: "bw_e16", room_day_id: "rd_1", start_ms: WSTART, end_ms: WSTART + A9.window_ms, clip_r2_key: "clips/e16.webm", diarize_state: "ok", last_run_id: "run_1", segments_json: DB.segmentsJson }];
+      return [{ id: "bw_e16", room_day_id: "rd_1", start_ms: WSTART, end_ms: WSTART + A9.window_ms, clip_r2_key: "clips/e16.webm", diarize_state: "ok", last_run_id: "run_1", segments_json: DB.segmentsJson, segments_run_id: DB.segmentsRunId }];
     if (text.includes("FROM room_turn_speaker t")) return DB.turns;
     if (text.includes("SELECT state, last_run_id FROM room_diarize_window")) return [{ state: "ok", last_run_id: "run_1" }];
     if (text.includes("WITH seg AS")) { DB.writes.push({ text, values }); return [DB.finishAnswer]; }
@@ -58,7 +60,8 @@ vi.mock("@/lib/emotion/store", async (orig) => {
 });
 
 const { EMOTION_MODEL_ID, parseSegmentsResponse, emotionHealth, EMPTY_LABELS_UNFLAGGED } = await import("@/lib/emotion/client");
-const { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, staleSegmentTurns } = await import("@/lib/emotion/segments");
+const { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech } = await import("@/lib/emotion/segments");
+const { bindTurnsExclusive } = await import("@/lib/stt/speaker-roles");
 const { PREFILTER_REASON, PRE_FIX_BASIS, SPEECH_BASIS, writeScoredOrFailed, writeUnscorable } = await import("@/lib/emotion/store");
 const { emotionWindowKind } = await import("@/lib/jobs/kinds/emotion-window");
 
@@ -78,9 +81,10 @@ const fixtureTurns = () => A9.turns.map((t, i) => ({ source_ref: `t${i}`, speake
 let HEALTH: Row = {};
 let ANSWER: (index: number, seg: { start_s: number; end_s: number }) => Row = classified;
 let SENT: Array<{ start_s: number; end_s: number }> = [];
+let HEALTH_CALLS = 0;
 
 beforeEach(() => {
-  DB.segmentsJson = A9.diarize_segments; DB.turns = fixtureTurns(); DB.writes = [];
+  DB.segmentsJson = A9.diarize_segments; DB.segmentsRunId = "run_1"; DB.turns = fixtureTurns(); DB.writes = []; HEALTH_CALLS = 0;
   DB.finishAnswer = { scored: 0, failed: 0, skipped: 0, unscorable: 0, zero_scored: false, written_state: "ok" };
   REC.calls = []; REC.finish = []; REC.window = []; SENT = [];
   HEALTH = { ok: true, max_duration_s: 60, min_speech_s: 1.5, silence_rms: 0.008, loaded: true };
@@ -89,7 +93,7 @@ beforeEach(() => {
   process.env.EMOTION_SEGMENTS_SECRET = "test-secret";
   process.env.EMOTION_BASE_URL = "https://emotion.test";
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-    if (String(url).endsWith("/health")) return new Response(JSON.stringify(HEALTH), { status: 200 });
+    if (String(url).endsWith("/health")) { HEALTH_CALLS += 1; return new Response(JSON.stringify(HEALTH), { status: 200 }); }
     const body = JSON.parse(String(init!.body)) as { segments: Array<{ start_s: number; end_s: number }> };
     const warm = body.segments.length === 1 && body.segments[0]!.start_s === 0 && body.segments[0]!.end_s === 1;
     if (!warm) SENT.push(...body.segments);
@@ -272,38 +276,70 @@ describe("V3 — a scorable span the service genuinely fails still fails, and st
   });
 });
 
-describe("E16(i) — stale diarize segments are a NAMED failure, never a quiet wrong speech_ms", () => {
-  it("no false positive on a real same-run window: the stored intervals reproduce A9's stored bindings exactly", () => {
-    expect(staleSegmentTurns(fixtureTurns(), A9.diarize_segments, WSTART)).toBe(0);
-  });
+/** What the job wrote to room_emotion_window, read at the SQL boundary — valid for any version of the store. */
+const emotionWindowWrites = () => DB.writes.filter((w) => w.text.includes("INSERT INTO room_emotion_window"));
+const spanDeletes = () => DB.writes.filter((w) => w.text.includes("DELETE FROM room_span_emotion"));
+const spanInserts = () => DB.writes.filter((w) => w.text.includes("INSERT INTO room_span_emotion"));
 
-  it("a re-run that renumbered the speaker (the Refuter's A9 case): named failure, a window row, nothing sent, nothing measured", async () => {
-    // The turns say speaker 0 (the new run); the kept intervals say speaker 1 (the old run's rank).
-    DB.segmentsJson = A9.diarize_segments.map((iv) => ({ ...iv, speaker_idx: iv.speaker_idx === 0 ? 1 : 0 }));
+/** Every stored turn the given intervals do NOT bind as the turn row says, by the diarize writer's own function. */
+const disagreeingTurns = (intervals: typeof A9.diarize_segments) => {
+  const onClock = intervals.map((iv) => ({ ...iv, start_ms: WSTART + iv.start_ms, end_ms: WSTART + iv.end_ms }));
+  return fixtureTurns().filter((t) => {
+    const [b] = bindTurnsExclusive(onClock, [{ source_ref: t.source_ref, start_ms: t.start_ms, end_ms: t.end_ms }]);
+    return !(b && b.speaker_idx === t.speaker_idx && Math.round(b.overlap_ms) === t.overlap_ms && b.exclusive === (t.no_role_reason !== "straddle"));
+  }).length;
+};
+
+describe("E24 R9/R8 — stale segments are known by RUN ID, recorded diarize_stale, and spend no attempt", () => {
+  it("W1 — a re-diarize that changed EXACTLY ONE turn's binding: stale, named, terminal, nothing sent, nothing measured", async () => {
+    // Built from A9's real intervals: a newer run (run_1, whose turns are stored) dropped ONE of the older
+    // run's speaker-0 intervals inside run B. The kept intervals are the older run's (run_0).
+    const b1 = A9.diarize_segments.findIndex((iv) => iv.speaker_idx === 0 && iv.start_ms >= 743_780 && iv.end_ms <= 771_410);
+    expect(b1, "the fixture needs one speaker-0 interval inside run B chunk 1").toBeGreaterThanOrEqual(0);
+    DB.segmentsJson = A9.diarize_segments.filter((_, i) => i !== b1);
+    DB.segmentsRunId = "run_0";
+    // The fixture really is the W1 shape: exactly one stored turn disagrees with the kept intervals.
+    expect(disagreeingTurns(DB.segmentsJson as typeof A9.diarize_segments)).toBe(1);
     const { steps, out } = await drive();
     expect(steps).toEqual(["prepare"]);
     expect(out.kind).toBe("fail");
-    expect(String(out.error)).toMatch(/^diarize_segments_stale: 2 of 2 turn\(s\)/);
-    expect(REC.window[0], "a failed window row, so the attempt bound applies").toMatchObject({ state: "failed" });
-    expect(SENT).toHaveLength(0);
-    expect(REC.calls, "no span is written against intervals from another run").toHaveLength(0);
-  });
-
-  it("'[]' beside attributed turns is the same named failure, not a quiet no_segments", async () => {
-    DB.segmentsJson = [];
-    const { out } = await drive();
     expect(String(out.error)).toMatch(/^diarize_segments_stale/);
+    expect(emotionWindowWrites()).toHaveLength(1);
+    expect(emotionWindowWrites()[0]!.values, "recorded diarize_stale — terminal, not a retryable failure").toContain("diarize_stale");
+    expect(SENT, "no audio is sent against another run's intervals").toHaveLength(0);
+    expect(spanInserts(), "no span is written against another run's intervals").toHaveLength(0);
+    expect(HEALTH_CALLS, "decided before /health").toBe(0);
+  });
+
+  it("W5 — an earlier run's span rows are KEPT: the stale decision comes before clearWindowSegments", async () => {
+    // The window already holds span rows from an earlier scored run (the mock keeps nothing; what matters is
+    // whether the job issues the delete). A stale window must leave them as they were. The same real one-turn
+    // re-diarize as W1, so any version of the stale check reaches its stale branch.
+    const b1 = A9.diarize_segments.findIndex((iv) => iv.speaker_idx === 0 && iv.start_ms >= 743_780 && iv.end_ms <= 771_410);
+    DB.segmentsJson = A9.diarize_segments.filter((_, i) => i !== b1);
+    DB.segmentsRunId = "run_0";
+    const { out } = await drive();
+    expect(spanDeletes(), "a stale window must not delete the earlier run's span rows").toHaveLength(0);
+    expect(spanInserts()).toHaveLength(0);
+    expect(String(out.error)).toMatch(/^diarize_segments_stale/);
+    expect(emotionWindowWrites()[0]!.values).toContain("diarize_stale");
+  });
+
+  it("segments written before 0099 (segments_run_id NULL) are stale too: an unknown run is not trusted", async () => {
+    DB.segmentsRunId = null;
+    const { steps, out } = await drive();
+    expect(steps).toEqual(["prepare"]);
+    expect(String(out.error)).toMatch(/^diarize_segments_stale: diarize segments predate run-id recording \(0099\)/);
+    expect(emotionWindowWrites()[0]!.values).toContain("diarize_stale");
     expect(SENT).toHaveLength(0);
   });
 
-  it("a stored overlap the intervals do not reproduce is stale too — the same speaker, a different run's timings", () => {
-    const shifted = A9.diarize_segments.map((iv) => ({ ...iv, start_ms: iv.start_ms + 40, end_ms: iv.end_ms + 40 }));
-    expect(staleSegmentTurns(fixtureTurns(), shifted, WSTART)).toBeGreaterThan(0);
-  });
-
-  it("a straddle the intervals no longer show is stale: exclusivity is part of the binding", () => {
-    const turns = fixtureTurns().map((t) => ({ ...t, no_role_reason: "straddle" }));
-    expect(staleSegmentTurns(turns, A9.diarize_segments, WSTART)).toBe(2);
+  it("control: segments written by THIS run are scored, with no stale write", async () => {
+    DB.finishAnswer = { scored: 4, failed: 0, skipped: 0, unscorable: 9, zero_scored: false, written_state: "ok" };
+    const { out } = await drive();
+    expect(out.kind).toBe("done");
+    expect(emotionWindowWrites().some((w) => w.values.includes("diarize_stale"))).toBe(false);
+    expect(SENT).toHaveLength(4);
   });
 });
 

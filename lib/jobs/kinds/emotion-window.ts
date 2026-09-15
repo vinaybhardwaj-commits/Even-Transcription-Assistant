@@ -26,8 +26,8 @@ import { sql } from "@/lib/db";
 import { signGetUrl } from "@/lib/r2";
 import { emotionEnabled } from "@/lib/emotion/gate";
 import { emotionHealth, scoreSegments, emotionSecretConfigured, EMOTION_MODEL_KEY, EMOTION_SECRET_ENV } from "@/lib/emotion/client";
-import { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, staleSegmentTurns, SEGMENTS_PER_CALL, type MeasuredSegment, type PlannedSegment, type StoredTurnBinding } from "@/lib/emotion/segments";
-import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, stateFor, writeScoredOrFailed, writeSkipped, writeUnscorable, type SegmentWrite } from "@/lib/emotion/store";
+import { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, SEGMENTS_PER_CALL, type AttributedTurn, type MeasuredSegment, type PlannedSegment } from "@/lib/emotion/segments";
+import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, recordStaleWindow, stateFor, writeScoredOrFailed, writeSkipped, writeUnscorable, type SegmentWrite } from "@/lib/emotion/store";
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -96,10 +96,10 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
 
   const windowId = String(ctx.args.window_id ?? "");
   const rows = (await sql`
-    SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key, d.state AS diarize_state, d.last_run_id, d.segments_json
+    SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key, d.state AS diarize_state, d.last_run_id, d.segments_json, d.segments_run_id
       FROM bench_window w LEFT JOIN room_diarize_window d ON d.window_id = w.id
      WHERE w.id = ${windowId} LIMIT 1
-  `) as Array<{ id: string; room_day_id: string | null; start_ms: string | number; end_ms: string | number; clip_r2_key: string | null; diarize_state: string | null; last_run_id: string | null; segments_json: unknown }>;
+  `) as Array<{ id: string; room_day_id: string | null; start_ms: string | number; end_ms: string | number; clip_r2_key: string | null; diarize_state: string | null; last_run_id: string | null; segments_json: unknown; segments_run_id: string | null }>;
   const w = rows[0];
   if (!w) return failWith(jobError("progress_incomplete", "no such window"));
   // Nothing to score and nothing to retry: the scan only picks diarized windows, so no window row.
@@ -111,30 +111,36 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   // always stores an array; anything else is a row this job cannot measure against, and it fails by name
   // WITH a window row, so the attempt bound stops it being offered on every tick.
   if (!Array.isArray(w.segments_json)) return fail(base, "diarize_not_ok", "diarize segments unreadable", "none");
+  // E24 R9/R8 — WHICH RUN WROTE THE SEGMENTS IS A FACT, NOT AN INFERENCE. recordDiarizeWindow keeps an ok row's
+  // segments when a later run succeeds, and moves last_run_id; segments_run_id (0099) names the run that wrote
+  // them. If it is not this run's — or is unknown, written before 0099 — every speech_ms measured from them
+  // would be a confident measure of another run's speakers, or of none. So the window is recorded
+  // `diarize_stale`: NAMED, TERMINAL, NOT A FAILURE, and it spends NO attempt. It is checked before /health,
+  // before any turn is read and before clearWindowSegments, so an earlier run's span rows are left as they were.
+  // THE CURE IS A FRESH DIARIZE RUN: repairStaleDiarizeSegments (lib/stt/diarize-window.ts) accepts that run's
+  // segments for a window in this state, and the enqueue offers the window again because last_run_id moved.
+  if (w.segments_run_id !== w.last_run_id) {
+    const reason = w.segments_run_id === null
+      ? "diarize segments predate run-id recording (0099); their run is unknown"
+      : "diarize segments were written by an earlier diarize run than this window's turns";
+    await recordStaleWindow({ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: w.last_run_id, reason: `diarize_segments_stale: ${reason}` });
+    return failWith(jobError("diarize_segments_stale", reason));
+  }
   const intervals = parseDiarizeSegments(w.segments_json);
   const health = await emotionHealth();
   if (!health.ok) return fail(base, "emotion_unavailable", health.error, "none");
 
   const turns = (await sql`
-    SELECT t.source_ref, t.speaker_idx, t.no_role_reason, t.overlap_ms,
+    SELECT t.source_ref, t.speaker_idx, t.no_role_reason,
            (c.payload->>'start_ms')::bigint AS start_ms, (c.payload->>'end_ms')::bigint AS end_ms
       FROM room_turn_speaker t
       JOIN cue c ON c.source_ref = t.source_ref AND c.type = 'stt_turn' AND c.room_day_id = t.room_day_id
      WHERE t.window_id = ${w.id}
        -- ONLY THIS RUN'S TURNS. A turn row the latest run did not rewrite belongs to an earlier run.
        AND t.run_id = ${w.last_run_id}
-  `) as Array<{ source_ref: string; speaker_idx: number; no_role_reason: string | null; overlap_ms: string | number; start_ms: string | number; end_ms: string | number }>;
-  const attributed: StoredTurnBinding[] = turns.map((t) => ({ source_ref: t.source_ref, speaker_idx: Number(t.speaker_idx), no_role_reason: t.no_role_reason, overlap_ms: Number(t.overlap_ms), start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) }));
+  `) as Array<{ source_ref: string; speaker_idx: number; no_role_reason: string | null; start_ms: string | number; end_ms: string | number }>;
+  const attributed: AttributedTurn[] = turns.map((t) => ({ source_ref: t.source_ref, speaker_idx: Number(t.speaker_idx), no_role_reason: t.no_role_reason, start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) }));
   const windowStart = Number(w.start_ms);
-  // E16 — STALE SEGMENTS ARE A NAMED FAILURE, NEVER A QUIET WRONG NUMBER. If the stored intervals cannot
-  // reproduce this run's own turn bindings, they belong to another diarize run, and every speech_ms
-  // measured from them would be a confident measure of the wrong person — or zero, which would drop the
-  // spans as unscorable and end the window `no_segments` as if nothing were wrong. A window row is
-  // written, so the attempt bound applies; the cure is a fresh diarize run, not a retry.
-  const stale = staleSegmentTurns(attributed, intervals, windowStart);
-  if (stale > 0) {
-    return fail(base, "diarize_segments_stale", `${stale} of ${attributed.length} turn(s) are not reproduced by the stored diarize segments; they belong to another diarize run`, "none");
-  }
   const { runs, skipped } = buildRuns(attributed);
   let planned: PlannedSegment[];
   let split: { scorable: MeasuredSegment[]; unscorable: MeasuredSegment[] };
