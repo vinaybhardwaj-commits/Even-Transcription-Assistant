@@ -74,7 +74,9 @@ public enum MachineFactsReader {
   public static let launchAgentLabel = "com.evenscribe.room-recorder"
 
   /// Read everything §5.5 asks for. Cheap enough to run on every poll: one AVFoundation call
-  /// that reads a cached TCC answer, two short subprocesses, and three sysctl-class lookups.
+  /// that reads a cached TCC answer, three short subprocesses (`pmset`, `launchctl`, `scutil`),
+  /// and three sysctl-class lookups. Those three helpers used to allocate a `Pipe()` each poll
+  /// and leak it for the life of the process.
   ///
   /// `inputDeviceUID` IS REQUIRED AND HAS NO DEFAULT, deliberately. It is the device the config
   /// says this room records from, and only the caller holding the configuration knows it. A
@@ -259,25 +261,18 @@ public enum MachineFactsReader {
   /// loop and a wedged subprocess must not stall the heartbeat of a recording room.
   static func runTool(_ path: String, _ arguments: [String], timeout: TimeInterval = 3) -> String? {
     guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
-    do { try process.run() } catch { return nil }
-
-    let deadline = Date().addingTimeInterval(timeout)
-    while process.isRunning && Date() < deadline {
-      usleep(20_000)
-    }
-    if process.isRunning {
-      process.terminate()
-      return nil
-    }
-    guard process.terminationStatus == 0 else { return nil }
-    guard let data = try? pipe.fileHandleForReading.readToEnd(), !data.isEmpty else { return nil }
-    let text = String(decoding: data, as: UTF8.self)
+    // Called three times on every engine poll (~1.5 s), including while recording — this is the
+    // PIPE leak that kept climbing after kickstart (Home Office bs_tgys4atu). No Pipe().
+    guard
+      let result = RoomSubprocess.run(
+        executable: URL(fileURLWithPath: path),
+        arguments: arguments,
+        timeout: timeout,
+        captureStdout: true,
+        captureStderr: false),
+      result.status == 0, !result.stdout.isEmpty
+    else { return nil }
+    let text = String(decoding: result.stdout, as: UTF8.self)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     return text.isEmpty ? nil : text
   }
