@@ -1,0 +1,65 @@
+{
+  "checks" : {
+    "captured_equals_target" : true,
+    "captured_equals_written_plus_dropped" : true,
+    "dropped_equals_sum_of_overflow_events" : true,
+    "file_bytes_equal_written_frames_x4" : true,
+    "no_drops_outside_starvation" : true,
+    "no_read_failure" : true,
+    "ring_balanced" : true,
+    "ring_empty_at_end" : true,
+    "starvation_dropped_equals_offered_minus_free" : true
+  },
+  "device" : {
+    "alsa_lib_version" : "1.2.15.3",
+    "alsa_name" : "hw:0,6",
+    "card" : 0,
+    "card_id" : "sofhdadsp",
+    "device" : 6,
+    "opened_name" : "hw:0,6",
+    "pcm_id" : "DMIC (*)",
+    "pcm_name" : "",
+    "requested" : "hw:0,6",
+    "stable_name" : "hw:CARD=sofhdadsp,DEV=6"
+  },
+  "device_overruns" : [
+
+  ],
+  "file_bytes" : 1008000,
+  "measured_rate_hz" : 47999.18665603913,
+  "negotiated" : {
+    "buffer_frames" : 4800,
+    "channels" : 2,
+    "format" : "S16_LE",
+    "period_frames" : 1200,
+    "rate" : 48000
+  },
+  "overflow_events" : [
+    {
+      "first_frame" : 106800,
+      "frames" : 132000
+    }
+  ],
+  "ring" : {
+    "accepted" : 252000,
+    "dropped" : 132000,
+    "fill" : 0,
+    "high_water" : 12000,
+    "offered" : 384000,
+    "taken" : 252000
+  },
+  "ring_capacity_frames" : 12000,
+  "source" : "alsa",
+  "starvation" : {
+    "accepted_in_window" : 12000,
+    "at_s" : 2,
+    "dropped_in_window" : 132000,
+    "expected_dropped" : 132000,
+    "fill_at_start" : 0,
+    "for_s" : 3,
+    "free_at_start" : 12000,
+    "offered_in_window" : 144000
+  },
+  "target_frames" : 384000,
+  "written_frames" : 252000
+}

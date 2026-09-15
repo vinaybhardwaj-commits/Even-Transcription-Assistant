@@ -1,0 +1,4 @@
+after SIGKILL at 17s: stat tape.pcm = 541600 bytes; last committed record byte_offset = 531200; difference = 10400
+restart record: byte_offset 541600 previous_byte_offset 531200 surviving_tail_bytes 10400 | keys ['byte_offset', 'device', 'discontinuity', 'mono_ns', 'previous_byte_offset', 'samples', 'surviving_tail_bytes', 'wall_ns']
+after SIGKILL at 23.3s: stat tape.pcm = 744800 bytes; last committed record byte_offset = 735200; difference = 9600
+restart record: byte_offset 744800 previous_byte_offset 735200 surviving_tail_bytes 9600 | keys ['byte_offset', 'device', 'discontinuity', 'mono_ns', 'previous_byte_offset', 'samples', 'surviving_tail_bytes', 'wall_ns']

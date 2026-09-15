@@ -1,0 +1,129 @@
+conformance: fixtures /home/vinay/dev/room-recorder-linux/fixtures
+CASE FIXTURE                               ROLE     RESULT  MUST         HOLDS
+C1   good/c7-quiet-room-ramp               good     PASS    PASS         yes
+C1   good/clean-short                      good     PASS    PASS         yes
+C1   good/device-lost-resumed              good     PASS    PASS         yes
+C1   good/discontinuity                    good     PASS    PASS         yes
+C1   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
+C1   good/gap-rounding-below-half          good     PASS    PASS         yes
+C1   good/ist-midnight                     good     PASS    PASS         yes
+C1   good/multi-piece                      good     PASS    PASS         yes
+C1   good/multi-piece-gap                  good     PASS    PASS         yes
+C1   good/restart-odd-tail-trimmed         good     PASS    PASS         yes
+C1   good/torn-tail                        good     PASS    PASS         yes
+C1   negative/c1-offset-not-twice-samples  negative FAIL    FAIL         yes
+      · line 4: byte_offset 48002 != samples 24000 × 2
+C1   negative/c1-restart-odd-tail-untrimmed negative FAIL    FAIL         yes
+      · tape.pcm is 64001 bytes: not a whole number of s16 samples
+      · line 4: byte_offset 32001 != samples 16000 × 2
+      · line 5: byte_offset 64001 != samples 32000 × 2
+      · … 1 more
+C2   good/c7-quiet-room-ramp               good     PASS    PASS         yes
+C2   good/clean-short                      good     PASS    PASS         yes
+C2   good/darwin-encoder-doubles           good     PASS    PASS         yes
+C2   good/device-lost-resumed              good     PASS    PASS         yes
+C2   good/discontinuity                    good     PASS    PASS         yes
+C2   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
+C2   good/gap-rounding-below-half          good     PASS    PASS         yes
+C2   good/ist-midnight                     good     PASS    PASS         yes
+C2   good/multi-piece                      good     PASS    PASS         yes
+C2   good/multi-piece-gap                  good     PASS    PASS         yes
+C2   good/restart-odd-tail-trimmed         good     PASS    PASS         yes
+C2   good/torn-tail                        good     PASS    PASS         yes
+C2   negative/c2-darwin-line-17-digit-double negative FAIL    FAIL         yes
+      · this platform's encoder output differs from the fixture line
+        fixture: {"a":0,"b":48000,"c":0.5,"d":0.0317,"e":0.41666666666666669,"f":0.3333333333333333}
+        ours:    {"a":0,"b":48000,"c":0.5,"d":0.0317,"e":0.4166666666666667,"f":0.3333333333333333}
+C2   negative/c2-escaped-slash             negative FAIL    FAIL         yes
+      · line 2: re-encoded bytes differ
+        original:  {"byte_offset":16000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) \/ Yoga — built-in","input_frames":24000,"input_sample_rate":48000,"mono_ns":86400623000000,"peak":0.5,"rms":0.35355339059327373,"samples":8000,"wall_ns":1789360200623456789,"zero_ratio":0}
+        reencoded: {"byte_offset":16000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","input_frames":24000,"input_sample_rate":48000,"mono_ns":86400623000000,"peak":0.5,"rms":0.35355339059327373,"samples":8000,"wall_ns":1789360200623456789,"zero_ratio":0}
+C2   negative/c2-noncanonical-double       negative FAIL    FAIL         yes
+      · line 2: re-encoded bytes differ
+        original:  {"byte_offset":16000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","input_frames":24000,"input_sample_rate":48000,"mono_ns":86400623000000,"peak":0.50,"rms":0.35355339059327373,"samples":8000,"wall_ns":1789360200623456789,"zero_ratio":0}
+        reencoded: {"byte_offset":16000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","input_frames":24000,"input_sample_rate":48000,"mono_ns":86400623000000,"peak":0.5,"rms":0.35355339059327373,"samples":8000,"wall_ns":1789360200623456789,"zero_ratio":0}
+C2   negative/c2-rms-on-discontinuity      negative FAIL    FAIL         yes
+      · line 5: rms/peak/zero_ratio on a ring_overflow record
+C2   negative/c2-unsorted-keys             negative FAIL    FAIL         yes
+      · line 3: re-encoded bytes differ
+        original:  {"zero_ratio":0.6666666666666666,"wall_ns":1789360201123456789,"samples":16000,"rms":0.17677669529663687,"peak":0.0625,"mono_ns":86401123000000,"input_sample_rate":48000,"input_frames":48000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","byte_offset":32000}
+        reencoded: {"byte_offset":32000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","input_frames":48000,"input_sample_rate":48000,"mono_ns":86401123000000,"peak":0.0625,"rms":0.17677669529663687,"samples":16000,"wall_ns":1789360201123456789,"zero_ratio":0.6666666666666666}
+C3   good/clean-short                      good     PASS    PASS         yes
+C3   good/discontinuity                    good     PASS    PASS         yes
+C3   good/interior-blank                   good     PASS    PASS         yes
+C3   good/restart-odd-tail-trimmed         good     PASS    PASS         yes
+C3   good/torn-tail                        good     PASS    PASS         yes
+C3   negative/c3-blank-line-inside-torn-log negative FAIL    FAIL         yes
+      · expected torn-tail repair, repair threw: interior blank line at line 2
+C4   good/clean-short                      good     PASS    PASS         yes
+C4   good/discontinuity                    good     PASS    PASS         yes
+C4   good/ist-midnight                     good     PASS    PASS         yes
+C4   negative/c4-one-sample-lost           negative FAIL    FAIL         yes
+      · end of tape (pcm_end = sample 39999, anchored on line 1): wall_ns 1789360202623394289 != expected 1789360202623456789 (Δ -62500 ns)
+      · end of tape: Double formula 1789360202.6233943 s disagrees with 1789360202623456789 ns beyond 2 ulp (476.837158203125 ns)
+C5   good/device-lost-resumed              good     PASS    PASS         yes
+C5   good/discontinuity                    good     PASS    PASS         yes
+C5   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
+C5   good/gap-rounding-below-half          good     PASS    PASS         yes
+C5   good/multi-piece                      good     PASS    PASS         yes
+C5   good/multi-piece-gap                  good     PASS    PASS         yes
+C5   negative/c5-gap-on-preceding-piece    negative FAIL    FAIL         yes
+      · gap_before_ms after the ring_overflow at 24000 (gap_ns 500000000) is absent, rule gives 500
+      · piece [0, 24000) carries gap_before_ms 500 but no gap-carrying discontinuity precedes it
+      · pieces differ from the plan of the index: ["[0,24000)", "[24000,40000) gap 500ms", "[40000,48000)"]
+C5   negative/c5-gap-on-restart            negative FAIL    FAIL         yes
+      · gap_before_ms after the restart at 40000 (gap_ns 2000000000) is 2000, rule gives 0
+      · piece [40000, 48000) carries gap_before_ms 2000 but no gap-carrying discontinuity precedes it
+      · pieces differ from the plan of the index: ["[0,24000)", "[24000,40000) gap 500ms", "[40000,48000)"]
+C5   negative/c5-gap-rounded-down-at-half  negative FAIL    FAIL         yes
+      · gap_before_ms after the device_lost at 16000 (gap_ns 120500000) is 120, rule gives 121
+      · pieces differ from the plan of the index: ["[0,16000)", "[16000,32000) gap 121ms", "[32000,48000) gap 61ms"]
+C5   negative/c5-piece-straddles-discontinuity negative FAIL    FAIL         yes
+      · piece [0, 40000) straddles the ring_overflow discontinuity at sample 24000 (line 6)
+      · no piece starts at the ring_overflow discontinuity at sample 24000
+      · pieces differ from the plan of the index: ["[0,24000)", "[24000,40000) gap 500ms", "[40000,48000)"]
+C5   negative/c5-reanchored-seam           negative FAIL    FAIL         yes
+      · seam 0/1: piece[0].sampleEnd 4800000 != piece[1].sampleStart 4800001
+      · seam 1/2: piece[1].sampleEnd 9600001 != piece[2].sampleStart 9600000
+      · pieces differ from the plan of the index: ["[0,4800000)", "[4800000,9600000)", "[9600000,11200000)"]
+      · … 1 more
+C5   negative/c5-resumed-gap-dropped       negative FAIL    FAIL         yes
+      · gap_before_ms after the resumed at 16000 (gap_ns 2500000000) is absent, rule gives 2500
+      · pieces differ from the plan of the index: ["[0,16000)", "[16000,32000) gap 2500ms"]
+C6   good/multi-piece                      good     PASS    PASS         yes
+C6   good/multi-piece-gap                  good     PASS    PASS         yes
+C6   negative/c6-first-piece-one-short     negative FAIL    FAIL         yes
+      · piece 0 is 4799999 samples, a full piece is 4800000, and it does not end at a discontinuity or the tape end
+      · piece 1 is 4800001 samples, a full piece is 4800000, and it does not end at a discontinuity or the tape end
+      · 0 full pieces, expected 2
+      · … 1 more
+C7   good/c7-quiet-room-ramp               good     PASS    PASS         yes
+C7   good/discontinuity                    good     PASS    PASS         yes
+C7   negative/c7-zero-filled-gap           negative FAIL    FAIL         yes
+      · tape.pcm is 112000 bytes, real audio is 96000: 16000 bytes (8000 samples) inserted across the gap
+      · tape.pcm holds a run of ≥16 zero samples starting 40 samples after the discontinuity offset 48000: zero fill
+C8   good/ist-midnight                     good     PASS    PASS         yes
+C8   negative/c8-straddle-moved-to-new-day negative FAIL    FAIL         yes
+      · day_rollover record at sample 32000, computed 32001 (anchored on line 1)
+      · day_rollover computed at sample 32001, expected 32000
+      · the last old-day sample 31999 spans [1789324199999897500, 1789324199999960000), which does not end at or after midnight 1789324200000000000
+      · … 1 more
+C9   good/c9-direction-probe               good     PASS    PASS         yes
+C9   good/c9-resample-tones                good     PASS    PASS         yes
+C9   negative/c9-coefficient-perturbed     negative FAIL    FAIL         yes
+      · taps differ from the implementation: h[59] is 16534 in fir-48k-to-16k-121tap-q16.taps, 16533 in the implementation
+      · output differs from expected-16k-mono.pcm: first difference at output sample 1620: expected 11380, produced 11379; 11044 of 44800 samples differ
+C9   negative/c9-convolution-reversed      negative FAIL    FAIL         yes
+      · output differs from expected-16k-mono.pcm: first difference at output sample 1600: expected 1351, produced 9917; 31360 of 44800 samples differ
+C9   negative/c9-decimation-phase-shifted  negative FAIL    FAIL         yes
+      · decimation.phase 1 != implementation 2
+      · output differs from expected-16k-mono.pcm: first difference at output sample 1602: expected -1, produced -2; 32316 of 44800 samples differ
+C9   negative/c9-history-carried-across-discontinuity negative FAIL    FAIL         yes
+      · regions output is 44800 samples (manifest 44800); resets at [52801, 100800] give 44799
+      · output with resets at [52801, 100800] differs from expected-16k-mono-regions.pcm: first difference at output sample 17600: expected -775, produced 0; 16824 of 44799 samples differ
+C10  good/clean-short                      good     PASS    PASS         yes
+
+67/67 rows hold; 0 load errors; 0 coverage problems
+SUITE HOLDS
+C10 encoder: running ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers / libopus 1.6.1 on Ubuntu 26.04.1 LTS: an attested pair
+C10 measurement: decoded 40000/40000 samples (Δ 0), best lag 0, correlation 0.99316, RMS Δ +0.0008 dB
