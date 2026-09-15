@@ -58,23 +58,23 @@ Closing Foundation `Pipe` handles after `waitUntilExit` is not a reliable Darwin
 
 Until that build is on the Mini, FDs will climb on every recording. Kickstart again only resets the counter.
 
-### Addendum — `bs_tgys4atu`: 10 min, ~26 MB PCM, still no piece, no `last_error`
+### Addendum — `bs_tgys4atu`: 15.4M idx samples, still no piece (operator blind spot)
 
-Tape size is **not** the cut cursor. `RoomPiecePlanner.plan` only sees **`tape.idx` `samples`**, and only emits a piece when `region.end - segment.nextSample >= 4_800_000`. Silence/`silence_ms` is **not** a gate. `spool.pending()` ignores hidden `.piece-*.tmp`, so `pending_piece_count` stays 0 until `spool.publish` after a successful encode.
+MiniBot: `tape.idx` **~15.4e6 samples @ 16 kHz**, healthy, **≥ 3 × `fullPieceSamples`**. Plain `publishAvailable` path. Planner **would** emit pieces. Silence is not a gate.
 
-FDs oscillating ~1k–1.3k means the **poll loop is running**. `publishAvailable` is therefore returning quickly — not blocked in a 9.6 MB copy/ffmpeg (that would stall polls). ffmpeg is **not scheduled** unless `plan` is non-empty.
+**Verified in `RoomEngine.run` (0.1.22 / `vinay/release-b1`):** encode/spool throw does not stick in `status.json`.
 
-Gates that match empty spool + empty `last_error`:
+Same loop iteration:
 
-1. **`lastError` wiped every successful poll.** After `publishAvailable` throws, `lastError` is saved, then `if retainedArchiveReady { lastError = nil }` (`RoomEngine.run` ~1338). On the plain path `refreshRetainedArchiveRecovery()` is **true** when there is no retained-archive job (`guard let retainedArchiveRecovery else { return true }`). Clinic Macs always clear cutter errors on the next heartbeat. **Absence of `last_error` does not mean the cutter succeeded.**
+1. `publishAvailable(finalFlush: false)` throws (e.g. `writeFailed` / EMFILE / ffmpeg under FD pressure, **before** `spool.publish`).
+2. `catch { lastError = bounded(error); try? saveStatus() }` — pending still 0 (no manifest yet). This write can flash `last_error` for one RTT.
+3. `machineFacts` + `pollCommands` **succeeds**.
+4. `if retainedArchiveReady { lastError = nil }` (~1338) — on the plain path `refreshRetainedArchiveRecovery()` is **`true`** when `retainedArchiveRecovery == nil`.
+5. `try saveStatus()` — **`last_error` nil, `pending_piece_count` 0.**
 
-2. **Planner returns `[]` (no throw).** Last idx `samples` still `< 4_800_000` (or idx unreadable as empty), even if `tape.pcm` is 26 MB. Confirm with `tail -1 …/tape.idx` — the planner never looks at PCM byte size.
+That is the operator blind spot. FDs oscillating ~1k–1.3k is the poll still running, not a hung encoder.
 
-3. **Silent no-op (no throw).** `residentCaptureOwner != nil` or `capture == nil` → `publishAvailable` returns. Unlikely here (`captures/<session>/tape.pcm` + `tape_advancing`), but it would look identical in `status.json`.
-
-4. **Throw then (1).** `uncoveredSample`, `indexBeyondPCM`, ffmpeg/`writeFailed` — same empty `last_error` after the poll.
-
-Ops on that Mini: `tail -1 tape.idx` (`samples` vs 4800000), `ls -la spool` (hidden tmps), and whether `last_error` flashes between polls. Do not wait for EMFILE; the first piece is already overdue.
+**PR #3** (`RoomSubprocess`, no `Pipe()` on `runTool` ×3 and ffmpeg stderr) is the piece-cut fix. No separate planner bug. After that build: idx this large must produce WebMs; if it does not, then look at ffmpeg/spool with `last_error` that **survives** a poll (today it will not).
 
 ---
 
