@@ -249,12 +249,41 @@ const capped = (n: number | undefined, dflt: number, max: number) =>
 // interpolation as a PARAMETER, so a shared SQL fragment would arrive as a string literal, not as an
 // expression. Two copies of one line, kept honest by the test that measures preview against apply.
 
-/** The as-of a caller handed back, checked before it reaches a statement. */
+/**
+ * The as-of a caller handed back, checked before it reaches a statement.
+ *
+ * R53 — THE MESSAGE CARRIES THE TOOL'S OWN NAME FOR THE REFUSAL. The published surface answers
+ * `as_of_required` / `as_of_invalid` / `as_of_in_future`; a direct module caller used to get prose for the
+ * first two and, if the throw were ever removed, a Postgres cast error on `''::timestamptz` instead — the
+ * database refusing what the module should have refused. Same rule, same name, both doors.
+ */
 function checkedAsOf(asOf: string): string {
   const v = String(asOf ?? "").trim();
-  if (!v) throw new Error("reopenSilentWindows: an as_of is required — the apply must be pinned to the bound the preview returned");
-  if (Number.isNaN(Date.parse(v))) throw new Error(`reopenSilentWindows: as_of "${v.slice(0, 40)}" is not a timestamp — pass back the as_of the preview returned`);
+  if (!v) throw new Error("reopenSilentWindows: as_of_required — the apply must be pinned to the bound the preview returned");
+  if (Number.isNaN(Date.parse(v))) throw new Error(`reopenSilentWindows: as_of_invalid — "${v.slice(0, 40)}" is not a timestamp; pass back the as_of the preview returned`);
   return v;
+}
+
+/**
+ * R51 — IS THIS BOUND ONE THE SERVER HAS ACTUALLY REACHED?
+ *
+ * A future as_of was accepted, and measured at preview 1, moved 2: the apply moved rows the preview never
+ * showed. That is R47's defect wearing a different coat. `Date.parse` asks whether a string is A timestamp;
+ * it cannot ask whether it is a timestamp this system issued, so a caller who fabricates tomorrow's date got
+ * the old unbounded behaviour with the pin apparently satisfied. A bound the caller can widen is not a bound,
+ * which is the same reasoning that made as_of required in the first place.
+ *
+ * AGAINST THE DATABASE'S CLOCK, NOT THIS PROCESS'S. The as_of is issued by `now()` inside the preview's own
+ * statement, so the database is the only clock that can say whether a bound is in the future. Comparing
+ * against `Date.now()` here would reject a legitimate as_of whenever the app runtime lagged Postgres by a
+ * millisecond, which is a real gap between a serverless runtime and Neon and not a hypothetical one.
+ *
+ * There is no race in the dangerous direction: an as_of that is not in the future when this runs cannot
+ * become so, because the clock only moves one way.
+ */
+export async function asOfIsInFuture(asOf: string): Promise<boolean> {
+  const rows = (await sql`SELECT (${asOf}::timestamptz > now()) AS future`) as Array<{ future: boolean }>;
+  return rows[0]?.future === true;
 }
 
 /**
@@ -457,6 +486,11 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
     throw new Error(`reopenSilentWindows: detector "${detector.slice(0, 32)}" is not a usable name — letters, digits and . _ : - only, 1-64 characters`);
   }
   const asOf = checkedAsOf(f.asOf ?? "");
+  // R51 — and it must be a bound the server has reached. Refused here as well as at the tool, because a
+  // pin only a cooperative caller honours is advisory, and this module is a door of its own.
+  if (await asOfIsInFuture(asOf)) {
+    throw new Error(`reopenSilentWindows: as_of_in_future — "${asOf.slice(0, 40)}" is later than the server's clock; an apply cannot be pinned to a set nobody has read yet`);
+  }
   const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
     WITH bound AS (

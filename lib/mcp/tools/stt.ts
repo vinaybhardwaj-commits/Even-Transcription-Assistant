@@ -458,6 +458,7 @@ const silenceReadjudicate: McpTool = {
     "The dry run also returns would.as_of, the instant it read the set at: PASS IT BACK as as_of on the apply, which then moves only windows whose " +
     "verdict was written at or before it, so an apply can never move a window the dry run did not describe. " +
     "apply:true moves that population back to 'closed' for the drain to read again, and REQUIRES detector, reason and as_of; unscoped apply also requires all_rooms:true. " +
+    "An as_of later than the server's clock is refused (as_of_in_future) on both paths: a bound the caller can widen is not a bound. " +
     "Scope it with room_id, room_day_id, from_ms/to_ms. It classifies nothing: no dead-mic detector and no VAD calibration exist yet (E13, E15).",
   scope: "write",
   inputSchema: {
@@ -472,7 +473,7 @@ const silenceReadjudicate: McpTool = {
       apply: { type: "boolean", description: "DO IT. Omit for the dry run, which is the default and writes nothing." },
       detector: { type: "string", maxLength: 64, description: "required with apply: which detector will re-read this set" },
       reason: { type: "string", maxLength: 300, description: "required with apply: why this set is being re-run" },
-      as_of: { type: "string", maxLength: 64, description: "required with apply: the would.as_of a dry run returned — the apply moves nothing whose verdict was written after it" },
+      as_of: { type: "string", maxLength: 64, description: "required with apply: the would.as_of a dry run returned — the apply moves nothing whose verdict was written after it, and a value later than the server's clock is refused" },
       batch: { type: "string", maxLength: 64, description: "names the batch; generated from the detector and the time when omitted" },
       all_rooms: { type: "boolean", description: "required with apply when no room, day or time bound is given" },
     },
@@ -480,7 +481,7 @@ const silenceReadjudicate: McpTool = {
   },
   handler: async (args: ToolArgs) =>
     failSafe({ ok: false, dry_run: true }, async () => {
-      const { previewSilenceReadjudication, reopenSilentWindows, DETECTOR_NAME } = await import("@/lib/stt/silence");
+      const { previewSilenceReadjudication, reopenSilentWindows, asOfIsInFuture, DETECTOR_NAME } = await import("@/lib/stt/silence");
       const roomId = argStr(args, "room_id", 64) || null;
       const roomDayId = argStr(args, "room_day_id", 64) || null;
       const fromMs = args.from_ms === undefined || args.from_ms === null ? null : argInt(args, "from_ms", 0, 0, Number.MAX_SAFE_INTEGER);
@@ -493,6 +494,13 @@ const silenceReadjudicate: McpTool = {
       const asOf = argStr(args, "as_of", 64);
       if (asOf && Number.isNaN(Date.parse(asOf))) {
         return { ok: false, dry_run: !apply, error: "as_of_invalid", detail: "as_of must be the timestamp a dry run returned as would.as_of" };
+      }
+      // R51 — a bound later than the server's own clock is refused on BOTH paths. Parseable is not the same
+      // as issued: a caller passing tomorrow's date was getting the unbounded apply back with the pin
+      // apparently satisfied (measured at preview 1, moved 2). Refusing it on the dry run too means an
+      // operator learns their bound is fabricated while reading, not after asking for the write.
+      if (asOf && (await asOfIsInFuture(asOf))) {
+        return { ok: false, dry_run: !apply, error: "as_of_in_future", detail: "as_of is later than the server's clock; pass back the would.as_of a dry run returned rather than a time of your own" };
       }
       // R47 — the bound applies to BOTH steps. A dry run given an as_of re-reads the set at that instant instead
       // of now, so the operator can see again exactly what a pinned apply would move; a dry run without one reads

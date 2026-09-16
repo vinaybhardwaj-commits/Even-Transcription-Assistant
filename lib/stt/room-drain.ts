@@ -794,6 +794,17 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
       // evidence write was left to a later phase that may not run. What is not knowable is NAMED, not
       // guessed: the recorder's meter is absent on every native-recorder window (0 of 4,405 chunks), and the
       // whisper service does not report the flags it ran under. See lib/stt/silence.ts.
+      //
+      // ─── R52 — THIS LINE MUST STAY AHEAD OF THE STATE MOVE IN `roomWindowFinish` ────────────────────
+      // ORDER, NOT PREFERENCE. The evidence row is written HERE, in `segment`; the window becomes `silent`
+      // LATER, in `roomWindowFinish` (search: "R52"). Reversed — or merged into finish after the state write
+      // — a crash or a failed write between them leaves a window resting in `silent` with NO evidence row,
+      // and E18's bulk path cannot pin such a window in time: with no `decided_at` the as-of bound falls back
+      // to `closed_at`, which precedes any later verdict, so the window slips under every as_of an operator
+      // can pass (measured: preview 1, moved 2). Today that population cannot GROW, and this ordering is the
+      // only reason why. It is pinned by "R52 — the verdict row is written BEFORE the state moves" in
+      // tests/unit/e11-silent-room-window.test.ts, which reads the order of the two writes as they happen.
+      // R38 exists because the population is real historically; this keeps it from being added to.
       const level = await readWindowAudioLevel(w.session_id, source, startMs, endMs);
       await recordSilenceVerdict({
         windowId, roomDayId: w.room_day_id, sessionId: w.session_id,
@@ -1318,6 +1329,13 @@ export async function roomWindowFinish(windowId: string, opts: RunActor, progres
     // E18 R1.1 — "we heard nothing" and "we heard something" are different claims and do not share a state.
     // The silent verdict was made in `segment` and carried here in progress; its evidence row is already
     // written. Every other window is `transcribed` exactly as before.
+    //
+    // R52 — THE OTHER HALF OF AN ORDER NOTHING ELSE ENFORCES. "its evidence row is already written" is a
+    // claim about `segment` (lib/stt/room-drain.ts, search: "R52"), not about anything this function checks.
+    // Move the verdict write to after this line and every window that fails in between rests in `silent`
+    // with no evidence row — a window E18's bulk path cannot bound in time, because with no `decided_at` the
+    // as-of falls back to `closed_at` and it slips under any as_of. The order is pinned by
+    // "R52 — the verdict row is written BEFORE the state moves" in tests/unit/e11-silent-room-window.test.ts.
     // Written as two literal statements rather than one parameterised one, deliberately: every other state
     // move in this file is a literal, and the tests that pin the ORDER of the cue gate against the state write
     // read the source for it. A parameterised state would hide both from a reader and from them.

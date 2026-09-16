@@ -716,6 +716,112 @@ describe.runIf(HAVE_DOCKER)("E18 R47/R48/R49 — the set is pinned in time, the 
   }, 300_000);
 });
 
+describe.runIf(HAVE_DOCKER)("E18 R51/R53 — a bound the server never issued, and the module's own refusals", () => {
+  const tool = async () => (await import("@/lib/mcp/tools/stt")).STT_TOOLS.find((t) => t.name === "scribe_silence_readjudicate")!;
+  const call = async (args: Record<string, unknown>) => (await (await tool()).handler(args as never, {} as never)) as Record<string, unknown>;
+  const verdictFor = async (id: string, n: number, session: string, roomDay: string) => {
+    const { recordSilenceVerdict, readWindowAudioLevel, readVadParams, VERDICT_EMPTY_TRANSCRIPT } = await import("@/lib/stt/silence");
+    await recordSilenceVerdict({
+      windowId: id, roomDayId: roomDay, sessionId: session, verdict: VERDICT_EMPTY_TRANSCRIPT, engine: "whisper",
+      audioSeconds: 900, level: await readWindowAudioLevel(session, "primary", startOf(n), startOf(n) + WINDOW_MS),
+      vad: readVadParams({}), answer: null,
+    });
+  };
+  /** A bound no clock has reached. The database's clock is the one that matters, so it is read from there. */
+  const tomorrow = async () =>
+    ((await pg.sql`SELECT (now() + interval '1 day')::text AS t`) as Array<{ t: string }>)[0]!.t;
+
+  it("R51 — a future as_of is refused by name, on the apply, and nothing moves", async () => {
+    // The Refuter's measurement: preview 1, moved 2. `Date.parse` asks whether a string is A timestamp, not
+    // whether it is one this system issued, so a caller passing tomorrow's date got the unbounded apply back
+    // with the pin apparently satisfied. That is R47's defect wearing a different coat: a bound the caller can
+    // widen is not a bound.
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_r51', 'room_r51', to_timestamp(0), 'ended')`);
+    seedWindow("bw_r51_seen", 801, { levels: null, session: "sess_r51", roomDay: "rd_r51" });
+    await verdictFor("bw_r51_seen", 801, "sess_r51", "rd_r51");
+
+    const preview = (await call({ room_id: "room_r51" })).would as Record<string, unknown>;
+    expect(preview.windows, "the operator reads one").toBe(1);
+
+    // A second window reaches a silent verdict after that read, exactly as in P7.
+    seedWindow("bw_r51_late", 802, { levels: null, session: "sess_r51", roomDay: "rd_r51", state: "closed" });
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_r51_late'`);
+    await verdictFor("bw_r51_late", 802, "sess_r51", "rd_r51");
+
+    const future = await tomorrow();
+    const refused = await call({ room_id: "room_r51", apply: true, as_of: future, detector: "e13_v1", reason: "a bound of my own" });
+    expect(refused, "refused by name, in the same family as as_of_required").toMatchObject({ ok: false, dry_run: false, error: "as_of_in_future" });
+    for (const id of ["bw_r51_seen", "bw_r51_late"]) {
+      expect(await stateOf(id), `${id} did not move: the refusal happened before the first row`).toBe("silent");
+    }
+    const stamps = ((await pg.sql`SELECT count(*)::int AS n FROM bench_window_silence
+                                   WHERE window_id IN ('bw_r51_seen','bw_r51_late') AND reopened_at IS NOT NULL`) as Array<{ n: number }>)[0]!.n;
+    expect(stamps, "and nothing was stamped either").toBe(0);
+
+    // And the honest bound still works on the same fixture, which is what makes the refusal a fix and not a wall.
+    const applied = await call({ room_id: "room_r51", apply: true, as_of: preview.as_of, detector: "e13_v1", reason: "the bound I was given" });
+    expect(applied.reopened, "the pinned apply moves the one window the preview described").toBe(1);
+    expect(await stateOf("bw_r51_late"), "the late one is still waiting, as it should be").toBe("silent");
+  }, 600_000);
+
+  it("R51 — the dry run refuses it too, so a fabricated bound is found while reading and not after asking to write", async () => {
+    const future = await tomorrow();
+    const dry = await call({ room_id: "room_r51", as_of: future });
+    expect(dry).toMatchObject({ ok: false, dry_run: true, error: "as_of_in_future" });
+    // A bound the server HAS reached is still accepted on the dry run — the refusal is about the future, not
+    // about passing an as_of at all.
+    const ok = await call({ room_id: "room_r51", as_of: await dbNow() });
+    expect(ok.ok).toBe(true);
+  }, 300_000);
+
+  it("R51 / R53 — the module refuses on its own: the tool is not the only door", async () => {
+    const { reopenSilentWindows } = await import("@/lib/stt/silence");
+    const base = { roomId: "room_r51", batch: "b_r51", reason: "r", detector: "e13_v1" };
+    // R51 at the module. A direct caller that skipped the surface gets the same rule and the same name.
+    await expect(reopenSilentWindows({ ...base, asOf: await tomorrow() })).rejects.toThrow(/as_of_in_future/);
+    // R53 / A2 — an EMPTY as_of fails HERE, with the published name, not at the database on ''::timestamptz.
+    // Removing that throw leaves the call failing anyway, one layer down and with a cast error for a message,
+    // which is the difference this asserts.
+    await expect(reopenSilentWindows({ ...base, asOf: "" })).rejects.toThrow(/as_of_required/);
+    await expect(reopenSilentWindows({ ...base, asOf: "   " })).rejects.toThrow(/as_of_required/);
+    await expect(reopenSilentWindows({ ...base, asOf: "last tuesday" })).rejects.toThrow(/as_of_invalid/);
+    // None of the four reached a statement: the room is untouched.
+    expect(((await pg.sql`SELECT count(*)::int AS n FROM bench_window w JOIN bench_session s ON s.id = w.session_id
+                           WHERE s.room_id = 'room_r51' AND w.state = 'silent'`) as Array<{ n: number }>)[0]!.n)
+      .toBe(1);
+  }, 300_000);
+
+  it("R52 — THE LIMIT, MEASURED: a silent window with no evidence row slips any bound; only the drain's write order keeps that population from growing", async () => {
+    // Rule 21. This is the Refuter's preview 1, moved 2, reproduced deliberately rather than fixed: with no
+    // `decided_at` the as-of falls back to `closed_at`, which precedes any later verdict, so the window is
+    // inside every bound an operator can pass. It is NOT reachable in production — `recordSilenceVerdict`
+    // runs in the drain's segment step BEFORE the state moves in finish, so a crash leaves a row without a
+    // silent state and never a silent state without a row. That order is the whole guarantee and it is pinned
+    // in tests/unit/e11-silent-room-window.test.ts ("R52 — the verdict row is written BEFORE the state
+    // moves"); the comments at both drain lines say what breaks if it is reversed. This test exists so the
+    // limit is a measured number in the repo rather than a claim in a report, and so that anyone who closes
+    // it has to come here and say they did.
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_r52', 'room_r52', to_timestamp(0), 'ended')`);
+    seedWindow("bw_r52_seen", 811, { levels: null, session: "sess_r52", roomDay: "rd_r52" });
+    await verdictFor("bw_r52_seen", 811, "sess_r52", "rd_r52");
+    // Closed and waiting, with no verdict of any kind — the shape the drain cannot produce in this order.
+    seedWindow("bw_r52_noev", 812, { levels: null, session: "sess_r52", roomDay: "rd_r52", state: "closed" });
+
+    const preview = (await call({ room_id: "room_r52" })).would as Record<string, unknown>;
+    expect(preview.windows, "the operator reads one").toBe(1);
+
+    // BY HAND: the state moves with no evidence row behind it. Nothing in the drain does this.
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_r52_noev'`);
+
+    const applied = await call({ room_id: "room_r52", apply: true, as_of: preview.as_of, detector: "e13_v1", reason: "R52 limit" });
+    expect(applied.reopened, "MEASURED, and still open: the unevidenced window slips the bound").toBe(2);
+    expect((applied.window_ids as string[]).sort()).toEqual(["bw_r52_noev", "bw_r52_seen"]);
+    // R38 still holds over it: it moved, so it has a ledger row now.
+    const led = ((await pg.sql`SELECT reopened_detector FROM bench_window_silence WHERE window_id = 'bw_r52_noev'`) as Array<Record<string, unknown>>)[0];
+    expect(led?.reopened_detector, "a moved window always gets its row, evidence or not").toBe("e13_v1");
+  }, 600_000);
+});
+
 /**
  * R50 — 0101 MUST UPGRADE A DATABASE THAT ALREADY HOLDS AN EARLIER SHAPE.
  *
