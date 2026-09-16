@@ -455,7 +455,9 @@ const silenceReadjudicate: McpTool = {
     "DRY RUN BY DEFAULT: the plain call writes nothing and returns what THIS call would move (would.windows, the same limit apply uses), " +
     "how many match the filter altogether (eligible.total), the span each covers, how many rooms it touches, " +
     "and the distribution of the evidence those verdicts hold (audio level present vs absent, VAD parameters reported vs not, verdict, engine). " +
-    "apply:true moves that population back to 'closed' for the drain to read again, and REQUIRES detector and reason; unscoped apply also requires all_rooms:true. " +
+    "The dry run also returns would.as_of, the instant it read the set at: PASS IT BACK as as_of on the apply, which then moves only windows whose " +
+    "verdict was written at or before it, so an apply can never move a window the dry run did not describe. " +
+    "apply:true moves that population back to 'closed' for the drain to read again, and REQUIRES detector, reason and as_of; unscoped apply also requires all_rooms:true. " +
     "Scope it with room_id, room_day_id, from_ms/to_ms. It classifies nothing: no dead-mic detector and no VAD calibration exist yet (E13, E15).",
   scope: "write",
   inputSchema: {
@@ -470,6 +472,7 @@ const silenceReadjudicate: McpTool = {
       apply: { type: "boolean", description: "DO IT. Omit for the dry run, which is the default and writes nothing." },
       detector: { type: "string", maxLength: 64, description: "required with apply: which detector will re-read this set" },
       reason: { type: "string", maxLength: 300, description: "required with apply: why this set is being re-run" },
+      as_of: { type: "string", maxLength: 64, description: "required with apply: the would.as_of a dry run returned — the apply moves nothing whose verdict was written after it" },
       batch: { type: "string", maxLength: 64, description: "names the batch; generated from the detector and the time when omitted" },
       all_rooms: { type: "boolean", description: "required with apply when no room, day or time bound is given" },
     },
@@ -484,32 +487,46 @@ const silenceReadjudicate: McpTool = {
       const toMs = args.to_ms === undefined || args.to_ms === null ? null : argInt(args, "to_ms", 0, 0, Number.MAX_SAFE_INTEGER);
       const includeReopened = argBool(args, "include_reopened");
       const limit = argInt(args, "limit", 100, 1, 1000);
-      const filter = { roomId, roomDayId, fromMs, toMs, includeReopened, limit };
+      const live = { roomId, roomDayId, fromMs, toMs, includeReopened, limit };
       const scope = { room_id: roomId, room_day_id: roomDayId, from_ms: fromMs, to_ms: toMs, include_reopened: includeReopened, limit };
-      const would = await previewSilenceReadjudication(filter);
+      const apply = argBool(args, "apply");
+      const asOf = argStr(args, "as_of", 64);
+      if (asOf && Number.isNaN(Date.parse(asOf))) {
+        return { ok: false, dry_run: !apply, error: "as_of_invalid", detail: "as_of must be the timestamp a dry run returned as would.as_of" };
+      }
+      // R47 — the bound applies to BOTH steps. A dry run given an as_of re-reads the set at that instant instead
+      // of now, so the operator can see again exactly what a pinned apply would move; a dry run without one reads
+      // the world now and returns the instant it did, which is the as_of to hand back.
+      const pinned = { ...live, asOf: asOf || null };
 
-      if (!argBool(args, "apply")) return { ok: true, dry_run: true, scope, would };
+      if (!apply) return { ok: true, dry_run: true, scope, would: await previewSilenceReadjudication(pinned) };
 
       // From here on it writes, so every refusal happens BEFORE the first row moves.
       const detector = argStr(args, "detector", 64);
       const reason = argStr(args, "reason", 300);
       if (!detector) return { ok: false, dry_run: false, error: "detector_required", detail: "apply names which detector will re-read this set" };
       if (!reason) return { ok: false, dry_run: false, error: "reason_required", detail: "apply names why this set is being re-run" };
+      // The apply is pinned to the instant a dry run read the set. Without it the apply is the same filter
+      // re-evaluated later, and a window that turned silent in between would be moved without ever being shown.
+      if (!asOf) return { ok: false, dry_run: false, error: "as_of_required", detail: "run the dry run first and pass back its would.as_of; the apply moves nothing whose verdict was written after it" };
       // The detector is an identity later passes are compared against, so it must be matchable exactly.
       if (!DETECTOR_NAME.test(detector)) {
         return { ok: false, dry_run: false, error: "detector_name_invalid", detail: "letters, digits and . _ : - only, 1-64 characters, starting with a letter or digit" };
       }
+      // What this call says it will do, measured under the bound the caller handed back rather than at this instant.
+      const would = await previewSilenceReadjudication(pinned);
       const bounded = Boolean(roomId || roomDayId || fromMs !== null || toMs !== null);
       if (!bounded && !argBool(args, "all_rooms")) {
         return { ok: false, dry_run: false, error: "unscoped_apply_needs_all_rooms", detail: "scope by room, day or time, or pass all_rooms:true to mean every room", would };
       }
       const batch = argStr(args, "batch", 64) || `readjudicate_${detector}_${new Date().toISOString().replace(/[:.]/g, "-")}`;
-      const done = await reopenSilentWindows({ ...filter, batch, reason, detector });
-      // `would` was taken BEFORE the move, so it is what this call said it would do; `remaining` is what the
-      // next call would still find. Both, because "100 moved" alone does not say whether the job is finished.
-      const remaining = await previewSilenceReadjudication(filter);
+      const done = await reopenSilentWindows({ ...pinned, batch, reason, detector, asOf });
+      // `would` was taken BEFORE the move, under the bound, so it is what this call said it would do.
+      // `remaining_eligible` is deliberately NOT bounded: it answers "how much is still waiting" for the NEXT
+      // pass, which is a live question, and a bounded answer would hide every window that turned silent since.
+      const remaining = await previewSilenceReadjudication(live);
       return {
-        ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector,
+        ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector, as_of: done.as_of,
         reopened: done.reopened, window_ids: done.window_ids.slice(0, 50),
         would, remaining_eligible: remaining.eligible.total,
       };

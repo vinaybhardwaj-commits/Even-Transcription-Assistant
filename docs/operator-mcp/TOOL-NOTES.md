@@ -47,8 +47,11 @@ review; the code does not check it.
 `scribe_silence_readjudicate` (write, E18 R31, 16 Sep) is listed on its own: it takes no selector, and no
 group absorbs it because a group holds one scope and the silent backlog is the only thing it acts on. The plain
 call is a DRY RUN that writes nothing and reports what it would re-adjudicate — how many windows, over what span,
-across how many rooms, and what evidence those verdicts hold. `apply: true` does the work and requires `detector`
-and `reason`; an unscoped apply also requires `all_rooms: true`. Nothing schedules it.
+across how many rooms, and what evidence those verdicts hold. It also returns `would.as_of`, the instant it read
+that set at. `apply: true` does the work and requires `detector`, `reason` and that `as_of` handed back (R47): the
+apply moves only windows whose silence verdict was written at or before it, so it can never move a window the dry
+run did not describe, and the bound is recorded on every row it moves. Passing an `as_of` to a dry run re-reads the
+set at that instant instead of now. An unscoped apply also requires `all_rooms: true`. Nothing schedules it.
 
 The other 17 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
 `scribe_pin_visit`, `scribe_mark_consult`, `scribe_extract_audio`, `scribe_transcribe_range`,

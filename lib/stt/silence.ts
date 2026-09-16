@@ -194,6 +194,12 @@ export type SilenceFilter = {
   /** Default false: a window already handed back once is not offered again unless asked for. */
   includeReopened?: boolean;
   limit?: number;
+  /**
+   * R47 — THE AS-OF BOUND. Only windows whose silence verdict was written AT OR BEFORE this instant are in the
+   * set. The preview returns the bound it used; the apply is given it back. Omitted on a preview means "now",
+   * and the preview says which instant that was.
+   */
+  asOf?: string | null;
 };
 
 export type SilentWindowRow = {
@@ -221,6 +227,37 @@ const capped = (n: number | undefined, dflt: number, max: number) =>
   Math.max(1, Math.min(max, Math.trunc(Number(n ?? dflt)) || dflt));
 
 /**
+ * R47 — WHEN THIS WINDOW'S SILENCE VERDICT WAS WRITTEN, for every silent window including the ones that have no
+ * evidence row at all.
+ *
+ * `decided_at` is the verdict's own timestamp and is the answer whenever there is a verdict row. The fallbacks
+ * are for the population 0101's header calls the real production shape — a window called silent by code older
+ * than E18, which has no row. `closed_at` is when the window was closed, `created_at` when it was made; both are
+ * EARLIER than whatever verdict followed, so a legacy window is never excluded by a bound that should hold it.
+ * That direction is safe here and only here, because that population is FIXED: under E18 a new silent verdict
+ * always writes its row in the same step that moves the state (lib/stt/room-drain.ts), so a window that becomes
+ * silent after a preview always carries a `decided_at` later than the bound. `created_at` is NOT NULL (0057), so
+ * there is no silent window this expression leaves NULL and therefore none it strands outside every bound.
+ *
+ * THE LIMIT OF THE BOUND (rule 21). It is a clock, not a snapshot. A writer whose transaction began before the
+ * preview and committed after it produces a row the preview did not see but whose `decided_at` is under the
+ * bound, so that one row can still slip into a later apply. That is narrower than the unbounded set the apply
+ * used to take — which was every window matching the filter at apply time, however long after — but it is not
+ * nothing, and it is stated here rather than in a comment claiming it cannot happen.
+ */
+// Written out in full in both statements below rather than interpolated: the `sql` tag binds every
+// interpolation as a PARAMETER, so a shared SQL fragment would arrive as a string literal, not as an
+// expression. Two copies of one line, kept honest by the test that measures preview against apply.
+
+/** The as-of a caller handed back, checked before it reaches a statement. */
+function checkedAsOf(asOf: string): string {
+  const v = String(asOf ?? "").trim();
+  if (!v) throw new Error("reopenSilentWindows: an as_of is required — the apply must be pinned to the bound the preview returned");
+  if (Number.isNaN(Date.parse(v))) throw new Error(`reopenSilentWindows: as_of "${v.slice(0, 40)}" is not a timestamp — pass back the as_of the preview returned`);
+  return v;
+}
+
+/**
  * R1.3 — THE SET, not a window at a time.
  *
  * LEFT JOIN, deliberately: a window in state 'silent' with no evidence row is exactly the thing a reader must
@@ -243,12 +280,14 @@ export async function listSilentWindows(f: SilenceFilter = {}): Promise<SilentWi
        AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
        AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
        AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
-     ORDER BY w.start_ms ASC
+     -- R48 — total, for the same reason the bulk path's is: start_ms alone leaves ties to the planner, so two
+     -- reads of one unchanged population could return different windows at the same limit.
+     ORDER BY w.start_ms ASC, w.id ASC
      LIMIT ${limit}
   `) as SilentWindowRow[];
 }
 
-export type ReopenResult = { batch: string; detector: string; reopened: number; window_ids: string[] };
+export type ReopenResult = { batch: string; detector: string; as_of: string; reopened: number; window_ids: string[] };
 
 /** What a detector name may look like. An identity later passes are compared against, not a vocabulary. */
 export const DETECTOR_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -276,6 +315,12 @@ export type SilencePreview = {
   by_engine: Array<{ engine: string | null; n: number }>;
   /** How many windows match the filter ALTOGETHER, ignoring the limit. The number the operator is deciding about. */
   eligible: { total: number; rooms: number; first_start_ms: number | null; last_start_ms: number | null };
+  /**
+   * R47 — THE BOUND THIS SET WAS READ AT. Hand it back to the apply and the apply cannot move a window whose
+   * verdict was written after it. Compact, monotone and auditable: one timestamp, recorded in the ledger,
+   * where a list of previewed ids would be thousands of tokens and would say nothing a reader could check later.
+   */
+  as_of: string;
 };
 
 /**
@@ -289,25 +334,42 @@ export type SilencePreview = {
  *
  * ONE STATEMENT, so the two numbers cannot drift. The roll-ups used to come from a second query with its own copy
  * of the filter; a future edit to one could have left the other behind. There is now nothing to keep in step.
+ *
+ * R47 — AND THE SET IS PINNED IN TIME. Equal bounds are not the same thing as an equal world: the preview and the
+ * apply are two statements at two instants, and measured across a gap they disagreed in both directions — a window
+ * leaving the silent set (preview 5, moved 4) and, worse, two windows JOINING it (preview 3, moved 5), so the apply
+ * moved windows the preview never described. So the preview now returns `as_of` — the instant it read the world —
+ * the apply takes it back, and the apply's set is bounded by it. Passing a previous `as_of` in reproduces that set,
+ * which is why this reads the bound from the filter when it is given one instead of always taking `now()`.
  */
 export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promise<SilencePreview> {
   const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
-    WITH matched AS (
+    WITH bound AS (
+      -- The instant this set is read at. now() is the statement's own clock when the caller did not pin one.
+      SELECT COALESCE(${f.asOf ?? null}::timestamptz, now()) AS as_of
+    ),
+    matched AS (
       SELECT w.id, w.start_ms, s.room_id, z.window_id AS ev, z.audio_level_source, z.vad_params_source, z.verdict, z.engine
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
         LEFT JOIN bench_window_silence z ON z.window_id = w.id
+        CROSS JOIN bound b
        WHERE w.state = ${SILENT_STATE}
+         AND COALESCE(z.decided_at, w.closed_at, w.created_at) <= b.as_of
          AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
          AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
          AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
          AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
          AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
     ),
-    -- EXACTLY the apply's own bound: same order, same limit. These are the windows that would move.
-    picked AS (SELECT * FROM matched ORDER BY start_ms ASC LIMIT ${limit})
-    SELECT (SELECT count(*)::int FROM matched) AS eligible_total,
+    -- EXACTLY the apply's own bound: same order, same tiebreaker, same limit. These are the windows that would
+    -- move. R48 — id is the tiebreaker because start_ms alone is not a total order: windows sharing a start
+    -- would leave membership of the picked set to the planner, and the preview and the apply could then pick
+    -- different windows while both obeyed their ORDER BY.
+    picked AS (SELECT * FROM matched ORDER BY start_ms ASC, id ASC LIMIT ${limit})
+    SELECT (SELECT as_of::text FROM bound) AS as_of,
+           (SELECT count(*)::int FROM matched) AS eligible_total,
            (SELECT count(DISTINCT room_id)::int FROM matched) AS eligible_rooms,
            (SELECT min(start_ms)::bigint FROM matched) AS eligible_first,
            (SELECT max(start_ms)::bigint FROM matched) AS eligible_last,
@@ -342,6 +404,7 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
       total: n(r.eligible_total), rooms: n(r.eligible_rooms),
       first_start_ms: orNull(r.eligible_first), last_start_ms: orNull(r.eligible_last),
     },
+    as_of: String(r.as_of ?? ""),
   };
 }
 
@@ -363,8 +426,22 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
  * re-adjudication nobody has to justify is how the last unexplained backlog happened. `detector` is required for
  * the same reason one step further on (R31.3): a second pass with a better detector must be distinguishable from
  * the first, or we have overwritten one verdict with another and lost the fact that we did.
+ *
+ * R47 — `asOf` IS REQUIRED TOO, and for the same kind of reason. The bound the preview read the world at is what
+ * stops this moving a window the operator never saw: without it the apply is the same filter re-evaluated later,
+ * and in a live clinic the drain writes silent verdicts continuously, so the set moves underneath the dry run.
+ * Optional would be no bound at all, because the call that omits it is exactly the call that wanted the old
+ * behaviour. The bound is recorded on every row this moves, so which apply was pinned to what is answerable
+ * afterwards and not only at the time.
+ *
+ * R49 — THE STAMP IS DERIVED FROM THE STATEMENT THAT MOVED THE ROWS, and cannot be written any other way. `moved`
+ * RETURNs the session and the day alongside the id, and `picked` carries the id ALONE, so the INSERT's SELECT can
+ * only be built over `moved`. Pointing it at `picked` does not produce a subtler bug that a concurrency test might
+ * or might not catch — it does not resolve. Under a concurrent commit `moved` is a subset of `picked`, and a stamp
+ * over `picked` would tell the ledger a window had been handed back when it had not; that divergence is now not
+ * expressible rather than merely untested.
  */
-export async function reopenSilentWindows(f: SilenceFilter & { batch: string; reason: string; detector: string }): Promise<ReopenResult> {
+export async function reopenSilentWindows(f: SilenceFilter & { batch: string; reason: string; detector: string; asOf: string }): Promise<ReopenResult> {
   const batch = String(f.batch ?? "").trim();
   const reason = String(f.reason ?? "").trim();
   const detector = String(f.detector ?? "").trim();
@@ -379,46 +456,62 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
   if (!DETECTOR_NAME.test(detector)) {
     throw new Error(`reopenSilentWindows: detector "${detector.slice(0, 32)}" is not a usable name — letters, digits and . _ : - only, 1-64 characters`);
   }
+  const asOf = checkedAsOf(f.asOf ?? "");
   const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
-    WITH picked AS (
+    WITH bound AS (
+      SELECT ${asOf}::timestamptz AS as_of
+    ),
+    -- R47 — bounded by what the preview could see. R48 — ordered totally, by the same two keys the preview uses:
+    -- start_ms decides, and id decides the ties start_ms leaves, so the two statements cannot pick different
+    -- members of the same-sized set. R49 — id ALONE, deliberately: everything the stamp needs comes out of
+    -- moved, so the stamp cannot be written over this set even by accident.
+    picked AS (
       SELECT w.id
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
         LEFT JOIN bench_window_silence z ON z.window_id = w.id
+        CROSS JOIN bound b
        WHERE w.state = ${SILENT_STATE}
+         AND COALESCE(z.decided_at, w.closed_at, w.created_at) <= b.as_of
          AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
          AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
          AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
          AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
          AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
-       ORDER BY w.start_ms ASC
+       ORDER BY w.start_ms ASC, w.id ASC
        LIMIT ${limit}
     ),
+    -- R49 — this statement is the one that knows what actually moved, so it returns everything the ledger needs.
     moved AS (
       UPDATE bench_window w SET state = 'closed'
        WHERE w.id IN (SELECT id FROM picked) AND w.state = ${SILENT_STATE}
-      RETURNING w.id
+      RETURNING w.id, w.session_id, w.room_day_id
     ),
     -- R38 — ONLY the moved windows, and ALL of them: an INSERT over the moved set (so a window with no evidence
     -- row gets its first row here) with ON CONFLICT for the ones that already have one. R39 — the pass APPENDS.
+    -- R47 — and the pass records the bound it ran under, in the scalar and in the history entry.
     stamped AS (
       INSERT INTO bench_window_silence
-        (window_id, session_id, room_day_id, reopened_at, reopened_batch, reopened_reason, reopened_detector, reopened_history)
-      SELECT m.id, w.session_id, w.room_day_id, NOW(), ${batch}::text, ${reason}::text, ${detector}::text,
-             jsonb_build_array(jsonb_build_object('at', NOW(), 'batch', ${batch}::text, 'reason', ${reason}::text, 'detector', ${detector}::text))
-        FROM moved m JOIN bench_window w ON w.id = m.id
+        (window_id, session_id, room_day_id, reopened_at, reopened_batch, reopened_reason, reopened_detector,
+         reopened_as_of, reopened_history)
+      SELECT m.id, m.session_id, m.room_day_id, NOW(), ${batch}::text, ${reason}::text, ${detector}::text,
+             b.as_of,
+             jsonb_build_array(jsonb_build_object('at', NOW(), 'batch', ${batch}::text, 'reason', ${reason}::text,
+                                                  'detector', ${detector}::text, 'as_of', b.as_of::text))
+        FROM moved m CROSS JOIN bound b
       ON CONFLICT (window_id) DO UPDATE SET
         reopened_at       = EXCLUDED.reopened_at,
         reopened_batch    = EXCLUDED.reopened_batch,
         reopened_reason   = EXCLUDED.reopened_reason,
         reopened_detector = EXCLUDED.reopened_detector,
+        reopened_as_of    = EXCLUDED.reopened_as_of,
         reopened_history  = bench_window_silence.reopened_history || EXCLUDED.reopened_history
       RETURNING window_id
     )
     SELECT id FROM moved ORDER BY id
   `) as Array<{ id: string }>;
-  return { batch, detector, reopened: rows.length, window_ids: rows.map((r) => r.id) };
+  return { batch, detector, as_of: asOf, reopened: rows.length, window_ids: rows.map((r) => r.id) };
 }
 
 /** How many silent windows are waiting on a second opinion, and how many have had one. */
