@@ -1,0 +1,146 @@
+# room-recorder.service — U2, written against S1-S8 of
+# ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 as amended by R1 (RestartSec floor) and R4 (no .device dependency).
+#
+# Install to /etc/systemd/system/room-recorder.service. Root required; see deploy/room-recorder-install.sh.
+#
+# S2 — this is a SYSTEM unit, deliberately. A user unit dies with the session, and the acceptance test is
+# "nobody logs in". There is no session to hang it off.
+
+[Unit]
+Description=Room recorder (U2): continuous pinned-device capture to a local tape
+Documentation=file:///usr/local/share/room-recorder/NOTES.md
+
+# ---------------------------------------------------------------------------------------------------------------
+# Do NOT add After=sound.target. Measured on this Yoga with tools/u2-boot-enum-probe.sh, three boots, 16 Sep 2026:
+#
+#   the TM20's PCM node is born     0.589 / 0.645 / 0.630 s  before sound.target        (spread 0.056 s)
+#   the same node is born           7.589 / 7.669 / 5.467 s  before multi-user.target   (spread 2.203 s)
+#
+# Ordering against sound.target would trade a 5.5-7.7 s margin for a 0.6 s one — an order of magnitude — and buy
+# nothing, because on all three boots the node already existed when multi-user.target was reached.
+#
+# THE 5.5-7.7 s IS AN OBSERVATION ON THIS HARDWARE, NOT A GUARANTEE, AND IT IS NOT THE SAFETY PROPERTY.
+# Boot 3 proves the point: its PCM node was born 9 ms EARLIER than boot 2's and it still lost 2.2 s of margin,
+# because multi-user.target arrived 2.572 s sooner. The margin moves with userspace, which we do not control.
+# What makes this unit safe is the bounded wait in the recorder (S3, below). Nobody may delete that wait on the
+# grounds that "there is plenty of margin" — that margin was measured on one laptop, on three boots, with the mic
+# already plugged in at power-on.
+#
+# There is also no .device unit to depend on even if we wanted one (R4, measured on boot 3): systemd publishes
+# sys-devices-...-usb3-3\x2d1-3\x2d1:1.0-sound-card1-controlC1.device for the CONTROL node and nothing at all for
+# pcmC1D0c, the capture node we actually open. That name also encodes the USB port (3-1) and the allocation-order
+# card index (card1), so moving the mic to the other port makes the unit name cease to exist and the service would
+# then never start AND never say why. A bounded wait that exits non-zero with a named cause is strictly better.
+# ---------------------------------------------------------------------------------------------------------------
+
+# Ordered after the tape's filesystem only. /var/lib is on the root fs here, but say it rather than assume it.
+RequiresMountsFor=/var/lib/room-recorder
+
+# S4 — a crash loop must be VISIBLE as a crash loop, not as silence and not as a unit that quietly gives up.
+# These are [Unit] keys, not [Service] keys; systemd-analyze verify rejects them in [Service] and then SILENTLY
+# ignores them, which would have left us with systemd's 5-in-10s default and a unit that stops itself.
+# 100 restarts per hour: fast enough that a transient fault recovers, slow enough that a persistent one is obvious.
+# StartLimitAction is left at the default (none) deliberately — we would rather have a loudly looping unit than a
+# stopped one, because S8 says a room that cannot record must be obviously broken, never quietly idle.
+StartLimitIntervalSec=3600
+StartLimitBurst=100
+
+[Service]
+Type=exec
+
+# S1 — dedicated system account, nologin shell, group audio. Group audio is the ONLY non-seat path to the PCM node:
+# M2.1 measured the udev uaccess ACL (user:vinay:rw-) present with a seat session and GONE without one, leaving
+# /dev/snd/pcmC1D0c as root:audio 0660. Do not "fix" an access problem by loosening /dev/snd.
+User=room-recorder
+Group=room-recorder
+SupplementaryGroups=audio
+
+# S1/M2.1 — the binary lives OUTSIDE /home. /home/vinay is mode 750 (drwxr-x---), so a system account cannot
+# traverse it: the M2.1 probe died at exec with "Permission denied", exit 126, before it ever reached ALSA.
+# That was nothing to do with audio permissions and it will happen again to anyone who installs into a home.
+#
+# S7 — the tape directory is also outside /home/vinay, owned by the account, and not world-readable.
+# StateDirectory= creates /var/lib/room-recorder as room-recorder:room-recorder before ExecStart and is the reason
+# this unit needs no ExecStartPre mkdir/chown.
+StateDirectory=room-recorder
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/room-recorder
+
+# S3 — bounded wait for the PINNED device, then a distinct named failure with a non-zero exit. NEVER a fallback to
+# another device, for any reason: a room that records the laptop's own array mic instead of the TM20 is worse than a
+# room that records nothing, because it looks like it worked. The device is named in stable hw:CARD= form, which does
+# not move when the card index or USB port changes; hw: only, never plughw: or any plugin layer.
+#
+# !!! NOT YET IMPLEMENTED IN THE BINARY — this unit cannot start until it is. See deploy/README.md "Blocked". !!!
+# `room-recorder record` today requires --seconds S and resolves the device once, failing immediately if absent.
+# --wait-for-device and --seconds forever do not exist yet.
+ExecStart=/usr/local/lib/room-recorder/room-recorder record \
+    --device hw:CARD=Device,DEV=0 \
+    --wait-for-device 90 \
+    --tape /var/lib/room-recorder/tape \
+    --seconds forever
+
+# S4 as amended by R1 — RestartSec is NEVER below 5 s, and the 5 s is measured, not chosen.
+# M2.2, 16 Sep: PipeWire holds the ALSA PCM for exactly 5.0 s after its last client exits — three trials,
+# 5.0 / 5.0 / 5.0 s, no variance (pw-record for 4 s, PCM polled every 0.5 s until `closed`, then a real open).
+# A shorter backoff spends restarts inside a window where the open CANNOT succeed, and the journal then reads as our
+# crash loop rather than as somebody else's hold. If that hold ever changes it is re-measured, never guessed.
+Restart=always
+RestartSec=5s
+
+# S5 — the machine must not sleep. There is DELIBERATELY no systemd-inhibit line here. The obvious
+# `ExecStartPre=/usr/bin/systemd-inhibit ... /bin/true` is a no-op: systemd-inhibit holds the lock only for the
+# lifetime of the command it runs, so the lock is taken and dropped before ExecStart even begins. An inhibitor that
+# lasted would have to wrap ExecStart itself, and that puts a second process between systemd and the recorder for
+# no gain. S5 is instead made true of the MACHINE, by masking sleep.target/suspend.target/hibernate.target/
+# hybrid-sleep.target and setting logind's lid handling — root-only steps the install script performs and the
+# preflight re-checks. S5 is a property of the machine, not of this unit, and cannot be delegated to it.
+
+# S6 — the journal gets lifecycle, device identity, errors and counts, and NEVER sample values, transcript text, or
+# anything derived from what was said in the room. That is enforced in the recorder's own logging, not here; what is
+# enforced here is the OTHER half of S6, that log volume is bounded so a long-running room cannot fill the disk.
+# 200 messages per 30 s per unit, and nothing below `info` is accepted at all.
+LogLevelMax=info
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=room-recorder
+
+# Hardening. The recorder needs one character device, one state directory, and nothing else: no network (U2 is
+# explicitly "no network, no upload"), no other users' files, no new privileges.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# The one device it may touch. DevicePolicy=closed denies everything not listed here, so a bug cannot wander into
+# another card. Both nodes of the pinned card: the control node is opened for the capability query, the pcm node
+# for capture.
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+# S8 — tzdata is a hard dependency, not a nicety: a run crossing IST midnight needs Asia/Kolkata zone data to write
+# the day_rollover record (Sources/CaptureCore/Rollover.swift). ProtectSystem=strict leaves /usr readable, so the
+# zoneinfo is reachable; the recorder still checks and exits non-zero with a named message if it is not.
+Environment=TZ=Asia/Kolkata
+
+[Install]
+# S3/R4 — multi-user.target, NOT graphical.target and NOT sound.target. graphical.target would tie a headless room
+# machine's recorder to a display stack it does not need, and on all three measured boots it was reached within
+# 52 ms of multi-user.target anyway, so it buys nothing either.
+WantedBy=multi-user.target

@@ -56,7 +56,7 @@ found=0
 while IFS= read -r line; do
     [ -n "$line" ] && { printf "    %s\n" "$line"; found=1; }
 done < <(journalctl -b "$b" -o short-iso 2>/dev/null |
-         grep -iE "corrupted or uncleanly shut down|recovering journal|Dirty bit is set|orphan" |
+         grep -iE "corrupted or uncleanly shut down|recovering journal|Dirty bit is set|Clearing orphaned inode" |
          sed 's/^[^ ]* [^ ]* //' | head -8)
 [ "$found" = 0 ] && echo "    (no unclean-shutdown marker: previous shutdown was clean)"
 prev=$((b - 1))
@@ -64,5 +64,5 @@ last_prev=$(journalctl -b "$prev" -o short-iso-precise 2>/dev/null | tail -1 | c
 first_this=$(journalctl -b "$b" -o short-iso-precise 2>/dev/null | head -1 | cut -d' ' -f1)
 printf "    %-30s %s\n" "last entry of boot $prev:" "${last_prev:-(none)}"
 printf "    %-30s %s\n" "first entry of boot $b:" "${first_this:-(none)}"
-printf "    %-30s %s\n" "journals renamed by journald:" "$(ls /var/log/journal/*/*.journal~ 2>/dev/null | wc -l) file(s)"
+printf "    %-30s %s\n" "journals renamed in this boot:" "$(grep -c "corrupted or uncleanly shut down, renaming and replacing" <<< "$j") event(s)"
 printf "    %-30s %s\n" "journalctl --verify:" "$(journalctl --verify 2>&1 | grep -c '^PASS') PASS, $(journalctl --verify 2>&1 | grep -ciE '^(FAIL|WARN)') FAIL/WARN"

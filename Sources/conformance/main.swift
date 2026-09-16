@@ -25,6 +25,9 @@ usage:
 """
 
 func die(_ message: String, _ code: Int32 = 2) -> Never {
+    // stdout is block-buffered when piped; without this flush the error reaches the terminal before the output it
+    // refers to ("see STALE above" printing above the STALE block).
+    fflush(nil)  // nil = all streams; `stdout` is a global var and Swift 6 rejects it as shared mutable state
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(code)
 }
@@ -45,6 +48,14 @@ func url(_ path: String) -> URL {
 
 switch command {
 case "run":
+    // V's ruling, 16 Sep: the clean-build rule is mechanical, not remembered. Provenance is printed on every run and
+    // a stale binary refuses to print a count at all. Checked before the suite: a stale count is not worth computing.
+    let provenance = BuildProvenance.detect()
+    print(provenance.render())
+    if provenance.refusesToPrintCount {
+        die("HARD ERROR: refusing to print a count from a stale binary (see STALE above).", 2)
+    }
+
     let root = url(option("--fixtures") ?? "fixtures")
     var only: Set<CaseID>? = nil
     if let list = option("--case") {
