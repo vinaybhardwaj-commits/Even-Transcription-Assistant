@@ -290,6 +290,56 @@ describe("E22 R5 (F6) — SPOKEN turns that could not be written are NOT a finis
   }
 });
 
+describe("F1 (B3) — a spoken window with EXACTLY ONE turn, rolled back, is NOT a finished read", () => {
+  // The block above drives a TWO-segment answer, so `failed` is 2 there and every guard that counts turns at all
+  // agrees with the real one. Mutant B3 (the speech-path guard changed to `counts.failed > 1`) survived exactly
+  // because of that: with one turn refused, `failed` is 1, and the mutant marks the window transcribed while the
+  // only thing the day holds is the marker. One turn is the smallest spoken window there is, and the commonest
+  // shape of a short consultation utterance — not an edge case invented to kill a mutant.
+  const ONE_TURN = () => ({ ok: true, transcript: "one", language: "en", latency_ms: 90, attempts: 1, engineVersion: "large-v3-turbo",
+    segments: [{ start_s: 0, end_s: 5, text: "one" }] });
+
+  it("batch_refused_marker_accepted with ONE turn: failed is exactly 1, and the window is still cues_refused", async () => {
+    WHISPER.value = ONE_TURN();
+    const brain: Array<{ replace: boolean; types: string[] }> = [];
+    CUES.real = true;
+    const other: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      // Anything that is NOT the brain is recorded and answered blandly rather than asserted on, so that a guard
+      // which wrongly lets the window through runs to the end and fails on what it DID, not on a timeout.
+      if (String(url) !== "https://x.test/api/brain/cues") { other.push(String(url)); return new Response("{}", { status: 200 }); }
+      const body = JSON.parse(String(init.body)) as { replace_window?: unknown; cues: Array<{ type: string }> };
+      const markerOnly = !body.replace_window;
+      brain.push({ replace: !markerOnly, types: body.cues.map((c) => c.type) });
+      if (!markerOnly) return new Response(JSON.stringify({ ok: false, error: "brain_permission_denied" }), { status: 403 });
+      return new Response(JSON.stringify({ ok: true, deleted: 0, written: 1, already_existed: 0, dropped: 0, attempted: 1 }), { status: 200 });
+    });
+    try {
+      // Stop before the `engine` step: a guard that wrongly lets this window through returns `next` here, and
+      // the drive would otherwise run on into the poll loop's real sleep. Stopping makes that wrong answer a fast,
+      // named assertion failure instead of a timeout.
+      const r = await driveRoom(12, "engine");
+      expect(CUES.realAnswers).toHaveLength(1);
+      // THE SEPARATING FACT: exactly one turn was rolled back. A guard that asks for more than one sees nothing here.
+      expect(Number(CUES.realAnswers[0]!.failed), "one spoken turn, rolled back: failed is 1, not 2").toBe(1);
+      expect(CUES.realAnswers[0], "the marker landed, so `written` and `window_recorded` both say success").toMatchObject({ complete: false, window_recorded: true });
+      expect(Number(CUES.realAnswers[0]!.written), "the marker-only admission: written is non-zero").toBeGreaterThan(0);
+      expect(brain[0]!.types, "the turn batch was sent, and refused").toContain("stt_turn");
+      expect(brain.at(-1)).toEqual({ replace: false, types: ["stt_window"] });
+      expect(r.visited, "the window never reaches the engine: the read did not finish").toEqual(["prepare", "segment"]);
+      expect(r.error, "one rolled-back turn fails the window exactly as many do").toBe("room_window_failed: cues_refused");
+      expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
+      expect(DB.windowState, "back in the queue, not transcribed").toBe("closed");
+      expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
+      expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
+      expect(ROUTER.submits, "no routed engine for a window whose turn did not land").toBe(0);
+      expect(other, "nothing but the brain is called on this path").toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 20_000);
+});
+
 describe("E11(c) — silent_window is SAID on a spoken result, never inherited", () => {
   it("segment entered with silent_window:true in progress, on a spoken window, goes to engine and clears the flag", async () => {
     // No step order does this today. The test pins the hazard: a stale `true` carried by the
