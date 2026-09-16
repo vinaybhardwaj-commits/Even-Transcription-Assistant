@@ -995,6 +995,43 @@ Not a worry, a measurement (orchestrator search of the Mini, 16 Sep):
 **Do not attempt a 44.1 kHz path. Do not change the spec.** Recorded for U2/U3 so nobody later reads a rate difference as
 a conversion defect, or a matching byte_offset as proof of parity.
 
+## STANDING RULE (16 Sep, before any TM20 measurement): the recorder opens `hw:` only
+
+**Never `plughw:`. Never any ALSA plugin layer — no `plug`, no `rate`, no `dmix`, no `.asoundrc` indirection.** Not to make
+a rate mismatch go away, not "temporarily", not behind a flag.
+
+`plughw:` resamples transparently, with a converter nobody selected and nobody measured. Our decimate-by-3 would then run
+on **already-resampled** audio: a double conversion that no check in the suite can see — C9 tests the converter against its
+own input, C1–C8 read a tape that looks perfectly well-formed — and that degrades every recording in every room. The tape
+would carry `input_sample_rate` as if the hardware had produced it.
+
+**If the hardware will not give us 48 kHz on a raw `hw:` device, that is a finding to report, not a problem to route
+around.** A rate the hardware does not natively support is an error, never a conversion. `room-recorder` today opens
+`hw:CARD=<id>,DEV=<n>` and fails with the negotiated parameters if they are not S16_LE / 2 ch / 48 000 Hz; that behaviour
+stays.
+
+## Carried to U2 — the headroom measurement does not transfer to the TM20
+
+The **0.41 dB headroom** figure and the **−6 dBFS** target were measured on the **Yoga's built-in DMIC** (step 3 finding).
+The room machines will use the existing **TONOR TM20s** — the same mics already in the seven clinic rooms (decision,
+16 Sep). Those numbers are properties of the DMIC's analogue gain and its driver, not of the format. **They must be
+re-measured on a TM20 before any room machine records a patient.** Do not carry the DMIC numbers into a room.
+
+## Carried to U3 — the TM20's hardware mute is bit-exact digital zero
+
+Ground-truthed on the Mac side, 9 Sep 2026: the TM20's hardware mute produces **bit-exact digital zero**, not a noise
+floor. With the TM20 chosen for the Linux rooms, that signature now applies here, and it lands on two things already in
+this file:
+
+- **C7's zero-fill detection.** A muted TM20 writes a long run of exact zeros as *real audio*, and zero fill across a gap
+  is exactly what C7's probe looks for. The probe only inspects `min(gap samples, 16)` samples starting 40 after a
+  boundary, so a mute does not by itself trip it — but any future widening of that probe, or any mute-detection built on
+  top of it, has to tell "the mic was muted" from "the recorder invented silence". Those are the same bytes.
+- **The 25 ms of near-silent warm-up after `resumed`** (step 4 finding, DMIC: `zero_ratio` 0.415, `peak` 9.155e-05, `rms`
+  3.53e-05 over the first 400 samples). On a TM20 the warm-up signature will differ, and a mute is now a third
+  indistinguishable case alongside warm-up and a dead input. Any mute/unplug classifier in U3 must be specified against
+  all three, with `zero_ratio` read over a stated window — not inferred from `rms` alone.
+
 ## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
 
 Twice a check written from prose rejected a correct recorder (C5 in step 4, C8 in step 5). From now on every named check
