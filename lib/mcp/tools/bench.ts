@@ -2482,9 +2482,9 @@ async function liveMonitorExtras(
     if (ts.degraded) reasons.push(ts.degraded);
     const mine = ts.value.get(roomId) ?? null;
     if (mine) { counts = mine.counts; strandedRaw = mine.stranded; }
-    else if (!ts.degraded) counts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+    else if (!ts.degraded) counts = { done: 0, silent: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
   } else {
-    counts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+    counts = { done: 0, silent: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
   }
 
   let visits: { built: number; open: number } | null = null;

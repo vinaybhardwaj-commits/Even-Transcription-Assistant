@@ -62,6 +62,7 @@ import type { McpScope } from "@/lib/mcp/auth";
 import type { SttTranscribeResult } from "./types";
 import { buildRouteMetrics } from "./route-run";
 import { shouldShadow } from "./shadow";
+import { readVadParams, readWindowAudioLevel, recordSilenceVerdict, SILENT_STATE, VERDICT_EMPTY_TRANSCRIPT } from "./silence";
 
 /**
  * PURE — did this window's turns actually land AS A SET?
@@ -462,7 +463,9 @@ export async function drainRoomWindow(
     // With it, the window goes round again and the window-as-unit replace does the rest: the
     // previous run's turns are deleted before the new ones land, never merged with them.
     const drainable = opts.force
-      ? ["closed", "transcribing", "transcribed", "failed"]
+      // E18: `silent` is a settled state like `transcribed`, so `force` reaches it too — otherwise naming the
+      // state would have taken away the one per-window escape hatch that existed before it.
+      ? ["closed", "transcribing", "transcribed", "failed", SILENT_STATE]
       : ["closed", "transcribing"];
     if (!drainable.includes(w.state)) {
       return { ...out, step: "wrong_state", detail: w.state };
@@ -785,6 +788,22 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
         const attempts = await recordFailure(windowId, "cues_refused", why);
         return { ...out, step: "cues_refused", detail: why, attempts };
       }
+      // ─── E18 R1.2 — THE VERDICT CARRIES ITS EVIDENCE, RECORDED HERE, WHERE IT IS MADE ──────────────
+      // Written AFTER the cues landed, so a window that failed to record its silence never also records a
+      // verdict about it, and BEFORE the step returns, so there is no window resting in `silent` whose
+      // evidence write was left to a later phase that may not run. What is not knowable is NAMED, not
+      // guessed: the recorder's meter is absent on every native-recorder window (0 of 4,405 chunks), and the
+      // whisper service does not report the flags it ran under. See lib/stt/silence.ts.
+      const level = await readWindowAudioLevel(w.session_id, source, startMs, endMs);
+      await recordSilenceVerdict({
+        windowId, roomDayId: w.room_day_id, sessionId: w.session_id,
+        verdict: VERDICT_EMPTY_TRANSCRIPT, engine: whisperAdapter.key,
+        // The empty-transcript answer is whisper's NOT-OK shape, which carries no model field at all, so the
+        // engine version here is null by construction rather than by omission.
+        engineVersion: null, audioSeconds: audioSeconds ?? null,
+        level, vad: readVadParams(full),
+        answer: { error: full.error, latency_ms: full.latency_ms, attempts: full.attempts ?? 1, source_mic: source },
+      });
       out.segment_count = 0;
       out.activity = "silent";
       return {
@@ -1296,7 +1315,17 @@ export async function roomWindowFinish(windowId: string, opts: RunActor, progres
     run_id: typeof progress.run_id === "string" ? progress.run_id : null,
   };
     // --- C7. STATE --------------------------------------------------------------------------
-    await sql`UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'`;
+    // E18 R1.1 — "we heard nothing" and "we heard something" are different claims and do not share a state.
+    // The silent verdict was made in `segment` and carried here in progress; its evidence row is already
+    // written. Every other window is `transcribed` exactly as before.
+    // Written as two literal statements rather than one parameterised one, deliberately: every other state
+    // move in this file is a literal, and the tests that pin the ORDER of the cue gate against the state write
+    // read the source for it. A parameterised state would hide both from a reader and from them.
+    if (progress.silent_window === true) {
+      await sql`UPDATE bench_window SET state = 'silent' WHERE id = ${windowId} AND state = 'transcribing'`;
+    } else {
+      await sql`UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'`;
+    }
     await sql`
       UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
        WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'

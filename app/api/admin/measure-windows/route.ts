@@ -95,7 +95,7 @@ async function pendingCount(): Promise<number | null> {
     const rows = (await sql`
       SELECT COUNT(*)::int AS n
         FROM bench_window w
-       WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed')
+       WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed', 'silent')
          AND NOT EXISTS (SELECT 1 FROM stt_window_measure m WHERE m.window_id = w.id)
     `) as Array<{ n: number }>;
     return Number(rows[0]?.n) || 0;
