@@ -33,16 +33,24 @@ vi.mock("@/lib/db", () => ({
     if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.windowState = "silent"; return []; }
     if (q.includes("FROM stt_routing")) return [{ engine_id: DB.routing }];
     if (q.includes("FROM stt_engine")) return [{ enabled: true }];
-    if (q.includes("DELETE FROM transcription_run")) { DB.deletes += 1; return []; }
+    // E31 A7 — the delete and the insert are now ONE statement, so this fake database must record BOTH from
+    // it. Returning on the first match would count the delete and lose the run, which is not what the database
+    // does: either both land or neither does.
+    if (q.includes("DELETE FROM transcription_run")) DB.deletes += 1;
     if (q.includes("INSERT INTO transcription_run")) {
       // Keep every bound value so a test can read the row's metrics_json without counting
       // parameter positions, which differ between the routed insert and the shadow insert.
       const metricsRaw = v.find((x) => typeof x === "string" && /[{]/.test(x) && /audio_seconds|language_timeline/.test(x));
-      DB.runs.push({ id: String(v[0]), window: String(v[1]), engine: String(v[2]),
-                     text: v.find((x, i) => i > 3 && typeof x === "string" && / /.test(x) && !/[{]/.test(x)) as string | undefined,
+      // E31 A7 — the routed insert is now preceded by its DELETE inside one statement, and that delete binds
+      // the window id FIRST. The positional reads below start after it; the shadow insert has no delete and
+      // starts at 0. Read by offset rather than renumbering every index by hand.
+      const off = q.includes("DELETE FROM transcription_run") ? 1 : 0;
+      DB.runs.push({ id: String(v[off]), window: String(v[off + 1]), engine: String(v[off + 2]),
+                     text: v.find((x, i) => i > off + 3 && typeof x === "string" && / /.test(x) && !/[{]/.test(x)) as string | undefined,
                      metrics: metricsRaw ? JSON.parse(String(metricsRaw)) as Record<string, unknown> : {} });
       return [];
     }
+    if (q.includes("DELETE FROM transcription_run")) return [];
     if (q.includes("UPDATE stt_subject_job")) return [{ attempts: 1 }];
     return [];
   },

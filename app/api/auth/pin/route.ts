@@ -102,6 +102,13 @@ export async function POST(req: NextRequest) {
 
   if (!pinOk) {
     const newState = await recordFailedAttempt(lockState, ip, userAgent);
+    // E31 R58/R63 — WRONG PIN, COUNTER NOT RECORDED: FAIL CLOSED. The lockout counter did not move, so this
+    // attempt is not accounted for and the next one would arrive against the same count. Answering PIN_INVALID
+    // here is what let a brute force run un-counted while the clinician table was degraded: refuse instead, and
+    // say the system could not record it rather than implying anything about the pin. This is the brute-force
+    // path. It is NOT symmetric with the correct-pin path below, on purpose.
+    if (newState.kind === "not_recorded")
+      return respondError("PIPELINE_FAILED", "Attempt could not be recorded; refusing the attempt");
     if (newState.kind === "disabled") return respondError("FORBIDDEN", "Account disabled after too many attempts");
     if (newState.kind === "locked")
       return respondError("PIN_LOCKED", newState.reason, { retry_after_seconds: newState.retry_after_seconds });
@@ -118,8 +125,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // PIN correct — reset counter + issue session
-  await recordSuccessfulAttempt(lockState, ip, userAgent);
+  // PIN correct — reset counter + issue session. E31 R63 — CORRECT PIN, RESET NOT RECORDED: ALLOW THE LOGIN.
+  // The security property is that an unrecorded FAILURE is never ignored (above); it is not that an unrecorded
+  // SUCCESS is punished. Refusing here locked every clinician out of the encounter assistant whenever the
+  // clinician table was degraded, to guard against nothing: a correct pin is not a guess. The stale counter is
+  // logged and audited in recordSuccessfulAttempt, and the next reset that lands clears it. Do not re-add a
+  // refusal here to "match" the failure path.
+  const reset = await recordSuccessfulAttempt(lockState, ip, userAgent);
+  if (reset.kind === "reset_not_recorded")
+    console.error("[auth/pin] session issued with the lockout counter NOT reset:",
+      JSON.stringify({ doctor_id: doctor.id, audited: reset.audited }));
   const jwt = await signDoctorJwt({ doctor_id: doctor.id, slug: doctor.url_slug });
   await setDoctorCookie(jwt, doctor.url_slug);
 

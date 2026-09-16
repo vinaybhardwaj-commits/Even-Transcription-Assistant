@@ -165,8 +165,18 @@ export async function updateVisitClinician(
  * saying only the new value cannot answer "what did this used to say", which is the question
  * an audit of a late correction is for.
  *
- * Best-effort by design (see the header). A failure is logged, never thrown.
+ * Best-effort by design (see the header): a failure is logged, never thrown. E31 D1 — but it no longer lies
+ * about itself. This spans two roles (the visit moves under the brain role, the audit row is written by the
+ * app role), so atomicity is out of reach and is NOT attempted here; what is in reach is LEGIBILITY. The
+ * INSERT now RETURNS its id and this function reports what actually happened, so `audited` can only be true
+ * when a row exists. Intent is logged before the write and the outcome after it — the shape
+ * lib/bench-reaper.ts:80 uses — so a reader can always tell a crash from a success, and the console.warn
+ * below is no longer the only evidence that anything was attempted.
  */
+export type AuditOutcome =
+  | { audited: true; audit: "written"; audit_id: string }
+  | { audited: false; audit: "failed"; error: string };
+
 export async function auditVisitClinicianChange(input: {
   visitId: string;
   roomDayId: string;
@@ -176,7 +186,7 @@ export async function auditVisitClinicianChange(input: {
   after: { clinician_id: string | null; clinician_source: string | null; clinician_confidence: number | null };
   visitState: string;
   note?: string | null;
-}): Promise<void> {
+}): Promise<AuditOutcome> {
   const meta = {
     room_day_id: input.roomDayId,
     visit_state: input.visitState,
@@ -185,16 +195,44 @@ export async function auditVisitClinicianChange(input: {
     after: input.after,
     ...(input.note ? { note: input.note } : {}),
   };
+  // INTENT, before the act: if the process dies here, this line is what says an audit row was OWED — which
+  // visit, and that a post-close change was being attempted. E31 R59: it does NOT carry the payload. The first
+  // version logged `meta` — clinician ids and the operator's free-text note — on EVERY post-close change, where
+  // that payload previously reached the log only on failure. The audit_log row is unchanged and still records
+  // everything; what shrinks is the console line, which is the copy nobody redacts.
+  console.log("[visit-update] audit intended", JSON.stringify({
+    visit_id: input.visitId, action: "visit.set_clinician", post_close: meta.post_close,
+  }));
   try {
-    await sql`
+    const rows = (await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
       VALUES (${input.actorType}, ${input.actorId}, 'visit.set_clinician', 'visit', ${input.visitId},
               ${JSON.stringify(meta)}::jsonb)
-    `;
+      RETURNING id
+    `) as Array<{ id: string }>;
+    // E31 R59 — THE ROW, NOT THE FIELD. This used to test `id === undefined || id === null`, so a driver that
+    // answered with a row whose id was 0 or "" would have reported audited:true with nothing written. The
+    // column is bigserial and Postgres cannot produce that today, but this guard exists precisely for the
+    // driver class that answers oddly (R54), so it asks the question it means: did a row come back at all?
+    const row = rows[0];
+    const id = row?.id;
+    if (!row) {
+      // A statement that reported success and returned nothing is not an audit row.
+      console.warn(
+        "[visit-update] audit_log insert returned no row (console fallback)",
+        JSON.stringify({ visit_id: input.visitId, ...meta }),
+      );
+      return { audited: false, audit: "failed", error: "insert_returned_no_row" };
+    }
+    // OUTCOME, after the act.
+    console.log("[visit-update] audit written", JSON.stringify({ visit_id: input.visitId, audit_id: String(id) }));
+    return { audited: true, audit: "written", audit_id: String(id) };
   } catch (e) {
+    const err = String((e as Error)?.message ?? e).slice(0, 160);
     console.warn(
       "[visit-update] audit_log insert failed (console fallback)",
-      JSON.stringify({ visit_id: input.visitId, ...meta, err: String((e as Error)?.message ?? e).slice(0, 160) }),
+      JSON.stringify({ visit_id: input.visitId, ...meta, err }),
     );
+    return { audited: false, audit: "failed", error: err };
   }
 }

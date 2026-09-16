@@ -67,6 +67,13 @@ vi.mock("@/lib/db", () => {
     if (q.includes("FROM bench_window w JOIN bench_session")) return [{ ...ROOM_WINDOW_ROW, state: DB.windowState }];
     if (q.includes("FROM bench_chunk")) return ROOM_CHUNKS;
     if (q.includes("UPDATE bench_window SET state = 'transcribing'")) { DB.windowState = "transcribing"; return [{ id: "bw_1" }]; }
+    // E31 A4 — the window state and the job state are ONE statement now, so both effects are recorded from it.
+    if (q.includes("UPDATE stt_subject_job SET state = 'done'") && q.includes("UPDATE bench_window SET state = ")) {
+      if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.verdictsAtSilentState = DB.silenceWrites.length; DB.windowState = "silent"; }
+      else DB.windowState = "transcribed";
+      DB.subjectDone += 1;
+      return [];
+    }
     if (q.includes("UPDATE bench_window SET state = 'transcribed'")) { DB.windowState = "transcribed"; return []; }
     // E18 — a silent window settles in its OWN state; the harness records which one the drain actually wrote.
     if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.verdictsAtSilentState = DB.silenceWrites.length; DB.windowState = "silent"; return []; }
