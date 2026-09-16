@@ -18,23 +18,55 @@
 # add anyone to the group and do not loosen the mode to make this readable without root; needing root is the point.
 #
 # WHAT THIS IS NOT
-# It is not the conformance suite and does not replace it. It checks the index's OWN arithmetic — byte_offset =
-# samples x 2, samples and byte_offset never going backwards, mono_ns advancing along the checkpoint spine, and
-# every nanosecond of the span either backed by samples or explained by a gap_ns. mono_ns is CLOCK_MONOTONIC, which
-# restarts at zero on every boot, and the tape is appended across reboots with no boot epoch in the index; so a
-# backwards mono_ns across a `restart` marker is reported as a boot boundary, not a break, and coverage and the
-# restart-crossing time accounting are measured on wall_ns. Corruption that lowers mono_ns on the first checkpoint
-# after a restart marker is not detectable by this rule. It does NOT check the
-# tape-to-piece conversion contract: key ordering, double formatting, gap attribution, anchor placement, piece
-# boundaries. Run `conformance` for those. Checked against the fixture corpus: of the 28 negative fixtures that
-# carry a tape.idx, the structural claim fails exactly the four whose index arithmetic is damaged
-# (c1-offset-not-twice-samples, c1-restart-odd-tail-untrimmed, c3-blank-line-inside-torn-log, c4-one-sample-lost)
-# and holds for the other 24, which violate conversion rules while still being real tapes. Two of those 24
-# (c5-reanchored-seam, c6-first-piece-one-short), and good/multi-piece and good/multi-piece-gap, then FAIL the
-# clipping claim, correctly by their own numbers: the generator writes peak from formatting literals that no case
-# asserts (Generator.swift:36, :113), "1" on one checkpoint in six, so 11 of 70 checkpoints sit on the rail.
-# Index-only tapes for this script (a reboot, backwards mono_ns without a restart, clipping, silence) are made by
-# fixtures/verify/generate.py, uncommitted like the rest of fixtures/. That is the intended scope: "is there a tape with sound in it", not "is every rule obeyed".
+# It is not the conformance suite and does not replace it. It checks the index's OWN arithmetic: byte_offset =
+# samples x 2; samples and byte_offset never going backwards; mono_ns advancing and the boot epoch holding still along
+# the checkpoint spine within a boot; every checkpoint's levels matching the samples it added; and every nanosecond of
+# the span either backed by samples or explained by a gap_ns. It does NOT check the tape-to-piece conversion contract:
+# key ordering, double formatting, gap attribution, anchor placement, piece boundaries. Run `conformance` for those.
+# Checked against the fixture corpus: of the 28 negative fixtures that carry a tape.idx, this script fails exactly the
+# four whose index arithmetic is damaged (c1-offset-not-twice-samples, c1-restart-odd-tail-untrimmed,
+# c3-blank-line-inside-torn-log, c4-one-sample-lost) and passes the other 24, which violate conversion rules while
+# still being real tapes with real audio in them. Of the 18 good fixtures it passes 17; the 18th, interior-blank, is a
+# tape whose expected outcome IS a hard error (a blank index line) and it fails here too. That is the intended scope:
+# "is there a tape with sound in it", not "is every rule obeyed". Index-only tapes that exercise this script (reboots,
+# clock steps, missing levels, clipping, silence) are written by tools/verify-fixtures-generate.py into
+# fixtures/verify/, which, like all of fixtures/, is not committed.
+#
+# REBOOTS: HOW A BOOT IS TOLD FROM A CLOCK STEP OR CORRUPTION
+# The tape is appended across restarts AND reboots. mono_ns is CLOCK_MONOTONIC, which restarts at zero at boot, and
+# the index carries no boot identifier. What every checkpoint does carry is wall_ns and mono_ns read back to back
+# (room-recorder main.swift:294, offset together by ArrivalClock), so
+#     E = wall_ns - mono_ns
+# is the wall-clock instant at which that boot's CLOCK_MONOTONIC read zero: the boot epoch. Within one boot E is
+# constant, because an NTP slew moves CLOCK_REALTIME and CLOCK_MONOTONIC together. It moves only when the wall clock
+# is stepped, the machine suspends (S5 masks sleep), or a record is corrupt. So, along the checkpoint spine:
+#   - No restart marker between two checkpoints: |dE| <= EPOCH_TOL_NS and mono_ns does not go backwards, else a break.
+#   - A restart marker between them, and |dE| <= EPOCH_TOL_NS: the same boot, and mono_ns must still advance.
+#   - A restart marker between them, and E moved: a REBOOT only if the new E, the implied boot instant, lies inside
+#     the downtime window, from the wall_ns of the last record the old session wrote (its `stopped` marker, or its
+#     last checkpoint if it died without one) to the wall_ns of the restart marker, widened by EPOCH_TOL_NS each side.
+#     A clock step does not put a boot inside that window, so anything else is a break.
+# The implied boot epoch is printed for every boot segment.
+# EPOCH_TOL_NS = 100 ms.
+#   Floor: the largest in-boot movement of E measured on this Yoga is 386 ns, over 5 379 spine steps on the 39 real
+#     tapes under /home/vinay/tapes (16 Sep 2026; 11- and 30-minute runs and the U2 power cut among them). Seven
+#     same-boot restarts moved it at most 87 ns.
+#   Ceiling: NTP here is chrony with `makestep 1 3`. It steps the clock only for an offset above 1 s, in its first
+#     three updates, and slews everything else, so a real step moves E by more than 1 s.
+#   100 ms is a decade under the smallest step and 2.6 x 10^5 over the measured jitter. That leaves room for the
+#     capture thread being preempted between its two clock reads without letting any NTP step through.
+# Blind spot: a corrupted mono_ns on the first checkpoint after a restart marker passes if the boot instant it implies
+# falls inside that restart's downtime window.
+# Four ways to tell a reboot from corruption were weighed on 16 Sep 2026, and V ruled for the first. Recorded here so
+# they are not re-litigated:
+#   1. CHOSEN: derive the boot epoch from wall_ns - mono_ns, which every record already carries. No format change, no
+#      recorder change, no Mac sign-off, nothing outside the tape.
+#   2. Rejected: require a boot from `journalctl --list-boots` inside each downtime window. It depends on journal
+#      retention we do not control, and tapes outlive it.
+#   3. Rejected: a Linux-only sidecar file recording boot_id at each restart. It is a second file that will drift out
+#      of sync with the tape it describes.
+#   4. Rejected: a boot_id key on `restart` records. It breaks byte-identity with the Mac tape format, for a problem
+#      that does not require it.
 #
 # Exit status: 0 only when a tape with sound in it exists and it is not clipping. 1 otherwise, or on any structural
 # failure.
@@ -142,47 +174,38 @@ first, last = recs[0][1], recs[-1][1]
 w0, w1 = int(first["wall_ns"]), int(last["wall_ns"])
 m0, m1 = int(first["mono_ns"]), int(last["mono_ns"])
 wall_span, mono_span = w1 - w0, m1 - m0
-
-# CLOCK_MONOTONIC restarts at zero on every boot. A step along the checkpoint spine whose mono_ns goes backwards with a
-# `restart` marker between its two checkpoints is a boot boundary; see the continuity section for why only there.
-def restart_between(n_prev, n_cur):
-    return any(r["discontinuity"] == "restart" for n, r in discs if n_prev < n < n_cur)
-boot_steps = {i for i in range(1, len(ckpts))
-              if int(ckpts[i][1]["mono_ns"]) < int(ckpts[i - 1][1]["mono_ns"])
-              and restart_between(ckpts[i - 1][0], ckpts[i][0])}
-
 print(f"  first wall_ns       {w0}   {ist(w0)}")
 print(f"  last  wall_ns       {w1}   {ist(w1)}")
 print(f"  span                {wall_span} ns = {dur(wall_span)}")
 print(f"  monotonic span      {mono_span} ns = {dur(mono_span)}  (information only: it resets at every boot)")
-print(f"  wall - mono         {wall_span - mono_span} ns  (non-zero means the wall clock was stepped, e.g. NTP)")
-if boot_steps:
-    # wall - mono is an NTP measure only within one boot, so it is re-summed over the spine steps that stay in one.
-    within = sum((int(b["wall_ns"]) - int(a["wall_ns"])) - (int(b["mono_ns"]) - int(a["mono_ns"]))
-                 for i, ((_, a), (_, b)) in enumerate(zip(ckpts, ckpts[1:]), 1) if i not in boot_steps)
-    print(f"    this tape crosses {len(boot_steps)} boot boundary(ies), so the figure above includes a monotonic clock")
-    print(f"    reset; summed along the checkpoint spine within each boot, wall - mono = {within} ns")
+print(f"  wall - mono         {wall_span - mono_span} ns  (non-zero means the wall clock was stepped, e.g. NTP, or the")
+print(f"                      tape crosses a reboot; the boot segments below say which)")
 
 # ---- continuity -------------------------------------------------------------------------------------------------
 head("Did the index advance continuously?")
-# Three different things are checked here, because they have three different guarantees.
+# Five different things are checked here, because they have different guarantees.
 #
 # 1. byte_offset == samples x 2, on EVERY record. A hard invariant of the format.
 # 2. samples and byte_offset never go backwards, on EVERY record. Also hard.
-# 3. mono_ns never goes backwards ALONG THE CHECKPOINT SPINE — checkpoints only, not marker records.
+# 3. mono_ns never goes backwards ALONG THE CHECKPOINT SPINE within a boot: checkpoints only, not marker records.
 #    A marker carries the instant of the EVENT, and that instant can land a few microseconds BEFORE the checkpoint
 #    written just before it: fixtures/good/ist-midnight-two-rollovers line 3 is a day_rollover stamped 10 417 ns
 #    behind line 2, and that fixture is a GOOD one. Demanding global mono_ns monotonicity fails every run that
-#    crosses IST midnight — which S8 exists for and an hour-long run can easily do. Marker inversions are reported
+#    crosses IST midnight, which S8 exists for and an hour-long run can easily do. Marker inversions are reported
 #    below as information, never as a break.
-#    The one spine exemption: a backwards step with a `restart` marker between its two checkpoints. The tape is
-#    appended across reboots and CLOCK_MONOTONIC restarts at zero at boot, so that is what a reboot looks like. The
-#    index carries no boot epoch, so a reboot and a corrupted mono_ns there cannot be told apart; the exemption is
-#    confined to restart-adjacent steps, and a backwards step anywhere else stays a hard break.
-#    Across any restart the spine step is measured on wall_ns for the time accounting, because the two checkpoints
-#    may be on different boots and wall_ns is the only clock in the index that survives one.
-inv, marker_inversions = [], []
-prev_s, prev_b = -1, -1
+# 4. The boot epoch wall_ns - mono_ns holds still along the spine except at a reboot proven by its downtime window.
+#    See REBOOTS in the header. Across any restart the spine step is measured on wall_ns for the time accounting,
+#    because the two checkpoints may be on different boots and wall_ns is the only clock that survives one.
+# 5. Levels, on every checkpoint, against the samples it added since the previous record of ANY kind. The level
+#    window is reset only by a checkpoint (TapeWriter.swift:231-239), and a gap forces a checkpoint first while the
+#    window holds samples (TapeSession.swift:94). A checkpoint that added samples carries rms, peak and zero_ratio.
+#    A checkpoint that added none is the empty first-audio checkpoint (TapeSession.swift:123-125): rms exactly 0, no
+#    peak, no zero_ratio. Anything else is a break. Loudness is read only from checkpoints that added samples, with
+#    no defaults, so a missing field can never be read as a value.
+EPOCH_TOL_NS = 100_000_000
+LEVELS = ("rms", "peak", "zero_ratio")
+inv, marker_inversions, added = [], [], {}
+prev_s, prev_b, prev_rec_s = -1, -1, 0
 for n, r in recs:
     s_cur, b_cur = int(r.get("samples", 0)), int(r.get("byte_offset", 0))
     if b_cur != s_cur * BYTES_PER_SAMPLE:
@@ -191,27 +214,69 @@ for n, r in recs:
         inv.append(f"line {n}: samples went backwards, {prev_s} -> {s_cur}")
     if b_cur < prev_b:
         inv.append(f"line {n}: byte_offset went backwards, {prev_b} -> {b_cur}")
-    prev_s, prev_b = max(prev_s, s_cur), max(prev_b, b_cur)
+    if "discontinuity" not in r:
+        added[n] = s_cur - prev_rec_s
+        present = [k for k in LEVELS if k in r]
+        if added[n] > 0 and len(present) < len(LEVELS):
+            inv.append(f"line {n}: checkpoint added {added[n]} samples but carries no "
+                       + ", ".join(k for k in LEVELS if k not in r))
+        elif added[n] == 0 and (present != ["rms"] or float(r["rms"]) != 0):
+            inv.append(f"line {n}: checkpoint added no samples but is not the empty first-audio checkpoint "
+                       f"(rms exactly 0, no peak, no zero_ratio); it carries {', '.join(present) or 'no levels'}")
+    prev_s, prev_b, prev_rec_s = max(prev_s, s_cur), max(prev_b, b_cur), s_cur
+
+def epoch(r):
+    return int(r["wall_ns"]) - int(r["mono_ns"])
 
 # The spine: consecutive checkpoints, with any marker records between them attributed to that step.
-unaccounted_steps, total_unaccounted, explained, boot_notes = [], 0, 0, []
+position = {n: k for k, (n, _) in enumerate(recs)}
+segments = [{"start": ckpts[0][0], "how": "start of tape", "epochs": [epoch(ckpts[0][1])], "lines": [ckpts[0][0]]}] if ckpts else []
+unaccounted_steps, total_unaccounted, explained, same_boot_restarts = [], 0, 0, 0
 for i in range(1, len(ckpts)):
     (n_prev, a), (n_cur, b) = ckpts[i - 1], ckpts[i]
-    if i in boot_steps:
-        boot_notes.append((n_prev, n_cur, int(a["mono_ns"]) - int(b["mono_ns"])))
-    elif int(b["mono_ns"]) < int(a["mono_ns"]):
-        inv.append(f"line {n_cur}: mono_ns went backwards along the checkpoint spine with no restart marker "
-                   f"between, {a['mono_ns']} -> {b['mono_ns']}")
-    between = [r for n, r in discs if n_prev < n < n_cur]
-    gap_here = sum(int(r["gap_ns"]) for r in between if r.get("gap_ns") is not None)
-    clock = "wall_ns" if restart_between(n_prev, n_cur) else "mono_ns"
+    between = [(n, r) for n, r in discs if n_prev < n < n_cur]
+    restarts = [n for n, r in between if r["discontinuity"] == "restart"]
+    d_epoch = epoch(b) - epoch(a)
+    mono_back = int(b["mono_ns"]) < int(a["mono_ns"])
+    if not restarts:
+        if mono_back:
+            inv.append(f"line {n_cur}: mono_ns went backwards along the checkpoint spine with no restart marker "
+                       f"between, {a['mono_ns']} -> {b['mono_ns']}")
+        if abs(d_epoch) > EPOCH_TOL_NS:
+            inv.append(f"line {n_cur}: wall_ns - mono_ns moved by {d_epoch} ns ({dur(d_epoch)}) since line {n_prev} "
+                       f"with no restart marker between: the wall clock was stepped, or a record is corrupt")
+            segments.append({"start": n_cur, "how": "BREAK: epoch moved with no restart marker", "epochs": [], "lines": []})
+    elif abs(d_epoch) <= EPOCH_TOL_NS:
+        same_boot_restarts += 1
+        if mono_back:
+            inv.append(f"line {n_cur}: mono_ns went backwards across a restart marker while wall_ns - mono_ns stayed "
+                       f"within {EPOCH_TOL_NS} ns, so this is not a reboot: {a['mono_ns']} -> {b['mono_ns']}")
+    else:
+        k = position[restarts[0]]
+        lo = int(recs[k - 1][1]["wall_ns"]) if k > 0 else None
+        hi = int(recs[position[restarts[-1]]][1]["wall_ns"])
+        boot = epoch(b)
+        window = f"{ist(lo) if lo is not None else 'start of tape'} .. {ist(hi)}"
+        if (lo is None or boot >= lo - EPOCH_TOL_NS) and boot <= hi + EPOCH_TOL_NS:
+            segments.append({"start": n_cur, "how": f"reboot: boot instant inside the downtime {window}",
+                             "epochs": [], "lines": []})
+        else:
+            inv.append(f"line {n_cur}: wall_ns - mono_ns moved by {d_epoch} ns across a restart marker, but the boot "
+                       f"instant it implies, {ist(boot)}, is outside the downtime {window}: not a reboot; "
+                       f"a clock step or a corrupt record")
+            segments.append({"start": n_cur, "how": "BREAK: epoch moved across a restart, boot instant outside the downtime",
+                             "epochs": [], "lines": []})
+    segments[-1]["epochs"].append(epoch(b))
+    segments[-1]["lines"].append(n_cur)
+    gap_here = sum(int(r["gap_ns"]) for _, r in between if r.get("gap_ns") is not None)
+    clock = "wall_ns" if restarts else "mono_ns"
     step = int(b[clock]) - int(a[clock]) - (int(b.get("samples", 0)) - int(a.get("samples", 0))) * NS_PER_SAMPLE
     if step:
         total_unaccounted += step
         explained += min(gap_here, step) if step > 0 else 0
         residual = step - gap_here
         if residual:
-            unaccounted_steps.append((n_prev, n_cur, residual, [r["discontinuity"] for r in between]))
+            unaccounted_steps.append((n_prev, n_cur, residual, [r["discontinuity"] for _, r in between]))
 for i in range(1, len(recs)):
     if recs[i][1].get("discontinuity") and int(recs[i][1]["mono_ns"]) < int(recs[i - 1][1]["mono_ns"]):
         marker_inversions.append((recs[i][0], recs[i][1]["discontinuity"],
@@ -237,14 +302,10 @@ for n_prev, n_cur, residual, kinds in unaccounted_steps[:10]:
     print(f"      lines {n_prev}->{n_cur}: {residual} ns unexplained ({k})")
 if len(unaccounted_steps) > 10:
     print(f"      ... and {len(unaccounted_steps)-10} more")
-if boot_notes:
-    print(f"  mono_ns backwards across a restart marker (EXPECTED — a reboot resets CLOCK_MONOTONIC; not a break):")
-    for n_prev, n_cur, by in boot_notes[:10]:
-        print(f"      lines {n_prev}->{n_cur}: {by} ns backwards; step measured on wall_ns instead")
 if marker_inversions:
     print(f"  marker timestamps behind the record above them (EXPECTED, not a break):")
     for n, kind, by in marker_inversions[:10]:
-        why = ("a reboot restarted CLOCK_MONOTONIC" if kind == "restart"
+        why = ("CLOCK_MONOTONIC restarted; the boot segments below say whether it was a reboot" if kind == "restart"
                else "it carries the instant of the event")
         print(f"      line {n}: {kind} stamped {by} ns earlier — {why}")
 # Coverage is on wall_ns, never mono_ns: mono_ns restarts at every boot and this tape is appended across reboots.
@@ -253,6 +314,19 @@ coverage = (span_audio_ns / cov_den * 100) if cov_den > 0 else float("nan")
 print(f"  coverage            {coverage:.4f}%  of the wall-clock span, less {dur(gap_total)} of recorded gap_ns, is on tape")
 print(f"                      ({span_audio_ns / wall_span * 100 if wall_span > 0 else float('nan'):.4f}% of the raw "
       f"wall-clock span; restarts carry no gap_ns by rule, so their downtime counts as missing)")
+
+# ---- boot segments ----------------------------------------------------------------------------------------------
+head("Boot segments (boot epoch = wall_ns - mono_ns: the wall instant this boot's CLOCK_MONOTONIC read zero)")
+print(f"  tolerance           {EPOCH_TOL_NS} ns within a boot (see REBOOTS in the header for why)")
+print(f"  restarts in the same boot   {same_boot_restarts}")
+for k, seg in enumerate(segments, 1):
+    if not seg["epochs"]:
+        continue
+    e0, spread = seg["epochs"][0], max(seg["epochs"]) - min(seg["epochs"])
+    print(f"  segment {k}  from line {seg['start']} ({seg['how']})")
+    print(f"    boot epoch        {e0} ns = {ist(e0)}")
+    print(f"    checkpoints       {len(seg['lines'])}, lines {seg['lines'][0]}..{seg['lines'][-1]}; "
+          f"epoch spread {spread} ns")
 
 # ---- discontinuities --------------------------------------------------------------------------------------------
 head("Every discontinuity record")
@@ -281,9 +355,13 @@ else:
 
 # ---- loudness distributions -------------------------------------------------------------------------------------
 head("Loudness across checkpoints (distributions only — never a per-checkpoint series)")
-peaks = [float(r["peak"]) for _, r in ckpts if "peak" in r]
-rmss = [float(r["rms"]) for _, r in ckpts if "rms" in r]
-zeros = [float(r["zero_ratio"]) for _, r in ckpts if "zero_ratio" in r]
+# Only checkpoints that added samples carry levels (check 5); a field missing from one is already a structural break.
+windowed = [(n, r) for n, r in ckpts if added[n] > 0]
+peaks = [float(r["peak"]) for _, r in windowed if "peak" in r]
+rmss = [float(r["rms"]) for _, r in windowed if "rms" in r]
+zeros = [float(r["zero_ratio"]) for _, r in windowed if "zero_ratio" in r]
+print(f"  from {len(windowed)} checkpoint(s) that added samples; {sum(1 for n in added if added[n] == 0)} empty "
+      f"first-audio checkpoint(s) carry no levels by design and are excluded")
 distribution("peak", peaks)
 distribution("rms", rmss)
 distribution("zero_ratio", zeros)
@@ -334,8 +412,8 @@ else:
 #    as useless as silence. Threshold: the peak p99 printed above reaching the rail, because one slam or cough touches a
 #    handful of checkpoints an hour while a p99 on the rail makes clipping the tape's ordinary texture.
 head("VERDICT")
-loud = [n for n, r in ckpts if float(r.get("peak", 0)) > 0 and float(r.get("rms", 0)) > 0]
-loud_frac = len(loud) / len(ckpts) if ckpts else 0.0
+loud = [n for n, r in windowed if "peak" in r and "rms" in r and float(r["peak"]) > 0 and float(r["rms"]) > 0]
+loud_frac = len(loud) / len(windowed) if windowed else 0.0
 nonsilent = [z for z in zeros if z < 1.0]
 nonsilent_frac = len(nonsilent) / len(zeros) if zeros else 0.0
 
@@ -345,16 +423,17 @@ rail_frac = len(railed) / len(peaks) if peaks else 0.0
 peak_p99 = pct(sorted(peaks), 99)
 
 is_tape = not inv and not bad and s_last > 0
-has_sound = loud_frac > 0.01 and nonsilent_frac > 0.01 and (max(peaks) if peaks else 0) > 0
+has_sound = loud_frac > 0.01 and nonsilent_frac > 0.01 and bool(peaks) and max(peaks) > 0
 clipping = bool(peaks) and peak_p99 >= RAIL
 
 print(f"  a tape exists and advanced      {'YES' if is_tape else 'NO'}")
 print(f"    decided by: {len(recs)} records parsed, {len(bad)} malformed, {len(inv)} structural breaks,")
 print(f"                {s_last} samples = {dur(audio_ns)} of audio, coverage {coverage:.4f}% of the wall-clock span")
 print(f"  it has sound in it              {'YES' if has_sound else 'NO'}")
-print(f"    decided by: {len(loud)}/{len(ckpts)} checkpoints ({loud_frac*100:.2f}%) have peak > 0 AND rms > 0;")
+print(f"    decided by: {len(loud)}/{len(windowed)} checkpoints that added samples ({loud_frac*100:.2f}%) have peak > 0 AND rms > 0;")
 print(f"                {len(nonsilent)}/{len(zeros)} ({nonsilent_frac*100:.2f}%) have zero_ratio < 1;")
-print(f"                highest peak anywhere on the tape is {max(peaks) if peaks else 0:.6g}")
+print(f"                highest peak anywhere on the tape is {max(peaks):.6g}" if peaks else
+      f"                no checkpoint on the tape carries a peak")
 print(f"    threshold:  more than 1% of checkpoints on both counts. The numbers above are printed so that this")
 print(f"                threshold can be disagreed with without re-running anything.")
 print(f"  it is not clipping              {'NO' if clipping else 'YES'}")

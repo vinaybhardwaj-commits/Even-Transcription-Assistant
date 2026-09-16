@@ -110,7 +110,11 @@ struct TapeBuilder {
     var stat = 0
 
     static let rmsLiterals = ["0.35355339059327373", "0.17677669529663687", "0.30000000000000004", "0.1", "6.25e-05", "0.9999999999999999"]
-    static let peakLiterals = ["0.5", "0.0625", "0.3333333333333333", "1e-05", "0.001", "1"]
+    /// Peaks a writer can emit: each is k/32768 for a sample magnitude k (16384, 6144, 10923, 4096, 3, 0), none on
+    /// the rail. The previous set put "1" on one checkpoint in six, which reads as a clipping capture chain to any
+    /// check that looks at loudness. Each is ≥ its slot's rms except the last, where zero_ratio is 1 (all samples
+    /// zero) and peak 0 agrees with it; that slot's rms literal contradicts both.
+    static let peakLiterals = ["0.5", "0.1875", "0.333343505859375", "0.125", "9.1552734375e-05", "0"]
     static let zeroRatioLiterals = ["0", "0.6666666666666666", "1.5e-07", "0.001", "0.5", "1"]
 
     init(device: String, wall: Int64, mono: UInt64, inputRate: (String, Int64, Int64)?) {
