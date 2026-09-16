@@ -35,15 +35,39 @@ const DB = vi.hoisted(() => ({
 }));
 const REC = vi.hoisted(() => ({ calls: [] as Array<{ fn: string; seg: Row; score?: Row }>, finish: [] as Row[], window: [] as Row[] }));
 
+/**
+ * E31 A1 — A SPAN INSERT NOW CARRIES EVERY ROW OF AN ATTEMPT IN ONE STATEMENT, bound as a single jsonb
+ * array instead of 36 scalars per row. These cases assert about ROWS — nine never sent, four sent, this
+ * one carrying that basis — and the one-statement-per-row shape was incidental to that. So the recorder
+ * below unpacks a batched insert into ONE ENTRY PER ROW, and every assertion in this file keeps its exact
+ * meaning against the batched write.
+ */
+const spanRowsOf = (values: unknown[]): Array<Record<string, unknown>> | null => {
+  if (values.length !== 1 || typeof values[0] !== "string") return null;
+  try {
+    const parsed = JSON.parse(values[0]);
+    return Array.isArray(parsed) && parsed.every((r) => r && typeof r === "object" && "speech_basis" in r) ? parsed : null;
+  } catch { return null; }
+};
+/** The finishing statement, named by what only it contains. Its leading CTE is no longer `seg` (A2 put the delete first). */
+const isFinishWrite = (t: string) => t.includes("seg AS (") && t.includes("zero_scored");
+
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const text = strings.join("?").replace(/\s+/g, " ");
+    // `--` comments are stripped BEFORE the newlines are, or collapsing the statement onto one line would
+    // comment out everything after the first one and every text match below would silently stop matching.
+    const text = strings.join("?").replace(/--[^\n]*/g, " ").replace(/\s+/g, " ");
     if (text.includes("FROM bench_window w LEFT JOIN room_diarize_window d"))
       return [{ id: "bw_e16", room_day_id: "rd_1", start_ms: WSTART, end_ms: WSTART + A9.window_ms, clip_r2_key: "clips/e16.webm", diarize_state: "ok", last_run_id: "run_1", segments_json: DB.segmentsJson, segments_run_id: DB.segmentsRunId }];
     if (text.includes("FROM room_turn_speaker t")) return DB.turns;
     if (text.includes("SELECT state, last_run_id FROM room_diarize_window")) return [{ state: "ok", last_run_id: "run_1" }];
-    if (text.includes("WITH seg AS")) { DB.writes.push({ text, values }); return [DB.finishAnswer]; }
-    if (/INSERT INTO|DELETE FROM/.test(text)) { DB.writes.push({ text, values }); return []; }
+    if (isFinishWrite(text)) { DB.writes.push({ text, values }); return [DB.finishAnswer]; }
+    if (/INSERT INTO|DELETE FROM/.test(text)) {
+      const rows = spanRowsOf(values);
+      if (rows) { for (const r of rows) DB.writes.push({ text, values: Object.values(r) }); return []; }
+      DB.writes.push({ text, values });
+      return [];
+    }
     return [];
   },
 }));
@@ -52,10 +76,20 @@ vi.mock("@/lib/emotion/store", async (orig) => {
   const real = await orig<typeof import("@/lib/emotion/store")>();
   return {
     ...real,
-    writeScoredOrFailed: async (w: never, seg: Row, score: Row) => { REC.calls.push({ fn: "sent", seg, score }); return real.writeScoredOrFailed(w, seg as never, score as never); },
-    writeUnscorable: async (w: never, seg: Row) => { REC.calls.push({ fn: "unsent", seg }); return real.writeUnscorable(w, seg as never); },
+    // E31 A1 — the job no longer calls the single-row writers; it builds every row of an attempt and writes
+    // them in one statement. The spy moves to the ROW BUILDERS, which take exactly the arguments the old
+    // writers took and are called once per span exactly as they were, so these recordings are unchanged.
+    scoredOrFailedRow: (w: never, seg: Row, score: Row) => { REC.calls.push({ fn: "sent", seg, score }); return real.scoredOrFailedRow(w, seg as never, score as never); },
+    unscorableRow: (w: never, seg: Row) => { REC.calls.push({ fn: "unsent", seg }); return real.unscorableRow(w, seg as never); },
     finishEmotionWindow: async (f: Row) => { REC.finish.push(f); return real.finishEmotionWindow(f as never); },
     recordEmotionWindow: async (r: Row) => { REC.window.push(r); return real.recordEmotionWindow(r as never); },
+    // E31 A1 — the terminal `no_segments` path writes its spans AND its window row in ONE statement, so it
+    // no longer reaches recordEmotionWindow. Recorded in the same shape, because what these cases assert is
+    // the ROW that was written, not which function wrote it.
+    writeNoSegmentsWindow: async (a: Row) => {
+      REC.window.push({ ...a, state: "no_segments", counts: { planned: 0, scored: 0, skipped: a.skipped, failed: 0, unscorable: a.unscorable, calls: 0 } });
+      return real.writeNoSegmentsWindow(a as never);
+    },
   };
 });
 
@@ -257,7 +291,7 @@ describe("V2 — a window of only unscorable spans does not trip zero-scored and
 
   it("the zero-scored statement subtracts only SENT unscorable rows, keyed by the never-sent reason it is bound", async () => {
     await drive();
-    const finish = DB.writes.find((w) => w.text.includes("WITH seg AS"))!;
+    const finish = DB.writes.find((w) => isFinishWrite(w.text))!;
     expect(finish.values, "the never-sent reason travels as a bound parameter").toContain(PREFILTER_REASON);
     expect(finish.text).toMatch(/- seg\.unscorable_sent > 0 AND seg\.scored = 0/);
   });
@@ -311,10 +345,13 @@ describe("E24 R9/R8 — stale segments are known by RUN ID, recorded diarize_sta
     expect(HEALTH_CALLS, "decided before /health").toBe(0);
   });
 
-  it("W5 — an earlier run's span rows are KEPT: the stale decision comes before clearWindowSegments", async () => {
+  it("W5 — an earlier run's span rows are KEPT: a stale window issues no delete at all", async () => {
     // The window already holds span rows from an earlier scored run (the mock keeps nothing; what matters is
     // whether the job issues the delete). A stale window must leave them as they were. The same real one-turn
     // re-diarize as W1, so any version of the stale check reaches its stale branch.
+    // E31 A2 — the delete that used to open `prepare` is gone; the only one left lives in the finishing
+    // statement, which a stale window never reaches. This assertion is unchanged and still load-bearing:
+    // it fails if anyone puts a delete back on a path that has decided to touch nothing.
     const b1 = A9.diarize_segments.findIndex((iv) => iv.speaker_idx === 0 && iv.start_ms >= 743_780 && iv.end_ms <= 771_410);
     DB.segmentsJson = A9.diarize_segments.filter((_, i) => i !== b1);
     DB.segmentsRunId = "run_0";

@@ -77,7 +77,6 @@ import { type MicEventRow, type MicSource } from "@/lib/bench-source";
 // page and the room page so all three judge a microphone the same way.
 import { decideBinding, deviceReportedGone, type BindReason, type MicPiece } from "@/lib/mic-health";
 import { isTranscriptEnabled } from "@/lib/room-switches";
-import { enqueueSubject } from "@/lib/stt/fanout";
 import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 /** The grid. 15 minutes, aligned to the IST hour. */
@@ -373,33 +372,54 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
         }
 
         if (v.complete) {
+          // ─── E31 A12 — CLOSING A WINDOW AND QUEUEING IT ARE ONE ACT ─────────────────────────────
+          // They used to be two statements with a swallow between them: the close committed, then
+          // `enqueueSubject` ran inside a swallowing catch with NO LOG LINE AT ALL — the only
+          // best-effort write in this file that said nothing when it failed. A window closed
+          // irreversibly (the `state = 'open'` guard means this path can never re-enter it) with
+          // nothing queued to transcribe it, and `base.enqueued` merely came back one short.
+          // Auto-drain would eventually re-offer it, but only if ROOM_AUTO_DRAIN_ENABLED is on —
+          // it ships dark — and only within AUTO_DRAIN_MAX_AGE_HOURS of the close. Outside that,
+          // silent and permanent.
+          //
+          // ONE STATEMENT NOW. The insert SELECTs FROM the close's own RETURNING, so it cannot
+          // happen without the close and the close cannot commit without it. THE ORDER IS LOAD-
+          // BEARING and is pinned by a test: the close must feed the enqueue, never the reverse —
+          // an enqueue that could run first would queue a window that is still `open`, which the
+          // drain would claim out from under the recorder.
+          //
           // `state = 'open'` is the whole of A8's no-regression guarantee: once a window has
-          // moved on to transcribing or transcribed, this cannot pull it back.
-          const upd = (await sql`
-            UPDATE bench_window SET state = 'closed', closed_at = NOW()
-             WHERE session_id = ${sessionId} AND start_ms = ${v.start_ms} AND end_ms = ${v.end_ms}
-               AND source_mic = ${v.source_mic} AND state = 'open'
-             RETURNING id
-          `) as Array<{ id: string }>;
-          if (upd.length > 0) {
+          // moved on to transcribing or transcribed, this cannot pull it back. It is unchanged.
+          //
+          // C1 — a window becoming CLOSED is the drain's trigger, and this is the only place that
+          // transition happens. Gated on the room's Transcript switch, which is READ BEFORE the
+          // statement and travels into it as a boolean: the driver's transaction form allows no
+          // application logic between statements, and a gate evaluated mid-statement would be
+          // exactly that. Enqueue only — no join, no engine call, no cue, no money: this runs
+          // inside the chunk route's after() hook.
+          const enqueue = Boolean(roomId && v.source_mic) && (roomId ? await isTranscriptEnabled(roomId) : false);
+          const done = (await sql`
+            WITH closed AS (
+              UPDATE bench_window SET state = 'closed', closed_at = NOW()
+               WHERE session_id = ${sessionId} AND start_ms = ${v.start_ms} AND end_ms = ${v.end_ms}
+                 AND source_mic = ${v.source_mic} AND state = 'open'
+               RETURNING id
+            ),
+            queued AS (
+              INSERT INTO stt_subject_job (subject_type, subject_id, tier, state)
+              SELECT 'bench_window', closed.id, 'asr', 'queued'
+                FROM closed
+               WHERE ${enqueue}::boolean
+              ON CONFLICT (subject_type, subject_id, tier) DO NOTHING
+              RETURNING subject_id
+            )
+            SELECT (SELECT count(*)::int FROM closed) AS closed,
+                   (SELECT count(*)::int FROM queued) AS queued
+          `) as Array<{ closed: number; queued: number }>;
+          const closedNow = Number(done[0]?.closed ?? 0);
+          if (closedNow > 0) {
             base.closed++;
-            // C1 — a window becoming CLOSED is the drain's trigger, and this is the only place
-            // that transition happens. Gated on the room's Transcript switch (lib/room-switches).
-            //
-            // Guarded three ways: the flag must name this room, the window must be grid-aligned,
-            // and the enqueue only runs on the open→closed edge — `upd.length > 0` means THIS
-            // call closed it, so re-running the evaluator over a settled session enqueues
-            // nothing. The insert is ON CONFLICT DO NOTHING besides.
-            //
-            // Enqueue only. No join, no engine call, no cue, and no money is spent here: this
-            // runs inside the chunk route's after() hook, and a paid API call has no business on
-            // the tail of a recording request.
-            if (roomId && v.source_mic && (await isTranscriptEnabled(roomId))) {
-              try {
-                await enqueueSubject("bench_window", id, "asr");
-                base.enqueued = (base.enqueued ?? 0) + 1;
-              } catch { /* the queue is not the tape; a failed enqueue never fails a chunk */ }
-            }
+            base.enqueued = (base.enqueued ?? 0) + Number(done[0]?.queued ?? 0);
           } else base.unchanged++;
         } else {
           base.still_open++;
