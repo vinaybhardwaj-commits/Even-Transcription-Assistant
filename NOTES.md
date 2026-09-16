@@ -1902,3 +1902,109 @@ decision to ride EBUSY out is ours; the citation carries the measurement in full
 WRONG in 0.00 s exit 5 · ABSENT polling then exit 3 · BUSY polling then exit 4 (second instance against a first that
 held the PCM) · BUSY-then-free riding out a real holder and going on to record, exit 0 · indefinite run stopped by
 SIGTERM after 3 s, 48 000 samples, exit 0. Those tapes were deleted afterwards: they are real room audio.
+
+## R1 (16 Sep, boot 3) — `--expect-usbid` is INTERIM SCAFFOLDING, and here is its expiry
+
+V authorised the flag and ruled its end in the same breath. Both halves are recorded now, before the flag has time to
+look permanent.
+
+**Why it exists.** WRONG cannot fire without a hardware identity. A name is not an identity: `Device` is the generic
+ALSA id any USB interface can take from its product string, so a different generic USB mic in the same slot can
+legitimately claim `hw:CARD=Device,DEV=0`. Without a vendor:product to compare, a stranger answering to our name is
+recorded as if it were ours.
+
+**Why it is the wrong home for it.** V's identity ruling says the pin is **one opaque string, composed at enrol from
+the card longname, the USB vendor:product, the serial and the by-path, stored, and compared whole.** A separate
+`--expect-usbid` flag is a second, weaker identity living beside the real one. It exists only because enrol does not
+exist yet.
+
+### Carried to U3, both binding
+
+1. **When enrol lands, the USB id folds into the single pinned identity string,** and `--expect-usbid` becomes a
+   test-only override or disappears entirely. It must not survive as a parallel identity mechanism: two places to
+   state what the mic is, is one place too many, and the weaker one will drift.
+2. **Once enrol exists, starting without a pinned identity is a REFUSAL, not a warning.** A room machine that cannot
+   tell its own mic from a stranger must not record. The U2 behaviour — start, and say loudly that the pin is a name
+   only — is right *only* while the recorder is local and unenrolled, where there is nothing to enrol against.
+
+Until then the warning stands as written, and `S3.wrong-never-waits` carries the reasoning in its citation.
+
+## Standing rule (16 Sep, boot 3) — a real-mic test keeps `tape.idx` and deletes only `tape.pcm`
+
+**What went wrong.** The five real-TM20 runs that proved S3's three cases, the BUSY-then-free path and the indefinite
+run were deleted **whole** afterwards, on the reasoning that they contained real room audio. Half of that was right.
+`tape.pcm` is the audio and must never survive a test. `tape.idx` is metadata — sample counts, byte offsets, wall and
+monotonic timestamps, discontinuity causes, device identity — and carries **no audio at all.** It was also the entire
+evidence that those five paths ran against real hardware rather than against a scripted probe. We destroyed
+admissible evidence to satisfy a rule that never asked for it.
+
+**The rule, from here:**
+
+1. `tape.pcm` is deleted. Always, immediately, no exceptions.
+2. `tape.idx` is **kept**, and the note keeping it says **which run it came from** — which case, which flags, which
+   boot. An index with no provenance is not evidence either.
+3. The keep goes somewhere durable (`verification/`), not a scratch directory that the next session clears.
+
+The distinction to hold on to: *the tape is the room, the index is the recorder.* U3 already depends on that
+separation — "when did this room stop?" is answered from the index's last committed `wall_ns`, never from the audio
+and never from the journal. A rule that throws the index away contradicts a rule we have already written down.
+
+**Not recoverable for the boot-3 runs.** Those indices are gone; the transcripts in this file and in commit 03bb507
+are what remains of them. The next real-mic test re-establishes them under the rule above.
+
+## The give-up line that misstated its own measurement — found by a test, not by reasoning
+
+Worth recording on its own, because of how it was caught rather than what it was.
+
+`DeviceWait` stops polling when the *next* poll would overrun the bound. So a 4 s bound at a 1 s interval gives up
+after 4 probes at **3.0 s elapsed** — correct behaviour, it never exceeds its bound. The log line said:
+
+```
+pinned device held by another client (EBUSY); bound of 4.0 s reached after 4 attempt(s)
+```
+
+**The bound had not been reached. 3.0 s of a 4.0 s bound had elapsed.** The line stated a number that was not the
+number it had measured. Nothing downstream was wrong — the failure message beneath it said "4 probe(s) over 3.0 s"
+correctly — but a log line that misstates its own measurement is exactly how a wrong figure ends up quoted in a
+report six weeks later, by someone who read the line and not the code. We have already been bitten by a figure
+carried forward without its run (the 119/106 attribution, settled earlier in this file).
+
+It now reads:
+
+```
+pinned device not present yet; giving up after 2 attempt(s) and 1.0 s — a further poll would exceed the 2.0 s bound
+```
+
+**It was the live run against real hardware that exposed it, not the reasoning and not the scripted rows.** The
+fake-clock rows passed: with an exact clock, `elapsed + poll > timeout` lands on clean boundaries and the wording
+looked fine. Only the real clock's jitter pushed a probe over the line early and made the discrepancy visible. The
+lesson is not "add more assertions" — it is that a scripted harness and a real-hardware run catch different classes
+of defect, and S3 is now pinned by both on purpose.
+
+## R2 (16 Sep, boot 3) — a fourth grounding class: `linux-measurement`
+
+`S3.busy-waits-then-fails` was filed `our-choice` to keep a Linux measurement out of `mac-measurement`, where it
+would have corrupted the tally. Keeping it out of `mac-measurement` was right; `our-choice` was the wrong home and
+**understated it.**
+
+**`our-choice` means we could have decided otherwise.** PipeWire holding the device for exactly 5.0 s is not a
+decision — it is a fact about this platform, measured three times with no variance. Filed as a choice, it invites
+somebody later to **re-decide** it. The only honest response to doubting a measured platform fact is to
+**re-measure** it.
+
+`linux-measurement` requires the measurement **and where it is recorded**, mechanically, exactly as `mac-source`
+requires a Swift `file:line`: the loader refuses an entry whose citation does not name `NOTES.md` or `verification/`.
+A measurement nobody can go and read is not grounding.
+
+**Swept all 50 entries.** Only `S3.busy-waits-then-fails` moved. `S3.wait-bound` stays `our-choice` and is the
+instructive contrast: it mentions a measurement only to say it is *not* one — the 30 s is V's judgement, and it
+would be just as wrong to promote it as it was to demote the 5.0 s.
+
+| class | count | meaning |
+|---|---|---|
+| `mac-source` | 34 | pins a Mac behaviour, carries a Swift file:line |
+| `mac-measurement` | 1 | pins a Mac behaviour measured on the Mac |
+| `linux-measurement` | **1** | pins a platform fact WE measured, carries the measurement and where it is recorded |
+| `our-choice` | 13 | a decision of ours, carrying its ruling. Not debt |
+| `ungrounded` | 0 | claims a Mac behaviour with no citation. Debt |
+| `ungrounded-blocked` | 1 | cannot be settled by reading; carries `blocked_by` |

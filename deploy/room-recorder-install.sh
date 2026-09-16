@@ -84,6 +84,7 @@ IdleAction=ignore
 CONF
 say "wrote /etc/systemd/logind.conf.d/10-room-recorder.conf (lid ignored, idle action none)"
 say "NOTE: logind picks this up on restart; a reboot is the honest way to apply it before an acceptance run."
+say "      Use: sudo systemctl reboot -i   (a plain \`sudo reboot\` was blocked here on 16 Sep by a gnome-session inhibitor)"
 
 # --- S6: bound the log volume ----------------------------------------------------------------------------------
 # The unit rate-limits its own messages; this bounds what the journal as a whole may consume, so a long-running room

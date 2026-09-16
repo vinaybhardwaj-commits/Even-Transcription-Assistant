@@ -16,7 +16,7 @@ sessions=$(loginctl list-sessions --no-legend 2>/dev/null | grep -c seat0)
 if [ "$sessions" = 0 ]; then ok "no seat0 session"; else
     bad "$sessions seat0 session(s) present — the run would be invalid"
     loginctl list-sessions --no-legend 2>/dev/null | sed 's/^/        /'
-    note "fix (root): set AutomaticLoginEnable=false in /etc/gdm3/custom.conf, then reboot"
+    note "fix (root): set AutomaticLoginEnable=false in /etc/gdm3/custom.conf, then sudo systemctl reboot -i"
 fi
 
 echo "M2.1 — the seat ACL must be ABSENT from the pinned PCM node:"

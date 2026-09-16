@@ -54,6 +54,10 @@ public struct RequiredFixtures: Codable, Sendable {
 /// spec/check-grounding.json: every named check, and what it rests on.
 ///   `mac-source`      — pins a Mac behaviour and carries a Swift file:line; refused without one.
 ///   `mac-measurement` — pins a Mac behaviour measured on the Mac, and carries that measurement.
+///   `linux-measurement` — pins a fact about THIS platform that we measured, and carries the measurement and where it
+///                       is recorded. Not `our-choice`: our-choice means we could have decided otherwise, and a
+///                       platform's behaviour is not ours to decide. Filing a measured platform fact as a choice
+///                       invites someone to re-decide it later instead of re-measuring it. V's ruling, 16 Sep 2026.
 ///   `our-choice`      — a deliberate decision of ours, carrying the ruling that made it instead of a file:line. Not debt.
 ///   `ungrounded`      — claims to pin a Mac behaviour and has no citation. Debt: somebody has to go and read the source.
 ///   `ungrounded-blocked` — claims to pin a Mac behaviour that CANNOT be established by reading (it happens inside a closed
@@ -62,7 +66,7 @@ public struct RequiredFixtures: Codable, Sendable {
 /// A check that runs without an entry counts as ungrounded.
 public struct CheckGrounding: Codable, Sendable {
     public static let currentSchema = "eta.room-recorder.check-grounding/1"
-    public static let kinds = ["mac-source", "mac-measurement", "our-choice", "ungrounded", "ungrounded-blocked"]
+    public static let kinds = ["mac-source", "mac-measurement", "linux-measurement", "our-choice", "ungrounded", "ungrounded-blocked"]
     public struct Entry: Codable, Sendable {
         public var id: String
         public var asserts: String
@@ -88,6 +92,13 @@ public struct CheckGrounding: Codable, Sendable {
             guard kinds.contains(e.grounding) else { throw FixtureLoadError(fixture: url.path, reason: "\(e.id): grounding \(e.grounding) is not one of \(kinds)") }
             if e.grounding == "mac-source", e.citation.range(of: #"\.swift:[0-9]+"#, options: .regularExpression) == nil {
                 throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is mac-source but cites no Swift file:line")
+            }
+            // The parallel of mac-source's file:line: a measurement nobody can go and read is not grounding. The
+            // citation must name where the measurement is written down, so a later reader re-measures rather than
+            // re-decides.
+            if e.grounding == "linux-measurement",
+               e.citation.range(of: #"(NOTES\.md|verification/)"#, options: .regularExpression) == nil {
+                throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is linux-measurement but does not say where the measurement is recorded (cite NOTES.md or verification/)")
             }
             if e.grounding == "our-choice", e.citation.isEmpty {
                 throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is our-choice but cites no ruling")
@@ -154,7 +165,7 @@ public struct SuiteReport {
             let ungrounded = ran.filter { kind($0) == "ungrounded" }
             let blocked = ran.filter { kind($0) == "ungrounded-blocked" }
             let count = { (k: String) in ran.filter { kind($0) == k }.count }
-            out.append("GROUNDING: \(ran.count) named checks made assertions — \(count("mac-source")) on Mac source, \(count("mac-measurement")) on a Mac measurement, \(count("our-choice")) our choice (ruled, not debt), \(ungrounded.count) UNGROUNDED (debt), \(blocked.count) BLOCKED (cannot be grounded by reading)")
+            out.append("GROUNDING: \(ran.count) named checks made assertions — \(count("mac-source")) on Mac source, \(count("mac-measurement")) on a Mac measurement, \(count("linux-measurement")) on a Linux measurement (ours, measured, not decided), \(count("our-choice")) our choice (ruled, not debt), \(ungrounded.count) UNGROUNDED (debt), \(blocked.count) BLOCKED (cannot be grounded by reading)")
             for id in ungrounded {
                 out.append(pad("UNGROUNDED", 11) + pad(id, 40) + (byID[id].map { $0.citation } ?? "not in spec/check-grounding.json"))
             }

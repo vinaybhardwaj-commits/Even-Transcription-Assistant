@@ -52,14 +52,17 @@ Everything below. None of it has been done; `u2-acceptance-preflight.sh` reports
    demonstrate an access path that does not exist in production. Verified as still true on boot 3.
 2. **The account and install** — `sudo deploy/room-recorder-install.sh <built binary>`.
 3. **Sleep masking and lid handling (S5)** — done by the same script, but logind needs a reboot to apply cleanly.
-4. **A reboot** after 1 and 3, which is also what the acceptance test starts with.
+4. **A reboot** after 1 and 3, which is also what the acceptance test starts with. Use
+   **`sudo systemctl reboot -i`**, not `sudo reboot`: a plain reboot was blocked on this machine on 16 Sep by a
+   gnome-session inhibitor and did nothing. `-i` ignores inhibitors, which is correct here — the whole point of the
+   reboot is to leave the graphical session behind.
 
 ## Order
 
 ```
 sudo deploy/room-recorder-install.sh .build/release/room-recorder   # 2 and 3
 # edit /etc/gdm3/custom.conf: AutomaticLoginEnable=false            # 1
-sudo reboot                                                        # 4
+sudo systemctl reboot -i                                           # 4  -i, NOT `sudo reboot`
 deploy/u2-acceptance-preflight.sh                                  # must print PREFLIGHT PASSES
 sudo systemctl enable --now room-recorder.service                  # S3 exists now; this is the last step
 ```
