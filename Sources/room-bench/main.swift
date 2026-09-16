@@ -16,6 +16,12 @@ usage:
       config.json. The token is read from a file (or `--token-file -` for stdin) and never from the command line, where
       any local user can read it from /proc. The first enrol on a machine names the capture device; a re-enrol keeps it.
       Run as the account that owns the state directory (room-recorder).
+  room-bench serve [--root DIR]
+      Poll the Bench, run its commands, cut pieces from the tape and upload them. SIGTERM closes the pieces without ending
+      the session. Exit 75 after an acknowledged restart_engine. Idles (does not exit) once retired or superseded.
+  room-bench recut --piece <session_id>/<idx> --bytes <start>-<end> [--root DIR]
+      Re-cut a piece the capped spool dropped, from tape.pcm, back into the spool. The piece must be in spool-drops.jsonl
+      with exactly that byte range.
 """
 
 func die(_ message: String, _ code: Int32 = 2) -> Never {
@@ -82,6 +88,88 @@ case "enrol":
     } catch {
         die("\(error)", 1)
     }
+case "serve":
+    checkOptions(["--root"])
+    let log = RoomLog()
+    let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot))
+    do { try store.prepareRoot() } catch { die("\(error)", 1) }
+    // Startup errors are named and non-zero, never a silent degrade.
+    guard access(Pinned.ffmpegPath, X_OK) == 0 else { die("ffmpeg is not an executable at the pinned path \(Pinned.ffmpegPath); pieces cannot be made. Install it (U4 apt dependency).", 1) }
+    let config: RoomConfig
+    let session: RoomSessionRecord
+    do {
+        guard let c = try store.loadConfig() else { die("not enrolled: no config.json in \(store.root.path); run room-bench enrol", 1) }
+        guard let s = try store.loadSession() else { die("not enrolled: no room-session.json in \(store.root.path); run room-bench enrol", 1) }
+        config = c
+        session = s
+    } catch { die("\(error)", 1) }
+    guard let installID = config.installID else { die("config.json names no install_id; re-enrol", 1) }
+    guard session.installID == installID else {
+        die("room-session.json is for install \(session.installID) but config.json names \(installID); re-enrol to make them agree", 1)
+    }
+    let token = session.sessionToken
+    let client = BenchClient(origin: config.origin, transport: URLSessionTransport(), sessionToken: { token })
+    let enumerator = ALSADeviceEnumerator()
+    let sleeper = TaskSleeper()
+    let spool: PieceSpool
+    let encoder: PieceEncoder
+    do {
+        spool = try PieceSpool(root: store.spoolURL, dropLog: store.dropLogURL, log: log)
+        encoder = try PieceEncoder(ffmpegPath: Pinned.ffmpegPath)
+    } catch { die("\(error)", 1) }
+    let lane = TapePieceLane(tapeDir: URL(fileURLWithPath: config.tapeDir), encoder: encoder, spool: spool, client: client,
+                             store: store, log: log, sleeper: sleeper)
+    let environment = RoomEngineEnvironment(
+        client: client, store: store, lane: lane, devices: enumerator, volume: ALSAVolumeControl(enumerator: enumerator),
+        captureSwitch: UnwiredCaptureSwitch(), machineFacts: { LinuxFacts.read() },
+        ffmpegVersion: { LinuxFacts.ffmpegVersion(path: Pinned.ffmpegPath) }, sleeper: sleeper, log: log)
+    let engine = RoomEngine(config: config, installID: installID, environment: environment)
+    log("serving room \(config.roomSlug) as install \(installID), device \(config.deviceUID), origin \(config.origin.absoluteString), tape \(config.tapeDir), spool cap \(PieceSpool.defaultCapBytes) bytes")
+    let run = Task { await engine.run() }
+    let stopRequested = DispatchSemaphore(value: 0)
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGINT, SIG_IGN)
+    var stops: [any DispatchSourceSignal] = []
+    for number in [SIGTERM, SIGINT] {
+        let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+        source.setEventHandler {
+            log("signal \(number): closing pieces without ending the session")
+            run.cancel()
+            stopRequested.signal()
+        }
+        source.resume()
+        stops.append(source)
+    }
+    switch await run.value {
+    case .restart:
+        exit(RoomEngine.restartExitCode)
+    case .cancelled:
+        exit(0)
+    case .retired, .superseded:
+        // Idle, not polling, and not exiting: an exit under Restart=always would come straight back. retired.json keeps
+        // a retired install from polling even across a restart.
+        log("idle: this install no longer polls")
+        // Wait for a stop signal and honour it; an idle process must still stop when systemd asks.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                stopRequested.wait()
+                done.resume()
+            }
+        }
+        exit(0)
+    }
+case "recut":
+    checkOptions(["--piece", "--bytes", "--root"])
+    guard let piece = option("--piece"), let bytes = option("--bytes") else { die(usage) }
+    let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot))
+    guard access(Pinned.ffmpegPath, X_OK) == 0 else { die("ffmpeg is not an executable at the pinned path \(Pinned.ffmpegPath)", 1) }
+    do {
+        guard let config = try store.loadConfig() else { die("not enrolled: no config.json", 1) }
+        let spool = try PieceSpool(root: store.spoolURL, dropLog: store.dropLogURL, log: RoomLog())
+        let manifest = try PieceRecut.recut(pieceID: piece, bytes: bytes, spool: spool, encoder: try PieceEncoder(ffmpegPath: Pinned.ffmpegPath),
+                                            pcmPath: URL(fileURLWithPath: config.tapeDir).appendingPathComponent("tape.pcm").path)
+        print("re-cut \(piece) into the spool as \(manifest.filename) (\(manifest.sizeBytes) bytes); the serving process uploads it")
+    } catch { die("\(error)", 1) }
 default:
     die(usage)
 }
