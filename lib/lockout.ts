@@ -22,6 +22,9 @@ export type DoctorLockState = {
   status: "active" | "disabled" | "locked";
 };
 
+/** What the one statement above hands back — the only thing the decision may be computed from. */
+type LockRow = { failed_pin_count: number; status: string; retry_after_seconds: number | null };
+
 export type LockoutDecision =
   | { kind: "ok" }
   | { kind: "locked"; retry_after_seconds: number; reason: string }
@@ -83,77 +86,70 @@ export async function recordFailedAttempt(
   ip: string | null,
   userAgent: string | null
 ): Promise<LockoutDecision> {
+  // E31 D3 — SECURITY. THE DECISION IS WHAT THE DATABASE DID, NEVER WHAT WE INTENDED.
+  //
+  // This used to be an INSERT and up to three UPDATEs, every one of them in its own try/catch, and then a
+  // decision computed from IN-MEMORY state: all three writes could fail and the caller was still told
+  // {kind:"locked"} or {kind:"disabled"}. A lockout the caller believes is enforced, that the row does not
+  // record, is not a lockout — the next attempt arrives against the old count and the old status.
+  //
+  // ONE STATEMENT, and the answer comes out of its RETURNING. The attempt row and the clinician update land
+  // together or not at all, the update is conditional on the insert (EXISTS over the CTE), and the thresholds
+  // are evaluated by the database against the row's OWN count rather than against a number this process read
+  // earlier — which also closes the lost-update race two simultaneous wrong PINs used to have.
+  //
+  // IF IT THROWS, OR IF IT MATCHES NO ROW, WE DO NOT CLAIM A LOCK. The attempt is still refused by the caller
+  // (kind "ok" falls through to PIN_INVALID); what we refuse to do is assert a lock nobody recorded.
+  let row: LockRow | undefined;
   try {
-    await sql`
-      INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
-      VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
-    `;
-  } catch (e) {
-    console.warn("[lockout] pin_attempt insert failed:", e);
-  }
-
-  const newCount = doctor.failed_pin_count + 1;
-  let lockedUntilSec: number | null = null;
-  let newStatus: "active" | "disabled" | "locked" = doctor.status;
-
-  if (newCount >= 30) {
-    newStatus = "locked";
-    lockedUntilSec = null;
-  } else if (newCount >= 20) {
-    lockedUntilSec = 60 * 60 * 24; // 24h
-  } else if (newCount >= 10) {
-    lockedUntilSec = 60 * 60; // 1h
-  } else if (newCount >= 5) {
-    lockedUntilSec = 60 * 15; // 15min
-  }
-
-  try {
-    await sql`
-      UPDATE clinician
-         SET failed_pin_count = ${newCount},
-             locked_until = ${lockedUntilSec ? `NOW() + INTERVAL '${lockedUntilSec} seconds'` : null}::timestamptz,
-             status = ${newStatus},
+    const rows = (await sql`
+      WITH att AS (
+        INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
+        VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
+        RETURNING doctor_id
+      )
+      UPDATE clinician c
+         SET failed_pin_count = c.failed_pin_count + 1,
+             locked_until = CASE
+               WHEN c.failed_pin_count + 1 >= 30 THEN NULL
+               WHEN c.failed_pin_count + 1 >= 20 THEN NOW() + INTERVAL '24 hours'
+               WHEN c.failed_pin_count + 1 >= 10 THEN NOW() + INTERVAL '1 hour'
+               WHEN c.failed_pin_count + 1 >= 5  THEN NOW() + INTERVAL '15 minutes'
+               ELSE NULL END,
+             status = CASE WHEN c.failed_pin_count + 1 >= 30 THEN 'locked' ELSE c.status END,
              updated_at = NOW()
-       WHERE id = ${doctor.doctor_id}
-    `;
+       WHERE c.id = ${doctor.doctor_id}
+         AND EXISTS (SELECT 1 FROM att)
+      RETURNING c.failed_pin_count AS failed_pin_count,
+                c.status AS status,
+                GREATEST(0, CEIL(EXTRACT(EPOCH FROM (c.locked_until - NOW()))))::int AS retry_after_seconds
+    `) as LockRow[];
+    row = rows[0];
   } catch (e) {
-    // Fallback: separate query for the interval (parameterised intervals are awkward)
-    if (lockedUntilSec) {
-      try {
-        await sql`
-          UPDATE clinician
-             SET failed_pin_count = ${newCount},
-                 locked_until = NOW() + (${lockedUntilSec}::int * INTERVAL '1 second'),
-                 status = ${newStatus},
-                 updated_at = NOW()
-           WHERE id = ${doctor.doctor_id}
-        `;
-      } catch (e2) {
-        console.warn("[lockout] doctor UPDATE failed:", e2);
-      }
-    } else {
-      try {
-        await sql`
-          UPDATE clinician
-             SET failed_pin_count = ${newCount},
-                 locked_until = NULL,
-                 status = ${newStatus},
-                 updated_at = NOW()
-           WHERE id = ${doctor.doctor_id}
-        `;
-      } catch (e2) {
-        console.warn("[lockout] doctor UPDATE failed:", e2);
-      }
-    }
+    // The whole unit failed, so nothing was recorded: say so loudly and claim nothing.
+    console.error("[lockout] failed-attempt write failed — NO lock recorded, and none reported:",
+      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return { kind: "ok" };
   }
 
-  if (newStatus === "locked") return { kind: "disabled" };
-  if (lockedUntilSec)
+  if (!row) {
+    // Zero rows: the clinician row was not there, or the insert produced nothing for the update to depend on.
+    // Either way no count moved, so there is no lock to report.
+    console.error("[lockout] failed-attempt write matched no row — NO lock recorded, and none reported:",
+      JSON.stringify({ doctor_id: doctor.doctor_id }));
+    return { kind: "ok" };
+  }
+
+  // From here every branch is read off the row the database returned.
+  if (row.status === "locked") return { kind: "disabled" };
+  const retry = Number(row.retry_after_seconds ?? 0);
+  if (retry > 0) {
     return {
       kind: "locked",
-      retry_after_seconds: lockedUntilSec,
-      reason: `Too many incorrect attempts. Try again in ${Math.ceil(lockedUntilSec / 60)} min.`,
+      retry_after_seconds: retry,
+      reason: `Too many incorrect attempts. Try again in ${Math.ceil(retry / 60)} min.`,
     };
+  }
   return { kind: "ok" }; // attempt still valid, will fall through to PIN_INVALID
 }
 

@@ -265,8 +265,12 @@ const setVisitClinician: McpTool = {
       const after = { clinician_id: clinicianId, clinician_source: source, clinician_confidence: confidence };
       const postClose = isClosed(before.state);
       // C2 — every POST-CLOSE change is audited. Best-effort; never fails the write.
+      // E31 D1 — `audited` used to be `postClose`: a boolean computed from STATE, so a caller was told
+      // audited:true whenever the change was post-close, including when the audit insert had just failed.
+      // It now carries what the writer reports, and the writer only says written when a row came back.
+      let audit: "written" | "failed" | "not_required" = "not_required";
       if (postClose) {
-        await auditVisitClinicianChange({
+        const outcome = await auditVisitClinicianChange({
           visitId,
           roomDayId: before.room_day_id,
           actorType: "system",
@@ -280,6 +284,7 @@ const setVisitClinician: McpTool = {
           visitState: before.state,
           note: argStr(args, "note", 500),
         });
+        audit = outcome.audit;
       }
 
       return {
@@ -287,7 +292,9 @@ const setVisitClinician: McpTool = {
         visit_id: visitId,
         state: before.state,
         post_close: postClose,
-        audited: postClose,
+        // TRUE ONLY IF THE AUDIT ROW EXISTS. not_required is not audited, and neither is failed.
+        audited: audit === "written",
+        audit,
         before: {
           clinician_id: before.clinician_id,
           clinician_source: before.clinician_source,

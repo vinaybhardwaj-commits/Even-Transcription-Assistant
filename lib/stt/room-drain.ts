@@ -1021,7 +1021,9 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
  * and the router's poll path — so the two cannot drift into writing different rows for the same
  * window. That drift is exactly what produced the silent-window defect one slice ago.
  */
-async function writeRoutedRun(
+// EXPORTED for E31's failure-injection test: the A7 statement must be reachable on its own to prove that a
+// failure inside it leaves the PREVIOUS run row intact. No behaviour change — the only caller is still below.
+export async function writeRoutedRun(
   windowId: string, ctx: WindowContext, p: WindowProgress, opts: RunActor,
   asr: SttTranscribeResult, receipt: { audio_r2_key: string | null; audio_byte_start: number | null; audio_byte_end: number | null; audio_sha256: string | null },
   engineId: string, engineKey: string, engineVersion: string | null,
@@ -1040,9 +1042,19 @@ async function writeRoutedRun(
     // A re-transcription REPLACES the previous run for this subject, exactly as the turns are
     // replaced. Two runs for one window would make "the window's transcript" ambiguous, and the
     // STT lab groups on (subject_type, subject_id).
-    await sql`DELETE FROM transcription_run WHERE subject_type = 'bench_window' AND subject_id = ${windowId}`;
     const id = runId();
+    // E31 A7 — ONE STATEMENT. The DELETE of the previous run and the INSERT of its replacement were two
+    // statements, so a failure between them left the window with NO run row at all: the previous transcript
+    // destroyed, and "no run for this window" reads as "never transcribed". As one statement the delete cannot
+    // commit without the insert — a data-modifying CTE and the INSERT are one atomic unit under autocommit.
+    // The INSERT does not select FROM the delete: there may be no previous run, and the new row must land
+    // either way. A data-modifying CTE always executes, so the delete still happens.
     await sql`
+      WITH gone AS (
+        DELETE FROM transcription_run
+         WHERE subject_type = 'bench_window' AND subject_id = ${windowId}
+        RETURNING id
+      )
       INSERT INTO transcription_run
         (id, encounter_id, subject_type, subject_id, engine, stt_engine_id, mode, tier,
          detected_language, transcript_original, transcript_english, latency_ms, cost_usd,
@@ -1339,15 +1351,33 @@ export async function roomWindowFinish(windowId: string, opts: RunActor, progres
     // Written as two literal statements rather than one parameterised one, deliberately: every other state
     // move in this file is a literal, and the tests that pin the ORDER of the cue gate against the state write
     // read the source for it. A parameterised state would hide both from a reader and from them.
+    // E31 A4 — ONE STATEMENT, so the window and its job cannot disagree. These were two UPDATEs: when the
+    // second failed the window read `transcribed` — a clean success — over a job row still `running`, which
+    // fanout re-queues for ever without ever executing (it claims subject_type='encounter' only) while the
+    // drain cannot re-claim the window either, because `drainable` without force is closed|transcribing. The
+    // job update is CONDITIONAL on the window update having matched (EXISTS over the first CTE), so the guard
+    // below is the only thing that decides whether either happens. Both guards are preserved verbatim.
     if (progress.silent_window === true) {
-      await sql`UPDATE bench_window SET state = 'silent' WHERE id = ${windowId} AND state = 'transcribing'`;
+      await sql`
+        WITH w AS (
+          UPDATE bench_window SET state = 'silent' WHERE id = ${windowId} AND state = 'transcribing'
+          RETURNING id
+        )
+        UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
+         WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'
+           AND EXISTS (SELECT 1 FROM w)
+      `;
     } else {
-      await sql`UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'`;
+      await sql`
+        WITH w AS (
+          UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'
+          RETURNING id
+        )
+        UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
+         WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'
+           AND EXISTS (SELECT 1 FROM w)
+      `;
     }
-    await sql`
-      UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
-       WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr'
-    `;
     return { ...out, ok: true, step: "ok" };
 }
 
