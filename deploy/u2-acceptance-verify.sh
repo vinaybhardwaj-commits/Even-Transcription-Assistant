@@ -73,8 +73,22 @@
 #   4. Rejected: a boot_id key on `restart` records. It breaks byte-identity with the Mac tape format, for a problem
 #      that does not require it.
 #
-# Exit status: 0 only when a tape with sound in it exists and it is not clipping. 1 otherwise, or on any structural
-# failure.
+# CAPTURE LEVEL: A WARNING, NEVER THE VERDICT
+# Clipping is reported with its numbers, threshold and decided-by line, but it does not set the exit status. Capture
+# gain is not a property of this build. On the Mac it is `input_volume`, a per-room parameter the Bench sets at
+# runtime through set_audio_input (RoomEngine.swift:3040-3070), and a build cannot pass or fail on a deployment
+# setting. The Mac fleet does not meet a clipping standard either: V measured 47 h of real OPD tape across the room
+# Macs, where one 29-hour segment is 82 182 checkpoints of bit-exact zero, a second is mostly zero, and exactly one
+# tape is healthy.
+# What a correctly set room looks like, as the linux-measurement anchor. The one healthy real OPD tape (consul4,
+# bs_ryqjan2t, 25 550 checkpoints, about 9 h) reads:
+#   peak p90 0.1304, p99 0.3730
+#   rms  p90 0.0225, p99 0.0523
+#   rail 0.03% of checkpoints
+#   crest (p99 peak over p99 rms) 17.1 dB, which independently matches the 18.5 dB measured on this Yoga.
+#
+# Exit status: 0 when a tape exists, advanced, and has sound in it; clipping only warns. 1 otherwise, or on any
+# structural failure.
 set -uo pipefail
 
 TAPEDIR=${1:-/var/lib/room-recorder/tape}
@@ -407,12 +421,12 @@ else:
     inv.append("tape.pcm missing")
 
 # ---- verdict ----------------------------------------------------------------------------------------------------
-# "A tape with sound in it" is three claims, decided separately and stated separately.
+# "A tape with sound in it" is two claims, decided separately and stated separately, plus one warning.
 # 1. A TAPE: it parses, the invariants hold, and it actually advanced.
 # 2. WITH SOUND: the audio is not digital silence. The TM20's hardware mute is bit-exact zero (NOTES.md, carried to
 #    U3), so a muted or dead mic produces peak == 0, rms == 0 and zero_ratio == 1 on EVERY checkpoint. A tape of
 #    silence is structurally perfect and worthless, which is exactly why the verdict cannot rest on structure alone.
-# 3. NOT CLIPPING: peak = max |s| / 32768 and the decimator clips to [-32768, 32767] (Decimator.swift clipMin/clipMax),
+# 3. WARNING, NOT A CLAIM: CLIPPING. peak = max |s| / 32768 and the decimator clips to [-32768, 32767] (Decimator.swift clipMin/clipMax),
 #    so peak >= 32767/32768 means a sample sat on the rail. A tape that is mostly rail is loud, structurally perfect and
 #    as useless as silence. Threshold: the peak p99 printed above reaching the rail, because one slam or cough touches a
 #    handful of checkpoints an hour while a p99 on the rail makes clipping the tape's ordinary texture.
@@ -441,13 +455,20 @@ print(f"                highest peak anywhere on the tape is {max(peaks):.6g}" i
       f"                no checkpoint on the tape carries a peak")
 print(f"    threshold:  more than 1% of checkpoints on both counts. The numbers above are printed so that this")
 print(f"                threshold can be disagreed with without re-running anything.")
-print(f"  it is not clipping              {'NO' if clipping else 'YES'}")
+print(f"  it is not clipping (warning only, does not decide the exit status)  {'NO' if clipping else 'YES'}")
 print(f"    decided by: {len(railed)}/{len(peaks)} checkpoints ({rail_frac*100:.2f}%) have peak >= 32767/32768, a sample on the rail;")
 print(f"                peak p99 is {peak_p99:.6g}; rms p99 is {pct(sorted(rmss), 99):.6g}")
 print(f"    threshold:  clipping when the peak p99 is on the rail (>= 32767/32768). One slam or cough is a handful of")
 print(f"                rail checkpoints an hour; a p99 on the rail is a gain or capture-chain fault.")
 print()
-if is_tape and has_sound and not clipping:
+if clipping:
+    print(f"WARNING  CLIPPING: {len(railed)} of {len(peaks)} checkpoints ({rail_frac*100:.2f}%) put a sample on the rail and the")
+    print(f"         peak p99 is on it. Capture gain is a ROOM SETTING carried by set_audio_input (input_volume, set")
+    print(f"         from the Bench), not a defect in the recorder: fix it there. A correctly set room reads about peak")
+    print(f"         p99 0.37, rms p99 0.05, rail 0.03% (consul4, bs_ryqjan2t; see the header). This does not change")
+    print(f"         the verdict below.")
+    print()
+if is_tape and has_sound:
     print(f"PASS  A tape exists and there is sound in it: {dur(audio_ns)} of audio committed across a")
     print(f"      {dur(wall_span)} wall-clock span. The PRD asks for an hour; compare those two numbers against")
     print(f"      what was actually run rather than taking PASS to mean the hour was reached. Read the")
@@ -457,11 +478,6 @@ if is_tape and not has_sound:
     print("FAIL  A structurally perfect tape of SILENCE. The recorder ran and the index is sound, but every")
     print("      checkpoint is digital zero — a muted, dead or disconnected mic. This is the failure the")
     print("      structure checks cannot see, and it is why the verdict does not rest on them.")
-    sys.exit(1)
-if is_tape:
-    print(f"FAIL  A structurally sound tape that is CLIPPING: {len(railed)} of {len(peaks)} checkpoints put a sample on the")
-    print(f"      rail. The recorder ran and there is sound, but the capture chain is overdriven — gain, mic or")
-    print(f"      mixer. Fix the level before calling this tape the acceptance run.")
     sys.exit(1)
 print("FAIL  The tape is not structurally sound. Read the structural breaks above; the loudness numbers are")
 print("      not meaningful until they are explained.")

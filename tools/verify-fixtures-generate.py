@@ -24,7 +24,7 @@ describe the PCM. Windows are 100 samples (6.25 ms), so every tape is small.
   restart-epoch-outside-downtime    FAIL. A restart whose new epoch implies a boot 12.7 s BEFORE the old session ended.
   levels-missing                    FAIL. A checkpoint that added samples carries rms but no peak or zero_ratio.
   empty-checkpoint-with-levels      FAIL. A checkpoint that added no samples carries peak and zero_ratio.
-  clipping                          FAIL on "not clipping" only. 27 of 300 checkpoints at peak 1.
+  clipping                          PASS with a clipping WARNING. 27 of 300 checkpoints at peak 1.
   silence                           FAIL on "has sound" only. peak 0, rms 0, zero_ratio 1 everywhere.
 """
 import json
