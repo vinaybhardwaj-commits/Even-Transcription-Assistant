@@ -2,9 +2,14 @@
 # U2 acceptance preflight — read-only, unprivileged. Run it immediately before the acceptance run.
 # It answers one question: would the run PROVE anything? Exits non-zero if any precondition is unmet.
 #
-# R2 is why this exists. This Yoga runs gdm-autologin, so "nobody logs in" is not true of it as configured, and an
-# acceptance run in that state proves nothing: the seat ACL on /dev/snd/* grants an access a real room machine will
-# not have (M2.1 measured it appearing with a session and vanishing without one).
+# R2 is why this exists. A seat0 session grants a seat ACL on /dev/snd/* — an access a real room machine will not
+# have (M2.1 measured it appearing with a session and vanishing without one) — so an acceptance run with one present
+# proves nothing. There are two different ways to end up with that session, and they need different fixes:
+#   autologin enabled   the machine logs itself in       -> turn autologin off, reboot
+#   autologin off       a human logged in at the console -> reboot and let nobody touch the machine
+# The R2 check below reads /etc/gdm3/custom.conf and the session's Service to tell which one you are in, and names
+# both in its output. Do not collapse them back into one hint: on 16 Sep 2026 the hint told an operator to set
+# AutomaticLoginEnable=false in a file that already said false.
 set -u
 fail=0
 ok()   { printf '  PASS  %s\n' "$*"; }
@@ -12,11 +17,36 @@ bad()  { printf '  FAIL  %s\n' "$*"; fail=1; }
 note() { printf '        %s\n' "$*"; }
 
 echo "R2 — autologin off / no seat session (THE precondition; needs root to change, V must do it):"
-sessions=$(loginctl list-sessions --no-legend 2>/dev/null | grep -c seat0)
-if [ "$sessions" = 0 ]; then ok "no seat0 session"; else
-    bad "$sessions seat0 session(s) present — the run would be invalid"
-    loginctl list-sessions --no-legend 2>/dev/null | sed 's/^/        /'
-    note "fix (root): set AutomaticLoginEnable=false in /etc/gdm3/custom.conf, then sudo systemctl reboot -i"
+# Both facts are read before anything is judged, and both are printed whatever the verdict, so the operator can see
+# which of the two causes they are in rather than being told.
+autologin=$(sed -n 's/^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' \
+            /etc/gdm3/custom.conf 2>/dev/null | tail -1)
+case "${autologin,,}" in true|1|yes) autologin_on=1;; *) autologin_on=0;; esac
+seat0=""
+for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    [ "$(loginctl show-session "$s" -p Seat --value 2>/dev/null)" = seat0 ] && seat0="$seat0 $s"
+done
+note "/etc/gdm3/custom.conf AutomaticLoginEnable=${autologin:-unset (gdm default: off)}"
+if [ -z "$seat0" ]; then ok "no seat0 session"; else
+    svcs=""
+    for s in $seat0; do
+        svc=$(loginctl show-session "$s" -p Service --value 2>/dev/null)
+        bad "seat0 session $s is present (user $(loginctl show-session "$s" -p Name --value 2>/dev/null), Service=${svc:-unknown}) — the run would be invalid"
+        svcs="$svcs $svc"
+    done
+    svcs=$(printf '%s\n' $svcs | sort -u | tr '\n' ' '); svcs=${svcs% }
+    if [ "$autologin_on" = 1 ]; then
+        note "cause: autologin is ENABLED — the machine logs itself in at boot, and will again after any reboot."
+        note "fix (root): set AutomaticLoginEnable=false in /etc/gdm3/custom.conf, then sudo systemctl reboot -i"
+    elif [ "$svcs" = gdm-password ]; then
+        note "cause: autologin is already OFF and the session came from gdm-password — somebody typed a password at"
+        note "       the laptop. Editing custom.conf would change nothing; it already says what that fix asks for."
+        note "fix: sudo systemctl reboot -i, then leave the machine at the login screen with nobody touching it, and"
+        note "     run this preflight again over SSH. The acceptance run needs a boot that nobody logs into."
+    else
+        note "cause: autologin is OFF, so this is not gdm-autologin; the session's Service is $svcs."
+        note "fix: end that session, then sudo systemctl reboot -i and let nobody log in at the seat before the run."
+    fi
 fi
 
 echo "M2.1 — the seat ACL must be ABSENT from the pinned PCM node:"

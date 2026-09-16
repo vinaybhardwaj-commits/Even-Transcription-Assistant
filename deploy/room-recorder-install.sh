@@ -105,5 +105,13 @@ systemctl restart systemd-journald
 say "journal capped at 512M / 1 month"
 
 echo
-echo "Installed. NOT enabled and NOT started — S3's bounded wait is not implemented in the binary yet."
-echo "When it is:  systemctl enable --now room-recorder.service"
+echo "Installed. NOT enabled, NOT started."
+echo
+echo "That is a deliberate stop, not a missing feature. S3's bounded wait IS in the binary as of 03bb507:"
+echo "--wait-for-device SECONDS (default 30), with exit 3 absent / 4 busy / 5 wrong device. Nothing is waiting"
+echo "on code. Enabling is a decision that follows a passing preflight, because a run started before the"
+echo "preflight passes proves nothing about a room machine."
+echo
+echo "Next, in this order, as the operator and NOT as root:"
+echo "  $here/u2-acceptance-preflight.sh          # must print PREFLIGHT PASSES"
+echo "  sudo systemctl enable --now room-recorder.service"
