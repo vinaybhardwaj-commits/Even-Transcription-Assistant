@@ -351,6 +351,91 @@ const cases: Case[] = [
     },
   },
   {
+    // E26 T4 — THE STRADDLE ROW'S CURE, END TO END, AND THE ONE MUTANT THAT PASSES EVERYTHING ELSE.
+    // `IS NOT DISTINCT FROM` in repairStaleDiarizeSegments is what matches a NULL mark to NULL stored provenance.
+    // Changed to `=`, NULL = NULL is NULL, the EXISTS never matches, and every NULL-marked window is permanently
+    // incurable — the population e25 itself creates, and the population R18's NO BACKFILL ruling rests on being
+    // curable. Nothing else in this suite fails under that change.
+    // RULE 21: this case runs the whole chain in one fixture — score, a pre-E24 re-diarize that loses provenance,
+    // the mark, the cure, and the rescore — rather than seeding the mark and asserting the repair alone.
+    name: "E26 T4 on Postgres — a stale window whose mark is NULL is cured by a fresh ok run: score -> re-diarize -> mark -> cure -> rescore",
+    fn: async () => {
+      const { recordDiarizeWindow, repairStaleDiarizeSegments } = await import("@/lib/stt/diarize-window");
+      const id = "bw_e26_null_mark";
+      const mark = async () =>
+        ((await pg.sql`SELECT state, stale_segments_run_id FROM room_emotion_window WHERE window_id = ${id}`) as Array<{ state: string; stale_segments_run_id: string | null }>)[0]!;
+      const diarize = async () =>
+        ((await pg.sql`SELECT segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = ${id}`) as Array<{ segments_run_id: string | null; last_run_id: string }>)[0]!;
+
+      // 1. SCORE. A healthy window, its segments recorded as run_<id>'s.
+      seedWindow(id);
+      expect((await runKind(id, "all_ok")).out.kind).toBe("done");
+      expect(await windowRow(id)).toMatchObject({ state: "ok", attempts: 1 });
+      expect(await segmentStates(id)).toEqual(["scored", "scored"]);
+
+      // 2. RE-DIARIZE, by a PRE-E24 writer during the straddle: it names no segments_run_id, so the column is
+      //    cleared while last_run_id moves. This is the write tests/fixtures/pre-e24-diarize-window-insert.sql holds.
+      pg.exec(`UPDATE room_diarize_window SET segments_run_id = NULL, last_run_id = 'run_straddle_writer' WHERE window_id = '${id}'`);
+      expect(await diarize()).toEqual({ segments_run_id: null, last_run_id: "run_straddle_writer" });
+
+      // 3. MARK. The emotion job — not a seed — records diarize_stale, and the mark it writes is NULL, because
+      //    NULL is what it judged. No attempt is spent (E24 R8).
+      const stale = await runKind(id, "all_ok");
+      expect(errorCodeOf(stale.out.error!)).toBe("diarize_segments_stale");
+      expect(await mark(), "the mark records the segments it judged: an unrecorded writer").toEqual({ state: "diarize_stale", stale_segments_run_id: null });
+      expect(await windowRow(id)).toMatchObject({ state: "diarize_stale", attempts: 1 });
+
+      // 4. CURE. A fresh E24 ok run. The keep-rule leaves the segments alone; the named repair adopts them —
+      //    and this is the step that dies under `=`, because both sides of the comparison are NULL.
+      const fresh = [{ start_ms: 0, end_ms: 20000, speaker_idx: 0 }];
+      await recordDiarizeWindow({ windowId: id, roomDayId: "rd_1", state: "ok", error: null, speakers: [], segments: fresh, clipR2Key: `clips/${id}.webm`, timing: null, runId: "run_e26_cure" });
+      expect(await diarize(), "the keep-rule is unchanged: an ok row keeps its segments").toEqual({ segments_run_id: null, last_run_id: "run_e26_cure" });
+      expect(await repairStaleDiarizeSegments({ windowId: id, runId: "run_e26_cure", runState: "ok", speakers: [], segments: fresh }),
+        "a NULL mark against NULL stored provenance IS a match — `=` would never cure this row").toBe(true);
+      expect(await diarize()).toEqual({ segments_run_id: "run_e26_cure", last_run_id: "run_e26_cure" });
+
+      // 5. RESCORE. The window is offered again (its emotion row names an older run) and finishes ok.
+      pg.exec(`UPDATE room_turn_speaker SET run_id = 'run_e26_cure' WHERE window_id = '${id}'`);
+      const cured = await runKind(id, "all_ok");
+      expect(cured.out.kind, `the cured window scores; ${JSON.stringify(cured.out)}`).toBe("done");
+      expect(await windowRow(id), "cured: an ok row under the fresh run, and the mark is gone").toMatchObject({ state: "ok" });
+      expect(await mark()).toEqual({ state: "ok", stale_segments_run_id: null });
+    },
+  },
+  {
+    // E26 R32 / M1. stale_segments_run_id was written by the DO UPDATE but missing from the comparison tuple, so a
+    // rewrite that changes ONLY the mark wrote nothing: the row kept the older segments_run_id. The mark permits
+    // exactly one repair (E25 R15), so a stale mark is a cure pointed at the wrong run.
+    name: "E26 R32 on Postgres — a MARK-ONLY rewrite lands: same run, same state, a different judged segments_run_id",
+    fn: async () => {
+      const { recordStaleWindow } = await import("@/lib/emotion/store");
+      const id = "bw_e26_markonly";
+      seedWindow(id, { turns: false });
+      const row = async () =>
+        ((await pg.sql`SELECT state, stale_segments_run_id, attempts, scored_at::text AS at FROM room_emotion_window WHERE window_id = ${id}`) as Array<{ state: string; stale_segments_run_id: string | null; attempts: number; at: string }>)[0]!;
+      const stale = (segmentsRunId: string | null) =>
+        recordStaleWindow({ windowId: id, roomDayId: "rd_1", diarizeRunId: "run_same", segmentsRunId, reason: "diarize segments belong to another run" });
+
+      await stale("seg_A");
+      // attempts is 1 from the INSERT (0089 defaults it to 1, CHECK attempts >= 1) and must not move on a stale rewrite (E24 R8).
+      expect(await row()).toMatchObject({ state: "diarize_stale", stale_segments_run_id: "seg_A", attempts: 1 });
+
+      // Only the judged segments differ. Everything else the tuple compares is identical.
+      await stale("seg_B");
+      expect(await row(), "the mark is the only thing that changed, and it is the thing that must be right")
+        .toMatchObject({ state: "diarize_stale", stale_segments_run_id: "seg_B", attempts: 1 });
+
+      // And NULL is a value here too: a later judgement of unrecorded provenance replaces a named one.
+      await stale(null);
+      expect(await row()).toMatchObject({ state: "diarize_stale", stale_segments_run_id: null, attempts: 1 });
+
+      // C9 still holds: a rewrite that changes NOTHING writes nothing, so scored_at does not move.
+      const before = await row();
+      await stale(null);
+      expect(await row(), "an identical stale write is still a no-op (S1 FIX3b C9)").toEqual(before);
+    },
+  },
+  {
     name: "E25 R15 / 0099 — the database refuses a stale mark on a row that is not diarize_stale",
     fn: async () => {
       seedWindow("bw_e25_markchk", { turns: false });

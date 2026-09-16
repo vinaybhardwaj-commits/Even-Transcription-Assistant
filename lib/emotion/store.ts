@@ -231,7 +231,12 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
       stale_segments_run_id = EXCLUDED.stale_segments_run_id
     WHERE room_emotion_window.state = 'failed'
        OR room_emotion_window.diarize_run_id <> EXCLUDED.diarize_run_id
-       -- COMPARED, S1 FIX4 C16: state, error, the segment counts (segments_unscorable added by E16 — rule 15), model, model_key, subfolder, cap_s, room_day_id.
+       -- COMPARED, S1 FIX4 C16: state, error, the segment counts (segments_unscorable added by E16 — rule 15), model, model_key, subfolder, cap_s, room_day_id,
+       --   and stale_segments_run_id (E26 R32 / M1). It was written by the DO UPDATE but missing from this tuple, so a
+       --   MARK-ONLY rewrite — same run, same state, same counts, a different judged segments_run_id — wrote nothing and
+       --   the row kept the older mark. The mark is what permits exactly one repair (E25 R15), so a stale mark naming
+       --   segments that are no longer stored is a cure aimed at the wrong run. No caller reaches it today; it is one
+       --   line on the same column the cure reads, and the last thing called latent took 98-100 of 117 drain slots.
        -- What each identifying field protects against, corrected in S1 MERGE C19:
        --   model, model_key - the emotion client refuses any service answer whose model or model_key is not its
        --     own constant, lib/emotion/client.ts:91 emotion_unexpected_model, so within one deployment no segment
@@ -251,12 +256,12 @@ export async function recordEmotionWindow(r: EmotionWindowRow): Promise<void> {
        OR (room_emotion_window.state, room_emotion_window.error, room_emotion_window.segments_planned,
            room_emotion_window.segments_scored, room_emotion_window.segments_skipped, room_emotion_window.segments_failed, room_emotion_window.segments_unscorable,
            room_emotion_window.model, room_emotion_window.model_key, room_emotion_window.subfolder,
-           room_emotion_window.cap_s, room_emotion_window.room_day_id)
+           room_emotion_window.cap_s, room_emotion_window.room_day_id, room_emotion_window.stale_segments_run_id)
           IS DISTINCT FROM
           (EXCLUDED.state, EXCLUDED.error, EXCLUDED.segments_planned,
            EXCLUDED.segments_scored, EXCLUDED.segments_skipped, EXCLUDED.segments_failed, EXCLUDED.segments_unscorable,
            EXCLUDED.model, EXCLUDED.model_key, EXCLUDED.subfolder,
-           EXCLUDED.cap_s, EXCLUDED.room_day_id)
+           EXCLUDED.cap_s, EXCLUDED.room_day_id, EXCLUDED.stale_segments_run_id)
   `;
 }
 
