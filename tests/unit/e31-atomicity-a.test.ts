@@ -20,9 +20,18 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 const H = vi.hoisted(() => ({
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
   transcriptOn: true,
+  /** R62 — the windows auto-drain offered to the drain. The SCAN is real; only the paid drain is not. */
+  drained: [] as string[],
 }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
 vi.mock("@/lib/room-switches", () => ({ isTranscriptEnabled: async () => H.transcriptOn }));
+vi.mock("@/lib/stt/room-drain", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  drainRoomWindow: async (windowId: string) => {
+    H.drained.push(windowId);
+    return { window_id: windowId, ok: false, step: "flag_off" };
+  },
+}));
 
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -60,8 +69,13 @@ beforeAll(() => {
       last_error text, started_at timestamptz, finished_at timestamptz,
       PRIMARY KEY (subject_type, subject_id, tier));
     CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, source text, source_ref text, payload jsonb, at timestamptz DEFAULT now());
+    CREATE TABLE room (id text PRIMARY KEY, transcript_enabled boolean NOT NULL DEFAULT FALSE);
+    INSERT INTO room VALUES ('room_1', TRUE);
   `);
   pg.exec(noRecord("db/migrations/0057_bench_window.sql"));
+  // R62 — what auto-drain's scan reads besides bench_window: the job store, and the refusal columns.
+  pg.exec(noRecord("db/migrations/0082_scribe_job.sql"));
+  pg.exec(noRecord("db/migrations/0092_bench_window_auto_drain_refusal.sql"));
   pg.exec(keep("room_turn_speaker"));
   pg.exec(keep("room_diarize_window"));
   for (const f of ["0085_room_turn_speaker_role", "0088_room_diarize_window_retry", "0089_room_emotion", "0090_diarize_run_id_and_service_guess", "0097_room_span_emotion_speech", "0099_room_diarize_segments_run_id"]) {
@@ -185,7 +199,7 @@ describe.runIf(HAVE_DOCKER)("E31 A2 — the previous run's spans are never delet
   }, 300_000);
 });
 
-describe.runIf(HAVE_DOCKER)("E31 A12 — closing a window and queueing it are one act", () => {
+describe.runIf(HAVE_DOCKER)("E31 A12 (R62) — the close lands on its own; the enqueue follows it, and its failure is loud", () => {
   const seedTape = (sessionId: string, startMs: number) => {
     pg.exec(`INSERT INTO bench_session (id, room_id) VALUES ('${sessionId}', 'room_1') ON CONFLICT DO NOTHING;`);
     // Two 450 s chunks covering one 900 s grid slot, plus one chunk after it so the slot is complete.
@@ -198,74 +212,141 @@ describe.runIf(HAVE_DOCKER)("E31 A12 — closing a window and queueing it are on
   };
   const jobRows = async (windowId: string) =>
     ((await pg.sql`SELECT count(*)::int AS n FROM stt_subject_job WHERE subject_type = 'bench_window' AND subject_id = ${windowId}`) as Array<{ n: number }>)[0]!.n;
-  const windowState = async (id: string) =>
-    ((await pg.sql`SELECT state FROM bench_window WHERE id = ${id}`) as Array<{ state: string }>)[0]?.state;
+  const sessionJobRows = async (sessionId: string) =>
+    ((await pg.sql`SELECT count(*)::int AS n FROM stt_subject_job j JOIN bench_window w ON w.id = j.subject_id
+                    WHERE j.subject_type = 'bench_window' AND w.session_id = ${sessionId}`) as Array<{ n: number }>)[0]!.n;
+  const windowStates = async (sessionId: string) =>
+    ((await pg.sql`SELECT state FROM bench_window WHERE session_id = ${sessionId} ORDER BY start_ms`) as Array<{ state: string }>).map((x) => x.state);
+  const closedId = async (sessionId: string) =>
+    ((await pg.sql`SELECT id FROM bench_window WHERE session_id = ${sessionId} AND state = 'closed' ORDER BY start_ms LIMIT 1`) as Array<{ id: string }>)[0]!.id;
 
-  it("the happy path: the window closes and the job exists, from one statement", async () => {
+  it("the happy path: the window closes and the job exists", async () => {
     const { evaluateAndWriteWindows } = await import("@/lib/bench-window");
     H.transcriptOn = true;
     seedTape("sess_a12_ok", 900_000_000);
     const r = await evaluateAndWriteWindows("sess_a12_ok");
     expect(r.closed, "one grid slot closed").toBeGreaterThan(0);
-    expect(r.enqueued, "and it was queued by the same statement").toBe(r.closed);
-    const id = ((await pg.sql`SELECT id FROM bench_window WHERE session_id = 'sess_a12_ok' AND state = 'closed' ORDER BY start_ms LIMIT 1`) as Array<{ id: string }>)[0]!.id;
-    expect(await jobRows(id)).toBe(1);
+    expect(r.enqueued, "and it was queued").toBe(r.closed);
+    expect(r.enqueue_failed, "and nothing failed").toBeUndefined();
+    expect(await jobRows(await closedId("sess_a12_ok"))).toBe(1);
 
-    // AND THE ENQUEUE IS FED BY THE CLOSE, not merely adjacent to it: re-running the evaluator over a
-    // settled session closes nothing, so it must queue nothing. An insert that did not read the close's
-    // RETURNING would fire again here — the row count would not move (ON CONFLICT), but the count this
-    // function reports would, and a reader would be told work was queued that never was.
+    // THE ENQUEUE RIDES THE open→closed EDGE: re-running the evaluator over a settled session closes
+    // nothing, so it must queue nothing, and the count it reports must not claim work that never happened.
     const again = await evaluateAndWriteWindows("sess_a12_ok");
     expect(again.closed, "nothing closed the second time").toBe(0);
     expect(again.enqueued ?? 0, "so nothing was queued the second time").toBe(0);
   }, 300_000);
 
-  it("FAILURE INJECTION: the enqueue is refused, and the window is left OPEN rather than closed and unqueued", async () => {
-    const { evaluateAndWriteWindows } = await import("@/lib/bench-window");
+  it("FAILURE INJECTION on the enqueue: the window IS closed, the failure is loud, and both recovery readers find it", async () => {
+    const { evaluateAndWriteWindows, istDateOf } = await import("@/lib/bench-window");
+    const { countRoomWaitingWindows } = await import("@/lib/stt/room-drain");
+    const { enqueueAutoDrain } = await import("@/lib/stt/auto-drain");
     H.transcriptOn = true;
-    seedTape("sess_a12_fail", 1_800_000_000);
-    // Refuse exactly the insert the close feeds. Under the old shape the close had already committed and
-    // the failure was swallowed by a catch with no log line: a window closed for ever, never queued.
+    const start = 1_800_000_000;
+    seedTape("sess_a12_fail", start);
+    // A day, so the window is one the recovery readers are allowed to see (both require room_day_id).
+    pg.exec(`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_a12_fail', 'room_1', '${istDateOf(start)}');`);
+    const waitingBefore = await countRoomWaitingWindows("room_1");
+
+    // Refuse exactly the enqueue. D-5: the close is a fact other readers depend on, so it must not share
+    // the enqueue's fate. The bug R62 exists to prevent — the two collapsed into one statement — leaves
+    // the window OPEN here, where neither auto-drain nor run-waiting can see it.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     pg.exec(`ALTER TABLE stt_subject_job ADD CONSTRAINT e31_refuse_bw CHECK (subject_type <> 'bench_window') NOT VALID;`);
-    const r = await evaluateAndWriteWindows("sess_a12_fail");
-    pg.exec(`ALTER TABLE stt_subject_job DROP CONSTRAINT e31_refuse_bw;`);
+    let r: Awaited<ReturnType<typeof evaluateAndWriteWindows>>;
+    let calls: unknown[][];
+    try {
+      r = await evaluateAndWriteWindows("sess_a12_fail");
+    } finally {
+      pg.exec(`ALTER TABLE stt_subject_job DROP CONSTRAINT e31_refuse_bw;`);
+      calls = [...errors.mock.calls];   // mockRestore clears them
+      errors.mockRestore();
+    }
 
-    expect(r.closed, "nothing was recorded as closed").toBe(0);
-    const states = ((await pg.sql`SELECT state FROM bench_window WHERE session_id = 'sess_a12_fail'`) as Array<{ state: string }>).map((x) => x.state);
-    expect(states.every((s) => s === "open"), "the close rolled back with the enqueue it could not do").toBe(true);
+    // 1. THE CLOSE LANDED.
+    expect(r.closed, "the close is recorded").toBe(1);
+    const id = await closedId("sess_a12_fail");
+    expect((await windowStates("sess_a12_fail"))[0], "the window is closed — the refused enqueue did not roll it back").toBe("closed");
+    expect(await jobRows(id), "and it has no job: closed-but-unqueued, which the database itself can tell apart").toBe(0);
 
-    // And with the refusal lifted the same tape closes and queues together, so the assertion above is
-    // about atomicity and not about the tape being unclosable.
-    const again = await evaluateAndWriteWindows("sess_a12_fail");
-    expect(again.closed).toBeGreaterThan(0);
-    expect(again.enqueued).toBe(again.closed);
-    const id = ((await pg.sql`SELECT id FROM bench_window WHERE session_id = 'sess_a12_fail' AND state = 'closed' ORDER BY start_ms LIMIT 1`) as Array<{ id: string }>)[0]!.id;
-    expect(await windowState(id)).toBe("closed");
-    expect(await jobRows(id)).toBe(1);
+    // 2. THE FAILURE IS VISIBLE (D-3): counted in the result, and logged with the window it happened to.
+    expect(r.enqueued ?? 0, "nothing is claimed as queued").toBe(0);
+    expect(r.enqueue_failed, "the failed enqueue is counted").toBe(1);
+    expect(r.error, "a failed enqueue is not a failed chunk").toBeUndefined();
+    const logged = calls.filter((c) => String(c[0]).includes("CLOSED but NOT QUEUED"));
+    expect(logged, "one log line, naming the window").toHaveLength(1);
+    expect(logged[0]).toContain(id);
+    expect(String(logged[0]![2]), "carrying the refusal").toMatch(/stt_subject_job/);
+
+    // 3. THE ADMIN RECOVERY SEES IT: run-waiting counts closed windows with no job.
+    expect(await countRoomWaitingWindows("room_1"), "the run-waiting count went up by exactly this window").toBe(waitingBefore + 1);
+
+    // 4. AUTO-DRAIN'S REAL SCAN FINDS IT and heals it: its legacy enqueue writes the job the evaluator
+    // could not. Only the paid drain after that is stubbed.
+    H.drained.length = 0;
+    const saved = process.env.ROOM_AUTO_DRAIN_ENABLED;
+    process.env.ROOM_AUTO_DRAIN_ENABLED = "1";
+    try {
+      await enqueueAutoDrain("https://x.test", { log: () => {} });
+    } finally {
+      if (saved === undefined) delete process.env.ROOM_AUTO_DRAIN_ENABLED;
+      else process.env.ROOM_AUTO_DRAIN_ENABLED = saved;
+    }
+    expect(H.drained, "auto-drain's scan offered this window").toContain(id);
+    expect(await jobRows(id), "and its enqueue healed the gap").toBe(1);
+    expect(await countRoomWaitingWindows("room_1"), "so it no longer waits").toBe(waitingBefore);
   }, 300_000);
 
-  it("Transcript off: the window still closes, and nothing is queued — the gate is read before the statement, not inside it", async () => {
+  it("Transcript off: the window still closes, and nothing is queued or counted as failed", async () => {
     const { evaluateAndWriteWindows } = await import("@/lib/bench-window");
     H.transcriptOn = false;
     seedTape("sess_a12_off", 2_700_000_000);
     const r = await evaluateAndWriteWindows("sess_a12_off");
+    H.transcriptOn = true;
     expect(r.closed).toBeGreaterThan(0);
     expect(r.enqueued ?? 0, "the room's switch is off, so no job — and the close is unaffected").toBe(0);
-    const id = ((await pg.sql`SELECT id FROM bench_window WHERE session_id = 'sess_a12_off' AND state = 'closed' ORDER BY start_ms LIMIT 1`) as Array<{ id: string }>)[0]!.id;
-    expect(await jobRows(id)).toBe(0);
-    H.transcriptOn = true;
+    expect(r.enqueue_failed, "a switched-off room is not a failure").toBeUndefined();
+    expect(await jobRows(await closedId("sess_a12_off"))).toBe(0);
   }, 300_000);
 
-  it("THE ORDER IS PINNED: the enqueue is fed BY the close, never the other way round", () => {
-    // D-4. Reversing this — an insert that runs first and a close that reads ITS returning — would queue a
-    // window that is still `open`, which the drain would claim out from under a recorder still writing to
-    // it. Nothing in the type system says which CTE feeds which, so it is asserted here.
+  it("THE ORDER IS PINNED (D-4), BEHAVIOURALLY: the close is refused, so nothing may be queued", async () => {
+    // Close, THEN enqueue. Reversed, the enqueue lands for a window that is still `open`, and the drain
+    // would claim it out from under a recorder still writing to it. Refusing the close is what tells the
+    // two orders apart: close-first queues nothing; enqueue-first leaves a job behind.
+    const { evaluateAndWriteWindows } = await import("@/lib/bench-window");
+    H.transcriptOn = true;
+    seedTape("sess_a12_order", 3_600_000_000);
+    pg.exec(`ALTER TABLE bench_window ADD CONSTRAINT e31_refuse_close CHECK (state <> 'closed') NOT VALID;`);
+    let r: Awaited<ReturnType<typeof evaluateAndWriteWindows>>;
+    try {
+      r = await evaluateAndWriteWindows("sess_a12_order");
+    } finally {
+      pg.exec(`ALTER TABLE bench_window DROP CONSTRAINT e31_refuse_close;`);
+    }
+    expect(r.closed, "the close was refused").toBe(0);
+    expect((await windowStates("sess_a12_order")).every((s) => s === "open")).toBe(true);
+    expect(await sessionJobRows("sess_a12_order"), "an open window was never queued").toBe(0);
+
+    // Lifted, the same tape closes and queues, so the zero above is about order, not an unclosable tape.
+    const again = await evaluateAndWriteWindows("sess_a12_order");
+    expect(again.closed).toBe(1);
+    expect(await sessionJobRows("sess_a12_order")).toBe(1);
+  }, 300_000);
+
+  it("THE CLOSE STAYS ITS OWN STATEMENT, AND THE ENQUEUE FOLLOWS IT WITH THE ID IT RETURNED (source pin)", () => {
+    // R62 exists because the two were collapsed once and every test stayed green except the ones that make
+    // the enqueue fail. This pins the shape too, so a re-collapse is named for what it is.
     const src = readFileSync("lib/bench-window.ts", "utf8");
-    const stmt = src.slice(src.indexOf("WITH closed AS ("), src.indexOf("`) as Array<{ closed: number; queued: number }>"));
-    expect(stmt.indexOf("closed AS ("), "the close is the first CTE").toBeLessThan(stmt.indexOf("queued AS ("));
-    expect(stmt, "the close RETURNs the id").toMatch(/UPDATE bench_window SET state = 'closed'[\s\S]*?RETURNING id/);
-    expect(stmt, "and the insert SELECTs FROM it, so it cannot run without it").toMatch(/INSERT INTO stt_subject_job[\s\S]*?SELECT 'bench_window', closed\.id[\s\S]*?FROM closed/);
-    expect(stmt, "the enqueue never re-reads bench_window: it takes the id the close returned").not.toMatch(/FROM bench_window[\s\S]*?queued AS/);
+    const closeAt = src.indexOf("UPDATE bench_window SET state = 'closed', closed_at = NOW()");
+    expect(closeAt, "the close exists exactly once").toBeGreaterThan(-1);
+    expect(src.indexOf("UPDATE bench_window SET state = 'closed', closed_at = NOW()", closeAt + 1)).toBe(-1);
+    const stmtStart = src.lastIndexOf("sql`", closeAt);
+    const stmt = src.slice(stmtStart, src.indexOf("`", closeAt));
+    expect(stmt, "the close statement writes no job").not.toMatch(/stt_subject_job|INSERT\s+INTO/i);
+    expect(stmt, "and no CTE carries anything alongside it").not.toMatch(/\bWITH\b/);
+    const enqueueAt = src.indexOf('enqueueSubject("bench_window", closedId, "asr")');
+    expect(enqueueAt, "the enqueue takes the id the close returned").toBeGreaterThan(closeAt);
+    expect(src.slice(closeAt, enqueueAt), "and that id is the close's RETURNING").toMatch(/const closedId = upd\[0\]!\.id;/);
   });
 });
 
