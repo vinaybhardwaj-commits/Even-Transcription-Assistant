@@ -31,5 +31,9 @@ let package = Package(
         // U1 step 5. RecorderCore: the writer loop (ring → decimator → tape), shared with the fixture generator. No ALSA.
         .target(name: "RecorderCore", dependencies: ["CaptureCore", "TapeConvert", "TapeCore"]),
         .executableTarget(name: "room-recorder", dependencies: ["ALSACapture", "CaptureCore", "RecorderCore", "TapeCore"]),
+        // U3. BenchCore: the server side — HTTP, enrol, the command bus, pieces and the spool. No ALSA; a separate process
+        // from the capture, because the capture unit is PrivateNetwork=yes and stays that way.
+        .target(name: "BenchCore", dependencies: ["TapeCore"]),
+        .testTarget(name: "BenchCoreTests", dependencies: ["BenchCore", "TapeCore"]),
     ]
 )
