@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "conformance", targets: ["conformance"]),
         .executable(name: "capture-probe", targets: ["capture-probe"]),
         .executable(name: "room-recorder", targets: ["room-recorder"]),
+        .executable(name: "room-bench", targets: ["room-bench"]),
     ],
     targets: [
         // Platform-neutral conversion core: no Foundation, no ALSA.
@@ -34,6 +35,8 @@ let package = Package(
         // U3. BenchCore: the server side — HTTP, enrol, the command bus, pieces and the spool. No ALSA; a separate process
         // from the capture, because the capture unit is PrivateNetwork=yes and stays that way.
         .target(name: "BenchCore", dependencies: ["TapeCore"]),
+        // room-bench: enrol, serve, recut. ALSACapture for USB device enumeration and the capture volume only.
+        .executableTarget(name: "room-bench", dependencies: ["BenchCore", "ALSACapture"]),
         .testTarget(name: "BenchCoreTests", dependencies: ["BenchCore", "TapeCore"]),
     ]
 )
