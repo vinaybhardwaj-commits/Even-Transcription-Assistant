@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// `POST /api/room-recorder/enrol` (RoomEnrolment.swift:170-184) and what it persists.
 public struct RoomEnrolmentResponse: Decodable, Equatable, Sendable {
@@ -151,22 +154,55 @@ public enum RoomEnrolment {
         return uid
     }
 
-    /// Persist, in the Mac's load-bearing order (RoomEnrolment.swift:69-106): room-session.json FIRST, then config.json
-    /// re-pointed by `applyEnrolment`. A crash between the two leaves the new session beside the old config, which the
-    /// next enrol overwrites; the reverse order could leave a config naming an install whose session was never written.
-    /// Nothing here deletes, except the retired marker of a DIFFERENT install id.
+    /// Persist, in the Mac's load-bearing order (RoomEnrolment.swift:69-106): room-session.json is INSTALLED FIRST, then
+    /// config.json. Written as a two-phase commit so that a process dying at ANY instant leaves either the state from
+    /// before this enrol or the complete new pair — never a session without its config, never a partial file:
+    ///
+    ///   1. `config.json.staged` — the new config, written whole: O_EXCL temp at 0600, fsync, rename, fsync(dir).
+    ///   2. `room-session.json` — the same atomic write. The enrolment now exists locally.
+    ///   3. rename `config.json.staged` -> `config.json`, fsync(dir).
+    ///
+    /// A death after 1 and before 2 leaves a staged config and no new session: `completeInterruptedEnrolment` discards
+    /// it (the previous pair, or nothing, is intact). A death after 2 and before 3 leaves the new session and a staged
+    /// config naming the same install: it is installed on the next start (roll forward).
+    ///
+    /// The one window no local ordering can close is between the server's success and step 2's rename: the token is
+    /// spent server-side and only this process holds the session. It is kept to decoding plus two small fsynced writes,
+    /// with nothing released or torn down inside it.
     @discardableResult
     public static func persist(_ enrolled: RoomEnrolmentResponse, origin: URL, deviceUID: USBDeviceUID, store: RoomStore,
                                now: Date = Date()) throws -> RoomConfig {
+        var config = ((try? store.loadConfig()) ?? nil) ?? RoomConfig(origin: origin, roomSlug: enrolled.roomSlug, deviceUID: deviceUID.description)
+        config.applyEnrolment(origin: origin, roomSlug: enrolled.roomSlug, installID: enrolled.installID)
+        try store.faultPoint?("before-staged-config")
+        try store.write(config, to: store.stagedConfigURL)
+        try store.faultPoint?("after-staged-config")
         try store.saveSession(RoomSessionRecord(
             sessionToken: enrolled.session.token, installID: enrolled.installID, roomSlug: enrolled.roomSlug,
             roomName: enrolled.roomName, origin: origin.absoluteString, writtenBy: Pinned.appVersion, writtenAt: now))
-        var config = ((try? store.loadConfig()) ?? nil) ?? RoomConfig(origin: origin, roomSlug: enrolled.roomSlug, deviceUID: deviceUID.description)
-        config.applyEnrolment(origin: origin, roomSlug: enrolled.roomSlug, installID: enrolled.installID)
-        try store.saveConfig(config)
+        try store.faultPoint?("after-session")
+        try store.install(store.stagedConfigURL, as: store.configURL)
+        store.didWrite?("config.json")
+        try store.faultPoint?("after-config")
         if let retired = try? store.loadRetired(), retired.installID != enrolled.installID {
             try store.clearRetired()
         }
         return config
+    }
+
+    /// Run at the start of `enrol` and `serve`: finish or discard an enrolment's persist that a dead process left half done.
+    /// Returns what it did, for the journal, or nil when there was nothing to do.
+    public static func completeInterruptedEnrolment(store: RoomStore) throws -> String? {
+        guard let staged = try store.read(RoomConfig.self, from: store.stagedConfigURL) else { return nil }
+        let session = try store.loadSession()
+        if let session, session.installID == staged.installID {
+            try store.install(store.stagedConfigURL, as: store.configURL)
+            return "completed an interrupted enrolment: installed config.json for install \(staged.installID ?? "?"), whose room-session.json was already written"
+        }
+        guard unlink(store.stagedConfigURL.path) == 0 else {
+            throw RoomStoreError.io("cannot remove \(store.stagedConfigURL.path): errno \(errno)")
+        }
+        try store.syncDirectory(store.root)
+        return "discarded a staged config for install \(staged.installID ?? "?"): its room-session.json was never written, so that enrolment did not complete on this machine (the server may hold it; re-enrol with a fresh token, which retires it)"
     }
 }

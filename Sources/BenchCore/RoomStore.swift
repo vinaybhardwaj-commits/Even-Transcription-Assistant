@@ -172,11 +172,17 @@ public struct RoomStore: Sendable {
     public let root: URL
     /// Test hook: observes each completed install, by file name, in order.
     let didWrite: (@Sendable (String) -> Void)?
+    /// Test hook: called at each named point of an enrolment's persist; throwing there simulates the process dying.
+    let faultPoint: (@Sendable (String) throws -> Void)?
 
-    public init(root: URL, didWrite: (@Sendable (String) -> Void)? = nil) {
+    public init(root: URL, didWrite: (@Sendable (String) -> Void)? = nil, faultPoint: (@Sendable (String) throws -> Void)? = nil) {
         self.root = root.standardizedFileURL
         self.didWrite = didWrite
+        self.faultPoint = faultPoint
     }
+
+    /// A config.json written in full but not yet installed: phase one of an enrolment's persist.
+    public var stagedConfigURL: URL { root.appendingPathComponent("config.json.staged") }
 
     public var configURL: URL { root.appendingPathComponent("config.json") }
     public var sessionURL: URL { root.appendingPathComponent("room-session.json") }
@@ -283,6 +289,17 @@ public struct RoomStore: Sendable {
         let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw RoomStoreError.io("cannot open \(url.path): errno \(errno)") }
         defer { close(fd) }
-        _ = fsync(fd)
+        while fsync(fd) != 0 {
+            if errno == EINTR { continue }
+            throw RoomStoreError.io("cannot fsync \(url.path): errno \(errno)")
+        }
+    }
+
+    /// rename(2) then fsync of the directory: the atomic install of an already-fsynced file.
+    func install(_ source: URL, as destination: URL) throws {
+        guard rename(source.path, destination.path) == 0 else {
+            throw RoomStoreError.io("cannot install \(destination.path): errno \(errno)")
+        }
+        try syncDirectory(root)
     }
 }

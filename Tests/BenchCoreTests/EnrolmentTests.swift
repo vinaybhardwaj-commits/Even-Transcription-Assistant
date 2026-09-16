@@ -79,7 +79,8 @@ final class EnrolmentTests: XCTestCase {
         let enrolled = try JSONDecoder().decode(RoomEnrolmentResponse.self, from: Data(enrolJSON.utf8))
         let device = try RoomEnrolment.preflight(store: store, requestedDeviceUID: "usb:0D8C:0134", devices: [tm20], ffmpegIsExecutable: true)
         let config = try RoomEnrolment.persist(enrolled, origin: URL(string: "https://www.evenscribe.app")!, deviceUID: device, store: store)
-        XCTAssertEqual(log.all, ["room-session.json", "config.json"])
+        XCTAssertEqual(log.all, ["config.json.staged", "room-session.json", "config.json"], "staged, then the session installed FIRST, then config.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.stagedConfigURL.path))
         XCTAssertEqual(mode(root), 0o750)
         XCTAssertEqual(mode(store.sessionURL), 0o600)
         XCTAssertEqual(mode(store.configURL), 0o600)
@@ -114,6 +115,50 @@ final class EnrolmentTests: XCTestCase {
         XCTAssertEqual(config.roomSlug, "opd-5")
         XCTAssertEqual(config.ffmpegPath, Pinned.ffmpegPath)
         XCTAssertNil(try store.loadRetired(), "a new install id supersedes the old retirement")
+    }
+
+    struct SimulatedDeath: Error {}
+
+    /// An enrolment's persist killed at every point, then the next start's recovery: the machine holds either what it had
+    /// before (nothing, or the previous pair) or the complete new pair — never a session without a config, never a
+    /// partial file, never a stray staged config.
+    func testDeathAtAnyPointLeavesTheOldStateOrTheCompleteNewPair() throws {
+        let enrolled = try JSONDecoder().decode(RoomEnrolmentResponse.self, from: Data(enrolJSON.utf8))
+        let origin = URL(string: "https://www.evenscribe.app")!
+        for previous in [false, true] {
+            for point in ["before-staged-config", "after-staged-config", "after-session", "after-config", "never"] {
+                let root = temporaryRoot()
+                let dying = RoomStore(root: root, faultPoint: { if $0 == point { throw SimulatedDeath() } })
+                if previous {
+                    try dying.saveSession(RoomSessionRecord(sessionToken: "OLD", installID: "inst_0", roomSlug: "opd-5", roomName: "OPD 5",
+                                                            origin: origin.absoluteString, writtenBy: "t", writtenAt: Date()))
+                    try dying.saveConfig(RoomConfig(origin: origin, roomSlug: "opd-5", deviceUID: "usb:0d8c:0134", installID: "inst_0", tabID: "app_inst_0"))
+                }
+                do {
+                    try RoomEnrolment.persist(enrolled, origin: origin, deviceUID: USBDeviceUID("usb:0d8c:0134")!, store: dying)
+                } catch is SimulatedDeath {}
+                let next = RoomStore(root: root)
+                _ = try RoomEnrolment.completeInterruptedEnrolment(store: next)
+                let session = try next.loadSession()
+                let config = try next.loadConfig()
+                let label = "\(previous ? "re-enrol" : "first enrol"), died \(point)"
+                XCTAssertFalse(FileManager.default.fileExists(atPath: next.stagedConfigURL.path), label)
+                XCTAssertEqual(session?.installID, config?.installID, "\(label): session and config always name the same install")
+                XCTAssertEqual(session == nil, config == nil, "\(label): never one without the other")
+                if point == "after-session" || point == "after-config" || point == "never" {
+                    XCTAssertEqual(session?.installID, "inst_1", "\(label): the new pair")
+                    XCTAssertEqual(session?.sessionToken, "JWT.SECRET", label)
+                } else {
+                    XCTAssertEqual(session?.installID, previous ? "inst_0" : nil, "\(label): the state from before")
+                }
+                XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.hasSuffix(".tmp") }, label)
+            }
+        }
+    }
+
+    func testEveryTransportSharesOneProcessSession() {
+        XCTAssertTrue(URLSessionTransport().session === URLSessionTransport(timeout: 5).session,
+                      "a released transport must never release the URLSession (corelibs aborts in its teardown)")
     }
 
     func testAbsentDeviceRefusesBeforeAnythingIsWritten() throws {

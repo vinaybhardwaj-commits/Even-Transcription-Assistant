@@ -3,6 +3,9 @@
 // only READS the tape (tape.idx, and byte ranges of tape.pcm through the piece pipeline).
 import BenchCore
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -68,26 +71,88 @@ case "devices":
         print("\(device.uid)  \(device.alsaName)  \(device.name)  input_volume=\(level) settable=\(reading?.settable.description ?? "-")")
     }
 case "enrol":
+    #if BENCH_TEST_HOOKS
+    checkOptions(["--origin", "--token-file", "--device-uid", "--root", "--test-abort-at"])
+    let abortAt = option("--test-abort-at")
+    /// TEST HOOKS ONLY: die exactly like the live abort did, at a named point.
+    let hookAbort: @Sendable (String) -> Void = { point in
+        if abortAt == point {
+            FileHandle.standardError.write(Data("room-bench: TEST HOOK aborting at \(point)\n".utf8))
+            abort()
+        }
+    }
+    #else
     checkOptions(["--origin", "--token-file", "--device-uid", "--root"])
+    let hookAbort: @Sendable (String) -> Void = { _ in }
+    #endif
     guard let rawOrigin = option("--origin"), let tokenPath = option("--token-file") else { die(usage) }
     let origin: URL
     do { origin = try RoomEnrolment.validate(origin: rawOrigin) } catch { die("\(error)") }
+    #if BENCH_TEST_HOOKS
+    let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot), faultPoint: { point in hookAbort(point) })
+    #else
     let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot))
+    #endif
+    // The HTTP client for this whole verb, created first and never released: see URLSessionTransport.
+    let transport = URLSessionTransport()
     let device: USBDeviceUID
     do {
+        try store.prepareRoot()
+        if let recovered = try RoomEnrolment.completeInterruptedEnrolment(store: store) {
+            FileHandle.standardError.write(Data("room-bench: \(recovered)\n".utf8))
+        }
         device = try RoomEnrolment.preflight(store: store, requestedDeviceUID: option("--device-uid"),
                                              devices: ALSADeviceEnumerator().usbCaptureDevices(),
                                              ffmpegIsExecutable: access(Pinned.ffmpegPath, X_OK) == 0)
     } catch { die("\(error)") }
     let token = readToken(tokenPath)
+    // From the server's success to the installed pair nothing is torn down, released or deferred: decode, then
+    // RoomEnrolment.persist's two fsynced installs, then — and only then — anything else.
+    let enrolled: RoomEnrolmentResponse
     do {
-        let enrolled = try await RoomEnrolment.exchange(token: token, origin: origin, transport: URLSessionTransport())
-        let config = try RoomEnrolment.persist(enrolled, origin: origin, deviceUID: device, store: store)
-        print("enrolled: room \(enrolled.roomSlug) (\(enrolled.roomName)), install \(enrolled.installID), device \(config.deviceUID), origin \(origin.absoluteString)")
-        print("session expires \(enrolled.session.expiresAt); there is no refresh — re-enrol before then")
+        enrolled = try await RoomEnrolment.exchange(token: token, origin: origin, transport: transport)
     } catch {
         die("\(error)", 1)
     }
+    hookAbort("after-exchange")
+    let config: RoomConfig
+    do {
+        config = try RoomEnrolment.persist(enrolled, origin: origin, deviceUID: device, store: store)
+    } catch {
+        die("ENROLLED ON THE SERVER BUT NOT SAVED HERE: install \(enrolled.installID) was issued and could not be written (\(error)). The token is spent; re-enrol with a fresh token, which retires that install.", 1)
+    }
+    print("enrolled: room \(enrolled.roomSlug) (\(enrolled.roomName)), install \(enrolled.installID), device \(config.deviceUID), origin \(origin.absoluteString)")
+    print("session expires \(enrolled.session.expiresAt); there is no refresh — re-enrol before then")
+    fflush(nil)
+    hookAbort("at-client-release")
+    _ = transport
+    exit(0)
+#if BENCH_TEST_HOOKS
+case "http-check":
+    // TEST HOOKS ONLY: the HTTP client's whole lifecycle, many times over — construct, request, release. With
+    // --per-call-session each iteration makes and releases its own URLSession, the shape that aborted the live enrol.
+    checkOptions(["--url", "--times", "--per-call-session"])
+    guard let raw = option("--url"), let url = URL(string: raw) else { die("http-check --url URL [--times N]") }
+    let times = option("--times").flatMap(Int.init) ?? 10
+    let perCall = arguments.contains("--per-call-session")
+    for i in 1...times {
+        do {
+            let status: Int
+            if perCall {
+                let session = URLSession(configuration: .ephemeral)
+                let (_, response) = try await session.data(for: URLRequest(url: url))
+                status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            } else {
+                let transport = URLSessionTransport()
+                status = try await transport.send(HTTPRequest(method: "GET", url: url)).status
+            }
+            print("iteration \(i): HTTP \(status), client released")
+        } catch {
+            print("iteration \(i): \(error)")
+        }
+    }
+    print("http-check: \(times) lifecycles, no abort")
+#endif
 case "serve":
     #if BENCH_TEST_HOOKS
     checkOptions(["--root", "--test-synthetic-devices"])
@@ -96,7 +161,10 @@ case "serve":
     #endif
     let log = RoomLog()
     let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot))
-    do { try store.prepareRoot() } catch { die("\(error)", 1) }
+    do {
+        try store.prepareRoot()
+        if let recovered = try RoomEnrolment.completeInterruptedEnrolment(store: store) { log(recovered) }
+    } catch { die("\(error)", 1) }
     // Startup errors are named and non-zero, never a silent degrade.
     guard access(Pinned.ffmpegPath, X_OK) == 0 else { die("ffmpeg is not an executable at the pinned path \(Pinned.ffmpegPath); pieces cannot be made. Install it (U4 apt dependency).", 1) }
     let config: RoomConfig

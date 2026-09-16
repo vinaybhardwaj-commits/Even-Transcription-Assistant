@@ -40,11 +40,25 @@ public protocol HTTPTransport: Sendable {
 }
 
 /// The production transport: FoundationNetworking's URLSession (libcurl underneath on Linux).
+///
+/// ─── ONE SESSION FOR THE WHOLE PROCESS, NEVER RELEASED ──────────────────────────────────────
+/// swift-corelibs-foundation 6.3.3 aborts when a URLSession is deallocated while libcurl still monitors a cached
+/// connection — which an HTTPS/HTTP-2 exchange with the Bench leaves behind. `_MultiHandle.deinit` calls
+/// `curl_multi_cleanup` (FoundationNetworking/URLSession/libcurl/MultiHandle.swift:61); libcurl answers with a
+/// socket-remove callback that reaches `_SocketSources.tearDown` (:130, :551), which queues
+/// `cancelHandlerGroup.notify { handle.endOperation(...) }` (:571-573) holding a STRONG reference to the handle being
+/// destroyed. That closure runs on another thread after deinit, and the runtime aborts with "_MultiHandle deallocated
+/// with non-zero retain count 2". Measured 16 Sep 2026: a URLSession released after one HTTPS request to an HTTP/2 host
+/// aborted 10 times in 10; one kept for the process aborted 0 in 10; plain HTTP/1.1 to 127.0.0.1 never aborts, which is
+/// why the stub dry run did not see it. It aborted the first live `room-bench enrol` between the server's success and
+/// the first write.
+///
+/// The cycle is inside corelibs and cannot be broken from here. What this code controls is whether that teardown ever
+/// runs: every `URLSessionTransport` shares `processSession`, a static that is never released (process exit does not
+/// deinitialise statics). The Mac uses `URLSession.shared` the same way. If corelibs is fixed, this can become per-instance
+/// again; until then a second session must not be created and released anywhere in this binary.
 public struct URLSessionTransport: HTTPTransport {
-    let session: URLSession
-    let timeout: TimeInterval
-
-    public init(timeout: TimeInterval = 60) {
+    static let processSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         // No cookie jar and no cache: the session cookie is set explicitly on every request (RoomEngine.swift:637) and
         // a cached poll answer would be a room acting on commands it was already given.
@@ -52,9 +66,16 @@ public struct URLSessionTransport: HTTPTransport {
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        self.session = URLSession(configuration: configuration)
+        return URLSession(configuration: configuration)
+    }()
+
+    let timeout: TimeInterval
+
+    public init(timeout: TimeInterval = 60) {
         self.timeout = timeout
     }
+
+    var session: URLSession { Self.processSession }
 
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         var urlRequest = URLRequest(url: request.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
