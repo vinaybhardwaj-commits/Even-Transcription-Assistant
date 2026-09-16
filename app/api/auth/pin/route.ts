@@ -26,6 +26,16 @@ import { respondError } from "@/lib/respond";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * THE ONE REFUSAL FOR AN ATTEMPT THE SYSTEM CANNOT ACCOUNT FOR — used by the wrong-pin path (E31 R58/R63) AND by the
+ * correct-pin path when nothing is recording (E32), and it must stay ONE response. If the correct pin were refused
+ * with anything distinguishable — another status, another code, another message — the refusal itself would say
+ * which of the 10,000 guesses was right, and the attacker would simply wait for writes to come back and use it.
+ * The reason is told apart where only the operator reads it: the log line and the audit row (lib/lockout).
+ */
+const refuseUnrecordedAttempt = () =>
+  respondError("PIPELINE_FAILED", "Attempt could not be recorded; refusing the attempt");
+
 type DoctorRow = {
   id: string;
   full_name: string;
@@ -107,8 +117,7 @@ export async function POST(req: NextRequest) {
     // here is what let a brute force run un-counted while the clinician table was degraded: refuse instead, and
     // say the system could not record it rather than implying anything about the pin. This is the brute-force
     // path. It is NOT symmetric with the correct-pin path below, on purpose.
-    if (newState.kind === "not_recorded")
-      return respondError("PIPELINE_FAILED", "Attempt could not be recorded; refusing the attempt");
+    if (newState.kind === "not_recorded") return refuseUnrecordedAttempt();
     if (newState.kind === "disabled") return respondError("FORBIDDEN", "Account disabled after too many attempts");
     if (newState.kind === "locked")
       return respondError("PIN_LOCKED", newState.reason, { retry_after_seconds: newState.retry_after_seconds });
@@ -125,16 +134,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // PIN correct — reset counter + issue session. E31 R63 — CORRECT PIN, RESET NOT RECORDED: ALLOW THE LOGIN.
-  // The security property is that an unrecorded FAILURE is never ignored (above); it is not that an unrecorded
-  // SUCCESS is punished. Refusing here locked every clinician out of the encounter assistant whenever the
-  // clinician table was degraded, to guard against nothing: a correct pin is not a guess. The stale counter is
-  // logged and audited in recordSuccessfulAttempt, and the next reset that lands clears it. Do not re-add a
-  // refusal here to "match" the failure path.
+  // PIN correct — reset counter + issue session. THREE STATES, and they stay three (lib/lockout, above ResetOutcome).
   const reset = await recordSuccessfulAttempt(lockState, ip, userAgent);
+
+  // E32 — NEITHER BOUND IS RECORDING: REFUSE THE SESSION, even for this correct pin. Every wrong guess before it
+  // was refused but none was counted, so nothing stopped the walk to this one: the correct pin IS the winning
+  // guess. This costs the clinician nothing they could use — with no write landing anywhere, no encounter can be
+  // recorded or saved either. The answer is the wrong-pin refusal, byte for byte (see refuseUnrecordedAttempt).
+  if (reset.kind === "no_bound_recording") return refuseUnrecordedAttempt();
+
+  // E31 R63 — EXACTLY ONE BOUND IS RECORDING: ALLOW THE LOGIN. The surviving bound still limits guessing, and
+  // refusing here would lock every clinician out of the encounter assistant for a partial fault. The unrecorded
+  // SUCCESS is logged (and, for the counter, audited) in recordSuccessfulAttempt. Do not re-add a refusal here to
+  // "match" the failure path, and do not widen the refusal above to cover this case.
   if (reset.kind === "reset_not_recorded")
     console.error("[auth/pin] session issued with the lockout counter NOT reset:",
       JSON.stringify({ doctor_id: doctor.id, audited: reset.audited }));
+  if (reset.kind === "attempt_not_recorded")
+    console.warn("[auth/pin] session issued with the rate limiter's pin_attempt row NOT recorded:",
+      JSON.stringify({ doctor_id: doctor.id }));
   const jwt = await signDoctorJwt({ doctor_id: doctor.id, slug: doctor.url_slug });
   await setDoctorCookie(jwt, doctor.url_slug);
 

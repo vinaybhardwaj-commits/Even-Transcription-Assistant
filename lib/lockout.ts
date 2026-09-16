@@ -31,6 +31,8 @@ export type DoctorLockState = {
  * who knows their pin: refusing them locks every doctor out of the encounter assistant for as long as the
  * database is unwell, mid-clinic, to prevent nothing — the guesses that led up to it were counted or refused on
  * the failure path. The cost of allowing it is a stale counter, which the next reset that lands clears.
+ * (E32 bounds that claim: "refused" bounds nothing unless something COUNTED the refusal. It holds only while at
+ * least one of the two bounds still records — see the E32 block below.)
  *
  * So the two log lines are distinct, the two result types are distinct, and the route handles them apart. Do
  * not fold them back into one rule in either direction.
@@ -46,11 +48,49 @@ export const LOG_RESET_NOT_RECORDED = "[lockout] CORRECT PIN, RESET NOT RECORDED
 export const AUDIT_ACTOR_PIN_LOCKOUT = "auth:pin-lockout-v1";
 export const AUDIT_PIN_RESET_WRITE_FAILED = "auth.pin_reset_write_failed";
 
-/** What recordSuccessfulAttempt reports. Deliberately NOT a LockoutDecision: it carries no refusal. */
+/**
+ * E32 — NEVER ISSUE A SESSION WHILE NEITHER THE LOCKOUT COUNTER NOR THE RATE LIMITER IS RECORDING.
+ *
+ * Brute force has exactly two bounds: the lockout counter (clinician.failed_pin_count) and the rate limiter's
+ * evidence (pin_attempt rows). R63 above is right while at least one of them records. It is wrong when NEITHER
+ * does — a database that refuses writes but still serves reads (storage quota, read-only failover). The pin
+ * comparison is a read, so it still works; every wrong guess is refused, but nothing counts it, so nothing stops
+ * the next one, and the correct pin is simply the guess that wins. The Refuter measured it: 80 wrong pins, then
+ * the correct one, and a session. Refusing a wrong pin is no defence, because a wrong pin never authenticates
+ * anyway. The only thing left to refuse is the session. This was present identically before E31.
+ *
+ * So the success path has THREE states, and they must stay three:
+ *   BOTH recording            → `reset`                 — normal.
+ *   EXACTLY ONE recording     → `reset_not_recorded`    — counter down, limiter up: ALLOW (the limiter bounds it)
+ *                               `attempt_not_recorded`  — limiter down, counter up: ALLOW (the lockout bounds it)
+ *                               A clinician must not be locked out of the encounter assistant by a partial fault.
+ *   NEITHER recording         → `no_bound_recording`    — REFUSE, even though the pin is correct.
+ *
+ * WHY REFUSING THE CORRECT PIN IN THE TOTAL CASE COSTS THE CLINICIAN NOTHING: if no write lands anywhere, no
+ * encounter can be recorded, transcribed or saved either. A session would open an assistant that cannot write a
+ * single row. Refusing it denies nothing the clinician could have used, and it is the only bound left.
+ *
+ * Folding NEITHER into EXACTLY ONE re-opens the brute force. Folding EXACTLY ONE into NEITHER re-creates
+ * lockout-during-degradation (R63). Folding EXACTLY ONE into BOTH hides a blind bound. Each is a named test.
+ */
+export const LOG_ATTEMPT_ROW_NOT_RECORDED =
+  "[lockout] CORRECT PIN, pin_attempt NOT RECORDED — allowing the login (the lockout counter still records)";
+export const LOG_NO_BOUND_RECORDING =
+  "[lockout] CORRECT PIN, NEITHER THE LOCKOUT COUNTER NOR THE RATE LIMITER IS RECORDING — refusing the session";
+export const AUDIT_PIN_SESSION_REFUSED_NO_BOUND = "auth.pin_session_refused_no_bound";
+
+/** Why a write did not land. A closed code, so it can go into audit metadata. */
+type WriteMiss = { reason: "threw"; err: string } | { reason: "zero_rows" };
+
+/** What recordSuccessfulAttempt reports. Not a LockoutDecision: its one refusal is E32's, not the failure path's. */
 export type ResetOutcome =
   | { kind: "reset" }
-  /** The counter could not be reset. The login is ALLOWED; `audited` says whether the audit row landed. */
-  | { kind: "reset_not_recorded"; audited: boolean };
+  /** The counter could not be reset; the limiter's row landed. ALLOWED; `audited` says whether the audit row landed. */
+  | { kind: "reset_not_recorded"; audited: boolean }
+  /** The limiter's row did not land; the counter reset did. ALLOWED. */
+  | { kind: "attempt_not_recorded" }
+  /** NEITHER landed. The route REFUSES the session (E32). `audited` says whether the audit row landed. */
+  | { kind: "no_bound_recording"; audited: boolean };
 
 /** What the one statement above hands back — the only thing the decision may be computed from. */
 type LockRow = { failed_pin_count: number; status: string; retry_after_seconds: number | null };
@@ -201,24 +241,31 @@ export async function recordFailedAttempt(
 /**
  * Record a successful PIN attempt — resets counter, clears lockout.
  *
- * E31 R63 — the reset is BEST-EFFORT FOR THE LOGIN and LOUD WHEN IT FAILS. A correct pin authenticates whether
- * or not the reset lands; if it does not, this says so on its own log line, writes an audit row if audit_log is
- * reachable, and returns reset_not_recorded so the route can tell. It never returns a refusal.
+ * E31 R63 — the reset is BEST-EFFORT FOR THE LOGIN and LOUD WHEN IT FAILS, while the rate limiter still records.
+ * E32 — and the two bounds are each checked for having LANDED, because the answer depends on how many did (see
+ * the three states above ResetOutcome). A write has landed only if the database hands its row back: a throw is a
+ * miss, and so is zero rows.
  */
 export async function recordSuccessfulAttempt(
   doctor: DoctorLockState,
   ip: string | null,
   userAgent: string | null
 ): Promise<ResetOutcome> {
+  // BOUND 1 — the rate limiter's evidence. Its own statement, as on the failure path (D-5).
+  let attemptMiss: WriteMiss | null = null;
   try {
-    await sql`
+    const rows = (await sql`
       INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
       VALUES (${doctor.doctor_id}, true, ${ip}::inet, ${userAgent})
-    `;
+      RETURNING id
+    `) as Array<{ id: unknown }>;
+    if (rows.length === 0) attemptMiss = { reason: "zero_rows" };
   } catch (e) {
-    console.warn("[lockout] pin_attempt insert failed:", e);
+    attemptMiss = { reason: "threw", err: String((e as Error)?.message ?? e).slice(0, 160) };
   }
-  let failure: { reason: "threw"; err: string } | { reason: "zero_rows" } | null = null;
+
+  // BOUND 2 — the lockout counter.
+  let resetMiss: WriteMiss | null = null;
   try {
     const reset = (await sql`
       UPDATE clinician
@@ -229,26 +276,59 @@ export async function recordSuccessfulAttempt(
        WHERE id = ${doctor.doctor_id}
       RETURNING id
     `) as Array<{ id: string }>;
-    if (!reset[0]) failure = { reason: "zero_rows" };
+    if (!reset[0]) resetMiss = { reason: "zero_rows" };
   } catch (e) {
-    failure = { reason: "threw", err: String((e as Error)?.message ?? e).slice(0, 160) };
+    resetMiss = { reason: "threw", err: String((e as Error)?.message ?? e).slice(0, 160) };
   }
-  if (!failure) return { kind: "reset" };
 
-  console.error(LOG_RESET_NOT_RECORDED + ":",
-    JSON.stringify({ doctor_id: doctor.doctor_id, stale_failed_pin_count: doctor.failed_pin_count, ...failure }));
-  let audited = false;
+  // BOTH RECORDING — normal.
+  if (!attemptMiss && !resetMiss) return { kind: "reset" };
+
+  // EXACTLY ONE RECORDING — ALLOW. The lockout counter landed, so the lockout still bounds guessing.
+  if (attemptMiss && !resetMiss) {
+    console.warn(LOG_ATTEMPT_ROW_NOT_RECORDED + ":", JSON.stringify({ doctor_id: doctor.doctor_id, ...attemptMiss }));
+    return { kind: "attempt_not_recorded" };
+  }
+
+  // EXACTLY ONE RECORDING — ALLOW (R63). The limiter's row landed, so the 1/sec and 60/hr gates still bound it.
+  if (!attemptMiss && resetMiss) {
+    console.error(LOG_RESET_NOT_RECORDED + ":",
+      JSON.stringify({ doctor_id: doctor.doctor_id, stale_failed_pin_count: doctor.failed_pin_count, ...resetMiss }));
+    const audited = await auditPinLockout(AUDIT_PIN_RESET_WRITE_FAILED, doctor.doctor_id,
+      { reason: resetMiss.reason, stale_failed_pin_count: doctor.failed_pin_count });
+    return { kind: "reset_not_recorded", audited };
+  }
+
+  // NEITHER RECORDING — REFUSE THE SESSION (E32). Nothing bounds the next guess, so the correct pin is the only
+  // thing left to refuse. The audit row is attempted: a database that refuses clinician and pin_attempt writes
+  // may still take audit_log, and if it does not, this line and `audited: false` are the evidence.
+  console.error(LOG_NO_BOUND_RECORDING + ":",
+    JSON.stringify({ doctor_id: doctor.doctor_id, attempt: attemptMiss, reset: resetMiss }));
+  const audited = await auditPinLockout(AUDIT_PIN_SESSION_REFUSED_NO_BOUND, doctor.doctor_id, {
+    attempt_reason: attemptMiss!.reason,
+    reset_reason: resetMiss!.reason,
+    stale_failed_pin_count: doctor.failed_pin_count,
+  });
+  return { kind: "no_bound_recording", audited };
+}
+
+/** R64 convention: metadata is closed codes and counts only — never a pin, a name, a slug or free text. */
+async function auditPinLockout(
+  action: string,
+  doctorId: string,
+  metadata: Record<string, string | number>,
+): Promise<boolean> {
   try {
     const rows = (await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', ${AUDIT_ACTOR_PIN_LOCKOUT}, ${AUDIT_PIN_RESET_WRITE_FAILED}, 'doctor', ${doctor.doctor_id},
-              ${JSON.stringify({ reason: failure.reason, stale_failed_pin_count: doctor.failed_pin_count })}::jsonb)
+      VALUES ('system', ${AUDIT_ACTOR_PIN_LOCKOUT}, ${action}, 'doctor', ${doctorId},
+              ${JSON.stringify(metadata)}::jsonb)
       RETURNING id
     `) as Array<{ id: unknown }>;
-    audited = rows.length > 0;
+    return rows.length > 0;
   } catch (e) {
-    console.error("[lockout] audit row for the unrecorded reset could not be written either:",
-      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    console.error("[lockout] audit row could not be written either:",
+      JSON.stringify({ doctor_id: doctorId, action, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return false;
   }
-  return { kind: "reset_not_recorded", audited };
 }
