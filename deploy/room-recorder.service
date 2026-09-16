@@ -1,7 +1,12 @@
-# room-recorder.service — U2, written against S1-S8 of
+# room-recorder.service — U2 (U4: pinned by config.json), written against S1-S8 of
 # ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 as amended by R1 (RestartSec floor) and R4 (no .device dependency).
 #
-# Install to /etc/systemd/system/room-recorder.service. Root required; see deploy/room-recorder-install.sh.
+# Installed to /etc/systemd/system/room-recorder.service by deploy/room-recorder-install.sh.
+#
+# V8 — THE CAPTURE UNIT KNOWS NOTHING OF room-bench.service, and room-bench.service knows nothing of this one: no
+# After=, Before=, Requires=, Wants=, BindsTo= or PartOf= in either direction. The U2 durability guarantee is a capture
+# process that never stops; any ordering or dependency on the network half would let a stuck poll, an ffmpeg crash or
+# a failed enrol delay, stop or block recording. room-bench only READS the tape.
 #
 # S2 — this is a SYSTEM unit, deliberately. A user unit dies with the session, and the acceptance test is
 # "nobody logs in". There is no session to hang it off.
@@ -81,17 +86,24 @@ WorkingDirectory=/var/lib/room-recorder
 #   BUSY    ours, but the open gives EBUSY -> same bounded wait, then exit 4, named. Rides out PipeWire's 5.0 s hold.
 #   WRONG   something else answering to our name -> NO WAIT AT ALL, exit 5, naming expected and found.
 #
-# --expect-usbid is not optional in spirit even though it is in the CLI. Without it the pin is a NAME, and ALSA card
-# ids are not unique hardware identities: "Device" is the generic id a USB interface takes from its product string,
-# so another generic USB mic in the same slot can legitimately claim hw:CARD=Device,DEV=0 and be indistinguishable
-# from ours. 0d8c:0134 is the TONOR TM20, the same identity every M-series probe used.
+# U4 — THE PIN NOW COMES FROM config.json, BY USB IDENTITY (spec S5, U3 fix 1). --device and --expect-usbid are gone
+# from this line. `device_uid` in /var/lib/room-recorder/config.json is `usb:<vid>:<pid>`, resolved by EXACT usb id
+# against /proc/asound; that usb id match is what makes WRONG detectable, as --expect-usbid did — a generic "Device"
+# card id is never trusted on its own. room-bench writes device_uid for a Bench `set_audio_input`; this process watches
+# the file and re-pins ITSELF (absent device: refused, keep recording; present: clean stop, re-exec under the same PID,
+# `restart` record, same tape). room-bench never restarts this unit and has no way to.
+#
+# --default-device-uid is the install-time identity from /etc/room-recorder/room-recorder.env, used ONLY while
+# config.json does not exist (before the first enrol) or names no usable device_uid. It is what keeps capture from
+# depending on enrolment: a machine installed with no token records from its first boot. 0d8c:0134 is the TONOR TM20.
 #
 # There is NO --seconds. An absent --seconds means run until terminated. There is deliberately no magic value such
 # as "forever": a magic string inside a numeric option is a mistyping waiting to happen, and an absent option cannot
 # be mistyped. Do not add one back.
+EnvironmentFile=/etc/room-recorder/room-recorder.env
 ExecStart=/usr/local/lib/room-recorder/room-recorder record \
-    --device hw:CARD=Device,DEV=0 \
-    --expect-usbid 0d8c:0134 \
+    --device-config /var/lib/room-recorder/config.json \
+    --default-device-uid ${ROOM_RECORDER_DEVICE_UID} \
     --wait-for-device 30 \
     --tape /var/lib/room-recorder/tape
 

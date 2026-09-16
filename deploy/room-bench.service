@@ -1,0 +1,106 @@
+# room-bench.service — U4, the Bench half of the room recorder (spec U3, deviation V8).
+#
+# Installed to /etc/systemd/system/room-bench.service by deploy/room-recorder-install.sh, and ENABLED only once the room
+# is enrolled. It runs `room-bench serve`: poll the Bench, run its commands, cut pieces from the tape, transcode them
+# with the pinned /usr/bin/ffmpeg, upload them.
+#
+# ─── NO ORDERING OR DEPENDENCY ON room-recorder.service, DELIBERATELY ─────────────────────────────────────────────────
+# There is no After=, Before=, Requires=, Wants=, BindsTo= or PartOf= naming room-recorder.service, and the capture unit
+# names nothing here. V8: the U2 durability guarantee — proven under a hard power cut — is a capture process that never
+# stops. If this unit were ordered before capture, a slow network-online wait would delay the first recording after a
+# boot; if capture Required or BindsTo this, a room-bench crash loop would stop recording. Neither can happen: systemd
+# starts the two independently, and this unit only READS the tape (and cannot write it: ReadOnlyPaths below).
+# room-bench copes with the tape not existing yet or not advancing — `start_day` then refuses with
+# capture_not_advancing rather than opening a session on a dead microphone.
+#
+# The network ordering below concerns THIS unit only.
+
+[Unit]
+Description=Room recorder Bench link (U3): poll, commands, pieces, upload
+Documentation=file:///usr/local/share/room-recorder/README.md
+Wants=network-online.target
+After=network-online.target
+# Not enrolled yet: skipped, not failed, and no restart loop. The installer enables this unit only after an enrol.
+ConditionPathExists=/var/lib/room-recorder/room-session.json
+# ffmpeg is a hard dependency resolved from its absolute pinned path, never PATH. Missing is a loud start failure.
+AssertPathExists=/usr/bin/ffmpeg
+# Restarts are unlimited in count: a room must keep trying to reach the Bench for as long as the machine is up. The
+# spacing below is what bounds them.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=room-recorder
+Group=room-recorder
+# /proc/asound and the ALSA control node, for S5 device enumeration and the capture-volume mixer (set_audio_input).
+SupplementaryGroups=audio
+StateDirectory=room-recorder
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/room-recorder
+ExecStart=/usr/local/lib/room-recorder/room-bench serve
+
+# ─── EXIT STATUSES, AND WHY Restart=on-failure ──────────────────────────────────────────────────────────────────────
+#   75   restart_engine, after its ack LANDED (RoomEngine.restartExitCode, sysexits EX_TEMPFAIL). Non-zero, so
+#        on-failure RESTARTS it — which is the whole point of the command.
+#   0    SIGTERM/SIGINT: pieces closed without ending the session. A deliberate stop, not restarted.
+#   1    a named startup error (not enrolled, config.json and room-session.json disagree, ffmpeg missing). Restarted
+#        every RestartSec so a repaired machine recovers by itself, visibly, in the journal.
+#   2    usage error: this unit or the binary is wrong. NOT restarted (RestartPreventExitStatus) — a loop cannot fix it.
+#   signal (e.g. SIGABRT, 134): restarted.
+# RETIRED (409) AND SUPERSEDED DO NOT EXIT. room-bench writes /var/lib/room-recorder/retired.json (retired) and then
+# IDLES in the running state without polling, still honouring SIGTERM. systemd therefore sees a healthy running
+# service and never restarts it into the same state — there is no loop to fight. A boot, or a manual restart, that
+# finds retired.json for the configured install id goes straight back to idle without a single poll. The recovery is
+# a re-enrol with a fresh token (deploy/room-recorder-install.sh --token-file ... --re-enrol), which clears it.
+Restart=on-failure
+RestartPreventExitStatus=2
+# 10 s: twice the Bench poll backoff's 5 s start (RoomEngine.backoffStartNS), so a restart never polls harder than
+# the engine's own error path would. This is the network half: nothing here is measured against a PCM hold.
+RestartSec=10s
+# A stop uploads for at most 10 s (RoomEngine.stopDrainBudget) and waits at most 3 s for the index to reach the
+# command (TapePieceLane.flushWaitNS); 30 s covers both and an ffmpeg encode of a final piece.
+TimeoutStopSec=30s
+
+# ─── IT MUST NOT BE ABLE TO STARVE CAPTURE ─────────────────────────────────────────────────────────────────────────
+# ffmpeg transcodes on this machine (D2). Lower CPU and I/O weight than any default service, a positive nice, and the
+# first thing the OOM killer takes, so a stuck encode or a large backlog never competes with the capture thread.
+Nice=10
+CPUWeight=20
+IOWeight=20
+OOMScoreAdjust=500
+
+# ─── LOGGING (same rule as capture: lifecycle, identity, errors, counts; never a token, never a sample) ─────────────
+LogLevelMax=info
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=room-bench
+
+# ─── HARDENING ─────────────────────────────────────────────────────────────────────────────────────────────────────
+# It needs: the network (the Bench and presigned storage over HTTPS), /var/lib/room-recorder read-write for its state
+# and spool, the tape READ-ONLY, /proc/asound and the ALSA control node, and to exec /usr/bin/ffmpeg.
+# NOT set, on purpose: SystemCallFilter= and MemoryDenyWriteExecute= — both are on the capture unit, but this unit
+# execs ffmpeg and libopus, whose code paths under those filters have not been measured; a filter that kills a
+# transcode would look like a spool that never empties. PrivateNetwork= obviously not.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=-/var/lib/room-recorder/tape
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=multi-user.target
