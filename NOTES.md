@@ -2008,3 +2008,91 @@ would be just as wrong to promote it as it was to demote the 5.0 s.
 | `our-choice` | 13 | a decision of ours, carrying its ruling. Not debt |
 | `ungrounded` | 0 | claims a Mac behaviour with no citation. Debt |
 | `ungrounded-blocked` | 1 | cannot be settled by reading; carries `blocked_by` |
+
+## R5 (16 Sep, boot 4) — "nobody logged in" does NOT mean "no seat0 session", and another user's ACL is not a hazard
+
+V ended the seat0 desktop session to try to reach a passing preflight without spending a reboot. **gdm's greeter took
+seat0 immediately**, and `/dev/snd/pcmC1D0c` came back carrying `user:gdm-greeter:rw-`. Measured:
+
+```
+session c2   user gdm-greeter   uid 60579   Service=gdm-launch-environment   Class=greeter   seat0/tty1 wayland
+/dev/snd/pcmC1D0c   root:audio 660   user::rw-  user:gdm-greeter:rw-  group::rw-  mask::rw-  other::---
+```
+
+**The precondition as written could never pass on a correctly unattended boot.** Every machine that runs a display
+manager — which is every room machine — has a seat user holding seat0 at the login screen and a uaccess ACL with it.
+A preflight that fails on *any* seat0 session, or on *any* named ACL entry, fails forever on exactly the state we are
+trying to prove.
+
+It was also **measuring the wrong thing**. The check exists so the acceptance cannot pass because vinay's ACL quietly
+supplied the access the group-`audio` path is supposed to provide. An ACL naming gdm-greeter grants **room-recorder**
+nothing — room-recorder reaches the node through group `audio` (`root:audio 0660`) or not at all — so it can mask
+nothing. A human's entry matters only as the *fingerprint of a person logged in at the seat*. Another user's is noise.
+
+### Prior assertions, verbatim (`deploy/u2-acceptance-preflight.sh`, replaced 16 Sep, boot 4)
+
+```
+echo "R2 — autologin off / no seat session (THE precondition; needs root to change, V must do it):"
+sessions=$(loginctl list-sessions --no-legend 2>/dev/null | grep -c seat0)
+if [ "$sessions" = 0 ]; then ok "no seat0 session"; else
+```
+```
+echo "M2.1 — the seat ACL must be ABSENT from the pinned PCM node:"
+    acl=$(getfacl -p "$node" 2>/dev/null | grep -c '^user:[^:]')
+    if [ "$acl" = 0 ]; then ok "$node has no user: ACL entry beyond the owner"
+```
+
+And from the R2 paragraph in `U2 §4 measurements` above: "This Yoga runs `gdm-autologin` (session 1, seat0/tty2,
+wayland, since boot), so 'nobody logs in' is not true of it as configured". True when written; autologin is off now and
+the greeter holds seat0 regardless. **Autologin was never the whole of the precondition.**
+
+### Both checks now discriminate HUMAN from system, and say so in their output
+
+R2 keys on logind's `Class` (greeter ⇒ PASS, printed as the expected state) and, for the human arm, on the uid together
+with `Service` (`gdm-password`/`gdm-autologin`). M2.1 keys on the ACL's uid. The PASS lines carry the reason inline so
+the next operator reads it in the output, not only here.
+
+### `uid >= 1000` is WRONG on this machine, in both directions (linux-measurement)
+
+**gdm's greeter is a systemd DynamicUser at uid 60579** — *above* `UID_MAX`, and with **no `/etc/passwd` entry at all**:
+
+```
+$ id -u gdm-greeter        -> id: 'gdm-greeter': no such user
+$ getent passwd 60579      -> (no entry)
+$ grep UID_ /etc/login.defs -> UID_MIN 1000   UID_MAX 60000
+$ getent passwd room-recorder -> room-recorder:x:994:971:...:/usr/sbin/nologin
+```
+
+So the test is **`UID_MIN <= uid <= UID_MAX`, read from `/etc/login.defs`** — the machine's own policy — and the ACL
+decision is made on the **numeric** uid from `getfacl -pn`, never on a name. A first attempt at this fix used
+`uid >= 1000`; it classified the greeter as human and would have kept the preflight failing forever, and it was caught
+by replaying the measured greeter state through the script's own lines, not by reading them.
+
+### Carried to U3 and U4 — the greeter carries a full PipeWire stack
+
+Measured while the greeter held seat0:
+
+```
+gdm-greeter  7488 pipewire     gdm-greeter  7505 wireplumber
+gdm-greeter  7506 pipewire     gdm-greeter  7511 pipewire-pulse
+```
+
+**M2.2's contention condition is therefore present on the login screen of EVERY room machine**, not only once somebody
+logs in. This is INFO in the preflight and NOT a precondition failure: S3's bounded wait rides out PipeWire's measured
+5.0 s hold and exit 4 names the busy case. What it does not change is M2.2's rule — **we win only by opening first**,
+and at boot we are racing a stack that is already up.
+
+`/proc/asound/card1/pcm0c/sub0/status` read `closed` throughout, so nothing was actually holding the node.
+
+### The preflight's `fuser` line is a partial signal, and says so
+
+An unprivileged `fuser` sees only this user's processes. Positive control: it found our own `sleep` holding
+`/etc/hostname`. Negative: `ls /proc/7488/fd` as vinay is `Permission denied`, so a greeter process's fds are invisible
+from here, and there is no passwordless sudo on this machine to escalate. **`/proc/asound/card<N>/pcm0c/sub*/status` is
+the probe that does not depend on who is asking** — world-readable, and it reports the substream's own state. The
+preflight prints both and labels the limitation.
+
+### NOT decided here
+
+Whether a room machine should run a display manager at all is a real question and it is **U4's and V's**. gdm was not
+touched, the greeter was not disabled, the default target was not changed.
