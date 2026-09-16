@@ -764,6 +764,78 @@ describe.runIf(HAVE_DOCKER)("E18 R51/R53 — a bound the server never issued, an
     expect(await stateOf("bw_r51_late"), "the late one is still waiting, as it should be").toBe("silent");
   }, 600_000);
 
+  it("R54 — the check ANSWERS NOTHING: a fabricated bound is refused, and moves 0 (it fails closed, not open)", async () => {
+    // The Refuter's probe. Postgres always returns one row for `SELECT (... > now()) AS future`, so an empty
+    // answer needs a driver or proxy that reports success with nothing in it. That is exactly the case the old
+    // `=== true` shape got wrong: undefined read as "not in the future", so the guard admitted a bound it had
+    // never verified and a fabricated tomorrow moved a window. The anomaly is induced HERE, at the driver
+    // boundary, because the shape of the guard is what is being tested — not Postgres's row-count behaviour.
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_r54', 'room_r54', to_timestamp(0), 'ended')`);
+    seedWindow("bw_r54", 811, { levels: null, session: "sess_r54", roomDay: "rd_r54" });
+    await verdictFor("bw_r54", 811, "sess_r54", "rd_r54");
+    const future = await tomorrow();
+
+    const real = H.sql!;
+    let asked = 0;
+    // Every other statement runs for real; only the future check answers with no rows.
+    H.sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (strings.join("?").includes("AS future")) { asked += 1; return Promise.resolve([]); }
+      return real(strings, ...values);
+    }) as typeof real;
+    let refused: Record<string, unknown>;
+    let moduleThrew = "";
+    try {
+      refused = await call({ room_id: "room_r54", apply: true, as_of: future, detector: "e13_v1", reason: "a bound nobody confirmed" });
+      const { reopenSilentWindows } = await import("@/lib/stt/silence");
+      moduleThrew = await reopenSilentWindows({ roomId: "room_r54", batch: "b_r54", reason: "r", detector: "e13_v1", asOf: future })
+        .then(() => "", (e: Error) => String(e.message));
+    } finally {
+      H.sql = real;
+    }
+
+    expect(asked, "the check did run — this is an empty answer, not a skipped guard").toBeGreaterThan(0);
+    expect(refused!, "an answer it cannot read is a refusal").toMatchObject({ ok: false, dry_run: false, error: "as_of_in_future" });
+    expect(moduleThrew, "and the module's own door refuses the same way").toMatch(/as_of_in_future/);
+    // THE NUMBER THE REFUTER MEASURED AS 1. Both doors, nothing moved, nothing stamped.
+    const stillSilent = ((await pg.sql`SELECT count(*)::int AS n FROM bench_window w JOIN bench_session s ON s.id = w.session_id
+                                        WHERE s.room_id = 'room_r54' AND w.state = 'silent'`) as Array<{ n: number }>)[0]!.n;
+    const moved = 1 - stillSilent;
+    expect(moved, "moved").toBe(0);
+    expect(await stateOf("bw_r54")).toBe("silent");
+    expect(((await pg.sql`SELECT count(*)::int AS n FROM bench_window_silence WHERE window_id = 'bw_r54' AND reopened_at IS NOT NULL`) as Array<{ n: number }>)[0]!.n,
+      "and no ledger row claims it was handed back").toBe(0);
+  }, 300_000);
+
+  it("R55 — the two clocks DISAGREE: a bound the database has reached is accepted even when this process's clock has not", async () => {
+    // The clock choice is the point. The as_of is minted by now() inside the preview's own statement, so the
+    // database is the only clock that can judge it; a serverless runtime lagging Neon by even a moment would
+    // otherwise reject a bound it had just been given. Nothing separated the two clocks before this test, so
+    // the reasoning was sound and untested — swapping in Date.now() passed everything.
+    //
+    // The skew is induced on THIS process only: Date is frozen an hour behind the database. On the real code
+    // the answer is the database's and the apply proceeds; on a Date.now() comparison the as_of looks like an
+    // hour into the future and the apply refuses, which is the legitimate bound being thrown away.
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_r55', 'room_r55', to_timestamp(0), 'ended')`);
+    seedWindow("bw_r55", 812, { levels: null, session: "sess_r55", roomDay: "rd_r55" });
+    await verdictFor("bw_r55", 812, "sess_r55", "rd_r55");
+    const preview = (await call({ room_id: "room_r55" })).would as Record<string, unknown>;
+    expect(preview.windows, "one window, and its bound comes from the database").toBe(1);
+
+    const HOUR = 3_600_000;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() - HOUR });
+    let applied: Record<string, unknown>;
+    try {
+      // Sanity: the skew is real and in the direction that would matter — the database's bound is "ahead" of
+      // this process's clock, which is precisely what a Date.now() check would call the future.
+      expect(Date.parse(String(preview.as_of)) > Date.now(), "the bound looks future-dated to this process").toBe(true);
+      applied = await call({ room_id: "room_r55", apply: true, as_of: preview.as_of, detector: "e13_v1", reason: "the bound the preview gave me" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(applied!, "the database's clock decides, so the legitimate bound is honoured").toMatchObject({ ok: true, dry_run: false, reopened: 1 });
+    expect(await stateOf("bw_r55"), "and the window actually moved").toBe("closed");
+  }, 300_000);
+
   it("R51 — the dry run refuses it too, so a fabricated bound is found while reading and not after asking to write", async () => {
     const future = await tomorrow();
     const dry = await call({ room_id: "room_r51", as_of: future });

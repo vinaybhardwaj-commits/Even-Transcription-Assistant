@@ -280,10 +280,17 @@ function checkedAsOf(asOf: string): string {
  *
  * There is no race in the dangerous direction: an as_of that is not in the future when this runs cannot
  * become so, because the clock only moves one way.
+ *
+ * R54 — IT FAILS CLOSED. This used to read `rows[0]?.future === true`, so an answer with NO ROWS — undefined —
+ * read as "not in the future" and the bound was accepted unverified: the Refuter measured a fabricated tomorrow
+ * moving one window. Postgres always returns exactly one row for this SELECT, so reaching it needs a driver or
+ * proxy that reports success with nothing in it; the shape was still wrong. "Absent answer means permitted" is
+ * the wrong default for a guard, so the test is now an EXPLICIT negative: only a database that says false lets
+ * the bound through, and silence refuses. It cannot say "not in the future" by failing to say anything.
  */
 export async function asOfIsInFuture(asOf: string): Promise<boolean> {
   const rows = (await sql`SELECT (${asOf}::timestamptz > now()) AS future`) as Array<{ future: boolean }>;
-  return rows[0]?.future === true;
+  return rows[0]?.future !== false;
 }
 
 /**
