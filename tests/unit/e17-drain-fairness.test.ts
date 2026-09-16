@@ -42,6 +42,20 @@ const cand = (id: string, room_id: string, end_ms: number, closed_ms: number, la
 const ids = (c: DrainCandidate[]) => c.map((x) => x.id);
 
 // ═══ THE MODEL ══════════════════════════════════════════════════════════════════════════════════════
+//
+// READ THIS BEFORE PRUNING TESTS (E22 R12).
+// This model COPIES the served rule; it does not run the SQL. `runModel` decides `last_served_ms` itself
+// (World.served), so every assertion in this file passes against the pre-fix commit 3aa75c9 too — measured, not
+// assumed: this file is 30 of 30 green with 3aa75c9's lib/stt/auto-drain.ts in place. It cannot see F1 come back.
+// The test that proves the fix is the Postgres S2 scenario in tests/unit/s1-auto-drain.test.ts:
+//   describe "E22 R3 — a room is served when its slot is OFFERED, not when a job is created (F1)"
+//   it       "S2: one room refuses every offer — the slots stay spread across all six rooms"
+// It runs the shipped selector against postgres:16 and fails before the fix (3/3/3/4/4/100 of 117) and passes
+// after (19/19/19/20/20/20). Do not delete it on the grounds that this file covers fairness. It does not cover
+// the SQL.
+//
+// Fairness here is asserted over CLINIC HOURS. Across the whole modelled day a refusing room picks up tail slots
+// after the other rooms have drained, when nobody else is waiting. That is accepted, not a defect (E22 R12).
 const GRID = 900, TICK = 300, CLINIC_S = 9 * 3600, MAX_AGE = 6 * 3600, N_WIN = 36, END = CLINIC_S + MAX_AGE + 2 * GRID;
 
 function mulberry32(seed: number) {

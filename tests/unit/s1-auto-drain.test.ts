@@ -305,6 +305,9 @@ beforeAll(() => {
   pg.exec(noRecord("db/migrations/0061_stt_subject_job.sql"));
   pg.exec(noRecord("db/migrations/0082_scribe_job.sql"));
   pg.exec(noRecord("db/migrations/0092_bench_window_auto_drain_refusal.sql"));
+  // E22 R11: the refusal branch's index, applied twice — every selector test below runs with it, and a re-run must not error.
+  pg.exec(noRecord("db/migrations/0100_bench_window_auto_drain_refused_idx.sql"));
+  pg.exec(noRecord("db/migrations/0100_bench_window_auto_drain_refused_idx.sql"));
 }, 180_000);
 afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
@@ -674,6 +677,24 @@ describe.skipIf(!HAVE_DOCKER)("E22 R3 — a room is served when its slot is OFFE
     expect(offered()).toEqual(["bw_on_second"]);
     await drainOnce();
     expect(offered()).toEqual(["bw_two_old"]);
+  });
+
+  it("R11: the refusal branch AS SHIPPED can be served by 0100's partial index — the planner picks it when a seq scan is ruled out", async () => {
+    // The branch is cut from the source, so a rewrite the partial index cannot serve fails here, not in production.
+    const src = readFileSync("lib/stt/auto-drain.ts", "utf8");
+    const branch = /UNION ALL\s*(SELECT rs\.room_id[\s\S]*?)\n\s*\),/.exec(src)?.[1];
+    expect(branch, "the refusal branch of the offered CTE").toBeTruthy();
+    const query = branch!.replace("${AUTO_DRAIN_MAX_AGE_HOURS}", String(AUTO_DRAIN_MAX_AGE_HOURS));
+    expect(query).not.toContain("${");
+    pg.exec(`CREATE OR REPLACE FUNCTION pg_temp_plan(q text) RETURNS SETOF text LANGUAGE plpgsql AS $f$
+             BEGIN PERFORM set_config('enable_seqscan', 'off', true); RETURN QUERY EXECUTE 'EXPLAIN ' || q; END $f$;`);
+    const plan = ((await pg.sql`SELECT pg_temp_plan(${query}) AS line`) as Array<{ line: string }>).map((r) => r.line).join("\n");
+    // The index must SERVE the predicate (an Index Cond on the column), not merely be walked: with seq scans off,
+    // postgres will scan any partial index whose predicate is implied — an index on another column included.
+    expect(plan, plan).toMatch(/(Index Scan using|Index Only Scan using|Bitmap Index Scan on) idx_bench_window_auto_drain_refused_at\b[^\n]*\n\s+Index Cond: \(auto_drain_refused_at >= /);
+    // And it is PARTIAL, as ruled: scoped to the rows the branch can select.
+    const def = ((await pg.sql`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_bench_window_auto_drain_refused_at'`) as Array<{ indexdef: string }>)[0]?.indexdef;
+    expect(def).toMatch(/ON public\.bench_window USING btree \(auto_drain_refused_at\) WHERE \(auto_drain_refused_at IS NOT NULL\)$/);
   });
 
   /**
