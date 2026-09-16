@@ -34,7 +34,8 @@ public enum Synth {
 /// round-trips with a trailing ".0" removed (measured as swift-foundation's output on 14 Sep 2026; Darwin's
 /// output is not verified on this machine). Double fields are therefore carried as literal strings.
 /// rms/peak/zero_ratio values are literals chosen to exercise Double formatting; no case asserts them
-/// against the PCM.
+/// against the PCM. They are nonetheless constrained to physically possible signals (TapeBuilder.loudnessViolations),
+/// because a check that reads loudness from the index cannot tell a fixture's impossible signal from a broken recorder.
 public struct SynthRecord {
     public var samples: Int64?
     public var monoNS: UInt64
@@ -109,13 +110,38 @@ struct TapeBuilder {
     var records: [SynthRecord] = []
     var stat = 0
 
-    static let rmsLiterals = ["0.35355339059327373", "0.17677669529663687", "0.30000000000000004", "0.1", "6.25e-05", "0.9999999999999999"]
-    /// Peaks a writer can emit: each is k/32768 for a sample magnitude k (16384, 6144, 10923, 4096, 3, 0), none on
-    /// the rail. The previous set put "1" on one checkpoint in six, which reads as a clipping capture chain to any
-    /// check that looks at loudness. Each is ≥ its slot's rms except the last, where zero_ratio is 1 (all samples
-    /// zero) and peak 0 agrees with it; that slot's rms literal contradicts both.
-    static let peakLiterals = ["0.5", "0.1875", "0.333343505859375", "0.125", "9.1552734375e-05", "0"]
+    /// Each slot (rms, peak, zero_ratio) describes a signal that can exist; loudnessViolations states the rule and
+    /// `checkpoint` refuses to emit any slot that breaks it. Peaks are k/32768 for a sample magnitude k (16384, 12288,
+    /// 10923, 4096, 3, 0), none on the rail: an earlier set put "1" on one checkpoint in six, which reads as a clipping
+    /// capture chain to any check that looks at loudness, and an rms of 0.9999999999999999 beside zero_ratio 1.
+    static let rmsLiterals = ["0.35355339059327373", "0.17677669529663687", "0.30000000000000004", "0.1", "6.25e-05", "0"]
+    static let peakLiterals = ["0.5", "0.375", "0.333343505859375", "0.125", "9.1552734375e-05", "0"]
     static let zeroRatioLiterals = ["0", "0.6666666666666666", "1.5e-07", "0.001", "0.5", "1"]
+
+    /// Every way a slot fails to describe a physically possible window of samples s (n > 0):
+    ///   0 <= rms, peak, zero_ratio <= 1, and peak = k/32768 for an integer sample magnitude k;
+    ///   rms <= peak (no sample exceeds the peak);
+    ///   peak == 0, rms == 0 and zero_ratio == 1 hold together or not at all (each says every sample is zero), which
+    ///   covers zero_ratio 1 requiring peak 0 and rms 0, and zero_ratio 0 forbidding peak 0 unless rms is 0;
+    ///   rms² <= peak² × (1 - zero_ratio) (zero samples add nothing to the sum of squares; the rest add at most peak²).
+    static var loudnessViolations: [String] {
+        var v: [String] = []
+        for i in rmsLiterals.indices {
+            let rms = Double(rmsLiterals[i])!, peak = Double(peakLiterals[i])!, zero = Double(zeroRatioLiterals[i])!
+            let slot = "loudness slot \(i + 1) (rms \(rmsLiterals[i]), peak \(peakLiterals[i]), zero_ratio \(zeroRatioLiterals[i]))"
+            if ![rms, peak, zero].allSatisfy({ $0 >= 0 && $0 <= 1 }) { v.append("\(slot): a value outside [0, 1]") }
+            if (peak * 32_768).rounded() != peak * 32_768 { v.append("\(slot): peak is not k/32768") }
+            if rms > peak { v.append("\(slot): rms above peak") }
+            if (peak == 0) != (rms == 0) || (peak == 0) != (zero == 1) { v.append("\(slot): peak 0, rms 0 and zero_ratio 1 disagree") }
+            if rms * rms > peak * peak * (1 - zero) { v.append("\(slot): rms too high for its peak and share of zero samples") }
+        }
+        return v
+    }
+    /// fatalError, not precondition: a release build drops precondition's message, and this one must say which slot.
+    static let loudnessChecked: Void = {
+        let v = loudnessViolations
+        if !v.isEmpty { fatalError("physically impossible fixture loudness: \(v.joined(separator: "; "))") }
+    }()
 
     init(device: String, wall: Int64, mono: UInt64, inputRate: (String, Int64, Int64)?) {
         self.device = device
@@ -136,6 +162,7 @@ struct TapeBuilder {
     mutating func checkpoint(_ s: Int64, window: Bool = true) {
         var r = base(s)
         if window {
+            _ = TapeBuilder.loudnessChecked
             r.rms = TapeBuilder.rmsLiterals[stat % 6]
             r.peak = TapeBuilder.peakLiterals[stat % 6]
             r.zeroRatio = TapeBuilder.zeroRatioLiterals[stat % 6]

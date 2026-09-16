@@ -27,10 +27,15 @@
 # four whose index arithmetic is damaged (c1-offset-not-twice-samples, c1-restart-odd-tail-untrimmed,
 # c3-blank-line-inside-torn-log, c4-one-sample-lost) and passes the other 24, which violate conversion rules while
 # still being real tapes with real audio in them. Of the 18 good fixtures it passes 17; the 18th, interior-blank, is a
-# tape whose expected outcome IS a hard error (a blank index line) and it fails here too. That is the intended scope:
+# tape whose expected outcome IS a hard error (a blank index line) and it fails here too. The generator's loudness
+# literals are constrained to physically possible signals, and it refuses to emit any that are not, because an
+# impossible fixture signal reads here exactly like a broken capture chain. That is the intended scope:
 # "is there a tape with sound in it", not "is every rule obeyed". Index-only tapes that exercise this script (reboots,
 # clock steps, missing levels, clipping, silence) are written by tools/verify-fixtures-generate.py into
 # fixtures/verify/, which, like all of fixtures/, is not committed.
+# zero_ratio on a 1/5100 grid, read off the first live run: EXPLAINED AND DISMISSED, do not chase it. Windows are
+# 20400 samples, but zero counts on 5 376 real checkpoints hit all four residues mod 4. That run's printed median and
+# max both being multiples of 4 was a 1-in-16 coincidence.
 #
 # REBOOTS: HOW A BOOT IS TOLD FROM A CLOCK STEP OR CORRUPTION
 # The tape is appended across restarts AND reboots. mono_ns is CLOCK_MONOTONIC, which restarts at zero at boot, and
