@@ -94,8 +94,14 @@ const spanCount = async (windowId: string) =>
   ((await pg.sql`SELECT count(*)::int AS n FROM room_span_emotion WHERE window_id = ${windowId}`) as Array<{ n: number }>)[0]!.n;
 const spanRuns = async (windowId: string) =>
   ((await pg.sql`SELECT DISTINCT diarize_run_id AS r FROM room_span_emotion WHERE window_id = ${windowId} ORDER BY r`) as Array<{ r: string }>).map((x) => x.r);
+/**
+ * R60 — `diarize_run_id` IS READ, because the claim below is about WHICH RUN the row describes.
+ * The A2 case is captioned "the window still reads as the earlier run"; without this column that caption
+ * asserted nothing, and a row incorrectly rewritten to the NEW run would have satisfied `{state:'ok',
+ * scored:1}` just as well. The property held; the test did not pin it.
+ */
 const emotionRow = async (windowId: string) =>
-  ((await pg.sql`SELECT state, attempts, error, segments_scored AS scored FROM room_emotion_window WHERE window_id = ${windowId}`) as Array<Record<string, unknown>>)[0];
+  ((await pg.sql`SELECT state, attempts, error, diarize_run_id, segments_scored AS scored FROM room_emotion_window WHERE window_id = ${windowId}`) as Array<Record<string, unknown>>)[0];
 
 describe.runIf(HAVE_DOCKER)("E31 A1 — every span of an attempt lands, or none of them does", () => {
   it("FAILURE INJECTION: one bad row in the batch and the database keeps NONE of the good ones", async () => {
@@ -150,13 +156,20 @@ describe.runIf(HAVE_DOCKER)("E31 A2 — the previous run's spans are never delet
 
     // Refuse the window-row half of the finishing statement. Under the old shape the delete had already
     // committed a whole job step earlier and this window would now hold NO spans at all.
-    pg.exec(`ALTER TABLE room_emotion_window ADD CONSTRAINT e31_refuse_ok CHECK (state <> 'ok') NOT VALID;`);
+    // R60 — THE REFUSAL TARGETS THE FINISHING WRITE AND NOTHING ELSE. It used to be CHECK (state <> 'ok'),
+    // which refuses ANY update of this row, because Postgres re-checks a constraint on every updated row.
+    // That also refused a mutant that moved only `diarize_run_id` to the new run, so the assertion on the
+    // run could never be shown to bite: the mutant died on the injection before the assertion was reached.
+    // The seeded row has calls = NULL and the finishing write sets calls = 1, so this refuses exactly that
+    // write and lets an unrelated one-column update through.
+    pg.exec(`ALTER TABLE room_emotion_window ADD CONSTRAINT e31_refuse_ok CHECK (calls IS NULL) NOT VALID;`);
     await expect(finishEmotionWindow({
       windowId: "bw_a2", roomDayId: "rd_1", diarizeRunId: "run_new", planned: 1, calls: 1,
       model: "m", model_key: "wavlm", subfolder: null, cap_s: 30,
     })).rejects.toThrow();
     expect(await spanRuns("bw_a2"), "the delete cannot land without the row that describes what replaced them").toEqual(["run_new", "run_old"]);
-    expect(await emotionRow("bw_a2"), "and the window still reads as the earlier run — a consistent earlier state").toMatchObject({ state: "ok", scored: 1 });
+    expect(await emotionRow("bw_a2"), "and the window still reads as the earlier run — a consistent earlier state")
+      .toMatchObject({ state: "ok", scored: 1, diarize_run_id: "run_old" });
 
     // Lift the refusal: the same call now deletes the old run AND records the new one, together.
     pg.exec(`ALTER TABLE room_emotion_window DROP CONSTRAINT e31_refuse_ok;`);
@@ -166,7 +179,9 @@ describe.runIf(HAVE_DOCKER)("E31 A2 — the previous run's spans are never delet
     });
     expect(r.spans_removed, "the earlier run's one row went with the write that replaced it").toBe(1);
     expect(await spanRuns("bw_a2")).toEqual(["run_new"]);
-    expect(await emotionRow("bw_a2")).toMatchObject({ state: "ok", scored: 1 });
+    // And it MOVED: the pair of assertions is what makes the one above non-vacuous. If the row had read
+    // `run_new` all along, "still reads as the earlier run" would have been true of nothing.
+    expect(await emotionRow("bw_a2")).toMatchObject({ state: "ok", scored: 1, diarize_run_id: "run_new" });
   }, 300_000);
 });
 
@@ -251,5 +266,161 @@ describe.runIf(HAVE_DOCKER)("E31 A12 — closing a window and queueing it are on
     expect(stmt, "the close RETURNs the id").toMatch(/UPDATE bench_window SET state = 'closed'[\s\S]*?RETURNING id/);
     expect(stmt, "and the insert SELECTs FROM it, so it cannot run without it").toMatch(/INSERT INTO stt_subject_job[\s\S]*?SELECT 'bench_window', closed\.id[\s\S]*?FROM closed/);
     expect(stmt, "the enqueue never re-reads bench_window: it takes the id the close returned").not.toMatch(/FROM bench_window[\s\S]*?queued AS/);
+  });
+});
+
+/**
+ * ─── R61 — THE THREE COPIES OF THE CONFLICT RULE, PINNED ────────────────────────────────────────────
+ *
+ * THE MEASUREMENT THIS ANSWERS. `room_emotion_window` now has three writers, each with its own copy of the
+ * "rewrite when the stored row contradicts what these rows now say" rule. The Refuter dropped
+ * `segments_unscorable` from each comparison tuple in turn: from `recordEmotionWindow` it was CAUGHT, but
+ * from `finishEmotionWindow` and from `writeNoSegmentsWindow` it SURVIVED with the whole suite green. Two of
+ * three copies could drift with nothing noticing, and a prose comment was the only thing holding them.
+ *
+ * WHY NOT "THE THREE TUPLES MUST BE IDENTICAL". They must not be, and that is correct: each compares what
+ * its own statement writes. `finishEmotionWindow` nulls `stale_segments_run_id` unconditionally so has
+ * nothing to compare there; `writeNoSegmentsWindow` writes `segments_planned/scored/failed` as the literal
+ * `0`, so comparing them would be comparing a constant with itself. A test asserting sameness would be
+ * asserting something false.
+ *
+ * WHY NOT A HAND-WRITTEN LIST OF FIELDS. That list is a fourth copy, and it drifts like the other three.
+ *
+ * THE RULE, DERIVED FROM THE STATEMENTS THEMSELVES: a `segments_*` column is in the comparison tuple IF AND
+ * ONLY IF its value in that statement is not a literal constant. A value the statement computes — from the
+ * span rows or from a parameter — can contradict what is stored, so it must be compared; a value that is
+ * literally `0` on every execution cannot, so comparing it would be noise. That holds for all three copies
+ * today, is read off the source rather than remembered, and fails the moment any tuple loses a field it
+ * still computes.
+ */
+const STORE_SRC = readFileSync("lib/emotion/store.ts", "utf8");
+/** The three writers of room_emotion_window that carry a conflict rule. The narrow failure write has none. */
+const CONFLICT_COPIES = ["recordEmotionWindow", "finishEmotionWindow", "writeNoSegmentsWindow"] as const;
+
+/** The index of the `)` matching the `(` at `from`. */
+function matchParen(t: string, from: number): number {
+  let d = 0;
+  for (let i = from; i < t.length; i += 1) {
+    if (t[i] === "(") d += 1;
+    else if (t[i] === ")") { d -= 1; if (d === 0) return i; }
+  }
+  return -1;
+}
+/** Split on commas at paren depth 0, outside string literals and outside `${ … }` interpolations. */
+function splitTopLevel(t: string): string[] {
+  const out: string[] = [];
+  let d = 0, tpl = 0, inStr = false, cur = "";
+  for (let i = 0; i < t.length; i += 1) {
+    const c = t[i]!;
+    if (inStr) { cur += c; if (c === "'") { if (t[i + 1] === "'") cur += t[++i]; else inStr = false; } continue; }
+    if (c === "'") { inStr = true; cur += c; continue; }
+    if (c === "$" && t[i + 1] === "{") { tpl += 1; cur += "${"; i += 1; continue; }
+    if (tpl > 0 && c === "}") { tpl -= 1; cur += c; continue; }
+    if (tpl === 0 && c === "(") d += 1;
+    if (tpl === 0 && c === ")") d -= 1;
+    if (tpl === 0 && d === 0 && c === ",") { out.push(cur.trim()); cur = ""; continue; }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+/** Everything one of the three writers actually says, read off the file. */
+function readCopy(name: string) {
+  const start = STORE_SRC.indexOf(`function ${name}`);
+  expect(start, `${name} is a function in lib/emotion/store.ts`).toBeGreaterThan(-1);
+  const next = STORE_SRC.indexOf("\nexport ", start + 1);
+  const body = STORE_SRC.slice(start, next === -1 ? STORE_SRC.length : next);
+
+  const ins = body.indexOf("INSERT INTO room_emotion_window");
+  expect(ins, `${name} writes room_emotion_window`).toBeGreaterThan(-1);
+  const lp = body.indexOf("(", ins);
+  const rp = matchParen(body, lp);
+  const columns = splitTopLevel(body.slice(lp + 1, rp));
+
+  // The value list runs from the SELECT to the first FROM at paren depth 0.
+  const selAt = body.indexOf("SELECT", rp);
+  let d = 0, tpl = 0, inStr = false, fromAt = -1;
+  for (let i = selAt + 6; i < body.length; i += 1) {
+    const c = body[i]!;
+    if (inStr) { if (c === "'") { if (body[i + 1] === "'") i += 1; else inStr = false; } continue; }
+    if (c === "'") { inStr = true; continue; }
+    if (c === "$" && body[i + 1] === "{") { tpl += 1; i += 1; continue; }
+    if (tpl > 0 && c === "}") { tpl -= 1; continue; }
+    if (tpl === 0 && c === "(") d += 1;
+    if (tpl === 0 && c === ")") d -= 1;
+    if (tpl === 0 && d === 0 && /^from\b/i.test(body.slice(i, i + 5)) && !/\w/.test(body[i - 1] ?? " ")) { fromAt = i; break; }
+  }
+  expect(fromAt, `${name}'s inserted value list ends at a FROM`).toBeGreaterThan(-1);
+  const values = splitTopLevel(body.slice(selAt + 6, fromAt));
+
+  const lstart = body.indexOf("(room_emotion_window.");
+  expect(lstart, `${name} carries a comparison tuple`).toBeGreaterThan(-1);
+  const lend = matchParen(body, lstart);
+  const idf = body.indexOf("IS DISTINCT FROM", lend);
+  const rstart = body.indexOf("(EXCLUDED.", idf);
+  const rend = matchParen(body, rstart);
+  const left = [...body.slice(lstart, lend).matchAll(/room_emotion_window\.(\w+)/g)].map((m) => m[1]!);
+  const right = [...body.slice(rstart, rend).matchAll(/EXCLUDED\.(\w+)/g)].map((m) => m[1]!);
+  return { name, columns, values, left, right };
+}
+/** A value that is the same on every execution, so comparing it with itself would say nothing. */
+const isLiteralConstant = (v: string) => /^(0|NULL(::[\w ]+)?|'[^']*')$/i.test(v.trim());
+
+describe("E31 R61 — the three copies of the conflict rule cannot drift unseen (no database: it reads the .ts)", () => {
+  it("each copy's inserted columns and values line up, so the pairing below means what it says", () => {
+    for (const name of CONFLICT_COPIES) {
+      const c = readCopy(name);
+      expect(c.columns.length, `${name}: one value per column`).toBe(c.values.length);
+      expect(c.columns.length, `${name}: the column list parsed at all`).toBeGreaterThan(5);
+    }
+  });
+
+  it("a segments_* column is compared IF AND ONLY IF this statement computes it", () => {
+    for (const name of CONFLICT_COPIES) {
+      const c = readCopy(name);
+      const computed: string[] = [];
+      const constant: string[] = [];
+      c.columns.forEach((col, i) => {
+        if (!col.startsWith("segments_")) return;
+        (isLiteralConstant(c.values[i]!) ? constant : computed).push(col);
+      });
+      expect(computed.length, `${name}: it computes at least one segment count, or this rule is vacuous`).toBeGreaterThan(0);
+      // The direction that matters: a count this statement computes MUST be compared. Dropping one from the
+      // tuple while still writing it is exactly the drift that survived a whole green suite.
+      for (const col of computed) {
+        expect(c.left, `${name} computes ${col} but does not compare it — the stored row could contradict it and be left alone`).toContain(col);
+      }
+      // And the other direction, so the rule cannot be satisfied by comparing everything: a literal cannot
+      // differ from itself, and comparing it would make the tuple look complete while saying nothing.
+      for (const col of constant) {
+        expect(c.left, `${name} writes ${col} as a literal constant, so comparing it is noise`).not.toContain(col);
+      }
+    }
+  });
+
+  it("every copy compares the same fields on both sides of IS DISTINCT FROM", () => {
+    // A one-sided drift is a different shape of the same defect: the tuple still looks complete on the left.
+    for (const name of CONFLICT_COPIES) {
+      const c = readCopy(name);
+      expect(c.left.length, `${name}: the tuple parsed`).toBeGreaterThan(0);
+      expect(c.right, `${name}: the stored side and the incoming side compare the same fields, in the same order`).toEqual(c.left);
+    }
+  });
+
+  it("all three copies open with the same rule, and a fourth writer would have to declare itself", () => {
+    // The shared part IS identical across the three and is asserted as such: the two escape hatches that
+    // come before the tuple. If a copy loses one it stops rewriting rows it must rewrite.
+    for (const name of CONFLICT_COPIES) {
+      const c = readCopy(name);
+      const start = STORE_SRC.indexOf(`function ${name}`);
+      const next = STORE_SRC.indexOf("\nexport ", start + 1);
+      const body = STORE_SRC.slice(start, next === -1 ? STORE_SRC.length : next);
+      expect(body, `${name}: a stored FAILED row is always rewritten`).toMatch(/room_emotion_window\.state = 'failed'/);
+      expect(body, `${name}: a row belonging to another diarize run is always rewritten`).toMatch(/room_emotion_window\.diarize_run_id <> EXCLUDED\.diarize_run_id/);
+      expect(c.left[0], `${name}: every tuple leads with state`).toBe("state");
+    }
+    // The count is asserted so a FOURTH copy cannot appear without this test being updated to know about it.
+    const writers = [...STORE_SRC.matchAll(/INSERT INTO room_emotion_window/g)].length;
+    expect(writers, "four writers of room_emotion_window: the three conflict copies plus the narrow failure write, which deliberately has no tuple").toBe(4);
   });
 });
