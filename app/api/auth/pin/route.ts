@@ -102,6 +102,12 @@ export async function POST(req: NextRequest) {
 
   if (!pinOk) {
     const newState = await recordFailedAttempt(lockState, ip, userAgent);
+    // E31 R58 — FAIL CLOSED. The lockout counter did not move, so this attempt is not accounted for and the
+    // next one would arrive against the same count. Answering PIN_INVALID here is what let a brute force run
+    // un-counted while the clinician table was degraded: refuse instead, and say the system could not record
+    // it rather than implying anything about the pin.
+    if (newState.kind === "not_recorded")
+      return respondError("PIPELINE_FAILED", "Attempt could not be recorded; refusing the attempt");
     if (newState.kind === "disabled") return respondError("FORBIDDEN", "Account disabled after too many attempts");
     if (newState.kind === "locked")
       return respondError("PIN_LOCKED", newState.reason, { retry_after_seconds: newState.retry_after_seconds });
@@ -118,8 +124,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // PIN correct — reset counter + issue session
-  await recordSuccessfulAttempt(lockState, ip, userAgent);
+  // PIN correct — reset counter + issue session. E31 R58: the reset is a precondition of the session, not a
+  // best-effort afterthought. A correct pin that authenticates while the counter cannot be reset leaves the
+  // account's lockout state frozen, which is the same brute-force window seen from the other side.
+  const reset = await recordSuccessfulAttempt(lockState, ip, userAgent);
+  if (reset.kind === "not_recorded")
+    return respondError("PIPELINE_FAILED", "Attempt could not be recorded; refusing the attempt");
   const jwt = await signDoctorJwt({ doctor_id: doctor.id, slug: doctor.url_slug });
   await setDoctorCookie(jwt, doctor.url_slug);
 

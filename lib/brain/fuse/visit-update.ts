@@ -195,8 +195,14 @@ export async function auditVisitClinicianChange(input: {
     after: input.after,
     ...(input.note ? { note: input.note } : {}),
   };
-  // INTENT, before the act: if the process dies here, this line is what says an audit row was owed.
-  console.log("[visit-update] audit intended", JSON.stringify({ visit_id: input.visitId, action: "visit.set_clinician", ...meta }));
+  // INTENT, before the act: if the process dies here, this line is what says an audit row was OWED — which
+  // visit, and that a post-close change was being attempted. E31 R59: it does NOT carry the payload. The first
+  // version logged `meta` — clinician ids and the operator's free-text note — on EVERY post-close change, where
+  // that payload previously reached the log only on failure. The audit_log row is unchanged and still records
+  // everything; what shrinks is the console line, which is the copy nobody redacts.
+  console.log("[visit-update] audit intended", JSON.stringify({
+    visit_id: input.visitId, action: "visit.set_clinician", post_close: meta.post_close,
+  }));
   try {
     const rows = (await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
@@ -204,8 +210,13 @@ export async function auditVisitClinicianChange(input: {
               ${JSON.stringify(meta)}::jsonb)
       RETURNING id
     `) as Array<{ id: string }>;
-    const id = rows[0]?.id;
-    if (id === undefined || id === null) {
+    // E31 R59 — THE ROW, NOT THE FIELD. This used to test `id === undefined || id === null`, so a driver that
+    // answered with a row whose id was 0 or "" would have reported audited:true with nothing written. The
+    // column is bigserial and Postgres cannot produce that today, but this guard exists precisely for the
+    // driver class that answers oddly (R54), so it asks the question it means: did a row come back at all?
+    const row = rows[0];
+    const id = row?.id;
+    if (!row) {
       // A statement that reported success and returned nothing is not an audit row.
       console.warn(
         "[visit-update] audit_log insert returned no row (console fallback)",

@@ -27,6 +27,14 @@ type LockRow = { failed_pin_count: number; status: string; retry_after_seconds: 
 
 export type LockoutDecision =
   | { kind: "ok" }
+  /**
+   * E31 R58 — THE ATTEMPT COULD NOT BE RECORDED. Not "wrong pin" and not "locked": the lockout counter did not
+   * move, so the next attempt would arrive against the same count and the bound would never be reached. The
+   * caller FAILS CLOSED on this — a pin attempt the system cannot account for is refused, not answered
+   * PIN_INVALID, because answering PIN_INVALID is what let a brute force run un-counted while the clinician
+   * table was degraded.
+   */
+  | { kind: "not_recorded" }
   | { kind: "locked"; retry_after_seconds: number; reason: string }
   | { kind: "disabled" }
   | { kind: "rate_limited"; retry_after_seconds: number };
@@ -86,28 +94,34 @@ export async function recordFailedAttempt(
   ip: string | null,
   userAgent: string | null
 ): Promise<LockoutDecision> {
-  // E31 D3 — SECURITY. THE DECISION IS WHAT THE DATABASE DID, NEVER WHAT WE INTENDED.
+  // E31 D3 — SECURITY. Two writes, TWO STATEMENTS, on purpose (R58, PRD ADDENDUM 1 / D-5).
   //
-  // This used to be an INSERT and up to three UPDATEs, every one of them in its own try/catch, and then a
-  // decision computed from IN-MEMORY state: all three writes could fail and the caller was still told
-  // {kind:"locked"} or {kind:"disabled"}. A lockout the caller believes is enforced, that the row does not
-  // record, is not a lockout — the next attempt arrives against the old count and the old status.
+  // The first cure made these one CTE, and that was wrong for a reason no test caught: `pin_attempt` is TWO
+  // THINGS. It is the lockout's counter AND it is the rate limiter's evidence — preAttemptCheck counts these
+  // rows for its 1/sec and 60/hr gates. Binding the row to the clinician update put both in one failure domain,
+  // so a degraded clinician table took the attempt row down with it: measured at 12 wrong pins under an
+  // injected clinician failure, 0 rows survived and NOTHING throttled, where the two-statement shape kept 12
+  // rows and answered rate_limited. Atomicity that merges two readers' failure domains disarms one of them
+  // silently. The coupling-scope check (D-5) is why this stays uncollapsed.
   //
-  // ONE STATEMENT, and the answer comes out of its RETURNING. The attempt row and the clinician update land
-  // together or not at all, the update is conditional on the insert (EXISTS over the CTE), and the thresholds
-  // are evaluated by the database against the row's OWN count rather than against a number this process read
-  // earlier — which also closes the lost-update race two simultaneous wrong PINs used to have.
+  // What the first cure got RIGHT and keeps: the clinician update is ONE statement with RETURNING, every
+  // returned kind is read off the returned row, and the thresholds are evaluated by the database against the
+  // row's OWN count (c.failed_pin_count + 1), which closes the lost-update race between simultaneous attempts.
   //
-  // IF IT THROWS, OR IF IT MATCHES NO ROW, WE DO NOT CLAIM A LOCK. The attempt is still refused by the caller
-  // (kind "ok" falls through to PIN_INVALID); what we refuse to do is assert a lock nobody recorded.
+  // INDEPENDENT EVIDENCE FIRST, and it survives a clinician failure by construction: its own statement, its own
+  // catch. A limiter that cannot see the attempt is worse than a counter that cannot move.
+  try {
+    await sql`
+      INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
+      VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
+    `;
+  } catch (e) {
+    console.warn("[lockout] pin_attempt insert failed (the rate limiter loses this row):", e);
+  }
+
   let row: LockRow | undefined;
   try {
     const rows = (await sql`
-      WITH att AS (
-        INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
-        VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
-        RETURNING doctor_id
-      )
       UPDATE clinician c
          SET failed_pin_count = c.failed_pin_count + 1,
              locked_until = CASE
@@ -119,25 +133,21 @@ export async function recordFailedAttempt(
              status = CASE WHEN c.failed_pin_count + 1 >= 30 THEN 'locked' ELSE c.status END,
              updated_at = NOW()
        WHERE c.id = ${doctor.doctor_id}
-         AND EXISTS (SELECT 1 FROM att)
       RETURNING c.failed_pin_count AS failed_pin_count,
                 c.status AS status,
                 GREATEST(0, CEIL(EXTRACT(EPOCH FROM (c.locked_until - NOW()))))::int AS retry_after_seconds
     `) as LockRow[];
     row = rows[0];
   } catch (e) {
-    // The whole unit failed, so nothing was recorded: say so loudly and claim nothing.
-    console.error("[lockout] failed-attempt write failed — NO lock recorded, and none reported:",
+    console.error("[lockout] clinician UPDATE failed — the attempt is NOT counted, so the caller must refuse:",
       JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
-    return { kind: "ok" };
+    return { kind: "not_recorded" };
   }
 
   if (!row) {
-    // Zero rows: the clinician row was not there, or the insert produced nothing for the update to depend on.
-    // Either way no count moved, so there is no lock to report.
-    console.error("[lockout] failed-attempt write matched no row — NO lock recorded, and none reported:",
+    console.error("[lockout] clinician UPDATE matched no row — the attempt is NOT counted, so the caller must refuse:",
       JSON.stringify({ doctor_id: doctor.doctor_id }));
-    return { kind: "ok" };
+    return { kind: "not_recorded" };
   }
 
   // From here every branch is read off the row the database returned.
@@ -160,7 +170,7 @@ export async function recordSuccessfulAttempt(
   doctor: DoctorLockState,
   ip: string | null,
   userAgent: string | null
-): Promise<void> {
+): Promise<LockoutDecision> {
   try {
     await sql`
       INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
@@ -169,16 +179,29 @@ export async function recordSuccessfulAttempt(
   } catch (e) {
     console.warn("[lockout] pin_attempt insert failed:", e);
   }
+  // E31 R58 — THE RESET IS NOT BEST-EFFORT ANY MORE. A session handed out while the counter cannot be reset is
+  // the same hole from the other side: the clinician row keeps a stale count, and — worse — a correct pin used
+  // to authenticate while the lockout bookkeeping was failing, which is exactly the brute-force window this
+  // site exists to close. If the reset does not land, the caller refuses the login.
   try {
-    await sql`
+    const reset = (await sql`
       UPDATE clinician
          SET failed_pin_count = 0,
              locked_until = NULL,
              last_active_at = NOW(),
              updated_at = NOW()
        WHERE id = ${doctor.doctor_id}
-    `;
+      RETURNING id
+    `) as Array<{ id: string }>;
+    if (!reset[0]) {
+      console.error("[lockout] reset matched no row — refusing the session rather than issuing one uncounted:",
+        JSON.stringify({ doctor_id: doctor.doctor_id }));
+      return { kind: "not_recorded" };
+    }
   } catch (e) {
-    console.warn("[lockout] reset failed (ignoring):", e);
+    console.error("[lockout] reset failed — refusing the session rather than issuing one uncounted:",
+      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return { kind: "not_recorded" };
   }
+  return { kind: "ok" };
 }

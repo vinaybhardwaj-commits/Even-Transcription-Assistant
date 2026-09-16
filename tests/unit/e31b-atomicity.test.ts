@@ -194,7 +194,7 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
   const attempts = async (id: string) =>
     ((await pg.sql`SELECT count(*)::int AS n FROM pin_attempt WHERE doctor_id = ${id}`) as Array<{ n: number }>)[0]!.n;
 
-  it("THE WRITE FAILS: the caller is NOT told a lock was taken, and no attempt row is left behind either", async () => {
+  it("R58 — THE CLINICIAN WRITE FAILS: the ATTEMPT ROW STILL LANDS, no lock is claimed, and the answer is not_recorded", async () => {
     const { recordFailedAttempt } = await import("@/lib/lockout");
     const d = doctor("doc_fail", 4); // the next failure would be the 5th — a 15-minute lock, if it landed
     armTrigger("t_d3", "clinician", "UPDATE");
@@ -204,19 +204,71 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     } finally {
       disarm("t_d3", "clinician");
     }
-    // It must be IMPOSSIBLE to answer locked or disabled when no row changed.
-    expect(decision.kind, "no row moved, so no lock is claimed").toBe("ok");
+    // PRD ADDENDUM 1 / D-5. The attempt row is the RATE LIMITER's evidence as well as the lockout's counter, and
+    // the two readers are not in the same failure domain. Collapsed into one statement this measured 0 — the
+    // limiter blinded by a clinician failure — which is the regression this test exists to stop coming back.
+    expect(await attempts("doc_fail"), "the limiter's evidence survives a clinician failure").toBe(1);
+    // It must still be IMPOSSIBLE to answer locked or disabled when no row changed.
+    expect(decision.kind, "not a lock, and not a plain ok either: the attempt was not counted").toBe("not_recorded");
     expect(await clinicianRow("doc_fail"), "the count did not move").toMatchObject({ failed_pin_count: 4, status: "active" });
-    expect(await attempts("doc_fail"), "and the attempt row went back with it — one statement, one outcome").toBe(0);
   }, 300_000);
 
-  it("THE UPDATE MATCHES ZERO ROWS: the same answer — nothing recorded, nothing claimed", async () => {
+  it("R58 — THE LIMITER STILL THROTTLES while the clinician table is failing: 12 wrong pins, then rate_limited", async () => {
+    const { recordFailedAttempt, preAttemptCheck } = await import("@/lib/lockout");
+    const d = doctor("doc_rate_limited", 0);
+    armTrigger("t_d3_throttle", "clinician", "UPDATE");
+    let decisions: string[] = [];
+    try {
+      for (let i = 0; i < 12; i += 1) decisions.push((await recordFailedAttempt(d, "10.0.0.2", "agent")).kind);
+    } finally {
+      disarm("t_d3_throttle", "clinician");
+    }
+    // The Refuter's measurement, both halves: 12 attempt rows, and the gate closes on the next request. The
+    // one-statement shape measured 0 rows and `ok` — no throttle at all.
+    expect(await attempts("doc_rate_limited"), "twelve attempts, twelve rows").toBe(12);
+    expect(new Set(decisions), "every one of them refused to claim a lock it had not taken").toEqual(new Set(["not_recorded"]));
+    const gate = await preAttemptCheck(d, "10.0.0.2");
+    expect(gate.kind, "the 1/sec gate counts rows the clinician failure never touched").toBe("rate_limited");
+  }, 300_000);
+
+  it("R58 — A CORRECT PIN DOES NOT AUTHENTICATE while the reset cannot land", async () => {
+    const { recordSuccessfulAttempt } = await import("@/lib/lockout");
+    const d = doctor("doc_correct", 3);
+    armTrigger("t_d3_ok", "clinician", "UPDATE");
+    let outcome;
+    try {
+      outcome = await recordSuccessfulAttempt(d, "10.0.0.3", "agent");
+    } finally {
+      disarm("t_d3_ok", "clinician");
+    }
+    // The measured hole: a correct pin authenticated while attempts went uncounted, so an attacker who guessed
+    // right during degradation walked in and the counter stayed frozen behind them.
+    expect(outcome.kind, "the session is refused because the reset did not land").toBe("not_recorded");
+    expect(await clinicianRow("doc_correct"), "and the count really did not move").toMatchObject({ failed_pin_count: 3 });
+    expect(await attempts("doc_correct"), "the successful attempt is still evidence for the limiter").toBe(1);
+  }, 300_000);
+
+  it("R58 — THE CALLER FAILS CLOSED: the route refuses on not_recorded rather than answering PIN_INVALID", async () => {
+    // The route's own source, because driving it needs bcrypt, a doctor lookup and a cookie jar; the behaviour
+    // it maps to is measured by the three tests above.
+    const src = readFileSync("app/api/auth/pin/route.ts", "utf8");
+    expect(src, "the failed path refuses").toMatch(/newState\.kind === "not_recorded"[\s\S]{0,200}respondError\("PIPELINE_FAILED"/);
+    expect(src, "and so does the success path, before any session is issued").toMatch(/reset\.kind === "not_recorded"[\s\S]{0,200}respondError\("PIPELINE_FAILED"/);
+    const issueAt = src.lastIndexOf("signDoctorJwt"); // the call site, not the import
+    const refuseAt = src.indexOf('reset.kind === "not_recorded"');
+    expect(refuseAt).toBeGreaterThan(-1);
+    expect(refuseAt, "the refusal comes BEFORE the session is minted").toBeLessThan(issueAt);
+  });
+
+  it("R58 — THE UPDATE MATCHES ZERO ROWS: not_recorded, so the caller refuses rather than guessing", async () => {
     const { recordFailedAttempt } = await import("@/lib/lockout");
-    // A clinician id that does not exist. In memory this attempt looks like the 30th, which the old code would
-    // have answered {kind:"disabled"} for, from a count it had computed itself.
+    // A clinician id that does not exist. In memory this attempt looks like the 30th, which the ORIGINAL code
+    // answered {kind:"disabled"} for, from a count it had computed itself — a lock claimed over a row that was
+    // never touched. Nothing was counted here either, so the honest answer is that it was not recorded.
     const ghost = { doctor_id: "doc_ghost", failed_pin_count: 29, status: "active", locked_until: null } as never;
     const decision = await recordFailedAttempt(ghost, "10.0.0.1", "agent");
-    expect(decision.kind, "in-memory state said disabled; the database said nothing, so the answer is nothing").toBe("ok");
+    expect(decision.kind, "no row moved: not a lock, and not a silent pass either").toBe("not_recorded");
+    expect(await attempts("doc_ghost"), "the attempt itself is still recorded for the limiter").toBe(1);
   }, 300_000);
 
   it("THE IN-MEMORY COUNT IS STALE: the answer is the ROW's, not the one this process was carrying", async () => {
@@ -298,6 +350,39 @@ describe.runIf(HAVE_DOCKER)("E31 D1 — AUDIT: `audited` means the audit row exi
       H.sql = real; log.mockRestore(); warn.mockRestore();
     }
     expect(outcome, "no row, so not audited — and it says why").toMatchObject({ audited: false, audit: "failed", error: "insert_returned_no_row" });
+  }, 300_000);
+
+  it("R59 — a row whose id is FALSY is still a row, and a MISSING row is still not audited", async () => {
+    const { auditVisitClinicianChange } = await import("@/lib/brain/fuse/visit-update");
+    const real = H.sql!;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The guard asks whether a ROW came back, not whether a field looks truthy. A driver that answers with
+    // {id: 0} — or {id: ""} — has written a row, and calling that "failed" would be as wrong as the reverse.
+    // Postgres cannot produce it from a bigserial today; the guard exists for the driver class that answers
+    // oddly, which is the same class R54 was about.
+    H.sql = ((strings: TemplateStringsArray, ...values: unknown[]) =>
+      strings.join("?").includes("INSERT INTO audit_log") ? Promise.resolve([{ id: 0 }]) : real(strings, ...values)) as typeof real;
+    let zero;
+    try { zero = await auditVisitClinicianChange(input("visit_zero")); } finally { H.sql = real; }
+    expect(zero, "a row came back, so it is audited").toMatchObject({ audited: true, audit: "written", audit_id: "0" });
+    log.mockRestore(); warn.mockRestore();
+  }, 300_000);
+
+  it("R59 — the intent line names the visit, never the clinician ids or the operator's note", async () => {
+    const { auditVisitClinicianChange } = await import("@/lib/brain/fuse/visit-update");
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    await auditVisitClinicianChange({ ...input("visit_quiet"), note: "the operator's own words" });
+    log.mockRestore();
+    const intent = lines.find((l) => l.includes("audit intended"))!;
+    expect(intent, "it says WHICH visit, and that a post-close change was attempted").toContain("visit_quiet");
+    expect(intent, "and not who").not.toContain("doc_x");
+    expect(intent, "and not the note").not.toContain("the operator's own words");
+    // What audit_log holds is unchanged: the row still carries everything.
+    const row = ((await pg.sql`SELECT metadata_json FROM audit_log WHERE target_id = 'visit_quiet'`) as Array<{ metadata_json: Record<string, unknown> }>)[0]!;
+    expect(JSON.stringify(row.metadata_json), "the audit row still records the payload in full").toContain("doc_x");
+    expect(JSON.stringify(row.metadata_json)).toContain("the operator's own words");
   }, 300_000);
 
   it("THE INSERT LANDS: audited, with the id of the row that exists", async () => {
