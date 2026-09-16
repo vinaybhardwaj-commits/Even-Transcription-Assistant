@@ -279,7 +279,7 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     }
   };
   const auditRowsFor = async (id: string) =>
-    ((await pg.sql`SELECT count(*)::int AS n FROM audit_log WHERE target_id = ${id} AND action = 'auth.pin_reset_not_recorded'`) as Array<{ n: number }>)[0]!.n;
+    ((await pg.sql`SELECT count(*)::int AS n FROM audit_log WHERE target_id = ${id} AND action = 'auth.pin_reset_write_failed'`) as Array<{ n: number }>)[0]!.n;
 
   it("R63 (a) — WRONG PIN, COUNTER WRITE FAILS: the route REFUSES, claims no lock, issues no session, and logs the FAILURE line", async () => {
     const { LOG_FAILED_ATTEMPT_NOT_RECORDED, LOG_RESET_NOT_RECORDED } = await import("@/lib/lockout");
@@ -316,6 +316,13 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     expect(lines.some((l) => l.includes(LOG_RESET_NOT_RECORDED)), "logged loudly, on the success path's own line").toBe(true);
     expect(lines.some((l) => l.includes(LOG_FAILED_ATTEMPT_NOT_RECORDED)), "and not on the failure path's").toBe(false);
     expect(await auditRowsFor("doc_r63_right"), "the audit path was available, so the row exists").toBe(1);
+    // R64 — the row's identifiers are the live convention's, literally, and its metadata is ids, counts and flags.
+    const row = ((await pg.sql`SELECT actor_type, actor_id, action, target_type, target_id, metadata_json FROM audit_log WHERE target_id = 'doc_r63_right'`) as Array<Record<string, unknown>>)[0];
+    expect(row).toEqual({
+      actor_type: "system", actor_id: "auth:pin-lockout-v1", action: "auth.pin_reset_write_failed",
+      target_type: "doctor", target_id: "doc_r63_right",
+      metadata_json: { reason: "threw", stale_failed_pin_count: 3 },
+    });
   }, 300_000);
 
   it("R63 (b) — CORRECT PIN, RESET WRITE FAILS AND AUDIT IS DOWN TOO: still AUTHENTICATES, and says it could not audit", async () => {
@@ -325,6 +332,22 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     expect(H.signDoctorJwt).toHaveBeenCalledTimes(1);
     expect(await auditRowsFor("doc_r63_noaudit")).toBe(0);
     expect(lines.some((l) => l.includes('"audited":false')), "the route's line says the audit did not land").toBe(true);
+  }, 300_000);
+
+  it("R64 — WRONG PIN, pin_attempt ROW FAILS BUT THE COUNTER LANDS: still PIN_INVALID, not a refusal", async () => {
+    // The counter is the security-bearing record and it moved, so the lockout still bounds brute force. Only the
+    // rate limiter lost a data point. Tightening this into a refusal re-creates lockout-during-degradation.
+    const slug = routeDoctor("doc_r64_limiter", 1);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    H.signDoctorJwt.mockClear();
+    armTrigger("t_r64_attempt", "pin_attempt", "INSERT");
+    let out;
+    try { out = await callPin(slug, "0000"); } finally { disarm("t_r64_attempt", "pin_attempt"); warn.mockRestore(); }
+    expect(out.status, "answered as a wrong pin").toBe(401);
+    expect(out.body.error?.code).toBe("PIN_INVALID");
+    expect(await clinicianRow("doc_r64_limiter"), "because the counter did land").toMatchObject({ failed_pin_count: 2 });
+    expect(await attempts("doc_r64_limiter"), "and only the limiter's row is missing").toBe(0);
+    expect(H.signDoctorJwt).not.toHaveBeenCalled();
   }, 300_000);
 
   it("R63 — recordSuccessfulAttempt: reset_not_recorded when the write fails, reset when it lands, and never a refusal", async () => {

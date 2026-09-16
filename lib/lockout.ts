@@ -37,7 +37,14 @@ export type DoctorLockState = {
  */
 export const LOG_FAILED_ATTEMPT_NOT_RECORDED = "[lockout] FAILED ATTEMPT NOT RECORDED — refusing";
 export const LOG_RESET_NOT_RECORDED = "[lockout] CORRECT PIN, RESET NOT RECORDED — allowing the login";
-export const AUDIT_RESET_NOT_RECORDED = "auth.pin_reset_not_recorded";
+/**
+ * R64 — the audit row follows the live audit_log convention: actor namespaced and versioned (mcp:operator-v1),
+ * action dotted and named after its precedent (install.poll_write_failed), target_type a snake_case noun,
+ * metadata ids, counts and flags only. Column names are those of audit_log in db/migrations/0001_init.sql, which
+ * no later migration alters; lib/jobs/audit-read.ts selects actor_id and renders it as `actor`.
+ */
+export const AUDIT_ACTOR_PIN_LOCKOUT = "auth:pin-lockout-v1";
+export const AUDIT_PIN_RESET_WRITE_FAILED = "auth.pin_reset_write_failed";
 
 /** What recordSuccessfulAttempt reports. Deliberately NOT a LockoutDecision: it carries no refusal. */
 export type ResetOutcome =
@@ -140,6 +147,10 @@ export async function recordFailedAttempt(
       VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
     `;
   } catch (e) {
+    // R64 — DELIBERATELY NOT A REFUSAL. If this row fails but the clinician counter below lands, the wrong pin is
+    // still answered PIN_INVALID. The counter is the security-bearing record: it landed, so brute force is still
+    // bounded by the lockout. Only the rate limiter loses one data point, and the limiter is defence in depth,
+    // not the bound. Refusing here would re-create lockout-during-degradation (R63) for no security gain.
     console.warn("[lockout] pin_attempt insert failed (the rate limiter loses this row):", e);
   }
 
@@ -230,7 +241,7 @@ export async function recordSuccessfulAttempt(
   try {
     const rows = (await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', 'pin_lockout', ${AUDIT_RESET_NOT_RECORDED}, 'doctor', ${doctor.doctor_id},
+      VALUES ('system', ${AUDIT_ACTOR_PIN_LOCKOUT}, ${AUDIT_PIN_RESET_WRITE_FAILED}, 'doctor', ${doctor.doctor_id},
               ${JSON.stringify({ reason: failure.reason, stale_failed_pin_count: doctor.failed_pin_count })}::jsonb)
       RETURNING id
     `) as Array<{ id: unknown }>;
