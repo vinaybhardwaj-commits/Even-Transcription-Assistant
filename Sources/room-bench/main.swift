@@ -9,6 +9,8 @@ import Glibc
 
 let usage = """
 usage:
+  room-bench devices
+      List the USB capture devices S5 can resolve (usb:VID:PID) and each one's capture volume. Read-only.
   room-bench enrol --origin https://www.evenscribe.app --token-file PATH [--device-uid usb:VVVV:PPPP] [--root DIR]
       Exchange a bootstrap token for a room session (POST /api/room-recorder/enrol) and write room-session.json, then
       config.json. The token is read from a file (or `--token-file -` for stdin) and never from the command line, where
@@ -50,6 +52,15 @@ func readToken(_ path: String) -> String {
 }
 
 switch arguments.first {
+case "devices":
+    // Read-only: what S5 can resolve now, and each device's capture volume reading. Writes nothing to any mixer.
+    let enumerator = ALSADeviceEnumerator()
+    let volume = ALSAVolumeControl(enumerator: enumerator)
+    for device in enumerator.usbCaptureDevices() {
+        let reading = volume.inputVolume(uid: device.uid)
+        let level = reading.map { r in r.value.map { InstallPollFields.fourDecimals($0) } ?? "unreadable" } ?? "no control"
+        print("\(device.uid)  \(device.alsaName)  \(device.name)  input_volume=\(level) settable=\(reading?.settable.description ?? "-")")
+    }
 case "enrol":
     checkOptions(["--origin", "--token-file", "--device-uid", "--root"])
     guard let rawOrigin = option("--origin"), let tokenPath = option("--token-file") else { die(usage) }
