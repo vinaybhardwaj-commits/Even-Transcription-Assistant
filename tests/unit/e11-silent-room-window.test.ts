@@ -26,6 +26,12 @@ const DB = vi.hoisted(() => ({
   subjectDone: 0,
   routingReads: 0,
   runInserts: 0,
+  /** E18 — the silence verdicts the drain wrote, with the bound values it wrote them from. */
+  silenceWrites: [] as unknown[][],
+  /** R52 — the window's state at the instant the verdict row was written. */
+  stateAtVerdict: null as string | null,
+  /** R52 — how many verdict rows existed at the instant the state moved to 'silent'. */
+  verdictsAtSilentState: null as number | null,
   lastError: null as string | null,
 }));
 const ROUTER = vi.hoisted(() => ({ submits: 0 }));
@@ -62,11 +68,16 @@ vi.mock("@/lib/db", () => {
     if (q.includes("FROM bench_chunk")) return ROOM_CHUNKS;
     if (q.includes("UPDATE bench_window SET state = 'transcribing'")) { DB.windowState = "transcribing"; return [{ id: "bw_1" }]; }
     if (q.includes("UPDATE bench_window SET state = 'transcribed'")) { DB.windowState = "transcribed"; return []; }
+    // E18 — a silent window settles in its OWN state; the harness records which one the drain actually wrote.
+    if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.verdictsAtSilentState = DB.silenceWrites.length; DB.windowState = "silent"; return []; }
     if (q.includes("UPDATE bench_window SET state = 'closed'")) { DB.windowState = "closed"; return []; }
     if (q.includes("UPDATE bench_window SET state = 'failed'")) { DB.windowState = "failed"; return []; }
     if (q.includes("FROM stt_routing")) { DB.routingReads += 1; return [{ engine_id: "route" }]; }
     if (q.includes("FROM stt_engine")) return [{ enabled: true }];
     if (q.includes("INSERT INTO transcription_run")) { DB.runInserts += 1; return []; }
+    if (q.includes("INSERT INTO bench_window_silence")) { DB.stateAtVerdict = DB.windowState; DB.silenceWrites.push(v); return []; }
+    // The evidence read: this fixture's chunks carry no meter, which is the production shape.
+    if (q.includes("count(*) FILTER (WHERE c.peak_level")) return [{ total: 2, levelled: 0, peak: null, avg: null }];
     // recordFailure binds `last_error` first; keep it so a test can say WHICH failure cost the attempt.
     if (q.includes("SET attempts = attempts + 1")) { DB.attemptWrites += 1; DB.attempts += 1; DB.lastError = String(v[0]); return [{ attempts: DB.attempts }]; }
     if (q.includes("UPDATE stt_subject_job SET state = 'done'")) { DB.subjectDone += 1; return []; }
@@ -145,16 +156,23 @@ async function driveRoom(maxSteps = 12, stopAt?: string) {
 const SILENT = () => ({ ok: false, error: EMPTY_TRANSCRIPT, latency_ms: 3_900, attempts: 1 });
 
 beforeEach(() => {
-  Object.assign(DB, { mode: "room", windowState: "transcribing", attempts: 0, attemptWrites: 0, subjectDone: 0, routingReads: 0, runInserts: 0, lastError: null });
+  Object.assign(DB, { mode: "room", windowState: "transcribing", attempts: 0, attemptWrites: 0, subjectDone: 0, routingReads: 0, runInserts: 0, silenceWrites: [], stateAtVerdict: null, verdictsAtSilentState: null, lastError: null });
   ROUTER.submits = 0; WHISPER.calls = 0; WHISPER.value = SILENT(); CUES.calls = []; CUES.answer = null; CUES.real = false; CUES.realAnswers = [];
   process.env.BRAIN_SERVICE_TOKEN = "tok";
 });
 
 describe("V1 — a window whose Whisper call is a 200 with no text finishes transcribed, as silence", () => {
-  it("one stt_silence, a complete marker with segment_count 0, zero turns, window transcribed", async () => {
+  it("one stt_silence, a complete marker with segment_count 0, zero turns, window SILENT (E18: never transcribed)", async () => {
     const r = await driveRoom();
     expect(r.error, "a quiet room must not fail the job").toBeUndefined();
-    expect(DB.windowState).toBe("transcribed");
+    // E18 R1.1 — settled, but in its own state: "we heard nothing" is not "we heard something".
+    expect(DB.windowState).toBe("silent");
+    // E18 R1.2 — and the verdict carried its evidence, written on the way through, not left to a later phase.
+    expect(DB.silenceWrites, "one verdict row, written where the verdict was made").toHaveLength(1);
+    const ev = DB.silenceWrites[0]!;
+    expect(ev, "the window, its day and the engine that answered").toEqual(expect.arrayContaining(["bw_1", "rd_1", "whisper"]));
+    expect(ev, "the recorder sent no level, and the service reported no VAD flags — both SAID, not guessed")
+      .toEqual(expect.arrayContaining(["absent", "unreported"]));
     expect(DB.subjectDone, "the subject row is settled done").toBe(1);
     expect(CUES.calls, "the window is written exactly once").toHaveLength(1);
     const { turns, marker } = CUES.calls[0]!;
@@ -163,6 +181,44 @@ describe("V1 — a window whose Whisper call is a 200 with no text finishes tran
     expect(marker.type).toBe("stt_window");
     expect(marker.payload).toMatchObject({ complete: true, segment_count: 0 });
     expect(r.result).toMatchObject({ silent_window: true, segment_count: 0, run_id: null });
+  });
+});
+
+describe("R52 — the verdict row is written BEFORE the state moves", () => {
+  /**
+   * AN ORDER NOTHING ELSE ENFORCES, AND WHAT DEPENDS ON IT.
+   *
+   * `recordSilenceVerdict` runs in `segment`; `state = 'silent'` is written later, in `roomWindowFinish`.
+   * Nothing in the code couples them — they are two phases of a job machine, and a reader reordering them
+   * would break no type and fail no other test. What breaks is downstream and silent: a window resting in
+   * `silent` with NO evidence row has no `decided_at`, so E18's as-of bound falls back to `closed_at`, which
+   * precedes any later verdict, and the window slips under every as_of an operator can pass. The Refuter
+   * measured that at preview 1, moved 2 on a hand-made row. It is unreachable today ONLY because of this
+   * order: a crash between the two writes leaves a row without a silent state, never a silent state without
+   * a row. R38 exists because the population is real historically; this is what stops it growing.
+   *
+   * Tested rather than left as a comment because the order IS observable from here: this fixture is the
+   * drain's own database, so it can be asked what the state was when the verdict landed and how many
+   * verdicts existed when the state moved. Both comments are at the two lines as well (search: "R52").
+   */
+  it("at the instant the state became 'silent', the verdict row already existed — and not the other way round", async () => {
+    const r = await driveRoom();
+    expect(r.error).toBeUndefined();
+    expect(DB.windowState, "the window settled silent, so both writes happened").toBe("silent");
+    expect(DB.silenceWrites, "and there is exactly one verdict to order against").toHaveLength(1);
+
+    expect(DB.verdictsAtSilentState, "R52: the state did not move until a verdict row existed").toBe(1);
+    expect(DB.stateAtVerdict, "R52: and the verdict was written while the window was still transcribing").toBe("transcribing");
+  });
+
+  it("a read that never reached a verdict never reaches the silent state either — the order holds on the failing branch too", async () => {
+    // cues_refused: the silence could not be written, so no verdict row and no state move. The pair is
+    // all-or-nothing in this direction as well, which is what makes "silent implies a row" true.
+    CUES.answer = { ok: false, error: "brain_unreachable" };
+    await driveRoom();
+    expect(DB.silenceWrites, "no verdict was recorded").toHaveLength(0);
+    expect(DB.verdictsAtSilentState, "and the state never moved to silent").toBeNull();
+    expect(DB.windowState, "the window went back to the queue instead").toBe("closed");
   });
 });
 
@@ -185,7 +241,7 @@ describe("V2 — a real Whisper failure still fails whisper_unavailable, and sti
 describe("V3 — the silent branch consumes no attempt", () => {
   it("two consecutive silent drains of the same window leave the attempt counter at 0", async () => {
     await driveRoom();
-    expect(DB.windowState).toBe("transcribed");
+    expect(DB.windowState).toBe("silent");
     DB.windowState = "transcribing"; // a forced re-drain claims it again
     const second = await driveRoom();
     expect(second.error).toBeUndefined();
@@ -232,6 +288,9 @@ describe("E11(b)/(e) — a silence that could not be written is NOT a finished r
           { replace: false, types: ["stt_window"] },
         ]);
         expect(r.error).toBe("room_window_failed: cues_refused");
+        // E18 — NO VERDICT WITHOUT A RECORD OF IT. The silence never landed in the day, so nothing may claim
+        // the window was adjudicated silent: the evidence write sits AFTER the cue gate, not before it.
+        expect(DB.silenceWrites, "a refused silence records no verdict").toHaveLength(0);
         expect(r.visited).toEqual(["prepare", "segment"]);
         expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
         expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
@@ -338,6 +397,26 @@ describe("F1 (B3) — a spoken window with EXACTLY ONE turn, rolled back, is NOT
       vi.unstubAllGlobals();
     }
   }, 20_000);
+});
+
+describe("E18 — a silent verdict can still be argued with, one window at a time", () => {
+  // Naming the state must not take away the escape hatch that existed before it. `force` reached a settled
+  // window when the only settled states were `transcribed` and `failed`; a silent window is settled too, and an
+  // operator who disagrees with the verdict on ONE window must still be able to say so — which is a different
+  // thing from the bulk path E18 builds for the whole backlog.
+  it("force re-drains a window resting in `silent`; without force it is left alone", async () => {
+    const { drainRoomWindow } = await import("@/lib/stt/room-drain");
+    const actor = { actor: "admin_1", via: "admin_route" } as never;
+
+    DB.windowState = "silent";
+    const left = await drainRoomWindow("bw_1", "https://x.test", actor);
+    expect(left.step, "a settled window is not re-run by an ordinary pass").toBe("wrong_state");
+    expect(left.detail).toBe("silent");
+
+    DB.windowState = "silent";
+    const forced = await drainRoomWindow("bw_1", "https://x.test", { ...(actor as object), force: true } as never);
+    expect(forced.step, "with force it goes round again, exactly as a transcribed window does").not.toBe("wrong_state");
+  });
 });
 
 describe("E11(c) — silent_window is SAID on a spoken result, never inherited", () => {
@@ -474,7 +553,7 @@ type SiteClass = "window_reader" | "not_a_window_reader";
 const SITES: Array<{ file: string; counts: Record<string, number>; role: SiteClass; why: string }> = [
   { file: "lib/mcp/tools/bench.ts", counts: { transcribeWithWhisper: 2, whisperAdapter: 4, adapterFor: 1, ADAPTERS: 2 }, role: "window_reader", why: "sync tool scribe_transcribe_range — K5 in whisperNotOkAnswer; ADAPTERS only lists engine keys" },
   { file: "lib/jobs/kinds/transcribe-range.ts", counts: { transcribeWithWhisper: 2 }, role: "window_reader", why: "transcribe_range job — K5 in transcribeStep" },
-  { file: "lib/stt/room-drain.ts", counts: { transcribeWithWhisper: 3, whisperAdapter: 9, adapterFor: 2 }, role: "window_reader", why: "room_window job — K5 in roomWindowSegment (E11); the probe read may fail harmlessly" },
+  { file: "lib/stt/room-drain.ts", counts: { transcribeWithWhisper: 3, whisperAdapter: 10, adapterFor: 2 }, role: "window_reader", why: "room_window job — K5 in roomWindowSegment (E11); the probe read may fail harmlessly" },
   { file: "lib/whisper.ts", counts: { transcribeWithWhisper: 1, inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "the client itself — it PRODUCES EMPTY_TRANSCRIPT" },
   { file: "lib/stt/adapters/whisper.ts", counts: { transcribeWithWhisper: 2, whisperAdapter: 1, inference: 1, WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "engine adapter; the room path reaches it only for a window with speech, and its health() is a GET" },
   { file: "lib/stt/registry.ts", counts: { whisperAdapter: 2, adapterFor: 1, ADAPTERS: 2 }, role: "not_a_window_reader", why: "the registry that defines ADAPTERS and maps a key to an adapter" },

@@ -697,7 +697,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     }
   }
 
-  const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+  const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, silent: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
   const out = rooms.map((room) => {
     const mine = byRoom.get(room.id) ?? [];
     const brain = brainByRoom.get(room.id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };

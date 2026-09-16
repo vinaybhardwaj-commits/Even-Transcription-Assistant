@@ -29,6 +29,8 @@ vi.mock("@/lib/db", () => ({
                 started_at: new Date(0).toISOString(), ended_at: new Date(900_000).toISOString(), upload_state: "uploaded" }];
     if (q.includes("UPDATE bench_window SET state = 'transcribing'")) { DB.windowState = "transcribing"; return [{ id: "bw_1" }]; }
     if (q.includes("UPDATE bench_window SET state = 'transcribed'")) { DB.windowState = "transcribed"; return []; }
+    // E18 — a silent window settles in its OWN state; the harness records which one the drain actually wrote.
+    if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.windowState = "silent"; return []; }
     if (q.includes("FROM stt_routing")) return [{ engine_id: DB.routing }];
     if (q.includes("FROM stt_engine")) return [{ enabled: true }];
     if (q.includes("DELETE FROM transcription_run")) { DB.deletes += 1; return []; }
