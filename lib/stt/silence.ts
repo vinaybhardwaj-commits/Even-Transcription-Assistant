@@ -177,7 +177,8 @@ export async function recordSilenceVerdict(v: SilenceVerdict): Promise<void> {
       answer_json        = EXCLUDED.answer_json,
       reopened_at        = NULL,
       reopened_batch     = NULL,
-      reopened_reason    = NULL
+      reopened_reason    = NULL,
+      reopened_detector  = NULL
   `;
 }
 
@@ -245,7 +246,90 @@ export async function listSilentWindows(f: SilenceFilter = {}): Promise<SilentWi
   `) as SilentWindowRow[];
 }
 
-export type ReopenResult = { batch: string; reopened: number; window_ids: string[] };
+export type ReopenResult = { batch: string; detector: string; reopened: number; window_ids: string[] };
+
+/**
+ * R31.2 — WHAT A BULK RUN WOULD DO, WITHOUT DOING IT.
+ *
+ * An empty room and a dead mic produce the same row, and the third shape — no level at all — is the real
+ * production shape. A bulk operation over a population we have just admitted we cannot classify is exactly the
+ * thing that must be previewable. So this is what the operator surface answers by default, and doing the work
+ * takes a second, explicit argument.
+ *
+ * It reports the size of the set, the span of days it covers, how many rooms it touches, and the distribution of
+ * the evidence those windows hold — because "re-adjudicate 4,000 windows" and "re-adjudicate 4,000 windows of
+ * which none carries an audio level" are different decisions.
+ */
+export type SilencePreview = {
+  windows: number;
+  rooms: number;
+  first_start_ms: number | null;
+  last_start_ms: number | null;
+  evidence: { level_recorder: number; level_absent: number; no_evidence_row: number; vad_reported: number; vad_unreported: number };
+  by_verdict: Array<{ verdict: string | null; n: number }>;
+  by_engine: Array<{ engine: string | null; n: number }>;
+};
+
+export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promise<SilencePreview> {
+  const rows = (await sql`
+    WITH picked AS (
+      SELECT w.id, w.start_ms, s.room_id, z.window_id AS ev, z.audio_level_source, z.vad_params_source, z.verdict, z.engine
+        FROM bench_window w
+        JOIN bench_session s ON s.id = w.session_id
+        LEFT JOIN bench_window_silence z ON z.window_id = w.id
+       WHERE w.state = ${SILENT_STATE}
+         AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
+         AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
+         AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
+         AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
+         AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+    )
+    SELECT count(*)::int AS windows,
+           count(DISTINCT room_id)::int AS rooms,
+           min(start_ms)::bigint AS first_start_ms,
+           max(start_ms)::bigint AS last_start_ms,
+           count(*) FILTER (WHERE audio_level_source = 'recorder')::int AS level_recorder,
+           count(*) FILTER (WHERE audio_level_source = 'absent')::int AS level_absent,
+           count(*) FILTER (WHERE ev IS NULL)::int AS no_evidence_row,
+           count(*) FILTER (WHERE vad_params_source = 'service')::int AS vad_reported,
+           count(*) FILTER (WHERE vad_params_source = 'unreported')::int AS vad_unreported,
+           jsonb_agg(DISTINCT jsonb_build_object('verdict', verdict)) AS verdicts,
+           jsonb_agg(DISTINCT jsonb_build_object('engine', engine)) AS engines
+      FROM picked
+  `) as Array<Record<string, unknown>>;
+  const r = rows[0] ?? {};
+  const n = (v: unknown) => Number(v ?? 0) || 0;
+  const counts = (await sql`
+    SELECT z.verdict, z.engine, count(*)::int AS n
+      FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+      LEFT JOIN bench_window_silence z ON z.window_id = w.id
+     WHERE w.state = ${SILENT_STATE}
+       AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
+       AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
+       AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
+       AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
+       AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+     GROUP BY z.verdict, z.engine
+     ORDER BY count(*) DESC
+  `) as Array<{ verdict: string | null; engine: string | null; n: number }>;
+  const roll = (key: "verdict" | "engine") => {
+    const m = new Map<string | null, number>();
+    for (const c of counts) m.set(c[key], (m.get(c[key]) ?? 0) + Number(c.n ?? 0));
+    return [...m].map(([k, v]) => ({ [key]: k, n: v })) as never;
+  };
+  return {
+    windows: n(r.windows), rooms: n(r.rooms),
+    first_start_ms: r.first_start_ms === null || r.first_start_ms === undefined ? null : n(r.first_start_ms),
+    last_start_ms: r.last_start_ms === null || r.last_start_ms === undefined ? null : n(r.last_start_ms),
+    evidence: {
+      level_recorder: n(r.level_recorder), level_absent: n(r.level_absent), no_evidence_row: n(r.no_evidence_row),
+      vad_reported: n(r.vad_reported), vad_unreported: n(r.vad_unreported),
+    },
+    by_verdict: roll("verdict"),
+    by_engine: roll("engine"),
+  };
+}
 
 /**
  * R1.3 — HAND THE WHOLE SET BACK, in one statement.
@@ -257,13 +341,17 @@ export type ReopenResult = { batch: string; reopened: number; window_ids: string
  *
  * ONE STATEMENT. The window move and the ledger stamp are one CTE, so a window can never be re-offered with
  * nothing recording why, and a stamp can never name a window that was not moved. `reason` is required: a bulk
- * re-adjudication nobody has to justify is how the last unexplained backlog happened.
+ * re-adjudication nobody has to justify is how the last unexplained backlog happened. `detector` is required for
+ * the same reason one step further on (R31.3): a second pass with a better detector must be distinguishable from
+ * the first, or we have overwritten one verdict with another and lost the fact that we did.
  */
-export async function reopenSilentWindows(f: SilenceFilter & { batch: string; reason: string }): Promise<ReopenResult> {
+export async function reopenSilentWindows(f: SilenceFilter & { batch: string; reason: string; detector: string }): Promise<ReopenResult> {
   const batch = String(f.batch ?? "").trim();
   const reason = String(f.reason ?? "").trim();
+  const detector = String(f.detector ?? "").trim();
   if (!batch) throw new Error("reopenSilentWindows: a batch id is required — the set must be nameable afterwards");
   if (!reason) throw new Error("reopenSilentWindows: a reason is required — a re-adjudication nobody justified is not a mechanism");
+  if (!detector) throw new Error("reopenSilentWindows: a detector is required — a second pass must be distinguishable from the first");
   const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
     WITH picked AS (
@@ -287,13 +375,14 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
     ),
     stamped AS (
       UPDATE bench_window_silence z
-         SET reopened_at = NOW(), reopened_batch = ${batch}::text, reopened_reason = ${reason}::text
+         SET reopened_at = NOW(), reopened_batch = ${batch}::text, reopened_reason = ${reason}::text,
+             reopened_detector = ${detector}::text
        WHERE z.window_id IN (SELECT id FROM moved)
       RETURNING z.window_id
     )
     SELECT id FROM moved ORDER BY id
   `) as Array<{ id: string }>;
-  return { batch, reopened: rows.length, window_ids: rows.map((r) => r.id) };
+  return { batch, detector, reopened: rows.length, window_ids: rows.map((r) => r.id) };
 }
 
 /** How many silent windows are waiting on a second opinion, and how many have had one. */

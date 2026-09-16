@@ -17,6 +17,7 @@
  * all. These tests pin that limit so that no later reader mistakes a recorded number for an adjudicated cause.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
@@ -176,6 +177,9 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'absent', 0.01, 'unreported');`)).toThrow(/bench_window_silence_level_chk/);
     expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, verdict, engine, audio_level_source, vad_params_source)
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'recorder', 'unreported');`)).toThrow(/bench_window_silence_level_chk/);
+    // A re-adjudication that cannot say which detector ran is refused by the database, not only by the code.
+    expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, verdict, engine, audio_level_source, vad_params_source, reopened_at, reopened_batch)
+      VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'absent', 'unreported', NOW(), 'b');`)).toThrow(/bench_window_silence_detector_chk/);
     // And an 'unreported' row may not carry a parameter it never observed.
     expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, verdict, engine, audio_level_source, vad_params_source, no_speech_thold)
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'absent', 'unreported', 0.6);`)).toThrow(/bench_window_silence_vad_chk/);
@@ -205,10 +209,13 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
     expect(await silenceBacklog()).toEqual({ pending: 3, reopened: 0, no_evidence: 1 });
 
     // A bulk re-adjudication must be nameable and justified: this is a mechanism, not a wish.
-    await expect(reopenSilentWindows({ batch: "", reason: "x" })).rejects.toThrow(/batch id is required/);
-    await expect(reopenSilentWindows({ batch: "b1", reason: "  " })).rejects.toThrow(/reason is required/);
+    await expect(reopenSilentWindows({ batch: "", reason: "x", detector: "d" })).rejects.toThrow(/batch id is required/);
+    await expect(reopenSilentWindows({ batch: "b1", reason: "  ", detector: "d" })).rejects.toThrow(/reason is required/);
+    // R31.3 — and a run that cannot say which detector re-read the set is refused too: a second pass with a
+    // better detector must be distinguishable from the first, or one verdict overwrote another unrecorded.
+    await expect(reopenSilentWindows({ batch: "b1", reason: "r", detector: " " })).rejects.toThrow(/detector is required/);
 
-    const r = await reopenSilentWindows({ batch: "e15_vad_v2", reason: "E15 calibration landed; re-run the backlog" });
+    const r = await reopenSilentWindows({ batch: "e15_vad_v2", reason: "E15 calibration landed; re-run the backlog", detector: "e15_vad_v2" });
     expect(r.reopened, "every silent window went back in one call, not one force at a time").toBe(4);
     expect(r.window_ids.sort()).toEqual(["bw_dead_mic", "bw_empty_room", "bw_no_evidence", "bw_no_level"]);
     for (const id of r.window_ids) expect(await stateOf(id), `${id} is back in the queue`).toBe("closed");
@@ -217,7 +224,7 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
     // Nothing is left to offer, and the ledger says who was re-run.
     expect(await listSilentWindows({})).toEqual([]);
     expect(await silenceBacklog()).toEqual({ pending: 0, reopened: 0, no_evidence: 0 });
-    expect((await reopenSilentWindows({ batch: "again", reason: "second pass" })).reopened, "a window already handed back is not handed back twice").toBe(0);
+    expect((await reopenSilentWindows({ batch: "again", reason: "second pass", detector: "e15_vad_v2" })).reopened, "a window already handed back is not handed back twice").toBe(0);
   }, 300_000);
 
   it("R1.3 — the filters pick a population, not everything: room, day and time bounds, and reopened rows stay out unless asked for", async () => {
@@ -242,7 +249,7 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
     expect((await listSilentWindows({ roomId: "room_f", fromMs: startOf(12) })).map((r) => r.window_id)).toEqual(["bw_f2"]);
     expect((await listSilentWindows({ roomId: "room_f", toMs: startOf(12) })).map((r) => r.window_id)).toEqual(["bw_f1"]);
 
-    await reopenSilentWindows({ roomDayId: "rd_a", batch: "b_day", reason: "one day only" });
+    await reopenSilentWindows({ roomDayId: "rd_a", batch: "b_day", reason: "one day only", detector: "e13_v1" });
     expect(await stateOf("bw_f1")).toBe("closed");
     expect(await stateOf("bw_f2"), "a filtered re-adjudication leaves the rest alone").toBe("silent");
     // The reopened row is out of the default set and back in with the flag — so a second pass can be asked for.
@@ -262,7 +269,7 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
     seedWindow("bw_lim_sil1", 43, { levels: null, session: "sess_lim" });
     seedWindow("bw_lim_sil2", 44, { levels: null, session: "sess_lim" });
 
-    const r = await reopenSilentWindows({ roomId: "room_lim", limit: 2, batch: "b_lim", reason: "bounded pass" });
+    const r = await reopenSilentWindows({ roomId: "room_lim", limit: 2, batch: "b_lim", reason: "bounded pass", detector: "e13_v1" });
     expect(r.reopened, "the limit is spent on the population asked for").toBe(2);
     expect(r.window_ids.sort()).toEqual(["bw_lim_sil1", "bw_lim_sil2"]);
     expect(await listSilentWindows({ roomId: "room_lim" }), "and the room's silent set is now empty").toEqual([]);
@@ -279,7 +286,7 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
       vad: readVadParams({}), answer: null,
     });
     await verdict();
-    await reopenSilentWindows({ roomDayId: "rd_redrain", batch: "b_redrain", reason: "second opinion" });
+    await reopenSilentWindows({ roomDayId: "rd_redrain", batch: "b_redrain", reason: "second opinion", detector: "e13_v1" });
     expect(await evidenceOf("bw_redrain"), "it was re-adjudicated a moment ago").toMatchObject({ reopened_batch: "b_redrain" });
     pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_redrain'`);
     await verdict();
@@ -310,6 +317,110 @@ describe.runIf(HAVE_DOCKER)("E18 R1.1 — the readers of the old state, on real 
     // The audio that turned into words is the transcribed window's alone: silence produced none.
     expect(counts.words_ms).toBe(WINDOW_MS);
   }, 300_000);
+});
+
+describe.runIf(HAVE_DOCKER)("E18 R31 — the operator surface, on real SQL", () => {
+  const tool = async () => {
+    const { STT_TOOLS } = await import("@/lib/mcp/tools/stt");
+    return STT_TOOLS.find((t) => t.name === "scribe_silence_readjudicate")!;
+  };
+  const call = async (args: Record<string, unknown>) => (await (await tool()).handler(args as never, {} as never)) as Record<string, unknown>;
+  const silentIn = async (room: string) =>
+    ((await pg.sql`SELECT count(*)::int AS n FROM bench_window w JOIN bench_session s ON s.id = w.session_id
+                    WHERE w.state = 'silent' AND s.room_id = ${room}`) as Array<{ n: number }>)[0]!.n;
+
+  beforeAll(() => {
+    if (!HAVE_DOCKER) return;
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_op', 'room_op', to_timestamp(0), 'ended')`);
+    // A realistic mix: one window whose recorder metered it, three with nothing — the production shape.
+    seedWindow("bw_op1", 51, { levels: [{ peak: 0.02, avg: 0.01 }, { peak: 0.02, avg: 0.01 }], session: "sess_op", roomDay: "rd_op1" });
+    seedWindow("bw_op2", 52, { levels: null, session: "sess_op", roomDay: "rd_op1" });
+    seedWindow("bw_op3", 53, { levels: null, session: "sess_op", roomDay: "rd_op2" });
+    seedWindow("bw_op4", 54, { levels: null, session: "sess_op", roomDay: "rd_op2" });
+  });
+
+  it("the plain call is a DRY RUN: it writes nothing and says what it would re-adjudicate", async () => {
+    const { recordSilenceVerdict, readWindowAudioLevel, readVadParams, VERDICT_EMPTY_TRANSCRIPT } = await import("@/lib/stt/silence");
+    for (const [id, n] of [["bw_op1", 51], ["bw_op2", 52], ["bw_op3", 53]] as const) {
+      await recordSilenceVerdict({
+        windowId: id, roomDayId: n < 53 ? "rd_op1" : "rd_op2", sessionId: "sess_op", verdict: VERDICT_EMPTY_TRANSCRIPT,
+        engine: "whisper", audioSeconds: 900,
+        level: await readWindowAudioLevel("sess_op", "primary", startOf(n), startOf(n) + WINDOW_MS),
+        vad: readVadParams({}), answer: null,
+      });
+    }
+    const before = await silentIn("room_op");
+    const r = await call({ room_id: "room_op" });
+    expect(r.ok).toBe(true);
+    expect(r.dry_run, "the default call is the preview").toBe(true);
+    expect(await silentIn("room_op"), "and it moved nothing").toBe(before);
+
+    const would = r.would as Record<string, unknown>;
+    expect(would.windows).toBe(4);
+    expect(would.rooms).toBe(1);
+    expect(would.first_start_ms).toBe(startOf(51));
+    expect(would.last_start_ms).toBe(startOf(54));
+    // The distribution is the point: "re-adjudicate 4 windows" and "re-adjudicate 4 windows, 3 of which never
+    // carried an audio level and one of which has no evidence row at all" are different decisions.
+    expect(would.evidence).toEqual({ level_recorder: 1, level_absent: 2, no_evidence_row: 1, vad_reported: 0, vad_unreported: 3 });
+    expect(would.by_engine).toEqual(expect.arrayContaining([{ engine: "whisper", n: 3 }, { engine: null, n: 1 }]));
+  }, 300_000);
+
+  it("apply is refused — and writes nothing — without a detector, without a reason, and unscoped without all_rooms", async () => {
+    const before = await silentIn("room_op");
+    const noDetector = await call({ room_id: "room_op", apply: true, reason: "because" });
+    expect(noDetector).toMatchObject({ ok: false, dry_run: false, error: "detector_required" });
+    const noReason = await call({ room_id: "room_op", apply: true, detector: "e13_v1" });
+    expect(noReason).toMatchObject({ ok: false, dry_run: false, error: "reason_required" });
+    const unscoped = await call({ apply: true, detector: "e13_v1", reason: "the lot" });
+    expect(unscoped).toMatchObject({ ok: false, dry_run: false, error: "unscoped_apply_needs_all_rooms" });
+    expect(unscoped.would, "a refused unscoped apply still shows the size of what was asked for").toBeDefined();
+    expect(await silentIn("room_op"), "every refusal happened before the first row moved").toBe(before);
+  }, 300_000);
+
+  it("apply names its detector, moves only the scoped set, and the ledger keeps which detector ran", async () => {
+    const r = await call({ room_day_id: "rd_op1", apply: true, detector: "e13_deadmic_v1", reason: "E13 landed; re-read the day" });
+    expect(r).toMatchObject({ ok: true, dry_run: false, detector: "e13_deadmic_v1", reopened: 2 });
+    expect(String(r.batch), "the batch names the detector and the time when the caller passes none").toContain("e13_deadmic_v1");
+    expect(await stateOf("bw_op1")).toBe("closed");
+    expect(await stateOf("bw_op3"), "the other day was not in scope").toBe("silent");
+    const ledger = (await pg.sql`SELECT reopened_detector, reopened_reason FROM bench_window_silence WHERE window_id = 'bw_op1'`) as Array<Record<string, unknown>>;
+    expect(ledger[0]).toMatchObject({ reopened_detector: "e13_deadmic_v1", reopened_reason: "E13 landed; re-read the day" });
+
+    // R31.3 — a second pass with a better detector is distinguishable from the first.
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_op1'`);
+    const again = await call({ room_day_id: "rd_op1", include_reopened: true, apply: true, detector: "e13_deadmic_v2", reason: "better detector", batch: "b_v2" });
+    expect(again).toMatchObject({ ok: true, reopened: 1, batch: "b_v2", detector: "e13_deadmic_v2" });
+    const after = (await pg.sql`SELECT reopened_detector, reopened_batch FROM bench_window_silence WHERE window_id = 'bw_op1'`) as Array<Record<string, unknown>>;
+    expect(after[0]).toEqual({ reopened_detector: "e13_deadmic_v2", reopened_batch: "b_v2" });
+  }, 300_000);
+
+  it("the preview leaves out windows already handed back, unless they are asked for", async () => {
+    // bw_op1 carries a re-adjudication stamp from the case above. Put it back in 'silent' — a second verdict
+    // after a re-run — and the default preview must not offer it again just because it is silent once more.
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_op1'`);
+    const plain = (await call({ room_day_id: "rd_op1" })).would as Record<string, unknown>;
+    expect(plain.windows, "a window already re-adjudicated is not offered again by default").toBe(0);
+    const asked = (await call({ room_day_id: "rd_op1", include_reopened: true })).would as Record<string, unknown>;
+    expect(asked.windows, "and it comes back when the caller asks for it").toBe(1);
+  }, 300_000);
+
+  it("an unscoped apply IS allowed, once it is asked for in as many words", async () => {
+    // include_reopened, because the case above deliberately left one window silent with a stamp on it.
+    const r = await call({ apply: true, all_rooms: true, include_reopened: true, detector: "e15_vad_v2", reason: "calibration landed", batch: "b_all" });
+    expect(r).toMatchObject({ ok: true, dry_run: false, batch: "b_all", detector: "e15_vad_v2" });
+    expect(Number(r.reopened), "everything still silent across every room went back").toBeGreaterThan(0);
+    expect(await silentIn("room_op")).toBe(0);
+  }, 300_000);
+
+  it("the tool is WRITE scope and nothing schedules it", async () => {
+    expect((await tool()).scope).toBe("write");
+    // No cron, no auto-drain, no migration hook: the only caller is a person at the door.
+    const callers = execSync(`git grep -l "scribe_silence_readjudicate\\|reopenSilentWindows" -- lib app scripts || true`, { encoding: "utf8" })
+      .split("\n").filter(Boolean).sort();
+    expect(callers, "only the silence module and the operator tool name the bulk path")
+      .toEqual(["lib/mcp/tools/stt.ts", "lib/stt/silence.ts"]);
+  });
 });
 
 describe("E18 — what the service tells us about the flags it ran under (pure)", () => {

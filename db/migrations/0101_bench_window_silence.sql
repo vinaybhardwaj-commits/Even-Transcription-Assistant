@@ -29,11 +29,14 @@
 --                                  A verdict we cannot re-derive is a verdict we cannot overturn; this row says
 --                                  exactly how far the current verdict can be re-derived, and no further.
 --
---   reopened_at / reopened_batch / reopened_reason
+--   reopened_at / reopened_batch / reopened_reason / reopened_detector
 --                                  the re-adjudication ledger. `reopenSilentWindows` (lib/stt/silence.ts) moves
 --                                  a whole matching set back to 'closed' in ONE statement and stamps these, so
 --                                  the population that was re-run is itself queryable afterwards. Per-window
 --                                  `force` is not a bulk mechanism and is not the answer to E13/E15's backlog.
+--                                  reopened_detector NAMES WHICH DETECTOR re-ran the set (E25 R31.3). Without it,
+--                                  a second pass with a better detector is indistinguishable from the first, and
+--                                  the fact that one verdict overwrote another is lost with it.
 --
 -- WHAT THIS MIGRATION DOES NOT DO. It does not adjudicate anything. It does not detect a dead mic (E13) and it
 -- does not calibrate VAD (E15). It records what was decided and keeps the audio reachable for the detector that
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
   reopened_at        TIMESTAMPTZ,
   reopened_batch     TEXT,
   reopened_reason    TEXT,
+  reopened_detector  TEXT,
   CONSTRAINT bench_window_silence_level_src_chk
     CHECK (audio_level_source IN ('recorder','absent')),
   -- A level and its source cannot disagree: 'absent' means no number, 'recorder' means a number.
@@ -91,7 +95,10 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
     CHECK (vad_params_source = 'service'
            OR (vad_enabled IS NULL AND no_speech_thold IS NULL AND suppress_nst IS NULL AND silero_version IS NULL)),
   CONSTRAINT bench_window_silence_reopen_chk
-    CHECK ((reopened_at IS NULL) = (reopened_batch IS NULL))
+    CHECK ((reopened_at IS NULL) = (reopened_batch IS NULL)),
+  -- A re-adjudication that cannot say WHICH detector ran is not a re-adjudication anybody can repeat or compare.
+  CONSTRAINT bench_window_silence_detector_chk
+    CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL))
 );
 
 -- The set E13/E15 will re-run: verdicts nobody has re-adjudicated yet, oldest first.
@@ -104,6 +111,8 @@ COMMENT ON TABLE bench_window_silence IS
   'E18 (0101): one row per window called silent, written when the verdict is made. Holds what the verdict was made from, including what was NOT available: audio_level_source=absent (the recorder sent no level) and vad_params_source=unreported (the whisper service does not report its VAD flags). Re-adjudicated in bulk by reopenSilentWindows (lib/stt/silence.ts).';
 COMMENT ON COLUMN bench_window_silence.audio_level_source IS
   'recorder = at least one of this window''s chunks carried a meter reading (0066). absent = none did, which is the expected value: the native recorder has never sent one (0 of 4,405 chunks on 16 Sep 2026).';
+COMMENT ON COLUMN bench_window_silence.reopened_detector IS
+  'E25 R31.3 (0101): which detector re-adjudicated this window, named by the caller of the bulk path. A second pass with a better detector must be distinguishable from the first.';
 COMMENT ON COLUMN bench_window_silence.vad_params_source IS
   'unreported = the whisper service does not report the flags it ran under, so --vad, --no-speech-thold, --suppress-nst and the Silero version are stored NULL rather than assumed. service = the answer carried them.';
 COMMENT ON COLUMN bench_window.state IS

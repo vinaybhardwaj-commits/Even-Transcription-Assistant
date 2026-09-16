@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 27 listed tools, 52 names that answer (Slice E, 13 Sep)
+## The surface: 28 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep)
 
 `tools/list` publishes **27** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -43,6 +43,12 @@ review; the code does not check it.
 | `scribe_voice` | read | `view`: `prints` → `scribe_list_voiceprints`; `samples` → `scribe_list_voice_samples`; `window_speakers` → `scribe_window_speakers` |
 | `scribe_room_command` | write | `kind`: `start_day` → `scribe_start_recording`; `pause_day` → `scribe_pause_recording`; `resume_day` → `scribe_resume_recording`; `end_day` → `scribe_stop_recording`; `close_orphaned_session` → `scribe_close_orphaned_session`; `set_audio_input` → `scribe_set_audio_input`; `check_update_now` / `report_diag` / `restart_engine` → `scribe_room_command` |
 | `scribe_scratch` | write | `action`: `replay` → `scribe_replay_write`; `fuse` → `scribe_fuse_run` |
+
+`scribe_silence_readjudicate` (write, E18 R31, 16 Sep) is listed on its own: it takes no selector, and no
+group absorbs it because a group holds one scope and the silent backlog is the only thing it acts on. The plain
+call is a DRY RUN that writes nothing and reports what it would re-adjudicate — how many windows, over what span,
+across how many rooms, and what evidence those verdicts hold. `apply: true` does the work and requires `detector`
+and `reason`; an unscoped apply also requires `all_rooms: true`. Nothing schedules it.
 
 The other 17 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
 `scribe_pin_visit`, `scribe_mark_consult`, `scribe_extract_audio`, `scribe_transcribe_range`,
