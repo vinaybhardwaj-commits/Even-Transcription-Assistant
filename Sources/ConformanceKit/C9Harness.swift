@@ -1,16 +1,18 @@
 import Foundation
 import TapeConvert
 
-/// The 48 kHz stereo → 16 kHz mono conversion as C9 sees it.
+/// The 48 kHz → 16 kHz mono conversion as C9 sees it, at the fixture's channel count.
 public protocol Resampler: Sendable {
     var rule: DecimationRule { get }
-    /// s16le 48 kHz 2-channel interleaved in, s16le 16 kHz mono out. `chunkFrames` is cycled to split the input
+    /// s16le 48 kHz interleaved at rule.channels in, s16le 16 kHz mono out. `chunkFrames` is cycled to split the input
     /// into calls; empty means one call.
-    func convert(stereo48k: [UInt8], chunkFrames: [Int]) -> [UInt8]
+    func convert(input48k: [UInt8], chunkFrames: [Int]) -> [UInt8]
     /// The same conversion with a reset (a discontinuity) before each listed input frame.
-    func convert(stereo48k: [UInt8], resetAtFrames: [Int]) -> [UInt8]
+    func convert(input48k: [UInt8], resetAtFrames: [Int]) -> [UInt8]
     /// The same arithmetic with other taps: used only by direction-probe fixtures.
     func with(taps: [Int32]) -> any Resampler
+    /// The same arithmetic at another channel count.
+    func with(channels: Int) -> any Resampler
 }
 
 /// The implementation in TapeConvert, adapted for the suite.
@@ -24,13 +26,20 @@ public struct TapeConvertResampler: Resampler {
         return TapeConvertResampler(rule: r)
     }
 
-    public func convert(stereo48k: [UInt8], resetAtFrames: [Int]) -> [UInt8] {
-        var decimator = StereoDecimator(rule: rule)
+    public func with(channels: Int) -> any Resampler {
+        var r = rule
+        r.channels = channels
+        return TapeConvertResampler(rule: r)
+    }
+
+    public func convert(input48k: [UInt8], resetAtFrames: [Int]) -> [UInt8] {
+        var decimator = Decimator(rule: rule)
         var samples: [Int16] = []
         var start = 0
-        for boundary in resetAtFrames.sorted() + [stereo48k.count / 4] where boundary >= start {
-            decimator.process(interleaved: stereo48k[(start * 4)..<(boundary * 4)], into: &samples)
-            if boundary * 4 < stereo48k.count { decimator.reset() }
+        let bpf = decimator.bytesPerFrame
+        for boundary in resetAtFrames.sorted() + [input48k.count / bpf] where boundary >= start {
+            decimator.process(interleaved: input48k[(start * bpf)..<(boundary * bpf)], into: &samples)
+            if boundary * bpf < input48k.count { decimator.reset() }
             start = boundary
         }
         return Self.bytes(samples)
@@ -47,17 +56,17 @@ public struct TapeConvertResampler: Resampler {
         return out
     }
 
-    public func convert(stereo48k: [UInt8], chunkFrames: [Int]) -> [UInt8] {
-        var decimator = StereoDecimator(rule: rule)
+    public func convert(input48k: [UInt8], chunkFrames: [Int]) -> [UInt8] {
+        var decimator = Decimator(rule: rule)
         var samples: [Int16] = []
-        samples.reserveCapacity(stereo48k.count / 12)
+        samples.reserveCapacity(input48k.count / (decimator.bytesPerFrame * 3))
         if chunkFrames.isEmpty {
-            decimator.process(interleaved: stereo48k, into: &samples)
+            decimator.process(interleaved: input48k, into: &samples)
         } else {
             var offset = 0, k = 0
-            while offset < stereo48k.count {
-                let end = min(stereo48k.count, offset + max(1, chunkFrames[k % chunkFrames.count]) * 4)
-                decimator.process(interleaved: stereo48k[offset..<end], into: &samples)
+            while offset < input48k.count {
+                let end = min(input48k.count, offset + max(1, chunkFrames[k % chunkFrames.count]) * decimator.bytesPerFrame)
+                decimator.process(interleaved: input48k[offset..<end], into: &samples)
                 offset = end
                 k += 1
             }
@@ -107,22 +116,24 @@ public enum C9Harness {
         guard let r = f.manifest.resampler else { return .error("C9 fixture has no resampler block") }
         guard let resampler else { return .skipped("C9 fixture present but no resampler is linked into this build") }
         guard let fixtureTaps = parseTaps(f.resamplerTaps) else { return .error("\(r.taps.file) is not one decimal integer per \\n-terminated line") }
-        let impl = resampler.rule
+        var impl = resampler.rule
+        impl.channels = r.channelCount
         var c = Checks()
         // A direction probe runs the implementation's arithmetic with the fixture's deliberately asymmetric taps.
         let subject: any Resampler
         switch r.tapsRole {
-        case "production": subject = resampler
+        case "production": subject = resampler.with(channels: r.channelCount)
         case "direction_probe":
             c.law("C9.direction-probe")
             c.expect(fixtureTaps != fixtureTaps.reversed(), "a direction probe needs asymmetric taps; \(r.taps.file) is symmetric")
-            subject = resampler.with(taps: fixtureTaps)
+            subject = resampler.with(taps: fixtureTaps).with(channels: r.channelCount)
         default: return .error("unknown taps_role \(r.tapsRole)")
         }
 
         // The written rules, field by field, against the implementation.
         c.law("C9.manifest-describes-implementation")
         c.expect(r.design == impl.designID, "design \(r.design) != implementation \(impl.designID)")
+        c.expect(r.channelCount >= 1, "channel_count \(r.channelCount) is not a positive channel count")
         c.expect(r.filter.tapCount == fixtureTaps.count, "filter.tap_count \(r.filter.tapCount) but \(r.taps.file) holds \(fixtureTaps.count) taps")
         c.expect(r.filter.tapSum == fixtureTaps.reduce(Int64(0)) { $0 + Int64($1) }, "filter.tap_sum \(r.filter.tapSum) but \(r.taps.file) sums to \(fixtureTaps.reduce(Int64(0)) { $0 + Int64($1) })")
         c.expect(r.filter.symmetric == (fixtureTaps == fixtureTaps.reversed()), "filter.symmetric \(r.filter.symmetric) does not describe \(r.taps.file)")
@@ -134,41 +145,43 @@ public enum C9Harness {
         c.expect(r.accumulator.bits == DecimationRule.accumulatorBits && r.accumulator.signed, "accumulator \(r.accumulator.signed ? "signed" : "unsigned") \(r.accumulator.bits)-bit != implementation signed \(DecimationRule.accumulatorBits)-bit")
         c.expect(r.decimation.factor == impl.factor, "decimation.factor \(r.decimation.factor) != implementation \(impl.factor)")
         c.expect(r.decimation.phase == impl.phase, "decimation.phase \(r.decimation.phase) != implementation \(impl.phase)")
-        c.expect(r.outputRounding.bias == impl.roundingBias && r.outputRounding.shift == impl.outputShift,
-                 "output_rounding bias \(r.outputRounding.bias) shift \(r.outputRounding.shift) != implementation \(impl.roundingBias), \(impl.outputShift)")
+        c.expect(r.outputRounding.bias == impl.roundingBias && r.outputRounding.divisor == impl.outputDivisor,
+                 "output_rounding bias \(r.outputRounding.bias) divisor \(r.outputRounding.divisor) != implementation \(impl.roundingBias), \(impl.outputDivisor)")
         c.expect(r.clipping.min == DecimationRule.clipMin && r.clipping.max == DecimationRule.clipMax, "clipping [\(r.clipping.min), \(r.clipping.max)] != implementation")
 
         // Geometry of the checked-in files.
-        c.expect(f.resamplerInput.count % 4 == 0 && f.resamplerInput.count / 4 == r.inputFrames, "input is \(f.resamplerInput.count) bytes, manifest says \(r.inputFrames) frames")
+        let bytesPerFrame = 2 * max(1, r.channelCount)
+        c.expect(f.resamplerInput.count % bytesPerFrame == 0 && f.resamplerInput.count / bytesPerFrame == r.inputFrames,
+                 "input is \(f.resamplerInput.count) bytes = \(f.resamplerInput.count / bytesPerFrame) frames of \(r.channelCount) channel(s), manifest says \(r.inputFrames)")
         c.expect(f.resamplerOutput.count == r.outputSamples * 2, "output is \(f.resamplerOutput.count) bytes, manifest says \(r.outputSamples) samples")
-        let rule = DecimationRule(designID: r.design, taps: fixtureTaps, qBits: r.filter.qBits, factor: r.decimation.factor, phase: r.decimation.phase)
+        let rule = DecimationRule(designID: r.design, taps: fixtureTaps, qBits: r.filter.qBits, factor: r.decimation.factor, phase: r.decimation.phase, channels: r.channelCount)
         c.expect(r.outputSamples == rule.outputCount(frames: r.inputFrames),
                  "output_samples \(r.outputSamples) != \(rule.outputCount(frames: r.inputFrames)), the count of frames n < \(r.inputFrames) with n mod \(r.decimation.factor) == \(r.decimation.phase)")
 
         // Output bytes: whole stream, twice, and every chunking.
-        let whole = subject.convert(stereo48k: f.resamplerInput, chunkFrames: [])
+        let whole = subject.convert(input48k: f.resamplerInput, chunkFrames: [])
         c.law("C9.output-deterministic")
         c.expect(whole == f.resamplerOutput, "output differs from \(r.output.file): " + firstDifference(f.resamplerOutput, whole))
-        c.expect(subject.convert(stereo48k: f.resamplerInput, chunkFrames: []) == whole, "two whole-stream runs differ")
+        c.expect(subject.convert(input48k: f.resamplerInput, chunkFrames: []) == whole, "two whole-stream runs differ")
         for pattern in r.chunkPatterns {
-            let chunked = subject.convert(stereo48k: f.resamplerInput, chunkFrames: pattern)
+            let chunked = subject.convert(input48k: f.resamplerInput, chunkFrames: pattern)
             c.expect(chunked == whole, "chunks \(pattern) change the output: " + firstDifference(whole, chunked))
         }
 
         // Discontinuities: history resets, so the stream equals its regions converted in isolation.
         if let starts = r.regionStarts, let file = r.regionsOutput {
             c.law("C9.region-reset")
-            let frames = f.resamplerInput.count / 4
+            let frames = f.resamplerInput.count / bytesPerFrame
             let bounds = [0] + starts + [frames]
             let expectedCount = zip(bounds, bounds.dropFirst()).reduce(0) { $0 + rule.outputCount(frames: $1.1 - $1.0) }
             c.expect(r.regionsOutputSamples == expectedCount && f.resamplerRegionsOutput.count == expectedCount * 2,
                      "regions output is \(f.resamplerRegionsOutput.count / 2) samples (manifest \(r.regionsOutputSamples ?? -1)); resets at \(starts) give \(expectedCount)")
-            let withResets = subject.convert(stereo48k: f.resamplerInput, resetAtFrames: starts)
+            let withResets = subject.convert(input48k: f.resamplerInput, resetAtFrames: starts)
             c.expect(withResets == f.resamplerRegionsOutput,
                      "output with resets at \(starts) differs from \(file.file): " + firstDifference(f.resamplerRegionsOutput, withResets))
             var isolated: [UInt8] = []
             for (a, b) in zip(bounds, bounds.dropFirst()) {
-                isolated += subject.convert(stereo48k: Array(f.resamplerInput[(a * 4)..<(b * 4)]), chunkFrames: [])
+                isolated += subject.convert(input48k: Array(f.resamplerInput[(a * bytesPerFrame)..<(b * bytesPerFrame)]), chunkFrames: [])
             }
             c.expect(isolated == withResets, "regions converted in isolation differ from the stream with resets: " + firstDifference(isolated, withResets))
         }

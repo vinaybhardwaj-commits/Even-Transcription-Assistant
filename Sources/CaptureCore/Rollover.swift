@@ -107,6 +107,8 @@ public final class CaptureSide: @unchecked Sendable {
     public let ring: FrameRing
     public let arrival: ArrivalClock
     public let rate: Int64
+    /// 2 × the device's channel count.
+    public let bytesPerFrame: Int
     public private(set) var capturedFrames: Int64 = 0
     private var timeline = RolloverTimeline(nextRolloverWallNS: nil)
     private var rollovers: [RolloverTimeline.Split] = []
@@ -117,6 +119,7 @@ public final class CaptureSide: @unchecked Sendable {
         self.ring = ring
         self.arrival = arrival
         self.rate = arrival.rate
+        self.bytesPerFrame = ring.bytesPerFrame
     }
 
     /// A new capture session (stream opened, device reopened): the rollover target is queried afresh by the caller.
@@ -130,7 +133,7 @@ public final class CaptureSide: @unchecked Sendable {
     /// One capture buffer of whole 4-byte frames, whose wall and monotonic START are given (read-return time minus the
     /// buffer's duration). Frames not accepted by the ring are still stamped, so a gap can be timed.
     public func deliver(_ bytes: UnsafeRawBufferPointer, monoStartNS: Int64, wallStartNS: Int64) {
-        let n = bytes.count / 4
+        let n = bytes.count / bytesPerFrame
         guard n > 0 else { return }
         if var s = timeline.split(wallStartNS: wallStartNS, monoStartNS: monoStartNS, frameCount: n, rate: rate) {
             let p = s.frameOffset
@@ -141,9 +144,9 @@ public final class CaptureSide: @unchecked Sendable {
                 arrival.stamp(firstFrame: capturedFrames + Int64(p), frames: Int64(n - p),
                               monoStartNS: s.suffixMonoStartNS, wallStartNS: s.suffixWallStartNS)
             }
-            if p > 0 { ring.push(UnsafeRawBufferPointer(rebasing: bytes[0..<(p * 4)])) }
+            if p > 0 { ring.push(UnsafeRawBufferPointer(rebasing: bytes[0..<(p * bytesPerFrame)])) }
             ring.markDiscontinuity(cause: "day_rollover", monoNS: s.markerMonoNS, wallNS: s.targetWallNS)
-            if p < n { ring.push(UnsafeRawBufferPointer(rebasing: bytes[(p * 4)...])) }
+            if p < n { ring.push(UnsafeRawBufferPointer(rebasing: bytes[(p * bytesPerFrame)...])) }
             timeline.didPublish()
             s.nextRolloverWallNS = timeline.nextRolloverWallNS
             lock.lock(); rollovers.append(s); lock.unlock()

@@ -38,6 +38,15 @@
         "C9"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/c9-resample-mono",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
       "id": "good/c9-resample-tones",
       "role": "good",
       "source": "in-repo"
@@ -564,7 +573,25 @@
         "C9"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-downmix-sum-not-mean",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
       "id": "negative/c9-history-carried-across-discontinuity",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C9"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c9-mono-attenuated",
       "role": "negative",
       "source": "in-repo"
     }

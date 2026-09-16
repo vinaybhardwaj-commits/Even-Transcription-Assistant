@@ -8,9 +8,25 @@ file:line). Where Linux must choose something the Mac gets from Darwin, the choi
 
 ALSA `hw:CARD=<id>,DEV=<n>` (S16_LE, 2 ch, 48 000 Hz, blocking, explicit `snd_pcm_start`) → capture thread →
 `CaptureSide` (stamps each buffer, splits it at a day rollover) → `FrameRing` (never blocks capture; drops counted) →
-writer thread (`RecorderCore.TapeSession`, consuming at most one period, 1 200 frames, per iteration) → `StereoDecimator`
-(spec/CONVERSION-48K-STEREO-TO-16K-MONO.md) → `tape.pcm` → records in `tape.idx`. The conformance generator runs the same
+writer thread (`RecorderCore.TapeSession`, consuming at most one period, 1 200 frames, per iteration) → `Decimator`
+(spec/CONVERSION-48K-TO-16K-MONO.md) → `tape.pcm` → records in `tape.idx`. The conformance generator runs the same
 `CaptureSide` and `TapeSession` for the rollover fixtures.
+
+## The capture format is read, never requested
+
+The device's own `hw_params` decide the channel count: `CaptureDevices.capabilities()` reads them before anything is
+requested, `CaptureFormat.validate` checks them, and the PCM is opened with the count the hardware reports — 1 for a TONOR
+TM20, 2 for the Yoga's DMIC — which is also the channel count the conversion divides by (conversion spec §2, §5). The Mac
+does the same by reading `input.inputFormat(forBus: 0)` (`Recorder.swift:78`) and tapping that format (`:89`); it never
+requests a channel count either. 48 000 Hz S16_LE is **required** of the hardware and never converted (NOTES.md standing
+rule: `hw:` only, no plugin layer). See NOTES.md for which of the Mac validator's four rules carried over.
+
+**The tape records no channel count.** The fifteen keys (`TapeFormat.swift:34-49`) have no channel field on either
+platform, so no tape says what its downmix did: `input_sample_rate` is recorded, the channel count is not. **Inherited
+gap; no key was added — the format is not ours to extend.** Consequences, both handled rather than papered over: a device
+that returns from a loss with a different channel count stops the run (the downmix would change mid-tape, invisibly), and
+anyone comparing two tapes' audio must get the channel count from the recorder's run summary
+(`capabilities`, `conversion_channels`), not from the index.
 
 ## Clocks and buffer times — Linux choice
 

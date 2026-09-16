@@ -22,7 +22,7 @@ public final class TapeSession {
     /// Every input frame fed to the converter, in order (test hook builds only set it).
     public var tee: (([UInt8]) -> Void)?
 
-    var decimator = StereoDecimator()
+    var decimator: Decimator
     /// Running total of input frames fed to the converter, seeded from the prior tape (Mac :152); never reset.
     var consumed: Int64
     /// Mac currentInputSampleRate != nil. Declared per run() (TapeWriter.swift:153), set by the first audio buffer and
@@ -40,7 +40,10 @@ public final class TapeSession {
     var chunk: [UInt8] = []
     var out: [Int16] = []
 
-    public init(writer: TapeWriter, ring: FrameRing, arrival: ArrivalClock, monoNow: @escaping () -> Int64, wallNow: @escaping () -> Int64) {
+    /// `rule` carries the device's channel count: the conversion divides by it (conversion spec §2, §5).
+    public init(writer: TapeWriter, ring: FrameRing, arrival: ArrivalClock, rule: DecimationRule = .production,
+                monoNow: @escaping () -> Int64, wallNow: @escaping () -> Int64) {
+        self.decimator = Decimator(rule: rule)
         self.writer = writer
         self.ring = ring
         self.arrival = arrival

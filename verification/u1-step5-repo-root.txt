@@ -1,4 +1,4 @@
-conformance: fixtures /home/vinay/dev/room-recorder-linux/fixtures; required fixtures /home/vinay/dev/room-recorder-linux/spec/required-fixtures.json (56); check grounding /home/vinay/dev/room-recorder-linux/spec/check-grounding.json (44)
+conformance: fixtures /home/vinay/dev/room-recorder-linux/fixtures; required fixtures /home/vinay/dev/room-recorder-linux/spec/required-fixtures.json (59); check grounding /home/vinay/dev/room-recorder-linux/spec/check-grounding.json (44)
 CASE FIXTURE                               ROLE     RESULT  MUST         HOLDS
 C1   good/c7-quiet-room-midnight           good     PASS    PASS         yes
 C1   good/c7-quiet-room-ramp               good     PASS    PASS         yes
@@ -167,6 +167,7 @@ C8   negative/c8-suffix-stamped-at-midnight negative FAIL    FAIL         yes
       · [C8.pins] day_rollover 0 suffix first wall_ns 1789324200000000000, expected 1789324200000010417
       · [C8.pins] day_rollover 0: straddling measured false, expected true
 C9   good/c9-direction-probe               good     PASS    PASS         yes
+C9   good/c9-resample-mono                 good     PASS    PASS         yes
 C9   good/c9-resample-tones                good     PASS    PASS         yes
 C9   negative/c9-coefficient-perturbed     negative FAIL    FAIL         yes
       · [C9.manifest-describes-implementation] taps differ from the implementation: h[59] is 16534 in fir-48k-to-16k-121tap-q16.taps, 16533 in the implementation
@@ -176,9 +177,13 @@ C9   negative/c9-convolution-reversed      negative FAIL    FAIL         yes
 C9   negative/c9-decimation-phase-shifted  negative FAIL    FAIL         yes
       · [C9.manifest-describes-implementation] decimation.phase 1 != implementation 2
       · [C9.output-deterministic] output differs from expected-16k-mono.pcm: first difference at output sample 1602: expected -1, produced -2; 32316 of 44800 samples differ
+C9   negative/c9-downmix-sum-not-mean      negative FAIL    FAIL         yes
+      · [C9.output-deterministic] output differs from expected-16k-mono.pcm: first difference at output sample 1601: expected 2, produced 1; 34440 of 44800 samples differ
 C9   negative/c9-history-carried-across-discontinuity negative FAIL    FAIL         yes
       · [C9.region-reset] regions output is 44800 samples (manifest 44800); resets at [52801, 100800] give 44799
       · [C9.region-reset] output with resets at [52801, 100800] differs from expected-16k-mono-regions.pcm: first difference at output sample 17600: expected -775, produced 0; 16824 of 44799 samples differ
+C9   negative/c9-mono-attenuated           negative FAIL    FAIL         yes
+      · [C9.output-deterministic] output differs from expected-16k-mono.pcm: first difference at output sample 1601: expected 1, produced 2; 39592 of 44800 samples differ
 C10  good/clean-short                      good     PASS    PASS         yes
 REDUCED ROOT: 2 required fixture(s) absent; these rows did not run:
 NOT RUN  C1   good/u1-real-faults                   good     (out-of-repo-audio: tools/u1-real-suite.sh ROOT /home/vinay/tapes/u1-step4-real:u1-real-faults ... (real room audio; never committed))
@@ -197,7 +202,7 @@ NOT RUN  C8   good/u1-real-midnight                 good     (out-of-repo-audio:
 
 GROUNDING: 44 named checks made assertions — 34 on Mac source, 1 on a Mac measurement, 8 our choice (ruled, not debt), 0 UNGROUNDED (debt), 1 BLOCKED (cannot be grounded by reading)
 BLOCKED    C7.boundary-after-flush                 Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3)
-106/106 rows hold; 0 load errors; 0 coverage problems; 13 assertions not made
+109/109 rows hold; 0 load errors; 0 coverage problems; 13 assertions not made
 SUITE HOLDS (REDUCED): 13 assertions not made, from good/u1-real-faults, good/u1-real-midnight
 C10 encoder: running ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers / libopus 1.6.1 on Ubuntu 26.04.1 LTS: an attested pair
 C10 measurement: decoded 40000/40000 samples (Δ 0), best lag 0, correlation 0.99316, RMS Δ +0.0008 dB

@@ -1,4 +1,5 @@
-// U1: ALSA capture → ring → StereoDecimator → tape.pcm and tape.idx, with honest faults. No network, no systemd, no upload.
+// U1: ALSA capture → ring → Decimator → tape.pcm and tape.idx, with honest faults. No network, no systemd, no upload.
+// The capture format is read from the device and validated, never requested: `hw:` only, no plugin layer, no resampling.
 import ALSACapture
 import CaptureCore
 import Foundation
@@ -23,7 +24,8 @@ let hooksUsage = ""
 
 let usage = """
 usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR --seconds S [--ring-frames N]
-  Records S seconds of captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. A new DIR gets
+  Records S seconds of captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. The device's own
+  channel count is used (1 or more); 48 000 Hz S16_LE is required of the hardware and never converted. A new DIR gets
   a new tape; an existing tape is continued with a `restart` record.
   The device must be named in stable form; with no --device, prints the capture devices and exits.
   A run that crosses IST midnight (Asia/Kolkata zone data required) writes a day_rollover record at the boundary.
@@ -56,7 +58,7 @@ let listed: CaptureDevices.Listed
 do { listed = try CaptureDevices.resolve(opt("--device")) } catch { die("\(error)") }
 guard let tapePath = opt("--tape"), let seconds = opt("--seconds").flatMap(Double.init), seconds > 0 else { die(usage) }
 let ringFrames = opt("--ring-frames").flatMap(Int.init) ?? 48_000
-let inputRate: Int64 = 48_000
+let inputRate = Int64(CaptureFormat.requiredRate)
 let targetFrames = Int64((seconds * Double(inputRate)).rounded())
 
 #if TAPE_TEST_HOOKS
@@ -98,10 +100,26 @@ if let origin = hooks.wallOriginNS { WallClock.testHookWallOffsetNS = origin - c
 // The zone decides each capture session's first boundary; without zone data the recorder does not start.
 do { _ = try ISTDay.nextMidnight(nowWallNS: WallClock.now()) } catch { die("\(error)") }
 
+// The device's channel count is READ, never requested (the Mac reads input.inputFormat(forBus: 0), Recorder.swift:78,
+// and taps that same format at :89). Validated by CaptureFormat, then used as it is: 1 for a TONOR TM20, 2 for the DMIC.
+let capabilities: DeviceCapabilities
+do {
+    capabilities = try CaptureDevices.capabilities(listed)
+    try CaptureFormat.validate(capabilities, device: listed.stableName)
+} catch { die("\(error)") }
+let inputChannels = capabilities.channels
+
 @Sendable func openDevice(_ listed: CaptureDevices.Listed) throws -> ALSACapturePCM {
-    let pcm = try ALSACapturePCM(device: listed, channels: 2, rate: UInt32(inputRate), latencyMicros: 100_000)
-    guard pcm.negotiated.format == "S16_LE", pcm.negotiated.channels == 2, pcm.negotiated.rate == UInt32(inputRate) else {
-        throw ALSAError(description: "\(listed.stableName) negotiated \(pcm.negotiated), not S16_LE 2 ch 48000 Hz")
+    // A device that comes back with a different channel count than the tape's audio so far would silently change the
+    // downmix, and no index key records the channel count (see spec/RECORDER-RECORDS-LINUX.md), so the run stops instead.
+    let now = try CaptureDevices.capabilities(listed)
+    guard now.channels == inputChannels else {
+        throw ALSAError(description: "\(listed.stableName) now offers \(now.channels) channel(s); this tape's audio was converted from \(inputChannels). The tape records no channel count, so the run stops rather than change the downmix mid-tape")
+    }
+    try CaptureFormat.validate(now, device: listed.stableName)
+    let pcm = try ALSACapturePCM(device: listed, channels: inputChannels, rate: UInt32(inputRate), latencyMicros: 100_000)
+    guard pcm.negotiated.format == "S16_LE", pcm.negotiated.channels == inputChannels, pcm.negotiated.rate == UInt32(inputRate) else {
+        throw ALSAError(description: "\(listed.stableName) negotiated \(pcm.negotiated), not S16_LE \(inputChannels) ch \(inputRate) Hz")
     }
     return pcm
 }
@@ -133,7 +151,7 @@ final class Shared: @unchecked Sendable {
 }
 
 let shared = Shared()
-let ring = FrameRing(capacityFrames: ringFrames, bytesPerFrame: 4)
+let ring = FrameRing(capacityFrames: ringFrames, bytesPerFrame: 2 * Int(inputChannels))
 let arrival = ArrivalClock(rate: inputRate)
 let side = CaptureSide(ring: ring, arrival: arrival)
 
@@ -156,7 +174,8 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
     let ring = side.ring
     defer { box.pcm = nil; shared.with { shared.captureDone = true } }
     let period = 1_200
-    let buffer = UnsafeMutableRawPointer.allocate(byteCount: period * 4, alignment: 1)
+    let bytesPerFrame = side.bytesPerFrame
+    let buffer = UnsafeMutableRawPointer.allocate(byteCount: period * bytesPerFrame, alignment: 1)
     defer { buffer.deallocate() }
     var captured: Int64 = 0
     var needStart = true
@@ -214,7 +233,7 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
             // observed time minus callback lag, CaptureTimeline.swift:48-51).
             let mono = clockNS(CLOCK_MONOTONIC), wall = WallClock.now()
             let duration = FrameTime.duration(frames: Int64(n), rate: inputRate)
-            side.deliver(UnsafeRawBufferPointer(start: buffer, count: n * 4), monoStartNS: mono - duration, wallStartNS: wall - duration)
+            side.deliver(UnsafeRawBufferPointer(start: buffer, count: n * bytesPerFrame), monoStartNS: mono - duration, wallStartNS: wall - duration)
             captured += Int64(n)
         case .overrun(let text):
             ring.markDiscontinuity(cause: "capture_discontinuity")
@@ -257,7 +276,8 @@ Thread {
     captureDone.signal()
 }.start()
 var writeError: String? = nil
-let session = TapeSession(writer: writer, ring: ring, arrival: arrival, monoNow: { clockNS(CLOCK_MONOTONIC) }, wallNow: WallClock.now)
+let session = TapeSession(writer: writer, ring: ring, arrival: arrival, rule: .production(channels: Int(inputChannels)),
+                          monoNow: { clockNS(CLOCK_MONOTONIC) }, wallNow: WallClock.now)
 do { try runWriter(session: session, ring: ring, shared: shared, hooks: hooks) } catch { writeError = "\(error)" }
 captureDone.wait()
 _ = signalSources
@@ -265,6 +285,9 @@ _ = signalSources
 struct Summary: Codable {
     var device: OpenedDevice
     var negotiated: Negotiated
+    /// What the hardware offered before anything was requested of it, and the channel count the conversion used.
+    var capabilities: DeviceCapabilities
+    var conversionChannels: Int
     var tape: String
     var prior: TapeWriter.PriorTape?
     var samples: Int64
@@ -280,7 +303,8 @@ struct Summary: Codable {
     var testHooks: Bool
     var failure: String?
     enum CodingKeys: String, CodingKey {
-        case device, negotiated, tape, prior, samples, records, ring, events, outages, failure
+        case device, negotiated, capabilities, tape, prior, samples, records, ring, events, outages, failure
+        case conversionChannels = "conversion_channels"
         case deviceOverruns = "device_overruns", elapsedS = "elapsed_s", testHooks = "test_hooks"
         case sessionTargets = "session_rollover_targets", rollovers
     }
@@ -292,7 +316,8 @@ let builtWithHooks = false
 #endif
 let (counters, events) = ring.snapshot()
 let rolloverLog = side.log()
-let summary = Summary(device: openedDevice, negotiated: negotiated, tape: tapePath, prior: writer.prior, samples: writer.samples,
+let summary = Summary(device: openedDevice, negotiated: negotiated, capabilities: capabilities, conversionChannels: Int(inputChannels),
+                      tape: tapePath, prior: writer.prior, samples: writer.samples,
                       records: writer.records, ring: counters, events: events,
                       sessionTargets: rolloverLog.sessions, rollovers: rolloverLog.rollovers, deviceOverruns: shared.overruns,
                       outages: shared.outages, elapsedS: Double(clockNS(CLOCK_MONOTONIC) - shared.startNS) / 1e9,

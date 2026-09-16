@@ -132,7 +132,7 @@ straddling gaps (item 4). All four now follow the Mac source at f798edf as quote
 
 ## U1 step 1 — the conversion (spec: /home/vinay/Share/ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1.md)
 
-- Normative spec: `spec/CONVERSION-48K-STEREO-TO-16K-MONO.md`; taps: `spec/fir-48k-to-16k-121tap-q16.taps`
+- Normative spec: `spec/CONVERSION-48K-TO-16K-MONO.md`; taps: `spec/fir-48k-to-16k-121tap-q16.taps`
   (sha256 fca3925a…). Design tool (provenance): `tools/design_fir.py 121 7000 8.0 16`.
 - Implementation: `Sources/TapeConvert` (no Foundation, no platform imports). `FIRTaps.swift` is generated from the
   taps file; C9 checks the fixture's taps file equals the linked array tap by tap.
@@ -149,7 +149,7 @@ straddling gaps (item 4). All four now follow the Mac source at f798edf as quote
 - 11.2: `good/c9-direction-probe` (h[0]=32768, h[1]=16384, h[2]=8192, h[120]=8192) + `negative/c9-convolution-reversed`
   (31360 of 44800 samples differ). Coverage guard requires the probe.
 - 11.3: floor-division sentence in the spec §5 and manifest rule text.
-- 11.4: reset at stream start and every discontinuity; `StereoDecimator.reset()`; `expected-16k-mono-regions.pcm`
+- 11.4: reset at stream start and every discontinuity; `Decimator.reset()`; `expected-16k-mono-regions.pcm`
   (resets before 52801 and 100800, 44799 samples) + `negative/c9-history-carried-across-discontinuity`.
   **Ramp-up correction:** §11.4 says 60 output samples / 3.75 ms. Structurally output k reads frames 3k+2-120..3k+2,
   so only outputs 0..39 depend on the zero history: 40 samples, 2.5 ms. Measured: 40 (1 kHz tone), 35 (DC).
@@ -690,6 +690,12 @@ every run (from the tape start or a restart record), not only the first. L8 (the
   (the recorder's own `ISTDay.nextMidnight` check, or an equivalent probe) before the install line reports success.
 - **libasound2** (alsa-lib, linked dynamically; ldd: libasound.so.2) installed and loadable before the install line reports
   success.
+- **Autologin off** (16 Sep ruling R2). A room machine must reach a login prompt with no seat session: the seat ACL on
+  `/dev/snd/*` must not be what grants the service its audio access, and U2's acceptance test is invalid while autologin is
+  on. Verify after install: `loginctl list-sessions` shows no `seat0` session, and `getfacl /dev/snd/pcmC1D0c` shows no
+  `user:` entry beyond the owner.
+- **The service binary and the tape directory live outside `/home`** (measured 16 Sep: `/home/vinay` is mode 750 and a
+  system account cannot traverse it — the M2.1 probe failed at exec with "Permission denied" before reaching ALSA).
 
 
 ## The grounding pass, round 1 (16 Sep): eight citations, and two checks it refuted
@@ -985,7 +991,7 @@ Not a worry, a measurement (orchestrator search of the Mini, 16 Sep):
 
 - Every Mac tape in existence is **44 100 Hz** — 22 capture directories, largest 21 439 records, all `input_sample_rate`
   44100, all the TONOR TM20. No tape file anywhere contains 48000.
-- Our conversion is specified for **48 kHz** input (`spec/CONVERSION-48K-STEREO-TO-16K-MONO.md`, U1 spec §4), because the
+- Our conversion is specified for **48 kHz** input (`spec/CONVERSION-48K-TO-16K-MONO.md`, U1 spec §4), because the
   Yoga's DMIC rejects anything else, and every assertion resting on it is scoped to 48 kHz: C9 entirely, C8.L5-frames, and
   C7.boundary-after-flush (which skips a record whose `input_sample_rate` is not 48000 — `good/discontinuity` describes a
   44.1 kHz device and is exempt).
@@ -1031,6 +1037,203 @@ this file:
   3.53e-05 over the first 400 samples). On a TM20 the warm-up signature will differ, and a mute is now a third
   indistinguishable case alongside warm-up and a dead input. Any mute/unplug classifier in U3 must be specified against
   all three, with `zero_ratio` read over a stated window — not inferred from `rms` alone.
+
+## The downmix was specified as the sum; the Mac takes the mean (16 Sep, orchestrator read + measurement)
+
+`AudioRing.swift:296-309`: one channel is a straight copy; more than one is the **arithmetic mean over `channelCount`**,
+in **Float32**, with no scaling afterwards. Our spec said `m = L + R` in Int32 — wrong twice in wording (sum where the Mac
+averages, integer where the Mac is float) and, worse, silent about any channel count but two. The spec is renamed
+`spec/CONVERSION-48K-TO-16K-MONO.md` (the STEREO framing is gone) and §2 now states: **C == 1 copies; C > 1 takes the mean
+over C**, with the division folded into the output divisor so the conversion rounds exactly once:
+
+    m[n] = Σ_c s_c[n]                     exact, Int32
+    divisor = C · 2¹⁶                      (C = 1 → 65 536;  C = 2 → 131 072)
+    y[k] = floor((acc + divisor/2) / divisor)
+
+### What that changed numerically: nothing for two channels, everything for one
+
+For C = 2 the divisor is 131 072, which is exactly the old `(acc + 65 536) >> 17`. **The arithmetic already was the mean**
+— the ÷2 was hidden in the output shift. Evidence, not reasoning:
+
+- Every existing C9 file is **bit-identical** after the rewrite: `input-48k.pcm` (renamed from `input-48k-stereo.pcm`),
+  `expected-16k-mono.pcm`, `expected-16k-mono-regions.pcm`, and the direction-probe and perturbed-coefficient outputs. Only
+  manifests changed.
+- A fresh 20 s DMIC tape (2 ch, 48 kHz, tee'd input) recomputed from its own input: the **mean** reproduces the tape
+  **byte for byte**; the **sum** (divisor 65 536) gives exactly twice the amplitude.
+
+| Conversion of the same 20 s DMIC input | samples | peak | rms |
+|---|---|---|---|
+| the tape the recorder wrote | 320 000 | 0.428131103515625 | 0.031774273858741 |
+| recomputed, **mean** over 2 channels (divisor 131 072) | 320 000 | 0.428131103515625 | 0.031774273858741 |
+| recomputed, **sum**, no division (divisor 65 536) | 320 000 | 0.856292724609375 | 0.063548552870718 |
+
+For C = 1 the old wording had no rule at all, and a mono device forced through the C = 2 divisor would be **attenuated by
+6 dB**. That is the real defect the TM20 exposed, and it is now a negative control (`c9-mono-attenuated`).
+
+### The headroom finding stands: it is NOT this defect
+
+**Answer to the question asked:** recomputing a DMIC tape with the mean does not halve its peak, because our pipeline was
+already dividing by 2. The measured DMIC peak **0.953582763671875** (0.41 dB of headroom) was already a mean-based number;
+it does not become 0.4767913818359375. Halving it would require applying the mean **twice**, which would be a new defect.
+**The gain question for U2 is real and untouched** — and it must be re-measured on a TM20 anyway (see the U2 carry-forward
+above). No gain was adjusted.
+
+### Fixtures
+
+- `good/c9-resample-tones`, `good/c9-direction-probe`: unchanged bytes, 2 channels, manifests now carry `channel_count`
+  and `output_rounding.divisor` (replacing `shift`).
+- `good/c9-resample-mono` (new): the same 134 402-frame programme as one channel — the TM20's format — divisor 65 536,
+  unity gain, with the region-reset output as well.
+- `negative/c9-downmix-sum-not-mean` (new): the 2-channel input converted with divisor 65 536. **Divisor-only:** the
+  framing stays 2-channel, so the only thing that differs is the downmix division. It fails on the output bytes alone.
+- `negative/c9-mono-attenuated` (new): the 1-channel input converted with divisor 131 072 — the old wording's 6 dB loss.
+- `DecimationRule.divisorChannelsOverride` exists for those two controls only, documented as generator-only, in the same
+  way the taps and phase variants already were.
+
+## Which of the Mac's four format rules we kept (16 Sep, point 3)
+
+The Mac reads `input.inputFormat(forBus: 0)` (`Recorder.swift:78`) and installs its tap with that same format (`:89`).
+**There is no channel-count request anywhere in the Mac tree.** Our hard-coded `channels: 2` is the whole reason the TM20
+failed to open, and it is gone: `CaptureDevices.capabilities()` reads the device's `hw_params` before anything is
+requested, `CaptureFormat.validate` checks it, and the recorder opens with the count the hardware reports (1 for a TM20,
+2 for the DMIC) and converts with that count.
+
+Their validator (`Recorder.swift:18-34`) rejects four things. **Kept two, dropped two, deliberately:**
+
+| Mac rule | Here | Why |
+|---|---|---|
+| `channelCount <= 0` rejected | **kept** | A channel count is a channel count on any platform. |
+| `sampleRate < 44_100` rejected | **kept** as `CaptureFormat.rateFloor` | Same floor, same reason: below it nothing downstream is specified. |
+| non-interleaved rejected | **dropped** | AVAudioEngine can hand back a non-interleaved buffer; ALSA cannot surprise us — we open `SND_PCM_ACCESS_RW_INTERLEAVED` by design and the open fails otherwise. |
+| non-Float32 rejected | **dropped** | That is AVAudioEngine's canonical format. We ask ALSA for `S16_LE` by design, because the tape format is S16_LE; a device that cannot give it is rejected by `supportsS16LE`, which is the same rule inverted. |
+
+Added beyond theirs, from the `hw:`-only standing rule: the hardware must support **48 000 Hz natively**
+(`CaptureFormat.requiredRate`), because the conversion is specified for a 48 kHz input and no plugin layer will be added to
+make another rate fit. A device offering 8 000…48 000 Hz (the TM20) passes; one that cannot reach 48 kHz is an error to
+report.
+
+**Live, through our own capture path, after the change:**
+
+| device | capabilities read | negotiated | conversion channels | index `input_sample_rate` |
+|---|---|---|---|---|
+| `hw:CARD=Device,DEV=0` (TM20) | channels 1…1, rate 8 000…48 000, S16_LE, 48 kHz yes | S16_LE, 1 ch, 48 000 Hz | 1 | 48000 |
+| `hw:CARD=sofhdadsp,DEV=6` (DMIC) | channels 2…2, rate 48 000…48 000, S16_LE, 48 kHz yes | S16_LE, 2 ch, 48 000 Hz | 2 | 48000 |
+
+A device that comes back from a loss with a **different** channel count stops the run rather than change the downmix
+mid-tape, because no index key records the channel count (next section).
+
+## The tape does not record its channel count — inherited gap (16 Sep, point 4)
+
+The fifteen `CodingKeys` (`TapeFormat.swift:34-49`) have no channel field, on either platform, so **no tape can tell you
+what its downmix did**: `input_sample_rate` is there, C is not. That is the Mac's gap and we inherit it deliberately — the
+format is not ours to extend, and no key was added. Recorded in `spec/RECORDER-RECORDS-LINUX.md`; the recorder's run
+summary carries `capabilities` and `conversion_channels` so the operator's log has what the tape cannot.
+
+## TM20 identity, measured for the card-id ruling (16 Sep, point 5)
+
+- `lsusb -v`: `idVendor 0x0d8c`, `idProduct 0x0134`, `iManufacturer FuZhou Kingwayinfo CO.,LTD`,
+  `iProduct TONOR TM20 Audio Device`, **`iSerial 20200918`** (sysfs `serial` agrees). It is present, but it reads as a date
+  — a batch string, not a per-unit serial. **Whether two TM20s share it cannot be tested here with one mic.**
+- `/dev/snd/by-id/usb-FuZhou_Kingwayinfo_CO._LTD_TONOR_TM20_Audio_Device_20200918-00 → ../controlC1`. One entry, and it
+  points at the **control** node, not at `pcmC1D0c`; ALSA's by-id does not name PCM devices.
+- `/dev/snd/by-path/pci-0000:00:14.0-usb-0:1:1.0 → ../controlC1` and `…-usbv2-0:1:1.0 → ../controlC1`: stable per physical
+  port, and it would change if the mic moved to another port.
+- ALSA card id: **`Device`** (generic), card index 1, so today's stable name is `hw:CARD=Device,DEV=0`.
+
+No decision taken; the recorder still requires a stable `hw:CARD=<id>,DEV=<n>` name and still refuses a default.
+
+## Build hazard, measured 16 Sep: an incremental SwiftPM build produced a corrupt binary
+
+Adding one field to `DecimationRule` (a struct shared by TapeConvert, RecorderCore and room-recorder) and rebuilding
+incrementally gave a `room-recorder` that **aborted at startup with `malloc(): invalid size (unsorted)`, 100 % of runs, on
+both microphones**. gdb put the crash in `Decimator.init` reading a `DecimationRule` whose memory was unreadable — a
+struct-layout mismatch between modules compiled at different times (SwiftPM's local modules have no library evolution, so
+layout is baked in per compile). `rm -rf .build && swift build -c release --static-swift-stdlib` fixed it with no source
+change, and both devices then recorded.
+
+Earlier the same day the same incremental builder **skipped a relink** after a source change (the hook-rename check), so
+this is the second staleness incident in one day.
+
+**Rule: every run that produces evidence — a real recording, a fixture generation, a suite run quoted in a report — is
+made with binaries from a clean `.build`.** Regenerating the fixtures with the clean binary changed no fixture byte
+(manifests differ only by the encoder attestation), and both roots still held, so nothing measured before it was wrong;
+but that was luck, not method.
+
+## U2 §4 measurements (16 Sep) — M2.1, M2.2, M2.3
+
+### M2.1 — the seat ACL does disappear; the service-account half did not run
+
+Measured with the display manager stopped (`sudo tools/u2-m21-probe.sh`, first run):
+
+```
+with the autologin session present:          with gdm stopped, no seat session:
+  user::rw-                                    user::rw-
+  user:vinay:rw-      <- udev uaccess          group::rw-        <- group audio only
+  group::rw-                                   mask::rw-
+  other::---                                   other::---
+```
+
+**Settled: the `user:vinay:rw-` entry is a seat ACL and it is gone when no one is logged in.** What remains on
+`/dev/snd/pcmC1D0c` is `root:audio 0660`, so group `audio` is the only path a service account can have — which is what S1
+assumes.
+
+**Not settled: whether our service account can then open it.** The probe failed at exec, not at audio:
+`env: '/home/vinay/dev/…/room-recorder': Permission denied`, exit 126, both with and without group `audio`.
+Cause, measured: **`/home/vinay` is mode 750** (`drwxr-x--- vinay vinay`), so a system account cannot traverse it; the
+binary itself is `-rwxr-xr-x root root`. Nothing to do with ALSA.
+
+**Two consequences for U2/U4, not guesses:** the service binary must live outside `/home` (U4 installs it; the probe now
+stages a copy in `/usr/local/lib/room-recorder-probe` and removes it afterwards), and S7's tape directory must be outside
+`/home/vinay` too — the probe now uses `/var/tmp/u2-m21-probe-tape` owned by the account, mode 0750. The probe is fixed and
+needs one more root run.
+
+### M2.2 — settled, with numbers: whoever opens first wins, and we must open first
+
+wireplumber holds the cooperative D-Bus reservations `ReserveDevice1.Audio0`/`Audio1`; a raw ALSA client does not consult
+them, so they change nothing for us.
+
+| Test | Result |
+|---|---|
+| we hold the device, a PipeWire client (`pw-record`) targets the TM20 | **we keep recording** (8 s, 128 000 samples, no events); the client wrote a 44-byte WAV — header only, no audio |
+| a PipeWire client holds it, then we start | **loud failure**: `snd_pcm_open(hw:CARD=Device,DEV=0) for capability query: Device or resource busy`, exit 2; PCM state `RUNNING` |
+| the user audio stack restarts mid-recording (the audio part of a login) | **unaffected**: 12.0 s exactly, 192 000 samples, no `device_lost`, no gap |
+| client holds 6 s, we retry every 2 s | busy at t = 2, 4, 6, **8, 10** s — the hold outlives the client |
+| time from client exit to the PCM being free, 3 trials | **5.0 s, 5.0 s, 5.0 s** |
+
+**V's ruling (16 Sep): a login does not take the mic from a service that is already recording, so room machines do not need
+a no-login policy; but our service must open first, and that is a hard requirement, not a preference.**
+
+### R1 — RestartSec floor: 5.0 s, measured, not chosen
+
+S4 is amended: **`RestartSec` is never below 5 s.** The number is PipeWire's hold after its last client exits, measured
+three times with no variance (5.0 s, 5.0 s, 5.0 s; `pw-record` 4 s, then the PCM polled at 0.5 s until `closed`, then a
+real open). A shorter backoff spends restarts inside a window where the open cannot succeed and makes the journal read as
+our crash loop rather than as somebody else's hold.
+
+### R3 — carried to U3: when we hold the mic, a desktop session gets silence
+
+A raw ALSA client ignoring wireplumber's reservation is **the behaviour we want** on a room machine: the recorder keeps the
+device and a logged-in session's mic yields an empty stream (measured: a 44-byte WAV with no samples). It will look like a
+broken microphone to anyone who logs in and tries to use it. **Do not "fix" this by making the recorder yield**, and do not
+add a plugin layer to share the device. If a room ever needs a working desktop mic, that is a second capture device or a
+policy decision, not a change to how we open ours.
+
+### M2.3 — still unmeasured; S3 stands unchanged either way
+
+The journal is persistent but holds two boots, and the TM20 was plugged into the current one at 08:50, so **no recorded
+boot has the mic attached.** Today's hotplug gives only the last step: **190 ms** from `usb 3-1: new full-speed USB device`
+to `snd-usb-audio` registered. This boot reached `sound.target` at 6.74 s, `graphical.target` at 7.47 s and
+`multi-user.target` at **11.25 s** — where a `WantedBy=multi-user.target` service would start.
+
+`tools/u2-boot-enum-probe.sh [-1|-2|-3]` reads it back per boot from the journal (unprivileged, retroactive, no unit).
+**R4: S3's bounded wait then named failure stands whatever the three boots show** — a `.device` dependency cannot cover
+"plugged in late" or "never plugged in"; the boots decide only whether one is worth having in addition.
+
+### R2 — autologin is a precondition of the acceptance test, not just a shipping item
+
+This Yoga runs `gdm-autologin` (session 1, seat0/tty2, wayland, since boot), so "nobody logs in" is not true of it as
+configured, and an acceptance run in that state proves nothing: the seat ACL grants an access a real room machine will not
+have. Written into the U2 spec §6 as a precondition and carried to U4 below.
 
 ## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
 
@@ -1088,18 +1291,18 @@ This table is generated from the manifest.
 | `C7.gap-fields` | mac-source | a ring_overflow record carries non-zero gap_ns and dropped_input_frames | AudioRing.swift:191, :264, :338, :355 (gap = new-side mono start - drop start); TapeWriter.swift:281 (0 omitted); TapeFormat.swift:12-49 (dropped_input_frames on ring_overflow with drops, ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
 | `C7.gapless-day-rollover` | mac-source | a day_rollover boundary carries neither gap_ns nor dropped_input_frames | TapeWriter.swift:267-296; AudioRing.swift:143-215 (gapNS 0, droppedFrames 0) (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C7.no-zero-fill` | mac-source | the boundary's byte_offset is the tape length after the resampler flush that opens discontinuity(), and tape.pcm holds exactly the audio before and after it: nothing is inserted for the gap | TapeWriter.swift:267-296, whose first statement :268 is try finishConversion() (:261-264 → writeConverted :245-259, which appends to tape.pcm through writeAll at :252), and only then is the record stamped with byteOffset: bytesWritten (orchestrator read, 15 Sep). The earlier wording, 'discontinuity() writes no PCM', was FALSE: the path flushes the resampler first |
-| `C7.boundary-after-flush` | ungrounded-blocked | the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes | What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own **Blocked by:** Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3) |
+| `C7.boundary-after-flush` | ungrounded-blocked | the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes | What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own **Blocked by:** Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3) |
 | `C7.zero-run-probe` | our-choice | no run of min(gap samples, 16) zero samples (16 at a gapless boundary) starting 40 samples after the boundary | Ours, never a Mac behaviour: the 16-sample zero-run threshold that defines zero fill was chosen in U0-A (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3, C7), and the 40-sample exemption is ruled in ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.5 |
 | `C8.L1-keys` | mac-source | day_rollover keys: byte_offset, samples, mono_ns, wall_ns, device, discontinuity, input_frames/input_sample_rate; nothing else | TapeWriter.swift:267-296; AudioRing.swift:20 (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C8.L2-target` | mac-source | a day_rollover's wall_ns is an IST midnight (the target itself) | AudioRing.swift:143-215 (marker wallNS = rollover.wallNS = target); CaptureTimeline.swift:141-150; ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata) (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C8.L3-rearm` | mac-source | a capture session's first boundary comes from the zone, and within one session each later boundary is the previous one + 86400000000000 ns | First arm: Recorder.swift:66 `let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })` and :75 `nextRolloverWallNS: UInt64(nextMidnightNS.rounded())`; ArchiveMidnightFoundation.swift:73 `nextMidnight(now: @Sendable () -> Date)` and :10 timeZoneIdentifier = "Asia/Kolkata". Re-arm: CaptureTimeline.swift:24 (istDayNS literal) and :122-131 (+istDayNS). Two different mechanisms; the check rests on both (orchestrator read, 16 Sep) |
 | `C8.L4-straddle` | mac-source | the input frame holding midnight stays in the old day: where prefix end and suffix start share wall time S, S - midnight lies in [0, 20834) ns at 48 kHz | CaptureTimeline.swift:146-149 (frameOffset ceil); AudioRing.swift:323-325 (segmentEnd = start + UInt64(Double(frameCount) / sampleRate * 1e9), truncating). The [0, 20834) form of the bound is ours (orchestrator ruling 15 Sep), checked on Linux for split counts <= 1200 frames |
-| `C8.L5-frames` | our-choice | the day closed by a day_rollover holds floor(input frames / 3) samples | spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026) |
+| `C8.L5-frames` | our-choice | the day closed by a day_rollover holds floor(input frames / 3) samples | spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026) |
 | `C8.L6-no-unmarked-midnight` | mac-source | no end-of-audio checkpoint at or after an IST midnight unless a day_rollover at that sample closes the region | CaptureTimeline.swift:141 (every buffer whose wall end reaches the target is split) |
 | `C8.L7-input-frames` | mac-source | a day_rollover carries input_frames exactly when audio preceded it in the same run (tape start or restart) | TapeWriter.swift:153 (currentInputSampleRate declared per run()); TapeWriter.swift:285 (input_frames keyed off it); TapeWriter.swift:290 (cleared only on formatChange) (orchestrator read, 15 Sep) |
 | `C8.L8-anchor-deferred` | mac-source | the capture anchor follows the last of a run of markers, before the first audio: no checkpoint between adjacent markers with no audio consumed; the record after a marker run, if a checkpoint, is its empty-window anchor | TapeWriter.swift:288-292 (needsCaptureAnchor set in discontinuity()); TapeWriter.swift:323-326 (marker item returns early); TapeWriter.swift:339-341 (anchor checkpoint for an audio item) (orchestrator read, 15 Sep) |
 | `C8.pins` | mac-source | every day_rollover's line, wall_ns, mono_ns, sample, input_frames, prefix-end and new-day wall times equal the expected answers | Expected answers computed from CaptureTimeline.swift:141-150, :146-149, :122-131 and AudioRing.swift:323-325 (synthetic fixtures), or taken from the recorder's capture-side split log (recorded tape) |
-| `C9.manifest-describes-implementation` | our-choice | the fixture's written conversion rules and taps equal the linked implementation | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2 |
+| `C9.manifest-describes-implementation` | our-choice | the fixture's written conversion rules and taps equal the linked implementation | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2 |
 | `C9.output-deterministic` | our-choice | the conversion output is byte-identical to the checked-in output, whole and chunked | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 4 |
 | `C9.direction-probe` | our-choice | asymmetric taps pin the convolution index direction | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.2 (C9 blind spot closed) |
 | `C9.region-reset` | our-choice | history resets at every discontinuity: the stream with resets equals its regions converted in isolation | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 |

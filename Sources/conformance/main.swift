@@ -97,7 +97,7 @@ case "explain-c7":
 
 case "explain-flush":
     guard let frames = option("--frames").flatMap(Int.init), frames > 0 else { die(usage) }
-    var decimator = StereoDecimator()
+    var decimator = Decimator()
     var out: [Int16] = []
     // A 1 kHz tone, so a flushed partial sample would be non-zero and visible.
     var input: [UInt8] = []

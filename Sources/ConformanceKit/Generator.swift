@@ -470,11 +470,12 @@ public enum FixtureGenerator {
         (2, .tone(hz: 1000, amplitude: 0.5), .tone(hz: 3000, amplitude: 0.25)),
     ]
 
-    static func c9Input() -> [UInt8] {
+    /// The C9 input at `channels` channels: channel 0 is the left programme, channel 1 the right (only 1 and 2 are used).
+    static func c9Input(channels: Int = 2) -> [UInt8] {
         var out: [UInt8] = []
         for seg in c9Segments {
             for n in 0..<seg.frames {
-                for v in [seg.left.sample(n), seg.right.sample(n)] {
+                for v in (0..<channels).map({ $0 == 1 ? seg.right.sample(n) : seg.left.sample(n) }) {
                     let u = UInt16(bitPattern: v)
                     out.append(UInt8(u & 0xff))
                     out.append(UInt8(u >> 8))
@@ -503,14 +504,16 @@ public enum FixtureGenerator {
         }
         return ResamplerFixture(
             design: rule.designID,
-            specification: "spec/CONVERSION-48K-STEREO-TO-16K-MONO.md. All arithmetic exact integer; no floating point in the conversion.",
-            input: FileDigest(file: "input-48k-stereo.pcm", bytes: 0, sha256: ""),
+            specification: "spec/CONVERSION-48K-TO-16K-MONO.md. All arithmetic exact integer; no floating point in the conversion.",
+            input: FileDigest(file: "input-48k.pcm", bytes: 0, sha256: ""),
             output: FileDigest(file: "expected-16k-mono.pcm", bytes: 0, sha256: ""),
             taps: FileDigest(file: probe ? "direction-probe-121tap-q16.taps" : "fir-48k-to-16k-\(rule.taps.count)tap-q\(rule.qBits).taps", bytes: 0, sha256: ""),
-            inputFrames: inputFrames, outputSamples: rule.outputCount(frames: inputFrames),
-            inputFormat: "S16_LE, 2 channels interleaved L,R, 48000 Hz; frame = 4 bytes, L = bytes 0-1, R = bytes 2-3; frames numbered n = 0,1,2,... from stream start",
+            inputFrames: inputFrames, channelCount: rule.channels, outputSamples: rule.outputCount(frames: inputFrames),
+            inputFormat: "S16_LE, \(rule.channels) channel(s) interleaved, 48000 Hz; frame = \(2 * rule.channels) bytes, channel c at bytes 2c..2c+1; frames numbered n = 0,1,2,... from stream start",
             outputFormat: "S16_LE, 1 channel, 16000 Hz",
-            downmix: "m[n] = L[n] + R[n], exact, in a signed 32-bit integer (range -65536..65534). No halving and no rounding at this step; the factor 1/2 is applied in the output shift. L=-1,R=0 gives m=-1 exactly.",
+            downmix: rule.channels == 1
+                ? "channel_count 1: m[n] = s[n], a copy (conversion spec section 2), as the Mac copies a single channel (AudioRing.swift:296-309). No attenuation: the output divisor is 2^\(rule.qBits), not 2 x 2^\(rule.qBits)."
+                : "channel_count \(rule.channels): m[n] is the MEAN over the channels. Held here as the exact sum m[n] = sum over c of s_c[n] in a signed 32-bit integer (range \(-32768 * rule.channels)..\(32767 * rule.channels)), with the division by \(rule.channels) folded into the output divisor (section 5), so the conversion rounds exactly once. The Mac takes the same mean in Float32 (AudioRing.swift:296-309). s=(-1,0) gives m=-1 exactly.",
             filter: probe
                 ? .init(tapCount: rule.taps.count, qBits: rule.qBits, tapSum: tapSum, symmetric: false, cutoffHz: 0, window: "none", kaiserBeta: 0,
                         design: "Direction probe, not a low-pass: h[0]=32768, h[1]=16384, h[2]=8192, h[120]=8192, every other tap 0. Asymmetric on purpose, so acc[n] = sum h[i]*m[n-i] and the reversed sum h[i]*m[n+i-120] give different output.",
@@ -524,8 +527,8 @@ public enum FixtureGenerator {
                                rule: "acc[n] = sum over i = 0..\(rule.taps.count - 1) of h[i] * m[n - i], in a signed 64-bit integer. Index direction: h[0] multiplies the NEWEST sample m[n], h[\(rule.taps.count - 1)] the OLDEST m[n - \(rule.taps.count - 1)]. |acc| <= 65536 * sum|h| = 8357675008 for the production taps, beyond 32 bits."),
             decimation: .init(factor: rule.factor, phase: rule.phase,
                               rule: "Output sample k = 0,1,2,... is computed from acc[\(rule.factor)k + \(rule.phase)], produced when input frame \(rule.factor)k + \(rule.phase) arrives. F input frames give one output per frame n < F with n mod \(rule.factor) == \(rule.phase)\(rule.phase == rule.factor - 1 ? ", i.e. floor(F / \(rule.factor)): an output needs the complete group \(rule.factor)k .. \(rule.factor)k+\(rule.factor - 1), and up to \(rule.factor - 1) trailing frames give none" : "")."),
-            outputRounding: .init(bias: rule.roundingBias, shift: rule.outputShift,
-                                  rule: "y = (acc + \(rule.roundingBias)) >> \(rule.outputShift) is FLOOR division of (acc + \(rule.roundingBias)) by \(Int64(1) << Int64(rule.outputShift)), never truncation toward zero; the two differ for negative accumulators, so a port using / on a signed integer is non-conforming. Divides by 2 (downmix) and 2^\(rule.qBits) (Q\(rule.qBits)) at once; exact halves round toward +infinity: acc=65536 -> 1, acc=-65536 -> 0, acc=-196608 -> -1."),
+            outputRounding: .init(bias: rule.roundingBias, divisor: rule.outputDivisor,
+                                  rule: "y = floor((acc + \(rule.roundingBias)) / \(rule.outputDivisor)), FLOOR division, never truncation toward zero; the two differ for negative accumulators, so a port using / on a signed integer is non-conforming. The divisor is channels x 2^\(rule.qBits) = \(rule.channels) x \(Int64(1) << Int64(rule.qBits)): it divides by the channel count (the downmix mean) and by Q\(rule.qBits) at once. Exact halves round toward +infinity: acc=\(rule.roundingBias) -> 1, acc=\(-rule.roundingBias) -> 0, acc=\(-3 * rule.roundingBias) -> -1."),
             clipping: .init(min: DecimationRule.clipMin, max: DecimationRule.clipMax,
                             rule: "After rounding: y > 32767 becomes 32767; y < -32768 becomes -32768."),
             streaming: "Output does not depend on how input frames are split across calls: FIR history and the position within the current 3-frame group carry across calls. At stream start AND at every discontinuity the converter resets: history zero, the next frame is frame 0 of a new group, and frames of an incomplete group buffered before the reset (at most 2) produce no output. Cost: the first 40 output samples of every region (2.5 ms) are computed partly from zero history, deterministically.",
@@ -534,7 +537,9 @@ public enum FixtureGenerator {
             regionStarts: regionStarts,
             regionsOutput: regionStarts == nil ? nil : FileDigest(file: "expected-16k-mono-regions.pcm", bytes: 0, sha256: ""),
             regionsOutputSamples: regionsCount,
-            inputSynthesis: c9Segments.map { "\($0.frames) frames: L \($0.left.text); R \($0.right.text)" }
+            inputSynthesis: (rule.channels == 1
+                ? c9Segments.map { "\($0.frames) frames: \($0.left.text)" }
+                : c9Segments.map { "\($0.frames) frames: L \($0.left.text); R \($0.right.text)" })
                 + ["tone samples: round(amplitude * 32767 * cos(2*pi*f*n/48000)) with n from 0 at each segment start, rounded half away from zero"])
     }
 
@@ -542,15 +547,15 @@ public enum FixtureGenerator {
     /// `carryHistory` writes the regions output as if nothing reset at the discontinuities.
     static func c9Draft(name: String, description: String, rule: DecimationRule, tapsRole: String = "production",
                         regionStarts: [Int]? = nil, outputRule: DecimationRule? = nil, carryHistory: Bool = false) -> Draft {
-        let input = c9Input()
+        let input = c9Input(channels: rule.channels)
         let producer = TapeConvertResampler(rule: outputRule ?? rule)
-        let output = producer.convert(stereo48k: input, chunkFrames: [])
-        let regions = regionStarts.map { carryHistory ? output : producer.convert(stereo48k: input, resetAtFrames: $0) }
+        let output = producer.convert(input48k: input, chunkFrames: [])
+        let regions = regionStarts.map { carryHistory ? output : producer.convert(input48k: input, resetAtFrames: $0) }
         let taps = Array(rule.taps.map { "\($0)\n" }.joined().utf8)
         var m = FixtureManifest(schema: FixtureManifest.currentSchema, name: name, description: description,
                                 provenance: "synthetic", role: .good, cases: [.C9], negativeControl: nil,
                                 pcm: nil, idx: nil, expected: nil, synthesis: nil, resampler: nil, encoder: nil)
-        m.resampler = conversionSpec(rule, inputFrames: input.count / 4, tapsRole: tapsRole, regionStarts: regionStarts)
+        m.resampler = conversionSpec(rule, inputFrames: input.count / (2 * rule.channels), tapsRole: tapsRole, regionStarts: regionStarts)
         if carryHistory, let count = regions.map({ $0.count / 2 }) { m.resampler!.regionsOutputSamples = count }
         var d = Draft(manifest: m, pcm: [], idx: [], expected: ExpectedAnswers())
         d.resampler = (input, output, taps, regions)
@@ -568,6 +573,9 @@ public enum FixtureGenerator {
             c9Draft(name: "c9-resample-tones",
                     description: "134402 frames of synthetic 48 kHz stereo: independent L/R tones, a 10 kHz tone above the output Nyquist, DC half-steps (-1/0, 0/1, -3/-2) and both rails, a full-scale square that overshoots and clips at both rails, a 7 kHz tone at the cut-off, and 2 trailing frames. Output generated by the production conversion; regions output with resets at frames 52801 and 100800.",
                     rule: .production, regionStarts: c9RegionStarts),
+            c9Draft(name: "c9-resample-mono",
+                    description: "The same 134402-frame programme as ONE channel (the TONOR TM20's format): channel_count 1, so the downmix is a copy and the output divisor is 65536, not 131072 — unity gain, not half. Regions output with resets at frames 52801 and 100800.",
+                    rule: .production(channels: 1), regionStarts: c9RegionStarts),
             c9Draft(name: "c9-direction-probe",
                     description: "The C9 input run through the production arithmetic with deliberately asymmetric taps, so the convolution index direction (h[0] on the newest sample) is pinned.",
                     rule: directionProbeRule, tapsRole: "direction_probe"),
@@ -588,7 +596,17 @@ public enum FixtureGenerator {
             d.manifest.description = "NEGATIVE CONTROL for C9, derived from \(from). \(corruption)"
             return d
         }
+        // Divisor-only variants: the framing stays at the fixture's channel count, so only the downmix division differs.
+        var sumNotMean = DecimationRule.production
+        sumNotMean.divisorChannelsOverride = 1   // 2-channel input divided by 2^16 only: the sum, not the mean
+        var monoHalved = DecimationRule.production(channels: 1)
+        monoHalved.divisorChannelsOverride = 2   // 1-channel input divided by 2 x 2^16: attenuated by 6 dB
         return [
+            neg(c9Draft(name: "c9-downmix-sum-not-mean", description: "", rule: .production, outputRule: sumNotMean),
+                corruption: "The 2-channel input converted with the divisor 65536 instead of 131072: the downmix sums the channels instead of averaging them, so every sample is twice the specified value, and clips where the mean would not."),
+            neg(c9Draft(name: "c9-mono-attenuated", description: "", rule: .production(channels: 1), outputRule: monoHalved),
+                from: "good/c9-resample-mono",
+                corruption: "The 1-channel input converted with the 2-channel divisor 131072: a mono copy attenuated by 6 dB, which is what the old 'm = L + R' wording would have produced on a TONOR TM20."),
             neg(c9Draft(name: "c9-coefficient-perturbed", description: "", rule: perturbed),
                 corruption: "A self-consistent variant with one coefficient changed: h[59] is 16534 instead of 16533 (tap sum 65537). Taps file, manifest fields and expected output all describe that variant."),
             neg(c9Draft(name: "c9-decimation-phase-shifted", description: "", rule: shifted),
@@ -634,7 +652,7 @@ public enum FixtureGenerator {
             return bytes
         }
         let converter = TapeConvertResampler()
-        let pcm = converter.convert(stereo48k: region(48_000), chunkFrames: []) + converter.convert(stereo48k: region(48_000), chunkFrames: [])
+        let pcm = converter.convert(input48k: region(48_000), chunkFrames: []) + converter.convert(input48k: region(48_000), chunkFrames: [])
         var b = TapeBuilder(device: dmic, wall: cleanAnchorNS, mono: monoStart, inputRate: ("48000", 3, 1))
         b.checkpoint(0, window: false)
         b.checkpoints(every: 8_000, after: 0, through: 16_000)

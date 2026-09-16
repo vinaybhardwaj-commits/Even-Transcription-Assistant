@@ -168,7 +168,7 @@
       "id": "C7.boundary-after-flush",
       "asserts": "the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes",
       "grounding": "ungrounded-blocked",
-      "citation": "What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own",
+      "citation": "What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own",
       "blocked_by": "Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3)"
     },
     {
@@ -205,7 +205,7 @@
       "id": "C8.L5-frames",
       "asserts": "the day closed by a day_rollover holds floor(input frames / 3) samples",
       "grounding": "our-choice",
-      "citation": "spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026)"
+      "citation": "spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026)"
     },
     {
       "id": "C8.L6-no-unmarked-midnight",
@@ -233,15 +233,15 @@
     },
     {
       "id": "C9.manifest-describes-implementation",
-      "asserts": "the fixture's written conversion rules and taps equal the linked implementation",
+      "asserts": "the fixture's written conversion rules, taps and channel_count equal the linked implementation",
       "grounding": "our-choice",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2"
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2. The downmix RULE it encodes is the Mac's and is cited: AudioRing.swift:296-309 (one channel copies; more than one takes the mean over channelCount, in Float32, with no scaling afterwards, orchestrator read 16 Sep). Our integer formulation of that mean - the exact sum with the division folded into the output divisor - is ours"
     },
     {
       "id": "C9.output-deterministic",
       "asserts": "the conversion output is byte-identical to the checked-in output, whole and chunked",
       "grounding": "our-choice",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 4"
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 4. Includes the downmix divisor channels x 2^qBits: negative controls c9-downmix-sum-not-mean (2-channel input, divisor 65536) and c9-mono-attenuated (1-channel input, divisor 131072) pin it in both directions"
     },
     {
       "id": "C9.direction-probe",

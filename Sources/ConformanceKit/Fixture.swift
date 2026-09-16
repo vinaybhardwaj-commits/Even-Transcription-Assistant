@@ -62,7 +62,7 @@ public struct SynthSegment: Codable, Equatable, Sendable {
     }
 }
 
-/// C9 only: the conversion under test, specified field by field (spec/CONVERSION-48K-STEREO-TO-16K-MONO.md),
+/// C9 only: the conversion under test, specified field by field (spec/CONVERSION-48K-TO-16K-MONO.md),
 /// with its checked-in input, output and taps. Numeric fields are compared with the linked implementation;
 /// the rule strings are the written specification and are carried so the fixture stands alone.
 public struct ResamplerFixture: Codable, Equatable, Sendable {
@@ -72,6 +72,8 @@ public struct ResamplerFixture: Codable, Equatable, Sendable {
     public var output: FileDigest
     public var taps: FileDigest
     public var inputFrames: Int
+    /// Channels in the input file: 1 copies, more than 1 is averaged (conversion spec §2).
+    public var channelCount: Int
     public var outputSamples: Int
     public var inputFormat: String
     public var outputFormat: String
@@ -95,7 +97,7 @@ public struct ResamplerFixture: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case design, specification, input, output, taps, downmix, filter, accumulator, decimation, clipping, streaming
-        case inputFrames = "input_frames", outputSamples = "output_samples", inputFormat = "input_format"
+        case inputFrames = "input_frames", channelCount = "channel_count", outputSamples = "output_samples", inputFormat = "input_format"
         case outputFormat = "output_format", outputRounding = "output_rounding", chunkPatterns = "chunk_patterns"
         case inputSynthesis = "input_synthesis"
         case tapsRole = "taps_role", regionStarts = "region_starts", regionsOutput = "regions_output"
@@ -131,7 +133,8 @@ public struct ResamplerFixture: Codable, Equatable, Sendable {
     }
     public struct RoundingSpec: Codable, Equatable, Sendable {
         public var bias: Int64
-        public var shift: Int
+        /// channels × 2^qBits: the single division of the conversion (§5).
+        public var divisor: Int64
         public var rule: String
     }
     public struct ClippingSpec: Codable, Equatable, Sendable {

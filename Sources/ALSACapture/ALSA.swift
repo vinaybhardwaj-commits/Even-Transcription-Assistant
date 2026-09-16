@@ -68,6 +68,30 @@ public enum CaptureDevices {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// What the hardware offers, before anything is requested of it: the channel count and rate range from its own
+    /// hw_params. Opened and closed for the query alone.
+    public static func capabilities(_ listed: Listed) throws -> DeviceCapabilities {
+        var handle: OpaquePointer?
+        let rc = snd_pcm_open(&handle, listed.stableName, SND_PCM_STREAM_CAPTURE, 0)
+        guard rc >= 0, let handle else { throw ALSAError(description: "snd_pcm_open(\(listed.stableName)) for capability query: \(alsaMessage(rc))") }
+        defer { snd_pcm_close(handle) }
+        var hw: OpaquePointer?
+        snd_pcm_hw_params_malloc(&hw)
+        guard let hw else { throw ALSAError(description: "snd_pcm_hw_params_malloc failed") }
+        defer { snd_pcm_hw_params_free(hw) }
+        let any = snd_pcm_hw_params_any(handle, hw)
+        guard any >= 0 else { throw ALSAError(description: "snd_pcm_hw_params_any(\(listed.stableName)): \(alsaMessage(any))") }
+        let s16 = snd_pcm_hw_params_test_format(handle, hw, SND_PCM_FORMAT_S16_LE) == 0
+        let at48k = snd_pcm_hw_params_test_rate(handle, hw, CaptureFormat.requiredRate, 0) == 0
+        var cMin: UInt32 = 0, cMax: UInt32 = 0, rMin: UInt32 = 0, rMax: UInt32 = 0, dir: Int32 = 0
+        snd_pcm_hw_params_get_channels_min(hw, &cMin)
+        snd_pcm_hw_params_get_channels_max(hw, &cMax)
+        snd_pcm_hw_params_get_rate_min(hw, &rMin, &dir)
+        snd_pcm_hw_params_get_rate_max(hw, &rMax, &dir)
+        return DeviceCapabilities(channelsMin: cMin, channelsMax: cMax, rateMin: rMin, rateMax: rMax,
+                                  supportsS16LE: s16, supports48000: at48k)
+    }
+
     /// A capture device must be named, in stable form, and must exist. Never a default, never a substitute.
     public static func resolve(_ requested: String?) throws -> Listed {
         let devices = list()
@@ -79,6 +103,50 @@ public enum CaptureDevices {
             throw ALSAError(description: "capture device \(requested) not found; name one in stable form hw:CARD=<id>,DEV=<n>. Capture devices:\n\(listing)")
         }
         return found
+    }
+}
+
+/// What the hardware offers, read from its hw_params before anything is requested. The Mac reads
+/// `input.inputFormat(forBus: 0)` (Recorder.swift:78) and installs its tap with that same format (:89); there is no
+/// channel-count request anywhere in the Mac tree. This is the ALSA equivalent: read, then validate, then use.
+public struct DeviceCapabilities: Codable, Sendable {
+    public var channelsMin: UInt32
+    public var channelsMax: UInt32
+    public var rateMin: UInt32
+    public var rateMax: UInt32
+    public var supportsS16LE: Bool
+    public var supports48000: Bool
+    /// The channel count this device is opened with: the hardware's minimum, which for a single-format USB class device
+    /// (TONOR TM20: CHANNELS 1) and for the Yoga's DMIC (CHANNELS 2) is the only value it has.
+    public var channels: UInt32 { channelsMin }
+    enum CodingKeys: String, CodingKey {
+        case channelsMin = "channels_min", channelsMax = "channels_max", rateMin = "rate_min", rateMax = "rate_max"
+        case supportsS16LE = "supports_s16_le", supports48000 = "supports_48000"
+    }
+}
+
+/// The format rules. The Mac's validator (Recorder.swift:18-34) rejects four things; two of them transfer to ALSA and two
+/// do not — see NOTES.md, "Which of the Mac's four format rules we kept".
+public enum CaptureFormat {
+    /// The conversion is specified for a 48 kHz input (spec/CONVERSION-48K-TO-16K-MONO.md); a rate the hardware does not
+    /// support natively is an error, never a conversion (NOTES.md standing rule: `hw:` only, no plugin layer).
+    public static let requiredRate: UInt32 = 48_000
+    /// The Mac's floor, kept: Recorder.swift:18-34 rejects sampleRate < 44_100.
+    public static let rateFloor: UInt32 = 44_100
+
+    public static func validate(_ caps: DeviceCapabilities, device: String) throws {
+        guard caps.channelsMin > 0 else {
+            throw ALSAError(description: "\(device) reports a channel count of \(caps.channelsMin): not a usable capture format")
+        }
+        guard caps.rateMax >= rateFloor else {
+            throw ALSAError(description: "\(device) tops out at \(caps.rateMax) Hz, below the \(rateFloor) Hz floor")
+        }
+        guard caps.supportsS16LE else {
+            throw ALSAError(description: "\(device) does not offer S16_LE; the tape format is S16_LE and nothing converts it")
+        }
+        guard caps.supports48000, caps.rateMin <= requiredRate, caps.rateMax >= requiredRate else {
+            throw ALSAError(description: "\(device) does not support \(requiredRate) Hz natively (it offers \(caps.rateMin)…\(caps.rateMax) Hz): the conversion is specified for \(requiredRate) Hz input and no plugin layer is used, so this is a hardware mismatch to report, not something to convert around")
+        }
     }
 }
 

@@ -491,7 +491,7 @@ public enum Cases {
         // incomplete group of input frames produces no output, so the closing region holds exactly
         // outputCount(frames consumed in it) = floor(frames / 3) samples. If the Mac's resampler emits a final partial sample
         // where ours drops it, every discontinuity's byte_offset differs by one sample, and this is the check that shows it.
-        // Only at 48 kHz: the conversion is specified for a 48 kHz input (spec/CONVERSION-48K-STEREO-TO-16K-MONO.md), and a
+        // Only at 48 kHz: the conversion is specified for a 48 kHz input (spec/CONVERSION-48K-TO-16K-MONO.md), and a
         // fixture may describe a device at another rate.
         c.law("C7.boundary-after-flush")
         let closingRegions = regions(f, s)

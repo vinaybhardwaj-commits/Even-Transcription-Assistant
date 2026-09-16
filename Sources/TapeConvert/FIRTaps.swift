@@ -3,7 +3,7 @@
 // Do not edit by hand. The taps file is normative; C9 checks this array equals the fixture's copy of it.
 
 public enum FIRTaps {
-    /// h[0] … h[120], Q16, symmetric, sum exactly 65 536. spec/CONVERSION-48K-STEREO-TO-16K-MONO.md §3.
+    /// h[0] … h[120], Q16, symmetric, sum exactly 65 536. spec/CONVERSION-48K-TO-16K-MONO.md §3.
     public static let fir48kTo16k121TapQ16: [Int32] = [
         -1, -1, 1, 3, 3, 1, -5, -8, -5, 5,
         15, 15, 0, -22, -32, -15, 22, 52, 43, -9,

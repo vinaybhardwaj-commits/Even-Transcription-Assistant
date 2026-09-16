@@ -1,0 +1,15 @@
+# Downmix rule: mean vs sum, measured on a 20 s DMIC tape (2 ch, 48 kHz), 16 Sep 2026.
+# The tee'd 48 kHz input was reconverted under both rules and compared with the tape the recorder wrote.
+
+conversion of the same input                        samples     peak                 rms
+tape (what the recorder wrote)                       320000  0.428131103515625  0.031774273858741
+recomputed, MEAN over 2 channels (divisor 131072)    320000  0.428131103515625  0.031774273858741
+recomputed, SUM with no division (divisor 65536)      320000  0.856292724609375  0.063548552870718
+
+mean recomputation is bit-identical to the tape: True
+sum/mean peak ratio: 2.0000712809180983
+
+Conclusion: the production pipeline already divided by the channel count (the 1/2 was in the output shift),
+so the corrected 'mean' wording changes nothing at 2 channels. The DMIC peak 0.953582763671875 measured in
+U1 step 3 was already a mean-based number: the 0.41 dB headroom finding is NOT this defect. At 1 channel the
+old wording had no rule, and the 2-channel divisor would have attenuated a TONOR TM20 by 6 dB.
