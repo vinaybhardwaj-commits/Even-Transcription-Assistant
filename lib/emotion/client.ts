@@ -42,10 +42,17 @@ export const EMOTION_HEALTH_TIMEOUT_MS = 10_000;
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
 export type EmotionHealth =
-  | { ok: true; cap_s: number; loaded: boolean | "unknown"; model: string | null; subfolder: string | null }
+  | { ok: true; cap_s: number; min_speech_s: number; loaded: boolean | "unknown"; model: string | null; subfolder: string | null }
   | { ok: false; error: string };
 
-/** The cap comes from here, at run time, every job. There is no constant to fall back to. */
+/** The service's health field for the least speech it will score, spelled as the service spells it. */
+export const HEALTH_MIN_SPEECH_KEY = "min_speech_s";
+
+/**
+ * The cap AND the service's minimum speech come from here, at run time, every job. There is no
+ * constant to fall back to for either: a planner that hard-coded 1.5 s would drift silently the day
+ * the service's EMOTION_MIN_SPEECH_S changes (E14 §4.3).
+ */
 export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<EmotionHealth> {
   try {
     const res = await fetchImpl(`${BASE()}/health`, { signal: AbortSignal.timeout(EMOTION_HEALTH_TIMEOUT_MS), cache: "no-store" });
@@ -58,12 +65,19 @@ export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<Emotion
     const cap = body.max_duration_s;
     if (typeof cap !== "number" || !Number.isFinite(cap)) return { ok: false, error: "health_cap_unreadable" };
     if (cap < EMOTION_CAP_MIN_S || cap > EMOTION_CAP_MAX_S) return { ok: false, error: `health_cap_out_of_range: ${cap}s not in [${EMOTION_CAP_MIN_S}, ${EMOTION_CAP_MAX_S}]` };
+    // A minimum that is missing, non-finite, not positive or not under the cap is not a minimum: every
+    // span would be planned, or none could be. Refused by name, like a bad cap.
+    const minSpeech = body[HEALTH_MIN_SPEECH_KEY];
+    if (typeof minSpeech !== "number" || !Number.isFinite(minSpeech) || minSpeech <= 0 || minSpeech >= cap) {
+      return { ok: false, error: "health_min_speech_unreadable" };
+    }
     const models = body.models as Record<string, Record<string, unknown>> | undefined;
     const wavlm = models?.wavlm;
     const loadedRaw = wavlm && typeof wavlm.loaded === "boolean" ? wavlm.loaded : typeof body.loaded === "boolean" ? body.loaded : null;
     return {
       ok: true,
       cap_s: cap,
+      min_speech_s: minSpeech,
       loaded: loadedRaw === null ? "unknown" : loadedRaw,
       model: typeof body.model === "string" ? body.model : null,
       subfolder: wavlm && typeof wavlm.subfolder === "string" ? wavlm.subfolder : null,
@@ -75,7 +89,22 @@ export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<Emotion
 
 export type SegmentScore =
   | { index: number; ok: true; labels: Record<EmotionLabel, number>; top_label: EmotionLabel; top_score: number; duration_s: number; inference_s: number }
-  | { index: number; ok: false; reason: string };
+  /** E16 — the service read the span and would not score it. Not a failure. */
+  | { index: number; ok: false; unscorable: true; reason: string; service_speech_s: number | null; duration_s: number | null }
+  | { index: number; ok: false; unscorable?: undefined; reason: string };
+
+/** The service's reason when it refuses without naming one. */
+export const UNSCORABLE_UNNAMED = "unscorable_unnamed";
+/**
+ * E16(iii) — `ok: true` with an EMPTY labels object and NO unscorable flag. Today's service cannot send it
+ * (every gate refusal carries the flag; labels come from the model's id2label), so if it arrives it is a
+ * model fault, and a model fault is a failure: named, counted, and it spends an attempt. Reading it as
+ * unscorable would record silence where the model broke (Refuter §2.2).
+ */
+export const EMPTY_LABELS_UNFLAGGED = "empty_labels_without_unscorable_flag";
+
+const isEmptyObject = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0;
+const finiteOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 
 export type SegmentsResponse =
   | { ok: true; model: string; model_key: string; subfolder: string | null; device: string | null; cap_s: number; results: SegmentScore[]; fetch_s: number | null; decode_s: number | null }
@@ -97,6 +126,24 @@ export function parseSegmentsResponse(body: unknown, sent: number): SegmentsResp
     const r = raw as Record<string, unknown>;
     if (!r || r.index !== i) return { ok: false, error: "emotion_result_order_mismatch", retryable: false };
     if (r.ok !== true) { results.push({ index: i, ok: false, reason: reasonText(r.error) }); continue; }
+    // E16 — UNSCORABLE, NOT MALFORMED. Since 11:46 on 14 Sep the service answers a span its gate refuses
+    // with `ok: true, unscorable: true, labels: {}` (app.py score_segments). Read as "ok:true without seven
+    // labels" that became `malformed_scores` — a failure — for every quiet span (E14 cause 1).
+    // EXACTLY ONE shape means unscorable: the explicit flag. ok:true with an empty labels object and no
+    // flag is a model fault (EMPTY_LABELS_UNFLAGGED), and partial or out-of-range labels are malformed.
+    if (r.unscorable !== true && isEmptyObject(r.labels)) {
+      results.push({ index: i, ok: false, reason: EMPTY_LABELS_UNFLAGGED });
+      continue;
+    }
+    if (r.unscorable === true) {
+      results.push({
+        index: i, ok: false, unscorable: true,
+        reason: typeof r.skip_reason === "string" && r.skip_reason ? reasonText(r.skip_reason) : UNSCORABLE_UNNAMED,
+        service_speech_s: finiteOrNull(r.speech_s_est),
+        duration_s: finiteOrNull(r.duration_s),
+      });
+      continue;
+    }
     const labels = r.labels as Record<string, unknown> | undefined;
     const scores = {} as Record<EmotionLabel, number>;
     let bad = !labels || typeof labels !== "object";

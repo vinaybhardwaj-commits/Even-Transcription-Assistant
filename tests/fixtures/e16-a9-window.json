@@ -1,0 +1,259 @@
+{
+ "_source": "E14's window (run A holds chunk A9), 14 Sep 2026, read-only from room_diarize_window / room_turn_speaker / room_span_emotion. TIMINGS ONLY (turns carry room_turn_speaker.overlap_ms as the diarize run stored it): no ids, no text. Offsets are clip-relative ms; spans are what the pre-E16 planner produced and what the service answered.",
+ "window_ms": 900000,
+ "diarize_segments": [
+  {
+   "start_ms": 161625,
+   "end_ms": 165169,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 177235,
+   "end_ms": 177420,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 294280,
+   "end_ms": 296710,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 303932,
+   "end_ms": 305839,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 674220,
+   "end_ms": 675334,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 675402,
+   "end_ms": 675891,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 676448,
+   "end_ms": 676482,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 684801,
+   "end_ms": 685274,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 686725,
+   "end_ms": 687501,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 693525,
+   "end_ms": 694403,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 706536,
+   "end_ms": 709894,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 710485,
+   "end_ms": 713590,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 725470,
+   "end_ms": 725740,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 727124,
+   "end_ms": 727174,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 765717,
+   "end_ms": 768957,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 770121,
+   "end_ms": 774660,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 776230,
+   "end_ms": 777968,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 799163,
+   "end_ms": 799332,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 801593,
+   "end_ms": 801863,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 801964,
+   "end_ms": 801981,
+   "speaker_idx": 0
+  },
+  {
+   "start_ms": 890575,
+   "end_ms": 891098,
+   "speaker_idx": 0
+  }
+ ],
+ "turns": [
+  {
+   "speaker_idx": 0,
+   "no_role_reason": "no_match",
+   "start_ms": 5860,
+   "end_ms": 296560,
+   "overlap_ms": 6009
+  },
+  {
+   "speaker_idx": 0,
+   "no_role_reason": "no_match",
+   "start_ms": 716140,
+   "end_ms": 799050,
+   "overlap_ms": 9837
+  }
+ ],
+ "pre_e16_spans": [
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 0,
+   "chunk_count": 10,
+   "clip_start_s": 5.86,
+   "clip_end_s": 34.93,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 1,
+   "chunk_count": 10,
+   "clip_start_s": 34.93,
+   "clip_end_s": 64,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 2,
+   "chunk_count": 10,
+   "clip_start_s": 64,
+   "clip_end_s": 93.07,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 3,
+   "chunk_count": 10,
+   "clip_start_s": 93.07,
+   "clip_end_s": 122.14,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 4,
+   "chunk_count": 10,
+   "clip_start_s": 122.14,
+   "clip_end_s": 151.21,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 5,
+   "chunk_count": 10,
+   "clip_start_s": 151.21,
+   "clip_end_s": 180.28,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 6,
+   "chunk_count": 10,
+   "clip_start_s": 180.28,
+   "clip_end_s": 209.35,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 7,
+   "chunk_count": 10,
+   "clip_start_s": 209.35,
+   "clip_end_s": 238.42,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 8,
+   "chunk_count": 10,
+   "clip_start_s": 238.42,
+   "clip_end_s": 267.49,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 9,
+   "chunk_count": 10,
+   "clip_start_s": 267.49,
+   "clip_end_s": 296.56,
+   "state": "scored",
+   "reason": null,
+   "has_label": true
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 0,
+   "chunk_count": 3,
+   "clip_start_s": 716.14,
+   "clip_end_s": 743.777,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 1,
+   "chunk_count": 3,
+   "clip_start_s": 743.777,
+   "clip_end_s": 771.413,
+   "state": "failed",
+   "reason": "malformed_scores",
+   "has_label": false
+  },
+  {
+   "speaker_idx": 0,
+   "chunk_idx": 2,
+   "chunk_count": 3,
+   "clip_start_s": 771.413,
+   "clip_end_s": 799.05,
+   "state": "scored",
+   "reason": null,
+   "has_label": true
+  }
+ ]
+}

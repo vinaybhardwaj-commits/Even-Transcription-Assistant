@@ -26,8 +26,9 @@ import { sql } from "@/lib/db";
 import { signGetUrl } from "@/lib/r2";
 import { emotionEnabled } from "@/lib/emotion/gate";
 import { emotionHealth, scoreSegments, emotionSecretConfigured, EMOTION_MODEL_KEY, EMOTION_SECRET_ENV } from "@/lib/emotion/client";
-import { buildRuns, planSegments, SEGMENTS_PER_CALL, type AttributedTurn, type PlannedSegment } from "@/lib/emotion/segments";
-import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, writeScoredOrFailed, writeSkipped, type SegmentWrite } from "@/lib/emotion/store";
+import { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, SEGMENTS_PER_CALL, type AttributedTurn, type MeasuredSegment, type PlannedSegment } from "@/lib/emotion/segments";
+import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, recordStaleWindow, stateFor, writeScoredOrFailed, writeSkipped, writeUnscorable, type SegmentWrite } from "@/lib/emotion/store";
+import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
 
@@ -44,8 +45,13 @@ type Progress = {
   /** The cap the segments were planned under — and the one recorded. */
   cap_s: number;
   loaded_before: boolean | "unknown";
-  segments: PlannedSegment[];
+  /** What is SENT: chunks whose speaker's diarized speech clears the service's min_speech_s, each with it. */
+  segments: MeasuredSegment[];
   skipped: number;
+  /** Never sent: diarized speech under min_speech_s. Recorded unscorable in prepare. */
+  unscorable_unsent: number;
+  /** Sent, and refused by the service's gate. */
+  unscorable: number;
   batch: number;
   calls: number;
   scored: number;
@@ -90,10 +96,10 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
 
   const windowId = String(ctx.args.window_id ?? "");
   const rows = (await sql`
-    SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key, d.state AS diarize_state, d.last_run_id
+    SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key, d.state AS diarize_state, d.last_run_id, d.segments_json, d.segments_run_id
       FROM bench_window w LEFT JOIN room_diarize_window d ON d.window_id = w.id
      WHERE w.id = ${windowId} LIMIT 1
-  `) as Array<{ id: string; room_day_id: string | null; start_ms: string | number; end_ms: string | number; clip_r2_key: string | null; diarize_state: string | null; last_run_id: string | null }>;
+  `) as Array<{ id: string; room_day_id: string | null; start_ms: string | number; end_ms: string | number; clip_r2_key: string | null; diarize_state: string | null; last_run_id: string | null; segments_json: unknown; segments_run_id: string | null }>;
   const w = rows[0];
   if (!w) return failWith(jobError("progress_incomplete", "no such window"));
   // Nothing to score and nothing to retry: the scan only picks diarized windows, so no window row.
@@ -101,6 +107,28 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   if (!w.clip_r2_key) return failWith(jobError("clip_missing_in_r2", "window has no clip"));
 
   const base = { window_id: w.id, room_day_id: w.room_day_id, diarize_run_id: w.last_run_id };
+  // E16 — THE DIARIZER'S SPEECH, per speaker, is what every span is measured against. An `ok` diarize row
+  // always stores an array; anything else is a row this job cannot measure against, and it fails by name
+  // WITH a window row, so the attempt bound stops it being offered on every tick.
+  if (!Array.isArray(w.segments_json)) return fail(base, "diarize_not_ok", "diarize segments unreadable", "none");
+  // E24 R9/R8 — WHICH RUN WROTE THE SEGMENTS IS A FACT, NOT AN INFERENCE. recordDiarizeWindow keeps an ok row's
+  // segments when a later run succeeds, and moves last_run_id; segments_run_id (0099) names the run that wrote
+  // them. If it is not this run's — or is unknown, because no writer run is recorded — every speech_ms measured from them
+  // would be a confident measure of another run's speakers, or of none. So the window is recorded
+  // `diarize_stale`: NAMED, TERMINAL, NOT A FAILURE, and it spends NO attempt. It is checked before /health,
+  // before any turn is read and before clearWindowSegments, so an earlier run's span rows are left as they were.
+  // THE CURE IS A FRESH DIARIZE RUN: repairStaleDiarizeSegments (lib/stt/diarize-window.ts) accepts that run's
+  // segments for a window in this state, and the enqueue offers the window again because last_run_id moved.
+  if (w.segments_run_id !== w.last_run_id) {
+    const reason = w.segments_run_id === null
+      // E25 R17: NULL means no writer run is recorded — NOT that the row predates 0099 (code older than E24
+      // still writes NULL after 0099 lands). Say only what is known.
+      ? "diarize segments have no recorded writer run (segments_run_id is NULL); which run wrote them is unknown"
+      : "diarize segments were written by an earlier diarize run than this window's turns";
+    await recordStaleWindow({ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: w.last_run_id, segmentsRunId: w.segments_run_id, reason: `diarize_segments_stale: ${reason}` });
+    return failWith(jobError("diarize_segments_stale", reason));
+  }
+  const intervals = parseDiarizeSegments(w.segments_json);
   const health = await emotionHealth();
   if (!health.ok) return fail(base, "emotion_unavailable", health.error, "none");
 
@@ -114,25 +142,36 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
        AND t.run_id = ${w.last_run_id}
   `) as Array<{ source_ref: string; speaker_idx: number; no_role_reason: string | null; start_ms: string | number; end_ms: string | number }>;
   const attributed: AttributedTurn[] = turns.map((t) => ({ source_ref: t.source_ref, speaker_idx: Number(t.speaker_idx), no_role_reason: t.no_role_reason, start_ms: Number(t.start_ms), end_ms: Number(t.end_ms) }));
-  const { runs, skipped } = buildRuns(attributed);
   const windowStart = Number(w.start_ms);
-  let segments: PlannedSegment[];
-  try { segments = planSegments(runs, windowStart, health.cap_s); } catch (e) { return fail(base, "emotion_unavailable", String((e as Error).message).slice(0, 160), "none"); }
+  const { runs, skipped } = buildRuns(attributed);
+  let planned: PlannedSegment[];
+  let split: { scorable: MeasuredSegment[]; unscorable: MeasuredSegment[] };
+  try {
+    planned = planSegments(runs, windowStart, health.cap_s);
+    // P2 — `planned` MEANS SCORABLE. A chunk whose speaker's diarized speech is under the service's
+    // min_speech_s (from /health) never enters `planned`; it is recorded unscorable with that speech.
+    split = splitByDiarizedSpeech(planned, intervals, health.min_speech_s);
+  } catch (e) { return fail(base, "emotion_unavailable", String((e as Error).message).slice(0, 160), "none"); }
+  const segments = split.scorable;
 
   const writeCtx: SegmentWrite = { windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id, clipR2Key: w.clip_r2_key, windowStartMs: windowStart, cap_s: health.cap_s, model: { model: null, model_key: null, subfolder: null, device: null } };
   // WINDOW-AS-UNIT: this attempt's rows replace every earlier attempt's, never merge with them. After the
   // plan exists, so an attempt that fails before planning leaves the previous rows as they were.
   await clearWindowSegments(w.id);
-  for (const s of skipped) await writeSkipped(writeCtx, s);
+  for (const s of skipped) await writeSkipped(writeCtx, s, speakerSpeechMs(intervals, s.speaker_idx, s.start_ms - windowStart, s.end_ms - windowStart));
+  for (const u of split.unscorable) await writeUnscorable(writeCtx, u);
 
   if (segments.length === 0) {
-    await recordEmotionWindow({ ...{ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id }, state: "no_segments", error: null, cap_s: health.cap_s, counts: { planned: 0, scored: 0, skipped: skipped.length, failed: 0, calls: 0 } });
-    return doneWith({ window_id: w.id, segments: 0, skipped: skipped.length, turns: attributed.length });
+    // Nothing the service could score: a fact about the audio, like no turns at all. Final, and it spends
+    // no attempt — the two windows that exhausted on one sub-1.5 s span each now end here (A3).
+    await recordEmotionWindow({ ...{ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id }, state: "no_segments", error: null, cap_s: health.cap_s, counts: { planned: 0, scored: 0, skipped: skipped.length, failed: 0, unscorable: split.unscorable.length, calls: 0 } });
+    return doneWith({ window_id: w.id, segments: 0, skipped: skipped.length, unscorable: split.unscorable.length, turns: attributed.length });
   }
 
   const progress: Progress = {
     ...base, window_start_ms: windowStart, window_end_ms: Number(w.end_ms), clip_r2_key: w.clip_r2_key,
     cap_s: health.cap_s, loaded_before: health.loaded, segments, skipped: skipped.length,
+    unscorable_unsent: split.unscorable.length, unscorable: 0,
     batch: 0, calls: 0, scored: 0, failed: 0, model: null, subfolder: health.subfolder, device: null, started_ms: Date.now(),
   };
   return nextStep("warm", progress as unknown as Record<string, unknown>);
@@ -176,13 +215,14 @@ async function score(ctx: StepContext): Promise<StepOutcome> {
     windowStartMs: p.window_start_ms, cap_s: p.cap_s,
     model: { model: res.model, model_key: res.model_key ?? EMOTION_MODEL_KEY, subfolder: res.subfolder, device: res.device },
   };
-  let scored = 0, failed = 0;
+  let scored = 0, failed = 0, unscorable = 0;
   for (const [i, seg] of batch.entries()) {
     const r = res.results[i]!;
     await writeScoredOrFailed(writeCtx, seg, r);
-    if (r.ok) scored += 1; else failed += 1;
+    const st = stateFor(r);
+    if (st === "scored") scored += 1; else if (st === "unscorable") unscorable += 1; else failed += 1;
   }
-  const next = { ...p, batch: p.batch + 1, calls: p.calls + 1, scored: p.scored + scored, failed: p.failed + failed, model: res.model, subfolder: res.subfolder, device: res.device };
+  const next = { ...p, batch: p.batch + 1, calls: p.calls + 1, scored: p.scored + scored, failed: p.failed + failed, unscorable: (p.unscorable ?? 0) + unscorable, model: res.model, subfolder: res.subfolder, device: res.device };
   return nextStep((p.batch + 1) * SEGMENTS_PER_CALL >= p.segments.length ? "finish" : "score", next as unknown as Record<string, unknown>);
 }
 
@@ -191,14 +231,15 @@ async function finish(ctx: StepContext): Promise<StepOutcome> {
   // THE COUNTS ARE THE ROWS. finishEmotionWindow counts room_span_emotion in the statement that writes the
   // window, and decides zero-scored from that count — never from p.scored / p.failed, which can drift from
   // what was persisted. ZERO SCORED IS A FAILURE, so the enqueue scan's attempt bound governs a retry.
-  // (planned = 0 never reaches here — prepare records no_segments. Some scored with some failed stays ok.)
+  // (planned = 0 never reaches here — prepare records no_segments. Some scored with some failed stays ok.
+  // E16: spans the service refused as unscorable are not failures and do not make a window zero-scored.)
   const planned = p.segments.length;
   const r = await finishEmotionWindow({
     windowId: p.window_id, roomDayId: p.room_day_id, diarizeRunId: p.diarize_run_id, planned, calls: p.calls,
     model: p.model, model_key: EMOTION_MODEL_KEY, subfolder: p.subfolder, cap_s: p.cap_s, warmup: p.warmup,
     timing: { wall_ms: Date.now() - p.started_ms },
   });
-  const counts = { planned, scored: r.scored, skipped: r.skipped, failed: r.failed, calls: p.calls };
+  const counts = { planned, scored: r.scored, skipped: r.skipped, failed: r.failed, unscorable: r.unscorable, calls: p.calls };
   if (r.zero_scored) return failWith(jobError("emotion_window_failed", `emotion_zero_scored: ${counts.failed} of ${counts.planned} segment(s) failed`));
   // A null written_state: the stored row already said exactly this, so nothing was rewritten (C9).
   return doneWith({ window_id: p.window_id, ...counts, loaded_before: p.loaded_before, window_row: r.written_state === null ? "left_final" : "written" });
