@@ -22,17 +22,41 @@ export type DoctorLockState = {
   status: "active" | "disabled" | "locked";
 };
 
+/**
+ * E31 R63 — THE TWO UNRECORDED WRITES ARE NOT THE SAME EVENT, AND THEY DO NOT GET THE SAME ANSWER.
+ *
+ * The security property is "an unrecorded FAILURE must not be ignored". It was never "an unrecorded SUCCESS must
+ * be punished". A wrong pin whose counter write does not land is a guess nobody counted: refuse it, or a brute
+ * force runs free while the clinician table is degraded. A correct pin whose reset does not land is a clinician
+ * who knows their pin: refusing them locks every doctor out of the encounter assistant for as long as the
+ * database is unwell, mid-clinic, to prevent nothing — the guesses that led up to it were counted or refused on
+ * the failure path. The cost of allowing it is a stale counter, which the next reset that lands clears.
+ *
+ * So the two log lines are distinct, the two result types are distinct, and the route handles them apart. Do
+ * not fold them back into one rule in either direction.
+ */
+export const LOG_FAILED_ATTEMPT_NOT_RECORDED = "[lockout] FAILED ATTEMPT NOT RECORDED — refusing";
+export const LOG_RESET_NOT_RECORDED = "[lockout] CORRECT PIN, RESET NOT RECORDED — allowing the login";
+export const AUDIT_RESET_NOT_RECORDED = "auth.pin_reset_not_recorded";
+
+/** What recordSuccessfulAttempt reports. Deliberately NOT a LockoutDecision: it carries no refusal. */
+export type ResetOutcome =
+  | { kind: "reset" }
+  /** The counter could not be reset. The login is ALLOWED; `audited` says whether the audit row landed. */
+  | { kind: "reset_not_recorded"; audited: boolean };
+
 /** What the one statement above hands back — the only thing the decision may be computed from. */
 type LockRow = { failed_pin_count: number; status: string; retry_after_seconds: number | null };
 
 export type LockoutDecision =
   | { kind: "ok" }
   /**
-   * E31 R58 — THE ATTEMPT COULD NOT BE RECORDED. Not "wrong pin" and not "locked": the lockout counter did not
-   * move, so the next attempt would arrive against the same count and the bound would never be reached. The
+   * E31 R58 — A FAILED ATTEMPT COULD NOT BE RECORDED. Not "wrong pin" and not "locked": the lockout counter did
+   * not move, so the next attempt would arrive against the same count and the bound would never be reached. The
    * caller FAILS CLOSED on this — a pin attempt the system cannot account for is refused, not answered
    * PIN_INVALID, because answering PIN_INVALID is what let a brute force run un-counted while the clinician
-   * table was degraded.
+   * table was degraded. Only recordFailedAttempt returns this. The success path has its own type (ResetOutcome)
+   * and its own answer, on purpose — see R63 there.
    */
   | { kind: "not_recorded" }
   | { kind: "locked"; retry_after_seconds: number; reason: string }
@@ -139,13 +163,13 @@ export async function recordFailedAttempt(
     `) as LockRow[];
     row = rows[0];
   } catch (e) {
-    console.error("[lockout] clinician UPDATE failed — the attempt is NOT counted, so the caller must refuse:",
+    console.error(LOG_FAILED_ATTEMPT_NOT_RECORDED + " (the clinician UPDATE failed):",
       JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
     return { kind: "not_recorded" };
   }
 
   if (!row) {
-    console.error("[lockout] clinician UPDATE matched no row — the attempt is NOT counted, so the caller must refuse:",
+    console.error(LOG_FAILED_ATTEMPT_NOT_RECORDED + " (the clinician UPDATE matched no row):",
       JSON.stringify({ doctor_id: doctor.doctor_id }));
     return { kind: "not_recorded" };
   }
@@ -165,12 +189,16 @@ export async function recordFailedAttempt(
 
 /**
  * Record a successful PIN attempt — resets counter, clears lockout.
+ *
+ * E31 R63 — the reset is BEST-EFFORT FOR THE LOGIN and LOUD WHEN IT FAILS. A correct pin authenticates whether
+ * or not the reset lands; if it does not, this says so on its own log line, writes an audit row if audit_log is
+ * reachable, and returns reset_not_recorded so the route can tell. It never returns a refusal.
  */
 export async function recordSuccessfulAttempt(
   doctor: DoctorLockState,
   ip: string | null,
   userAgent: string | null
-): Promise<LockoutDecision> {
+): Promise<ResetOutcome> {
   try {
     await sql`
       INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
@@ -179,10 +207,7 @@ export async function recordSuccessfulAttempt(
   } catch (e) {
     console.warn("[lockout] pin_attempt insert failed:", e);
   }
-  // E31 R58 — THE RESET IS NOT BEST-EFFORT ANY MORE. A session handed out while the counter cannot be reset is
-  // the same hole from the other side: the clinician row keeps a stale count, and — worse — a correct pin used
-  // to authenticate while the lockout bookkeeping was failing, which is exactly the brute-force window this
-  // site exists to close. If the reset does not land, the caller refuses the login.
+  let failure: { reason: "threw"; err: string } | { reason: "zero_rows" } | null = null;
   try {
     const reset = (await sql`
       UPDATE clinician
@@ -193,15 +218,26 @@ export async function recordSuccessfulAttempt(
        WHERE id = ${doctor.doctor_id}
       RETURNING id
     `) as Array<{ id: string }>;
-    if (!reset[0]) {
-      console.error("[lockout] reset matched no row — refusing the session rather than issuing one uncounted:",
-        JSON.stringify({ doctor_id: doctor.doctor_id }));
-      return { kind: "not_recorded" };
-    }
+    if (!reset[0]) failure = { reason: "zero_rows" };
   } catch (e) {
-    console.error("[lockout] reset failed — refusing the session rather than issuing one uncounted:",
-      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
-    return { kind: "not_recorded" };
+    failure = { reason: "threw", err: String((e as Error)?.message ?? e).slice(0, 160) };
   }
-  return { kind: "ok" };
+  if (!failure) return { kind: "reset" };
+
+  console.error(LOG_RESET_NOT_RECORDED + ":",
+    JSON.stringify({ doctor_id: doctor.doctor_id, stale_failed_pin_count: doctor.failed_pin_count, ...failure }));
+  let audited = false;
+  try {
+    const rows = (await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', 'pin_lockout', ${AUDIT_RESET_NOT_RECORDED}, 'doctor', ${doctor.doctor_id},
+              ${JSON.stringify({ reason: failure.reason, stale_failed_pin_count: doctor.failed_pin_count })}::jsonb)
+      RETURNING id
+    `) as Array<{ id: unknown }>;
+    audited = rows.length > 0;
+  } catch (e) {
+    console.error("[lockout] audit row for the unrecorded reset could not be written either:",
+      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+  }
+  return { kind: "reset_not_recorded", audited };
 }

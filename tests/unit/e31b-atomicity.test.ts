@@ -15,10 +15,20 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import bcrypt from "bcryptjs";
+import { NextRequest } from "next/server";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
-const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
+const H = vi.hoisted(() => ({
+  sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>),
+  // R63: the pin route is driven for real; only the two things that need a JWT secret and a request scope are
+  // stubbed, and they are spies so a test can ask whether a session was issued.
+  signDoctorJwt: vi.fn(async (_c: { doctor_id: string; slug: string }) => "jwt.fixture"),
+  setDoctorCookie: vi.fn(async (_jwt: string, _slug: string) => {}),
+}));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v) }));
+vi.mock("@/lib/auth", async (orig) => ({ ...(await orig<typeof import("@/lib/auth")>()), signDoctorJwt: H.signDoctorJwt }));
+vi.mock("@/lib/cookie", () => ({ setDoctorCookie: H.setDoctorCookie }));
 vi.mock("@/lib/r2", () => ({ getObjectBytes: async () => new Uint8Array([1]), signGetUrl: async () => "https://r2.example/x" }));
 
 const HAVE_DOCKER = dockerAvailable();
@@ -60,7 +70,8 @@ beforeAll(() => {
       audio_r2_key text, audio_byte_start bigint, audio_byte_end bigint, audio_sha256 text);
     CREATE TABLE clinician (
       id text PRIMARY KEY, failed_pin_count int NOT NULL DEFAULT 0, locked_until timestamptz,
-      status text NOT NULL DEFAULT 'active', updated_at timestamptz);
+      status text NOT NULL DEFAULT 'active', updated_at timestamptz, last_active_at timestamptz,
+      full_name text, url_slug text, pin_hash text, deleted_at timestamptz);
     CREATE TABLE pin_attempt (
       id bigserial PRIMARY KEY, doctor_id text NOT NULL, success boolean NOT NULL, ip inet, user_agent text,
       created_at timestamptz NOT NULL DEFAULT NOW());
@@ -231,34 +242,116 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     expect(gate.kind, "the 1/sec gate counts rows the clinician failure never touched").toBe("rate_limited");
   }, 300_000);
 
-  it("R58 — A CORRECT PIN DOES NOT AUTHENTICATE while the reset cannot land", async () => {
-    const { recordSuccessfulAttempt } = await import("@/lib/lockout");
-    const d = doctor("doc_correct", 3);
-    armTrigger("t_d3_ok", "clinician", "UPDATE");
-    let outcome;
+  // ── E31 R63 — ASYMMETRIC, ON PURPOSE ─────────────────────────────────────────────────────────────────────
+  // An unrecorded FAILURE must not be ignored: a wrong pin whose counter write does not land is REFUSED. An
+  // unrecorded SUCCESS is not punished: a correct pin whose reset does not land AUTHENTICATES, loudly. These
+  // tests drive the real route against postgres, so folding the two paths back into one rule — refuse-both or
+  // allow-both — turns one of them red.
+  const PIN = "4821";
+  const PIN_HASH = bcrypt.hashSync(PIN, 4);
+  const routeDoctor = (id: string, count: number) => {
+    pg.exec(`INSERT INTO clinician (id, failed_pin_count, status, full_name, url_slug, pin_hash)
+             VALUES ('${id}', ${count}, 'active', 'Fixture Clinician', 'slug-${id}', '${PIN_HASH}')
+             ON CONFLICT (id) DO UPDATE SET failed_pin_count = ${count}, status = 'active', locked_until = NULL`);
+    return `slug-${id}`;
+  };
+  const callPin = async (slug: string, pin: string) => {
+    const { POST } = await import("@/app/api/auth/pin/route");
+    const res = await POST(new NextRequest("https://x.test/api/auth/pin", {
+      method: "POST", body: JSON.stringify({ slug, pin }), headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.9" },
+    }));
+    return { status: res.status, body: (await res.json()) as { ok?: boolean; error?: { code: string } } };
+  };
+  /** Run fn with the clinician UPDATE failing, capturing every console.error line. */
+  const withClinicianWriteFailing = async <T,>(trigger: string, fn: () => Promise<T>, alsoFail?: string) => {
+    const lines: string[] = [];
+    const err = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    H.signDoctorJwt.mockClear(); H.setDoctorCookie.mockClear();
+    armTrigger(trigger, "clinician", "UPDATE");
+    if (alsoFail) armTrigger(`${trigger}_audit`, alsoFail, "INSERT");
     try {
-      outcome = await recordSuccessfulAttempt(d, "10.0.0.3", "agent");
+      return { out: await fn(), lines };
     } finally {
-      disarm("t_d3_ok", "clinician");
+      disarm(trigger, "clinician");
+      if (alsoFail) disarm(`${trigger}_audit`, alsoFail);
+      err.mockRestore(); warn.mockRestore();
     }
-    // The measured hole: a correct pin authenticated while attempts went uncounted, so an attacker who guessed
-    // right during degradation walked in and the counter stayed frozen behind them.
-    expect(outcome.kind, "the session is refused because the reset did not land").toBe("not_recorded");
-    expect(await clinicianRow("doc_correct"), "and the count really did not move").toMatchObject({ failed_pin_count: 3 });
-    expect(await attempts("doc_correct"), "the successful attempt is still evidence for the limiter").toBe(1);
+  };
+  const auditRowsFor = async (id: string) =>
+    ((await pg.sql`SELECT count(*)::int AS n FROM audit_log WHERE target_id = ${id} AND action = 'auth.pin_reset_not_recorded'`) as Array<{ n: number }>)[0]!.n;
+
+  it("R63 (a) — WRONG PIN, COUNTER WRITE FAILS: the route REFUSES, claims no lock, issues no session, and logs the FAILURE line", async () => {
+    const { LOG_FAILED_ATTEMPT_NOT_RECORDED, LOG_RESET_NOT_RECORDED } = await import("@/lib/lockout");
+    const slug = routeDoctor("doc_r63_wrong", 4); // a recorded 5th failure would be a 15-minute lock
+    const { out, lines } = await withClinicianWriteFailing("t_r63_wrong", () => callPin(slug, "0000"));
+    expect(out.status, "refused as a pipeline failure — not 401 PIN_INVALID, not 423 PIN_LOCKED").toBe(500);
+    expect(out.body.error?.code).toBe("PIPELINE_FAILED");
+    expect((out.body.error as { message?: string })?.message, "and it is the lockout's refusal, not a lookup or bcrypt failure").toMatch(/could not be recorded/);
+    expect(H.signDoctorJwt, "no session is minted for a wrong pin").not.toHaveBeenCalled();
+    expect(H.setDoctorCookie).not.toHaveBeenCalled();
+    expect(await clinicianRow("doc_r63_wrong"), "no lock is claimed, because none was recorded").toMatchObject({ failed_pin_count: 4, status: "active", locked_until: null });
+    expect(lines.some((l) => l.includes(LOG_FAILED_ATTEMPT_NOT_RECORDED)), "the failure path logs its own line").toBe(true);
+    expect(lines.some((l) => l.includes(LOG_RESET_NOT_RECORDED)), "and not the success path's").toBe(false);
   }, 300_000);
 
-  it("R58 — THE CALLER FAILS CLOSED: the route refuses on not_recorded rather than answering PIN_INVALID", async () => {
-    // The route's own source, because driving it needs bcrypt, a doctor lookup and a cookie jar; the behaviour
-    // it maps to is measured by the three tests above.
-    const src = readFileSync("app/api/auth/pin/route.ts", "utf8");
-    expect(src, "the failed path refuses").toMatch(/newState\.kind === "not_recorded"[\s\S]{0,200}respondError\("PIPELINE_FAILED"/);
-    expect(src, "and so does the success path, before any session is issued").toMatch(/reset\.kind === "not_recorded"[\s\S]{0,200}respondError\("PIPELINE_FAILED"/);
-    const issueAt = src.lastIndexOf("signDoctorJwt"); // the call site, not the import
-    const refuseAt = src.indexOf('reset.kind === "not_recorded"');
-    expect(refuseAt).toBeGreaterThan(-1);
-    expect(refuseAt, "the refusal comes BEFORE the session is minted").toBeLessThan(issueAt);
-  });
+  it("R63 (a) — THE FAILED-ATTEMPT PATH STILL CANNOT CLAIM A LOCK IT DID NOT RECORD: at 29, a failing write is not `disabled`", async () => {
+    const slug = routeDoctor("doc_r63_edge", 29); // in memory this is the 30th — the ORIGINAL code answered disabled
+    const { out } = await withClinicianWriteFailing("t_r63_edge", () => callPin(slug, "0000"));
+    expect(out.status, "not 403 FORBIDDEN").toBe(500);
+    expect(out.body.error?.code).toBe("PIPELINE_FAILED");
+    expect(await clinicianRow("doc_r63_edge"), "the row was never disabled").toMatchObject({ failed_pin_count: 29, status: "active", locked_until: null });
+    expect(H.signDoctorJwt).not.toHaveBeenCalled();
+  }, 300_000);
+
+  it("R63 (b) — CORRECT PIN, RESET WRITE FAILS: the route AUTHENTICATES, logs the RESET line, and writes the audit row", async () => {
+    const { LOG_FAILED_ATTEMPT_NOT_RECORDED, LOG_RESET_NOT_RECORDED } = await import("@/lib/lockout");
+    const slug = routeDoctor("doc_r63_right", 3);
+    const { out, lines } = await withClinicianWriteFailing("t_r63_right", () => callPin(slug, PIN));
+    expect(out.status, "a correct pin is not a guess: the clinician gets in").toBe(200);
+    expect(out.body.ok).toBe(true);
+    expect(H.signDoctorJwt, "a session was minted for this clinician").toHaveBeenCalledWith({ doctor_id: "doc_r63_right", slug });
+    expect(H.setDoctorCookie).toHaveBeenCalledTimes(1);
+    expect(await clinicianRow("doc_r63_right"), "the cost, accepted: the counter is stale until the next reset lands").toMatchObject({ failed_pin_count: 3 });
+    expect(lines.some((l) => l.includes(LOG_RESET_NOT_RECORDED)), "logged loudly, on the success path's own line").toBe(true);
+    expect(lines.some((l) => l.includes(LOG_FAILED_ATTEMPT_NOT_RECORDED)), "and not on the failure path's").toBe(false);
+    expect(await auditRowsFor("doc_r63_right"), "the audit path was available, so the row exists").toBe(1);
+  }, 300_000);
+
+  it("R63 (b) — CORRECT PIN, RESET WRITE FAILS AND AUDIT IS DOWN TOO: still AUTHENTICATES, and says it could not audit", async () => {
+    const slug = routeDoctor("doc_r63_noaudit", 2);
+    const { out, lines } = await withClinicianWriteFailing("t_r63_noaudit", () => callPin(slug, PIN), "audit_log");
+    expect(out.status, "the audit row is best-effort; the login is not conditional on it").toBe(200);
+    expect(H.signDoctorJwt).toHaveBeenCalledTimes(1);
+    expect(await auditRowsFor("doc_r63_noaudit")).toBe(0);
+    expect(lines.some((l) => l.includes('"audited":false')), "the route's line says the audit did not land").toBe(true);
+  }, 300_000);
+
+  it("R63 — recordSuccessfulAttempt: reset_not_recorded when the write fails, reset when it lands, and never a refusal", async () => {
+    const { recordSuccessfulAttempt } = await import("@/lib/lockout");
+    const d = doctor("doc_correct", 3);
+    const { out } = await withClinicianWriteFailing("t_d3_ok", () => recordSuccessfulAttempt(d, "10.0.0.3", "agent"));
+    expect(out, "the reset did not land, and the audit row did").toEqual({ kind: "reset_not_recorded", audited: true });
+    expect(await clinicianRow("doc_correct"), "and the count really did not move").toMatchObject({ failed_pin_count: 3 });
+    expect(await attempts("doc_correct"), "the successful attempt is still evidence for the limiter").toBe(1);
+
+    const landed = await recordSuccessfulAttempt(doctor("doc_reset_ok", 7), null, null);
+    expect(landed, "the write lands").toEqual({ kind: "reset" });
+    expect(await clinicianRow("doc_reset_ok"), "and the counter is cleared").toMatchObject({ failed_pin_count: 0, locked_until: null });
+  }, 300_000);
+
+  it("R63 (c) — THE TWO PATHS ARE DISTINGUISHABLE: different log lines, and the correct-pin path is a different type", async () => {
+    const lockout = await import("@/lib/lockout");
+    expect(lockout.LOG_FAILED_ATTEMPT_NOT_RECORDED).not.toBe(lockout.LOG_RESET_NOT_RECORDED);
+    expect(lockout.LOG_FAILED_ATTEMPT_NOT_RECORDED).toMatch(/refusing/);
+    expect(lockout.LOG_RESET_NOT_RECORDED).toMatch(/allowing/);
+    // Only the failure path may return the refusal kind. A ghost clinician makes the reset match zero rows.
+    const ghost = { doctor_id: "doc_ghost_ok", failed_pin_count: 0, status: "active", locked_until: null } as never;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await lockout.recordSuccessfulAttempt(ghost, null, null);
+    err.mockRestore();
+    expect(res.kind, "zero rows on the success path is reset_not_recorded, never not_recorded").toBe("reset_not_recorded");
+  }, 300_000);
 
   it("R58 — THE UPDATE MATCHES ZERO ROWS: not_recorded, so the caller refuses rather than guessing", async () => {
     const { recordFailedAttempt } = await import("@/lib/lockout");
