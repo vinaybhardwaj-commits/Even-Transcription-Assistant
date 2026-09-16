@@ -436,6 +436,44 @@ const cases: Case[] = [
     },
   },
   {
+    // E26 R35 — the repair's last two guards. Both survived the E26 mutation run because no fixture reached them:
+    // today's writers do not produce these rows. That is a claim about TODAY'S writers, and the writers have changed
+    // three times in two days — F1 was latent until E17 changed the drain, M1 until 0099 added a column. Each guard
+    // decides a RETURN VALUE (measured: dropped, each returns true where the real code returns false), so each gets
+    // an assertion. The rows are built by hand, because the point is that no current writer builds them.
+    name: "E26 R35 on Postgres — the repair's last two guards each decide a return value: a FAILED diarize row, and segments already this run's",
+    fn: async () => {
+      const { repairStaleDiarizeSegments } = await import("@/lib/stt/diarize-window");
+      const fresh = [{ start_ms: 0, end_ms: 20000, speaker_idx: 0 }];
+      const diarize = async (id: string) =>
+        ((await pg.sql`SELECT state, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = ${id}`) as Array<{ state: string; segments_run_id: string | null; last_run_id: string }>)[0]!;
+
+      // (a) E26-4 — `AND d.state = 'ok'`. A FAILED diarize row that still carries a stale mark: the repair imports
+      // content into a row whose state names a failure, so state and content would describe different runs.
+      const failed = "bw_e26_failed_row";
+      seedWindow(failed, { turns: false, segmentsRunId: "run_A" });
+      pg.exec(`
+        UPDATE room_diarize_window SET state = 'failed', error = 'boom', last_run_id = 'run_B' WHERE window_id = '${failed}';
+        INSERT INTO room_emotion_window (window_id, room_day_id, state, diarize_run_id, error, stale_segments_run_id)
+        VALUES ('${failed}', 'rd_1', 'diarize_stale', 'run_B', 'stale', 'run_A');`);
+      expect(await repairStaleDiarizeSegments({ windowId: failed, runId: "run_B", runState: "ok", speakers: [], segments: fresh }),
+        "a failed diarize row is not repaired: its state names a failure and the content would name a run").toBe(false);
+      expect(await diarize(failed), "and nothing of the fresh run landed").toMatchObject({ state: "failed", segments_run_id: "run_A", last_run_id: "run_B" });
+
+      // (b) E26-6 — `AND d.segments_run_id IS DISTINCT FROM ${runId}`. The stored segments are ALREADY this run's and
+      // the mark names them too: there is nothing to replace, so the repair must not report that it acted.
+      const same = "bw_e26_same_run";
+      seedWindow(same, { turns: false, segmentsRunId: "run_C" });
+      pg.exec(`
+        UPDATE room_diarize_window SET last_run_id = 'run_C' WHERE window_id = '${same}';
+        INSERT INTO room_emotion_window (window_id, room_day_id, state, diarize_run_id, error, stale_segments_run_id)
+        VALUES ('${same}', 'rd_1', 'diarize_stale', 'run_C', 'stale', 'run_C');`);
+      expect(await repairStaleDiarizeSegments({ windowId: same, runId: "run_C", runState: "ok", speakers: [], segments: fresh }),
+        "segments already this run's are not repaired: a repair that changes nothing must not answer true").toBe(false);
+      expect(await diarize(same)).toMatchObject({ state: "ok", segments_run_id: "run_C", last_run_id: "run_C" });
+    },
+  },
+  {
     name: "E25 R15 / 0099 — the database refuses a stale mark on a row that is not diarize_stale",
     fn: async () => {
       seedWindow("bw_e25_markchk", { turns: false });
