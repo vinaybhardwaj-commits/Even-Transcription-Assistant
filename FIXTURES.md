@@ -45,8 +45,10 @@ PCM length, or the role/cases/negative_control combination is inconsistent.
 C1 and C2 need no expected answers: they are invariants over every complete index line (C1 also: the final `stopped`
 record's byte_offset equals tape.pcm's length).
 
-Every assertion of C1–C10 is made under a named check; `spec/check-grounding.json` states what each rests on (Mac
-file:line, Mac measurement, ruling, or UNGROUNDED) and the runner prints the UNGROUNDED count on every run.
+Every assertion of C1–C10 is made under a named check; `spec/check-grounding.json` states what each rests on — `mac-source`
+(a Mac file:line, refused without one), `mac-measurement`, `our-choice` (a ruling of ours, not debt), `ungrounded` (debt), or
+`ungrounded-blocked` (cannot be established by reading; `blocked_by` says why and what would settle it). The runner prints
+the counts on every run, and names the ungrounded and blocked checks separately.
 
 ## Index keys
 

@@ -932,35 +932,99 @@ The region model behind C5 and C6, `Sources/ConformanceKit/Pieces.swift`, replac
     }
 ```
 
+## Grounding pass round 2 (16 Sep): the last two citations, and one check that cannot be grounded by reading
+
+**C1.geometry — mac-source.** The `samples × 2` claim holds for every record the writer builds, not only `stopped`:
+`TapeFormat.swift:7` (`bytesPerSample = 2`) and the identical expression `samples: bytesWritten /
+TapeConstants.bytesPerSample` at all four construction sites — `TapeWriter.swift:221` (checkpoint / audio path), `:278`
+(discontinuity path), `:307` (restart record), `:374` (stopped record). No path computes `samples` by any other route, so
+the check may assert it for every record, which it does.
+
+**C8.L3-rearm — mac-source, two mechanisms.** The first arm of a capture session comes from the zone: `Recorder.swift:66`
+`let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })`, stored at `:75` as
+`nextRolloverWallNS: UInt64(nextMidnightNS.rounded())`, with `ArchiveMidnightFoundation.swift:73`
+`nextMidnight(now: @Sendable () -> Date)` and `:10` `timeZoneIdentifier = "Asia/Kolkata"`. Every later boundary in that
+session is the flat re-arm: `CaptureTimeline.swift:24` (the istDayNS literal) and `:122-131` (+ istDayNS). The check rests
+on both, and cites both.
+
+**Debt is now zero.** One check is blocked instead.
+
+### C7.boundary-after-flush is UNGROUNDED-BLOCKED, not grounded
+
+A new class, with `blocked_by` as a required field the loader enforces: a check that claims a Mac behaviour which cannot
+be established by reading at all. The suite prints blocked checks on their own line, separately from debt, so "cannot be
+grounded yet" is never mistaken for "nobody bothered".
+
+Why it is blocked. `TapeWriter.swift:268` flushes through `PCMResampler.finish`, which signals end of stream and loops on
+whatever comes back:
+
+```swift
+let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
+  inputStatus.pointee = .endOfStream
+  return nil
+}
+let count = Int(outputBuffer.frameLength)
+if count > 0 { try body(output, count) }
+```
+
+There is no group-of-three arithmetic of its own. Whether a trailing incomplete group emits a final sample or is dropped
+is decided **inside AVAudioConverter**, which is not our source. So the question cannot be answered by reading — only by
+running the Mac.
+
+It cannot be answered from existing Mac tapes either (orchestrator search, 16 Sep): every `tape.idx` on the Mini — **22
+capture directories, the largest 21 439 records** — is `input_sample_rate` **44100** (TONOR TM20). A full content search
+found **no 48000 in any tape file anywhere**; the only `48000` strings are literals in `IndexLogTests.swift`.
+
+What would settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of
+three, and compare that record's `byte_offset` with 2 × floor(frames / 3). Our side of the same comparison is already
+measured (`verification/u1-flush-measurement.txt`: 0 samples emitted at a reset).
+
+## Measured fact carried to U2 and U3 — the Mac has never recorded at 48 kHz
+
+Not a worry, a measurement (orchestrator search of the Mini, 16 Sep):
+
+- Every Mac tape in existence is **44 100 Hz** — 22 capture directories, largest 21 439 records, all `input_sample_rate`
+  44100, all the TONOR TM20. No tape file anywhere contains 48000.
+- Our conversion is specified for **48 kHz** input (`spec/CONVERSION-48K-STEREO-TO-16K-MONO.md`, U1 spec §4), because the
+  Yoga's DMIC rejects anything else, and every assertion resting on it is scoped to 48 kHz: C9 entirely, C8.L5-frames, and
+  C7.boundary-after-flush (which skips a record whose `input_sample_rate` is not 48000 — `good/discontinuity` describes a
+  44.1 kHz device and is exempt).
+- **The two platforms have never been compared at the same input rate.** Every "matches the Mac" statement about converted
+  audio, and every sample count at a boundary, is a statement about two different input rates.
+
+**Do not attempt a 44.1 kHz path. Do not change the spec.** Recorded for U2/U3 so nobody later reads a rate difference as
+a conversion defect, or a matching byte_offset as proof of parity.
+
 ## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
 
 Twice a check written from prose rejected a correct recorder (C5 in step 4, C8 in step 5). From now on every named check
-of C1–C10 is listed in `spec/check-grounding.json` with what it rests on, in one of four classes:
+of C1–C10 is listed in `spec/check-grounding.json` with what it rests on, in one of five classes:
 
 - **mac-source** — pins a Mac behaviour and carries a Swift file:line at f798edf. The loader refuses an entry without one.
 - **mac-measurement** — pins a Mac behaviour measured on the Mac, and carries that measurement.
 - **our-choice** — a deliberate decision of ours, carrying the ruling that made it (document and section) instead of a
   file:line. **Not debt:** it was never a Mac behaviour and can never acquire a Mac citation.
-- **ungrounded** — claims to pin a Mac behaviour and has no citation. **The only count that is debt**, and the only one
-  the suite nags about.
+- **ungrounded** — claims to pin a Mac behaviour and has no citation. **Debt**: somebody must go and read the source.
+- **ungrounded-blocked** — claims to pin a Mac behaviour that cannot be established by reading at all (it happens inside a
+  closed component, or the evidence does not exist), carrying a required `blocked_by`: why, and what would settle it. The
+  suite prints these separately from debt, so "cannot be grounded yet" is never read as "nobody bothered".
 
 Every assertion in the runner is made under a check id; a check id that asserts and is not in the manifest counts as
-ungrounded. Every `conformance run` prints the four counts and names each ungrounded check. A missing or unreadable
+ungrounded. Every `conformance run` prints all five counts and names each ungrounded and each blocked check. A missing or unreadable
 manifest is a hard error (exit 2). Ungrounded does not change the verdict; it is reported so it cannot be forgotten.
 
-Classification after the grounding pass of 16 Sep: 44 checks — 32 mac-source, 1 mac-measurement,
-9 our-choice, **2 ungrounded**. Two corrections were made to the first classification on 15 Sep: C7.zero-run-probe's
-16-sample threshold is ours (U0-A), not a missing citation; and the three entries marked "grounded with a caveat" moved
-to ungrounded, because an approximate range is not a citation — a line moves and the claim silently detaches. On 16 Sep
-eight citations arrived: C3 (split in two), C1.monotonic, C5.byte-ranges-concatenate and C5.plan became mac-source,
-C7.no-zero-fill became mac-source with corrected wording, and C5.same-sample-last-region-governs was replaced by
-C5.gap-max-at-sample. **Remaining debt: C1.geometry and C8.L3-rearm.**
+Classification after round 2 of the grounding pass (16 Sep): 44 checks — 34 mac-source, 1 mac-measurement,
+8 our-choice, **0 ungrounded (debt)** and **1 ungrounded-blocked**. The history: 15 Sep, first pass, 26/1/7/8 with three
+entries wrongly marked "grounded with a caveat"; corrected to 23/1/8/10 (our-choice split out of the debt, the caveated
+three moved into it). 16 Sep round 1: eight citations arrived, two of which refuted the checks that cited them (C7's
+"no PCM at a discontinuity", C5's "last gap wins"), leaving 32/1/9/2. Round 2: C1.geometry and C8.L3-rearm grounded,
+C7.boundary-after-flush moved to ungrounded-blocked. **Debt is zero; one check is blocked on running the Mac at 48 kHz.**
 
 This table is generated from the manifest.
 
 | Check | Grounding | Asserts | Citation |
 |---|---|---|---|
-| `C1.geometry` | ungrounded | byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative | Claims byte_offset == samples x 2 for EVERY record; the expression is quoted only for the stopped builder (TapeWriter.swift:366-384, ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6), and ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'TapeFormat.swift' with no line for the rest. Needs the checkpoint and discontinuity builders' file:line |
+| `C1.geometry` | mac-source | byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative | TapeFormat.swift:7 (bytesPerSample = 2) and the identical expression samples: bytesWritten / TapeConstants.bytesPerSample at all four construction sites - TapeWriter.swift:221 (checkpoint / audio path), :278 (discontinuity path), :307 (restart record), :374 (stopped record); no path computes samples by any other route (orchestrator read, 16 Sep). Presence: TapeFormat.swift:12-49 |
 | `C1.pcm-whole-samples` | mac-source | tape.pcm is a whole number of 2-byte samples | TapeFormat.swift:4-9 (S16 mono); TapeWriter.swift:129-133 (a trailing odd byte is trimmed on startup) |
 | `C1.within-pcm` | our-choice | no record references a byte beyond tape.pcm | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.3 (fsync of tape.pcm before the index record that references it). The Mac's F_FULLFSYNC ordering is cited only as 'tapewriter/TapeWriter.swift', no line (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2) |
 | `C1.monotonic` | mac-source | byte_offset and samples never decrease from one record to the next | TapeFormat.swift:194-196: guard offset >= previousOffset, samples >= previousSamples else { throw TapeError.invalidIndex(line:detail:"offset or sample count regressed") } (orchestrator read, 15 Sep). A different check from the input_frames guard at :239-241 |
@@ -987,11 +1051,11 @@ This table is generated from the manifest.
 | `C7.gap-fields` | mac-source | a ring_overflow record carries non-zero gap_ns and dropped_input_frames | AudioRing.swift:191, :264, :338, :355 (gap = new-side mono start - drop start); TapeWriter.swift:281 (0 omitted); TapeFormat.swift:12-49 (dropped_input_frames on ring_overflow with drops, ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
 | `C7.gapless-day-rollover` | mac-source | a day_rollover boundary carries neither gap_ns nor dropped_input_frames | TapeWriter.swift:267-296; AudioRing.swift:143-215 (gapNS 0, droppedFrames 0) (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C7.no-zero-fill` | mac-source | the boundary's byte_offset is the tape length after the resampler flush that opens discontinuity(), and tape.pcm holds exactly the audio before and after it: nothing is inserted for the gap | TapeWriter.swift:267-296, whose first statement :268 is try finishConversion() (:261-264 → writeConverted :245-259, which appends to tape.pcm through writeAll at :252), and only then is the record stamped with byteOffset: bytesWritten (orchestrator read, 15 Sep). The earlier wording, 'discontinuity() writes no PCM', was FALSE: the path flushes the resampler first |
-| `C7.boundary-after-flush` | our-choice | the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes | Ours: U1 spec 11.4 (RULED - the converter resets at every discontinuity and an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md. MEASURED with `conformance explain-flush`: our converter emits 0 samples at a reset, for 1 and for 2 held frames. The Mac flushes its resampler at the same point (TapeWriter.swift:268, :261-264); if AVAudioConverter emits a final partial sample there, every discontinuity's byte_offset differs from ours by one sample - this check is where that shows |
+| `C7.boundary-after-flush` | ungrounded-blocked | the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes | What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own **Blocked by:** Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3) |
 | `C7.zero-run-probe` | our-choice | no run of min(gap samples, 16) zero samples (16 at a gapless boundary) starting 40 samples after the boundary | Ours, never a Mac behaviour: the 16-sample zero-run threshold that defines zero fill was chosen in U0-A (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3, C7), and the 40-sample exemption is ruled in ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.5 |
 | `C8.L1-keys` | mac-source | day_rollover keys: byte_offset, samples, mono_ns, wall_ns, device, discontinuity, input_frames/input_sample_rate; nothing else | TapeWriter.swift:267-296; AudioRing.swift:20 (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C8.L2-target` | mac-source | a day_rollover's wall_ns is an IST midnight (the target itself) | AudioRing.swift:143-215 (marker wallNS = rollover.wallNS = target); CaptureTimeline.swift:141-150; ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata) (step 5 grounding read off f798edf, 15 Sep 2026) |
-| `C8.L3-rearm` | ungrounded | within one capture session each boundary is the previous one + 86400000000000 ns | The re-arm itself is CaptureTimeline.swift:122-131, :24; but the session rule this check applies (a restart, device_lost or resumed starts a new CaptureSession that re-queries the zone) rests on Recorder.swift ~65-77, an approximate range: a line moves and the claim detaches. Needs the exact CaptureSession.init lines |
+| `C8.L3-rearm` | mac-source | a capture session's first boundary comes from the zone, and within one session each later boundary is the previous one + 86400000000000 ns | First arm: Recorder.swift:66 `let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })` and :75 `nextRolloverWallNS: UInt64(nextMidnightNS.rounded())`; ArchiveMidnightFoundation.swift:73 `nextMidnight(now: @Sendable () -> Date)` and :10 timeZoneIdentifier = "Asia/Kolkata". Re-arm: CaptureTimeline.swift:24 (istDayNS literal) and :122-131 (+istDayNS). Two different mechanisms; the check rests on both (orchestrator read, 16 Sep) |
 | `C8.L4-straddle` | mac-source | the input frame holding midnight stays in the old day: where prefix end and suffix start share wall time S, S - midnight lies in [0, 20834) ns at 48 kHz | CaptureTimeline.swift:146-149 (frameOffset ceil); AudioRing.swift:323-325 (segmentEnd = start + UInt64(Double(frameCount) / sampleRate * 1e9), truncating). The [0, 20834) form of the bound is ours (orchestrator ruling 15 Sep), checked on Linux for split counts <= 1200 frames |
 | `C8.L5-frames` | our-choice | the day closed by a day_rollover holds floor(input frames / 3) samples | spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026) |
 | `C8.L6-no-unmarked-midnight` | mac-source | no end-of-audio checkpoint at or after an IST midnight unless a day_rollover at that sample closes the region | CaptureTimeline.swift:141 (every buffer whose wall end reaches the target is split) |

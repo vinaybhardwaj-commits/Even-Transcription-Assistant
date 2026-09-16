@@ -1,12 +1,12 @@
 {
   "schema": "eta.room-recorder.check-grounding/1",
-  "description": "Every named check of C1-C10 and what it rests on. mac-source: pins a Mac behaviour and carries a Mac file:line at f798edf (refused without one). mac-measurement: pins a Mac behaviour measured on the Mac. our-choice: a deliberate decision of ours, carrying the ruling that made it instead of a file:line - not debt, and it can never acquire a Mac citation. ungrounded: claims to pin a Mac behaviour and has no citation - the only count that is debt, printed on every run. A check that asserts without an entry here counts as ungrounded. Rule from 15 Sep 2026: a check pinning a Mac behaviour carries its citation.",
+  "description": "Every named check of C1-C10 and what it rests on. mac-source: pins a Mac behaviour and carries a Mac file:line at f798edf (refused without one). mac-measurement: pins a Mac behaviour measured on the Mac. our-choice: a deliberate decision of ours, carrying the ruling that made it instead of a file:line - not debt, and it can never acquire a Mac citation. ungrounded: claims to pin a Mac behaviour and has no citation - debt, somebody must read the source. ungrounded-blocked: claims to pin a Mac behaviour that cannot be established by reading at all, with blocked_by stating why and what would settle it - reported separately from debt. A check that asserts without an entry here counts as ungrounded. Rule from 15 Sep 2026: a check pinning a Mac behaviour carries its citation.",
   "checks": [
     {
       "id": "C1.geometry",
       "asserts": "byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative",
-      "grounding": "ungrounded",
-      "citation": "Claims byte_offset == samples x 2 for EVERY record; the expression is quoted only for the stopped builder (TapeWriter.swift:366-384, ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6), and ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'TapeFormat.swift' with no line for the rest. Needs the checkpoint and discontinuity builders' file:line"
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:7 (bytesPerSample = 2) and the identical expression samples: bytesWritten / TapeConstants.bytesPerSample at all four construction sites - TapeWriter.swift:221 (checkpoint / audio path), :278 (discontinuity path), :307 (restart record), :374 (stopped record); no path computes samples by any other route (orchestrator read, 16 Sep). Presence: TapeFormat.swift:12-49"
     },
     {
       "id": "C1.pcm-whole-samples",
@@ -167,8 +167,9 @@
     {
       "id": "C7.boundary-after-flush",
       "asserts": "the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes",
-      "grounding": "our-choice",
-      "citation": "Ours: U1 spec 11.4 (RULED - the converter resets at every discontinuity and an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md. MEASURED with `conformance explain-flush`: our converter emits 0 samples at a reset, for 1 and for 2 held frames. The Mac flushes its resampler at the same point (TapeWriter.swift:268, :261-264); if AVAudioConverter emits a final partial sample there, every discontinuity's byte_offset differs from ours by one sample - this check is where that shows"
+      "grounding": "ungrounded-blocked",
+      "citation": "What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own",
+      "blocked_by": "Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3)"
     },
     {
       "id": "C7.zero-run-probe",
@@ -190,9 +191,9 @@
     },
     {
       "id": "C8.L3-rearm",
-      "asserts": "within one capture session each boundary is the previous one + 86400000000000 ns",
-      "grounding": "ungrounded",
-      "citation": "The re-arm itself is CaptureTimeline.swift:122-131, :24; but the session rule this check applies (a restart, device_lost or resumed starts a new CaptureSession that re-queries the zone) rests on Recorder.swift ~65-77, an approximate range: a line moves and the claim detaches. Needs the exact CaptureSession.init lines"
+      "asserts": "a capture session's first boundary comes from the zone, and within one session each later boundary is the previous one + 86400000000000 ns",
+      "grounding": "mac-source",
+      "citation": "First arm: Recorder.swift:66 `let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })` and :75 `nextRolloverWallNS: UInt64(nextMidnightNS.rounded())`; ArchiveMidnightFoundation.swift:73 `nextMidnight(now: @Sendable () -> Date)` and :10 timeZoneIdentifier = \"Asia/Kolkata\". Re-arm: CaptureTimeline.swift:24 (istDayNS literal) and :122-131 (+istDayNS). Two different mechanisms; the check rests on both (orchestrator read, 16 Sep)"
     },
     {
       "id": "C8.L4-straddle",

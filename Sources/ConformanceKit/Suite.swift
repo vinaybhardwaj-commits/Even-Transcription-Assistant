@@ -55,16 +55,22 @@ public struct RequiredFixtures: Codable, Sendable {
 ///   `mac-source`      — pins a Mac behaviour and carries a Swift file:line; refused without one.
 ///   `mac-measurement` — pins a Mac behaviour measured on the Mac, and carries that measurement.
 ///   `our-choice`      — a deliberate decision of ours, carrying the ruling that made it instead of a file:line. Not debt.
-///   `ungrounded`      — claims to pin a Mac behaviour and has no citation. The only count that is debt.
+///   `ungrounded`      — claims to pin a Mac behaviour and has no citation. Debt: somebody has to go and read the source.
+///   `ungrounded-blocked` — claims to pin a Mac behaviour that CANNOT be established by reading (it happens inside a closed
+///                       component, or the evidence does not exist), carrying `blocked_by`: what would be needed instead.
+///                       Reported separately from debt, so "cannot be grounded yet" is never read as "nobody bothered".
 /// A check that runs without an entry counts as ungrounded.
 public struct CheckGrounding: Codable, Sendable {
     public static let currentSchema = "eta.room-recorder.check-grounding/1"
-    public static let kinds = ["mac-source", "mac-measurement", "our-choice", "ungrounded"]
+    public static let kinds = ["mac-source", "mac-measurement", "our-choice", "ungrounded", "ungrounded-blocked"]
     public struct Entry: Codable, Sendable {
         public var id: String
         public var asserts: String
         public var grounding: String
         public var citation: String
+        /// Required for `ungrounded-blocked`: why reading cannot settle it, and what would.
+        public var blockedBy: String? = nil
+        enum CodingKeys: String, CodingKey { case id, asserts, grounding, citation, blockedBy = "blocked_by" }
     }
     public var schema: String
     public var description: String
@@ -85,6 +91,9 @@ public struct CheckGrounding: Codable, Sendable {
             }
             if e.grounding == "our-choice", e.citation.isEmpty {
                 throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is our-choice but cites no ruling")
+            }
+            if e.grounding == "ungrounded-blocked", (e.blockedBy ?? "").isEmpty {
+                throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is ungrounded-blocked but states no blocked_by")
             }
         }
         guard Set(m.checks.map(\.id)).count == m.checks.count else { throw FixtureLoadError(fixture: url.path, reason: "duplicate check id") }
@@ -143,10 +152,14 @@ public struct SuiteReport {
             let ran = checksRan.keys.sorted()
             func kind(_ id: String) -> String { byID[id]?.grounding ?? "ungrounded" }
             let ungrounded = ran.filter { kind($0) == "ungrounded" }
+            let blocked = ran.filter { kind($0) == "ungrounded-blocked" }
             let count = { (k: String) in ran.filter { kind($0) == k }.count }
-            out.append("GROUNDING: \(ran.count) named checks made assertions — \(count("mac-source")) on Mac source, \(count("mac-measurement")) on a Mac measurement, \(count("our-choice")) our choice (ruled, not debt), \(ungrounded.count) UNGROUNDED (debt)")
+            out.append("GROUNDING: \(ran.count) named checks made assertions — \(count("mac-source")) on Mac source, \(count("mac-measurement")) on a Mac measurement, \(count("our-choice")) our choice (ruled, not debt), \(ungrounded.count) UNGROUNDED (debt), \(blocked.count) BLOCKED (cannot be grounded by reading)")
             for id in ungrounded {
                 out.append(pad("UNGROUNDED", 11) + pad(id, 40) + (byID[id].map { $0.citation } ?? "not in spec/check-grounding.json"))
+            }
+            for id in blocked {
+                out.append(pad("BLOCKED", 11) + pad(id, 40) + (byID[id]?.blockedBy ?? ""))
             }
             let silent = g.checks.map(\.id).filter { checkID in
                 checksRan[checkID] == nil && (only.map { $0.contains { checkID.hasPrefix($0.rawValue + ".") } } ?? true)
