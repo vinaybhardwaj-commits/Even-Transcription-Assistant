@@ -514,6 +514,20 @@ extension EngineTests {
                        ["record", "--device-config", "c", "--tape", "t", "--repin-from", "usb:0d8c:0134"])
     }
 
+    func testStartIdentityNeverWaitsOnEnrolment() {
+        let tm20 = PinnedUSBIdentity("usb:0d8c:0134")!
+        XCTAssertEqual(StartIdentity.choose(configExists: true, configRaw: "usb:1234:5678", defaultRaw: "usb:0d8c:0134")?.identity,
+                       PinnedUSBIdentity("usb:1234:5678"), "config.json wins")
+        XCTAssertEqual(StartIdentity.choose(configExists: true, configRaw: "usb:1234:5678", defaultRaw: "usb:0d8c:0134")?.source, .config)
+        XCTAssertEqual(StartIdentity.choose(configExists: false, configRaw: nil, defaultRaw: "usb:0d8c:0134")?.identity, tm20,
+                       "not enrolled yet: the install-time default")
+        XCTAssertEqual(StartIdentity.choose(configExists: false, configRaw: nil, defaultRaw: "usb:0d8c:0134")?.source, .defaultNoConfig)
+        XCTAssertEqual(StartIdentity.choose(configExists: true, configRaw: "hw:CARD=Device", defaultRaw: "usb:0d8c:0134")?.source,
+                       .defaultUnusableConfig("device_uid hw:CARD=Device is not usb:<vid>:<pid>"))
+        XCTAssertNil(StartIdentity.choose(configExists: false, configRaw: nil, defaultRaw: nil))
+        XCTAssertNil(StartIdentity.choose(configExists: false, configRaw: nil, defaultRaw: "0d8c:0134"))
+    }
+
     func testCaptureRewritesOneKeyAtModeSixHundred() throws {
         let root = temporaryRoot()
         let store = RoomStore(root: root)

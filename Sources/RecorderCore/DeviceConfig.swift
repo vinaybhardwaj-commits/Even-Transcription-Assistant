@@ -192,6 +192,30 @@ public enum DeviceConfigFile {
     }
 }
 
+/// U4: which identity a `--device-config` start pins. The capture must not depend on enrolment (V8): before the first
+/// enrol there is no config.json, and a capture that refused to start until one existed would make recording wait on
+/// the network. So the install-time `--default-device-uid` stands in until config.json names a device, and the watcher
+/// re-pins from config.json as usual once it does.
+public enum StartIdentity {
+    public enum Source: Equatable, Sendable {
+        /// config.json's own device_uid.
+        case config
+        /// No config.json yet (not enrolled): the install-time default.
+        case defaultNoConfig
+        /// config.json exists but names no usable device_uid: the install-time default, said loudly.
+        case defaultUnusableConfig(String)
+    }
+
+    /// Nil when neither config.json nor the default gives a `usb:<vid>:<pid>`.
+    public static func choose(configExists: Bool, configRaw: String?, defaultRaw: String?) -> (identity: PinnedUSBIdentity, source: Source)? {
+        if let raw = configRaw, let identity = PinnedUSBIdentity(raw) { return (identity, .config) }
+        guard let raw = defaultRaw, let fallback = PinnedUSBIdentity(raw) else { return nil }
+        guard configExists else { return (fallback, .defaultNoConfig) }
+        let why = configRaw.map { "device_uid \($0.prefix(64)) is not usb:<vid>:<pid>" } ?? "no readable device_uid"
+        return (fallback, .defaultUnusableConfig(why))
+    }
+}
+
 /// The re-exec'd start's choice: the new device if it became ready in time, else the one it came from.
 public enum RepinStartup {
     public enum Choice: Equatable, Sendable {

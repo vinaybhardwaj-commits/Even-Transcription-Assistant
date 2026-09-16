@@ -27,7 +27,7 @@ let usage = """
 usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR [--seconds S]
                             [--expect-usbid VID:PID] [--wait-for-device SECONDS] [--ring-frames N]
        room-recorder record --device-config /var/lib/room-recorder/config.json --tape DIR [--seconds S]
-                            [--wait-for-device SECONDS] [--ring-frames N]
+                            [--default-device-uid usb:V:P] [--wait-for-device SECONDS] [--ring-frames N]
   Records captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. The device's own
   channel count is used (1 or more); 48 000 Hz S16_LE is required of the hardware and never converted. A new DIR gets
   a new tape; an existing tape is continued with a `restart` record.
@@ -47,6 +47,8 @@ usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR [--seconds 
                          device is attached re-pins this process (a `stopped` record, a re-exec, a `restart` record, the
                          same tape); one whose device is absent is refused and recording carries on. Every outcome is
                          written to capture-device.json beside FILE.
+  --default-device-uid usb:V:P  the identity to pin while config.json does not exist yet (before the first enrol)
+                         or names no usable device_uid. Capture never waits on enrolment.
   --repin-from usb:V:P   set by the re-exec itself: the identity to go back to if the new one is not ready in 5 s.
 
 exit codes: 2 usage / refusal   3 pinned device absent after the bounded wait
@@ -64,12 +66,12 @@ guard args.first == "record" else { die(usage) }
 // Every option must be one this binary has: a release build refuses a test-hook option rather than ignoring it.
 #if TAPE_TEST_HOOKS
 let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
-                                 "--wait-for-device", "--device-config", "--repin-from", "--tee-input", "--starve-writer-at",
+                                 "--wait-for-device", "--device-config", "--default-device-uid", "--repin-from", "--tee-input", "--starve-writer-at",
                                  "--starve-writer-for", "--inject-device-lost-at", "--inject-device-lost-for", "--test-wall-origin-ns",
                                  "--test-synthetic-devices"]
 #else
 let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
-                                 "--wait-for-device", "--device-config", "--repin-from"]
+                                 "--wait-for-device", "--device-config", "--default-device-uid", "--repin-from"]
 #endif
 do {
     var i = 1
@@ -138,8 +140,18 @@ if let configPath = deviceConfigPath {
     guard opt("--device") == nil, opt("--expect-usbid") == nil else {
         die("--device-config names the device; pass neither --device nor --expect-usbid with it")
     }
-    guard let raw = DeviceConfigFile.readDeviceUID(configPath), let configured = PinnedUSBIdentity(raw) else {
-        die("--device-config \(configPath) holds no device_uid of the form usb:<vid>:<pid>")
+    let configExists = FileManager.default.fileExists(atPath: configPath)
+    guard let start = StartIdentity.choose(configExists: configExists, configRaw: DeviceConfigFile.readDeviceUID(configPath),
+                                           defaultRaw: opt("--default-device-uid")) else {
+        die("--device-config \(configPath) holds no device_uid of the form usb:<vid>:<pid>, and no usable --default-device-uid was given")
+    }
+    let configured = start.identity
+    switch start.source {
+    case .config: break
+    case .defaultNoConfig:
+        journal("no \(configPath) yet (this room is not enrolled): pinning the install-time identity \(configured) and watching for it")
+    case .defaultUnusableConfig(let why):
+        journal("WARNING: \(configPath) exists but \(why); pinning the install-time identity \(configured) and watching for a usable one")
     }
     var repinFrom: PinnedUSBIdentity? = nil
     if let raw = opt("--repin-from") {
