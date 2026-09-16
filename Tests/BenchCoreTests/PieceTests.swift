@@ -250,6 +250,24 @@ final class LaneTests: XCTestCase {
         XCTAssertEqual(regularFileSize(r.tape.dir.appendingPathComponent("tape.pcm").path), r.tape.samples * 2)
     }
 
+    func testADelayedStartBeginsWhereTheCommandArrivedEvenAcrossARestart() async throws {
+        let r = try rig()
+        r.tape.growOnSleep = 0
+        r.tape.grow(1_000_000)
+        let atCommand = await r.lane.durableSamples()!
+        r.tape.grow(300_000)                      // the start waited on a backlog...
+        r.tape.discontinuity("restart", gapNS: 0) // ...and the capture re-pinned meanwhile
+        r.tape.grow(200_000)
+        r.tape.growOnSleep = 20_400
+        try await r.lane.start(sessionID: "s1", nextIndex: 0, trigger: .startDay, fromSamples: atCommand)
+        r.tape.growOnSleep = 0
+        try await r.lane.stopAndFlush()
+        let pieces = try r.spool.pending().map { [$0.manifest.sampleStart, $0.manifest.sampleEnd] }
+        XCTAssertEqual(pieces.first?.first, atCommand, "nothing between the command and the start is skipped")
+        XCTAssertEqual(pieces.first?.last, atCommand + 300_000, "the restart record closes the piece")
+        XCTAssertEqual(pieces.count, 2)
+    }
+
     func testStartOnADeadTapeThrows() async throws {
         let r = try rig()
         r.tape.growOnSleep = 0

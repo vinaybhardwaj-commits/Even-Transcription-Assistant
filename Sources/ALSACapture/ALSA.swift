@@ -47,6 +47,12 @@ public enum CaptureDevices {
         public var card: Int
         public var device: Int
         public var description: String
+        public init(stableName: String, card: Int, device: Int, description: String) {
+            self.stableName = stableName
+            self.card = card
+            self.device = device
+            self.description = description
+        }
     }
 
     /// Every capture PCM the kernel lists in /proc/asound/pcm, named in stable form hw:CARD=<id>,DEV=<n>.

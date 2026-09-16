@@ -1,24 +1,36 @@
 import Foundation
+import RecorderCore
 import XCTest
 @testable import BenchCore
+
+/// A clock the tests move by hand; `sleep` advances it.
+final class FakeClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var t: TimeInterval = 1_789_400_000
+    var now: Date { lock.withLock { Date(timeIntervalSince1970: t) } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { t += seconds } }
+}
 
 actor FakeLane: PieceLane {
     var calls: [String] = []
     var cutting = false
-    var pending = 0
+    /// Pending pieces as (session, seconds each upload takes on the fake clock).
+    var pending: [(session: String, uploadSeconds: TimeInterval)] = []
     var startError: Error?
     var drainError: Error?
     var endedByServer = false
     var index = 0
     var samples: Int64 = 1000
+    let clock: FakeClock
 
-    func record(_ c: String) { calls.append(c) }
+    init(clock: FakeClock = FakeClock()) { self.clock = clock }
+
     func setStartError(_ e: Error?) { startError = e }
-    func setPending(_ n: Int) { pending = n }
+    func setPending(_ p: [(session: String, uploadSeconds: TimeInterval)]) { pending = p }
     func setDrainError(_ e: Error?) { drainError = e }
 
-    func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger) async throws {
-        calls.append("start \(sessionID) \(nextIndex) \(trigger)")
+    func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger, fromSamples: Int64?) async throws {
+        calls.append("start \(sessionID) \(nextIndex) \(trigger)\(fromSamples.map { " from \($0)" } ?? "")")
         if let startError { throw startError }
         cutting = true
         index = nextIndex
@@ -28,13 +40,20 @@ actor FakeLane: PieceLane {
         cutting = false
     }
     func publishAvailable() async throws {}
-    func drainPending() async throws -> Bool {
+    func drainPending(maxPieces: Int?, deadline: Date?) async throws -> Bool {
         calls.append("drain")
         if let drainError { throw drainError }
-        pending = 0
+        var done = 0
+        while !pending.isEmpty {
+            if let maxPieces, done >= maxPieces { break }
+            if let deadline, clock.now >= deadline { break }
+            clock.advance(pending[0].uploadSeconds)
+            pending.removeFirst()
+            done += 1
+        }
         return endedByServer
     }
-    func pendingCount() async -> Int { pending }
+    func pendingCount(sessionID: String?) async -> Int { pending.filter { sessionID == nil || $0.session == sessionID }.count }
     func isCutting() async -> Bool { cutting }
     func nextIndex() async -> Int { index }
     func durableSamples() async -> Int64? {
@@ -76,9 +95,30 @@ final class FakeVolume: InputVolumeControlling, @unchecked Sendable {
     }
 }
 
+/// Plays the capture's part: answers a re-pin request, and on a refusal or a revert puts config.json back as it would.
 struct RecordingSwitch: CaptureDeviceSwitching {
-    let succeed: Bool
-    func switchCapture(to uid: USBDeviceUID) async throws { if !succeed { throw CaptureSwitchUnavailable() } }
+    enum Answer { case switched, absent, revertedBusy, silent }
+    let answer: Answer
+    var store: RoomStore? = nil
+    var previous = "usb:0d8c:0134"
+    init(succeed: Bool) { answer = succeed ? .switched : .silent }
+    init(answer: Answer, store: RoomStore) {
+        self.answer = answer
+        self.store = store
+    }
+    func switchCapture(to uid: USBDeviceUID, requestedAtWallNS: Int64) async throws {
+        switch answer {
+        case .switched: return
+        case .absent:
+            if var c = try store?.loadConfig() { c.deviceUID = previous; try store?.saveConfig(c) }
+            throw CaptureSwitchError.notPresent
+        case .revertedBusy:
+            if var c = try store?.loadConfig() { c.deviceUID = previous; try store?.saveConfig(c) }
+            throw CaptureSwitchError.reverted(reason: "busy")
+        case .silent:
+            throw CaptureSwitchError.noConfirmation(seconds: 15)
+        }
+    }
 }
 
 let spare = EnumeratedCaptureDevice(uid: USBDeviceUID("usb:1234:5678")!, name: "Spare", alsaName: "hw:CARD=Spare,DEV=0", card: 2)
@@ -92,9 +132,11 @@ final class EngineTests: XCTestCase {
         let store: RoomStore
         let volume: FakeVolume
         let log: RoomLog
+        let lines: LockedLines
     }
 
-    func rig(devices: [EnumeratedCaptureDevice] = [tm20, spare], switchSucceeds: Bool = false, cancelAfter: Int = 1_000) throws -> Rig {
+    func rig(devices: [EnumeratedCaptureDevice] = [tm20, spare], switchSucceeds: Bool = false, switchAnswer: RecordingSwitch.Answer? = nil,
+             clock: FakeClock? = nil, cancelAfter: Int = 1_000) throws -> Rig {
         let root = temporaryRoot()
         let store = RoomStore(root: root)
         let config = RoomConfig(origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "opd-5", deviceUID: "usb:0d8c:0134",
@@ -103,17 +145,20 @@ final class EngineTests: XCTestCase {
         let t = FakeTransport()
         t.onJSON("GET /api/bench/sessions/active", #"{"ok":true,"resumable":false,"session":null,"handover_pending":false,"tab_gone":false}"#)
         t.onJSON("POST *", #"{"ok":true,"id":"x","status":"acked"}"#)
-        let lane = FakeLane()
+        let lane = FakeLane(clock: clock ?? FakeClock())
         let sleeper = RecordingSleeper(cancelAfter: cancelAfter)
         let volume = FakeVolume()
         volume.values[tm20.uid] = InputVolumeReading(value: 21.0 / 62, settable: true)
-        let log = RoomLog(sink: { _ in })
+        let lines = LockedLines()
+        let log = RoomLog(sink: { lines.add($0) })
         let env = RoomEngineEnvironment(
             client: BenchClient(origin: config.origin, transport: t, sessionToken: { "TOKEN" }), store: store, lane: lane,
-            devices: FakeDevices(devices: devices), volume: volume, captureSwitch: RecordingSwitch(succeed: switchSucceeds),
-            machineFacts: { MachineFacts(hostname: "yoga") }, ffmpegVersion: { "ffmpeg version 6.1.1" }, sleeper: sleeper, log: log)
+            devices: FakeDevices(devices: devices), volume: volume,
+            captureSwitch: switchAnswer.map { RecordingSwitch(answer: $0, store: store) } ?? RecordingSwitch(succeed: switchSucceeds),
+            machineFacts: { MachineFacts(hostname: "yoga") }, ffmpegVersion: { "ffmpeg version 6.1.1" }, sleeper: sleeper, log: log,
+            now: { [clock] in clock?.now ?? Date() })
         return Rig(engine: RoomEngine(config: config, installID: "inst_1", environment: env), transport: t, lane: lane,
-                   sleeper: sleeper, store: store, volume: volume, log: log)
+                   sleeper: sleeper, store: store, volume: volume, log: log, lines: lines)
     }
 
     /// Acks answer with the id that was acked and the status the ok implies.
@@ -161,7 +206,7 @@ final class EngineTests: XCTestCase {
         let creates = r.transport.requests.filter { $0.method == "POST" && $0.url.path == "/api/bench/sessions" }
         XCTAssertEqual(creates.count, 1, "the session is created once")
         let starts = await r.lane.calls.filter { $0.hasPrefix("start") }
-        XCTAssertEqual(starts, ["start s1 0 startDay"])
+        XCTAssertEqual(starts, ["start s1 0 startDay from 17000"])
         XCTAssertEqual(acks(r.transport).map(\.0), ["c1", "c1", "c1"], "every delivery is acked")
         XCTAssertTrue(acks(r.transport).allSatisfy { $0.1["ok"] as? Bool == true && $0.1["session_id"] as? String == "s1" })
         let phase = await r.engine.phase
@@ -276,7 +321,7 @@ final class EngineTests: XCTestCase {
         let r = try rig(switchSucceeds: false)
         echoAcks(r.transport)
         await r.engine.handle(BenchCommand(id: "s1", kind: .setAudioInput, args: .object(["device_uid": .string("usb:1234:5678")])))
-        XCTAssertEqual(acks(r.transport).last?.1["error"] as? String, "device_switch_failed: capture_device_switch_not_wired")
+        XCTAssertEqual(acks(r.transport).last?.1["error"] as? String, "device_switch_failed: capture_did_not_confirm within 15 s")
         XCTAssertEqual(try r.store.loadConfig()?.deviceUID, "usb:0d8c:0134")
         let uid = await r.engine.currentDeviceUID
         XCTAssertEqual(uid, "usb:0d8c:0134")
@@ -333,7 +378,7 @@ final class EngineTests: XCTestCase {
         let lane = FakeLane()
         let env = RoomEngineEnvironment(client: BenchClient(origin: config.origin, transport: t, sessionToken: { "T" }), store: store,
                                         lane: lane, devices: FakeDevices(devices: [tm20]), volume: FakeVolume(),
-                                        captureSwitch: UnwiredCaptureSwitch(), machineFacts: { MachineFacts() }, ffmpegVersion: { nil },
+                                        captureSwitch: RecordingSwitch(succeed: false), machineFacts: { MachineFacts() }, ffmpegVersion: { nil },
                                         sleeper: sleeper, log: RoomLog(sink: { lines.add($0) }))
         let exit = await RoomEngine(config: config, installID: "inst_1", environment: env).run()
         XCTAssertEqual(exit, .cancelled)
@@ -383,6 +428,163 @@ final class EngineTests: XCTestCase {
         XCTAssertNotNil(first["input_devices"])
         let second = Dictionary(uniqueKeysWithValues: queryItems(polls[1].url).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(second["tape_advancing"], "true")
+    }
+}
+
+extension EngineTests {
+
+    // MARK: fix 1 — the bench side of a re-pin
+
+    func testSwitchToPresentDeviceAcksAfterTheCaptureConfirms() async throws {
+        let r = try rig(switchAnswer: .switched)
+        echoAcks(r.transport)
+        await r.engine.handle(BenchCommand(id: "d1", kind: .setAudioInput, args: .object(["device_uid": .string("usb:1234:5678")])))
+        let ack = try XCTUnwrap(acks(r.transport).last?.1)
+        XCTAssertEqual(ack["ok"] as? Bool, true)
+        XCTAssertEqual(ack["applied_device_uid"] as? String, "usb:1234:5678")
+        XCTAssertEqual(try r.store.loadConfig()?.deviceUID, "usb:1234:5678", "room-bench wrote the identity; it restarted nothing")
+    }
+
+    func testCaptureRefusingAnAbsentDeviceAcksDeviceNotPresentAndKeepsTheOldOne() async throws {
+        let r = try rig(switchAnswer: .absent)
+        echoAcks(r.transport)
+        await r.engine.handle(BenchCommand(id: "d2", kind: .setAudioInput, args: .object(["device_uid": .string("usb:1234:5678")])))
+        XCTAssertEqual(acks(r.transport).last?.1["error"] as? String, "device_not_present")
+        XCTAssertEqual(try r.store.loadConfig()?.deviceUID, "usb:0d8c:0134")
+        let uid = await r.engine.currentDeviceUID
+        XCTAssertEqual(uid, "usb:0d8c:0134")
+    }
+
+    func testCaptureRevertingABusyDeviceAcksTheReason() async throws {
+        let r = try rig(switchAnswer: .revertedBusy)
+        echoAcks(r.transport)
+        await r.engine.handle(BenchCommand(id: "d3", kind: .setAudioInput, args: .object(["device_uid": .string("usb:1234:5678")])))
+        XCTAssertEqual(acks(r.transport).last?.1["error"] as? String, "device_switch_failed: reverted: busy")
+        XCTAssertEqual(try r.store.loadConfig()?.deviceUID, "usb:0d8c:0134")
+    }
+
+    func testConfigRepinSwitchReadsOnlyAnAnswerToThisRequest() async throws {
+        let root = temporaryRoot()
+        let store = RoomStore(root: root)
+        let statusPath = root.appendingPathComponent("capture-device.json").path
+        let sleeper = RecordingSleeper()
+        let uid = USBDeviceUID("usb:1234:5678")!
+        // A stale answer from before the request does not count: it times out.
+        try DeviceConfigFile.writeStatus(CaptureDeviceStatus(deviceUID: "usb:1234:5678", requestedUID: "usb:1234:5678", outcome: .switched,
+                                                             alsaName: "hw:CARD=Spare,DEV=0", reason: nil, atWallNS: 100, pid: 1),
+                                         besideConfig: store.configURL.path)
+        do {
+            try await ConfigRepinSwitch(store: store, sleeper: sleeper).switchCapture(to: uid, requestedAtWallNS: 200)
+            XCTFail("took a stale answer")
+        } catch {
+            XCTAssertEqual(error as? CaptureSwitchError, .noConfirmation(seconds: 15))
+        }
+        XCTAssertEqual(sleeper.sleeps.count, 61, "15 s at 250 ms")
+        try DeviceConfigFile.writeStatus(CaptureDeviceStatus(deviceUID: "usb:0d8c:0134", requestedUID: "usb:1234:5678", outcome: .refusedAbsent,
+                                                             alsaName: nil, reason: "absent", atWallNS: 300, pid: 1), besideConfig: store.configURL.path)
+        XCTAssertEqual(mode(URL(fileURLWithPath: statusPath)), 0o600)
+        do {
+            try await ConfigRepinSwitch(store: store, sleeper: RecordingSleeper()).switchCapture(to: uid, requestedAtWallNS: 200)
+            XCTFail()
+        } catch {
+            XCTAssertEqual(error as? CaptureSwitchError, .notPresent)
+        }
+        try DeviceConfigFile.writeStatus(CaptureDeviceStatus(deviceUID: "usb:1234:5678", requestedUID: "usb:1234:5678", outcome: .switched,
+                                                             alsaName: "hw:CARD=Spare,DEV=0", reason: nil, atWallNS: 400, pid: 1), besideConfig: store.configURL.path)
+        try await ConfigRepinSwitch(store: store, sleeper: RecordingSleeper()).switchCapture(to: uid, requestedAtWallNS: 200)
+    }
+
+    // MARK: fix 1 — the capture's decisions
+
+    func testRepinDecisions() {
+        let a = PinnedUSBIdentity("usb:0d8c:0134")!
+        let listed = [ListedCapture(stableName: "hw:CARD=Device,DEV=0", card: 1, device: 0, usbID: "0d8c:0134"),
+                      ListedCapture(stableName: "hw:CARD=Spare2,DEV=0", card: 3, device: 0, usbID: "1234:5678"),
+                      ListedCapture(stableName: "hw:CARD=Spare,DEV=0", card: 2, device: 0, usbID: "1234:5678"),
+                      ListedCapture(stableName: "hw:CARD=sofhdadsp,DEV=6", card: 0, device: 6, usbID: nil)]
+        XCTAssertEqual(RepinDecision.decide(current: a, configured: "usb:0d8c:0134", listed: listed), .ignore(reason: "unchanged"))
+        XCTAssertEqual(RepinDecision.decide(current: a, configured: nil, listed: listed), .ignore(reason: "config.json has no readable device_uid"))
+        guard case .ignore = RepinDecision.decide(current: a, configured: "hw:CARD=Device", listed: listed) else { return XCTFail() }
+        XCTAssertEqual(RepinDecision.decide(current: a, configured: "usb:dead:beef", listed: listed), .refuseAbsent(requested: PinnedUSBIdentity("usb:dead:beef")!))
+        XCTAssertEqual(RepinDecision.decide(current: a, configured: "usb:1234:5678", listed: listed),
+                       .switchTo(PinnedUSBIdentity("usb:1234:5678")!, listed[2]), "exact usb id, lowest card")
+        XCTAssertEqual(RepinStartup.decide(requestedNotReadyReason: nil, previous: a), .useRequested)
+        XCTAssertEqual(RepinStartup.decide(requestedNotReadyReason: "busy", previous: a), .revertTo(a, reason: "busy"))
+        XCTAssertEqual(RepinStartup.execArguments(["record", "--device-config", "c", "--repin-from", "usb:1111:2222", "--tape", "t"], previous: a),
+                       ["record", "--device-config", "c", "--tape", "t", "--repin-from", "usb:0d8c:0134"])
+    }
+
+    func testCaptureRewritesOneKeyAtModeSixHundred() throws {
+        let root = temporaryRoot()
+        let store = RoomStore(root: root)
+        var config = RoomConfig(origin: URL(string: "https://www.evenscribe.app")!, roomSlug: "opd-5", deviceUID: "usb:1234:5678", installID: "i", tabID: "app_i")
+        config.channelLocked = true
+        try store.saveConfig(config)
+        XCTAssertEqual(DeviceConfigFile.readDeviceUID(store.configURL.path), "usb:1234:5678")
+        try DeviceConfigFile.rewriteDeviceUID(store.configURL.path, to: "usb:0d8c:0134")
+        var expected = config
+        expected.deviceUID = "usb:0d8c:0134"
+        XCTAssertEqual(try store.loadConfig(), expected, "every other key kept, and room-bench's own reader accepts the file")
+        XCTAssertEqual(mode(store.configURL), 0o600)
+    }
+
+    func testCaptureStatusKeysAreWhatRoomBenchReads() throws {
+        let status = CaptureDeviceStatus(deviceUID: "usb:a", requestedUID: "usb:b", outcome: .reverted, alsaName: "hw", reason: "busy", atWallNS: 7, pid: 9)
+        let report = try JSONDecoder().decode(CaptureDeviceReport.self, from: try JSONEncoder().encode(status))
+        XCTAssertEqual(report, CaptureDeviceReport(deviceUID: "usb:a", requestedUID: "usb:b", outcome: "reverted", alsaName: "hw", reason: "busy", atWallNS: 7, pid: 9))
+    }
+
+    // MARK: fix 2 — a day start cannot deadlock on uploads
+
+    func testDayStartWaitsAtMostTheBoundThenStartsWithTheBacklogBehindIt() async throws {
+        let clock = FakeClock()
+        let r = try rig(clock: clock)
+        echoAcks(r.transport)
+        r.transport.onJSON("POST /api/bench/sessions", #"{"session":{"id":"s2","status":"recording"}}"#)
+        // A weekend offline: 144 pieces from the last session, each taking 60 s to upload on a slow link.
+        await r.lane.setPending(Array(repeating: (session: "s1", uploadSeconds: 60), count: 144))
+        let before = clock.now
+        await r.engine.handle(BenchCommand(id: "c1", kind: .startDay))
+        let waited = clock.now.timeIntervalSince(before)
+        XCTAssertLessThanOrEqual(waited, RoomEngine.dayStartBacklogTimeout + 60, "bounded: 300 s plus the one upload already under way")
+        XCTAssertEqual(acks(r.transport).last?.1["ok"] as? Bool, true, "the day started")
+        let remaining = await r.lane.pendingCount(sessionID: nil)
+        XCTAssertEqual(remaining, 144 - 5, "the backlog is still there, uploading behind the day")
+        let starts = await r.lane.calls.filter { $0.hasPrefix("start") }
+        XCTAssertEqual(starts, ["start s2 0 startDay from 17000"], "the day begins on the tape where the command arrived")
+        XCTAssertEqual(r.lines.all.filter { $0.hasPrefix("DAY START WITH BACKLOG: 139 piece(s)") }.count, 1)
+        let phase = await r.engine.phase
+        XCTAssertEqual(phase, .recording)
+    }
+
+    func testDayStartDoesNotWaitAtAllWhenUploadsAreFailing() async throws {
+        let clock = FakeClock()
+        let r = try rig(clock: clock)
+        echoAcks(r.transport)
+        r.transport.onJSON("POST /api/bench/sessions", #"{"session":{"id":"s2","status":"recording"}}"#)
+        await r.lane.setPending([(session: "s1", uploadSeconds: 60)])
+        await r.lane.setDrainError(BenchError.transport(message: "offline", retention: .retainLocalPiece))
+        let before = clock.now
+        await r.engine.handle(BenchCommand(id: "c1", kind: .startDay))
+        XCTAssertEqual(clock.now, before)
+        XCTAssertEqual(acks(r.transport).last?.1["ok"] as? Bool, true)
+        XCTAssertTrue(r.lines.all.contains { $0.hasPrefix("DAY START WITH BACKLOG") && $0.contains("upload failing") })
+    }
+
+    func testAnotherSessionsBacklogDoesNotStopThisDayEnding() async throws {
+        let clock = FakeClock()
+        let r = try rig(clock: clock)
+        echoAcks(r.transport)
+        r.transport.onJSON("PATCH /api/bench/sessions/s2", #"{"ok":true}"#)
+        await r.engine.setPhaseForTesting(.recording, sessionID: "s2")
+        await r.lane.setPending([(session: "s1", uploadSeconds: 1_000)])
+        await r.lane.setDrainError(BenchError.transport(message: "offline", retention: .retainLocalPiece))
+        await r.engine.handle(BenchCommand(id: "e1", kind: .endDay))
+        XCTAssertEqual(acks(r.transport).last?.1["ok"] as? Bool, false, "draining failed three times: the Mac's rule, kept")
+        await r.lane.setDrainError(nil)
+        await r.engine.setPhaseForTesting(.recording, sessionID: "s2")
+        await r.engine.handle(BenchCommand(id: "e2", kind: .endDay))
+        XCTAssertEqual(acks(r.transport).last?.1["ok"] as? Bool, true, "s1's backlog does not hold s2's end")
     }
 }
 

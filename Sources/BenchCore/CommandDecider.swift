@@ -87,22 +87,81 @@ public struct AudioInputRequest: Equatable, Sendable {
     }
 }
 
-/// Linux has one continuous capture process, pinned by its own unit and network-isolated. Moving it to another device
-/// is a capture-side operation this process cannot perform by itself; this seam is where it plugs in.
+/// The capture is a separate, network-isolated process (V8). Moving it to another device is its own operation: this
+/// process writes the new identity to config.json and waits for the capture to say what became of it.
 public protocol CaptureDeviceSwitching: Sendable {
-    /// Throws with a short reason when the capture could not be moved to `uid`.
-    func switchCapture(to uid: USBDeviceUID) async throws
+    /// Called after config.json names `uid`. `requestedAtWallNS` is the wall time just before that write, so only an
+    /// answer to THIS request counts. Returns when the capture records from `uid`; throws `CaptureSwitchError`.
+    func switchCapture(to uid: USBDeviceUID, requestedAtWallNS: Int64) async throws
 }
 
-public struct CaptureSwitchUnavailable: Error, CustomStringConvertible {
-    public var description: String { "capture_device_switch_not_wired" }
-    public init() {}
+public enum CaptureSwitchError: Error, Equatable, CustomStringConvertible {
+    /// The capture found the device absent and kept recording the old one (it has put config.json back).
+    case notPresent
+    /// The device was attached but not ready; the capture went back to the old one (and put config.json back).
+    case reverted(reason: String)
+    /// No answer within the deadline: the capture is not running, or is not a build that watches config.json.
+    case noConfirmation(seconds: Int)
+
+    public var description: String {
+        switch self {
+        case .notPresent: return "device_not_present"
+        case .reverted(let reason): return "reverted: \(reason)"
+        case .noConfirmation(let s): return "capture_did_not_confirm within \(s) s"
+        }
+    }
 }
 
-/// The production switch in U3: not wired. See the report — the capture unit's device is pinned in its ExecStart and
-/// nothing yet carries config.json's device_uid to it. Every different-device switch therefore fails cleanly and is
-/// rolled back; a same-device request and a volume change are unaffected.
-public struct UnwiredCaptureSwitch: CaptureDeviceSwitching {
-    public init() {}
-    public func switchCapture(to uid: USBDeviceUID) async throws { throw CaptureSwitchUnavailable() }
+/// `capture-device.json`, as room-recorder writes it (RecorderCore/DeviceConfig.swift `CaptureDeviceStatus`, same keys).
+public struct CaptureDeviceReport: Codable, Equatable, Sendable {
+    public var deviceUID: String
+    public var requestedUID: String
+    public var outcome: String
+    public var alsaName: String?
+    public var reason: String?
+    public var atWallNS: Int64
+    public var pid: Int32
+
+    enum CodingKeys: String, CodingKey {
+        case outcome, reason, pid
+        case deviceUID = "device_uid"
+        case requestedUID = "requested_uid"
+        case alsaName = "alsa_name"
+        case atWallNS = "at_wall_ns"
+    }
+}
+
+/// The production switch (U3 fix 1): the capture watches config.json and re-pins itself; this waits for its answer.
+public struct ConfigRepinSwitch: CaptureDeviceSwitching {
+    /// 15 s = the capture's 1 s look at config.json + its 5 s bound for the new device to become ready + PipeWire's
+    /// measured 5.0 s hold on a device it goes back to (M2.2) + 4 s for the clean stop and the re-exec.
+    public static let confirmationDeadlineNS: UInt64 = 15_000_000_000
+    static let pollNS: UInt64 = 250_000_000
+
+    let store: RoomStore
+    let sleeper: any Sleeper
+
+    public init(store: RoomStore, sleeper: any Sleeper) {
+        self.store = store
+        self.sleeper = sleeper
+    }
+
+    public func switchCapture(to uid: USBDeviceUID, requestedAtWallNS: Int64) async throws {
+        let url = store.root.appendingPathComponent("capture-device.json")
+        var waited: UInt64 = 0
+        while waited <= Self.confirmationDeadlineNS {
+            if let report = try? store.read(CaptureDeviceReport.self, from: url),
+               report.requestedUID == uid.description, report.atWallNS >= requestedAtWallNS {
+                switch report.outcome {
+                case "switched", "started" where report.deviceUID == uid.description: return
+                case "refused_absent": throw CaptureSwitchError.notPresent
+                case "reverted": throw CaptureSwitchError.reverted(reason: report.reason ?? "not ready")
+                default: break
+                }
+            }
+            try await sleeper.sleep(nanoseconds: Self.pollNS)
+            waited += Self.pollNS
+        }
+        throw CaptureSwitchError.noConfirmation(seconds: Int(Self.confirmationDeadlineNS / 1_000_000_000))
+    }
 }

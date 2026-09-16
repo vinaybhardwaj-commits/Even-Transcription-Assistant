@@ -11,15 +11,19 @@ public enum LaneStartTrigger: Equatable, Sendable {
 public protocol PieceLane: Sendable {
     /// Begin cutting pieces for `sessionID` with index `nextIndex`. Throws when the tape shows no durable growth within
     /// its deadline — the capture process is not running, and a session must not open on a dead microphone.
-    func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger) async throws
+    /// `fromSamples`, when given, is where cutting begins: the tape position when the command arrived, so a start delayed by
+    /// a backlog still begins the day at the command. Nil means the durable end now.
+    func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger, fromSamples: Int64?) async throws
     /// Cut everything durable into pieces, the last one partial, and stop cutting. The tape is untouched and keeps
     /// advancing. Idempotent: a lane that is not cutting does nothing.
     func stopAndFlush() async throws
     /// Cut the full pieces now due. Does nothing while not cutting.
     func publishAvailable() async throws
-    /// Upload every spooled piece, oldest first. True when a registration said the server had ended the session.
-    func drainPending() async throws -> Bool
-    func pendingCount() async -> Int
+    /// Upload spooled pieces, oldest first: at most `maxPieces`, and no new upload is begun after `deadline`. True when a
+    /// registration said the server had ended the session. A piece not uploaded stays in the spool.
+    func drainPending(maxPieces: Int?, deadline: Date?) async throws -> Bool
+    /// Spooled pieces, all of them or only one session's.
+    func pendingCount(sessionID: String?) async -> Int
     func isCutting() async -> Bool
     func nextIndex() async -> Int
     /// The tape's durable sample count now, or nil when the index cannot be read.
@@ -117,6 +121,15 @@ public actor RoomEngine {
     static let reportDiagLineMax = 300
     static let reportDiagForbidden = ["eta_room_session", "etaRoomSession", "commandVerifyKey", "SCRIBE_MCP_TOKEN",
                                       "authorization", "cookie", "session_token"]
+    /// U3 fix 2. How long pending uploads may delay a day start before it starts anyway. 300 s: one nominal 5-minute
+    /// piece is 1 200 000 bytes at 32 kbit/s and uploads within 300 s on any link that carries the room's own rate, so a
+    /// start waits for at most one piece; a full spool (398 897 568 bytes) would need 99 724 s (27.7 h) at that rate,
+    /// which is the deadlock this bound removes. A piece already uploading when it expires finishes (its requests carry
+    /// their own 60 s timeouts).
+    public static let dayStartBacklogTimeout: TimeInterval = 300
+    /// A stop (SIGTERM, restart_engine, superseded) uploads what it can in this long and leaves the rest in the spool for
+    /// the next process: well inside systemd's default 90 s stop timeout, so a stop never waits on the network.
+    public static let stopDrainBudget: TimeInterval = 10
     /// A refused token is said at once and then every ten minutes while it lasts, not every backoff.
     static let authRefusedRepeatSeconds: TimeInterval = 600
 
@@ -156,7 +169,7 @@ public actor RoomEngine {
             return .retired
         }
         do {
-            _ = try await env.lane.drainPending()
+            _ = try await env.lane.drainPending(maxPieces: 1, deadline: nil)
         } catch {
             needsActiveReconciliation = true
             lastError = bounded(error)
@@ -183,7 +196,8 @@ public actor RoomEngine {
             }
             if env.now() >= uploadRetryAfter {
                 do {
-                    if try await env.lane.drainPending() { try await stopAfterServerEnd() }
+                    // One piece per turn of the loop, so a backlog uploads BEHIND the poll and never starves it.
+                    if try await env.lane.drainPending(maxPieces: 1, deadline: nil) { try await stopAfterServerEnd() }
                     uploadBackoff = 5
                     uploadRetryAfter = .distantPast
                 } catch {
@@ -307,7 +321,7 @@ public actor RoomEngine {
             phase = .paused
         } else {
             if !(await env.lane.isCutting()) {
-                try await env.lane.start(sessionID: session.id, nextIndex: nextPieceIndex, trigger: .reconciliation)
+                try await env.lane.start(sessionID: session.id, nextIndex: nextPieceIndex, trigger: .reconciliation, fromSamples: nil)
             }
             phase = .recording
         }
@@ -408,10 +422,25 @@ public actor RoomEngine {
 
     // MARK: - the four day kinds (plain-capture paths)
 
+    /// U3 fix 2. The Mac refuses a start while anything is pending (RoomEngine.swift `beginOrResume`); on a machine
+    /// that was offline for a weekend that refusal would hold recording indefinitely. Here pending uploads may delay the
+    /// start by at most `dayStartBacklogTimeout`, a failing upload delays it not at all, and the day then starts with the
+    /// backlog still uploading behind it. The day begins on the tape where the command arrived, whatever the delay.
     func beginOrResume() async throws {
-        _ = try await env.lane.drainPending()
-        let pending = await env.lane.pendingCount()
-        guard pending == 0 else { throw RoomEngineError.pendingUploads(pending) }
+        let commandSamples = await env.lane.durableSamples()
+        let began = env.now()
+        let deadline = began.addingTimeInterval(Self.dayStartBacklogTimeout)
+        var drainFailure: String?
+        do {
+            _ = try await env.lane.drainPending(maxPieces: nil, deadline: deadline)
+        } catch {
+            drainFailure = bounded(error, limit: 160)
+        }
+        let pending = await env.lane.pendingCount(sessionID: nil)
+        if pending > 0 {
+            let waited = Int(env.now().timeIntervalSince(began).rounded())
+            log("DAY START WITH BACKLOG: \(pending) piece(s) still to upload after \(waited) s (bound \(Int(Self.dayStartBacklogTimeout)) s\(drainFailure.map { "; upload failing: \($0)" } ?? "")). Starting the day anyway; the backlog keeps uploading behind it.")
+        }
         let active = try await env.client.activeSession(tabID: tabID)
         if active.resumable, let existing = active.session {
             guard !active.handoverPending || active.tabGone else { throw RoomEngineError.handoverPending }
@@ -419,7 +448,7 @@ public actor RoomEngine {
             transition(to: existing.id)
             if let r = existing.roomID, !r.isEmpty { roomID = r }
             nextPieceIndex = active.nextIndex?.primary ?? 0
-            try await env.lane.start(sessionID: existing.id, nextIndex: nextPieceIndex, trigger: .reconciliation)
+            try await env.lane.start(sessionID: existing.id, nextIndex: nextPieceIndex, trigger: .reconciliation, fromSamples: nil)
             phase = .recording
             await saveStatus()
             return
@@ -429,7 +458,7 @@ public actor RoomEngine {
         if let r = created.session.roomID, !r.isEmpty { roomID = r }
         nextPieceIndex = 0
         do {
-            try await env.lane.start(sessionID: created.session.id, nextIndex: 0, trigger: .startDay)
+            try await env.lane.start(sessionID: created.session.id, nextIndex: 0, trigger: .startDay, fromSamples: commandSamples)
         } catch {
             // No durable growth: end the session just opened rather than leave a recording session on a dead mic.
             let startupError = error
@@ -460,7 +489,7 @@ public actor RoomEngine {
     func resume() async throws {
         guard let id = sessionID else { throw RoomEngineError.noActiveSession }
         nextPieceIndex = max(nextPieceIndex, await env.lane.nextIndex())
-        try await env.lane.start(sessionID: id, nextIndex: nextPieceIndex, trigger: .resumeDay)
+        try await env.lane.start(sessionID: id, nextIndex: nextPieceIndex, trigger: .resumeDay, fromSamples: nil)
         do {
             _ = try await env.client.patchSession(id: id, action: .resume)
         } catch {
@@ -485,7 +514,9 @@ public actor RoomEngine {
         var finalError: Error?
         for attempt in 1...3 {
             do {
-                if try await env.lane.drainPending() { throw RoomEngineError.sessionEndedByServer }
+                if try await env.lane.drainPending(maxPieces: nil, deadline: env.now().addingTimeInterval(Self.dayStartBacklogTimeout)) {
+                    throw RoomEngineError.sessionEndedByServer
+                }
                 finalError = nil
                 break
             } catch {
@@ -496,7 +527,8 @@ public actor RoomEngine {
             }
         }
         if let finalError { throw finalError }
-        let remaining = await env.lane.pendingCount()
+        // This session's pieces only: another session's backlog (a day started over it, fix 2) must not stop this one ending.
+        let remaining = await env.lane.pendingCount(sessionID: id)
         guard remaining == 0 else { throw RoomEngineError.pendingUploads(remaining) }
         _ = try await env.client.patchSession(id: id, action: .end)
         await env.lane.endSession()
@@ -508,7 +540,7 @@ public actor RoomEngine {
 
     func stopAfterServerEnd() async throws {
         try await env.lane.stopAndFlush()
-        _ = try await env.lane.drainPending()
+        _ = try await env.lane.drainPending(maxPieces: nil, deadline: env.now().addingTimeInterval(Self.stopDrainBudget))
         await env.lane.endSession()
         transition(to: nil)
         nextPieceIndex = 0
@@ -523,7 +555,7 @@ public actor RoomEngine {
     func stopWithoutEnding() async throws {
         do {
             try await env.lane.stopAndFlush()
-            _ = try await env.lane.drainPending()
+            _ = try await env.lane.drainPending(maxPieces: nil, deadline: env.now().addingTimeInterval(Self.stopDrainBudget))
         } catch {
             lastError = bounded(error)
             phase = .failed
@@ -734,29 +766,57 @@ public actor RoomEngine {
         return CommandResult(ok: true, sessionID: sessionID, error: nil, audioInput: applied)
     }
 
-    /// Disk first, then the capture; a switch that cannot complete puts config.json back.
+    /// Disk first, then the capture's answer (U3 fix 1). The capture re-pins itself; this never restarts anything.
+    /// Absent or not ready: the capture kept recording the old device and put config.json back, and the ack says so.
+    /// No answer: config.json is put back here.
     func switchRecordingDevice(to uid: USBDeviceUID) async -> CommandResult? {
         let previous = config.deviceUID
         guard uid.description != previous else { return nil }
+        let requestedAt = Int64(env.now().timeIntervalSince1970 * 1_000_000_000)
         do {
             try saveDeviceUID(uid.description)
         } catch {
             return audioFailure("config_write_failed: \(bounded(error, limit: 120))")
         }
+        log("recording device \(uid) requested by the desk (was \(previous)); waiting for the capture to re-pin")
         do {
-            try await env.captureSwitch.switchCapture(to: uid)
-        } catch {
-            log("device switch to \(uid) failed (\(bounded(error, limit: 120))); back to \(previous)")
-            do {
-                try saveDeviceUID(previous)
-            } catch {
-                log("recording device NOT restored to \(previous) in config.json: \(bounded(error, limit: 120))")
-                config.deviceUID = previous
+            try await env.captureSwitch.switchCapture(to: uid, requestedAtWallNS: requestedAt)
+        } catch let error as CaptureSwitchError {
+            switch error {
+            case .notPresent:
+                log("device switch to \(uid) refused by the capture: not attached; still recording \(previous)")
+                reloadDeviceUID(fallback: previous)
+                return audioFailure("device_not_present")
+            case .reverted(let reason):
+                log("device switch to \(uid) reverted by the capture (\(reason)); still recording \(previous)")
+                reloadDeviceUID(fallback: previous)
+                return audioFailure(reason == "absent" ? "device_not_present" : "device_switch_failed: \(error)")
+            case .noConfirmation:
+                log("device switch to \(uid): \(error); putting config.json back to \(previous)")
+                restoreDeviceUID(previous)
+                return audioFailure("device_switch_failed: \(error)")
             }
+        } catch {
+            log("device switch to \(uid) failed (\(bounded(error, limit: 120))); putting config.json back to \(previous)")
+            restoreDeviceUID(previous)
             return audioFailure("device_switch_failed: \(bounded(error, limit: 120))")
         }
         log("recording device set to \(uid) by the desk (was \(previous))")
         return nil
+    }
+
+    /// The capture has already rewritten config.json; take its value, or the previous one if it cannot be read.
+    func reloadDeviceUID(fallback: String) {
+        config.deviceUID = ((try? env.store.loadConfig()) ?? nil)?.deviceUID ?? fallback
+    }
+
+    func restoreDeviceUID(_ uid: String) {
+        do {
+            try saveDeviceUID(uid)
+        } catch {
+            log("recording device NOT restored to \(uid) in config.json: \(bounded(error, limit: 120))")
+            config.deviceUID = uid
+        }
     }
 
     /// Re-read config.json and change ONE key, so a hand edit made while running is kept.
@@ -807,7 +867,7 @@ public actor RoomEngine {
     }
 
     func saveStatus(preferred: RoomStatus.State? = nil) async {
-        let pending = await env.lane.pendingCount()
+        let pending = await env.lane.pendingCount(sessionID: nil)
         let state: RoomStatus.State
         switch phase {
         case .recording, .ending: state = .recording

@@ -37,6 +37,6 @@ let package = Package(
         .target(name: "BenchCore", dependencies: ["TapeCore"]),
         // room-bench: enrol, serve, recut. ALSACapture for USB device enumeration and the capture volume only.
         .executableTarget(name: "room-bench", dependencies: ["BenchCore", "ALSACapture"]),
-        .testTarget(name: "BenchCoreTests", dependencies: ["BenchCore", "TapeCore"]),
+        .testTarget(name: "BenchCoreTests", dependencies: ["BenchCore", "TapeCore", "RecorderCore"]),
     ]
 )

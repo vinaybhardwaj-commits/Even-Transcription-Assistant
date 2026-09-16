@@ -1,6 +1,6 @@
 # U3 — Server side: enrol, poll, pieces, command bus
 
-Status: SPEC. Not built. Base: 720572e.
+Status: BUILT on branch u3-server-side (33b75bf and after). Spec base: 720572e.
 Grounding: every Mac citation below is `apps/room-recorder/<file>:<line>` in
 Even-Transcription-Assistant on the Mini, read 16 Sep 2026.
 
@@ -61,6 +61,8 @@ D7. **Mic mute is detected, reported, and recorded through.** NEW REQUIREMENT wi
 | V5 | Unbounded spool | Capped, re-cut from tape | D1 |
 | V6 | No mute concept | Mute detection + report | D7 |
 | V7 | `BenchPieceSource.backup` modelled | Not implemented | Dead on the Mac: `PrimaryResidentArchiveCaptureOwner.swift:216-218` throws `.backupNotSupported` unconditionally |
+| V8 | One process: capture, HTTP, transcode, spool | Two binaries: `room-recorder` (capture, no network) and `room-bench` (enrol, poll, pieces, upload) | Ratified 16 Sep 2026. The U2 durability guarantee comes from a capture process that never stops, proven under a hard power cut. HTTP, TLS, ffmpeg and a spool inside that process would put a network stall or an ffmpeg crash in the path of capture. The separation is the property, not an incidental layout |
+| V9 | `input_volume` is CoreAudio's volume scalar | `input_volume` is the ALSA capture element's steps, linear 0–1 | Ratified 16 Sep 2026. The two scales differ, so the same `input_volume` means a different gain on a Mac and on Linux; the Bench cannot assume parity |
 
 ---
 

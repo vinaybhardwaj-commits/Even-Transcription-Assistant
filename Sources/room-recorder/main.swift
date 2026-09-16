@@ -13,6 +13,7 @@ import Glibc
 let hooksUsage = """
 
   TEST HOOKS (this binary was built with -DTAPE_TEST_HOOKS; release builds do not contain them):
+  --test-synthetic-devices FILE    capture devices described by FILE (a tone generator), instead of ALSA
   --tee-input FILE                 every input frame fed to the converter, in order
   --starve-writer-at S --starve-writer-for S   stop the writer draining the ring for a window (forces ring_overflow)
   --inject-device-lost-at S --inject-device-lost-for S   close the device for a window, then reopen it
@@ -25,6 +26,8 @@ let hooksUsage = ""
 let usage = """
 usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR [--seconds S]
                             [--expect-usbid VID:PID] [--wait-for-device SECONDS] [--ring-frames N]
+       room-recorder record --device-config /var/lib/room-recorder/config.json --tape DIR [--seconds S]
+                            [--wait-for-device SECONDS] [--ring-frames N]
   Records captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. The device's own
   channel count is used (1 or more); 48 000 Hz S16_LE is required of the hardware and never converted. A new DIR gets
   a new tape; an existing tape is continued with a `restart` record.
@@ -39,6 +42,12 @@ usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR [--seconds 
                          a different generic USB mic answering to the same name cannot be told from ours.
   --wait-for-device S    bounded wait at startup for the pinned device, default 30. 0 means probe once and fail.
                          ABSENT or BUSY are waited out; a WRONG device is never waited for and fails immediately.
+  --device-config FILE   take the pinned identity from FILE's device_uid (usb:<vid>:<pid>, spec S5) instead of --device
+                         and --expect-usbid, resolve it by exact USB id, and WATCH the file: a changed identity whose
+                         device is attached re-pins this process (a `stopped` record, a re-exec, a `restart` record, the
+                         same tape); one whose device is absent is refused and recording carries on. Every outcome is
+                         written to capture-device.json beside FILE.
+  --repin-from usb:V:P   set by the re-exec itself: the identity to go back to if the new one is not ready in 5 s.
 
 exit codes: 2 usage / refusal   3 pinned device absent after the bounded wait
             4 pinned device busy after the bounded wait     5 wrong device (immediate, never waited for)
@@ -55,11 +64,12 @@ guard args.first == "record" else { die(usage) }
 // Every option must be one this binary has: a release build refuses a test-hook option rather than ignoring it.
 #if TAPE_TEST_HOOKS
 let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
-                                 "--wait-for-device", "--tee-input", "--starve-writer-at",
-                                 "--starve-writer-for", "--inject-device-lost-at", "--inject-device-lost-for", "--test-wall-origin-ns"]
+                                 "--wait-for-device", "--device-config", "--repin-from", "--tee-input", "--starve-writer-at",
+                                 "--starve-writer-for", "--inject-device-lost-at", "--inject-device-lost-for", "--test-wall-origin-ns",
+                                 "--test-synthetic-devices"]
 #else
 let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
-                                 "--wait-for-device"]
+                                 "--wait-for-device", "--device-config", "--repin-from"]
 #endif
 do {
     var i = 1
@@ -83,43 +93,123 @@ if let raw = opt("--seconds") {
 let ringFrames = opt("--ring-frames").flatMap(Int.init) ?? 48_000
 let inputRate = Int64(CaptureFormat.requiredRate)
 
-guard let pinnedDevice = opt("--device") else {
-    // Unchanged behaviour: with no --device, print what is there and exit. resolve(nil) builds that listing.
-    do { _ = try CaptureDevices.resolve(nil) } catch { die("\(error)") }
-    die(usage)
-}
+#if TAPE_TEST_HOOKS
+if let path = opt("--test-synthetic-devices") { DeviceLayer.synthetic = SyntheticDevices(path: path) }
+#endif
 let waitBound = opt("--wait-for-device").flatMap(Double.init) ?? DeviceWait.defaultTimeoutSeconds
 guard waitBound >= 0 else { die("--wait-for-device must be zero or positive seconds; got \(opt("--wait-for-device") ?? "")") }
-let expectUSBID = opt("--expect-usbid")
 
 // S6 — lifecycle and device identity only. Never sample values, never anything derived from what was said.
 @Sendable func journal(_ m: String) { FileHandle.standardError.write(Data(("room-recorder: " + m + "\n").utf8)) }
-journal("starting: pinned \(pinnedDevice), identity \(expectUSBID ?? "NOT PINNED"), tape \(tapePath), run \(runLength.describedForJournal), device wait \(waitBound) s")
-if expectUSBID == nil {
-    // Said out loud rather than left implicit: without a usbid the WRONG case cannot be detected at all, and a
-    // stranger answering to our pinned name would be recorded as if it were ours.
-    journal("WARNING: no --expect-usbid, so the pin is a NAME ONLY. A different device answering to \(pinnedDevice) cannot be detected.")
+
+/// S3's three failures, named, each with its own exit code; `ready` journals and returns.
+func settle(_ outcome: DeviceWaitOutcome, pinned: String, identity: String?) {
+    switch outcome {
+    case .ready(let attempts, let waited):
+        journal("pinned device present after \(attempts) probe(s), \(DeviceWait.fmt(waited)) s")
+    case .absentTimeout(let attempts, let waited):
+        die("PINNED DEVICE ABSENT: \(pinned) did not appear within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 3)
+    case .busyTimeout(let attempts, let waited):
+        die("PINNED DEVICE BUSY: \(pinned) is present but held by another client and did not free within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 4)
+    case .wrong(let found):
+        die("WRONG DEVICE: expected \(pinned) with USB id \(identity ?? "(unpinned)"); found \(found). Refusing to record: a device that is not the pinned one is a hard failure, never waited for and never substituted.", 5)
+    }
 }
 
-// S3 — the bounded wait. ABSENT and BUSY are waited out; WRONG is never waited for. No fallback to another device
-// in any case, for any reason.
-switch DeviceWait.wait(timeout: waitBound,
-                       now: { Double(clockNS(CLOCK_MONOTONIC)) / 1e9 },
-                       sleep: { usleep(UInt32($0 * 1e6)) },
-                       log: { journal($0) },
-                       probe: { CaptureDevices.probe(pinned: pinnedDevice, expectUSBID: expectUSBID) }) {
-case .ready(let attempts, let waited):
-    journal("pinned device present after \(attempts) probe(s), \(DeviceWait.fmt(waited)) s")
-case .absentTimeout(let attempts, let waited):
-    die("PINNED DEVICE ABSENT: \(pinnedDevice) did not appear within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 3)
-case .busyTimeout(let attempts, let waited):
-    die("PINNED DEVICE BUSY: \(pinnedDevice) is present but held by another client and did not free within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 4)
-case .wrong(let found):
-    die("WRONG DEVICE: expected \(pinnedDevice) with USB id \(expectUSBID ?? "(unpinned)"); found \(found). Refusing to record: a device that is not the pinned one is a hard failure, never waited for and never substituted.", 5)
+func notReadyReason(_ outcome: DeviceWaitOutcome) -> String? {
+    switch outcome {
+    case .ready: return nil
+    case .absentTimeout: return "absent"
+    case .busyTimeout: return "busy"
+    case .wrong(let found): return "wrong device: \(found)"
+    }
+}
+
+let deviceConfigPath = opt("--device-config")
+var pinnedIdentity: PinnedUSBIdentity? = nil
+var configuredAtStart: PinnedUSBIdentity? = nil
+var startOutcome: CaptureDeviceStatus.Outcome = .started
+var startReason: String? = nil
+let pinnedDevice: String
+let expectUSBID: String?
+
+if let configPath = deviceConfigPath {
+    // U3 fix 1: the identity comes from config.json, which room-bench writes and this process watches.
+    guard opt("--device") == nil, opt("--expect-usbid") == nil else {
+        die("--device-config names the device; pass neither --device nor --expect-usbid with it")
+    }
+    guard let raw = DeviceConfigFile.readDeviceUID(configPath), let configured = PinnedUSBIdentity(raw) else {
+        die("--device-config \(configPath) holds no device_uid of the form usb:<vid>:<pid>")
+    }
+    var repinFrom: PinnedUSBIdentity? = nil
+    if let raw = opt("--repin-from") {
+        guard let parsed = PinnedUSBIdentity(raw) else { die("--repin-from must be usb:<vid>:<pid>; got \(raw)") }
+        repinFrom = parsed
+    }
+    configuredAtStart = configured
+    journal("starting: identity \(configured) from \(configPath), tape \(tapePath), run \(runLength.describedForJournal), device wait \(waitBound) s")
+    func waitFor(_ identity: PinnedUSBIdentity, _ bound: Double) -> DeviceWaitOutcome {
+        DeviceWait.wait(timeout: bound,
+                        now: { Double(clockNS(CLOCK_MONOTONIC)) / 1e9 },
+                        sleep: { usleep(UInt32($0 * 1e6)) },
+                        log: { journal($0) },
+                        probe: {
+                            guard let found = DeviceIdentityResolution.resolve(identity, in: DeviceLayer.listedCaptures()) else { return .absent }
+                            return DeviceLayer.probe(pinned: found.stableName, expectUSBID: identity.procUSBID)
+                        })
+    }
+    var identity = configured
+    if let previous = repinFrom, previous != configured {
+        let first = waitFor(configured, min(waitBound, DeviceConfigFile.repinReadySeconds))
+        switch RepinStartup.decide(requestedNotReadyReason: notReadyReason(first), previous: previous) {
+        case .useRequested:
+            startOutcome = .switched
+            journal("RE-PIN: recording \(configured) (was \(previous))")
+        case .revertTo(let back, let reason):
+            // Never trade a working mic for a missing one: back to the device this process came from.
+            journal("RE-PIN REVERTED: \(configured) was not ready within \(DeviceConfigFile.repinReadySeconds) s (\(reason)); going back to \(back)")
+            identity = back
+            startOutcome = .reverted
+            startReason = reason
+            do { try DeviceConfigFile.rewriteDeviceUID(configPath, to: back.description) } catch {
+                journal("config.json was NOT put back to \(back): \(error)")
+            }
+        }
+    }
+    let label = identity.description
+    settle(waitFor(identity, waitBound), pinned: label, identity: identity.procUSBID)
+    guard let found = DeviceIdentityResolution.resolve(identity, in: DeviceLayer.listedCaptures()) else {
+        die("PINNED DEVICE ABSENT: \(label) was ready and is no longer listed", 3)
+    }
+    pinnedIdentity = identity
+    pinnedDevice = found.stableName
+    expectUSBID = identity.procUSBID
+} else {
+    guard let named = opt("--device") else {
+        // Unchanged behaviour: with no --device, print what is there and exit. resolve(nil) builds that listing.
+        do { _ = try CaptureDevices.resolve(nil) } catch { die("\(error)") }
+        die(usage)
+    }
+    pinnedDevice = named
+    expectUSBID = opt("--expect-usbid")
+    journal("starting: pinned \(pinnedDevice), identity \(expectUSBID ?? "NOT PINNED"), tape \(tapePath), run \(runLength.describedForJournal), device wait \(waitBound) s")
+    if expectUSBID == nil {
+        // Said out loud rather than left implicit: without a usbid the WRONG case cannot be detected at all, and a
+        // stranger answering to our pinned name would be recorded as if it were ours.
+        journal("WARNING: no --expect-usbid, so the pin is a NAME ONLY. A different device answering to \(pinnedDevice) cannot be detected.")
+    }
+    // S3 — the bounded wait. ABSENT and BUSY are waited out; WRONG is never waited for. No fallback to another device
+    // in any case, for any reason.
+    settle(DeviceWait.wait(timeout: waitBound,
+                           now: { Double(clockNS(CLOCK_MONOTONIC)) / 1e9 },
+                           sleep: { usleep(UInt32($0 * 1e6)) },
+                           log: { journal($0) },
+                           probe: { DeviceLayer.probe(pinned: pinnedDevice, expectUSBID: expectUSBID) }),
+           pinned: pinnedDevice, identity: expectUSBID)
 }
 
 let listed: CaptureDevices.Listed
-do { listed = try CaptureDevices.resolve(pinnedDevice) } catch { die("\(error)") }
+do { listed = try DeviceLayer.resolve(pinnedDevice) } catch { die("\(error)") }
 
 #if TAPE_TEST_HOOKS
 struct Hooks: Sendable {
@@ -164,20 +254,20 @@ do { _ = try ISTDay.nextMidnight(nowWallNS: WallClock.now()) } catch { die("\(er
 // and taps that same format at :89). Validated by CaptureFormat, then used as it is: 1 for a TONOR TM20, 2 for the DMIC.
 let capabilities: DeviceCapabilities
 do {
-    capabilities = try CaptureDevices.capabilities(listed)
+    capabilities = try DeviceLayer.capabilities(listed)
     try CaptureFormat.validate(capabilities, device: listed.stableName)
 } catch { die("\(error)") }
 let inputChannels = capabilities.channels
 
-@Sendable func openDevice(_ listed: CaptureDevices.Listed) throws -> ALSACapturePCM {
+@Sendable func openDevice(_ listed: CaptureDevices.Listed) throws -> any CapturePCM {
     // A device that comes back with a different channel count than the tape's audio so far would silently change the
     // downmix, and no index key records the channel count (see spec/RECORDER-RECORDS-LINUX.md), so the run stops instead.
-    let now = try CaptureDevices.capabilities(listed)
+    let now = try DeviceLayer.capabilities(listed)
     guard now.channels == inputChannels else {
         throw ALSAError(description: "\(listed.stableName) now offers \(now.channels) channel(s); this tape's audio was converted from \(inputChannels). The tape records no channel count, so the run stops rather than change the downmix mid-tape")
     }
     try CaptureFormat.validate(now, device: listed.stableName)
-    let pcm = try ALSACapturePCM(device: listed, channels: inputChannels, rate: UInt32(inputRate), latencyMicros: 100_000)
+    let pcm = try DeviceLayer.open(listed, channels: inputChannels, rate: UInt32(inputRate), latencyMicros: 100_000)
     guard pcm.negotiated.format == "S16_LE", pcm.negotiated.channels == inputChannels, pcm.negotiated.rate == UInt32(inputRate) else {
         throw ALSAError(description: "\(listed.stableName) negotiated \(pcm.negotiated), not S16_LE \(inputChannels) ch \(inputRate) Hz")
     }
@@ -185,8 +275,8 @@ let inputChannels = capabilities.channels
 }
 
 final class PCMBox: @unchecked Sendable {
-    var pcm: ALSACapturePCM?
-    init(_ pcm: ALSACapturePCM) { self.pcm = pcm }
+    var pcm: (any CapturePCM)?
+    init(_ pcm: any CapturePCM) { self.pcm = pcm }
 }
 // The box holds the only reference to the open PCM, so dropping it closes the device (snd_pcm_close in deinit).
 let pcmBox: PCMBox
@@ -207,6 +297,10 @@ final class Shared: @unchecked Sendable {
     var outages: [String] = []
     var failure: String?
     var startNS: Int64 = 0
+    /// U3 fix 1: set by the config watcher when a present device is requested; the process re-execs after a clean stop.
+    var repinTo: PinnedUSBIdentity?
+    /// A stop that came from SIGINT/SIGTERM: never followed by a re-exec.
+    var signalled = false
     func with<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 }
 
@@ -220,7 +314,7 @@ signal(SIGTERM, SIG_IGN)
 let signalQueue = DispatchQueue(label: "signals")
 let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
     let s = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
-    s.setEventHandler { shared.with { shared.stop = true } }
+    s.setEventHandler { shared.with { shared.stop = true; shared.signalled = true } }
     s.resume()
     return s
 }
@@ -262,7 +356,7 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
         #endif
         guard let pcm = box.pcm else {
             do {
-                guard CaptureDevices.list().contains(where: { $0.stableName == listed.stableName }) else {
+                guard DeviceLayer.list().contains(where: { $0.stableName == listed.stableName }) else {
                     throw ALSAError(description: "\(listed.stableName) not listed in /proc/asound/pcm")
                 }
                 box.pcm = try openDevice(listed)
@@ -329,6 +423,45 @@ func runWriter(session: TapeSession, ring: FrameRing, shared: Shared, hooks: Hoo
     }
 }
 
+// U3 fix 1 — config mode: say what this process records from, then watch config.json for a new identity.
+if let configPath = deviceConfigPath, let identity = pinnedIdentity, let configured = configuredAtStart {
+    do {
+        try DeviceConfigFile.writeStatus(CaptureDeviceStatus(deviceUID: identity.description, requestedUID: configured.description,
+                                                             outcome: startOutcome, alsaName: pinnedDevice, reason: startReason,
+                                                             atWallNS: WallClock.now(), pid: getpid()), besideConfig: configPath)
+    } catch { journal("capture-device.json not written: \(error)") }
+    Thread {
+        var seen = DeviceConfigFile.signature(configPath)
+        var lastIgnored = ""
+        while !shared.with({ shared.stop }) {
+            usleep(UInt32(DeviceConfigFile.watchIntervalSeconds * 1e6))
+            let now = DeviceConfigFile.signature(configPath)
+            guard now != seen else { continue }
+            seen = now
+            switch RepinDecision.decide(current: identity, configured: DeviceConfigFile.readDeviceUID(configPath), listed: DeviceLayer.listedCaptures()) {
+            case .ignore(let reason):
+                if reason != "unchanged", reason != lastIgnored { journal("config.json changed; not re-pinning: \(reason)") }
+                lastIgnored = reason
+            case .refuseAbsent(let requested):
+                journal("RE-PIN REFUSED: \(requested) is not attached; still recording \(identity), and config.json is put back")
+                do { try DeviceConfigFile.rewriteDeviceUID(configPath, to: identity.description) } catch {
+                    journal("config.json was NOT put back to \(identity): \(error)")
+                }
+                seen = DeviceConfigFile.signature(configPath)
+                do {
+                    try DeviceConfigFile.writeStatus(CaptureDeviceStatus(deviceUID: identity.description, requestedUID: requested.description,
+                                                                         outcome: .refusedAbsent, alsaName: pinnedDevice, reason: "absent",
+                                                                         atWallNS: WallClock.now(), pid: getpid()), besideConfig: configPath)
+                } catch { journal("capture-device.json not written: \(error)") }
+            case .switchTo(let requested, let found):
+                journal("RE-PIN: \(identity) -> \(requested) at \(found.stableName); closing the tape cleanly and re-executing")
+                shared.with { shared.repinTo = requested; shared.stop = true }
+                return
+            }
+        }
+    }.start()
+}
+
 shared.startNS = clockNS(CLOCK_MONOTONIC)
 let captureDone = DispatchSemaphore(value: 0)
 Thread {
@@ -385,4 +518,18 @@ let summary = Summary(device: openedDevice, negotiated: negotiated, capabilities
 let enc = JSONEncoder()
 enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
 print(String(decoding: try! enc.encode(summary), as: UTF8.self))
+// U3 fix 1: a clean stop asked for by a re-pin (never by a signal) re-executes this same image. Same PID, so systemd sees
+// no exit; the new image's startup is the proven one and continues this tape with a `restart` record.
+if summary.failure == nil, let previous = pinnedIdentity, let requested = shared.with({ shared.signalled ? nil : shared.repinTo }) {
+    fflush(nil)  // nil = every stream; `stdout` is shared mutable state to Swift 6
+    journal("re-executing to re-pin \(previous) -> \(requested)")
+    // The signal mask survives execve; a blocked SIGTERM would leave the new image unstoppable.
+    var none = sigset_t()
+    sigemptyset(&none)
+    pthread_sigmask(SIG_SETMASK, &none, nil)
+    let argv = [CommandLine.arguments[0]] + RepinStartup.execArguments(Array(CommandLine.arguments.dropFirst()), previous: previous)
+    var cArgs = argv.map { strdup($0) } + [nil]
+    execv("/proc/self/exe", &cArgs)
+    die("re-exec for the re-pin failed: errno \(errno); exiting for systemd to restart", 1)
+}
 exit(summary.failure == nil ? 0 : 1)

@@ -6,8 +6,8 @@ import Foundation
 /// R4-D4 on Linux: the capture volume of the device's ALSA simple mixer element (the TM20's is `Mic`, capture 0-62).
 ///
 /// THE SCALAR IS LINEAR IN MIXER STEPS: value = (raw - min) / (max - min). The Mac's `input_volume` is CoreAudio's
-/// volume scalar, whose mapping to gain is the driver's business; the two 0-1 numbers are not claimed to mean the same
-/// gain. Named in the report as unsettled.
+/// volume scalar, a different scale, so THE SAME input_volume MEANS A DIFFERENT GAIN ON A MAC AND ON LINUX and the Bench
+/// cannot assume parity between them (spec deviation V9, ratified 16 Sep 2026).
 struct ALSAVolumeControl: InputVolumeControlling {
     struct VolumeError: Error, CustomStringConvertible {
         let description: String

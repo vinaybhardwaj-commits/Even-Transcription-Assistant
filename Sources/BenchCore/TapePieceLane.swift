@@ -157,7 +157,7 @@ public actor TapePieceLane: PieceLane {
 
     // MARK: PieceLane
 
-    public func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger) async throws {
+    public func start(sessionID: String, nextIndex: Int, trigger: LaneStartTrigger, fromSamples: Int64? = nil) async throws {
         refresh()
         let before = lastRecord?.samples
         let deadline = Self.growthDeadlineNS / Self.growthPollNS
@@ -181,14 +181,20 @@ public actor TapePieceLane: PieceLane {
             bootCursor = nil
             log("resuming piece cutting for session \(sessionID) at sample \(cursor), index \(index), from cursor.json")
         } else {
-            let startSample = before ?? lastRecord?.samples ?? 0
+            let durableEnd = before ?? lastRecord?.samples ?? 0
+            let startSample = min(fromSamples ?? durableEnd, lastRecord?.samples ?? durableEnd)
             if sessionID != self.sessionID { lastPieceEndedAtMS = nil }
             cursor = startSample
             index = nextIndex
-            // The region holding the durable end is the latest one: its opening group and the last record are all the
-            // planner needs. No rescan of a long tape.
-            window = latestGroup
-            if let last = lastRecord, last != latestGroup.last { window.append(last) }
+            if let groupStart = latestGroup.first?.samples, startSample >= groupStart {
+                // The region holding the start is the latest one: its opening group and the last record are all the
+                // planner needs. No rescan of a long tape.
+                window = latestGroup
+                if let last = lastRecord, last != latestGroup.last { window.append(last) }
+            } else {
+                // The start lies before the latest region (a restart landed while the start waited on a backlog).
+                rescan(cursor: startSample)
+            }
             bootWindow = []
             bootCursor = nil
             if trigger == .resumeDay, let last = lastPieceEndedAtMS, let anchor = latestGroupAnchor(atOrBefore: cursor) {
@@ -273,9 +279,13 @@ public actor TapePieceLane: PieceLane {
         if !plans.isEmpty { prune() }
     }
 
-    public func drainPending() async throws -> Bool {
+    public func drainPending(maxPieces: Int? = nil, deadline: Date? = nil) async throws -> Bool {
         var endedByServer = false
+        var uploaded = 0
         for piece in try spool.pending() {
+            if let maxPieces, uploaded >= maxPieces { break }
+            if let deadline, now() >= deadline { break }
+            uploaded += 1
             let bytes = try Data(contentsOf: URL(fileURLWithPath: piece.mediaPath))
             let result = try await client.uploadImmutablePiece(piece.manifest.benchPiece, bytes: bytes)
             try spool.removeVerified(piece, sessionID: piece.manifest.sessionID, index: piece.manifest.index, sizeBytes: piece.manifest.sizeBytes)
@@ -284,7 +294,9 @@ public actor TapePieceLane: PieceLane {
         return endedByServer
     }
 
-    public func pendingCount() async -> Int { (try? spool.pending().count) ?? 0 }
+    public func pendingCount(sessionID: String? = nil) async -> Int {
+        ((try? spool.pending()) ?? []).filter { sessionID == nil || $0.manifest.sessionID == sessionID }.count
+    }
     public func isCutting() async -> Bool { cutting }
     public func nextIndex() async -> Int { index }
 

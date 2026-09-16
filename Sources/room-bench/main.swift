@@ -89,7 +89,11 @@ case "enrol":
         die("\(error)", 1)
     }
 case "serve":
+    #if BENCH_TEST_HOOKS
+    checkOptions(["--root", "--test-synthetic-devices"])
+    #else
     checkOptions(["--root"])
+    #endif
     let log = RoomLog()
     let store = RoomStore(root: URL(fileURLWithPath: option("--root") ?? Pinned.stateRoot))
     do { try store.prepareRoot() } catch { die("\(error)", 1) }
@@ -109,7 +113,13 @@ case "serve":
     }
     let token = session.sessionToken
     let client = BenchClient(origin: config.origin, transport: URLSessionTransport(), sessionToken: { token })
-    let enumerator = ALSADeviceEnumerator()
+    #if BENCH_TEST_HOOKS
+    let enumerator: any CaptureDeviceEnumerating = option("--test-synthetic-devices").map { SyntheticDeviceEnumerator(path: $0) } ?? ALSADeviceEnumerator()
+    let volume: any InputVolumeControlling = option("--test-synthetic-devices") != nil ? NoVolumeControl() : ALSAVolumeControl(enumerator: ALSADeviceEnumerator())
+    #else
+    let enumerator: any CaptureDeviceEnumerating = ALSADeviceEnumerator()
+    let volume: any InputVolumeControlling = ALSAVolumeControl(enumerator: ALSADeviceEnumerator())
+    #endif
     let sleeper = TaskSleeper()
     let spool: PieceSpool
     let encoder: PieceEncoder
@@ -120,8 +130,8 @@ case "serve":
     let lane = TapePieceLane(tapeDir: URL(fileURLWithPath: config.tapeDir), encoder: encoder, spool: spool, client: client,
                              store: store, log: log, sleeper: sleeper)
     let environment = RoomEngineEnvironment(
-        client: client, store: store, lane: lane, devices: enumerator, volume: ALSAVolumeControl(enumerator: enumerator),
-        captureSwitch: UnwiredCaptureSwitch(), machineFacts: { LinuxFacts.read() },
+        client: client, store: store, lane: lane, devices: enumerator, volume: volume,
+        captureSwitch: ConfigRepinSwitch(store: store, sleeper: sleeper), machineFacts: { LinuxFacts.read() },
         ffmpegVersion: { LinuxFacts.ffmpegVersion(path: Pinned.ffmpegPath) }, sleeper: sleeper, log: log)
     let engine = RoomEngine(config: config, installID: installID, environment: environment)
     log("serving room \(config.roomSlug) as install \(installID), device \(config.deviceUID), origin \(config.origin.absoluteString), tape \(config.tapeDir), spool cap \(PieceSpool.defaultCapBytes) bytes")
