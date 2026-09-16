@@ -176,9 +176,9 @@ public struct SuiteReport {
 
 public enum Suite {
     /// Cases that must each pass on at least one good fixture.
-    public static let mustPass: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9, .C10]
+    public static let mustPass: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9, .C10, .S3]
     /// Cases that must each fail on at least one negative control.
-    public static let mustHaveNegative: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9]
+    public static let mustHaveNegative: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9, .S3]
 
     public static func run(root: URL, required: RequiredFixtures, grounding: CheckGrounding? = nil, only: Set<CaseID>? = nil,
                            resampler: (any Resampler)? = LinkedResampler.current) -> SuiteReport {
@@ -198,6 +198,14 @@ public enum Suite {
         }
 
         for id in CaseID.allCases where only?.contains(id) ?? true {
+            // S3 is not fixture-driven: it scripts probe sequences and a fake clock against the real DeviceWait and
+            // RunLength. It emits its own rows, like C9, and needs no tape and no sound card.
+            if id == .S3 {
+                for (name, role, v) in S3Harness.run() {
+                    report.rows.append(CaseRow(caseID: .S3, fixture: name, role: role, verdict: v))
+                }
+                continue
+            }
             if id == .C9 {
                 for (fx, v) in C9Harness.run(fixtures: fixtures, resampler: resampler) {
                     let role = fixtures.first { $0.id == fx }?.manifest.role

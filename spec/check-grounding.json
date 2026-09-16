@@ -266,6 +266,42 @@
       "asserts": "decoded audio within the stated tolerance (sample count, correlation, RMS); encoded bytes never compared",
       "grounding": "our-choice",
       "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3 (C10); ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026 (no test compares container bytes)"
+    },
+    {
+      "id": "S3.wait-bound",
+      "asserts": "the startup wait for the pinned device is bounded, settable via --wait-for-device, defaults to 30 s, and a bound of 0 still probes exactly once before failing",
+      "grounding": "our-choice",
+      "citation": "V's ruling, 16 Sep 2026 (boot-3 session), recorded as a JUDGEMENT AND NOT A MEASUREMENT: 30 s is long enough for a slow hub or a re-enumeration, short enough that a genuinely absent mic is reported inside half a minute. Nothing measured produced the number and it must never be quoted as though something had. It is settable so the acceptance test can drive it to 0 and prove the immediate-failure path without waiting 30 s for it. Contrast S3.busy-waits-then-fails, whose 5.0 s IS measured."
+    },
+    {
+      "id": "S3.absent-waits-then-fails",
+      "asserts": "a pinned device that is not present is polled every 1 s up to the bound, each attempt logged; on expiry the run ends with a distinct named error and a non-zero exit, never a fallback",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('a device that has not enumerated YET is a different condition and must not be treated as the same... wait then fail'); R4 as confirmed by measurement in NOTES.md 'M2.3 CLOSED' - a .device dependency cannot cover 'plugged in late' or 'never plugged in', so the wait is the only mechanism that can. Per-attempt logging is so the journal shows waiting rather than hanging (S6: lifecycle, never content)."
+    },
+    {
+      "id": "S3.busy-waits-then-fails",
+      "asserts": "a pinned device present but returning EBUSY is waited out on the same bound as absent, and a permanent holder ends in a DISTINCT failure from absent",
+      "grounding": "our-choice",
+      "citation": "V's ruling via R1/M2.2, 16 Sep 2026: EBUSY is the one open failure worth waiting on, because it is transient by a measured amount. Measured on this Yoga (NOTES.md 'U2 section 4 measurements', M2.2): PipeWire holds the ALSA PCM for exactly 5.0 s after its last client exits - three trials, 5.0/5.0/5.0 s, no variance (pw-record 4 s, PCM polled at 0.5 s until closed, then a real open succeeded). The same 5.0 s is the RestartSec floor in R1. The DECISION to ride it out rather than fail is ours, which is why this is our-choice; the class mac-measurement is not used because the measurement is ours on Linux, not a Mac behaviour, and miscounting it there would corrupt the GROUNDING tally. That a permanent holder must fail DISTINCTLY from an absent device is S8: each refusal names its own cause."
+    },
+    {
+      "id": "S3.wrong-never-waits",
+      "asserts": "a device present under the pinned name whose identity does not match fails IMMEDIATELY with its own error naming expected and found; it is never polled again, even when the pinned device would appear on the next probe",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('the identity rule says a device that is not the expected one is a hard failure') and S8 ('a room that cannot record must be obviously broken, never quietly idle'). V's ruling, 16 Sep 2026: waiting here would be waiting for the right mic to appear next to the wrong one, which is not a thing we ever want to happen quietly. Identity is the pinned stable name PLUS --expect-usbid, because ALSA card ids are not unique hardware identities: 'Device' is the generic id a USB interface takes from its product string, so a different generic USB mic can legitimately claim hw:CARD=Device,DEV=0."
+    },
+    {
+      "id": "S3.no-fallback",
+      "asserts": "no path from any of the three startup cases reaches a recording state on a device other than the pinned one",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('never fall back to another device, and never start recording from something that is not the pinned mic'). Carried as a negative control because there is no fallback code path to exercise: the control asserts the property that would be true IF one existed and holds by failing."
+    },
+    {
+      "id": "S3.run-length",
+      "asserts": "--seconds absent means run until terminated with no frame target; --seconds S keeps its exact prior meaning, including that the final read does not overshoot the target",
+      "grounding": "our-choice",
+      "citation": "V's ruling, 16 Sep 2026 (boot-3 session): --seconds becomes optional and an absent option means indefinite. Explicitly NO magic string such as 'forever' - a magic value inside a numeric option is a mistyping waiting to happen, and an absent option cannot be mistyped. --seconds S is unchanged so no existing fixture, generation run or measurement moves; the bounded half of this check exists to pin that."
     }
   ]
 }

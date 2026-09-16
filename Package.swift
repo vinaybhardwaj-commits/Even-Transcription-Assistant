@@ -23,7 +23,8 @@ let package = Package(
         .target(name: "CaptureCore"),
         // alsa-lib, linked dynamically against its headers (libasound2-dev in the build image).
         .systemLibrary(name: "CALSA", path: "Sources/CALSA", providers: [.apt(["libasound2-dev"])]),
-        .target(name: "ALSACapture", dependencies: ["CALSA"]),
+        // CaptureCore for S3's DeviceState/DeviceWait: the wait decision is pure and ALSA-free, this target only probes.
+        .target(name: "ALSACapture", dependencies: ["CALSA", "CaptureCore"]),
         .executableTarget(name: "capture-probe", dependencies: ["CaptureCore", "ALSACapture"]),
         // U1 step 3. TapeCore: the tape writer, no ALSA import.
         .target(name: "TapeCore"),

@@ -11,6 +11,11 @@ import Foundation
 
 public enum CaseID: String, Codable, CaseIterable, Comparable, Sendable {
     case C1, C2, C3, C4, C5, C6, C7, C8, C9, C10
+    /// U2 S3 + the indefinite run. Unlike C1-C10 this case is NOT fixture-driven: it has no tape to read, because
+    /// what it pins is a startup decision (which of ABSENT / BUSY / WRONG a probe result is, and what each does) and
+    /// a run-length rule. S3Harness generates its own rows from scripted probe sequences and a fake clock, the same
+    /// way C9Harness generates its own; see Suite.run.
+    case S3
     public static func < (a: CaseID, b: CaseID) -> Bool {
         allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
     }

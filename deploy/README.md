@@ -9,28 +9,38 @@ Written against S1-S8 of `ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1`, as
 | `room-recorder-install.sh` | account, binary, tape dir, unit, sleep masking, journal bound | **yes, all of it** |
 | `u2-acceptance-preflight.sh` | read-only check that an acceptance run would prove anything | no |
 
-## BLOCKED — the unit cannot start yet, and it is the recorder that is missing, not the unit
+## S3 and the indefinite run — IMPLEMENTED (16 Sep, boot 3). No longer blocked.
 
-**S3's bounded wait is not implemented in the binary.** `room-recorder record` today:
+`room-recorder` now has both. Conformance case `S3` pins all of it (12 rows, fixture-free: scripted probe sequences
+and a fake clock against the real `DeviceWait`/`RunLength`, so it holds on a machine with no sound card).
 
-- requires `--seconds S`, a fixed duration. There is no "run until stopped". A room recorder needs one.
-- resolves the device exactly once, at startup, via `CaptureDevices.resolve`, and fails immediately if it is absent
-  (`ALSA.swift:103`, "capture device … not found"). There is no wait.
+**Indefinite run.** `--seconds` is optional. Absent means run until SIGINT/SIGTERM. `--seconds S` is unchanged, so no
+existing fixture, generation run or measurement moves. There is no magic value for "forever" — a magic string inside
+a numeric option is a mistyping waiting to happen, and an absent option cannot be mistyped. A *present* `--seconds`
+that will not parse is a usage error, never silently demoted to an indefinite run.
 
-So the two options the unit's `ExecStart` names — `--wait-for-device 90` and `--seconds forever` — **do not exist**.
-The binary rejects unknown options loudly rather than ignoring them (`main.swift`: "unknown option …", exit 2), so
-installing and starting this unit today produces a clean, named, non-zero failure rather than a silent wrong run.
-That is the correct behaviour for a half-built system, but it is still a half-built system.
+**Bounded wait, three distinct cases.** `--wait-for-device SECONDS`, default 30, settable to 0.
 
-What S3 requires of the recorder, restated so it can be implemented without re-reading the spec:
+| case | what it is | what happens | exit |
+|---|---|---|---|
+| ABSENT | nothing present under the pinned name | poll every 1 s to the bound, each attempt logged, then a named failure | **3** |
+| BUSY | present and ours, open returns `EBUSY` | same bounded wait — rides out PipeWire's measured 5.0 s hold — then a named failure | **4** |
+| WRONG | present under our name, but not our hardware | **no wait at all**, names expected and found | **5** |
 
-1. Wait up to a bounded interval for the **pinned** device to appear.
-2. On appearance, open it and record. On timeout, exit **non-zero** with a **distinct named** error that says the
-   pinned device never appeared and names it.
-3. **Never** fall back to another device, for any reason. A room that records the laptop's own array mic instead of
-   the TM20 is worse than a room that records nothing, because it looks like it worked.
-4. A device that has not enumerated *yet* is not the same condition as a device that is the *wrong* one. The second
-   is an immediate hard failure; only the first gets the wait.
+Never a fallback to another device, in any case, for any reason.
+
+`--expect-usbid VID:PID` is what makes WRONG detectable. Without it the pin is only a *name*, and ALSA card ids are
+not unique hardware identities: `Device` is the generic id a USB interface takes from its product string, so another
+generic USB mic in the same slot can legitimately claim `hw:CARD=Device,DEV=0`. When it is not set the recorder says
+so at startup rather than leaving the gap silent.
+
+The 30 s default is **V's judgement, not a measurement**, and is recorded as `our-choice` in
+`spec/check-grounding.json` with that reasoning: long enough for a slow hub or a re-enumeration, short enough that a
+genuinely absent mic is reported inside half a minute. The 5.0 s that BUSY rides out *is* measured (M2.2).
+
+All five paths were exercised against the real TM20 on boot 3: WRONG in 0.00 s exit 5; ABSENT polling then exit 3;
+BUSY polling then exit 4; BUSY-then-free riding out a real holder and recording; indefinite run stopped by SIGTERM
+after 3 s with 48 000 samples written and exit 0.
 
 ## What needs root, and therefore needs V
 
@@ -51,7 +61,7 @@ sudo deploy/room-recorder-install.sh .build/release/room-recorder   # 2 and 3
 # edit /etc/gdm3/custom.conf: AutomaticLoginEnable=false            # 1
 sudo reboot                                                        # 4
 deploy/u2-acceptance-preflight.sh                                  # must print PREFLIGHT PASSES
-sudo systemctl enable --now room-recorder.service                   # only once S3 exists
+sudo systemctl enable --now room-recorder.service                  # S3 exists now; this is the last step
 ```
 
 The preflight is not a formality. It is the difference between an acceptance run that establishes something and one

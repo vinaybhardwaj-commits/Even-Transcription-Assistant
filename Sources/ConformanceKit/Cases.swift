@@ -60,6 +60,8 @@ public enum Cases {
         case .C7: return c7(f)
         case .C8: return c8(f)
         case .C9: return .error("C9 is run by C9Harness, not per fixture")
+        // S3 has no fixture: it scripts probe sequences and a fake clock against the real DeviceWait and RunLength.
+        case .S3: return .error("S3 is run by S3Harness, not per fixture")
         case .C10: return c10(f)
         }
     }

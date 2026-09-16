@@ -23,12 +23,25 @@ let hooksUsage = ""
 #endif
 
 let usage = """
-usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR --seconds S [--ring-frames N]
-  Records S seconds of captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. The device's own
+usage: room-recorder record --device hw:CARD=<id>,DEV=<n> --tape DIR [--seconds S]
+                            [--expect-usbid VID:PID] [--wait-for-device SECONDS] [--ring-frames N]
+  Records captured audio from the named capture device into DIR/tape.pcm and DIR/tape.idx. The device's own
   channel count is used (1 or more); 48 000 Hz S16_LE is required of the hardware and never converted. A new DIR gets
   a new tape; an existing tape is continued with a `restart` record.
   The device must be named in stable form; with no --device, prints the capture devices and exits.
   A run that crosses IST midnight (Asia/Kolkata zone data required) writes a day_rollover record at the boundary.
+
+  --seconds S            stop after S seconds of CAPTURED AUDIO (not wall time). OMIT IT to run until terminated
+                         (SIGINT/SIGTERM) — a room does not know in advance how long it is a room for. There is no
+                         magic value for "forever": an absent option cannot be mistyped, a magic string can.
+  --expect-usbid VID:PID the USB vendor:product the pinned device must report (e.g. 0d8c:0134 for a TONOR TM20).
+                         Without it the pin is only a NAME, and ALSA card ids are not unique hardware identities, so
+                         a different generic USB mic answering to the same name cannot be told from ours.
+  --wait-for-device S    bounded wait at startup for the pinned device, default 30. 0 means probe once and fail.
+                         ABSENT or BUSY are waited out; a WRONG device is never waited for and fails immediately.
+
+exit codes: 2 usage / refusal   3 pinned device absent after the bounded wait
+            4 pinned device busy after the bounded wait     5 wrong device (immediate, never waited for)
 """ + hooksUsage
 
 func die(_ m: String, _ code: Int32 = 2) -> Never { FileHandle.standardError.write(Data((m + "\n").utf8)); exit(code) }
@@ -41,10 +54,12 @@ func opt(_ n: String) -> String? {
 guard args.first == "record" else { die(usage) }
 // Every option must be one this binary has: a release build refuses a test-hook option rather than ignoring it.
 #if TAPE_TEST_HOOKS
-let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--tee-input", "--starve-writer-at",
+let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
+                                 "--wait-for-device", "--tee-input", "--starve-writer-at",
                                  "--starve-writer-for", "--inject-device-lost-at", "--inject-device-lost-for", "--test-wall-origin-ns"]
 #else
-let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames"]
+let knownOptions: Set<String> = ["--device", "--tape", "--seconds", "--ring-frames", "--expect-usbid",
+                                 "--wait-for-device"]
 #endif
 do {
     var i = 1
@@ -54,12 +69,57 @@ do {
     }
 }
 
-let listed: CaptureDevices.Listed
-do { listed = try CaptureDevices.resolve(opt("--device")) } catch { die("\(error)") }
-guard let tapePath = opt("--tape"), let seconds = opt("--seconds").flatMap(Double.init), seconds > 0 else { die(usage) }
+guard let tapePath = opt("--tape") else { die(usage) }
+
+// A --seconds that is PRESENT must be a positive number. A mistyped one is a usage error and is never silently
+// demoted to an indefinite run: "record until terminated" is asked for by omitting the option, not by fumbling it.
+let runLength: RunLength
+if let raw = opt("--seconds") {
+    guard let s = Double(raw), s > 0 else { die("--seconds must be a positive number of seconds; got \(raw). Omit --seconds entirely to run until terminated.") }
+    runLength = RunLength(seconds: s, rate: Int64(CaptureFormat.requiredRate))
+} else {
+    runLength = .indefinite
+}
 let ringFrames = opt("--ring-frames").flatMap(Int.init) ?? 48_000
 let inputRate = Int64(CaptureFormat.requiredRate)
-let targetFrames = Int64((seconds * Double(inputRate)).rounded())
+
+guard let pinnedDevice = opt("--device") else {
+    // Unchanged behaviour: with no --device, print what is there and exit. resolve(nil) builds that listing.
+    do { _ = try CaptureDevices.resolve(nil) } catch { die("\(error)") }
+    die(usage)
+}
+let waitBound = opt("--wait-for-device").flatMap(Double.init) ?? DeviceWait.defaultTimeoutSeconds
+guard waitBound >= 0 else { die("--wait-for-device must be zero or positive seconds; got \(opt("--wait-for-device") ?? "")") }
+let expectUSBID = opt("--expect-usbid")
+
+// S6 — lifecycle and device identity only. Never sample values, never anything derived from what was said.
+@Sendable func journal(_ m: String) { FileHandle.standardError.write(Data(("room-recorder: " + m + "\n").utf8)) }
+journal("starting: pinned \(pinnedDevice), identity \(expectUSBID ?? "NOT PINNED"), tape \(tapePath), run \(runLength.describedForJournal), device wait \(waitBound) s")
+if expectUSBID == nil {
+    // Said out loud rather than left implicit: without a usbid the WRONG case cannot be detected at all, and a
+    // stranger answering to our pinned name would be recorded as if it were ours.
+    journal("WARNING: no --expect-usbid, so the pin is a NAME ONLY. A different device answering to \(pinnedDevice) cannot be detected.")
+}
+
+// S3 — the bounded wait. ABSENT and BUSY are waited out; WRONG is never waited for. No fallback to another device
+// in any case, for any reason.
+switch DeviceWait.wait(timeout: waitBound,
+                       now: { Double(clockNS(CLOCK_MONOTONIC)) / 1e9 },
+                       sleep: { usleep(UInt32($0 * 1e6)) },
+                       log: { journal($0) },
+                       probe: { CaptureDevices.probe(pinned: pinnedDevice, expectUSBID: expectUSBID) }) {
+case .ready(let attempts, let waited):
+    journal("pinned device present after \(attempts) probe(s), \(DeviceWait.fmt(waited)) s")
+case .absentTimeout(let attempts, let waited):
+    die("PINNED DEVICE ABSENT: \(pinnedDevice) did not appear within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 3)
+case .busyTimeout(let attempts, let waited):
+    die("PINNED DEVICE BUSY: \(pinnedDevice) is present but held by another client and did not free within \(waitBound) s (\(attempts) probe(s) over \(DeviceWait.fmt(waited)) s). Not falling back to any other device.", 4)
+case .wrong(let found):
+    die("WRONG DEVICE: expected \(pinnedDevice) with USB id \(expectUSBID ?? "(unpinned)"); found \(found). Refusing to record: a device that is not the pinned one is a hard failure, never waited for and never substituted.", 5)
+}
+
+let listed: CaptureDevices.Listed
+do { listed = try CaptureDevices.resolve(pinnedDevice) } catch { die("\(error)") }
 
 #if TAPE_TEST_HOOKS
 struct Hooks: Sendable {
@@ -167,10 +227,10 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
 
 /// The capture thread. A read that cannot be recovered is a lost device: it is marked `device_lost` at the moment of
 /// detection, the PCM is closed, and the device is reopened by its stable name as soon as it can be. `--seconds` counts
-/// captured audio, not wall time.
+/// captured audio, not wall time; omitted, the loop ends only on SIGINT/SIGTERM.
 /// Every (re)open is a new capture session: the next IST midnight is queried from the zone then, and only then.
 @Sendable func capture(box: PCMBox, listed: CaptureDevices.Listed, side: CaptureSide, shared: Shared,
-                       targetFrames: Int64, hooks: Hooks) {
+                       runLength: RunLength, hooks: Hooks) {
     let ring = side.ring
     defer { box.pcm = nil; shared.with { shared.captureDone = true } }
     let period = 1_200
@@ -191,7 +251,7 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
         box.pcm = nil
     }
 
-    while captured < targetFrames, !shared.with({ shared.stop }) {
+    while runLength.shouldContinue(captured: captured), !shared.with({ shared.stop }) {
         #if TAPE_TEST_HOOKS
         let elapsed = Double(clockNS(CLOCK_MONOTONIC) - shared.startNS) / 1e9
         if let at = hooks.lossAt, elapsed >= at, elapsed < at + hooks.lossFor {
@@ -227,7 +287,7 @@ let signalSources = [SIGINT, SIGTERM].map { sig -> DispatchSourceSignal in
             if let e = pcm.start() { lose(e); continue }
             needStart = false
         }
-        switch pcm.read(into: buffer, frames: Int(min(Int64(period), targetFrames - captured))) {
+        switch pcm.read(into: buffer, frames: runLength.readSize(period: period, captured: captured)) {
         case .frames(let n):
             // Read return stamps the END of the buffer; its start is that minus the buffer's duration (the Mac's
             // observed time minus callback lag, CaptureTimeline.swift:48-51).
@@ -272,7 +332,7 @@ func runWriter(session: TapeSession, ring: FrameRing, shared: Shared, hooks: Hoo
 shared.startNS = clockNS(CLOCK_MONOTONIC)
 let captureDone = DispatchSemaphore(value: 0)
 Thread {
-    capture(box: pcmBox, listed: listed, side: side, shared: shared, targetFrames: targetFrames, hooks: hooks)
+    capture(box: pcmBox, listed: listed, side: side, shared: shared, runLength: runLength, hooks: hooks)
     captureDone.signal()
 }.start()
 var writeError: String? = nil

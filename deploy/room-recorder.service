@@ -20,8 +20,13 @@ Documentation=file:///usr/local/share/room-recorder/NOTES.md
 # nothing, because on all three boots the node already existed when multi-user.target was reached.
 #
 # THE 5.5-7.7 s IS AN OBSERVATION ON THIS HARDWARE, NOT A GUARANTEE, AND IT IS NOT THE SAFETY PROPERTY.
-# Boot 3 proves the point: its PCM node was born 9 ms EARLIER than boot 2's and it still lost 2.2 s of margin,
-# because multi-user.target arrived 2.572 s sooner. The margin moves with userspace, which we do not control.
+#
+# THE DEVICE SIDE IS STEADY AND USERSPACE IS NOT. That sentence is the whole argument. Across the three boots the
+# PCM node's birth moved 449 ms, and most of that was one hardware term (the wait for the snd-usb-audio module:
+# 4.87 / 4.44 / 4.35 s). multi-user.target moved 2.572 s. Boot 3 proves it on its own: its PCM node was born 9 ms
+# EARLIER than boot 2's and it still lost 2.2 s of margin, because multi-user.target arrived 2.572 s sooner.
+# We do not control the term that moves. So the margin is not something to rely on, and ordering against a target
+# cannot defend us from a target getting faster. Only the bounded wait below can.
 # What makes this unit safe is the bounded wait in the recorder (S3, below). Nobody may delete that wait on the
 # grounds that "there is plenty of margin" — that margin was measured on one laptop, on three boots, with the mic
 # already plugged in at power-on.
@@ -71,14 +76,24 @@ WorkingDirectory=/var/lib/room-recorder
 # room that records nothing, because it looks like it worked. The device is named in stable hw:CARD= form, which does
 # not move when the card index or USB port changes; hw: only, never plughw: or any plugin layer.
 #
-# !!! NOT YET IMPLEMENTED IN THE BINARY — this unit cannot start until it is. See deploy/README.md "Blocked". !!!
-# `room-recorder record` today requires --seconds S and resolves the device once, failing immediately if absent.
-# --wait-for-device and --seconds forever do not exist yet.
+# The three startup cases are DISTINCT and must stay so (conformance case S3 pins each of them):
+#   ABSENT  nothing under the pinned name  -> poll every 1 s to --wait-for-device, then exit 3, named
+#   BUSY    ours, but the open gives EBUSY -> same bounded wait, then exit 4, named. Rides out PipeWire's 5.0 s hold.
+#   WRONG   something else answering to our name -> NO WAIT AT ALL, exit 5, naming expected and found.
+#
+# --expect-usbid is not optional in spirit even though it is in the CLI. Without it the pin is a NAME, and ALSA card
+# ids are not unique hardware identities: "Device" is the generic id a USB interface takes from its product string,
+# so another generic USB mic in the same slot can legitimately claim hw:CARD=Device,DEV=0 and be indistinguishable
+# from ours. 0d8c:0134 is the TONOR TM20, the same identity every M-series probe used.
+#
+# There is NO --seconds. An absent --seconds means run until terminated. There is deliberately no magic value such
+# as "forever": a magic string inside a numeric option is a mistyping waiting to happen, and an absent option cannot
+# be mistyped. Do not add one back.
 ExecStart=/usr/local/lib/room-recorder/room-recorder record \
     --device hw:CARD=Device,DEV=0 \
-    --wait-for-device 90 \
-    --tape /var/lib/room-recorder/tape \
-    --seconds forever
+    --expect-usbid 0d8c:0134 \
+    --wait-for-device 30 \
+    --tape /var/lib/room-recorder/tape
 
 # S4 as amended by R1 — RestartSec is NEVER below 5 s, and the 5 s is measured, not chosen.
 # M2.2, 16 Sep: PipeWire holds the ALSA PCM for exactly 5.0 s after its last client exits — three trials,

@@ -1843,3 +1843,62 @@ Three things worth carrying out of writing them:
 The preflight was run on boot 3 and fails, correctly and usefully: it reproduces M2.1 from scratch —
 `/dev/snd/pcmC1D0c` still carries `user:vinay:rw-` because the autologin session is live — and reports every root
 step as outstanding. **R2 stands: an acceptance run in this state would prove nothing.**
+
+## S3 and the indefinite run implemented (16 Sep, boot 3) — the U2 blocker is closed
+
+Authorised by V after the unit was written, so the install happens once. Suite: **134/134 complete root, 121/121
+repo-only**, +12 rows each, all of them case `S3`.
+
+### A — `--seconds` is optional; absent means run until terminated
+
+`RunLength` in `CaptureCore`. `--seconds S` is **unchanged**, deliberately, so no existing fixture, generation run or
+measurement moves. **No magic string.** `--seconds forever` would put a non-numeric value inside a numeric option,
+which is a mistyping waiting to happen; an absent option cannot be mistyped. A *present* `--seconds` that will not
+parse is a usage error and is never silently demoted to an indefinite run — "record forever" must be asked for by
+omitting the option, not arrived at by fumbling it.
+
+### B — the bounded wait, three distinct cases
+
+`DeviceWait` in `CaptureCore` (pure: a probe result, a clock, a sleep — no ALSA, no Foundation) and
+`CaptureDevices.probe` in `ALSACapture` (the half that must touch a card). Split that way so the suite can drive the
+real decision logic with scripted sequences and a fake clock on a build box with no sound hardware.
+
+| case | what happens | exit |
+|---|---|---|
+| ABSENT | poll every 1 s to `--wait-for-device` (default 30), each attempt logged, then a named failure | **3** |
+| BUSY | the same bounded wait — rides out PipeWire's measured 5.0 s hold — then a **distinct** named failure | **4** |
+| WRONG | **no wait at all**, names expected and found | **5** |
+
+No fallback to another device in any case. WRONG never waits: waiting there is waiting for the right mic to appear
+next to the wrong one. `s3/wrong-not-waited-even-if-right-one-follows` pins exactly that — a scripted `[.wrong, .ready]`
+must still fail, and must not probe a second time.
+
+**`--expect-usbid VID:PID` is what makes WRONG detectable at all,** and it had to be added: without it the pin is a
+NAME, and ALSA card ids are not unique hardware identities. `Device` is the generic id a USB interface takes from its
+product string, so another generic USB mic in the same slot can legitimately claim `hw:CARD=Device,DEV=0` and be
+indistinguishable from ours by name. With it, a stranger answering to our name is caught. When it is not set the
+recorder says so at startup rather than leaving the gap silent.
+
+**The 30 s is V's judgement and is recorded as `our-choice`,** not as a measurement, in `spec/check-grounding.json`
+(`S3.wait-bound`): long enough for a slow hub or a re-enumeration, short enough that a genuinely absent mic is
+reported inside half a minute. The 5.0 s that BUSY rides out **is** measured (M2.2). The two must never be confused,
+which is why they are separate entries with separate citations.
+
+`S3.busy-waits-then-fails` is filed `our-choice`, **not** `mac-measurement`, although it rests on a measurement: that
+class means "measured on the Mac", and a Linux measurement counted there would corrupt the GROUNDING tally. The
+decision to ride EBUSY out is ours; the citation carries the measurement in full.
+
+### Two things the tests caught that reasoning had not
+
+1. **The bound is used to its last second, and the give-up line has to say so.** Probes land at t = 0,1,…,bound, so a
+   30 s bound is 31 probes and the wait never exceeds it. But polling stops when the *next* poll would overrun, so a
+   4 s bound gives up at 3.0 s having probed 4 times. The first log line claimed "bound of 4.0 s reached" at 3.0 s
+   elapsed, which was untrue; it now states elapsed, attempts and why it stopped.
+2. **My own row expectation was wrong, not the code** — `s3/absent-times-out-named` asserted 30 probes and got 31.
+   The code was right. Fixed in the test, with the t = 0…30 reasoning written next to it.
+
+### Exercised against the real TM20 on boot 3, not only in the suite
+
+WRONG in 0.00 s exit 5 · ABSENT polling then exit 3 · BUSY polling then exit 4 (second instance against a first that
+held the PCM) · BUSY-then-free riding out a real holder and going on to record, exit 0 · indefinite run stopped by
+SIGTERM after 3 s, 48 000 samples, exit 0. Those tapes were deleted afterwards: they are real room audio.
