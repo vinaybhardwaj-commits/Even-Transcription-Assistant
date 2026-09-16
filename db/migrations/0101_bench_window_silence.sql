@@ -118,8 +118,15 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
   CONSTRAINT bench_window_silence_reopen_chk
     CHECK ((reopened_at IS NULL) = (reopened_batch IS NULL)),
   -- A re-adjudication that cannot say WHICH detector ran is not a re-adjudication anybody can repeat or compare.
+  -- THE STORED SET AND THE CALLER SET DIFFER ON PURPOSE (E25 R57), and the next reader will think that is a bug:
+  -- this CHECK says what may be STORED, and lib/stt/silence.ts's DETECTOR_NAME says what a CALLER may SUPPLY.
+  -- The backfill sentinel lives in the first set and NOT the second — that is exactly what makes it unmintable.
+  -- The literal is admitted by value, never by a pattern that would let other parenthesised strings in with it.
   CONSTRAINT bench_window_silence_detector_chk
-    CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL)),
+    CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL)
+           AND (reopened_detector IS NULL
+                OR reopened_detector = '(unrecorded.pre-r31)'
+                OR reopened_detector ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$')),
   -- A row is a VERDICT (all four evidence columns present) or a LEDGER ENTRY (it was handed back), or both.
   -- Neither is a row nobody wrote for a reason.
   CONSTRAINT bench_window_silence_row_kind_chk
@@ -181,18 +188,25 @@ ALTER TABLE bench_window_silence ALTER COLUMN vad_params_source  DROP NOT NULL;
 -- BACKFILL BEFORE THE CHECKS, or the checks are refused by rows that predate the requirement. A pass recorded
 -- under the earlier shape has no detector and no history, and there is no way to find out which detector ran:
 -- the fact was never written down. So it is NAMED as unrecorded rather than invented, which is the same move
--- this table already makes with audio_level_source='absent' and vad_params_source='unreported'. The sentinel is
--- a legal detector name by shape, so nothing downstream has to special-case it; it is not a vocabulary and it
--- classifies nothing. On a fresh database this statement touches zero rows.
+-- this table already makes with audio_level_source='absent' and vad_params_source='unreported'. It is not a
+-- vocabulary and it classifies nothing. On a fresh database this statement touches zero rows.
+--
+-- WHY THE PARENTHESES (E25 R57). The sentinel must be UNMINTABLE: no caller may ever supply it, or the ledger
+-- would hold one string with two meanings — "this row predates the rule" and "a caller named this detector" —
+-- and the sentinel would stop being queryable and excludable, which is its whole justification. An earlier
+-- spelling, unrecorded.pre-r31, was a legal caller name by shape and therefore mintable by anyone. Parentheses
+-- are outside DETECTOR_NAME's allowed set ([A-Za-z0-9._:-]) in EVERY position, not merely the first, so this
+-- value survives a later hand relaxing the first-character rule. A guard in code could be deleted; a value the
+-- validator cannot express cannot be minted by anyone, ever, with no test to maintain and no mutant to catch.
 UPDATE bench_window_silence
-   SET reopened_detector = COALESCE(reopened_detector, 'unrecorded.pre-r31'),
+   SET reopened_detector = COALESCE(reopened_detector, '(unrecorded.pre-r31)'),
        reopened_history  =
          CASE WHEN jsonb_array_length(COALESCE(reopened_history, '[]'::jsonb)) = 0
               THEN jsonb_build_array(jsonb_build_object(
                      'at',       reopened_at,
                      'batch',    reopened_batch,
                      'reason',   reopened_reason,
-                     'detector', COALESCE(reopened_detector, 'unrecorded.pre-r31'),
+                     'detector', COALESCE(reopened_detector, '(unrecorded.pre-r31)'),
                      'as_of',    NULL::text))
               ELSE reopened_history END
  WHERE reopened_at IS NOT NULL;
@@ -202,7 +216,10 @@ UPDATE bench_window_silence
 -- Only the three added after the first draft are listed; the other five are unchanged since it.
 ALTER TABLE bench_window_silence DROP CONSTRAINT IF EXISTS bench_window_silence_detector_chk;
 ALTER TABLE bench_window_silence ADD CONSTRAINT bench_window_silence_detector_chk
-  CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL));
+  CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL)
+         AND (reopened_detector IS NULL
+              OR reopened_detector = '(unrecorded.pre-r31)'
+              OR reopened_detector ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'));
 ALTER TABLE bench_window_silence DROP CONSTRAINT IF EXISTS bench_window_silence_row_kind_chk;
 ALTER TABLE bench_window_silence ADD CONSTRAINT bench_window_silence_row_kind_chk
   CHECK ((verdict IS NOT NULL AND engine IS NOT NULL AND audio_level_source IS NOT NULL AND vad_params_source IS NOT NULL)

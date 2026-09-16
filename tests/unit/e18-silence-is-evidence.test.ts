@@ -764,6 +764,37 @@ describe.runIf(HAVE_DOCKER)("E18 R51/R53 — a bound the server never issued, an
     expect(await stateOf("bw_r51_late"), "the late one is still waiting, as it should be").toBe("silent");
   }, 600_000);
 
+  it("R57 — the backfill sentinel is UNMINTABLE: both doors refuse it as caller input, and the old spelling shows why", async () => {
+    const { reopenSilentWindows, DETECTOR_NAME, BACKFILL_DETECTOR_SENTINEL } = await import("@/lib/stt/silence");
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_r57', 'room_r57', to_timestamp(0), 'ended')`);
+    seedWindow("bw_r57", 821, { levels: null, session: "sess_r57", roomDay: "rd_r57" });
+    await verdictFor("bw_r57", 821, "sess_r57", "rd_r57");
+    const bound = (await call({ room_id: "room_r57" })).would as Record<string, unknown>;
+
+    // (ii) THE VALIDATOR REFUSES IT. This is the property the whole design rests on, so it is pinned rather
+    // than assumed: a caller cannot write the sentinel through the module or through the tool.
+    expect(DETECTOR_NAME.test(BACKFILL_DETECTOR_SENTINEL), "the shape rule cannot express it at all").toBe(false);
+    await expect(reopenSilentWindows({ roomId: "room_r57", batch: "b_r57", reason: "r", detector: BACKFILL_DETECTOR_SENTINEL, asOf: String(bound.as_of) }))
+      .rejects.toThrow(/not a usable name/);
+    const refusedAtTool = await call({ room_id: "room_r57", apply: true, as_of: bound.as_of, detector: BACKFILL_DETECTOR_SENTINEL, reason: "mint me a sentinel" });
+    expect(refusedAtTool).toMatchObject({ ok: false, dry_run: false, error: "detector_name_invalid" });
+    expect(await stateOf("bw_r57"), "and neither refusal moved anything").toBe("silent");
+
+    // (iii) THE OLD SPELLING IS NOT A SENTINEL, and is not silently treated as one. unrecorded.pre-r31 passes
+    // the caller shape rule, which is exactly why it was replaced: a value anyone can supply cannot also mean
+    // "the system could not say". 0101 has never been applied anywhere, so no row carries it — and the
+    // migration no longer contains that spelling at all, which is what this asserts rather than assuming.
+    expect(DETECTOR_NAME.test("unrecorded.pre-r31"), "the old spelling was mintable — that was the defect").toBe(true);
+    const migration = readFileSync("db/migrations/0101_bench_window_silence.sql", "utf8");
+    expect(migration.includes("'unrecorded.pre-r31'"), "the migration writes only the unmintable spelling").toBe(false);
+    expect(migration.includes("'(unrecorded.pre-r31)'"), "and it does write that one").toBe(true);
+    // A row carrying the old spelling would be indistinguishable from a caller's own detector: the ledger
+    // cannot tell them apart, which is the reason the sentinel had to change before 0101 ever ships.
+    const applied = await call({ room_id: "room_r57", apply: true, as_of: bound.as_of, detector: "unrecorded.pre-r31", reason: "a caller minting the old spelling" });
+    expect(applied, "the old spelling is accepted AS A CALLER'S DETECTOR, which is what made it unusable as a sentinel")
+      .toMatchObject({ ok: true, detector: "unrecorded.pre-r31", reopened: 1 });
+  }, 300_000);
+
   it("R54 — the check ANSWERS NOTHING: a fabricated bound is refused, and moves 0 (it fails closed, not open)", async () => {
     // The Refuter's probe. Postgres always returns one row for `SELECT (... > now()) AS future`, so an empty
     // answer needs a driver or proxy that reports success with nothing in it. That is exactly the case the old
@@ -998,7 +1029,18 @@ describe.runIf(HAVE_DOCKER)("E18 R50 — 0101 on a database that already holds t
     // The detector CHECK cannot be added while a reopened row carries no detector, and there is no way to find
     // out which detector ran — the fact was never written down. So it is NAMED, the same move this table makes
     // with audio_level_source='absent'. Inventing a real detector name here would be the smuggled classifier.
-    expect(row.reopened_detector).toBe("unrecorded.pre-r31");
+    // R57 — the sentinel is PARENTHESISED so that no caller can ever mint it (see BACKFILL_DETECTOR_SENTINEL).
+    const { BACKFILL_DETECTOR_SENTINEL } = await import("@/lib/stt/silence");
+    expect(row.reopened_detector).toBe("(unrecorded.pre-r31)");
+    expect(row.reopened_detector, "and the module and the migration agree on the one spelling").toBe(BACKFILL_DETECTOR_SENTINEL);
+    expect((row.reopened_history as Array<Record<string, unknown>>)[0]!.detector, "the history entry carries it too").toBe(BACKFILL_DETECTOR_SENTINEL);
+    // The widened CHECK admits it BY LITERAL: the same shape with any other text inside the parentheses is not
+    // a sentinel and is refused, so "parenthesised" never becomes a second, open vocabulary.
+    pg.exec(`UPDATE upgrade_probe.bench_window_silence SET reopened_detector = '(unrecorded.pre-r31)' WHERE window_id = 'bw_up_legacy'`);
+    expect(() => pg.exec(`UPDATE upgrade_probe.bench_window_silence SET reopened_detector = '(something.else)' WHERE window_id = 'bw_up_legacy'`))
+      .toThrow(/bench_window_silence_detector_chk/);
+    expect(() => pg.exec(`UPDATE upgrade_probe.bench_window_silence SET reopened_detector = 'two words' WHERE window_id = 'bw_up_legacy'`))
+      .toThrow(/bench_window_silence_detector_chk/);
     expect(row.reopened_batch, "and the pass that WAS recorded is untouched").toBe("batch_before_r31");
     expect((row.reopened_history as unknown[]), "R39's history is backfilled from the scalars, one entry for the one pass").toHaveLength(1);
     expect((row.reopened_history as Array<Record<string, unknown>>)[0]!.batch).toBe("batch_before_r31");

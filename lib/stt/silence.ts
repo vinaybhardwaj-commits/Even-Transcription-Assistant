@@ -329,6 +329,21 @@ export type ReopenResult = { batch: string; detector: string; as_of: string; reo
 export const DETECTOR_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 /**
+ * E25 R57 — WHAT 0101's UPGRADE BACKFILL WRITES, AND WHAT NOBODY CAN SUPPLY.
+ *
+ * A pass recorded before the ledger had a detector column has no detector and no way to recover one, so the
+ * migration NAMES it rather than inventing a real one. The parentheses are the point: they are outside
+ * DETECTOR_NAME's allowed set in EVERY position, so this value cannot be minted by a caller through the module
+ * or the tool — no guard to delete, no test to maintain, no mutant to catch. That matters because the sentinel
+ * is only queryable and excludable while it means one thing; a mintable spelling (it used to be
+ * unrecorded.pre-r31) would let one string mean both "predates the rule" and "a caller named this".
+ *
+ * So the STORED set and the SUPPLIABLE set differ on purpose: 0101's detector CHECK admits this literal beside
+ * DETECTOR_NAME's shape, and DETECTOR_NAME does not. Exported for the tests that pin both halves of that.
+ */
+export const BACKFILL_DETECTOR_SENTINEL = "(unrecorded.pre-r31)";
+
+/**
  * R31.2 — WHAT A BULK RUN WOULD DO, WITHOUT DOING IT.
  *
  * An empty room and a dead mic produce the same row, and the third shape — no level at all — is the real
