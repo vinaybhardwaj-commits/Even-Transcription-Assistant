@@ -19,7 +19,7 @@ wins = [r for r in recs if "peak" in r]
 def db(x): return "-inf" if x <= 0 else f"{20 * math.log10(x):+.2f}"
 print(f"device {s['device']['name']}  {s['negotiated']['channels']} ch {s['negotiated']['rate']} Hz  "
       f"conversion_channels {s['conversion_channels']}  {s['samples']} samples ({s['samples']/16000:.1f} s)")
-print(f"{len(wins)} level windows (one per checkpoint, ~1.25 s each)")
+print(f"{len(wins)} level windows (one per checkpoint; measured effective interval 1.275 s, 1.300 s worst observed)")
 print()
 print("  window   length_s     peak      peak dBFS      rms       rms dBFS   zero_ratio")
 prev = 0

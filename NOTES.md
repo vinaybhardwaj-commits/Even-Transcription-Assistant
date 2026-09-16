@@ -195,7 +195,9 @@ straddling gaps (item 4). All four now follow the Mac source at f798edf as quote
 
 Changed after the first 11-minute recording (that tape is superseded; acceptance uses u1-step3-11min-v2):
 - Cadence: exact 16 000-sample checkpoints → 1.25 s monotonic floor checked once per consumed buffer (1 200 frames),
-  gated on a non-empty window. Observed intervals ~1.275 s.
+  gated on a non-empty window. The floor is not the interval: because a 1 200-frame read is exactly 25 ms and
+  1.25 s / 25 ms = 50 exactly, the fifty-first read carries it. **Measured effective interval 1.275 s, worst observed
+  1.300 s** (derivation and the 357-interval measurement in the U2 power-cut section below).
 - Timestamps: anchor = start of first buffer; periodic = end of latest buffer; discontinuity = start of new-side buffer;
   forced-by-discontinuity checkpoint = end of prior buffer; stop fallback = fresh clocks.
 - Removed the boundary checkpoint after a discontinuity (no Mac counterpart).
@@ -1234,6 +1236,228 @@ to `snd-usb-audio` registered. This boot reached `sound.target` at 6.74 s, `grap
 This Yoga runs `gdm-autologin` (session 1, seat0/tty2, wayland, since boot), so "nobody logs in" is not true of it as
 configured, and an acceptance run in that state proves nothing: the seat ACL grants an access a real room machine will not
 have. Written into the U2 spec §6 as a precondition and carried to U4 below.
+
+## U2 power-cut durability (16 Sep, measured): 0 samples lost after the last checkpoint; bound is 1.300 s worst / 1.275 s typical, not 1.25 s
+
+Power was cut with the tape running and the machine booted once before this was read. `/home/vinay/tapes/u2-powercut`,
+read before anything wrote. Both files sha256-pinned first and byte-identical afterwards
+(`tape.idx de79ac75...93d7a`, `tape.pcm ecd6d11b...7fb127e`), so the measurement below did not consume its own evidence.
+
+### The tail is NOT torn
+
+`tape.idx` ends with a complete record and its `0x0A`; final byte is `0a`, 358 complete lines, every one valid JSON,
+no interior blank line. Raw last line, quoted:
+
+```
+{"byte_offset":14566400,"device":"hw:CARD=Device,DEV=0","input_frames":21849600,"input_sample_rate":48000,"mono_ns":144170722920328,"peak":0.092742919921875,"rms":0.024028387231372336,"samples":7283200,"wall_ns":1789536844320695124,"zero_ratio":0.000588235294117647}
+```
+
+Run against the real code (driver linking `ConformanceKit`, built in `eta-u1-build`):
+
+| run | outcome | effect on disk |
+|---|---|---|
+| `IndexLog.scan` on the on-disk bytes, no repair | `clean`, 358 lines parsed, last line #358 (266 bytes) | none; 94 705 bytes |
+| `IndexLog.repair` on the file | `clean`, **`openedForWriting: false`** | 94 705 → 94 705, delta 0 |
+| control: same code, copy with the last 41 bytes chopped | `tornTail(repairedLength: 94438, droppedBytes: 226)`, `openedForWriting: true` | 94 664 → 94 438 |
+
+The repair path is live and correct; this tape simply did not need it. **Citation correction:** "TapeFormat.swift:135-154"
+and "TapeWriter.swift:137" are *Mac* line numbers quoted inside our comments. In this repo `TapeFormat.swift` is 67 lines
+of constants; the reader/repairer is `Sources/ConformanceKit/IndexLog.swift:60-96`, and the writer's own inline truncation
+of a torn tail is `Sources/TapeCore/TapeWriter.swift:147-150`. **No call site in this repo passes a `repairTrailingPartial`
+flag** — the name survives only in the comments at `IndexLog.swift:55`, `:83` and `Cases.swift:209`.
+
+### tape.pcm against the last committed record
+
+| tape.pcm length | 14 566 400 bytes |
+|---|---|
+| last committed `byte_offset` | 14 566 400 |
+| difference | **0 bytes** |
+| even? | yes — 14 566 400 / 2 = 7 283 200 whole samples, remainder 0 |
+
+`byte_offset == samples x 2` holds on all 358 records (C1.geometry, on real power-cut evidence).
+
+### Samples beyond the last committed checkpoint: **0 samples, 0.000 ms**
+
+Why zero rather than "up to one interval": `append()` writes PCM through `writeAll` as it goes, and `appendRecord`
+(`Sources/TapeCore/TapeWriter.swift:223-230`) fsyncs `tape.pcm` **before** writing the index line and fsyncs `tape.idx`
+after. On disk `pcm_len >= byte_offset` always, and the excess is audio appended but not yet checkpointed. Here the excess
+is exactly zero: the cut landed in the window after a checkpoint's second fsync and before the next `append` reached the
+platter. File mtimes agree — `tape.pcm` 11:04:04.321686575, `tape.idx` 11:04:04.327686598, the index 6 ms behind the PCM,
+which is the documented ordering (U1 section 2.3).
+
+### The effective checkpoint interval is 1.275 s (worst observed 1.300 s), and the cause is OURS
+
+**V's correction, 16 Sep — the 1.25 s figure quoted repeatedly today is wrong for our build, and the reason is our read
+size, not the Mac's constant.**
+
+Measured over 357 intervals: **356 of exactly 20 400 samples = 1.275000 s**, and one of 20 800 samples = 1.300000 s.
+Every interval without exception is a whole multiple of 400 samples, and only two multiples occur: 51 reads and 52 reads.
+
+The derivation. Our read is `TapeSession.chunkFrames = 1_200` input frames — at 48 kHz exactly **25.000 ms**, decimated
+3:1 to exactly **400 output samples**, also 25.000 ms. The cadence gate (`Sources/RecorderCore/TapeSession.swift:134`) is
+tested once per consumed read, so the floor can only ever be crossed **at a multiple of 25 ms**. And 1.25 s / 25 ms = **50
+exactly**: fifty reads land precisely on the floor, the reading taken there falls fractionally short of it, and the
+**fifty-first read carries it — 51 x 400 = 20 400 samples = 1.275 s**. The quantisation, not the constant, sets the
+spacing. The Mac's 44.1 kHz input never divides the floor evenly, so it never sits on that boundary and never takes the
+full extra read (V's ruling; the Mac's own effective interval is therefore not exactly 1.25 s either).
+
+**The code is NOT changed.** Checkpoint spacing is not in the byte-identical contract, and 1.25 s is not the Mac's
+effective interval either, so there is nothing to converge on. `TapeSession.checkpointIntervalNS = 1_250_000_000` stays as
+it is, and every place that quotes **1.25 s while citing Mac `TapeWriter.swift:11/29/36` keeps quoting 1.25 s, because that
+is what the source says.** What changes is only how we describe OUR interval: it is a *measured effective* 1.275 s, and the
+1 250 000 000 ns constant is a *floor*, not the interval.
+
+Swept and corrected in this pass: `spec/RECORDER-RECORDS-LINUX.md` (periodic-checkpoint rule), NOTES.md step 3
+reconciliation, `tools/u1-level-run.sh` (printed "~1.25 s each"). Left alone deliberately: the Mac-citing comments in
+`Sources/RecorderCore/TapeSession.swift:11`, `:12`, `:133`, and "the 1.25 s cadence floor" in the U3 DMIC note — both
+describe the floor/constant, not the effective interval.
+
+### Wall clock against the 10:56:28 IST start
+
+| stated start | 10:56:28.000000 IST |
+|---|---|
+| first record (the tape-open record, `samples` 0) | 10:56:29.124026 — start + 1.124 s |
+| last committed record | **11:04:04.320695 — start + 456.321 s** |
+| audio on tape | 7 283 200 / 16 000 = **455.200 s** = 7 min 35.2 s |
+| `mono_ns` span | 455.196669 s |
+| `input_frames` | 21 849 600 / 48 000 = 455.200 s |
+
+All 358 records are checkpoints. No `discontinuity`, `gap_ns`, `previous_byte_offset`, `surviving_tail_bytes` or
+`dropped_input_frames` key appears anywhere in the file: no ring overflow, no restart, and **no `stopped` record** — which
+is exactly what a tape killed by power loss should look like (`C1.stopped-at-pcm-end`'s non-final branch never arises).
+
+The run's two side files agree: `u2-powercut.err` and `u2-powercut.json` are both **0 bytes, mtime 10:56** — the recorder
+never wrote a line of stderr and never wrote its summary, so it died mid-run rather than exiting. Neither file carries a
+timestamp later than the tape, so neither narrows when the cut happened; the last checkpoint remains the only witness.
+
+### The durability number, plainly
+
+**The loss is bounded by the checkpoint interval, not worse — and this cut lost nothing that had been written.**
+
+Everything up to the last checkpoint is durable and internally consistent: 0 bytes of orphaned PCM, no torn index line, no
+odd trailing byte. The loss that actually matters is the audio captured between 11:04:04.320695 and the instant the power
+died, and that never reached the disk in any form, so **it cannot be measured from the tape**. It is bounded above by one
+checkpoint interval plus ring residency, because a checkpoint fsyncs everything appended before it.
+
+**The figure to carry: at most 1.300 s, typically 1.275 s. Measured 0 ms of written-but-uncommitted audio on this cut.**
+
+V's rule, 16 Sep: **a durability claim quotes the worst observation in hand, not the mode.** We saw one interval of 20 800
+samples = 1.300 s, so the bound is 1.300 s and not 1.275 s, and it stays that way until a longer interval is observed, at
+which point the bound moves to that. Writing "≤ 1.275 s" because 356 of 357 intervals were 1.275 s is the mode dressed up
+as a bound, and a clinician may one day rely on this number. (For completeness, and it does not soften the bound: the one
+1.300 s interval is the **first** — the tape-open record to the first checkpoint, a startup artefact. A later 52-read
+interval would be indistinguishable in the index, so it is quoted as the bound regardless.)
+
+For a room machine losing power mid-consultation: **at most the last 1.3 s of speech**, and the surviving 455.2 s is
+complete and byte-exact.
+
+**Not proven by this:** that the recorder was still capturing at the moment of the cut. The tape cannot tell us how long it
+kept running after 11:04:04.32 — see the next section, which is why it is the best witness we have.
+
+### FINDING — on this machine the tape is a better witness of the moment of death than the system journal
+
+Not an aside; this is a result about incident forensics on a room machine, and it generalises.
+
+| | last durable record | source |
+|---|---|---|
+| systemd journal | **11:03:52.302842** | boot `-1` final entry |
+| tape.idx | **11:04:04.320695** | last committed checkpoint |
+| | **tape is 12.018 s later** | |
+
+The mechanism is the whole point. `appendRecord` (`Sources/TapeCore/TapeWriter.swift:223-230`) fsyncs `tape.pcm`, writes
+the index line, then fsyncs `tape.idx` — **every checkpoint, so at most every 1.3 s the tape's own record of "I was alive
+at time T" is forced to the platter.** journald buffers and writes back lazily; it makes no such guarantee and its file
+header was still open when the power went (it was renamed on the next boot for exactly that reason). So the artefact whose
+durability we were measuring turns out to also be the most accurate clock we have for when the machine stopped.
+
+Caveat, stated so it is not overclaimed later: inter-entry gaps in the journal in that window run to ~24 s, so part of the
+12.018 s may be genuine quiet rather than lost write-back. It cannot be separated from here. The asymmetry stands either
+way — the tape's timestamp is *guaranteed* durable to within a checkpoint, the journal's is not guaranteed at all.
+
+**Carried to U3 — "when did this room stop?" is answered from the tape, not the journal.** The poll will eventually have to
+report the moment a room went dark, and the obvious instinct is to read the journal. On this evidence that answer is late
+by an unbounded amount and early-truncated by lazy write-back, while the tape's last checkpoint is durable to within one
+checkpoint interval by construction. The rule: **take the last committed `wall_ns` in `tape.idx` as the time of death,
+bounded +0/+1.3 s; use the journal only to classify the cause** (clean shutdown vs. unclean, per the fsck/journald markers
+in M2.3 boot 1 below). Any future incident write-up on a room machine should cite both and say which it trusts.
+
+### M2.3 boot 1 of 3 — **UNCLEAN**, the boot after the power cut (16 Sep, 11:04:40 IST)
+
+Labelled unclean deliberately: boots 2 and 3 will be clean reboots, and the difference between them is itself the
+measurement. `tools/u2-boot-enum-probe.sh 0`:
+
+```
+boot 0: 11d67350625247948cab0b5aaa5f2354 Wed 2026-09-16 11:04:40
+  USB device detected (kernel):      t=1.331294 s  (usb 3-1)
+  descriptor read (0d8c:0134):       t=1.331400 s
+  snd-usb-audio driver registered:   t=6.204010 s
+  PCM node /dev/snd/pcmC1D0c:        t=6.202507 s  (devtmpfs birth)
+  sound.target reached:              t=6.791357 s
+  multi-user.target reached:         t=13.791912 s
+  graphical.target reached:          t=13.836666 s
+```
+
+The TM20's PCM node appeared at **t = 6.2025 s** after boot (monotonic origin 11:04:39.585725, from the anchor
+`[1.305200]` = 11:04:40.890925; node birth 11:04:45.788232300). Against the targets:
+
+| against | target at | PCM node is |
+|---|---|---|
+| `sound.target` (PID 1) | 6.791357 s | **0.589 s earlier** |
+| `multi-user.target` | 13.791912 s | **7.589 s earlier** |
+| `graphical.target` | 13.836666 s | **7.634 s earlier** |
+
+So on this boot a `WantedBy=multi-user.target` service finds the node already 7.59 s old. That is one boot, and an unclean
+one — **R4 stands unchanged**: a bounded wait then a named failure still covers "plugged in late" and "never plugged in",
+which no `.device` dependency can. The mic was attached across the cut, so unlike the earlier M2.3 note this boot does have
+the TM20 present from enumeration onward. Note the enumeration-to-driver gap here is 4.873 s, not the 190 ms measured at
+hotplug: at hotplug `snd-usb-audio` is already resident, at boot the device waits for the module.
+
+### Did journald flag the previous boot unclean, and was any journal lost?
+
+Flagged unclean, by three independent markers:
+
+1. `systemd-fsck[367]: /dev/nvme0n1p2: recovering journal` — ext4 journal replay on the root fs, which is also where the
+   tape lives (`/home` is not a separate mount; `/dev/nvme0n1p2` is `/`).
+2. `systemd-journald[436]: File /var/log/journal/.../system.journal corrupted or uncleanly shut down, renaming and replacing.`
+3. `systemd-fsck[539]` on the EFI vfat: `Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.`
+
+**No journal was lost.** `journalctl --verify` returns **4 PASS, 0 FAIL/WARN**, including the renamed 41 MB
+`system@00065b93064bd448-75938b9e0311301d.journal~`; boot `-1` reads end to end. journald renamed the file defensively
+because its header was not closed cleanly, not because the contents were damaged. The single journald restart at
+11:04:43–44 is the normal runtime→persistent flush handover (SIGTERM from PID 1, restart counter 1), not damage.
+
+What was never *written* is a different matter: boot `-1`'s last entry is **11:03:52.302842**, and the tape's last
+checkpoint is **11:04:04.320695** — the journal's record ends **12.018 s before the tape's**. Inter-entry gaps in that
+window run to ~24 s, so some of that may be genuine quiet rather than write-behind loss; it cannot be separated from here.
+Either way the conclusion is the same and it is the useful one: **the fsync-per-checkpoint tape outlived the system journal
+as a witness of when this machine died.**
+
+fsck cleared four orphaned inodes — 18879326, 18879414, 18879415 (uid 1000) and 13662804 (uid 0). The tape's inodes are
+**18879500 (`tape.pcm`) and 18879501 (`tape.idx`)**; neither was among them. The tape came through the ext4 recovery
+untouched, and the repo tree came back clean at `8fde01f`.
+
+### Two bugs found in `tools/u2-boot-enum-probe.sh`, fixed before the clean boots
+
+Both were in the probe, not in the machine, and both were fixed now so all three boots are read by the same corrected tool
+(the probe reads the persistent journal, so boot 1 was simply re-run afterwards):
+
+1. **"the mic did not enumerate in this boot" was a false negative.** `journalctl -k` is *not* kernel-only: systemd in the
+   initrd logs through `/dev/kmsg`, so 113 of this boot's 1 212 `-k` lines are `systemd[1]`, and five of them sit between
+   the port line (`[1.331294] usb 3-1: new full-speed USB device number 2`) and the `idVendor=` line (`[1.331400]`) —
+   outside the old `grep -m1 -B2` window. The port is now parsed out of the descriptor line and matched directly.
+2. **`graphical.target` was reported 6.1 s early.** `grep -m1 "Reached target .*graphical"` matched the *per-user*
+   manager's `graphical-session-pre.target` (`systemd[1940]`, 7.725166 s) instead of PID 1's `graphical.target`
+   (13.836666 s). Target greps are now anchored to `systemd[1]:` and the exact target name. `sound.target` was right only
+   by luck — PID 1's line happens to come first, at 6.791357 s, ahead of the user manager's at 7.580238 s.
+
+Also added: the PCM node's devtmpfs birth time (the thing M2.3 actually asks for, current boot only — devtmpfs nodes are
+recreated each boot, so an older boot keeps only the `snd-usb-audio` line as a proxy), and a previous-boot cleanliness
+block (fsck/journald markers, boot-boundary timestamps, renamed journals, `--verify` counts). A third cosmetic defect was
+fixed in passing: the `${v:+a}${v:-b}` idiom in the original printed *both* the formatted string and the raw value whenever
+the variable was set.
+
+**Carried:** the M2.3 numbers earlier in this file (sound 6.74 s, graphical 7.47 s, multi-user 11.25 s) were taken with the
+buggy script. The graphical figure there has the same user-manager signature and should be treated as suspect until re-read.
 
 ## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
 

@@ -71,6 +71,12 @@ build has no such code and refuses the option.
   `resumed`. (Step 3 wrote the anchor only at first audio; restored in step 5; pinned by C8.L8.)
 - **Periodic:** once per consumed buffer, if the window holds samples, the monotonic time since the last checkpoint is
   ≥ **1 250 000 000 ns**, and audio timestamps exist. A floor, not a timer: never less than 1.25 s. (:11, :29, :36, :355-358)
+  **Our effective interval is not the floor.** The gate is tested once per consumed read of 1 200 input frames = exactly
+  25.000 ms = 400 output samples, so the floor can only be crossed at a multiple of 25 ms; 1.25 s / 25 ms = 50 exactly, the
+  fiftieth read falls fractionally short and the fifty-first carries it. **Measured effective interval: 1.275 s typical,
+  1.300 s worst observed** (u2-powercut, 357 intervals: 356 x 20 400 samples, 1 x 20 800; every interval a whole multiple of
+  400). Durability claims quote the worst: **at most 1.300 s**. The 1.25 s above is the Mac's constant as the source states
+  it and is left quoted as such.
 - **Any discontinuity:** if the window holds samples, a checkpoint stamped with the end of the prior buffer; the converter
   resets (U1 §11.4); latest audio times cleared; then the record. On the Mac the discontinuity path first flushes the
   resampler (TapeWriter :268 → :261-264 → writeConverted :245-259, appending at :252) and only then stamps the record with
