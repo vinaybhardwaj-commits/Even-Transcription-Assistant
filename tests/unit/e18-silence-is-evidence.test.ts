@@ -177,6 +177,12 @@ describe.runIf(HAVE_DOCKER)("E18 — the verdict, its evidence, and the set", ()
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'absent', 0.01, 'unreported');`)).toThrow(/bench_window_silence_level_chk/);
     expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, verdict, engine, audio_level_source, vad_params_source)
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'recorder', 'unreported');`)).toThrow(/bench_window_silence_level_chk/);
+    // A row that is neither a verdict nor a ledger entry is nobody's record of anything.
+    expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id)
+      VALUES ('bw_chk', 'sess_1');`)).toThrow(/bench_window_silence_row_kind_chk/);
+    // R39 — a re-adjudication whose history is empty claims a pass it did not keep.
+    expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, reopened_at, reopened_batch, reopened_reason, reopened_detector, reopened_history)
+      VALUES ('bw_chk', 'sess_1', NOW(), 'b', 'r', 'd', '[]'::jsonb);`)).toThrow(/bench_window_silence_history_chk/);
     // A re-adjudication that cannot say which detector ran is refused by the database, not only by the code.
     expect(() => pg.exec(`INSERT INTO bench_window_silence (window_id, session_id, verdict, engine, audio_level_source, vad_params_source, reopened_at, reopened_batch)
       VALUES ('bw_chk', 'sess_1', 'x', 'whisper', 'absent', 'unreported', NOW(), 'b');`)).toThrow(/bench_window_silence_detector_chk/);
@@ -421,6 +427,109 @@ describe.runIf(HAVE_DOCKER)("E18 R31 — the operator surface, on real SQL", () 
     expect(callers, "only the silence module and the operator tool name the bulk path")
       .toEqual(["lib/mcp/tools/stt.ts", "lib/stt/silence.ts"]);
   });
+});
+
+describe.runIf(HAVE_DOCKER)("E18 R37/R38/R39 — the preview is honest, and the ledger records every pass", () => {
+  const tool = async () => (await import("@/lib/mcp/tools/stt")).STT_TOOLS.find((t) => t.name === "scribe_silence_readjudicate")!;
+  const call = async (args: Record<string, unknown>) => (await (await tool()).handler(args as never, {} as never)) as Record<string, unknown>;
+  const silentIn = async (room: string) =>
+    ((await pg.sql`SELECT count(*)::int AS n FROM bench_window w JOIN bench_session s ON s.id = w.session_id
+                    WHERE w.state = 'silent' AND s.room_id = ${room}`) as Array<{ n: number }>)[0]!.n;
+  const ledger = async (id: string) =>
+    ((await pg.sql`SELECT reopened_at::text AS reopened_at, reopened_batch, reopened_detector, reopened_history
+                     FROM bench_window_silence WHERE window_id = ${id}`) as Array<Record<string, unknown>>)[0];
+
+  it("R37 / X1 — 250 silent windows: the preview says what THIS call moves and how many match altogether, and the apply moves exactly that", async () => {
+    // The Refuter's measurement, rerun here so it cannot drift back: preview 250, apply 100, 150 left was the
+    // defect. One bound, two numbers, and the apply is held to the number the preview printed.
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_250', 'room_250', to_timestamp(0), 'ended')`);
+    const values = Array.from({ length: 250 }, (_, i) => {
+      const start = startOf(1000 + i);
+      return `('bw_250_${i}', 'sess_250', 'rd_250', ${start}, ${start + WINDOW_MS}, 'primary', 'clips/bw_250_${i}.webm', TRUE, 'silent', NOW())`;
+    }).join(",");
+    pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key, grid_aligned, state, closed_at) VALUES ${values};`);
+
+    const preview = (await call({ room_id: "room_250" })).would as Record<string, unknown>;
+    const eligible = preview.eligible as Record<string, unknown>;
+    expect(preview.windows, "what this call would move, at the default limit").toBe(100);
+    expect(eligible.total, "and how many match the filter altogether").toBe(250);
+
+    const applied = await call({ room_id: "room_250", apply: true, detector: "refuter_p1", reason: "the 250-window measurement" });
+    expect(applied.reopened, "the apply moves exactly what the preview said it would").toBe(preview.windows);
+    expect(await silentIn("room_250"), "and what is left is the difference, not a surprise").toBe(150);
+    expect(applied.remaining_eligible, "the answer says how much is still waiting").toBe(150);
+
+    // The same three numbers the Refuter measured, now equal by design: preview === moved, remaining === total − moved.
+    expect({ preview: preview.windows, moved: applied.reopened, remaining: await silentIn("room_250") })
+      .toEqual({ preview: 100, moved: 100, remaining: 150 });
+
+    // X1 — the bound is the tool's promise, so a caller can raise it and see the whole set move.
+    const rest = await call({ room_id: "room_250", limit: 1000, apply: true, detector: "refuter_p1", reason: "the rest" });
+    expect(rest.reopened).toBe(150);
+    expect(await silentIn("room_250")).toBe(0);
+  }, 600_000);
+
+  it("R38 / X3 — every moved window gets a ledger row, including one that had no evidence at all; nothing else is stamped", async () => {
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_led', 'room_led', to_timestamp(0), 'ended')`);
+    // No evidence row for either — the production shape 0101's header names, and the population that used to
+    // move with nothing recorded.
+    seedWindow("bw_led_moved", 61, { levels: null, session: "sess_led", roomDay: "rd_led_a" });
+    seedWindow("bw_led_untouched", 62, { levels: null, session: "sess_led", roomDay: "rd_led_b" });
+    expect(await ledger("bw_led_moved"), "nothing recorded about it yet").toBeUndefined();
+
+    const r = await call({ room_day_id: "rd_led_a", apply: true, detector: "e13_v1", reason: "no-evidence population" });
+    expect(r.reopened).toBe(1);
+
+    const moved = await ledger("bw_led_moved");
+    expect(moved, "R38: a moved window ALWAYS has a row saying who moved it and why").toMatchObject({ reopened_batch: expect.any(String), reopened_detector: "e13_v1" });
+    expect((moved!.reopened_history as unknown[]), "one pass, recorded once").toHaveLength(1);
+    // And it is no longer eligible: the silent hole that let the same windows be re-opened for ever is closed.
+    expect(((await call({ room_id: "room_led" })).would as Record<string, unknown>).windows, "only the window nobody moved is still on offer").toBe(1);
+
+    // X3 — a window outside the moved set carries NO stamp. A false ledger entry is worse than none: it says a
+    // window was handed back when it never was.
+    const untouched = await ledger("bw_led_untouched");
+    expect(untouched === undefined || untouched.reopened_at === null, "a window that did not move is not stamped").toBe(true);
+  }, 300_000);
+
+  it("R39 — two passes on one window leave TWO records, oldest first, and a later verdict does not erase them", async () => {
+    const { recordSilenceVerdict, readWindowAudioLevel, readVadParams, VERDICT_EMPTY_TRANSCRIPT } = await import("@/lib/stt/silence");
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('sess_hist', 'room_hist', to_timestamp(0), 'ended')`);
+    seedWindow("bw_hist", 71, { levels: null, session: "sess_hist", roomDay: "rd_hist" });
+
+    await call({ room_day_id: "rd_hist", apply: true, detector: "detector_A", reason: "first pass" });
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_hist'`);
+    await call({ room_day_id: "rd_hist", include_reopened: true, apply: true, detector: "detector_B", reason: "second pass" });
+
+    const row = await ledger("bw_hist");
+    const history = row!.reopened_history as Array<Record<string, unknown>>;
+    expect(history, "R39: both passes survive — a better detector does not erase the fact of the first").toHaveLength(2);
+    expect(history.map((h) => h.detector)).toEqual(["detector_A", "detector_B"]);
+    expect(history.map((h) => h.reason)).toEqual(["first pass", "second pass"]);
+    expect(row!.reopened_detector, "the scalars are the latest pass, for a cheap read").toBe("detector_B");
+
+    // A fresh verdict clears the scalars — it has not been reviewed — but the history of having been
+    // re-adjudicated twice is not the verdict's to erase.
+    pg.exec(`UPDATE bench_window SET state = 'silent' WHERE id = 'bw_hist'`);
+    await recordSilenceVerdict({
+      windowId: "bw_hist", roomDayId: "rd_hist", sessionId: "sess_hist", verdict: VERDICT_EMPTY_TRANSCRIPT,
+      engine: "whisper", audioSeconds: 900,
+      level: await readWindowAudioLevel("sess_hist", "primary", startOf(71), startOf(71) + WINDOW_MS),
+      vad: readVadParams({}), answer: null,
+    });
+    const after = await ledger("bw_hist");
+    expect(after).toMatchObject({ reopened_at: null, reopened_detector: null });
+    expect((after!.reopened_history as unknown[]), "the two passes are still on the record").toHaveLength(2);
+  }, 300_000);
+
+  it("the detector name is an identity, so it must be matchable: junk is refused by the tool and by the module", async () => {
+    const { reopenSilentWindows } = await import("@/lib/stt/silence");
+    const bad = await call({ room_id: "room_hist", apply: true, detector: "NOT-A-DETECTOR: <script>", reason: "junk" });
+    expect(bad).toMatchObject({ ok: false, error: "detector_name_invalid" });
+    await expect(reopenSilentWindows({ roomId: "room_hist", batch: "b", reason: "r", detector: "two words" })).rejects.toThrow(/not a usable name/);
+    // And a real name still passes, including the dotted and colonned shapes a version string uses.
+    for (const name of ["e13_deadmic_v1", "e15.vad.2026-09-16", "silero:v5.1"]) expect(name).toMatch((await import("@/lib/stt/silence")).DETECTOR_NAME);
+  }, 300_000);
 });
 
 describe("E18 — what the service tells us about the flags it ran under (pure)", () => {

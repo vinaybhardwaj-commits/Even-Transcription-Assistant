@@ -452,7 +452,8 @@ const silenceReadjudicate: McpTool = {
   name: "scribe_silence_readjudicate",
   description:
     "The silent-window backlog (E18): what a bulk re-adjudication WOULD re-run, and — only with apply:true — the re-run itself. " +
-    "DRY RUN BY DEFAULT: the plain call writes nothing and returns the size of the set, the span it covers, how many rooms it touches, " +
+    "DRY RUN BY DEFAULT: the plain call writes nothing and returns what THIS call would move (would.windows, the same limit apply uses), " +
+    "how many match the filter altogether (eligible.total), the span each covers, how many rooms it touches, " +
     "and the distribution of the evidence those verdicts hold (audio level present vs absent, VAD parameters reported vs not, verdict, engine). " +
     "apply:true moves that population back to 'closed' for the drain to read again, and REQUIRES detector and reason; unscoped apply also requires all_rooms:true. " +
     "Scope it with room_id, room_day_id, from_ms/to_ms. It classifies nothing: no dead-mic detector and no VAD calibration exist yet (E13, E15).",
@@ -476,7 +477,7 @@ const silenceReadjudicate: McpTool = {
   },
   handler: async (args: ToolArgs) =>
     failSafe({ ok: false, dry_run: true }, async () => {
-      const { previewSilenceReadjudication, reopenSilentWindows } = await import("@/lib/stt/silence");
+      const { previewSilenceReadjudication, reopenSilentWindows, DETECTOR_NAME } = await import("@/lib/stt/silence");
       const roomId = argStr(args, "room_id", 64) || null;
       const roomDayId = argStr(args, "room_day_id", 64) || null;
       const fromMs = args.from_ms === undefined || args.from_ms === null ? null : argInt(args, "from_ms", 0, 0, Number.MAX_SAFE_INTEGER);
@@ -494,13 +495,24 @@ const silenceReadjudicate: McpTool = {
       const reason = argStr(args, "reason", 300);
       if (!detector) return { ok: false, dry_run: false, error: "detector_required", detail: "apply names which detector will re-read this set" };
       if (!reason) return { ok: false, dry_run: false, error: "reason_required", detail: "apply names why this set is being re-run" };
+      // The detector is an identity later passes are compared against, so it must be matchable exactly.
+      if (!DETECTOR_NAME.test(detector)) {
+        return { ok: false, dry_run: false, error: "detector_name_invalid", detail: "letters, digits and . _ : - only, 1-64 characters, starting with a letter or digit" };
+      }
       const bounded = Boolean(roomId || roomDayId || fromMs !== null || toMs !== null);
       if (!bounded && !argBool(args, "all_rooms")) {
         return { ok: false, dry_run: false, error: "unscoped_apply_needs_all_rooms", detail: "scope by room, day or time, or pass all_rooms:true to mean every room", would };
       }
       const batch = argStr(args, "batch", 64) || `readjudicate_${detector}_${new Date().toISOString().replace(/[:.]/g, "-")}`;
       const done = await reopenSilentWindows({ ...filter, batch, reason, detector });
-      return { ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector, reopened: done.reopened, window_ids: done.window_ids.slice(0, 50), would };
+      // `would` was taken BEFORE the move, so it is what this call said it would do; `remaining` is what the
+      // next call would still find. Both, because "100 moved" alone does not say whether the job is finished.
+      const remaining = await previewSilenceReadjudication(filter);
+      return {
+        ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector,
+        reopened: done.reopened, window_ids: done.window_ids.slice(0, 50),
+        would, remaining_eligible: remaining.eligible.total,
+      };
     }),
 };
 

@@ -178,6 +178,8 @@ export async function recordSilenceVerdict(v: SilenceVerdict): Promise<void> {
       reopened_at        = NULL,
       reopened_batch     = NULL,
       reopened_reason    = NULL,
+      -- reopened_history is NOT cleared: a new verdict has not been reviewed by the old batch, but the fact that
+      -- this window WAS re-adjudicated before is exactly what R39 says must survive.
       reopened_detector  = NULL
   `;
 }
@@ -248,6 +250,9 @@ export async function listSilentWindows(f: SilenceFilter = {}): Promise<SilentWi
 
 export type ReopenResult = { batch: string; detector: string; reopened: number; window_ids: string[] };
 
+/** What a detector name may look like. An identity later passes are compared against, not a vocabulary. */
+export const DETECTOR_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
 /**
  * R31.2 — WHAT A BULK RUN WOULD DO, WITHOUT DOING IT.
  *
@@ -261,6 +266,7 @@ export type ReopenResult = { batch: string; detector: string; reopened: number; 
  * which none carries an audio level" are different decisions.
  */
 export type SilencePreview = {
+  /** What THIS call would move: the filter AND the same limit the apply uses. */
   windows: number;
   rooms: number;
   first_start_ms: number | null;
@@ -268,11 +274,26 @@ export type SilencePreview = {
   evidence: { level_recorder: number; level_absent: number; no_evidence_row: number; vad_reported: number; vad_unreported: number };
   by_verdict: Array<{ verdict: string | null; n: number }>;
   by_engine: Array<{ engine: string | null; n: number }>;
+  /** How many windows match the filter ALTOGETHER, ignoring the limit. The number the operator is deciding about. */
+  eligible: { total: number; rooms: number; first_start_ms: number | null; last_start_ms: number | null };
 };
 
+/**
+ * R37 — ONE BOUND, TWO NUMBERS.
+ *
+ * The preview used to count the whole matching set while the apply moved at most `limit` of it: 250 previewed,
+ * 100 moved. A dry run that miscounts is worse than no dry run, because it licenses an apply nobody described.
+ * So `windows` is now what THIS call will move — the same filter, the same ORDER BY and the same LIMIT the apply
+ * uses — and `eligible.total` is how many match altogether. An operator needs both: one says what is about to
+ * happen, the other says how much is left after it.
+ *
+ * ONE STATEMENT, so the two numbers cannot drift. The roll-ups used to come from a second query with its own copy
+ * of the filter; a future edit to one could have left the other behind. There is now nothing to keep in step.
+ */
 export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promise<SilencePreview> {
+  const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
-    WITH picked AS (
+    WITH matched AS (
       SELECT w.id, w.start_ms, s.room_id, z.window_id AS ev, z.audio_level_source, z.vad_params_source, z.verdict, z.engine
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
@@ -283,8 +304,14 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
          AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
          AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
          AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
-    )
-    SELECT count(*)::int AS windows,
+    ),
+    -- EXACTLY the apply's own bound: same order, same limit. These are the windows that would move.
+    picked AS (SELECT * FROM matched ORDER BY start_ms ASC LIMIT ${limit})
+    SELECT (SELECT count(*)::int FROM matched) AS eligible_total,
+           (SELECT count(DISTINCT room_id)::int FROM matched) AS eligible_rooms,
+           (SELECT min(start_ms)::bigint FROM matched) AS eligible_first,
+           (SELECT max(start_ms)::bigint FROM matched) AS eligible_last,
+           count(*)::int AS windows,
            count(DISTINCT room_id)::int AS rooms,
            min(start_ms)::bigint AS first_start_ms,
            max(start_ms)::bigint AS last_start_ms,
@@ -293,41 +320,28 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
            count(*) FILTER (WHERE ev IS NULL)::int AS no_evidence_row,
            count(*) FILTER (WHERE vad_params_source = 'service')::int AS vad_reported,
            count(*) FILTER (WHERE vad_params_source = 'unreported')::int AS vad_unreported,
-           jsonb_agg(DISTINCT jsonb_build_object('verdict', verdict)) AS verdicts,
-           jsonb_agg(DISTINCT jsonb_build_object('engine', engine)) AS engines
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object('verdict', v.verdict, 'n', v.n) ORDER BY v.n DESC), '[]'::jsonb)
+              FROM (SELECT verdict, count(*)::int AS n FROM picked GROUP BY verdict) v) AS by_verdict,
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object('engine', e.engine, 'n', e.n) ORDER BY e.n DESC), '[]'::jsonb)
+              FROM (SELECT engine, count(*)::int AS n FROM picked GROUP BY engine) e) AS by_engine
       FROM picked
   `) as Array<Record<string, unknown>>;
   const r = rows[0] ?? {};
   const n = (v: unknown) => Number(v ?? 0) || 0;
-  const counts = (await sql`
-    SELECT z.verdict, z.engine, count(*)::int AS n
-      FROM bench_window w
-      JOIN bench_session s ON s.id = w.session_id
-      LEFT JOIN bench_window_silence z ON z.window_id = w.id
-     WHERE w.state = ${SILENT_STATE}
-       AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
-       AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
-       AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
-       AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
-       AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
-     GROUP BY z.verdict, z.engine
-     ORDER BY count(*) DESC
-  `) as Array<{ verdict: string | null; engine: string | null; n: number }>;
-  const roll = (key: "verdict" | "engine") => {
-    const m = new Map<string | null, number>();
-    for (const c of counts) m.set(c[key], (m.get(c[key]) ?? 0) + Number(c.n ?? 0));
-    return [...m].map(([k, v]) => ({ [key]: k, n: v })) as never;
-  };
+  const orNull = (v: unknown) => (v === null || v === undefined ? null : n(v));
   return {
     windows: n(r.windows), rooms: n(r.rooms),
-    first_start_ms: r.first_start_ms === null || r.first_start_ms === undefined ? null : n(r.first_start_ms),
-    last_start_ms: r.last_start_ms === null || r.last_start_ms === undefined ? null : n(r.last_start_ms),
+    first_start_ms: orNull(r.first_start_ms), last_start_ms: orNull(r.last_start_ms),
     evidence: {
       level_recorder: n(r.level_recorder), level_absent: n(r.level_absent), no_evidence_row: n(r.no_evidence_row),
       vad_reported: n(r.vad_reported), vad_unreported: n(r.vad_unreported),
     },
-    by_verdict: roll("verdict"),
-    by_engine: roll("engine"),
+    by_verdict: (r.by_verdict ?? []) as SilencePreview["by_verdict"],
+    by_engine: (r.by_engine ?? []) as SilencePreview["by_engine"],
+    eligible: {
+      total: n(r.eligible_total), rooms: n(r.eligible_rooms),
+      first_start_ms: orNull(r.eligible_first), last_start_ms: orNull(r.eligible_last),
+    },
   };
 }
 
@@ -340,7 +354,12 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
  * population that was re-run is itself queryable afterwards.
  *
  * ONE STATEMENT. The window move and the ledger stamp are one CTE, so a window can never be re-offered with
- * nothing recording why, and a stamp can never name a window that was not moved. `reason` is required: a bulk
+ * nothing recording why, and a stamp can never name a window that was not moved. The stamp is an UPSERT (R38):
+ * a window with no evidence row — the population 0101's header calls the real production shape — used to move
+ * with nothing written at all, which made that first promise false and left those windows eligible for every
+ * later pass in silence. It APPENDS to reopened_history (R39) rather than overwriting the scalars alone, because
+ * a second detector that replaces the first destroys the fact that the window was re-adjudicated before.
+ * `reason` is required: a bulk
  * re-adjudication nobody has to justify is how the last unexplained backlog happened. `detector` is required for
  * the same reason one step further on (R31.3): a second pass with a better detector must be distinguishable from
  * the first, or we have overwritten one verdict with another and lost the fact that we did.
@@ -352,6 +371,14 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
   if (!batch) throw new Error("reopenSilentWindows: a batch id is required — the set must be nameable afterwards");
   if (!reason) throw new Error("reopenSilentWindows: a reason is required — a re-adjudication nobody justified is not a mechanism");
   if (!detector) throw new Error("reopenSilentWindows: a detector is required — a second pass must be distinguishable from the first");
+  // The detector name is an IDENTITY that later passes are compared against, so it is constrained to something
+  // that can be matched exactly: letters, digits and . _ : - only. This is not a safety boundary (the door
+  // authenticates, and nothing renders this string); it stops "detector v2" and "detector_v2 " being two names
+  // for one pass. It deliberately does NOT constrain the VALUE to a known vocabulary — inventing one here would
+  // be the smuggled classifier R31.5 forbids.
+  if (!DETECTOR_NAME.test(detector)) {
+    throw new Error(`reopenSilentWindows: detector "${detector.slice(0, 32)}" is not a usable name — letters, digits and . _ : - only, 1-64 characters`);
+  }
   const limit = capped(f.limit, 100, 1000);
   const rows = (await sql`
     WITH picked AS (
@@ -373,12 +400,21 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
        WHERE w.id IN (SELECT id FROM picked) AND w.state = ${SILENT_STATE}
       RETURNING w.id
     ),
+    -- R38 — ONLY the moved windows, and ALL of them: an INSERT over the moved set (so a window with no evidence
+    -- row gets its first row here) with ON CONFLICT for the ones that already have one. R39 — the pass APPENDS.
     stamped AS (
-      UPDATE bench_window_silence z
-         SET reopened_at = NOW(), reopened_batch = ${batch}::text, reopened_reason = ${reason}::text,
-             reopened_detector = ${detector}::text
-       WHERE z.window_id IN (SELECT id FROM moved)
-      RETURNING z.window_id
+      INSERT INTO bench_window_silence
+        (window_id, session_id, room_day_id, reopened_at, reopened_batch, reopened_reason, reopened_detector, reopened_history)
+      SELECT m.id, w.session_id, w.room_day_id, NOW(), ${batch}::text, ${reason}::text, ${detector}::text,
+             jsonb_build_array(jsonb_build_object('at', NOW(), 'batch', ${batch}::text, 'reason', ${reason}::text, 'detector', ${detector}::text))
+        FROM moved m JOIN bench_window w ON w.id = m.id
+      ON CONFLICT (window_id) DO UPDATE SET
+        reopened_at       = EXCLUDED.reopened_at,
+        reopened_batch    = EXCLUDED.reopened_batch,
+        reopened_reason   = EXCLUDED.reopened_reason,
+        reopened_detector = EXCLUDED.reopened_detector,
+        reopened_history  = bench_window_silence.reopened_history || EXCLUDED.reopened_history
+      RETURNING window_id
     )
     SELECT id FROM moved ORDER BY id
   `) as Array<{ id: string }>;

@@ -61,18 +61,21 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
   session_id         TEXT,
   decided_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   -- HOW silence was concluded. One value today: the engine read the window and returned no speech.
-  verdict            TEXT NOT NULL,
-  engine             TEXT NOT NULL,
+  -- NULLABLE because a row can also be LEDGER-ONLY (R38): a window re-adjudicated before 0101 existed, or one
+  -- whose verdict was written by code older than E18, still gets a row saying it was handed back and by whom.
+  -- The row-kind CHECK below is what stops a row that is neither a verdict nor a ledger entry.
+  verdict            TEXT,
+  engine             TEXT,
   engine_version     TEXT,
   audio_seconds      DOUBLE PRECISION,
   -- The recorder's own meter, read off this window's chunks at verdict time (0066).
-  audio_level_source TEXT NOT NULL,
+  audio_level_source TEXT,
   peak_level         REAL,
   avg_level          REAL,
   level_chunks       INTEGER NOT NULL DEFAULT 0,
   total_chunks       INTEGER NOT NULL DEFAULT 0,
   -- The whisper parameters in force, when the service reports them. It does not today.
-  vad_params_source  TEXT NOT NULL,
+  vad_params_source  TEXT,
   vad_enabled        BOOLEAN,
   no_speech_thold    DOUBLE PRECISION,
   suppress_nst       BOOLEAN,
@@ -83,6 +86,11 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
   reopened_batch     TEXT,
   reopened_reason    TEXT,
   reopened_detector  TEXT,
+  -- R39 — EVERY PASS, NOT THE LATEST ONE. The scalars above are the most recent re-adjudication, kept for a
+  -- cheap read; this is the whole sequence, appended to and never overwritten. A detector that replaced its
+  -- predecessor destroyed the evidence that the window had been re-adjudicated at all, which is the one thing
+  -- the ledger exists to record. One object per pass: {at, batch, reason, detector}.
+  reopened_history   JSONB NOT NULL DEFAULT '[]'::jsonb,
   CONSTRAINT bench_window_silence_level_src_chk
     CHECK (audio_level_source IN ('recorder','absent')),
   -- A level and its source cannot disagree: 'absent' means no number, 'recorder' means a number.
@@ -98,7 +106,16 @@ CREATE TABLE IF NOT EXISTS bench_window_silence (
     CHECK ((reopened_at IS NULL) = (reopened_batch IS NULL)),
   -- A re-adjudication that cannot say WHICH detector ran is not a re-adjudication anybody can repeat or compare.
   CONSTRAINT bench_window_silence_detector_chk
-    CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL))
+    CHECK ((reopened_at IS NULL) = (reopened_detector IS NULL)),
+  -- A row is a VERDICT (all four evidence columns present) or a LEDGER ENTRY (it was handed back), or both.
+  -- Neither is a row nobody wrote for a reason.
+  CONSTRAINT bench_window_silence_row_kind_chk
+    CHECK ((verdict IS NOT NULL AND engine IS NOT NULL AND audio_level_source IS NOT NULL AND vad_params_source IS NOT NULL)
+           OR reopened_at IS NOT NULL),
+  -- The history holds one object per pass, and it cannot be emptier than the scalars claim.
+  CONSTRAINT bench_window_silence_history_chk
+    CHECK (jsonb_typeof(reopened_history) = 'array'
+           AND (reopened_at IS NULL OR jsonb_array_length(reopened_history) >= 1))
 );
 
 -- The set E13/E15 will re-run: verdicts nobody has re-adjudicated yet, oldest first.
@@ -111,6 +128,8 @@ COMMENT ON TABLE bench_window_silence IS
   'E18 (0101): one row per window called silent, written when the verdict is made. Holds what the verdict was made from, including what was NOT available: audio_level_source=absent (the recorder sent no level) and vad_params_source=unreported (the whisper service does not report its VAD flags). Re-adjudicated in bulk by reopenSilentWindows (lib/stt/silence.ts).';
 COMMENT ON COLUMN bench_window_silence.audio_level_source IS
   'recorder = at least one of this window''s chunks carried a meter reading (0066). absent = none did, which is the expected value: the native recorder has never sent one (0 of 4,405 chunks on 16 Sep 2026).';
+COMMENT ON COLUMN bench_window_silence.reopened_history IS
+  'E25 R39 (0101): every re-adjudication this window has had, appended in order — {at, batch, reason, detector} per pass. The reopened_* scalars are the latest pass; this is all of them, because a second detector replacing the first destroys the fact that the window was re-adjudicated before.';
 COMMENT ON COLUMN bench_window_silence.reopened_detector IS
   'E25 R31.3 (0101): which detector re-adjudicated this window, named by the caller of the bulk path. A second pass with a better detector must be distinguishable from the first.';
 COMMENT ON COLUMN bench_window_silence.vad_params_source IS
