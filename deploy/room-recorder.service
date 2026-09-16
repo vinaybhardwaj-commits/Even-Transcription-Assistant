@@ -143,6 +143,32 @@ SystemCallFilter=@system-service
 CapabilityBoundingSet=
 AmbientCapabilities=
 
+# Thread priority. Until 16 Sep 2026 the recorder logged, once, at every start:
+#   Failed to set thread priority for worker thread: pqc=0x... errno=13
+# errno 13 is EACCES, which setpriority(2) gives for exactly one thing: lowering a nice value without the privilege
+# to do it. The capture thread then ran at default scheduling for the life of the process. On an idle laptop that
+# never bites; in a room under load it is the ring_overflow path, arriving silently long after the log line has
+# scrolled away. Fixed here rather than in the recorder, and NOT by silencing the line.
+#
+# Which privilege, determined FROM THE BINARY rather than by trying things:
+#   - the only priority call it contains is `setpriority(PRIO_PROCESS, 0, nice)`, one call site, inside
+#     libdispatch's _dispatch_worker_thread (the message is libdispatch's, statically linked; it is not ours);
+#   - `nice` is read from libdispatch's 5-entry QoS table {10, 2, 0, -2, -4} in .rodata, so the worst it can ask
+#     for is -4;
+#   - there is NO sched_setscheduler, sched_setattr, sched_setparam or pthread_setschedparam symbol in the binary
+#     at all. This is a nice() change, not a scheduler change, so LimitRTPRIO= would grant a realtime privilege
+#     that nothing ever requests, and would not stop the warning.
+# Measured cause: `systemctl show room-recorder.service -p LimitNICE` read 0, so RLIMIT_NICE allowed no nice below
+# 0 at all. Reproduced on this kernel at RLIMIT_NICE=(0,0): setpriority(...,-4) and (...,-2) return EACCES, while
+# 0, +2 and +10 succeed.
+#
+# The grant is the rlimit, NOT a capability. AmbientCapabilities=CAP_SYS_NICE was the obvious reach and is far
+# wider than the need: it also permits renicing OTHER processes, SCHED_FIFO/RR realtime policies, and changing
+# other processes' CPU affinity and I/O priorities — and it would mean un-emptying CapabilityBoundingSet= above,
+# which today drops every capability there is. LimitNICE grants one thing only: this process may lower its OWN
+# nice, and only as far as -4.
+LimitNICE=-4
+
 # The one device it may touch. DevicePolicy=closed denies everything not listed here, so a bug cannot wander into
 # another card. Both nodes of the pinned card: the control node is opened for the capability query, the pcm node
 # for capture.
