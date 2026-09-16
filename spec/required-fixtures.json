@@ -5,6 +5,18 @@
       "cases": [
         "C1",
         "C2",
+        "C7",
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/c7-quiet-room-midnight",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
         "C7"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
@@ -124,6 +136,46 @@
       "cases": [
         "C1",
         "C2",
+        "C4",
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/ist-midnight-before-first-audio",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/ist-midnight-device-lost-at-midnight",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/ist-midnight-two-rollovers",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
         "C5",
         "C6"
       ],
@@ -175,10 +227,34 @@
         "C6",
         "C7"
       ],
-      "how": "tools/u1-real-suite.sh /home/vinay/tapes/u1-step4-real ROOT u1-real-faults (real room audio; never committed)",
+      "how": "tools/u1-real-suite.sh ROOT /home/vinay/tapes/u1-step4-real:u1-real-faults ... (real room audio; never committed)",
       "id": "good/u1-real-faults",
       "role": "good",
       "source": "out-of-repo-audio"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C5",
+        "C6",
+        "C7",
+        "C8"
+      ],
+      "how": "tools/u1-step5-midnight-run.sh /home/vinay/tapes/u1-step5-midnight (TAPE_TEST_HOOKS build), then tools/u1-real-suite.sh ROOT ... /home/vinay/tapes/u1-step5-midnight:u1-real-midnight:/home/vinay/tapes/u1-step5-midnight.summary.json (real room audio across an injected IST midnight; never committed)",
+      "id": "good/u1-real-midnight",
+      "role": "good",
+      "source": "out-of-repo-audio"
+    },
+    {
+      "cases": [
+        "C1"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c1-bytes-after-stopped",
+      "role": "negative",
+      "source": "in-repo"
     },
     {
       "cases": [
@@ -335,10 +411,82 @@
     },
     {
       "cases": [
+        "C7"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c7-zero-filled-rollover",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-anchor-between-adjacent-markers",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-input-frames-before-first-audio",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-marker-stamped-with-suffix-wall",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-no-anchor-after-markers",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-rearmed-from-suffix-wall",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-second-midnight-not-armed",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
         "C8"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
       "id": "negative/c8-straddle-moved-to-new-day",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C8"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c8-suffix-stamped-at-midnight",
       "role": "negative",
       "source": "in-repo"
     },

@@ -18,20 +18,34 @@ public enum Verdict: Equatable {
     }
 }
 
-/// Collects failed checks; a case passes only if at least one check ran and none failed.
+/// Collects failed checks; a case passes only if at least one check ran and none failed. Every assertion belongs to a
+/// named check (`law`), whose grounding spec/check-grounding.json states; an assertion made under no name is counted
+/// as UNLABELLED, which the suite reports as ungrounded.
 struct Checks {
     private(set) var failures: [String] = []
     private(set) var count = 0
+    private var current = "UNLABELLED"
+
+    mutating func law(_ id: String) { current = id }
 
     mutating func expect(_ ok: Bool, _ message: @autoclosure () -> String) {
         count += 1
-        if !ok { failures.append(message()) }
+        CheckRegistry.record(current)
+        if !ok { failures.append("[\(current)] " + message()) }
     }
 
     var verdict: Verdict {
         if count == 0 { return .error("no checks ran") }
         return failures.isEmpty ? .pass : .fail(failures)
     }
+}
+
+/// Which named checks made assertions in this process, and how many.
+public enum CheckRegistry {
+    nonisolated(unsafe) private static var ran: [String: Int] = [:]
+    static func record(_ id: String) { ran[id, default: 0] += 1 }
+    public static func reset() { ran = [:] }
+    public static var snapshot: [String: Int] { ran }
 }
 
 public enum Cases {
@@ -60,11 +74,14 @@ public enum Cases {
         let s: IndexScan
         do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
         var c = Checks()
+        c.law("C1.geometry")
         c.expect(!s.lines.isEmpty, "tape.idx has no complete records")
+        c.law("C1.pcm-whole-samples")
         c.expect(f.pcm.count % 2 == 0, "tape.pcm is \(f.pcm.count) bytes: not a whole number of s16 samples")
         var previous: (Int64, Int64)? = nil
         for line in s.lines {
             let hasOffset = line.fields[IndexKey.byteOffset] != nil, hasSamples = line.fields[IndexKey.samples] != nil
+            c.law("C1.geometry")
             c.expect(hasOffset == hasSamples, "line \(line.number): byte_offset and samples must be both present or both absent")
             guard hasOffset || hasSamples else { continue }
             guard let bo = line.int(IndexKey.byteOffset), let sa = line.int(IndexKey.samples) else {
@@ -73,11 +90,30 @@ public enum Cases {
             }
             c.expect(bo == sa * TapeFormat.bytesPerSample, "line \(line.number): byte_offset \(bo) != samples \(sa) × 2")
             c.expect(bo >= 0 && sa >= 0, "line \(line.number): negative offset")
+            c.law("C1.within-pcm")
             c.expect(bo <= Int64(f.pcm.count), "line \(line.number): byte_offset \(bo) beyond tape.pcm end \(f.pcm.count)")
             if let (pb, ps) = previous {
+                c.law("C1.monotonic")
                 c.expect(bo >= pb && sa >= ps, "line \(line.number): byte_offset/samples went backwards (\(pb)/\(ps) → \(bo)/\(sa))")
             }
             previous = (bo, sa)
+        }
+        // A clean stop is the tape's last write (TapeWriter.swift:366-384: the stopped record carries byteOffset:
+        // bytesWritten after fullSyncTape(.stopped)). The final stopped record sits at tape.pcm's length exactly; the
+        // `stopped` record opens a zero-length region. A stopped record that is not the last line (a tape restarted after
+        // a clean stop) is followed by the restart record at the same byte_offset (:305-315: byte_offset = tape.pcm
+        // length at open) with nothing surviving past it.
+        c.law("C1.stopped-at-pcm-end")
+        for (i, line) in s.lines.enumerated() {
+            guard case .string(DiscontinuityCause.stopped)? = line.fields[IndexKey.discontinuity], let bo = line.int(IndexKey.byteOffset) else { continue }
+            if i == s.lines.count - 1 {
+                c.expect(bo == Int64(f.pcm.count), "line \(line.number): the final stopped record's byte_offset \(bo) != tape.pcm length \(f.pcm.count): \(Int64(f.pcm.count) - bo) bytes written after the clean stop")
+            } else {
+                let next = s.lines[i + 1]
+                let isRestart: Bool = { if case .string(DiscontinuityCause.restart)? = next.fields[IndexKey.discontinuity] { return true }; return false }()
+                c.expect(isRestart && next.int(IndexKey.byteOffset) == bo && next.int(IndexKey.survivingTailBytes) == 0,
+                         "line \(line.number): a stopped record that is not the last line must be followed by a restart at byte_offset \(bo) with surviving_tail_bytes 0")
+            }
         }
         return c.verdict
     }
@@ -92,21 +128,27 @@ public enum Cases {
         guard f.manifest.idx != nil else { return c.verdict }
         let s: IndexScan
         do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
+        c.law("C2.schema-keys")
         c.expect(!s.lines.isEmpty, "tape.idx has no complete records")
         for line in s.lines {
             let unknown = line.fields.keys.filter { !IndexKey.all.contains($0) }.sorted()
+            c.law("C2.schema-keys")
             c.expect(unknown.isEmpty, "line \(line.number): keys outside the schema: \(unknown)")
             let record: IndexRecord
             do { record = try IndexRecord.decode(line.bytes) } catch {
+                c.law("C2.presence")
                 c.expect(false, "line \(line.number): does not decode as an index record: \(error)")
                 continue
             }
+            c.law("C2.presence")
             for v in record.presenceViolations() { c.expect(false, "line \(line.number): \(v)") }
             do {
                 let reencoded = try record.encodedLine()
+                c.law("C2.reencode")
                 c.expect(reencoded == line.bytes,
                          "line \(line.number): re-encoded bytes differ\n        original:  \(String(decoding: line.bytes, as: UTF8.self))\n        reencoded: \(String(decoding: reencoded, as: UTF8.self))")
             } catch {
+                c.law("C2.reencode")
                 c.expect(false, "line \(line.number): re-encode threw \(error)")
             }
         }
@@ -130,6 +172,7 @@ public enum Cases {
             source[k] = v
         }
         do {
+            c.law("C2.darwin-encoder-line")
             let decoded = try JSONDecoder().decode([String: Double].self, from: Data(line))
             c.expect(Set(decoded.keys) == Set(source.keys), "encoder line keys \(decoded.keys.sorted()) != source keys \(source.keys.sorted())")
             for (k, v) in source.sorted(by: { $0.key < $1.key }) {
@@ -168,6 +211,7 @@ public enum Cases {
 
         switch e.outcome {
         case "clean":
+            c.law("C3.clean-unchanged")
             if case .success(let o) = outcome {
                 c.expect(o == .clean, "expected a clean log, repair reported \(o)")
             } else if case .failure(let err) = outcome {
@@ -177,6 +221,7 @@ public enum Cases {
             if let n = e.records, case .success(let s) = scan(f) { c.expect(s.lines.count == n, "expected \(n) records, read \(s.lines.count)") }
 
         case "torn_tail":
+            c.law("C3.torn-tail")
             guard case .success(let o) = outcome else {
                 if case .failure(let err) = outcome { c.expect(false, "expected torn-tail repair, repair threw: \(err)") }
                 return c.verdict
@@ -198,6 +243,7 @@ public enum Cases {
             }
 
         case "hard_error":
+            c.law("C3.interior-blank")
             switch outcome {
             case .success(let o):
                 c.expect(false, "expected a hard error (\(e.error ?? "?")), repair reported \(o)")
@@ -244,9 +290,11 @@ public enum Cases {
         do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
         let rs = regions(f, s)
         var c = Checks()
+        c.law("C4.clock")
         c.expect(!e.points.isEmpty, "C4 names no sample points")
         c.expect(!rs.isEmpty, "no record opens a region: no clock anchor")
         for p in e.points {
+            c.law("C4.clock")
             guard let sample = resolve(p.at, f, s) else {
                 c.expect(false, "\(p.name): cannot resolve \(p.at)")
                 continue
@@ -258,6 +306,7 @@ public enum Cases {
             let ns = TapeClock.wallNS(sample: sample, anchorSample: r.anchorSample, anchorWallNS: r.anchorWallNS)
             c.expect(ns == p.wallNS, "\(p.name) (\(p.at) = sample \(sample), anchored on line \(r.anchorLine)): wall_ns \(ns) != expected \(p.wallNS) (Δ \(ns - p.wallNS) ns)")
             // The Double formula must agree with the exact model within its own representable precision.
+            c.law("C4.double-formula")
             let secs = TapeClock.wallSeconds(sample: sample, anchorSample: r.anchorSample, anchorWallNS: r.anchorWallNS)
             let tolNS = secs.ulp * 2e9
             c.expect(abs(secs * 1e9 - Double(p.wallNS)) <= tolNS,
@@ -275,6 +324,7 @@ public enum Cases {
         let rs = regions(f, s)
         var c = Checks()
         let total = TapeClock.samples(bytesWritten: Int64(f.pcm.count))
+        c.law("C5.adjacency")
         c.expect(pieces.count >= 2, "a seam needs at least two pieces, have \(pieces.count)")
         c.expect(pieces.first?.sampleStart == 0, "first piece starts at \(pieces.first?.sampleStart ?? -1), not 0")
         c.expect(pieces.last?.sampleEnd == total, "last piece ends at \(pieces.last?.sampleEnd ?? -1), tape ends at \(total)")
@@ -288,10 +338,13 @@ public enum Cases {
         let later = rs.dropFirst()
         for (k, r) in later.enumerated() {
             let d = r.start
+            c.law("C5.no-straddle")
             for p in pieces where p.sampleStart < d && d < p.sampleEnd {
                 c.expect(false, "piece [\(p.sampleStart), \(p.sampleEnd)) straddles the \(r.openedBy ?? "?") discontinuity at sample \(d) (line \(r.anchorLine))")
             }
             let lastAtSample = !later.dropFirst(k + 1).contains { $0.start == d }
+            let sharesSample = later.filter { $0.start == d }.count > 1
+            c.law(sharesSample ? "C5.same-sample-last-region-governs" : "C5.gap-after-discontinuity")
             if d < total, lastAtSample {
                 let following = pieces.first { $0.sampleStart == d }
                 c.expect(following != nil, "no piece starts at the \(r.openedBy ?? "?") discontinuity at sample \(d)")
@@ -303,13 +356,16 @@ public enum Cases {
                 }
             }
         }
+        c.law("C5.gap-after-discontinuity")
         let gapStarts = Set(rs.dropFirst().filter { DiscontinuityCause.gapMilliseconds(cause: $0.openedBy, gapNS: $0.gapBeforeNS) > 0 }.map(\.start))
         for p in pieces where (p.gapBeforeMS ?? 0) != 0 && !gapStarts.contains(p.sampleStart) {
             c.expect(false, "piece [\(p.sampleStart), \(p.sampleEnd)) carries gap_before_ms \(p.gapBeforeMS!) but no gap-carrying discontinuity precedes it")
         }
+        c.law("C5.plan")
         let planned = PiecePlanner.plan(rs)
         let normalised = pieces.map { PieceRange(sampleStart: $0.sampleStart, sampleEnd: $0.sampleEnd, gapBeforeMS: $0.gapBeforeMS == 0 ? nil : $0.gapBeforeMS) }
         c.expect(planned == normalised, "pieces differ from the plan of the index: \(planned.map { "[\($0.sampleStart),\($0.sampleEnd))\($0.gapBeforeMS.map { " gap \($0)ms" } ?? "")" })")
+        c.law("C5.byte-ranges-concatenate")
         // Consecutive pieces are adjacent byte ranges of one file: their bytes concatenate to the tape.
         var h = SHA256()
         for p in pieces {
@@ -330,6 +386,7 @@ public enum Cases {
         do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
         let regionEnds = Set(regions(f, s).map(\.end))
         var c = Checks()
+        c.law("C6.full-piece")
         c.expect(e.pieceSamples == TapeFormat.pieceSamples, "expected.json piece_samples \(e.pieceSamples) is not the format's \(TapeFormat.pieceSamples)")
         c.expect(!pieces.isEmpty, "no pieces")
         var full = 0
@@ -337,10 +394,12 @@ public enum Cases {
         for (i, p) in pieces.enumerated() {
             if p.samples == TapeFormat.pieceSamples { full += 1; continue }
             // Only a region end (a discontinuity or the tape tail) may close a piece short.
+            c.law("C6.partial-only-at-region-end")
             c.expect(regionEnds.contains(p.sampleEnd) && p.samples > 0 && p.samples < TapeFormat.pieceSamples,
                      "piece \(i) is \(p.samples) samples, a full piece is \(TapeFormat.pieceSamples), and it does not end at a discontinuity or the tape end")
             partials.append(p.samples)
         }
+        c.law("C6.full-piece")
         c.expect(full == e.fullPieces, "\(full) full pieces, expected \(e.fullPieces)")
         c.expect(partials == e.partialPieces, "partial pieces \(partials), expected \(e.partialPieces)")
         c.expect(TapeFormat.pieceSamples * TapeFormat.nsPerSample == 300_000_000_000, "a full piece is not exactly 300.000 s")
@@ -358,16 +417,31 @@ public enum Cases {
         var c = Checks()
 
         let cause: String? = { if case .string(let v)? = d.fields[IndexKey.discontinuity] { return v }; return nil }()
+        c.law("C7.boundary")
         c.expect(cause == e.cause, "line \(e.line): discontinuity is \(cause ?? "absent"), expected \(e.cause)")
         let gap = d.int(IndexKey.gapNS)
         let dropped = d.int(IndexKey.droppedInputFrames)
-        c.expect(gap != nil, "line \(e.line): gap_ns absent")
-        c.expect(dropped != nil, "line \(e.line): dropped_input_frames absent")
-        c.expect((gap ?? 0) > 0, "line \(e.line): gap_ns is \(gap.map(String.init) ?? "absent"), must be non-zero")
-        c.expect((dropped ?? 0) > 0, "line \(e.line): dropped_input_frames is \(dropped.map(String.init) ?? "absent"), must be non-zero")
-        c.expect(gap == e.gapNS, "line \(e.line): gap_ns \(gap.map(String.init) ?? "absent") != expected \(e.gapNS)")
-        c.expect(dropped == e.droppedInputFrames, "line \(e.line): dropped_input_frames \(dropped.map(String.init) ?? "absent") != expected \(e.droppedInputFrames)")
+        let probeLength: Int
+        if let wantGap = e.gapNS, let wantDropped = e.droppedInputFrames {
+            c.law("C7.gap-fields")
+            c.expect(gap != nil, "line \(e.line): gap_ns absent")
+            c.expect(dropped != nil, "line \(e.line): dropped_input_frames absent")
+            c.expect((gap ?? 0) > 0, "line \(e.line): gap_ns is \(gap.map(String.init) ?? "absent"), must be non-zero")
+            c.expect((dropped ?? 0) > 0, "line \(e.line): dropped_input_frames is \(dropped.map(String.init) ?? "absent"), must be non-zero")
+            c.expect(gap == wantGap, "line \(e.line): gap_ns \(gap.map(String.init) ?? "absent") != expected \(wantGap)")
+            c.expect(dropped == wantDropped, "line \(e.line): dropped_input_frames \(dropped.map(String.init) ?? "absent") != expected \(wantDropped)")
+            probeLength = C7ZeroProbe.length(gapNS: wantGap)
+        } else {
+            c.law("C7.gapless-day-rollover")
+            // A boundary with no gap (day_rollover): nothing was lost, so there is nothing to count and nothing to fill.
+            c.expect(e.gapNS == nil && e.droppedInputFrames == nil, "expected.json gives only one of gap_ns and dropped_input_frames")
+            c.expect(cause == DiscontinuityCause.dayRollover, "a gapless C7 boundary must be a day_rollover, line \(e.line) is \(cause ?? "absent")")
+            c.expect(gap == nil, "line \(e.line): a gapless boundary carries gap_ns \(gap.map(String.init) ?? "")")
+            c.expect(dropped == nil, "line \(e.line): a gapless boundary carries dropped_input_frames \(dropped.map(String.init) ?? "")")
+            probeLength = C7ZeroProbe.threshold
+        }
 
+        c.law("C7.no-zero-fill")
         // The discontinuity is metadata-only: it sits exactly where the real pre-gap audio ends.
         let offset = d.int(IndexKey.byteOffset) ?? -1
         c.expect(offset == e.preGapSamples * 2, "discontinuity byte_offset \(offset) != pre-gap audio \(e.preGapSamples) × 2")
@@ -377,12 +451,14 @@ public enum Cases {
                  "tape.pcm is \(f.pcm.count) bytes, real audio is \(real): \(Int64(f.pcm.count) - real) bytes (\((Int64(f.pcm.count) - real) / 2) samples) inserted across the gap")
         // The bytes after the discontinuity are real post-gap audio, not a run of zeros. §11.5: the probe skips the first
         // rampOutputSamples (40) after the boundary, where the reset filter's near-zero output is correct behaviour.
-        let probe = C7ZeroProbe.run(pcm: f.pcm, byteOffset: offset, gapNS: e.gapNS, exemptSamples: C7ZeroProbe.exemptSamples)
+        c.law("C7.zero-run-probe")
+        let probe = C7ZeroProbe.run(pcm: f.pcm, byteOffset: offset, length: probeLength, exemptSamples: C7ZeroProbe.exemptSamples)
         if probe.inRange {
             c.expect(!probe.zeroFill, "tape.pcm holds a run of ≥\(probe.length) zero samples starting \(probe.exempt) samples after the discontinuity offset \(offset): zero fill")
         } else {
-            c.expect(offset < 0 || e.gapNS < TapeFormat.nsPerSample || Int(offset) == f.pcm.count, "discontinuity offset \(offset) outside tape.pcm")
+            c.expect(offset < 0 || probeLength == 0 || Int(offset) == f.pcm.count, "discontinuity offset \(offset) outside tape.pcm")
         }
+        c.law("C7.no-zero-fill")
         // Records after the gap continue from the same byte count.
         if i + 1 < s.lines.count, let next = s.lines[i + 1].int(IndexKey.byteOffset) {
             c.expect(next >= offset && next - offset <= e.postGapSamples * 2,
@@ -391,39 +467,157 @@ public enum Cases {
         return c.verdict
     }
 
-    // MARK: C8 — day rollover: a day_rollover discontinuity at the computed sample, straddling sample in the old day
+    // MARK: C8 — day rollover (U1 step 5, Mac grounding of 15 Sep read off f798edf)
+    //
+    // The Mac decides the boundary on the WALL clock of each capture buffer (CaptureTimeline.swift:141), splits the buffer
+    // at frameOffset = ceil(elapsed × input rate / 1e9) input frames (:146-149), publishes prefix audio, a marker whose
+    // wall_ns IS the target midnight, then suffix audio, and re-arms at target + 86 400 000 000 000 ns (:122-131). The first
+    // target of a capture session comes from Asia/Kolkata (ArchiveMidnightFoundation.swift:10-11). The marker is written by
+    // the generic discontinuity() (TapeWriter.swift:267-296) and resets the converter, so the old day holds exactly the
+    // output of its input frames: floor(frames / 3). Every law below is read off the tape's own records, so it holds on a
+    // real tape as well as a synthetic one.
 
     static func c8(_ f: Fixture) -> Verdict {
         guard let e = f.expected.c8 else { return .error("expected.json has no C8 block") }
         let s: IndexScan
         do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
+        let lines = s.lines
         let rs = regions(f, s)
         var c = Checks()
-        let total = TapeClock.samples(bytesWritten: Int64(f.pcm.count))
-        let markers = rs.indices.dropFirst().filter { rs[$0].openedBy == DiscontinuityCause.dayRollover }
-        c.expect(markers.count == 1, "expected exactly one day_rollover record, found \(markers.count)")
-        for m in markers {
-            let marker = rs[m], before = rs[m - 1]
-            let line = s.lines.first { $0.number == marker.anchorLine }
-            if let line {
-                for k in [IndexKey.gapNS, IndexKey.rms, IndexKey.peak, IndexKey.zeroRatio] where line.fields[k] != nil {
-                    c.expect(false, "day_rollover record (line \(line.number)) carries \(k)")
+        func cause(_ l: IndexLine) -> String? { if case .string(let v)? = l.fields[IndexKey.discontinuity] { return v }; return nil }
+        func isCheckpoint(_ l: IndexLine) -> Bool { l.fields[IndexKey.discontinuity] == nil }
+        let markers = lines.indices.filter { cause(lines[$0]) == DiscontinuityCause.dayRollover }
+        c.law("C8.pins")
+        c.expect(markers.count == e.rollovers.count, "tape.idx holds \(markers.count) day_rollover record(s), expected \(e.rollovers.count)")
+        let sessionBreaks: Set<String> = [DiscontinuityCause.restart, DiscontinuityCause.deviceLost, DiscontinuityCause.resumed]
+        let allowed: Set<String> = [IndexKey.byteOffset, IndexKey.samples, IndexKey.monoNS, IndexKey.wallNS, IndexKey.device,
+                                    IndexKey.discontinuity, IndexKey.inputFrames, IndexKey.inputSampleRate]
+
+        for (k, mi) in markers.enumerated() {
+            let r = lines[mi]
+            let n = r.number
+            guard let m = r.int(IndexKey.wallNS), let rs0 = r.int(IndexKey.samples) else {
+                c.law("C8.L1-keys")
+                c.expect(false, "day_rollover line \(n) has no wall_ns or samples")
+                continue
+            }
+            c.law("C8.L1-keys")
+            // L1 — the record's keys (TapeWriter.swift:267-296): no gap, no drops, no levels, no restart fields.
+            let extra = Set(r.fields.keys).subtracting(allowed).sorted()
+            c.expect(extra.isEmpty, "day_rollover line \(n) carries \(extra)")
+            for key in [IndexKey.byteOffset, IndexKey.monoNS, IndexKey.device] where r.fields[key] == nil {
+                c.expect(false, "day_rollover line \(n) has no \(key)")
+            }
+            c.law("C8.L2-target")
+            // L2 — wall_ns is the target itself, an IST midnight, not a clock read.
+            c.expect((m + TapeFormat.istOffsetNS) % TapeFormat.istDayNS == 0,
+                     "day_rollover line \(n) wall_ns \(m) is not an IST midnight (\((m + TapeFormat.istOffsetNS) % TapeFormat.istDayNS) ns past one)")
+            c.law("C8.L3-rearm")
+            // L3 — within one capture session each boundary is the previous one plus exactly one IST day.
+            if k > 0 {
+                let prev = lines[markers[k - 1]]
+                let broken = lines[(markers[k - 1] + 1)..<mi].contains { cause($0).map(sessionBreaks.contains) ?? false }
+                if !broken, let pm = prev.int(IndexKey.wallNS) {
+                    c.expect(m == pm + TapeFormat.istDayNS,
+                             "day_rollover line \(n) wall_ns \(m) is not the previous boundary (line \(prev.number)) + 86400000000000 = \(pm + TapeFormat.istDayNS) (Δ \(m - pm - TapeFormat.istDayNS) ns)")
                 }
             }
-            // The anchor is the region the marker closes.
-            let (boundary, sample) = DayRollover.rolloverSample(anchorSample: before.anchorSample, anchorWallNS: before.anchorWallNS)
-            c.expect(boundary == e.boundaryWallNS, "IST midnight computed at \(boundary) ns, expected \(e.boundaryWallNS)")
-            c.expect(boundary % TapeFormat.istDayNS == (TapeFormat.istDayNS - TapeFormat.istOffsetNS) % TapeFormat.istDayNS,
-                     "boundary \(boundary) is not an IST midnight")
-            c.expect(marker.start == sample, "day_rollover record at sample \(marker.start), computed \(sample) (anchored on line \(before.anchorLine))")
-            c.expect(sample == e.rolloverSample, "day_rollover computed at sample \(sample), expected \(e.rolloverSample)")
-            c.expect(marker.start > 0 && marker.start < total, "day_rollover sample \(marker.start) is not inside the \(total)-sample tape")
-            let wallAt = { (n: Int64) in TapeClock.wallNS(sample: n, anchorSample: before.anchorSample, anchorWallNS: before.anchorWallNS) }
-            let last = marker.start - 1
-            c.expect(wallAt(last) < boundary && boundary <= wallAt(marker.start),
-                     "the last old-day sample \(last) spans [\(wallAt(last)), \(wallAt(marker.start))), which does not end at or after midnight \(boundary)")
-            let straddles = wallAt(last) < boundary && boundary < wallAt(marker.start)
-            c.expect(straddles == e.straddling, "fixture says straddling=\(e.straddling), measured \(straddles)")
+            // The capture anchor after the marker (start of the suffix) and the forced checkpoint before it (end of the
+            // prefix), when the tape has them at the marker's own sample.
+            let after = mi + 1 < lines.count ? lines[mi + 1] : nil
+            let suffix = after.flatMap { isCheckpoint($0) && $0.int(IndexKey.samples) == rs0 ? $0.int(IndexKey.wallNS) : nil }
+            var bi = mi - 1
+            while bi >= 0, !isCheckpoint(lines[bi]), lines[bi].int(IndexKey.samples) == rs0, cause(lines[bi]) != DiscontinuityCause.dayRollover { bi -= 1 }
+            let before = bi >= 0 ? lines[bi] : nil
+            let prefixEnd = before.flatMap { isCheckpoint($0) && $0.fields[IndexKey.peak] != nil && $0.int(IndexKey.samples) == rs0 ? $0.int(IndexKey.wallNS) : nil }
+            let rate = (after?.double(IndexKey.inputSampleRate) ?? r.double(IndexKey.inputSampleRate)) ?? 48_000
+            // One input frame, as the Mac's truncating segmentEnd can express it: the new day's first wall time lies in
+            // [midnight, midnight + floor(1e9 / rate)] — [0, 20834) ns at 48 kHz — for split counts up to 1 200 frames
+            // (checked: no truncated count ≤ 1 200 falls below an exact frame edge).
+            let frameNS = Int64((1e9 / rate).rounded(.down))
+            func withinOneFrame(_ d: Int64) -> Bool { d >= 0 && d <= frameNS }
+            // The run of the marker: from the last restart record (or the tape start) up to the marker.
+            let sessionStart = lines[..<mi].lastIndex { cause($0) == DiscontinuityCause.restart }
+            let audioBefore = lines[((sessionStart ?? -1) + 1)..<mi].contains(where: isCheckpoint)
+            c.law("C8.L4-straddle")
+            // L4 — the straddling input frame stays in the OLD day: ceil for the frame count (CaptureTimeline.swift:146-149),
+            // floor for the new day's wall time (AudioRing.swift:323-325).
+            if let e0 = prefixEnd, let s0 = suffix, e0 == s0 {
+                // Split inside one buffer: prefix end == suffix start, and midnight lies in the last prefix frame.
+                c.expect(s0 >= m, "the old day's audio ends and the new day's begins at \(s0), \(m - s0) ns BEFORE midnight \(m) (line \(n)): the input frame straddling midnight was put in the NEW day")
+                c.expect(s0 < m || withinOneFrame(s0 - m), "the new day begins \(s0 - m) ns after midnight (line \(n)), outside [0, \(frameNS + 1)): at least one whole old-day input frame lies after midnight")
+            } else if let e0 = prefixEnd {
+                if e0 >= m {
+                    c.expect(withinOneFrame(e0 - m), "the prefix ends \(e0 - m) ns after midnight (line \(n)): a whole old-day input frame lies after midnight")
+                } else if let s0 = suffix {
+                    c.expect(s0 >= m, "the prefix ended before midnight and the new day begins at \(s0), \(m - s0) ns BEFORE midnight \(m) (line \(n)): new-day audio before the boundary")
+                }
+            } else if let s0 = suffix, !audioBefore {
+                c.expect(s0 >= m, "no audio preceded the marker, yet the new day begins \(m - s0) ns BEFORE midnight (line \(n))")
+            }
+            c.law("C8.L5-frames")
+            // L5 — the old day holds exactly the converter output of its input frames (reset at every discontinuity).
+            if let closed = rs.last(where: { $0.end == rs0 && $0.start <= rs0 && $0.anchorLine < n }),
+               let anchor = lines.first(where: { $0.number == closed.anchorLine }),
+               let f0 = anchor.int(IndexKey.inputFrames), let f1 = r.int(IndexKey.inputFrames), closed.openLine < n {
+                let want = Int64(DecimationRule.production.outputCount(frames: Int(f1 - f0)))
+                c.expect(rs0 - closed.start == want,
+                         "the day closed at line \(n) holds \(rs0 - closed.start) samples from \(f1 - f0) input frames (lines \(anchor.number)→\(n)); the conversion gives \(want)")
+            }
+            c.law("C8.L7-input-frames")
+            // L7 — input_frames keyed off currentInputSampleRate (TapeWriter.swift:285), which is declared per run() (:153),
+            // set by the run's first audio and cleared only by a format change (:290). A run is the tape from its start or
+            // from a restart record; a device loss does not start one.
+            c.expect((r.fields[IndexKey.inputFrames] != nil) == audioBefore,
+                     audioBefore ? "day_rollover line \(n) omits input_frames although audio preceded it in this run"
+                                 : "day_rollover line \(n) carries input_frames although no audio preceded it in this run (no input rate was known)")
+            c.law("C8.pins")
+            // Pins.
+            if k < e.rollovers.count {
+                let w = e.rollovers[k]
+                c.expect(n == w.line, "day_rollover \(k) is on line \(n), expected \(w.line)")
+                c.expect(m == w.boundaryWallNS, "day_rollover \(k) wall_ns \(m), expected \(w.boundaryWallNS)")
+                c.expect(r.int(IndexKey.monoNS) == w.markerMonoNS, "day_rollover \(k) mono_ns \(r.int(IndexKey.monoNS).map(String.init) ?? "absent"), expected \(w.markerMonoNS)")
+                c.expect(rs0 == w.rolloverSample, "day_rollover \(k) at sample \(rs0), expected \(w.rolloverSample)")
+                c.expect(r.int(IndexKey.inputFrames) == w.inputFrames, "day_rollover \(k) input_frames \(r.int(IndexKey.inputFrames).map(String.init) ?? "absent"), expected \(w.inputFrames.map(String.init) ?? "absent")")
+                c.expect(prefixEnd == w.prefixEndWallNS, "day_rollover \(k) prefix end wall_ns \(prefixEnd.map(String.init) ?? "none"), expected \(w.prefixEndWallNS.map(String.init) ?? "none")")
+                c.expect(suffix == w.suffixWallNS, "day_rollover \(k) suffix first wall_ns \(suffix.map(String.init) ?? "none"), expected \(w.suffixWallNS.map(String.init) ?? "none")")
+                let straddles = prefixEnd != nil && prefixEnd == suffix && (suffix ?? m) > m
+                c.expect(straddles == w.straddling, "day_rollover \(k): straddling measured \(straddles), expected \(w.straddling)")
+            }
+        }
+        c.law("C8.L6-no-unmarked-midnight")
+        // L6 — no unmarked midnight: a checkpoint stamped with the end of audio (it carries peak) at or after the first IST
+        // midnight following its region's start must be the forced checkpoint of a day_rollover at that same sample. A
+        // region opened by a day_rollover starts its day at the marker's wall_ns, not at its capture anchor.
+        for (ri, region) in rs.enumerated() {
+            let opener = lines.first { $0.number == region.openLine }
+            let dayStart = region.openedBy == DiscontinuityCause.dayRollover ? (opener?.int(IndexKey.wallNS) ?? region.anchorWallNS) : region.anchorWallNS
+            let boundary = DayRollover.nextISTMidnight(after: dayStart)
+            let nextOpen = ri + 1 < rs.count ? rs[ri + 1].openLine : Int.max
+            let closer = ri + 1 < rs.count ? lines.first { $0.number == rs[ri + 1].openLine } : nil
+            for l in lines where l.number >= region.openLine && l.number < nextOpen && isCheckpoint(l) && l.fields[IndexKey.peak] != nil {
+                guard let w = l.int(IndexKey.wallNS), w >= boundary else { continue }
+                let marked = closer.map { cause($0) == DiscontinuityCause.dayRollover && $0.int(IndexKey.samples) == l.int(IndexKey.samples) } ?? false
+                c.expect(marked, "line \(l.number) is stamped \(w - boundary) ns after IST midnight \(boundary) (region anchored on line \(region.anchorLine)) with no day_rollover at that boundary")
+            }
+        }
+        // L8 — the capture anchor is deferred to the first AUDIO after a run of markers: every discontinuity() sets
+        // needsCaptureAnchor (TapeWriter.swift:288-292), a marker item returns early (:323-326), and the anchor at :339-341
+        // is reached only for an audio item. So (a) no checkpoint sits between two discontinuity records unless audio was
+        // consumed between them (an anchor always precedes at least one consumed frame), and (b) the first record after
+        // the last marker of a run, if it is a checkpoint, is that marker's empty-window anchor at the same sample.
+        c.law("C8.L8-anchor-deferred")
+        for i in lines.indices where !isCheckpoint(lines[i]) && cause(lines[i]) != DiscontinuityCause.stopped && i + 1 < lines.count {
+            let d = lines[i], next = lines[i + 1]
+            guard isCheckpoint(next) else { continue }
+            let anchorShaped = next.fields[IndexKey.peak] == nil && next.int(IndexKey.samples) == d.int(IndexKey.samples)
+            c.expect(anchorShaped, "line \(next.number) follows the \(cause(d) ?? "?") record on line \(d.number) but is not its capture anchor (it carries levels or another sample): audio after the marker was written without the deferred anchor")
+            if anchorShaped, i + 2 < lines.count, !isCheckpoint(lines[i + 2]), lines[i + 2].int(IndexKey.samples) == next.int(IndexKey.samples) {
+                let after = lines[i + 2]
+                let consumed = after.int(IndexKey.inputFrames).map { f in next.int(IndexKey.inputFrames).map { f > $0 } ?? true } ?? false
+                c.expect(consumed, "line \(next.number) is a capture anchor between the \(cause(d) ?? "?") record (line \(d.number)) and the \(cause(after) ?? "?") record (line \(after.number)) with no audio consumed between them: the anchor must wait for the first audio after both")
+            }
         }
         return c.verdict
     }
@@ -437,10 +631,12 @@ public enum Cases {
 
         // Assertion 1: the arguments, byte for byte.
         let argv = PieceEncoder.arguments(input: PieceEncoder.inputPlaceholder, output: PieceEncoder.outputPlaceholder)
+        c.law("C10.argv")
         c.expect(argv.map { Array($0.utf8) } == e.argv.map { Array($0.utf8) },
                  "encoder arguments differ from pinned\n        pinned: \(e.argv)\n        built:  \(argv)")
 
         // Assertion 2: the decoded audio, within the manifest's stated tolerance.
+        c.law("C10.decoded-audio")
         let env: EncoderEnvironment
         switch EncoderEnvironment.detect() {
         case .success(let v): env = v
@@ -506,17 +702,18 @@ public enum C10Probe {
     }
 }
 
-/// C7's zero-fill probe (U1 spec §11.5). A run of min(gap samples, 16) exact zero samples is zero fill, looked for
-/// starting `exemptSamples` after the discontinuity: the first 40 samples after any boundary are the decimation
-/// filter's ramp-up from a zeroed history (§11.4), where near-zero output is correct.
+/// C7's zero-fill probe (U1 spec §11.5). A run of `length` exact zero samples is zero fill — min(gap samples, 16) after a
+/// gap, 16 after a gapless boundary — looked for starting `exemptSamples` after the discontinuity: the first 40 samples
+/// after any boundary are the decimation filter's ramp-up from a zeroed history (§11.4), where near-zero output is correct.
 public enum C7ZeroProbe {
     public static let exemptSamples = DecimationRule.production.rampOutputSamples
     public static let threshold = 16
 
     public struct Result: Sendable { public var inRange: Bool; public var exempt: Int; public var length: Int; public var zeroRun: Int; public var zeroFill: Bool }
 
-    public static func run(pcm: [UInt8], byteOffset: Int64, gapNS: Int64, exemptSamples: Int) -> Result {
-        let length = Int(min(gapNS / TapeFormat.nsPerSample, Int64(threshold)))
+    public static func length(gapNS: Int64) -> Int { Int(min(gapNS / TapeFormat.nsPerSample, Int64(threshold))) }
+
+    public static func run(pcm: [UInt8], byteOffset: Int64, length: Int, exemptSamples: Int) -> Result {
         let start = Int(byteOffset) + exemptSamples * 2
         guard byteOffset >= 0, length > 0, start + length * 2 <= pcm.count else {
             return Result(inRange: false, exempt: exemptSamples, length: length, zeroRun: 0, zeroFill: false)

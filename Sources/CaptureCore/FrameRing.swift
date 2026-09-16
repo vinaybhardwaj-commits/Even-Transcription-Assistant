@@ -10,9 +10,10 @@ public final class FrameRing: @unchecked Sendable {
         /// Frames dropped by the ring. 0 for a capture-side marker (a device overrun or loss), whose loss ALSA does
         /// not count.
         public var frames: Int64
-        /// "ring_overflow", "capture_discontinuity" or "device_lost".
+        /// "ring_overflow", "capture_discontinuity", "device_lost" or "day_rollover".
         public var cause: String
-        /// Capture-side markers: CLOCK_MONOTONIC and CLOCK_REALTIME read when the capture thread detected the event.
+        /// Capture-side markers carry their own clocks: device_lost the moment of detection; day_rollover the
+        /// interpolated monotonic time and the target wall time (the IST midnight itself).
         public var monoNS: Int64? = nil
         public var wallNS: Int64? = nil
         enum CodingKeys: String, CodingKey { case frames, cause, firstFrame = "first_frame", monoNS = "mono_ns", wallNS = "wall_ns" }
@@ -147,31 +148,44 @@ public final class FrameRing: @unchecked Sendable {
     }
 }
 
-/// When each input frame arrived. The capture thread stamps every read with CLOCK_MONOTONIC and CLOCK_REALTIME, read
-/// back to back immediately after snd_pcm_readi returns; frame F in a read whose last frame is L is placed at
-/// stamp − (L − F) × 1e9 / rate. Frames not yet read are extrapolated forward from the latest stamp.
+/// When each input frame was captured. Every buffer (or rollover segment) is stamped with its first frame, its frame
+/// count and its monotonic and wall START; frame F of a segment starting at S occupies
+///   [S + duration(F − first), S + duration(F − first + 1))   (FrameTime.duration: the Mac's segmentEnd arithmetic)
+/// so a segment's end is FrameTime.segmentEnd(start: S, frames: count). Frames beyond the latest segment extrapolate it.
 public final class ArrivalClock: @unchecked Sendable {
-    public struct Stamp: Sendable { public var lastFrame: Int64; public var monoNS: Int64; public var wallNS: Int64 }
+    public struct Stamp: Sendable { public var firstFrame: Int64; public var frames: Int64; public var monoStartNS: Int64; public var wallStartNS: Int64 }
     public let rate: Int64
     private var stamps: [Stamp] = []
     private let lock = NSLock()
 
     public init(rate: Int64) { self.rate = rate }
 
-    public func stamp(lastFrame: Int64, monoNS: Int64, wallNS: Int64) {
+    public func stamp(firstFrame: Int64, frames: Int64, monoStartNS: Int64, wallStartNS: Int64) {
         lock.lock()
         defer { lock.unlock() }
-        stamps.append(Stamp(lastFrame: lastFrame, monoNS: monoNS, wallNS: wallNS))
+        stamps.append(Stamp(firstFrame: firstFrame, frames: frames, monoStartNS: monoStartNS, wallStartNS: wallStartNS))
         if stamps.count > 4096 { stamps.removeFirst(2048) }
     }
 
-    /// (mono, wall) arrival time of capture frame `frame`, nil before any read.
-    public func time(of frame: Int64) -> (monoNS: Int64, wallNS: Int64)? {
+    private func boundary(_ k: Int64) -> (monoNS: Int64, wallNS: Int64)? {
         lock.lock()
         defer { lock.unlock() }
-        guard let last = stamps.last else { return nil }
-        let s = stamps.first(where: { $0.lastFrame >= frame }) ?? last
-        let offset = (frame - s.lastFrame) * 1_000_000_000 / rate
-        return (s.monoNS + offset, s.wallNS + offset)
+        guard let s = stamps.last(where: { $0.firstFrame <= k }) ?? stamps.first else { return nil }
+        let d = k - s.firstFrame
+        let offset = d >= 0 ? FrameTime.duration(frames: d, rate: rate) : -FrameTime.duration(frames: -d, rate: rate)
+        return (s.monoStartNS + offset, s.wallStartNS + offset)
+    }
+
+    /// (mono, wall) start of capture frame `frame`, nil before any stamp.
+    public func start(of frame: Int64) -> (monoNS: Int64, wallNS: Int64)? { boundary(frame) }
+
+    /// (mono, wall) end of capture frame `frame`: the end of its own segment's frame, not the next segment's start.
+    public func end(of frame: Int64) -> (monoNS: Int64, wallNS: Int64)? {
+        lock.lock()
+        let s = stamps.last(where: { $0.firstFrame <= frame }) ?? stamps.first
+        lock.unlock()
+        guard let s else { return nil }
+        let offset = FrameTime.duration(frames: frame - s.firstFrame + 1, rate: rate)
+        return (s.monoStartNS + offset, s.wallStartNS + offset)
     }
 }

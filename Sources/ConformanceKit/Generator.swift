@@ -189,8 +189,6 @@ public enum FixtureGenerator {
     static let cleanAnchorNS: Int64 = 1_789_360_200_123_456_789
     /// 2026-09-14 00:00:00 IST, as UTC ns.
     static let istMidnightNS: Int64 = 1_789_324_200_000_000_000
-    /// 2.00004 s before that midnight: midnight lands 0.64 of the way through sample 32 000.
-    static let midnightAnchorNS: Int64 = istMidnightNS - 2_000_040_000
     static let monoStart: UInt64 = 86_400_123_000_000
 
     static let dmic = "sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in"
@@ -687,33 +685,6 @@ public enum FixtureGenerator {
                      pcm: pcm, idx: idx, expected: e)
     }
 
-    static func istMidnightBuilder(rolloverAt: Int64) -> TapeBuilder {
-        var b = TapeBuilder(device: dmic, wall: midnightAnchorNS, mono: monoStart, inputRate: ("48000", 3, 1))
-        b.checkpoint(0, window: false)
-        b.checkpoints(every: 16_000, after: 0, through: 32_000)
-        b.discontinuity(rolloverAt, cause: DiscontinuityCause.dayRollover)
-        b.checkpoints(every: 16_000, after: 32_000, through: 64_000)
-        return b
-    }
-
-    static func istMidnight() -> Draft {
-        let syn: [SynthSegment] = [.tone(1000, 0.5, 64_000)]
-        let b = istMidnightBuilder(rolloverAt: 32_001)
-        let clock = TapeBuilder(device: dmic, wall: midnightAnchorNS, mono: 0, inputRate: nil)
-        var e = ExpectedAnswers()
-        e.c4 = ClockExpected(points: [
-            point("anchor", "sample:0", clock, 0),
-            point("straddling sample, last of the old day", "sample:32000", clock, 32_000),
-            point("first sample of the new day (day_rollover anchor)", "sample:32001", clock, 32_001),
-            point("end of tape", "pcm_end", clock, 64_000),
-        ])
-        e.c8 = C8Expected(boundaryWallNS: istMidnightNS, rolloverSample: 32_001, straddling: true)
-        return Draft(manifest: manifest("ist-midnight",
-                                        "4 s tone starting 2.00004 s before 2026-09-14 00:00 IST. Midnight falls inside sample 32000, which stays in the old day; the day_rollover discontinuity is at 32001.",
-                                        [.C1, .C2, .C4, .C8], syn),
-                     pcm: Synth.render(syn), idx: b.idx, expected: e)
-    }
-
     // MARK: Negative controls
 
     static func negative(_ base: Draft, name: String, target: CaseID, corruption: String, _ mutate: (inout Draft) -> Void) -> Draft {
@@ -734,7 +705,7 @@ public enum FixtureGenerator {
         return Array(lines.joined(separator: "\n").utf8)
     }
 
-    static func negatives(clean: Draft, disc: Draft, torn: Draft, multi: Draft, midnight: Draft, above: Draft, darwin: Draft, lost: Draft, odd: Draft) -> [Draft] {
+    static func negatives(clean: Draft, disc: Draft, torn: Draft, multi: Draft, above: Draft, darwin: Draft, lost: Draft, odd: Draft) -> [Draft] {
         func cleanRecords(_ edit: (inout [SynthRecord]) -> Void) -> [UInt8] {
             var b = cleanShortBuilder()
             edit(&b.records)
@@ -829,11 +800,6 @@ public enum FixtureGenerator {
                 d.manifest.synthesis!.insert(.silence(8_000), at: 2)
                 d.idx = discontinuityBuilder(zeroFill: 8_000).idx
             },
-            negative(midnight, name: "c8-straddle-moved-to-new-day", target: .C8,
-                     corruption: "day_rollover is written at sample 32000: the straddling sample is moved into the new day (rounded down), and expected.json claims 32000.") { d in
-                d.idx = istMidnightBuilder(rolloverAt: 32_000).idx
-                d.expected.c8!.rolloverSample = 32_000
-            },
         ]
     }
 
@@ -857,13 +823,15 @@ public enum FixtureGenerator {
             throw FixtureLoadError(fixture: "good/clean-short", reason: "libopus is not compiled into \(env.ffmpegPath): \(env.opusEncoders)")
         }
         let clean = try cleanShort(encoder: env), disc = discontinuity(), torn = tornTail()
-        let blank = interiorBlank(), multi = multiPiece(), multiGap = multiPieceGap(), midnight = istMidnight()
+        let blank = interiorBlank(), multi = multiPiece(), multiGap = multiPieceGap(), midnight = try istMidnight()
         let below = gapRoundingBelow(), above = gapRoundingAbove(), darwin = darwinDoubles(), lost = deviceLostResumed(), quiet = c7QuietRoom(), odd = try restartOddTail()
+        let two = try twoRollovers().0, before = try beforeFirstAudio(), quietMidnight = try quietRoomMidnight(), lostMidnight = try deviceLostAtMidnight()
         var written: [String] = []
-        for d in [clean, disc, torn, blank, multi, multiGap, below, above, midnight, darwin, lost, quiet, odd] + c9Good() {
+        for d in [clean, disc, torn, blank, multi, multiGap, below, above, midnight, two, before, quietMidnight, lostMidnight, darwin, lost, quiet, odd] + c9Good() {
             written.append(try write(d, to: root.appendingPathComponent("good").appendingPathComponent(d.manifest.name)))
         }
-        for d in negatives(clean: clean, disc: disc, torn: torn, multi: multi, midnight: midnight, above: above, darwin: darwin, lost: lost, odd: odd) + c9Negatives() {
+        for d in negatives(clean: clean, disc: disc, torn: torn, multi: multi, above: above, darwin: darwin, lost: lost, odd: odd) + c9Negatives()
+            + (try rolloverNegatives(midnight: midnight, two: two, before: before, quiet: quietMidnight, lost: lostMidnight)) {
             written.append(try write(d, to: root.appendingPathComponent("negative").appendingPathComponent(d.manifest.name)))
         }
         return written

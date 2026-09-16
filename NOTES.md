@@ -327,3 +327,441 @@ A missing/unreadable manifest is a hard error (exit 2). A present fixture not in
 coverage problem. New fixtures must be added to the list in the same change.
 
 Not a C-check change: the rows and assertions of C1–C10 are unchanged; this is the suite's verdict over them.
+
+## U1 step 5 — day rollover (15 Sep), built on the Mac grounding read off f798edf
+
+**Correction received:** `ArchiveMidnightFoundation.swift` is live (CaptureSession.init calls it; it alone defines the
+zone). The rest of the Archive family stays dead.
+
+What the Mac does, and what this port now does:
+- **Clock: wall.** CaptureTimeline.swift:141 `guard let target = nextRolloverWallNS, target <= wallEndNS`. Buffer wall start
+  = observed − callback lag (:48-51); Linux: read-return CLOCK_REALTIME − segmentEnd duration of the buffer.
+- **Zone: once per capture session.** ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata, 19 800 s); CaptureSession.init
+  stores `ArchiveISTDay.nextMidnight(now:)`. Linux: `ISTDay.nextMidnight` at stream open and at every device reopen,
+  from the zone's offset (no zone data → the recorder refuses to start; tzdata is a runtime dependency on the fleet).
+- **Re-arm: flat.** didPublishFrame (:122-131): target + 86 400 000 000 000, overflow → nil. No calendar re-query.
+- **Split.** CaptureTimeline.swift:141-150: target <= wall start → frameOffset 0 and mono_ns = mono start; otherwise
+  frameOffset = min(n, ceil(elapsed × rate / 1e9)) (:146-149) and mono_ns = mono start + (target − wall start), exact
+  integer addition. Prefix audio, marker (wall_ns = target exactly, gap 0, drops 0), suffix audio whose wall start is
+  segmentEnd(start, prefixFrames) (AudioRing.swift:143-215) with segmentEnd = start + UInt64(Double(frameCount) /
+  sampleRate × 1e9) (AudioRing.swift:323-325): ceil for the count, floor (truncation) for the time. Marker wall_ns and
+  the new day's first wall_ns are two numbers; both are pinned, and their difference is asserted in [0, 20834) ns.
+- **Record.** Generic discontinuity() (TapeWriter.swift:267-296), `day_rollover` (AudioRing.swift:20); input_frames and
+  input_sample_rate only when an input rate is known.
+- **Reset.** resampler = nil, latest audio times = nil, needsCaptureAnchor = true (:288-292): a day rollover is a
+  converter reset, so §11.5 applies there (fixture `good/c7-quiet-room-midnight`).
+
+### The Mac has no multi-rollover test
+
+cap08 drives one boundary, cap09 checks the same boundary does not re-fire, cap10 checks edge alignment on two fresh
+instances. **Nothing on the Mac drives two successive boundaries on one timeline.** `good/ist-midnight-two-rollovers`
+is the first test of that path anywhere: it pins the Mac's arithmetic exactly (second boundary = first +
+86 400 000 000 000 ns, one capture session), with negatives for a re-arm from the new day's wall time and for no re-arm.
+**A future Mac change to the re-arm will not be caught by the Mac's own suite.**
+
+### Inherited limit of the Mac — an NTP step across a boundary is undetectable (U3, not touched)
+
+The target is fixed at session start and advanced by flat arithmetic; the Mac never re-derives it from the wall clock
+when the wall clock steps, and neither does this port. An NTP step (or any settimeofday) that moves CLOCK_REALTIME across
+a midnight inside a session therefore puts the rollover at the wrong audio — a step forward past the target fires it at
+the next buffer (frameOffset 0), ahead of the true midnight; a step back delays it by the size of the step — and nothing
+on the tape records the step. `clock_jump` is neither
+detected nor written (Mac: CaptureTimeline.swift:79-90). Recorded here as inherited, per instruction; U3.
+
+### The capture anchor — deferred to the first audio after a run of markers (corrected 15 Sep, orchestrator read)
+
+The step 5 report said the anchor follows EVERY discontinuity. **Wrong.** TapeWriter.swift:339-341 is a plain
+`if needsCaptureAnchor`, but it sits after the early return for a marker item at :323-326, so it is reached only when the
+next ring item is audio. Every discontinuity() sets the flag (:288-292); the anchor is written before the first audio after
+any run of markers, and adjacent markers get none between them. device_lost + resumed at one sample is that case. The
+implementation already behaved so (the anchor is written only on a frames item; resumed is written just before it); the
+statement is corrected, and it is now pinned: C8.L8 and `good/ist-midnight-device-lost-at-midnight` (day_rollover,
+device_lost and resumed adjacent at sample 16000, one anchor after resumed), with negatives
+`c8-anchor-between-adjacent-markers` and `c8-no-anchor-after-markers`. Step 3's reconciliation had removed the anchor
+after discontinuities; it stays restored. Real tape u1-step5-midnight: anchor after day_rollover (19), ring_overflow (34),
+and after resumed (44) with none between device_lost (42) and resumed (43). good/u1-real-faults (step 4) predates it.
+
+### input_frames belongs to the run, not the capture session (orchestrator read, 15 Sep)
+
+currentInputSampleRate is declared per run() (TapeWriter.swift:153), keys input_frames (:285), and is reset only on
+.formatChange (:290). A device loss or a new CaptureSession keeps it (real fault tape lines 1868 and 1869 both carry
+114042000); a restarted process has none until its own first audio. Changed: TapeSession's predicate was
+`audioArrived || writer.prior?.lastInputFrames != nil`, now `audioArrived` — for every discontinuity record and for
+`stopped`. The step 3 predicate for `stopped` (prior input_frames counted as a known rate) was wrong in the one case of a
+restarted run that stops before any audio.
+
+### Settled by source (orchestrator read, 15 Sep) — no assumption left from the step 5 report
+
+- segmentEnd: AudioRing.swift:323-325, truncating Double (was: nearest ns, assumed). `FrameTime.duration` now computes
+  `UInt64(Double(frames) / Double(rate) × 1e9)`. Checked: for every split count ≤ 1 200 frames the truncation never falls
+  below an exact frame edge (the first count where it does is 3 003), so the new-day offset stays in [0, 20834) ns.
+- Marker mono_ns and the clamp: CaptureTimeline.swift:141-150 (was: assumed). The clamp now also gives mono_ns = mono start
+  (step 5 had mono start + a negative delta). `good/ist-midnight-before-first-audio` now pins mono_ns = mono0.
+- input_frames before first audio: TapeWriter.swift:153, :285 — the fixture and its negative stand.
+- Still chosen, not read: when midnight falls inside a gap still waiting for its new-side audio, the gap's record is
+  written before the day_rollover record.
+
+### C8 — prior assertion (FIX1 through U1 step 4), `Sources/ConformanceKit/Cases.swift`, replaced 15 Sep
+
+```swift
+    // MARK: C8 — day rollover: a day_rollover discontinuity at the computed sample, straddling sample in the old day
+
+    static func c8(_ f: Fixture) -> Verdict {
+        guard let e = f.expected.c8 else { return .error("expected.json has no C8 block") }
+        let s: IndexScan
+        do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
+        let rs = regions(f, s)
+        var c = Checks()
+        let total = TapeClock.samples(bytesWritten: Int64(f.pcm.count))
+        let markers = rs.indices.dropFirst().filter { rs[$0].openedBy == DiscontinuityCause.dayRollover }
+        c.expect(markers.count == 1, "expected exactly one day_rollover record, found \(markers.count)")
+        for m in markers {
+            let marker = rs[m], before = rs[m - 1]
+            let line = s.lines.first { $0.number == marker.anchorLine }
+            if let line {
+                for k in [IndexKey.gapNS, IndexKey.rms, IndexKey.peak, IndexKey.zeroRatio] where line.fields[k] != nil {
+                    c.expect(false, "day_rollover record (line \(line.number)) carries \(k)")
+                }
+            }
+            // The anchor is the region the marker closes.
+            let (boundary, sample) = DayRollover.rolloverSample(anchorSample: before.anchorSample, anchorWallNS: before.anchorWallNS)
+            c.expect(boundary == e.boundaryWallNS, "IST midnight computed at \(boundary) ns, expected \(e.boundaryWallNS)")
+            c.expect(boundary % TapeFormat.istDayNS == (TapeFormat.istDayNS - TapeFormat.istOffsetNS) % TapeFormat.istDayNS,
+                     "boundary \(boundary) is not an IST midnight")
+            c.expect(marker.start == sample, "day_rollover record at sample \(marker.start), computed \(sample) (anchored on line \(before.anchorLine))")
+            c.expect(sample == e.rolloverSample, "day_rollover computed at sample \(sample), expected \(e.rolloverSample)")
+            c.expect(marker.start > 0 && marker.start < total, "day_rollover sample \(marker.start) is not inside the \(total)-sample tape")
+            let wallAt = { (n: Int64) in TapeClock.wallNS(sample: n, anchorSample: before.anchorSample, anchorWallNS: before.anchorWallNS) }
+            let last = marker.start - 1
+            c.expect(wallAt(last) < boundary && boundary <= wallAt(marker.start),
+                     "the last old-day sample \(last) spans [\(wallAt(last)), \(wallAt(marker.start))), which does not end at or after midnight \(boundary)")
+            let straddles = wallAt(last) < boundary && boundary < wallAt(marker.start)
+            c.expect(straddles == e.straddling, "fixture says straddling=\(e.straddling), measured \(straddles)")
+        }
+        return c.verdict
+    }
+```
+
+with `Sources/ConformanceKit/Clock.swift`:
+
+```swift
+public enum DayRollover {
+    /// The first IST midnight strictly after `wallNS`, as a UTC wall time in ns.
+    public static func nextISTMidnight(after wallNS: Int64) -> Int64 {
+        let local = wallNS + TapeFormat.istOffsetNS
+        let day = local / TapeFormat.istDayNS
+        return (day + 1) * TapeFormat.istDayNS - TapeFormat.istOffsetNS
+    }
+
+    /// The sample at which the `day_rollover` discontinuity is written, as CaptureTimeline.swift:134-152:
+    ///   frameOffset = Int((Double(elapsedNS) * sampleRate / 1_000_000_000).rounded(.up))
+    /// Frames 0..<frameOffset are the prefix (old day). Rounding up puts a sample that straddles midnight in
+    /// the prefix: it is the LAST sample of the old day, and the marker lands on the sample after it.
+    public static func rolloverSample(anchorSample: Int64, anchorWallNS: Int64) -> (boundaryWallNS: Int64, sample: Int64) {
+        let boundary = nextISTMidnight(after: anchorWallNS)
+        let elapsedNS = boundary - anchorWallNS
+        let frameOffset = Int64((Double(elapsedNS) * Double(TapeFormat.sampleRate) / 1_000_000_000).rounded(.up))
+        return (boundary, anchorSample + frameOffset)
+    }
+}
+```
+
+and `Sources/ConformanceKit/Fixture.swift` (C7Expected, C8Expected):
+
+```swift
+public struct C7Expected: Codable, Equatable, Sendable {
+    /// 1-based index line carrying the discontinuity.
+    public var line: Int
+    /// The record's `discontinuity` value.
+    public var cause: String
+    public var gapNS: Int64
+    public var droppedInputFrames: Int64
+    /// Real audio samples written before and after the gap. The tape holds exactly their sum.
+    public var preGapSamples: Int64
+    public var postGapSamples: Int64
+    enum CodingKeys: String, CodingKey {
+        case line, cause
+        case gapNS = "gap_ns", droppedInputFrames = "dropped_input_frames"
+        case preGapSamples = "pre_gap_samples", postGapSamples = "post_gap_samples"
+    }
+}
+
+/// The anchor is read from the index: the region that the day_rollover record closes.
+public struct C8Expected: Codable, Equatable, Sendable {
+    public var boundaryWallNS: Int64
+    public var rolloverSample: Int64
+    /// True when midnight falls strictly inside a sample, so the rounding rule is exercised.
+    public var straddling: Bool
+    enum CodingKeys: String, CodingKey {
+        case straddling
+        case boundaryWallNS = "boundary_wall_ns", rolloverSample = "rollover_sample"
+    }
+}
+```
+
+Changed because:
+1. **Wrong domain.** It placed the marker at `anchor + ceil(elapsed × 16000 / 1e9)` in TAPE samples. The Mac splits in
+   INPUT frames at the device rate, and the converter resets at the marker, dropping up to two frames of an incomplete
+   group, so the old day holds floor(ceil(elapsed × 48000 / 1e9) / 3) samples. The two agree only when the frame holding
+   midnight is the third of its group: in two cases of three a correct recorder failed the old C8. (Its fixture passed
+   because it was hand-built to the 16 kHz model.)
+2. **One rollover only** (`markers.count == 1`): a tape across two midnights could not pass.
+3. **Sample-clock straddle from the region anchor** holds only on an ideal clock; a real tape's wall stamps wander by
+   milliseconds, so C8 could never run on a recording. The new straddle law reads the forced checkpoint and the capture
+   anchor around the marker, which come from the same buffer stamps the recorder split on.
+4. It did not pin the marker's wall_ns against the new day's first wall_ns, the error the grounding warned of.
+
+### C7 — prior assertion (U1 step 4, §11.5), `Sources/ConformanceKit/Cases.swift`, replaced 15 Sep
+
+```swift
+    static func c7(_ f: Fixture) -> Verdict {
+        guard let e = f.expected.c7 else { return .error("expected.json has no C7 block") }
+        let s: IndexScan
+        do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
+        guard let i = s.lines.firstIndex(where: { $0.number == e.line }) else { return .error("tape.idx has no line \(e.line)") }
+        let d = s.lines[i]
+        var c = Checks()
+
+        let cause: String? = { if case .string(let v)? = d.fields[IndexKey.discontinuity] { return v }; return nil }()
+        c.expect(cause == e.cause, "line \(e.line): discontinuity is \(cause ?? "absent"), expected \(e.cause)")
+        let gap = d.int(IndexKey.gapNS)
+        let dropped = d.int(IndexKey.droppedInputFrames)
+        c.expect(gap != nil, "line \(e.line): gap_ns absent")
+        c.expect(dropped != nil, "line \(e.line): dropped_input_frames absent")
+        c.expect((gap ?? 0) > 0, "line \(e.line): gap_ns is \(gap.map(String.init) ?? "absent"), must be non-zero")
+        c.expect((dropped ?? 0) > 0, "line \(e.line): dropped_input_frames is \(dropped.map(String.init) ?? "absent"), must be non-zero")
+        c.expect(gap == e.gapNS, "line \(e.line): gap_ns \(gap.map(String.init) ?? "absent") != expected \(e.gapNS)")
+        c.expect(dropped == e.droppedInputFrames, "line \(e.line): dropped_input_frames \(dropped.map(String.init) ?? "absent") != expected \(e.droppedInputFrames)")
+
+        // The discontinuity is metadata-only: it sits exactly where the real pre-gap audio ends.
+        let offset = d.int(IndexKey.byteOffset) ?? -1
+        c.expect(offset == e.preGapSamples * 2, "discontinuity byte_offset \(offset) != pre-gap audio \(e.preGapSamples) × 2")
+        // No zero fill: the tape holds exactly the real audio, not a sample more.
+        let real = (e.preGapSamples + e.postGapSamples) * 2
+        c.expect(Int64(f.pcm.count) == real,
+                 "tape.pcm is \(f.pcm.count) bytes, real audio is \(real): \(Int64(f.pcm.count) - real) bytes (\((Int64(f.pcm.count) - real) / 2) samples) inserted across the gap")
+        // The bytes after the discontinuity are real post-gap audio, not a run of zeros. §11.5: the probe skips the first
+        // rampOutputSamples (40) after the boundary, where the reset filter's near-zero output is correct behaviour.
+        let probe = C7ZeroProbe.run(pcm: f.pcm, byteOffset: offset, gapNS: e.gapNS, exemptSamples: C7ZeroProbe.exemptSamples)
+        if probe.inRange {
+            c.expect(!probe.zeroFill, "tape.pcm holds a run of ≥\(probe.length) zero samples starting \(probe.exempt) samples after the discontinuity offset \(offset): zero fill")
+        } else {
+            c.expect(offset < 0 || e.gapNS < TapeFormat.nsPerSample || Int(offset) == f.pcm.count, "discontinuity offset \(offset) outside tape.pcm")
+        }
+        // Records after the gap continue from the same byte count.
+        if i + 1 < s.lines.count, let next = s.lines[i + 1].int(IndexKey.byteOffset) {
+            c.expect(next >= offset && next - offset <= e.postGapSamples * 2,
+                     "record after the gap at byte_offset \(next) is not within the post-gap audio (\(offset)…\(offset + e.postGapSamples * 2))")
+        }
+        return c.verdict
+    }
+```
+
+with the probe:
+
+```swift
+/// C7's zero-fill probe (U1 spec §11.5). A run of min(gap samples, 16) exact zero samples is zero fill, looked for
+/// starting `exemptSamples` after the discontinuity: the first 40 samples after any boundary are the decimation
+/// filter's ramp-up from a zeroed history (§11.4), where near-zero output is correct.
+public enum C7ZeroProbe {
+    public static let exemptSamples = DecimationRule.production.rampOutputSamples
+    public static let threshold = 16
+
+    public struct Result: Sendable { public var inRange: Bool; public var exempt: Int; public var length: Int; public var zeroRun: Int; public var zeroFill: Bool }
+
+    public static func run(pcm: [UInt8], byteOffset: Int64, gapNS: Int64, exemptSamples: Int) -> Result {
+        let length = Int(min(gapNS / TapeFormat.nsPerSample, Int64(threshold)))
+        let start = Int(byteOffset) + exemptSamples * 2
+        guard byteOffset >= 0, length > 0, start + length * 2 <= pcm.count else {
+            return Result(inRange: false, exempt: exemptSamples, length: length, zeroRun: 0, zeroFill: false)
+        }
+        var run = 0
+        while run < length, pcm[start + run * 2] == 0, pcm[start + run * 2 + 1] == 0 { run += 1 }
+        return Result(inRange: true, exempt: exemptSamples, length: length, zeroRun: run, zeroFill: run >= length)
+    }
+}
+```
+
+Changed because: §11.5 applies at a day_rollover (a converter reset), and a rollover has no gap. C7 now accepts a
+boundary whose expected `gap_ns` and `dropped_input_frames` are both absent: it must be a `day_rollover`, the record must
+carry neither key, and the zero-run probe is 16 samples. Gap-carrying boundaries are checked exactly as before.
+
+### Fixtures (all written by the production CaptureSide + TapeSession + TapeWriter; expected answers by hand arithmetic)
+
+| Fixture | Cases | What it pins | Negative control(s) and the one reason each fails |
+|---|---|---|---|
+| good/ist-midnight (regenerated) | C1 C2 C4 C8 | midnight 0.499984 into frame 96002; split 96003 frames → 32001 samples; marker wall M, new day M + 10417 ns | c8-straddle-moved-to-new-day (split rounded down: "the new day begins 10417 ns BEFORE midnight … put in the NEW day"); c1-bytes-after-stopped (C1: final stopped byte_offset ≠ tape.pcm length); c8-marker-stamped-with-suffix-wall ("not an IST midnight"); c8-suffix-stamped-at-midnight (pinned suffix wall) |
+| good/ist-midnight-two-rollovers | C1 C2 C3 C4 C5 C8 | one session, M1 then M1 + 86400000000000 exactly; second boundary edge-aligned (marker = new day = M2) | c8-rearmed-from-suffix-wall ("not an IST midnight", "not previous + 86400000000000"); c8-second-midnight-not-armed ("stamped … after IST midnight with no day_rollover") |
+| good/ist-midnight-before-first-audio | C1 C2 C4 C8 | marker is line 1 at sample 0, no input_frames | c8-input-frames-before-first-audio ("carries input_frames although no audio preceded it") |
+| good/c7-quiet-room-midnight | C1 C2 C7 C8 | §11.5 at a rollover: zero run 16 with no exemption, 0 with 40 (enforced at generation) | c7-zero-filled-rollover (400 zeros at the marker) |
+| good/ist-midnight-device-lost-at-midnight | C1 C2 C3 C4 C5 C8 | buffer ends exactly at midnight (split after all frames, no suffix); day_rollover, device_lost, resumed adjacent; one capture anchor after resumed; zone re-queried at reopen | c8-anchor-between-adjacent-markers ("a capture anchor between the device_lost record and the resumed record with no audio consumed"); c8-no-anchor-after-markers ("not its capture anchor … written without the deferred anchor") |
+| good/u1-real-midnight (out-of-repo audio) | C1 C2 C3 C5 C6 C7 C8 | real room audio across an injected midnight, plus ring_overflow and device loss; C8 pins from the capture-side split log | (laws shared with the synthetic negatives) |
+
+The generator no longer hand-formats rollover tapes; `TapeBuilder` fixtures are unchanged. Regenerated in the fleet
+image: every pre-existing fixture file is bit-identical except good/ist-midnight and negative/c8-straddle-moved-to-new-day
+(both rebuilt on the corrected model), and 9 new fixture directories. After the 15 Sep rulings: 3 more new fixture
+directories, and only ist-midnight-before-first-audio (mono clamp), its negative and the straddle negative (truncating
+segmentEnd: M − 10 417 ns) changed.
+
+### C4 and the trailing `stopped` region — ruled 15 Sep: C4 unchanged
+
+A `stopped` record opens a zero-length region: it has no pcm_end of its own and its clocks describe the stop, not audio.
+Pinning the last sample is correct; C4 is not changed. Documented as an expected shape in spec/RECORDER-RECORDS-LINUX.md.
+Added instead, a free invariant in C1 (C1.stopped-at-pcm-end): the final `stopped` record's byte_offset equals tape.pcm's
+length exactly (step 4 tape: 77 178 400 and 77 178 400; step 5 midnight tape: 1 904 000 and 1 904 000), and a stopped
+record that is not the last line is followed by a restart at the same byte_offset with surviving_tail_bytes 0.
+Negative: `c1-bytes-after-stopped`.
+
+#### C1 — prior assertion (U0-A FIX1 through U1 step 5), `Sources/ConformanceKit/Cases.swift`, extended 15 Sep
+
+```swift
+    // MARK: C1 — geometry: byte_offset == samples × 2 for every index record
+
+    static func c1(_ f: Fixture) -> Verdict {
+        let s: IndexScan
+        do { s = try IndexLog.scan(f.idx) } catch { return .error("tape.idx does not scan: \(error)") }
+        var c = Checks()
+        c.expect(!s.lines.isEmpty, "tape.idx has no complete records")
+        c.expect(f.pcm.count % 2 == 0, "tape.pcm is \(f.pcm.count) bytes: not a whole number of s16 samples")
+        var previous: (Int64, Int64)? = nil
+        for line in s.lines {
+            let hasOffset = line.fields[IndexKey.byteOffset] != nil, hasSamples = line.fields[IndexKey.samples] != nil
+            c.expect(hasOffset == hasSamples, "line \(line.number): byte_offset and samples must be both present or both absent")
+            guard hasOffset || hasSamples else { continue }
+            guard let bo = line.int(IndexKey.byteOffset), let sa = line.int(IndexKey.samples) else {
+                c.expect(false, "line \(line.number): byte_offset and samples must both be integers")
+                continue
+            }
+            c.expect(bo == sa * TapeFormat.bytesPerSample, "line \(line.number): byte_offset \(bo) != samples \(sa) × 2")
+            c.expect(bo >= 0 && sa >= 0, "line \(line.number): negative offset")
+            c.expect(bo <= Int64(f.pcm.count), "line \(line.number): byte_offset \(bo) beyond tape.pcm end \(f.pcm.count)")
+            if let (pb, ps) = previous {
+                c.expect(bo >= pb && sa >= ps, "line \(line.number): byte_offset/samples went backwards (\(pb)/\(ps) → \(bo)/\(sa))")
+            }
+            previous = (bo, sa)
+        }
+        return c.verdict
+    }
+```
+
+Changed because: orchestrator ruling 15 Sep (TapeWriter.swift:366-384). The prior assertions are unchanged; the stopped
+law is added after the loop, and every assertion now carries a check id.
+
+#### C8 — step 5 report version of L4 and L7 (never committed), amended 15 Sep
+
+```swift
+            // L4 — the straddling input frame stays in the OLD day (.rounded(.up)).
+            if let e0 = prefixEnd, let s0 = suffix, e0 == s0 {
+                // Split inside one buffer: prefix end == suffix start, and midnight lies in the last prefix frame.
+                c.expect(s0 >= m, "the old day's audio ends and the new day's begins at \(s0), \(m - s0) ns BEFORE midnight \(m) (line \(n)): the input frame straddling midnight was put in the NEW day")
+                c.expect(s0 < m || withinOneFrame(s0 - m), "the new day begins \(s0 - m) ns after midnight (line \(n)): at least one whole old-day input frame lies after midnight")
+            } else if let e0 = prefixEnd {
+                if e0 >= m {
+                    c.expect(withinOneFrame(e0 - m), "the prefix ends \(e0 - m) ns after midnight (line \(n)): a whole old-day input frame lies after midnight")
+                } else if let s0 = suffix {
+                    c.expect(s0 >= m, "the prefix ended before midnight and the new day begins at \(s0), \(m - s0) ns BEFORE midnight \(m) (line \(n)): new-day audio before the boundary")
+                }
+            } else if let s0 = suffix, !audioBefore {
+                c.expect(s0 >= m, "no audio preceded the marker, yet the new day begins \(m - s0) ns BEFORE midnight (line \(n))")
+            }
+```
+
+L4 changed because: segmentEnd truncates (AudioRing.swift:323-325); the one-frame bound is now written as the ruled
+[0, 20834) ns (`d <= floor(1e9 / rate)`), which is the same set of integers at 48 kHz.
+
+```swift
+            // L7 — input_frames only once an input rate is known: absent when no audio preceded the marker in the tape's
+            // first writer session. (A restarted session's rule was not read; not asserted.)
+            if sessionStart == nil {
+                c.expect((r.fields[IndexKey.inputFrames] != nil) == audioBefore,
+                         audioBefore ? "day_rollover line \(n) omits input_frames although audio preceded it"
+                                     : "day_rollover line \(n) carries input_frames although no audio preceded it (no input rate was known)")
+            }
+```
+
+L7 changed because: currentInputSampleRate is per run() (TapeWriter.swift:153, :285, :290), so the law now applies to
+every run (from the tape start or a restart record), not only the first. L8 (the deferred capture anchor) is new.
+
+## Carried to U4 — install must prove the runtime dependencies (ruled 15 Sep)
+
+- **tzdata, and Asia/Kolkata must resolve.** The recorder refuses to start without the zone, and that refusal is right: a
+  recorder that fell back to UTC would roll over at 05:30 IST and split a clinic day in the middle of the morning list. It
+  must be caught at install, never at first start in a room: U4 installs tzdata and verifies that Asia/Kolkata resolves
+  (the recorder's own `ISTDay.nextMidnight` check, or an equivalent probe) before the install line reports success.
+- **libasound2** (alsa-lib, linked dynamically; ldd: libasound.so.2) installed and loadable before the install line reports
+  success.
+
+
+## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
+
+Twice a check written from prose rejected a correct recorder (C5 in step 4, C8 in step 5). From now on every named check
+of C1–C10 is listed in `spec/check-grounding.json` with what it rests on, in one of four classes:
+
+- **mac-source** — pins a Mac behaviour and carries a Swift file:line at f798edf. The loader refuses an entry without one.
+- **mac-measurement** — pins a Mac behaviour measured on the Mac, and carries that measurement.
+- **our-choice** — a deliberate decision of ours, carrying the ruling that made it (document and section) instead of a
+  file:line. **Not debt:** it was never a Mac behaviour and can never acquire a Mac citation.
+- **ungrounded** — claims to pin a Mac behaviour and has no citation. **The only count that is debt**, and the only one
+  the suite nags about.
+
+Every assertion in the runner is made under a check id; a check id that asserts and is not in the manifest counts as
+ungrounded. Every `conformance run` prints the four counts and names each ungrounded check. A missing or unreadable
+manifest is a hard error (exit 2). Ungrounded does not change the verdict; it is reported so it cannot be forgotten.
+
+Classification after the orchestrator's corrections of 15 Sep: 42 checks — 23 mac-source,
+1 mac-measurement, 8 our-choice, **10 ungrounded**. Two corrections were made to the first
+classification: C7.zero-run-probe's 16-sample threshold is ours (U0-A), not missing a citation; and the three entries
+marked "grounded with a caveat" (C1.geometry, quoted only for the stopped builder; C8.L3-rearm, citing an approximate
+range; C5.plan, resting on the unread empty-region loop) are ungrounded until the caveat is gone. An approximate range is
+not a citation: a line moves and the claim silently detaches.
+
+The orchestrator is reading the Mac source for the groundable ones — C3's index recovery, the monotonic invariant, that
+`discontinuity()` writes no PCM, the planner's empty-region loop, and `copyExactRange`/pread. **Nothing moves out of
+ungrounded until those exact file:line citations arrive; they are not to be guessed.**
+
+This table is generated from the manifest.
+
+| Check | Grounding | Asserts | Citation |
+|---|---|---|---|
+| `C1.geometry` | ungrounded | byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative | Claims byte_offset == samples x 2 for EVERY record; the expression is quoted only for the stopped builder (TapeWriter.swift:366-384, ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6), and ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'TapeFormat.swift' with no line for the rest. Needs the checkpoint and discontinuity builders' file:line |
+| `C1.pcm-whole-samples` | mac-source | tape.pcm is a whole number of 2-byte samples | TapeFormat.swift:4-9 (S16 mono); TapeWriter.swift:129-133 (a trailing odd byte is trimmed on startup) |
+| `C1.within-pcm` | our-choice | no record references a byte beyond tape.pcm | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.3 (fsync of tape.pcm before the index record that references it). The Mac's F_FULLFSYNC ordering is cited only as 'tapewriter/TapeWriter.swift', no line (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2) |
+| `C1.monotonic` | ungrounded | byte_offset and samples never decrease from one record to the next | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 says 'byte_offset and samples are monotonic' citing 'TapeFormat.swift IndexRecord / IndexLog' with no line |
+| `C1.stopped-at-pcm-end` | mac-source | the final stopped record's byte_offset equals tape.pcm's length; a non-final stopped is followed by restart at the same byte_offset with surviving_tail_bytes 0 | TapeWriter.swift:366-384 (stopped: byteOffset: bytesWritten after fullSyncTape(.stopped), ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6); TapeWriter.swift:305-315 (restart record at the tape length on open); orchestrator ruling 15 Sep (step 4 tape: 77178400 = 77178400) |
+| `C2.schema-keys` | mac-source | every key is one of the fifteen | TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
+| `C2.presence` | mac-source | presence rules: rms only and always on checkpoints; peak with zero_ratio; no levels on discontinuities; gap_ns never 0 and never on day_rollover; restart fields only on restart; dropped_input_frames only on ring_overflow and never 0; input_frames with input_sample_rate | TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); TapeWriter.swift:281 (gap_ns 0 omitted); TapeWriter.swift:401-424 (rms 0, peak and zero_ratio nil for an empty window); TapeWriter.swift:267-296 (discontinuity keys; dropped 0 omitted; step 5 grounding read off f798edf, 15 Sep 2026); TapeWriter.swift:305-315 (restart keys); TapeWriter.swift:231, :283, :382 (input_frames only with currentInputSampleRate) |
+| `C2.reencode` | mac-source | decode then re-encode reproduces each index line byte for byte (sorted keys, unescaped slashes, no whitespace) | TapeFormat.swift:271-277 (encodedLine sets [.sortedKeys, .withoutEscapingSlashes]; ETA-U0-CLOSED-14-SEP-2026) |
+| `C2.darwin-encoder-line` | mac-measurement | this platform's JSONEncoder writes the same bytes as Darwin's for six measured Doubles | Measured on the Mac mini, Swift 6.4, macOS 27.0, 14 Sep 2026 (ETA-U0-CLOSED-14-SEP-2026) |
+| `C3.clean-unchanged` | ungrounded | repair leaves a clean index untouched | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
+| `C3.torn-tail` | ungrounded | a torn trailing line (no 0x0A) is truncated on repair | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
+| `C3.interior-blank` | ungrounded | an interior blank line is a hard error and the file is untouched | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
+| `C4.clock` | mac-source | wall time of a sample = anchor wall + (sample - anchor sample) x 62500 ns; the anchor is the record opening the region, replaced by a checkpoint at the region boundary | PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
+| `C4.double-formula` | mac-source | the Double formula anchorWallNS/1e9 + (sample - anchorSample)/16000 agrees within 2 ulp | PiecePipeline.swift:407-413 |
+| `C5.adjacency` | mac-source | pieces tile the tape: first starts at 0, last ends at the tape end, piece[i].sampleEnd == piece[i+1].sampleStart | PiecePipeline.swift:279-296, :355, :371 (regions close at discontinuities; partial close at the region end; cursor reset there) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
+| `C5.no-straddle` | mac-source | no piece straddles a discontinuity | PiecePipeline.swift:279-296, :355 |
+| `C5.gap-after-discontinuity` | mac-source | gap_before_ms lands on the piece after a discontinuity, round half up at 500000 ns, only for capture_discontinuity, resumed, ring_overflow, device_lost | PiecePipeline.swift:417 (rounding); PiecePipeline.swift:421-428 (gapMilliseconds(for:), four causes) (ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026) |
+| `C5.same-sample-last-region-governs` | ungrounded | when several discontinuities share a sample, the gap of the following piece is that of the LAST one | Inferred in U1 step 4 from PiecePipeline.swift:279-296, :355, :371 (an empty region emits no piece); the planner's emission loop over an empty region was not read |
+| `C5.plan` | ungrounded | the piece list equals the planner port's plan of the index | PiecePipeline.swift:279-296, :355, :371, :417, :421-428 cover the plan, but the port's behaviour where discontinuities share a sample rests on the planner's emission loop over an empty region, which nobody has read (same defect as C5.same-sample-last-region-governs) |
+| `C5.byte-ranges-concatenate` | ungrounded | the pieces' byte ranges concatenate to tape.pcm | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 quotes app-reference prose ('consecutive pieces are adjacent byte ranges of one file'); copyExactRange / pread is cited with no line (ETA-U0A-REFUTER-VERDICT-14-SEP-2026) |
+| `C6.full-piece` | mac-source | a full piece is exactly 4800000 samples (300.000 s) | PiecePipeline.swift:231 |
+| `C6.partial-only-at-region-end` | mac-source | a short piece ends only at a discontinuity or the tape end | PiecePipeline.swift:279-296, :355 |
+| `C7.boundary` | mac-source | the named record is the expected discontinuity | AudioRing.swift:191, :264, :338, :355 (ring_overflow drop boundary); AudioRing.swift:20 (day_rollover) |
+| `C7.gap-fields` | mac-source | a ring_overflow record carries non-zero gap_ns and dropped_input_frames | AudioRing.swift:191, :264, :338, :355 (gap = new-side mono start - drop start); TapeWriter.swift:281 (0 omitted); TapeFormat.swift:12-49 (dropped_input_frames on ring_overflow with drops, ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
+| `C7.gapless-day-rollover` | mac-source | a day_rollover boundary carries neither gap_ns nor dropped_input_frames | TapeWriter.swift:267-296; AudioRing.swift:143-215 (gapNS 0, droppedFrames 0) (step 5 grounding read off f798edf, 15 Sep 2026) |
+| `C7.no-zero-fill` | ungrounded | the discontinuity sits where pre-gap audio ends and tape.pcm holds exactly the real audio (no bytes for the gap) | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2: 'A gap is never zero-filled. TapeWriter.discontinuity() writes a metadata-only index record', citing 'TapeWriter' with no line |
+| `C7.zero-run-probe` | our-choice | no run of min(gap samples, 16) zero samples (16 at a gapless boundary) starting 40 samples after the boundary | Ours, never a Mac behaviour: the 16-sample zero-run threshold that defines zero fill was chosen in U0-A (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3, C7), and the 40-sample exemption is ruled in ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.5 |
+| `C8.L1-keys` | mac-source | day_rollover keys: byte_offset, samples, mono_ns, wall_ns, device, discontinuity, input_frames/input_sample_rate; nothing else | TapeWriter.swift:267-296; AudioRing.swift:20 (step 5 grounding read off f798edf, 15 Sep 2026) |
+| `C8.L2-target` | mac-source | a day_rollover's wall_ns is an IST midnight (the target itself) | AudioRing.swift:143-215 (marker wallNS = rollover.wallNS = target); CaptureTimeline.swift:141-150; ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata) (step 5 grounding read off f798edf, 15 Sep 2026) |
+| `C8.L3-rearm` | ungrounded | within one capture session each boundary is the previous one + 86400000000000 ns | The re-arm itself is CaptureTimeline.swift:122-131, :24; but the session rule this check applies (a restart, device_lost or resumed starts a new CaptureSession that re-queries the zone) rests on Recorder.swift ~65-77, an approximate range: a line moves and the claim detaches. Needs the exact CaptureSession.init lines |
+| `C8.L4-straddle` | mac-source | the input frame holding midnight stays in the old day: where prefix end and suffix start share wall time S, S - midnight lies in [0, 20834) ns at 48 kHz | CaptureTimeline.swift:146-149 (frameOffset ceil); AudioRing.swift:323-325 (segmentEnd = start + UInt64(Double(frameCount) / sampleRate * 1e9), truncating). The [0, 20834) form of the bound is ours (orchestrator ruling 15 Sep), checked on Linux for split counts <= 1200 frames |
+| `C8.L5-frames` | our-choice | the day closed by a day_rollover holds floor(input frames / 3) samples | spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026) |
+| `C8.L6-no-unmarked-midnight` | mac-source | no end-of-audio checkpoint at or after an IST midnight unless a day_rollover at that sample closes the region | CaptureTimeline.swift:141 (every buffer whose wall end reaches the target is split) |
+| `C8.L7-input-frames` | mac-source | a day_rollover carries input_frames exactly when audio preceded it in the same run (tape start or restart) | TapeWriter.swift:153 (currentInputSampleRate declared per run()); TapeWriter.swift:285 (input_frames keyed off it); TapeWriter.swift:290 (cleared only on formatChange) (orchestrator read, 15 Sep) |
+| `C8.L8-anchor-deferred` | mac-source | the capture anchor follows the last of a run of markers, before the first audio: no checkpoint between adjacent markers with no audio consumed; the record after a marker run, if a checkpoint, is its empty-window anchor | TapeWriter.swift:288-292 (needsCaptureAnchor set in discontinuity()); TapeWriter.swift:323-326 (marker item returns early); TapeWriter.swift:339-341 (anchor checkpoint for an audio item) (orchestrator read, 15 Sep) |
+| `C8.pins` | mac-source | every day_rollover's line, wall_ns, mono_ns, sample, input_frames, prefix-end and new-day wall times equal the expected answers | Expected answers computed from CaptureTimeline.swift:141-150, :146-149, :122-131 and AudioRing.swift:323-325 (synthetic fixtures), or taken from the recorder's capture-side split log (recorded tape) |
+| `C9.manifest-describes-implementation` | our-choice | the fixture's written conversion rules and taps equal the linked implementation | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-STEREO-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2 |
+| `C9.output-deterministic` | our-choice | the conversion output is byte-identical to the checked-in output, whole and chunked | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 4 |
+| `C9.direction-probe` | our-choice | asymmetric taps pin the convolution index direction | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.2 (C9 blind spot closed) |
+| `C9.region-reset` | our-choice | history resets at every discontinuity: the stream with resets equals its regions converted in isolation | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 |
+| `C10.argv` | mac-source | the piece encoder arguments, byte for byte | PiecePipeline.swift:485-496 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026) |
+| `C10.decoded-audio` | our-choice | decoded audio within the stated tolerance (sample count, correlation, RMS); encoded bytes never compared | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3 (C10); ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026 (no test compares container bytes) |

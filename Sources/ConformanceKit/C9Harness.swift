@@ -114,12 +114,14 @@ public enum C9Harness {
         switch r.tapsRole {
         case "production": subject = resampler
         case "direction_probe":
+            c.law("C9.direction-probe")
             c.expect(fixtureTaps != fixtureTaps.reversed(), "a direction probe needs asymmetric taps; \(r.taps.file) is symmetric")
             subject = resampler.with(taps: fixtureTaps)
         default: return .error("unknown taps_role \(r.tapsRole)")
         }
 
         // The written rules, field by field, against the implementation.
+        c.law("C9.manifest-describes-implementation")
         c.expect(r.design == impl.designID, "design \(r.design) != implementation \(impl.designID)")
         c.expect(r.filter.tapCount == fixtureTaps.count, "filter.tap_count \(r.filter.tapCount) but \(r.taps.file) holds \(fixtureTaps.count) taps")
         c.expect(r.filter.tapSum == fixtureTaps.reduce(Int64(0)) { $0 + Int64($1) }, "filter.tap_sum \(r.filter.tapSum) but \(r.taps.file) sums to \(fixtureTaps.reduce(Int64(0)) { $0 + Int64($1) })")
@@ -145,6 +147,7 @@ public enum C9Harness {
 
         // Output bytes: whole stream, twice, and every chunking.
         let whole = subject.convert(stereo48k: f.resamplerInput, chunkFrames: [])
+        c.law("C9.output-deterministic")
         c.expect(whole == f.resamplerOutput, "output differs from \(r.output.file): " + firstDifference(f.resamplerOutput, whole))
         c.expect(subject.convert(stereo48k: f.resamplerInput, chunkFrames: []) == whole, "two whole-stream runs differ")
         for pattern in r.chunkPatterns {
@@ -154,6 +157,7 @@ public enum C9Harness {
 
         // Discontinuities: history resets, so the stream equals its regions converted in isolation.
         if let starts = r.regionStarts, let file = r.regionsOutput {
+            c.law("C9.region-reset")
             let frames = f.resamplerInput.count / 4
             let bounds = [0] + starts + [frames]
             let expectedCount = zip(bounds, bounds.dropFirst()).reduce(0) { $0 + rule.outputCount(frames: $1.1 - $1.0) }

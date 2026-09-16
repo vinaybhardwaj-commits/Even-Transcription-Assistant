@@ -53,6 +53,7 @@ public enum DiscontinuityCause {
     public static let captureDiscontinuity = "capture_discontinuity"
     public static let resumed = "resumed"
     public static let deviceLost = "device_lost"
+    public static let stopped = "stopped"
 
     /// gapMilliseconds(for:), PiecePipeline.swift:421-428: only these causes surface a gap on the following
     /// piece. Every other cause, day_rollover and restart included, is zero by rule whatever gap_ns says.

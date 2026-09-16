@@ -51,6 +51,47 @@ public struct RequiredFixtures: Codable, Sendable {
     }
 }
 
+/// spec/check-grounding.json: every named check, and what it rests on.
+///   `mac-source`      — pins a Mac behaviour and carries a Swift file:line; refused without one.
+///   `mac-measurement` — pins a Mac behaviour measured on the Mac, and carries that measurement.
+///   `our-choice`      — a deliberate decision of ours, carrying the ruling that made it instead of a file:line. Not debt.
+///   `ungrounded`      — claims to pin a Mac behaviour and has no citation. The only count that is debt.
+/// A check that runs without an entry counts as ungrounded.
+public struct CheckGrounding: Codable, Sendable {
+    public static let currentSchema = "eta.room-recorder.check-grounding/1"
+    public static let kinds = ["mac-source", "mac-measurement", "our-choice", "ungrounded"]
+    public struct Entry: Codable, Sendable {
+        public var id: String
+        public var asserts: String
+        public var grounding: String
+        public var citation: String
+    }
+    public var schema: String
+    public var description: String
+    public var checks: [Entry]
+
+    /// A missing or unreadable manifest is a hard error. A mac-source entry must cite at least one Swift file:line.
+    public static func load(_ url: URL) throws -> CheckGrounding {
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch {
+            throw FixtureLoadError(fixture: url.path, reason: "check-grounding manifest missing or unreadable: \(error)")
+        }
+        let m = try JSONDecoder().decode(CheckGrounding.self, from: data)
+        guard m.schema == currentSchema else { throw FixtureLoadError(fixture: url.path, reason: "schema \(m.schema) is not \(currentSchema)") }
+        for e in m.checks {
+            guard kinds.contains(e.grounding) else { throw FixtureLoadError(fixture: url.path, reason: "\(e.id): grounding \(e.grounding) is not one of \(kinds)") }
+            if e.grounding == "mac-source", e.citation.range(of: #"\.swift:[0-9]+"#, options: .regularExpression) == nil {
+                throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is mac-source but cites no Swift file:line")
+            }
+            if e.grounding == "our-choice", e.citation.isEmpty {
+                throw FixtureLoadError(fixture: url.path, reason: "\(e.id) is our-choice but cites no ruling")
+            }
+        }
+        guard Set(m.checks.map(\.id)).count == m.checks.count else { throw FixtureLoadError(fixture: url.path, reason: "duplicate check id") }
+        return m
+    }
+}
+
 public struct SuiteReport {
     public var rows: [CaseRow] = []
     public var loadErrors: [String] = []
@@ -58,6 +99,9 @@ public struct SuiteReport {
     /// Required fixtures absent from this root; their rows were not run.
     public var missingRequired: [RequiredFixtures.Entry] = []
     public var only: Set<CaseID>? = nil
+    public var grounding: CheckGrounding? = nil
+    /// Named checks that made at least one assertion in this run.
+    public var checksRan: [String: Int] = [:]
 
     public var holds: Bool { loadErrors.isEmpty && coverageProblems.isEmpty && rows.allSatisfy(\.holds) }
     public var complete: Bool { missingRequired.isEmpty }
@@ -94,6 +138,21 @@ public struct SuiteReport {
         }
         let held = rows.filter(\.holds).count
         out.append("")
+        if let g = grounding {
+            let byID = Dictionary(uniqueKeysWithValues: g.checks.map { ($0.id, $0) })
+            let ran = checksRan.keys.sorted()
+            func kind(_ id: String) -> String { byID[id]?.grounding ?? "ungrounded" }
+            let ungrounded = ran.filter { kind($0) == "ungrounded" }
+            let count = { (k: String) in ran.filter { kind($0) == k }.count }
+            out.append("GROUNDING: \(ran.count) named checks made assertions — \(count("mac-source")) on Mac source, \(count("mac-measurement")) on a Mac measurement, \(count("our-choice")) our choice (ruled, not debt), \(ungrounded.count) UNGROUNDED (debt)")
+            for id in ungrounded {
+                out.append(pad("UNGROUNDED", 11) + pad(id, 40) + (byID[id].map { $0.citation } ?? "not in spec/check-grounding.json"))
+            }
+            let silent = g.checks.map(\.id).filter { checkID in
+                checksRan[checkID] == nil && (only.map { $0.contains { checkID.hasPrefix($0.rawValue + ".") } } ?? true)
+            }
+            if !silent.isEmpty { out.append("listed checks that made no assertion on this root: \(silent.joined(separator: ", "))") }
+        }
         out.append("\(held)/\(rows.count) rows hold; \(loadErrors.count) load errors; \(coverageProblems.count) coverage problems; \(notMade.count) assertions not made")
         if !holds { out.append("SUITE DOES NOT HOLD") }
         else if complete { out.append("SUITE HOLDS") }
@@ -108,10 +167,12 @@ public enum Suite {
     /// Cases that must each fail on at least one negative control.
     public static let mustHaveNegative: [CaseID] = [.C1, .C2, .C3, .C4, .C5, .C6, .C7, .C8, .C9]
 
-    public static func run(root: URL, required: RequiredFixtures, only: Set<CaseID>? = nil,
+    public static func run(root: URL, required: RequiredFixtures, grounding: CheckGrounding? = nil, only: Set<CaseID>? = nil,
                            resampler: (any Resampler)? = LinkedResampler.current) -> SuiteReport {
         var report = SuiteReport()
         report.only = only
+        report.grounding = grounding
+        CheckRegistry.reset()
         var fixtures: [Fixture] = []
         do {
             for dir in try FixtureLoader.discover(root: root) {
@@ -119,6 +180,7 @@ public enum Suite {
             }
         } catch {
             report.loadErrors.append("cannot read fixtures root \(root.path): \(error)")
+            report.checksRan = CheckRegistry.snapshot
             return report
         }
 
@@ -182,6 +244,7 @@ public enum Suite {
                 report.coverageProblems.append("index key \(k) is not exercised by any good fixture that passes C2")
             }
         }
+        report.checksRan = CheckRegistry.snapshot
         return report
     }
 }

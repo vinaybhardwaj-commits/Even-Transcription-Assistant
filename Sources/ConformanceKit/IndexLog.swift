@@ -21,6 +21,14 @@ public struct IndexLine {
     public let fields: [String: JSONValue]
 
     public func int(_ key: String) -> Int64? { fields[key]?.int64 }
+    /// A numeric field as Double, whether written as an integer (48000) or not.
+    public func double(_ key: String) -> Double? {
+        switch fields[key] {
+        case .int(let v)?: return Double(v)
+        case .double(let v)?: return v
+        default: return nil
+        }
+    }
 }
 
 public enum IndexScanOutcome: Equatable {

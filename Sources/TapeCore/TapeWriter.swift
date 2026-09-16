@@ -239,14 +239,16 @@ public final class TapeWriter {
             inputFrames: inputFrames, inputSampleRate: inputSampleRate))
     }
 
-    /// A metadata-only discontinuity record at the current tape position. No PCM is written for the gap.
-    public func discontinuity(cause: String, gapNS: Int64?, droppedInputFrames: Int64?, monoNS: Int64, wallNS: Int64, inputFrames: Int64) throws {
+    /// A metadata-only discontinuity record at the current tape position (Mac TapeWriter.swift:267-296). No PCM is written
+    /// for a gap. gap_ns and dropped_input_frames are omitted when zero; input_frames and input_sample_rate are omitted
+    /// when `inputFrames` is nil (the Mac's currentInputSampleRate == nil).
+    public func discontinuity(cause: String, gapNS: Int64?, droppedInputFrames: Int64?, monoNS: Int64, wallNS: Int64, inputFrames: Int64?) throws {
         try appendRecord(TapeIndexRecord(
             byteOffset: samples * 2, samples: samples, monoNS: UInt64(monoNS), wallNS: UInt64(wallNS), device: device,
             discontinuity: cause,
             gapNS: gapNS.flatMap { $0 > 0 ? UInt64($0) : nil },
             droppedInputFrames: droppedInputFrames.flatMap { $0 > 0 ? UInt64($0) : nil },
-            inputFrames: inputFrames, inputSampleRate: inputSampleRate))
+            inputFrames: inputFrames, inputSampleRate: inputFrames == nil ? nil : inputSampleRate))
     }
 
     /// The terminal `stopped` record (Mac TapeWriter.swift:366-384): exactly eight keys — byte_offset, samples, mono_ns,

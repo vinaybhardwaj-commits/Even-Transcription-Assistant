@@ -39,10 +39,14 @@ PCM length, or the role/cases/negative_control combination is inconsistent.
 | `C4` | C4 | `{points: [{name, at, wall_ns}]}`; `at` is `sample:<n>`, `record:<line>` or `pcm_end`. The anchor is read from the index: `samples`+`wall_ns` of the record opening the region; a checkpoint at the region boundary replaces a discontinuity's timestamp |
 | `pieces` | C5, C6 | `[{sampleStart, sampleEnd, gap_before_ms?}]` — the piece list under test. Pieces close at every discontinuity. The piece after a discontinuity carries `gap_before_ms` = `gap_ns / 1e6`, rounded half up at 500 000 ns (PiecePipeline.swift:417), only for `capture_discontinuity`, `resumed`, `ring_overflow`, `device_lost`; every other cause (`day_rollover`, `restart`, …) is 0 by rule (:421-428). Absent and 0 are treated alike |
 | `C6` | C6 | `{piece_samples, full_pieces, partial_pieces: [samples…]}` — a piece may be short only where a region ends |
-| `C7` | C7 | `{line, cause, gap_ns, dropped_input_frames, pre_gap_samples, post_gap_samples}`. Zero-fill probe: a run of min(gap samples, 16) zeros, looked for from 40 samples after the boundary (U1 spec §11.5) |
-| `C8` | C8 | `{boundary_wall_ns, rollover_sample, straddling}`; the `day_rollover` discontinuity record in tape.idx must sit at `anchor + ceil(elapsedNS × 16000 / 1e9)`, the straddling sample being the last of the old day |
+| `C7` | C7 | `{line, cause, gap_ns?, dropped_input_frames?, pre_gap_samples, post_gap_samples}`. Zero-fill probe: a run of min(gap samples, 16) zeros — 16 at a gapless `day_rollover` (both gap keys absent from expected.json and from the record) — looked for from 40 samples after the boundary (U1 spec §11.5) |
+| `C8` | C8 | `{rollovers: [{line, boundary_wall_ns, marker_mono_ns, rollover_sample, input_frames?, prefix_end_wall_ns?, suffix_wall_ns?, straddling}]}` — every `day_rollover` record in order. Laws read off the tape: keys; `wall_ns` an IST midnight; within one capture session (no `restart`/`device_lost`/`resumed` between) each boundary = previous + 86 400 000 000 000 ns; the input frame holding midnight stays in the old day (when the forced checkpoint before the marker and the capture anchor after it share a wall time S: 0 ≤ S − midnight < one input frame); the closed day holds floor(input frames / 3) samples; no end-of-audio checkpoint at or after an unmarked midnight; no `input_frames` on a marker no audio preceded (first writer session). no capture anchor between adjacent markers with no audio consumed, and the record after a marker run, if a checkpoint, is its empty-window anchor. The values pin the laws: the marker's wall_ns and the new day's first wall_ns are pinned separately |
 
-C1 and C2 need no expected answers: they are invariants over every complete index line.
+C1 and C2 need no expected answers: they are invariants over every complete index line (C1 also: the final `stopped`
+record's byte_offset equals tape.pcm's length).
+
+Every assertion of C1–C10 is made under a named check; `spec/check-grounding.json` states what each rests on (Mac
+file:line, Mac measurement, ruling, or UNGROUNDED) and the runner prints the UNGROUNDED count on every run.
 
 ## Index keys
 

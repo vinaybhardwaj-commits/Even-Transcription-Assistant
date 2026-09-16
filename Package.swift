@@ -17,7 +17,7 @@ let package = Package(
     targets: [
         // Platform-neutral conversion core: no Foundation, no ALSA.
         .target(name: "TapeConvert"),
-        .target(name: "ConformanceKit", dependencies: ["TapeConvert", "TapeCore"]),
+        .target(name: "ConformanceKit", dependencies: ["TapeConvert", "TapeCore", "CaptureCore", "RecorderCore"]),
         .executableTarget(name: "conformance", dependencies: ["ConformanceKit"]),
         // U1 step 2. CaptureCore: the counted ring, no ALSA. ALSACapture: alsa-lib through dlopen.
         .target(name: "CaptureCore"),
@@ -27,6 +27,8 @@ let package = Package(
         .executableTarget(name: "capture-probe", dependencies: ["CaptureCore", "ALSACapture"]),
         // U1 step 3. TapeCore: the tape writer, no ALSA import.
         .target(name: "TapeCore"),
-        .executableTarget(name: "room-recorder", dependencies: ["ALSACapture", "CaptureCore", "TapeConvert", "TapeCore"]),
+        // U1 step 5. RecorderCore: the writer loop (ring → decimator → tape), shared with the fixture generator. No ALSA.
+        .target(name: "RecorderCore", dependencies: ["CaptureCore", "TapeConvert", "TapeCore"]),
+        .executableTarget(name: "room-recorder", dependencies: ["ALSACapture", "CaptureCore", "RecorderCore", "TapeCore"]),
     ]
 )

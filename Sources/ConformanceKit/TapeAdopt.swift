@@ -10,7 +10,23 @@ import Foundation
 /// record's fields, and no zero fill at its offset). C4 needs expected wall times and is not listed;
 /// the clock report below measures the recorded times against the sample-clock model instead.
 public enum TapeAdopter {
-    public static func adopt(tape: URL, fixturesRoot: URL, name: String, simulateTornTailBytes: Int?) throws -> String {
+    /// The parts of room-recorder's run summary that C8 pins a recorded rollover to: the capture thread's own log.
+    struct RecorderSummary: Decodable {
+        struct Split: Decodable {
+            var firstFrame: Int64; var frameCount: Int; var frameOffset: Int
+            var targetWallNS: Int64; var markerMonoNS: Int64; var suffixWallStartNS: Int64
+            enum CodingKeys: String, CodingKey {
+                case firstFrame = "first_frame", frameCount = "frame_count", frameOffset = "frame_offset"
+                case targetWallNS = "target_wall_ns", markerMonoNS = "marker_mono_ns", suffixWallStartNS = "suffix_wall_start_ns"
+            }
+        }
+        struct Event: Decodable { var firstFrame: Int64; var frames: Int64; var cause: String
+            enum CodingKeys: String, CodingKey { case frames, cause, firstFrame = "first_frame" } }
+        var rollovers: [Split]
+        var events: [Event]
+    }
+
+    public static func adopt(tape: URL, fixturesRoot: URL, name: String, simulateTornTailBytes: Int?, recorderSummary: URL? = nil) throws -> String {
         let pcm = [UInt8](try Data(contentsOf: tape.appendingPathComponent("tape.pcm")))
         var idx = [UInt8](try Data(contentsOf: tape.appendingPathComponent("tape.idx")))
         var e = ExpectedAnswers()
@@ -54,6 +70,39 @@ public enum TapeAdopter {
                                   droppedInputFrames: gap.int(IndexKey.droppedInputFrames)!, preGapSamples: at, postGapSamples: total - at)
                 cases.append(.C7)
                 report.append("C7 on line \(gap.number): ring_overflow at sample \(at), gap_ns \(gap.int(IndexKey.gapNS)!), dropped_input_frames \(gap.int(IndexKey.droppedInputFrames)!)")
+            }
+            // C8 on a recorded rollover: the laws are the tape's own; the pins come from the recorder's capture-side split
+            // log (target, marker mono, the new day's first wall time, input frames at the split), not from the index.
+            let markers = scan.lines.filter { if case .string(DiscontinuityCause.dayRollover)? = $0.fields[IndexKey.discontinuity] { return true }; return false }
+            if !markers.isEmpty {
+                guard let url = recorderSummary else { throw FixtureLoadError(fixture: name, reason: "the tape holds day_rollover records: pass --recorder-summary") }
+                let log = try JSONDecoder().decode(RecorderSummary.self, from: Data(contentsOf: url))
+                guard log.rollovers.count == markers.count else {
+                    throw FixtureLoadError(fixture: name, reason: "summary logs \(log.rollovers.count) splits, tape holds \(markers.count) day_rollover records")
+                }
+                var pins: [C8Rollover] = []
+                for (split, marker) in zip(log.rollovers, markers) {
+                    let at = split.firstFrame + Int64(split.frameOffset)
+                    let dropped = log.events.filter { $0.cause == "ring_overflow" && $0.firstFrame < at }.reduce(Int64(0)) { $0 + $1.frames }
+                    let i = scan.lines.firstIndex { $0.number == marker.number }!
+                    let s0 = marker.int(IndexKey.samples)
+                    let next = i + 1 < scan.lines.count ? scan.lines[i + 1] : nil
+                    let prev = i > 0 ? scan.lines[i - 1] : nil
+                    let hasSuffix = next.map { $0.fields[IndexKey.discontinuity] == nil && $0.int(IndexKey.samples) == s0 } ?? false
+                    let hasPrefix = prev.map { $0.fields[IndexKey.discontinuity] == nil && $0.fields[IndexKey.peak] != nil && $0.int(IndexKey.samples) == s0 } ?? false
+                    let inside = split.frameOffset > 0 && split.frameOffset < split.frameCount
+                    // Inside one buffer both neighbours are the logged segment boundary; at a buffer edge the other
+                    // neighbour belongs to another buffer the log does not describe, and is taken from the tape.
+                    let suffix = hasSuffix ? (split.frameOffset < split.frameCount ? split.suffixWallStartNS : next!.int(IndexKey.wallNS)) : nil
+                    let prefix = hasPrefix ? (split.frameOffset > 0 ? split.suffixWallStartNS : prev!.int(IndexKey.wallNS)) : nil
+                    pins.append(C8Rollover(line: marker.number, boundaryWallNS: split.targetWallNS, markerMonoNS: split.markerMonoNS,
+                                           rolloverSample: s0 ?? -1, inputFrames: marker.fields[IndexKey.inputFrames] == nil ? nil : at - dropped,
+                                           prefixEndWallNS: prefix, suffixWallNS: suffix,
+                                           straddling: inside && split.suffixWallStartNS > split.targetWallNS && hasPrefix && hasSuffix))
+                    report.append("C8 pin from the capture log: line \(marker.number) target \(split.targetWallNS), frame offset \(split.frameOffset)/\(split.frameCount), new day's first wall \(split.suffixWallStartNS) (Δ \(split.suffixWallStartNS - split.targetWallNS) ns), input frames at split \(at - dropped); rollover_sample \(s0 ?? -1) taken from the tape (held by C8's frames law)")
+                }
+                e.c8 = C8Expected(rollovers: pins)
+                cases.append(.C8)
             }
             description = "RECORDED tape \(tape.path): \(total) samples (\(Double(total) / 16000) s), \(scan.lines.count) records, \(regions.count) region(s), \(pieces.count) piece(s). Real audio: never commit."
             report.append("tape: \(total) samples = \(Double(total) / 16000) s, \(scan.lines.count) records, \(regions.count) region(s), pieces \(pieces.map { "[\($0.sampleStart),\($0.sampleEnd))" })")

@@ -251,8 +251,9 @@ public struct C7Expected: Codable, Equatable, Sendable {
     public var line: Int
     /// The record's `discontinuity` value.
     public var cause: String
-    public var gapNS: Int64
-    public var droppedInputFrames: Int64
+    /// Both nil for a gapless boundary (day_rollover): the record must then carry neither key.
+    public var gapNS: Int64?
+    public var droppedInputFrames: Int64?
     /// Real audio samples written before and after the gap. The tape holds exactly their sum.
     public var preGapSamples: Int64
     public var postGapSamples: Int64
@@ -263,15 +264,31 @@ public struct C7Expected: Codable, Equatable, Sendable {
     }
 }
 
-/// The anchor is read from the index: the region that the day_rollover record closes.
+/// Every day_rollover record of the tape, in order. The laws C8 applies are read off the tape; these values pin them.
 public struct C8Expected: Codable, Equatable, Sendable {
+    public var rollovers: [C8Rollover]
+}
+
+public struct C8Rollover: Codable, Equatable, Sendable {
+    /// 1-based index line of the day_rollover record.
+    public var line: Int
+    /// The marker's wall_ns: the target IST midnight.
     public var boundaryWallNS: Int64
+    public var markerMonoNS: Int64
+    /// The marker's `samples`: old-day samples end here.
     public var rolloverSample: Int64
-    /// True when midnight falls strictly inside a sample, so the rounding rule is exercised.
+    /// nil: the record carries no input_frames.
+    public var inputFrames: Int64?
+    /// wall_ns of the forced checkpoint at the marker's sample (end of the old-day audio); nil if the tape has none.
+    public var prefixEndWallNS: Int64?
+    /// wall_ns of the capture anchor right after the marker (the suffix's first wall_ns); nil if the tape has none.
+    public var suffixWallNS: Int64?
+    /// Midnight falls strictly inside an input frame: prefix end == suffix start > boundary.
     public var straddling: Bool
     enum CodingKeys: String, CodingKey {
-        case straddling
-        case boundaryWallNS = "boundary_wall_ns", rolloverSample = "rollover_sample"
+        case line, straddling
+        case boundaryWallNS = "boundary_wall_ns", markerMonoNS = "marker_mono_ns", rolloverSample = "rollover_sample"
+        case inputFrames = "input_frames", prefixEndWallNS = "prefix_end_wall_ns", suffixWallNS = "suffix_wall_ns"
     }
 }
 
