@@ -36,6 +36,9 @@ Group=room-recorder
 SupplementaryGroups=audio
 StateDirectory=room-recorder
 StateDirectoryMode=0750
+# Everything room-bench creates is the account's alone: pieces, the drop log, and files it does not choose the mode of
+# (Foundation's URLCache under $HOME/.cache, which is this directory). Without this they are created 0644/0755.
+UMask=0077
 WorkingDirectory=/var/lib/room-recorder
 ExecStart=/usr/local/lib/room-recorder/room-bench serve
 

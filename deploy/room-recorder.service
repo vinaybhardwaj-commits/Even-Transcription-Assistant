@@ -74,6 +74,10 @@ SupplementaryGroups=audio
 # this unit needs no ExecStartPre mkdir/chown.
 StateDirectory=room-recorder
 StateDirectoryMode=0750
+# U4 — the tape writer opens segments 0644 and makes directories 0755; systemd's default umask (0022) would leave them
+# world-readable inside the 0750 state directory. 0027 keeps every new tape file off-limits to other users at the
+# source, so the installer's world-access sweep only ever repairs files from before this line (and stays idempotent).
+UMask=0027
 WorkingDirectory=/var/lib/room-recorder
 
 # S3 — bounded wait for the PINNED device, then a distinct named failure with a non-zero exit. NEVER a fallback to
