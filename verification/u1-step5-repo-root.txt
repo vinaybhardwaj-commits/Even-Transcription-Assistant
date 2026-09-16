@@ -1,10 +1,12 @@
-conformance: fixtures /home/vinay/dev/room-recorder-linux/fixtures; required fixtures /home/vinay/dev/room-recorder-linux/spec/required-fixtures.json (52); check grounding /home/vinay/dev/room-recorder-linux/spec/check-grounding.json (42)
+conformance: fixtures /home/vinay/dev/room-recorder-linux/fixtures; required fixtures /home/vinay/dev/room-recorder-linux/spec/required-fixtures.json (56); check grounding /home/vinay/dev/room-recorder-linux/spec/check-grounding.json (44)
 CASE FIXTURE                               ROLE     RESULT  MUST         HOLDS
 C1   good/c7-quiet-room-midnight           good     PASS    PASS         yes
 C1   good/c7-quiet-room-ramp               good     PASS    PASS         yes
 C1   good/clean-short                      good     PASS    PASS         yes
+C1   good/coincident-gaps-max              good     PASS    PASS         yes
 C1   good/device-lost-resumed              good     PASS    PASS         yes
 C1   good/discontinuity                    good     PASS    PASS         yes
+C1   good/discontinuity-mid-group          good     PASS    PASS         yes
 C1   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
 C1   good/gap-rounding-below-half          good     PASS    PASS         yes
 C1   good/ist-midnight                     good     PASS    PASS         yes
@@ -27,9 +29,11 @@ C1   negative/c1-restart-odd-tail-untrimmed negative FAIL    FAIL         yes
 C2   good/c7-quiet-room-midnight           good     PASS    PASS         yes
 C2   good/c7-quiet-room-ramp               good     PASS    PASS         yes
 C2   good/clean-short                      good     PASS    PASS         yes
+C2   good/coincident-gaps-max              good     PASS    PASS         yes
 C2   good/darwin-encoder-doubles           good     PASS    PASS         yes
 C2   good/device-lost-resumed              good     PASS    PASS         yes
 C2   good/discontinuity                    good     PASS    PASS         yes
+C2   good/discontinuity-mid-group          good     PASS    PASS         yes
 C2   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
 C2   good/gap-rounding-below-half          good     PASS    PASS         yes
 C2   good/ist-midnight                     good     PASS    PASS         yes
@@ -60,22 +64,31 @@ C2   negative/c2-unsorted-keys             negative FAIL    FAIL         yes
         reencoded: {"byte_offset":32000,"device":"sof-hda-dsp: DMIC Raw (hw:0,6) / Yoga — built-in","input_frames":48000,"input_sample_rate":48000,"mono_ns":86401123000000,"peak":0.0625,"rms":0.17677669529663687,"samples":16000,"wall_ns":1789360201123456789,"zero_ratio":0.6666666666666666}
 C3   good/clean-short                      good     PASS    PASS         yes
 C3   good/discontinuity                    good     PASS    PASS         yes
+C3   good/discontinuity-mid-group          good     PASS    PASS         yes
 C3   good/interior-blank                   good     PASS    PASS         yes
 C3   good/ist-midnight-device-lost-at-midnight good     PASS    PASS         yes
 C3   good/ist-midnight-two-rollovers       good     PASS    PASS         yes
 C3   good/restart-odd-tail-trimmed         good     PASS    PASS         yes
 C3   good/torn-tail                        good     PASS    PASS         yes
 C3   negative/c3-blank-line-inside-torn-log negative FAIL    FAIL         yes
-      · [C3.torn-tail] expected torn-tail repair, repair threw: interior blank line at line 2
+      · [C3.torn-tail-excluded-by-the-reader] the reader must exclude a torn tail, not fail: interior blank line at line 2
+      · [C3.torn-tail-repaired-by-the-writer] expected torn-tail repair, repair threw: interior blank line at line 2
 C4   good/clean-short                      good     PASS    PASS         yes
+C4   good/coincident-gaps-max              good     PASS    PASS         yes
 C4   good/discontinuity                    good     PASS    PASS         yes
 C4   good/ist-midnight                     good     PASS    PASS         yes
 C4   good/ist-midnight-before-first-audio  good     PASS    PASS         yes
 C4   good/ist-midnight-device-lost-at-midnight good     PASS    PASS         yes
 C4   good/ist-midnight-two-rollovers       good     PASS    PASS         yes
+C4   negative/c4-anchor-from-first-coincident negative FAIL    FAIL         yes
+      · [C4.clock] first sample after them (anchored on the LAST of the two records) (sample:16000 = sample 16000, anchored on line 5): wall_ns 1789360201883456789 != expected 1789360201873456789 (Δ 10000000 ns)
+      · [C4.double-formula] first sample after them (anchored on the LAST of the two records): Double formula 1789360201.8834567 s disagrees with 1789360201873456789 ns beyond 2 ulp (476.837158203125 ns)
+      · [C4.clock] last sample of the tape (sample:31999 = sample 31999, anchored on line 5): wall_ns 1789360202883394289 != expected 1789360202873394289 (Δ 10000000 ns)
+      · … 1 more
 C4   negative/c4-one-sample-lost           negative FAIL    FAIL         yes
       · [C4.clock] end of tape (pcm_end = sample 39999, anchored on line 1): wall_ns 1789360202623394289 != expected 1789360202623456789 (Δ -62500 ns)
       · [C4.double-formula] end of tape: Double formula 1789360202.6233943 s disagrees with 1789360202623456789 ns beyond 2 ulp (476.837158203125 ns)
+C5   good/coincident-gaps-max              good     PASS    PASS         yes
 C5   good/device-lost-resumed              good     PASS    PASS         yes
 C5   good/discontinuity                    good     PASS    PASS         yes
 C5   good/gap-rounding-at-and-above-half   good     PASS    PASS         yes
@@ -84,16 +97,19 @@ C5   good/ist-midnight-device-lost-at-midnight good     PASS    PASS         yes
 C5   good/ist-midnight-two-rollovers       good     PASS    PASS         yes
 C5   good/multi-piece                      good     PASS    PASS         yes
 C5   good/multi-piece-gap                  good     PASS    PASS         yes
+C5   negative/c5-coincident-gap-from-last  negative FAIL    FAIL         yes
+      · [C5.gap-max-at-sample] gap_before_ms after the 2 discontinuity record(s) at 16000 (last: capture_discontinuity) is 10, the rule gives 750
+      · [C5.plan] pieces differ from the plan of the index: ["[0,16000)", "[16000,32000) gap 750ms"]
 C5   negative/c5-gap-on-preceding-piece    negative FAIL    FAIL         yes
-      · [C5.gap-after-discontinuity] gap_before_ms after the ring_overflow at 24000 (gap_ns 500000000) is absent, rule gives 500
+      · [C5.gap-after-discontinuity] gap_before_ms after the 1 discontinuity record(s) at 24000 (last: ring_overflow) is absent, the rule gives 500
       · [C5.gap-after-discontinuity] piece [0, 24000) carries gap_before_ms 500 but no gap-carrying discontinuity precedes it
       · [C5.plan] pieces differ from the plan of the index: ["[0,24000)", "[24000,40000) gap 500ms", "[40000,48000)"]
 C5   negative/c5-gap-on-restart            negative FAIL    FAIL         yes
-      · [C5.gap-after-discontinuity] gap_before_ms after the restart at 40000 (gap_ns 2000000000) is 2000, rule gives 0
+      · [C5.gap-after-discontinuity] gap_before_ms after the 1 discontinuity record(s) at 40000 (last: restart) is 2000, the rule gives 0
       · [C5.gap-after-discontinuity] piece [40000, 48000) carries gap_before_ms 2000 but no gap-carrying discontinuity precedes it
       · [C5.plan] pieces differ from the plan of the index: ["[0,24000)", "[24000,40000) gap 500ms", "[40000,48000)"]
 C5   negative/c5-gap-rounded-down-at-half  negative FAIL    FAIL         yes
-      · [C5.gap-after-discontinuity] gap_before_ms after the device_lost at 16000 (gap_ns 120500000) is 120, rule gives 121
+      · [C5.gap-after-discontinuity] gap_before_ms after the 1 discontinuity record(s) at 16000 (last: device_lost) is 120, the rule gives 121
       · [C5.plan] pieces differ from the plan of the index: ["[0,16000)", "[16000,32000) gap 121ms", "[32000,48000) gap 61ms"]
 C5   negative/c5-piece-straddles-discontinuity negative FAIL    FAIL         yes
       · [C5.no-straddle] piece [0, 40000) straddles the ring_overflow discontinuity at sample 24000 (line 6)
@@ -105,7 +121,7 @@ C5   negative/c5-reanchored-seam           negative FAIL    FAIL         yes
       · [C5.plan] pieces differ from the plan of the index: ["[0,4800000)", "[4800000,9600000)", "[9600000,11200000)"]
       · … 1 more
 C5   negative/c5-resumed-gap-dropped       negative FAIL    FAIL         yes
-      · [C5.same-sample-last-region-governs] gap_before_ms after the resumed at 16000 (gap_ns 2500000000) is absent, rule gives 2500
+      · [C5.gap-max-at-sample] gap_before_ms after the 2 discontinuity record(s) at 16000 (last: resumed) is absent, the rule gives 2500
       · [C5.plan] pieces differ from the plan of the index: ["[0,16000)", "[16000,32000) gap 2500ms"]
 C6   good/multi-piece                      good     PASS    PASS         yes
 C6   good/multi-piece-gap                  good     PASS    PASS         yes
@@ -117,6 +133,7 @@ C6   negative/c6-first-piece-one-short     negative FAIL    FAIL         yes
 C7   good/c7-quiet-room-midnight           good     PASS    PASS         yes
 C7   good/c7-quiet-room-ramp               good     PASS    PASS         yes
 C7   good/discontinuity                    good     PASS    PASS         yes
+C7   good/discontinuity-mid-group          good     PASS    PASS         yes
 C7   negative/c7-zero-filled-gap           negative FAIL    FAIL         yes
       · [C7.no-zero-fill] tape.pcm is 112000 bytes, real audio is 96000: 16000 bytes (8000 samples) inserted across the gap
       · [C7.zero-run-probe] tape.pcm holds a run of ≥16 zero samples starting 40 samples after the discontinuity offset 48000: zero fill
@@ -134,11 +151,13 @@ C8   negative/c8-input-frames-before-first-audio negative FAIL    FAIL         y
       · [C8.L7-input-frames] day_rollover line 1 carries input_frames although no audio preceded it in this run (no input rate was known)
 C8   negative/c8-marker-stamped-with-suffix-wall negative FAIL    FAIL         yes
       · [C8.L2-target] day_rollover line 4 wall_ns 1789324200000010417 is not an IST midnight (10417 ns past one)
+      · [C8.L6-no-unmarked-midnight] line 3 is stamped 10417 ns after IST midnight 1789324200000000000 (region anchored on line 1) with no day_rollover at that boundary
 C8   negative/c8-no-anchor-after-markers   negative FAIL    FAIL         yes
       · [C8.L8-anchor-deferred] line 6 follows the resumed record on line 5 but is not its capture anchor (it carries levels or another sample): audio after the marker was written without the deferred anchor
 C8   negative/c8-rearmed-from-suffix-wall  negative FAIL    FAIL         yes
       · [C8.L2-target] day_rollover line 9 wall_ns 1789410600000010417 is not an IST midnight (10417 ns past one)
       · [C8.L3-rearm] day_rollover line 9 wall_ns 1789410600000010417 is not the previous boundary (line 3) + 86400000000000 = 1789410600000000000 (Δ 10417 ns)
+      · [C8.L6-no-unmarked-midnight] line 8 is stamped 20833 ns after IST midnight 1789410600000000000 (region anchored on line 7) with no day_rollover at that boundary
 C8   negative/c8-second-midnight-not-armed negative FAIL    FAIL         yes
       · [C8.L6-no-unmarked-midnight] line 8 is stamped 274937500 ns after IST midnight 1789410600000000000 (region anchored on line 7) with no day_rollover at that boundary
       · [C8.L6-no-unmarked-midnight] line 9 is stamped 999937500 ns after IST midnight 1789410600000000000 (region anchored on line 7) with no day_rollover at that boundary
@@ -176,18 +195,10 @@ NOT RUN  C6   good/u1-real-midnight                 good     (out-of-repo-audio:
 NOT RUN  C7   good/u1-real-midnight                 good     (out-of-repo-audio: tools/u1-step5-midnight-run.sh /home/vinay/tapes/u1-step5-midnight (TAPE_TEST_HOOKS build), then tools/u1-real-suite.sh ROOT ... /home/vinay/tapes/u1-step5-midnight:u1-real-midnight:/home/vinay/tapes/u1-step5-midnight.summary.json (real room audio across an injected IST midnight; never committed))
 NOT RUN  C8   good/u1-real-midnight                 good     (out-of-repo-audio: tools/u1-step5-midnight-run.sh /home/vinay/tapes/u1-step5-midnight (TAPE_TEST_HOOKS build), then tools/u1-real-suite.sh ROOT ... /home/vinay/tapes/u1-step5-midnight:u1-real-midnight:/home/vinay/tapes/u1-step5-midnight.summary.json (real room audio across an injected IST midnight; never committed))
 
-GROUNDING: 42 named checks made assertions — 23 on Mac source, 1 on a Mac measurement, 8 our choice (ruled, not debt), 10 UNGROUNDED (debt)
+GROUNDING: 44 named checks made assertions — 32 on Mac source, 1 on a Mac measurement, 9 our choice (ruled, not debt), 2 UNGROUNDED (debt)
 UNGROUNDED C1.geometry                             Claims byte_offset == samples x 2 for EVERY record; the expression is quoted only for the stopped builder (TapeWriter.swift:366-384, ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6), and ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'TapeFormat.swift' with no line for the rest. Needs the checkpoint and discontinuity builders' file:line
-UNGROUNDED C1.monotonic                            ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 says 'byte_offset and samples are monotonic' citing 'TapeFormat.swift IndexRecord / IndexLog' with no line
-UNGROUNDED C3.clean-unchanged                      ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line
-UNGROUNDED C3.interior-blank                       ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line
-UNGROUNDED C3.torn-tail                            ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line
-UNGROUNDED C5.byte-ranges-concatenate              ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 quotes app-reference prose ('consecutive pieces are adjacent byte ranges of one file'); copyExactRange / pread is cited with no line (ETA-U0A-REFUTER-VERDICT-14-SEP-2026)
-UNGROUNDED C5.plan                                 PiecePipeline.swift:279-296, :355, :371, :417, :421-428 cover the plan, but the port's behaviour where discontinuities share a sample rests on the planner's emission loop over an empty region, which nobody has read (same defect as C5.same-sample-last-region-governs)
-UNGROUNDED C5.same-sample-last-region-governs      Inferred in U1 step 4 from PiecePipeline.swift:279-296, :355, :371 (an empty region emits no piece); the planner's emission loop over an empty region was not read
-UNGROUNDED C7.no-zero-fill                         ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2: 'A gap is never zero-filled. TapeWriter.discontinuity() writes a metadata-only index record', citing 'TapeWriter' with no line
 UNGROUNDED C8.L3-rearm                             The re-arm itself is CaptureTimeline.swift:122-131, :24; but the session rule this check applies (a restart, device_lost or resumed starts a new CaptureSession that re-queries the zone) rests on Recorder.swift ~65-77, an approximate range: a line moves and the claim detaches. Needs the exact CaptureSession.init lines
-96/96 rows hold; 0 load errors; 0 coverage problems; 13 assertions not made
+106/106 rows hold; 0 load errors; 0 coverage problems; 13 assertions not made
 SUITE HOLDS (REDUCED): 13 assertions not made, from good/u1-real-faults, good/u1-real-midnight
 C10 encoder: running ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers / libopus 1.6.1 on Ubuntu 26.04.1 LTS: an attested pair
 C10 measurement: decoded 40000/40000 samples (Δ 0), best lag 0, correlation 0.99316, RMS Δ +0.0008 dB

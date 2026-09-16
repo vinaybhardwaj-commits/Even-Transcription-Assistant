@@ -57,6 +57,18 @@
     },
     {
       "cases": [
+        "C1",
+        "C2",
+        "C4",
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/coincident-gaps-max",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
         "C2"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
@@ -86,6 +98,18 @@
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
       "id": "good/discontinuity",
+      "role": "good",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C1",
+        "C2",
+        "C3",
+        "C7"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "good/discontinuity-mid-group",
       "role": "good",
       "source": "in-repo"
     },
@@ -333,7 +357,25 @@
         "C4"
       ],
       "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c4-anchor-from-first-coincident",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C4"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
       "id": "negative/c4-one-sample-lost",
+      "role": "negative",
+      "source": "in-repo"
+    },
+    {
+      "cases": [
+        "C5"
+      ],
+      "how": "conformance generate --out fixtures (fixtures/ is not committed)",
+      "id": "negative/c5-coincident-gap-from-last",
       "role": "negative",
       "source": "in-repo"
     },

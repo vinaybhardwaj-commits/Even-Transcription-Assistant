@@ -1,5 +1,6 @@
 import ConformanceKit
 import Foundation
+import TapeConvert
 
 let usage = """
 usage:
@@ -12,6 +13,10 @@ usage:
   conformance adopt-tape --tape TAPEDIR --fixtures ROOT --name NAME [--simulate-torn-tail BYTES] [--recorder-summary FILE]
       Wraps a recorded tape as ROOT/good/NAME (outside the repository: it holds real audio). A tape with day_rollover
       records needs room-recorder's JSON summary: C8's pins come from its capture-side split log.
+  conformance explain-flush --frames N
+      Diagnostic only: feeds N input frames through the production converter, then resets it (what a discontinuity does),
+      then feeds N more, and reports how many output samples each step produced — i.e. what the converter emits, if
+      anything, for an incomplete group of 3 frames held at a boundary.
   conformance explain-c7 --fixture DIR --exempt N
       Diagnostic only: C7's zero-run probe at the fixture's C7 boundary with an exemption of N samples.
   conformance attest-encoder --fixture DIR
@@ -89,6 +94,32 @@ case "explain-c7":
         let r = C7ZeroProbe.run(pcm: f.pcm, byteOffset: offset, length: e.gapNS.map(C7ZeroProbe.length(gapNS:)) ?? C7ZeroProbe.threshold, exemptSamples: exempt)
         print("fixture \(f.id): \(e.cause) at byte \(offset); exempt \(exempt) samples; probe \(r.length) samples; zero run \(r.zeroRun); zero fill reported: \(r.zeroFill)")
     } catch { die("explain-c7: \(error)", 1) }
+
+case "explain-flush":
+    guard let frames = option("--frames").flatMap(Int.init), frames > 0 else { die(usage) }
+    var decimator = StereoDecimator()
+    var out: [Int16] = []
+    // A 1 kHz tone, so a flushed partial sample would be non-zero and visible.
+    var input: [UInt8] = []
+    for n in 0..<frames {
+        let phase: Double = 2.0 * Double.pi * 1000.0 * Double(n) / 48000.0
+        let amplitude: Double = 0.5 * 32767.0
+        let v = Int16((amplitude * Foundation.cos(phase)).rounded())
+        let u = UInt16(bitPattern: v)
+        input += [UInt8(u & 0xff), UInt8(u >> 8), UInt8(u & 0xff), UInt8(u >> 8)]
+    }
+    decimator.process(interleaved: input, into: &out)
+    let before = out.count
+    decimator.reset()
+    let afterReset = out.count - before
+    decimator.process(interleaved: input, into: &out)
+    let second = out.count - before - afterReset
+    let rule = DecimationRule.production
+    print("explain-flush: \(frames) input frames (\(frames % rule.factor) frame(s) short of a whole group of \(rule.factor))")
+    print("  before the boundary: \(before) output samples (outputCount(frames:) = \(rule.outputCount(frames: frames)))")
+    print("  emitted BY the reset itself: \(afterReset) output samples")
+    print("  after the boundary, \(frames) more frames: \(second) output samples")
+    print("  so the incomplete group of \(frames % rule.factor) frame(s) held at the boundary is \(afterReset == 0 ? "DROPPED" : "FLUSHED as \(afterReset) sample(s)") (U1 spec 11.4)")
 
 case "attest-encoder":
     guard let dir = option("--fixture") else { die(usage) }

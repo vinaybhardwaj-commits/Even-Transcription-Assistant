@@ -23,8 +23,8 @@
     {
       "id": "C1.monotonic",
       "asserts": "byte_offset and samples never decrease from one record to the next",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 says 'byte_offset and samples are monotonic' citing 'TapeFormat.swift IndexRecord / IndexLog' with no line"
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:194-196: guard offset >= previousOffset, samples >= previousSamples else { throw TapeError.invalidIndex(line:detail:\"offset or sample count regressed\") } (orchestrator read, 15 Sep). A different check from the input_frames guard at :239-241"
     },
     {
       "id": "C1.stopped-at-pcm-end",
@@ -57,28 +57,34 @@
       "citation": "Measured on the Mac mini, Swift 6.4, macOS 27.0, 14 Sep 2026 (ETA-U0-CLOSED-14-SEP-2026)"
     },
     {
-      "id": "C3.clean-unchanged",
-      "asserts": "repair leaves a clean index untouched",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line"
+      "id": "C3.torn-tail-excluded-by-the-reader",
+      "asserts": "a final line with no 0x0A is excluded from the parse, the read does not fail, and nothing on disk is touched",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:135-154: committedLength walks back to the last 0x0A (or 0) and a partial final line is ALWAYS excluded from the parse; truncation happens only under repairTrailingPartial (orchestrator read, 15 Sep)"
     },
     {
-      "id": "C3.torn-tail",
-      "asserts": "a torn trailing line (no 0x0A) is truncated on repair",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line"
+      "id": "C3.torn-tail-repaired-by-the-writer",
+      "asserts": "the writer's open path truncates the partial line on disk, to the last complete line, and only then opens the file for writing",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:135-154 (repairTrailingPartial); TapeWriter.swift:137 passes it on open, so the writer repairs and a reader does not (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C3.clean-unchanged",
+      "asserts": "a clean log is never opened for writing and its bytes are unchanged",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:136-144: with a trailing 0x0A the guard is false, discarded is 0, the repair block never runs and FileHandle(forWritingTo:) is never opened (orchestrator read, 15 Sep)"
     },
     {
       "id": "C3.interior-blank",
-      "asserts": "an interior blank line is a hard error and the file is untouched",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line"
+      "asserts": "an interior blank line fails the WHOLE read, and nothing on disk is touched",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:170-175: a blank line is tolerated only as the trailing split artifact; any other throws TapeError.malformedIndex(line:detail:\"empty interior record\") and the whole read fails (orchestrator read, 15 Sep)"
     },
     {
       "id": "C4.clock",
       "asserts": "wall time of a sample = anchor wall + (sample - anchor sample) x 62500 ns; the anchor is the record opening the region, replaced by a checkpoint at the region boundary",
       "grounding": "mac-source",
-      "citation": "PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3)"
+      "citation": "PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); PiecePipeline.swift:277-307 (with coincident discontinuities the anchor is the last record's wall_ns)"
     },
     {
       "id": "C4.double-formula",
@@ -105,22 +111,22 @@
       "citation": "PiecePipeline.swift:417 (rounding); PiecePipeline.swift:421-428 (gapMilliseconds(for:), four causes) (ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026)"
     },
     {
-      "id": "C5.same-sample-last-region-governs",
-      "asserts": "when several discontinuities share a sample, the gap of the following piece is that of the LAST one",
-      "grounding": "ungrounded",
-      "citation": "Inferred in U1 step 4 from PiecePipeline.swift:279-296, :355, :371 (an empty region emits no piece); the planner's emission loop over an empty region was not read"
+      "id": "C5.gap-max-at-sample",
+      "asserts": "when several discontinuities share a sample, the following piece's gap_before_ms is the MAXIMUM of their gaps (and the region's clock anchor is the LAST record's wall_ns, checked by C4.clock)",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:277-307: for a coincident discontinuity `if sample > regionStart` is false, so no Region is appended for the zero-length gap; the else branch does regionGap = max(regionGap, nextGap) while regionStart, durableEnd and the anchor are overwritten unconditionally (orchestrator read, 15 Sep). Our prior wording, 'the last region governs', was wrong whenever the first of the coincident records carried the larger gap"
     },
     {
       "id": "C5.plan",
       "asserts": "the piece list equals the planner port's plan of the index",
-      "grounding": "ungrounded",
-      "citation": "PiecePipeline.swift:279-296, :355, :371, :417, :421-428 cover the plan, but the port's behaviour where discontinuities share a sample rests on the planner's emission loop over an empty region, which nobody has read (same defect as C5.same-sample-last-region-governs)"
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:279-296, :355, :371, :417, :421-428; and :277-307 for the empty-region behaviour that was previously unread (orchestrator read, 15 Sep)"
     },
     {
       "id": "C5.byte-ranges-concatenate",
       "asserts": "the pieces' byte ranges concatenate to tape.pcm",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 quotes app-reference prose ('consecutive pieces are adjacent byte ranges of one file'); copyExactRange / pread is cited with no line (ETA-U0A-REFUTER-VERDICT-14-SEP-2026)"
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:669-707, pread at :698 reading at off_t(offset + completed) through a 1 MiB buffer (positional, never seeking the shared fd); called at :531 with byteOffset = sampleStart x bytesPerSample and byteCount = (sampleEnd - sampleStart) x bytesPerSample; the planner chains cursor = region.end (:371), so consecutive pieces concatenate with no gap and no overlap by construction (orchestrator read, 15 Sep)"
     },
     {
       "id": "C6.full-piece",
@@ -154,9 +160,15 @@
     },
     {
       "id": "C7.no-zero-fill",
-      "asserts": "the discontinuity sits where pre-gap audio ends and tape.pcm holds exactly the real audio (no bytes for the gap)",
-      "grounding": "ungrounded",
-      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2: 'A gap is never zero-filled. TapeWriter.discontinuity() writes a metadata-only index record', citing 'TapeWriter' with no line"
+      "asserts": "the boundary's byte_offset is the tape length after the resampler flush that opens discontinuity(), and tape.pcm holds exactly the audio before and after it: nothing is inserted for the gap",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:267-296, whose first statement :268 is try finishConversion() (:261-264 → writeConverted :245-259, which appends to tape.pcm through writeAll at :252), and only then is the record stamped with byteOffset: bytesWritten (orchestrator read, 15 Sep). The earlier wording, 'discontinuity() writes no PCM', was FALSE: the path flushes the resampler first"
+    },
+    {
+      "id": "C7.boundary-after-flush",
+      "asserts": "the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes",
+      "grounding": "our-choice",
+      "citation": "Ours: U1 spec 11.4 (RULED - the converter resets at every discontinuity and an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md. MEASURED with `conformance explain-flush`: our converter emits 0 samples at a reset, for 1 and for 2 held frames. The Mac flushes its resampler at the same point (TapeWriter.swift:268, :261-264); if AVAudioConverter emits a final partial sample there, every discontinuity's byte_offset differs from ours by one sample - this check is where that shows"
     },
     {
       "id": "C7.zero-run-probe",

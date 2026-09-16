@@ -31,6 +31,8 @@ extension FixtureGenerator {
         var markWallNS: Int64? = nil
         /// The device was reopened before this buffer: a new capture session, which queries the zone at this wall time.
         var newSessionAtWallNS: Int64? = nil
+        /// false: the writer is not run after this buffer (a starved writer, so the ring can overflow).
+        var drainAfter = true
     }
 
     static let inputRate: Int64 = 48_000
@@ -50,6 +52,7 @@ extension FixtureGenerator {
     /// Runs the recorder's capture side and writer over `buffers` into a temporary tape and returns its bytes. The
     /// writer drains after every buffer, as the live writer keeps up; `now` is the end of the latest buffer.
     static func record(_ buffers: [SyntheticBuffer], firstTarget: Int64?, rule: SplitRule = .production,
+                       ringCapacityFrames: Int = 1 << 20,
                        signal: (Int64) -> (Int16, Int16) = toneSignal) throws -> (pcm: [UInt8], idx: [UInt8]) {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("conformance-rollover-\(UUID().uuidString)")
@@ -59,7 +62,7 @@ extension FixtureGenerator {
         now.mono = buffers[0].monoStartNS
         now.wall = buffers[0].wallStartNS
         let writer = try TapeWriter(directory: dir, device: dmic, inputSampleRate: Double(inputRate), monoNow: { now.mono }, wallNow: { now.wall })
-        let ring = FrameRing(capacityFrames: 1 << 20, bytesPerFrame: 4)
+        let ring = FrameRing(capacityFrames: ringCapacityFrames, bytesPerFrame: 4)
         let arrival = ArrivalClock(rate: inputRate)
         let session = TapeSession(writer: writer, ring: ring, arrival: arrival, monoNow: { now.mono }, wallNow: { now.wall })
         let side = CaptureSide(ring: ring, arrival: arrival)
@@ -91,7 +94,7 @@ extension FixtureGenerator {
                 }
             }
             captured += Int64(b.frames)
-            while try session.step() == .progressed {}
+            if b.drainAfter { while try session.step() == .progressed {} }
         }
         now.mono += 1_000_000
         now.wall += 1_000_000
@@ -322,12 +325,107 @@ extension FixtureGenerator {
         return Draft(manifest: m, pcm: t.pcm, idx: t.idx, expected: e)
     }
 
+    // MARK: good/discontinuity-mid-group — a boundary with a non-empty converter buffer
+
+    /// Buffers of 1 200 frames except the first, which holds 1 201, so the frame count at each boundary is not a multiple of
+    /// three and the converter is holding an incomplete group when the boundary arrives. Measured with
+    /// `conformance explain-flush`: our converter emits NOTHING at a reset (U1 spec §11.4), so the boundary's byte_offset is
+    /// 2 × floor(frames / 3) and the held frames are dropped.
+    ///   ring capacity 2 400 frames (wider than any buffer, so nothing is lost to the ring except at the starve); the writer
+    ///   is starved over buffers 40 and 41, which fill it, so every frame of buffer 42 is dropped: ring_overflow, 1 200
+    ///   dropped input frames, gap_ns 25 000 000.
+    ///   at that boundary 50 401 frames have been consumed (1 short of a group): 16 800 samples, byte_offset 33 600.
+    ///   region 2 then consumes 1 202 + 1 200 + 1 200 = 3 602 frames (2 short of a group) before a capture_discontinuity
+    ///   40 ms later: 1 200 samples, byte_offset 36 000. Then 3 600 frames and a clean stop: 19 200 samples in all.
+    static func discontinuityMidGroup() throws -> Draft {
+        let w0 = cleanAnchorNS, m0 = Int64(monoStart)
+        var bs: [SyntheticBuffer] = []
+        var wall = w0, mono = m0
+        func add(_ frames: Int, drain: Bool = true, mark: String? = nil, extraWaitNS: Int64 = 0) {
+            wall += extraWaitNS
+            mono += extraWaitNS
+            bs.append(SyntheticBuffer(frames: frames, wallStartNS: wall, monoStartNS: mono, markBefore: mark, drainAfter: drain))
+            let d = FrameTime.duration(frames: Int64(frames), rate: inputRate)
+            wall += d
+            mono += d
+        }
+        add(1_201)                                   // buffer 0: 1 201 frames, so no boundary lands on a group edge
+        for _ in 1..<40 { add(bufferFrames) }        // buffers 1…39
+        add(bufferFrames, drain: false)              // buffers 40 and 41 fill the 2 400-frame ring
+        add(bufferFrames, drain: false)
+        add(bufferFrames)                            // buffer 42 is dropped whole, then the writer catches up
+        add(1_202)                                   // buffer 43: the new side
+        add(bufferFrames)
+        add(bufferFrames)
+        add(bufferFrames, mark: DiscontinuityCause.captureDiscontinuity, extraWaitNS: 40_000_000)
+        for _ in 0..<2 { add(bufferFrames) }
+        let t = try record(bs, firstTarget: try ISTDay.nextMidnight(nowWallNS: w0), ringCapacityFrames: 2 * bufferFrames)
+        let lines = idxLines(t.idx).filter { !$0.isEmpty }
+        let overflow = lines.firstIndex { $0.contains("\"discontinuity\":\"ring_overflow\"") }.map { $0 + 1 }
+        guard let overflowLine = overflow else {
+            throw FixtureLoadError(fixture: "good/discontinuity-mid-group", reason: "the starved writer produced no ring_overflow: \(lines.count) records")
+        }
+        var e = ExpectedAnswers()
+        e.c3 = C3Expected(outcome: "clean", records: lines.count)
+        e.c7 = C7Expected(line: overflowLine, cause: DiscontinuityCause.ringOverflow, gapNS: 25_000_000, droppedInputFrames: 1_200,
+                          preGapSamples: 16_800, postGapSamples: 19_200 - 16_800)
+        let m = rolloverManifest("discontinuity-mid-group",
+                                 "Boundaries that fall inside a group of three input frames. 25 ms buffers except the first (1201 frames) and buffer 43 (1202), a ring of 2400 frames and a writer starved over two buffers: ring_overflow with 1200 dropped frames after 50401 consumed frames (1 short of a group) at byte_offset 33600, then a capture_discontinuity after 3602 frames of the new region (2 short) at byte_offset 36000. Our converter emits nothing at a reset (measured: conformance explain-flush), so each boundary's byte_offset is 2 x floor(frames / 3) and the held frames are dropped. If the Mac's resampler flush emits a final partial sample instead, these offsets differ by one sample.",
+                                 [.C1, .C2, .C3, .C7])
+        return Draft(manifest: m, pcm: t.pcm, idx: t.idx, expected: e)
+    }
+
+    // MARK: good/coincident-gaps-max — two discontinuities at one sample
+
+    /// PiecePipeline.swift:277-307: a discontinuity at the region's own start appends no region; the region's gap becomes the
+    /// MAXIMUM of the coincident gaps while its anchor is overwritten by the LAST record. The first discontinuity here carries
+    /// the larger gap, so the two rules give different answers: gap_before_ms 750 (max, not the last record's 10) and the
+    /// anchor is the second record's wall_ns (not the first's).
+    static func coincidentGaps() -> Draft {
+        let syn: [SynthSegment] = [.tone(1000, 0.5, 16_000), SynthSegment(kind: "gap", gapNS: 750_000_000), .tone(440, 0.25, 16_000)]
+        var b = TapeBuilder(device: dmic, wall: cleanAnchorNS, mono: monoStart, inputRate: ("48000", 3, 1))
+        b.checkpoint(0, window: false)
+        b.checkpoints(every: 8_000, after: 0, through: 16_000)
+        b.discontinuity(16_000, cause: DiscontinuityCause.ringOverflow, gapNS: 750_000_000, dropped: 36_000)
+        b.discontinuity(16_000, cause: DiscontinuityCause.captureDiscontinuity, gapNS: 10_000_000)
+        b.checkpoints(every: 8_000, after: 16_000, through: 32_000)
+        var clock = TapeBuilder(device: dmic, wall: cleanAnchorNS, mono: 0, inputRate: nil)
+        let before = point("last sample before the two discontinuities", "sample:15999", clock, 15_999)
+        clock.anchorWall = clock.wall(16_000) + 750_000_000 + 10_000_000
+        clock.anchorSample = 16_000
+        let after = point("first sample after them (anchored on the LAST of the two records)", "sample:16000", clock, 16_000)
+        let end = point("last sample of the tape", "sample:31999", clock, 31_999)
+        var e = ExpectedAnswers()
+        e.c4 = ClockExpected(points: [before, after, end])
+        e.pieces = [PieceRange(sampleStart: 0, sampleEnd: 16_000),
+                    PieceRange(sampleStart: 16_000, sampleEnd: 32_000, gapBeforeMS: 750)]
+        return Draft(manifest: manifest("coincident-gaps-max",
+                                        "Two discontinuities at sample 16000, the FIRST carrying the larger gap: ring_overflow (gap_ns 750000000, 36000 dropped frames) then capture_discontinuity (gap_ns 10000000) 10 ms later. The piece after them carries gap_before_ms 750 — the maximum of the two, not the last one's 10 — and the region's clock anchor is the second record's wall_ns.",
+                                        [.C1, .C2, .C4, .C5], syn),
+                     pcm: Synth.render(syn), idx: b.idx, expected: e)
+    }
+
     // MARK: Negative controls
 
     static func idxLines(_ idx: [UInt8]) -> [String] { String(decoding: idx, as: UTF8.self).components(separatedBy: "\n") }
 
-    static func rolloverNegatives(midnight: Draft, two: Draft, before: Draft, quiet: Draft, lost: Draft) throws -> [Draft] {
+    static func rolloverNegatives(midnight: Draft, two: Draft, before: Draft, quiet: Draft, lost: Draft, coincident: Draft) throws -> [Draft] {
         var out: [Draft] = []
+
+        // The old wording: the LAST discontinuity at the sample governs the gap. It gives 10 ms where the rule gives 750.
+        out.append(negative(coincident, name: "c5-coincident-gap-from-last", target: .C5,
+                            corruption: "The piece after the two coincident discontinuities carries gap_before_ms 10, the LAST record's gap, instead of 750, the maximum of the two (PiecePipeline.swift:277-307).") { d in
+            d.expected.pieces![1].gapBeforeMS = 10
+            d.expected.c4 = nil
+        })
+
+        // The other half of PiecePipeline.swift:277-307: the anchor is the LAST record's wall_ns, not the first's.
+        out.append(negative(coincident, name: "c4-anchor-from-first-coincident", target: .C4,
+                            corruption: "The clock for sample 16000 is anchored on the FIRST of the two coincident records (10 ms earlier), not the last.") { d in
+            d.expected.pieces = nil
+            d.expected.c4!.points[1].wallNS -= 10_000_000
+            d.expected.c4!.points[2].wallNS -= 10_000_000
+        })
 
         // Bytes written after the clean stop: tape.pcm is 800 bytes longer than the final stopped record's byte_offset.
         out.append(negative(midnight, name: "c1-bytes-after-stopped", target: .C1,

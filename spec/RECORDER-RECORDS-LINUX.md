@@ -56,7 +56,12 @@ build has no such code and refuses the option.
 - **Periodic:** once per consumed buffer, if the window holds samples, the monotonic time since the last checkpoint is
   ≥ **1 250 000 000 ns**, and audio timestamps exist. A floor, not a timer: never less than 1.25 s. (:11, :29, :36, :355-358)
 - **Any discontinuity:** if the window holds samples, a checkpoint stamped with the end of the prior buffer; the converter
-  resets (U1 §11.4); latest audio times cleared; then the record. `device_lost`: at once, on the detection clocks;
+  resets (U1 §11.4); latest audio times cleared; then the record. On the Mac the discontinuity path first flushes the
+  resampler (TapeWriter :268 → :261-264 → writeConverted :245-259, appending at :252) and only then stamps the record with
+  `byteOffset: bytesWritten`, so a boundary's `byte_offset` is a post-flush tape length. **Ours flushes nothing:** §11.4
+  resets the converter and an incomplete group of 1–2 input frames produces no output (measured: `conformance
+  explain-flush` reports 0 samples emitted at a reset). So a boundary lands at `floor(input frames in the region / 3)`
+  samples, pinned by C7.boundary-after-flush and the fixture good/discontinuity-mid-group. `device_lost`: at once, on the detection clocks;
   `resumed` when audio returns. `ring_overflow` / `capture_discontinuity`: when the new-side buffer arrives, stamped with
   its start. `day_rollover`: at once, on the marker's clocks (a gap still waiting for its new-side audio is written
   first, stamped with the start of the buffer being split). (:267-296)

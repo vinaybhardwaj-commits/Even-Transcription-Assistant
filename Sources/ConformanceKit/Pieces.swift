@@ -32,30 +32,56 @@ public struct TapeRegion: Equatable, Sendable {
     public var anchorLine: Int
     /// Index line of the record that opened the region. Its records run from here up to the next region's openLine.
     public var openLine: Int
-    /// The discontinuity that opened the region, if any.
+    /// The discontinuity that opened the region, if any: the LAST one when several share the sample.
     public var openedBy: String?
     public var gapBeforeNS: Int64?
+    /// gap_before_ms of the first piece of this region: the MAXIMUM over every discontinuity record at its start
+    /// (PiecePipeline.swift:277-307 — a coincident discontinuity appends no region; `regionGap = max(regionGap, nextGap)`
+    /// while regionStart, durableEnd and the anchor are overwritten).
+    public var gapBeforeMS: Int64 = 0
+    /// How many discontinuity records sit at this region's start.
+    public var coincidentDiscontinuities = 0
 }
 
 public enum TapeRegions {
-    /// Regions from the index. Records without `samples` cannot be placed and are skipped.
-    /// A region closes on any record whose `discontinuity` is set; the last region ends at `totalSamples`.
+    /// Regions from the index (RoomPiecePlanner, PiecePipeline.swift:277-307). Records without `samples` cannot be placed
+    /// and are skipped. A region closes on any record whose `discontinuity` is set, EXCEPT one that sits at the region's own
+    /// start: a zero-length region is never appended. Instead that region's gap becomes the maximum of the coincident gaps
+    /// and its anchor, open line and cause are overwritten by the later record. The last region ends at `totalSamples`.
     public static func regions(_ lines: [IndexLine], totalSamples: Int64) -> [TapeRegion] {
         var out: [TapeRegion] = []
         var current: TapeRegion? = nil
+        func opened(at s: Int64, _ line: IndexLine, _ w: Int64, _ cause: String?) -> TapeRegion {
+            TapeRegion(start: s, end: 0, anchorSample: s, anchorWallNS: w, anchorLine: line.number, openLine: line.number,
+                       openedBy: cause, gapBeforeNS: line.int(IndexKey.gapNS),
+                       gapBeforeMS: DiscontinuityCause.gapMilliseconds(cause: cause, gapNS: line.int(IndexKey.gapNS)),
+                       coincidentDiscontinuities: cause == nil ? 0 : 1)
+        }
         for line in lines {
             guard let s = line.int(IndexKey.samples), let w = line.int(IndexKey.wallNS) else { continue }
             let cause: String? = { if case .string(let c)? = line.fields[IndexKey.discontinuity] { return c }; return nil }()
             if current == nil {
-                current = TapeRegion(start: 0, end: 0, anchorSample: s, anchorWallNS: w, anchorLine: line.number,
-                                     openLine: line.number, openedBy: cause, gapBeforeNS: line.int(IndexKey.gapNS))
+                current = opened(at: 0, line, w, cause)
+                current!.anchorSample = s
                 continue
             }
             if let cause {
+                if s == current!.start, current!.openedBy != nil {
+                    // Coincident with the discontinuity that opened this region: no region is appended.
+                    let ms = DiscontinuityCause.gapMilliseconds(cause: cause, gapNS: line.int(IndexKey.gapNS))
+                    current!.gapBeforeMS = max(current!.gapBeforeMS, ms)
+                    current!.coincidentDiscontinuities += 1
+                    current!.anchorSample = s
+                    current!.anchorWallNS = w
+                    current!.anchorLine = line.number
+                    current!.openLine = line.number
+                    current!.openedBy = cause
+                    current!.gapBeforeNS = line.int(IndexKey.gapNS)
+                    continue
+                }
                 current!.end = s
                 out.append(current!)
-                current = TapeRegion(start: s, end: 0, anchorSample: s, anchorWallNS: w, anchorLine: line.number,
-                                     openLine: line.number, openedBy: cause, gapBeforeNS: line.int(IndexKey.gapNS))
+                current = opened(at: s, line, w, cause)
             } else if current!.openedBy != nil, s == current!.start {
                 current!.anchorSample = s
                 current!.anchorWallNS = w
@@ -85,9 +111,9 @@ public enum TapeRegions {
 public enum PiecePlanner {
     /// RoomPiecePlanner.plan: pieces of 4 800 000 samples within each region; a region's end forces a partial
     /// close and resets the cursor, so no piece straddles a discontinuity. The final partial is included
-    /// (the tail flush is requested). The first piece of a region carries gapMilliseconds(for:) of the
-    /// discontinuity that opened it. Zero is represented here as absent; whether the Mac writes 0 or omits the
-    /// key is not pinned, so C5 treats absent and 0 alike.
+    /// (the tail flush is requested). The first piece of a region carries the region's gap — the maximum of
+    /// gapMilliseconds(for:) over every discontinuity at its start (PiecePipeline.swift:277-307). Zero is represented here
+    /// as absent; whether the Mac writes 0 or omits the key is not pinned, so C5 treats absent and 0 alike.
     public static func plan(_ regions: [TapeRegion]) -> [PieceRange] {
         var pieces: [PieceRange] = []
         for r in regions {
@@ -95,10 +121,7 @@ public enum PiecePlanner {
             while cursor < r.end {
                 let end = min(cursor + TapeFormat.pieceSamples, r.end)
                 var gap: Int64? = nil
-                if cursor == r.start {
-                    let ms = DiscontinuityCause.gapMilliseconds(cause: r.openedBy, gapNS: r.gapBeforeNS)
-                    gap = ms == 0 ? nil : ms
-                }
+                if cursor == r.start, r.gapBeforeMS != 0 { gap = r.gapBeforeMS }
                 pieces.append(PieceRange(sampleStart: cursor, sampleEnd: end, gapBeforeMS: gap))
                 cursor = end
             }

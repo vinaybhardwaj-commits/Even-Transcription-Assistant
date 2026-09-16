@@ -826,12 +826,13 @@ public enum FixtureGenerator {
         let blank = interiorBlank(), multi = multiPiece(), multiGap = multiPieceGap(), midnight = try istMidnight()
         let below = gapRoundingBelow(), above = gapRoundingAbove(), darwin = darwinDoubles(), lost = deviceLostResumed(), quiet = c7QuietRoom(), odd = try restartOddTail()
         let two = try twoRollovers().0, before = try beforeFirstAudio(), quietMidnight = try quietRoomMidnight(), lostMidnight = try deviceLostAtMidnight()
+        let midGroup = try discontinuityMidGroup(), coincident = coincidentGaps()
         var written: [String] = []
-        for d in [clean, disc, torn, blank, multi, multiGap, below, above, midnight, two, before, quietMidnight, lostMidnight, darwin, lost, quiet, odd] + c9Good() {
+        for d in [clean, disc, torn, blank, multi, multiGap, below, above, midnight, two, before, quietMidnight, lostMidnight, midGroup, coincident, darwin, lost, quiet, odd] + c9Good() {
             written.append(try write(d, to: root.appendingPathComponent("good").appendingPathComponent(d.manifest.name)))
         }
         for d in negatives(clean: clean, disc: disc, torn: torn, multi: multi, above: above, darwin: darwin, lost: lost, odd: odd) + c9Negatives()
-            + (try rolloverNegatives(midnight: midnight, two: two, before: before, quiet: quietMidnight, lost: lostMidnight)) {
+            + (try rolloverNegatives(midnight: midnight, two: two, before: before, quiet: quietMidnight, lost: lostMidnight, coincident: coincident)) {
             written.append(try write(d, to: root.appendingPathComponent("negative").appendingPathComponent(d.manifest.name)))
         }
         return written

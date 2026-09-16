@@ -692,6 +692,246 @@ every run (from the tape start or a restart record), not only the first. L8 (the
   success.
 
 
+## The grounding pass, round 1 (16 Sep): eight citations, and two checks it refuted
+
+The orchestrator read the Mac source for the eight ungrounded checks. **Two of them asserted something the Mac does not
+do** — the grounding manifest earned its keep in its first hour. Four wrong C-checks in two steps now (C5 in step 4, C8
+in step 5, C7 and C5 again here), every one written from prose rather than from a citation, and every one would have
+failed a correct recorder.
+
+### C7 — "discontinuity() writes no PCM" was FALSE
+
+`TapeWriter.swift:267-296`, first statement `:268`: `try finishConversion()` → `:261-264`:
+
+```swift
+func finishConversion() throws {
+  if let resampler {
+    try resampler.finish { output, count in try writeConverted(output, count: count) }
+  }
+}
+```
+
+`writeConverted` (`:245-259`) appends to tape.pcm through `writeAll(fd: pcmFD, ..., operation: .pcmWrite, ...)` at `:252`.
+So the discontinuity **path** appends PCM whenever the resampler holds buffered output, and only then is the record
+stamped `byteOffset: bytesWritten` — post-flush. C7.no-zero-fill is reworded to that (the boundary is the tape length
+after the flush; nothing is inserted for the gap itself) and is now mac-source.
+
+**Measured, not reasoned** (`conformance explain-flush`, a new diagnostic subcommand): our converter emits **0 output
+samples at a reset**, with 1 held frame and with 2. The held frames are dropped, as U1 §11.4 ruled.
+
+```
+explain-flush: 48001 input frames (1 frame(s) short of a whole group of 3)
+  before the boundary: 16000 output samples (outputCount(frames:) = 16000)
+  emitted BY the reset itself: 0 output samples
+  after the boundary, 48001 more frames: 16000 output samples
+  so the incomplete group of 1 frame(s) held at the boundary is DROPPED (U1 spec 11.4)
+```
+
+New check **C7.boundary-after-flush** (our-choice, §11.4): a discontinuity's closing region holds
+`outputCount(frames consumed) = floor(frames / 3)` samples, so its byte_offset is pinned to what the flush contributes —
+nothing, for us. It runs on every C7 fixture, real tapes included, and only at a 48 kHz input rate (the conversion is
+specified for 48 kHz; good/discontinuity describes a 44.1 kHz device and is exempt).
+
+**New fixture `good/discontinuity-mid-group`**, because the step 4 tape proves nothing here: its line 1867 (audio) and
+1868 (device_lost) share byte_offset 76 028 000, which is one sample point with possibly-empty buffers. The fixture
+guarantees a non-empty converter buffer at two boundaries — 25 ms buffers except the first (1 201 frames) and buffer 43
+(1 202), a 2 400-frame ring, and a writer starved over two buffers:
+
+- ring_overflow after **50 401** consumed frames (1 short of a group): byte_offset **33 600** = 2 × floor(50401/3);
+- capture_discontinuity after **3 602** frames of the next region (2 short): byte_offset **36 000**;
+- stopped at 19 200 samples = 38 400 bytes.
+
+**Open parity question for the Mac side:** if AVAudioConverter's `finish` emits a final partial sample where ours drops
+one, every discontinuity's byte_offset differs by one sample. §11.4 already ruled our reset (the Mac carries history
+instead), so some divergence in boundary sample counts was ruled in; its size is now measurable on both sides from this
+fixture's numbers.
+
+### C5 — the gap rule is MAX, not "last"
+
+`PiecePipeline.swift:277-307`: for a discontinuity at the region's own start `if sample > regionStart` is false, so **no
+Region is appended** for the zero-length gap; the else branch does `regionGap = max(regionGap, nextGap)` while
+`regionStart`, `durableEnd` and the anchor are overwritten unconditionally. **Two rules:** the gap is the maximum over the
+coincident discontinuities, the anchor is the last one's `wall_ns`. Our step 4 wording — "the last region at a sample
+governs" — gets the max wrong whenever the FIRST record carries the larger gap. device_lost (no gap) then resumed
+(5.216 s) gives the same answer under both, which is why the real tape never separated them.
+
+Changed: `TapeRegions.regions` no longer appends a zero-length region; a coincident discontinuity folds into the open one
+with `gapBeforeMS = max(...)` and the later record's anchor, open line and cause. `PiecePlanner` uses that gap.
+C5.same-sample-last-region-governs is **gone**, replaced by **C5.gap-max-at-sample** (mac-source, :277-307), and C5.plan's
+unread-loop caveat is resolved by the same citation.
+
+**New fixture `good/coincident-gaps-max`:** ring_overflow (gap 750 ms, 36 000 dropped frames) then capture_discontinuity
+(gap 10 ms) at sample 16 000 — the FIRST carries the larger gap. The piece after them carries 750; the region's anchor is
+the second record's wall_ns. Negatives: `c5-coincident-gap-from-last` (gap 10, the old wording) and
+`c4-anchor-from-first-coincident` (anchored on the first record, 10 ms early).
+
+### C3, C1.monotonic, C5.byte-ranges-concatenate — grounded on the lines received
+
+- **Torn tail, split in two.** `TapeFormat.swift:135-154`: a final line with no 0x0A is ALWAYS excluded from the parse
+  (committedLength walks back to the last 0x0A, or 0); it is truncated on disk only under `repairTrailingPartial`, which
+  `TapeWriter.swift:137` passes on open. **The writer repairs; a reader does not.** Our check is now two:
+  C3.torn-tail-excluded-by-the-reader (the read excludes it, does not fail, touches nothing) and
+  C3.torn-tail-repaired-by-the-writer (the open path truncates, and is the only thing that opens the file for writing).
+- **Interior blank line** (`TapeFormat.swift:170-175`): tolerated only as the trailing split artifact; anything else throws
+  `TapeError.malformedIndex(line:detail:"empty interior record")` and the **whole read** fails. C3.interior-blank now
+  asserts that `IndexLog.scan` itself fails, not merely that the repair refuses. Verified: ours does.
+- **Clean file** (`TapeFormat.swift:136-144`): the guard is false, discarded is 0, the repair block never runs and
+  `FileHandle(forWritingTo:)` is never opened. `IndexLog.repair` now reports `openedForWriting`, and C3.clean-unchanged
+  asserts it is false — not merely that the bytes are equal.
+- **C1.monotonic** — `TapeFormat.swift:194-196`, the offset/sample regression guard; a different check from the
+  input_frames guard at :239-241.
+- **C5.byte-ranges-concatenate** — `PiecePipeline.swift:669-707`, `pread` at `:698` at `off_t(offset + completed)` through a
+  1 MiB buffer (positional, never seeking the shared fd), called at `:531` with `byteOffset = sampleStart × bytesPerSample`
+  and `byteCount = (sampleEnd − sampleStart) × bytesPerSample`; the planner chains `cursor = region.end` (`:371`).
+
+Still ungrounded, and not guessed at: **C1.geometry** (the samples × 2 expression is quoted only for the stopped builder)
+and **C8.L3-rearm** (Recorder.swift ~65-77 is an approximate range).
+
+### Prior assertions, verbatim (rule of 15 Sep)
+
+C3, `Sources/ConformanceKit/Cases.swift`, replaced 16 Sep — one block covering all three outcomes:
+
+```swift
+        var c = Checks()
+        let outcome: Result<IndexScanOutcome, Error> = Result { try IndexLog.repair(fileAt: copy) }
+        let after = (try? [UInt8](Data(contentsOf: copy))) ?? []
+
+        switch e.outcome {
+        case "clean":
+            c.law("C3.clean-unchanged")
+            if case .success(let o) = outcome {
+                c.expect(o == .clean, "expected a clean log, repair reported \(o)")
+            } else if case .failure(let err) = outcome {
+                c.expect(false, "expected a clean log, repair threw: \(err)")
+            }
+            c.expect(after == f.idx, "repair of a clean log changed the file")
+            if let n = e.records, case .success(let s) = scan(f) { c.expect(s.lines.count == n, "expected \(n) records, read \(s.lines.count)") }
+
+        case "torn_tail":
+            c.law("C3.torn-tail")
+            guard case .success(let o) = outcome else {
+                if case .failure(let err) = outcome { c.expect(false, "expected torn-tail repair, repair threw: \(err)") }
+                return c.verdict
+            }
+            guard case .tornTail(let length, let dropped) = o else {
+                c.expect(false, "expected a torn tail, repair reported \(o)")
+                return c.verdict
+            }
+            if let want = e.repairedLength { c.expect(length == want, "repaired length \(length) != expected \(want)") }
+            if let want = e.droppedBytes { c.expect(dropped == want, "dropped \(dropped) bytes, expected \(want)") }
+            c.expect(after.count == length, "file is \(after.count) bytes after repair, repair reported \(length)")
+            c.expect(after == Array(f.idx.prefix(length)), "repaired file is not a prefix of the original")
+            c.expect(after.last == 0x0A, "repaired file does not end in 0x0A")
+            if let s = try? IndexLog.scan(after) {
+                c.expect(s.outcome == .clean, "repaired file still scans as \(s.outcome)")
+                if let n = e.records { c.expect(s.lines.count == n, "expected \(n) records after repair, read \(s.lines.count)") }
+            } else {
+                c.expect(false, "repaired file does not scan")
+            }
+
+        case "hard_error":
+            c.law("C3.interior-blank")
+            switch outcome {
+            case .success(let o):
+                c.expect(false, "expected a hard error (\(e.error ?? "?")), repair reported \(o)")
+            case .failure(let err):
+                if e.error == "interior_blank_line" {
+                    if case IndexLogError.interiorBlankLine(let n) = err {
+                        if let want = e.line { c.expect(n == want, "blank line reported at \(n), expected \(want)") }
+                        else { c.expect(true, "") }
+                    } else {
+                        c.expect(false, "expected interior_blank_line, got \(err)")
+                    }
+                } else {
+                    return .error("unknown expected error \(e.error ?? "nil")")
+                }
+            }
+            c.expect(after == f.idx, "a hard error must leave the log untouched")
+
+        default:
+            return .error("unknown C3 outcome \(e.outcome)")
+        }
+        return c.verdict
+    }
+```
+
+C5's discontinuity loop, `Sources/ConformanceKit/Cases.swift`, replaced 16 Sep:
+
+```swift
+        // Every discontinuity: no piece straddles it, and its gap lands on the piece that follows it. Several
+        // discontinuities can share a sample (device_lost then resumed): the regions between them are empty, and the
+        // following piece belongs to the LAST region starting there, so only that region's gap rule applies to it.
+        let later = rs.dropFirst()
+        for (k, r) in later.enumerated() {
+            let d = r.start
+            c.law("C5.no-straddle")
+            for p in pieces where p.sampleStart < d && d < p.sampleEnd {
+                c.expect(false, "piece [\(p.sampleStart), \(p.sampleEnd)) straddles the \(r.openedBy ?? "?") discontinuity at sample \(d) (line \(r.anchorLine))")
+            }
+            let lastAtSample = !later.dropFirst(k + 1).contains { $0.start == d }
+            let sharesSample = later.filter { $0.start == d }.count > 1
+            c.law(sharesSample ? "C5.same-sample-last-region-governs" : "C5.gap-after-discontinuity")
+            if d < total, lastAtSample {
+                let following = pieces.first { $0.sampleStart == d }
+                c.expect(following != nil, "no piece starts at the \(r.openedBy ?? "?") discontinuity at sample \(d)")
+                // Round half up at 500 000 ns, and only for the four gap-carrying causes.
+                let want = DiscontinuityCause.gapMilliseconds(cause: r.openedBy, gapNS: r.gapBeforeNS)
+                if let following {
+                    c.expect((following.gapBeforeMS ?? 0) == want,
+                             "gap_before_ms after the \(r.openedBy ?? "?") at \(d) (gap_ns \(r.gapBeforeNS.map(String.init) ?? "absent")) is \(following.gapBeforeMS.map(String.init) ?? "absent"), rule gives \(want)")
+                }
+            }
+        }
+        c.law("C5.gap-after-discontinuity")
+```
+
+C7's statement about the boundary, `Sources/ConformanceKit/Cases.swift`, reworded 16 Sep:
+
+```swift
+        // The discontinuity is metadata-only: it sits exactly where the real pre-gap audio ends.
+        let offset = d.int(IndexKey.byteOffset) ?? -1
+        c.expect(offset == e.preGapSamples * 2, "discontinuity byte_offset \(offset) != pre-gap audio \(e.preGapSamples) × 2")
+        // No zero fill: the tape holds exactly the real audio, not a sample more.
+        let real = (e.preGapSamples + e.postGapSamples) * 2
+        c.expect(Int64(f.pcm.count) == real,
+                 "tape.pcm is \(f.pcm.count) bytes, real audio is \(real): \(Int64(f.pcm.count) - real) bytes (\((Int64(f.pcm.count) - real) / 2) samples) inserted across the gap")
+```
+
+The region model behind C5 and C6, `Sources/ConformanceKit/Pieces.swift`, replaced 16 Sep:
+
+```swift
+    /// Regions from the index. Records without `samples` cannot be placed and are skipped.
+    /// A region closes on any record whose `discontinuity` is set; the last region ends at `totalSamples`.
+    public static func regions(_ lines: [IndexLine], totalSamples: Int64) -> [TapeRegion] {
+        var out: [TapeRegion] = []
+        var current: TapeRegion? = nil
+        for line in lines {
+            guard let s = line.int(IndexKey.samples), let w = line.int(IndexKey.wallNS) else { continue }
+            let cause: String? = { if case .string(let c)? = line.fields[IndexKey.discontinuity] { return c }; return nil }()
+            if current == nil {
+                current = TapeRegion(start: 0, end: 0, anchorSample: s, anchorWallNS: w, anchorLine: line.number,
+                                     openLine: line.number, openedBy: cause, gapBeforeNS: line.int(IndexKey.gapNS))
+                continue
+            }
+            if let cause {
+                current!.end = s
+                out.append(current!)
+                current = TapeRegion(start: s, end: 0, anchorSample: s, anchorWallNS: w, anchorLine: line.number,
+                                     openLine: line.number, openedBy: cause, gapBeforeNS: line.int(IndexKey.gapNS))
+            } else if current!.openedBy != nil, s == current!.start {
+                current!.anchorSample = s
+                current!.anchorWallNS = w
+                current!.anchorLine = line.number
+            }
+        }
+        if var last = current {
+            last.end = totalSamples
+            out.append(last)
+        }
+        return out
+    }
+```
+
 ## Standing rule (15 Sep): every check that pins a Mac behaviour carries its citation
 
 Twice a check written from prose rejected a correct recorder (C5 in step 4, C8 in step 5). From now on every named check
@@ -708,16 +948,13 @@ Every assertion in the runner is made under a check id; a check id that asserts 
 ungrounded. Every `conformance run` prints the four counts and names each ungrounded check. A missing or unreadable
 manifest is a hard error (exit 2). Ungrounded does not change the verdict; it is reported so it cannot be forgotten.
 
-Classification after the orchestrator's corrections of 15 Sep: 42 checks — 23 mac-source,
-1 mac-measurement, 8 our-choice, **10 ungrounded**. Two corrections were made to the first
-classification: C7.zero-run-probe's 16-sample threshold is ours (U0-A), not missing a citation; and the three entries
-marked "grounded with a caveat" (C1.geometry, quoted only for the stopped builder; C8.L3-rearm, citing an approximate
-range; C5.plan, resting on the unread empty-region loop) are ungrounded until the caveat is gone. An approximate range is
-not a citation: a line moves and the claim silently detaches.
-
-The orchestrator is reading the Mac source for the groundable ones — C3's index recovery, the monotonic invariant, that
-`discontinuity()` writes no PCM, the planner's empty-region loop, and `copyExactRange`/pread. **Nothing moves out of
-ungrounded until those exact file:line citations arrive; they are not to be guessed.**
+Classification after the grounding pass of 16 Sep: 44 checks — 32 mac-source, 1 mac-measurement,
+9 our-choice, **2 ungrounded**. Two corrections were made to the first classification on 15 Sep: C7.zero-run-probe's
+16-sample threshold is ours (U0-A), not a missing citation; and the three entries marked "grounded with a caveat" moved
+to ungrounded, because an approximate range is not a citation — a line moves and the claim silently detaches. On 16 Sep
+eight citations arrived: C3 (split in two), C1.monotonic, C5.byte-ranges-concatenate and C5.plan became mac-source,
+C7.no-zero-fill became mac-source with corrected wording, and C5.same-sample-last-region-governs was replaced by
+C5.gap-max-at-sample. **Remaining debt: C1.geometry and C8.L3-rearm.**
 
 This table is generated from the manifest.
 
@@ -726,29 +963,31 @@ This table is generated from the manifest.
 | `C1.geometry` | ungrounded | byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative | Claims byte_offset == samples x 2 for EVERY record; the expression is quoted only for the stopped builder (TapeWriter.swift:366-384, ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6), and ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'TapeFormat.swift' with no line for the rest. Needs the checkpoint and discontinuity builders' file:line |
 | `C1.pcm-whole-samples` | mac-source | tape.pcm is a whole number of 2-byte samples | TapeFormat.swift:4-9 (S16 mono); TapeWriter.swift:129-133 (a trailing odd byte is trimmed on startup) |
 | `C1.within-pcm` | our-choice | no record references a byte beyond tape.pcm | ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.3 (fsync of tape.pcm before the index record that references it). The Mac's F_FULLFSYNC ordering is cited only as 'tapewriter/TapeWriter.swift', no line (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2) |
-| `C1.monotonic` | ungrounded | byte_offset and samples never decrease from one record to the next | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 says 'byte_offset and samples are monotonic' citing 'TapeFormat.swift IndexRecord / IndexLog' with no line |
+| `C1.monotonic` | mac-source | byte_offset and samples never decrease from one record to the next | TapeFormat.swift:194-196: guard offset >= previousOffset, samples >= previousSamples else { throw TapeError.invalidIndex(line:detail:"offset or sample count regressed") } (orchestrator read, 15 Sep). A different check from the input_frames guard at :239-241 |
 | `C1.stopped-at-pcm-end` | mac-source | the final stopped record's byte_offset equals tape.pcm's length; a non-final stopped is followed by restart at the same byte_offset with surviving_tail_bytes 0 | TapeWriter.swift:366-384 (stopped: byteOffset: bytesWritten after fullSyncTape(.stopped), ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6); TapeWriter.swift:305-315 (restart record at the tape length on open); orchestrator ruling 15 Sep (step 4 tape: 77178400 = 77178400) |
 | `C2.schema-keys` | mac-source | every key is one of the fifteen | TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
 | `C2.presence` | mac-source | presence rules: rms only and always on checkpoints; peak with zero_ratio; no levels on discontinuities; gap_ns never 0 and never on day_rollover; restart fields only on restart; dropped_input_frames only on ring_overflow and never 0; input_frames with input_sample_rate | TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); TapeWriter.swift:281 (gap_ns 0 omitted); TapeWriter.swift:401-424 (rms 0, peak and zero_ratio nil for an empty window); TapeWriter.swift:267-296 (discontinuity keys; dropped 0 omitted; step 5 grounding read off f798edf, 15 Sep 2026); TapeWriter.swift:305-315 (restart keys); TapeWriter.swift:231, :283, :382 (input_frames only with currentInputSampleRate) |
 | `C2.reencode` | mac-source | decode then re-encode reproduces each index line byte for byte (sorted keys, unescaped slashes, no whitespace) | TapeFormat.swift:271-277 (encodedLine sets [.sortedKeys, .withoutEscapingSlashes]; ETA-U0-CLOSED-14-SEP-2026) |
 | `C2.darwin-encoder-line` | mac-measurement | this platform's JSONEncoder writes the same bytes as Darwin's for six measured Doubles | Measured on the Mac mini, Swift 6.4, macOS 27.0, 14 Sep 2026 (ETA-U0-CLOSED-14-SEP-2026) |
-| `C3.clean-unchanged` | ungrounded | repair leaves a clean index untouched | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
-| `C3.torn-tail` | ungrounded | a torn trailing line (no 0x0A) is truncated on repair | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
-| `C3.interior-blank` | ungrounded | an interior blank line is a hard error and the file is untouched | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 cites 'IndexLog' with no file:line |
-| `C4.clock` | mac-source | wall time of a sample = anchor wall + (sample - anchor sample) x 62500 ns; the anchor is the record opening the region, replaced by a checkpoint at the region boundary | PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
+| `C3.torn-tail-excluded-by-the-reader` | mac-source | a final line with no 0x0A is excluded from the parse, the read does not fail, and nothing on disk is touched | TapeFormat.swift:135-154: committedLength walks back to the last 0x0A (or 0) and a partial final line is ALWAYS excluded from the parse; truncation happens only under repairTrailingPartial (orchestrator read, 15 Sep) |
+| `C3.torn-tail-repaired-by-the-writer` | mac-source | the writer's open path truncates the partial line on disk, to the last complete line, and only then opens the file for writing | TapeFormat.swift:135-154 (repairTrailingPartial); TapeWriter.swift:137 passes it on open, so the writer repairs and a reader does not (orchestrator read, 15 Sep) |
+| `C3.clean-unchanged` | mac-source | a clean log is never opened for writing and its bytes are unchanged | TapeFormat.swift:136-144: with a trailing 0x0A the guard is false, discarded is 0, the repair block never runs and FileHandle(forWritingTo:) is never opened (orchestrator read, 15 Sep) |
+| `C3.interior-blank` | mac-source | an interior blank line fails the WHOLE read, and nothing on disk is touched | TapeFormat.swift:170-175: a blank line is tolerated only as the trailing split artifact; any other throws TapeError.malformedIndex(line:detail:"empty interior record") and the whole read fails (orchestrator read, 15 Sep) |
+| `C4.clock` | mac-source | wall time of a sample = anchor wall + (sample - anchor sample) x 62500 ns; the anchor is the record opening the region, replaced by a checkpoint at the region boundary | PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); PiecePipeline.swift:277-307 (with coincident discontinuities the anchor is the last record's wall_ns) |
 | `C4.double-formula` | mac-source | the Double formula anchorWallNS/1e9 + (sample - anchorSample)/16000 agrees within 2 ulp | PiecePipeline.swift:407-413 |
 | `C5.adjacency` | mac-source | pieces tile the tape: first starts at 0, last ends at the tape end, piece[i].sampleEnd == piece[i+1].sampleStart | PiecePipeline.swift:279-296, :355, :371 (regions close at discontinuities; partial close at the region end; cursor reset there) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
 | `C5.no-straddle` | mac-source | no piece straddles a discontinuity | PiecePipeline.swift:279-296, :355 |
 | `C5.gap-after-discontinuity` | mac-source | gap_before_ms lands on the piece after a discontinuity, round half up at 500000 ns, only for capture_discontinuity, resumed, ring_overflow, device_lost | PiecePipeline.swift:417 (rounding); PiecePipeline.swift:421-428 (gapMilliseconds(for:), four causes) (ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026) |
-| `C5.same-sample-last-region-governs` | ungrounded | when several discontinuities share a sample, the gap of the following piece is that of the LAST one | Inferred in U1 step 4 from PiecePipeline.swift:279-296, :355, :371 (an empty region emits no piece); the planner's emission loop over an empty region was not read |
-| `C5.plan` | ungrounded | the piece list equals the planner port's plan of the index | PiecePipeline.swift:279-296, :355, :371, :417, :421-428 cover the plan, but the port's behaviour where discontinuities share a sample rests on the planner's emission loop over an empty region, which nobody has read (same defect as C5.same-sample-last-region-governs) |
-| `C5.byte-ranges-concatenate` | ungrounded | the pieces' byte ranges concatenate to tape.pcm | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2 quotes app-reference prose ('consecutive pieces are adjacent byte ranges of one file'); copyExactRange / pread is cited with no line (ETA-U0A-REFUTER-VERDICT-14-SEP-2026) |
+| `C5.gap-max-at-sample` | mac-source | when several discontinuities share a sample, the following piece's gap_before_ms is the MAXIMUM of their gaps (and the region's clock anchor is the LAST record's wall_ns, checked by C4.clock) | PiecePipeline.swift:277-307: for a coincident discontinuity `if sample > regionStart` is false, so no Region is appended for the zero-length gap; the else branch does regionGap = max(regionGap, nextGap) while regionStart, durableEnd and the anchor are overwritten unconditionally (orchestrator read, 15 Sep). Our prior wording, 'the last region governs', was wrong whenever the first of the coincident records carried the larger gap |
+| `C5.plan` | mac-source | the piece list equals the planner port's plan of the index | PiecePipeline.swift:279-296, :355, :371, :417, :421-428; and :277-307 for the empty-region behaviour that was previously unread (orchestrator read, 15 Sep) |
+| `C5.byte-ranges-concatenate` | mac-source | the pieces' byte ranges concatenate to tape.pcm | PiecePipeline.swift:669-707, pread at :698 reading at off_t(offset + completed) through a 1 MiB buffer (positional, never seeking the shared fd); called at :531 with byteOffset = sampleStart x bytesPerSample and byteCount = (sampleEnd - sampleStart) x bytesPerSample; the planner chains cursor = region.end (:371), so consecutive pieces concatenate with no gap and no overlap by construction (orchestrator read, 15 Sep) |
 | `C6.full-piece` | mac-source | a full piece is exactly 4800000 samples (300.000 s) | PiecePipeline.swift:231 |
 | `C6.partial-only-at-region-end` | mac-source | a short piece ends only at a discontinuity or the tape end | PiecePipeline.swift:279-296, :355 |
 | `C7.boundary` | mac-source | the named record is the expected discontinuity | AudioRing.swift:191, :264, :338, :355 (ring_overflow drop boundary); AudioRing.swift:20 (day_rollover) |
 | `C7.gap-fields` | mac-source | a ring_overflow record carries non-zero gap_ns and dropped_input_frames | AudioRing.swift:191, :264, :338, :355 (gap = new-side mono start - drop start); TapeWriter.swift:281 (0 omitted); TapeFormat.swift:12-49 (dropped_input_frames on ring_overflow with drops, ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3) |
 | `C7.gapless-day-rollover` | mac-source | a day_rollover boundary carries neither gap_ns nor dropped_input_frames | TapeWriter.swift:267-296; AudioRing.swift:143-215 (gapNS 0, droppedFrames 0) (step 5 grounding read off f798edf, 15 Sep 2026) |
-| `C7.no-zero-fill` | ungrounded | the discontinuity sits where pre-gap audio ends and tape.pcm holds exactly the real audio (no bytes for the gap) | ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2: 'A gap is never zero-filled. TapeWriter.discontinuity() writes a metadata-only index record', citing 'TapeWriter' with no line |
+| `C7.no-zero-fill` | mac-source | the boundary's byte_offset is the tape length after the resampler flush that opens discontinuity(), and tape.pcm holds exactly the audio before and after it: nothing is inserted for the gap | TapeWriter.swift:267-296, whose first statement :268 is try finishConversion() (:261-264 → writeConverted :245-259, which appends to tape.pcm through writeAll at :252), and only then is the record stamped with byteOffset: bytesWritten (orchestrator read, 15 Sep). The earlier wording, 'discontinuity() writes no PCM', was FALSE: the path flushes the resampler first |
+| `C7.boundary-after-flush` | our-choice | the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes | Ours: U1 spec 11.4 (RULED - the converter resets at every discontinuity and an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-STEREO-TO-16K-MONO.md. MEASURED with `conformance explain-flush`: our converter emits 0 samples at a reset, for 1 and for 2 held frames. The Mac flushes its resampler at the same point (TapeWriter.swift:268, :261-264); if AVAudioConverter emits a final partial sample there, every discontinuity's byte_offset differs from ours by one sample - this check is where that shows |
 | `C7.zero-run-probe` | our-choice | no run of min(gap samples, 16) zero samples (16 at a gapless boundary) starting 40 samples after the boundary | Ours, never a Mac behaviour: the 16-sample zero-run threshold that defines zero fill was chosen in U0-A (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3, C7), and the 40-sample exemption is ruled in ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.5 |
 | `C8.L1-keys` | mac-source | day_rollover keys: byte_offset, samples, mono_ns, wall_ns, device, discontinuity, input_frames/input_sample_rate; nothing else | TapeWriter.swift:267-296; AudioRing.swift:20 (step 5 grounding read off f798edf, 15 Sep 2026) |
 | `C8.L2-target` | mac-source | a day_rollover's wall_ns is an IST midnight (the target itself) | AudioRing.swift:143-215 (marker wallNS = rollover.wallNS = target); CaptureTimeline.swift:141-150; ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata) (step 5 grounding read off f798edf, 15 Sep 2026) |

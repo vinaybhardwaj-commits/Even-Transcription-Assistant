@@ -205,8 +205,13 @@ public enum Cases {
             try Data(f.idx).write(to: copy)
         } catch { return .error("cannot stage tape.idx: \(error)") }
 
+        // The reader (IndexLog.scan) and the writer's open path (IndexLog.repair) are separate behaviours on the Mac and are
+        // asserted separately: TapeFormat.swift:135-154 excludes a torn tail from every parse; only repairTrailingPartial,
+        // which TapeWriter.swift:137 passes, truncates it on disk.
         var c = Checks()
-        let outcome: Result<IndexScanOutcome, Error> = Result { try IndexLog.repair(fileAt: copy) }
+        let read: Result<IndexScan, Error> = Result { try IndexLog.scan(f.idx) }
+        let repaired: Result<IndexRepair, Error> = Result { try IndexLog.repair(fileAt: copy) }
+        let outcome = repaired.map(\.outcome)
         let after = (try? [UInt8](Data(contentsOf: copy))) ?? []
 
         switch e.outcome {
@@ -217,19 +222,35 @@ public enum Cases {
             } else if case .failure(let err) = outcome {
                 c.expect(false, "expected a clean log, repair threw: \(err)")
             }
+            if case .success(let r) = repaired {
+                c.expect(!r.openedForWriting, "a clean log must never be opened for writing")
+            }
             c.expect(after == f.idx, "repair of a clean log changed the file")
-            if let n = e.records, case .success(let s) = scan(f) { c.expect(s.lines.count == n, "expected \(n) records, read \(s.lines.count)") }
+            if let n = e.records, case .success(let s) = read { c.expect(s.lines.count == n, "expected \(n) records, read \(s.lines.count)") }
 
         case "torn_tail":
-            c.law("C3.torn-tail")
-            guard case .success(let o) = outcome else {
-                if case .failure(let err) = outcome { c.expect(false, "expected torn-tail repair, repair threw: \(err)") }
+            // The reader: the partial line is excluded, the file is not touched, and no error is raised.
+            c.law("C3.torn-tail-excluded-by-the-reader")
+            switch read {
+            case .failure(let err):
+                c.expect(false, "the reader must exclude a torn tail, not fail: \(err)")
+            case .success(let s):
+                guard case .tornTail(let length, let dropped) = s.outcome else {
+                    c.expect(false, "the reader reported \(s.outcome), not a torn tail")
+                    break
+                }
+                if let want = e.repairedLength { c.expect(length == want, "the reader puts the last complete line at \(length), expected \(want)") }
+                if let want = e.droppedBytes { c.expect(dropped == want, "the reader excludes \(dropped) bytes, expected \(want)") }
+                if let n = e.records { c.expect(s.lines.count == n, "the reader returned \(s.lines.count) complete records, expected \(n)") }
+            }
+            // The writer's open path: it truncates, and only then.
+            c.law("C3.torn-tail-repaired-by-the-writer")
+            guard case .success(let r) = repaired, case .tornTail(let length, let dropped) = r.outcome else {
+                if case .failure(let err) = repaired { c.expect(false, "expected torn-tail repair, repair threw: \(err)") }
+                else { c.expect(false, "expected a torn tail, repair reported \(outcome)") }
                 return c.verdict
             }
-            guard case .tornTail(let length, let dropped) = o else {
-                c.expect(false, "expected a torn tail, repair reported \(o)")
-                return c.verdict
-            }
+            c.expect(r.openedForWriting, "a torn tail must be truncated on disk (the file was never opened for writing)")
             if let want = e.repairedLength { c.expect(length == want, "repaired length \(length) != expected \(want)") }
             if let want = e.droppedBytes { c.expect(dropped == want, "dropped \(dropped) bytes, expected \(want)") }
             c.expect(after.count == length, "file is \(after.count) bytes after repair, repair reported \(length)")
@@ -243,22 +264,32 @@ public enum Cases {
             }
 
         case "hard_error":
+            // An interior blank line fails the WHOLE read (TapeFormat.swift:170-175), not just the repair, and nothing on
+            // disk is touched.
             c.law("C3.interior-blank")
+            if e.error == "interior_blank_line" {
+                switch read {
+                case .success(let s):
+                    c.expect(false, "the read must fail on an interior blank line; it returned \(s.lines.count) records and \(s.outcome)")
+                case .failure(let err):
+                    if case IndexLogError.interiorBlankLine(let n) = err {
+                        if let want = e.line { c.expect(n == want, "the read reported the blank line at \(n), expected \(want)") }
+                        else { c.expect(true, "") }
+                    } else {
+                        c.expect(false, "expected interior_blank_line from the read, got \(err)")
+                    }
+                }
+            } else {
+                return .error("unknown expected error \(e.error ?? "nil")")
+            }
             switch outcome {
             case .success(let o):
                 c.expect(false, "expected a hard error (\(e.error ?? "?")), repair reported \(o)")
             case .failure(let err):
-                if e.error == "interior_blank_line" {
-                    if case IndexLogError.interiorBlankLine(let n) = err {
-                        if let want = e.line { c.expect(n == want, "blank line reported at \(n), expected \(want)") }
-                        else { c.expect(true, "") }
-                    } else {
-                        c.expect(false, "expected interior_blank_line, got \(err)")
-                    }
-                } else {
-                    return .error("unknown expected error \(e.error ?? "nil")")
-                }
+                if case IndexLogError.interiorBlankLine = err { c.expect(true, "") }
+                else { c.expect(false, "expected interior_blank_line, got \(err)") }
             }
+            if case .success(let r) = repaired { c.expect(!r.openedForWriting, "a hard error must not open the log for writing") }
             c.expect(after == f.idx, "a hard error must leave the log untouched")
 
         default:
@@ -333,31 +364,26 @@ public enum Cases {
                      "seam \(i)/\(i + 1): piece[\(i)].sampleEnd \(pieces[i].sampleEnd) != piece[\(i + 1)].sampleStart \(pieces[i + 1].sampleStart)")
         }
         // Every discontinuity: no piece straddles it, and its gap lands on the piece that follows it. Several
-        // discontinuities can share a sample (device_lost then resumed): the regions between them are empty, and the
-        // following piece belongs to the LAST region starting there, so only that region's gap rule applies to it.
-        let later = rs.dropFirst()
-        for (k, r) in later.enumerated() {
+        // discontinuities can share a sample (device_lost then resumed): PiecePipeline.swift:277-307 appends no region for
+        // the zero-length gap, so the following piece carries the MAXIMUM of their gaps while the region's anchor is the
+        // LAST one's wall_ns.
+        for r in rs.dropFirst() {
             let d = r.start
             c.law("C5.no-straddle")
             for p in pieces where p.sampleStart < d && d < p.sampleEnd {
                 c.expect(false, "piece [\(p.sampleStart), \(p.sampleEnd)) straddles the \(r.openedBy ?? "?") discontinuity at sample \(d) (line \(r.anchorLine))")
             }
-            let lastAtSample = !later.dropFirst(k + 1).contains { $0.start == d }
-            let sharesSample = later.filter { $0.start == d }.count > 1
-            c.law(sharesSample ? "C5.same-sample-last-region-governs" : "C5.gap-after-discontinuity")
-            if d < total, lastAtSample {
+            c.law(r.coincidentDiscontinuities > 1 ? "C5.gap-max-at-sample" : "C5.gap-after-discontinuity")
+            if d < total {
                 let following = pieces.first { $0.sampleStart == d }
                 c.expect(following != nil, "no piece starts at the \(r.openedBy ?? "?") discontinuity at sample \(d)")
-                // Round half up at 500 000 ns, and only for the four gap-carrying causes.
-                let want = DiscontinuityCause.gapMilliseconds(cause: r.openedBy, gapNS: r.gapBeforeNS)
                 if let following {
-                    c.expect((following.gapBeforeMS ?? 0) == want,
-                             "gap_before_ms after the \(r.openedBy ?? "?") at \(d) (gap_ns \(r.gapBeforeNS.map(String.init) ?? "absent")) is \(following.gapBeforeMS.map(String.init) ?? "absent"), rule gives \(want)")
+                    c.expect((following.gapBeforeMS ?? 0) == r.gapBeforeMS,
+                             "gap_before_ms after the \(r.coincidentDiscontinuities) discontinuity record(s) at \(d) (last: \(r.openedBy ?? "?")) is \(following.gapBeforeMS.map(String.init) ?? "absent"), the rule gives \(r.gapBeforeMS)")
                 }
             }
         }
-        c.law("C5.gap-after-discontinuity")
-        let gapStarts = Set(rs.dropFirst().filter { DiscontinuityCause.gapMilliseconds(cause: $0.openedBy, gapNS: $0.gapBeforeNS) > 0 }.map(\.start))
+        let gapStarts = Set(rs.dropFirst().filter { $0.gapBeforeMS > 0 }.map(\.start))
         for p in pieces where (p.gapBeforeMS ?? 0) != 0 && !gapStarts.contains(p.sampleStart) {
             c.expect(false, "piece [\(p.sampleStart), \(p.sampleEnd)) carries gap_before_ms \(p.gapBeforeMS!) but no gap-carrying discontinuity precedes it")
         }
@@ -441,8 +467,11 @@ public enum Cases {
             probeLength = C7ZeroProbe.threshold
         }
 
+        // discontinuity() writes no PCM of its own, but its first statement flushes the resampler
+        // (TapeWriter.swift:268 → :261-264 → writeConverted :245-259, whose writeAll at :252 appends to tape.pcm), and the
+        // record's byteOffset: bytesWritten is taken AFTER that flush. So the boundary sits exactly at the end of the audio
+        // the tape holds at that moment; nothing is inserted for the gap itself.
         c.law("C7.no-zero-fill")
-        // The discontinuity is metadata-only: it sits exactly where the real pre-gap audio ends.
         let offset = d.int(IndexKey.byteOffset) ?? -1
         c.expect(offset == e.preGapSamples * 2, "discontinuity byte_offset \(offset) != pre-gap audio \(e.preGapSamples) × 2")
         // No zero fill: the tape holds exactly the real audio, not a sample more.
@@ -457,6 +486,22 @@ public enum Cases {
             c.expect(!probe.zeroFill, "tape.pcm holds a run of ≥\(probe.length) zero samples starting \(probe.exempt) samples after the discontinuity offset \(offset): zero fill")
         } else {
             c.expect(offset < 0 || probeLength == 0 || Int(offset) == f.pcm.count, "discontinuity offset \(offset) outside tape.pcm")
+        }
+        // What our converter contributes to that flush: nothing. U1 spec §11.4 resets it at every discontinuity, and an
+        // incomplete group of input frames produces no output, so the closing region holds exactly
+        // outputCount(frames consumed in it) = floor(frames / 3) samples. If the Mac's resampler emits a final partial sample
+        // where ours drops it, every discontinuity's byte_offset differs by one sample, and this is the check that shows it.
+        // Only at 48 kHz: the conversion is specified for a 48 kHz input (spec/CONVERSION-48K-STEREO-TO-16K-MONO.md), and a
+        // fixture may describe a device at another rate.
+        c.law("C7.boundary-after-flush")
+        let closingRegions = regions(f, s)
+        if d.double(IndexKey.inputSampleRate) == 48_000,
+           let closing = closingRegions.last(where: { $0.end == e.preGapSamples && $0.openLine <= d.number }),
+           let anchor = s.lines.first(where: { $0.number == closing.anchorLine }),
+           let f0 = anchor.int(IndexKey.inputFrames), let f1 = d.int(IndexKey.inputFrames) {
+            let want = Int64(DecimationRule.production.outputCount(frames: Int(f1 - f0)))
+            c.expect(e.preGapSamples - closing.start == want,
+                     "the region closed at line \(d.number) holds \(e.preGapSamples - closing.start) samples from \(f1 - f0) input frames (lines \(anchor.number)→\(d.number)); the converter gives \(want), so the boundary byte_offset should be \((closing.start + want) * 2)")
         }
         c.law("C7.no-zero-fill")
         // Records after the gap continue from the same byte count.
@@ -595,10 +640,11 @@ public enum Cases {
             let dayStart = region.openedBy == DiscontinuityCause.dayRollover ? (opener?.int(IndexKey.wallNS) ?? region.anchorWallNS) : region.anchorWallNS
             let boundary = DayRollover.nextISTMidnight(after: dayStart)
             let nextOpen = ri + 1 < rs.count ? rs[ri + 1].openLine : Int.max
-            let closer = ri + 1 < rs.count ? lines.first { $0.number == rs[ri + 1].openLine } : nil
             for l in lines where l.number >= region.openLine && l.number < nextOpen && isCheckpoint(l) && l.fields[IndexKey.peak] != nil {
                 guard let w = l.int(IndexKey.wallNS), w >= boundary else { continue }
-                let marked = closer.map { cause($0) == DiscontinuityCause.dayRollover && $0.int(IndexKey.samples) == l.int(IndexKey.samples) } ?? false
+                // The exception: a day_rollover at this checkpoint's own sample, stamped with this very midnight. (Not the
+                // region's opener: when discontinuities share a sample the region is opened by the LAST of them.)
+                let marked = lines.contains { cause($0) == DiscontinuityCause.dayRollover && $0.int(IndexKey.samples) == l.int(IndexKey.samples) && $0.int(IndexKey.wallNS) == boundary }
                 c.expect(marked, "line \(l.number) is stamped \(w - boundary) ns after IST midnight \(boundary) (region anchored on line \(region.anchorLine)) with no day_rollover at that boundary")
             }
         }
