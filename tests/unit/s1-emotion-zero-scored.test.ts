@@ -580,8 +580,15 @@ const cases: Case[] = [
       await runKind("bw_partway", "all_ok");
       const { out } = await runKind("bw_partway", "warm_fail");
       expect(out.kind).toBe("fail");
-      expect(await segmentStates("bw_partway"), "prepare replaced the rows; warm failed before any were scored").toEqual([]);
-      expect(await windowRow("bw_partway")).toMatchObject({ state: "failed", scored: 0, failed: 0, skipped: 0 });
+      // E31 A2 — THIS ASSERTION CHANGED, AND THE CHANGE IS THE FIX. `prepare` used to open by deleting
+      // every span the window had, a whole job step before a replacement existed, so a re-run that failed
+      // at `warm` left the window with NOTHING — the previous run's evidence destroyed for a run that
+      // never produced any. Now the delete lives in the finishing statement, which this run never reaches,
+      // so the window still holds the last attempt that actually scored. The row says `failed` over it, so
+      // nothing reads as success; it reads as "the last good description, and the newest attempt failed".
+      expect(await segmentStates("bw_partway"), "the settled run's rows survive an attempt that never got to replace them").toEqual(["scored", "scored"]);
+      // And the row describes the rows that are actually there, as it always has — counted in the write.
+      expect(await windowRow("bw_partway")).toMatchObject({ state: "failed", scored: 2, failed: 0, skipped: 0 });
     },
   },
   {

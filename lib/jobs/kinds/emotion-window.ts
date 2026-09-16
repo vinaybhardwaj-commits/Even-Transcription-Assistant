@@ -27,7 +27,7 @@ import { signGetUrl } from "@/lib/r2";
 import { emotionEnabled } from "@/lib/emotion/gate";
 import { emotionHealth, scoreSegments, emotionSecretConfigured, EMOTION_MODEL_KEY, EMOTION_SECRET_ENV } from "@/lib/emotion/client";
 import { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, SEGMENTS_PER_CALL, type AttributedTurn, type MeasuredSegment, type PlannedSegment } from "@/lib/emotion/segments";
-import { clearWindowSegments, finishEmotionWindow, recordEmotionWindow, recordStaleWindow, stateFor, writeScoredOrFailed, writeSkipped, writeUnscorable, type SegmentWrite } from "@/lib/emotion/store";
+import { finishEmotionWindow, recordEmotionFailureNarrow, recordEmotionWindow, recordStaleWindow, scoredOrFailedRow, skippedRow, stateFor, unscorableRow, writeNoSegmentsWindow, writeSpans, type SegmentWrite } from "@/lib/emotion/store";
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -74,18 +74,57 @@ const P = (ctx: StepContext) => ctx.progress as unknown as Progress;
  */
 type FailCounts = "rows" | "none";
 
+/**
+ * ─── E31 A1 — THE FAILURE PATH CAN RECORD ITS OWN FAILURE ───────────────────────────────────────────
+ *
+ * This is the function that broke in production. It writes ONE statement (recordEmotionWindow) that sets
+ * the failed state AND counts the attempt together. What it did not do was survive that statement
+ * failing: the write died on a column a migration had not yet added, the error escaped the kind, and the
+ * window was left with no failed row, no attempt counted and no error text — retried for ever with a
+ * counter that never moved, reading to every operator view as a window nobody had reached yet.
+ *
+ * So the throw is caught, and a SECOND, STRICTLY NARROWER statement is tried: `recordEmotionFailureNarrow`
+ * touches only columns 0089 created with the table, so it survives exactly what killed the fat one. It is
+ * an alternative, not a continuation — each is one statement and neither leaves half a row.
+ *
+ * If BOTH fail the original error is still not lost: both causes are logged and `emotion_bookkeeping_failed`
+ * is thrown carrying them, so the job fails with a name that says which of the two things happened rather
+ * than with the primary cause alone (which would read as an ordinary retryable failure) or with the
+ * bookkeeping cause alone (which would hide what actually went wrong).
+ */
 async function fail(p: Pick<Progress, "window_id" | "room_day_id" | "diarize_run_id"> & Partial<Progress>, code: JobErrorCode, detail: string, counts: FailCounts): Promise<StepOutcome> {
-  await recordEmotionWindow({
-    windowId: p.window_id,
-    roomDayId: p.room_day_id,
-    state: "failed",
-    diarizeRunId: p.diarize_run_id,
-    error: `${code}: ${detail}`,
-    cap_s: p.cap_s ?? null,
-    counts: counts === "rows" && p.segments ? { fromRows: true, planned: p.segments.length, calls: p.calls ?? 0 } : undefined,
-    warmup: p.warmup,
-  });
-  return failWith(jobError(code, detail));
+  const error = `${code}: ${detail}`;
+  try {
+    await recordEmotionWindow({
+      windowId: p.window_id,
+      roomDayId: p.room_day_id,
+      state: "failed",
+      diarizeRunId: p.diarize_run_id,
+      error,
+      cap_s: p.cap_s ?? null,
+      counts: counts === "rows" && p.segments ? { fromRows: true, planned: p.segments.length, calls: p.calls ?? 0 } : undefined,
+      warmup: p.warmup,
+    });
+    return failWith(jobError(code, detail));
+  } catch (bookErr) {
+    const because = String((bookErr as Error)?.message ?? bookErr).slice(0, 200);
+    console.error("[emotion_window] the failure record could not be written; falling back to the narrow one", JSON.stringify({ window: p.window_id, original: error.slice(0, 200), bookkeeping: because }));
+    try {
+      // The attempt IS counted here. That number is the retry bound, and its never moving is what made the
+      // production case retry for ever.
+      const attempts = await recordEmotionFailureNarrow({
+        windowId: p.window_id, roomDayId: p.room_day_id, diarizeRunId: p.diarize_run_id,
+        // Both causes on the row itself, because a reader of room_emotion_window has no other record.
+        error: `${error} | bookkeeping_degraded: ${because}`,
+      });
+      console.error("[emotion_window] narrow failure record written", JSON.stringify({ window: p.window_id, attempts }));
+      return failWith(jobError(code, detail));
+    } catch (narrowErr) {
+      const alsoBecause = String((narrowErr as Error)?.message ?? narrowErr).slice(0, 200);
+      console.error("[emotion_window] the narrow failure record could not be written either", JSON.stringify({ window: p.window_id, original: error.slice(0, 200), bookkeeping: because, narrow: alsoBecause }));
+      throw new Error(`emotion_bookkeeping_failed: ${error} | bookkeeping: ${because} | narrow: ${alsoBecause}`);
+    }
+  }
 }
 
 async function prepare(ctx: StepContext): Promise<StepOutcome> {
@@ -155,18 +194,37 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   const segments = split.scorable;
 
   const writeCtx: SegmentWrite = { windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id, clipR2Key: w.clip_r2_key, windowStartMs: windowStart, cap_s: health.cap_s, model: { model: null, model_key: null, subfolder: null, device: null } };
-  // WINDOW-AS-UNIT: this attempt's rows replace every earlier attempt's, never merge with them. After the
-  // plan exists, so an attempt that fails before planning leaves the previous rows as they were.
-  await clearWindowSegments(w.id);
-  for (const s of skipped) await writeSkipped(writeCtx, s, speakerSpeechMs(intervals, s.speaker_idx, s.start_ms - windowStart, s.end_ms - windowStart));
-  for (const u of split.unscorable) await writeUnscorable(writeCtx, u);
+  // ─── E31 A1/A2 — ONE STATEMENT, AND NOTHING IS DELETED HERE ───────────────────────────────────────
+  // WINDOW-AS-UNIT still holds, but it is settled at FINISH now, not here. This step used to open with
+  // `clearWindowSegments`, which removed every span the window had — across every diarize run — a whole
+  // job step before a single replacement row existed. `prepare` and `score` are separate invocations of
+  // the job machine, so that was a durable crash boundary: the window could rest indefinitely with no
+  // spans at all under a room_emotion_window row still saying `ok` with a count of twelve. Now the
+  // earlier run's rows stay until `finishEmotionWindow` replaces them and describes what replaced them,
+  // in one statement. Until then the window reads as the earlier run, which is true.
+  //
+  // The two loops are one multi-row insert: a loop of autocommitted INSERTs has a half-state after every
+  // iteration, and there is no reason these rows should be able to arrive four of nine.
+  const prepRows = [
+    ...skipped.map((s) => skippedRow(writeCtx, s, speakerSpeechMs(intervals, s.speaker_idx, s.start_ms - windowStart, s.end_ms - windowStart))),
+    ...split.unscorable.map((u) => unscorableRow(writeCtx, u)),
+  ];
 
   if (segments.length === 0) {
     // Nothing the service could score: a fact about the audio, like no turns at all. Final, and it spends
     // no attempt — the two windows that exhausted on one sub-1.5 s span each now end here (A3).
-    await recordEmotionWindow({ ...{ windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id }, state: "no_segments", error: null, cap_s: health.cap_s, counts: { planned: 0, scored: 0, skipped: skipped.length, failed: 0, unscorable: split.unscorable.length, calls: 0 } });
+    //
+    // A1 — THIS PATH IS TERMINAL, so its spans and its window row are ONE statement: the row says
+    // `no_segments` over exactly the rows that statement wrote, or neither exists. `no_segments` is also
+    // the only terminal path that does not go through finish, so it carries finish's delete of the earlier
+    // run's spans too — otherwise a window could end here still holding another run's rows.
+    await writeNoSegmentsWindow({
+      rows: prepRows, windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id,
+      cap_s: health.cap_s, skipped: skipped.length, unscorable: split.unscorable.length,
+    });
     return doneWith({ window_id: w.id, segments: 0, skipped: skipped.length, unscorable: split.unscorable.length, turns: attributed.length });
   }
+  await writeSpans(prepRows);
 
   const progress: Progress = {
     ...base, window_start_ms: windowStart, window_end_ms: Number(w.end_ms), clip_r2_key: w.clip_r2_key,
@@ -215,13 +273,17 @@ async function score(ctx: StepContext): Promise<StepOutcome> {
     windowStartMs: p.window_start_ms, cap_s: p.cap_s,
     model: { model: res.model, model_key: res.model_key ?? EMOTION_MODEL_KEY, subfolder: res.subfolder, device: res.device },
   };
+  // A1 — EVERY ANSWER OF THIS CALL, IN ONE STATEMENT. One INSERT per segment meant a batch of sixteen had
+  // fifteen half-states, each of them a durable crash point on an autocommitting handle: the service had
+  // answered for all sixteen and the window could keep four.
   let scored = 0, failed = 0, unscorable = 0;
-  for (const [i, seg] of batch.entries()) {
+  const spanRows = batch.map((seg, i) => {
     const r = res.results[i]!;
-    await writeScoredOrFailed(writeCtx, seg, r);
     const st = stateFor(r);
     if (st === "scored") scored += 1; else if (st === "unscorable") unscorable += 1; else failed += 1;
-  }
+    return scoredOrFailedRow(writeCtx, seg, r);
+  });
+  await writeSpans(spanRows);
   const next = { ...p, batch: p.batch + 1, calls: p.calls + 1, scored: p.scored + scored, failed: p.failed + failed, unscorable: (p.unscorable ?? 0) + unscorable, model: res.model, subfolder: res.subfolder, device: res.device };
   return nextStep((p.batch + 1) * SEGMENTS_PER_CALL >= p.segments.length ? "finish" : "score", next as unknown as Record<string, unknown>);
 }

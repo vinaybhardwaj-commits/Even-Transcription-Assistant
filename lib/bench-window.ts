@@ -294,6 +294,9 @@ export function istDateOf(atMs: number): string {
 export type WriteWindowsResult = {
   /** C1 — windows handed to the STT queue on this pass. Absent when the flag is off. */
   enqueued?: number;
+  /** E31 A12 — windows this pass CLOSED whose enqueue then failed. Each is closed with no job row,
+   *  which auto-drain and the run-waiting recovery both find. Absent when none failed. */
+  enqueue_failed?: number;
   session_id: string;
   slots: number;
   inserted: number;
@@ -373,6 +376,14 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
         }
 
         if (v.complete) {
+          // ─── E31 A12 (R62) — THE CLOSE AND THE ENQUEUE ARE TWO FACTS, AND STAY TWO STATEMENTS ─────
+          // D-5. `state = 'closed'` is read independently of the queue: auto-drain's scan takes
+          // `w.state = 'closed'` and enqueues the window itself, and the admin run-waiting recovery
+          // (countRoomWaitingWindows, room-reads' closed_no_job) counts exactly "closed, no job". A
+          // close that could roll back with a refused enqueue would leave the window `open`, where
+          // neither of them can see it. So the close lands on its own, whatever the enqueue does:
+          // a closed window with no job is a HEALABLE state, and an open one is an invisible one.
+          //
           // `state = 'open'` is the whole of A8's no-regression guarantee: once a window has
           // moved on to transcribing or transcribed, this cannot pull it back.
           const upd = (await sql`
@@ -384,21 +395,32 @@ export async function evaluateAndWriteWindows(sessionId: string): Promise<WriteW
           if (upd.length > 0) {
             base.closed++;
             // C1 — a window becoming CLOSED is the drain's trigger, and this is the only place
-            // that transition happens. Gated on the room's Transcript switch (lib/room-switches).
+            // that transition happens. Gated on the room's Transcript switch (lib/room-switches),
+            // and only on the open→closed edge: `upd.length > 0` means THIS call closed it, so
+            // re-running the evaluator over a settled session enqueues nothing.
             //
-            // Guarded three ways: the flag must name this room, the window must be grid-aligned,
-            // and the enqueue only runs on the open→closed edge — `upd.length > 0` means THIS
-            // call closed it, so re-running the evaluator over a settled session enqueues
-            // nothing. The insert is ON CONFLICT DO NOTHING besides.
+            // THE ORDER IS LOAD-BEARING and is pinned by a test: close, then enqueue the id the
+            // close RETURNED. An enqueue that ran first would queue a window that is still `open`,
+            // which the drain would claim out from under the recorder.
             //
-            // Enqueue only. No join, no engine call, no cue, and no money is spent here: this
-            // runs inside the chunk route's after() hook, and a paid API call has no business on
-            // the tail of a recording request.
-            if (roomId && v.source_mic && (await isTranscriptEnabled(roomId))) {
-              try {
-                await enqueueSubject("bench_window", id, "asr");
+            // Enqueue only. No join, no engine call, no cue, and no money is spent here: this runs
+            // inside the chunk route's after() hook. A failed enqueue never fails a chunk — but it
+            // is NOT silent any more (the catch here used to have no log line at all). It is
+            // logged, and counted in `enqueue_failed`, and the database says it too: a closed
+            // window with no stt_subject_job row is the closed-but-unqueued state, and it is the
+            // state both recovery readers above look for.
+            const closedId = upd[0]!.id;
+            try {
+              if (roomId && v.source_mic && (await isTranscriptEnabled(roomId))) {
+                await enqueueSubject("bench_window", closedId, "asr");
                 base.enqueued = (base.enqueued ?? 0) + 1;
-              } catch { /* the queue is not the tape; a failed enqueue never fails a chunk */ }
+              }
+            } catch (e) {
+              base.enqueue_failed = (base.enqueue_failed ?? 0) + 1;
+              console.error(
+                "[bench-window] E31 A12: window CLOSED but NOT QUEUED — left for auto-drain / run-waiting to pick up",
+                closedId, String((e as Error)?.message ?? e).slice(0, 160),
+              );
             }
           } else base.unchanged++;
         } else {
