@@ -62,6 +62,15 @@ vi.mock("@/lib/transcribe", async (orig) => ({
   transcribeDiarized: async () => { H.deepgramCalls += 1; return H.deepgram!(); },
 }));
 vi.mock("@/lib/stt/diarize-window", async (orig) => ({ ...(await orig<Json>()), loadActiveClinicianCentroid: async () => null }));
+vi.mock("@/lib/whisper", async (orig) => ({ ...(await orig<Json>()), transcribeWithWhisper: async () => ({ ok: false, error: "fixture: whisper not called" }) }));
+vi.mock("@/lib/note-generation", async (orig) => ({
+  ...(await orig<Json>()),
+  generateNote: async () => ({ ok: true, note: { fixture: "regenerated" }, latency_ms: 1, model: "fixture", provider: "fixture", raw_response: "{}" }),
+}));
+vi.mock("@/lib/cdmss-pipeline", async (orig) => ({
+  ...(await orig<Json>()),
+  runCdmssPipeline: async () => ({ ok: true, cdmss: { differentials_to_consider: [], red_flags: [], evidence_based_suggestions: [], follow_up_considerations: [] } }),
+}));
 vi.mock("@/lib/voice-samples", async (orig) => ({ ...(await orig<Json>()), capturePassiveSample: async () => {} }));
 vi.mock("@/lib/cookie", async (orig) => ({ ...(await orig<Json>()), readAdminCookie: async () => "admin-session", readDoctorCookie: async () => null }));
 vi.mock("@/lib/auth", async (orig) => ({ ...(await orig<Json>()), verifyAdminJwt: async () => ({ admin_id: "adm_session" }) }));
@@ -195,11 +204,11 @@ const syncStep = async (id: string, only = "diarize") => {
   return { status: res.status, body: { data: j.error ? undefined : j, error: j.error } };
 };
 /** One ASYNC step, as the self-chain drives it: ACK, then the scheduled after() work runs. */
-const asyncStep = async (id: string) => {
+const asyncStep = async (id: string, only = "diarize") => {
   const { POST } = await import("@/app/[slug]/api/encounters/[id]/process/route");
   H.afters = [];
   const res = await POST(new NextRequest(`${ORIGIN}/${DOC.url_slug}/api/encounters/${id}/process`, {
-    method: "POST", headers: { "content-type": "application/json", "x-eta-internal": SECRET }, body: JSON.stringify({ step: true }),
+    method: "POST", headers: { "content-type": "application/json", "x-eta-internal": SECRET }, body: JSON.stringify({ step: true, only }),
   }), { params: Promise.resolve({ slug: DOC.url_slug, id }) });
   const j = (await res.json()) as Json & { error?: { code: string; message: string } };
   const body = { data: j.error ? undefined : j, error: j.error };
@@ -213,6 +222,13 @@ const rediarize = async (id: string) => {
   }));
   return { data: (await res.json()) as Json };
 };
+const resetDoor = async (id: string) => {
+  const { GET } = await import("@/app/api/admin/resume-processing/route");
+  const res = await GET(new NextRequest(`${ORIGIN}/api/admin/resume-processing?id=${id}&reset=1`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  }));
+  return { data: (await res.json()) as Json };
+};
 const eerSelects = async (id: string) => {
   const { GET } = await import("@/app/api/admin/diarization-eer/route");
   const body = (await (await GET()).json()) as { items?: Array<{ encounter_id: string }> };
@@ -221,20 +237,22 @@ const eerSelects = async (id: string) => {
 /** The doctor's page, as the page component builds it from the row. */
 const renderDoctorPanel = async (row: Awaited<ReturnType<typeof rowOf>>) => {
   const { EncounterDetailClient } = await import("@/components/encounter/EncounterDetailClient");
-  const { conversationUnavailable } = await import("@/lib/diarize-conversation");
+  const { conversationState } = await import("@/lib/diarize-conversation");
   return renderToStaticMarkup(React.createElement(EncounterDetailClient, {
     slug: DOC.url_slug, doctorEmail: DOC.email, doctorName: DOC.full_name,
     initial: {
       id: "enc_render", status: "complete", note: null, cdmss: null, transcript: null, transcriptOriginal: null, detectedLanguage: null,
       nativeAnalysis: null, nativeAnalysisLang: null, processingPct: 100, processingStages: null,
       speakers: row.speakers, taggedTranscript: row.tagged_transcript, diarizeStatus: row.diarize_status,
-      conversationUnavailable: conversationUnavailable(row.diarize_status, row.diarize_error),
+      conversationState: conversationState(row.diarize_status, row.diarize_error),
       sendStatus: "pending", sentAt: null, sendEvents: [],
     },
   }));
 };
-const UNAVAILABLE = "The conversation by speaker is unavailable for this recording.";
+const LOST = "The conversation by speaker was prepared but could not be saved for this recording.";
+const SOURCE_DOWN = "The conversation by speaker could not be prepared because the transcription service was unavailable.";
 const NOT_RECORDED_CODE = "tagged_transcript_not_recorded";
+const SOURCE_UNAVAILABLE_CODE = "tagged_transcript_source_unavailable";
 
 describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged turns and the refined roster", () => {
   it("B1 HAPPY PATH: one run lands the result, the turns and the refined roster; no degraded code; the page shows the conversation", async () => {
@@ -249,7 +267,7 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     expect(row.tagged_transcript?.map((t) => t.name)).toEqual([DOC.label, "Patient"]);
     const html = await renderDoctorPanel(row);
     expect(html).toContain("Conversation by speaker (2 turns)");
-    expect(html).not.toContain(UNAVAILABLE);
+    expect(html).not.toContain(LOST);
   }, 120_000);
 
   it("B1 TAG BLOCK FAILS WHILE W1 LANDS: complete, the closed code is written, and the doctor's page says the conversation is unavailable", async () => {
@@ -266,7 +284,7 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     expect(r.lines.some((l) => l.includes("SPEAKER-TAGGED CONVERSATION NOT RECORDED")), "and logged").toBe(true);
     expect(r.out.body.data?.progressed, "W1 is a recorded conclusion: progress").toBe(true);
     const html = await renderDoctorPanel(row);
-    expect(html, "the doctor is told, not shown an empty panel").toContain(UNAVAILABLE);
+    expect(html, "the doctor is told, not shown an empty panel").toContain(LOST);
     expect(html).not.toContain("Conversation by speaker (");
   }, 120_000);
 
@@ -280,16 +298,59 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     expect(row.diarize_error).toBe(NOT_RECORDED_CODE);
   }, 120_000);
 
-  it("B1 A LEGITIMATE EMPTY RUN IS NOT SPELLED AS A LOSS: Deepgram answers not-ok → complete, no turns, NO code, no 'unavailable'", async () => {
-    reset({ deepgram: () => ({ ok: false, error: "deepgram_http_503" }) });
+  it("B1 NOTHING TO TRANSCRIBE: the service answers with no utterances → complete, no turns, NO code, and neither degraded sentence", async () => {
+    reset({ deepgram: deepgramOk([]) });
     const id = seedEncounter();
     await captured(() => syncStep(id));
     const row = await rowOf(id);
     expect(row.diarize_status).toBe("complete");
     expect(row.tagged_transcript).toBeNull();
-    expect(row.diarize_error, "nothing to tag is not a loss").toBeNull();
-    expect(await renderDoctorPanel(row)).not.toContain(UNAVAILABLE);
+    expect(row.diarize_error, "nothing to tag is neither a loss nor an outage").toBeNull();
+    const html = await renderDoctorPanel(row);
+    expect(html).not.toContain(LOST);
+    expect(html).not.toContain(SOURCE_DOWN);
   }, 120_000);
+
+  it("B1 (1b) THE TRANSCRIPTION SERVICE IS DOWN (returns ok:false, as lib/transcribe.ts reports every outage): its OWN closed code and its own sentence", async () => {
+    reset({ deepgram: () => ({ ok: false, error: "deepgram_503: upstream unavailable" }) });
+    const id = seedEncounter();
+    const r = await captured(() => syncStep(id));
+    const row = await rowOf(id);
+    expect(row.diarize_status, "W1 still lands 'complete'").toBe("complete");
+    expect(row.tagged_transcript).toBeNull();
+    expect(row.diarize_error, "an outage is degraded, not empty").toBe(SOURCE_UNAVAILABLE_CODE);
+    expect(row.diarize_error).not.toBe(NOT_RECORDED_CODE);
+    expect(r.lines.some((l) => l.includes("transcription service unavailable"))).toBe(true);
+    const html = await renderDoctorPanel(row);
+    expect(html).toContain(SOURCE_DOWN);
+    expect(html, "not the loss sentence").not.toContain(LOST);
+    expect(html, "no code on screen").not.toContain(SOURCE_UNAVAILABLE_CODE);
+  }, 120_000);
+
+  it("B1 (1b) THREE STATES, THREE RENDERINGS: nothing to transcribe, transcription service down, and tag block lost — each produced through the route and rendered", async () => {
+    const produce = async (over: Partial<typeof H>, trigger?: string) => {
+      reset(over);
+      const id = seedEncounter();
+      if (trigger) arm("three_states", trigger, "raise");
+      try { await captured(() => syncStep(id)); } finally { disarmAll(); }
+      return rowOf(id);
+    };
+    const empty = await produce({ deepgram: deepgramOk([]) });
+    const down = await produce({ deepgram: () => ({ ok: false, error: "deepgram_key_missing" }) });
+    const lost = await produce({ deepgram: deepgramOk(PLAIN_ENTRIES) }, TAG_WRITE);
+    expect([empty.diarize_error, down.diarize_error, lost.diarize_error]).toEqual([null, SOURCE_UNAVAILABLE_CODE, NOT_RECORDED_CODE]);
+    for (const r of [empty, down, lost]) {
+      expect(r.diarize_status).toBe("complete");
+      expect(r.tagged_transcript, "none of the three shows turns").toBeNull();
+    }
+    const [hEmpty, hDown, hLost] = [await renderDoctorPanel(empty), await renderDoctorPanel(down), await renderDoctorPanel(lost)];
+    const says = (h: string) => [h.includes(SOURCE_DOWN), h.includes(LOST)];
+    expect(says(hEmpty), "nothing to transcribe: neither sentence").toEqual([false, false]);
+    expect(says(hDown), "service down: the outage sentence only").toEqual([true, false]);
+    expect(says(hLost), "lost: the loss sentence only").toEqual([false, true]);
+    expect(new Set([hEmpty, hDown, hLost]).size, "three different renderings").toBe(3);
+    for (const h of [hEmpty, hDown, hLost]) expect(h).not.toMatch(/tagged_transcript_|deepgram/);
+  }, 180_000);
 
   it("B1 W3'S HALF FAILS: the turns do NOT land without the roster they were named from — no 'turns refined, roster not' state", async () => {
     reset();
@@ -303,10 +364,10 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
   }, 120_000);
 
   // A Deepgram OUTAGE, in the shape production produces it: lib/transcribe.ts catches its own network and HTTP
-  // errors and RETURNS { ok: false } — it never throws. So a real outage is an empty run (no code), and the thrown
-  // shape below is a second injection, reaching the tag block's catch. W1's readers must be undisturbed by both.
+  // errors and RETURNS { ok: false } — it never throws. Round 1b names that shape (its own code); the thrown shape
+  // below is a second injection, reaching the tag block's catch. W1's readers must be undisturbed by both.
   for (const [shape, deepgram, code] of [
-    ["returns ok:false (the real outage shape)", () => ({ ok: false, error: "deepgram_503: upstream unavailable" }), null],
+    ["returns ok:false (the real outage shape)", () => ({ ok: false, error: "deepgram_503: upstream unavailable" }), SOURCE_UNAVAILABLE_CODE],
     ["throws (an injected failure inside the tag block)", () => { throw new Error("deepgram unreachable"); }, NOT_RECORDED_CODE],
   ] as const) {
     it(`B1 W1's TWO READERS UNDISTURBED when Deepgram ${shape}: needDiarize goes false (pyannote is not re-run) and the EER matcher still selects the row`, async () => {
@@ -344,7 +405,7 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     const labels = new Set((two.speakers ?? []).map((s) => s.label));
     for (const t of two.tagged_transcript ?? []) expect(labels.has(t.name), `turn named "${t.name}" is not in the roster`).toBe(true);
     expect(two.diarize_error).toBe(NOT_RECORDED_CODE);
-    expect(await renderDoctorPanel(two)).toContain(UNAVAILABLE);
+    expect(await renderDoctorPanel(two)).toContain(LOST);
 
     // And a third run through the door that lands clears the code: a loss is not sticky.
     reset({ diarize: diarizeOk("Nurse"), deepgram: deepgramOk(PLAIN_ENTRIES) });
@@ -352,11 +413,50 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     const three = await rowOf(id);
     expect(three.diarize_error).toBeNull();
     expect(three.tagged_transcript?.map((t) => t.name)).toEqual([DOC.label, "Nurse"]);
-    expect(await renderDoctorPanel(three)).not.toContain(UNAVAILABLE);
+    expect(await renderDoctorPanel(three)).not.toContain(LOST);
   }, 180_000);
+
+  it("B1 (1b) THE STALE CASE THROUGH THE ?reset=1 DOOR, END TO END: a full reprocess whose tag block fails cannot leave run two's roster over run one's turns", async () => {
+    reset({ diarize: diarizeOk("Attender"), deepgram: deepgramOk(PLAIN_ENTRIES) });
+    const id = seedEncounter();
+    await captured(() => syncStep(id));
+    const one = await rowOf(id);
+    expect(one.tagged_transcript?.map((t) => t.name), "run one: turns named from roster one").toEqual([DOC.label, "Attender"]);
+
+    // The door re-runs the WHOLE pipeline through the real resume loop: translate (Whisper refine), note, finalize,
+    // CDS, then diarize — with run two's roster and its tag block failing.
+    reset({ diarize: diarizeOk("Nurse"), deepgram: deepgramOk(PLAIN_ENTRIES) });
+    arm("tag_write", TAG_WRITE, "raise");
+    let door;
+    try { door = await captured(() => resetDoor(id)); } finally { disarmAll(); }
+    expect(door.out.data?.mode).toBe("reset");
+    const steps = H.chained.map((b) => (JSON.parse(b) as { only?: string }).only ?? "natural");
+    expect(steps.length, "the resume loop drove several steps").toBeGreaterThan(3);
+    expect(H.diarizeCalls, "and reached diarize").toBe(1);
+    const two = await rowOf(id);
+    expect(two.status, "the reprocess finished").toBe("complete");
+    expect(two.speakers?.map((s) => s.label), "run two's roster").toEqual([DOC.label, "Nurse"]);
+    expect(two.tagged_transcript, "run one's turns did not survive the reset").toBeNull();
+    const labels = new Set((two.speakers ?? []).map((s) => s.label));
+    for (const t of two.tagged_transcript ?? []) expect(labels.has(t.name), `turn named "${t.name}" is not in the roster`).toBe(true);
+    expect(two.diarize_error, "the loss is named").toBe(NOT_RECORDED_CODE);
+    expect(await renderDoctorPanel(two)).toContain(LOST);
+  }, 300_000);
 });
 
 describe.runIf(HAVE_DOCKER)("E31 batch 2 — B2: the failure write, and the progress that follows it", () => {
+  it("B2 (1b, the Refuter's T8) NOT DISPATCHED — the queue is full: no self-chain back into it, and the attempts are not reset", async () => {
+    reset({ diarize: () => ({ ok: false, retryable: true, error: "diarize_busy_fixture", latencyMs: 0, timing: timing() }) });
+    const id = seedEncounter({ diarize_status: "running" });
+    H.chainMode = "record";
+    await captured(() => asyncStep(id));
+    expect(H.diarizeCalls, "the diarize step really ran and was refused a slot").toBe(1);
+    expect(H.chained, "not_dispatched does not self-chain straight back into a full queue").toEqual([]);
+    const row = await rowOf(id);
+    expect(row.process_attempts, "and it is not counted as progress").toBe(1);
+    expect(row.locked, "the lock is held to its TTL — the pacing").toBe(true);
+  }, 120_000);
+
   it("B2 F3 HEALTHY, original error (R2 unreachable): the failure is recorded and IS progress — attempts reset, as before", async () => {
     reset({ r2Throw: "r2 unreachable" });
     const id = seedEncounter({ status: "processing" });
@@ -422,7 +522,10 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B2: the failure write, and the prog
         for (let i = 0; i < 40; i += 1) {
           const before = H.chained.length;
           await asyncStep(id);
-          attemptsSeen.push((await rowOf(id)).process_attempts);
+          const seen = await rowOf(id);
+          // Only diarizeStore's intent write sets 'running' (R2 then throws before /diarize is called).
+          expect(seen.diarize_status, "the async pass really ran the diarize step").toBe("running");
+          attemptsSeen.push(seen.process_attempts);
           if (H.chained.length === before) break;
           chainedCalls += 1;
           await ageLock(id);

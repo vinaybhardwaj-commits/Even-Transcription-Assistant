@@ -3,7 +3,7 @@ import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { parseDoctorSlug } from "@/lib/doctor-slug";
-import { conversationUnavailable } from "@/lib/diarize-conversation";
+import { conversationState } from "@/lib/diarize-conversation";
 import { EncounterDetailClient } from "@/components/encounter/EncounterDetailClient";
 import type { AnyNote } from "@/lib/note-generation";
 import type { NativeAnalysis } from "@/lib/stt/indic-comprehension";
@@ -122,9 +122,9 @@ export default async function EncounterPage({
         speakers: row.speakers,
         taggedTranscript: row.tagged_transcript,
         diarizeStatus: row.diarize_status,
-        // E31 batch 2, B1 (D-6): a boolean, not the error text — the doctor's page needs to know the conversation
-        // was lost, and nothing else from diarize_error belongs in the browser.
-        conversationUnavailable: conversationUnavailable(row.diarize_status, row.diarize_error),
+        // E31 batch 2, B1 (D-6): a closed state, not the error text — the doctor's page needs to know whether the
+        // conversation was lost or never supplied, and nothing else from diarize_error belongs in the browser.
+        conversationState: conversationState(row.diarize_status, row.diarize_error),
         transcriptFlag: row.transcript_flag,
         transcriptFlagReason: row.transcript_flag_reason,
         sendStatus: row.send_status,

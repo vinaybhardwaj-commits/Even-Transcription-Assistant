@@ -106,10 +106,15 @@ export async function GET(req: NextRequest) {
       return respondOk({ encounter: manualId, mode: "rediarize", ...(stateAfter[0] ?? {}) });
     }
     if (reset) {
+      // E31 batch 2 round 1b — as on the rediarize door above: the previous run's speaker-tagged turns, roster and
+      // degraded-state code go in the SAME statement that clears diarize_status. Left in place, a reprocess whose tag
+      // block failed held the new run's roster over the old run's turns, in admin and through MCP.
       await sql`UPDATE encounter SET status = 'processing', process_attempts = 0, processing_step_at = NULL,
                   translated = false, note_json = NULL, cdmss_json = NULL,
                   transcript_flag = NULL, transcript_flag_reason = NULL,
-                  diarize_status = NULL, processing_pct = 0, processing_stages = NULL
+                  diarize_status = NULL, diarize_error = NULL,
+                  tagged_transcript = NULL, speakers = NULL,
+                  processing_pct = 0, processing_stages = NULL
                 WHERE id = ${manualId}`;
     } else {
       // Resurrect: back to processing, fresh attempt budget. Let the step machine

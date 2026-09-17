@@ -12,6 +12,7 @@ import { CdmssCard } from "@/components/encounter/CdmssCard";
 import { SendPanel, type SendEventLite } from "@/components/encounter/SendPanel";
 import type { AnyNote } from "@/lib/note-generation";
 import type { CdmssOutput } from "@/lib/cdmss-stub";
+import type { ConversationState } from "@/lib/diarize-conversation";
 
 // Sprint 6.3 (27 May 2026): 'draft_partial' added — encounter state after the
 // doctor cancels mid-process. Note/CDMSS may be partially populated; the UI
@@ -40,8 +41,8 @@ type InitialState = {
   speakers: unknown[] | null;
   taggedTranscript: unknown[] | null;
   diarizeStatus: string | null;
-  /** E31 batch 2, B1 (D-6): diarization landed but the speaker-tagged conversation did not. */
-  conversationUnavailable?: boolean;
+  /** E31 batch 2, B1 (D-6): diarization landed but the speaker-tagged conversation is degraded — and how. */
+  conversationState?: ConversationState;
   transcriptFlag?: string | null;
   transcriptFlagReason?: string | null;
   sendStatus: SendStatus;
@@ -689,7 +690,7 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
           </div>
         ) : null}
 
-        {initial.diarizeStatus === "complete" && ((initial.speakers && initial.speakers.length > 0) || initial.conversationUnavailable) ? (() => {
+        {initial.diarizeStatus === "complete" && ((initial.speakers && initial.speakers.length > 0) || initial.conversationState) ? (() => {
           const COLORS = ["#2563EB", "#10B981", "#F59E0B", "#8B5CF6", "#EF4444", "#0EA5E9"];
           const sps = (initial.speakers ?? []) as Speaker[];
           const clinician = sps.find((sp) => sp.source === "auto");
@@ -709,10 +710,15 @@ export function EncounterDetailClient({ slug, doctorEmail, doctorName, initial }
                 </span>
               </div>
               ) : null}
-              {/* E31 batch 2, B1 (D-6): a LOST conversation says so. An empty panel reads as "nobody spoke". */}
-              {initial.conversationUnavailable ? (
+              {/* E31 batch 2, B1 (D-6): a DEGRADED conversation says which, in plain words. An empty panel reads as
+                  "nobody spoke", which is only true when neither of these is set. */}
+              {initial.conversationState === "lost" ? (
                 <p className={`${sps.length > 0 ? "border-t border-even-ink-100 " : ""}px-3 py-2 text-caption text-even-ink-500`}>
-                  The conversation by speaker is unavailable for this recording.
+                  The conversation by speaker was prepared but could not be saved for this recording.
+                </p>
+              ) : initial.conversationState === "source_unavailable" ? (
+                <p className={`${sps.length > 0 ? "border-t border-even-ink-100 " : ""}px-3 py-2 text-caption text-even-ink-500`}>
+                  The conversation by speaker could not be prepared because the transcription service was unavailable.
                 </p>
               ) : turns.length > 0 ? (
                 <details open className="border-t border-even-ink-100">

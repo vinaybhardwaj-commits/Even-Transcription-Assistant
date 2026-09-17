@@ -1,13 +1,16 @@
 /**
- * lib/diarize-conversation.ts — E31 batch 2, B1 (D-6): A CONVERSATION THAT WAS LOST IS NOT SPELLED LIKE ONE THAT
- * NEVER EXISTED.
+ * lib/diarize-conversation.ts — E31 batch 2, B1 (D-6): A DEGRADED CONVERSATION IS NOT SPELLED LIKE ONE THAT WAS
+ * NEVER THERE.
  *
- * When diarization lands (diarize_status = 'complete') but the speaker-tagged conversation that follows it does
- * not, the row used to look exactly like a legitimate run with nothing to tag — a non-English encounter with no
- * Sarvam entries, or a Deepgram answer that was not ok. The doctor saw a speaker panel with no conversation, and
- * nothing anywhere could tell "there was nothing to show" from "we lost it".
+ * When diarization lands (diarize_status = 'complete') the speaker-tagged conversation that follows it can end three
+ * ways, and they used to be indistinguishable — a speaker panel with no conversation and diarize_error NULL:
+ *   - NOTHING TO TAG: a legitimate run with no utterances (the transcription service answered, with none; or a
+ *     non-English encounter with no Sarvam entries). diarize_error stays NULL.
+ *   - SOURCE UNAVAILABLE (round 1b): the transcription service did not answer — lib/transcribe.ts reports an outage
+ *     as { ok: false }, it never throws. An upstream outage is DEGRADED, not empty.
+ *   - LOST: the conversation was prepared but the write that records it did not land.
  *
- * The degraded state is named in diarize_error with this CLOSED CODE, and diarize_status stays 'complete' so its
+ * The two degraded states are named in diarize_error with CLOSED CODES, and diarize_status stays 'complete' so its
  * two readers (the step gate needDiarize, and the EER matcher) are undisturbed. No migration: diarize_error is
  * nullable text, W1 sets it to NULL on success, and no reader treats it as contradicting 'complete'.
  *
@@ -15,8 +18,14 @@
  * neither may pull the other's imports in.
  */
 export const DIARIZE_ERROR_CONVERSATION_NOT_RECORDED = "tagged_transcript_not_recorded";
+export const DIARIZE_ERROR_CONVERSATION_SOURCE_UNAVAILABLE = "tagged_transcript_source_unavailable";
 
-/** True only for the named degraded state — never for a legitimate run that had no conversation to tag. */
-export function conversationUnavailable(diarizeStatus: string | null, diarizeError: string | null): boolean {
-  return diarizeStatus === "complete" && diarizeError === DIARIZE_ERROR_CONVERSATION_NOT_RECORDED;
+/** What the doctor's page may know about a degraded conversation. Null is "nothing is wrong" — including empty. */
+export type ConversationState = "lost" | "source_unavailable" | null;
+
+export function conversationState(diarizeStatus: string | null, diarizeError: string | null): ConversationState {
+  if (diarizeStatus !== "complete") return null;
+  if (diarizeError === DIARIZE_ERROR_CONVERSATION_NOT_RECORDED) return "lost";
+  if (diarizeError === DIARIZE_ERROR_CONVERSATION_SOURCE_UNAVAILABLE) return "source_unavailable";
+  return null;
 }

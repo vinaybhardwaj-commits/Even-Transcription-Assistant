@@ -42,7 +42,7 @@ import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "
 import { runDiarize, reconcileTagged, applyRoleOverrides, diarizeTimingLine } from "@/lib/diarize";
 import { DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
 import { capturePassiveSample } from "@/lib/voice-samples";
-import { DIARIZE_ERROR_CONVERSATION_NOT_RECORDED } from "@/lib/diarize-conversation";
+import { DIARIZE_ERROR_CONVERSATION_NOT_RECORDED, DIARIZE_ERROR_CONVERSATION_SOURCE_UNAVAILABLE } from "@/lib/diarize-conversation";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
@@ -645,6 +645,7 @@ export async function POST(
         // which selects source:"auto" speakers that refinement never touches. Merging them would put Deepgram's
         // outage domain inside the pyannote result. Do not collapse W1 into this block.
         let tagRecorded = true; // nothing to tag is not a loss; only a block that does not complete is
+        let sourceUnavailable = false; // round 1b: the transcription service did not answer — degraded, not empty
         try {
           const segs = d.result.transcript_segments as Array<{ start_ms?: number; end_ms?: number; speaker_idx?: number }>;
           let entries = sarvamEntries;
@@ -654,6 +655,11 @@ export async function POST(
           if (entries.length === 0 && isEnglish) {
             const dgd = await transcribeDiarized(bytes, head.content_type || "audio/webm");
             if (dgd.ok) entries = dgd.entries;
+            else {
+              // lib/transcribe.ts reports an outage as { ok: false }; it never throws. Not "nothing was said".
+              sourceUnavailable = true;
+              console.warn(`[process] transcription service unavailable for speaker tagging enc=${id}: ${dgd.error.slice(0, 40)}`);
+            }
           }
           if (entries.length > 0) {
             const tagged = reconcileTagged(entries, segs, d.result.speakers);
@@ -677,20 +683,24 @@ export async function POST(
           tagRecorded = false;
           console.warn(`[process] tag/role reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
         }
-        // E31 batch 2, B1 (D-6) — NAME THE LOSS. diarize_status stays 'complete' (W1's readers are undisturbed); the
-        // closed code in diarize_error is what tells a lost conversation from one that never existed, on the doctor's
-        // page and in admin. Not free text and not the exception: the exception is in the line above.
-        if (!tagRecorded) {
+        // E31 batch 2, B1 (D-6) — NAME THE DEGRADED STATE. diarize_status stays 'complete' (W1's readers are
+        // undisturbed); a closed code in diarize_error is what tells a lost conversation, and one the transcription
+        // service never supplied, from one that was legitimately empty — on the doctor's page and in admin. Not free
+        // text and not the exception: that is in the lines above. A loss outranks an outage (it cannot follow one).
+        const degradedCode = !tagRecorded ? DIARIZE_ERROR_CONVERSATION_NOT_RECORDED
+          : sourceUnavailable ? DIARIZE_ERROR_CONVERSATION_SOURCE_UNAVAILABLE
+          : null;
+        if (degradedCode) {
           try {
             const marked = (await sql`
-              UPDATE encounter SET diarize_error = ${DIARIZE_ERROR_CONVERSATION_NOT_RECORDED}
+              UPDATE encounter SET diarize_error = ${degradedCode}
                WHERE id = ${id} AND diarize_status = 'complete'
               RETURNING id
             `) as Array<{ id: string }>;
-            if (marked.length === 0) console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED (no complete row) enc=${id}`);
-            else console.warn(`${LOG_CONVERSATION_NOT_RECORDED} — marked ${DIARIZE_ERROR_CONVERSATION_NOT_RECORDED} enc=${id}`);
+            if (marked.length === 0) console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED ${degradedCode} (no complete row) enc=${id}`);
+            else console.warn(`${LOG_CONVERSATION_NOT_RECORDED} — marked ${degradedCode} enc=${id}`);
           } catch (me) {
-            console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED enc=${id}: ${me instanceof Error ? me.message : String(me)}`);
+            console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED ${degradedCode} enc=${id}: ${me instanceof Error ? me.message : String(me)}`);
           }
         }
         emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${diarizeTimingLine(d.timing)})` });
