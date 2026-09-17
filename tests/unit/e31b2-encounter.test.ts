@@ -302,19 +302,28 @@ describe.runIf(HAVE_DOCKER)("E31 batch 2 — B1: the diarize result, the tagged 
     expect(row.diarize_error).toBe(NOT_RECORDED_CODE);
   }, 120_000);
 
-  it("B1 W1's TWO READERS UNDISTURBED on a Deepgram OUTAGE (throws): needDiarize goes false (pyannote is not re-run) and the EER matcher still selects the row", async () => {
-    reset({ deepgram: () => { throw new Error("deepgram unreachable"); } });
-    const id = seedEncounter();
-    await captured(() => syncStep(id));
-    const row = await rowOf(id);
-    expect(row.diarize_status).toBe("complete");
-    expect(row.diarize_error).toBe(NOT_RECORDED_CODE);
-    expect(H.diarizeCalls).toBe(1);
-    const again = await captured(() => syncStep(id));
-    expect(again.out.body.data?.step, "needDiarize is false: the step machine reports done").toBe("done");
-    expect(H.diarizeCalls, "and the Mac Mini is not called again").toBe(1);
-    expect(await eerSelects(id), "the EER matcher selects it (diarize_status complete, an auto speaker)").toBe(true);
-  }, 120_000);
+  // A Deepgram OUTAGE, in the shape production produces it: lib/transcribe.ts catches its own network and HTTP
+  // errors and RETURNS { ok: false } — it never throws. So a real outage is an empty run (no code), and the thrown
+  // shape below is a second injection, reaching the tag block's catch. W1's readers must be undisturbed by both.
+  for (const [shape, deepgram, code] of [
+    ["returns ok:false (the real outage shape)", () => ({ ok: false, error: "deepgram_503: upstream unavailable" }), null],
+    ["throws (an injected failure inside the tag block)", () => { throw new Error("deepgram unreachable"); }, NOT_RECORDED_CODE],
+  ] as const) {
+    it(`B1 W1's TWO READERS UNDISTURBED when Deepgram ${shape}: needDiarize goes false (pyannote is not re-run) and the EER matcher still selects the row`, async () => {
+      reset({ deepgram });
+      const id = seedEncounter();
+      await captured(() => syncStep(id));
+      const row = await rowOf(id);
+      expect(row.diarize_status).toBe("complete");
+      expect(row.diarize_error).toBe(code);
+      expect(H.deepgramCalls, "Deepgram was asked").toBe(1);
+      expect(H.diarizeCalls).toBe(1);
+      const again = await captured(() => syncStep(id));
+      expect(again.out.body.data?.step, "needDiarize is false: the step machine reports done").toBe("done");
+      expect(H.diarizeCalls, "and the Mac Mini is not called again").toBe(1);
+      expect(await eerSelects(id), "the EER matcher selects it (diarize_status complete, an auto speaker)").toBe(true);
+    }, 120_000);
+  }
 
   it("B1 THE STALE CASE, THROUGH THE REDIARIZE DOOR: run one lands, run two's tag block fails — the row never holds run two's roster with run one's turns", async () => {
     reset({ diarize: diarizeOk("Attender"), deepgram: deepgramOk(PLAIN_ENTRIES) });
