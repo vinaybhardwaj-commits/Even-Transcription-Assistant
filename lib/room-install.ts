@@ -644,8 +644,16 @@ fi
     exit 1
   fi
 
-  echo "The install needs administrator rights. Type this computer's password if you are asked for it."
-  sudo -v </dev/null
+  # Ubuntu 26.04 ships sudo-rs, whose 'sudo -v' authenticates against the password-requiring
+  # %sudo group entry even for a NOPASSWD user, so the pre-warm aborted installs that would have
+  # succeeded. Warm only when a password is actually needed, and never let the warm-up be fatal:
+  # the sudo calls below do their own authentication and fail with a message about what they were doing.
+  if sudo -n true </dev/null 2>/dev/null; then
+    :
+  else
+    echo "The install needs administrator rights. Type this computer's password if you are asked for it."
+    sudo -v </dev/null || true
+  fi
 
   L_TOKEN_FILE="$(sudo mktemp -p /run evenscribe-token.XXXXXX </dev/null)"
   printf '%s\\n' "$L_TOKEN" | sudo tee "$L_TOKEN_FILE" >/dev/null
