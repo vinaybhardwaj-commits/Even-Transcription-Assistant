@@ -530,13 +530,54 @@ export type ScriptInput = {
   roomName: string;
 };
 
+/** What the Linux branch of the served script is rendered from. `release` null = none published. */
+export type LinuxBranchInput = {
+  token: string;
+  origin: string;
+  release: { blobUrl: string; sha256: string; version: string } | null;
+};
+
+const SCRIPT_HEAD = "#!/bin/bash\nset -euo pipefail\n";
+
 /**
- * Render the §4.4 body for one token. The body is REPRODUCED VERBATIM from the PRD — the only
- * changes are the six substitutions it marks. `bootout` is present, and it is present for a
- * reason worth keeping in view: a re-install on a Mac already running the app is the same single
- * paste, and this line is what stops the earlier copy before its bundle is replaced underneath it.
+ * The Linux branch: ONE `if ... fi` block that sits between the script's second line and the Mac body.
+ *
+ * ─── WHY THE PLATFORM IS DECIDED ON THE MACHINE, NOT HERE ────────────────────────────────
+ * Nothing that reaches this server names the platform. curl's User-Agent is `curl/<version>` on
+ * both macOS and Ubuntu, and the minting browser is routinely NOT the target machine (V mints on a
+ * Mac and pastes on the Ubuntu box). `uname -s`, run by the machine the script lands on, is the only
+ * answer that cannot be wrong about which machine it is.
+ *
+ * ─── WHY THIS COSTS A MAC NOTHING ────────────────────────────────────────────────────────
+ * bash reads a whole compound command before it executes any of it, so on a Mac the block is one
+ * `uname` answering Darwin and a jump past `fi` to the unchanged body. The branch ENDS IN `exit` on
+ * every path, so a Linux machine never reaches a Mac line. The Mac body below is pinned byte for byte
+ * by tests/unit/room-install-bootstrap-platform.test.ts.
  */
-export function renderBootstrapScript(input: ScriptInput): string {
+export function renderLinuxBranch(input: LinuxBranchInput): string {
+  void input;
+  return `if [ "$(uname -s)" = "Linux" ]; then
+  echo "EvenScribe Room Recorder is not yet published for Linux. Nothing was changed."
+  exit 1
+fi
+`;
+}
+
+/**
+ * Render the served script for one token: the Linux branch, then the §4.4 Mac body.
+ *
+ * The Mac body is REPRODUCED VERBATIM from the PRD — the only changes are the six substitutions it
+ * marks. `bootout` is present, and it is present for a reason worth keeping in view: a re-install on
+ * a Mac already running the app is the same single paste, and this line is what stops the earlier
+ * copy before its bundle is replaced underneath it.
+ */
+export function renderBootstrapScript(input: ScriptInput, linux: LinuxBranchInput["release"] = null): string {
+  const mac = renderMacScript(input);
+  // The head is the Mac body's own first two lines, so removing the block restores it exactly.
+  return SCRIPT_HEAD + renderLinuxBranch({ token: input.token, origin: input.origin, release: linux }) + mac.slice(SCRIPT_HEAD.length);
+}
+
+function renderMacScript(input: ScriptInput): string {
   const token = escapeForDoubleQuotes(input.token);
   const origin = escapeForDoubleQuotes(input.origin);
   const blobUrl = escapeForDoubleQuotes(input.blobUrl);

@@ -969,6 +969,7 @@ const STEP_PILL: Record<Step["state"], { tone: keyof typeof PILL; word: string }
   done: { tone: "ok", word: "done" },
   waiting: { tone: "idle", word: "waiting" },
   blocked: { tone: "bad", word: "blocked" },
+  not_applicable: { tone: "idle", word: "not applicable" },
 };
 
 function Steps({ steps }: { steps: Step[] }) {

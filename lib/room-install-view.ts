@@ -383,7 +383,29 @@ export function daysUntil(iso: string | null, nowMs: number): number | null {
 // The five checklist steps (§6, D11)
 // ---------------------------------------------------------------------------
 
-export type StepState = "done" | "waiting" | "blocked";
+/**
+ * `not_applicable` exists for ONE step on ONE platform: a Linux room has no operating-system microphone
+ * permission, so step 3 has nothing to wait for and nothing to be done. It is not `done` — a green tick
+ * would claim a permission was granted, and nothing granted one.
+ */
+export type StepState = "done" | "waiting" | "blocked" | "not_applicable";
+
+export type InstallPlatform = "macos" | "linux";
+
+/**
+ * PURE — which platform an install runs on, read off what the machine REPORTED about itself.
+ *
+ * `os_version` is the only platform fact any poll carries. The Mac app writes `macOS <major>.<minor>`
+ * (apps/room-recorder MachineFacts.osVersion); the Linux room-bench writes /etc/os-release's
+ * PRETTY_NAME ("Ubuntu 26.04 LTS"). ANYTHING ELSE IS A MAC, including a row that has not polled yet:
+ * every install before the Linux port is a Mac, and a guess must never move a Mac row off the wording
+ * and rules it has always had.
+ */
+export function installPlatform(i: Pick<InstallView, "os_version"> | null | undefined): InstallPlatform {
+  const os = i?.os_version?.trim() ?? "";
+  if (/^macOS\b/.test(os)) return "macos";
+  return /\b(ubuntu|debian|linux)\b/i.test(os) ? "linux" : "macos";
+}
 
 export type Step = {
   n: 1 | 2 | 3 | 4 | 5;
@@ -398,7 +420,7 @@ export type Step = {
 };
 
 const machineLine = (i: InstallView): string => {
-  const bits = [i.hostname ?? "this Mac", i.hardware_model, i.os_version].filter(Boolean);
+  const bits = [i.hostname ?? (installPlatform(i) === "linux" ? "this machine" : "this Mac"), i.hardware_model, i.os_version].filter(Boolean);
   return bits.join(" · ");
 };
 
@@ -442,9 +464,31 @@ export function deriveSteps(input: {
   // whole point of the step: an app someone double-clicked runs until the window is closed, and
   // a room that records only while a person is standing in it is not installed. §6 gives the
   // blocked instruction as "report it" — there is no setting the operator can change.
+  //
+  // ON LINUX THERE IS NO launchd AND NO `launched_by`. room-bench is a systemd service that starts at
+  // boot with nobody logged in, so there is no "opened by a person" failure to tell apart: the first
+  // poll IS the proof the service runs. Nothing is written to `launched_by` to make this turn green.
+  const linux = installPlatform(i) === "linux";
   const started = i?.first_seen_at ?? null;
-  const step2: Step =
-    i?.launched_by === "launchd"
+  const step2: Step = linux
+    ? started
+      ? {
+          n: 2,
+          title: "App running",
+          state: "done",
+          did: `Running on ${machineLine(i!)} · systemd service · ${fmtClock(started)}`,
+          note: "Reported from this machine's first poll after the command ran.",
+          tone: "plain",
+        }
+      : {
+          n: 2,
+          title: "App running",
+          state: "waiting",
+          did: null,
+          note: "Paste the command into a terminal on the room machine and press Return. This turns done on the machine's first poll.",
+          tone: "plain",
+        }
+    : i?.launched_by === "launchd"
       ? {
           n: 2,
           title: "App running",
@@ -475,8 +519,19 @@ export function deriveSteps(input: {
   // The blocked instruction is the System Settings path, because that is the only thing that
   // fixes it — and the step clears itself on the next poll after the switch is turned on, so the
   // note says there is nothing to press here.
-  const step3: Step =
-    i?.mic_state === "authorized"
+  //
+  // ON LINUX: NOT APPLICABLE, never `done`. The column stays `unknown` because nothing on the machine
+  // measures a permission, and step 4 is where audio arriving is proved.
+  const step3: Step = linux
+    ? {
+        n: 3,
+        title: "Microphone allowed",
+        state: "not_applicable",
+        did: null,
+        note: "Not applicable on Linux: there is no microphone permission to grant. Step 4 shows whether audio arrives.",
+        tone: "plain",
+      }
+    : i?.mic_state === "authorized"
       ? {
           n: 3,
           title: "Microphone allowed",
@@ -533,10 +588,36 @@ export function deriveSteps(input: {
   // NEVER SLEEP is reported and can turn done. AUTOMATIC LOGIN IS NOT REPORTED BY ANYTHING, so
   // it stays a reminder for ever — §6 says it "never turns done", and this step honours that by
   // carrying the reminder into the done branch rather than dropping it once never-sleep lands.
+  //
+  // ON LINUX THE LOGIN RULE IS THE OPPOSITE ONE. The installer turns automatic login OFF and boots to a
+  // text console, because both services run with nobody logged in. The Mac reminder would tell an
+  // operator to undo that, so Linux gets its own sentence, and it is not a warning: nothing is missing.
   const autoLoginNote =
     "Automatic login: set it in System Settings → Users & Groups → Automatic login (reminder, not checked).";
-  const step5: Step =
-    i?.never_sleep === true
+  const linuxLoginNote =
+    "Nobody needs to log in: the recorder runs as a system service. After a restart this machine shows a text screen, not a desktop, by design — watch this checklist from another device.";
+  const step5: Step = linux
+    ? i?.never_sleep === true
+      ? {
+          n: 5,
+          title: "Machine settings",
+          state: "done",
+          did: "Never sleep: detected (sleep, suspend and hibernate are switched off)",
+          note: linuxLoginNote,
+          tone: "plain",
+        }
+      : {
+          n: 5,
+          title: "Machine settings",
+          state: "waiting",
+          did: null,
+          note:
+            i?.never_sleep === false
+              ? "Sleep is still switched on for this machine. Paste the install command again; it switches sleep off. " + linuxLoginNote
+              : "Never sleep turns done when the recorder reports it. " + linuxLoginNote,
+          tone: "plain",
+        }
+    : i?.never_sleep === true
       ? {
           n: 5,
           title: "Machine settings",
