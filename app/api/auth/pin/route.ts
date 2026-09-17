@@ -147,7 +147,12 @@ export async function POST(req: NextRequest) {
   // was refused but none was counted, so nothing stopped the walk to this one: the correct pin IS the winning
   // guess. This costs the clinician nothing they could use — with no write landing anywhere, no encounter can be
   // recorded or saved either. The answer is the wrong-pin refusal, byte for byte (see refuseUnrecordedAttempt).
-  if (reset.kind === "no_bound_recording") return refuseUnrecordedAttempt();
+  if (reset.kind === "no_bound_recording") {
+    // E32b — the same fields as the not_recorded branch's line, so route logs alone document both refusals.
+    console.error("[auth/pin] session refused, no bound recording:",
+      JSON.stringify({ doctor_id: doctor.id, audited: reset.audited }));
+    return refuseUnrecordedAttempt();
+  }
 
   // E31 R63 — EXACTLY ONE BOUND IS RECORDING: ALLOW THE LOGIN. The surviving bound still limits guessing, and
   // refusing here would lock every clinician out of the encounter assistant for a partial fault. The unrecorded

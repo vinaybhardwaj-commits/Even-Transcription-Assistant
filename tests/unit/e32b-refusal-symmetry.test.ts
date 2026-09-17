@@ -169,7 +169,7 @@ const roundTrips = async <T,>(fn: () => Promise<T>) => {
     .map((l) => /LOG:\s+statement: PREPARE __s AS (.*)$/.exec(l)?.[1])
     .filter((l): l is string => l !== undefined)
     .map(classify);
-  return { out, driver: sent.map(classify), server };
+  return { out, driver: sent.map(classify), driverText: sent, server };
 };
 const writesOf = (xs: string[]) => xs.filter((x) => x !== "SELECT");
 const report = (label: string, wrong: { driver: string[]; server: string[] }, right: { driver: string[]; server: string[] }) =>
@@ -214,6 +214,13 @@ describe.runIf(HAVE_DOCKER)("E32b — the wrong-pin and correct-pin refusals do 
     expect(writesOf(wrong.out.server), "the wrong pin attempts all three writes").toEqual(THE_THREE_WRITES);
     expect(writesOf(right.out.server), "the correct pin attempts the same three").toEqual(THE_THREE_WRITES);
     expect(wrong.out.server, "and the whole sequence, reads included, is the same").toEqual(right.out.server);
+    // The pin_attempt INSERT is the same statement on both paths (E32b follow-up): same text, RETURNING id on both.
+    // The one token left different is the success literal, false versus true.
+    const insertOf = (xs: string[]) => xs.filter((t) => /INSERT INTO pin_attempt/.test(t))
+      .map((t) => t.replace(/\b(true|false)\b/, "<success>").replace(/\s+/g, " ").trim());
+    expect(insertOf(wrong.out.driverText), "one pin_attempt INSERT per path").toHaveLength(1);
+    expect(insertOf(wrong.out.driverText)[0], "RETURNING id on the wrong-pin path").toMatch(/RETURNING id$/);
+    expect(insertOf(wrong.out.driverText), "the same INSERT statement on both paths").toEqual(insertOf(right.out.driverText));
     return { wrong, right };
   };
 
@@ -348,6 +355,35 @@ describe.runIf(HAVE_DOCKER)("E32b — the wrong-pin and correct-pin refusals do 
     expect(one.status).toBe(500);
     expect(JSON.parse(one.body)).toEqual({ error: { code: "PIPELINE_FAILED", message: "Attempt could not be recorded; refusing the attempt" } });
     expect(one.headers.some(([k]: [string]) => k === "set-cookie"), "no cookie header").toBe(false);
+  }, 300_000);
+
+  it("ROUTE LOGS: both refusal branches emit one [auth/pin] line with the same field names, with audit_log up and down", async () => {
+    const routeFields = (lines: string[]) => {
+      const mine = lines.filter((l) => l.startsWith("[auth/pin]"));
+      expect(mine, "exactly one route line per refusal").toHaveLength(1);
+      return JSON.parse(mine[0]!.slice(mine[0]!.indexOf("{"))) as Record<string, unknown>;
+    };
+    for (const [label, arm, audited] of [
+      ["audit-up", () => armRaise("clinician", "pin_attempt"), true],
+      ["audit-down", () => armRaise("clinician", "pin_attempt", "audit_log"), false],
+    ] as const) {
+      const wrongSlug = routeDoctor(`doc_rl_${label}_w`, 2);
+      const rightSlug = routeDoctor(`doc_rl_${label}_r`, 2);
+      arm();
+      let wrong, right;
+      try {
+        wrong = await captured(() => callPin(wrongSlug, WRONG));
+        right = await captured(() => callPin(rightSlug, PIN));
+      } finally {
+        disarm();
+      }
+      const w = routeFields(wrong.lines);
+      const r = routeFields(right.lines);
+      expect(Object.keys(w).sort(), `${label}: the same field names on both branches`).toEqual(Object.keys(r).sort());
+      expect(Object.keys(w).sort()).toEqual(["audited", "doctor_id"]);
+      expect(w, `${label}: wrong pin`).toEqual({ doctor_id: `doc_rl_${label}_w`, audited });
+      expect(r, `${label}: correct pin`).toEqual({ doctor_id: `doc_rl_${label}_r`, audited });
+    }
   }, 300_000);
 
   it("THE CONSTANT: exported beside the others, distinct, on the R64 actor", async () => {

@@ -197,10 +197,16 @@ export async function recordFailedAttempt(
   // INDEPENDENT EVIDENCE FIRST, and it survives a clinician failure by construction: its own statement, its own
   // catch. A limiter that cannot see the attempt is worse than a counter that cannot move.
   try {
-    await sql`
+    // E32b — RETURNING id, so this is the success path's statement and the two refusals send the same INSERT. The
+    // result is read only to be logged: under R64 below, a pin_attempt miss on this path is never a refusal.
+    const rows = (await sql`
       INSERT INTO pin_attempt (doctor_id, success, ip, user_agent)
       VALUES (${doctor.doctor_id}, false, ${ip}::inet, ${userAgent})
-    `;
+      RETURNING id
+    `) as Array<{ id: unknown }>;
+    if (rows.length === 0)
+      console.warn("[lockout] pin_attempt insert landed no row (the rate limiter loses this row):",
+        JSON.stringify({ doctor_id: doctor.doctor_id }));
   } catch (e) {
     // R64 — DELIBERATELY NOT A REFUSAL. If this row fails but the clinician counter below lands, the wrong pin is
     // still answered PIN_INVALID. The counter is the security-bearing record: it landed, so brute force is still
