@@ -42,6 +42,7 @@ import { fuseTranscript, TRANSCRIPT_FUSION_ON, type TranscriptCandidate } from "
 import { runDiarize, reconcileTagged, applyRoleOverrides, diarizeTimingLine } from "@/lib/diarize";
 import { DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
 import { capturePassiveSample } from "@/lib/voice-samples";
+import { DIARIZE_ERROR_CONVERSATION_NOT_RECORDED } from "@/lib/diarize-conversation";
 import { enqueueFanout, runFanoutForEncounter } from "@/lib/stt/fanout";
 import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/lib/transcript-guard";
 import { transcribeDiarized } from "@/lib/transcribe";
@@ -79,6 +80,29 @@ type Row = {
   duration_seconds: number | null;
   router_job_id: string | null;
 };
+
+/**
+ * E31 batch 2, B2 (D-8) — WHAT diarizeStore REPORTS, AS THREE OUTCOMES RATHER THAN ONE BOOLEAN.
+ *
+ * It used to return `true` whatever happened, including after the failure write in its outer catch had itself
+ * failed. Downstream, `true` meant PROGRESS: the step machine reset process_attempts to 0 and self-chained. The next
+ * pass found diarize_status still 'running' (or NULL), needDiarize true and attempts 0, so the 15-attempt cap was
+ * never reached — A1's shape, retrying for ever without ever being reported exhausted.
+ *
+ * The value has two readers that want different things, so they no longer share one bit:
+ *   - the terminal status flip after diarize runs WHATEVER happened (unchanged, and it does not read this);
+ *   - the attempt reset and the self-chain fire ONLY on `recorded` — a conclusion the database holds.
+ */
+type DiarizeStoreOutcome =
+  /** The row holds a conclusion: complete, skipped, already complete, or a failure write that LANDED. */
+  | { kind: "recorded" }
+  /** Never reached the service (no depth-1 slot / caller aborted). Retryable; nothing to record. */
+  | { kind: "not_dispatched" }
+  /** The run failed AND the failure write did not land: the row still reads 'running' or its prior value. */
+  | { kind: "failure_not_recorded" };
+
+const LOG_DIARIZE_FAILURE_NOT_RECORDED = "[process] DIARIZE FAILURE NOT RECORDED";
+const LOG_CONVERSATION_NOT_RECORDED = "[process] SPEAKER-TAGGED CONVERSATION NOT RECORDED";
 
 function isAbortError(e: unknown): boolean {
   if (!e || typeof e !== "object") return false;
@@ -522,18 +546,19 @@ export async function POST(
   // no manual_relabels yet (live relabel = V2.SD.2). Soft-fails to
   // diarize_status='failed' and the note/email behave as v2.0 (unlabeled).
   //
-  // Returns whether the step PROGRESSED. It returns false in exactly one case: the depth-1
+  // Returns a DiarizeStoreOutcome (above). `not_dispatched` is the case where the depth-1
   // diarize slot (lib/diarize-gate.ts) was never acquired, so we never reached the service and
   // there is nothing to record about it. That is not a failure — marking it 'failed' would be
   // terminal (needDiarize excludes 'failed') and would strand the encounter over pure
   // contention. Leaving the status at 'running' and not progressing hands it to the step
   // machine's 5-minute lock TTL and bounded retry, which is the backoff that already exists.
-  const diarizeStore = async (emit?: (o: unknown) => void): Promise<boolean> => {
-    if (!row) return true;
-    if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return true; }
+  // `failure_not_recorded` (E31 B2) is the other not-progressed case: see the outer catch.
+  const diarizeStore = async (emit?: (o: unknown) => void): Promise<DiarizeStoreOutcome> => {
+    if (!row) return { kind: "recorded" };
+    if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return { kind: "recorded" }; }
     if (!row.audio_object_key) {
       try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
-      return true;
+      return { kind: "recorded" };
     }
     emit?.({ stage: "progress", msg: "Identifying speakers (diarization)\u2026" });
     try {
@@ -543,7 +568,7 @@ export async function POST(
       if (!bytes) {
         await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = 'audio_missing' WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: "Diarization skipped (audio unavailable)" });
-        return true;
+        return { kind: "recorded" };
       }
       // Load the doctor's enrolled voiceprint (if any) so /diarize can NAME them
       // (otherwise speakers stay heuristic — Patient/Attender/Nurse).
@@ -613,6 +638,13 @@ export async function POST(
         // diarized batch utterances. Either way, reconcile anonymous speaker
         // ids onto pyannote's NAMED speakers by time overlap, then refine roles
         // from the per-speaker text (first-person → Patient).
+        //
+        // E31 batch 2, B1 (D-7) — THIS BLOCK STAYS SEPARATE FROM W1 ABOVE. W1 has two readers that need it to land
+        // whether or not tagging does: the step gate needDiarize (bound W1 to this block and a Deepgram outage would
+        // hold diarize_status off 'complete', re-running pyannote on the Mac Mini every retry), and the EER matcher,
+        // which selects source:"auto" speakers that refinement never touches. Merging them would put Deepgram's
+        // outage domain inside the pyannote result. Do not collapse W1 into this block.
+        let tagRecorded = true; // nothing to tag is not a loss; only a block that does not complete is
         try {
           const segs = d.result.transcript_segments as Array<{ start_ms?: number; end_ms?: number; speaker_idx?: number }>;
           let entries = sarvamEntries;
@@ -627,12 +659,39 @@ export async function POST(
             const tagged = reconcileTagged(entries, segs, d.result.speakers);
             const { speakers: refined, changed } = applyRoleOverrides(d.result.speakers, tagged);
             const finalTagged = changed ? reconcileTagged(entries, segs, refined) : tagged;
-            await sql`UPDATE encounter SET tagged_transcript = ${JSON.stringify(finalTagged)}::jsonb WHERE id = ${id}`;
-            if (changed) await sql`UPDATE encounter SET speakers = ${JSON.stringify(refined)}::jsonb WHERE id = ${id}`;
+            // E31 batch 2, B1 (D-7) — the turns and the refined roster are ONE STATEMENT. They are two halves of one
+            // fact (the turn names are computed from the refined roster), and as two writes a failure between them
+            // left turns named by one roster over a row holding the other. `changed` is a condition inside the
+            // statement, not a second round trip. Landed only if the row comes back.
+            const tagRows = (await sql`
+              UPDATE encounter
+                 SET tagged_transcript = ${JSON.stringify(finalTagged)}::jsonb,
+                     speakers          = CASE WHEN ${changed}::boolean THEN ${JSON.stringify(refined)}::jsonb ELSE speakers END
+               WHERE id = ${id}
+              RETURNING id
+            `) as Array<{ id: string }>;
+            if (tagRows.length === 0) throw new Error("tagged_transcript write matched no row");
             emit?.({ stage: "progress", msg: `Speaker-tagged conversation ready (${finalTagged.length} turn(s)${changed ? ", roles refined" : ""})` });
           }
         } catch (te) {
+          tagRecorded = false;
           console.warn(`[process] tag/role reconcile failed enc=${id}: ${te instanceof Error ? te.message : String(te)}`);
+        }
+        // E31 batch 2, B1 (D-6) — NAME THE LOSS. diarize_status stays 'complete' (W1's readers are undisturbed); the
+        // closed code in diarize_error is what tells a lost conversation from one that never existed, on the doctor's
+        // page and in admin. Not free text and not the exception: the exception is in the line above.
+        if (!tagRecorded) {
+          try {
+            const marked = (await sql`
+              UPDATE encounter SET diarize_error = ${DIARIZE_ERROR_CONVERSATION_NOT_RECORDED}
+               WHERE id = ${id} AND diarize_status = 'complete'
+              RETURNING id
+            `) as Array<{ id: string }>;
+            if (marked.length === 0) console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED (no complete row) enc=${id}`);
+            else console.warn(`${LOG_CONVERSATION_NOT_RECORDED} — marked ${DIARIZE_ERROR_CONVERSATION_NOT_RECORDED} enc=${id}`);
+          } catch (me) {
+            console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED enc=${id}: ${me instanceof Error ? me.message : String(me)}`);
+          }
         }
         emit?.({ stage: "progress", msg: `Diarization complete (${d.result.speakers.length} speaker(s), ${diarizeTimingLine(d.timing)})` });
       } else if (d.retryable) {
@@ -642,7 +701,7 @@ export async function POST(
           .catch(() => { /* intentional: best-effort side-write; main flow continues */ });
         console.warn(`[process] diarize not dispatched enc=${id}: ${d.error} — will retry`);
         emit?.({ stage: "progress", msg: `Diarization queued behind another call (${d.timing.queue_wait_ms}ms) — retrying` });
-        return false;
+        return { kind: "not_dispatched" };
       } else {
         await sql`UPDATE encounter
                      SET diarize_status = 'failed', diarize_completed_at = NOW(),
@@ -651,13 +710,28 @@ export async function POST(
                    WHERE id = ${id}`;
         emit?.({ stage: "progress", msg: `Diarization unavailable (${d.error.slice(0, 80)})` });
       }
-      return true;
+      return { kind: "recorded" };
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       console.warn(`[process] diarize failed enc=${id}: ${m}`);
-      try { await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)} WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
+      // E31 batch 2, B2 (D-8) — THE FAILURE WRITE'S OWN FAILURE IS NOT SWALLOWED. It used to be, and the function then
+      // returned "progressed", so the attempt counter was reset and the step retried for ever. The failure has landed
+      // only if its row comes back; otherwise say so on its own line and report `failure_not_recorded`, which the
+      // step machine does not count as progress.
+      let failureRecorded = false;
+      try {
+        const f3 = (await sql`
+          UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)}
+           WHERE id = ${id}
+          RETURNING id
+        `) as Array<{ id: string }>;
+        failureRecorded = f3.length > 0;
+        if (!failureRecorded) console.error(`${LOG_DIARIZE_FAILURE_NOT_RECORDED} (the failure write matched no row) enc=${id}`);
+      } catch (fe) {
+        console.error(`${LOG_DIARIZE_FAILURE_NOT_RECORDED} (the failure write failed) enc=${id}: ${fe instanceof Error ? fe.message : String(fe)}`);
+      }
       emit?.({ stage: "progress", msg: "Diarization error (non-critical)" });
-      return true;
+      return failureRecorded ? { kind: "recorded" } : { kind: "failure_not_recorded" };
     }
   };
 
@@ -864,7 +938,7 @@ export async function POST(
           await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`;
           progressed = true;
         } else if (nextStep === "diarize") {
-          const dispatched = await diarizeStore();
+          const outcome = await diarizeStore();
           // Diarization is the LAST step and non-critical: by the time it runs, the encounter
           // is already clinically complete (note + CDS done before this). The per-step claim
           // above set status='processing'; flip back to terminal HERE so a dropped self-chain
@@ -872,7 +946,9 @@ export async function POST(
           await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND note_json IS NOT NULL`.catch(() => { /* best-effort terminal flip */ });
           // Not dispatched (queue full) => not progressed: hold the step lock to its TTL so the
           // retry is paced, instead of self-chaining straight back into the same busy queue.
-          progressed = dispatched;
+          // E31 batch 2, B2 (D-8) — and a failure that could not be RECORDED is not progress either: resetting the
+          // attempts over it is what kept the 15-attempt cap out of reach. The flip above still runs regardless.
+          progressed = outcome.kind === "recorded";
         }
       } catch (e) {
         console.warn(`[process:step] enc=${id} step=${nextStep} err=${e instanceof Error ? e.message : String(e)}`);

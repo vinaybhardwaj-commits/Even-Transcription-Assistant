@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 import { readDoctorCookie } from "@/lib/cookie";
 import { verifyDoctorJwt } from "@/lib/auth";
 import { parseDoctorSlug } from "@/lib/doctor-slug";
+import { conversationUnavailable } from "@/lib/diarize-conversation";
 import { EncounterDetailClient } from "@/components/encounter/EncounterDetailClient";
 import type { AnyNote } from "@/lib/note-generation";
 import type { NativeAnalysis } from "@/lib/stt/indic-comprehension";
@@ -25,6 +26,7 @@ type Row = {
   speakers: unknown[] | null;
   tagged_transcript: unknown[] | null;
   diarize_status: string | null;
+  diarize_error: string | null;
   transcript_flag: string | null;
   transcript_flag_reason: string | null;
   note_type: string | null;
@@ -73,7 +75,7 @@ export default async function EncounterPage({
   try {
     const [encRows, docRows, eventRows] = await Promise.all([
       sql`
-        SELECT id, recorded_at, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, processing_pct, processing_stages, speakers, tagged_transcript, diarize_status, transcript_flag, transcript_flag_reason, note_type, input_mode, note_json,
+        SELECT id, recorded_at, doctor_id, status, transcript_raw, transcript_original, detected_language, native_analysis, native_analysis_lang, processing_pct, processing_stages, speakers, tagged_transcript, diarize_status, diarize_error, transcript_flag, transcript_flag_reason, note_type, input_mode, note_json,
                note_json_edited, cdmss_json, send_status, sent_at
           FROM encounter
          WHERE id = ${id} AND deleted_at IS NULL
@@ -120,6 +122,9 @@ export default async function EncounterPage({
         speakers: row.speakers,
         taggedTranscript: row.tagged_transcript,
         diarizeStatus: row.diarize_status,
+        // E31 batch 2, B1 (D-6): a boolean, not the error text — the doctor's page needs to know the conversation
+        // was lost, and nothing else from diarize_error belongs in the browser.
+        conversationUnavailable: conversationUnavailable(row.diarize_status, row.diarize_error),
         transcriptFlag: row.transcript_flag,
         transcriptFlagReason: row.transcript_flag_reason,
         sendStatus: row.send_status,

@@ -87,7 +87,11 @@ export async function GET(req: NextRequest) {
     if (rediarize) {
       // Diarization fields ONLY. status, note_json, cdmss_json, translated, transcripts and the
       // flag are all left exactly as they are; the per-step claim preserves 'complete'.
+      // E31 batch 2, B1 — the previous run's speaker-tagged turns and roster go in the SAME statement. Left in place,
+      // a re-run whose tag block failed held the new run's roster over the old run's turns, named against the old
+      // roster. Safe for the EER matcher: it selects only diarize_status = 'complete', which this has just cleared.
       await sql`UPDATE encounter SET diarize_status = NULL, diarize_error = NULL,
+                  tagged_transcript = NULL, speakers = NULL,
                   process_attempts = 0, processing_step_at = NULL
                 WHERE id = ${manualId}`;
       await resumeOne(origin, rows[0].slug, rows[0].id, "diarize");
