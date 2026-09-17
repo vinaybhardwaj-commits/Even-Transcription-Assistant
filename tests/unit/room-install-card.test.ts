@@ -343,6 +343,61 @@ describe("row words and states (§6)", () => {
   });
 });
 
+// bench/device-missing-row-state. A room whose input device vanishes raised DEVICE_MISSING (a red
+// pill) and still read `healthy`, because the state decision never consulted `state_flags`. These
+// pin the fix both ways: a degradation flag alone reaches the state; an information-only flag,
+// alone, does not — see DEGRADED_STATE_FLAGS in lib/room-install-view.ts for the classification.
+describe("Tier 1 §2 flags reaching row state (bench/device-missing-row-state)", () => {
+  // Otherwise healthy: matches the "reads healthy" fixture above, so the only thing under test on
+  // each row below is the one flag.
+  const healthyBase: Partial<InstallView> = {
+    app_version: "1.0.3",
+    mic_state: "authorized",
+    tape_advancing: true,
+    tape_poll_streak: 9,
+    last_seen_at: ago(4_000),
+  };
+
+  it.each(["DEVICE_MISSING", "SILENT_WHILE_RECORDING", "CLIPPING", "ENCODER_STALLED"] as const)(
+    "%s alone reads needs_attention — capture is degraded",
+    (flag) => {
+      const r = deriveRow({
+        row: row({ install: install({ ...healthyBase, state_flags: [flag] }) }),
+        latestRelease: release(),
+        nowMs,
+      });
+      expect(r.state).toBe("needs_attention");
+      // The state moved on the flag alone — no attention line and no update failure did it.
+      expect(r.attention).toEqual([]);
+      expect(r.update_failed).toBe(false);
+      expect(r.state_flags).toEqual([flag]);
+    },
+  );
+
+  it.each(["DEVICE_CHANGED", "DISK_LOW", "CHANNEL_DRIFT"] as const)(
+    "%s alone still reads healthy — information, not degradation",
+    (flag) => {
+      const r = deriveRow({
+        row: row({ install: install({ ...healthyBase, state_flags: [flag] }) }),
+        latestRelease: release(),
+        nowMs,
+      });
+      expect(r.state).toBe("healthy");
+      // The flag still carries through to the pill even though it did not move the state.
+      expect(r.state_flags).toEqual([flag]);
+    },
+  );
+
+  it("an information flag does not mask a degradation flag also present", () => {
+    const r = deriveRow({
+      row: row({ install: install({ ...healthyBase, state_flags: ["DISK_LOW", "DEVICE_MISSING"] }) }),
+      latestRelease: release(),
+      nowMs,
+    });
+    expect(r.state).toBe("needs_attention");
+  });
+});
+
 describe("last-seen wording", () => {
   it("never renders a missing stamp as a number", () => {
     expect(fmtSeen(null, nowMs)).toBe("never");

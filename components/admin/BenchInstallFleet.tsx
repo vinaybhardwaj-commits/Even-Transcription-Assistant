@@ -592,8 +592,10 @@ function FleetRowView({
             </span>
           )}
           {/* Tier 1 §2. The server's named states for this Mac, one chip each, in the one order
-              lib/bench-bus-constants.ts lists them. Coarse alarms, so they colour nothing else: the
-              row's state is still the row's. */}
+              lib/bench-bus-constants.ts lists them. The chip renders for every flag regardless —
+              four of the seven also move the row's state to `needs_attention` when nothing else
+              does (bench/device-missing-row-state); see DEGRADED_STATE_FLAGS in
+              lib/room-install-view.ts for which, and why. */}
           {view.state_flags.map((f) => (
             <span key={f} data-state-flag={f}>
               <Pill tone="bad">{INSTALL_STATE_LABEL[f]}</Pill>

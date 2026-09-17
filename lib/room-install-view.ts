@@ -310,6 +310,52 @@ export const LAST_SEEN_ALARM_MS = 10 * 60_000;
 export const SESSION_WARN_DAYS = 30;
 
 // ---------------------------------------------------------------------------
+// Row state — which Tier 1 §2 flags mean CAPTURE is degraded
+// ---------------------------------------------------------------------------
+
+/**
+ * THE DEFECT THIS SET FIXES: a room whose input device vanishes raises DEVICE_MISSING (a red
+ * pill, `r3.state_flags` below) and still reads `healthy`, because the state decision at the
+ * bottom of `deriveInstallView` never consulted `state_flags`. A room that is not capturing must
+ * not read as healthy to anyone scanning, filtering, or sorting the fleet by state.
+ *
+ * NOT EVERY FLAG BELONGS HERE. bench-bus-constants.ts's seven Tier 1 §2 alarms are orthogonal,
+ * and several of them are true without anything being wrong with the audio landing on the tape
+ * right now. Blanket-promoting all seven would make `needs_attention` mean "something about this
+ * Mac is worth a glance", which is what the pills already say, and would drown the rooms that are
+ * actually failing to capture in rooms that are merely due a look. A flag earns a place in this
+ * set only when it means the same thing `failure` and the four attention reasons above already
+ * mean: audio that should be arriving now is missing, silent, corrupted, or not being written.
+ *
+ * DEGRADATION — reaches the row state:
+ *  - DEVICE_MISSING          the input device this Mac was reading from is gone. Nothing is
+ *                            arriving; this is the exact case that exposed the bug.
+ *  - SILENT_WHILE_RECORDING  recording, tape advancing, and the last two minutes are bit-exact
+ *                            zero (§2). The room is capturing nothing usable.
+ *  - CLIPPING                three of the last ten recording polls hit full scale. The samples
+ *                            reaching the tape are corrupted at the peaks — degraded content, not
+ *                            just a fact worth a note.
+ *  - ENCODER_STALLED         recording, and the durable tape index has not grown for four polls
+ *                            running. Audio is not being written, independent of whatever the
+ *                            single most-recent `tape_advancing` poll happens to say.
+ *
+ * INFORMATION — pill only, never moves the state:
+ *  - DEVICE_CHANGED  the reporting device differs from the one this room expects. The Mac is
+ *                    still capturing, from a device nobody has confirmed is the wrong one — worth
+ *                    checking, not proof anything is broken.
+ *  - DISK_LOW        under 2 GiB free. Capture is fine right now; this is a warning about the
+ *                    next few hours, not a report that anything failed today.
+ *  - CHANNEL_DRIFT   an assigned update channel this Mac has not obeyed for 30 minutes. About
+ *                    which build the Mac runs, not about whether it is recording.
+ */
+const DEGRADED_STATE_FLAGS: ReadonlySet<InstallStateFlag> = new Set<InstallStateFlag>([
+  "DEVICE_MISSING",
+  "SILENT_WHILE_RECORDING",
+  "CLIPPING",
+  "ENCODER_STALLED",
+]);
+
+// ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
@@ -1009,7 +1055,12 @@ export function deriveRow(input: {
     // print it a second time in the Actions cell, where every other attention line renders; not
     // marking the row at all would leave a failure the same colour as a healthy room. So the
     // state is raised here and the words stay where V put them.
-    state: attention.length > 0 || failure !== null ? "needs_attention" : "healthy",
+    // Tier 1 §2, bench/device-missing-row-state: a degradation flag reaches the state even when
+    // nothing else is wrong — see DEGRADED_STATE_FLAGS above for which flags and why.
+    state:
+      attention.length > 0 || failure !== null || r3.state_flags.some((f) => DEGRADED_STATE_FLAGS.has(f))
+        ? "needs_attention"
+        : "healthy",
     words,
     attention,
     session_label: sessionLabel,
