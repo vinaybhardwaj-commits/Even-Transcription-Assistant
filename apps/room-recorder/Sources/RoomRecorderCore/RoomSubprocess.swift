@@ -75,9 +75,6 @@ enum RoomSubprocess {
     try? stderrHandle?.close()
     stdoutHandle = nil
     stderrHandle = nil
-    process.standardOutput = nil
-    process.standardError = nil
-    process.standardInput = nil
 
     let stdout = stdoutURL.flatMap { try? Data(contentsOf: $0) } ?? Data()
     let stderr = stderrURL.flatMap { try? Data(contentsOf: $0) } ?? Data()
