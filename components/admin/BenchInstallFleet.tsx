@@ -605,6 +605,15 @@ function FleetRowView({
               <Pill tone="warn">channel locked</Pill>
             </span>
           )}
+          {/* ETA-DELIVERY-EVIDENCE phase 1. The words must name the fact, not the mechanism: "no
+              audio delivered for Nm", never "recording" — incident 3 was the system saying
+              "recording" about a room that was not. `deriveRow` decides when this fires; this
+              cell only prints the sentence. */}
+          {view.not_delivering_minutes !== null && (
+            <span data-not-delivering>
+              <Pill tone="bad">no audio delivered for {view.not_delivering_minutes}m</Pill>
+            </span>
+          )}
         </div>
       </td>
 
