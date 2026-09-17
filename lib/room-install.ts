@@ -317,6 +317,8 @@ function sameDigest(a: string, b: string): boolean {
 export type CreateReleaseInput = {
   blobUrl: string;
   channel: "stable" | "test";
+  /** Migration 0102. Absent means 'macos', which is every publish that predates the Linux port. */
+  platform?: ReleasePlatform;
   manifest: ReleaseManifest;
   publishedBy: string;
   fetchImpl?: typeof fetch;
@@ -353,7 +355,7 @@ export async function createRelease(input: CreateReleaseInput): Promise<ReleaseV
       ) VALUES (
         ${id}, ${input.manifest.version}, ${input.manifest.build_sha}, ${actual.sha256},
         ${actual.size_bytes}, ${input.blobUrl}, ${input.channel}, ${input.publishedBy},
-        ${input.manifest.notes ?? null}, ${input.manifest.min_macos ?? "15.0"}, 'macos'
+        ${input.manifest.notes ?? null}, ${input.manifest.min_macos ?? "15.0"}, ${input.platform ?? "macos"}
       )
       RETURNING id, version, build_sha, sha256, size_bytes, blob_url, channel,
                 published_at, published_by, withdrawn_at, notes, min_macos, platform
@@ -543,10 +545,18 @@ export type ScriptInput = {
 export type LinuxBranchInput = {
   token: string;
   origin: string;
+  roomName: string;
   release: { blobUrl: string; sha256: string; version: string } | null;
 };
 
 const SCRIPT_HEAD = "#!/bin/bash\nset -euo pipefail\n";
+
+/**
+ * The capture device the Linux installer pins by default (TONOR TM20), as /proc/asound/card*\/usbid
+ * prints it. MUST equal DEFAULT_DEVICE_UID in apps/room-recorder-linux/deploy/room-recorder-install.sh.
+ * The script only uses it to WARN; the installer is what decides.
+ */
+const LINUX_DEFAULT_USBID = "0d8c:0134";
 
 /**
  * The Linux branch: ONE `if ... fi` block that sits between the script's second line and the Mac body.
@@ -562,12 +572,131 @@ const SCRIPT_HEAD = "#!/bin/bash\nset -euo pipefail\n";
  * `uname` answering Darwin and a jump past `fi` to the unchanged body. The branch ENDS IN `exit` on
  * every path, so a Linux machine never reaches a Mac line. The Mac body below is pinned byte for byte
  * by tests/unit/room-install-bootstrap-platform.test.ts.
+ *
+ * ─── WHAT THE LINUX BRANCH DOES, AND WHAT IT LEAVES TO THE INSTALLER ─────────────────────
+ * It is the delivery, not the install: download the published tarball, check its sha256, unpack it as
+ * the user, and run the tarball's own deploy/room-recorder-install.sh as root. Everything the machine
+ * ends up as is the installer's decision.
+ *
+ *   · STDIN. This script arrives on bash's stdin, and the rest of it is still in that pipe. Every child
+ *     that could read stdin (sudo, the installer, apt under it) gets </dev/null. sudo asks for a password
+ *     on the terminal, not on stdin.
+ *   · THE TOKEN never reaches an argv. It goes to a file made by `sudo mktemp -p /run` (tmpfs: never on
+ *     disk, 0600 root) through `printf | sudo tee` — printf is a bash builtin, so the token is not a
+ *     process argument either — and the installer passes it to room-bench on stdin. An EXIT trap runs
+ *     `shred -u` on it on every path out, success or failure.
+ *   · --re-enrol, always: a second paste re-enrols, as it does on a Mac. Without it the installer keeps an
+ *     existing enrolment and ignores the token.
+ *   · NEVER --restart-capture. A re-paste on a live room must not put a gap in the tape. The installer
+ *     prints that a restart is needed; this script repeats it where the operator will read it.
+ *   · NO REBOOT. The script says, in plain words, that the machine will come up as a text screen and that
+ *     the checklist is watched from another device, and leaves the restart to a person.
  */
 export function renderLinuxBranch(input: LinuxBranchInput): string {
-  void input;
-  return `if [ "$(uname -s)" = "Linux" ]; then
-  echo "EvenScribe Room Recorder is not yet published for Linux. Nothing was changed."
+  if (!input.release) {
+    return `if [ "$(uname -s)" = "Linux" ]; then
+  echo "No Linux release of EvenScribe Room Recorder is available right now. Nothing was changed."
   exit 1
+fi
+`;
+  }
+  const token = escapeForDoubleQuotes(input.token);
+  const origin = escapeForDoubleQuotes(input.origin);
+  const blobUrl = escapeForDoubleQuotes(input.release.blobUrl);
+  const sha = escapeForDoubleQuotes(input.release.sha256);
+  const version = escapeForDoubleQuotes(input.release.version);
+  const roomName = escapeForDoubleQuotes(input.roomName);
+
+  return `if [ "$(uname -s)" = "Linux" ]; then
+  L_TOKEN="${token}"
+  L_ORIGIN="${origin}"
+  L_BLOB_URL="${blobUrl}"
+  L_EXPECTED_SHA="${sha}"
+  L_TMP=""
+  L_TOKEN_FILE=""
+  l_cleanup() {
+    if [ -n "$L_TOKEN_FILE" ]; then
+      sudo shred -u "$L_TOKEN_FILE" </dev/null 2>/dev/null || sudo rm -f "$L_TOKEN_FILE" </dev/null || true
+    fi
+    if [ -n "$L_TMP" ]; then rm -rf "$L_TMP"; fi
+  }
+  trap l_cleanup EXIT
+
+  if [ "$(uname -m)" != "x86_64" ]; then
+    echo "This computer is $(uname -m). EvenScribe Room Recorder runs on x86_64 only. Nothing was changed."
+    exit 1
+  fi
+
+  echo "Downloading EvenScribe Room Recorder ${version} for Linux..."
+  L_TMP="$(mktemp -d)"
+  curl -fsSL -o "$L_TMP/room-recorder-linux.tar.gz" "$L_BLOB_URL"
+
+  echo "Verifying the download..."
+  L_ACTUAL_SHA="$(sha256sum "$L_TMP/room-recorder-linux.tar.gz" | awk '{print $1}')"
+  if [ "$L_ACTUAL_SHA" != "$L_EXPECTED_SHA" ]; then
+    echo "Checksum mismatch. Install stopped. Nothing was changed."
+    exit 1
+  fi
+  mkdir "$L_TMP/release"
+  tar -xzf "$L_TMP/room-recorder-linux.tar.gz" -C "$L_TMP/release"
+  if [ ! -x "$L_TMP/release/deploy/room-recorder-install.sh" ]; then
+    echo "The download does not contain the installer. Install stopped. Nothing was changed."
+    exit 1
+  fi
+
+  echo "The install needs administrator rights. Type this computer's password if you are asked for it."
+  sudo -v </dev/null
+
+  L_TOKEN_FILE="$(sudo mktemp -p /run evenscribe-token.XXXXXX </dev/null)"
+  printf '%s\\n' "$L_TOKEN" | sudo tee "$L_TOKEN_FILE" >/dev/null
+
+  l_install() {
+    sudo "$L_TMP/release/deploy/room-recorder-install.sh" --token-file "$L_TOKEN_FILE" --re-enrol --origin "$L_ORIGIN" "$@" </dev/null
+  }
+  L_STATUS=0
+  if grep -qsx "${LINUX_DEFAULT_USBID}" /proc/asound/card*/usbid; then
+    l_install 2>&1 | tee "$L_TMP/install.log" || L_STATUS=$?
+  else
+    echo ""
+    echo "WARNING: the room microphone is not plugged in."
+    echo "The install carries on. The recorder starts recording by itself as soon as the"
+    echo "microphone is plugged in, and until then the Bench shows this room's microphone as missing."
+    echo ""
+    l_install --defer-device 2>&1 | tee "$L_TMP/install.log" || L_STATUS=$?
+  fi
+  if [ "$L_STATUS" -ne 0 ]; then
+    echo ""
+    echo "The install stopped. The lines above say why. This command did nothing more."
+    exit "$L_STATUS"
+  fi
+
+  echo ""
+  echo "=============================================================================="
+  echo "PLEASE READ THIS BEFORE YOU CLOSE THE WINDOW"
+  echo ""
+  echo "This computer is now the room recorder for ${roomName}."
+  if grep -q "It was NOT restarted" "$L_TMP/install.log"; then
+    echo ""
+    echo "The recorder was already running here, and it was NOT restarted, so nothing"
+    echo "being recorded was interrupted. It keeps running the version it had until it"
+    echo "restarts. When the room is not in use, run:"
+    echo "    sudo systemctl restart room-recorder.service"
+  fi
+  echo ""
+  echo "When this computer next restarts, it will NOT show the usual desktop. It will"
+  echo "show a plain black screen with white text. That is on purpose: the recorder"
+  echo "runs by itself and nobody needs to log in."
+  echo ""
+  echo "After that you cannot open a web browser on this computer. To check that the"
+  echo "room is working, open the EvenScribe Bench on a different computer or a phone"
+  echo "and watch this room's install checklist there."
+  if systemctl is-active --quiet graphical.target 2>/dev/null; then
+    echo ""
+    echo "Restart this computer once, at a time when the room is not in use:"
+    echo "    sudo systemctl reboot"
+  fi
+  echo "=============================================================================="
+  exit 0
 fi
 `;
 }
@@ -583,7 +712,8 @@ fi
 export function renderBootstrapScript(input: ScriptInput, linux: LinuxBranchInput["release"] = null): string {
   const mac = renderMacScript(input);
   // The head is the Mac body's own first two lines, so removing the block restores it exactly.
-  return SCRIPT_HEAD + renderLinuxBranch({ token: input.token, origin: input.origin, release: linux }) + mac.slice(SCRIPT_HEAD.length);
+  const branch = renderLinuxBranch({ token: input.token, origin: input.origin, roomName: input.roomName, release: linux });
+  return SCRIPT_HEAD + branch + mac.slice(SCRIPT_HEAD.length);
 }
 
 function renderMacScript(input: ScriptInput): string {
@@ -664,14 +794,28 @@ export async function bootstrapScriptFor(token: string): Promise<string | null> 
     const release = await latestRelease("stable", "macos");
     if (!release) return null;
 
-    return renderBootstrapScript({
-      token: row.token,
-      origin: recorderOrigin(),
-      blobUrl: release.blob_url,
-      sha256: release.sha256,
-      version: release.version,
-      roomName: row.room_name,
-    });
+    // THE LINUX READ CANNOT BREAK A MAC PASTE. Every script now carries both branches, so a fault reading
+    // the Linux shelf renders the Linux branch's "not available" stop and serves the Mac body untouched.
+    let linux: ReleaseView | null = null;
+    try {
+      linux = await latestRelease("stable", "linux");
+    } catch (e) {
+      console.warn("[room-install] linux release read failed; the Linux branch will say none is available", {
+        err: String((e as Error)?.message ?? e).slice(0, 200),
+      });
+    }
+
+    return renderBootstrapScript(
+      {
+        token: row.token,
+        origin: recorderOrigin(),
+        blobUrl: release.blob_url,
+        sha256: release.sha256,
+        version: release.version,
+        roomName: row.room_name,
+      },
+      linux ? { blobUrl: linux.blob_url, sha256: linux.sha256, version: linux.version } : null,
+    );
   } catch (e) {
     throw classifyInstallError(e);
   }

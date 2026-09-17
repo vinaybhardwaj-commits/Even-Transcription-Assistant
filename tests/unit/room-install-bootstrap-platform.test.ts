@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 vi.mock("@/lib/db", () => {
@@ -89,7 +90,7 @@ echo "Installed and enrolled as OPD 5. Close this window."
  */
 function macPart(script: string, linux: Parameters<typeof M.renderLinuxBranch>[0]["release"] = null): string {
   const head = "#!/bin/bash\nset -euo pipefail\n";
-  const block = M.renderLinuxBranch({ token: MAC.token, origin: MAC.origin, release: linux });
+  const block = M.renderLinuxBranch({ token: MAC.token, origin: MAC.origin, roomName: MAC.roomName, release: linux });
   expect(script.startsWith(head + block)).toBe(true);
   return head + script.slice(head.length + block.length);
 }
@@ -140,11 +141,136 @@ describe("the Mac branch of the served script", () => {
   });
 });
 
+describe("the Mac branch stays byte for byte with a Linux release published", () => {
+  it("removing the Linux block still leaves the golden, and on Darwin nothing Linux runs", () => {
+    const linux = { blobUrl: "https://x.public.blob.vercel-storage.com/rr-linux-0.2.0.tar.gz", sha256: "d".repeat(64), version: "0.2.0" };
+    const script = M.renderBootstrapScript(MAC, linux);
+    expect(macPart(script, linux)).toBe(MAC_GOLDEN);
+    execFileSync("bash", ["-n"], { input: script });
+    const r = runPiped(script, { uname: "echo Darwin", curl: "exit 22", sudo: "exit 0" });
+    expect(r.out).toContain("Downloading EvenScribe Room Recorder 0.1.21...");
+    expect(r.calls).not.toMatch(/^sudo /m);
+    expect(r.calls).not.toContain("tar.gz");
+  });
+});
+
 describe("the Linux branch of the served script", () => {
-  it("with no Linux release published, stops on Linux before touching anything", () => {
-    const r = runPiped(M.renderBootstrapScript(MAC, null), { uname: 'echo Linux', curl: "exit 0", sudo: "exit 0" });
+  it("with no Linux release available, stops on Linux before touching anything", () => {
+    const r = runPiped(M.renderBootstrapScript(MAC, null), { uname: "echo Linux", curl: "exit 0", sudo: "exit 0" });
     expect(r.status).toBe(1);
-    expect(r.out).toContain("not yet published for Linux. Nothing was changed.");
+    expect(r.out).toContain("No Linux release of EvenScribe Room Recorder is available right now. Nothing was changed.");
     expect(r.calls.split("\n").filter(Boolean)).toEqual(["uname -s"]);
+  });
+
+  /**
+   * A real tarball with the layout the installer expects (deploy/ beside .build/release/), whose installer
+   * is a stub that records its argv, copies what the token file held, and records the file's mode. Every
+   * privileged or Linux-only command is a PATH stub; the script itself is the rendered text, run as the
+   * paste runs it.
+   */
+  function linuxRun(opts: { installerExit?: number; notRestarted?: boolean; corrupt?: boolean } = {}) {
+    const work = mkdtempSync(join(tmpdir(), "rr-linux-release-"));
+    const rel = join(work, "tree");
+    mkdirSync(join(rel, "deploy"), { recursive: true });
+    mkdirSync(join(rel, ".build", "release"), { recursive: true });
+    for (const b of ["room-recorder", "room-bench"]) {
+      writeFileSync(join(rel, ".build", "release", b), "#!/bin/sh\n");
+      chmodSync(join(rel, ".build", "release", b), 0o755);
+    }
+    writeFileSync(
+      join(rel, "deploy", "room-recorder-install.sh"),
+      `#!/bin/bash
+printf 'installer %s\\n' "$*" >> "$HOME/calls.log"
+tf=""
+while [ $# -gt 0 ]; do case "$1" in --token-file) tf=$2; shift 2 ;; *) shift ;; esac; done
+cp "$tf" "$HOME/token-seen"
+ls -l "$tf" | cut -c1-10 > "$HOME/token-mode"
+echo "  UNCHANGED  stub installer"
+if [ "\${STUB_NOT_RESTARTED:-}" = 1 ]; then echo "             It was NOT restarted: a restart is a gap in the tape. When the room is idle:"; fi
+exit \${STUB_EXIT:-0}
+`,
+    );
+    chmodSync(join(rel, "deploy", "room-recorder-install.sh"), 0o755);
+    const tarball = join(work, "rr.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", rel, "deploy", ".build"]);
+    const bytes = readFileSync(tarball);
+    const sha = opts.corrupt ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex");
+    const linux = { blobUrl: "https://x.public.blob.vercel-storage.com/rr-linux-0.2.0.tar.gz", sha256: sha, version: "0.2.0" };
+
+    const r = runPiped(
+      M.renderBootstrapScript(MAC, linux),
+      {
+        uname: 'if [ "$1" = -m ]; then echo x86_64; else echo Linux; fi',
+        curl: `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${tarball}" "$2"; shift 2; else shift; fi; done`,
+        sha256sum: 'shasum -a 256 "$@"',
+        sudo: 'if [ "$1" = -v ]; then exit 0; fi; exec "$@"',
+        mktemp: `if [ "$1" = -p ]; then d="$TMPDIR/run"; mkdir -p "$d"; f="$d/token-file"; : > "$f"; chmod 600 "$f"; echo "$f"; else exec /usr/bin/mktemp "$@"; fi`,
+        shred: 'if [ "$1" = -u ]; then rm -f "$2"; fi',
+        systemctl: "exit 3",
+      },
+      {
+        STUB_EXIT: String(opts.installerExit ?? 0),
+        STUB_NOT_RESTARTED: opts.notRestarted ? "1" : "0",
+      },
+    );
+    return r;
+  }
+
+  it("installs: the token reaches a 0600 file and no argv, --re-enrol is passed, --restart-capture never is, and the file is shredded", () => {
+    const r = linuxRun();
+    expect(r.status, r.out).toBe(0);
+    const lines = r.calls.split("\n").filter(Boolean);
+    // THE TOKEN IS IN NO COMMAND LINE — not sudo's, not tee's, not the installer's.
+    expect(r.calls).not.toContain(MAC.token);
+    expect(readFileSync(join(r.dir, "token-seen"), "utf8")).toBe(`${MAC.token}\n`);
+    expect(readFileSync(join(r.dir, "token-mode"), "utf8").trim()).toBe("-rw-------");
+    expect(lines).toContain("mktemp -p /run evenscribe-token.XXXXXX");
+    const installer = lines.find((l) => l.startsWith("installer "))!;
+    expect(installer).toMatch(/--token-file \S+\/run\/token-file --re-enrol --origin https:\/\/www\.evenscribe\.app/);
+    expect(installer).not.toContain("--restart-capture");
+    // Shredded on the way out, and gone.
+    expect(lines).toContain(`shred -u ${r.dir}/run/token-file`);
+    expect(() => readFileSync(join(r.dir, "run", "token-file"))).toThrow();
+  });
+
+  it("with the microphone absent, warns loudly and passes --defer-device rather than stopping", () => {
+    // No /proc/asound on the test machine, or no TONOR on it: the absent path.
+    const r = linuxRun();
+    expect(r.out).toContain("WARNING: the room microphone is not plugged in.");
+    expect(r.calls).toMatch(/^installer .* --defer-device$/m);
+  });
+
+  it("says, before anything else could restart the machine, that it will come up as a text screen and where to watch", () => {
+    const r = linuxRun();
+    const out = r.out;
+    expect(out).toContain("This computer is now the room recorder for OPD 5.");
+    expect(out).toContain("it will NOT show the usual desktop");
+    expect(out).toContain("open the EvenScribe Bench on a different computer or a phone");
+    // The script never restarts the machine itself.
+    expect(r.calls).not.toMatch(/reboot/);
+  });
+
+  it("repeats the installer's 'NOT restarted' in the closing words, so a re-paste's pending restart is not missed", () => {
+    const r = linuxRun({ notRestarted: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("it was NOT restarted, so nothing");
+    expect(r.out).toContain("sudo systemctl restart room-recorder.service");
+    expect(linuxRun().out).not.toContain("it was NOT restarted, so nothing");
+  });
+
+  it("an installer that stops: the script stops with its status and still shreds the token", () => {
+    const r = linuxRun({ installerExit: 1 });
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("The install stopped. The lines above say why.");
+    expect(r.out).not.toContain("PLEASE READ");
+    expect(r.calls).toMatch(/^shred -u /m);
+  });
+
+  it("a checksum mismatch stops before sudo is ever asked for, and nothing is installed", () => {
+    const r = linuxRun({ corrupt: true });
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("Checksum mismatch. Install stopped. Nothing was changed.");
+    expect(r.calls).not.toMatch(/^sudo /m);
+    expect(r.calls).not.toMatch(/^installer /m);
   });
 });

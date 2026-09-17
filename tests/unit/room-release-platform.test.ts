@@ -4,7 +4,7 @@
  * THE HAZARD THIS FILE GUARDS. One query — `latestRelease` — answers the Mac self-update route, the install
  * mint and the bootstrap script. Unfiltered, a Linux row would be "the latest stable" for every Mac. So:
  *   · the query names the platform in SQL, and every Mac-facing caller passes 'macos';
- *   · this change gives nothing a way to WRITE a Linux row (createRelease inserts the literal 'macos');
+ *   · a publish names its platform; absent is 'macos', unknown is refused, never rounded to macos;
  *   · a Linux fleet row is measured against a Linux shelf, and a Mac row reads exactly what it did;
  *   · the migration writes no Linux row and says, in its own header, why the order is load-bearing.
  */
@@ -70,12 +70,27 @@ describe("latestRelease filters by platform in SQL", () => {
     expect(q.values).toEqual(["stable", "macos"]);
   });
 
-  it("the bootstrap script builds its Mac body from the macos stable release", async () => {
-    responses = [[{ token: "ab".repeat(16), room_name: "OPD 5" }], [releaseRow()]];
-    const script = await M.bootstrapScriptFor("ab".repeat(16));
-    const q = calls.find((c) => c.text.includes("FROM app_release"))!;
-    expect(q.values).toEqual(["stable", "macos"]);
+  it("the bootstrap script builds its Mac body from the macos release and its Linux branch from the linux one", async () => {
+    responses = [
+      [{ token: "ab".repeat(16), room_name: "OPD 5" }],
+      [releaseRow()],
+      [releaseRow({ id: "rel_linux", version: "0.2.0", platform: "linux", blob_url: "https://x.public.blob.vercel-storage.com/rr-linux-0.2.0.tar.gz" })],
+    ];
+    const script = (await M.bootstrapScriptFor("ab".repeat(16)))!;
+    const q = calls.filter((c) => c.text.includes("FROM app_release"));
+    expect(q.map((c) => c.values)).toEqual([["stable", "macos"], ["stable", "linux"]]);
     expect(script).toContain('BLOB_URL="https://x.public.blob.vercel-storage.com/rr-0.1.21.zip"');
+    expect(script).toContain('L_BLOB_URL="https://x.public.blob.vercel-storage.com/rr-linux-0.2.0.tar.gz"');
+  });
+
+  it("a failed Linux read never breaks a Mac paste: the Mac body is served and the Linux branch says none is available", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    responses = [[{ token: "ab".repeat(16), room_name: "OPD 5" }], [releaseRow()], new Error("column \"platform\" does not exist")];
+    const script = (await M.bootstrapScriptFor("ab".repeat(16)))!;
+    expect(script).toContain('BLOB_URL="https://x.public.blob.vercel-storage.com/rr-0.1.21.zip"');
+    expect(script).toContain("No Linux release of EvenScribe Room Recorder is available right now.");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("the Mac self-update route asks for macos, whatever channel it is given", () => {
@@ -93,8 +108,8 @@ describe("latestRelease filters by platform in SQL", () => {
   });
 });
 
-describe("nothing in this change can write a Linux row", () => {
-  it("createRelease inserts the literal 'macos'", async () => {
+describe("publishing names its platform, and absent is macos", () => {
+  it("createRelease with no platform inserts 'macos' — every publish that predates the Linux port", async () => {
     const body = new TextEncoder().encode("bundle");
     const { createHash } = await import("node:crypto");
     const sha = createHash("sha256").update(body).digest("hex");
@@ -108,8 +123,43 @@ describe("nothing in this change can write a Linux row", () => {
     });
     const insert = calls.find((c) => /INSERT INTO app_release/.test(c.text))!;
     expect(insert.text).toContain("min_macos, platform");
-    expect(insert.text).toMatch(/'macos' \) RETURNING/);
-    expect(insert.values).not.toContain("linux");
+    expect(insert.values.at(-1)).toBe("macos");
+  });
+
+  describe("POST /api/admin/releases", () => {
+    const post = async (body: Record<string, unknown>) => {
+      process.env.MIGRATION_SECRET = "test-secret";
+      const { POST } = await import("@/app/api/admin/releases/route");
+      const res = await POST(
+        new Request("https://www.evenscribe.app/api/admin/releases", {
+          method: "POST",
+          headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }) as unknown as import("next/server").NextRequest,
+      );
+      delete process.env.MIGRATION_SECRET;
+      return res;
+    };
+    const base = {
+      blob_url: "https://x.public.blob.vercel-storage.com/rr-0.1.22.zip",
+      channel: "stable",
+      manifest: { version: "0.1.22", build_sha: "abc1234", sha256: "e".repeat(64), size_bytes: 10 },
+    };
+
+    it("refuses an unknown platform before fetching anything, rather than rounding it to macos", async () => {
+      const res = await post({ ...base, platform: "windows" });
+      expect(res.status).toBe(400);
+      expect(calls.filter((c) => /INSERT INTO app_release/.test(c.text))).toHaveLength(0);
+    });
+
+    it("a body with no platform (the Mac publisher's POST today) still validates as before", async () => {
+      // The Blob fetch fails in the test, so the route answers BAD_BUNDLE from the hash step — past validation.
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404 }));
+      const res = await post(base);
+      const j = await res.json();
+      expect(j.error.message).toMatch(/blob fetch failed/);
+      fetchSpy.mockRestore();
+    });
   });
 });
 
