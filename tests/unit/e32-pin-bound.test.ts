@@ -149,10 +149,15 @@ describe.runIf(HAVE_DOCKER)("E32 — no session while no brute-force bound is re
     expect(right.lines.some((l) => l.includes("session issued")), "and the route never says it issued one").toBe(false);
     // The reason, for the operator: audit_log was still writable here, so the row exists — and it is the E32
     // row, not R63's reset row. Closed codes and a count; no pin, no name, no slug, no error text.
+    // E32b: the wrong pin that follows now writes its own row too — the two refusals attempt the same writes.
     expect(await auditRows("doc_e32_neither")).toEqual([{
       actor_type: "system", actor_id: "auth:pin-lockout-v1", action: "auth.pin_session_refused_no_bound",
       target_type: "doctor", target_id: "doc_e32_neither",
       metadata_json: { attempt_reason: "threw", reset_reason: "threw", stale_failed_pin_count: 3 },
+    }, {
+      actor_type: "system", actor_id: "auth:pin-lockout-v1", action: "auth.pin_attempt_refused_unrecorded",
+      target_type: "doctor", target_id: "doc_e32_neither",
+      metadata_json: { reason: "threw", stale_failed_pin_count: 3 },
     }]);
     // NO ORACLE. The same doctor's WRONG pin under the same fault gets the IDENTICAL response. If the correct pin's
     // refusal differed in any byte, the refusal would reveal the pin to an attacker who then waits out the fault.

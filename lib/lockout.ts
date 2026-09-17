@@ -79,6 +79,21 @@ export const LOG_NO_BOUND_RECORDING =
   "[lockout] CORRECT PIN, NEITHER THE LOCKOUT COUNTER NOR THE RATE LIMITER IS RECORDING — refusing the session";
 export const AUDIT_PIN_SESSION_REFUSED_NO_BOUND = "auth.pin_session_refused_no_bound";
 
+/**
+ * E32b — THE TWO REFUSALS DO THE SAME AMOUNT OF WORK.
+ *
+ * The client cannot tell the wrong-pin refusal (not_recorded) from the correct-pin refusal (no_bound_recording):
+ * one response, byte for byte. It could still tell them apart by TIME. Under a total write failure the correct pin
+ * attempted three writes (pin_attempt, clinician, audit_log) and the wrong pin two, so the right guess was the one
+ * that took a database round trip longer — and the attacker waits for writes to come back and uses it.
+ *
+ * The cure is symmetry, not deletion: the correct-pin audit row is the operator's only evidence that a session was
+ * refused, so it stays, and the wrong-pin refusal attempts its own audit row. Both paths now attempt the same three
+ * writes. It also means a brute force during a write outage leaves an audit trail, where before only the one guess
+ * that won wrote anything. Do not drop either audit write, and do not add a write to one path without the other.
+ */
+export const AUDIT_PIN_ATTEMPT_REFUSED_UNRECORDED = "auth.pin_attempt_refused_unrecorded";
+
 /** Why a write did not land. A closed code, so it can go into audit metadata. */
 type WriteMiss = { reason: "threw"; err: string } | { reason: "zero_rows" };
 
@@ -103,9 +118,9 @@ export type LockoutDecision =
    * caller FAILS CLOSED on this — a pin attempt the system cannot account for is refused, not answered
    * PIN_INVALID, because answering PIN_INVALID is what let a brute force run un-counted while the clinician
    * table was degraded. Only recordFailedAttempt returns this. The success path has its own type (ResetOutcome)
-   * and its own answer, on purpose — see R63 there.
+   * and its own answer, on purpose — see R63 there. `audited` says whether the E32b audit row landed.
    */
-  | { kind: "not_recorded" }
+  | { kind: "not_recorded"; audited: boolean }
   | { kind: "locked"; retry_after_seconds: number; reason: string }
   | { kind: "disabled" }
   | { kind: "rate_limited"; retry_after_seconds: number };
@@ -195,6 +210,7 @@ export async function recordFailedAttempt(
   }
 
   let row: LockRow | undefined;
+  let counterMiss: WriteMiss | null = null;
   try {
     const rows = (await sql`
       UPDATE clinician c
@@ -213,16 +229,25 @@ export async function recordFailedAttempt(
                 GREATEST(0, CEIL(EXTRACT(EPOCH FROM (c.locked_until - NOW()))))::int AS retry_after_seconds
     `) as LockRow[];
     row = rows[0];
+    if (!row) {
+      counterMiss = { reason: "zero_rows" };
+      console.error(LOG_FAILED_ATTEMPT_NOT_RECORDED + " (the clinician UPDATE matched no row):",
+        JSON.stringify({ doctor_id: doctor.doctor_id }));
+    }
   } catch (e) {
+    counterMiss = { reason: "threw", err: String((e as Error)?.message ?? e).slice(0, 160) };
     console.error(LOG_FAILED_ATTEMPT_NOT_RECORDED + " (the clinician UPDATE failed):",
-      JSON.stringify({ doctor_id: doctor.doctor_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
-    return { kind: "not_recorded" };
+      JSON.stringify({ doctor_id: doctor.doctor_id, err: counterMiss.err }));
   }
 
+  // E32b — BOTH not_recorded exits (a throw AND zero rows) attempt the audit row, so this refusal attempts the same
+  // writes as the correct-pin refusal (see above AUDIT_PIN_ATTEMPT_REFUSED_UNRECORDED). Closed codes and a count.
   if (!row) {
-    console.error(LOG_FAILED_ATTEMPT_NOT_RECORDED + " (the clinician UPDATE matched no row):",
-      JSON.stringify({ doctor_id: doctor.doctor_id }));
-    return { kind: "not_recorded" };
+    const audited = await auditPinLockout(AUDIT_PIN_ATTEMPT_REFUSED_UNRECORDED, doctor.doctor_id, {
+      reason: counterMiss?.reason ?? "zero_rows",
+      stale_failed_pin_count: doctor.failed_pin_count,
+    });
+    return { kind: "not_recorded", audited };
   }
 
   // From here every branch is read off the row the database returned.

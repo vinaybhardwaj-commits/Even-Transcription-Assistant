@@ -117,7 +117,13 @@ export async function POST(req: NextRequest) {
     // here is what let a brute force run un-counted while the clinician table was degraded: refuse instead, and
     // say the system could not record it rather than implying anything about the pin. This is the brute-force
     // path. It is NOT symmetric with the correct-pin path below, on purpose.
-    if (newState.kind === "not_recorded") return refuseUnrecordedAttempt();
+    if (newState.kind === "not_recorded") {
+      // E32b — `audited: false` here, and on the correct-pin refusal's audit line, is how an operator learns that
+      // audit_log is down as well. The client answer does not change: it is refuseUnrecordedAttempt, as below.
+      console.error("[auth/pin] attempt refused, not recorded:",
+        JSON.stringify({ doctor_id: doctor.id, audited: newState.audited }));
+      return refuseUnrecordedAttempt();
+    }
     if (newState.kind === "disabled") return respondError("FORBIDDEN", "Account disabled after too many attempts");
     if (newState.kind === "locked")
       return respondError("PIN_LOCKED", newState.reason, { retry_after_seconds: newState.retry_after_seconds });
