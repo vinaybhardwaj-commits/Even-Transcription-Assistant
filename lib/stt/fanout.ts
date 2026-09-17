@@ -130,11 +130,13 @@ export async function runFanoutForEncounter(encounterId: string, opts?: { allowP
   }
   if (!bytes) return { encounter_id: encounterId, inserted: 0, skipped: 0, errors: ["audio_object_missing"] };
 
-  // Drop any prior errored batch rows for the engines we are re-running (so a
-  // retry replaces the failure rather than duplicating it).
-  for (const e of todo) {
-    await sql`DELETE FROM transcription_run WHERE subject_type = 'encounter' AND subject_id = ${encounterId} AND mode = 'batch' AND tier = 'asr' AND engine = ${e.id} AND error IS NOT NULL`;
-  }
+  // E31 C6 — EVERY ATTEMPT IS KEPT. This used to delete the prior errored batch rows for the engines being
+  // re-run, "so a retry replaces the failure rather than duplicating it". A failed attempt is not a duplicate of
+  // the retry that follows it: it is a separate attempt, and the leaderboard's reliability figure is per attempt.
+  // Deleting it made an engine that needed three tries read as reliable as one that needed one. The "done" read
+  // above still counts only error IS NULL rows, so a failed engine is still retried; it just no longer erases the
+  // failure. With no delete here, an overlapping call can no longer remove another call's fresh row either.
+  // True duplicates (a second SUCCESSFUL row for the same subject, engine, mode and tier) are dedupRuns' job.
 
   const errors: string[] = [];
   let inserted = 0;
@@ -300,15 +302,17 @@ export async function resetAllJobs(): Promise<number> {
 }
 
 
-/** Remove duplicate batch ASR rows (keep best per encounter+engine), then clear
- *  the scored_at marker on affected encounters so they re-score cleanly. */
+/** Remove duplicate SUCCESSFUL batch ASR rows (keep the newest per encounter+engine; failed attempts are never
+ *  duplicates and are never touched), then clear the scored_at marker on affected encounters so they re-score. */
 export async function dedupRuns(): Promise<{ deleted: number; affected: number }> {
   const del = (await sql`
     WITH ranked AS (
+      -- E31 C6 — SUCCESSFUL DUPLICATES ONLY. Every row beyond the first used to go, failed attempts included,
+      -- so one click of "dedup" erased an engine's attempt history. A failed attempt is never a duplicate.
       SELECT id, encounter_id,
              ROW_NUMBER() OVER (PARTITION BY encounter_id, engine, mode, tier
-                                ORDER BY (error IS NULL) DESC, created_at DESC) AS rn
-        FROM transcription_run WHERE mode='batch' AND tier='asr'
+                                ORDER BY created_at DESC) AS rn
+        FROM transcription_run WHERE mode='batch' AND tier='asr' AND error IS NULL
     )
     DELETE FROM transcription_run WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
     RETURNING encounter_id
@@ -378,7 +382,7 @@ export async function runScribeForEncounter(encounterId: string): Promise<{ enco
     } catch (e) { errors.push(`audio_load: ${String(e).slice(0, 80)}`); }
     if (bytes) {
       for (const e of todo) {
-        await sql`DELETE FROM transcription_run WHERE encounter_id = ${encounterId} AND tier = 'scribe' AND engine = ${e.id} AND error IS NOT NULL`;
+        // E31 C7 — EVERY ATTEMPT IS KEPT, as C6 above: no delete of the prior errored scribe row before a retry.
         const adapter = adapterFor(e.adapter_key)!;
         try {
           const r = await adapter.generateNote!(bytes, { contentType, language: enc.detected_language ?? undefined, template: enc.note_type ?? undefined });
