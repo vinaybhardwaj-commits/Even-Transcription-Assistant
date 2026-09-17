@@ -1,0 +1,56 @@
+# TM20 measurement, 16 Sep 2026: device identity, capabilities, and our capture path.
+
+## lsusb / sysfs identity
+Bus 003 Device 005: ID 0d8c:0134 C-Media Electronics, Inc. TONOR TM20 Audio Device
+  idVendor      0d8c
+  idProduct     0134
+  manufacturer  FuZhou Kingwayinfo CO.,LTD
+  product       TONOR TM20 Audio Device
+  serial        20200918
+  version        1.10
+
+## /proc/asound/card1/stream0 (primary evidence)
+FuZhou Kingwayinfo CO.,LTD TONOR TM20 Audio Device at usb-0000:00:14.0-1, full  : USB Audio
+
+Capture:
+  Status: Stop
+  Interface 1
+    Altset 1
+    Format: S16_LE
+    Channels: 1
+    Endpoint: 0x82 (2 IN) (ASYNC)
+    Rates: 8000, 11025, 16000, 22050, 32000, 44100, 48000
+    Bits: 16
+    Channel map: MONO
+
+## --dump-hw-params
+HW Params of device "hw:CARD=Device,DEV=0":
+ACCESS:  MMAP_INTERLEAVED RW_INTERLEAVED
+FORMAT:  S16_LE
+SUBFORMAT:  STD MSBITS_MAX
+SAMPLE_BITS: 16
+FRAME_BITS: 16
+CHANNELS: 1
+RATE: [8000 48000]
+PERIOD_TIME: [1000 1000000]
+PERIOD_SIZE: [32 48000]
+PERIOD_BYTES: [64 96000]
+PERIODS: [2 1024]
+BUFFER_TIME: (1333 2000000]
+BUFFER_SIZE: [64 96000]
+BUFFER_BYTES: [128 192000]
+TICK_TIME: ALL
+
+## raw hw: opens
+  arecord -r 48000 -c 1    -> Recording raw data '/dev/null' : Signed 16 bit Little Endian, Rate 48000 Hz, Mono
+  arecord -r 44100 -c 1    -> Recording raw data '/dev/null' : Signed 16 bit Little Endian, Rate 44100 Hz, Mono
+  arecord -r 48000 -c 2    -> arecord: set_params:1404: Channels count non available
+
+## /dev/snd/by-id and by-path
+/dev/snd/by-id/:
+lrwxrwxrwx+1 root root 12 Sep 16 08:50 usb-FuZhou_Kingwayinfo_CO._LTD_TONOR_TM20_Audio_Device_20200918-00 -> ../controlC1
+
+/dev/snd/by-path/:
+lrwxrwxrwx+1 root root 12 Sep 16 08:50 pci-0000:00:14.0-usb-0:1:1.0 -> ../controlC1
+lrwxrwxrwx+1 root root 12 Sep 16 08:50 pci-0000:00:14.0-usbv2-0:1:1.0 -> ../controlC1
+lrwxrwxrwx+1 root root 12 Sep 15 19:18 pci-0000:00:1f.3-platform-skl_hda_dsp_generic -> ../controlC0

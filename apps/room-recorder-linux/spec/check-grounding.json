@@ -1,0 +1,307 @@
+{
+  "schema": "eta.room-recorder.check-grounding/1",
+  "description": "Every named check of C1-C10 and what it rests on. mac-source: pins a Mac behaviour and carries a Mac file:line at f798edf (refused without one). mac-measurement: pins a Mac behaviour measured on the Mac. linux-measurement: pins a fact about THIS platform that we measured, carrying the measurement and where it is recorded (NOTES.md or verification/), refused without one - NOT our-choice, because our-choice means we could have decided otherwise and a platform's behaviour is not ours to decide; filing a measured platform fact as a choice invites a later re-decision instead of a re-measurement (V's ruling, 16 Sep 2026). our-choice: a deliberate decision of ours, carrying the ruling that made it instead of a file:line - not debt, and it can never acquire a Mac citation. ungrounded: claims to pin a Mac behaviour and has no citation - debt, somebody must read the source. ungrounded-blocked: claims to pin a Mac behaviour that cannot be established by reading at all, with blocked_by stating why and what would settle it - reported separately from debt. A check that asserts without an entry here counts as ungrounded. Rule from 15 Sep 2026: a check pinning a Mac behaviour carries its citation.",
+  "checks": [
+    {
+      "id": "C1.geometry",
+      "asserts": "byte_offset == samples x 2 on every record; both present or both absent; integers; non-negative",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:7 (bytesPerSample = 2) and the identical expression samples: bytesWritten / TapeConstants.bytesPerSample at all four construction sites - TapeWriter.swift:221 (checkpoint / audio path), :278 (discontinuity path), :307 (restart record), :374 (stopped record); no path computes samples by any other route (orchestrator read, 16 Sep). Presence: TapeFormat.swift:12-49"
+    },
+    {
+      "id": "C1.pcm-whole-samples",
+      "asserts": "tape.pcm is a whole number of 2-byte samples",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:4-9 (S16 mono); TapeWriter.swift:129-133 (a trailing odd byte is trimmed on startup)"
+    },
+    {
+      "id": "C1.within-pcm",
+      "asserts": "no record references a byte beyond tape.pcm",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.3 (fsync of tape.pcm before the index record that references it). The Mac's F_FULLFSYNC ordering is cited only as 'tapewriter/TapeWriter.swift', no line (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 2)"
+    },
+    {
+      "id": "C1.monotonic",
+      "asserts": "byte_offset and samples never decrease from one record to the next",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:194-196: guard offset >= previousOffset, samples >= previousSamples else { throw TapeError.invalidIndex(line:detail:\"offset or sample count regressed\") } (orchestrator read, 15 Sep). A different check from the input_frames guard at :239-241"
+    },
+    {
+      "id": "C1.stopped-at-pcm-end",
+      "asserts": "the final stopped record's byte_offset equals tape.pcm's length; a non-final stopped is followed by restart at the same byte_offset with surviving_tail_bytes 0",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:366-384 (stopped: byteOffset: bytesWritten after fullSyncTape(.stopped), ETA-U1-RECORD-FIELDS-MAC-GROUND-TRUTH-14-SEP-2026 section 6); TapeWriter.swift:305-315 (restart record at the tape length on open); orchestrator ruling 15 Sep (step 4 tape: 77178400 = 77178400)"
+    },
+    {
+      "id": "C2.schema-keys",
+      "asserts": "every key is one of the fifteen",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3)"
+    },
+    {
+      "id": "C2.presence",
+      "asserts": "presence rules: rms only and always on checkpoints; peak with zero_ratio; no levels on discontinuities; gap_ns never 0 and never on day_rollover; restart fields only on restart; dropped_input_frames only on ring_overflow and never 0; input_frames with input_sample_rate",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:12-49 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); TapeWriter.swift:281 (gap_ns 0 omitted); TapeWriter.swift:401-424 (rms 0, peak and zero_ratio nil for an empty window); TapeWriter.swift:267-296 (discontinuity keys; dropped 0 omitted; step 5 grounding read off f798edf, 15 Sep 2026); TapeWriter.swift:305-315 (restart keys); TapeWriter.swift:231, :283, :382 (input_frames only with currentInputSampleRate)"
+    },
+    {
+      "id": "C2.reencode",
+      "asserts": "decode then re-encode reproduces each index line byte for byte (sorted keys, unescaped slashes, no whitespace)",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:271-277 (encodedLine sets [.sortedKeys, .withoutEscapingSlashes]; ETA-U0-CLOSED-14-SEP-2026)"
+    },
+    {
+      "id": "C2.darwin-encoder-line",
+      "asserts": "this platform's JSONEncoder writes the same bytes as Darwin's for six measured Doubles",
+      "grounding": "mac-measurement",
+      "citation": "Measured on the Mac mini, Swift 6.4, macOS 27.0, 14 Sep 2026 (ETA-U0-CLOSED-14-SEP-2026)"
+    },
+    {
+      "id": "C3.torn-tail-excluded-by-the-reader",
+      "asserts": "a final line with no 0x0A is excluded from the parse, the read does not fail, and nothing on disk is touched",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:135-154: committedLength walks back to the last 0x0A (or 0) and a partial final line is ALWAYS excluded from the parse; truncation happens only under repairTrailingPartial (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C3.torn-tail-repaired-by-the-writer",
+      "asserts": "the writer's open path truncates the partial line on disk, to the last complete line, and only then opens the file for writing",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:135-154 (repairTrailingPartial); TapeWriter.swift:137 passes it on open, so the writer repairs and a reader does not (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C3.clean-unchanged",
+      "asserts": "a clean log is never opened for writing and its bytes are unchanged",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:136-144: with a trailing 0x0A the guard is false, discarded is 0, the repair block never runs and FileHandle(forWritingTo:) is never opened (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C3.interior-blank",
+      "asserts": "an interior blank line fails the WHOLE read, and nothing on disk is touched",
+      "grounding": "mac-source",
+      "citation": "TapeFormat.swift:170-175: a blank line is tolerated only as the trailing split artifact; any other throws TapeError.malformedIndex(line:detail:\"empty interior record\") and the whole read fails (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C4.clock",
+      "asserts": "wall time of a sample = anchor wall + (sample - anchor sample) x 62500 ns; the anchor is the record opening the region, replaced by a checkpoint at the region boundary",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:407-413 (timestamp); PiecePipeline.swift:300-305 (a boundary checkpoint replaces the discontinuity's anchor) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3); PiecePipeline.swift:277-307 (with coincident discontinuities the anchor is the last record's wall_ns)"
+    },
+    {
+      "id": "C4.double-formula",
+      "asserts": "the Double formula anchorWallNS/1e9 + (sample - anchorSample)/16000 agrees within 2 ulp",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:407-413"
+    },
+    {
+      "id": "C5.adjacency",
+      "asserts": "pieces tile the tape: first starts at 0, last ends at the tape end, piece[i].sampleEnd == piece[i+1].sampleStart",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:279-296, :355, :371 (regions close at discontinuities; partial close at the region end; cursor reset there) (ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3)"
+    },
+    {
+      "id": "C5.no-straddle",
+      "asserts": "no piece straddles a discontinuity",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:279-296, :355"
+    },
+    {
+      "id": "C5.gap-after-discontinuity",
+      "asserts": "gap_before_ms lands on the piece after a discontinuity, round half up at 500000 ns, only for capture_discontinuity, resumed, ring_overflow, device_lost",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:417 (rounding); PiecePipeline.swift:421-428 (gapMilliseconds(for:), four causes) (ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026)"
+    },
+    {
+      "id": "C5.gap-max-at-sample",
+      "asserts": "when several discontinuities share a sample, the following piece's gap_before_ms is the MAXIMUM of their gaps (and the region's clock anchor is the LAST record's wall_ns, checked by C4.clock)",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:277-307: for a coincident discontinuity `if sample > regionStart` is false, so no Region is appended for the zero-length gap; the else branch does regionGap = max(regionGap, nextGap) while regionStart, durableEnd and the anchor are overwritten unconditionally (orchestrator read, 15 Sep). Our prior wording, 'the last region governs', was wrong whenever the first of the coincident records carried the larger gap"
+    },
+    {
+      "id": "C5.plan",
+      "asserts": "the piece list equals the planner port's plan of the index",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:279-296, :355, :371, :417, :421-428; and :277-307 for the empty-region behaviour that was previously unread (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C5.byte-ranges-concatenate",
+      "asserts": "the pieces' byte ranges concatenate to tape.pcm",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:669-707, pread at :698 reading at off_t(offset + completed) through a 1 MiB buffer (positional, never seeking the shared fd); called at :531 with byteOffset = sampleStart x bytesPerSample and byteCount = (sampleEnd - sampleStart) x bytesPerSample; the planner chains cursor = region.end (:371), so consecutive pieces concatenate with no gap and no overlap by construction (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C6.full-piece",
+      "asserts": "a full piece is exactly 4800000 samples (300.000 s)",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:231"
+    },
+    {
+      "id": "C6.partial-only-at-region-end",
+      "asserts": "a short piece ends only at a discontinuity or the tape end",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:279-296, :355"
+    },
+    {
+      "id": "C7.boundary",
+      "asserts": "the named record is the expected discontinuity",
+      "grounding": "mac-source",
+      "citation": "AudioRing.swift:191, :264, :338, :355 (ring_overflow drop boundary); AudioRing.swift:20 (day_rollover)"
+    },
+    {
+      "id": "C7.gap-fields",
+      "asserts": "a ring_overflow record carries non-zero gap_ns and dropped_input_frames",
+      "grounding": "mac-source",
+      "citation": "AudioRing.swift:191, :264, :338, :355 (gap = new-side mono start - drop start); TapeWriter.swift:281 (0 omitted); TapeFormat.swift:12-49 (dropped_input_frames on ring_overflow with drops, ETA-U0A-REFUTER-VERDICT-14-SEP-2026 D3)"
+    },
+    {
+      "id": "C7.gapless-day-rollover",
+      "asserts": "a day_rollover boundary carries neither gap_ns nor dropped_input_frames",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:267-296; AudioRing.swift:143-215 (gapNS 0, droppedFrames 0) (step 5 grounding read off f798edf, 15 Sep 2026)"
+    },
+    {
+      "id": "C7.no-zero-fill",
+      "asserts": "the boundary's byte_offset is the tape length after the resampler flush that opens discontinuity(), and tape.pcm holds exactly the audio before and after it: nothing is inserted for the gap",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:267-296, whose first statement :268 is try finishConversion() (:261-264 → writeConverted :245-259, which appends to tape.pcm through writeAll at :252), and only then is the record stamped with byteOffset: bytesWritten (orchestrator read, 15 Sep). The earlier wording, 'discontinuity() writes no PCM', was FALSE: the path flushes the resampler first"
+    },
+    {
+      "id": "C7.boundary-after-flush",
+      "asserts": "the closing region holds outputCount(input frames consumed in it) = floor(frames / 3) samples, so the boundary's byte_offset accounts for whatever the converter flushes",
+      "grounding": "ungrounded-blocked",
+      "citation": "What ours does is ruled and measured: U1 spec 11.4 (the converter resets at every discontinuity; an incomplete group of at most 2 frames produces no output) and spec/CONVERSION-48K-TO-16K-MONO.md; `conformance explain-flush` measures 0 samples emitted at a reset, for 1 and for 2 held frames (verification/u1-flush-measurement.txt). What the MAC does at the same point cannot be read: TapeWriter.swift:268 flushes through PCMResampler.finish, which signals .endOfStream and loops on whatever outputBuffer.frameLength comes back, with no group-of-three arithmetic of its own",
+      "blocked_by": "Decided inside AVAudioConverter, which is not our source: PCMResampler.finish sets inputStatus .endOfStream, takes count = Int(outputBuffer.frameLength) and calls body only when count > 0, so whether a trailing incomplete group emits a final sample or is dropped is the converter's business. It cannot be settled from existing tapes either: every tape.idx on the Mini (22 capture directories, largest 21 439 records) is input_sample_rate 44100 (TONOR TM20), and a full content search found no 48000 in any tape file anywhere - the only 48000 strings are literals in IndexLogTests.swift. The Mac has never recorded at 48 kHz (orchestrator search, 16 Sep). To settle it: run the Mac writer at 48 kHz across a discontinuity whose consumed frame count is not a multiple of 3, and compare the discontinuity record's byte_offset with 2 x floor(frames / 3)"
+    },
+    {
+      "id": "C7.zero-run-probe",
+      "asserts": "no run of min(gap samples, 16) zero samples (16 at a gapless boundary) starting 40 samples after the boundary",
+      "grounding": "our-choice",
+      "citation": "Ours, never a Mac behaviour: the 16-sample zero-run threshold that defines zero fill was chosen in U0-A (ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3, C7), and the 40-sample exemption is ruled in ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.5"
+    },
+    {
+      "id": "C8.L1-keys",
+      "asserts": "day_rollover keys: byte_offset, samples, mono_ns, wall_ns, device, discontinuity, input_frames/input_sample_rate; nothing else",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:267-296; AudioRing.swift:20 (step 5 grounding read off f798edf, 15 Sep 2026)"
+    },
+    {
+      "id": "C8.L2-target",
+      "asserts": "a day_rollover's wall_ns is an IST midnight (the target itself)",
+      "grounding": "mac-source",
+      "citation": "AudioRing.swift:143-215 (marker wallNS = rollover.wallNS = target); CaptureTimeline.swift:141-150; ArchiveMidnightFoundation.swift:10-11 (Asia/Kolkata) (step 5 grounding read off f798edf, 15 Sep 2026)"
+    },
+    {
+      "id": "C8.L3-rearm",
+      "asserts": "a capture session's first boundary comes from the zone, and within one session each later boundary is the previous one + 86400000000000 ns",
+      "grounding": "mac-source",
+      "citation": "First arm: Recorder.swift:66 `let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })` and :75 `nextRolloverWallNS: UInt64(nextMidnightNS.rounded())`; ArchiveMidnightFoundation.swift:73 `nextMidnight(now: @Sendable () -> Date)` and :10 timeZoneIdentifier = \"Asia/Kolkata\". Re-arm: CaptureTimeline.swift:24 (istDayNS literal) and :122-131 (+istDayNS). Two different mechanisms; the check rests on both (orchestrator read, 16 Sep)"
+    },
+    {
+      "id": "C8.L4-straddle",
+      "asserts": "the input frame holding midnight stays in the old day: where prefix end and suffix start share wall time S, S - midnight lies in [0, 20834) ns at 48 kHz",
+      "grounding": "mac-source",
+      "citation": "CaptureTimeline.swift:146-149 (frameOffset ceil); AudioRing.swift:323-325 (segmentEnd = start + UInt64(Double(frameCount) / sampleRate * 1e9), truncating). The [0, 20834) form of the bound is ours (orchestrator ruling 15 Sep), checked on Linux for split counts <= 1200 frames"
+    },
+    {
+      "id": "C8.L5-frames",
+      "asserts": "the day closed by a day_rollover holds floor(input frames / 3) samples",
+      "grounding": "our-choice",
+      "citation": "spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4 (the converter resets at every discontinuity). Not a Mac behaviour: the Mac's AVAudioConverter carries history (ETA-MAC-RESAMPLER-STATE-ACROSS-DISCONTINUITY-14-SEP-2026)"
+    },
+    {
+      "id": "C8.L6-no-unmarked-midnight",
+      "asserts": "no end-of-audio checkpoint at or after an IST midnight unless a day_rollover at that sample closes the region",
+      "grounding": "mac-source",
+      "citation": "CaptureTimeline.swift:141 (every buffer whose wall end reaches the target is split)"
+    },
+    {
+      "id": "C8.L7-input-frames",
+      "asserts": "a day_rollover carries input_frames exactly when audio preceded it in the same run (tape start or restart)",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:153 (currentInputSampleRate declared per run()); TapeWriter.swift:285 (input_frames keyed off it); TapeWriter.swift:290 (cleared only on formatChange) (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C8.L8-anchor-deferred",
+      "asserts": "the capture anchor follows the last of a run of markers, before the first audio: no checkpoint between adjacent markers with no audio consumed; the record after a marker run, if a checkpoint, is its empty-window anchor",
+      "grounding": "mac-source",
+      "citation": "TapeWriter.swift:288-292 (needsCaptureAnchor set in discontinuity()); TapeWriter.swift:323-326 (marker item returns early); TapeWriter.swift:339-341 (anchor checkpoint for an audio item) (orchestrator read, 15 Sep)"
+    },
+    {
+      "id": "C8.pins",
+      "asserts": "every day_rollover's line, wall_ns, mono_ns, sample, input_frames, prefix-end and new-day wall times equal the expected answers",
+      "grounding": "mac-source",
+      "citation": "Expected answers computed from CaptureTimeline.swift:141-150, :146-149, :122-131 and AudioRing.swift:323-325 (synthetic fixtures), or taken from the recorder's capture-side split log (recorded tape)"
+    },
+    {
+      "id": "C9.manifest-describes-implementation",
+      "asserts": "the fixture's written conversion rules, taps and channel_count equal the linked implementation",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4 (V's ruling, 14 Sep: audio content deterministic and specified per platform); spec/CONVERSION-48K-TO-16K-MONO.md; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 2.2. The downmix RULE it encodes is the Mac's and is cited: AudioRing.swift:296-309 (one channel copies; more than one takes the mean over channelCount, in Float32, with no scaling afterwards, orchestrator read 16 Sep). Our integer formulation of that mean - the exact sum with the division folded into the output divisor - is ours"
+    },
+    {
+      "id": "C9.output-deterministic",
+      "asserts": "the conversion output is byte-identical to the checked-in output, whole and chunked",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 4; ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 4. Includes the downmix divisor channels x 2^qBits: negative controls c9-downmix-sum-not-mean (2-channel input, divisor 65536) and c9-mono-attenuated (1-channel input, divisor 131072) pin it in both directions"
+    },
+    {
+      "id": "C9.direction-probe",
+      "asserts": "asymmetric taps pin the convolution index direction",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.2 (C9 blind spot closed)"
+    },
+    {
+      "id": "C9.region-reset",
+      "asserts": "history resets at every discontinuity: the stream with resets equals its regions converted in isolation",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U1-SPEC-14-SEP-2026-v0.1 section 11.4"
+    },
+    {
+      "id": "C10.argv",
+      "asserts": "the piece encoder arguments, byte for byte",
+      "grounding": "mac-source",
+      "citation": "PiecePipeline.swift:485-496 (ETA-U0A-REFUTER-VERDICT-14-SEP-2026)"
+    },
+    {
+      "id": "C10.decoded-audio",
+      "asserts": "decoded audio within the stated tolerance (sample count, correlation, RMS); encoded bytes never compared",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U0-SPEC-14-SEP-2026-v0.1 section 3 (C10); ETA-U0A-FIX1-REFUTER-VERDICT-14-SEP-2026 (no test compares container bytes)"
+    },
+    {
+      "id": "S3.wait-bound",
+      "asserts": "the startup wait for the pinned device is bounded, settable via --wait-for-device, defaults to 30 s, and a bound of 0 still probes exactly once before failing",
+      "grounding": "our-choice",
+      "citation": "V's ruling, 16 Sep 2026 (boot-3 session), recorded as a JUDGEMENT AND NOT A MEASUREMENT: 30 s is long enough for a slow hub or a re-enumeration, short enough that a genuinely absent mic is reported inside half a minute. Nothing measured produced the number and it must never be quoted as though something had. It is settable so the acceptance test can drive it to 0 and prove the immediate-failure path without waiting 30 s for it. Contrast S3.busy-waits-then-fails, whose 5.0 s IS measured."
+    },
+    {
+      "id": "S3.absent-waits-then-fails",
+      "asserts": "a pinned device that is not present is polled every 1 s up to the bound, each attempt logged; on expiry the run ends with a distinct named error and a non-zero exit, never a fallback",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('a device that has not enumerated YET is a different condition and must not be treated as the same... wait then fail'); R4 as confirmed by measurement in NOTES.md 'M2.3 CLOSED' - a .device dependency cannot cover 'plugged in late' or 'never plugged in', so the wait is the only mechanism that can. Per-attempt logging is so the journal shows waiting rather than hanging (S6: lifecycle, never content)."
+    },
+    {
+      "id": "S3.busy-waits-then-fails",
+      "asserts": "a pinned device present but returning EBUSY is waited out on the same bound as absent, and a permanent holder ends in a DISTINCT failure from absent",
+      "grounding": "linux-measurement",
+      "citation": "MEASURED, not decided: PipeWire holds the ALSA PCM for exactly 5.0 s after its last client exits - three trials, 5.0/5.0/5.0 s, no variance (pw-record 4 s, PCM polled at 0.5 s until closed, then a real open succeeded). Recorded in NOTES.md, 'U2 section 4 measurements (16 Sep) - M2.1, M2.2, M2.3', table row 'time from client exit to the PCM being free, 3 trials'; the same 5.0 s is the RestartSec floor in R1 there. Re-MEASURE if it is ever doubted; do not re-decide it. That a permanent holder must fail DISTINCTLY from an absent device is S8 (each refusal names its own cause), and that EBUSY is the one open failure worth waiting on follows from the 5.0 s being bounded and short."
+    },
+    {
+      "id": "S3.wrong-never-waits",
+      "asserts": "a device present under the pinned name whose identity does not match fails IMMEDIATELY with its own error naming expected and found; it is never polled again, even when the pinned device would appear on the next probe",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('the identity rule says a device that is not the expected one is a hard failure') and S8 ('a room that cannot record must be obviously broken, never quietly idle'). V's ruling, 16 Sep 2026: waiting here would be waiting for the right mic to appear next to the wrong one, which is not a thing we ever want to happen quietly. Identity is the pinned stable name PLUS --expect-usbid, because ALSA card ids are not unique hardware identities: 'Device' is the generic id a USB interface takes from its product string, so a different generic USB mic can legitimately claim hw:CARD=Device,DEV=0."
+    },
+    {
+      "id": "S3.no-fallback",
+      "asserts": "no path from any of the three startup cases reaches a recording state on a device other than the pinned one",
+      "grounding": "our-choice",
+      "citation": "ETA-ROOM-RECORDER-UBUNTU-U2-SPEC-16-SEP-2026-v0.1 S3 ('never fall back to another device, and never start recording from something that is not the pinned mic'). Carried as a negative control because there is no fallback code path to exercise: the control asserts the property that would be true IF one existed and holds by failing."
+    },
+    {
+      "id": "S3.run-length",
+      "asserts": "--seconds absent means run until terminated with no frame target; --seconds S keeps its exact prior meaning, including that the final read does not overshoot the target",
+      "grounding": "our-choice",
+      "citation": "V's ruling, 16 Sep 2026 (boot-3 session): --seconds becomes optional and an absent option means indefinite. Explicitly NO magic string such as 'forever' - a magic value inside a numeric option is a mistyping waiting to happen, and an absent option cannot be mistyped. --seconds S is unchanged so no existing fixture, generation run or measurement moves; the bounded half of this check exists to pin that."
+    }
+  ]
+}

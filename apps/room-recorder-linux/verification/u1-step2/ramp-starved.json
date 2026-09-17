@@ -1,0 +1,46 @@
+{
+  "checks" : {
+    "captured_equals_target" : true,
+    "captured_equals_written_plus_dropped" : true,
+    "dropped_equals_sum_of_overflow_events" : true,
+    "file_bytes_equal_written_frames_x4" : true,
+    "no_drops_outside_starvation" : true,
+    "no_read_failure" : true,
+    "ring_balanced" : true,
+    "ring_empty_at_end" : true,
+    "starvation_dropped_equals_offered_minus_free" : true
+  },
+  "device_overruns" : [
+
+  ],
+  "file_bytes" : 624000,
+  "measured_rate_hz" : 48000.11276659759,
+  "overflow_events" : [
+    {
+      "first_frame" : 59520,
+      "frames" : 84000
+    }
+  ],
+  "ring" : {
+    "accepted" : 156000,
+    "dropped" : 84000,
+    "fill" : 0,
+    "high_water" : 12000,
+    "offered" : 240000,
+    "taken" : 156000
+  },
+  "ring_capacity_frames" : 12000,
+  "source" : "ramp",
+  "starvation" : {
+    "accepted_in_window" : 11520,
+    "at_s" : 1,
+    "dropped_in_window" : 84000,
+    "expected_dropped" : 84000,
+    "fill_at_start" : 480,
+    "for_s" : 2,
+    "free_at_start" : 11520,
+    "offered_in_window" : 95520
+  },
+  "target_frames" : 240000,
+  "written_frames" : 156000
+}

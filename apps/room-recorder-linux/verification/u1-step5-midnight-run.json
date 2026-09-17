@@ -1,0 +1,73 @@
+{
+  "device": {
+    "alsa_lib_version": "1.2.15.3",
+    "card": 0,
+    "card_id": "sofhdadsp",
+    "device": 6,
+    "name": "hw:CARD=sofhdadsp,DEV=6",
+    "pcm_id": "DMIC (*)"
+  },
+  "device_overruns": [],
+  "elapsed_s": 62.03865043,
+  "events": [
+    {
+      "cause": "day_rollover",
+      "first_frame": 957723,
+      "frames": 0,
+      "mono_ns": 97072385282613,
+      "wall_ns": 1789497000000000000
+    },
+    {
+      "cause": "ring_overflow",
+      "first_frame": 1726800,
+      "frames": 24000
+    },
+    {
+      "cause": "device_lost",
+      "first_frame": 2160000,
+      "frames": 0,
+      "mono_ns": 97097432874153,
+      "wall_ns": 1789497025047591526
+    }
+  ],
+  "negotiated": {
+    "buffer_frames": 4800,
+    "channels": 2,
+    "format": "S16_LE",
+    "period_frames": 1200,
+    "rate": 48000
+  },
+  "outages": [
+    "device lost before capture frame 2160000: injected by --inject-device-lost-at (test hook)",
+    "device reopened at capture frame 2160000"
+  ],
+  "records": 57,
+  "ring": {
+    "accepted": 2856000,
+    "dropped": 24000,
+    "fill": 0,
+    "high_water": 48000,
+    "offered": 2880000,
+    "taken": 2856000
+  },
+  "rollovers": [
+    {
+      "buffer_mono_start_ns": 97072382726030,
+      "buffer_wall_start_ns": 1789496999997443417,
+      "first_frame": 957600,
+      "frame_count": 1200,
+      "frame_offset": 123,
+      "marker_mono_ns": 97072385282613,
+      "next_rollover_wall_ns": 1789583400000000000,
+      "suffix_mono_start_ns": 97072385288530,
+      "suffix_wall_start_ns": 1789497000000005917,
+      "target_wall_ns": 1789497000000000000
+    }
+  ],
+  "samples": 952000,
+  "session_rollover_targets": [
+    1789497000000000000,
+    1789583400000000000
+  ],
+  "test_hooks": true
+}

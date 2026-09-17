@@ -1,0 +1,21 @@
+# Grounding pass round 1 (16 Sep 2026): what our converter emits at a discontinuity.
+# 'conformance explain-flush --frames N' feeds N frames, resets (what a boundary does), then feeds N more.
+
+explain-flush: 48001 input frames (1 frame(s) short of a whole group of 3)
+  before the boundary: 16000 output samples (outputCount(frames:) = 16000)
+  emitted BY the reset itself: 0 output samples
+  after the boundary, 48001 more frames: 16000 output samples
+  so the incomplete group of 1 frame(s) held at the boundary is DROPPED (U1 spec 11.4)
+
+explain-flush: 48002 input frames (2 frame(s) short of a whole group of 3)
+  before the boundary: 16000 output samples (outputCount(frames:) = 16000)
+  emitted BY the reset itself: 0 output samples
+  after the boundary, 48002 more frames: 16000 output samples
+  so the incomplete group of 2 frame(s) held at the boundary is DROPPED (U1 spec 11.4)
+
+explain-flush: 48000 input frames (0 frame(s) short of a whole group of 3)
+  before the boundary: 16000 output samples (outputCount(frames:) = 16000)
+  emitted BY the reset itself: 0 output samples
+  after the boundary, 48000 more frames: 16000 output samples
+  so the incomplete group of 0 frame(s) held at the boundary is DROPPED (U1 spec 11.4)
+
