@@ -395,7 +395,7 @@ export function FleetTable({
               <FleetRowView
                 key={row.room_id}
                 row={row}
-                view={deriveRow({ row, latestRelease: releaseForRow(row, releases), nowMs })}
+                view={deriveRow({ row, latestRelease: releaseForRow(row, releases, fleet?.linux_releases), nowMs })}
                 release={release}
                 nowMs={nowMs}
                 busy={busy}

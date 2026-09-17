@@ -158,13 +158,15 @@ describe("applyInstallPoll and the R3 columns (§13.4)", () => {
   });
 
   it("reads BOTH channels' releases, not just stable (Fix 1, F6)", async () => {
-    responses = [[], [], [], []];
+    responses = [[], [], [], [], [], []];
     const payload = await M.readFleet(new Date("2026-09-09T10:00:00.000Z"));
+    // 0102: the Mac shelf is still exactly two reads, stable and test, each filtered to macos; the Linux
+    // shelf is two more of its own.
     const releaseQueries = calls.filter((c) => c.text.includes("FROM app_release"));
-    expect(releaseQueries).toHaveLength(2);
-    expect(releaseQueries.flatMap((c) => c.values)).toEqual(
-      expect.arrayContaining(["stable", "test"]),
-    );
+    const mac = releaseQueries.filter((c) => c.values.includes("macos"));
+    expect(mac).toHaveLength(2);
+    expect(mac.flatMap((c) => c.values)).toEqual(expect.arrayContaining(["stable", "test"]));
+    expect(releaseQueries.filter((c) => c.values.includes("linux"))).toHaveLength(2);
     expect(payload.releases).toEqual({ stable: null, test: null });
   });
 });

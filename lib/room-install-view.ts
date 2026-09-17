@@ -119,7 +119,11 @@ export type ReleaseView = {
   withdrawn_at: string | null;
   notes: string | null;
   min_macos: string;
+  /** Migration 0102. Every row before it is 'macos'. A Mac is only ever offered a 'macos' row. */
+  platform: ReleasePlatform;
 };
+
+export type ReleasePlatform = "macos" | "linux";
 
 export type FleetRow = {
   room_id: string;
@@ -175,6 +179,12 @@ export type FleetPayload = {
    * Null for a channel with nothing published, which means the row shows no version word at all.
    */
   releases: { stable: ReleaseView | null; test: ReleaseView | null };
+  /**
+   * Migration 0102. The same two shelves for Linux rows. `releases` above is the MAC shelf and stays so:
+   * a Linux row measured against a Mac version would wear `update pending` for ever. Optional: a payload
+   * from before 0102 has none, and reads as nothing published for Linux.
+   */
+  linux_releases?: { stable: ReleaseView | null; test: ReleaseView | null };
   degraded: string[];
   /** B2-D3. Installs that belong on no row of this card. Optional: absent before B2 reads as none. */
   unassigned?: UnassignedInstall[];
@@ -258,12 +268,15 @@ export function groupFleet(input: {
 export function releaseForRow(
   row: FleetRow,
   releases: { stable: ReleaseView | null; test: ReleaseView | null } | null | undefined,
+  linuxReleases?: { stable: ReleaseView | null; test: ReleaseView | null } | null,
 ): ReleaseView | null {
-  if (!releases) return null;
+  // A row is only behind on ITS OWN platform's shelf (0102). A Mac row reads `releases` exactly as before.
+  const shelf = installPlatform(row.install) === "linux" ? linuxReleases : releases;
+  if (!shelf) return null;
   // A row with no install, or an install below 0.1.8 that reports no channel, is on stable by
   // construction — every install that predates R3 is.
   const channel = row.install?.update_channel ?? "stable";
-  return releases[channel] ?? null;
+  return shelf[channel] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +403,7 @@ export function daysUntil(iso: string | null, nowMs: number): number | null {
  */
 export type StepState = "done" | "waiting" | "blocked" | "not_applicable";
 
-export type InstallPlatform = "macos" | "linux";
+export type InstallPlatform = ReleasePlatform;
 
 /**
  * PURE — which platform an install runs on, read off what the machine REPORTED about itself.

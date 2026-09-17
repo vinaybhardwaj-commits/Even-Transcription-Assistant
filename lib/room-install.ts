@@ -40,6 +40,7 @@ import {
   type FleetRow,
   type InputDevice,
   type InstallView,
+  type ReleasePlatform,
   type ReleaseView,
 } from "@/lib/room-install-view";
 import {
@@ -348,14 +349,14 @@ export async function createRelease(input: CreateReleaseInput): Promise<ReleaseV
   try {
     const rows = (await sql`
       INSERT INTO app_release (
-        id, version, build_sha, sha256, size_bytes, blob_url, channel, published_by, notes, min_macos
+        id, version, build_sha, sha256, size_bytes, blob_url, channel, published_by, notes, min_macos, platform
       ) VALUES (
         ${id}, ${input.manifest.version}, ${input.manifest.build_sha}, ${actual.sha256},
         ${actual.size_bytes}, ${input.blobUrl}, ${input.channel}, ${input.publishedBy},
-        ${input.manifest.notes ?? null}, ${input.manifest.min_macos ?? "15.0"}
+        ${input.manifest.notes ?? null}, ${input.manifest.min_macos ?? "15.0"}, 'macos'
       )
       RETURNING id, version, build_sha, sha256, size_bytes, blob_url, channel,
-                published_at, published_by, withdrawn_at, notes, min_macos
+                published_at, published_by, withdrawn_at, notes, min_macos, platform
     `) as ReleaseView[];
     return normaliseRelease(rows[0]!);
   } catch (e) {
@@ -377,7 +378,7 @@ export async function listReleases(channel?: string | null): Promise<ReleaseView
     const ch = channel === "stable" || channel === "test" ? channel : null;
     const rows = (await sql`
       SELECT id, version, build_sha, sha256, size_bytes, blob_url, channel,
-             published_at, published_by, withdrawn_at, notes, min_macos
+             published_at, published_by, withdrawn_at, notes, min_macos, platform
         FROM app_release
        WHERE (${ch}::text IS NULL OR channel = ${ch}::text)
        ORDER BY published_at DESC
@@ -395,14 +396,22 @@ export async function listReleases(channel?: string | null): Promise<ReleaseView
  * THIS IS THE FEATURE GATE AND THE R3 ROLLBACK, one query serving both. Null here means the fleet
  * card reads "No release published yet" and every install button is off; withdrawing the newest
  * row makes this return the one before it, which is what walks a Mac backwards in Build R3.
+ *
+ * ─── THE PLATFORM IS REQUIRED, WITH NO DEFAULT (migration 0102) ──────────────────────────
+ * This one query answers the Mac self-update route, the install mint and the bootstrap script. Unfiltered,
+ * a Linux row would be the latest stable for every Mac. A default would let a new call site forget the
+ * question; a required parameter makes the compiler ask it at every call.
  */
-export async function latestRelease(channel: "stable" | "test" = "stable"): Promise<ReleaseView | null> {
+export async function latestRelease(
+  channel: "stable" | "test",
+  platform: ReleasePlatform,
+): Promise<ReleaseView | null> {
   try {
     const rows = (await sql`
       SELECT id, version, build_sha, sha256, size_bytes, blob_url, channel,
-             published_at, published_by, withdrawn_at, notes, min_macos
+             published_at, published_by, withdrawn_at, notes, min_macos, platform
         FROM app_release
-       WHERE channel = ${channel} AND withdrawn_at IS NULL
+       WHERE channel = ${channel} AND platform = ${platform} AND withdrawn_at IS NULL
        ORDER BY published_at DESC
        LIMIT 1
     `) as ReleaseView[];
@@ -419,7 +428,7 @@ export async function withdrawRelease(id: string): Promise<ReleaseView | null> {
          SET withdrawn_at = now()
        WHERE id = ${id} AND withdrawn_at IS NULL
       RETURNING id, version, build_sha, sha256, size_bytes, blob_url, channel,
-                published_at, published_by, withdrawn_at, notes, min_macos
+                published_at, published_by, withdrawn_at, notes, min_macos, platform
     `) as ReleaseView[];
     return rows[0] ? normaliseRelease(rows[0]) : null;
   } catch (e) {
@@ -462,7 +471,7 @@ export async function mintBootstrapToken(input: {
   // the bootstrap fetch reads the release again minutes later — so a token minted against a
   // different channel could not be honoured by the script it produces. `latestRelease` keeps its
   // channel parameter for Build R3's release route, which reads it per request.
-  const release = await latestRelease("stable");
+  const release = await latestRelease("stable", "macos");
   if (!release) throw new InstallError("NO_RELEASE", "no release published yet");
 
   const token = newBootstrapToken();
@@ -652,7 +661,7 @@ export async function bootstrapScriptFor(token: string): Promise<string | null> 
 
     // The release is read at FETCH time, not at mint time, so a withdraw between the copy and
     // the paste is honoured: the script that runs is built from what is published now.
-    const release = await latestRelease("stable");
+    const release = await latestRelease("stable", "macos");
     if (!release) return null;
 
     return renderBootstrapScript({
@@ -1515,12 +1524,27 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     stable: null,
     test: null,
   };
+  // `releases` IS THE MAC SHELF (0102), and reads exactly the rows it always did. Linux rows get their own
+  // shelf so they are never measured against a Mac version; its reads are guarded the same way and a
+  // fault there degrades only the Linux shelf.
+  const linuxReleases: { stable: ReleaseView | null; test: ReleaseView | null } = {
+    stable: null,
+    test: null,
+  };
   for (const channel of ["stable", "test"] as const) {
     try {
-      releases[channel] = await latestRelease(channel);
+      releases[channel] = await latestRelease(channel, "macos");
     } catch (e) {
       const err = classifyInstallError(e);
       degraded.push(`release_unavailable_${channel}:${err.code}`);
+    }
+  }
+  for (const channel of ["stable", "test"] as const) {
+    try {
+      linuxReleases[channel] = await latestRelease(channel, "linux");
+    } catch (e) {
+      const err = classifyInstallError(e);
+      degraded.push(`release_unavailable_linux_${channel}:${err.code}`);
     }
   }
   // The card HEADER is the stable release and stays the stable release — §5.8 of the main kickoff
@@ -1548,6 +1572,7 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     rows,
     latest_release: release,
     releases,
+    linux_releases: linuxReleases,
     degraded,
     unassigned: roomsRead ? grouped.unassigned : [],
   };

@@ -149,7 +149,7 @@ import { parseMicLevelPair } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { boundInstallForRoom, InstallError, readFleet } from "@/lib/room-install";
-import { deriveRow } from "@/lib/room-install-view";
+import { deriveRow, installPlatform } from "@/lib/room-install-view";
 import {
   ACK_WAIT_MS,
   ackWaitMsFor,
@@ -3225,7 +3225,10 @@ const fleet: McpTool = {
         (r.room_name ?? "").toLowerCase() === want.toLowerCase(),
       );
       const view = rows.map((row) => {
-        const derived = deriveRow({ row, latestRelease: payload.latest_release, nowMs: Date.now() });
+        // A Linux row is measured against the Linux stable shelf (0102); a Mac row reads exactly what it did.
+        const shelf =
+          installPlatform(row.install) === "linux" ? (payload.linux_releases?.stable ?? null) : payload.latest_release;
+        const derived = deriveRow({ row, latestRelease: shelf, nowMs: Date.now() });
         const full = {
           room: { id: row.room_id, slug: row.room_slug, name: row.room_name },
           disabled: row.disabled,
