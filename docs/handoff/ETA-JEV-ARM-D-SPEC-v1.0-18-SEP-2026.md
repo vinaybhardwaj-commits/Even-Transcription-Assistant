@@ -27,6 +27,23 @@ J0 → J1 → J2 → (voice thresholds) → J3 → (D1) → J4.
 
 **Hard gate D1 (V's decision, open).** Real consult transcripts may not be sent to TypeSafe until V has cleared vendor egress (DPA, zero-data-retention). Until then, Slices J1 to J3 are built and unit-tested against fixtures and a mock provider only. Slice J4 (the live bench on real room-days) runs only after D1 is cleared. Do not run J4 on your own initiative.
 
+**AMENDED v1.2, 19 Sep 2026.** The **`even-jev` MCP is now installed and keyed on the Mini**
+(`~/dev/even-jev-mcp`, `run.sh`, `~/.config/even-jev/key` — both verified present). §1's endpoint facts
+still hold, but the Builder calls Jev **through that MCP**, not by writing an HTTP client, and **must not
+add the SDK** (already forbidden in §9). See `ETA-JEV-INTEGRATION.md` for how Jev is used across the
+programme.
+
+**D1 IS NOW TWO DECISIONS. Read this before assuming you are unblocked.**
+- **D1a — development-time use on non-PHI** (diff review, question-wording trials on invented fixtures):
+  **OPEN, in force from 19 Sep.** The MCP being installed is V's act, and nothing patient-related crosses.
+- **D1b — real consult transcripts to TypeSafe** (DPA, zero-data-retention): **STILL CLOSED. V's alone,
+  unresolved.** Blocks J4 only.
+
+**The installed MCP does not clear D1b.** Having the tool wired up and being allowed to send it a patient's
+consultation are different facts. J1–J3 were always fixture-and-mock work and are unblocked today; J4 is
+not. Sending real transcript text to Jev without V saying so in words is a data-governance breach, not a
+build error.
+
 **Delegation contract.** Build exactly the scope below. Report in the format in §9, under the cap. Anything you could not verify is marked UNVERIFIED in your report.
 
 ---
@@ -356,7 +373,7 @@ Grouping by speaker, char floor, composite precedence (acoustic wins), low-confi
 
 ## 11. Open decisions for V
 
-- **D1: vendor egress of consult transcripts to TypeSafe (DPA, ZDR). V's call, open. Blocks J4 only.**
+- **D1b: vendor egress of real consult transcripts to TypeSafe (DPA, ZDR). V's call, OPEN. Blocks J4 only.** (D1a, development-time use on non-PHI, is in force from 19 Sep — the `even-jev` MCP is installed and keyed. See the v1.2 banner and `ETA-JEV-INTEGRATION.md`.)
   This is NOT covered by V's standing "do not gate PHI for EVEN physicians" instruction: that instruction is
   about internal EVEN systems, and this is third-party egress of patient conversation to an outside vendor.
   J0–J3 need nothing from TypeSafe and are unaffected. Note that J0 translation runs **on the Mini**, so
