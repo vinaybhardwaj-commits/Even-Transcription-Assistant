@@ -36,11 +36,12 @@ describe("the two emotion gates", () => {
     expect(() => canSurfaceEmotion({ EMOTION_ENABLED: "1", EMOTION_SURFACE_ENABLED: "sure" })).toThrow();
   });
 
-  it("DORMANCY STATED: nothing in lib/ or app/ calls canSurfaceEmotion today — an API awaiting a surface", () => {
+  it("ALLOWLISTED: canSurfaceEmotion is called ONLY by the S1 room-day tape read path", () => {
+    const ALLOWED = ["lib/room-day/admin.ts"];
     const callers = repoFiles()
       .filter((f) => /^(lib|app)\//.test(f) && f !== "lib/emotion/gate.ts")
       .filter((f) => /\bcanSurfaceEmotion\s*\(/.test(textOf(f) ?? ""));
-    expect(callers, "when a surface is built, it calls the gate — and this test changes with it").toEqual([]);
+    expect(callers, "a second, unreviewed surface must not appear quietly").toEqual(ALLOWED);
   });
 });
 

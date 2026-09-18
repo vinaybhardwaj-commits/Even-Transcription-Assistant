@@ -48,7 +48,8 @@ export type AdminNavKey =
   | "settings"
   | "diarization"
   | "stt-lab"
-  | "bench";
+  | "bench"
+  | "rooms";
 
 type NavItem = {
   key: AdminNavKey;
@@ -67,6 +68,7 @@ const NAV: NavItem[] = [
   { key: "diarization", label: "Diarization", href: "/admin/diarization", icon: "◍", section: "observe" },
   { key: "stt-lab", label: "STT Lab", href: "/admin/stt-lab", icon: "◎", section: "observe" },
   { key: "bench", label: "Bench", href: "/admin/bench", icon: "⏺", section: "observe" },
+  { key: "rooms", label: "Rooms", href: "/admin/rooms", icon: "▦", section: "observe" },
   { key: "admins",     label: "Admins",     href: "/admin/admins",   icon: "◑", section: "configure" },
   { key: "system-map", label: "System map", href: "/admin/system-map", icon: "▦", section: "configure" },
   { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },
