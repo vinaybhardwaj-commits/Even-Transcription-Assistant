@@ -147,6 +147,8 @@ function schema(): void {
   exec(readFileSync("db/migrations/0089_room_emotion.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0090 verbatim: run ids, and the service's speaker guess nested.
   exec(readFileSync("db/migrations/0090_diarize_run_id_and_service_guess.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0096 verbatim (E20): the losing candidate's three columns and their CHECKs.
+  exec(readFileSync("db/migrations/0096_room_turn_speaker_losing_score.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0097 verbatim (E16): speech_ms, service_speech_ms, speech_basis, the unscorable state, segments_unscorable.
   exec(readFileSync("db/migrations/0097_room_span_emotion_speech.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0099 verbatim (E24): room_diarize_window.segments_run_id, and the emotion window's diarize_stale state.
@@ -1708,3 +1710,38 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
   }, 120_000);
 });
 
+
+describe.skipIf(!HAVE_DOCKER)("E20 — 0096 against a real postgres: additive, idempotent, and the losing candidate only where it belongs", () => {
+  const ins = (ref: string, cols: string) =>
+    `INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, losing_clinician_id, losing_score, score_basis)
+     VALUES ('bw_e2e', '${ref}', 0, 10, 'rd_1', ${cols});`;
+  const refused = (ref: string, cols: string) => expect(() => exec(ins(ref, cols)), ref).toThrow();
+
+  it("applied twice: no error, and a row written before it keeps every value, with NULL in the three new columns", async () => {
+    const sql = G.__pgsql;
+    exec(`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id)
+          VALUES ('bw_e2e', 'e20_named_before', 0, 10, 'rd_1', 'doc_fake0001', 'clinician', 0.82, NULL, 'run_x');`);
+    exec(readFileSync("db/migrations/0096_room_turn_speaker_losing_score.sql", "utf8"));
+    exec(readFileSync("db/migrations/0096_room_turn_speaker_losing_score.sql", "utf8"));
+    const r = (await sql`SELECT clinician_id, role, match_confidence, no_role_reason, losing_clinician_id, losing_score, score_basis FROM room_turn_speaker WHERE source_ref = 'e20_named_before'`) as Array<Record<string, unknown>>;
+    expect(r[0]).toEqual({ clinician_id: "doc_fake0001", role: "clinician", match_confidence: 0.82, no_role_reason: null, losing_clinician_id: null, losing_score: null, score_basis: null });
+    const recorded = (await sql`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 96`) as Array<{ n: number }>;
+    expect(recorded[0]!.n, "recorded once").toBe(1);
+  });
+
+  it("a no_match row takes a losing candidate with basis app_recomputed; the reserved service_reported is accepted", () => {
+    exec(ins("e20_ok", "NULL, NULL, NULL, 'no_match', 'run_x', 'doc_fake0001', 0.51, 'app_recomputed'"));
+    exec(ins("e20_reserved", "NULL, NULL, NULL, 'no_match', 'run_x', 'doc_fake0001', 0.51, 'service_reported'"));
+  });
+
+  it("REFUSED: a losing candidate beside a NAME, on a STRADDLE, split across the three columns, out of range, or an unknown basis", () => {
+    refused("e20_named", "'doc_fake0001', 'clinician', 0.82, NULL, 'run_x', 'doc_fake0002', 0.51, 'app_recomputed'");
+    refused("e20_straddle", "NULL, NULL, NULL, 'straddle', 'run_x', 'doc_fake0001', 0.51, 'app_recomputed'");
+    refused("e20_no_basis", "NULL, NULL, NULL, 'no_match', 'run_x', 'doc_fake0001', 0.51, NULL");
+    refused("e20_no_id", "NULL, NULL, NULL, 'no_match', 'run_x', NULL, 0.51, 'app_recomputed'");
+    refused("e20_blank_id", "NULL, NULL, NULL, 'no_match', 'run_x', '  ', 0.51, 'app_recomputed'");
+    refused("e20_range", "NULL, NULL, NULL, 'no_match', 'run_x', 'doc_fake0001', 1.2, 'app_recomputed'");
+    refused("e20_basis", "NULL, NULL, NULL, 'no_match', 'run_x', 'doc_fake0001', 0.51, 'guessed'");
+    refused("e20_in_confidence", "'doc_fake0001', NULL, 0.51, 'no_match', 'run_x', NULL, NULL, NULL");
+  });
+});
