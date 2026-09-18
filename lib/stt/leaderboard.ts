@@ -5,6 +5,21 @@
  * configurable weights (stt_lab_config.weights_json, defaults below).
  */
 import { sql } from "@/lib/db";
+import { reliabilityBasisFor, type ReliabilityBasis } from "./reliability-label";
+
+/**
+ * E31 C6/C7 — THE DATE FROM WHICH EVERY ATTEMPT IS KEPT. Before it, each retry deleted the failed attempt before it
+ * (lib/stt/fanout.ts), so a per-attempt figure over earlier runs would be computed over a history missing its
+ * failures — more flattering than the old figure, and silently so. It is the production deploy of that change, which
+ * cannot be known when the code is written, so it is configuration: STT_PER_ATTEMPT_SINCE, an ISO timestamp. Unset or
+ * unparseable, the per-attempt figure is WITHHELD (null) and the page says why; it is never guessed.
+ */
+export function perAttemptSince(): string | null {
+  const raw = process.env.STT_PER_ATTEMPT_SINCE?.trim();
+  if (!raw) return null;
+  const t = new Date(raw);
+  return Number.isNaN(t.getTime()) ? null : t.toISOString();
+}
 
 export const DEFAULT_WEIGHTS = {
   accuracy: 0.30,   // 1 - WER (gold)
@@ -19,7 +34,14 @@ export const DEFAULT_WEIGHTS = {
 export type LeaderRow = {
   engine: string;
   display_name: string | null;
-  runs: number; ok: number; success_rate: number;
+  runs: number; ok: number;
+  /** The HEADLINE reliability, on reliability_basis: per attempt for encounters, final outcome for room windows,
+   *  null for a mixed board or while the per-attempt start date is unset. It is what the composite uses. */
+  success_rate: number | null;
+  /** Per attempt: runs from per_attempt_since only. Null when that date is unset or there are no such runs. */
+  attempts: number; attempts_ok: number; attempt_rate: number | null;
+  /** Final outcome: subjects in the selected period with at least one successful run, over subjects attempted. */
+  subjects: number; subjects_ok: number; outcome_rate: number | null;
   avg_latency_ms: number | null; p95_latency_ms: number | null;
   avg_judge: number | null; avg_agreement: number | null;
   gold_n: number; avg_wer: number | null; avg_cer: number | null; avg_term_recall: number | null;
@@ -45,7 +67,7 @@ export type SubjectKindFilter = "encounter" | "bench_window" | "all";
 
 export type LeaderFilters = { languageBucket?: "all" | "english" | "indic"; sinceDays?: number | null; tier?: "asr" | "scribe"; subjectKind?: SubjectKindFilter };
 
-export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{ engines: LeaderRow[]; weights: typeof DEFAULT_WEIGHTS; total_runs: number; subject_kind: SubjectKindFilter }> {
+export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{ engines: LeaderRow[]; weights: typeof DEFAULT_WEIGHTS; total_runs: number; subject_kind: SubjectKindFilter; reliability_basis: ReliabilityBasis; per_attempt_since: string | null }> {
   const bucket = filters.languageBucket ?? "all";
   // Default ENCOUNTER, never "all": a caller that says nothing gets the population this
   // leaderboard has always described, not a silently widened one.
@@ -54,12 +76,20 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
   const tier = filters.tier === "scribe" ? "scribe" : "asr";
 
   const sinceVal = since ?? null;
+  const attemptsFrom = perAttemptSince();
+  const basis = reliabilityBasisFor(subjectKind);
 
   const rows = (await sql`
     SELECT tr.engine,
            MAX(eng.display_name) AS display_name,
            COUNT(*)::int AS runs,
            COUNT(*) FILTER (WHERE tr.error IS NULL)::int AS ok,
+           -- E31 C6/C7: per attempt, clamped to the date every attempt started being kept (null → none counted).
+           COUNT(*) FILTER (WHERE ${attemptsFrom}::timestamptz IS NOT NULL AND tr.created_at >= ${attemptsFrom}::timestamptz)::int AS attempts,
+           COUNT(*) FILTER (WHERE ${attemptsFrom}::timestamptz IS NOT NULL AND tr.created_at >= ${attemptsFrom}::timestamptz AND tr.error IS NULL)::int AS attempts_ok,
+           -- Final outcome: honest over the whole period, because a subject's last row always survived the old delete.
+           COUNT(DISTINCT tr.subject_id)::int AS subjects,
+           COUNT(DISTINCT tr.subject_id) FILTER (WHERE tr.error IS NULL)::int AS subjects_ok,
            ROUND(AVG(tr.latency_ms) FILTER (WHERE tr.error IS NULL))::int AS avg_latency_ms,
            percentile_cont(0.95) WITHIN GROUP (ORDER BY tr.latency_ms) FILTER (WHERE tr.error IS NULL) AS p95_latency_ms,
            ROUND(AVG(tr.judge_score)::numeric, 2)::float8 AS avg_judge,
@@ -89,7 +119,7 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
        AND ( ${sinceVal}::int IS NULL OR tr.created_at >= NOW() - ((${sinceVal})::int || ' days')::interval )
      GROUP BY tr.engine
      ORDER BY tr.engine
-  `) as Array<Omit<LeaderRow, "success_rate" | "composite" | "components" | "p95_latency_ms"> & { p95_latency_ms: number | null }>;
+  `) as Array<Omit<LeaderRow, "success_rate" | "attempt_rate" | "outcome_rate" | "composite" | "components" | "p95_latency_ms"> & { p95_latency_ms: number | null }>;
 
   // config weights
   const cfg = (await sql`SELECT weights_json FROM stt_lab_config WHERE id = 1`) as Array<{ weights_json: Record<string, number> }>;
@@ -103,7 +133,11 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
   const minCost = costs.length ? Math.min(...costs) : 0, maxCost = costs.length ? Math.max(...costs) : 0;
 
   const engines: LeaderRow[] = rows.map((r) => {
-    const success = r.runs > 0 ? r.ok / r.runs : 0;
+    const round3 = (v: number | null) => (v === null ? null : Math.round(v * 1000) / 1000);
+    const attemptRate = attemptsFrom && r.attempts > 0 ? r.attempts_ok / r.attempts : null;
+    const outcomeRate = r.subjects > 0 ? r.subjects_ok / r.subjects : null;
+    // The headline is one figure on one stated basis — never per-outcome passed off as per-attempt.
+    const success = basis === "per_attempt" ? attemptRate : basis === "final_outcome" ? outcomeRate : null;
     const comp: Record<string, number | null> = {
       accuracy: r.avg_wer === null ? null : Math.max(0, 1 - Math.min(r.avg_wer, 1)),
       term: r.avg_term_recall === null ? null : r.avg_term_recall,
@@ -120,11 +154,11 @@ export async function computeLeaderboard(filters: LeaderFilters = {}): Promise<{
       wsum += weights[k]; vsum += weights[k] * v;
     }
     const composite = wsum > 0 ? Math.round((vsum / wsum) * 1000) / 10 : null; // 0-100, 1dp
-    return { ...r, success_rate: Math.round(success * 1000) / 1000, composite, components: comp };
+    return { ...r, success_rate: round3(success), attempt_rate: round3(attemptRate), outcome_rate: round3(outcomeRate), composite, components: comp };
   });
 
   engines.sort((a, b) => (b.composite ?? -1) - (a.composite ?? -1));
   const total_runs = rows.reduce((s, r) => s + r.runs, 0);
   // Echoed so a reader of the JSON can never mistake WHICH population these numbers describe.
-  return { engines, weights, total_runs, subject_kind: subjectKind };
+  return { engines, weights, total_runs, subject_kind: subjectKind, reliability_basis: basis, per_attempt_since: attemptsFrom };
 }

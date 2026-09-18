@@ -66,7 +66,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const release = await latestRelease(raw);
+    // MACOS, ALWAYS (0102). Only the Mac app calls this route; it must never be handed a Linux row.
+    const release = await latestRelease(raw, "macos");
     if (!release) {
       return installError("NO_RELEASE", "no release published on this channel", 404);
     }

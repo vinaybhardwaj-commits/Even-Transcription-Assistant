@@ -33,6 +33,10 @@ const H = vi.hoisted(() => ({
   submits: 0,
   submitThrows: false,
   cookie: null as string | null,
+  /** E22 R3 — a per-window step; null means "use `step`". */
+  stepFor: null as ((windowId: string) => string) | null,
+  /** E22 R3 — an `enqueued` answer also writes the room_window job the real drain's submit would. */
+  writeJob: false,
 }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
 vi.mock("@/lib/stt/room-drain", async (orig) => {
@@ -42,9 +46,13 @@ vi.mock("@/lib/stt/room-drain", async (orig) => {
     drainRoomWindow: async (windowId: string, origin: string, opts: Record<string, unknown>) => {
       H.drained.push({ windowId, origin, opts });
       if (H.realDrain) return actual.drainRoomWindow(windowId, origin, opts as never);
-      return H.step === "enqueued"
+      const step = H.stepFor ? H.stepFor(windowId) : H.step;
+      if (step === "enqueued" && H.writeJob) {
+        await H.sql`INSERT INTO scribe_job (id, kind, args, status) VALUES (${`job_${windowId}`}, 'room_window', ${{ window_id: windowId }}, 'queued')`;
+      }
+      return step === "enqueued"
         ? { window_id: windowId, ok: true, step: "enqueued", job_id: `job_${H.drained.length}` }
-        : { window_id: windowId, ok: false, step: H.step, ...(H.detail ? { detail: H.detail } : {}) };
+        : { window_id: windowId, ok: false, step, ...(H.detail ? { detail: H.detail } : {}) };
     },
   };
 });
@@ -77,7 +85,7 @@ let saved: Record<string, string | undefined> = {};
 const silent = () => {};
 
 beforeEach(() => {
-  Object.assign(H, { step: "enqueued", detail: undefined, realDrain: false, submits: 0, submitThrows: false, cookie: null });
+  Object.assign(H, { step: "enqueued", detail: undefined, realDrain: false, submits: 0, submitThrows: false, cookie: null, stepFor: null, writeJob: false });
   H.drained.length = 0;
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) delete (process.env as Record<string, string | undefined>)[k];
@@ -297,6 +305,9 @@ beforeAll(() => {
   pg.exec(noRecord("db/migrations/0061_stt_subject_job.sql"));
   pg.exec(noRecord("db/migrations/0082_scribe_job.sql"));
   pg.exec(noRecord("db/migrations/0092_bench_window_auto_drain_refusal.sql"));
+  // E22 R11: the refusal branch's index, applied twice — every selector test below runs with it, and a re-run must not error.
+  pg.exec(noRecord("db/migrations/0100_bench_window_auto_drain_refused_idx.sql"));
+  pg.exec(noRecord("db/migrations/0100_bench_window_auto_drain_refused_idx.sql"));
 }, 180_000);
 afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
@@ -584,6 +595,20 @@ describe.skipIf(!HAVE_DOCKER)("E17 — last served, derived from scribe_job, in 
     expect(offered()).toEqual(["bw_two_old"]);
   });
 
+  it("E22 R5 (F2): a QUEUED or RUNNING job is a turn — the state right after the drain submits, held ~20 min and four ticks by a 900 s route job", async () => {
+    for (const status of ["queued", "running", "done"]) {
+      pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job;");
+      windowRow("bw_two_done", { session: "sess_two", state: "transcribed" });
+      windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+      windowRow("bw_on_live", { state: "transcribing" });
+      windowRow("bw_on_next", { ageMin: 5 });
+      servedJob("job_two", "bw_two_done", 60);
+      pg.exec(`INSERT INTO scribe_job (id, kind, args, status, created_at) VALUES ('job_on', 'room_window', '{"window_id": "bw_on_live"}', '${status}', NOW() - INTERVAL '2 minutes');`);
+      await drainOnce();
+      expect(offered(), `${status}: room_on had its turn 2 min ago, room_two 60 min ago — room_two's older window goes first`).toEqual(["bw_two_old"]);
+    }
+  });
+
   it("a room_window job older than AUTO_DRAIN_MAX_AGE_HOURS does not count as served", async () => {
     windowRow("bw_two_done", { session: "sess_two", state: "transcribed" });
     windowRow("bw_on_a", { ageMin: 30 });
@@ -601,6 +626,112 @@ describe.skipIf(!HAVE_DOCKER)("E17 — last served, derived from scribe_job, in 
     await drainOnce();
     expect(offered()).toEqual(["bw_fresh_two"]);
   });
+});
+
+describe.skipIf(!HAVE_DOCKER)("E22 R3 — a room is served when its slot is OFFERED, not when a job is created (F1)", () => {
+  beforeEach(() => {
+    resetDb();
+    pg.exec(`INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_two', 'two', 'Two', 'x', TRUE)
+             ON CONFLICT (id) DO UPDATE SET transcript_enabled = TRUE;
+             INSERT INTO bench_session (id, room_id) VALUES ('sess_two', 'room_two') ON CONFLICT (id) DO NOTHING;`);
+  });
+
+  it("a room with a window refused inside the horizon has had its turn: the other room's OLDER window takes the slot", async () => {
+    windowRow("bw_on_refused", { refusedMin: 5 });
+    windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+    windowRow("bw_on_new", { ageMin: 5 });
+    await drainOnce();
+    expect(offered(), "with no job anywhere, a job-only 'served' leaves both rooms null and the newer slot wins").toEqual(["bw_two_old"]);
+  });
+
+  it("control: a refusal older than AUTO_DRAIN_MAX_AGE_HOURS is not a turn — the newer slot wins again", async () => {
+    windowRow("bw_on_refused", { refusedMin: AUTO_DRAIN_MAX_AGE_HOURS * 60 + 30 });
+    windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+    windowRow("bw_on_new", { ageMin: 5 });
+    await drainOnce();
+    expect(offered()).toContain("bw_on_new");
+    expect(offered()).toHaveLength(1);
+  });
+
+  it("through the loop: every refusal step the drain can give — flag_off and join_service_not_configured included — makes the room wait its turn", async () => {
+    for (const [step, detail] of [["flag_off"], ["join_failed", "join_service_not_configured"], ["too_long", "31m"], ["wrong_state", "claim_lost"], ["engine_failed"], ["no_room_day"]] as Array<[string, string?]>) {
+      pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job;");
+      windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+      windowRow("bw_on_first", { ageMin: 10 });
+      windowRow("bw_on_second", { ageMin: 5 });
+      H.step = step; H.detail = detail;
+      await drainOnce();
+      expect(offered(), `${step}: the first tick goes to room_on's newest slot`).toEqual(["bw_on_second"]);
+      H.step = "enqueued"; H.detail = undefined;
+      await drainOnce();
+      expect(offered(), `${step}: room_on was offered a slot and refused it — that was its turn`).toEqual(["bw_two_old"]);
+    }
+  });
+
+  it("an enqueue is still a turn: the job the drain writes marks the room served", async () => {
+    H.writeJob = true;
+    windowRow("bw_two_old", { session: "sess_two", ageMin: 40 });
+    windowRow("bw_on_first", { ageMin: 10 });
+    windowRow("bw_on_second", { ageMin: 5 });
+    await drainOnce();
+    expect(offered()).toEqual(["bw_on_second"]);
+    await drainOnce();
+    expect(offered()).toEqual(["bw_two_old"]);
+  });
+
+  it("R11: the refusal branch AS SHIPPED can be served by 0100's partial index — the planner picks it when a seq scan is ruled out", async () => {
+    // The branch is cut from the source, so a rewrite the partial index cannot serve fails here, not in production.
+    const src = readFileSync("lib/stt/auto-drain.ts", "utf8");
+    const branch = /UNION ALL\s*(SELECT rs\.room_id[\s\S]*?)\n\s*\),/.exec(src)?.[1];
+    expect(branch, "the refusal branch of the offered CTE").toBeTruthy();
+    const query = branch!.replace("${AUTO_DRAIN_MAX_AGE_HOURS}", String(AUTO_DRAIN_MAX_AGE_HOURS));
+    expect(query).not.toContain("${");
+    pg.exec(`CREATE OR REPLACE FUNCTION pg_temp_plan(q text) RETURNS SETOF text LANGUAGE plpgsql AS $f$
+             BEGIN PERFORM set_config('enable_seqscan', 'off', true); RETURN QUERY EXECUTE 'EXPLAIN ' || q; END $f$;`);
+    const plan = ((await pg.sql`SELECT pg_temp_plan(${query}) AS line`) as Array<{ line: string }>).map((r) => r.line).join("\n");
+    // The index must SERVE the predicate (an Index Cond on the column), not merely be walked: with seq scans off,
+    // postgres will scan any partial index whose predicate is implied — an index on another column included.
+    expect(plan, plan).toMatch(/(Index Scan using|Index Only Scan using|Bitmap Index Scan on) idx_bench_window_auto_drain_refused_at\b[^\n]*\n\s+Index Cond: \(auto_drain_refused_at >= /);
+    // And it is PARTIAL, as ruled: scoped to the rows the branch can select.
+    const def = ((await pg.sql`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_bench_window_auto_drain_refused_at'`) as Array<{ indexdef: string }>)[0]?.indexdef;
+    expect(def).toMatch(/ON public\.bench_window USING btree \(auto_drain_refused_at\) WHERE \(auto_drain_refused_at IS NOT NULL\)$/);
+  });
+
+  /**
+   * THE REFUTATION'S S2, ON THE REAL SELECTOR (ETA-E11-E17-REFUTATION §4). Six rooms, 36 windows each, each kiosk's
+   * phase fixed at 20-25 s, a tick every 300 s to one hour past the clinic, cap 1, 6 h horizon, 60 min cooldown.
+   * One room refuses every offer before the claim. Time is advanced by moving every stored timestamp back one tick,
+   * so NOW() stays the database's own and the SQL under test is the shipped statement, not a model of it.
+   * Before R3 the refusing room held 98-100 of 117 slots and the other five got 3-4 each.
+   */
+  it("S2: one room refuses every offer — the slots stay spread across all six rooms", async () => {
+    const GRID = 900, TICK = 300, CLINIC = 9 * 3600, PHASE = [20, 21, 22, 23, 24, 25], REFUSER = 5;
+    pg.exec(PHASE.map((_, r) => `INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_s${r}', 's${r}', 'S${r}', 'x', TRUE) ON CONFLICT (id) DO UPDATE SET transcript_enabled = TRUE;
+      INSERT INTO bench_session (id, room_id) VALUES ('sess_s${r}', 'room_s${r}') ON CONFLICT (id) DO NOTHING;`).join("\n"));
+    H.writeJob = true;
+    H.stepFor = (id) => (id.startsWith(`s${REFUSER}_`) ? "flag_off" : "enqueued");
+    const slots = Array(PHASE.length).fill(0) as number[];
+    let prev = 0;
+    for (let t = TICK; t <= CLINIC + 3600; t += TICK) {
+      const closing: string[] = [];
+      for (let r = 0; r < PHASE.length; r++)
+        for (let k = 0; k < CLINIC / GRID; k++) {
+          const end = (k + 1) * GRID, closed = end + PHASE[r]!;
+          if (closed > prev && closed <= t)
+            closing.push(`('s${r}_k${k}', 'sess_s${r}', 'rd_1', ${(end - GRID) * 1000}, ${end * 1000}, 'primary', TRUE, 'closed', NOW() - (${t - closed} * INTERVAL '1 second'))`);
+        }
+      if (closing.length) pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, grid_aligned, state, closed_at) VALUES ${closing.join(",\n")};`);
+      prev = t;
+      await drainOnce();
+      for (const id of offered()) slots[Number(id.slice(1, id.indexOf("_")))]! += 1;
+      pg.exec(`UPDATE bench_window SET closed_at = closed_at - INTERVAL '${TICK} seconds', auto_drain_refused_at = auto_drain_refused_at - INTERVAL '${TICK} seconds';
+               UPDATE scribe_job SET created_at = created_at - INTERVAL '${TICK} seconds';`);
+    }
+    const total = slots.reduce((a, b) => a + b, 0);
+    console.log(`[E22 S2] slots per room ${slots.join("/")} of ${total}; room_s${REFUSER} refuses every offer`);
+    expect(total, "the scenario must actually offer slots").toBeGreaterThan(100);
+    expect(Math.max(...slots) - Math.min(...slots), `flat: ${slots.join("/")}`).toBeLessThanOrEqual(2);
+  }, 180_000);
 });
 
 // ═══ THE ROUTE AND THE CRON ═══════════════════════════════════════════════════════════════════════

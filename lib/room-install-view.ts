@@ -17,9 +17,17 @@
  *
  * Tier 1 adds ONE TYPE-ONLY import, from the equally import-free lib/bench-bus-constants.ts. It is
  * erased at compile time, so the bundle this file joins is exactly what it was.
+ *
+ * ETA-DELIVERY-EVIDENCE phase 1, amendment 1 adds ONE VALUE import, from the equally
+ * import-free lib/bench-reaper-core.ts (zero imports of its own — confirmed, not assumed):
+ * `isBenchStalled`, the admin list's own stalled-badge rule (R10), which already closes over
+ * `STALLED_BADGE_MINUTES` — so NOT_DELIVERING is computed here by CALLING that rule, never by
+ * copying its threshold or its comparison. The bundle this file joins grows by one small, leaf,
+ * database-free module — not by the module graph lib/room-install.ts carries.
  */
 
 import type { InstallStateFlag } from "./bench-bus-constants";
+import { isBenchStalled } from "./bench-reaper-core";
 
 // ---------------------------------------------------------------------------
 // Wire types — what GET /api/admin/bench/fleet returns
@@ -119,7 +127,11 @@ export type ReleaseView = {
   withdrawn_at: string | null;
   notes: string | null;
   min_macos: string;
+  /** Migration 0102. Every row before it is 'macos'. A Mac is only ever offered a 'macos' row. */
+  platform: ReleasePlatform;
 };
+
+export type ReleasePlatform = "macos" | "linux";
 
 export type FleetRow = {
   room_id: string;
@@ -141,6 +153,15 @@ export type FleetRow = {
    */
   earlier_installs?: number;
   earlier?: EarlierInstall[];
+  /**
+   * ETA-DELIVERY-EVIDENCE phase 1, amendment 1. This room's currently OPEN (`status:
+   * "recording"`) `bench_session`, joined by room_id in `readFleet` — a JOIN of existing
+   * session/chunk data, not a new signal (lib/bench.ts's `listBenchSessions`). Null when there
+   * is no such session: paused, ended, or never started, which is the same "no flag" case as
+   * controls C and D in the PRD's acceptance table. Optional so every existing FleetRow literal
+   * in the test suite, built before this field existed, still type-checks.
+   */
+  open_session?: { status: string; started_at: string; last_any_chunk_at: string | null } | null;
 };
 
 /** B2-D3 — what the "N earlier installs" disclosure lists: the id and when it was retired. */
@@ -175,6 +196,12 @@ export type FleetPayload = {
    * Null for a channel with nothing published, which means the row shows no version word at all.
    */
   releases: { stable: ReleaseView | null; test: ReleaseView | null };
+  /**
+   * Migration 0102. The same two shelves for Linux rows. `releases` above is the MAC shelf and stays so:
+   * a Linux row measured against a Mac version would wear `update pending` for ever. Optional: a payload
+   * from before 0102 has none, and reads as nothing published for Linux.
+   */
+  linux_releases?: { stable: ReleaseView | null; test: ReleaseView | null };
   degraded: string[];
   /** B2-D3. Installs that belong on no row of this card. Optional: absent before B2 reads as none. */
   unassigned?: UnassignedInstall[];
@@ -258,12 +285,15 @@ export function groupFleet(input: {
 export function releaseForRow(
   row: FleetRow,
   releases: { stable: ReleaseView | null; test: ReleaseView | null } | null | undefined,
+  linuxReleases?: { stable: ReleaseView | null; test: ReleaseView | null } | null,
 ): ReleaseView | null {
-  if (!releases) return null;
+  // A row is only behind on ITS OWN platform's shelf (0102). A Mac row reads `releases` exactly as before.
+  const shelf = installPlatform(row.install) === "linux" ? linuxReleases : releases;
+  if (!shelf) return null;
   // A row with no install, or an install below 0.1.8 that reports no channel, is on stable by
   // construction — every install that predates R3 is.
   const channel = row.install?.update_channel ?? "stable";
-  return releases[channel] ?? null;
+  return shelf[channel] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +413,29 @@ export function daysUntil(iso: string | null, nowMs: number): number | null {
 // The five checklist steps (§6, D11)
 // ---------------------------------------------------------------------------
 
-export type StepState = "done" | "waiting" | "blocked";
+/**
+ * `not_applicable` exists for ONE step on ONE platform: a Linux room has no operating-system microphone
+ * permission, so step 3 has nothing to wait for and nothing to be done. It is not `done` — a green tick
+ * would claim a permission was granted, and nothing granted one.
+ */
+export type StepState = "done" | "waiting" | "blocked" | "not_applicable";
+
+export type InstallPlatform = ReleasePlatform;
+
+/**
+ * PURE — which platform an install runs on, read off what the machine REPORTED about itself.
+ *
+ * `os_version` is the only platform fact any poll carries. The Mac app writes `macOS <major>.<minor>`
+ * (apps/room-recorder MachineFacts.osVersion); the Linux room-bench writes /etc/os-release's
+ * PRETTY_NAME ("Ubuntu 26.04 LTS"). ANYTHING ELSE IS A MAC, including a row that has not polled yet:
+ * every install before the Linux port is a Mac, and a guess must never move a Mac row off the wording
+ * and rules it has always had.
+ */
+export function installPlatform(i: Pick<InstallView, "os_version"> | null | undefined): InstallPlatform {
+  const os = i?.os_version?.trim() ?? "";
+  if (/^macOS\b/.test(os)) return "macos";
+  return /\b(ubuntu|debian|linux)\b/i.test(os) ? "linux" : "macos";
+}
 
 export type Step = {
   n: 1 | 2 | 3 | 4 | 5;
@@ -398,7 +450,7 @@ export type Step = {
 };
 
 const machineLine = (i: InstallView): string => {
-  const bits = [i.hostname ?? "this Mac", i.hardware_model, i.os_version].filter(Boolean);
+  const bits = [i.hostname ?? (installPlatform(i) === "linux" ? "this machine" : "this Mac"), i.hardware_model, i.os_version].filter(Boolean);
   return bits.join(" · ");
 };
 
@@ -442,9 +494,31 @@ export function deriveSteps(input: {
   // whole point of the step: an app someone double-clicked runs until the window is closed, and
   // a room that records only while a person is standing in it is not installed. §6 gives the
   // blocked instruction as "report it" — there is no setting the operator can change.
+  //
+  // ON LINUX THERE IS NO launchd AND NO `launched_by`. room-bench is a systemd service that starts at
+  // boot with nobody logged in, so there is no "opened by a person" failure to tell apart: the first
+  // poll IS the proof the service runs. Nothing is written to `launched_by` to make this turn green.
+  const linux = installPlatform(i) === "linux";
   const started = i?.first_seen_at ?? null;
-  const step2: Step =
-    i?.launched_by === "launchd"
+  const step2: Step = linux
+    ? started
+      ? {
+          n: 2,
+          title: "App running",
+          state: "done",
+          did: `Running on ${machineLine(i!)} · systemd service · ${fmtClock(started)}`,
+          note: "Reported from this machine's first poll after the command ran.",
+          tone: "plain",
+        }
+      : {
+          n: 2,
+          title: "App running",
+          state: "waiting",
+          did: null,
+          note: "Paste the command into a terminal on the room machine and press Return. This turns done on the machine's first poll.",
+          tone: "plain",
+        }
+    : i?.launched_by === "launchd"
       ? {
           n: 2,
           title: "App running",
@@ -475,8 +549,19 @@ export function deriveSteps(input: {
   // The blocked instruction is the System Settings path, because that is the only thing that
   // fixes it — and the step clears itself on the next poll after the switch is turned on, so the
   // note says there is nothing to press here.
-  const step3: Step =
-    i?.mic_state === "authorized"
+  //
+  // ON LINUX: NOT APPLICABLE, never `done`. The column stays `unknown` because nothing on the machine
+  // measures a permission, and step 4 is where audio arriving is proved.
+  const step3: Step = linux
+    ? {
+        n: 3,
+        title: "Microphone allowed",
+        state: "not_applicable",
+        did: null,
+        note: "Not applicable on Linux: there is no microphone permission to grant. Step 4 shows whether audio arrives.",
+        tone: "plain",
+      }
+    : i?.mic_state === "authorized"
       ? {
           n: 3,
           title: "Microphone allowed",
@@ -533,10 +618,36 @@ export function deriveSteps(input: {
   // NEVER SLEEP is reported and can turn done. AUTOMATIC LOGIN IS NOT REPORTED BY ANYTHING, so
   // it stays a reminder for ever — §6 says it "never turns done", and this step honours that by
   // carrying the reminder into the done branch rather than dropping it once never-sleep lands.
+  //
+  // ON LINUX THE LOGIN RULE IS THE OPPOSITE ONE. The installer turns automatic login OFF and boots to a
+  // text console, because both services run with nobody logged in. The Mac reminder would tell an
+  // operator to undo that, so Linux gets its own sentence, and it is not a warning: nothing is missing.
   const autoLoginNote =
     "Automatic login: set it in System Settings → Users & Groups → Automatic login (reminder, not checked).";
-  const step5: Step =
-    i?.never_sleep === true
+  const linuxLoginNote =
+    "Nobody needs to log in: the recorder runs as a system service. After a restart this machine shows a text screen, not a desktop, by design — watch this checklist from another device.";
+  const step5: Step = linux
+    ? i?.never_sleep === true
+      ? {
+          n: 5,
+          title: "Machine settings",
+          state: "done",
+          did: "Never sleep: detected (sleep, suspend and hibernate are switched off)",
+          note: linuxLoginNote,
+          tone: "plain",
+        }
+      : {
+          n: 5,
+          title: "Machine settings",
+          state: "waiting",
+          did: null,
+          note:
+            i?.never_sleep === false
+              ? "Sleep is still switched on for this machine. Paste the install command again; it switches sleep off. " + linuxLoginNote
+              : "Never sleep turns done when the recorder reports it. " + linuxLoginNote,
+          tone: "plain",
+        }
+    : i?.never_sleep === true
       ? {
           n: 5,
           title: "Machine settings",
@@ -639,6 +750,15 @@ export type RowView = {
   state_flags: InstallStateFlag[];
   /** Tier 1 §3. The Mac reports a locked channel: an assignment will not move it. Shown as a chip. */
   channel_locked: boolean;
+  // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 ───────────────────────────────────────────
+  /**
+   * Minutes since this room's open session last delivered a chunk (or since it started, on the
+   * zero-chunks-ever fallback `isBenchStalled` already applies) — null while nothing is wrong.
+   * A NUMBER, not a boolean, because the chip must say "no audio delivered for Nm": D-6 in the
+   * place it matters most is spelling a degraded state differently from a fine one, and a bare
+   * flag would still have to be worded by something downstream.
+   */
+  not_delivering_minutes: number | null;
 };
 
 export type DiskLevel = "ok" | "amber" | "red" | "unknown";
@@ -695,8 +815,10 @@ export function receiptSentence(raw: string | null | undefined): string | null {
  *   2 NEEDS RE-ENROL  the session has expired. The app is on that Mac and is polling into 401s;
  *                     it will not record again until a second paste. This outranks every other
  *                     complaint because it is the only one that has already stopped the room.
- *   3 NEEDS ATTENTION mic denied, tape not advancing, session expiring inside 30 days, or last
- *                     seen older than the alarm window.
+ *   3 NEEDS ATTENTION mic denied, tape not advancing, session expiring inside 30 days, last
+ *                     seen older than the alarm window, or NOT_DELIVERING (ETA-DELIVERY-EVIDENCE
+ *                     phase 1: an open session whose chunk clock has gone stale — imported from
+ *                     `isBenchStalled`, never re-derived).
  *   4 HEALTHY         none of the above. `update pending` rides alongside as a word, never as a
  *                     state: a room on the previous version is recording perfectly well.
  */
@@ -722,6 +844,25 @@ export function deriveRow(input: {
   // install below 0.1.8 and on the first poll after enrolment, and null is "not reported", which
   // must not be read as "idle".
   const sessionOpen = i?.session_open ?? null;
+
+  // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 — NOT_DELIVERING, computed HERE at read time ──
+  //
+  // D-11: a signal about absence cannot be emitted by the thing that is absent, so this is not
+  // stored on `room_install` and not evaluated in `evaluateInstallStates` — it is derived fresh
+  // against `nowMs` every time the row is read, exactly where the fleet's stall rule already
+  // lives. `isBenchStalled` (imported, never re-derived) is that rule: a `recording` session
+  // whose newest chunk — falling back to `started_at` on zero chunks — is older than
+  // STALLED_BADGE_MINUTES. Calling it against `row.open_session` (a plain JOIN, not a new
+  // signal) catches all three incidents the same way: OPD 7's wedge (chunks stopped), OPD 3's
+  // vanished Mac (chunks stopped because nothing ran to produce them — no further poll needed to
+  // notice), and OPD 6's phantom (zero chunks ever, via the started_at fallback). A retired
+  // install's session, if any is somehow still joined, is not this Mac's to answer for.
+  const openSession = i && !i.retired_at ? (row.open_session ?? null) : null;
+  const notDelivering = openSession !== null && isBenchStalled(openSession, nowMs);
+  const notDeliveringMinutes = !notDelivering
+    ? null
+    : Math.floor((nowMs - (msOf(openSession!.last_any_chunk_at) ?? msOf(openSession!.started_at) ?? nowMs)) / 60_000);
+
   const tapeLabel = !i
     ? null
     : sessionOpen === false
@@ -729,7 +870,12 @@ export function deriveRow(input: {
       : i.tape_advancing
         ? "advancing"
         : sessionOpen === true
-          ? "recording, not advancing"
+          ? // Incident 3's exact shape: the system must never say "recording" on a row this build
+            // itself has already called NOT_DELIVERING. `notDelivering` takes precedence over the
+            // ordinary "recording, not advancing" wording — the chip carries the fact instead.
+            notDelivering
+            ? "not advancing"
+            : "recording, not advancing"
           : "not advancing";
 
   // STATE C. `ok` shows nothing; absent shows nothing. Only a failure speaks (R3-7).
@@ -812,6 +958,8 @@ export function deriveRow(input: {
     // A retired row's last flags describe a Mac that no longer serves the room: not shown.
     state_flags: i && !i.retired_at ? (i.state_flags ?? []) : [],
     channel_locked: Boolean(i && !i.retired_at && i.channel_locked === true),
+    // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 ──────────────────────────────────────────
+    not_delivering_minutes: notDeliveringMinutes,
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────
@@ -915,7 +1063,15 @@ export function deriveRow(input: {
     // print it a second time in the Actions cell, where every other attention line renders; not
     // marking the row at all would leave a failure the same colour as a healthy room. So the
     // state is raised here and the words stay where V put them.
-    state: attention.length > 0 || failure !== null ? "needs_attention" : "healthy",
+    //
+    // ETA-DELIVERY-EVIDENCE phase 1, amendment 1 — `notDelivering` joins this OR-condition on
+    // the same footing as `attention.length > 0` and `failure !== null`: D-6 (a degraded state
+    // must not be spelled the same as a fine one) requires the ROW to move, not merely a chip to
+    // appear beside an otherwise-healthy one. THIS IS NOT THE `8968b71` MECHANISM the amended
+    // PRD names (`DEGRADED_STATE_FLAGS`, `bench/device-missing-row-state`) — that commit is not
+    // an ancestor of this branch's base (de92359); it lives only on that unmerged branch. See
+    // the Builder's report for the flag. The observable outcome is the same either way.
+    state: attention.length > 0 || failure !== null || notDelivering ? "needs_attention" : "healthy",
     words,
     attention,
     session_label: sessionLabel,

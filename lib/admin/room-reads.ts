@@ -92,6 +92,8 @@ export async function readTranscriptAndStranded(
     const rows = (await sql`
       SELECT s.room_id,
              COUNT(*) FILTER (WHERE w.state = 'transcribed')  ::int AS done,
+             -- E18 R1.1 — silence is its own settled state and is NEVER added to the done count.
+             COUNT(*) FILTER (WHERE w.state = 'silent')       ::int AS silent,
              -- CLOSED splits in two, and the split is the whole point of this column pair.
              -- A closed window with a room_day is finished audio nobody has run. One without
              -- cannot be processed at all: room-drain.ts returns no_room_day BEFORE the claim,
@@ -133,7 +135,7 @@ export async function readTranscriptAndStranded(
       if (!roomId) continue;
       out.set(roomId, {
         counts: {
-          done: num(r.done), waiting: num(r.waiting), no_day: num(r.no_day),
+          done: num(r.done), silent: num(r.silent), waiting: num(r.waiting), no_day: num(r.no_day),
           in_progress: num(r.in_progress), failed: num(r.failed), words_ms: num(r.words_ms),
         },
         stranded: {

@@ -16,6 +16,8 @@ type Row = Record<string, unknown>;
 
 const DB = vi.hoisted(() => ({
   windowState: "transcribing", attemptWrites: 0, subjectDone: 0, routingReads: 0, runInserts: 0, lastError: null as string | null,
+  /** E18 — how many silence verdicts the drain wrote. */
+  silenceWrites: 0,
 }));
 const ROUTER = vi.hoisted(() => ({ submits: 0 }));
 const CUES = vi.hoisted(() => ({ calls: 0 }));
@@ -32,6 +34,10 @@ vi.mock("@/lib/db", () => {
       return [{ idx: 0, source: "primary", r2_key: "chunks/a.webm", content_type: "audio/webm",
                 started_at: new Date(0).toISOString(), ended_at: new Date(900_000).toISOString(), upload_state: "uploaded" }];
     if (q.includes("UPDATE bench_window SET state = 'transcribed'")) { DB.windowState = "transcribed"; return []; }
+    // E18 — the silent verdict settles in its own state, and carries its evidence with it.
+    if (q.includes("UPDATE bench_window SET state = 'silent'")) { DB.windowState = "silent"; return []; }
+    if (q.includes("count(*) FILTER (WHERE c.peak_level")) return [{ total: 1, levelled: 0, peak: null, avg: null }];
+    if (q.includes("INSERT INTO bench_window_silence")) { DB.silenceWrites += 1; return []; }
     if (q.includes("UPDATE bench_window SET state = 'closed'")) { DB.windowState = "closed"; return []; }
     if (q.includes("FROM stt_routing")) { DB.routingReads += 1; return [{ engine_id: "route" }]; }
     if (q.includes("INSERT INTO transcription_run")) { DB.runInserts += 1; return []; }
@@ -132,7 +138,7 @@ const useServer = (s: (typeof SERVER)[number]) => {
 };
 
 describe("E11(a) — what the real client emits, per way the server can answer", () => {
-  it("covers every error the client can produce, and exactly ONE answer is the bare constant", async () => {
+  it("one scenario per LISTED producer in lib/whisper.ts (a hand-kept list, not proof of every producer), and exactly ONE answer is the bare constant", async () => {
     const errors: string[] = [];
     for (const s of SERVER) {
       process.env.WHISPER_BASE_URL = "https://whisper.test";
@@ -162,7 +168,9 @@ describe("E11(a) — the room_window job, through the REAL client: silent iff th
         expect(r.error, "a quiet room finishes").toBeUndefined();
         expect(r.visited).toEqual(["prepare", "segment", "finish"]);
         expect(DB.attemptWrites).toBe(0);
-        expect(DB.windowState).toBe("transcribed");
+        // E18 R1.1/R1.2 — through the REAL client: its own state, and one evidence row beside it.
+        expect(DB.windowState).toBe("silent");
+        expect(DB.silenceWrites, "the verdict was recorded where it was made").toBe(1);
       } else {
         expect(r.error, `${full.error} must fail loudly`).toBe("room_window_failed: whisper_unavailable");
         expect(r.visited).toEqual(["prepare", "segment"]);

@@ -147,7 +147,7 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
       SELECT w.id, w.session_id, s.room_id, w.start_ms, w.end_ms, w.source_mic
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
-       WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed')
+       WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed', 'silent')
          AND NOT EXISTS (SELECT 1 FROM stt_window_measure m WHERE m.window_id = w.id)
        ORDER BY w.start_ms ASC
        LIMIT ${limit}

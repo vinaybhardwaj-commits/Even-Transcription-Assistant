@@ -74,11 +74,20 @@ describe("C8 — silence is REPORTED, never inferred", () => {
     expect([...verdicts].sort()).toEqual(["loop", "silent", "speech", "thin"]);
   });
 
-  it("no VAD, no threshold, no second stack — the CODE names none of them", () => {
+  it("no threshold, no second stack — the drain RECORDS VAD evidence (E18 R1.2) and still DECIDES nothing with it", () => {
     const src = codeOf("lib/stt/room-drain.ts");
-    expect(src).not.toMatch(/\bvad\b/i);
+    // E18 changed what this invariant can say. The drain must now record the parameters a silence verdict was
+    // made under, so the word appears; what it must never do is JUDGE with them. The mentions are therefore
+    // enumerated: recording only, no comparison, no threshold, no second detector.
+    // Exactly two mentions, both of them recording: the read, and the field it is stored under. A third —
+    // a threshold, a comparison, a `vadDecides` — fails this test, which is the point of enumerating them.
+    expect(new Set(src.match(/[A-Za-z_]*vad[A-Za-z_]*/gi) ?? []), "the only VAD mentions are the evidence read and the field it lands in")
+      .toEqual(new Set(["readVadParams", "vad"]));
     expect(src).not.toMatch(/no_speech_prob\s*[<>]/);
     expect(src).not.toMatch(/silence_threshold|min_confidence/i);
+    // Nothing in the drain compares a level or a probability against anything: that is E13's detector, and it
+    // is not built here.
+    expect(src).not.toMatch(/(peak_level|avg_level|no_speech_prob|silero)[^\n]*[<>]=?/);
   });
 });
 

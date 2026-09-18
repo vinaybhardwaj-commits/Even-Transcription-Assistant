@@ -26,6 +26,15 @@
  * not go degenerate — it still varies with the audio at 1 s. No degenerate length, so no floor. The
  * service refuses below 0.1 s (its model's own minimum) with a named reason, and every row stores
  * its duration, so a query can filter by length.
+ *
+ * ─── E16: A SPAN CARRIES ITS SPEAKER'S SPEECH, NOT ITS WALL DURATION ────────────────────────────
+ * A long turn is not a long stretch of speech: Whisper's turn bounds swallow silence (E14 cause 2), so
+ * chunk A9 was 29 s holding 2.28 s of its speaker. Every chunk is MEASURED against the diarizer's own
+ * intervals for that speaker (room_diarize_window.segments_json) — the speech attributed to the one
+ * person the score is for (ETA-E16-RULING §2). A chunk whose measured speech is under the service's
+ * `min_speech_s` (read from /health, never a constant) is not planned: it is recorded unscorable with
+ * the speech that disqualified it. NO FRACTION CUTOFF is applied — the fraction is recorded, and the
+ * floor is set later from a clinic week of it.
  */
 export const RUN_MERGE_GAP_MS = 2_000;
 export const CHUNK_TARGET_MAX_S = 30;
@@ -87,6 +96,57 @@ export function buildRuns(turns: AttributedTurn[], mergeGapMs = RUN_MERGE_GAP_MS
     runs.push(open);
   }
   return { runs, skipped };
+}
+
+/** A diarizer speech interval, as room_diarize_window.segments_json stores it: clip-relative ms. */
+export type SpeechInterval = { start_ms: number; end_ms: number; speaker_idx: number };
+
+/**
+ * PURE. Milliseconds of `speakerIdx`'s diarized speech inside [clipStartMs, clipEndMs).
+ *
+ * The UNION of that speaker's intervals, clipped to the span — so two overlapping intervals of one
+ * speaker are never counted twice, and the result can never exceed the span. Other speakers' speech
+ * does not count: the score is for this speaker.
+ */
+export function speakerSpeechMs(intervals: readonly SpeechInterval[], speakerIdx: number, clipStartMs: number, clipEndMs: number): number {
+  const mine = intervals
+    .filter((iv) => iv.speaker_idx === speakerIdx)
+    .map((iv) => [Math.max(iv.start_ms, clipStartMs), Math.min(iv.end_ms, clipEndMs)] as const)
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0]);
+  let total = 0;
+  let curA = -Infinity, curB = -Infinity;
+  for (const [a, b] of mine) {
+    if (a > curB) { if (curB > curA) total += curB - curA; curA = a; curB = b; }
+    else curB = Math.max(curB, b);
+  }
+  if (curB > curA) total += curB - curA;
+  return Math.round(total);
+}
+
+/** A planned chunk with its speaker's measured speech. */
+export type MeasuredSegment = PlannedSegment & { speech_ms: number };
+
+/**
+ * PURE. Measure every planned chunk, and split them at the service's minimum.
+ *
+ * `scorable` is what gets sent. `unscorable` never enters `planned`: its measured speech is under
+ * `minSpeechS`, which the service would refuse by arithmetic — and a window of only such spans would
+ * otherwise burn every attempt on audio that can never score (A3: two windows exhausted exactly so).
+ * The comparison is `speech_ms < minSpeechS * 1000`: at exactly the minimum a span is planned, as the
+ * service's own gate scores it (`speech_s_est < MIN_SPEECH_S` refuses).
+ */
+export function splitByDiarizedSpeech(
+  planned: readonly PlannedSegment[], intervals: readonly SpeechInterval[], minSpeechS: number,
+): { scorable: MeasuredSegment[]; unscorable: MeasuredSegment[] } {
+  if (!Number.isFinite(minSpeechS) || minSpeechS <= 0) throw new Error(`min_speech_s ${minSpeechS} is not a usable minimum`);
+  const scorable: MeasuredSegment[] = [];
+  const unscorable: MeasuredSegment[] = [];
+  for (const p of planned) {
+    const m: MeasuredSegment = { ...p, speech_ms: speakerSpeechMs(intervals, p.speaker_idx, Math.round(p.clip_start_s * 1000), Math.round(p.clip_end_s * 1000)) };
+    (m.speech_ms < minSpeechS * 1000 ? unscorable : scorable).push(m);
+  }
+  return { scorable, unscorable };
 }
 
 export function chunkTargetS(capS: number): number {

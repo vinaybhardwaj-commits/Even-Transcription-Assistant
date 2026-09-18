@@ -395,7 +395,7 @@ export function FleetTable({
               <FleetRowView
                 key={row.room_id}
                 row={row}
-                view={deriveRow({ row, latestRelease: releaseForRow(row, releases), nowMs })}
+                view={deriveRow({ row, latestRelease: releaseForRow(row, releases, fleet?.linux_releases), nowMs })}
                 release={release}
                 nowMs={nowMs}
                 busy={busy}
@@ -603,6 +603,15 @@ function FleetRowView({
           {view.channel_locked && (
             <span data-channel-locked>
               <Pill tone="warn">channel locked</Pill>
+            </span>
+          )}
+          {/* ETA-DELIVERY-EVIDENCE phase 1. The words must name the fact, not the mechanism: "no
+              audio delivered for Nm", never "recording" — incident 3 was the system saying
+              "recording" about a room that was not. `deriveRow` decides when this fires; this
+              cell only prints the sentence. */}
+          {view.not_delivering_minutes !== null && (
+            <span data-not-delivering>
+              <Pill tone="bad">no audio delivered for {view.not_delivering_minutes}m</Pill>
             </span>
           )}
         </div>
@@ -969,6 +978,7 @@ const STEP_PILL: Record<Step["state"], { tone: keyof typeof PILL; word: string }
   done: { tone: "ok", word: "done" },
   waiting: { tone: "idle", word: "waiting" },
   blocked: { tone: "bad", word: "blocked" },
+  not_applicable: { tone: "idle", word: "not applicable" },
 };
 
 function Steps({ steps }: { steps: Step[] }) {

@@ -8,6 +8,7 @@
  */
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
+import { reliabilityCaption, reliabilityHeading, type ReliabilityBasis } from "@/lib/stt/reliability-label";
 
 type Capabilities = {
   tiers?: string[]; stages?: string[]; languages?: string[];
@@ -330,12 +331,13 @@ function GoldTab() {
 
 // ---- Leaderboard tab (L4) --------------------------------------------------
 type LeaderRow = {
-  engine: string; display_name: string | null; runs: number; ok: number; success_rate: number;
+  engine: string; display_name: string | null; runs: number; ok: number; success_rate: number | null;
+  attempt_rate?: number | null; outcome_rate?: number | null;
   avg_latency_ms: number | null; p95_latency_ms: number | null; avg_judge: number | null; avg_agreement: number | null;
   gold_n: number; avg_wer: number | null; avg_cer: number | null; avg_term_recall: number | null;
   wins: number; cost_per_min: number | null; composite: number | null;
 };
-type LeaderBundle = { engines: LeaderRow[]; weights: Record<string, number>; total_runs: number; subject_kind?: string };
+type LeaderBundle = { engines: LeaderRow[]; weights: Record<string, number>; total_runs: number; subject_kind?: string; reliability_basis?: ReliabilityBasis; per_attempt_since?: string | null };
 
 function LeaderboardTab() {
   const [data, setData] = React.useState<LeaderBundle | null>(null);
@@ -389,7 +391,7 @@ function LeaderboardTab() {
         <section className="rounded-2xl border border-even-ink-100 bg-even-white p-5 overflow-x-auto">
           <table className="w-full text-body">
             <thead><tr className="text-caption text-even-ink-500 text-left border-b border-even-ink-100">
-              <th className="py-2 pr-2">#</th><th className="py-2 pr-3">Engine</th><th className="py-2 pr-3">Composite ↑</th><th className="py-2 pr-3">Accuracy</th><th className="py-2 pr-3">WER ↓</th><th className="py-2 pr-3">Med-term ↑</th><th className="py-2 pr-3">Judge</th><th className="py-2 pr-3">Agree</th><th className="py-2 pr-3">Latency</th><th className="py-2 pr-3">Reliab.</th><th className="py-2 pr-3">Wins</th><th className="py-2 pr-3">Gold n</th>
+              <th className="py-2 pr-2">#</th><th className="py-2 pr-3">Engine</th><th className="py-2 pr-3">Composite ↑</th><th className="py-2 pr-3">Accuracy</th><th className="py-2 pr-3">WER ↓</th><th className="py-2 pr-3">Med-term ↑</th><th className="py-2 pr-3">Judge</th><th className="py-2 pr-3">Agree</th><th className="py-2 pr-3">Latency</th><th className="py-2 pr-3" title="What the reliability figure measures is stated under the table">{reliabilityHeading(data?.reliability_basis ?? "per_attempt")}</th><th className="py-2 pr-3">Final outcome</th><th className="py-2 pr-3">Wins</th><th className="py-2 pr-3">Gold n</th>
             </tr></thead>
             <tbody>
               {data?.engines.map((e, i) => (
@@ -404,12 +406,15 @@ function LeaderboardTab() {
                   <td className="py-2 pr-3 font-mono text-even-ink-600">{e.avg_agreement ?? "—"}</td>
                   <td className="py-2 pr-3 font-mono text-even-ink-600">{e.avg_latency_ms === null ? "—" : `${(e.avg_latency_ms / 1000).toFixed(1)}s`}</td>
                   <td className="py-2 pr-3 font-mono text-even-ink-600">{pct(e.success_rate)}</td>
+                  <td className="py-2 pr-3 font-mono text-even-ink-600">{pct(e.outcome_rate ?? null)}</td>
                   <td className="py-2 pr-3 font-mono">{e.wins}</td>
                   <td className="py-2 pr-3 font-mono text-even-ink-400">{e.gold_n}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {/* E31 C6/C7 — what the reliability figure measures, and from when. Not decoration: see lib/stt/reliability-label. */}
+          {data ? <p className="text-caption text-warning-700 mt-3">{reliabilityCaption(data.reliability_basis ?? "per_attempt", data.per_attempt_since ?? null)}</p> : null}
           <p className="text-caption text-even-ink-400 mt-3">{tier === "Scribe" ? "Scribe tier: audio→finished note (Ekascribe vs the Even pipeline), scored by an LLM rubric vs the clinician's note. Judge = rubric overall; WER/agreement are ASR-tier only." : "Composite (0-100) blends accuracy, med-term, judge, agreement, speed, reliability, cost. WER/accuracy/med-term need gold labels; — = not yet available."}</p>
         </section>
       )}

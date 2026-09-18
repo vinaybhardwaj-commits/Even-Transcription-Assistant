@@ -79,6 +79,15 @@ export async function POST(req: NextRequest) {
   const channel = b.channel === "test" ? "test" : b.channel === "stable" ? "stable" : null;
   if (!channel) return installError("BAD_BUNDLE", "channel must be 'stable' or 'test'");
 
+  // MIGRATION 0102. Absent is 'macos', so the Mac publisher's POST is unchanged. Present-but-unknown is
+  // refused, not rounded to macos: a Linux tarball registered as a Mac release is the one mistake this
+  // column exists to make impossible.
+  //
+  // A 'linux' row is the LAST step of 0102's order: only after the platform filter is deployed and the Mac
+  // rooms have been verified on production to still resolve to their stable release.
+  const platform = b.platform === undefined ? "macos" : b.platform === "macos" || b.platform === "linux" ? b.platform : null;
+  if (!platform) return installError("BAD_BUNDLE", "platform must be 'macos' or 'linux'");
+
   const manifest = parseManifest(b.manifest);
   if (!manifest) {
     return installError(
@@ -91,6 +100,7 @@ export async function POST(req: NextRequest) {
     const release = await createRelease({
       blobUrl: b.blob_url,
       channel,
+      platform,
       manifest,
       publishedBy: guard.adminId,
     });

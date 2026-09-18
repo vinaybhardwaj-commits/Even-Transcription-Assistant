@@ -13,6 +13,18 @@
  * restated in TypeScript so it drives the REAL function: six to nine rooms, 36 windows each over a nine-hour
  * clinic, a cron tick every 300 s, one window per tick, six hours back. A window's slot ends on the grid line;
  * it closes `phase + 20 s + jitter` later, the phase fixed per kiosk run.
+ *
+ * THE WORLD SAYS NO (E22 R3, testing rule 21). The model first marked a room served on every pick and never
+ * refused, so it could not see F1: a room whose offers are refused before the claim has no job, stayed
+ * "never served", and took 98-100 of 117 slots. An offer now has three outcomes, as in lib/stt/auto-drain.ts:
+ *   enqueued    a room_window job is created; the window leaves the pool.
+ *   refused     no job; the window cools down for AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES (60) and returns.
+ *   job_failed  a job is created, runs four ticks (a 900 s window at ~1.3x realtime), fails, and the window
+ *               returns — up to three attempts, then it is parked.
+ * `served` chooses what the model feeds `last_served_ms`: "offered" is R3 and is what the selector SQL derives
+ * (the newest room_window job OR auto_drain_refused_at per room); "job" is the pre-R3 rule, kept as the control
+ * that shows the harness can fail. The rule is MIRRORED here; the SQL itself is proven on postgres in
+ * s1-auto-drain.test.ts ("E22 R3", including this S2 scenario on the real selector).
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -30,6 +42,20 @@ const cand = (id: string, room_id: string, end_ms: number, closed_ms: number, la
 const ids = (c: DrainCandidate[]) => c.map((x) => x.id);
 
 // ═══ THE MODEL ══════════════════════════════════════════════════════════════════════════════════════
+//
+// READ THIS BEFORE PRUNING TESTS (E22 R12).
+// This model COPIES the served rule; it does not run the SQL. `runModel` decides `last_served_ms` itself
+// (World.served), so every assertion in this file passes against the pre-fix commit 3aa75c9 too — measured, not
+// assumed: this file is 30 of 30 green with 3aa75c9's lib/stt/auto-drain.ts in place. It cannot see F1 come back.
+// The test that proves the fix is the Postgres S2 scenario in tests/unit/s1-auto-drain.test.ts:
+//   describe "E22 R3 — a room is served when its slot is OFFERED, not when a job is created (F1)"
+//   it       "S2: one room refuses every offer — the slots stay spread across all six rooms"
+// It runs the shipped selector against postgres:16 and fails before the fix (3/3/3/4/4/100 of 117) and passes
+// after (19/19/19/20/20/20). Do not delete it on the grounds that this file covers fairness. It does not cover
+// the SQL.
+//
+// Fairness here is asserted over CLINIC HOURS. Across the whole modelled day a refusing room picks up tail slots
+// after the other rooms have drained, when nobody else is waiting. That is accepted, not a defect (E22 R12).
 const GRID = 900, TICK = 300, CLINIC_S = 9 * 3600, MAX_AGE = 6 * 3600, N_WIN = 36, END = CLINIC_S + MAX_AGE + 2 * GRID;
 
 function mulberry32(seed: number) {
@@ -44,34 +70,55 @@ function mulberry32(seed: number) {
 }
 
 type Pick = (c: DrainCandidate[], limit: number) => DrainCandidate[];
-type ModelOut = { clinic: number[]; drained: number[]; secondServeWhileAnotherWaits: number };
+/** `clinic` and `drained` count OFFERS (slots taken); `enqueued` counts offers that created a job. */
+type ModelOut = { clinic: number[]; drained: number[]; enqueued: number[]; secondServeWhileAnotherWaits: number };
+type Outcome = "enqueued" | "refused" | "job_failed";
+type World = {
+  /** What the drain does with this offer. Default: every offer enqueues. */
+  outcome?: (room: number, rng: () => number) => Outcome;
+  /** What feeds last_served_ms. Default "offered" (R3, the selector's rule). */
+  served?: "offered" | "job";
+};
+const COOLDOWN = 3600, JOB_TICKS = 4, MAX_ATTEMPTS = 3;
 
 /** One clinic day. Seconds on the model clock, milliseconds on the candidates. */
-function runModel(rooms: number, seed: number, jitter: number, pick: Pick): ModelOut {
+function runModel(rooms: number, seed: number, jitter: number, pick: Pick, world: World = {}): ModelOut {
   const rng = mulberry32(seed);
+  const outcomeOf = world.outcome ?? (() => "enqueued" as const);
   const phase = Array.from({ length: rooms }, () => rng() * 300);
-  const wins: Array<{ room: number; k: number; end: number; closed: number; servedAt: number | null }> = [];
+  const wins: Array<{ room: number; k: number; end: number; closed: number; done: boolean; refusedAt: number | null; busyUntil: number; attempts: number }> = [];
   for (let r = 0; r < rooms; r++)
     for (let k = 0; k < N_WIN; k++) {
       const end = (k + 1) * GRID;
-      wins.push({ room: r, k, end, closed: end + phase[r]! + 20 + (rng() * 2 - 1) * jitter, servedAt: null });
+      wins.push({ room: r, k, end, closed: end + phase[r]! + 20 + (rng() * 2 - 1) * jitter, done: false, refusedAt: null, busyUntil: -1, attempts: 0 });
     }
-  const lastServed: Array<number | null> = Array(rooms).fill(null);
-  const out: ModelOut = { clinic: Array(rooms).fill(0), drained: Array(rooms).fill(0), secondServeWhileAnotherWaits: 0 };
+  const lastOffered: Array<number | null> = Array(rooms).fill(null);
+  const lastJob: Array<number | null> = Array(rooms).fill(null);
+  const out: ModelOut = { clinic: Array(rooms).fill(0), drained: Array(rooms).fill(0), enqueued: Array(rooms).fill(0), secondServeWhileAnotherWaits: 0 };
   let grid = -1, servedInGrid: number[] = [];
   for (let t = 15; t < END; t += TICK) {
     const g = Math.floor(t / GRID);
     if (g !== grid) { grid = g; servedInGrid = Array(rooms).fill(0); }
-    const eligible = wins.filter((w) => w.servedAt === null && w.closed <= t && w.closed >= t - MAX_AGE);
+    const eligible = wins.filter((w) => !w.done && w.closed <= t && w.closed >= t - MAX_AGE
+      && (w.refusedAt === null || w.refusedAt < t - COOLDOWN) && w.busyUntil <= t);
+    const mark = world.served === "job" ? lastJob : lastOffered;
     const candidates = eligible.map((w) => cand(`r${w.room}_k${w.k}`, `room_${w.room}`, w.end * 1000, w.closed * 1000,
-      lastServed[w.room] !== null && lastServed[w.room]! >= t - MAX_AGE ? lastServed[w.room]! * 1000 : null));
+      mark[w.room] !== null && mark[w.room]! >= t - MAX_AGE ? mark[w.room]! * 1000 : null));
     for (const chosen of pick(candidates, 1)) {
       const w = eligible.find((x) => `r${x.room}_k${x.k}` === chosen.id)!;
       const holding = new Set(eligible.map((x) => x.room));
       if (servedInGrid[w.room]! >= 1 && [...holding].some((r) => r !== w.room && servedInGrid[r] === 0)) out.secondServeWhileAnotherWaits += 1;
-      w.servedAt = t; lastServed[w.room] = t; servedInGrid[w.room]! += 1;
+      servedInGrid[w.room]! += 1;
       out.drained[w.room]! += 1;
       if (t < CLINIC_S + TICK) out.clinic[w.room]! += 1;
+      lastOffered[w.room] = t;
+      const o = outcomeOf(w.room, rng);
+      if (o === "refused") { w.refusedAt = t; continue; }
+      lastJob[w.room] = t;
+      out.enqueued[w.room]! += 1;
+      if (o === "enqueued") { w.done = true; continue; }
+      w.refusedAt = null; w.attempts += 1; w.busyUntil = t + JOB_TICKS * TICK;
+      if (w.attempts >= MAX_ATTEMPTS) w.done = true;
     }
   }
   return out;
@@ -142,6 +189,57 @@ describe("V2 — the E4 model at 6, 7, 8 and 9 rooms: no room gets nothing in cl
       const old = runModel(rooms, 20_001, 0, closedAtDesc).drained.reduce((a, b) => a + b, 0);
       expect(Math.abs(fair - old), `rooms ${rooms}: ${fair} vs ${old}`).toBeLessThanOrEqual(2);
     }
+  });
+});
+
+describe("V5 — the model refuses, times out and fails partway (E22 R3): a refused offer is still a turn", () => {
+  const spread = (xs: number[]) => Math.max(...xs) - Math.min(...xs);
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const refuser = (who: number) => (room: number): Outcome => (room === who ? "refused" : "enqueued");
+
+  // Fairness is asserted over CLINIC HOURS, where every room holds windows. After the clinic the other rooms' pools
+  // drain or age out while a refusing room's windows keep returning from cooldown, so it takes the tail slots nobody
+  // else is waiting for (whole day 24/24/24/24/24/40 at seed 300). That is idle capacity, not starvation, and
+  // `secondServeWhileAnotherWaits` — a second slot in a grid while another room holding a window has none — stays 0.
+  it("S2 — one room refuses every offer before the claim: clinic slots stay flat and no room is served twice while another waits, over 20 phase sets and whichever room refuses", () => {
+    for (let s = 0; s < 20; s++)
+      for (const who of [0, 5]) {
+        const m = runModel(6, 300 + s, 0, orderAutoDrainOffers, { outcome: refuser(who) });
+        expect(spread(m.clinic), `seed ${s}, room_${who} refusing: ${m.clinic.join("/")}`).toBeLessThanOrEqual(2);
+        expect(m.secondServeWhileAnotherWaits, `seed ${s}, room_${who} refusing`).toBe(0);
+        expect(m.enqueued[who], "the refusing room never enqueues").toBe(0);
+      }
+  });
+
+  it("control: the same S2 under the pre-R3 rule (served = a job exists) hands the refusing room most of the clinic — the harness can fail", () => {
+    for (let s = 0; s < 20; s++) {
+      const m = runModel(6, 300 + s, 0, orderAutoDrainOffers, { outcome: refuser(5), served: "job" });
+      expect(m.clinic[5]! / sum(m.clinic), `seed ${s}: ${m.clinic.join("/")}`).toBeGreaterThan(0.75);
+      expect(m.secondServeWhileAnotherWaits, `seed ${s}`).toBeGreaterThan(0);
+    }
+  });
+
+  it("a global refusal (join_service_not_configured): every room refuses, and every room still gets an equal share of the clinic's offers", () => {
+    const m = runModel(6, 41, 30, orderAutoDrainOffers, { outcome: () => "refused" });
+    expect(sum(m.enqueued)).toBe(0);
+    expect(spread(m.clinic), m.clinic.join("/")).toBeLessThanOrEqual(2);
+    expect(m.secondServeWhileAnotherWaits).toBe(0);
+  });
+
+  it("a mixed world — 30% refused, 20% of jobs time out and fail after four ticks — no room starves and no room is offered twice in a grid while another waits, at 6 and 9 rooms", () => {
+    const mixed = (_room: number, rng: () => number): Outcome => { const x = rng(); return x < 0.3 ? "refused" : x < 0.44 ? "job_failed" : "enqueued"; };
+    for (const rooms of [6, 9])
+      for (let s = 0; s < 20; s++) {
+        const m = runModel(rooms, 5_000 + s, 30, orderAutoDrainOffers, { outcome: mixed });
+        expect(m.clinic.filter((c) => c === 0), `rooms ${rooms} seed ${s}`).toEqual([]);
+        expect(m.secondServeWhileAnotherWaits, `rooms ${rooms} seed ${s}`).toBe(0);
+      }
+  });
+
+  it("one room's jobs all fail after submit (each is a job, so it was always a turn): that room gets no extra clinic slots", () => {
+    const m = runModel(6, 77, 0, orderAutoDrainOffers, { outcome: (room) => (room === 2 ? "job_failed" : "enqueued") });
+    expect(spread(m.clinic), m.clinic.join("/")).toBeLessThanOrEqual(2);
+    expect(m.secondServeWhileAnotherWaits).toBe(0);
   });
 });
 

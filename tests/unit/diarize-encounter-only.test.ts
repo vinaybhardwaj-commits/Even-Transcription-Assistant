@@ -65,7 +65,10 @@ describe("the diarize dispatch build stays on the encounter path", () => {
     const stmt = /UPDATE encounter SET[\s\S]*?WHERE id = \$\{manualId\}/.exec(branch)?.[0] ?? "";
     expect(stmt).toBeTruthy();
     expect(stmt).toMatch(/diarize_status = NULL/);
-    expect(stmt).not.toMatch(/note_json|cdmss_json|transcript|translated|(?<![_a-z])status\s*=/);
+    // E31 batch 2, B1: tagged_transcript is the DIARIZATION output (speaker-tagged turns), not a clinical transcript,
+    // and the door clears it so a re-run cannot mix rosters. Every clinical transcript column is still refused.
+    expect(stmt).toMatch(/tagged_transcript = NULL/);
+    expect(stmt).not.toMatch(/note_json|cdmss_json|(?<!tagged_)transcript|translated|(?<![_a-z])status\s*=/);
     // and it drives the step machine narrowed to diarization
     expect(branch).toMatch(/resumeOne\([^)]*"diarize"\)/);
   });

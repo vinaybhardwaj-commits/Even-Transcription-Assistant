@@ -156,7 +156,7 @@ describe("§3.2 D30 — finished for today", () => {
 const ROOM = { id: "room_1", slug: "cardio", name: "Cardiology", transcript_enabled: true, visits_enabled: false };
 const NO_BRAIN = { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
 const NO_COUNTS = {
-  transcript: { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 },
+  transcript: { done: 0, silent: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 },
   visits: { built: 0, open: 0 },
 };
 const session = (over: Partial<LiveSession> = {}): LiveSession => ({
@@ -390,7 +390,7 @@ describe("§3.3 — the read behind it", () => {
 
 describe("§3.4 — the copy that described a worker that does not exist", () => {
   const C = (over: Partial<Parameters<typeof transcriptLane>[1]> = {}) =>
-    ({ done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0, ...over });
+    ({ done: 0, silent: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0, ...over });
 
   it("a lane with finished slots and no worker reads 'waiting for someone to run it'", () => {
     expect(WAITING_PHRASE).toBe("waiting for someone to run it");
@@ -496,7 +496,7 @@ describe("§3.6 — one shared source, and both surfaces call it", () => {
 
   it("the two surfaces answer with the SAME WORDS for the same room", () => {
     // The lane the card renders and the lane the door reports are one function call.
-    const counts = { done: 3, waiting: 17, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
+    const counts = { done: 3, silent: 0, waiting: 17, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
     const lane = transcriptLane(true, counts, true);
     expect(lane.state).toBe("3 done, 17 waiting for someone to run it");
     expect(screen).toMatch(/transcriptLane/);

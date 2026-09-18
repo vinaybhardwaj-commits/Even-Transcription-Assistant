@@ -142,7 +142,15 @@ export type LaneView = {
 
 /** Counts behind the Transcript lane, for one room, today. Derived from bench_window state. */
 export type TranscriptCounts = {
+  /** TRANSCRIBED only. A silent window is settled but is not this (E18 R1.1) — see `silent`. */
   done: number;
+  /**
+   * E18 — windows the engine read and found no speech in. Settled, costing no attempt, and counted APART from
+   * `done`: "we heard nothing" and "we heard something" are different claims, and a card that adds them says
+   * neither. Each one carries its evidence in bench_window_silence and can be handed back for a second opinion
+   * (lib/stt/silence.ts) once E13's detector or E15's calibration lands.
+   */
+  silent: number;
   /** CLOSED and bound to a room_day — genuinely finished audio nobody has run yet. */
   waiting: number;
   /** CLOSED with NO room_day. NOT waiting: the drain refuses these before it claims anything,

@@ -84,13 +84,14 @@ const emb = (seed: number) => {
 const DIARIZE_CALLS: string[] = [];
 /** The clinician ids offered to /diarize on each call, in call order. */
 const CENTROIDS_SENT: string[][] = [];
-/** Flip to make the service fail, so the harness can prove it notices. */
-const SVC = { fail: false };
+/** Flip to make the service fail, so the harness can prove it notices. `noSpeakers`: a run that ends no_speakers (E25 R13). */
+const SVC = { fail: false, noSpeakers: false };
 vi.mock("@/lib/diarize", () => ({
   runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string; clinicianCentroids?: Array<{ clinician_id: string }> }) => {
     DIARIZE_CALLS.push(opts.encounterId);
     CENTROIDS_SENT.push((opts.clinicianCentroids ?? []).map((c) => c.clinician_id));
     if (SVC.fail) return { ok: false, error: "service refused", retryable: false, latencyMs: 0 };
+    if (SVC.noSpeakers) return { ok: true, latencyMs: 1_000, result: { speakers: [], transcript_segments: [], overlap_windows: [], aggregates: {}, model_versions: {} } };
     return {
       ok: true, latencyMs: 68_300,
       result: {
@@ -148,6 +149,10 @@ function schema(): void {
   exec(readFileSync("db/migrations/0090_diarize_run_id_and_service_guess.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0096 verbatim (E20): the losing candidate's three columns and their CHECKs.
   exec(readFileSync("db/migrations/0096_room_turn_speaker_losing_score.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0097 verbatim (E16): speech_ms, service_speech_ms, speech_basis, the unscorable state, segments_unscorable.
+  exec(readFileSync("db/migrations/0097_room_span_emotion_speech.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0099 verbatim (E24): room_diarize_window.segments_run_id, and the emotion window's diarize_stale state.
+  exec(readFileSync("db/migrations/0099_room_diarize_segments_run_id.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
 }
 
 /** A 900 s window whose turns leave a clean gap near every 120 s mark, plus one deliberate straddle. */
@@ -318,8 +323,10 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
 
   it("P1 JOIN: the job stores the service's speaker guess NESTED and self-describing; 0090 rewrites a legacy row the same way", async () => {
     const sql = G.__pgsql;
-    const stored = (await sql`SELECT speakers_json, last_run_id FROM room_diarize_window WHERE window_id = 'bw_cal'`) as Array<{ speakers_json: Array<Record<string, unknown>>; last_run_id: string | null }>;
+    const stored = (await sql`SELECT speakers_json, last_run_id, segments_run_id FROM room_diarize_window WHERE window_id = 'bw_cal'`) as Array<{ speakers_json: Array<Record<string, unknown>>; last_run_id: string | null; segments_run_id: string | null }>;
     expect(stored[0]!.last_run_id, "the run that wrote the turns is recorded").toMatch(/^[0-9a-f-]{36}$/);
+    // E24 R9 (0099): a FIRST successful run records itself as the writer of the segments, or every fresh window reads stale.
+    expect(stored[0]!.segments_run_id, "the first run's segments are recorded as the first run's").toBe(stored[0]!.last_run_id);
     const turnRuns = (await sql`SELECT DISTINCT run_id FROM room_turn_speaker WHERE window_id = 'bw_cal'`) as Array<{ run_id: string | null }>;
     for (const t of turnRuns) expect(t.run_id).toBe(stored[0]!.last_run_id);
     for (const sp of stored[0]!.speakers_json) {
@@ -525,12 +532,16 @@ describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, th
       const body = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string; retry_of_attempt: number | null }> };
       expect(body.jobs.find((j) => j.window_id === "bw_retry_ok")?.retry_of_attempt).toBe(1);
       await drainQueue("rok_2");
-      const row = (await sql`SELECT state, attempts, error, failure_history FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number; error: string | null; failure_history: Array<{ attempt: number; error: string }> }>;
+      const row = (await sql`SELECT state, attempts, error, failure_history, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number; error: string | null; failure_history: Array<{ attempt: number; error: string }> }>;
       expect(row[0]!.state).toBe("ok");
       expect(row[0]!.attempts).toBe(2);
       expect(row[0]!.error).toBeNull();
       expect(row[0]!.failure_history).toHaveLength(1);
       expect(row[0]!.failure_history[0]!.error, "the earlier failure survives the success").toBe("service refused");
+      // E24 R9: a failed row replaced by a success takes the successful run's segments — and its run id with them.
+      const ids = row[0] as unknown as { segments_run_id: string | null; last_run_id: string | null };
+      expect(ids.segments_run_id, "the retried run is the writer of the segments").toBe(ids.last_run_id);
+      expect(ids.segments_run_id).not.toBeNull();
       const again = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string }> };
       expect(again.jobs.map((j) => j.window_id), "an ok window is final").not.toContain("bw_retry_ok");
       // And the writer itself refuses to replace a final row.
@@ -1190,6 +1201,8 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is ac
 
 const EMO = {
   cap: 60 as number | undefined,
+  /** E16: the service's least scorable speech, as its /health reports it. undefined = the field is absent. */
+  minSpeech: 1.5 as number | undefined,
   /** When set, the scoring call reports this cap instead of `cap`. */
   segmentsCap: undefined as number | undefined,
   healthStatus: 200,
@@ -1210,7 +1223,7 @@ function fakeEmotionFetch(real: typeof fetch) {
     const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
     if (url.endsWith("/health")) {
       if (EMO.healthDown) throw new TypeError("fetch failed");
-      return json({ ok: EMO.healthOk, model: "Aniemore/wavlm-emotion-v1-crosslingual", ...(EMO.cap === undefined ? {} : { max_duration_s: EMO.cap }), ...(EMO.loaded === undefined ? {} : { loaded: EMO.loaded, models: { wavlm: { loaded: EMO.loaded, subfolder: "int8" } } }) }, EMO.healthStatus);
+      return json({ ok: EMO.healthOk, model: "Aniemore/wavlm-emotion-v1-crosslingual", ...(EMO.cap === undefined ? {} : { max_duration_s: EMO.cap }), ...(EMO.minSpeech === undefined ? {} : { min_speech_s: EMO.minSpeech }), ...(EMO.loaded === undefined ? {} : { loaded: EMO.loaded, models: { wavlm: { loaded: EMO.loaded, subfolder: "int8" } } }) }, EMO.healthStatus);
     }
     if (url.endsWith("/inference/wavlm/segments")) {
       if (EMO.callsDown) throw new TypeError("fetch failed");
@@ -1235,28 +1248,46 @@ function fakeEmotionFetch(real: typeof fetch) {
   };
 }
 
-/** A diarized window: an `ok` diarize row and attributed turns — one speaker's long run, a straddle, a second speaker. */
-async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?: number } = {}): Promise<void> {
+/**
+ * A diarized window: an `ok` diarize row and attributed turns — one speaker's long run, a straddle, a second speaker.
+ *
+ * E16 — THE INTERVALS COVER THE TURNS, AS ONE DIARIZE RUN WROTE THEM. The first version seeded
+ * `segments_json '[]'` beside speaker-attributed turns: every span then measured 0 ms, nothing was sent, and
+ * the window ended `done` — its SERVICE DOWN case included (Refuter, E16 §1). So each turn gets the interval
+ * the run would have bound it with, and room_turn_speaker.overlap_ms is that binding's overlap:
+ *   speaker 0's turns: one interval each, overlap = the turn (4000 ms)
+ *   the straddle:      speaker 0 for its first 2000 ms, speaker 1 for its last 1000 ms -> bound to 0, overlap 2000, not exclusive
+ *   speaker 1's turns: one interval each (5000 ms, 2500 ms)
+ * `segmentsRunId` names an OLDER run as the writer of the segments (E24, 0099) — a later diarize run kept them.
+ */
+async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?: number; segmentsRunId?: string } = {}): Promise<void> {
   const sql = G.__pgsql;
   const doc = makeFakeClinician(1);
   await sql`INSERT INTO bench_window VALUES (${id}, ${`sess_${id}`}, 'rd_emo', ${startMs}, ${startMs + WINDOW_MS}, 'primary', ${`clips/${id}.webm`}, true, 'transcribed')`;
-  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, '[]'::jsonb, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
   const longS = opts.longRunS ?? 70;
   // Speaker 0: turns every 5 s with 1 s gaps for `longS` seconds -> ONE run; speaker 1 after a straddle.
-  const turns: Array<[string, number, number, number, string | null, boolean]> = [];
-  for (let t = 0; t + 4000 <= longS * 1000; t += 5000) turns.push([`${id}|a${t}`, 0, t, t + 4000, null, true]);
+  const turns: Array<[string, number, number, number, string | null, boolean, number]> = [];
+  const intervals: Array<{ start_ms: number; end_ms: number; speaker_idx: number }> = [];
+  for (let t = 0; t + 4000 <= longS * 1000; t += 5000) {
+    turns.push([`${id}|a${t}`, 0, t, t + 4000, null, true, 4000]);
+    intervals.push({ start_ms: t, end_ms: t + 4000, speaker_idx: 0 });
+  }
   const after = longS * 1000 + 2000;
-  turns.push([`${id}|straddle`, 0, after, after + 3000, "straddle", false]);
-  turns.push([`${id}|b1`, 1, after + 4000, after + 9000, "no_match", false]);
-  turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false]);
-  for (const [ref, spk, s, e, reason, named] of turns) {
+  turns.push([`${id}|straddle`, 0, after, after + 3000, "straddle", false, 2000]);
+  intervals.push({ start_ms: after, end_ms: after + 2000, speaker_idx: 0 }, { start_ms: after + 2000, end_ms: after + 3000, speaker_idx: 1 });
+  turns.push([`${id}|b1`, 1, after + 4000, after + 9000, "no_match", false, 5000]);
+  turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false, 2500]);
+  intervals.push({ start_ms: after + 4000, end_ms: after + 9000, speaker_idx: 1 }, { start_ms: after + 9500, end_ms: after + 12000, speaker_idx: 1 });
+  // E24 (0099): the seeded segments were written by the seeding run, unless a case says they are an older run's.
+  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, segments_run_id, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, ${JSON.stringify(intervals)}::jsonb, ${opts.segmentsRunId ?? `run_seed_${id}`}, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
+  for (const [ref, spk, s, e, reason, named, overlap] of turns) {
     await sql`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES (${`c_${ref}`}, 'rd_emo', 'stt_turn', 'replay', ${ref}, ${JSON.stringify({ start_ms: startMs + s, end_ms: startMs + e, window: { start_ms: startMs, end_ms: startMs + WINDOW_MS } })}::jsonb)`;
     if (named) {
       await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
-                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', ${doc.id}, 'clinician', 0.8, NULL, ${`run_seed_${id}`}, NOW())`;
+                VALUES (${id}, ${ref}, ${spk}, NULL, ${overlap}, 'rd_emo', ${doc.id}, 'clinician', 0.8, NULL, ${`run_seed_${id}`}, NOW())`;
     } else {
       await sql`INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, cluster_id, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason, run_id, created_at)
-                VALUES (${id}, ${ref}, ${spk}, NULL, 1000, 'rd_emo', NULL, NULL, NULL, ${reason}, ${`run_seed_${id}`}, NOW())`;
+                VALUES (${id}, ${ref}, ${spk}, NULL, ${overlap}, 'rd_emo', NULL, NULL, NULL, ${reason}, ${`run_seed_${id}`}, NOW())`;
     }
   }
 }
@@ -1285,7 +1316,7 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
   beforeAll(() => { globalThis.fetch = fakeEmotionFetch(realFetch) as typeof fetch; });
   afterAll(() => { globalThis.fetch = realFetch; delete process.env.EMOTION_ENABLED; delete process.env.EMOTION_SEGMENTS_SECRET; });
   const reset = () => {
-    Object.assign(EMO, { cap: 60, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
+    Object.assign(EMO, { cap: 60, minSpeech: 1.5, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
     process.env.EMOTION_ENABLED = "1";
     process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
   };
@@ -1340,8 +1371,15 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(skipped.map((x) => [x.reason, x.speaker_idx])).toEqual([["straddle", 0]]);
     expect(EMO_LABELS.every((l) => skipped[0]![l] === null)).toBe(true);
 
-    const w = (await sql`SELECT state, diarize_run_id, attempts, segments_planned, segments_scored, segments_skipped, segments_failed, calls, cap_s, warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo'`) as Array<Record<string, unknown>>;
-    expect(w[0]).toMatchObject({ state: "ok", diarize_run_id: "run_seed_bw_emo", attempts: 1, segments_planned: 4, segments_scored: 4, segments_skipped: 1, segments_failed: 0, calls: 2, cap_s: 60 });
+    const w = (await sql`SELECT state, diarize_run_id, attempts, segments_planned, segments_scored, segments_skipped, segments_failed, segments_unscorable, calls, cap_s, warmup_json FROM room_emotion_window WHERE window_id = 'bw_emo'`) as Array<Record<string, unknown>>;
+    expect(w[0]).toMatchObject({ state: "ok", diarize_run_id: "run_seed_bw_emo", attempts: 1, segments_planned: 4, segments_scored: 4, segments_skipped: 1, segments_failed: 0, segments_unscorable: 0, calls: 2, cap_s: 60 });
+
+    // E16, END TO END ON POSTGRES: every row carries its speaker's measured speech, from the intervals.
+    const speech = (await sql`SELECT state, speaker_idx, speech_ms, service_speech_ms, speech_basis FROM room_span_emotion WHERE window_id = 'bw_emo' ORDER BY segment_start_ms`) as Array<{ state: string; speaker_idx: number; speech_ms: number; service_speech_ms: number | null; speech_basis: string }>;
+    expect(speech.every((x) => x.speech_basis === "diarize_segments" && x.service_speech_ms === null)).toBe(true);
+    expect(speech.filter((x) => x.state === "scored" && x.speaker_idx === 0).reduce((a, x) => a + x.speech_ms, 0), "speaker 0's 14 turns × 4000 ms, across its 3 chunks").toBe(56_000);
+    expect(speech.find((x) => x.state === "scored" && x.speaker_idx === 1)!.speech_ms, "speaker 1's run: 5000 + 2500, not the straddle's 1000").toBe(7_500);
+    expect(speech.find((x) => x.state === "skipped")!.speech_ms, "the straddle's speaker 0 share").toBe(2_000);
     expect(EMO.lastAuth, "the shared secret travels on every call").toBe("Bearer test-emotion-secret");
     expect(w[0]!.warmup_json).toMatchObject({ loaded_before: true, ok: true });
 
@@ -1464,6 +1502,9 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(after[0]!.state).toBe("ok");
     expect(after[0]!.attempts, "a successful re-run does not move the attempts counter — why the old guard was blind").toBe(before[0]!.attempts);
     expect(after[0]!.last_run_id, "the run id moves on every run that writes turns").not.toBe(before[0]!.last_run_id);
+    // E24 R10: the keep-rule stands for a window that is not diarize_stale — the re-run's segments are NOT accepted.
+    const kept = (await sql`SELECT segments_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_chg'`) as Array<{ segments_run_id: string }>;
+    expect(kept[0]!.segments_run_id, "segments stay the seeding run's; only a diarize_stale window is repaired").toBe("run_seed_bw_emo_chg");
     expect(r.status).toBe("failed");
     expect(String(r.error)).toMatch(/^diarize_changed/);
     const scored = (await sql`SELECT count(*)::int AS n FROM room_span_emotion WHERE window_id = 'bw_emo_chg' AND state = 'scored'`) as Array<{ n: number }>;
@@ -1518,6 +1559,128 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
     await expect(enqueueEmotionWindows({ actor: "cron:test", log: () => {} })).rejects.toThrow(/EMOTION_SEGMENTS_SECRET is not set/);
     process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
+  }, 300_000);
+
+  it("E16 — /health WITHOUT min_speech_s fails the window by name and sends no audio (the rollback hazard in 0097's header)", async () => {
+    reset();
+    EMO.minSpeech = undefined;
+    await seedEmotionWindow("bw_emo_nomin", 42 * WINDOW_MS);
+    const r = await runEmotionJob("job_emo_nomin", "bw_emo_nomin");
+    expect(r.status).toBe("failed");
+    expect(String(r.error)).toMatch(/^emotion_unavailable: health_min_speech_unreadable/);
+    expect(EMO.calls).toHaveLength(0);
+    const w = (await G.__pgsql`SELECT state, attempts FROM room_emotion_window WHERE window_id = 'bw_emo_nomin'`) as Array<{ state: string; attempts: number }>;
+    expect(w[0]).toEqual({ state: "failed", attempts: 1 });
+  }, 300_000);
+
+  it("E24 R8/R9/R10 — THE CURE, THROUGH THE RUNNER: stale by run id → diarize_stale, no attempt, not re-offered; a real re-diarize repairs it; the enqueue offers it again and it scores", async () => {
+    reset();
+    const sql = G.__pgsql;
+    await seedEmotionWindow("bw_emo_stale", 43 * WINDOW_MS, { segmentsRunId: "run_older_bw_emo_stale" });
+    // 1. Stale by run id: named, terminal, no audio, no span row.
+    const r1 = await runEmotionJob("job_emo_stale", "bw_emo_stale");
+    expect(r1.status).toBe("failed");
+    expect(r1.steps).toEqual(["(first)"]);
+    expect(String(r1.error)).toMatch(/^diarize_segments_stale: diarize segments were written by an earlier diarize run/);
+    expect(EMO.calls, "no audio is sent against another run's intervals").toHaveLength(0);
+    const w1 = (await sql`SELECT state, attempts, (SELECT count(*)::int FROM room_span_emotion WHERE window_id = 'bw_emo_stale') AS s FROM room_emotion_window WHERE window_id = 'bw_emo_stale'`) as Array<{ state: string; attempts: number; s: number }>;
+    expect(w1[0]).toEqual({ state: "diarize_stale", attempts: 1, s: 0 });
+
+    // 2. R8 — NOT re-offered, and no attempt spent, while nothing relevant has changed. Only this window is eligible.
+    await sql`UPDATE room_diarize_window SET state = 'failed', error = 'test: out of scope' WHERE window_id <> 'bw_emo_stale'`;
+    const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
+    const quiet = () => {};
+    const none = await enqueueEmotionWindows({ actor: "cron:test", log: quiet });
+    expect(none.enqueued, "a diarize_stale window is not a retryable failure").toEqual([]);
+
+    // 3. R10 — a REAL diarize_window job re-runs the window. The keep-rule keeps the old segments; the named repair
+    // path, scoped to this diarize_stale window, accepts the fresh run's.
+    SVC.fail = false;
+    const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+    const { runOneStep } = await import("@/lib/jobs/runner");
+    await insertJob({ id: "job_emo_stale_diarize", kind: "diarize_window", args: { window_id: "bw_emo_stale" }, actor: "mcp:test" });
+    for (let i = 0; i < 5; i += 1) {
+      const c = (await claimJobs(3, 240_000, `r_stale_${i}`)).find((x) => x.id === "job_emo_stale_diarize");
+      if (!c) break;
+      await runOneStep(c, `r_stale_${i}`);
+    }
+    const dj = (await sql`SELECT status, error, result FROM scribe_job WHERE id = 'job_emo_stale_diarize'`) as Array<{ status: string; error: string | null; result: Record<string, unknown> | null }>;
+    expect(dj[0]!.status, `the re-diarize must succeed; error=${dj[0]!.error}`).toBe("done");
+    expect(dj[0]!.result).toMatchObject({ stale_segments_repaired: true });
+    const d = (await sql`SELECT segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_stale'`) as Array<{ segments_run_id: string; last_run_id: string }>;
+    expect(d[0]!.segments_run_id, "the repaired segments are the fresh run's").toBe(d[0]!.last_run_id);
+    expect(d[0]!.last_run_id).not.toBe("run_seed_bw_emo_stale");
+
+    // 4. The enqueue offers the window again (its emotion row names an older run), and emotion now scores it.
+    const again = await enqueueEmotionWindows({ actor: "cron:test", log: quiet });
+    expect(again.enqueued.map((x) => x.window_id)).toEqual(["bw_emo_stale"]);
+    const jobId = again.enqueued[0]!.job_id;
+    for (let i = 0; i < 12; i += 1) {
+      const c = (await claimJobs(1, 240_000, `r_stale_emo_${i}`)).find((x) => x.id === jobId);
+      if (!c) break;
+      await runOneStep(c, `r_stale_emo_${i}`);
+      const st = (await sql`SELECT status FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string }>;
+      if (st[0]?.status === "done" || st[0]?.status === "failed") break;
+    }
+    const ej = (await sql`SELECT status, error FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string; error: string | null }>;
+    expect(ej[0]!.status, `emotion after the repair; error=${ej[0]!.error}`).toBe("done");
+    const w2 = (await sql`SELECT state, diarize_run_id, segments_scored FROM room_emotion_window WHERE window_id = 'bw_emo_stale'`) as Array<{ state: string; diarize_run_id: string; segments_scored: number }>;
+    expect(w2[0]!.state).toBe("ok");
+    expect(w2[0]!.diarize_run_id).toBe(d[0]!.last_run_id);
+    expect(w2[0]!.segments_scored).toBeGreaterThan(0);
+  }, 300_000);
+
+  it("E25 R13/R14/R15 — THROUGH THE RUNNER: a no_speakers run is refused; an ok run repairs speakers AND segments; a second run before the rescore meets the keep-rule", async () => {
+    reset();
+    const sql = G.__pgsql;
+    await seedEmotionWindow("bw_emo_once", 44 * WINDOW_MS, { segmentsRunId: "run_older_bw_emo_once" });
+    const r1 = await runEmotionJob("job_emo_once", "bw_emo_once");
+    expect(String(r1.error)).toMatch(/^diarize_segments_stale: /);
+    const markRow = async () => ((await sql`SELECT state, stale_segments_run_id FROM room_emotion_window WHERE window_id = 'bw_emo_once'`) as Array<{ state: string; stale_segments_run_id: string | null }>)[0]!;
+    expect(await markRow()).toEqual({ state: "diarize_stale", stale_segments_run_id: "run_older_bw_emo_once" });
+    const row = async () => ((await sql`SELECT state, speakers_json, segments_json, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = 'bw_emo_once'`) as Array<{ state: string; speakers_json: Array<Record<string, unknown>>; segments_json: unknown[]; segments_run_id: string | null; last_run_id: string }>)[0]!;
+    const seeded = await row();
+
+    const { insertJob, claimJobs } = await import("@/lib/jobs/store");
+    const { runOneStep } = await import("@/lib/jobs/runner");
+    const diarize = async (jobId: string) => {
+      await insertJob({ id: jobId, kind: "diarize_window", args: { window_id: "bw_emo_once" }, actor: "mcp:test" });
+      for (let i = 0; i < 5; i += 1) {
+        const c = (await claimJobs(3, 240_000, `r_${jobId}_${i}`)).find((x) => x.id === jobId);
+        if (!c) break;
+        await runOneStep(c, `r_${jobId}_${i}`);
+      }
+      const j = (await sql`SELECT status, error, result FROM scribe_job WHERE id = ${jobId}`) as Array<{ status: string; error: string | null; result: Record<string, unknown> | null }>;
+      expect(j[0]!.status, `${jobId} must succeed; error=${j[0]!.error}`).toBe("done");
+      return j[0]!.result ?? {};
+    };
+
+    // 1. R13 — a NO_SPEAKERS run on the stale window: refused. The ok row keeps the ok run's state AND content.
+    SVC.fail = false; SVC.noSpeakers = true;
+    const ns = await diarize("job_once_ns");
+    SVC.noSpeakers = false;
+    expect(ns.stale_segments_repaired, "R13: a no_speakers run is never adopted").toBeUndefined();
+    const afterNs = await row();
+    expect(afterNs.last_run_id, "the no_speakers run did run").not.toBe(seeded.last_run_id);
+    expect({ state: afterNs.state, speakers_json: afterNs.speakers_json, segments_json: afterNs.segments_json, segments_run_id: afterNs.segments_run_id },
+      "R13: state and content still describe one run").toEqual({ state: "ok", speakers_json: seeded.speakers_json, segments_json: seeded.segments_json, segments_run_id: "run_older_bw_emo_once" });
+
+    // 2. The FIRST ok run after the mark repairs it — speakers included (R14): the service's two speakers, nested as the writer stores them.
+    const ok1 = await diarize("job_once_ok1");
+    expect(ok1).toMatchObject({ stale_segments_repaired: true });
+    const afterOk1 = await row();
+    expect(afterOk1.segments_run_id).toBe(afterOk1.last_run_id);
+    expect(afterOk1.speakers_json.map((sp) => sp.idx), "R14: speakers_json is the repairing run's").toEqual([0, 1]);
+    expect(afterOk1.speakers_json[0]).toMatchObject({ clinician_id: "doc_fake0001" });
+    expect(afterOk1.segments_json).toHaveLength(2);
+
+    // 3. R15 — a SECOND diarize job between the SAME stale mark and any rescore: the mark is spent; the keep-rule governs.
+    expect((await markRow()).state, "no rescore in between").toBe("diarize_stale");
+    const ok2 = await diarize("job_once_ok2");
+    expect(ok2.stale_segments_repaired, "R15: one stale mark permits one repair").toBeUndefined();
+    const afterOk2 = await row();
+    expect(afterOk2.last_run_id).not.toBe(afterOk1.last_run_id);
+    expect(afterOk2.segments_run_id, "R15: the second run's content is kept out, as for any ok window").toBe(afterOk1.last_run_id);
   }, 300_000);
 
   it("LOADED IS REPORTED, NOT ASSUMED: a /health that does not say records 'unknown'", async () => {
