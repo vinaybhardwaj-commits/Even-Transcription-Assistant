@@ -90,6 +90,15 @@ beforeEach(() => {
   fixture = emptyFixture();
 });
 
+/**
+ * A session's/room_day's own started_at/ended_at is a MEASURED timestamp, not a grid mark - it sits
+ * a few seconds off the SLOT_MS boundary bench_window.start_ms always lands on. 9_308 ms matches the
+ * drift measured live on OPD 4 - Ortho, 2026-09-18 (build report, DEFECT 1). Every fixture below that
+ * feeds a session/room_day timestamp into getRoomDayTape uses this drift rather than a round number,
+ * so the anchoring bug these tests exist to catch cannot hide behind a coincidentally-aligned fixture.
+ */
+const DRIFT_MS = 9_308;
+
 // ---------------------------------------------------------------------------
 // Fixtures for the pure assembleTape tests
 // ---------------------------------------------------------------------------
@@ -170,6 +179,55 @@ describe("1 - no_recording fills the holes; the slot count is the span over 15 m
     expect(tape.totals.slots).toBe(3);
     expect(tape.slots.map((s) => s.kind)).toEqual(["window", "no_recording", "window"]);
     expect(buildSlotGrid(0, SLOT_MS * 3)).toHaveLength(3);
+  });
+});
+
+// ===========================================================================
+// 1b - REGRESSION: the grid is anchored to the 15-minute mark, never to a session's own timestamp
+// ===========================================================================
+
+describe("1b - a session/room_day timestamp a few seconds off the grid does not shift or drop a window", () => {
+  it("three consecutive windows, a drifted started_at/ended_at: every window is placed, none is no_recording, no trailing slot", async () => {
+    const t0 = Date.parse("2026-01-01T09:00:00.000Z"); // an exact SLOT_MS boundary, like every bench_window.start_ms
+    fixture.room = [{ id: "room_1", slug: "s", name: "N" }];
+    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: null }];
+    fixture.bench_session = [
+      { id: "bs_1", started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: new Date(t0 + SLOT_MS * 3 + DRIFT_MS).toISOString() },
+    ];
+    const mkWindow = (id: string, startMs: number) => ({
+      id,
+      session_id: "bs_1",
+      room_day_id: "rd_1",
+      start_ms: startMs,
+      end_ms: startMs + SLOT_MS,
+      source_mic: "primary",
+      grid_aligned: true,
+      state: "transcribed",
+      closed_at: null,
+      auto_drain_refused_at: null,
+      auto_drain_refused_reason: null,
+    });
+    fixture.bench_window = [mkWindow("bw_0", t0), mkWindow("bw_1", t0 + SLOT_MS), mkWindow("bw_2", t0 + SLOT_MS * 2)];
+
+    const tape = await getRoomDayTape("room_1", "2026-01-01", { now: () => t0 + SLOT_MS * 10, env: {} });
+    expect(tape).not.toBeNull();
+    expect(tape!.totals.windows).toBe(3);
+
+    // The FIRST window is placed, and not reported as no_recording (the day's-first-window-dropped bug).
+    const firstSlot = tape!.slots[0]!;
+    expect(firstSlot.kind).toBe("window");
+    expect(firstSlot.kind === "window" ? firstSlot.window.id : null).toBe("bw_0");
+
+    // Every window lands in the slot whose label matches ITS OWN start time - not shifted by one.
+    const expectedSlotStart: Record<string, number> = { bw_0: t0, bw_1: t0 + SLOT_MS, bw_2: t0 + SLOT_MS * 2 };
+    for (const slot of tape!.slots) {
+      if (slot.kind !== "window") continue;
+      expect(slot.start_ms).toBe(expectedSlotStart[slot.window.id]);
+    }
+
+    // No no_recording slot anywhere, and no phantom trailing slot: exactly the 3 real slots.
+    expect(tape!.slots.every((s) => s.kind === "window")).toBe(true);
+    expect(tape!.slots).toHaveLength(3);
   });
 });
 
@@ -256,8 +314,10 @@ describe("5 - a NULL room_day_id window survives via the bench_session + IST-dat
   it("the orphaned window is placed in its slot on the tape", async () => {
     const dayStart = Date.parse("2026-01-01T00:00:00.000Z");
     fixture.room = [{ id: "room_1", slug: "opd-4-ortho", name: "OPD 4 - Ortho" }];
-    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: "2026-01-01T00:00:00.000Z", ended_at: null }];
-    fixture.bench_session = [{ id: "bs_1", started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T01:00:00.000Z" }];
+    // started_at is a few seconds AFTER the fallback window's own start_ms (dayStart + SLOT_MS) - the
+    // production shape (build report, DEFECT 1), not the slot boundary itself.
+    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: new Date(dayStart + SLOT_MS + DRIFT_MS).toISOString(), ended_at: null }];
+    fixture.bench_session = [{ id: "bs_1", started_at: new Date(dayStart + SLOT_MS + DRIFT_MS).toISOString(), ended_at: "2026-01-01T01:00:00.000Z" }];
     fixture.bench_window = [
       {
         id: "bw_orphan",
@@ -291,8 +351,9 @@ describe("6 - the emotion gate is checked BEFORE the query", () => {
   it("gate off => every turn.emotion is null AND no call ever names room_span_emotion", async () => {
     const t0 = Date.parse("2026-01-01T00:00:00.000Z");
     fixture.room = [{ id: "room_1", slug: "s", name: "N" }];
-    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:15:00.000Z" }];
-    fixture.bench_session = [{ id: "bs_1", started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:15:00.000Z" }];
+    // started_at drifts past t0 (the window's own start_ms) by DRIFT_MS - see test 5's comment.
+    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: "2026-01-01T00:15:00.000Z" }];
+    fixture.bench_session = [{ id: "bs_1", started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: "2026-01-01T00:15:00.000Z" }];
     fixture.bench_window = [
       {
         id: "bw_1",
@@ -346,8 +407,9 @@ describe("7 - gate true joins emotion to the right turn through source_refs", ()
   it("a run over two source_refs reaches both turns; a row with no source_refs matches none", async () => {
     const t0 = Date.parse("2026-01-01T00:00:00.000Z");
     fixture.room = [{ id: "room_1", slug: "s", name: "N" }];
-    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:15:00.000Z" }];
-    fixture.bench_session = [{ id: "bs_1", started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:15:00.000Z" }];
+    // started_at drifts past t0 (the window's own start_ms) by DRIFT_MS - see test 5's comment.
+    fixture.room_day = [{ id: "rd_1", doctor_id: null, started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: "2026-01-01T00:15:00.000Z" }];
+    fixture.bench_session = [{ id: "bs_1", started_at: new Date(t0 + DRIFT_MS).toISOString(), ended_at: "2026-01-01T00:15:00.000Z" }];
     fixture.bench_window = [
       {
         id: "bw_1",
@@ -486,6 +548,48 @@ describe("9 - transcript_english/detected_language NULL still yields a transcrip
     expect(transcript?.text).toBe("namaste doctor");
     expect(transcript?.language).toBe("hi");
     expect(transcript?.audio_seconds).toBe(900);
+  });
+});
+
+// ===========================================================================
+// time_basis - a turn's timing carries its own provenance (build report DEFECT 2)
+// ===========================================================================
+
+describe("time_basis - a turn's start_ms/end_ms says where it came from", () => {
+  it("a joined cue => basis is 'cue'", () => {
+    const tape = assembleTape(baseInput({ windows: [win({ state: "transcribed" })], turnRows: [turn({})] }));
+    const slot = tape.slots[0]!;
+    const t = slot.kind === "window" ? slot.window.turns[0] : undefined;
+    expect(t?.time_basis).toBe("cue");
+  });
+
+  it("no cue, but a decodable source_ref => basis is 'source_ref'", () => {
+    const tape = assembleTape(
+      baseInput({
+        windows: [win({ state: "transcribed" })],
+        turnRows: [turn({ cue_start_ms: null, cue_end_ms: null, source_ref: "bs_1|5000|6000|0" })],
+      }),
+    );
+    const slot = tape.slots[0]!;
+    const t = slot.kind === "window" ? slot.window.turns[0] : undefined;
+    expect(t?.time_basis).toBe("source_ref");
+    expect(t?.start_ms).toBe(5000);
+    expect(t?.end_ms).toBe(6000);
+  });
+
+  it("BOTH sources missing => falls back to the window's own bounds, and SAYS SO (never silently)", () => {
+    const tape = assembleTape(
+      baseInput({
+        windows: [win({ state: "transcribed" })], // default win(): start_ms 0, end_ms SLOT_MS
+        turnRows: [turn({ cue_start_ms: null, cue_end_ms: null, source_ref: "not-shaped" })],
+      }),
+    );
+    const slot = tape.slots[0]!;
+    expect(slot.kind).toBe("window");
+    const t = slot.kind === "window" ? slot.window.turns[0] : undefined;
+    expect(t?.time_basis).toBe("window_start");
+    expect(t?.start_ms).toBe(0);
+    expect(t?.end_ms).toBe(SLOT_MS);
   });
 });
 

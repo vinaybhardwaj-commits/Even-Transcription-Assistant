@@ -68,6 +68,12 @@ function TurnRow({ turn, surfaceEnabled }: { turn: TapeTurn; surfaceEnabled: boo
         )}
       </p>
 
+      {turn.time_basis === "window_start" ? (
+        <p className="text-[10px] mt-1 uppercase tracking-wide text-red-600">
+          time estimated - no cue or source_ref timing joined; the window's own bounds are shown instead
+        </p>
+      ) : null}
+
       {/* Emotion - visible per V's ruling, always carrying its markers. */}
       <p className="text-[11px] mt-1 text-even-ink-500">
         {!surfaceEnabled ? (

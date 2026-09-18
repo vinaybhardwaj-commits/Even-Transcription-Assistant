@@ -55,6 +55,12 @@ export type TapeTurn = {
   /** ABSOLUTE epoch ms - see the file header for how these are recovered. */
   start_ms: number;
   end_ms: number;
+  /**
+   * Where start_ms/end_ms came from, in the priority order the file header describes. "window_start"
+   * means BOTH the cue join and the source_ref decode failed and the window's own bounds were used as
+   * a last resort - this is an ESTIMATE, not a measurement, and must render as one (D-11).
+   */
+  time_basis: "cue" | "source_ref" | "window_start";
   text: string | null;
   voice: {
     clinician_id: string | null;
@@ -321,8 +327,25 @@ function buildTapeTurn(
   spanEmotionRows: RawSpanEmotionRow[],
 ): TapeTurn {
   const parsed = parseTurnSourceRef(t.source_ref);
-  const start_ms = t.cue_start_ms ?? parsed?.start_ms ?? w.start_ms;
-  const end_ms = t.cue_end_ms ?? parsed?.end_ms ?? w.end_ms;
+  let time_basis: TapeTurn["time_basis"];
+  let start_ms: number;
+  let end_ms: number;
+  if (t.cue_start_ms != null && t.cue_end_ms != null) {
+    time_basis = "cue";
+    start_ms = Number(t.cue_start_ms);
+    end_ms = Number(t.cue_end_ms);
+  } else if (parsed) {
+    time_basis = "source_ref";
+    start_ms = parsed.start_ms;
+    end_ms = parsed.end_ms;
+  } else {
+    // Both sources failed. w.start_ms/w.end_ms is a DERIVED ESTIMATE, not a measured value - see
+    // time_basis on TapeTurn, and render it as the estimate it is (D-11). Unreachable on today's
+    // data (every turn joins a cue), covered by test case "both timing sources missing".
+    time_basis = "window_start";
+    start_ms = w.start_ms;
+    end_ms = w.end_ms;
+  }
 
   let turnEmotion: TapeTurn["emotion"] = null;
   if (emotion.surface_enabled) {
@@ -352,6 +375,7 @@ function buildTapeTurn(
     cluster_id: t.cluster_id,
     start_ms,
     end_ms,
+    time_basis,
     text: t.cue_text,
     voice: {
       clinician_id: t.clinician_id,
@@ -410,10 +434,16 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
     if (b.source_mic === "primary") return 1;
     return a.source_mic.localeCompare(b.source_mic);
   });
+  // w.start_ms is ALREADY an exact SLOT_MS multiple (bench_window is written on the 15-min grid -
+  // see the build report's DEFECT 1). Bin on it directly rather than re-deriving an offset from
+  // spanStartMs: spanStartMs itself is only a session/room_day timestamp, seconds off the grid, and
+  // computing an offset from it is exactly what dropped the day's first window and shifted every
+  // other one by a slot. The grid this window's slot key must match is built from a FLOORED
+  // spanStartMs (getRoomDayTape floors it before calling in), so w.start_ms lines up with a real
+  // grid slot's start_ms whenever spanStartMs was floored correctly upstream.
   const windowBySlotStart = new Map<number, RawBenchWindowRow>();
   for (const w of sortedWindows) {
-    const slotStart = spanStartMs + Math.floor((w.start_ms - spanStartMs) / SLOT_MS) * SLOT_MS;
-    if (!windowBySlotStart.has(slotStart)) windowBySlotStart.set(slotStart, w);
+    if (!windowBySlotStart.has(w.start_ms)) windowBySlotStart.set(w.start_ms, w);
   }
 
   const grid = buildSlotGrid(spanStartMs, spanEndMs);
@@ -556,10 +586,28 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
 
   if (!roomDay && sessionRows.length === 0) return null;
 
-  const spanStartMs = sessionRows.length ? Math.min(...sessionRows.map((s) => msOf(s.started_at))) : msOf(roomDay!.started_at ?? new Date(0).toISOString());
-  const spanEndMs = sessionRows.length
-    ? Math.max(...sessionRows.map((s) => Math.min(s.ended_at ? msOf(s.ended_at) : nowMs, nowMs)))
-    : Math.min(roomDay!.ended_at ? msOf(roomDay!.ended_at) : nowMs, nowMs);
+  // DEFECT 1 (build report): bench_window.start_ms sits on an exact 15-min grid; a session's or
+  // room_day's own started_at/ended_at does not (started_at is measured seconds after the window it
+  // opens for — 74/74 real room-days have started_at > min(window.start_ms)). Anchoring the slot grid
+  // to the RAW timestamp shifted every slot by one and silently dropped the day's first window. Floor
+  // spanStartMs onto the SLOT_MS grid before it goes anywhere near buildSlotGrid — flooring is safe
+  // here because IST is UTC+5:30, itself an exact 22*SLOT_MS offset, so a UTC-epoch floor lands on the
+  // same wall-clock 15-min mark in IST too.
+  const rawSpanStartMs = sessionRows.length ? Math.min(...sessionRows.map((s) => msOf(s.started_at))) : msOf(roomDay!.started_at ?? new Date(0).toISOString());
+  const spanStartMs = Math.floor(rawSpanStartMs / SLOT_MS) * SLOT_MS;
+
+  // The end needs the SAME floor for a room-day that has genuinely ended — an ended_at timestamp is
+  // stamped a few seconds AFTER the last window's own close boundary, and flooring it lands exactly on
+  // that boundary, which is what stops the phantom empty slot the un-floored value used to mint past
+  // the real last window. But a room-day still being recorded has no ended_at: it falls back to nowMs,
+  // which sits somewhere INSIDE the currently-open window's own slot, not past it — flooring THAT would
+  // exclude the live window from the grid entirely (its own start_ms would equal the floored spanEndMs,
+  // and buildSlotGrid's `t < spanEndMs` is strict). So nowMs is rounded up to the boundary AFTER it,
+  // which keeps the in-progress slot in view without reopening the phantom-trailing-slot the ended case
+  // just fixed.
+  const endOfSpan = (endedAtIso: string | null): number =>
+    endedAtIso ? Math.floor(Math.min(msOf(endedAtIso), nowMs) / SLOT_MS) * SLOT_MS : Math.ceil(nowMs / SLOT_MS) * SLOT_MS;
+  const spanEndMs = sessionRows.length ? Math.max(...sessionRows.map((s) => endOfSpan(s.ended_at))) : endOfSpan(roomDay!.ended_at);
 
   // Section 5.4 - a window belongs to this room-day by room_day_id, OR (when room_day_id is NULL) by its
   // OWN start_ms's IST date. The 8-window class this rescues.
