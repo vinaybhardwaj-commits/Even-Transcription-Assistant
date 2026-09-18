@@ -103,6 +103,16 @@ type DiarizeStoreOutcome =
 
 const LOG_DIARIZE_FAILURE_NOT_RECORDED = "[process] DIARIZE FAILURE NOT RECORDED";
 const LOG_CONVERSATION_NOT_RECORDED = "[process] SPEAKER-TAGGED CONVERSATION NOT RECORDED";
+/**
+ * ETA-OVERLAPPING-WRITERS phase 1, C1 — the distinct marker for a write that lost its fence.
+ * `processing_step_at` IS the fencing token (RETURNING'd off the claim, unique per successful
+ * claim — a guarded UPDATE, microsecond timestamptz; lib/diarize-gate.ts:143-175 runs the same
+ * holder-fenced idiom on this handle already). A write whose predicate carries
+ * `AND processing_step_at = $mine` and returns 0 rows lost the claim between taking it and this
+ * statement running: not retried, not thrown, logged here so it is distinguishable from a
+ * genuine DB error (which keeps its own, existing log line).
+ */
+const LOG_LOST_CLAIM = "[process:fence] LOST CLAIM";
 
 function isAbortError(e: unknown): boolean {
   if (!e || typeof e !== "object") return false;
@@ -217,7 +227,20 @@ export async function POST(
   // Set true when a long-file chunked job is still running, so the step machine
   // re-polls on the next tick instead of finalizing the translate step.
   let jobPending = false;
-  const translateIfNeeded = async (emit?: (o: unknown) => void): Promise<void> => {
+
+  // ETA-OVERLAPPING-WRITERS phase 1, C1 — every protected write below carries the literal
+  // predicate `AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)`
+  // inline (Neon's HTTP tag function does not compose nested sql fragments, so the predicate is
+  // repeated at each call site rather than built once). `myClaim` is `null` for a caller that
+  // took no claim (the non-streaming fallthrough, out of scope for this phase): the predicate
+  // then degrades to TRUE and nothing changes for it. Both step mode (C1) and the streaming
+  // branch (C2) pass their OWN `processing_step_at`, so the same shared helpers (translateIfNeeded,
+  // guardTranscripts, assessAndFlag, diarizeStore) are fenced correctly under whichever claim is
+  // actually held, without knowing which caller they are in. `RETURNING id` on each is what makes
+  // "0 rows" observable; a genuine DB error keeps its own existing catch and log line.
+  const logLostClaim = (step: string, myClaim: string | null) =>
+    console.warn(`${LOG_LOST_CLAIM} enc=${id} step=${step} myClaim=${myClaim ?? "none"} — write skipped, not retried`);
+  const translateIfNeeded = async (myClaim: string | null, emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     if (!row.audio_object_key) return;
     if (row.translated) return; // resumable: batch translate already done on a prior invocation
@@ -248,7 +271,11 @@ export async function POST(
     const misdetectedEnglish = langNonEn && !hasIndic && !origHasIndic && origRaw.length < 20 && workLooksEnglish;
     if (misdetectedEnglish) {
       emit?.({ stage: "progress", msg: `Language re-checked: tagged ${row.detected_language} but no native script found \u2014 treating as English` });
-      try { await sql`UPDATE encounter SET detected_language = 'en-IN' WHERE id = ${id}`; row.detected_language = "en-IN"; } catch { /* best-effort */ }
+      try {
+        const w = (await sql`UPDATE encounter SET detected_language = 'en-IN' WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+        if (myClaim !== null && w.length === 0) logLostClaim("translate:misdetection-guard", myClaim);
+        row.detected_language = "en-IN";
+      } catch { /* best-effort */ }
       console.warn(`[process] misdetection-guard enc=${id}: tagged Indic, no native script, work looks English -> English`);
     }
     if (((!langNonEn && !hasIndic) || misdetectedEnglish) && !(rescue && ETA_ROUTER_ON())) {
@@ -271,7 +298,8 @@ export async function POST(
           const cur = (row.transcript_raw ?? "").trim();
           if (wr.transcript.length > cur.length * 1.1 || cur.length < 40) {
             row.transcript_raw = wr.transcript;
-            await sql`UPDATE encounter SET transcript_raw = ${wr.transcript} WHERE id = ${id}`;
+            const w = (await sql`UPDATE encounter SET transcript_raw = ${wr.transcript} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+            if (myClaim !== null && w.length === 0) { logLostClaim("translate:whisper-en-refine", myClaim); return; }
             emit?.({ stage: "progress", msg: `English transcript refined (${wr.transcript.length} chars)` });
           }
         }
@@ -320,7 +348,8 @@ export async function POST(
               if (sub.ok && sub.job_id) {
                 jobId = sub.job_id;
                 row.router_job_id = jobId;
-                await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => {});
+                const wSubmit = await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`.catch(() => [] as Array<{ id: string }>);
+                if (myClaim !== null && wSubmit.length === 0) { logLostClaim("translate:chunked-submit", myClaim); return; }
                 emit?.({ stage: "progress", msg: "Long recording — chunked transcription job submitted…" });
               } else {
                 emit?.({ stage: "progress", msg: `Chunked job submit failed (${sub.error ?? "?"}); falling back to Whisper` });
@@ -342,13 +371,19 @@ export async function POST(
                     row.transcript_raw = eng; row.translated = true;
                     if (nat) row.transcript_original = nat;
                     if (st.dominant_language) row.detected_language = st.dominant_language;
-                    await sql`UPDATE encounter
+                    // THE WRITE THE SURVEY WALKS THROUGH (§4b): the chunked job's completion,
+                    // landing late over a newer holder's claim, is exactly how the streaming
+                    // branch's placeholder note used to survive beside the real transcript.
+                    const wDone = await sql`UPDATE encounter
                                 SET transcript_raw = ${eng}, transcript_original = ${nat || row.transcript_original || null},
                                     translated = true, translation_engine = 'eta-router-chunked',
                                     detected_language = ${st.dominant_language ?? row.detected_language},
                                     language_timeline = ${JSON.stringify(st.language_timeline ?? null)}::jsonb,
                                     router_job_id = NULL
-                              WHERE id = ${id}`.catch(() => {});
+                              WHERE id = ${id}
+                                AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
+                              RETURNING id`.catch(() => [] as Array<{ id: string }>);
+                    if (myClaim !== null && wDone.length === 0) { logLostClaim("translate:chunked-done", myClaim); return; }
                     row.router_job_id = null;
                   }
                   emit?.({ stage: "progress", msg: `Chunked transcript ready (${eng.length} chars, ${st.dominant_language ?? "?"})` });
@@ -356,7 +391,8 @@ export async function POST(
                   break;
                 }
                 if (!st.ok || st.state === "failed") {
-                  await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => {});
+                  const wClear = await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`.catch(() => [] as Array<{ id: string }>);
+                  if (myClaim !== null && wClear.length === 0) { logLostClaim("translate:chunked-failed", myClaim); return; }
                   row.router_job_id = null;
                   emit?.({ stage: "progress", msg: `Chunked job ${st.state ?? "error"} (${st.error ?? "?"}); falling back to Whisper` });
                   break;
@@ -382,7 +418,8 @@ export async function POST(
               fuseCands.push({ engine: "whisper-en", english: wt, native: null, language: "en" });
               row.transcript_raw = wt;
               row.translated = true;
-              await sql`UPDATE encounter SET transcript_raw = ${wt}, translated = true, translation_engine = 'whisper-en' WHERE id = ${id}`;
+              const wWhisperLong = (await sql`UPDATE encounter SET transcript_raw = ${wt}, translated = true, translation_engine = 'whisper-en' WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+              if (myClaim !== null && wWhisperLong.length === 0) { logLostClaim("translate:whisper-long", myClaim); return; }
               emit?.({ stage: "progress", msg: `Whisper transcript ready (${wt.length} chars)` });
             } else {
               emit?.({ stage: "progress", msg: `Whisper long-file unavailable (${wlong.ok ? "empty" : wlong.error})` });
@@ -403,14 +440,17 @@ export async function POST(
             row.translated = true;
             if (native) row.transcript_original = native;
             if (rr.dominant_language) row.detected_language = rr.dominant_language;
-            await sql`UPDATE encounter
+            const wRouter = (await sql`UPDATE encounter
                         SET transcript_raw = ${eng},
                             transcript_original = ${native || row.transcript_original || null},
                             translated = true,
                             translation_engine = 'eta-router',
                             detected_language = ${rr.dominant_language ?? row.detected_language},
                             language_timeline = ${JSON.stringify(rr.language_timeline ?? null)}::jsonb
-                      WHERE id = ${id}`;
+                      WHERE id = ${id}
+                        AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
+                      RETURNING id`) as Array<{ id: string }>;
+            if (myClaim !== null && wRouter.length === 0) { logLostClaim("translate:eta-router", myClaim); return; }
             emit?.({ stage: "progress", msg: `eta-router transcript ready (${eng.length} chars, ${rr.dominant_language ?? "?"})` });
             fuseCands.push({ engine: "eta-router", english: eng, native: native || null, language: rr.dominant_language ?? null });
             if (native) fuseNative = native;
@@ -433,7 +473,8 @@ export async function POST(
       if (bt.ok && bt.transcript.trim().length > 0) {
         row.transcript_raw = bt.transcript;
         row.translated = true;
-        await sql`UPDATE encounter SET transcript_raw = ${bt.transcript}, translated = true WHERE id = ${id}`;
+        const wSarvam = (await sql`UPDATE encounter SET transcript_raw = ${bt.transcript}, translated = true WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+        if (myClaim !== null && wSarvam.length === 0) { logLostClaim("translate:sarvam", myClaim); return; }
         emit?.({ stage: "progress", msg: `Full-conversation translation ready (${bt.transcript.length} chars)` });
         fuseCands.push({ engine: "sarvam", english: bt.transcript.trim(), native: null, language: row.detected_language });
         // Optional submit-time parallel pick-best: run IndicConformer on the SAME
@@ -447,7 +488,8 @@ export async function POST(
             });
             if (assist.used === "indicconformer" && assist.english.trim().length > 0 && assist.english !== row.transcript_raw) {
               row.transcript_raw = assist.english;
-              await sql`UPDATE encounter SET transcript_raw = ${assist.english} WHERE id = ${id}`;
+              const wAssist = (await sql`UPDATE encounter SET transcript_raw = ${assist.english} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+              if (myClaim !== null && wAssist.length === 0) { logLostClaim("translate:indic-note-assist", myClaim); return; }
             }
           } catch (e) {
             console.warn(`[process] indic note-assist failed enc=${id}: ${String(e).slice(0, 100)}`);
@@ -475,13 +517,16 @@ export async function POST(
               row.translated = true;
               if (fuseNative) row.transcript_original = fuseNative;
               if (fuseLang) row.detected_language = fuseLang;
-              await sql`UPDATE encounter
+              const wFused = (await sql`UPDATE encounter
                           SET transcript_raw = ${fused.english.trim()},
                               transcript_original = ${fuseNative || row.transcript_original || null},
                               translated = true,
                               translation_engine = 'fusion',
                               detected_language = ${fuseLang ?? row.detected_language}
-                        WHERE id = ${id}`;
+                        WHERE id = ${id}
+                          AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
+                        RETURNING id`) as Array<{ id: string }>;
+              if (myClaim !== null && wFused.length === 0) { logLostClaim("translate:fusion", myClaim); return; }
               emit?.({ stage: "progress", msg: `Fused transcript ready (${fused.english.trim().length} chars from ${fused.engines} engines)` });
             }
           } catch (e) {
@@ -499,11 +544,12 @@ export async function POST(
   // Patient-safety guardrail: assess the FINAL transcript and flag empty /
   // too-short-for-duration / degraded transcriptions so the UI warns the clinician
   // instead of silently presenting an incomplete note (the Poornima failure class).
-  const assessAndFlag = async (emit?: (o: unknown) => void): Promise<void> => {
+  const assessAndFlag = async (myClaim: string | null, emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     const q = assessTranscriptQuality(row.transcript_raw, row.duration_seconds);
     try {
-      await sql`UPDATE encounter SET transcript_flag = ${q.flag}, transcript_flag_reason = ${q.reason} WHERE id = ${id}`;
+      const w = (await sql`UPDATE encounter SET transcript_flag = ${q.flag}, transcript_flag_reason = ${q.reason} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+      if (myClaim !== null && w.length === 0) logLostClaim("assess-flag", myClaim);
     } catch { /* best-effort: a flag-write must never block the pipeline */ }
     if (q.flag) emit?.({ stage: "progress", msg: `\u26a0 Transcript flagged (${q.flag}): ${q.reason}` });
   };
@@ -512,7 +558,7 @@ export async function POST(
   // hallucination) from the canonical transcripts BEFORE they seed the note +
   // the displayed boxes. Leading-anchored, bounded, length-floored (see
   // lib/transcript-guard.ts). Soft: never blocks the encounter.
-  const guardTranscripts = async (emit?: (o: unknown) => void): Promise<void> => {
+  const guardTranscripts = async (myClaim: string | null, emit?: (o: unknown) => void): Promise<void> => {
     if (!row) return;
     const beforeEn = row.transcript_raw ?? "";
     const beforeOrig = row.transcript_original ?? "";
@@ -526,13 +572,15 @@ export async function POST(
     if (enChanged) row.transcript_raw = cleanedEn;
     if (origChanged) row.transcript_original = cleanedOrig;
     try {
+      let w: Array<{ id: string }>;
       if (enChanged && origChanged) {
-        await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw}, transcript_original = ${row.transcript_original} WHERE id = ${id}`;
+        w = (await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw}, transcript_original = ${row.transcript_original} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
       } else if (enChanged) {
-        await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw} WHERE id = ${id}`;
+        w = (await sql`UPDATE encounter SET transcript_raw = ${row.transcript_raw} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
       } else {
-        await sql`UPDATE encounter SET transcript_original = ${row.transcript_original} WHERE id = ${id}`;
+        w = (await sql`UPDATE encounter SET transcript_original = ${row.transcript_original} WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
       }
+      if (myClaim !== null && w.length === 0) { logLostClaim("guard-transcripts", myClaim); return; }
       emit?.({ stage: "progress", msg: "Removed non-clinical lead-in from transcript" });
     } catch (e) {
       console.warn(`[process] transcript guard persist failed enc=${id}: ${e instanceof Error ? e.message : String(e)}`);
@@ -553,20 +601,31 @@ export async function POST(
   // contention. Leaving the status at 'running' and not progressing hands it to the step
   // machine's 5-minute lock TTL and bounded retry, which is the backoff that already exists.
   // `failure_not_recorded` (E31 B2) is the other not-progressed case: see the outer catch.
-  const diarizeStore = async (emit?: (o: unknown) => void): Promise<DiarizeStoreOutcome> => {
+  const diarizeStore = async (myClaim: string | null, emit?: (o: unknown) => void): Promise<DiarizeStoreOutcome> => {
     if (!row) return { kind: "recorded" };
     if (row.diarize_status === 'complete') { emit?.({ stage: "progress", msg: "Diarization already complete" }); return { kind: "recorded" }; }
     if (!row.audio_object_key) {
-      try { await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id}`; } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
+      try {
+        const w = (await sql`UPDATE encounter SET diarize_status = 'skipped' WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+        if (myClaim !== null && w.length === 0) logLostClaim("diarize:skipped", myClaim);
+      } catch { /* intentional: best-effort side-write/parse; main flow continues */ }
       return { kind: "recorded" };
     }
     emit?.({ stage: "progress", msg: "Identifying speakers (diarization)\u2026" });
     try {
-      await sql`UPDATE encounter SET diarize_status = 'running', diarize_started_at = NOW() WHERE id = ${id}`;
+      const wRunning = (await sql`UPDATE encounter SET diarize_status = 'running', diarize_started_at = NOW() WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+      if (myClaim !== null && wRunning.length === 0) {
+        logLostClaim("diarize:running", myClaim);
+        return { kind: "failure_not_recorded" }; // reuses the existing "ran but did not land" outcome
+      }
       const head = await headObject(row.audio_object_key);
       const bytes = await getObjectBytes(row.audio_object_key);
       if (!bytes) {
-        await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = 'audio_missing' WHERE id = ${id}`;
+        const wMissing = (await sql`UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = 'audio_missing' WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz) RETURNING id`) as Array<{ id: string }>;
+        if (myClaim !== null && wMissing.length === 0) {
+          logLostClaim("diarize:audio-missing", myClaim);
+          return { kind: "failure_not_recorded" };
+        }
         emit?.({ stage: "progress", msg: "Diarization skipped (audio unavailable)" });
         return { kind: "recorded" };
       }
@@ -599,7 +658,7 @@ export async function POST(
         queueWaitMs,
       });
       if (d.ok) {
-        await sql`
+        const wDiarize = (await sql`
           UPDATE encounter
              SET speakers             = ${JSON.stringify(d.result.speakers)}::jsonb,
                  transcript_segments  = ${JSON.stringify(d.result.transcript_segments)}::jsonb,
@@ -610,7 +669,13 @@ export async function POST(
                  diarize_error        = NULL,
                  diarize_timing       = ${JSON.stringify(d.timing)}::jsonb
            WHERE id = ${id}
-        `;
+             AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
+          RETURNING id
+        `) as Array<{ id: string }>;
+        if (myClaim !== null && wDiarize.length === 0) {
+          logLostClaim("diarize:result", myClaim);
+          return { kind: "failure_not_recorded" };
+        }
         // Passive voiceprint capture (Voiceprint Retention Sprint B): if the
         // Mini returned this clinician's speaker embedding and the match is
         // confident, retain it as a passive sample (audio = this encounter's
@@ -674,9 +739,13 @@ export async function POST(
                  SET tagged_transcript = ${JSON.stringify(finalTagged)}::jsonb,
                      speakers          = CASE WHEN ${changed}::boolean THEN ${JSON.stringify(refined)}::jsonb ELSE speakers END
                WHERE id = ${id}
+                 AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
               RETURNING id
             `) as Array<{ id: string }>;
-            if (tagRows.length === 0) throw new Error("tagged_transcript write matched no row");
+            if (tagRows.length === 0) {
+              if (myClaim !== null) logLostClaim("diarize:tagged-transcript", myClaim);
+              throw new Error("tagged_transcript write matched no row");
+            }
             emit?.({ stage: "progress", msg: `Speaker-tagged conversation ready (${finalTagged.length} turn(s)${changed ? ", roles refined" : ""})` });
           }
         } catch (te) {
@@ -695,10 +764,13 @@ export async function POST(
             const marked = (await sql`
               UPDATE encounter SET diarize_error = ${degradedCode}
                WHERE id = ${id} AND diarize_status = 'complete'
+                 AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
               RETURNING id
             `) as Array<{ id: string }>;
-            if (marked.length === 0) console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED ${degradedCode} (no complete row) enc=${id}`);
-            else console.warn(`${LOG_CONVERSATION_NOT_RECORDED} — marked ${degradedCode} enc=${id}`);
+            if (marked.length === 0) {
+              if (myClaim !== null) logLostClaim("diarize:degraded-code", myClaim);
+              console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED ${degradedCode} (no complete row) enc=${id}`);
+            } else console.warn(`${LOG_CONVERSATION_NOT_RECORDED} — marked ${degradedCode} enc=${id}`);
           } catch (me) {
             console.error(`${LOG_CONVERSATION_NOT_RECORDED} AND NOT MARKED ${degradedCode} enc=${id}: ${me instanceof Error ? me.message : String(me)}`);
           }
@@ -707,17 +779,23 @@ export async function POST(
       } else if (d.retryable) {
         // Never reached the service (no slot / caller aborted). Record the wait so the
         // contention is visible, leave diarize_status alone, and let the retry handle it.
-        await sql`UPDATE encounter SET diarize_timing = ${JSON.stringify(d.timing)}::jsonb WHERE id = ${id}`
+        await sql`UPDATE encounter SET diarize_timing = ${JSON.stringify(d.timing)}::jsonb WHERE id = ${id} AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)`
           .catch(() => { /* intentional: best-effort side-write; main flow continues */ });
         console.warn(`[process] diarize not dispatched enc=${id}: ${d.error} — will retry`);
         emit?.({ stage: "progress", msg: `Diarization queued behind another call (${d.timing.queue_wait_ms}ms) — retrying` });
         return { kind: "not_dispatched" };
       } else {
-        await sql`UPDATE encounter
+        const wFailed = (await sql`UPDATE encounter
                      SET diarize_status = 'failed', diarize_completed_at = NOW(),
                          diarize_error = ${d.error.slice(0, 300)},
                          diarize_timing = ${JSON.stringify(d.timing)}::jsonb
-                   WHERE id = ${id}`;
+                   WHERE id = ${id}
+                     AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
+                   RETURNING id`) as Array<{ id: string }>;
+        if (myClaim !== null && wFailed.length === 0) {
+          logLostClaim("diarize:unavailable", myClaim);
+          return { kind: "failure_not_recorded" };
+        }
         emit?.({ stage: "progress", msg: `Diarization unavailable (${d.error.slice(0, 80)})` });
       }
       return { kind: "recorded" };
@@ -727,16 +805,21 @@ export async function POST(
       // E31 batch 2, B2 (D-8) — THE FAILURE WRITE'S OWN FAILURE IS NOT SWALLOWED. It used to be, and the function then
       // returned "progressed", so the attempt counter was reset and the step retried for ever. The failure has landed
       // only if its row comes back; otherwise say so on its own line and report `failure_not_recorded`, which the
-      // step machine does not count as progress.
+      // step machine does not count as progress. ETA-OVERLAPPING-WRITERS C1: the same 0-row check now ALSO covers a
+      // fence miss, which gets its own distinct log line rather than being folded into the E31 B2 one.
       let failureRecorded = false;
       try {
         const f3 = (await sql`
           UPDATE encounter SET diarize_status = 'failed', diarize_completed_at = NOW(), diarize_error = ${m.slice(0, 300)}
            WHERE id = ${id}
+             AND (${myClaim}::timestamptz IS NULL OR processing_step_at = ${myClaim}::timestamptz)
           RETURNING id
         `) as Array<{ id: string }>;
         failureRecorded = f3.length > 0;
-        if (!failureRecorded) console.error(`${LOG_DIARIZE_FAILURE_NOT_RECORDED} (the failure write matched no row) enc=${id}`);
+        if (!failureRecorded) {
+          if (myClaim !== null) logLostClaim("diarize:failure-write", myClaim);
+          console.error(`${LOG_DIARIZE_FAILURE_NOT_RECORDED} (the failure write matched no row) enc=${id}`);
+        }
       } catch (fe) {
         console.error(`${LOG_DIARIZE_FAILURE_NOT_RECORDED} (the failure write failed) enc=${id}: ${fe instanceof Error ? fe.message : String(fe)}`);
       }
@@ -863,6 +946,12 @@ export async function POST(
     // "locked", both make the resume loop sleep and retry, and the loop can do that thirty times
     // against an error that will never clear. A lock that is not held is not a lock; say so.
     let claimError: string | null = null;
+    // ETA-OVERLAPPING-WRITERS phase 1, C1 — RETURNING processing_step_at too: the column is
+    // already unique per successful claim (a guarded UPDATE, microsecond timestamptz), so this
+    // value IS the fencing token, at no cost beyond returning a second column. lib/diarize-gate.ts
+    // runs the same holder-fenced idiom on this handle already (claim with a holder, check it came
+    // back as OUR holder, fence every later write and the release on it) — reused here, not copied:
+    // this claim already only returns its own row, so there is nothing to compare it against.
     const claim = (await sql`
       UPDATE encounter
          SET processing_step_at = now(), process_attempts = process_attempts + 1,
@@ -873,12 +962,12 @@ export async function POST(
              status = CASE WHEN status = 'complete' THEN status ELSE 'processing' END
        WHERE id = ${id}
          AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
-       RETURNING id
+       RETURNING id, processing_step_at
     `.catch((e: unknown) => {
       claimError = String((e as Error)?.message ?? e).slice(0, 300);
       console.warn(`[process:step] enc=${id} claim FAILED (not a held lock): ${claimError}`);
-      return [] as Array<{ id: string }>;
-    })) as Array<{ id: string }>;
+      return [] as Array<{ id: string; processing_step_at: string }>;
+    })) as Array<{ id: string; processing_step_at: string }>;
     if (claim.length === 0) {
       // Another invocation holds the lock; it will self-chain. No-op.
       //
@@ -894,6 +983,9 @@ export async function POST(
       `.catch(() => [] as Array<Record<string, unknown>>)) as Array<{ processing_step_at: string | null; held_s: number | null; process_attempts: number | null; status: string }>;
       return respondOk({ step: nextStep, skipped: "locked", lock: held[0] ?? null, claim_error: claimError });
     }
+    // The fencing token for the LIFE OF THIS INVOCATION. Every write below that must not land
+    // after losing this claim carries `AND processing_step_at = ${myClaim}`.
+    const myClaim = claim[0]!.processing_step_at;
 
     // Run exactly ONE step. Returns whether it progressed, plus a jobPending sentinel for
     // the long-file chunked-transcription poll (which releases the lock to re-poll, without
@@ -902,28 +994,30 @@ export async function POST(
       let progressed = false;
       try {
         if (nextStep === "translate") {
-          await translateIfNeeded();
+          await translateIfNeeded(myClaim);
           if (jobPending) {
             // Long-file chunked job still running: release the lock (WITHOUT resetting
             // attempts, so a stuck job still gives up at the cap) and re-poll next tick.
-            await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
+            const wRelease = await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`.catch(() => [] as Array<{ id: string }>);
+            if (wRelease.length === 0) logLostClaim("translate:jobPending-release", myClaim);
             return { progressed: false, jobPending: true };
           }
-          await guardTranscripts();
-          await assessAndFlag();
-          await sql`UPDATE encounter SET translated = true WHERE id = ${id}`.catch(() => { /* best-effort: marks the transcribe step done so it never re-runs */ });
+          await guardTranscripts(myClaim);
+          await assessAndFlag(myClaim);
+          const wTranslated = await sql`UPDATE encounter SET translated = true WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`.catch(() => [] as Array<{ id: string }>);
+          if (wTranslated.length === 0) { logLostClaim("translate:done-flag", myClaim); return { progressed: false, jobPending: false }; }
           progressed = true;
         } else if (nextStep === "native") {
           try {
             const na = await generateNativeAnalysis(row!.transcript_original ?? "", row!.detected_language);
-            if (na) {
-              await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row!.detected_language}, translation_engine = 'saaras' WHERE id = ${id}`;
-            } else {
+            const wNative = na
+              ? await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row!.detected_language}, translation_engine = 'saaras' WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`
               // soft-fail sentinel so we don't loop on this step forever
-              await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id}`;
-            }
+              : await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`;
+            if ((wNative as Array<{ id: string }>).length === 0) { logLostClaim("native", myClaim); return { progressed: false, jobPending: false }; }
           } catch {
-            await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id}`.catch(() => { /* best-effort */ });
+            const w = await sql`UPDATE encounter SET native_analysis = ${JSON.stringify({ unavailable: true })}::jsonb WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`.catch(() => [] as Array<{ id: string }>);
+            if (w.length === 0) logLostClaim("native:soft-fail", myClaim);
           }
           progressed = true;
         } else if (nextStep === "note") {
@@ -931,7 +1025,11 @@ export async function POST(
           if (INDIC_COMPREHENSION_ON() && isIndic) nativeRef = (row!.transcript_original ?? "").trim() || undefined;
           const noteRes = await generateNote(row!.transcript_raw!, { noteType: row!.note_type ?? undefined, nativeReference: nativeRef, onEvent: stepEmit });
           if (noteRes.ok) {
-            await sql`UPDATE encounter SET note_json = ${JSON.stringify(noteRes.note)}::jsonb, transcript_clean = ${row!.transcript_raw} WHERE id = ${id}`;
+            // THE WRITE THE SURVEY'S RESIDUAL RACE IS ABOUT (§4a/§4c): a note landing after this
+            // invocation has lost the claim is exactly how one generation's note ends up stored
+            // beside another generation's CDS. Fenced like everything else.
+            const wNote = (await sql`UPDATE encounter SET note_json = ${JSON.stringify(noteRes.note)}::jsonb, transcript_clean = ${row!.transcript_raw} WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`) as Array<{ id: string }>;
+            if (wNote.length === 0) { logLostClaim("note", myClaim); return { progressed: false, jobPending: false }; }
             progressed = true;
           } else {
             console.warn(`[process:step] enc=${id} note not ok: ${noteRes.error}`);
@@ -942,18 +1040,21 @@ export async function POST(
           const store = pres.ok
             ? pres.cdmss
             : (pres.fallback ?? { differentials_to_consider: [], red_flags: [], evidence_based_suggestions: [], follow_up_considerations: [] });
-          await sql`UPDATE encounter SET cdmss_json = ${JSON.stringify(store)}::jsonb, status = 'complete', processing_pct = 100 WHERE id = ${id}`;
+          const wCdms = (await sql`UPDATE encounter SET cdmss_json = ${JSON.stringify(store)}::jsonb, status = 'complete', processing_pct = 100 WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`) as Array<{ id: string }>;
+          if (wCdms.length === 0) { logLostClaim("cdms", myClaim); return { progressed: false, jobPending: false }; }
           progressed = true;
         } else if (nextStep === "finalize") {
-          await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id}`;
+          const wFinalize = (await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`) as Array<{ id: string }>;
+          if (wFinalize.length === 0) { logLostClaim("finalize", myClaim); return { progressed: false, jobPending: false }; }
           progressed = true;
         } else if (nextStep === "diarize") {
-          const outcome = await diarizeStore();
+          const outcome = await diarizeStore(myClaim);
           // Diarization is the LAST step and non-critical: by the time it runs, the encounter
           // is already clinically complete (note + CDS done before this). The per-step claim
           // above set status='processing'; flip back to terminal HERE so a dropped self-chain
           // (after() not firing) can't strand a fully-processed encounter in 'processing' forever.
-          await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND note_json IS NOT NULL`.catch(() => { /* best-effort terminal flip */ });
+          // Fenced too: an already-superseded invocation must not flip a newer holder's row.
+          await sql`UPDATE encounter SET status = 'complete', processing_pct = 100 WHERE id = ${id} AND note_json IS NOT NULL AND processing_step_at = ${myClaim}::timestamptz`.catch(() => { /* best-effort terminal flip */ });
           // Not dispatched (queue full) => not progressed: hold the step lock to its TTL so the
           // retry is paced, instead of self-chaining straight back into the same busy queue.
           // E31 batch 2, B2 (D-8) — and a failure that could not be RECORDED is not progress either: resetting the
@@ -966,8 +1067,13 @@ export async function POST(
       return { progressed, jobPending: false };
     };
 
-    const releaseAndReset = () =>
-      sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id}`.catch(() => { /* best-effort */ });
+    // ETA-OVERLAPPING-WRITERS phase 1, C1 — fenced: a stale holder's release must not clear a
+    // newer holder's claim (survey §4c: an unfenced release is exactly what let an admin door's
+    // resurrect and a step's own release cancel each other's work).
+    const releaseAndReset = async () => {
+      const w = await sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`.catch(() => [] as Array<{ id: string }>);
+      if (w.length === 0) logLostClaim("release", myClaim);
+    };
 
     // SYNC MODE — run the step IN-REQUEST so the function stays alive while the heavy work
     // (R2 download + Whisper) executes. The caller (resume cron / manual recovery) loops these
@@ -999,6 +1105,38 @@ export async function POST(
   if (accept.includes("application/x-ndjson") || accept.includes("text/event-stream")) {
     const encoder = new TextEncoder();
     const doctorId = internal ? row.doctor_id : claims!.doctor_id;
+
+    // ETA-OVERLAPPING-WRITERS phase 1, C2 — THE STREAMING BRANCH TAKES THE SAME CLAIM, before any
+    // work that writes. This is the change that closes door (a): the Retry button used to run this
+    // branch with no claim at all while the background step machine was still mid-flight. Same
+    // statement shape as the step machine's own claim, same fencing token, same "who and since
+    // when" vocabulary on refusal, so a caller sees one shape whichever branch answers.
+    let streamClaimError: string | null = null;
+    const streamClaim = (await sql`
+      UPDATE encounter
+         SET processing_step_at = now(), process_attempts = process_attempts + 1,
+             status = CASE WHEN status = 'complete' THEN status ELSE 'processing' END
+       WHERE id = ${id}
+         AND (processing_step_at IS NULL OR processing_step_at < now() - interval '5 minutes')
+       RETURNING id, processing_step_at
+    `.catch((e: unknown) => {
+      streamClaimError = String((e as Error)?.message ?? e).slice(0, 300);
+      console.warn(`[process:stream] enc=${id} claim FAILED (not a held lock): ${streamClaimError}`);
+      return [] as Array<{ id: string; processing_step_at: string }>;
+    })) as Array<{ id: string; processing_step_at: string }>;
+    if (streamClaim.length === 0) {
+      // Does NOT run: no translate, no note, no CDS, no diarize. The refusal names the current
+      // holder's age — the same fact the step machine's "locked" answer carries (route.ts §C1).
+      const held = (await sql`
+        SELECT processing_step_at,
+               EXTRACT(EPOCH FROM (now() - processing_step_at))::int AS held_s,
+               process_attempts, status
+          FROM encounter WHERE id = ${id}
+      `.catch(() => [] as Array<Record<string, unknown>>)) as Array<{ processing_step_at: string | null; held_s: number | null; process_attempts: number | null; status: string }>;
+      return respondOk({ skipped: "locked", lock: held[0] ?? null, claim_error: streamClaimError });
+    }
+    // The fencing token for the life of this streaming call.
+    const myClaim = streamClaim[0]!.processing_step_at;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -1051,9 +1189,35 @@ export async function POST(
 
         try {
           // Full-file Sarvam batch translate for non-English (accuracy + safety net).
-          await translateIfNeeded(emit);
-          await guardTranscripts(emit);
-          await assessAndFlag(emit);
+          await translateIfNeeded(myClaim, emit);
+
+          // ETA-OVERLAPPING-WRITERS phase 1, C3 — jobPending, read here for the first time. A
+          // long-file chunked job that translateIfNeeded is still polling means transcript_raw is
+          // STILL the finalize placeholder: generating a note now is M3 (survey §4b, §5) — a note
+          // permanently written from the wrong transcript, because step mode never regenerates one
+          // once any note exists. Refuse in the same shape C2 refuses in: no note, no CDS, and the
+          // reason named, rather than a silent wrong answer.
+          if (jobPending) {
+            const held = (await sql`
+              SELECT processing_step_at,
+                     EXTRACT(EPOCH FROM (now() - processing_step_at))::int AS held_s,
+                     process_attempts, status
+                FROM encounter WHERE id = ${id}
+            `.catch(() => [] as Array<Record<string, unknown>>)) as Array<{ processing_step_at: string | null; held_s: number | null; process_attempts: number | null; status: string }>;
+            emit({
+              stage: "error",
+              where: "job_pending",
+              skipped: "job_pending",
+              lock: held[0] ?? null,
+              message: "A long-recording transcription job is still running in the background; try again shortly.",
+            });
+            close();
+            clearInterval(hbInterval);
+            return;
+          }
+
+          await guardTranscripts(myClaim, emit);
+          await assessAndFlag(myClaim, emit);
 
           // ---- Indic Comprehension Layer (non-English; flag ETA_INDIC_COMPREHENSION, default ON) ----
           // Saves a faithful native-language analysis for inspection and supplies the native
@@ -1066,8 +1230,9 @@ export async function POST(
             try {
               const na = await generateNativeAnalysis(row.transcript_original ?? "", row.detected_language);
               if (na) {
-                await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row.detected_language}, translation_engine = 'saaras' WHERE id = ${id}`;
-                emit({ stage: "progress", msg: "Original-language analysis saved" });
+                const wNative = (await sql`UPDATE encounter SET native_analysis = ${JSON.stringify(na)}::jsonb, native_analysis_lang = ${na.language ?? row.detected_language}, translation_engine = 'saaras' WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`) as Array<{ id: string }>;
+                if (wNative.length === 0) logLostClaim("stream:native", myClaim);
+                else emit({ stage: "progress", msg: "Original-language analysis saved" });
               }
             } catch { /* soft-fail: note still generated from the English transcript */ }
           }
@@ -1109,7 +1274,7 @@ export async function POST(
               error_message: noteRes.error,
             });
             noteTrace = null;
-            await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id}`.catch(() => { /* intentional: best-effort side-write/parse; main flow continues */ });
+            await sql`UPDATE encounter SET status = 'failed' WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz`.catch(() => { /* intentional: best-effort side-write/parse; main flow continues */ });
             close();
             clearInterval(hbInterval);
             return;
@@ -1131,14 +1296,25 @@ export async function POST(
           });
           noteTrace = null;
 
-          // Persist note immediately
+          // Persist note immediately. THE WRITE THE SURVEY'S §4b/§4c WALK THROUGH: a note landing
+          // over a claim this invocation no longer holds is exactly M1/M2 — one generation's note
+          // sitting beside another generation's transcript or CDS.
           try {
-            await sql`
+            const wNote = (await sql`
               UPDATE encounter
                  SET note_json = ${JSON.stringify(noteRes.note)}::jsonb,
                      transcript_clean = ${row.transcript_raw}
                WHERE id = ${id}
-            `;
+                 AND processing_step_at = ${myClaim}::timestamptz
+              RETURNING id
+            `) as Array<{ id: string }>;
+            if (wNote.length === 0) {
+              logLostClaim("stream:note", myClaim);
+              emit({ stage: "error", where: "persist_note", message: "lost the processing claim" });
+              close();
+              clearInterval(hbInterval);
+              return;
+            }
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             emit({ stage: "error", where: "persist_note", message: msg });
@@ -1213,12 +1389,21 @@ export async function POST(
             cdmssTrace = null;
 
             try {
-              await sql`
+              const wCdmss = (await sql`
                 UPDATE encounter
                    SET cdmss_json = ${JSON.stringify(cdmssToStore)}::jsonb,
                        status     = 'complete'
                  WHERE id = ${id}
-              `;
+                   AND processing_step_at = ${myClaim}::timestamptz
+                RETURNING id
+              `) as Array<{ id: string }>;
+              if (wCdmss.length === 0) {
+                logLostClaim("stream:cdmss", myClaim);
+                emit({ stage: "error", where: "persist_cdmss", message: "lost the processing claim" });
+                close();
+                clearInterval(hbInterval);
+                return;
+              }
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
               emit({ stage: "error", where: "persist_cdmss", message: msg });
@@ -1230,7 +1415,14 @@ export async function POST(
             // CDMSS-off note type: no decision support, just finalise.
             emit({ stage: "progress", msg: "Clinical decision support is not applicable for this note type" });
             try {
-              await sql`UPDATE encounter SET status = 'complete' WHERE id = ${id}`;
+              const wStatus = (await sql`UPDATE encounter SET status = 'complete' WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`) as Array<{ id: string }>;
+              if (wStatus.length === 0) {
+                logLostClaim("stream:finalize", myClaim);
+                emit({ stage: "error", where: "persist_status", message: "lost the processing claim" });
+                close();
+                clearInterval(hbInterval);
+                return;
+              }
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
               emit({ stage: "error", where: "persist_status", message: msg });
@@ -1251,7 +1443,7 @@ export async function POST(
           });
 
           // V2.SD.3 — diarization runs AFTER the note is delivered to the client.
-          await diarizeStore(emit);
+          await diarizeStore(myClaim, emit);
         } catch (e) {
           // S6.3: distinguish doctor cancel from real errors.
           // S6.2b: finalise any in-progress trace before returning.
@@ -1279,6 +1471,7 @@ export async function POST(
                    SET status = 'draft_partial'
                  WHERE id = ${id}
                    AND status = 'processing'
+                   AND processing_step_at = ${myClaim}::timestamptz
               `;
               await sql`
                 INSERT INTO audit_log
@@ -1309,6 +1502,13 @@ export async function POST(
         } finally {
           clearInterval(hbInterval);
           close();
+          // ETA-OVERLAPPING-WRITERS phase 1, C2 — release fenced, on every exit (success, note
+          // failure, persist failure, abort, or an unexpected throw). A stale holder's release
+          // must not clear a newer holder's claim (the door survey §4c walks through), so this
+          // predicate is the same one every write above carries.
+          await sql`UPDATE encounter SET process_attempts = 0, processing_step_at = NULL WHERE id = ${id} AND processing_step_at = ${myClaim}::timestamptz RETURNING id`
+            .then((w) => { if ((w as Array<{ id: string }>).length === 0) logLostClaim("stream:release", myClaim); })
+            .catch(() => { /* best-effort: the 5-min TTL frees it either way */ });
         }
       },
       cancel() {
@@ -1337,8 +1537,11 @@ export async function POST(
   }
 
   // ---- Non-streaming fallthrough (rare; trace instrumentation skipped) ----
-  await translateIfNeeded();
-  await guardTranscripts();
+  // Out of scope for ETA-OVERLAPPING-WRITERS phase 1 (C1/C2/C3 name the step machine and the
+  // streaming branch only): takes no claim, exactly as before. `null` degrades every fencing
+  // predicate in the shared helpers to TRUE, so nothing here changes.
+  await translateIfNeeded(null);
+  await guardTranscripts(null);
   // translateIfNeeded re-transcribes the saved audio when the live transcript was
   // empty; if there is STILL nothing usable, fail clearly (and narrow the type).
   if (!row.transcript_raw || row.transcript_raw.trim().length === 0) {
@@ -1406,7 +1609,7 @@ export async function POST(
     }
   }
 
-  await diarizeStore();
+  await diarizeStore(null);
 
   return respondOk({
     encounter: { id, status: "complete" as const },

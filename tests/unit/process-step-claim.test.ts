@@ -28,6 +28,15 @@
  *
  * app/api/webhooks/resend/route.ts had the correct shape all along (THEN status) and is the
  * reference; it is checked here too so the pattern is pinned in both places.
+ *
+ * ETA-OVERLAPPING-WRITERS phase 1, C2 (18 Sep 2026): the streaming branch now takes the SAME
+ * claim, so this file has TWO `status = CASE …` assignments, not one — the step machine's
+ * original and the streaming branch's, byte-for-byte the same shape on purpose (route.ts's own
+ * comment: "one vocabulary for both callers"). The count moved from 1 to 2; the RULE — every one
+ * types off the column — did not, and both assertions below still hold it. The claim's own
+ * RETURNING grew a second column (`processing_step_at`, the fencing token C1 adds); the capture
+ * regex is widened to match either width rather than pinned to one, so it still finds the step
+ * machine's claim specifically and still proves the same two invariants.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -41,13 +50,15 @@ function statusCases(src: string): string[] {
 }
 
 describe("the step claim assigns a value the enum column will accept", () => {
-  it("the claim's CASE types itself off the column, not off bare literals", () => {
+  it("every status CASE in the route types itself off the column, not off bare literals", () => {
     const cases = statusCases(route);
-    expect(cases).toHaveLength(1);
-    const c = cases[0]!;
-    expect(c).toMatch(/THEN status\b/);
-    // the exact shape that threw for two months
-    expect(c).not.toMatch(/THEN '\w+'/);
+    // C2: the step machine's claim and the streaming branch's claim, same shape, on purpose.
+    expect(cases).toHaveLength(2);
+    for (const c of cases) {
+      expect(c, c).toMatch(/THEN status\b/);
+      // the exact shape that threw for two months
+      expect(c, c).not.toMatch(/THEN '\w+'/);
+    }
   });
 
   it("every enum status CASE in the app follows the same rule", () => {
@@ -57,11 +68,17 @@ describe("the step claim assigns a value the enum column will accept", () => {
   });
 
   it("a failing claim is logged and reported, never disguised as a held lock", () => {
-    const claim = /const claim = \(await sql`[\s\S]*?\)\) as Array<\{ id: string \}>;/.exec(route)?.[0] ?? "";
+    const claim = /const claim = \(await sql`[\s\S]*?\)\) as Array<\{ id: string; processing_step_at: string \}>;/.exec(route)?.[0] ?? "";
     expect(claim).toBeTruthy();
     expect(claim).not.toMatch(/\.catch\(\(\) =>/);       // the silent form
     expect(claim).toMatch(/claimError\s*=/);
     expect(claim).toMatch(/console\.warn/);
     expect(route).toMatch(/skipped: "locked",[^}]*claim_error: claimError/);
+  });
+
+  it("C1: the claim's RETURNING carries processing_step_at — the fencing token", () => {
+    // Both claims (step machine and streaming) now return the token; neither re-derives it.
+    const returning = [...route.matchAll(/RETURNING id, processing_step_at/g)];
+    expect(returning.length).toBeGreaterThanOrEqual(2);
   });
 });
