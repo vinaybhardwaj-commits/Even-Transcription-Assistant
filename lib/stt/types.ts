@@ -47,6 +47,14 @@ export interface SttTranscribeResult {
    * thing this field exists to record. It is copied, never rebuilt.
    */
   languageTimeline?: unknown[] | null;
+  /**
+   * The router's own account of WHETHER IT RAN — `status`, `segmentation`, `outcome`, verbatim.
+   *
+   * OPTIONAL for the same reason `languageTimeline` is: nine adapters have no such concept and must
+   * not grow one to admit a tenth's. An engine that says nothing leaves this absent, and absent
+   * reads as "unknown" downstream — never as "engines ran".
+   */
+  routerOutcome?: { status?: unknown; segmentation?: unknown; outcome?: unknown } | null;
   error: string | null;
 }
 

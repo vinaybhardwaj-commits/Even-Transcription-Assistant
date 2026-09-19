@@ -93,6 +93,14 @@ export function toSttResult(r: RouterResult, latencyMs: number): SttTranscribeRe
     costUsd: 0,
     engineVersion: null,
     languageTimeline: Array.isArray(r.language_timeline) ? r.language_timeline : null,
+    // Carried VERBATIM and no further. This adapter does not decide what an outcome MEANS; it only
+    // stops throwing away the sentence in which the router said it, which is what left the corpus
+    // unable to tell "never heard" from "heard nothing".
+    routerOutcome: {
+      status: (r as Record<string, unknown>).status,
+      segmentation: (r as Record<string, unknown>).segmentation,
+      outcome: (r as Record<string, unknown>).outcome,
+    },
     error: null,
   };
 }
