@@ -13,6 +13,29 @@ export interface SttCapabilities {
   async: boolean;       // job/poll protocol (e.g. Ekascribe)
 }
 
+/**
+ * The router's `segmentation` block, as router_server.py's `window_outcome()` / `job_verdict()`
+ * build it (router_server.py:557-596, 765-781). `outcome` lives HERE, and only here — the reply's
+ * top level carries `status`, never `outcome`. A reader that goes looking for `outcome` beside
+ * `segmentation` instead of inside it is reading a key the router never sends.
+ */
+export type RouterOutcomeValue = "no_engine" | "engine_no_text" | "engine_text";
+
+export type RouterSegmentation = {
+  outcome?: RouterOutcomeValue | string | null;
+  windows_total?: number | null;
+  windows_skipped?: number | null;
+  n_segments?: number | null;
+  n_engine_segments?: number | null;
+  method?: string | null;
+  methods?: unknown;
+};
+
+/** Runtime narrowing for a value the router client typed `unknown` — never an `as` past the shape. */
+export function isRouterSegmentation(v: unknown): v is RouterSegmentation {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 export interface SttTranscribeResult {
   original: string | null;
   english: string | null;
@@ -47,6 +70,14 @@ export interface SttTranscribeResult {
    * thing this field exists to record. It is copied, never rebuilt.
    */
   languageTimeline?: unknown[] | null;
+  /**
+   * The router's own account of WHETHER IT RAN — `status`, `segmentation`, `outcome`, verbatim.
+   *
+   * OPTIONAL for the same reason `languageTimeline` is: nine adapters have no such concept and must
+   * not grow one to admit a tenth's. An engine that says nothing leaves this absent, and absent
+   * reads as "unknown" downstream — never as "engines ran".
+   */
+  routerOutcome?: { status?: unknown; segmentation?: RouterSegmentation | null; outcome?: RouterOutcomeValue | string | null } | null;
   error: string | null;
 }
 

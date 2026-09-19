@@ -31,6 +31,7 @@
 import { sql } from "@/lib/db";
 import { emotionEnabled, canSurfaceEmotion } from "@/lib/emotion/gate";
 import { AUTO_DRAIN_MAX_AGE_HOURS } from "@/lib/stt/auto-drain";
+import { readEngineOutcome } from "@/lib/stt/route-run";
 
 // ===========================================================================
 // Constants
@@ -118,6 +119,26 @@ export type TapeSlot =
           language_mix: Record<string, number> | null;
           latency_ms: number | null;
           error: string | null;
+          /**
+           * Did an engine ever RUN on this window? "unknown" is a real answer and the only honest
+           * one for every row written before the router learned to say — it is NOT the same as
+           * `ran`, and the tape must not render it as one. `skipped` is a window nobody listened
+           * to; `ran` is a window that was listened to, whatever it turned out to contain.
+           */
+          engines: "skipped" | "ran" | "unknown";
+          /** The router's own words for it (`silent_skipped`, `no_engine`), when it said any. */
+          engines_detail: string | null;
+          /**
+           * Sub-window granularity (router_server.py job_verdict): how many router sub-windows this
+           * job window had, and how many of them no engine ever ran on. Surfacing partial starvation
+           * is the point of this slice — a job can be honestly "ran" overall while most of its
+           * sub-windows were never heard, and these two numbers are the only place that survives.
+           * null whenever `engines` is "unknown", and null on the synchronous path, which has no
+           * sub-windows to count (see RouteOutcomeRecord in lib/stt/route-run.ts) — never coerced
+           * to 0, which would read as "none skipped" rather than "not applicable".
+           */
+          windows_total: number | null;
+          windows_skipped: number | null;
         } | null;
         diarize: {
           state: string;
@@ -488,6 +509,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
       .sort((a, b) => a.start_ms - b.start_ms);
 
     const metrics = transcriptRow?.metrics_json ?? {};
+    const engineReading = readEngineOutcome(metrics);
     const languageTimeline = (metrics.language_timeline ?? null) as Record<string, unknown> | null;
 
     return {
@@ -517,6 +539,14 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
               language_mix: (languageTimeline?.language_mix as Record<string, number> | undefined) ?? null,
               latency_ms: transcriptRow.latency_ms,
               error: transcriptRow.error,
+              // Read through the union, never from `text === ""`: that test is the one that could
+              // not tell "we never looked" from "we listened and the room was quiet".
+              engines: engineReading.known ? (engineReading.skipped ? "skipped" : "ran") : "unknown",
+              engines_detail: engineReading.known
+                ? (engineReading.outcome ?? engineReading.status ?? null)
+                : null,
+              windows_total: engineReading.known ? engineReading.windows_total : null,
+              windows_skipped: engineReading.known ? engineReading.windows_skipped : null,
             }
           : null,
         diarize: diarizeRow

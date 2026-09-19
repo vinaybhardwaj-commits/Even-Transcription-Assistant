@@ -1101,7 +1101,15 @@ export async function writeRoutedRun(
            // Slice C1 step 3 — the router's per-span timeline, VERBATIM, under one key. Spread
            // conditionally so a run by any other engine is byte-identical to what it wrote before:
            // nine adapters return no timeline and must not acquire an empty one.
-           ...(asr.languageTimeline ? buildRouteMetrics(asr.languageTimeline) : {}),
+           // The timeline as before, and beside it the router's outcome — re-derived from THIS
+           // reply on every write, so a regenerated run can never inherit a previous verdict.
+           // Gated on an ACTUAL timeline, never on `routerOutcome` alone: that carrier is an object
+           // whenever the router answered at all (F1), so `|| asr.routerOutcome` was writing an
+           // EMPTY `language_timeline` block on every route run that had none written before this
+           // feature existed.
+           ...(asr.languageTimeline
+             ? buildRouteMetrics(asr.languageTimeline, {}, asr.routerOutcome ?? undefined)
+             : {}),
          })}::jsonb, NOW(),
          ${opts.actor}, ${opts.via}, ${engineVersion},
          ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},

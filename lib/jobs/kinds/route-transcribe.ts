@@ -32,7 +32,7 @@ import { signGetUrl } from "@/lib/r2";
 import { headObject } from "@/lib/r2";
 import { adapterFor } from "@/lib/stt/registry";
 import { ROUTE_ADAPTER_KEY } from "@/lib/stt/adapters/route";
-import { buildRouteMetrics, charsPerAudioSecond } from "@/lib/stt/route-run";
+import { buildRouteMetrics, charsPerAudioSecond, readEngineOutcome } from "@/lib/stt/route-run";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 
@@ -167,7 +167,8 @@ async function pollStep(ctx: StepContext) {
         router_sec: Math.round(r.latencyMs / 1000),
         dominant_language: r.language ?? null,
         translated: english.length > 0,
-      });
+      }, r.routerOutcome ?? undefined);
+      const outcome = readEngineOutcome(metrics);
       const timeline = metrics.language_timeline as { span_count: number; engine_mix: Record<string, number>; language_mix: Record<string, number>; chars: number };
 
       // POINTERS AND COUNTS ONLY — no transcript text in the result, exactly as Slice B's rule
@@ -181,9 +182,21 @@ async function pollStep(ctx: StepContext) {
         language_mix: timeline.language_mix,
         dominant_language: r.language ?? null,
         chars_per_audio_second: charsPerAudioSecond(chars, audioSeconds),
-        // `empty_transcript` on the whisper path is a FACT ABOUT THE ROOM, not a failure, and the
-        // same reasoning holds here: a quiet window read correctly is a success with zero chars.
-        silent_window: chars === 0,
+        // A QUIET ROOM AND AN UNHEARD ONE ARE NOT THE SAME CLAIM, and `chars === 0` alone cannot
+        // tell them apart — it was true of both. When the router says which happened, that answer
+        // decides: only `engine_no_text` is a window we listened to and found quiet. `no_engine`
+        // never becomes `silent_window`, because nothing listened.
+        //
+        // When the router says nothing (every reply before it learned to), the old rule still
+        // applies — NAMED as the legacy fallback it is, rather than left looking like a verdict.
+        // `outcome.known` alone settles the BINARY skip/no-skip question — `status` does that on
+        // its own. `silent_window` is the THREE-way read (no_engine / engine_no_text / engine_text)
+        // and status alone cannot answer it: only a genuine `outcome` value can. A row with a known
+        // status but no known outcome (an older router, a partial reply) falls back to the pre-merge
+        // rule, `chars === 0`, and must never default to "not silent" — an unknown outcome must
+        // never collapse into "ran", exactly as it must never collapse into "skipped".
+        silent_window: (outcome.known && outcome.outcome !== null) ? outcome.outcome === "engine_no_text" : chars === 0,
+        engines_skipped: outcome.known ? outcome.skipped : null,
         polls,
         router_sec: Math.round(r.latencyMs / 1000),
       });
