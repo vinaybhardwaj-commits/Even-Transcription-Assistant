@@ -121,6 +121,18 @@ export type RouteOutcomeRecord = {
   status: string | null;
   n_engine_segments: number | null;
   /**
+   * SUB-WINDOW GRANULARITY, and the reason it is here rather than left on the floor.
+   *
+   * A job splits its clip into sub-windows and calls an engine per sub-window. If one transcribes
+   * and four starve, the JOB is honestly `engine_text` and `engines_skipped: false` — and those two
+   * fields, alone, would say the window is fine. These two numbers are the only thing on the row
+   * that says four fifths of it was never heard, and they are what a rebuild needs in order to
+   * re-run the four rather than the whole job. Null on the synchronous path, which has no
+   * sub-windows to count.
+   */
+  windows_total: number | null;
+  windows_skipped: number | null;
+  /**
    * TRUE only when the router SAYS no engine ran — `status === "silent_skipped"` or
    * `outcome === "no_engine"`. It is NEVER derived from an empty transcript, a zero span count or
    * zero spoken seconds, because those are equally what a room that was genuinely quiet produces,
@@ -147,11 +159,17 @@ export function buildRouteOutcome(router?: RouterOutcomeInput): Record<string, u
     ? (router.segmentation as Record<string, unknown>)
     : null;
   const nEngineSegments = num(seg?.n_engine_segments);
-  if (status === null && outcome === null && nEngineSegments === null) return {};
+  const windowsTotal = num(seg?.windows_total);
+  const windowsSkipped = num(seg?.windows_skipped);
+  if (status === null && outcome === null && nEngineSegments === null && windowsTotal === null && windowsSkipped === null) {
+    return {};
+  }
   const record: RouteOutcomeRecord = {
     outcome,
     status,
     n_engine_segments: nEngineSegments,
+    windows_total: windowsTotal,
+    windows_skipped: windowsSkipped,
     engines_skipped: status === ROUTE_STATUS_SKIPPED || outcome === "no_engine",
   };
   return { [ROUTE_OUTCOME_KEY]: record };
@@ -163,7 +181,16 @@ export function buildRouteOutcome(router?: RouterOutcomeInput): Record<string, u
  * true. That is requirement 3, enforced by the type rather than by everyone remembering it.
  */
 export type EngineOutcomeReading =
-  | { known: true; skipped: boolean; outcome: RouteOutcome | null; status: string | null; n_engine_segments: number | null }
+  | {
+      known: true;
+      skipped: boolean;
+      outcome: RouteOutcome | null;
+      status: string | null;
+      n_engine_segments: number | null;
+      /** How many of the job's sub-windows there were, and how many no engine ever ran on. */
+      windows_total: number | null;
+      windows_skipped: number | null;
+    }
   | { known: false };
 
 /** PURE. Read a stored `metrics_json`. Absent or malformed record => unknown, never a guess. */
@@ -181,6 +208,8 @@ export function readEngineOutcome(metrics: unknown): EngineOutcomeReading {
     outcome: isOutcome(r.outcome) ? r.outcome : null,
     status: typeof r.status === "string" ? r.status : null,
     n_engine_segments: num(r.n_engine_segments),
+    windows_total: num(r.windows_total),
+    windows_skipped: num(r.windows_skipped),
   };
 }
 

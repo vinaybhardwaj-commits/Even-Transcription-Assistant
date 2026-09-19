@@ -34,6 +34,8 @@ describe("the three outcomes reach metrics_json", () => {
       outcome: "no_engine",
       status: "silent_skipped",
       n_engine_segments: 0,
+      windows_total: null,
+      windows_skipped: null,
       engines_skipped: true,
     });
     // and the timeline it sits beside is untouched
@@ -109,13 +111,14 @@ describe("a legacy row reads UNKNOWN, and the unknown survives to the caller", (
     });
     expect(readEngineOutcome(m)).toEqual({
       known: true, skipped: true, outcome: "no_engine", status: "silent_skipped", n_engine_segments: 0,
+      windows_total: null, windows_skipped: null,
     });
   });
 });
 
 describe("a regenerated run re-derives the flag", () => {
   it("a stale record passed through `extra` cannot survive into the new row", () => {
-    const stale = { [ROUTE_OUTCOME_KEY]: { outcome: "no_engine", status: ROUTE_STATUS_SKIPPED, n_engine_segments: 0, engines_skipped: true } };
+    const stale = { [ROUTE_OUTCOME_KEY]: { outcome: "no_engine", status: ROUTE_STATUS_SKIPPED, n_engine_segments: 0, windows_total: 9, windows_skipped: 9, engines_skipped: true } };
     const m = buildRouteMetrics([SPAN], stale, { status: "ok", outcome: "engine_text", segmentation: { n_engine_segments: 3 } });
     expect(recordOf(m).engines_skipped).toBe(false);
     expect(recordOf(m).outcome).toBe("engine_text");
@@ -129,5 +132,37 @@ describe("a regenerated run re-derives the flag", () => {
     // every pre-existing key of the timeline is still present and still named the same
     expect(Object.keys(after.language_timeline as object).sort())
       .toEqual(["chars", "engine_mix", "language_mix", "span_count", "spans", "spoken_seconds"]);
+  });
+});
+
+describe("partial starvation: the job is ok and the row still says how much was never heard", () => {
+  it("5 sub-windows, 1 transcribed, 4 starved — ok at the job, 4 of 5 on the row", () => {
+    const m = buildRouteMetrics([SPAN], {}, {
+      status: "ok",
+      outcome: "engine_text",
+      segmentation: { method: "mixed", n_engine_segments: 1, windows_total: 5, windows_skipped: 4 },
+    });
+    const r = readEngineOutcome(m);
+    expect(r).toEqual({
+      known: true, skipped: false, outcome: "engine_text", status: "ok",
+      n_engine_segments: 1, windows_total: 5, windows_skipped: 4,
+    });
+    // The whole-job flag alone would call this window fine. These two numbers are what say that
+    // four fifths of it was never heard, and which fraction a rebuild has to re-run.
+    expect(r.known && r.skipped).toBe(false);
+    expect(r.known && r.windows_skipped).toBe(4);
+  });
+
+  it("the synchronous path has no sub-windows, so both read null rather than zero", () => {
+    const r = readEngineOutcome(buildRouteMetrics([SPAN], {}, { status: "ok", outcome: "engine_text" }));
+    expect(r).toMatchObject({ known: true, windows_total: null, windows_skipped: null });
+  });
+
+  it("a fully starved job counts every sub-window", () => {
+    const r = readEngineOutcome(buildRouteMetrics([], {}, {
+      status: ROUTE_STATUS_SKIPPED, outcome: "no_engine",
+      segmentation: { windows_total: 5, windows_skipped: 5 },
+    }));
+    expect(r).toMatchObject({ known: true, skipped: true, windows_total: 5, windows_skipped: 5 });
   });
 });
