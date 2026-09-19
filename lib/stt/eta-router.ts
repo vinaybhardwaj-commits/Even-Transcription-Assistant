@@ -70,6 +70,17 @@ export type RouterJobStatus = {
   transcript_native?: string;
   transcript_english?: string;
   segments?: unknown;
+  /**
+   * THE DRAIN'S TRANSPORT IS THIS ONE, and until 19 Sep these two fields did not exist on it.
+   *
+   * `/route` answered with `status` and `segmentation` from the start; `run_job` built its own
+   * reply out of a fixed key set that had neither, so a starved ROOM window — which only ever
+   * reaches the router through run_job — still stored as a clean empty success however well the
+   * synchronous path reported itself. The router now aggregates both across a job's sub-windows
+   * (`job_verdict`), and they are declared here so the poll path is typed rather than cast.
+   */
+  status?: string | null;
+  segmentation?: unknown;
   sec?: number;
   error?: string;
 };
