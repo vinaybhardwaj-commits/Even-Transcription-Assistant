@@ -1,189 +1,163 @@
 /**
- * tests/unit/jev-client.test.ts — Slice J1. The provider client, against a fake fetch and a fake
- * trace. No test ever reaches the network: fetchImpl is always injected.
+ * Slice J1 (ETA-JEV-ARM-D §4) — the Jev provider client.
  *
- * REFUTER F5 (19 Sep): tests appended below the original suite proving the trace is finalised
- * with status:"errored" on every non-success exit path (a thrown fetch error, a timeout, an
- * abort).
+ * Every test drives an INJECTED transport and an injected trace: no child process, no even-jev MCP,
+ * no network, no real Jev call — so this suite runs with D1b closed and proves the client's
+ * semantics (flag-off, size guard, retry, trace/token accounting) without ever touching the vendor.
+ * Each test states, in one clause, what would have to break for it to fail.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { McpJevClient, getJevClient, JEV_STATE_MAX_CHARS } from "@/lib/jev/client";
+import { MockJevClient } from "@/lib/jev/mock";
+import { JevDisabledError, JevStateTooLargeError, JevTransportError, type JevAnswer, type JevRequest } from "@/lib/jev/types";
+import type { TraceHandle } from "@/lib/llm-trace/log";
 
-const traceCalls: Array<{ args: unknown; finalise: unknown[] }> = [];
-vi.mock("@/lib/llm-trace/log", () => ({
-  openTrace: vi.fn(async (args: unknown) => {
-    const rec = { args, finalise: [] as unknown[] };
-    traceCalls.push(rec);
-    return {
-      id: "trace_1",
-      event: () => {},
-      finalise: async (f: unknown) => {
-        rec.finalise.push(f);
-      },
-    };
-  }),
-}));
+function fakeTrace() {
+  // Typed param so .mock.calls[0][0] is the finalise argument (tsconfig.tests.json is strict).
+  const finalise = vi.fn(async (_a: Parameters<TraceHandle["finalise"]>[0]) => {});
+  const event = vi.fn();
+  const handle: TraceHandle = { id: "trace-1", event, finalise };
+  return { handle, finalise, event };
+}
 
-import { createHttpJevClient, _resetJevClientForTests } from "@/lib/jev/client";
-import { JevDisabledError, JevStateTooLargeError } from "@/lib/jev/types";
-
-const OLD_ENV = { ...process.env };
+const noulReq: JevRequest = {
+  state: { windows: [{ id: "W1", text: "hello" }] },
+  questions: { q_noul: { type: "noul", instructions: "does X happen in W1?" } },
+};
 
 beforeEach(() => {
-  traceCalls.length = 0;
-  process.env = { ...OLD_ENV };
-  _resetJevClientForTests();
+  process.env.ETA_JEV_ENABLED = "1";
+  delete process.env.ETA_JEV_MOCK;
+  delete process.env.ETA_JEV_MODEL;
+  delete process.env.ETA_JEV_TIMEOUT_MS;
 });
 
-describe("J1 — jev client: disabled flag", () => {
-  it("ETA_JEV_ENABLED unset throws JevDisabledError BEFORE any fetch", async () => {
+describe("J1 — the request the transport receives", () => {
+  it("sends state, model, and each primitive's questions verbatim (escape option preserved)", async () => {
+    const tr = fakeTrace();
+    const seen: Array<{ state: unknown; questions: unknown; model: string }> = [];
+    const transport = vi.fn(async (payload: { state: unknown; questions: unknown; model: string }) => {
+      seen.push(payload);
+      return { model: "jev-x", answers: {}, usage: { input_tokens: 10, output_tokens: 0 }, latency_ms: 1 };
+    });
+    const client = new McpJevClient({ transport, openTrace: async () => tr.handle, sleep: async () => {} });
+    const req: JevRequest = {
+      state: { windows: [{ id: "W1", text: "x" }] },
+      model: "jev-pinned",
+      questions: {
+        q_noul: { type: "noul", instructions: "a?", criteria: { true: "t", false: "f" } },
+        q_choice: { type: "choice", instructions: "which?", criteria: { arrival: "a patient is seated", other: null } },
+        q_score: { type: "score", instructions: "how much?", criteria: ["low", "mid", "high"] },
+      },
+    };
+    await client.systemOne(req);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(seen[0].model).toBe("jev-pinned");
+    expect(seen[0].state).toEqual(req.state);
+    expect(seen[0].questions).toEqual(req.questions);
+    // breaks if: the client mutates/drops questions, loses the `other: null` escape option, or ignores an explicit model.
+  });
+});
+
+describe("J1 — retry semantics", () => {
+  it("retries a transient (429-class) failure once, backs off, then succeeds", async () => {
+    const tr = fakeTrace();
+    let n = 0;
+    const transport = vi.fn(async () => {
+      n += 1;
+      if (n === 1) throw new JevTransportError("HTTP 429 overloaded", { retryable: true, status: 429 });
+      return { model: "jev-x", answers: {}, usage: { input_tokens: 10, output_tokens: 0 }, latency_ms: 1 };
+    });
+    const sleep = vi.fn(async () => {});
+    const client = new McpJevClient({ transport, openTrace: async () => tr.handle, sleep });
+    const res = await client.systemOne(noulReq);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(res.model).toBe("jev-x");
+    // breaks if: a retryable error is not retried, or is retried with no backoff between attempts.
+  });
+
+  it("does NOT retry a non-retryable (422-class) failure and finalises the trace errored", async () => {
+    const tr = fakeTrace();
+    const transport = vi.fn(async () => { throw new JevTransportError("HTTP 422 invalid question", { retryable: false, status: 422 }); });
+    const sleep = vi.fn(async () => {});
+    const client = new McpJevClient({ transport, openTrace: async () => tr.handle, sleep });
+    await expect(client.systemOne(noulReq)).rejects.toBeInstanceOf(JevTransportError);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(tr.finalise).toHaveBeenCalledWith(expect.objectContaining({ status: "errored" }));
+    // breaks if: a 422-class failure is retried, or a failed call leaves the trace un-finalised.
+  });
+});
+
+describe("J1 — off and oversized are refused before the vendor is touched", () => {
+  it("throws JevDisabledError before opening a trace or calling the transport when the flag is off", async () => {
     delete process.env.ETA_JEV_ENABLED;
-    const fetchImpl = vi.fn();
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(JevDisabledError);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    const transport = vi.fn();
+    const openTraceFn = vi.fn();
+    const client = new McpJevClient({ transport, openTrace: openTraceFn as unknown as typeof import("@/lib/llm-trace/log").openTrace });
+    await expect(client.systemOne(noulReq)).rejects.toBeInstanceOf(JevDisabledError);
+    expect(transport).not.toHaveBeenCalled();
+    expect(openTraceFn).not.toHaveBeenCalled();
+    // breaks if: a gated-off call opens a trace, spawns the MCP, or reaches the vendor.
+  });
+
+  it("throws JevStateTooLargeError (never calls the transport) when the state exceeds the cap", async () => {
+    const transport = vi.fn();
+    const tr = fakeTrace();
+    const client = new McpJevClient({ transport, openTrace: async () => tr.handle });
+    const big = "x".repeat(JEV_STATE_MAX_CHARS + 1);
+    await expect(client.systemOne({ state: big, questions: noulReq.questions })).rejects.toBeInstanceOf(JevStateTooLargeError);
+    expect(transport).not.toHaveBeenCalled();
+    // breaks if: an oversized state is sent (silent truncation or a provider 413) instead of failing fast so the caller can chunk.
   });
 });
 
-describe("J1 — jev client: request shape", () => {
-  it("posts model/state/questions as JSON to /v1/systemone with a bearer header", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    process.env.TYPESAFE_API_KEY = "test-key";
-    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      expect(url).toBe("https://api.typesafe.ai/v1/systemone");
-      const body = JSON.parse(init.body as string);
-      expect(body).toMatchObject({ model: "jev-latest", questions: { q1: { type: "noul", instructions: "x" } } });
-      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-key");
-      return new Response(JSON.stringify({ model: "jev-latest", answers: { q1: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 10, output_tokens: 2 } }), { status: 200 });
-    });
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    const r = await client.systemOne({ state: { a: 1 }, questions: { q1: { type: "noul", instructions: "x" } } });
-    expect(r.answers.q1).toEqual({ type: "noul", noul: 0.9 });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+describe("J1 — the trace is the cost/PHI boundary", () => {
+  it("finalises the trace with model_calls carrying token counts", async () => {
+    const tr = fakeTrace();
+    const transport = vi.fn(async () => ({ model: "jev-x", answers: {}, usage: { input_tokens: 321, output_tokens: 7 }, latency_ms: 42 }));
+    const client = new McpJevClient({ transport, openTrace: async () => tr.handle, sleep: async () => {} });
+    await client.systemOne(noulReq);
+    expect(tr.finalise).toHaveBeenCalledTimes(1);
+    const arg = tr.finalise.mock.calls[0][0];
+    expect(arg.status).toBe("completed");
+    expect(arg.model_calls?.[0]).toMatchObject({ model: "jev-x", latency_ms: 42, tokens_in: 321, tokens_out: 7 });
+    // breaks if: token counts are not recorded on the trace, leaving Jev cost unobservable from the DB.
+  });
+
+  it("opens the trace with question ids and byte size only — never the state text", async () => {
+    let captured: { surface?: string; request_input?: { question_ids?: string[]; state_bytes?: number } } = {};
+    const tr = fakeTrace();
+    const openTraceFn = vi.fn(async (args: typeof captured) => { captured = args; return tr.handle; });
+    const transport = vi.fn(async () => ({ model: "jev-x", answers: {}, usage: { input_tokens: 1, output_tokens: 0 }, latency_ms: 1 }));
+    const client = new McpJevClient({ transport, openTrace: openTraceFn as unknown as typeof import("@/lib/llm-trace/log").openTrace, sleep: async () => {} });
+    await client.systemOne({ state: { note: "PATIENT_WORDS_MARKER" }, questions: noulReq.questions });
+    expect(captured.surface).toBe("jev");
+    expect(captured.request_input?.question_ids).toEqual(["q_noul"]);
+    expect(typeof captured.request_input?.state_bytes).toBe("number");
+    expect(JSON.stringify(captured.request_input)).not.toContain("PATIENT_WORDS_MARKER");
+    // breaks if: the trace's request_input ever carries the state text — a PHI leak into the trace table.
   });
 });
 
-describe("J1 — jev client: retries", () => {
-  it("429 then 200 retries once and succeeds", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    let calls = 0;
-    const fetchImpl = vi.fn(async () => {
-      calls += 1;
-      if (calls === 1) return new Response("rate limited", { status: 429 });
-      return new Response(JSON.stringify({ model: "jev-latest", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 });
-    });
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    const r = await client.systemOne({ state: {}, questions: {} });
-    expect(calls).toBe(2);
-    expect(r.model).toBe("jev-latest");
+describe("J1 — the mock provider", () => {
+  it("getJevClient returns the deterministic mock when ETA_JEV_MOCK is set", async () => {
+    process.env.ETA_JEV_MOCK = "1";
+    const client = getJevClient();
+    expect(client).toBeInstanceOf(MockJevClient);
+    const r1 = await client.systemOne(noulReq);
+    const r2 = await client.systemOne(noulReq);
+    expect(r1).toEqual(r2);
+    expect(r1.answers.q_noul).toEqual({ type: "noul", noul: 0 }); // absence-safe default
+    expect(r1.usage.input_tokens).toBeGreaterThan(0);
+    // breaks if: the mock is non-deterministic, reaches the network, or defaults noul to "yes".
   });
 
-  it("422 does not retry", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    const fetchImpl = vi.fn(async () => new Response("bad request", { status: 422 }));
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toThrow(/jev http 422/);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("J1 — jev client: state size guard", () => {
-  it("throws JevStateTooLargeError before fetch when state exceeds the char guard", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    const fetchImpl = vi.fn();
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    const bigState = { text: "x".repeat(100_001) };
-    await expect(client.systemOne({ state: bigState, questions: {} })).rejects.toBeInstanceOf(JevStateTooLargeError);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-});
-
-describe("J1 — jev client: trace", () => {
-  it("finalises the trace with model_calls token counts on success", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ model: "jev-latest", answers: {}, usage: { input_tokens: 42, output_tokens: 7 } }), { status: 200 }));
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await client.systemOne({ state: {}, questions: {} });
-    expect(traceCalls).toHaveLength(1);
-    const rec = traceCalls[0]!;
-    expect((rec.args as { surface: string }).surface).toBe("jev");
-    // the state text is NEVER in request_input — only question ids and byte size.
-    expect(JSON.stringify(rec.args)).not.toContain("state_text");
-    const fin = rec.finalise[0] as { status: string; model_calls: Array<{ tokens_in: number; tokens_out: number }> };
-    expect(fin.status).toBe("completed");
-    expect(fin.model_calls[0]).toMatchObject({ tokens_in: 42, tokens_out: 7 });
-  });
-});
-
-// =====================================================================================
-// REFUTER F5 (19 Sep): the trace is finalised with status:"errored" on EVERY non-success exit,
-// not only the explicit 401/422 branch.
-// =====================================================================================
-describe("F5 — the trace is finalised on every non-success exit path", () => {
-  it("a thrown fetch error finalises with status errored and the thrown message", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("network down");
-    });
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toThrow(/network down/);
-    expect(traceCalls).toHaveLength(1);
-    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
-    expect(fin.status).toBe("errored");
-    expect(fin.error_message).toContain("network down");
-  });
-
-  it("a timed-out attempt finalises with status errored and reason jev_timeout", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    process.env.ETA_JEV_TIMEOUT_MS = "10";
-    const fetchImpl = vi.fn((_url: string, init: RequestInit) => {
-      return new Promise((_resolve, reject) => {
-        const signal = init.signal as AbortSignal;
-        signal.addEventListener("abort", () => {
-          const e = new Error("This operation was aborted");
-          e.name = "AbortError";
-          reject(e);
-        });
-      });
-    });
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toThrow();
-    expect(traceCalls).toHaveLength(1);
-    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
-    expect(fin.status).toBe("errored");
-    expect(fin.error_message).toBe("jev_timeout");
-  });
-
-  it("a caller-aborted request finalises with reason jev_aborted, distinct from a timeout", async () => {
-    process.env.ETA_JEV_ENABLED = "1";
-    // Pre-abort the caller's own signal BEFORE the call starts: the client's own code checks
-    // `opts.signal.aborted` synchronously the moment it wires up the listener, so a signal that
-    // is already aborted by then fires the internal abort deterministically — no race against
-    // the `await openTrace(...)` the client does first (an abort() fired concurrently with that
-    // await could land before the listener is attached and be missed, which is a test-harness
-    // race, not a client bug).
-    const controller = new AbortController();
-    controller.abort();
-    const fetchImpl = vi.fn((_url: string, init: RequestInit) => {
-      return new Promise((_resolve, reject) => {
-        const signal = init.signal as AbortSignal;
-        if (signal.aborted) {
-          const e = new Error("This operation was aborted");
-          e.name = "AbortError";
-          reject(e);
-          return;
-        }
-        signal.addEventListener("abort", () => {
-          const e = new Error("This operation was aborted");
-          e.name = "AbortError";
-          reject(e);
-        });
-      });
-    });
-    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.systemOne({ state: {}, questions: {} }, { signal: controller.signal })).rejects.toThrow();
-    expect(traceCalls).toHaveLength(1);
-    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
-    expect(fin.status).toBe("errored");
-    expect(fin.error_message).toBe("jev_aborted");
+  it("MockJevClient returns fixture answers keyed by question id", async () => {
+    const fixtures: Record<string, JevAnswer> = { q_noul: { type: "noul", noul: 0.87 } };
+    const r = await new MockJevClient(fixtures).systemOne(noulReq);
+    expect(r.answers.q_noul).toEqual({ type: "noul", noul: 0.87 });
+    // breaks if: the mock ignores its fixture map, so tests cannot pin specific answers.
   });
 });

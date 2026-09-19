@@ -1,182 +1,231 @@
 /**
- * lib/jev/client.ts — Slice J1 (ETA-JEV-ARM-D §4). The Jev provider client.
+ * lib/jev/client.ts — Slice J1. The Jev ("System One") provider client.
  *
- * RAW FETCH, no SDK (spec §4, §9 forbids adding `@typesafe-ai/sdk`). Follows the repo's existing
- * fetch+abort pattern (lib/llm/gemini.ts, lib/sarvam.ts): AbortController + setTimeout + an
- * optional caller signal.
+ * TRANSPORT (spec §4 as amended by v1.2). Jev is reached THROUGH the even-jev MCP on the Mini
+ * (`~/dev/even-jev-mcp`, launcher `run.sh`, key at `~/.config/even-jev/key`) — NOT by a hand-written
+ * HTTP client and NOT via the SDK (both forbidden, spec §9 / v1.2 line 32). §4's "raw fetch to
+ * /v1/systemone" text is superseded on transport by v1.2; its SEMANTICS are kept: disabled-flag
+ * throws before any network, a state-size guard, a trace finalised with token counts, and retry of
+ * transient failures. The launcher loads the key itself, so this file NEVER reads or logs the key.
  *
- * ETA_JEV_ENABLED unset → JevDisabledError THROWN BEFORE any network call — proved by test
- * (jev-client.test.ts "disabled").  ETA_JEV_MOCK on → getJevClient() returns the mock so no
- * caller anywhere needs its own branch.
+ * The transport is an INJECTED SEAM (`deps.transport`), mirroring J0's `translate.ts` injecting
+ * `qwenJson`: every unit test drives a fake transport, so the whole client is tested with no child
+ * process, no network, and no real Jev call — and D1b (real transcripts to the vendor) stays closed.
  *
- * Every call opens an llm-trace with surface:"jev" carrying only question ids and the state's
- * byte size — NEVER the state text (spec §4, INTEGRATION §7 "log metadata only").
- *
- * REFUTER F5 (19 Sep): the trace is now finalised with status:"errored" on EVERY exit path that
- * isn't a clean success — retry exhaustion (429/529 x3), a timed-out attempt, an aborted attempt
- * (caller signal), and any other thrown fetch error — not only the explicit 401/422 branch. A
- * `finalised` flag makes this idempotent so an outer catch never double-finalises a trace an
- * inner branch already closed.
+ * Log metadata only (integration doc §7): question ids, counts, byte sizes, token counts, latency —
+ * NEVER the state text, never the key.
  */
-import { parseFlag, FlagValueError } from "@/lib/flags";
-import { openTrace } from "@/lib/llm-trace/log";
-import { getMockJevClient } from "./mock";
-import { JevDisabledError, JevHttpError, JevStateTooLargeError, type JevClient, type JevRequest, type JevResult } from "./types";
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
+import path from "node:path";
+import { parseFlag } from "@/lib/flags";
+import { jevModel, jevTimeoutMs } from "@/lib/env";
+import { openTrace, type TraceHandle } from "@/lib/llm-trace/log";
+import {
+  JevDisabledError,
+  JevStateTooLargeError,
+  JevTransportError,
+  type JevClient,
+  type JevRequest,
+  type JevResult,
+} from "./types";
+import { MockJevClient } from "./mock";
 
-const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-const STATE_CHAR_GUARD = 100_000; // ~25k tokens (spec §4)
+export const ETA_JEV_ENABLED = "ETA_JEV_ENABLED";
+export const ETA_JEV_MOCK = "ETA_JEV_MOCK";
+/** ~25k tokens. State over this must be chunked by the caller (spec §4). */
+export const JEV_STATE_MAX_CHARS = 100_000;
 const MAX_ATTEMPTS = 3;
 
-function flagOn(name: string): boolean {
+/** The single-shot call the client retries around. Returns the raw jev_ask payload. */
+export type JevTransport = (
+  payload: { state: unknown; questions: JevRequest["questions"]; model: string },
+  opts: { signal?: AbortSignal; timeoutMs: number },
+) => Promise<{ model?: string; answers: JevResult["answers"]; usage: { input_tokens: number; output_tokens?: number }; latency_ms?: number }>;
+
+type ClientDeps = {
+  transport?: JevTransport;
+  openTrace?: typeof openTrace;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Exponential backoff with jitter: ~200ms, ~400ms between the three attempts. */
+const backoffMs = (attempt: number) => Math.round(200 * 2 ** (attempt - 1) * (0.5 + Math.random()));
+
+/** Transient patterns that make a vendor/tool error worth retrying (429/529, overload, timeouts). */
+function isRetryableMessage(msg: string): boolean {
+  return /\b(429|529)\b|overload|temporar|timeout|ETIMEDOUT|ECONNRESET|EPIPE|socket hang up/i.test(msg);
+}
+
+function safeParse(text: unknown): { model?: string; answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number }; latency_ms?: number } | null {
+  if (typeof text !== "string") return null;
   try {
-    return parseFlag(name);
-  } catch (e) {
-    if (e instanceof FlagValueError) throw e;
-    throw e;
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }
 
-function envInt(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : def;
-}
+/**
+ * The default transport: spawn the even-jev MCP once per call and drive `jev_ask` over stdio
+ * (newline-delimited JSON-RPC). One call per batch, so a fresh child per call is simplest and cannot
+ * leak state between jobs. Never unit-tested directly (no live MCP in CI); validated by a guarded
+ * synthetic smoke and exercised for real by J2. `ETA_JEV_MCP_CMD` overrides the launcher path.
+ */
+export function mcpStdioTransport(): JevTransport {
+  return (payload, opts) =>
+    new Promise((resolve, reject) => {
+      const cmd = process.env.ETA_JEV_MCP_CMD || path.join(homedir(), "dev", "even-jev-mcp", "run.sh");
+      const t0 = Date.now();
+      const child = spawn(cmd, [], { stdio: ["pipe", "pipe", "pipe"], env: process.env });
+      let buf = "";
+      let settled = false;
+      const initId = 1;
+      const askId = 2;
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((r) => setTimeout(r, ms));
-}
+      const cleanup = () => {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", onAbort);
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      };
+      const fail = (e: Error) => { if (settled) return; settled = true; cleanup(); reject(e); };
+      const ok = (v: Awaited<ReturnType<JevTransport>>) => { if (settled) return; settled = true; cleanup(); resolve(v); };
 
-/** Exponential backoff with jitter for 429/529 only. Never retried: 401, 422. */
-function backoffMs(attempt: number): number {
-  const base = 250 * 2 ** (attempt - 1);
-  return base + Math.floor(Math.random() * 100);
-}
+      const timer = setTimeout(
+        () => fail(new JevTransportError(`jev MCP call timed out after ${opts.timeoutMs}ms`, { retryable: true })),
+        opts.timeoutMs,
+      );
+      const onAbort = () => fail(new JevTransportError("jev MCP call aborted", { retryable: false }));
+      if (opts.signal) {
+        if (opts.signal.aborted) return onAbort();
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
 
-type FetchFn = typeof fetch;
+      const send = (msg: unknown) => { try { child.stdin.write(JSON.stringify(msg) + "\n"); } catch (e) { fail(new JevTransportError(`jev MCP write failed: ${(e as Error).message}`, { retryable: true })); } };
 
-/** The real client. `deps.fetchImpl` is the seam every test replaces; production never sets it. */
-export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClient {
-  const fetchImpl = deps.fetchImpl ?? fetch;
+      child.on("error", (e) => fail(new JevTransportError(`jev MCP spawn failed: ${e.message}`, { retryable: true })));
+      child.on("exit", (code) => { if (!settled) fail(new JevTransportError(`jev MCP exited early (code ${code})`, { retryable: true })); });
+      child.stderr.on("data", () => { /* one audit line per call; may carry status but never content — not surfaced */ });
 
-  return {
-    async systemOne(req: JevRequest, opts): Promise<JevResult> {
-      if (!flagOn("ETA_JEV_ENABLED")) throw new JevDisabledError();
-
-      const stateStr = JSON.stringify(req.state ?? null);
-      if (stateStr.length > STATE_CHAR_GUARD) throw new JevStateTooLargeError(stateStr.length);
-
-      const model = req.model ?? process.env.ETA_JEV_MODEL ?? "jev-latest";
-      const timeoutMs = envInt("ETA_JEV_TIMEOUT_MS", 15_000);
-      const apiKey = process.env.TYPESAFE_API_KEY ?? "";
-
-      const trace =
-        opts?.trace ??
-        (await openTrace({
-          surface: "jev",
-          request_input: { question_ids: Object.keys(req.questions), state_bytes: stateStr.length, model },
-        }));
-
-      // F5: exactly one finalise call per invocation, on whichever exit path is actually taken.
-      let finalised = false;
-      const finaliseError = async (reason: string): Promise<void> => {
-        if (finalised) return;
-        finalised = true;
-        await trace.finalise({ status: "errored", error_message: reason });
+      const handle = (msg: { id?: number; result?: { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: unknown }; error?: unknown }) => {
+        if (msg.id === initId) {
+          if (msg.error) return fail(new JevTransportError(`jev MCP initialize failed: ${JSON.stringify(msg.error)}`, { retryable: true }));
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          send({ jsonrpc: "2.0", id: askId, method: "tools/call", params: { name: "jev_ask", arguments: payload } });
+          return;
+        }
+        if (msg.id === askId) {
+          if (msg.error) return fail(new JevTransportError(`jev_ask rpc error: ${JSON.stringify(msg.error)}`, { retryable: isRetryableMessage(JSON.stringify(msg.error)) }));
+          const result = msg.result;
+          if (result?.isError) {
+            const text = result?.content?.[0]?.text ?? "jev_ask failed";
+            return fail(new JevTransportError(`jev_ask failed: ${text}`, { retryable: isRetryableMessage(text) }));
+          }
+          const out = (result?.structuredContent as ReturnType<typeof safeParse>) ?? safeParse(result?.content?.[0]?.text);
+          if (!out || typeof out !== "object" || !out.answers || !out.usage || typeof out.usage.input_tokens !== "number") {
+            return fail(new JevTransportError("jev_ask returned an unrecognised shape", { retryable: false }));
+          }
+          return ok({
+            model: out.model,
+            answers: out.answers as JevResult["answers"],
+            usage: { input_tokens: out.usage.input_tokens, output_tokens: out.usage.output_tokens ?? 0 },
+            latency_ms: typeof out.latency_ms === "number" ? out.latency_ms : Date.now() - t0,
+          });
+        }
       };
 
-      let attempt = 0;
-      let lastErr: unknown;
-      try {
-        while (attempt < MAX_ATTEMPTS) {
-          attempt += 1;
-          const controller = new AbortController();
-          let timedOut = false;
-          const tid = setTimeout(() => {
-            timedOut = true;
-            controller.abort();
-          }, timeoutMs);
-          if (opts?.signal) {
-            if (opts.signal.aborted) controller.abort();
-            else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-          }
-          const t0 = Date.now();
-          try {
-            const res = await fetchImpl(ENDPOINT, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-              body: JSON.stringify({ model, state: req.state, questions: req.questions }),
-              signal: controller.signal,
-            });
-            const latency_ms = Date.now() - t0;
-            if (res.status === 429 || res.status === 529) {
-              lastErr = new JevHttpError(res.status, await res.text().catch(() => ""));
-              if (attempt < MAX_ATTEMPTS) {
-                await sleep(backoffMs(attempt));
-                continue;
-              }
-              await finaliseError(`jev_http_${res.status}_retries_exhausted`);
-              throw lastErr;
-            }
-            if (!res.ok) {
-              // 401/422 and anything else not retried.
-              const body = await res.text().catch(() => "");
-              const err = new JevHttpError(res.status, body);
-              await finaliseError(`jev_http_${res.status}`);
-              throw err;
-            }
-            const json = (await res.json()) as {
-              model?: string;
-              answers?: JevResult["answers"];
-              usage?: { input_tokens?: number; output_tokens?: number };
-            };
-            const result: JevResult = {
-              model: json.model ?? model,
-              answers: json.answers ?? {},
-              usage: { input_tokens: json.usage?.input_tokens ?? 0, output_tokens: json.usage?.output_tokens ?? 0 },
-              latency_ms,
-            };
-            finalised = true;
-            await trace.finalise({
-              status: "completed",
-              model_calls: [{ model: result.model, latency_ms, tokens_in: result.usage.input_tokens, tokens_out: result.usage.output_tokens }],
-            });
-            return result;
-          } catch (e) {
-            if (e instanceof JevHttpError) throw e; // already finalised above
-            const isAbort = e instanceof Error && e.name === "AbortError";
-            if (isAbort) {
-              await finaliseError(timedOut ? "jev_timeout" : "jev_aborted");
-            } else {
-              await finaliseError(`jev_fetch_error: ${e instanceof Error ? e.message : String(e)}`);
-            }
-            throw e;
-          } finally {
-            clearTimeout(tid);
-          }
+      child.stdout.on("data", (d: Buffer) => {
+        buf += d.toString("utf8");
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let msg: unknown;
+          try { msg = JSON.parse(line); } catch { continue; }
+          try { handle(msg as Parameters<typeof handle>[0]); } catch (e) { fail(e as Error); }
         }
-        await finaliseError("jev_retries_exhausted");
-        throw lastErr instanceof Error ? lastErr : new Error("jev: exhausted retries");
-      } catch (e) {
-        // Belt-and-braces: any path above that threw without going through finaliseError (there
-        // should be none left, but a future edit is cheaper to protect here than to re-audit).
-        await finaliseError(e instanceof Error ? e.message : "jev_error");
-        throw e;
+      });
+
+      send({ jsonrpc: "2.0", id: initId, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "eta-jev-client", version: "1" } } });
+    });
+}
+
+export class McpJevClient implements JevClient {
+  private readonly transport: JevTransport;
+  private readonly openTraceFn: typeof openTrace;
+  private readonly sleep: (ms: number) => Promise<void>;
+
+  constructor(deps: ClientDeps = {}) {
+    this.transport = deps.transport ?? mcpStdioTransport();
+    this.openTraceFn = deps.openTrace ?? openTrace;
+    this.sleep = deps.sleep ?? realSleep;
+  }
+
+  async systemOne(req: JevRequest, opts?: { signal?: AbortSignal; trace?: TraceHandle }): Promise<JevResult> {
+    // (1) Off is a deliberate state, not a failure — thrown BEFORE any spawn or trace, so a gated-off
+    // caller costs nothing and never reaches the vendor.
+    if (!parseFlag(ETA_JEV_ENABLED)) throw new JevDisabledError();
+
+    // (2) State-size guard, before any network. The caller must chunk; this is not retryable.
+    const stateJson = JSON.stringify(req.state ?? null);
+    if (stateJson.length > JEV_STATE_MAX_CHARS) throw new JevStateTooLargeError(stateJson.length, JEV_STATE_MAX_CHARS);
+
+    const model = req.model ?? jevModel();
+    const questionIds = Object.keys(req.questions);
+    // request_input carries ids + byte size ONLY — never the state text (integration doc §7).
+    const trace = opts?.trace ?? (await this.openTraceFn({
+      surface: "jev",
+      request_input: { question_ids: questionIds, question_count: questionIds.length, state_bytes: Buffer.byteLength(stateJson) },
+    }));
+    const payload = { state: req.state, questions: req.questions, model };
+    const timeoutMs = jevTimeoutMs();
+
+    try {
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const t0 = Date.now();
+          const r = await this.transport(payload, { signal: opts?.signal, timeoutMs });
+          const result: JevResult = {
+            model: r.model || model,
+            answers: r.answers,
+            usage: { input_tokens: r.usage.input_tokens, output_tokens: r.usage.output_tokens ?? 0 },
+            latency_ms: r.latency_ms ?? Date.now() - t0,
+          };
+          trace.event("jev_ask", `ok q=${questionIds.length}`, result.latency_ms, true);
+          await trace.finalise({
+            status: "completed",
+            result_summary: { question_count: questionIds.length, input_tokens: result.usage.input_tokens },
+            model_calls: [{ model: result.model, latency_ms: result.latency_ms, tokens_in: result.usage.input_tokens, tokens_out: result.usage.output_tokens }],
+          });
+          return result;
+        } catch (e) {
+          if (e instanceof JevTransportError && e.retryable && attempt < MAX_ATTEMPTS) {
+            trace.event("jev_ask", `retry ${attempt} after transient`, undefined, false, true);
+            await this.sleep(backoffMs(attempt));
+            continue;
+          }
+          throw e;
+        }
       }
-    },
-  };
+      // Unreachable: the loop either returns or throws.
+      throw new JevTransportError("jev_ask exhausted retries", { retryable: false });
+    } catch (e) {
+      const aborted = opts?.signal?.aborted === true;
+      trace.event("jev_ask", "failed", undefined, true, true);
+      await trace.finalise({ status: aborted ? "aborted" : "errored", error_message: e instanceof Error ? e.message : String(e) });
+      throw e;
+    }
+  }
 }
 
-let cached: JevClient | null = null;
-
-/** ETA_JEV_MOCK on → the deterministic mock. Otherwise the real HTTP client. */
-export function getJevClient(): JevClient {
-  if (flagOn("ETA_JEV_MOCK")) return getMockJevClient();
-  if (!cached) cached = createHttpJevClient();
-  return cached;
-}
-
-/** Test-only: drop the cached real client so a new fetch mock takes effect. */
-export function _resetJevClientForTests(): void {
-  cached = null;
+/**
+ * The one entry point callers use. When ETA_JEV_MOCK is set, returns the deterministic mock (no
+ * network, no vendor) — used in every unit test and while D1b is closed. Otherwise the real MCP
+ * client. `deps` lets a test inject a fake transport/trace; production passes nothing.
+ */
+export function getJevClient(deps: ClientDeps = {}): JevClient {
+  if (parseFlag(ETA_JEV_MOCK)) return new MockJevClient();
+  return new McpJevClient(deps);
 }
