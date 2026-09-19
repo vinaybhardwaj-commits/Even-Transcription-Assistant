@@ -162,6 +162,22 @@ describe("J2 — terminal windows are skipped on re-run unless forced", () => {
     expect(r2).toMatchObject({ ok: 1, skipped: 0 });
     // breaks if: a terminal ok window is re-billed on a normal re-run, or force fails to re-ask.
   });
+
+  it("UNKNOWN IS NOT ALLOWED: an unrecognised status reads as neither answered nor skipped", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    CLIENT.impl = okImpl();
+    DB.windows = [win("c", 0)];
+    DB.jt = [jtRow("c", "translated", "there is a cough")];
+    // A status this build does not know — written by a future slice, a hand edit, or a half-applied
+    // migration. It must not be trusted as done, and it must not be assumed already answered.
+    DB.existing = [{ window_id: "c", status: "weird_future_value" }];
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r).toMatchObject({ skipped: 0, ok: 1 });
+    expect(CLIENT.calls.length, "the window was actually re-asked, not assumed answered").toBe(1);
+    expect(DB.written.c.status).toBe("ok");
+    // breaks if: an unknown status is added to the terminal set (skipped for ever, never resolved) or
+    // is treated as already-answered (never asked) — the same absence/failure collapse, one level up.
+  });
 });
 
 describe("J2 — batching, context, and cost", () => {
