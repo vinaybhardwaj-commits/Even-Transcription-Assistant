@@ -915,3 +915,71 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
     expect(brainCalls.some((c) => /UPDATE speaker_cluster|INSERT INTO speaker_cluster/.test(c.text))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice J2 — arm D (`jev`) through the SAME runner and fake db.
+// ---------------------------------------------------------------------------
+
+describe("10 — arm D (jev): scribe_fuse_run writes visits with arm='jev'", () => {
+  it("no jev_window_signal rows: X4-style guard, nothing written", async () => {
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return [];
+      if (/FROM bench_session WHERE id = ANY/.test(text)) return [];
+      return orig(text, values);
+    };
+    const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(out).toMatchObject({ ok: false, error: "no_jev_signals" });
+    expect(visitRows.size).toBe(0);
+  });
+
+  it("with signals and a bound cue: one visit written, arm='jev', uid adopted", async () => {
+    const SESSION_STARTED = new Date(T("00:00"));
+    CUES = [cue("consult_mark", T("00:01"), { individual_uid: "ind_jev1" }, "replay", null)];
+    const SIGNALS = [
+      { window_id: "jw1", room_day_id: DAY, session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "non_clinical", phase_probs: {}, phase_confidence: 0.1, p_start: 0.2, p_end: 0.05, p_clinician: 0.1, p_clinical: 0.1 },
+      { window_id: "jw2", room_day_id: DAY, session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
+      { window_id: "jw3", room_day_id: DAY, session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw4", room_day_id: DAY, session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw5", room_day_id: DAY, session_id: "bs_jev1", start_ms: 120000, end_ms: 150000, phase: "closing", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.6, p_clinical: 0.7 },
+    ];
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return SIGNALS as unknown as Row[];
+      if (/FROM bench_session WHERE id = ANY/.test(text)) return [{ id: "bs_jev1", started_at: SESSION_STARTED, ended_at: null }];
+      return orig(text, values);
+    };
+    const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(out).toMatchObject({ ok: true, arm: "jev", written: 1, already_existed: 0, failed: 0 });
+    expect(visitRows.size).toBe(1);
+    const v = [...visitRows.values()][0]!;
+    expect(v.arm).toBe("jev");
+    expect(v.state).toBe("in_chair");
+    expect(v.individual_uid).toBe("ind_jev1");
+    expect(v.opened_by_kind).toBe("jev_window");
+  });
+
+  it("re-running the same arm on the same day writes nothing new (already_existed)", async () => {
+    const SESSION_STARTED = new Date(T("00:00"));
+    const SIGNALS = [
+      { window_id: "jw1", room_day_id: DAY, session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
+      { window_id: "jw2", room_day_id: DAY, session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw3", room_day_id: DAY, session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      // opening window's own count is 1; the close window's count is not incremented (it returns before
+      // that line — see jev-arm.ts), so a fourth window (two continues between open and close) is needed
+      // to clear ETA_JEV_MIN_VISIT_WINDOWS=3 at closure.
+      { window_id: "jw4", room_day_id: DAY, session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.7, p_clinical: 0.7 },
+    ];
+    CUES = [];
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return SIGNALS as unknown as Row[];
+      if (/FROM bench_session WHERE id = ANY/.test(text)) return [{ id: "bs_jev1", started_at: SESSION_STARTED, ended_at: null }];
+      return orig(text, values);
+    };
+    const first = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(first).toMatchObject({ written: 1 });
+    const second = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(second).toMatchObject({ written: 0, already_existed: 1 });
+  });
+});

@@ -1,0 +1,19 @@
+{
+  "room_day_id": "rd_scratch_jevclean",
+  "session_id": "bs_clean1",
+  "session_started_at": "2026-08-19T04:00:00.000Z",
+  "windows": [
+    { "id": "w00", "start_ms": 0,      "end_ms": 30000,  "english": "printer is jammed again on that side",           "phase": "non_clinical", "phase_confidence": 0.9, "p_start": 0.05, "p_end": 0.05, "p_clinician": 0.05, "p_clinical": 0.1 },
+    { "id": "w01", "start_ms": 30000,  "end_ms": 60000,  "english": "sister please send the next one when free",       "phase": "arrival",      "phase_confidence": 0.8, "p_start": 0.2,  "p_end": 0.05, "p_clinician": 0.1,  "p_clinical": 0.3 },
+    { "id": "w02", "start_ms": 60000,  "end_ms": 90000,  "english": "come in please sit down what is the trouble",      "phase": "history",      "phase_confidence": 0.85,"p_start": 0.85, "p_end": 0.1,  "p_clinician": 0.8,  "p_clinical": 0.8 },
+    { "id": "w03", "start_ms": 90000,  "end_ms": 120000, "english": "since when is this cough about five days",         "phase": "history",      "phase_confidence": 0.8, "p_start": 0.1,  "p_end": 0.1,  "p_clinician": 0.75, "p_clinical": 0.8 },
+    { "id": "w04", "start_ms": 120000, "end_ms": 150000, "english": "let me listen to your chest breathe in",           "phase": "examination",  "phase_confidence": 0.85,"p_start": 0.1,  "p_end": 0.2,  "p_clinician": 0.85, "p_clinical": 0.85 },
+    { "id": "w05", "start_ms": 150000, "end_ms": 180000, "english": "this is a chest infection take this tablet",       "phase": "plan",         "phase_confidence": 0.8, "p_start": 0.1,  "p_end": 0.85, "p_clinician": 0.8,  "p_clinical": 0.7 },
+    { "id": "w06", "start_ms": 180000, "end_ms": 210000, "english": "next patient's file please cancel four oclock",    "phase": "non_clinical", "phase_confidence": 0.85,"p_start": 0.1,  "p_end": 0.05, "p_clinician": 0.1,  "p_clinical": 0.1 },
+    { "id": "w07", "start_ms": 210000, "end_ms": 240000, "english": "come sit please what happened to you",            "phase": "arrival",      "phase_confidence": 0.75,"p_start": 0.3,  "p_end": 0.05, "p_clinician": 0.2,  "p_clinical": 0.65 },
+    { "id": "w08", "start_ms": 240000, "end_ms": 270000, "english": "my knee is swollen since two weeks it pains",      "phase": "history",      "phase_confidence": 0.8, "p_start": 0.4,  "p_end": 0.1,  "p_clinician": 0.6,  "p_clinical": 0.7 },
+    { "id": "w09", "start_ms": 270000, "end_ms": 300000, "english": "any injury before this let me see does it hurt",   "phase": "history",      "phase_confidence": 0.8, "p_start": 0.1,  "p_end": 0.1,  "p_clinician": 0.75, "p_clinical": 0.75 },
+    { "id": "w10", "start_ms": 300000, "end_ms": 330000, "english": "get an x-ray of the knee and this painkiller",     "phase": "plan",         "phase_confidence": 0.8, "p_start": 0.1,  "p_end": 0.1,  "p_clinician": 0.7,  "p_clinical": 0.7 },
+    { "id": "w11", "start_ms": 330000, "end_ms": 360000, "english": "come back if it is not settling in two days bye",  "phase": "closing",      "phase_confidence": 0.85,"p_start": 0.1,  "p_end": 0.9,  "p_clinician": 0.65, "p_clinical": 0.6 }
+  ]
+}

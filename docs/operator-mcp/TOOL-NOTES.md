@@ -4,9 +4,9 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 28 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep)
+## The surface: 30 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep)
 
-`tools/list` publishes **27** tools. `tools/call` accepts those 27 **and every one of the 52 names**
+`tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
 (`0f27b8c`) — for as long as the door exists. A regroup, not a rename.
 
@@ -53,12 +53,15 @@ apply moves only windows whose silence verdict was written at or before it, so i
 run did not describe, and the bound is recorded on every row it moves. Passing an `as_of` to a dry run re-reads the
 set at that instant instead of now. An unscoped apply also requires `all_rooms: true`. Nothing schedules it.
 
-The other 17 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
+The other 19 are listed exactly as before: `scribe_get_state`, `scribe_list_cues`, `scribe_post_cue`,
 `scribe_pin_visit`, `scribe_mark_consult`, `scribe_extract_audio`, `scribe_transcribe_range`,
 `scribe_list_encounters`, `scribe_list_traces`, `scribe_set_visit_clinician`, `scribe_fuse_report`,
 `scribe_list_commands`, and the `jobs.ts` tools `scribe_job_submit`, `scribe_job_status`,
 `scribe_job_list`, `scribe_job_cancel`, `scribe_audit_recent` — by ruling, 13 Sep, no group absorbs a
-`jobs.ts` tool. That ruling is why the surface is 27 and not the 25 first proposed.
+`jobs.ts` tool. That ruling is why the surface was 27 and not the 25 first proposed, before J1-J3
+(19 Sep, bench-only Arm D) added two more ungrouped tools: `scribe_jev_window_run` (invoke; runs the
+`jev_window` job) and `scribe_jev_signals` (read; reads `jev_window_signal` rows for a room-day),
+bringing the total to 29.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app

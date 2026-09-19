@@ -134,7 +134,7 @@ const acceptedRemovals = (tool: string, argument: string, sha: string) =>
 const REUSED_NAMES = ["scribe_health", "scribe_room_command"] as const;
 
 /** Primary tools once stt.ts, voice.ts and scribe_window_speakers are folded in: 27, as ruled on 13 Sep. */
-const PRIMARY_COUNT = 28;
+const PRIMARY_COUNT = 30; // Slice J1/J2/J3 (19 Sep): +2 for scribe_jev_window_run, scribe_jev_signals
 
 const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(ALL_SCOPES) };
 
