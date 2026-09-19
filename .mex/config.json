@@ -1,0 +1,10 @@
+{
+  "setupMode": "code-repo",
+  "aiTools": [
+    "claude"
+  ],
+  "scaffold_id": "9cd2ff91-7acb-49c4-a170-b93511e76c00",
+  "scaffold_name": "Even-Transcription-Assistant-mex",
+  "origin": null,
+  "upstream": null
+}
