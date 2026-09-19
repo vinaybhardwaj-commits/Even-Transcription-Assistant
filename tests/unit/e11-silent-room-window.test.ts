@@ -236,7 +236,9 @@ describe("V2 — a real Whisper failure still fails whisper_unavailable, and sti
     it(`${error} → whisper_unavailable`, async () => {
       WHISPER.value = { ok: false, error, latency_ms: 40, attempts: 2 };
       const r = await driveRoom();
-      expect(r.error, `${error} must fail the job`).toBe("room_window_failed: whisper_unavailable");
+      // The job's error now carries the detail alongside the phase (V's ruling, 19 Sep 2026): the
+      // phase stays the token right after the code, and `full.error` — the loop's own `error` — joins it.
+      expect(r.error, `${error} must fail the job`).toBe(`room_window_failed: whisper_unavailable: ${error}`);
       expect(r.visited).toEqual(["prepare", "segment"]);
       expect(DB.attemptWrites, "a failed read consumes exactly one attempt").toBe(1);
       expect(DB.windowState, "and returns the window to the queue").toBe("closed");
@@ -294,13 +296,15 @@ describe("E11(b)/(e) — a silence that could not be written is NOT a finished r
           { replace: true, types: ["stt_silence", "stt_window"] },
           { replace: false, types: ["stt_window"] },
         ]);
-        expect(r.error).toBe("room_window_failed: cues_refused");
+        expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
+        // The job's error now carries the phase's own detail alongside the phase (V's ruling, 19 Sep
+        // 2026), and that detail is the exact `why` recordFailure also wrote to DB.lastError.
+        expect(r.error).toBe(`room_window_failed: ${DB.lastError}`);
         // E18 — NO VERDICT WITHOUT A RECORD OF IT. The silence never landed in the day, so nothing may claim
         // the window was adjudicated silent: the evidence write sits AFTER the cue gate, not before it.
         expect(DB.silenceWrites, "a refused silence records no verdict").toHaveLength(0);
         expect(r.visited).toEqual(["prepare", "segment"]);
         expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
-        expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
         expect(DB.windowState, "back in the queue, not settled").toBe("closed");
         expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
         expect(ROUTER.submits + DB.routingReads + DB.runInserts, "and still no engine").toBe(0);
@@ -342,10 +346,10 @@ describe("E22 R5 (F6) — SPOKEN turns that could not be written are NOT a finis
         expect(brain[0]!.replace, "the turn batch carries the window replace").toBe(true);
         expect(brain[0]!.types).toContain("stt_turn");
         expect(brain.at(-1), "then the marker alone, without the replace").toEqual({ replace: false, types: ["stt_window"] });
-        expect(r.error).toBe("room_window_failed: cues_refused");
+        expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
+        expect(r.error).toBe(`room_window_failed: ${DB.lastError}`);
         expect(r.visited).toEqual(["prepare", "segment"]);
         expect(DB.attemptWrites, "one attempt, exactly").toBe(1);
-        expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
         expect(DB.windowState, "back in the queue, not transcribed").toBe("closed");
         expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
         expect(ROUTER.submits, "no routed engine for a window whose turns did not land").toBe(0);
@@ -393,8 +397,8 @@ describe("F1 (B3) — a spoken window with EXACTLY ONE turn, rolled back, is NOT
       expect(brain[0]!.types, "the turn batch was sent, and refused").toContain("stt_turn");
       expect(brain.at(-1)).toEqual({ replace: false, types: ["stt_window"] });
       expect(r.visited, "the window never reaches the engine: the read did not finish").toEqual(["prepare", "segment"]);
-      expect(r.error, "one rolled-back turn fails the window exactly as many do").toBe("room_window_failed: cues_refused");
       expect(DB.lastError).toMatch(/^cues_refused: brain_permission_denied/);
+      expect(r.error, "one rolled-back turn fails the window exactly as many do").toBe(`room_window_failed: ${DB.lastError}`);
       expect(DB.windowState, "back in the queue, not transcribed").toBe("closed");
       expect(DB.subjectDone, "the subject row is never marked done").toBe(0);
       expect(DB.attemptWrites, "one attempt, exactly").toBe(1);

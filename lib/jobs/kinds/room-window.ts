@@ -27,12 +27,23 @@ export const ROOM_POLL_INTERVAL_MS = 3_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
- * A phase's failure becomes the job's failure, carrying the DrainStep as its detail.
+ * A phase's failure becomes the job's failure, carrying the DrainStep as its detail — and, since
+ * this morning's `cues_refused` (first attempt against https://evenscribe.app failed, the retry
+ * against the cron's own deployment origin succeeded, and the row remembered only the phase name),
+ * the phase's OWN detail too, so the actual reason is not unrecoverable from the row.
  *
- * The detail is safe by construction: `DrainStep` is a closed union of our own names, so nothing a
- * service said about the audio can reach the row through it.
+ * THE PHASE STAYS WHERE IT WAS. `jobError`'s second argument becomes `<step>: <detail>` rather than
+ * `<step>` alone, so the string still reads `room_window_failed: cues_refused...` — `errorCodeOf`
+ * (lib/jobs/errors.ts) still finds `room_window_failed` as the leading code, and anything that reads
+ * or matches on the phase immediately after the first colon is unaffected. An old row with a phase
+ * and no detail is exactly what `o.detail` undefined already produces: `<step>` alone, unchanged.
+ *
+ * APPENDING THE DETAIL DOES NOT WIDEN WHO SEES IT. `read`-scope callers only ever get
+ * `errorCodeOf(j.error)` — the leading code, full stop (lib/mcp/tools/jobs.ts's `jobView`). Only
+ * `invoke`-scope callers see the raw `error` string at all, and they already saw the phase name;
+ * this adds the detail to what they already had access to, not a new audience for it.
  */
-const failFromPhase = (o: PhaseOutcome) => failWith(jobError("room_window_failed", o.step));
+export const failFromPhase = (o: PhaseOutcome) => failWith(jobError("room_window_failed", o.detail ? `${o.step}: ${o.detail}` : o.step));
 
 const actorOf = (ctx: StepContext) => ({
   actor: String(ctx.args.actor ?? ""),
