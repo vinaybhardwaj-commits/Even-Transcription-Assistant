@@ -406,11 +406,12 @@ describe("submit", () => {
 });
 
 describe("the seven kinds", () => {
-  it("all nine are registered, and the three stubs fail not_implemented", async () => {
-    // Slice C1 adds route_transcribe — the router's long transport. The list stays EXACT (toEqual,
-    // not a contains) so a kind that appears without being intended still fails here.
+  it("all ten are registered, and the three stubs fail not_implemented", async () => {
+    // Slice C1 adds route_transcribe — the router's long transport. Slice J0 adds jev_english. The
+    // list stays EXACT (toEqual, not a contains) so a kind that appears without being intended still
+    // fails here.
     expect(JOB_KIND_NAMES.sort()).toEqual(
-      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "room_window", "route_transcribe", "stitch", "stt_fanout", "transcribe_range"].sort(),
+      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "jev_english", "room_window", "route_transcribe", "stitch", "stt_fanout", "transcribe_range"].sort(),
     );
     // diarize_clip is GONE (C2 D3): diarize_window implements it for real.
     // emotion_clip is GONE (C3): emotion_window implements it for real.
