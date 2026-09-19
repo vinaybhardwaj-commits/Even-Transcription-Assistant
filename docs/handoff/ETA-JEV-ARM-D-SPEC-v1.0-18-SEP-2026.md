@@ -39,6 +39,8 @@ programme.
 - **D1b — real consult transcripts to TypeSafe** (DPA, zero-data-retention): **D1b CLEARED 18 Sep 2026
   by V in Cowork (trial terms: no training, zero retention); J4 runs after J1–J3 refutation.**
 
+**D1b clearance record (citation, not a rewrite).** Cleared by V, in his own words, in the Cowork thread "Jev / ETA" on 18 Sep 2026 (session_01TqJL9cNusj2Yfp9KeoqPRe), replying to the orchestrator's question on vendor egress: "I'm in a special trial and they've promised that they do not train off of our data and there is Zero data retention." The orchestrator (Fable) relayed this into the spec and ETA-JEV-INTEGRATION.md on 19 Sep. The rule that stood before the clearance still stands as the rule for any future vendor: sending real transcript text to a vendor without V saying so in words is a data-governance breach, not a build error. If the trial terms change, D1b closes again and J4 stops.
+
 **D1b is cleared, but J4 still waits on refutation.** V's clearance in Cowork on 18 Sep (trial terms: no
 training on our data, zero data retention) covers the vendor-egress question; J1–J3 were always
 fixture-and-mock work and are unblocked today. J4 runs only after J1–J3 pass refutation — this is a build

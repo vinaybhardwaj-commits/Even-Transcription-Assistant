@@ -28,6 +28,7 @@ embeddings — it documents itself as bad at numbers and dates, and it cannot he
 | Examples | `jev_review` on a Builder's diff; trialling question wording on invented text | Arm D reading a room window's transcript |
 | Gate | **OPEN.** The MCP is installed and keyed. Nothing patient-related crosses. | **OPEN since 18 Sep 2026** — V cleared D1 in Cowork: Even is on a TypeSafe trial with no training on our data and zero data retention. J4 may run once J1–J3 pass refutation. |
 | Status 19 Sep | **In force** | **Unblocked; J4 after J1–J3 refutation.** |
+| Clearance record | — | V, Cowork 18 Sep 2026 (session_01TqJL9cNusj2Yfp9KeoqPRe): "I'm in a special trial and they've promised that they do not train off of our data and there is Zero data retention." Relayed by the orchestrator; see spec §0 clearance record. |
 
 **The installed MCP does not clear D1.** Having the tool wired up and being allowed to send it a patient's
 consultation are different facts. Use A needs no permission beyond V having installed it; Use B needs V to
