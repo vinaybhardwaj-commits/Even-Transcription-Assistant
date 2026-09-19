@@ -1,0 +1,2455 @@
+{
+ "days": [
+  {
+   "room_day_id": "rd_bench_fixture_a",
+   "scratch": true,
+   "sessions": [
+    {
+     "id": "bs_fx_a",
+     "started_at": "2026-09-01T04:00:00.000Z",
+     "ended_at": "2026-09-01T04:30:00.000Z"
+    }
+   ],
+   "cues": [
+    {
+     "id": "cm_a1",
+     "type": "consult_mark",
+     "at": "2026-09-01T04:05:00.000Z",
+     "payload": {
+      "individual_uid": "uid_cm_a1"
+     },
+     "source": null,
+     "source_ref": null
+    },
+    {
+     "id": "cm_a2",
+     "type": "consult_mark",
+     "at": "2026-09-01T04:15:00.000Z",
+     "payload": {
+      "individual_uid": "uid_cm_a2"
+     },
+     "source": null,
+     "source_ref": null
+    },
+    {
+     "id": "cm_a3",
+     "type": "consult_mark",
+     "at": "2026-09-01T04:24:00.000Z",
+     "payload": {
+      "individual_uid": "uid_cm_a3"
+     },
+     "source": null,
+     "source_ref": null
+    }
+   ],
+   "jev_signals": [
+    {
+     "window_id": "bw_fx_a_0",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 0,
+     "end_ms": 30000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_1",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 30000,
+     "end_ms": 60000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_2",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 60000,
+     "end_ms": 90000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_3",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 90000,
+     "end_ms": 120000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_4",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 120000,
+     "end_ms": 150000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_5",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 150000,
+     "end_ms": 180000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_6",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 180000,
+     "end_ms": 210000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_7",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 210000,
+     "end_ms": 240000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_8",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 240000,
+     "end_ms": 270000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_9",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 270000,
+     "end_ms": 300000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_10",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 300000,
+     "end_ms": 330000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.9,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_11",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 330000,
+     "end_ms": 360000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_12",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 360000,
+     "end_ms": 390000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_13",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 390000,
+     "end_ms": 420000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_14",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 420000,
+     "end_ms": 450000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_15",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 450000,
+     "end_ms": 480000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_16",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 480000,
+     "end_ms": 510000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_17",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 510000,
+     "end_ms": 540000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_18",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 540000,
+     "end_ms": 570000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_19",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 570000,
+     "end_ms": 600000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.9,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_20",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 600000,
+     "end_ms": 630000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_21",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 630000,
+     "end_ms": 660000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_22",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 660000,
+     "end_ms": 690000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_23",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 690000,
+     "end_ms": 720000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_24",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 720000,
+     "end_ms": 750000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_25",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 750000,
+     "end_ms": 780000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_26",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 780000,
+     "end_ms": 810000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_27",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 810000,
+     "end_ms": 840000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_28",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 840000,
+     "end_ms": 870000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_29",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 870000,
+     "end_ms": 900000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_30",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 900000,
+     "end_ms": 930000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_31",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 930000,
+     "end_ms": 960000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.9,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_32",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 960000,
+     "end_ms": 990000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_33",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 990000,
+     "end_ms": 1020000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_34",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1020000,
+     "end_ms": 1050000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_35",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1050000,
+     "end_ms": 1080000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_36",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1080000,
+     "end_ms": 1110000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_37",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1110000,
+     "end_ms": 1140000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_38",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1140000,
+     "end_ms": 1170000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_39",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1170000,
+     "end_ms": 1200000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.9,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_40",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1200000,
+     "end_ms": 1230000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_41",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1230000,
+     "end_ms": 1260000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_42",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1260000,
+     "end_ms": 1290000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_43",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1290000,
+     "end_ms": 1320000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_44",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1320000,
+     "end_ms": 1350000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_45",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1350000,
+     "end_ms": 1380000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_46",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1380000,
+     "end_ms": 1410000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_47",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1410000,
+     "end_ms": 1440000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_48",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1440000,
+     "end_ms": 1470000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_49",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1470000,
+     "end_ms": 1500000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_50",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1500000,
+     "end_ms": 1530000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_51",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1530000,
+     "end_ms": 1560000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_52",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1560000,
+     "end_ms": 1590000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_53",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1590000,
+     "end_ms": 1620000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_54",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1620000,
+     "end_ms": 1650000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_55",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1650000,
+     "end_ms": 1680000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.9,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_56",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1680000,
+     "end_ms": 1710000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_57",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1710000,
+     "end_ms": 1740000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_58",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1740000,
+     "end_ms": 1770000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_a_59",
+     "room_day_id": "rd_bench_fixture_a",
+     "session_id": "bs_fx_a",
+     "start_ms": 1770000,
+     "end_ms": 1800000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_a_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    }
+   ],
+   "role_signals": [
+    {
+     "window_id": "bw_fx_a_10",
+     "speaker_idx": 0,
+     "role": "clinician",
+     "role_confidence": 0.95,
+     "acoustic_clinician": true
+    },
+    {
+     "window_id": "bw_fx_a_10",
+     "speaker_idx": 1,
+     "role": "patient",
+     "role_confidence": 0.8,
+     "acoustic_clinician": false
+    },
+    {
+     "window_id": "bw_fx_a_10",
+     "speaker_idx": 2,
+     "role": "attendant",
+     "role_confidence": 0.5,
+     "acoustic_clinician": false
+    },
+    {
+     "window_id": "bw_fx_a_11",
+     "speaker_idx": 0,
+     "role": "nurse_or_staff",
+     "role_confidence": 0.9,
+     "acoustic_clinician": false
+    }
+   ],
+   "jev_trace_total_ms": [
+    800,
+    1200,
+    1000
+   ]
+  },
+  {
+   "room_day_id": "rd_bench_fixture_b",
+   "scratch": true,
+   "sessions": [
+    {
+     "id": "bs_fx_b",
+     "started_at": "2026-09-01T09:00:00.000Z",
+     "ended_at": "2026-09-01T09:25:00.000Z"
+    }
+   ],
+   "cues": [
+    {
+     "id": "cm_b1",
+     "type": "consult_mark",
+     "at": "2026-09-01T09:10:00.000Z",
+     "payload": {
+      "individual_uid": "uid_cm_b1"
+     },
+     "source": null,
+     "source_ref": null
+    },
+    {
+     "id": "cm_b2",
+     "type": "consult_mark",
+     "at": "2026-09-01T09:20:00.000Z",
+     "payload": {
+      "individual_uid": "uid_cm_b2"
+     },
+     "source": null,
+     "source_ref": null
+    },
+    {
+     "id": "pn_b1",
+     "type": "pulse_note",
+     "at": "2026-09-01T09:18:00.000Z",
+     "payload": {},
+     "source": "warehouse",
+     "source_ref": "wh_pn_b1"
+    }
+   ],
+   "jev_signals": [
+    {
+     "window_id": "bw_fx_b_0",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 0,
+     "end_ms": 30000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0,
+     "model": "jev-1.13.0",
+     "prompt_version": "skipped:no_english",
+     "input_tokens": 0,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_1",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 30000,
+     "end_ms": 60000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0,
+     "model": "jev-1.13.0",
+     "prompt_version": "skipped:no_english",
+     "input_tokens": 0,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_2",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 60000,
+     "end_ms": 90000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_3",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 90000,
+     "end_ms": 120000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_4",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 120000,
+     "end_ms": 150000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_5",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 150000,
+     "end_ms": 180000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_6",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 180000,
+     "end_ms": 210000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_7",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 210000,
+     "end_ms": 240000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_8",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 240000,
+     "end_ms": 270000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_9",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 270000,
+     "end_ms": 300000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_10",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 300000,
+     "end_ms": 330000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_11",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 330000,
+     "end_ms": 360000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_12",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 360000,
+     "end_ms": 390000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_13",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 390000,
+     "end_ms": 420000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_14",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 420000,
+     "end_ms": 450000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_15",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 450000,
+     "end_ms": 480000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_16",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 480000,
+     "end_ms": 510000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_17",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 510000,
+     "end_ms": 540000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_18",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 540000,
+     "end_ms": 570000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_19",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 570000,
+     "end_ms": 600000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_0",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_20",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 600000,
+     "end_ms": 630000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_21",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 630000,
+     "end_ms": 660000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_22",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 660000,
+     "end_ms": 690000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_23",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 690000,
+     "end_ms": 720000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.9,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_24",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 720000,
+     "end_ms": 750000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_25",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 750000,
+     "end_ms": 780000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_26",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 780000,
+     "end_ms": 810000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_27",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 810000,
+     "end_ms": 840000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_28",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 840000,
+     "end_ms": 870000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_29",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 870000,
+     "end_ms": 900000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_30",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 900000,
+     "end_ms": 930000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_31",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 930000,
+     "end_ms": 960000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_32",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 960000,
+     "end_ms": 990000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.9,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_33",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 990000,
+     "end_ms": 1020000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_34",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1020000,
+     "end_ms": 1050000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_35",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1050000,
+     "end_ms": 1080000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_36",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1080000,
+     "end_ms": 1110000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_37",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1110000,
+     "end_ms": 1140000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.9,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_38",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1140000,
+     "end_ms": 1170000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_39",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1170000,
+     "end_ms": 1200000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_1",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_40",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1200000,
+     "end_ms": 1230000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_41",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1230000,
+     "end_ms": 1260000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_42",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1260000,
+     "end_ms": 1290000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_43",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1290000,
+     "end_ms": 1320000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_44",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1320000,
+     "end_ms": 1350000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_45",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1350000,
+     "end_ms": 1380000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_46",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1380000,
+     "end_ms": 1410000,
+     "phase": "history",
+     "phase_probs": {
+      "history": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.9,
+     "p_clinician": 0.9,
+     "p_clinical": 0.9,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_47",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1410000,
+     "end_ms": 1440000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_48",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1440000,
+     "end_ms": 1470000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+     "window_id": "bw_fx_b_49",
+     "room_day_id": "rd_bench_fixture_b",
+     "session_id": "bs_fx_b",
+     "start_ms": 1470000,
+     "end_ms": 1500000,
+     "phase": "non_clinical",
+     "phase_probs": {
+      "non_clinical": 0.9
+     },
+     "phase_confidence": 0.9,
+     "p_start": 0.02,
+     "p_end": 0.02,
+     "p_clinician": 0.1,
+     "p_clinical": 0.1,
+     "model": "jev-1.13.0",
+     "prompt_version": "jev-arm-d-v1",
+     "input_tokens": 100,
+     "batch_id": "batch_b_2",
+     "created_at": "2026-09-01T12:00:00.000Z"
+    }
+   ],
+   "jev_trace_total_ms": [
+    900
+   ]
+  },
+  {
+   "room_day_id": "rd_bench_fixture_c",
+   "scratch": true,
+   "sessions": [],
+   "cues": [
+    {
+     "id": "cm_c_none",
+     "type": "pqm_called",
+     "at": "2026-09-01T05:00:00.000Z",
+     "payload": {},
+     "source": null,
+     "source_ref": null
+    }
+   ]
+  }
+ ]
+}

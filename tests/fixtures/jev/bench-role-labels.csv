@@ -1,0 +1,5 @@
+window_id,speaker_idx,role
+bw_fx_a_10,0,clinician
+bw_fx_a_10,1,patient
+bw_fx_a_10,2,patient
+bw_fx_a_11,0,nurse_or_staff
