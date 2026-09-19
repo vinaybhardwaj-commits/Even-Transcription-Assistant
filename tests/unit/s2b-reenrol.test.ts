@@ -1,5 +1,5 @@
 /**
- * S2b voiceprint re-enrolment tooling (scripts/s2b-reenrol/) and migration 0106.
+ * S2b voiceprint re-enrolment tooling (scripts/s2b-reenrol/) and migration 0108.
  *
  * The Python lib is pure (no numpy, no network), so its unit tests run here, in the repo gate:
  * they pin the embedding wire format, the float32 centroid mean, the watchdog gate and the
@@ -62,8 +62,8 @@ describe("mine.py — the watchdog gate is in the path of every heavy step", () 
   });
 });
 
-describe("migration 0106_voice_print_generation", () => {
-  const sql = read(path.join(ROOT, "db", "migrations", "0106_voice_print_generation.sql"));
+describe("migration 0108_voice_print_generation", () => {
+  const sql = read(path.join(ROOT, "db", "migrations", "0108_voice_print_generation.sql"));
   const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
 
   it("creates one new table, re-runnably", () => {
@@ -89,11 +89,11 @@ describe("migration 0106_voice_print_generation", () => {
     expect(code).toMatch(/origin IN \('enrolment_clip', 'room_audio'\)/);
   });
 
-  it("records itself as version 106", () => {
-    expect(code).toMatch(/VALUES \(106, '0106_voice_print_generation'\)/);
+  it("records itself as version 108", () => {
+    expect(code).toMatch(/VALUES \(108, '0108_voice_print_generation'\)/);
   });
 
-  it("number 0106 is used once in db/migrations", () => {
-    expect(fs.readdirSync(path.join(ROOT, "db", "migrations")).filter((f) => f.startsWith("0106_"))).toHaveLength(1);
+  it("number 0108 is used once in db/migrations", () => {
+    expect(fs.readdirSync(path.join(ROOT, "db", "migrations")).filter((f) => f.startsWith("0108_"))).toHaveLength(1);
   });
 });

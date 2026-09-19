@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Turn mined.json into a .sql file of INSERTs for voice_print_generation. DRY RUN ONLY: this never
-connects to a database. V (or the Orchestrator) applies the file, after migration 0106 is applied.
+connects to a database. V (or the Orchestrator) applies the file, after migration 0108 is applied.
 
     python3 emit_sql.py --mined mined.json --day-filter salanki_11sep,... --generation 2 --out gen2.sql
 

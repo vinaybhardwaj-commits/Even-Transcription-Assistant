@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0106 — voice_print_generation: insert-only history of every voiceprint a clinician has had.
+-- Migration 0108 — voice_print_generation: insert-only history of every voiceprint a clinician has had.
 --
 -- WHY (S2b, 19 Sep 2026). Speaker identification has not fired once in production. voice_print holds
 -- ONE row per clinician (doctor_id is the primary key), enrolled from a quiet clip; room audio scores
@@ -60,5 +60,5 @@ FROM voice_print vp
 ON CONFLICT DO NOTHING;
 
 INSERT INTO schema_migrations (version, name)
-VALUES (106, '0106_voice_print_generation')
+VALUES (108, '0108_voice_print_generation')
 ON CONFLICT DO NOTHING;
