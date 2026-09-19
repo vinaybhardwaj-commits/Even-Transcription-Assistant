@@ -15,6 +15,26 @@
  * Jev through lib/jev/client (mock or real, per ETA_JEV_MOCK/ETA_JEV_ENABLED), and persisting one
  * jev_window_signal row per TARGET window. Context windows (§5.2 step 2) are read-only and never
  * persisted from that batch.
+ *
+ * REFUTER F6 (19 Sep):
+ *  (a) Batches are now sliced from the FULL ordered, non-already-signalled window list, not just
+ *      the subset with English text. A window with no English text still gets its skip row
+ *      written immediately in `collect` (unchanged), but it also keeps its PLACE in the batch
+ *      sequence, appearing in that batch's `state.windows` as `{id, text: null, note: "no English
+ *      text"}` — so "consecutive" (the window numbering Jev sees) reflects true chronological
+ *      adjacency instead of silently closing the gap a no-English window leaves. A batch with no
+ *      real target inside it (every window a placeholder) is dropped before it reaches `ask` —
+ *      there is nothing to call Jev about.
+ *  (b) A batch's `result.usage.input_tokens` is a TOTAL for every target window Jev was asked
+ *      about in that call, not a per-window figure. Each row's own `input_tokens` column now
+ *      stores that total divided by the number of target windows in the batch (rounded); the raw
+ *      batch total is still summed exactly once into the job's own summary (`input_tokens`,
+ *      `est_cost_usd`), unchanged.
+ *  (c) An in-flight semaphore caps concurrent Jev calls per spec §5.2: at most
+ *      `ETA_JEV_MAX_INFLIGHT_PER_JOB` (default 2) calls for the same room-day, and at most
+ *      `ETA_JEV_MAX_INFLIGHT_GLOBAL` (default 4) calls across every room-day sharing this module
+ *      instance. `ask` acquires a slot before calling `client.systemOne` and releases it in a
+ *      `finally`, whether the call succeeds or throws.
  */
 import { sql } from "@/lib/db";
 import { getJevClient } from "@/lib/jev/client";
@@ -36,6 +56,53 @@ const SKIPPED_PROMPT_VERSION = "skipped:no_english";
 const COST_PER_INPUT_TOKEN = 42e-9;
 
 type WindowMeta = { id: string; session_id: string; start_ms: number; end_ms: number; hasEnglish: boolean };
+
+// ---------------------------------------------------------------------------
+// F6(c) — in-flight semaphore: per-job (room_day_id) cap 2, module-wide cap 4.
+// ---------------------------------------------------------------------------
+const ETA_JEV_MAX_INFLIGHT_PER_JOB = envInt("ETA_JEV_MAX_INFLIGHT_PER_JOB", 2);
+const ETA_JEV_MAX_INFLIGHT_GLOBAL = envInt("ETA_JEV_MAX_INFLIGHT_GLOBAL", 4);
+
+let moduleInFlight = 0;
+const perJobInFlight = new Map<string, number>();
+const waiters: Array<() => void> = [];
+
+function tryAcquire(jobKey: string): boolean {
+  const jobCount = perJobInFlight.get(jobKey) ?? 0;
+  if (moduleInFlight >= ETA_JEV_MAX_INFLIGHT_GLOBAL || jobCount >= ETA_JEV_MAX_INFLIGHT_PER_JOB) return false;
+  moduleInFlight += 1;
+  perJobInFlight.set(jobKey, jobCount + 1);
+  return true;
+}
+
+function release(jobKey: string): void {
+  moduleInFlight = Math.max(0, moduleInFlight - 1);
+  const remaining = (perJobInFlight.get(jobKey) ?? 1) - 1;
+  if (remaining <= 0) perJobInFlight.delete(jobKey);
+  else perJobInFlight.set(jobKey, remaining);
+  const next = waiters.shift();
+  if (next) next();
+}
+
+/** Test-only introspection: current in-flight counts. */
+export function _jevInFlightForTests(): { module: number; perJob: Map<string, number> } {
+  return { module: moduleInFlight, perJob: new Map(perJobInFlight) };
+}
+
+/** Test-only: reset the semaphore's shared state between tests. */
+export function _resetJevInFlightForTests(): void {
+  moduleInFlight = 0;
+  perJobInFlight.clear();
+  waiters.length = 0;
+}
+
+/** Acquire a slot for `jobKey`, waiting if either cap is currently full. Always release it. */
+export async function acquireJevSlot(jobKey: string): Promise<() => void> {
+  while (!tryAcquire(jobKey)) {
+    await new Promise<void>((resolve) => waiters.push(resolve));
+  }
+  return () => release(jobKey);
+}
 
 function parseArgs(raw: unknown): Record<string, unknown> {
   if (!raw || typeof raw !== "object") throw new JobArgsError("args must be an object");
@@ -87,21 +154,27 @@ async function collect(ctx: StepContext): Promise<StepOutcome> {
   }
 
   const meta: WindowMeta[] = windows.map((w) => ({ ...w, hasEnglish: !!englishById.get(w.id) }));
+  const metaById = new Map(meta.map((m) => [m.id, m]));
 
   let skipped = 0;
-  const targetIds: string[] = [];
+  // F6(a): the eligible sequence keeps EVERY non-already-signalled window in order, English or
+  // not — a no-English window still gets its skip row written here, but also keeps its place so
+  // batches are sliced from the real, consecutive window list.
+  const eligibleIds: string[] = [];
   for (const w of meta) {
     if (existing.has(w.id)) { skipped += 1; continue; }
     if (!w.hasEnglish) {
       await writeSkipRow(w, roomDayId);
       skipped += 1;
-      continue;
     }
-    targetIds.push(w.id);
+    eligibleIds.push(w.id);
   }
 
-  const batches: string[][] = [];
-  for (let i = 0; i < targetIds.length; i += ETA_JEV_BATCH_WINDOWS) batches.push(targetIds.slice(i, i + ETA_JEV_BATCH_WINDOWS));
+  const rawBatches: string[][] = [];
+  for (let i = 0; i < eligibleIds.length; i += ETA_JEV_BATCH_WINDOWS) rawBatches.push(eligibleIds.slice(i, i + ETA_JEV_BATCH_WINDOWS));
+  // Drop a batch that is nothing but no-English placeholders — already fully persisted above,
+  // and there is nothing left to ask Jev.
+  const batches = rawBatches.filter((b) => b.some((id) => metaById.get(id)!.hasEnglish));
 
   if (batches.length === 0) {
     return doneWith({ room_day_id: roomDayId, windows_total: windows.length, windows_asked: 0, windows_skipped: skipped, calls: 0, input_tokens: 0, est_cost_usd: 0 });
@@ -112,7 +185,7 @@ async function collect(ctx: StepContext): Promise<StepOutcome> {
     prompt_version: promptVersion,
     windows_total: windows.length,
     windows_skipped: skipped,
-    meta, // ids + session/start/end only — no text
+    meta, // ids + session/start/end + hasEnglish only — no text
     batches,
     batch_index: 0,
     windows_asked: 0,
@@ -138,43 +211,56 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
   const batches = ctx.progress.batches as string[][];
   const batchIndex = ctx.progress.batch_index as number;
   const batch = batches[batchIndex]!;
+  const metaById = new Map(meta.map((m) => [m.id, m]));
 
-  const contextIds = contextFor(meta, batch[0]!);
-  const allIds = [...contextIds, ...batch];
+  // F6(a): split the batch into real targets (asked) and no-English placeholders (already
+  // persisted in `collect`, kept here only so the state's window numbering stays consecutive).
+  const targetIds = batch.filter((id) => metaById.get(id)!.hasEnglish);
+  const placeholderIds = new Set(batch.filter((id) => !metaById.get(id)!.hasEnglish));
+
+  const contextIds = targetIds.length > 0 ? contextFor(meta, targetIds[0]!) : [];
+  const textFetchIds = [...contextIds, ...targetIds];
   const textRows = (await sql`
-    SELECT window_id, english FROM jev_window_text WHERE window_id = ANY(${allIds})
+    SELECT window_id, english FROM jev_window_text WHERE window_id = ANY(${textFetchIds})
   `) as Array<{ window_id: string; english: string | null }>;
   const textById = new Map(textRows.map((r) => [r.window_id, r.english ?? ""]));
-  const metaById = new Map(meta.map((m) => [m.id, m]));
 
   const state = {
     setting: SETTING,
     context_windows: contextIds.map((id) => ({ id, text: textById.get(id) ?? "" })),
-    windows: batch.map((id) => ({ id, text: textById.get(id) ?? "" })),
+    windows: batch.map((id) =>
+      placeholderIds.has(id) ? { id, text: null, note: "no English text" } : { id, text: textById.get(id) ?? "" },
+    ),
   };
 
   const questions: Record<string, ReturnType<typeof phaseQuestion>> = {};
-  const qkinds: Record<string, "phase" | "start" | "end" | "clinician" | "clinical"> = {};
-  for (const id of batch) {
+  for (const id of targetIds) {
     questions[qid.phase(id)] = phaseQuestion(id) as never;
-    qkinds[qid.phase(id)] = "phase";
     questions[qid.start(id)] = startQuestion(id) as never;
-    qkinds[qid.start(id)] = "start";
     questions[qid.end(id)] = endQuestion(id) as never;
-    qkinds[qid.end(id)] = "end";
     questions[qid.clinician(id)] = clinicianQuestion(id) as never;
-    qkinds[qid.clinician(id)] = "clinician";
     questions[qid.clinical(id)] = clinicalQuestion(id) as never;
-    qkinds[qid.clinical(id)] = "clinical";
   }
 
   const client = getJevClient();
   const batchId = `${roomDayId}:${batchIndex}`;
-  const result = await client.systemOne({ state, questions }, { signal: ctx.signal });
+
+  // F6(c): at most ETA_JEV_MAX_INFLIGHT_PER_JOB calls for this room-day, ETA_JEV_MAX_INFLIGHT_GLOBAL overall.
+  const releaseSlot = await acquireJevSlot(roomDayId);
+  let result: Awaited<ReturnType<typeof client.systemOne>>;
+  try {
+    result = await client.systemOne({ state, questions }, { signal: ctx.signal });
+  } finally {
+    releaseSlot();
+  }
 
   const nounVal = (a: JevAnswer | undefined): number => (a && a.type === "noul" ? a.noul : 0);
 
-  for (const id of batch) {
+  // F6(b): the batch's own usage.input_tokens is a TOTAL for every target window asked about;
+  // each row gets its share, the raw total is summed once into the job summary below.
+  const perWindowTokens = targetIds.length > 0 ? Math.round(result.usage.input_tokens / targetIds.length) : 0;
+
+  for (const id of targetIds) {
     const m = metaById.get(id)!;
     const phaseAns = result.answers[qid.phase(id)];
     const phase = phaseAns && phaseAns.type === "choice" ? phaseAns.choice : "non_clinical";
@@ -191,7 +277,7 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
          p_start, p_end, p_clinician, p_clinical, model, prompt_version, input_tokens, batch_id)
       VALUES
         (${id}, ${roomDayId}, ${m.session_id}, ${m.start_ms}, ${m.end_ms}, ${phase}, ${JSON.stringify(phaseProbs)}::jsonb, ${phaseConfidence},
-         ${p_start}, ${p_end}, ${p_clinician}, ${p_clinical}, ${result.model}, ${promptVersion}, ${result.usage.input_tokens}, ${batchId})
+         ${p_start}, ${p_end}, ${p_clinician}, ${p_clinical}, ${result.model}, ${promptVersion}, ${perWindowTokens}, ${batchId})
       ON CONFLICT (window_id) DO UPDATE SET
         phase = EXCLUDED.phase, phase_probs = EXCLUDED.phase_probs, phase_confidence = EXCLUDED.phase_confidence,
         p_start = EXCLUDED.p_start, p_end = EXCLUDED.p_end, p_clinician = EXCLUDED.p_clinician, p_clinical = EXCLUDED.p_clinical,
@@ -200,9 +286,9 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
     `;
   }
 
-  const windows_asked = (ctx.progress.windows_asked as number) + batch.length;
+  const windows_asked = (ctx.progress.windows_asked as number) + targetIds.length;
   const calls = (ctx.progress.calls as number) + 1;
-  const input_tokens = (ctx.progress.input_tokens as number) + result.usage.input_tokens;
+  const input_tokens = (ctx.progress.input_tokens as number) + result.usage.input_tokens; // raw batch total, once
 
   if (batchIndex + 1 < batches.length) {
     return nextStep("ask", { ...ctx.progress, batch_index: batchIndex + 1, windows_asked, calls, input_tokens });

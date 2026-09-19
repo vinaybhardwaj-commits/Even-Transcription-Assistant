@@ -8,6 +8,14 @@
 --
 -- ADDITIVE AND IDEMPOTENT. One new table, no existing table touched, no CHECK on an existing
 -- column changed. Rolls forward from 0106. App-owned: no GRANTs.
+--
+-- REFUTER F4 (19 Sep, edited in place — this migration is unreleased):
+--  - prompt_version is now NOT NULL: jev-role.ts always supplies one (ROLE_PROMPT_VERSION by
+--    default, or args.prompt_version), and the row's own uniqueness key includes it, so a NULL
+--    here was never a real state, only an unenforced gap.
+--  - added `note text`: carries a short machine-readable trail (e.g. "off_menu_choice:<raw>",
+--    "low_confidence") for a row whose text role was never one of the five CHECK-constrained
+--    values and was mapped to 'other' rather than aborting the job.
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS jev_role_signal (
@@ -22,9 +30,10 @@ CREATE TABLE IF NOT EXISTS jev_role_signal (
   turn_count       int NOT NULL,
   char_count       int NOT NULL,
   model            text,
-  prompt_version   text,
+  prompt_version   text NOT NULL, -- Refuter F4 (19 Sep, unreleased migration): was nullable
   input_tokens     int,
   batch_id         text,
+  note             text, -- Refuter F4 (19 Sep): off-menu role choice / low-confidence trail
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 
@@ -36,6 +45,9 @@ CREATE INDEX IF NOT EXISTS idx_jev_role_signal_room_day
 
 COMMENT ON TABLE jev_role_signal IS
   'Slice J3 (ETA-JEV-ARM-D §6.1): text-derived role per diarized speaker per window. Bench-only; never feeds room_turn_speaker.role.';
+
+COMMENT ON COLUMN jev_role_signal.note IS
+  'Refuter F4 (19 Sep): set when the raw Jev answer was off-menu (mapped to other) or the composite role fell back on low confidence.';
 
 INSERT INTO schema_migrations (version, name)
 VALUES (107, '0107_jev_role_signal')

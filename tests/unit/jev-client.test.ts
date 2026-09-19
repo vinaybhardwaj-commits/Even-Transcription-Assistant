@@ -1,6 +1,10 @@
 /**
  * tests/unit/jev-client.test.ts — Slice J1. The provider client, against a fake fetch and a fake
  * trace. No test ever reaches the network: fetchImpl is always injected.
+ *
+ * REFUTER F5 (19 Sep): tests appended below the original suite proving the trace is finalised
+ * with status:"errored" on every non-success exit path (a thrown fetch error, a timeout, an
+ * abort).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -107,5 +111,79 @@ describe("J1 — jev client: trace", () => {
     const fin = rec.finalise[0] as { status: string; model_calls: Array<{ tokens_in: number; tokens_out: number }> };
     expect(fin.status).toBe("completed");
     expect(fin.model_calls[0]).toMatchObject({ tokens_in: 42, tokens_out: 7 });
+  });
+});
+
+// =====================================================================================
+// REFUTER F5 (19 Sep): the trace is finalised with status:"errored" on EVERY non-success exit,
+// not only the explicit 401/422 branch.
+// =====================================================================================
+describe("F5 — the trace is finalised on every non-success exit path", () => {
+  it("a thrown fetch error finalises with status errored and the thrown message", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toThrow(/network down/);
+    expect(traceCalls).toHaveLength(1);
+    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
+    expect(fin.status).toBe("errored");
+    expect(fin.error_message).toContain("network down");
+  });
+
+  it("a timed-out attempt finalises with status errored and reason jev_timeout", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    process.env.ETA_JEV_TIMEOUT_MS = "10";
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        signal.addEventListener("abort", () => {
+          const e = new Error("This operation was aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      });
+    });
+    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toThrow();
+    expect(traceCalls).toHaveLength(1);
+    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
+    expect(fin.status).toBe("errored");
+    expect(fin.error_message).toBe("jev_timeout");
+  });
+
+  it("a caller-aborted request finalises with reason jev_aborted, distinct from a timeout", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    // Pre-abort the caller's own signal BEFORE the call starts: the client's own code checks
+    // `opts.signal.aborted` synchronously the moment it wires up the listener, so a signal that
+    // is already aborted by then fires the internal abort deterministically — no race against
+    // the `await openTrace(...)` the client does first (an abort() fired concurrently with that
+    // await could land before the listener is attached and be missed, which is a test-harness
+    // race, not a client bug).
+    const controller = new AbortController();
+    controller.abort();
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        if (signal.aborted) {
+          const e = new Error("This operation was aborted");
+          e.name = "AbortError";
+          reject(e);
+          return;
+        }
+        signal.addEventListener("abort", () => {
+          const e = new Error("This operation was aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      });
+    });
+    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.systemOne({ state: {}, questions: {} }, { signal: controller.signal })).rejects.toThrow();
+    expect(traceCalls).toHaveLength(1);
+    const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
+    expect(fin.status).toBe("errored");
+    expect(fin.error_message).toBe("jev_aborted");
   });
 });

@@ -36,13 +36,13 @@ programme.
 **D1 IS NOW TWO DECISIONS. Read this before assuming you are unblocked.**
 - **D1a — development-time use on non-PHI** (diff review, question-wording trials on invented fixtures):
   **OPEN, in force from 19 Sep.** The MCP being installed is V's act, and nothing patient-related crosses.
-- **D1b — real consult transcripts to TypeSafe** (DPA, zero-data-retention): **STILL CLOSED. V's alone,
-  unresolved.** Blocks J4 only.
+- **D1b — real consult transcripts to TypeSafe** (DPA, zero-data-retention): **D1b CLEARED 18 Sep 2026
+  by V in Cowork (trial terms: no training, zero retention); J4 runs after J1–J3 refutation.**
 
-**The installed MCP does not clear D1b.** Having the tool wired up and being allowed to send it a patient's
-consultation are different facts. J1–J3 were always fixture-and-mock work and are unblocked today; J4 is
-not. Sending real transcript text to Jev without V saying so in words is a data-governance breach, not a
-build error.
+**D1b is cleared, but J4 still waits on refutation.** V's clearance in Cowork on 18 Sep (trial terms: no
+training on our data, zero data retention) covers the vendor-egress question; J1–J3 were always
+fixture-and-mock work and are unblocked today. J4 runs only after J1–J3 pass refutation — this is a build
+gate, not a data-governance one.
 
 **Delegation contract.** Build exactly the scope below. Report in the format in §9, under the cap. Anything you could not verify is marked UNVERIFIED in your report.
 
@@ -373,11 +373,12 @@ Grouping by speaker, char floor, composite precedence (acoustic wins), low-confi
 
 ## 11. Open decisions for V
 
-- **D1b: vendor egress of real consult transcripts to TypeSafe (DPA, ZDR). V's call, OPEN. Blocks J4 only.** (D1a, development-time use on non-PHI, is in force from 19 Sep — the `even-jev` MCP is installed and keyed. See the v1.2 banner and `ETA-JEV-INTEGRATION.md`.)
-  This is NOT covered by V's standing "do not gate PHI for EVEN physicians" instruction: that instruction is
-  about internal EVEN systems, and this is third-party egress of patient conversation to an outside vendor.
-  J0–J3 need nothing from TypeSafe and are unaffected. Note that J0 translation runs **on the Mini**, so
-  nothing leaves the estate before D1 is answered either way.
+- **D1b: vendor egress of real consult transcripts to TypeSafe (DPA, ZDR). D1b CLEARED 18 Sep 2026 by V
+  in Cowork (trial terms: no training, zero retention); J4 runs after J1–J3 pass refutation.** (D1a,
+  development-time use on non-PHI, is in force from 19 Sep — the `even-jev` MCP is installed and keyed.
+  See the v1.2 banner and `ETA-JEV-INTEGRATION.md`.)
+  J0–J3 need nothing from TypeSafe and are unaffected either way. Note that J0 translation runs **on the
+  Mini**, so nothing left the estate before D1b was answered.
 - D3: who labels the 60 non-clinician speaker-windows for the role bench. V's call (it is somebody's hours).
 - **D4 (new, v1.1, decided by Fable, recorded for V to overturn):** J0 option B over option A — derive English
   in Arm D's own job rather than flipping the production drain to `translate: true`. Reason in §3A. If V

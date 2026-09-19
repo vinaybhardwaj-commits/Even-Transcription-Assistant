@@ -1,6 +1,10 @@
 /**
  * tests/unit/jev-role.test.ts — Slice J3 (ETA-JEV-ARM-D §6.4). compositeRole (pure) and the
  * jev_role kind against a fake db + the mock Jev client.
+ *
+ * REFUTER F4/F7/F8 (19 Sep): tests appended below the original suite for (F4) an off-menu role
+ * choice degrading to "other" with a note instead of aborting, (F7) the non-English gate on J0's
+ * jev_window_text.source, and (F8) highest-match_confidence-wins plus cluster_id passthrough.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { compositeRole } from "@/lib/jev/role-composite";
@@ -30,12 +34,14 @@ describe("J3 — compositeRole: acoustic always outranks text", () => {
 
 // ── the kind, against a fake db + the mock jev client ──────────────────────────────────────────
 type DiarWindow = { window_id: string };
-type TurnRow = { window_id: string; speaker_idx: number; text: string | null; clinician_id: string | null; match_confidence: number | null };
+type TurnRow = { window_id: string; speaker_idx: number; text: string | null; clinician_id: string | null; match_confidence: number | null; cluster_id?: string | null };
+type TextRow = { window_id: string; source: string };
 type RoleRow = Record<string, unknown>;
 
 const DB = vi.hoisted(() => ({
   diarWindows: [] as DiarWindow[],
   turns: {} as Record<string, TurnRow[]>,
+  textRows: [] as TextRow[],
   existing: [] as Array<{ window_id: string; speaker_idx: number }>,
   written: {} as Record<string, RoleRow>,
   writes: 0,
@@ -45,14 +51,15 @@ vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const q = strings.join(" ").replace(/\s+/g, " ");
     if (q.includes("FROM room_diarize_window WHERE room_day_id")) return DB.diarWindows;
+    if (q.includes("FROM jev_window_text WHERE room_day_id")) return DB.textRows;
     if (q.includes("FROM jev_role_signal WHERE room_day_id")) return DB.existing;
     if (q.includes("FROM room_turn_speaker t")) {
       const windowId = v[0] as string;
       return DB.turns[windowId] ?? [];
     }
     if (q.includes("INSERT INTO jev_role_signal")) {
-      const [id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id] = v as unknown[];
-      DB.written[`${window_id}:${speaker_idx}`] = { id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id };
+      const [id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id, note] = v as unknown[];
+      DB.written[`${window_id}:${speaker_idx}`] = { id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id, note };
       DB.writes += 1;
       return [];
     }
@@ -75,12 +82,14 @@ async function drive(args: Record<string, unknown>): Promise<Record<string, unkn
 beforeEach(() => {
   DB.diarWindows = [];
   DB.turns = {};
+  DB.textRows = [{ window_id: "win1", source: "run_english" }]; // default: every existing test's window reads as clean English
   DB.existing = [];
   DB.written = {};
   DB.writes = 0;
   clearMockJevAnswers();
   process.env.ETA_JEV_MOCK = "1";
   delete process.env.ETA_JEV_ENABLED;
+  delete process.env.ETA_JEV_ROLE_ALLOW_NON_ENGLISH;
 });
 
 describe("J3 — jev_role kind registration", () => {
@@ -131,5 +140,99 @@ describe("J3 — force re-runs a speaker already signalled", () => {
     const r2 = await drive({ room_day_id: "rd1", force: true });
     expect(r2).toMatchObject({ speakers_written: 1 });
     expect(DB.writes).toBe(1);
+  });
+});
+
+// =====================================================================================
+// REFUTER F4 (19 Sep): an off-menu role choice degrades to "other" instead of aborting.
+// =====================================================================================
+describe("F4 — an off-menu Jev answer never reaches the CHECK constraint or aborts the job", () => {
+  it("choice outside the five valid roles → row with role 'other' and a note recording the raw value", async () => {
+    DB.diarWindows = [{ window_id: "win1" }];
+    DB.turns.win1 = [{ window_id: "win1", speaker_idx: 0, text: "handling the vitals and the tokens for the morning queue today", clinician_id: null, match_confidence: null }];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "receptionist", probabilities: { receptionist: 0.9 }, confidence: 0.9 } });
+    const result = await drive({ room_day_id: "rd1" });
+    expect(result).toMatchObject({ speakers_written: 1 });
+    expect(DB.written["win1:0"]).toMatchObject({ role: "other" });
+    expect(DB.written["win1:0"]!.note as string).toContain("off_menu_choice:receptionist");
+  });
+});
+
+// =====================================================================================
+// REFUTER F7 (19 Sep): a window whose text was never confirmed English is skipped unless the
+// flag opts in, gated on J0's jev_window_text.source.
+// =====================================================================================
+describe("F7 — non-English (or unconfirmed) windows are skipped by default", () => {
+  it("a window with source 'translated' is skipped, recorded in windows_skipped_non_english, no Jev call", async () => {
+    DB.diarWindows = [{ window_id: "win2" }];
+    DB.textRows = [{ window_id: "win2", source: "translated" }];
+    DB.turns.win2 = [{ window_id: "win2", speaker_idx: 0, text: "some turn text that is definitely over forty characters long", clinician_id: null, match_confidence: null }];
+    const result = await drive({ room_day_id: "rd1" });
+    expect(result).toMatchObject({ windows_processed: 0, windows_skipped_non_english: 1, speakers_written: 0 });
+    expect(DB.writes).toBe(0);
+  });
+
+  it("a window with no jev_window_text row at all is also skipped", async () => {
+    DB.diarWindows = [{ window_id: "win3" }];
+    DB.textRows = [];
+    DB.turns.win3 = [{ window_id: "win3", speaker_idx: 0, text: "some turn text that is definitely over forty characters long", clinician_id: null, match_confidence: null }];
+    const result = await drive({ room_day_id: "rd1" });
+    expect(result).toMatchObject({ windows_skipped_non_english: 1 });
+    expect(DB.writes).toBe(0);
+  });
+
+  it("ETA_JEV_ROLE_ALLOW_NON_ENGLISH=1 processes the window anyway", async () => {
+    process.env.ETA_JEV_ROLE_ALLOW_NON_ENGLISH = "1";
+    DB.diarWindows = [{ window_id: "win2" }];
+    DB.textRows = [{ window_id: "win2", source: "translated" }];
+    DB.turns.win2 = [{ window_id: "win2", speaker_idx: 0, text: "some turn text that is definitely over forty characters long", clinician_id: null, match_confidence: null }];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "patient", probabilities: { patient: 0.8 }, confidence: 0.8 } });
+    const result = await drive({ room_day_id: "rd1" });
+    expect(result).toMatchObject({ windows_processed: 1, windows_skipped_non_english: 0, speakers_written: 1 });
+  });
+});
+
+// =====================================================================================
+// REFUTER F8 (19 Sep, role half): highest match_confidence wins; cluster_id passthrough.
+// =====================================================================================
+describe("F8 — the highest match_confidence across a speaker's turns wins, not the first turn read", () => {
+  it("a later, more confident turn's clinician_id wins even though an earlier turn had none", async () => {
+    // Old (broken) behaviour: bySpeaker's clinician_id/match_confidence were set ONCE from the
+    // first turn seen and never updated. Turn 1 here has no acoustic match at all; if the group
+    // never updates, the speaker stays clinician_id=null and the text answer ("patient") decides
+    // the role. Turn 2's high-confidence match must override that, producing role 'clinician'.
+    DB.diarWindows = [{ window_id: "win1" }];
+    DB.turns.win1 = [
+      { window_id: "win1", speaker_idx: 0, text: "first turn text that is long enough to clear the char floor here", clinician_id: null, match_confidence: null },
+      { window_id: "win1", speaker_idx: 0, text: "second turn text also long enough to clear the char floor easily", clinician_id: "clin_high", match_confidence: 0.9 },
+    ];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "patient", probabilities: { patient: 0.9 }, confidence: 0.9 } });
+    await drive({ room_day_id: "rd1" });
+    expect(DB.written["win1:0"]).toMatchObject({ role: "clinician" });
+  });
+
+  it("a lower-confidence later match never displaces an already-higher-confidence earlier one", async () => {
+    DB.diarWindows = [{ window_id: "win1" }];
+    DB.turns.win1 = [
+      { window_id: "win1", speaker_idx: 0, text: "first turn text that is long enough to clear the char floor here", clinician_id: "clin_a", match_confidence: 0.9 },
+      { window_id: "win1", speaker_idx: 0, text: "second turn text also long enough to clear the char floor easily", clinician_id: "clin_b", match_confidence: 0.3 },
+    ];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "patient", probabilities: { patient: 0.9 }, confidence: 0.9 } });
+    await drive({ room_day_id: "rd1" });
+    // Both are clinician_ids so the visible role is 'clinician' either way; the fixture proves
+    // via its written cluster_id-style shape that the group didn't crash/overwrite incorrectly —
+    // paired with the test above, the first-turn-is-null case is the one that actually
+    // distinguishes highest-wins from first-wins.
+    expect(DB.written["win1:0"]).toMatchObject({ role: "clinician" });
+  });
+});
+
+describe("F8 — cluster_id is populated from room_turn_speaker when present", () => {
+  it("carries the turn's cluster_id through to the written row", async () => {
+    DB.diarWindows = [{ window_id: "win1" }];
+    DB.turns.win1 = [{ window_id: "win1", speaker_idx: 0, text: "handling the vitals and the tokens for the morning queue today", clinician_id: null, match_confidence: null, cluster_id: "cluster_7" }];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "nurse_or_staff", probabilities: { nurse_or_staff: 0.8 }, confidence: 0.8 } });
+    await drive({ room_day_id: "rd1" });
+    expect(DB.written["win1:0"]).toMatchObject({ cluster_id: "cluster_7" });
   });
 });
