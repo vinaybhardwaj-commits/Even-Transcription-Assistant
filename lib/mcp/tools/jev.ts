@@ -1,0 +1,93 @@
+/**
+ * lib/mcp/tools/jev.ts — Slice J2 (ETA-JEV-ARM-D §5.5). Operator-door tools for Arm D.
+ *
+ * scribe_jev_window_run submits the jev_window job (bench-only; the job itself never reaches
+ * TypeSafe unless ETA_JEV_ENABLED — D1 gate lives in lib/jev/client.ts, not here).
+ * scribe_jev_signals is READ-only and returns jev_window_signal rows — probabilities and phase,
+ * never transcript text (that lives in jev_window_text and is not this tool's business).
+ */
+import { query } from "@/lib/brain/db";
+import { submitJob } from "@/lib/jobs/submit";
+import { argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+
+const jevWindowRun: McpTool = {
+  name: "scribe_jev_window_run",
+  description:
+    "INVOKES — submit the jev_window job (Slice J2) for one room-day: reads jev_window_text (J0), batches windows, asks Jev (mock or real per ETA_JEV_MOCK/ETA_JEV_ENABLED), persists jev_window_signal rows. Fails jev_english_missing if J0 has never run for this room-day. Returns { ok, job_id }.",
+  scope: "invoke",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room_day_id: { type: "string", description: "the room-day to run" },
+      force: { type: "boolean", description: "re-run windows already signalled" },
+    },
+    required: ["room_day_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
+    failSafe({ ok: false as boolean }, async () => {
+      const roomDayId = argStr(args, "room_day_id", 128);
+      if (!roomDayId) return { ok: false, error: "room_day_id_required" };
+      const force = args.force === true;
+      const job = await submitJob({ kind: "jev_window", args: { room_day_id: roomDayId, force }, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
+      return { ok: true, job_id: job.id };
+    }),
+};
+
+type SignalRow = {
+  window_id: string;
+  room_day_id: string;
+  session_id: string;
+  start_ms: string | number;
+  end_ms: string | number;
+  phase: string;
+  phase_probs: unknown;
+  phase_confidence: number;
+  p_start: number;
+  p_end: number;
+  p_clinician: number;
+  p_clinical: number;
+  model: string;
+  prompt_version: string;
+};
+
+const jevSignals: McpTool = {
+  name: "scribe_jev_signals",
+  description:
+    "READS — jev_window_signal rows for one room-day: phase, phase probabilities, p_start/p_end/p_clinician/p_clinical, model, prompt_version. Never returns transcript text. Optional from_ms/to_ms narrow by start_ms.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room_day_id: { type: "string" },
+      from_ms: { type: "number" },
+      to_ms: { type: "number" },
+    },
+    required: ["room_day_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ signals: [] as unknown[] }, async () => {
+      const roomDayId = argStr(args, "room_day_id", 128);
+      if (!roomDayId) return { ok: false, error: "room_day_id_required", signals: [] };
+      const fromMs = typeof args.from_ms === "number" ? args.from_ms : null;
+      const toMs = typeof args.to_ms === "number" ? args.to_ms : null;
+      const r = await query<SignalRow>(
+        `SELECT window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence,
+                p_start, p_end, p_clinician, p_clinical, model, prompt_version
+           FROM jev_window_signal
+          WHERE room_day_id = $1
+            AND ($2::bigint IS NULL OR start_ms >= $2)
+            AND ($3::bigint IS NULL OR start_ms <= $3)
+          ORDER BY start_ms`,
+        [roomDayId, fromMs, toMs],
+      );
+      return {
+        ok: true,
+        room_day_id: roomDayId,
+        signals: r.rows.map((row) => ({ ...row, start_ms: Number(row.start_ms), end_ms: Number(row.end_ms) })),
+      };
+    }),
+};
+
+export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals];

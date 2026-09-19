@@ -67,10 +67,10 @@ export type ClinicianSource = (typeof CLINICIAN_SOURCES)[number];
  */
 export const K2_DERIVABLE_CLINICIAN_SOURCES: readonly ClinicianSource[] = ["mark", "operator", "unknown"];
 
-export const ARMS = ["rules", "hybrid", "flash"] as const;
+export const ARMS = ["rules", "hybrid", "flash", "jev"] as const;
 export type Arm = (typeof ARMS)[number];
 
-export type OpenedByKind = "pstart" | "pqm_called" | "mark";
+export type OpenedByKind = "pstart" | "pqm_called" | "mark" | "jev_window";
 
 export type DraftVisit = {
   individual_uid: string | null;

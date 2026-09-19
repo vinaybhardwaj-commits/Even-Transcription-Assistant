@@ -26,8 +26,8 @@ embeddings — it documents itself as bad at numbers and dates, and it cannot he
 |---|---|---|
 | What goes to the vendor | Code, diffs, synthetic fixtures, question wording | **Real consult transcripts** |
 | Examples | `jev_review` on a Builder's diff; trialling question wording on invented text | Arm D reading a room window's transcript |
-| Gate | **OPEN.** The MCP is installed and keyed. Nothing patient-related crosses. | **CLOSED — decision D1, V's alone.** DPA and zero-data-retention, unresolved. |
-| Status 19 Sep | **In force from today** | **Blocked. Arm D slice J4 only.** |
+| Gate | **OPEN.** The MCP is installed and keyed. Nothing patient-related crosses. | **OPEN since 18 Sep 2026** — V cleared D1 in Cowork: Even is on a TypeSafe trial with no training on our data and zero data retention. J4 may run once J1–J3 pass refutation. |
+| Status 19 Sep | **In force** | **Unblocked; J4 after J1–J3 refutation.** |
 
 **The installed MCP does not clear D1.** Having the tool wired up and being allowed to send it a patient's
 consultation are different facts. Use A needs no permission beyond V having installed it; Use B needs V to

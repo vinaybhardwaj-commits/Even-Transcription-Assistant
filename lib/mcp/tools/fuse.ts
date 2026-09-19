@@ -23,6 +23,8 @@ import { getPool, query } from "@/lib/brain/db";
 import { newVisitId, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_VISIT_INSERT, type RoomDayByIdRow } from "@/lib/brain/state";
 import { ambiguityOf, runRulesArm } from "@/lib/brain/fuse/rules";
 import { runFlashArm, runHybridArm, type ArmResult } from "@/lib/brain/fuse/gemini-arms";
+import { runJevArm, type JevWindowSignal } from "@/lib/brain/fuse/jev-arm";
+import type { TapeSession } from "@/lib/brain/fuse/rules";
 import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
 import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
 import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
@@ -103,12 +105,59 @@ export async function writeVisits(roomDayId: string, arm: Arm, visits: DraftVisi
   return counts;
 }
 
-async function runArm(arm: Arm, cues: FuseCue[]): Promise<ArmResult> {
+type JevSignalRow = {
+  window_id: string; room_day_id: string; session_id: string; start_ms: string | number; end_ms: string | number;
+  phase: string; phase_probs: unknown; phase_confidence: number;
+  p_start: number; p_end: number; p_clinician: number; p_clinical: number;
+};
+
+/** Slice J2 — jev_window_signal for one room-day, in start_ms order. No transcript text. */
+async function readJevSignals(roomDayId: string): Promise<JevWindowSignal[]> {
+  const r = await query<JevSignalRow>(
+    `SELECT window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence,
+            p_start, p_end, p_clinician, p_clinical
+       FROM jev_window_signal WHERE room_day_id = $1 ORDER BY start_ms`,
+    [roomDayId],
+  );
+  return r.rows.map((row) => ({
+    window_id: row.window_id,
+    room_day_id: row.room_day_id,
+    session_id: row.session_id,
+    start_ms: Number(row.start_ms),
+    end_ms: Number(row.end_ms),
+    phase: row.phase as JevWindowSignal["phase"],
+    phase_probs: (row.phase_probs ?? {}) as Record<string, number>,
+    phase_confidence: row.phase_confidence,
+    p_start: row.p_start,
+    p_end: row.p_end,
+    p_clinician: row.p_clinician,
+    p_clinical: row.p_clinical,
+  }));
+}
+
+/** bench_session rows for the sessions Arm D's signals reference, so tape ms can be anchored to wall clock. */
+async function readSessionsForJev(sessionIds: string[]): Promise<TapeSession[]> {
+  if (sessionIds.length === 0) return [];
+  const r = await query<{ id: string; started_at: string; ended_at: string | null }>(
+    `SELECT id, started_at, ended_at FROM bench_session WHERE id = ANY($1)`,
+    [sessionIds],
+  );
+  return r.rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
+}
+
+async function runArm(arm: Arm, cues: FuseCue[], roomDayId: string): Promise<ArmResult> {
   // B3 — scribe_fuse_run is scratch-only and runs over a day that is DONE (0046's scratch days
   // are replays of finished sessions), so the rollover pass applies. Stated here rather than
   // inferred inside rules.ts, which must not decide this for itself.
   if (arm === "rules") return { ok: true, provider: "none", output: runRulesArm(cues, { day_complete: true }) };
   if (arm === "hybrid") return runHybridArm(cues);
+  if (arm === "jev") {
+    // X4-style guard (gemini-arms.ts:70-77): no signals means nothing is written, named.
+    const signals = await readJevSignals(roomDayId);
+    if (signals.length === 0) return { ok: false, error: "no_jev_signals", provider: "none" };
+    const sessions = await readSessionsForJev([...new Set(signals.map((s) => s.session_id))]);
+    return { ok: true, provider: "none", output: runJevArm(cues, signals, sessions) };
+  }
   return runFlashArm(cues);
 }
 
@@ -153,7 +202,7 @@ const fuseRun: McpTool = {
       }
 
       const cues = await readCuesForFuse(roomDayId);
-      const res = await runArm(arm, cues);
+      const res = await runArm(arm, cues, roomDayId);
       if (!res.ok) {
         // X4 — nothing was written, and the provider that answered is named.
         return { ok: false, error: res.error, provider: res.provider, arm, room_day_id: roomDayId, ...(res.detail ? { detail: res.detail } : {}), visits: [], written: 0, already_existed: 0, failed: 0 };
