@@ -280,3 +280,57 @@ can, the promotion waits for the clinic day to end — V is in the OPD today.
 
 ### IGNORE
 OT 3 (`ot-3-x79h`) — not ready.
+
+---
+
+## THE CORPUS IS 5% BUILT — THIS OUTRANKS EVERYTHING BELOW IT (19 Sep, Fable)
+
+2,975 bench windows exist. **144 have ever had a transcription run; 124 have text.**
+`state='closed'` with no run at all: **2,451 windows = 612.8 hours of audio**, across 102
+sessions and ~88 room-days. Clips are cut at drain time, so those windows are undrained,
+not lost. Measured cost to close: route p50 181.5 s per 900 s window (RTF ~0.20), so
+~125 hours of single-stream Mini time. Concurrency is the only lever; the Yoga is not one.
+
+Diarization is further behind: `room_diarize_window` has 146 rows, 138 ok.
+
+J4 ran against production tonight and stopped at room-day 1 of 10 by its own stop rule —
+J2 wrote 55/55 signal rows that were **all `skipped:no_english` placeholders with zero Jev
+calls**, because the room-day has no text. That is a non-result about Jev and a real result
+about the corpus. Arm D is parked, not abandoned: tables, job kinds, env and migrations are
+all live and it re-runs on command.
+
+Two defects to clear before the drain, both cheap:
+- `scribe_fuse_run` accepts `arm ∈ {rules, hybrid, flash}` and requires a `rd_scratch_*` id,
+  so there is **no production path for `arm=jev`**. BLOCKING for J4.
+- `scribe_job_submit`'s published kind enum omits `jev_english` / `jev_window` / `jev_role`.
+  They are registered server-side and submit fine. Stale tool docs only.
+
+Do not lower jev-role.ts's 40-char CHAR_FLOOR to manufacture rows. Short turns are short turns.
+
+Full finding: `docs/handoff/ETA-STT-CORPUS-GAP-19-SEP-2026.md`
+
+### Shipped 19 Sep (late)
+`eda31b0` → production `czvsr7h98`: VAD starvation + route-metrics truth (`135d33e`,
+Refuter PASS with mutation proof on F1–F5/F7) and S2B re-enrolment (`1072421`).
+140 test files, 3,147 tests, 0 failures. Migrations **0106, 0107, 0108 applied** —
+`schema_migrations` max 108, no gap. Jev production env live (ENABLED, MODEL,
+ROLE_ALLOW_NON_ENGLISH=1, TYPESAFE_API_KEY), baked before the production build.
+
+### Rulings issued 19 Sep (late)
+- **jev_window_signal three-state:** option (a) — ALTER at **0110**, keep skipped/ran/unknown.
+  Do not edit the merged 0106. Unknown must never read as ran or as skipped.
+- **Migration numbering settled:** 0106 jev_window_signal · 0107 jev_role_signal ·
+  0108 voice_print_generation (merged, applied) · 0109 room_clinician_attestation
+  (attest-capture) · 0110 jev_window_signal state. jev-j2's stale 0108 is gone.
+- **Yoga: closed as a diarization producer.** No night drain, no new drain token. Reopens only
+  on an x86_64/arm64 boundary-equivalence result, never on a speed fix.
+- **`clinician.pin_plaintext`: KEPT, not removed.** It is V's own shipped feature
+  (`admin-pin-visibility-shipped` @ `750e5e4`, migration 0016), the read is gated to
+  role=super, and removing it breaks admin PIN visibility. My earlier "remove it" line is
+  withdrawn.
+- **Arm A scoring against `consult_mark` is a non-result**, not a number: the mark is both its
+  input and its truth. Do not tune against it.
+
+### Owed to V (his, not mine)
+A `CLAUDE_CODE_MESSAGING_TOKEN` value was printed into the fleet pane's transcript by a
+`pgrep -fl`. Treat it as burned and rotate it. No agent has been asked to touch it.
