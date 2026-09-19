@@ -172,7 +172,8 @@ describe("E11(a) — the room_window job, through the REAL client: silent iff th
         expect(DB.windowState).toBe("silent");
         expect(DB.silenceWrites, "the verdict was recorded where it was made").toBe(1);
       } else {
-        expect(r.error, `${full.error} must fail loudly`).toBe("room_window_failed: whisper_unavailable");
+        // The job's error now carries the detail alongside the phase (V's ruling, 19 Sep 2026).
+        expect(r.error, `${full.error} must fail loudly`).toBe(`room_window_failed: whisper_unavailable: ${full.error}`);
         expect(r.visited).toEqual(["prepare", "segment"]);
         expect(DB.attemptWrites).toBe(1);
         expect(DB.lastError, "the attempt is charged to the client's own error").toBe(`whisper_unavailable: ${full.error}`);
@@ -194,7 +195,7 @@ describe("E11(a) — near misses: only the bare constant is silence", () => {
     it(JSON.stringify(error), async () => {
       CLIENT.override = { ok: false, error, latency_ms: 1, attempts: 1 };
       const r = await driveRoom();
-      expect(r.error).toBe("room_window_failed: whisper_unavailable");
+      expect(r.error).toBe(`room_window_failed: whisper_unavailable: ${error}`);
       expect(DB.attemptWrites).toBe(1);
     });
   }

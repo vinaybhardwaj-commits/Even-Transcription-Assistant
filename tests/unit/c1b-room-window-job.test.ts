@@ -290,3 +290,37 @@ describe("C1b fix-up 2 — routing is resolved ONCE per job", () => {
     expect(out.step).toBe("no_engine");
   });
 });
+
+// ---------------------------------------------------------------------------
+// V's ruling, 19 Sep 2026 — cues_refused this morning (evenscribe.app failed, the cron origin
+// retry succeeded) recorded only the phase, and the reason was unrecoverable from the row.
+// `failFromPhase` is pure — no DB, no fetch — so its composition is pinned directly here.
+// ---------------------------------------------------------------------------
+describe("failFromPhase — the phase stays where it was, the detail joins it", () => {
+  it("records the phase AND the detail when the phase carries one", async () => {
+    const { failFromPhase } = await import("@/lib/jobs/kinds/room-window");
+    const out = failFromPhase({
+      window_id: "bw_1", ok: false, step: "cues_refused",
+      detail: "brain_permission_denied: 403 @ https://evenscribe.app",
+    } as never);
+    expect(out).toEqual({
+      kind: "fail",
+      error: "room_window_failed: cues_refused: brain_permission_denied: 403 @ https://evenscribe.app",
+    });
+  });
+
+  it("an old row shape with a phase but no detail still reads correctly", async () => {
+    const { failFromPhase } = await import("@/lib/jobs/kinds/room-window");
+    const out = failFromPhase({ window_id: "bw_1", ok: false, step: "no_room_day" } as never);
+    expect(out).toEqual({ kind: "fail", error: "room_window_failed: no_room_day" });
+  });
+
+  it("errorCodeOf still finds the published code first, whichever phase or detail follows it", async () => {
+    const { failFromPhase } = await import("@/lib/jobs/kinds/room-window");
+    const { errorCodeOf } = await import("@/lib/jobs/errors");
+    const withDetail = failFromPhase({ window_id: "bw_1", ok: false, step: "cues_refused", detail: "x: y: z" } as never) as { kind: "fail"; error: string };
+    const withoutDetail = failFromPhase({ window_id: "bw_1", ok: false, step: "no_room_day" } as never) as { kind: "fail"; error: string };
+    expect(errorCodeOf(withDetail.error)).toBe("room_window_failed");
+    expect(errorCodeOf(withoutDetail.error)).toBe("room_window_failed");
+  });
+});

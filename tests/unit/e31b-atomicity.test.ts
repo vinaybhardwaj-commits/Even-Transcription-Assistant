@@ -137,17 +137,60 @@ describe.runIf(HAVE_DOCKER)("E31 A4 — the window state and the job state land 
     expect((await jobState("bw_a4_silent")).state).toBe("done");
   }, 300_000);
 
-  it("ORDER PIN (D-4): the job is finished ONLY if the window update matched — a window not in `transcribing` leaves its job alone", async () => {
+  it("ORDER PIN (D-4): the job is finished ONLY if the window update matched — an ALREADY-TERMINAL window leaves its job alone", async () => {
     const { roomWindowFinish } = await import("@/lib/stt/room-drain");
-    // The guard `AND state = 'transcribing'` is preserved verbatim, so this window does not move. Split into
-    // two statements the job update was unconditional and would have said `done` over a window that never
-    // finished; with the order REVERSED (job first, window conditional on it) the same thing happens. Both
-    // mutants die here.
-    seedWindow("bw_a4_guard", "closed");
+    // The guard now admits `transcribing` OR `closed` (bench/room-drain-finish-state, 19 Sep 2026 — a
+    // room_window job submitted directly never claims, so its window is `closed` when finish sees it,
+    // and that is now a legitimate state to finish FROM, not one to reject). `transcribed` is the state
+    // that must still refuse: a SECOND finish reaching a window that already finished. Split into two
+    // statements the job update was unconditional and would have said `done` a second time over a job
+    // already `done`; with the order REVERSED (job first, window conditional on it) the same thing
+    // happens. Both mutants die here, on the state that is actually terminal now.
+    seedWindow("bw_a4_guard", "transcribed");
     await roomWindowFinish("bw_a4_guard", ACTOR, {});
-    expect(await windowState("bw_a4_guard"), "the guard held").toBe("closed");
-    expect((await jobState("bw_a4_guard")).state, "and the job was NOT finished over it").toBe("running");
+    expect(await windowState("bw_a4_guard"), "the guard held: already-terminal is not re-finished").toBe("transcribed");
+    expect((await jobState("bw_a4_guard")).state, "and the job was NOT touched over it").toBe("running");
     expect((await jobState("bw_a4_guard")).finished_at).toBeNull();
+  }, 300_000);
+
+  it("DIRECT SUBMISSION (the ORB defect): a room_window job that never claimed still moves a `closed` window to its terminal state", async () => {
+    const { roomWindowFinish } = await import("@/lib/stt/room-drain");
+    // `drainRoomWindow`'s claim (`UPDATE ... SET state = 'transcribing' WHERE state = ANY(drainable)`)
+    // is the ONLY path that ever sets `transcribing`. A room_window job submitted directly — the generic
+    // job MCP tool takes any registered kind — never runs it, so its window is still `closed` when
+    // `finish` is reached. Before the fix this window read `closed` forever: the guard matched nothing,
+    // the job still finished `done`, and the window was picked up again on every future sweep.
+    seedWindow("bw_a4_direct", "closed");
+    expect((await roomWindowFinish("bw_a4_direct", ACTOR, {})).ok).toBe(true);
+    expect(await windowState("bw_a4_direct"), "the window reaches its terminal state, not stuck at closed").toBe("transcribed");
+    expect((await jobState("bw_a4_direct")).state).toBe("done");
+    expect((await jobState("bw_a4_direct")).finished_at, "and it is stamped").not.toBeNull();
+
+    seedWindow("bw_a4_direct_silent", "closed");
+    await roomWindowFinish("bw_a4_direct_silent", ACTOR, { silent_window: true });
+    expect(await windowState("bw_a4_direct_silent"), "the silent branch reaches it too, from closed").toBe("silent");
+    expect((await jobState("bw_a4_direct_silent")).state).toBe("done");
+  }, 300_000);
+
+  it("RACE GUARD: two drains reaching finish for the same window cannot both proceed", async () => {
+    const { roomWindowFinish } = await import("@/lib/stt/room-drain");
+    // Two concurrent claims on one window is what `drainRoomWindow`'s own claim UPDATE already
+    // prevents (WHERE state = ANY(drainable), a partial-match race that only one caller wins). What
+    // THIS guard protects is the OTHER half: two finish calls that both believe they own the window —
+    // a lease reclaim racing the original runner, or (post-fix) a direct submission racing a claimed
+    // drain. Whichever commits first moves the window out of the admitted set; Postgres serializes on
+    // the row, so the second call's WHERE clause evaluates against the NEW value and matches nothing.
+    seedWindow("bw_a4_race", "transcribing");
+    const first = await roomWindowFinish("bw_a4_race", ACTOR, {});
+    expect(first.ok).toBe(true);
+    expect(await windowState("bw_a4_race")).toBe("transcribed");
+    const firstFinishedAt = (await jobState("bw_a4_race")).finished_at;
+
+    // The second caller's own view of the window: it too believes it is finishing a live drain.
+    const second = await roomWindowFinish("bw_a4_race", ACTOR, {});
+    expect(second.ok, "finish never reports failure for a no-op — it simply writes nothing").toBe(true);
+    expect(await windowState("bw_a4_race"), "still transcribed — the second caller did not re-process it").toBe("transcribed");
+    expect((await jobState("bw_a4_race")).finished_at, "the job's own finish was not re-stamped").toBe(firstFinishedAt);
   }, 300_000);
 });
 

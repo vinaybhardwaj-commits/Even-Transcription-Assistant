@@ -1330,6 +1330,29 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
   return { ...out, ok: true, step: "ok", next_progress: { ...progress, run_id: runIdWritten, done_engine: true } };
 }
 
+/**
+ * TWO ENTRY PATHS REACH `finish`, and only one of them ever claims. `drainRoomWindow` claims the
+ * window first (`UPDATE ... SET state = 'transcribing' WHERE state = ANY(drainable)`), so its jobs
+ * always arrive here `transcribing`. A `room_window` job submitted directly — the generic job MCP
+ * tool takes any registered kind, `room_window` included — never runs that claim, so its window is
+ * whatever it already was, which for a window nobody has touched yet is `closed`. Before this fix
+ * the guard below only admitted `transcribing`: a directly-submitted job did every step's real work
+ * and then wrote nothing here, because its window was still `closed` and the WHERE matched no row —
+ * the job still finished `done` (this function always returns ok), so the window read `closed`
+ * forever and was picked up again on every future sweep. `closed` joins the guard for exactly that
+ * reason: it is the ONE OTHER state a window legitimately holds the first time `finish` sees it.
+ *
+ * NOT WEAKENED TO "anything but a terminal state". `transcribed`, `silent` and `failed` are
+ * deliberately EXCLUDED — a finish call reaching an already-terminal window (a second concurrent
+ * drain, a stale re-run) must still do nothing, which is the race guard E31 A4 pinned this WHERE
+ * clause to provide in the first place. Widening to admit `closed` is additive to that guard, not a
+ * loosening of it: whichever UPDATE commits first moves the window out of this set, and every other
+ * concurrent or later UPDATE's WHERE clause then evaluates against the new, non-matching value and
+ * affects zero rows — Postgres serializes on the row, so at most one caller ever proceeds past this
+ * line for a given window, exactly as before.
+ */
+const FINISHABLE_FROM = ["transcribing", "closed"] as const;
+
 /** PHASE 5 — the window is transcribed. Reached once a run exists, or from `segment` for a silent window (E11), which has none. */
 export async function roomWindowFinish(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
   const out: DrainOutcome = {
@@ -1356,11 +1379,12 @@ export async function roomWindowFinish(windowId: string, opts: RunActor, progres
     // fanout re-queues for ever without ever executing (it claims subject_type='encounter' only) while the
     // drain cannot re-claim the window either, because `drainable` without force is closed|transcribing. The
     // job update is CONDITIONAL on the window update having matched (EXISTS over the first CTE), so the guard
-    // below is the only thing that decides whether either happens. Both guards are preserved verbatim.
+    // below is the only thing that decides whether either happens. See FINISHABLE_FROM above for what widened
+    // and why the atomicity and the race protection both hold exactly as before.
     if (progress.silent_window === true) {
       await sql`
         WITH w AS (
-          UPDATE bench_window SET state = 'silent' WHERE id = ${windowId} AND state = 'transcribing'
+          UPDATE bench_window SET state = 'silent' WHERE id = ${windowId} AND state = ANY(${FINISHABLE_FROM}::text[])
           RETURNING id
         )
         UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
@@ -1370,7 +1394,7 @@ export async function roomWindowFinish(windowId: string, opts: RunActor, progres
     } else {
       await sql`
         WITH w AS (
-          UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = 'transcribing'
+          UPDATE bench_window SET state = 'transcribed' WHERE id = ${windowId} AND state = ANY(${FINISHABLE_FROM}::text[])
           RETURNING id
         )
         UPDATE stt_subject_job SET state = 'done', finished_at = NOW(), last_error = NULL
