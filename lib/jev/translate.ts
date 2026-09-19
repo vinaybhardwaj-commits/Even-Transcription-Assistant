@@ -6,21 +6,32 @@
  * largest consumer on that machine. Therefore:
  *   • It is reached ONLY from lib/jobs/kinds/jev-english.ts step 3, and ONLY when
  *     ETA_JEV_TRANSLATE_ENABLED is set. Unset → the kind never calls this and the window lands
- *     source='empty'. The flag is checked in the kind, not here, so this stays a pure leaf.
+ *     source='not_ready' (re-eligible), never a terminal state. The flag is checked in the kind.
  *   • LOAD PER BATCH, NEVER HELD ACROSS THE JOB. We pass NO keep_alive, so Ollama uses its default
- *     idle expiry (~5 min) and unloads the model once the batch stops calling. The kind runs
- *     translation one bounded step-batch at a time; between the runner's claims the model may expire
- *     and reload — which is the point: the 11.5 GB is resident only while a batch is actively
- *     translating, never pinned for the life of the job. We deliberately do not set keep_alive:-1.
+ *     idle expiry and unloads the model once the batch stops calling; the 11.5 GB is resident only
+ *     while a batch is actively translating, never pinned for the life of the job.
  *   • It is INJECTABLE. `deps.qwenJson` defaults to the real client; every test passes a mock and no
- *     test ever reaches Ollama. A test proves that with the flag unset this is never called at all.
+ *     test ever reaches Ollama.
+ *
+ * ─── FAILURE IS NOT ABSENCE (Refuter round 2) ──────────────────────────────────────────────────
+ * A qwen error, timeout or abort returns `{ status: "failed", reason }` — a CLOSED code, never the
+ * exception text — so the caller records source='failed' (retryable), NOT 'empty'. The old bare
+ * catch that returned null (→ persisted as 'empty', done, never retried) was the VAD-starvation
+ * defect again: the caller discarding the status.
+ *
+ * ─── TRUNCATION IS RECORDED, NOT SILENT ────────────────────────────────────────────────────────
+ * `input_chars` is the pre-truncation length of the text we send; the row carries it so a long
+ * window that was clipped at TRANSLATE_CHAR_CAP is visible and quantifiable, never a 'translated'
+ * row that quietly dropped a third of the window.
  *
  * LOCAL ONLY. This is the Mini's qwen leg, never TypeSafe — D1 does not gate J0 (spec §3A, §6).
  * Logs carry metadata only: never the transcript, never a key.
  */
-import { qwenJson, QWEN_MODEL } from "@/lib/qwen";
+import { qwenJson, QWEN_MODEL, QwenError } from "@/lib/qwen";
 
-export type TranslateResult = { english: string | null; model: string; latency_ms: number };
+export type TranslateOutcome =
+  | { status: "ok"; english: string | null; model: string; latency_ms: number; input_chars: number }
+  | { status: "failed"; reason: string };
 
 /** The seam the kind and the tests share. The real implementation is qwenJson; tests pass a fake. */
 export type QwenJsonFn = <T = unknown>(
@@ -34,20 +45,39 @@ const SYSTEM =
   "CRITICAL: keep English medical terms, drug names, doses, units, and abbreviations exactly as a clinician writes them. " +
   "Do NOT add, omit, summarize, or invent content. Return JSON {\"english\":\"...\"}.";
 
-/** How much of the original we send in one call — matches the existing indic translate leg's cap. */
-export const TRANSLATE_CHAR_CAP = 8000;
+/**
+ * How much of the original we send in one call. Raised from 8,000 so ordinary long windows (the live
+ * corpus has runs up to ~9.5k chars) are sent in FULL; a genuinely huge window (a phrase-loop
+ * hallucination) is still clipped here, but `input_chars` records the real length so the clip is on
+ * the row rather than hidden.
+ */
+export const TRANSLATE_CHAR_CAP = 20_000;
+
+/** A closed code for the failure kind — never the exception message (no transcript/PII leakage). */
+function reasonFor(e: unknown): string {
+  if (e instanceof QwenError) {
+    if (e.kind === "timeout") return "qwen_timeout";
+    if (e.kind === "no_env") return "qwen_no_env";
+    return "qwen_error"; // network | http | parse_error
+  }
+  const name = (e as { name?: unknown } | null)?.name;
+  if (name === "AbortError") return "qwen_abort";
+  return "qwen_error";
+}
 
 /**
  * Translate one window's original-language transcript to English through the Mini's local qwen leg.
- * Returns null on any failure (the kind records that window as source='empty' — D-11, never a throw).
- * Never loads a model in a test: the caller injects `deps.qwenJson`.
+ * Returns a discriminated outcome; never throws. `status:"ok"` may carry an empty `english` (the
+ * caller turns that into a failed/empty_output row, not 'empty'). Never loads a model in a test:
+ * the caller injects `deps.qwenJson`.
  */
 export async function translateToEnglish(
   original: string,
   langHint: string,
   deps: { qwenJson?: QwenJsonFn; signal?: AbortSignal } = {},
-): Promise<TranslateResult | null> {
+): Promise<TranslateOutcome> {
   const call = deps.qwenJson ?? (qwenJson as QwenJsonFn);
+  const input_chars = original.length;
   try {
     const r = await call<{ english?: string }>(
       SYSTEM,
@@ -55,9 +85,8 @@ export async function translateToEnglish(
       { temperature: 0, timeoutMs: 60_000, signal: deps.signal },
     );
     const english = typeof r.json?.english === "string" ? r.json.english.trim() : "";
-    return { english: english || null, model: r.model || QWEN_MODEL, latency_ms: r.latency_ms };
-  } catch {
-    // Soft-fail: a translation error is an evidenced empty for this window, not a job failure.
-    return null;
+    return { status: "ok", english: english || null, model: r.model || QWEN_MODEL, latency_ms: r.latency_ms, input_chars };
+  } catch (e) {
+    return { status: "failed", reason: reasonFor(e) };
   }
 }

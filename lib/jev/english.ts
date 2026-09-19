@@ -68,7 +68,19 @@ export function isNativeEnglish(metrics: WindowMetrics): boolean {
   return true;
 }
 
-export type JevSource = "run_english" | "native_en" | "translated" | "empty";
+/**
+ * The provenance of a window's English, as a CLOSED vocabulary that keeps an absence and a failure
+ * apart (Refuter round 2):
+ *   run_english | native_en | translated — terminal successes.
+ *   empty      — a run exists and its source text is genuinely empty. Terminal.
+ *   not_ready  — no run yet, or translation gated off with text still to do. NOT terminal: the job
+ *                re-evaluates it every run and it turns into a real source on its own.
+ *   failed     — translation attempted and failed. Terminal for the attempt, RETRYABLE, reason in `error`.
+ */
+export type JevSource = "run_english" | "native_en" | "translated" | "empty" | "not_ready" | "failed";
+
+/** Sources the job treats as done and skips on a normal re-run. not_ready and failed are re-processed. */
+export const TERMINAL_SOURCES: ReadonlySet<JevSource> = new Set(["run_english", "native_en", "translated", "empty"]);
 
 /** The persisted shape (mirrors the jev_window_text columns the kind writes). */
 export type JevWindowText = {
@@ -78,6 +90,10 @@ export type JevWindowText = {
   source: JevSource;
   char_count: number;
   model: string | null;
+  /** Closed-code reason for source='failed' (never an exception string); NULL otherwise. */
+  error: string | null;
+  /** Pre-truncation length sent to translate for source='translated'; NULL otherwise. */
+  input_chars: number | null;
   latency_ms: number | null;
 };
 
@@ -105,29 +121,43 @@ export function classifyWindow(input: {
 
   if (nonEmpty(input.transcript_english)) {
     const english = input.transcript_english.trim();
-    return { done: { window_id, room_day_id, english, source: "run_english", char_count: english.length, model: null, latency_ms: null } };
+    return { done: { window_id, room_day_id, english, source: "run_english", char_count: english.length, model: null, error: null, input_chars: null, latency_ms: null } };
   }
 
   if (isNativeEnglish(input.metrics) && nonEmpty(input.transcript_original)) {
     const english = input.transcript_original.trim();
-    return { done: { window_id, room_day_id, english, source: "native_en", char_count: english.length, model: null, latency_ms: null } };
+    return { done: { window_id, room_day_id, english, source: "native_en", char_count: english.length, model: null, error: null, input_chars: null, latency_ms: null } };
   }
 
   return { needsTranslation: true, original: nonEmpty(input.transcript_original) ? input.transcript_original : null };
 }
 
-/** The row for an unproduced English — translation gated off, empty original, or empty result (D-11). */
+/** (b) A run exists and its source text is genuinely empty. Terminal. */
 export function emptyRow(window_id: string, room_day_id: string): JevWindowText {
-  return { window_id, room_day_id, english: null, source: "empty", char_count: 0, model: null, latency_ms: null };
+  return { window_id, room_day_id, english: null, source: "empty", char_count: 0, model: null, error: null, input_chars: null, latency_ms: null };
 }
 
-/** The row for a completed local translation. Empty/whitespace result collapses to emptyRow (D-11). */
+/** (a) No run yet, or translation gated off with text to do. NOT terminal — re-evaluated on the next run. */
+export function notReadyRow(window_id: string, room_day_id: string): JevWindowText {
+  return { window_id, room_day_id, english: null, source: "not_ready", char_count: 0, model: null, error: null, input_chars: null, latency_ms: null };
+}
+
+/** (c) Translation was attempted and failed. Terminal for the attempt, RETRYABLE; reason is a closed code. */
+export function failedRow(window_id: string, room_day_id: string, reason: string): JevWindowText {
+  return { window_id, room_day_id, english: null, source: "failed", char_count: 0, model: null, error: reason, input_chars: null, latency_ms: null };
+}
+
+/**
+ * The row for a completed local translation. A translation that ATTEMPTED and produced nothing is a
+ * `failed` (empty_output), never `empty` — an empty source (b) and a failed translation (c) must not
+ * share a value. `input_chars` (pre-truncation length) is recorded so a clipped long window shows.
+ */
 export function translatedRow(
   window_id: string,
   room_day_id: string,
-  result: { english: string | null; model: string; latency_ms: number } | null,
+  result: { english: string | null; model: string; latency_ms: number; input_chars: number },
 ): JevWindowText {
-  if (!result || !nonEmpty(result.english)) return emptyRow(window_id, room_day_id);
+  if (!nonEmpty(result.english)) return failedRow(window_id, room_day_id, "empty_output");
   const english = result.english.trim();
-  return { window_id, room_day_id, english, source: "translated", char_count: english.length, model: result.model, latency_ms: result.latency_ms };
+  return { window_id, room_day_id, english, source: "translated", char_count: english.length, model: result.model, error: null, input_chars: result.input_chars, latency_ms: result.latency_ms };
 }

@@ -25,7 +25,7 @@
  */
 import { sql } from "@/lib/db";
 import { parseFlag, FlagValueError } from "@/lib/flags";
-import { classifyWindow, emptyRow, translatedRow, type JevWindowText } from "@/lib/jev/english";
+import { classifyWindow, emptyRow, notReadyRow, failedRow, translatedRow, TERMINAL_SOURCES, type JevWindowText } from "@/lib/jev/english";
 import { translateToEnglish } from "@/lib/jev/translate";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 
@@ -34,8 +34,8 @@ export const ETA_JEV_TRANSLATE_ENABLED = "ETA_JEV_TRANSLATE_ENABLED";
 /** Windows translated per step. Sized so a step of up-to-60 s calls stays under MAX_STEP_MS (~200 s). */
 export const JEV_TRANSLATE_BATCH = 3;
 
-type Counts = { run_english: number; native_en: number; translated: number; empty: number };
-const zero = (): Counts => ({ run_english: 0, native_en: 0, translated: 0, empty: 0 });
+type Counts = { run_english: number; native_en: number; translated: number; empty: number; not_ready: number; failed: number };
+const zero = (): Counts => ({ run_english: 0, native_en: 0, translated: 0, empty: 0, not_ready: 0, failed: 0 });
 const bump = (c: Counts, s: JevWindowText["source"]) => { c[s] += 1; };
 
 type RunRow = {
@@ -59,14 +59,16 @@ async function latestRun(windowId: string): Promise<RunRow | null> {
 
 async function writeRow(row: JevWindowText): Promise<void> {
   await sql`
-    INSERT INTO jev_window_text (window_id, room_day_id, english, source, char_count, model, latency_ms)
-    VALUES (${row.window_id}, ${row.room_day_id}, ${row.english}, ${row.source}, ${row.char_count}, ${row.model}, ${row.latency_ms})
+    INSERT INTO jev_window_text (window_id, room_day_id, english, source, char_count, model, error, input_chars, latency_ms)
+    VALUES (${row.window_id}, ${row.room_day_id}, ${row.english}, ${row.source}, ${row.char_count}, ${row.model}, ${row.error}, ${row.input_chars}, ${row.latency_ms})
     ON CONFLICT (window_id) DO UPDATE
       SET room_day_id = EXCLUDED.room_day_id,
           english     = EXCLUDED.english,
           source      = EXCLUDED.source,
           char_count  = EXCLUDED.char_count,
           model       = EXCLUDED.model,
+          error       = EXCLUDED.error,
+          input_chars = EXCLUDED.input_chars,
           latency_ms  = EXCLUDED.latency_ms,
           created_at  = now()
   `;
@@ -105,10 +107,13 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
 
   const windows = (await sql`SELECT id FROM bench_window WHERE room_day_id = ${roomDayId} ORDER BY start_ms`) as Array<{ id: string }>;
 
+  // Skip only windows already in a TERMINAL source. not_ready (no run yet / gated off) and failed
+  // (a translation attempt) are deliberately NOT skipped — they are re-evaluated every run, which is
+  // how "no run yet" becomes a real source on its own once a run appears, with no force and no human.
   let skip = new Set<string>();
   if (!force) {
-    const existing = (await sql`SELECT window_id FROM jev_window_text WHERE room_day_id = ${roomDayId}`) as Array<{ window_id: string }>;
-    skip = new Set(existing.map((r) => r.window_id));
+    const existing = (await sql`SELECT window_id, source FROM jev_window_text WHERE room_day_id = ${roomDayId}`) as Array<{ window_id: string; source: JevWindowText["source"] }>;
+    skip = new Set(existing.filter((r) => TERMINAL_SOURCES.has(r.source)).map((r) => r.window_id));
   }
 
   const counts = zero();
@@ -118,23 +123,34 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
   for (const w of windows) {
     if (skip.has(w.id)) { skipped += 1; continue; }
     const run = await latestRun(w.id);
+    if (!run) {
+      // (a) NO RUN YET — not terminal. It becomes eligible again on its own when a run appears.
+      await writeRow(notReadyRow(w.id, roomDayId));
+      bump(counts, "not_ready");
+      continue;
+    }
     const c = classifyWindow({
       window_id: w.id,
       room_day_id: roomDayId,
-      transcript_english: run?.transcript_english,
-      transcript_original: run?.transcript_original,
-      metrics: (run?.metrics_json ?? null) as never,
+      transcript_english: run.transcript_english,
+      transcript_original: run.transcript_original,
+      metrics: (run.metrics_json ?? null) as never,
     });
     if ("done" in c) {
       await writeRow(c.done);
       bump(counts, c.done.source);
-    } else if (translateEnabled && c.original !== null) {
-      // Defer only the id — the original is re-fetched in the translate step (no text in progress).
-      toTranslate.push(w.id);
-    } else {
-      // Translation gated off, or nothing to translate: an evidenced empty (D-11).
+    } else if (c.original === null) {
+      // (b) A run exists and its source text is genuinely empty. Terminal, honest.
       await writeRow(emptyRow(w.id, roomDayId));
       bump(counts, "empty");
+    } else if (!translateEnabled) {
+      // Translation gated off, but there IS text to translate — NOT terminal. Re-evaluated once the
+      // flag is on. (This is the milder form of the same bug: gated-off must not read as done.)
+      await writeRow(notReadyRow(w.id, roomDayId));
+      bump(counts, "not_ready");
+    } else {
+      // Defer only the id — the original is re-fetched in the translate step (no text in progress).
+      toTranslate.push(w.id);
     }
   }
 
@@ -156,8 +172,12 @@ async function translate(ctx: StepContext): Promise<StepOutcome> {
     const run = await latestRun(windowId);
     const original = run?.transcript_original?.trim() || null;
     if (!original) { await writeRow(emptyRow(windowId, roomDayId)); bump(counts, "empty"); continue; }
-    const result = await translateToEnglish(original, langHint(run!), { signal: ctx.signal });
-    const row = translatedRow(windowId, roomDayId, result);
+    const outcome = await translateToEnglish(original, langHint(run!), { signal: ctx.signal });
+    // A qwen error/timeout/abort is a RETRYABLE failure recorded with its reason — never 'empty'.
+    // A successful-but-empty output is also a failure (empty_output), via translatedRow.
+    const row = outcome.status === "failed"
+      ? failedRow(windowId, roomDayId, outcome.reason)
+      : translatedRow(windowId, roomDayId, outcome);
     await writeRow(row);
     bump(counts, row.source);
   }

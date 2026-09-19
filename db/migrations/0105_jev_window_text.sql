@@ -10,31 +10,46 @@
 -- backfilling history — option B in §3A. Translation, when it runs, is LOCAL (the Mini's qwen leg),
 -- never TypeSafe; D1 does not gate J0.
 --
--- A ROW IS ALWAYS WRITTEN (D-11). "No English for this window" is an evidenced state, never an
--- absence: english = NULL with source = 'empty' means tried-and-produced-nothing, distinct from
--- there being no row at all (job never ran).
+-- AN ABSENCE AND A FAILURE NEVER SHARE A VALUE. Three situations are told apart by reading a row:
+--   not_ready — no transcription run exists for the window YET, or translation is gated off while
+--               there is still text to translate. NOT terminal: a normal re-run (no force, no human)
+--               re-evaluates it and it becomes a real source on its own once a run appears / the flag
+--               is turned on. This is the fix for the finding that the whole corpus (2,263/2,265
+--               closed windows have no run) was being stamped permanently 'empty'.
+--   empty     — a run exists and its source text is genuinely empty. Terminal, and 'empty' is honest.
+--   failed    — translation was attempted and FAILED (qwen error, timeout, abort, or empty output).
+--               Terminal for that attempt, RETRYABLE (a re-run reprocesses it without force), and the
+--               closed-code reason is in `error`.
+--   run_english / native_en / translated — terminal successes, skipped on re-run.
 --
--- source IS THE PROVENANCE, A CLOSED VOCABULARY:
+-- source IS THE PROVENANCE, A CLOSED VOCABULARY (extended for the three-way distinction above):
 --   run_english  transcript_english was already populated (the free live path the day room-drain
 --                flips to translate:true; NULL today on every window).
---   native_en    the window is already English — decided from metrics_json (full_window_language,
---                sarvam_language, language_timeline.language_mix all agree), so transcript_original
---                is stored as-is. detected_language is NOT consulted: it is NULL on every window.
+--   native_en    already English per metrics_json (full_window_language, sarvam_language,
+--                language_timeline.language_mix all agree); transcript_original stored as-is.
 --   translated   transcript_original was translated through the Mini's local qwen leg.
---   empty        the result was empty/whitespace, OR translation was gated off
---                (ETA_JEV_TRANSLATE_ENABLED unset) — either way, evidenced, not absent.
+--   empty        a run exists and its source text was genuinely empty.
+--   not_ready    no run yet, or translation gated off with text to do — re-evaluated on the next run.
+--   failed       translation attempted and failed; retryable; reason in `error`.
+--
+-- input_chars records the pre-truncation length of the text sent to translate, so a 'translated' row
+-- can never silently hide that a long window was clipped (see TRANSLATE_CHAR_CAP in lib/jev/translate.ts).
 --
 -- ADDITIVE AND IDEMPOTENT. One new table, name-guarded index, no existing table touched, no CHECK
--- on an existing column changed. Rolls forward from the current head (0103). App-owned: no GRANTs.
+-- on an existing column changed. Rolls forward from the current head (0104). App-owned: no GRANTs.
+-- NOTE (Refuter round 2): this migration has NOT been applied; the two columns and the wider CHECK
+-- vocabulary below were added here rather than in a new migration, as the fix brief permits.
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS jev_window_text (
   window_id   text        PRIMARY KEY REFERENCES bench_window(id),
   room_day_id text        NOT NULL,
-  english     text,                      -- NULL = tried and produced nothing (source='empty'), not "not tried"
-  source      text        NOT NULL CHECK (source IN ('run_english', 'native_en', 'translated', 'empty')),
-  char_count  int         NOT NULL,
-  model       text,                      -- NULL for run_english / native_en / empty; the translate model otherwise
+  english     text,                      -- NULL for every non-success source (empty / not_ready / failed)
+  source      text        NOT NULL CHECK (source IN ('run_english', 'native_en', 'translated', 'empty', 'not_ready', 'failed')),
+  char_count  int         NOT NULL,      -- length of `english`; 0 when english IS NULL
+  model       text,                      -- the translate model for source='translated'; NULL otherwise
+  error       text,                      -- CLOSED-CODE reason for source='failed' (e.g. qwen_error, qwen_timeout, empty_output); NULL otherwise
+  input_chars int,                       -- pre-truncation length sent to translate (source='translated'); NULL otherwise
   latency_ms  int,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -42,13 +57,17 @@ CREATE TABLE IF NOT EXISTS jev_window_text (
 CREATE INDEX IF NOT EXISTS idx_jev_window_text_room_day ON jev_window_text (room_day_id);
 
 COMMENT ON TABLE jev_window_text IS
-  'Slice J0 (ETA-JEV-ARM-D §3A): the English text each bench window is read as by the jev arm, produced by lib/jobs/kinds/jev-english.ts. A row is always written per window read; english=NULL with source=empty is an evidenced no-English state (D-11).';
+  'Slice J0 (ETA-JEV-ARM-D §3A): the English text each bench window is read as by the jev arm, produced by lib/jobs/kinds/jev-english.ts. not_ready (no run yet / gated off) is re-evaluated on every run; empty (run exists, no text) and failed (translation failed, reason in error) are terminal, failed being retryable.';
 COMMENT ON COLUMN jev_window_text.english IS
-  'The English transcript. NULL means the source produced nothing (source=empty), never "not attempted".';
+  'The English transcript for a success source; NULL for empty / not_ready / failed.';
 COMMENT ON COLUMN jev_window_text.source IS
-  'Provenance: run_english (transcription_run.transcript_english) | native_en (already English per metrics_json) | translated (Mini-local qwen) | empty (nothing produced, or translation gated off).';
+  'run_english | native_en | translated (successes) | empty (run exists, text genuinely empty) | not_ready (no run yet, or translation gated off — NOT terminal, re-evaluated) | failed (translation attempted and failed — retryable, reason in error).';
 COMMENT ON COLUMN jev_window_text.model IS
   'The translation model (e.g. qwen2.5:14b) for source=translated; NULL otherwise.';
+COMMENT ON COLUMN jev_window_text.error IS
+  'Closed-code reason for source=failed (qwen_error | qwen_timeout | empty_output). Never an exception string or transcript. NULL otherwise.';
+COMMENT ON COLUMN jev_window_text.input_chars IS
+  'Pre-truncation length of the text handed to translate, for source=translated; lets a reader see if a long window was clipped. NULL otherwise.';
 
 INSERT INTO schema_migrations (version, name)
 VALUES (105, '0105_jev_window_text')
