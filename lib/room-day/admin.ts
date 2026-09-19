@@ -82,6 +82,12 @@ export type TapeTurn = {
     speech_basis: string | null;
     scores: Record<string, number>;
   } | null;
+  /**
+   * The phrase-loop flag (0104, lib/transcript/repeat-runs.ts). MARK NEVER DELETE - a looped turn
+   * is never dropped from `turns`, only labelled. null = never measured (predates the flag, or the
+   * backfill has not reached this window yet), NOT the same as "measured and clean".
+   */
+  repeat_run: { in_run: boolean; run_id: string | null; run_length: number; run_rank: number } | null;
 };
 
 export type TapeSlot =
@@ -276,6 +282,15 @@ export type RawTurnRow = {
   score_basis: string | null;
 };
 
+export type RawRepeatRunRow = {
+  window_id: string;
+  source_ref: string;
+  in_run: boolean;
+  run_id: string | null;
+  run_length: number;
+  run_rank: number;
+};
+
 export type RawEmotionWindowRow = {
   window_id: string;
   state: string;
@@ -310,6 +325,7 @@ export type AssembleTapeInput = {
   diarizeRows: RawDiarizeRow[];
   transcriptRows: RawTranscriptRow[];
   turnRows: RawTurnRow[];
+  repeatRunRows: RawRepeatRunRow[];
   emotionWindowRows: RawEmotionWindowRow[];
   /** [] whenever the gate is false - see getRoomDayTape. */
   spanEmotionRows: RawSpanEmotionRow[];
@@ -325,6 +341,7 @@ function buildTapeTurn(
   clinicianNames: Record<string, string>,
   emotion: { compute_enabled: boolean; surface_enabled: boolean },
   spanEmotionRows: RawSpanEmotionRow[],
+  repeatRunRows: RawRepeatRunRow[],
 ): TapeTurn {
   const parsed = parseTurnSourceRef(t.source_ref);
   let time_basis: TapeTurn["time_basis"];
@@ -369,6 +386,8 @@ function buildTapeTurn(
     }
   }
 
+  const repeatRunMatch = repeatRunRows.find((r) => r.window_id === w.id && r.source_ref === t.source_ref);
+
   return {
     source_ref: t.source_ref,
     speaker_idx: t.speaker_idx,
@@ -377,6 +396,9 @@ function buildTapeTurn(
     end_ms,
     time_basis,
     text: t.cue_text,
+    repeat_run: repeatRunMatch
+      ? { in_run: repeatRunMatch.in_run, run_id: repeatRunMatch.run_id, run_length: repeatRunMatch.run_length, run_rank: repeatRunMatch.run_rank }
+      : null,
     voice: {
       clinician_id: t.clinician_id,
       clinician_name: t.clinician_id ? (clinicianNames[t.clinician_id] ?? null) : null,
@@ -407,6 +429,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
     diarizeRows,
     transcriptRows,
     turnRows,
+    repeatRunRows,
     emotionWindowRows,
     spanEmotionRows,
     clinicianNames,
@@ -457,7 +480,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
     const emotionWindowRow = emotionWindowByWindow.get(w.id) ?? null;
     const rawTurns = turnsByWindow.get(w.id) ?? [];
     const turns = rawTurns
-      .map((t) => buildTapeTurn(t, w, clinicianNames, emotion, spanEmotionRows))
+      .map((t) => buildTapeTurn(t, w, clinicianNames, emotion, spanEmotionRows, repeatRunRows))
       .sort((a, b) => a.start_ms - b.start_ms);
 
     const metrics = transcriptRow?.metrics_json ?? {};
@@ -654,11 +677,12 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
   let diarizeRows: RawDiarizeRow[] = [];
   let transcriptRows: RawTranscriptRow[] = [];
   let turnRows: RawTurnRow[] = [];
+  let repeatRunRows: RawRepeatRunRow[] = [];
   let emotionWindowRows: RawEmotionWindowRow[] = [];
   let clinicianNames: Record<string, string> = {};
 
   if (windowIds.length > 0) {
-    const [diarizeDb, transcriptDb, turnDb, emoWindowDb] = await Promise.all([
+    const [diarizeDb, transcriptDb, turnDb, repeatRunDb, emoWindowDb] = await Promise.all([
       sql`
         SELECT window_id, state, error, attempts, segments_run_id, speakers_json
           FROM room_diarize_window
@@ -697,6 +721,11 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
           cue_end_ms: string | number | null;
         }>
       >,
+      sql`
+        SELECT window_id, source_ref, in_run, run_id, run_length, run_rank
+          FROM room_turn_repeat_run
+         WHERE window_id = ANY(${windowIds}::text[])
+      ` as unknown as Promise<Array<{ window_id: string; source_ref: string; in_run: boolean; run_id: string | null; run_length: number; run_rank: number }>>,
       sql`
         SELECT window_id, state, segments_scored, segments_skipped, error
           FROM room_emotion_window
@@ -737,6 +766,15 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
       losing_clinician_id: t.losing_clinician_id,
       losing_score: t.losing_score,
       score_basis: t.score_basis,
+    }));
+
+    repeatRunRows = repeatRunDb.map((r) => ({
+      window_id: r.window_id,
+      source_ref: r.source_ref,
+      in_run: r.in_run,
+      run_id: r.run_id,
+      run_length: r.run_length,
+      run_rank: r.run_rank,
     }));
 
     emotionWindowRows = emoWindowDb.map((e) => ({
@@ -796,6 +834,7 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
     diarizeRows,
     transcriptRows,
     turnRows,
+    repeatRunRows,
     emotionWindowRows,
     spanEmotionRows,
     clinicianNames,

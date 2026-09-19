@@ -74,6 +74,13 @@ function TurnRow({ turn, surfaceEnabled }: { turn: TapeTurn; surfaceEnabled: boo
         </p>
       ) : null}
 
+      {/* Phrase-loop flag (0104) - MARK NEVER DELETE. The turn stays in the tape either way. */}
+      {turn.repeat_run?.in_run ? (
+        <p className="text-[10px] mt-1 uppercase tracking-wide text-amber-700">
+          repeat run - turn {turn.repeat_run.run_rank} of {turn.repeat_run.run_length} with identical text back to back (Whisper phrase loop, not deleted)
+        </p>
+      ) : null}
+
       {/* Emotion - visible per V's ruling, always carrying its markers. */}
       <p className="text-[11px] mt-1 text-even-ink-500">
         {!surfaceEnabled ? (

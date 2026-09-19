@@ -116,6 +116,7 @@ function baseInput(overrides: Partial<AssembleTapeInput> = {}): AssembleTapeInpu
     diarizeRows: [],
     transcriptRows: [],
     turnRows: [],
+    repeatRunRows: [],
     emotionWindowRows: [],
     spanEmotionRows: [],
     clinicianNames: {},
