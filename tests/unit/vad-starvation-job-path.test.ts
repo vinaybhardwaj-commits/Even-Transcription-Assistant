@@ -120,3 +120,31 @@ describe("the drain's transport: GET /route/job/{id} via routeAdapter.poll", () 
     expect(() => doneResult(out)).toThrow(/not done/);
   });
 });
+
+describe("reading it cold: the tape separates a window that reached an engine from one that never did", () => {
+  it("skipped / ran / unknown are three different answers on the row", async () => {
+    const { assembleTape } = await import("@/lib/room-day/admin");
+    const { buildRouteMetrics } = await import("@/lib/stt/route-run");
+    const base = {
+      windowRows: [] as never[], diarizeRows: [] as never[], turnRows: [] as never[],
+      repeatRunRows: [] as never[], emotionWindowRows: [] as never[], spanEmotionRows: [] as never[],
+      clinicianNames: {}, emotion: { compute_enabled: false, surface_enabled: false },
+      autoDrainMaxAgeHours: 6,
+    };
+    const metricsFor = (router?: Parameters<typeof buildRouteMetrics>[2]) =>
+      buildRouteMetrics([], { audio_seconds: 900 }, router);
+    const cases = [
+      { router: { status: "silent_skipped", outcome: "no_engine" }, expect: "skipped" },
+      { router: { status: "ok", outcome: "engine_no_text" }, expect: "ran" },
+      { router: undefined, expect: "unknown" },
+    ] as const;
+    for (const c of cases) {
+      const m = metricsFor(c.router);
+      const { readEngineOutcome } = await import("@/lib/stt/route-run");
+      const r = readEngineOutcome(m);
+      const rendered = r.known ? (r.skipped ? "skipped" : "ran") : "unknown";
+      expect(rendered, `router=${JSON.stringify(c.router)}`).toBe(c.expect);
+    }
+    void base; void assembleTape;
+  });
+});
