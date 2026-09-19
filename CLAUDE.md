@@ -35,7 +35,9 @@ The standing rules are in `~/.claude/CLAUDE.md`. This file adds only what is spe
 
 ## Deploy
 - **Production runs `vinay/s1-auto-drain`, NOT `main`.** `main` is stale at `7ffb168` (25 Aug). Corrected 15 Sep, restated 19 Sep.
-- A push produces only a PREVIEW on this project. Promotion to production is a separate action (`npx vercel promote <dpl_...>`), and the Vercel MCP tools do not expose it.
+- **A push to `vinay/s1-auto-drain` produces only a PREVIEW** (`target: null`). It does NOT ship. Production stays where it was until you promote. Verified 19 Sep: `843e7b2` built READY as a preview while production sat on `75cb0f9`.
+- **Promoting.** Run `npx -y vercel promote <dpl_...>` from the `-ow` worktree. The `-y` is not optional: without it, npx's own "Ok to proceed?" prompt blocks forever and the call returns no output at all, which looks exactly like a slow build. Despite the name, this does not flip an alias — it CREATES A NEW production deployment from that commit, and it must, because Vercel bakes env vars at build time and a preview build carries preview values.
+- **The Vercel MCP does expose `request_promote`**, but it returns 422 on a `target: null` deployment. It is for production-to-production rollback, not for shipping a preview. Use the CLI. (Its `projectId` is the `prj_...` id, not the project name; the name 404s.)
 - **Vercel env vars are baked at BUILD time.** Adding or changing one requires a redeploy, not just a settings change. `parseFlag` THROWS on an unrecognised value, so a typo is a 500, not a default.
 - You do not deploy. The Orchestrator merges, promotes and deploys, and rules on every verdict.
 
