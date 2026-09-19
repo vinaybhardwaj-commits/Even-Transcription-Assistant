@@ -335,13 +335,16 @@ export type AssembleTapeInput = {
   autoDrainMaxAgeHours: number;
 };
 
+/** (window_id, source_ref) is room_turn_repeat_run's primary key; NUL cannot occur in either part. */
+const repeatRunKey = (windowId: string, sourceRef: string) => `${windowId}\u0000${sourceRef}`;
+
 function buildTapeTurn(
   t: RawTurnRow,
   w: RawBenchWindowRow,
   clinicianNames: Record<string, string>,
   emotion: { compute_enabled: boolean; surface_enabled: boolean },
   spanEmotionRows: RawSpanEmotionRow[],
-  repeatRunRows: RawRepeatRunRow[],
+  repeatRunByTurn: Map<string, RawRepeatRunRow>,
 ): TapeTurn {
   const parsed = parseTurnSourceRef(t.source_ref);
   let time_basis: TapeTurn["time_basis"];
@@ -386,7 +389,7 @@ function buildTapeTurn(
     }
   }
 
-  const repeatRunMatch = repeatRunRows.find((r) => r.window_id === w.id && r.source_ref === t.source_ref);
+  const repeatRunMatch = repeatRunByTurn.get(repeatRunKey(w.id, t.source_ref));
 
   return {
     source_ref: t.source_ref,
@@ -439,6 +442,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
   } = input;
 
   const diarizeByWindow = new Map(diarizeRows.map((d) => [d.window_id, d]));
+  const repeatRunByTurn = new Map(repeatRunRows.map((r) => [repeatRunKey(r.window_id, r.source_ref), r]));
   const transcriptByWindow = new Map(transcriptRows.map((t) => [t.window_id, t]));
   const emotionWindowByWindow = new Map(emotionWindowRows.map((e) => [e.window_id, e]));
   const turnsByWindow = new Map<string, RawTurnRow[]>();
@@ -480,7 +484,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
     const emotionWindowRow = emotionWindowByWindow.get(w.id) ?? null;
     const rawTurns = turnsByWindow.get(w.id) ?? [];
     const turns = rawTurns
-      .map((t) => buildTapeTurn(t, w, clinicianNames, emotion, spanEmotionRows, repeatRunRows))
+      .map((t) => buildTapeTurn(t, w, clinicianNames, emotion, spanEmotionRows, repeatRunByTurn))
       .sort((a, b) => a.start_ms - b.start_ms);
 
     const metrics = transcriptRow?.metrics_json ?? {};

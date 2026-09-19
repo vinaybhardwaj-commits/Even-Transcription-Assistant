@@ -48,14 +48,34 @@ export const MIN_RUN_LENGTH_TO_FLAG = 4;
  * "lowercase; collapse runs of whitespace to one space; strip punctuation except ., ? and !;
  * tokenise on spaces." Tokenising is a no-op for whole-turn equality but kept for fidelity to the
  * definition and so a future n-gram-within-turn measure can reuse this function unchanged. */
+/**
+ * WHAT "strip punctuation" MAY REMOVE — and, more to the point, what it may NOT.
+ *
+ * THE DEFECT THIS REPLACES. The first version kept only `\p{L}\p{N}` and deleted everything else,
+ * which deletes every combining mark (`\p{M}`). In Devanagari, Kannada and the other Indic scripts the
+ * vowel signs (matras), the virama and the anusvara ARE combining marks — they are the letters, not
+ * accents on them. Stripping them reduced distinct phrases to the same bare-consonant skeleton, so four
+ * different Hindi turns compared equal and were flagged as one repeat run.
+ *
+ * THE RULE NOW. Delete only punctuation (`\p{P}`) and symbols (`\p{S}`). Letters, marks and numbers of
+ * every script are untouched BY CONSTRUCTION — there is no keep-list to forget a category from.
+ * Kept besides `. ? !` (the canonical doc's own exceptions): the danda and double danda (U+0964/0965),
+ * the Hindi sentence-final marks that play the role `.` plays in English, so a Hindi turn is compared
+ * the way an English one is. Zero-width joiner/non-joiner (U+200C/U+200D, category Cf) are neither
+ * punctuation nor symbols and are never touched: Kannada and Devanagari conjuncts are spelled with them.
+ *
+ * NFC first, so the same visible text spelled composed or decomposed compares equal instead of
+ * silently reading as two different turns.
+ */
+const KEEP_PUNCTUATION = new Set([".", "?", "!", "।", "॥"]);
+
 export function normalizeTurnText(text: string): string {
   return text
+    .normalize("NFC")
     .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[^\p{L}\p{N}\s.?!]/gu, "")
-    // Stripping punctuation can leave a run it used to separate (e.g. "wait -- really" -> "wait  really")
-    // - re-collapse so the whole function's own stated property ("whitespace collapsed to one space")
-    // holds on its OUTPUT, not just after the first pass.
+    .replace(/[\p{P}\p{S}]/gu, (ch) => (KEEP_PUNCTUATION.has(ch) ? ch : ""))
+    // Removing punctuation can leave a run of spaces it used to separate ("wait -- really" -> "wait  really"),
+    // so collapse after, not before: the output must hold the canonical "one space" property itself.
     .replace(/\s+/g, " ")
     .trim();
 }

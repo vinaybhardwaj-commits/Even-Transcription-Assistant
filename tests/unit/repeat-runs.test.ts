@@ -117,6 +117,136 @@ describe("detectRepeatRuns — pure", () => {
 });
 
 // ===========================================================================
+// 1b. Indic scripts: combining marks are the LETTERS, not noise (the refuter's UNSOUND finding)
+// ===========================================================================
+//
+// THE DEFECT: the first normaliser kept only \p{L}\p{N}, which deletes every combining mark. In
+// Devanagari and Kannada the vowel signs, virama and anusvara are combining marks, so distinct words
+// shrank to the same bare-consonant string and four different turns were flagged as one repeat run.
+//
+// THE FIXTURES are generic minimal pairs — ordinary function words, not clinic speech — because real
+// consultation text does not belong in a public repo (house rule). Each set is asserted, below, to
+// COLLIDE under the defective normaliser (inlined here, verbatim from 862868d, for that purpose only),
+// so a fixture that does not reproduce the defect fails loudly instead of passing for the wrong reason.
+// The real-window proof is the env-gated block at the end of this section.
+
+const legacyNormalize = (t: string) => t.toLowerCase().replace(/\s+/g, " ").replace(/[^\p{L}\p{N}\s.?!]/gu, "").replace(/\s+/g, " ").trim();
+const asTurns = (texts: string[]): RepeatRunTurnInput[] => texts.map((text, i) => ({ source_ref: `t${i}`, text }));
+
+const INDIC_SETS: Record<string, string[]> = {
+  // four DISTINCT Hindi words: every one reduces to the bare consonant "ह" without its vowel signs
+  hindi: ["हाँ", "हूँ", "हैं", "है"],
+  hindi_phrases: ["आज कल", "आज कुल", "आज कील", "आज कला"],
+  kannada: ["ಕಲ", "ಕಲಿ", "ಕಾಲ", "ಕೆಲ"],
+  // code-mixed: the Latin word is untouched, the Indic word collapses
+  code_mixed_english_hindi: ["ok हाँ", "ok हूँ", "ok हैं", "ok है"],
+  code_mixed_english_kannada: ["yes ಕಲ", "yes ಕಲಿ", "yes ಕಾಲ", "yes ಕೆಲ"],
+};
+
+describe("Indic scripts — distinct phrases are NOT one repeat run", () => {
+  for (const [name, set] of Object.entries(INDIC_SETS)) {
+    it(`${name}: the fixture really collides under the DEFECTIVE normaliser, and is not flagged by the fix`, () => {
+      expect(new Set(set).size, "four genuinely distinct strings").toBe(4);
+      expect(new Set(set.map(legacyNormalize)).size, "precondition: the old normaliser merged them into ONE key").toBe(1);
+
+      expect(new Set(set.map(normalizeTurnText)).size, "the fixed normaliser keeps them apart").toBe(4);
+      const results = detectRepeatRuns(asTurns(set));
+      expect(results.every((r) => !r.in_run), "no run, no flag").toBe(true);
+    });
+  }
+
+  it("the defect, replayed: four back-to-back distinct Hindi words would have been ONE run of 4 under the old key", () => {
+    // Same run-finding as detectRepeatRuns, keyed by the old normaliser: this is what shipped in 862868d.
+    const keys = INDIC_SETS.hindi!.map(legacyNormalize);
+    let run = 1;
+    while (run < keys.length && keys[run] === keys[0]) run++;
+    expect(run).toBeGreaterThanOrEqual(MIN_RUN_LENGTH_TO_FLAG);
+  });
+
+  it("a REAL loop in Hindi, Kannada and code-mixed text is still caught: the fix did not blunt detection", () => {
+    for (const phrase of ["ठीक है", "ಸರಿ ಹೌದು", "ok ठीक है"]) {
+      const four = detectRepeatRuns(asTurns(Array(4).fill(phrase)));
+      expect(four.every((r) => r.in_run && r.run_length === 4), `${phrase} x4 is a run`).toBe(true);
+      const three = detectRepeatRuns(asTurns(Array(3).fill(phrase)));
+      expect(three.every((r) => !r.in_run), `${phrase} x3 is ordinary speech`).toBe(true);
+    }
+  });
+
+  it("a true loop sitting next to distinct look-alikes flags ONLY the loop", () => {
+    const turns = asTurns([...INDIC_SETS.hindi!, "ठीक है", "ठीक है", "ठीक है", "ठीक है", ...INDIC_SETS.kannada!]);
+    const results = detectRepeatRuns(turns);
+    expect(results.slice(0, 4).every((r) => !r.in_run)).toBe(true);
+    expect(results.slice(4, 8).every((r) => r.in_run && r.run_length === 4)).toBe(true);
+    expect(results.slice(8).every((r) => !r.in_run)).toBe(true);
+  });
+
+  it("composed and decomposed spellings of the same visible text are ONE turn, so a loop cannot hide behind them", () => {
+    const composed = "café";
+    const decomposed = "café";
+    expect(composed).not.toBe(decomposed);
+    expect(normalizeTurnText(composed)).toBe(normalizeTurnText(decomposed));
+    const results = detectRepeatRuns(asTurns([composed, decomposed, composed, decomposed]));
+    expect(results.every((r) => r.in_run && r.run_length === 4)).toBe(true);
+    expect(normalizeTurnText("cafe"), "an accent is a difference, not noise").not.toBe(normalizeTurnText(composed));
+  });
+
+  it("what IS removed: punctuation and symbols. What is KEPT: danda, zero-width joiners, . ? !", () => {
+    expect(normalizeTurnText("वाह, ठीक है।")).toBe("वाह ठीक है।");
+    expect(normalizeTurnText("है।"), "the sentence-final danda is a difference, as `you.` vs `you` is").not.toBe(normalizeTurnText("है"));
+    expect(normalizeTurnText("क‍ष")).toContain("‍");
+    expect(normalizeTurnText("ಕ‌ಷ")).toContain("‌");
+    expect(normalizeTurnText("Really?!")).toBe("really?!");
+    expect(normalizeTurnText("₹500 (paid) — ok")).toBe("500 paid ok");
+  });
+
+  it("INVARIANT: no letter, combining mark or digit of ANY script is ever removed", () => {
+    const samples = [
+      "हाँ हूँ हैं है नमस्ते क्षत्रिय ज्ञान",          // Devanagari
+      "ಕಲ ಕಲಿ ಕಾಲ ಕೆಲ ಕ್ಷಮಿಸಿ ಇದೆ",                    // Kannada
+      "தமிழ் வணக்கம் கொடு", "తెలుగు నమస్కారం", "മലയാളം നന്ദി", "বাংলা ধন্যবাদ", // Tamil, Telugu, Malayalam, Bengali
+      "مَرْحَبًا كيف حالك", "สวัสดีครับ", "café naïve Zoë",   // Arabic with harakat, Thai, accented Latin
+      "१२३ ೧೨೩ 123",                                     // digits in three scripts
+    ];
+    const lmn = (s: string) => [...s.normalize("NFC").toLowerCase()].filter((c) => /[\p{L}\p{M}\p{N}]/u.test(c));
+    for (const s of samples) expect(lmn(normalizeTurnText(s)), s).toEqual(lmn(s));
+  });
+});
+
+// The same invariants over REAL text. Real consultation speech is not committed, so the corpus comes from a
+// file on the machine that has it: ETA_REAL_TEXT_FIXTURE=/path/to/[{window_id,text},...].json (routed
+// transcripts split into sentences), read-only from the database. Without it this block is skipped, and the
+// report says whether it ran.
+const REAL_FIXTURE = process.env.ETA_REAL_TEXT_FIXTURE;
+describe.skipIf(!REAL_FIXTURE)("Indic scripts — over the REAL windows (ETA_REAL_TEXT_FIXTURE)", () => {
+  const wins: Array<{ window_id: string; text: string }> = REAL_FIXTURE ? JSON.parse(readFileSync(REAL_FIXTURE, "utf8")) : [];
+  const sentencesOf = (text: string) => text.split(/(?<=[.?!।॥])\s+|\n+/u).map((x) => x.trim()).filter(Boolean);
+  const lmn = (s: string) => [...s.normalize("NFC").toLowerCase()].filter((c) => /[\p{L}\p{M}\p{N}]/u.test(c));
+
+  it("no real letter, mark or digit is removed, and the fix flags a subset of what the defect flagged", () => {
+    let sentences = 0, withMarks = 0, oldFlagged = 0, newFlagged = 0, legacyMerged = 0;
+    for (const w of wins) {
+      const turns = sentencesOf(w.text).map((text, i) => ({ source_ref: `${w.window_id}#${i}`, text }));
+      sentences += turns.length;
+      const groups = new Map<string, Set<string>>();
+      for (const t of turns) {
+        if (/\p{M}/u.test(t.text)) withMarks++;
+        expect(lmn(normalizeTurnText(t.text))).toEqual(lmn(t.text));
+        const k = legacyNormalize(t.text);
+        if (k) (groups.get(k) ?? groups.set(k, new Set()).get(k)!).add(normalizeTurnText(t.text));
+      }
+      for (const g of groups.values()) if (g.size > 1) legacyMerged++;
+      const keys = turns.map((t) => legacyNormalize(t.text));
+      const oldFlag = new Array<boolean>(turns.length).fill(false);
+      for (let i = 0; i < turns.length;) { let j = i + 1; if (keys[i]) while (j < turns.length && keys[j] === keys[i]) j++; if (keys[i] && j - i >= MIN_RUN_LENGTH_TO_FLAG) for (let k = i; k < j; k++) oldFlag[k] = true; i = j; }
+      detectRepeatRuns(turns).forEach((r, i) => { if (r.in_run) { newFlagged++; expect(oldFlag[i], "a turn the fix flags was flagged by the defect too").toBe(true); } });
+      oldFlagged += oldFlag.filter(Boolean).length;
+    }
+    console.log(`[REAL] windows ${wins.length}, sentences ${sentences}, with combining marks ${withMarks}, legacy keys that merged DISTINCT sentences ${legacyMerged}, flagged old ${oldFlagged} / new ${newFlagged}`);
+    expect(sentences).toBeGreaterThan(0);
+  });
+});
+
+// ===========================================================================
 // 2. Backfill against a real Postgres — read-and-flag, no text touched
 // ===========================================================================
 
@@ -246,6 +376,19 @@ describe("assembleTape — surfaces repeat_run on the tape", () => {
     const turns = slot!.kind === "window" ? slot!.window.turns : [];
     expect(turns.length).toBe(1); // never dropped
     expect(turns[0]!.repeat_run).toEqual({ in_run: true, run_id: "bs_1|1000|2000|0", run_length: 42, run_rank: 5 });
+  });
+
+  it("the flag is looked up by (window_id, source_ref): the same source_ref in two windows does not bleed", () => {
+    const shared = "bs_1|1000|2000|0";
+    const two = assembleTape(baseInput({
+      spanEndMs: 1_800_000,
+      windows: [win({ id: "bw_1", start_ms: 0, end_ms: 900_000 }), win({ id: "bw_2", start_ms: 900_000, end_ms: 1_800_000 })],
+      turnRows: [turnRow({ window_id: "bw_1", source_ref: shared }), turnRow({ window_id: "bw_2", source_ref: shared })],
+      repeatRunRows: [{ window_id: "bw_1", source_ref: shared, in_run: true, run_id: shared, run_length: 5, run_rank: 2 }],
+    }));
+    const turnsOf = (id: string) => two.slots.flatMap((s) => (s.kind === "window" && s.window.id === id ? s.window.turns : []));
+    expect(turnsOf("bw_1")[0]!.repeat_run).toEqual({ in_run: true, run_id: shared, run_length: 5, run_rank: 2 });
+    expect(turnsOf("bw_2")[0]!.repeat_run, "window 2 was never measured").toBeNull();
   });
 
   it("a turn never measured (no row in room_turn_repeat_run) renders repeat_run: null - not the same as clean", () => {
