@@ -143,6 +143,8 @@ export async function diarizeWindow(opts: {
   centroids?: ClinicianCentroid[];
   /** One id per run, stamped on every turn row this run writes (0090). */
   runId: string;
+  /** Aborts the /diarize call. `runDiarize` already takes one; an aborted call returns `retryable` and NOTHING below it runs. */
+  signal?: AbortSignal;
 }): Promise<
   | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
   | { ok: false; error: string; retryable: boolean; timing: unknown }
@@ -154,6 +156,7 @@ export async function diarizeWindow(opts: {
     clinicianCentroids: centroids,
     // The validated floor, on the wire, every time — never the service's own 0.70 default.
     batchThreshold: DIARIZE_BATCH_THRESHOLD,
+    signal: opts.signal,
   });
   // Branch on `ok`. /diarize returns real 4xx, but its sibling /enroll answers 200 with ok:false,
   // and a client that reads status learns the wrong lesson from whichever it meets first.

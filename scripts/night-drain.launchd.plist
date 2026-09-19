@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Supervision for the overnight Mini drain (scripts/night-drain.ts). NOT installed by the build.
+  The process runs all day and idles outside closed hours (21:30-07:30 IST), so the clock is the schedule and a
+  restart at any hour just resumes. KeepAlive restarts it only after a NON-ZERO exit (a fatal: refused credential,
+  missing config); a launchctl stop is a clean exit and stays stopped. ThrottleInterval keeps a fatal from spinning.
+  No credential appears here: the launcher reads them at run time and puts them in its own environment only.
+  Install (V): cp scripts/night-drain.launchd.plist ~/Library/LaunchAgents/com.even.eta.night-drain.plist
+               launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.even.eta.night-drain.plist
+  Stop:        launchctl bootout gui/$(id -u)/com.even.eta.night-drain
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.even.eta.night-drain</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/vinaybhardwaj/night-drain/night-drain.mjs</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/vinaybhardwaj/night-drain</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>300</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>/Users/vinaybhardwaj/night-drain/launchd.err.log</string>
+</dict>
+</plist>
