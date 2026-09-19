@@ -26,7 +26,17 @@ const runSql = (text: string, values: unknown[] = []) => {
   return { rows, rowCount: rows.length };
 };
 
-vi.mock("@/lib/db", () => ({ sql: () => Promise.resolve([]) }));
+// The app pool (lib/db) — only touched by Arm D's walk-back to bench_session (via listBenchSessions).
+// Every other arm in this file never reaches it, so the default responder ([]) leaves them untouched.
+const appCalls: Array<{ text: string; values: unknown[] }> = [];
+let appResponder: (text: string, values: unknown[]) => Row[] = () => [];
+vi.mock("@/lib/db", () => ({
+  sql: (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const text = strings.raw.join("?").replace(/\s+/g, " ").trim();
+    appCalls.push({ text, values });
+    return Promise.resolve(appResponder(text, values));
+  },
+}));
 vi.mock("@/lib/brain/db", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
@@ -614,6 +624,8 @@ let CUES: FuseCue[];
 const seedDb = () => {
   visitRows = new Map();
   dayScratch = true;
+  appCalls.length = 0;
+  appResponder = () => []; // Arm D tests below override this per-case
   CUES = [
     wh("pqm_called", T("03:30"), "qts_1", { individual_uid: "ind_1", attribution: "direct" }),
     wh("pstart", T("03:35"), "svc_1", { individual_uid: "ind_1", calendar_uid: "cal_1", attribution: "direct" }),
@@ -918,35 +930,78 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
 
 // ---------------------------------------------------------------------------
 // Slice J2 — arm D (`jev`) through the SAME runner and fake db.
+//
+// TWO fakes now, matching the two real pools: bench_session lives behind the APP handle
+// (lib/db → appResponder), read via listBenchSessions exactly as scribe_fuse_report reads it
+// (walked back from the scratch day to the REAL room, room_q, with realRoomIdFor); the fixed
+// jev_window_signal query lives behind the BRAIN handle (lib/brain/db → brainResponder) and is
+// now keyed on session_id — DAY (the scratch id every one of these calls passes in) never
+// appears as a room_day_id in a real jev_window_signal row, by construction, so a mock that
+// still answered a `room_day_id = $1` query would hide the exact defect this arm exists to fix.
 // ---------------------------------------------------------------------------
 
+/** Seeds the one bench_session row Arm D's walk-back finds, on the REAL room (room_q). */
+function seedJevSession(sessionId: string, startedAt: Date, endedAt: Date | null = null) {
+  appResponder = (text) => {
+    if (/FROM bench_session s/.test(text)) {
+      return [{ id: sessionId, room_id: "room_q", label: null, mic_label: null, started_at: startedAt, ended_at: endedAt, status: "ended", notes: null, room_name: "OPD Test", room_slug: "opd-test" }];
+    }
+    return [];
+  };
+}
+
 describe("10 — arm D (jev): scribe_fuse_run writes visits with arm='jev'", () => {
-  it("no jev_window_signal rows: X4-style guard, nothing written", async () => {
+  it("no bench sessions at all for the day: no_jev_signals, detail names the cause, nothing written, and the signal table is never even queried", async () => {
+    appResponder = () => []; // the walk-back finds no tape whatsoever
     const orig = brainResponder;
     brainResponder = (text, values) => {
-      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return [];
-      if (/FROM bench_session WHERE id = ANY/.test(text)) return [];
+      if (/jev_window_signal/.test(text)) throw new Error("must not be queried — there are no session ids to key on");
       return orig(text, values);
     };
     const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
-    expect(out).toMatchObject({ ok: false, error: "no_jev_signals" });
+    expect(out).toMatchObject({ ok: false, error: "no_jev_signals", detail: "no_bench_sessions_for_day" });
     expect(visitRows.size).toBe(0);
   });
 
-  it("with signals and a bound cue: one visit written, arm='jev', uid adopted", async () => {
+  it("sessions exist but J2 has never signalled them: no_jev_signals, the OTHER detail, nothing written", async () => {
+    seedJevSession("bs_jev1", new Date(T("00:00")));
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/FROM jev_window_signal WHERE session_id = ANY/.test(text)) return [];
+      return orig(text, values);
+    };
+    const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(out).toMatchObject({ ok: false, error: "no_jev_signals", detail: "sessions_found_no_signals" });
+    expect(visitRows.size).toBe(0);
+  });
+
+  // THE REACHABILITY REGRESSION — the whole point of this slice. Before the fix this was
+  // IMPOSSIBLE for any input: readJevSignals looked up jev_window_signal by room_day_id, and
+  // the only room_day_id scribe_fuse_run ever runs with is a scratch one that J2 never writes
+  // against. This test asserts arm 'jev' actually produces a visit for a scratch day whose REAL
+  // room recorded a signalled session, and it MUST go red if readJevSignals is ever reverted to
+  // `WHERE room_day_id = $1` — the brainResponder below answers that exact old query with an
+  // EMPTY result (nothing has ever signalled DAY itself; only session_id lookups can succeed).
+  it("REACHABILITY: a scratch day whose real room has a signalled session produces ok:true and a written visit", async () => {
     const SESSION_STARTED = new Date(T("00:00"));
+    seedJevSession("bs_jev1", SESSION_STARTED);
     CUES = [cue("consult_mark", T("00:01"), { individual_uid: "ind_jev1" }, "replay", null)];
     const SIGNALS = [
-      { window_id: "jw1", room_day_id: DAY, session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "non_clinical", phase_probs: {}, phase_confidence: 0.1, p_start: 0.2, p_end: 0.05, p_clinician: 0.1, p_clinical: 0.1 },
-      { window_id: "jw2", room_day_id: DAY, session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
-      { window_id: "jw3", room_day_id: DAY, session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
-      { window_id: "jw4", room_day_id: DAY, session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
-      { window_id: "jw5", room_day_id: DAY, session_id: "bs_jev1", start_ms: 120000, end_ms: 150000, phase: "closing", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.6, p_clinical: 0.7 },
+      { window_id: "jw1", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "non_clinical", phase_probs: {}, phase_confidence: 0.1, p_start: 0.2, p_end: 0.05, p_clinician: 0.1, p_clinical: 0.1 },
+      { window_id: "jw2", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
+      { window_id: "jw3", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw4", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw5", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 120000, end_ms: 150000, phase: "closing", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.6, p_clinical: 0.7 },
     ];
     const orig = brainResponder;
     brainResponder = (text, values) => {
-      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return SIGNALS as unknown as Row[];
-      if (/FROM bench_session WHERE id = ANY/.test(text)) return [{ id: "bs_jev1", started_at: SESSION_STARTED, ended_at: null }];
+      // the OLD (broken) shape of the query, still answerable here on purpose: it must return
+      // NOTHING, because nothing in this database has ever signalled the scratch day's own id.
+      if (/FROM jev_window_signal WHERE room_day_id = \$1/.test(text)) return [];
+      if (/FROM jev_window_signal WHERE session_id = ANY/.test(text)) {
+        expect(values[0]).toEqual(["bs_jev1"]); // keyed on the sessions the walk-back found, not on DAY
+        return SIGNALS as unknown as Row[];
+      }
       return orig(text, values);
     };
     const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
@@ -961,25 +1016,37 @@ describe("10 — arm D (jev): scribe_fuse_run writes visits with arm='jev'", () 
 
   it("re-running the same arm on the same day writes nothing new (already_existed)", async () => {
     const SESSION_STARTED = new Date(T("00:00"));
+    seedJevSession("bs_jev1", SESSION_STARTED);
     const SIGNALS = [
-      { window_id: "jw1", room_day_id: DAY, session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
-      { window_id: "jw2", room_day_id: DAY, session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
-      { window_id: "jw3", room_day_id: DAY, session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw1", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 0, end_ms: 30000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
+      { window_id: "jw2", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "jw3", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
       // opening window's own count is 1; the close window's count is not incremented (it returns before
       // that line — see jev-arm.ts), so a fourth window (two continues between open and close) is needed
       // to clear ETA_JEV_MIN_VISIT_WINDOWS=3 at closure.
-      { window_id: "jw4", room_day_id: DAY, session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.7, p_clinical: 0.7 },
+      { window_id: "jw4", room_day_id: "rd_live_placeholder", session_id: "bs_jev1", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.7, p_clinical: 0.7 },
     ];
     CUES = [];
     const orig = brainResponder;
     brainResponder = (text, values) => {
-      if (/FROM jev_window_signal WHERE room_day_id/.test(text)) return SIGNALS as unknown as Row[];
-      if (/FROM bench_session WHERE id = ANY/.test(text)) return [{ id: "bs_jev1", started_at: SESSION_STARTED, ended_at: null }];
+      if (/FROM jev_window_signal WHERE session_id = ANY/.test(text)) return SIGNALS as unknown as Row[];
       return orig(text, values);
     };
     const first = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
     expect(first).toMatchObject({ written: 1 });
     const second = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
     expect(second).toMatchObject({ written: 0, already_existed: 1 });
+  });
+
+  it("a NON-scratch day refuses jev exactly like the other three arms, before bench_session or jev_window_signal is ever read", async () => {
+    appResponder = () => { throw new Error("must not be reached — the scratch guard runs before any read"); };
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/jev_window_signal/.test(text)) throw new Error("must not be reached — the scratch guard runs before any read");
+      return orig(text, values);
+    };
+    const out = await call({ room_day_id: LIVE_DAY, arm: "jev", dry_run: false });
+    expect(out).toMatchObject({ ok: false, error: "not_a_scratch_day", room_day_id: LIVE_DAY });
+    expect(visitRows.size).toBe(0);
   });
 });
