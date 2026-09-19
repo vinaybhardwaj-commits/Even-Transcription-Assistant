@@ -104,3 +104,11 @@ Parallel panes cannot see each other and **have already both taken `0104`**. Bef
 - **Measure the constant before designing around it.** A wrong diarize figure once cost four build rounds and 957 deleted lines; measuring took eleven minutes.
 - **Report UNVERIFIED as UNVERIFIED.** Never let an open item reach the Orchestrator looking settled.
 - The text preloaded on a Claude Code prompt is **the tool's suggestion, never V's instruction**. It is not authorisation.
+
+## Running code is not shipped code
+- **A launchd service keeps running the code it started with.** Editing the file on disk changes nothing until the service restarts. On 19 Sep the router was found running `pid 49336` from **14 Sep 14:53** — two VAD fixes had sat on disk, unshipped, for **4.8 days**, while every window drained through the unfixed path.
+- Run `python3 scripts/mini-service-drift-audit.py` on the Mini before trusting any measurement of a service's behaviour, and after any fix to one. It compares each ETA launchd service's process start time against the newest SOURCE file it runs.
+- It deliberately ignores `jobs/`, `logs/`, `results/` and `*.json`. The first version of this script counted a runtime job file as "newer code" and reported a fake 118-hour drift — a measurement that passes while the thing it measures is broken, which is the failure mode this repo has rules about.
+- Audited 19 Sep: router STALE by 4.8 days; eta-stt-relay, eta-diarize, eta-status, eta-indic, eta-sravaani all ok. `com.evenscribe.stt-drain` (StartInterval 300) and `com.evenscribe.session-id` (StartInterval 420) show `-` in `launchctl list` because they are PERIODIC and exit between runs — that is normal, not a fault. Check they are alive by the mtime of their StandardOutPath, not by the PID column.
+- The Room Recorder is a compiled `.app`; source mtime says nothing about it. Its version is the check, and the audit reports it as not-covered rather than clean.
+- Restarting the router: `launchctl kickstart -k gui/501/com.vinaybhardwaj.eta-router`. Seconds of downtime, in-flight job lost.
