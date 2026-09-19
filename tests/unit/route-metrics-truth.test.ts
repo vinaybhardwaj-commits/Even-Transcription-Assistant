@@ -28,7 +28,10 @@ describe("the three outcomes reach metrics_json", () => {
     const m = buildRouteMetrics([], {}, {
       status: ROUTE_STATUS_SKIPPED,
       outcome: "no_engine",
-      segmentation: { method: "silero-vad-no-speech", n_engine_segments: 0 },
+      // `outcome` also lives INSIDE `segmentation`, exactly where the real router body carries it
+      // (router_server.py window_outcome()/job_verdict()) -- carried here alongside the top-level
+      // convenience copy this function's own contract (RouterOutcomeInput) reads.
+      segmentation: { method: "silero-vad-no-speech", n_engine_segments: 0, outcome: "no_engine" },
     });
     expect(recordOf(m)).toEqual({
       outcome: "no_engine",
@@ -46,7 +49,7 @@ describe("the three outcomes reach metrics_json", () => {
     const m = buildRouteMetrics([], {}, {
       status: "ok",
       outcome: "engine_no_text",
-      segmentation: { method: "silero-vad", n_engine_segments: 12 },
+      segmentation: { method: "silero-vad", n_engine_segments: 12, outcome: "engine_no_text" },
     });
     expect(recordOf(m).engines_skipped).toBe(false);
     expect(recordOf(m).n_engine_segments).toBe(12);
@@ -61,7 +64,7 @@ describe("the three outcomes reach metrics_json", () => {
     const m = buildRouteMetrics([SPAN], {}, {
       status: "ok",
       outcome: "engine_text",
-      segmentation: { n_engine_segments: 3 },
+      segmentation: { n_engine_segments: 3, outcome: "engine_text" },
     });
     expect(recordOf(m).engines_skipped).toBe(false);
     expect(recordOf(m).outcome).toBe("engine_text");
@@ -119,7 +122,7 @@ describe("a legacy row reads UNKNOWN, and the unknown survives to the caller", (
 describe("a regenerated run re-derives the flag", () => {
   it("a stale record passed through `extra` cannot survive into the new row", () => {
     const stale = { [ROUTE_OUTCOME_KEY]: { outcome: "no_engine", status: ROUTE_STATUS_SKIPPED, n_engine_segments: 0, windows_total: 9, windows_skipped: 9, engines_skipped: true } };
-    const m = buildRouteMetrics([SPAN], stale, { status: "ok", outcome: "engine_text", segmentation: { n_engine_segments: 3 } });
+    const m = buildRouteMetrics([SPAN], stale, { status: "ok", outcome: "engine_text", segmentation: { n_engine_segments: 3, outcome: "engine_text" } });
     expect(recordOf(m).engines_skipped).toBe(false);
     expect(recordOf(m).outcome).toBe("engine_text");
   });
@@ -140,7 +143,7 @@ describe("partial starvation: the job is ok and the row still says how much was 
     const m = buildRouteMetrics([SPAN], {}, {
       status: "ok",
       outcome: "engine_text",
-      segmentation: { method: "mixed", n_engine_segments: 1, windows_total: 5, windows_skipped: 4 },
+      segmentation: { method: "mixed", n_engine_segments: 1, windows_total: 5, windows_skipped: 4, outcome: "engine_text" },
     });
     const r = readEngineOutcome(m);
     expect(r).toEqual({
@@ -161,7 +164,7 @@ describe("partial starvation: the job is ok and the row still says how much was 
   it("a fully starved job counts every sub-window", () => {
     const r = readEngineOutcome(buildRouteMetrics([], {}, {
       status: ROUTE_STATUS_SKIPPED, outcome: "no_engine",
-      segmentation: { windows_total: 5, windows_skipped: 5 },
+      segmentation: { windows_total: 5, windows_skipped: 5, outcome: "no_engine" },
     }));
     expect(r).toMatchObject({ known: true, skipped: true, windows_total: 5, windows_skipped: 5 });
   });

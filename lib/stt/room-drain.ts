@@ -1103,8 +1103,12 @@ export async function writeRoutedRun(
            // nine adapters return no timeline and must not acquire an empty one.
            // The timeline as before, and beside it the router's outcome — re-derived from THIS
            // reply on every write, so a regenerated run can never inherit a previous verdict.
-           ...(asr.languageTimeline || asr.routerOutcome
-             ? buildRouteMetrics(asr.languageTimeline ?? [], {}, asr.routerOutcome ?? undefined)
+           // Gated on an ACTUAL timeline, never on `routerOutcome` alone: that carrier is an object
+           // whenever the router answered at all (F1), so `|| asr.routerOutcome` was writing an
+           // EMPTY `language_timeline` block on every route run that had none written before this
+           // feature existed.
+           ...(asr.languageTimeline
+             ? buildRouteMetrics(asr.languageTimeline, {}, asr.routerOutcome ?? undefined)
              : {}),
          })}::jsonb, NOW(),
          ${opts.actor}, ${opts.via}, ${engineVersion},

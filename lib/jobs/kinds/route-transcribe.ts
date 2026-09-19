@@ -189,7 +189,13 @@ async function pollStep(ctx: StepContext) {
         //
         // When the router says nothing (every reply before it learned to), the old rule still
         // applies — NAMED as the legacy fallback it is, rather than left looking like a verdict.
-        silent_window: outcome.known ? outcome.outcome === "engine_no_text" : chars === 0,
+        // `outcome.known` alone settles the BINARY skip/no-skip question — `status` does that on
+        // its own. `silent_window` is the THREE-way read (no_engine / engine_no_text / engine_text)
+        // and status alone cannot answer it: only a genuine `outcome` value can. A row with a known
+        // status but no known outcome (an older router, a partial reply) falls back to the pre-merge
+        // rule, `chars === 0`, and must never default to "not silent" — an unknown outcome must
+        // never collapse into "ran", exactly as it must never collapse into "skipped".
+        silent_window: (outcome.known && outcome.outcome !== null) ? outcome.outcome === "engine_no_text" : chars === 0,
         engines_skipped: outcome.known ? outcome.skipped : null,
         polls,
         router_sec: Math.round(r.latencyMs / 1000),

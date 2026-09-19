@@ -30,7 +30,8 @@
  * decision below reads the parsed `ok` field.
  */
 import { routeTranscribe, submitRouteJob, pollRouteJob, ROUTER_JOB_ON, type RouterResult } from "../eta-router";
-import type { SttAdapter, SttTranscribeResult } from "../types";
+import type { SttAdapter, SttTranscribeResult, RouterSegmentation } from "../types";
+import { isRouterSegmentation } from "../types";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { WHISPER_PROBE_FIXTURE } from "@/lib/health/whisper-probe";
@@ -84,6 +85,11 @@ export function toSttResult(r: RouterResult, latencyMs: number): SttTranscribeRe
   }
   const native = typeof r.transcript_native === "string" ? r.transcript_native : null;
   const english = typeof r.transcript_english === "string" ? r.transcript_english : null;
+  // The router puts `outcome` INSIDE `segmentation`, never beside it (router_server.py's
+  // window_outcome()/job_verdict()). `r.segmentation` is typed `unknown` on RouterResult, so it is
+  // narrowed with a real type guard here — never cast past into a top-level key the reply never
+  // carries, which is the bug that left every stored route_outcome's `outcome` null.
+  const segmentation: RouterSegmentation | undefined = isRouterSegmentation(r.segmentation) ? r.segmentation : undefined;
   return {
     original: native,
     english,
@@ -98,8 +104,8 @@ export function toSttResult(r: RouterResult, latencyMs: number): SttTranscribeRe
     // unable to tell "never heard" from "heard nothing".
     routerOutcome: {
       status: (r as Record<string, unknown>).status,
-      segmentation: (r as Record<string, unknown>).segmentation,
-      outcome: (r as Record<string, unknown>).outcome,
+      segmentation,
+      outcome: segmentation?.outcome,
     },
     error: null,
   };
