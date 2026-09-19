@@ -32,6 +32,10 @@
     {
       "path": "/api/jobs/run",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/admin/room-watchdog",
+      "schedule": "* * * * *"
     }
   ]
 }
