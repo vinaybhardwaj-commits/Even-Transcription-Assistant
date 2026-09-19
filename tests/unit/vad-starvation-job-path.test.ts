@@ -76,6 +76,7 @@ describe("the drain's transport: GET /route/job/{id} via routeAdapter.poll", () 
     const metrics = buildRouteMetrics(result.languageTimeline ?? [], { audio_seconds: 900 }, result.routerOutcome ?? undefined);
     expect(readEngineOutcome(metrics)).toEqual({
       known: true, skipped: true, outcome: "no_engine", status: "silent_skipped", n_engine_segments: 0,
+      windows_total: 5, windows_skipped: 5,
     });
   });
 
@@ -94,10 +95,11 @@ describe("the drain's transport: GET /route/job/{id} via routeAdapter.poll", () 
     const reading = readEngineOutcome(metrics);
     // An engine DID run on one sub-window, so the job is honestly not skipped...
     expect(reading).toMatchObject({ known: true, skipped: false, outcome: "engine_text", n_engine_segments: 1 });
-    // ...and the sub-window counts the router still sends are NOT carried by route_outcome today.
-    // Named here so the loss is visible rather than discovered later: partial starvation (4 of 5
-    // sub-windows skipped) is not readable from the row under the three-outcome model.
-    expect(JSON.stringify(metrics)).not.toContain("windows_skipped");
+    // ...AND THE ROW STILL SAYS FOUR OF FIVE WERE NEVER HEARD. The whole-job flag alone would call
+    // this window fine; these two numbers are what a rebuild reads to re-run the four sub-windows
+    // that starved instead of re-running all five to recover one.
+    expect(reading).toMatchObject({ windows_total: 5, windows_skipped: 4 });
+    expect(reading.known && reading.windows_skipped).toBe(4);
   });
 
   it("a PRE-FIX job reply (no status, no segmentation) still reads as never-measured", async () => {
