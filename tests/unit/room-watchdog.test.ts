@@ -32,36 +32,67 @@ const okFacts = (over: Partial<RoomPollFacts> = {}): RoomPollFacts => ({
   session_open: true,
   disk_free_bytes: 50_000_000_000,
   state_flags: [],
+  open_session: null,
   ...over,
 });
 
 const offlineFacts = (): RoomPollFacts => okFacts({ last_seen_at: minutesAgo(10) });
 const degradedFacts = (): RoomPollFacts => okFacts({ state_flags: ["DEVICE_MISSING"] });
+// ETA-DELIVERY-EVIDENCE: a 'recording' session whose newest chunk is stale (isBenchStalled's own
+// STALLED_BADGE_MINUTES is 10) — the notDelivering signal, independent of anything the poll says.
+const notDeliveringFacts = (): RoomPollFacts =>
+  okFacts({ open_session: { status: "recording", started_at: minutesAgo(30), last_any_chunk_at: minutesAgo(15) } });
 
 // ---------------------------------------------------------------------------
 // computeRoomStatus — the primitive everything else is built on
 // ---------------------------------------------------------------------------
 
-describe("computeRoomStatus (D4, D7)", () => {
+describe("computeRoomStatus (D4, D7, and notDelivering per V's 19 Sep ruling)", () => {
   it("reads offline past OFFLINE_AFTER_MS, and ok just under it", () => {
-    expect(computeRoomStatus(okFacts({ last_seen_at: minutesAgo(6) }), NOW)).toBe("offline");
+    expect(computeRoomStatus(okFacts({ last_seen_at: minutesAgo(6) }), NOW).status).toBe("offline");
     expect(OFFLINE_AFTER_MS).toBe(5 * 60_000);
-    expect(computeRoomStatus(okFacts({ last_seen_at: new Date(NOW - OFFLINE_AFTER_MS + 1000).toISOString() }), NOW)).toBe("ok");
+    expect(computeRoomStatus(okFacts({ last_seen_at: new Date(NOW - OFFLINE_AFTER_MS + 1000).toISOString() }), NOW).status).toBe("ok");
   });
 
   it("reads offline on a never-seen room (null last_seen_at)", () => {
-    expect(computeRoomStatus(okFacts({ last_seen_at: null }), NOW)).toBe("offline");
+    expect(computeRoomStatus(okFacts({ last_seen_at: null }), NOW).status).toBe("offline");
   });
 
   it("reads degraded on a Tier 1 §2 degradation flag, tape stalled while open, or critical disk", () => {
-    expect(computeRoomStatus(degradedFacts(), NOW)).toBe("degraded");
-    expect(computeRoomStatus(okFacts({ tape_advancing: false, session_open: true }), NOW)).toBe("degraded");
-    expect(computeRoomStatus(okFacts({ disk_free_bytes: 1_000_000_000 }), NOW)).toBe("degraded");
+    expect(computeRoomStatus(degradedFacts(), NOW)).toEqual({ status: "degraded", reasons: ["device_missing"] });
+    expect(computeRoomStatus(okFacts({ tape_advancing: false, session_open: true }), NOW)).toEqual({
+      status: "degraded",
+      reasons: ["tape_stalled"],
+    });
+    expect(computeRoomStatus(okFacts({ disk_free_bytes: 1_000_000_000 }), NOW)).toEqual({
+      status: "degraded",
+      reasons: ["disk_critical"],
+    });
   });
 
   it("does not read degraded on an information-only flag or tape stalled with no open session", () => {
-    expect(computeRoomStatus(okFacts({ state_flags: ["DISK_LOW"] }), NOW)).toBe("ok");
-    expect(computeRoomStatus(okFacts({ tape_advancing: false, session_open: false }), NOW)).toBe("ok");
+    expect(computeRoomStatus(okFacts({ state_flags: ["DISK_LOW"] }), NOW).status).toBe("ok");
+    expect(computeRoomStatus(okFacts({ tape_advancing: false, session_open: false }), NOW).status).toBe("ok");
+  });
+
+  it("reads degraded on notDelivering alone — a Mac polling a clean state_flags: [] but not uploading", () => {
+    expect(computeRoomStatus(notDeliveringFacts(), NOW)).toEqual({ status: "degraded", reasons: ["not_delivering"] });
+  });
+
+  it("does not read not_delivering on a session that is merely paused, or one whose newest chunk is recent", () => {
+    expect(computeRoomStatus(okFacts({ open_session: { status: "paused", started_at: minutesAgo(30), last_any_chunk_at: minutesAgo(20) } }), NOW).status).toBe("ok");
+    expect(computeRoomStatus(okFacts({ open_session: { status: "recording", started_at: minutesAgo(30), last_any_chunk_at: minutesAgo(2) } }), NOW).status).toBe("ok");
+  });
+
+  it("carries BOTH reasons when the classifier and notDelivering fire together — the OR keeps both facts alive", () => {
+    const both = computeRoomStatus({ ...degradedFacts(), open_session: notDeliveringFacts().open_session }, NOW);
+    expect(both.status).toBe("degraded");
+    expect(both.reasons).toEqual(["device_missing", "not_delivering"]);
+  });
+
+  it("offline outranks degraded and drops all reasons — a Mac that isn't polling cannot be judged", () => {
+    const stale = { ...degradedFacts(), open_session: notDeliveringFacts().open_session, last_seen_at: minutesAgo(10) };
+    expect(computeRoomStatus(stale, NOW)).toEqual({ status: "offline", reasons: [] });
   });
 });
 
@@ -178,6 +209,24 @@ describe("planWatchdogRun", () => {
     expect(plan.writes).toEqual([{ room_id: "r1", status: "offline", since: nowIso }]);
   });
 
+  // V's ruling, 19 Sep 2026: prove the fleet-wide guard holds under the OR of both degradation
+  // signals too, not just against the one (offline) signal it was originally found against. A
+  // single muted room carrying BOTH the classifier's reason and notDelivering at once is still
+  // just one room, and must not be able to fire ANY message — individual (muted) or fleet-wide
+  // (there is no fleet-wide mechanism for `degraded` at all, by design: D3 names offline only).
+  it("a lone muted room degraded through BOTH signals at once sends nothing, on either path", () => {
+    const input: RoomRunInput = {
+      room_id: "r1",
+      room_name: "OPD 6",
+      facts: { ...degradedFacts(), open_session: notDeliveringFacts().open_session },
+      prior: { status: "ok", since: minutesAgo(60) },
+      muted: true,
+    };
+    const plan = planWatchdogRun([input], NOW);
+    expect(plan.messages).toHaveLength(0);
+    expect(plan.writes).toEqual([{ room_id: "r1", status: "degraded", since: nowIso }]);
+  });
+
   it("a muted room does not inflate the fleet-wide bundle's individual messages, but still counts toward it", () => {
     const bad: RoomRunInput = {
       room_id: "",
@@ -203,15 +252,35 @@ describe("planWatchdogRun", () => {
 // ---------------------------------------------------------------------------
 
 describe("message shapes", () => {
-  it("offline, degraded and fleet-wide render the room name / counts", () => {
+  it("offline and fleet-wide render the room name / counts", () => {
     expect(offlineMessage("OPD 3", nowIso).text).toContain("OPD 3 has not polled in over 5 minutes");
-    expect(degradedMessage("OPD 3", nowIso).text).toContain("OPD 3 is polling but its capture looks degraded");
     expect(fleetOutageMessage(5, 8, nowIso).text).toContain("5 of 8 enabled rooms went offline");
   });
 
   it("recovery names whichever prior status it left, offline or degraded", () => {
     expect(recoveryMessage("OPD 3", "offline", 5 * 60_000, nowIso).text).toMatch(/being offline for 5 min/);
     expect(recoveryMessage("OPD 3", "degraded", 90 * 60_000, nowIso).text).toMatch(/being degraded for 1 h 30 min/);
+  });
+
+  // V's ruling, 19 Sep 2026: "the message has to say WHICH signal tripped — notDelivering, the
+  // classifier, or both. A watchdog that says 'degraded' without saying why sends someone to look
+  // at the wrong thing."
+  it("degraded names the classifier's own reason when only the classifier fired", () => {
+    const msg = degradedMessage("OPD 3", ["device_missing"], nowIso);
+    expect(msg.text).toContain("a missing input device");
+    expect(msg.text).not.toContain("reaching storage");
+  });
+
+  it("degraded names not_delivering, distinctly, when only that fired", () => {
+    const msg = degradedMessage("OPD 3", ["not_delivering"], nowIso);
+    expect(msg.text).toContain("no audio reaching storage, independent of what the Mac itself reports");
+  });
+
+  it("degraded names BOTH when both fired, so neither signal is masked by the other", () => {
+    const msg = degradedMessage("OPD 3", ["device_missing", "not_delivering"], nowIso);
+    expect(msg.text).toContain("a missing input device");
+    expect(msg.text).toContain("no audio reaching storage");
+    expect(msg.text).toMatch(/a missing input device and no audio reaching storage/);
   });
 });
 

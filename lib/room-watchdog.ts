@@ -19,17 +19,29 @@
  * — a room that has been `needs_attention` for days before this feature existed must not produce a
  * message the instant the feature ships.
  *
- * D7 WHAT COUNTS AS DEGRADED, AND WHY IT IS NOT A THIRD LIST. `DEGRADATION_FLAGS` below is a
+ * D7 WHAT COUNTS AS DEGRADED, AND WHY IT IS NOT A THIRD LIST. `FLAG_REASON` below is a
  * DELIBERATE, NAMED DUPLICATE of `DEGRADED_STATE_FLAGS` in lib/room-install-view.ts (commit
  * 8968b71) — not a second, divergent classification. It cannot be imported: that constant is not
  * exported, and this build's file contract forbids editing lib/room-install-view.ts to export it.
  * FLAGGED: if 8968b71's set ever changes, this one must change with it, and nothing enforces that
- * today. The other two D7 conditions (tape stalled while a session is open; disk critically low)
- * are re-derived from the same raw poll fields the fleet card reads, using the fleet card's own
- * `DISK_LOW_BYTES` (imported, not duplicated) for the disk threshold.
+ * today. Tape-stalled-while-open and disk-critical are re-derived from the same raw poll fields the
+ * fleet card reads, using the fleet card's own `DISK_LOW_BYTES` (imported, not duplicated).
+ *
+ * NOT_DELIVERING (V's ruling, 19 Sep 2026, on the merge in the build report). `origin/vinay/s1-
+ * auto-drain` shipped an INDEPENDENT degradation signal on the very line 8968b71 touches —
+ * `notDelivering`, from the ETA-DELIVERY-EVIDENCE PRD: a room's open bench_session whose newest
+ * chunk (`isBenchStalled`, lib/bench-reaper-core.ts, imported, never re-derived) is stale even
+ * though the Mac's own poll looks fine. The two signals do not overlap and neither subsumes the
+ * other — a Mac can poll a perfect `state_flags: []` while its upload path is wedged, and a
+ * wedged Mac never gets to report a flag about itself at all — so the watchdog now evaluates
+ * BOTH and the degraded message NAMES WHICH ONE FIRED. Silently picking one over the other was the
+ * one thing the ruling explicitly forbade: it would delete a signal somebody deliberately shipped,
+ * invisibly.
  */
 import { sql } from "@/lib/db";
 import { DISK_LOW_BYTES } from "@/lib/bench-bus-constants";
+import { isBenchStalled } from "@/lib/bench-reaper-core";
+import { listBenchSessions } from "@/lib/bench";
 
 // ---------------------------------------------------------------------------
 // The watchdog's own vocabulary
@@ -48,16 +60,7 @@ export const OFFLINE_AFTER_MS = 5 * 60_000;
 /** D3. "More than half" — strictly greater, so an exact half-and-half split still names names. */
 export const FLEET_OUTAGE_FRACTION = 0.5;
 
-/**
- * D7 duplicate of DEGRADED_STATE_FLAGS (lib/room-install-view.ts, 8968b71) — see the file header
- * for why this cannot be an import instead.
- */
-const DEGRADATION_FLAGS = new Set<string>([
-  "DEVICE_MISSING",
-  "SILENT_WHILE_RECORDING",
-  "CLIPPING",
-  "ENCODER_STALLED",
-]);
+export type OpenBenchSession = { status: string; started_at: string; last_any_chunk_at: string | null };
 
 export type RoomPollFacts = {
   last_seen_at: string | null;
@@ -66,24 +69,59 @@ export type RoomPollFacts = {
   disk_free_bytes: number | null;
   /** The raw flags array from room_install.state_flags -> 'flags'. */
   state_flags: readonly string[];
+  /** This room's currently-open (`status = 'recording'`) bench session, or null if none. */
+  open_session: OpenBenchSession | null;
 };
+
+/**
+ * One named reason a room reads `degraded`, so an alert can say WHICH evidence tripped rather than
+ * a vague "something is wrong" — the four Tier 1 §2 flags this build classifies as degradation
+ * (8968b71), the two raw-field conditions D7 adds, and `not_delivering` (the merge's other signal,
+ * see the file header).
+ */
+export type DegradationReason =
+  | "device_missing"
+  | "silent_while_recording"
+  | "clipping"
+  | "encoder_stalled"
+  | "tape_stalled"
+  | "disk_critical"
+  | "not_delivering";
+
+const FLAG_REASON: Record<string, DegradationReason> = {
+  DEVICE_MISSING: "device_missing",
+  SILENT_WHILE_RECORDING: "silent_while_recording",
+  CLIPPING: "clipping",
+  ENCODER_STALLED: "encoder_stalled",
+};
+
+export type RoomStatusResult = { status: RoomAlertStatus; reasons: DegradationReason[] };
 
 /**
  * PURE — D4 (offline) then D7 (degraded), worst first, exactly like the fleet card's own
  * precedence. A room that has not polled recently cannot be said to be "degraded": nothing it last
- * reported is still current enough to judge.
+ * reported is still current enough to judge, and `not_delivering` (a fact about bytes landing in
+ * storage, not about the Mac's poll) is not consulted either — offline already says the stronger
+ * thing.
  */
-export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomAlertStatus {
+export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStatusResult {
   const lastSeenMs = facts.last_seen_at ? Date.parse(facts.last_seen_at) : NaN;
-  if (!Number.isFinite(lastSeenMs) || nowMs - lastSeenMs > OFFLINE_AFTER_MS) return "offline";
+  if (!Number.isFinite(lastSeenMs) || nowMs - lastSeenMs > OFFLINE_AFTER_MS) {
+    return { status: "offline", reasons: [] };
+  }
 
-  const flagged = facts.state_flags.some((f) => DEGRADATION_FLAGS.has(f));
+  const reasons: DegradationReason[] = [];
+  for (const f of facts.state_flags) {
+    const reason = FLAG_REASON[f];
+    if (reason) reasons.push(reason);
+  }
   // Same condition lib/room-install-view.ts's attention reason 3 uses, re-derived here rather than
   // imported: deriveInstallView folds it into a sentence in `attention`, not a reusable boolean.
-  const tapeStalled = facts.tape_advancing === false && facts.session_open === true;
-  const diskCritical = facts.disk_free_bytes !== null && facts.disk_free_bytes < DISK_LOW_BYTES;
+  if (facts.tape_advancing === false && facts.session_open === true) reasons.push("tape_stalled");
+  if (facts.disk_free_bytes !== null && facts.disk_free_bytes < DISK_LOW_BYTES) reasons.push("disk_critical");
+  if (facts.open_session !== null && isBenchStalled(facts.open_session, nowMs)) reasons.push("not_delivering");
 
-  return flagged || tapeStalled || diskCritical ? "degraded" : "ok";
+  return reasons.length > 0 ? { status: "degraded", reasons } : { status: "ok", reasons: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +138,31 @@ function fmtDuration(ms: number): string {
   return mins === 0 ? `${hrs} h` : `${hrs} h ${mins} min`;
 }
 
+/** "a" / "a and b" / "a, b, and c" — English list joining for the degraded message's reasons. */
+function andJoin(parts: readonly string[]): string {
+  if (parts.length === 0) return "an unnamed condition";
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * The evidence behind each `DegradationReason`, in the order `computeRoomStatus` can produce them
+ * (Tier 1 §2 flags in their canonical order, then the two raw-field conditions, then delivery).
+ * `not_delivering` is phrased separately from the rest because it is evidence of a DIFFERENT kind
+ * — not what the Mac's poll says about itself, but whether its bytes are reaching storage — and
+ * V's ruling requires the message to be able to say which one fired.
+ */
+const REASON_LABEL: Record<DegradationReason, string> = {
+  device_missing: "a missing input device",
+  silent_while_recording: "silence while recording",
+  clipping: "clipping",
+  encoder_stalled: "a stalled encoder",
+  tape_stalled: "a stalled tape",
+  disk_critical: "critically low disk",
+  not_delivering: "no audio reaching storage, independent of what the Mac itself reports",
+};
+
 export function offlineMessage(roomName: string, atIso: string): WatchdogMessage {
   return {
     subject: `EvenScribe watchdog: ${roomName} is offline`,
@@ -107,10 +170,11 @@ export function offlineMessage(roomName: string, atIso: string): WatchdogMessage
   };
 }
 
-export function degradedMessage(roomName: string, atIso: string): WatchdogMessage {
+export function degradedMessage(roomName: string, reasons: readonly DegradationReason[], atIso: string): WatchdogMessage {
+  const why = andJoin(reasons.map((r) => REASON_LABEL[r]));
   return {
     subject: `EvenScribe watchdog: ${roomName} capture is degraded`,
-    text: `${roomName} is polling but its capture looks degraded — a missing device, silence, clipping, a stalled encoder, a stalled tape, or critically low disk — as of ${atIso}. Go and look.`,
+    text: `${roomName} is polling but its capture looks degraded — ${why} — as of ${atIso}. Go and look.`,
   };
 }
 
@@ -169,7 +233,7 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
   let offlineTransitions = 0; // D3 numerator — every room crossing into offline, muted or not.
 
   for (const input of inputs) {
-    const newStatus = computeRoomStatus(input.facts, nowMs);
+    const { status: newStatus, reasons } = computeRoomStatus(input.facts, nowMs);
 
     // D2: never seen before. Record it, say nothing — whatever state it is already in is older
     // than this feature.
@@ -194,7 +258,8 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
     if (input.muted) continue; // D9
 
     if (newStatus === "degraded") {
-      messages.push(degradedMessage(input.room_name, nowIso));
+      // V's ruling: name WHICH signal tripped — the classifier, not_delivering, or both.
+      messages.push(degradedMessage(input.room_name, reasons, nowIso));
     } else {
       // newStatus === "ok": D5, recovery is always sent, naming how long it was gone.
       const downForMs = nowMs - Date.parse(input.prior.since);
@@ -364,6 +429,27 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
     return { ok: false, evaluated: 0, messages_sent: 0, writes: 0, channel_results: [], error: "read_failed" };
   }
 
+  // ETA-DELIVERY-EVIDENCE's own join (lib/room-install.ts's readFleet), reused rather than
+  // re-derived: one query for every room's currently-open (`status = 'recording'`) session, keyed
+  // by room_id. FAIL-SAFE like the fleet read above — a fault here must not take the whole run
+  // down, so a room simply reads as having no open session (no not_delivering signal) rather than
+  // aborting.
+  const openSessions = new Map<string, OpenBenchSession>();
+  try {
+    for (const s of await listBenchSessions({ status: "recording" })) {
+      openSessions.set(s.room_id, {
+        status: s.status,
+        started_at: new Date(s.started_at).toISOString(),
+        last_any_chunk_at: s.last_any_chunk_at ? new Date(s.last_any_chunk_at).toISOString() : null,
+      });
+    }
+  } catch (e) {
+    console.error(
+      "[room-watchdog] could not read open bench sessions — not_delivering is unavailable this run:",
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+
   const inputs: RoomRunInput[] = rows.map((row) => ({
     room_id: row.room_id,
     room_name: row.room_name,
@@ -373,6 +459,7 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
       session_open: row.session_open,
       disk_free_bytes: row.disk_free_bytes,
       state_flags: Array.isArray(row.state_flags) ? (row.state_flags as string[]) : [],
+      open_session: openSessions.get(row.room_id) ?? null,
     },
     prior: row.prior_status && row.prior_since ? { status: row.prior_status, since: row.prior_since } : null,
     muted: Boolean(row.muted_until && Date.parse(row.muted_until) > nowMs),
