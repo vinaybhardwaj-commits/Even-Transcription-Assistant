@@ -33,6 +33,11 @@ import { sql } from "@/lib/db";
 import { signRoomJwt } from "@/lib/room-auth";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
+// ETA-DELIVERY-EVIDENCE phase 1, amendment 1 — the chunk clock's own source (lib/bench.ts,
+// already exported for /api/bench/sessions and scribe_list_sessions). A JOIN, not a new query
+// shape: readFleet reads the currently-`recording` sessions once and attaches each to its
+// room's FleetRow, so `deriveRow` can compute NOT_DELIVERING at read time.
+import { listBenchSessions } from "@/lib/bench";
 import {
   groupFleet,
   type FleetPayload,
@@ -644,8 +649,16 @@ fi
     exit 1
   fi
 
-  echo "The install needs administrator rights. Type this computer's password if you are asked for it."
-  sudo -v </dev/null
+  # Ubuntu 26.04 ships sudo-rs, whose 'sudo -v' authenticates against the password-requiring
+  # %sudo group entry even for a NOPASSWD user, so the pre-warm aborted installs that would have
+  # succeeded. Warm only when a password is actually needed, and never let the warm-up be fatal:
+  # the sudo calls below do their own authentication and fail with a message about what they were doing.
+  if sudo -n true </dev/null 2>/dev/null; then
+    :
+  else
+    echo "The install needs administrator rights. Type this computer's password if you are asked for it."
+    sudo -v </dev/null || true
+  fi
 
   L_TOKEN_FILE="$(sudo mktemp -p /run evenscribe-token.XXXXXX </dev/null)"
   printf '%s\\n' "$L_TOKEN" | sudo tee "$L_TOKEN_FILE" >/dev/null
@@ -1657,6 +1670,29 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     degraded.push(`installs_unavailable:${err.code}`);
   }
 
+  // ─── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 — THE CHUNK CLOCK, JOINED BY room_id ──────
+  //
+  // One query for every room's currently-open (`status = 'recording'`) session, keyed by
+  // room_id. `deriveRow` (lib/room-install-view.ts) reads `status`, `started_at` and
+  // `last_any_chunk_at` through `isBenchStalled` — imported there, never re-derived — to decide
+  // NOT_DELIVERING at read time, against a fresh nowMs. A room with no open session (paused,
+  // ended, or never started) simply gets no entry here, which is the same "no flag" outcome as
+  // controls C and D. FAIL-SAFE like every other section of readFleet: a fault here must not
+  // take the fleet down, and every row reads as if no session were open.
+  const openSessions = new Map<string, { status: string; started_at: string; last_any_chunk_at: string | null }>();
+  try {
+    const sessions = await listBenchSessions({ status: "recording" });
+    for (const s of sessions) {
+      openSessions.set(s.room_id, {
+        status: s.status,
+        started_at: new Date(s.started_at).toISOString(),
+        last_any_chunk_at: s.last_any_chunk_at ? new Date(s.last_any_chunk_at).toISOString() : null,
+      });
+    }
+  } catch (e) {
+    degraded.push(`sessions_unavailable:${String((e as Error)?.message ?? e).slice(0, 120)}`);
+  }
+
   // ─── BOTH CHANNELS, BECAUSE A ROW IS ONLY BEHIND ON ITS OWN SHELF (Fix 1, F6) ────────────
   //
   // This read was `latestRelease("stable")` alone, and `deriveRow` compared every row against it.
@@ -1710,6 +1746,8 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
     tokenTtlMs: TOKEN_TTL_MINUTES * 60_000,
   });
   const rows: FleetRow[] = grouped.rows;
+  // The join itself: attach each room's open session (if any) onto its row, by room_id.
+  for (const row of rows) row.open_session = openSessions.get(row.room_id) ?? null;
 
   return {
     now: now.toISOString(),

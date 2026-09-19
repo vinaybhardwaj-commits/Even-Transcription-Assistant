@@ -168,7 +168,7 @@ describe("the Linux branch of the served script", () => {
    * privileged or Linux-only command is a PATH stub; the script itself is the rendered text, run as the
    * paste runs it.
    */
-  function linuxRun(opts: { installerExit?: number; notRestarted?: boolean; corrupt?: boolean } = {}) {
+  function linuxRun(opts: { installerExit?: number; notRestarted?: boolean; corrupt?: boolean; sudoStub?: string } = {}) {
     const work = mkdtempSync(join(tmpdir(), "rr-linux-release-"));
     const rel = join(work, "tree");
     mkdirSync(join(rel, "deploy"), { recursive: true });
@@ -203,7 +203,7 @@ exit \${STUB_EXIT:-0}
         uname: 'if [ "$1" = -m ]; then echo x86_64; else echo Linux; fi',
         curl: `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${tarball}" "$2"; shift 2; else shift; fi; done`,
         sha256sum: 'shasum -a 256 "$@"',
-        sudo: 'if [ "$1" = -v ]; then exit 0; fi; exec "$@"',
+        sudo: opts.sudoStub ?? 'if [ "$1" = -v ]; then exit 0; fi; exec "$@"',
         mktemp: `if [ "$1" = -p ]; then d="$TMPDIR/run"; mkdir -p "$d"; f="$d/token-file"; : > "$f"; chmod 600 "$f"; echo "$f"; else exec /usr/bin/mktemp "$@"; fi`,
         shred: 'if [ "$1" = -u ]; then rm -f "$2"; fi',
         systemctl: "exit 3",
@@ -215,6 +215,30 @@ exit \${STUB_EXIT:-0}
     );
     return r;
   }
+
+  // THE PRE-WARM MUST NEVER BE THE THING THAT STOPS AN INSTALL.
+  // Ubuntu 26.04 ships sudo-rs, whose `sudo -v` authenticates against the password-requiring %sudo
+  // group entry even when the operator has NOPASSWD. The old unconditional `sudo -v` therefore aborted
+  // the install on exactly the machines this script targets, before anything had been attempted.
+  it("a machine where sudo -v refuses (Ubuntu 26.04 sudo-rs) still installs", () => {
+    const r = linuxRun({ sudoStub: "if [ \"$1\" = -n ]; then exit 1; fi; if [ \"$1\" = -v ]; then exit 1; fi; exec \"$@\"" });
+    expect(r.calls).toMatch(/^installer /m);
+    expect(r.status).toBe(0);
+  });
+
+  it("a machine with passwordless sudo is never told to type a password", () => {
+    const r = linuxRun({ sudoStub: "if [ \"$1\" = -n ]; then exit 0; fi; if [ \"$1\" = -v ]; then exit 0; fi; exec \"$@\"" });
+    expect(r.out).not.toContain("Type this computer's password");
+    expect(r.calls).toMatch(/^installer /m);
+    expect(r.status).toBe(0);
+  });
+
+  it("a machine that does need a password is still told so, once, before the sudo calls", () => {
+    const r = linuxRun({ sudoStub: "if [ \"$1\" = -n ]; then exit 1; fi; if [ \"$1\" = -v ]; then exit 0; fi; exec \"$@\"" });
+    expect(r.out).toContain("Type this computer's password");
+    expect(r.calls).toMatch(/^installer /m);
+    expect(r.status).toBe(0);
+  });
 
   it("installs: the token reaches a 0600 file and no argv, --re-enrol is passed, --restart-capture never is, and the file is shredded", () => {
     const r = linuxRun();

@@ -2599,7 +2599,7 @@ async function liveMonitorExtras(
 export const SUMMARY_ROOM_FIELDS = [
   "room", "page_open", "listener_state", "recording", "recording_session_id",
   "room_state", "tape_lane", "paused_listener", "paused_session", "paused_disagrees",
-  "last_piece_at", "last_cue", "stalled_age_ms", "flags", "degraded",
+  "last_piece_at", "last_cue", "stalled_age_ms", "not_delivering_minutes", "flags", "degraded",
 ] as const;
 
 /**
@@ -2821,6 +2821,11 @@ const diffRoom: McpTool = {
             // disagree an operator needs to know that, not a winner picked for them.
             paused_disagrees: listener !== null && pausedListener !== pausedSession,
             stalled_age_ms: stalledAgeMs,
+            // ETA-DELIVERY-EVIDENCE phase 1. Same fact as `stalled_age_ms` and `flags.stalled`
+            // above (both already `isBenchStalled`, imported, never re-derived), spelled in
+            // minutes and under the name scribe_fleet uses, so an orchestrator reading both
+            // tools sees one vocabulary for "a room has stopped delivering audio".
+            not_delivering_minutes: stalledAgeMs !== null ? Math.floor(stalledAgeMs / 60_000) : null,
             ...live,
             flags: {
               kiosk_not_listening: pageOpen === null ? null : !pageOpen,
@@ -3203,7 +3208,7 @@ const replayWrite: McpTool = {
 const fleet: McpTool = {
   name: "scribe_fleet",
   description:
-    "The room-recorder fleet: one row per room with its bound Mac — app_version, build_sha, update_channel, assigned_channel (and whether an assignment is still pending), channel_locked, last_seen_at, mic_state, input_device_name, disk, and the Tier 1 state_flags (SILENT_WHILE_RECORDING, CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT — a SET, null where never evaluated, [] where looked at and well). Also the newest release on each channel, so a row is measured against the shelf it actually asks for. Computed by the same function the admin fleet card calls, so the two cannot disagree. detail:\"summary\" (default) gives the identity/version/channel/health fields; detail:\"full\" gives the card's whole payload. Read-only.",
+    "The room-recorder fleet: one row per room with its bound Mac — app_version, build_sha, update_channel, assigned_channel (and whether an assignment is still pending), channel_locked, last_seen_at, mic_state, input_device_name, disk, and the Tier 1 state_flags (SILENT_WHILE_RECORDING, CLIPPING, DEVICE_MISSING, DEVICE_CHANGED, ENCODER_STALLED, DISK_LOW, CHANNEL_DRIFT — a SET, null where never evaluated, [] where looked at and well), and not_delivering_minutes (ETA-DELIVERY-EVIDENCE phase 1: minutes since this room's open session last delivered a chunk, null while nothing is wrong — a room can be needs_attention on this alone, with no state_flag set). Also the newest release on each channel, so a row is measured against the shelf it actually asks for. Computed by the same function the admin fleet card calls, so the two cannot disagree. detail:\"summary\" (default) gives the identity/version/channel/health fields; detail:\"full\" gives the card's whole payload. Read-only.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -3234,6 +3239,10 @@ const fleet: McpTool = {
           disabled: row.disabled,
           install: row.install ?? null,
           derived,
+          // Also flat, unlike `state`/`assigned_pending`/`disk_level`/`version_hint`: this is the
+          // one fact the summary must never quietly lose, so it is not on the "lifted from
+          // derived, new by design" list — it is the same value at both paths.
+          not_delivering_minutes: derived.not_delivering_minutes,
         };
         if (detail === "full") return full;
         const i = row.install;
@@ -3260,6 +3269,10 @@ const fleet: McpTool = {
           assigned_pending: derived.assigned_pending,
           disk_level: derived.disk_level,
           version_hint: derived.version_hint,
+          // ETA-DELIVERY-EVIDENCE phase 1. Minutes since this room's open session last
+          // delivered a chunk; null while nothing is wrong. Computed in deriveRow (same
+          // function the admin card calls), so the door and the screen cannot disagree.
+          not_delivering_minutes: derived.not_delivering_minutes,
         };
       });
       return {

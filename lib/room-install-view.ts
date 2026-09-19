@@ -17,9 +17,17 @@
  *
  * Tier 1 adds ONE TYPE-ONLY import, from the equally import-free lib/bench-bus-constants.ts. It is
  * erased at compile time, so the bundle this file joins is exactly what it was.
+ *
+ * ETA-DELIVERY-EVIDENCE phase 1, amendment 1 adds ONE VALUE import, from the equally
+ * import-free lib/bench-reaper-core.ts (zero imports of its own — confirmed, not assumed):
+ * `isBenchStalled`, the admin list's own stalled-badge rule (R10), which already closes over
+ * `STALLED_BADGE_MINUTES` — so NOT_DELIVERING is computed here by CALLING that rule, never by
+ * copying its threshold or its comparison. The bundle this file joins grows by one small, leaf,
+ * database-free module — not by the module graph lib/room-install.ts carries.
  */
 
 import type { InstallStateFlag } from "./bench-bus-constants";
+import { isBenchStalled } from "./bench-reaper-core";
 
 // ---------------------------------------------------------------------------
 // Wire types — what GET /api/admin/bench/fleet returns
@@ -145,6 +153,15 @@ export type FleetRow = {
    */
   earlier_installs?: number;
   earlier?: EarlierInstall[];
+  /**
+   * ETA-DELIVERY-EVIDENCE phase 1, amendment 1. This room's currently OPEN (`status:
+   * "recording"`) `bench_session`, joined by room_id in `readFleet` — a JOIN of existing
+   * session/chunk data, not a new signal (lib/bench.ts's `listBenchSessions`). Null when there
+   * is no such session: paused, ended, or never started, which is the same "no flag" case as
+   * controls C and D in the PRD's acceptance table. Optional so every existing FleetRow literal
+   * in the test suite, built before this field existed, still type-checks.
+   */
+  open_session?: { status: string; started_at: string; last_any_chunk_at: string | null } | null;
 };
 
 /** B2-D3 — what the "N earlier installs" disclosure lists: the id and when it was retired. */
@@ -779,6 +796,15 @@ export type RowView = {
   state_flags: InstallStateFlag[];
   /** Tier 1 §3. The Mac reports a locked channel: an assignment will not move it. Shown as a chip. */
   channel_locked: boolean;
+  // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 ───────────────────────────────────────────
+  /**
+   * Minutes since this room's open session last delivered a chunk (or since it started, on the
+   * zero-chunks-ever fallback `isBenchStalled` already applies) — null while nothing is wrong.
+   * A NUMBER, not a boolean, because the chip must say "no audio delivered for Nm": D-6 in the
+   * place it matters most is spelling a degraded state differently from a fine one, and a bare
+   * flag would still have to be worded by something downstream.
+   */
+  not_delivering_minutes: number | null;
 };
 
 export type DiskLevel = "ok" | "amber" | "red" | "unknown";
@@ -835,8 +861,10 @@ export function receiptSentence(raw: string | null | undefined): string | null {
  *   2 NEEDS RE-ENROL  the session has expired. The app is on that Mac and is polling into 401s;
  *                     it will not record again until a second paste. This outranks every other
  *                     complaint because it is the only one that has already stopped the room.
- *   3 NEEDS ATTENTION mic denied, tape not advancing, session expiring inside 30 days, or last
- *                     seen older than the alarm window.
+ *   3 NEEDS ATTENTION mic denied, tape not advancing, session expiring inside 30 days, last
+ *                     seen older than the alarm window, or NOT_DELIVERING (ETA-DELIVERY-EVIDENCE
+ *                     phase 1: an open session whose chunk clock has gone stale — imported from
+ *                     `isBenchStalled`, never re-derived).
  *   4 HEALTHY         none of the above. `update pending` rides alongside as a word, never as a
  *                     state: a room on the previous version is recording perfectly well.
  */
@@ -862,6 +890,25 @@ export function deriveRow(input: {
   // install below 0.1.8 and on the first poll after enrolment, and null is "not reported", which
   // must not be read as "idle".
   const sessionOpen = i?.session_open ?? null;
+
+  // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 — NOT_DELIVERING, computed HERE at read time ──
+  //
+  // D-11: a signal about absence cannot be emitted by the thing that is absent, so this is not
+  // stored on `room_install` and not evaluated in `evaluateInstallStates` — it is derived fresh
+  // against `nowMs` every time the row is read, exactly where the fleet's stall rule already
+  // lives. `isBenchStalled` (imported, never re-derived) is that rule: a `recording` session
+  // whose newest chunk — falling back to `started_at` on zero chunks — is older than
+  // STALLED_BADGE_MINUTES. Calling it against `row.open_session` (a plain JOIN, not a new
+  // signal) catches all three incidents the same way: OPD 7's wedge (chunks stopped), OPD 3's
+  // vanished Mac (chunks stopped because nothing ran to produce them — no further poll needed to
+  // notice), and OPD 6's phantom (zero chunks ever, via the started_at fallback). A retired
+  // install's session, if any is somehow still joined, is not this Mac's to answer for.
+  const openSession = i && !i.retired_at ? (row.open_session ?? null) : null;
+  const notDelivering = openSession !== null && isBenchStalled(openSession, nowMs);
+  const notDeliveringMinutes = !notDelivering
+    ? null
+    : Math.floor((nowMs - (msOf(openSession!.last_any_chunk_at) ?? msOf(openSession!.started_at) ?? nowMs)) / 60_000);
+
   const tapeLabel = !i
     ? null
     : sessionOpen === false
@@ -869,7 +916,12 @@ export function deriveRow(input: {
       : i.tape_advancing
         ? "advancing"
         : sessionOpen === true
-          ? "recording, not advancing"
+          ? // Incident 3's exact shape: the system must never say "recording" on a row this build
+            // itself has already called NOT_DELIVERING. `notDelivering` takes precedence over the
+            // ordinary "recording, not advancing" wording — the chip carries the fact instead.
+            notDelivering
+            ? "not advancing"
+            : "recording, not advancing"
           : "not advancing";
 
   // STATE C. `ok` shows nothing; absent shows nothing. Only a failure speaks (R3-7).
@@ -952,6 +1004,8 @@ export function deriveRow(input: {
     // A retired row's last flags describe a Mac that no longer serves the room: not shown.
     state_flags: i && !i.retired_at ? (i.state_flags ?? []) : [],
     channel_locked: Boolean(i && !i.retired_at && i.channel_locked === true),
+    // ── ETA-DELIVERY-EVIDENCE phase 1, amendment 1 ──────────────────────────────────────────
+    not_delivering_minutes: notDeliveringMinutes,
   };
 
   // ── Session wording, needed by two branches below ────────────────────────────────────────
@@ -1055,10 +1109,22 @@ export function deriveRow(input: {
     // print it a second time in the Actions cell, where every other attention line renders; not
     // marking the row at all would leave a failure the same colour as a healthy room. So the
     // state is raised here and the words stay where V put them.
-    // Tier 1 §2, bench/device-missing-row-state: a degradation flag reaches the state even when
-    // nothing else is wrong — see DEGRADED_STATE_FLAGS above for which flags and why.
+    // MERGE, bench/device-missing-row-state <- origin/vinay/s1-auto-drain (19 Sep 2026). Two
+    // independent degradation signals both reach the OR-condition here, on the same footing as
+    // `attention.length > 0` and `failure !== null`, and neither subsumes the other: they read
+    // different evidence.
+    //   - `r3.state_flags` (Tier 1 §2, 8968b71, DEGRADED_STATE_FLAGS above): what the Mac's OWN
+    //     poll says about its capture — device gone, silent, clipping, encoder stalled.
+    //   - `notDelivering` (ETA-DELIVERY-EVIDENCE phase 1, amendment 1, D-6/`isBenchStalled`):
+    //     whether bytes are actually landing in bench_chunk, derived fresh at read time so an
+    //     absent Mac's absence can be noticed by something other than the absent Mac itself.
+    // A room can fail either way without failing the other — a Mac can poll a perfect
+    // `state_flags: []` while its upload path is wedged, and a Mac that has stopped polling
+    // entirely never gets to report a flag at all. Both must reach the row. FLAGGED for the
+    // Orchestrator: this OR-combination was not itself specified by either commit and is the
+    // Builder's merge resolution — see the report.
     state:
-      attention.length > 0 || failure !== null || r3.state_flags.some((f) => DEGRADED_STATE_FLAGS.has(f))
+      attention.length > 0 || failure !== null || notDelivering || r3.state_flags.some((f) => DEGRADED_STATE_FLAGS.has(f))
         ? "needs_attention"
         : "healthy",
     words,
