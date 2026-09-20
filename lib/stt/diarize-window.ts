@@ -20,6 +20,7 @@
  * smeared across someone else's speech.
  */
 import { sql } from "@/lib/db";
+import { parseFlag } from "@/lib/flags";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
 import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
 import { rolesByIndex, UNATTRIBUTED, noRole, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
@@ -52,7 +53,55 @@ export type ClinicianCentroid = { clinician_id: string; full_name: string; centr
  * clinician row at all is not offered either — the join is INNER. `locked` (the PIN lockout) is not
  * active by this predicate; such a clinician drops out of matching until an admin resets the PIN.
  */
+/**
+ * Read the newest generation per clinician instead of the flat `voice_print` row.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS OFF. Migration 0108 `voice_print_generation` has been live in
+ * production since 19 Sep with seven rows, and NOTHING HAS EVER READ IT — the matcher still reads
+ * `voice_print`. It already holds what V's durable-centroids ruling asks of requirement 4: a
+ * `generation` per clinician, an `origin` CHECKed to `('enrolment_clip','room_audio')`, the raw
+ * 768-byte centroid and its provenance, insert-only and unique on (clinician_id, generation). So
+ * versioning needed a reader, not a migration.
+ *
+ * `origin` is the part the programme now turns on: it records whether a centroid was built from a
+ * close-mic enrolment clip or from room audio — the distinction the 0.908-versus-0.535 gap is
+ * about. Reading generations is what lets a model change become a recompute rather than a
+ * re-enrolment of 25 people.
+ *
+ * DEFAULT OFF. Switching which table the matcher trusts is a change to identity itself, and it
+ * must be a deliberate act, not a deploy. With the flag unset this file behaves exactly as it did.
+ */
+export const VOICEPRINT_GENERATION_READER_FLAG = "VOICEPRINT_GENERATION_READER";
+
+/**
+ * The newest generation per clinician, or [] when the flag is off.
+ *
+ * FALLBACK IS PER CLINICIAN, NOT ALL-OR-NOTHING: a clinician with no generation row keeps their
+ * `voice_print` centroid, so turning this on can only ever add versioned reads, never remove a
+ * clinician from matching.
+ */
+async function loadNewestGenerations(): Promise<Map<string, { centroid_base64: string; origin: string; generation: number }>> {
+  if (!parseFlag(VOICEPRINT_GENERATION_READER_FLAG)) return new Map();
+  const rows = (await sql`
+    SELECT DISTINCT ON (g.clinician_id)
+           g.clinician_id, g.generation, g.origin,
+           encode(g.centroid, 'base64') AS centroid_base64
+      FROM voice_print_generation g
+      JOIN clinician d ON d.id = g.clinician_id
+     WHERE d.status = 'active' AND d.deleted_at IS NULL
+     ORDER BY g.clinician_id, g.generation DESC
+  `) as Array<{ clinician_id: string; generation: number; origin: string; centroid_base64: string | null }>;
+  const out = new Map<string, { centroid_base64: string; origin: string; generation: number }>();
+  for (const r of rows) {
+    if (r.centroid_base64) {
+      out.set(r.clinician_id, { centroid_base64: r.centroid_base64, origin: r.origin, generation: r.generation });
+    }
+  }
+  return out;
+}
+
 export async function loadClinicianCentroids(): Promise<ClinicianCentroid[]> {
+  const generations = await loadNewestGenerations();
   const rows = (await sql`
     SELECT vp.doctor_id AS clinician_id,
            d.full_name,
@@ -65,8 +114,13 @@ export async function loadClinicianCentroids(): Promise<ClinicianCentroid[]> {
      ORDER BY vp.doctor_id
   `) as Array<{ clinician_id: string; full_name: string | null; centroid_base64: string | null }>;
   return rows
-    .filter((r) => !!r.centroid_base64)
-    .map((r) => ({ clinician_id: r.clinician_id, full_name: r.full_name ?? r.clinician_id, centroid_base64: r.centroid_base64! }));
+    .filter((r) => !!r.centroid_base64 || generations.has(r.clinician_id))
+    .map((r) => ({
+      clinician_id: r.clinician_id,
+      full_name: r.full_name ?? r.clinician_id,
+      // The newest generation wins where one exists; everyone else keeps the print they had.
+      centroid_base64: generations.get(r.clinician_id)?.centroid_base64 ?? r.centroid_base64!,
+    }));
 }
 
 /**

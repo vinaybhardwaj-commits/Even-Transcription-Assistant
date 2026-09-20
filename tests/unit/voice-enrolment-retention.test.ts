@@ -43,6 +43,11 @@ const H = vi.hoisted(() => ({
   batched: [] as string[],
   transactions: [] as number[],
   uploads: [] as string[],
+  deletes: [] as string[],
+  /** Rows the CAS upsert returns: empty means another enrolment moved the count under us. */
+  casReturns: [[{ doctor_id: "doc_test" }]] as unknown[][],
+  /** Rows the prior-samples SELECT returns — the mock's stand-in for what is already in the table. */
+  priorSamples: [] as Array<{ emb: string }>,
   uploadThrows: false,
   txThrows: false,
 }));
@@ -58,7 +63,8 @@ vi.mock("@/lib/db", () => {
         __text: text,
         then(res: (v: unknown[]) => unknown) {
           H.executed.push(text);
-          return Promise.resolve([] as unknown[]).then(res);
+          const rows = /encode\(embedding/i.test(text) ? H.priorSamples : [];
+          return Promise.resolve(rows as unknown[]).then(res);
         },
       };
     },
@@ -67,7 +73,12 @@ vi.mock("@/lib/db", () => {
         H.transactions.push(queries.length);
         for (const q of queries) H.batched.push(q.__text ?? "");
         if (H.txThrows) return Promise.reject(new Error("tx failed"));
-        return Promise.resolve([]);
+        // the sample inserts in this batch have now landed, so a re-read would see them
+        const inserted = queries.filter((q) => /INSERT INTO voice_sample/i.test(q.__text ?? "")).length;
+        for (let i = 0; i < inserted; i++) H.priorSamples.push({ emb: Buffer.alloc(768).toString("base64") });
+        // last statement is the centroid upsert; its RETURNING rows say whether the CAS held
+        const cas = H.casReturns.shift() ?? [{ doctor_id: "doc_test" }];
+        return Promise.resolve(queries.map((_, i) => (i === queries.length - 1 ? cas : [])));
       },
     },
   );
@@ -85,6 +96,7 @@ vi.mock("@/lib/r2", () => ({
     if (H.uploadThrows) throw new Error("r2 down");
     H.uploads.push(key);
   },
+  deleteObject: async (key: string) => { H.deletes.push(key); },
 }));
 
 async function store(clips: { buf: Buffer; contentType: string }[]) {
@@ -94,6 +106,7 @@ async function store(clips: { buf: Buffer; contentType: string }[]) {
 
 beforeEach(() => {
   H.executed.length = 0; H.batched.length = 0; H.transactions.length = 0; H.uploads.length = 0;
+  H.deletes.length = 0; H.casReturns = [[{ doctor_id: "doc_test" }]]; H.priorSamples = [];
   H.uploadThrows = false; H.txThrows = false;
   vi.resetModules();
 });
@@ -174,5 +187,48 @@ describe("DEFECT 3 — samples and centroid land together or not at all", () => 
     // the centroid upsert was only ever inside the batch, never issued on its own
     expect(H.batched.join(" ")).toMatch(/INSERT INTO voice_print/i);
     expect(H.executed.join(" ")).not.toMatch(/INSERT INTO voice_print/i);
+  });
+});
+
+describe("REFUTER 1 — a concurrent enrolment cannot silently lose samples", () => {
+  it("guards the centroid write on the sample count it was computed from", async () => {
+    const r = await store([CLIP(12000), CLIP(12000), CLIP(12000)]);
+    expect(r.ok).toBe(true);
+    const upsert = H.batched.find((t) => /INSERT INTO voice_print/i.test(t))!;
+    // the write states the count it assumes, so a racing enrolment makes it match no row
+    expect(upsert).toMatch(/count\(\*\)/i);
+  });
+
+  it("retries when the count moved under it, and lands on the second attempt", async () => {
+    H.casReturns = [[], [{ doctor_id: "doc_test" }]]; // first CAS loses the race, second holds
+    const r = await store([CLIP(12000), CLIP(12000), CLIP(12000)]);
+    expect(r.ok).toBe(true);
+    expect(H.transactions.length).toBeGreaterThan(1);
+    // the retry must NOT insert the samples a second time
+    const inserts = H.batched.filter((t) => /INSERT INTO voice_sample/i.test(t));
+    expect(inserts.length).toBe(3);
+  });
+
+  it("gives up by name rather than writing a centroid it cannot vouch for", async () => {
+    H.casReturns = [[], [], [], []];
+    const r = await store([CLIP(12000), CLIP(12000), CLIP(12000)]);
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toMatch(/concurrent|contention|retr/i);
+  });
+});
+
+describe("REFUTER 2 — a failed batch leaves no orphaned audio", () => {
+  it("deletes every uploaded object when the batch fails", async () => {
+    H.txThrows = true;
+    const r = await store([CLIP(12000), CLIP(12000), CLIP(12000)]);
+    expect(r.ok).toBe(false);
+    expect(H.uploads.length).toBe(3);
+    expect(H.deletes.sort()).toEqual(H.uploads.sort()); // every byte we put, we took back
+  });
+
+  it("keeps the audio when the batch succeeds", async () => {
+    const r = await store([CLIP(12000), CLIP(12000), CLIP(12000)]);
+    expect(r.ok).toBe(true);
+    expect(H.deletes).toEqual([]);
   });
 });

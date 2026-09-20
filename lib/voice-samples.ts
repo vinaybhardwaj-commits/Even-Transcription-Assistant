@@ -12,7 +12,7 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { runEnroll, averageEmbeddings } from "@/lib/enroll";
-import { putObjectBytes } from "@/lib/r2";
+import { putObjectBytes, deleteObject } from "@/lib/r2";
 import { webmDurationMs } from "@/lib/audio-duration";
 
 /**
@@ -181,50 +181,92 @@ export async function storeEnrollmentSession(opts: {
   // Self-healing was the alternative: mark the print stale and repair on the next read. It was
   // rejected because it leaves a window in which a stale centroid is served as though it were
   // current, and the repair needs a sweeper nobody runs.
-  const priorRows = (await sql`
-    SELECT encode(embedding, 'base64') AS emb
-      FROM voice_sample
-     WHERE clinician_id = ${clinicianId} AND included = true
-     ORDER BY created_at ASC
-  `) as Array<{ emb: string }>;
-  const allEmbeddings = [...priorRows.map((r) => r.emb).filter(Boolean), ...prepared.map((p) => p.x.r.embeddingBase64)];
-  const centroidB64 = averageEmbeddings(allEmbeddings);
+  // ── REFUTER 1. The read that feeds the centroid is OUTSIDE the batch, and it always will be:
+  // the Neon HTTP driver has no interactive transaction, so there is no way to hold a snapshot
+  // across a read and a write. Two enrolments landing together would therefore each compute a
+  // centroid from their own stale view and the later write would silently drop the earlier one's
+  // samples from sample_count and samples_json — corrupting the provenance the centroid exists to
+  // carry. So the write STATES THE COUNT IT ASSUMES and refuses to land if the world has moved:
+  // a compare-and-set, checked inside the transaction where the samples have already been inserted.
+  // An unmatched CAS means someone else enrolled while we were embedding; we re-read and retry.
+  const MAX_CAS_ATTEMPTS = 3;
+  let landed = false;
+  let lastCount = 0;
+  for (let attempt = 1; attempt <= MAX_CAS_ATTEMPTS && !landed; attempt++) {
+    const priorRows = (await sql`
+      SELECT encode(embedding, 'base64') AS emb
+        FROM voice_sample
+       WHERE clinician_id = ${clinicianId} AND included = true
+       ORDER BY created_at ASC
+    `) as Array<{ emb: string }>;
+    const prior = priorRows.map((r) => r.emb).filter(Boolean);
+    // On the first attempt our rows are not in the table yet; on a retry they already are.
+    const ours = prepared.map((p) => p.x.r.embeddingBase64);
+    const allEmbeddings = attempt === 1 ? [...prior, ...ours] : prior;
+    const centroidB64 = averageEmbeddings(allEmbeddings);
+    lastCount = allEmbeddings.length;
 
-  const batch = [
-    ...prepared.map((p) => sql`
-      INSERT INTO voice_sample
-        (id, clinician_id, source, embedding, audio_r2_key, content_type,
-         duration_ms, session_id, sample_index, captured_by_admin_id, included, created_at)
-      VALUES
-        (${p.id}, ${clinicianId}, 'enrollment', decode(${p.x.r.embeddingBase64}, 'base64'),
-         ${p.key}, ${p.x.contentType}, ${p.x.dur.ms}, ${sessionId}, ${p.x.i},
-         ${opts.capturedByAdminId ?? null}, true, NOW())
-    `),
-    sql`
-      INSERT INTO voice_print
-        (doctor_id, centroid, sample_count, samples_json, enrolled_at, last_sample_at, needs_reenrollment)
-      VALUES
-        (${clinicianId}, decode(${centroidB64}, 'base64'), ${allEmbeddings.length},
-         ${JSON.stringify(allEmbeddings)}::jsonb, NOW(), NOW(), FALSE)
-      ON CONFLICT (doctor_id) DO UPDATE SET
-        centroid           = EXCLUDED.centroid,
-        sample_count       = EXCLUDED.sample_count,
-        samples_json       = EXCLUDED.samples_json,
-        last_sample_at     = NOW(),
-        needs_reenrollment = FALSE
-    `,
-  ];
-  try {
-    await (sql as unknown as { transaction: (q: unknown[]) => Promise<unknown> }).transaction(batch);
-  } catch (e) {
-    return { ok: false, error: `atomic write failed; no sample or centroid was stored (${String(e).slice(0, 80)})` };
+    const sampleInserts = attempt === 1
+      ? prepared.map((p) => sql`
+          INSERT INTO voice_sample
+            (id, clinician_id, source, embedding, audio_r2_key, content_type,
+             duration_ms, session_id, sample_index, captured_by_admin_id, included, created_at)
+          VALUES
+            (${p.id}, ${clinicianId}, 'enrollment', decode(${p.x.r.embeddingBase64}, 'base64'),
+             ${p.key}, ${p.x.contentType}, ${p.x.dur.ms}, ${sessionId}, ${p.x.i},
+             ${opts.capturedByAdminId ?? null}, true, NOW())
+        `)
+      : []; // the samples are already in; a retry re-derives the centroid over them, never re-inserts
+
+    const batch = [
+      ...sampleInserts,
+      sql`
+        INSERT INTO voice_print
+          (doctor_id, centroid, sample_count, samples_json, enrolled_at, last_sample_at, needs_reenrollment)
+        SELECT ${clinicianId}, decode(${centroidB64}, 'base64'), ${allEmbeddings.length},
+               ${JSON.stringify(allEmbeddings)}::jsonb, NOW(), NOW(), FALSE
+         WHERE (SELECT count(*) FROM voice_sample
+                 WHERE clinician_id = ${clinicianId} AND included = true) = ${allEmbeddings.length}
+        ON CONFLICT (doctor_id) DO UPDATE SET
+          centroid           = EXCLUDED.centroid,
+          sample_count       = EXCLUDED.sample_count,
+          samples_json       = EXCLUDED.samples_json,
+          last_sample_at     = NOW(),
+          needs_reenrollment = FALSE
+        RETURNING doctor_id
+      `,
+    ];
+
+    let results: unknown[][];
+    try {
+      results = (await (sql as unknown as { transaction: (q: unknown[]) => Promise<unknown> })
+        .transaction(batch)) as unknown[][];
+    } catch (e) {
+      // ── REFUTER 2. The audio went to R2 before the batch, because a sample whose audio is not
+      // retained is the irreversible row we are ending. If the batch does not land, those objects
+      // belong to nothing, and retained audio is now THE durable asset — so take them back.
+      // Best effort by necessity: R2 is not in the transaction and never can be.
+      await Promise.all(prepared.map((p) => deleteObject(p.key).catch(() => {})));
+      return { ok: false, error: `atomic write failed; no sample or centroid was stored (${String(e).slice(0, 80)})` };
+    }
+    const casRows = Array.isArray(results?.[results.length - 1]) ? results[results.length - 1]! : [];
+    landed = casRows.length > 0;
+  }
+
+  if (!landed) {
+    // The samples are in — they are real, and deleting them would lose retained audio — but the
+    // centroid is not ours to claim. Say so rather than leave a silent disagreement.
+    return {
+      ok: false,
+      error: `centroid not written after ${MAX_CAS_ATTEMPTS} attempts: concurrent enrolment contention (samples were stored)`,
+    };
   }
 
   return {
     ok: true,
     stored: prepared.length,
     failed: errors.length,
-    totalSamples: allEmbeddings.length,
+    totalSamples: lastCount,
     errors,
   };
 }
