@@ -96,7 +96,7 @@ export function pgContainer(base: string) {
     docker(["exec", "-i", name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], text);
 
   function start(): void {
-    try { docker(["rm", "-f", name]); } catch { /* not running */ }
+    try { docker(["rm", "-fv", name]); } catch { /* not running */ }
     docker(["run", "-d", "--rm", "--name", name, "-e", "POSTGRES_PASSWORD=x", "postgres:16"]);
     // Two consecutive real SELECTs: pg_isready answers during initdb's restart and then loses the race.
     const deadline = Date.now() + 90_000;
@@ -108,7 +108,7 @@ export function pgContainer(base: string) {
   }
 
   function stop(): void {
-    try { docker(["rm", "-f", name]); } catch { /* already gone */ }
+    try { docker(["rm", "-fv", name]); } catch { /* already gone */ }
   }
 
   /** DDL and seeding. No parameters, no result. */
