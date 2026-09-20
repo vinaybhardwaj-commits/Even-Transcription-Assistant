@@ -14,11 +14,14 @@
  *
  * Admin-gated, read-mostly, and it touches NO chunk: the POST writes bench_window rows and
  * nothing else. It cannot transcribe, join, or delete anything.
+ *
+ * TWO DOORS (lib/operator-auth.ts): the admin cookie, unchanged, or `Authorization: Bearer
+ * ${OPERATOR_TOKEN}` for engineering panes with no browser. With OPERATOR_TOKEN unset the bearer
+ * door does not exist; it never falls through to "no auth".
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
-import { readAdminCookie } from "@/lib/cookie";
-import { verifyAdminJwt } from "@/lib/auth";
+import { benchAdminPrincipal } from "@/lib/operator-auth";
 import { respondOk, respondError } from "@/lib/respond";
 import {
   evaluateAndWriteWindows,
@@ -32,21 +35,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-async function guard(): Promise<string | null> {
-  const cookie = await readAdminCookie();
-  if (!cookie) return null;
-  try {
-    const c = await verifyAdminJwt(cookie);
-    return String(c.admin_id ?? "");
-  } catch {
-    return null;
-  }
-}
-
 const ms = (d: string | Date): number => (d instanceof Date ? d.getTime() : Date.parse(d));
 
 export async function GET(req: NextRequest) {
-  if ((await guard()) === null) return respondError("AUTH_REQUIRED", "Sign in required");
+  if ((await benchAdminPrincipal(req)) === null) return respondError("AUTH_REQUIRED", "Sign in required");
   const sessionId = new URL(req.url).searchParams.get("session_id") ?? "";
   if (!sessionId.startsWith("bs_")) return respondError("VALIDATION_FAILED", "session_id_required");
 
@@ -93,8 +85,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const adminId = await guard();
-  if (adminId === null) return respondError("AUTH_REQUIRED", "Sign in required");
+  const principal = await benchAdminPrincipal(req);
+  if (principal === null) return respondError("AUTH_REQUIRED", "Sign in required");
   let body: { session_id?: unknown };
   try {
     body = (await req.json()) as typeof body;
