@@ -258,6 +258,12 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 
   // F6(b): the batch's own usage.input_tokens is a TOTAL for every target window asked about;
   // each row gets its share, the raw total is summed once into the job summary below.
+  //
+  // THE PER-ROW COLUMN IS AN APPORTIONMENT, NOT A MEASUREMENT. The summary total is the measured
+  // fact — the tokens the call actually consumed — and it stays exact. This share is invented to
+  // attribute that cost across rows, and an odd total cannot divide into equal parts: summing the
+  // rows can legitimately differ from the total by up to n/2 (961 over 2 rows gives 481 + 481 =
+  // 962). Do not "fix" that by reconciling the two — bill from the summary, never from SUM(rows).
   const perWindowTokens = targetIds.length > 0 ? Math.round(result.usage.input_tokens / targetIds.length) : 0;
 
   for (const id of targetIds) {

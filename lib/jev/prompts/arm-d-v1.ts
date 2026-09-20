@@ -42,22 +42,27 @@ export const PHASE_CRITERIA: Record<Phase, string> = {
   closing: "The consultation is ending: follow-up date, thanks, goodbyes, patient leaving, or the next patient being called.",
 };
 
-/** Question id = `<dim>_<label>`, e.g. `phase_W3`. The label is the ordinal, never the window id. */
+/**
+ * Question id = `<dim>__<label>`, e.g. `phase__W3`. DOUBLE underscore: it is the separator the
+ * wording trial ran under, and matching the evidence beats matching anything else (ruling, 20 Sep).
+ * The label is the ordinal (W1, W2, …), never the window id.
+ */
+const SEP = "__";
 export const qid = {
-  phase: (w: string) => `phase_${w}`,
-  start: (w: string) => `start_${w}`,
-  end: (w: string) => `end_${w}`,
-  clinician: (w: string) => `clinician_${w}`,
-  clinical: (w: string) => `clinical_${w}`,
+  phase: (w: string) => `phase${SEP}${w}`,
+  start: (w: string) => `start${SEP}${w}`,
+  end: (w: string) => `end${SEP}${w}`,
+  clinician: (w: string) => `clinician${SEP}${w}`,
+  clinical: (w: string) => `clinical${SEP}${w}`,
 };
 
 /** Parse a question id back into its dim + label. Null for anything unrecognised. */
 export function parseQid(id: string): { dim: ArmDDim; label: string } | null {
-  const i = id.indexOf("_");
+  const i = id.indexOf(SEP);
   if (i < 0) return null;
   const dim = id.slice(0, i) as ArmDDim;
   if (!(ARM_D_DIMS as readonly string[]).includes(dim)) return null;
-  return { dim, label: id.slice(i + 1) };
+  return { dim, label: id.slice(i + SEP.length) };
 }
 
 // ── The five questions. One atomic judgement each (integration doc §7). ─────────────────────────

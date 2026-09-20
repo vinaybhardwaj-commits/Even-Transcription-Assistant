@@ -28,7 +28,14 @@ const DB = vi.hoisted(() => ({
 
 // F6(a)/(b): capture the request `state` sent to the Jev client so batch-shape tests can inspect
 // window numbering and placeholder framing without reaching into the mock module's internals.
-const captured = vi.hoisted(() => [] as Array<{ state: unknown }>);
+const captured = vi.hoisted(() => [] as Array<{ state: unknown; usage?: { input_tokens: number; output_tokens: number } }>);
+/**
+ * Lets a test pin the batch's measured usage. The mock derives input_tokens from the length of the
+ * state and the questions, so the total's PARITY is an accident of the current wordings and question
+ * ids — it flipped from odd to even when the qid separator changed. The odd case has to be
+ * CONSTRUCTED, not discovered, or the one case that exercises the remainder comes and goes silently.
+ */
+const forced = vi.hoisted(() => ({ usage: null as null | { input_tokens: number; output_tokens: number } }));
 
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
@@ -71,8 +78,12 @@ vi.mock("@/lib/jev/client", async () => {
       const real = actual.getJevClient();
       return {
         systemOne: async (req: { state: unknown; questions: unknown }, opts?: unknown) => {
-          captured.push({ state: req.state });
-          return real.systemOne(req as never, opts as never);
+          const real_res = await real.systemOne(req as never, opts as never);
+          const res = forced.usage ? { ...real_res, usage: forced.usage } : real_res;
+          // usage is captured so F6(b) can assert the summary against the MEASURED total rather
+          // than against a number derived from the per-row shares.
+          captured.push({ state: req.state, usage: res.usage });
+          return res;
         },
       };
     },
@@ -128,6 +139,7 @@ beforeEach(() => {
   DB.written = {};
   DB.writes = 0;
   captured.length = 0;
+  forced.usage = null;
   clearMockJevAnswers();
   _resetJevInFlightForTests();
   process.env.ETA_JEV_MOCK = "1";
@@ -237,17 +249,56 @@ describe("F6(a) — a no-English window keeps its place in the batch as a null-t
   });
 });
 
-describe("F6(b) — per-row input_tokens is the batch total split across target windows", () => {
-  it("w1 and w3 (the two targets) get equal shares; the job summary keeps the raw batch total once", async () => {
+describe("F6(b) — per-row input_tokens is the batch total apportioned across target windows", () => {
+  // THE SUMMARY IS A MEASUREMENT; THE PER-ROW VALUE IS AN APPORTIONMENT. They are not the same kind
+  // of quantity, and the previous assertion here (`summary === share * 2`) pretended they were. That
+  // identity holds only when the total is EVEN, so it was passing on parity luck: the wordings this
+  // module shipped at the time happened to give an even total. An odd total cannot divide into equal
+  // parts, so no arithmetic makes rows-sum equal total without either the summary ceasing to be the
+  // real billed number or one row ceasing to be an equal share. Ruled 20 Sep: keep the raw total
+  // exact, keep Math.round per row, and assert the TRUE bound instead.
+  it("shares are equal and within n/2 of the measured total, which the summary keeps exactly", async () => {
     seedThreeWindowsOneNoEnglish();
     const r = await drive({ room_day_id: "rd1" });
+    const n = 2; // w1 and w3 are the targets; w2 is the no-English placeholder
+    const measured = captured[0]!.usage!.input_tokens;
     const t1 = DB.written.w1!.input_tokens as number;
     const t3 = DB.written.w3!.input_tokens as number;
+
+    // the summary is the measured fact, carried through untouched
+    expect(r.done!.input_tokens).toBe(measured);
+    // the apportionment rule itself
     expect(t1).toBe(t3);
-    expect(r.done!.input_tokens).toBe(t1 * 2);
+    expect(t1).toBe(Math.round(measured / n));
+    // and the true bound for rounding n values — NOT equality
+    expect(Math.abs(t1 + t3 - measured)).toBeLessThanOrEqual(n / 2);
+
     // w2 was persisted in `collect` as the no-English skip row (batch_id 'skip'), never as an
     // ask-path target row (batch_id `${roomDayId}:0`) with a real per-window token share.
     expect(DB.written.w2).toMatchObject({ batch_id: "skip" });
+    // breaks if: the summary is ever recomputed from the shares, or the apportionment stops rounding.
+  });
+
+  it("THE ODD CASE the old invariant could never catch: shares do NOT sum to the total", async () => {
+    // CONSTRUCTED, not discovered. The mock's total is derived from the length of the state and the
+    // questions, so its parity is an accident — it flipped from 961 to even the moment the qid
+    // separator changed. Pinning the total here is what makes the remainder case exist at all.
+    forced.usage = { input_tokens: 961, output_tokens: 0 };
+    seedThreeWindowsOneNoEnglish();
+    const r = await drive({ room_day_id: "rd1" });
+    const measured = captured[0]!.usage!.input_tokens;
+    expect(measured % 2, "the pinned total must be ODD to exercise the remainder").toBe(1);
+    const t1 = DB.written.w1!.input_tokens as number;
+    const t3 = DB.written.w3!.input_tokens as number;
+    expect(t1).toBe(481); // round(961 / 2)
+    expect(t3).toBe(481);
+    // The shares overshoot by exactly 1, and the summary does NOT follow them — which is the proof
+    // that the billed number is measured rather than derived from the rows.
+    expect(t1 + t3).not.toBe(measured);
+    expect(t1 + t3 - measured).toBe(1);
+    expect(r.done!.input_tokens).toBe(measured);
+    // breaks if: someone reconciles the two by making the summary the sum of the shares, which would
+    // silently bill a token nobody spent.
   });
 });
 
