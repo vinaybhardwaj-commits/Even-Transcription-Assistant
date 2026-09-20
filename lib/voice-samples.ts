@@ -41,6 +41,8 @@ import { webmDurationMs } from "@/lib/audio-duration";
  * what should set it.
  */
 export const MIN_CLIP_MS = 3_000;
+/** UNMEASURED PLACEHOLDER for S2b. Argued from two data points (see above), never measured against
+ *  match quality. This is the ONE line to change when it is; nothing else reads a session floor. */
 export const MIN_SESSION_MS = 30_000;
 export const MIN_CLIPS = 3;
 
