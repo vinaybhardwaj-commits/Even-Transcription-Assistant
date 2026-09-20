@@ -240,6 +240,36 @@ export async function listBenchSessions(f: BenchSessionListFilters = {}): Promis
   `) as BenchSessionRollupRow[];
 }
 
+export type TapeSessionRow = { id: string; started_at: string | Date; ended_at: string | Date | null };
+
+/**
+ * The bench sessions a room-day's windows ACTUALLY belong to — by attribution, never by date.
+ *
+ * WHY THIS IS NOT listBenchSessions. listBenchSessions selects a day's sessions with
+ * `(started_at AT TIME ZONE 'Asia/Kolkata')::date = ist_date` — the IST date a session STARTED. That
+ * is a different fact from the day a window belongs to, and the two drift apart for any session that
+ * outlives the date it began on. That is not hypothetical: measured on live 20 Sep 2026, 447 windows
+ * across 5 sessions and 8 room-days had `room_day.ist_date` different from their session's start
+ * date, and 7 of those 8 days had NO session matching the start-date filter at all — one session
+ * begun on the 11th owned windows on the 12th, 13th and 14th. A caller walking back from a room-day
+ * to "its" sessions by start date finds nothing for those days, and every lookup keyed on the ids it
+ * returns is then silently empty while looking correctly fail-closed.
+ *
+ * This keys on the fact the WRITERS key on: `bench_window.room_day_id`. A window is attributed to the
+ * day it falls in, so the day's own rows name the day's own sessions. No session date is compared at
+ * all; the only dates compared are `room_day.ist_date` against itself.
+ */
+export async function listSessionsWithWindowsOnDay(f: { room_id: string; ist_date: string }): Promise<TapeSessionRow[]> {
+  return (await sql`
+    SELECT DISTINCT s.id, s.started_at, s.ended_at
+      FROM bench_window w
+      JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_session s ON s.id = w.session_id
+     WHERE rd.room_id = ${f.room_id} AND rd.ist_date = ${f.ist_date}::date
+     ORDER BY s.started_at
+  `) as TapeSessionRow[];
+}
+
 export type BenchConsultMarkRow = {
   id: string;
   at: string | Date;

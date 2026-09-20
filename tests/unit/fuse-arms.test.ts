@@ -940,11 +940,21 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
 // still answered a `room_day_id = $1` query would hide the exact defect this arm exists to fix.
 // ---------------------------------------------------------------------------
 
-/** Seeds the one bench_session row Arm D's walk-back finds, on the REAL room (room_q). */
+/**
+ * Seeds the one bench_session row Arm D's walk-back finds, on the REAL room (room_q).
+ *
+ * The walk-back now asks for the sessions the DAY'S OWN WINDOWS belong to
+ * (listSessionsWithWindowsOnDay: FROM bench_window w JOIN room_day JOIN bench_session), which is the
+ * fact J2 keys its signal rows on. The OLD, drifting shape — listBenchSessions selecting by the IST
+ * date a session STARTED (FROM bench_session s …) — is answered here ON PURPOSE and answered EMPTY:
+ * every session these tests seed is found by window attribution, so a revert to the start-date
+ * walk-back must go RED rather than quietly keep passing.
+ */
 function seedJevSession(sessionId: string, startedAt: Date, endedAt: Date | null = null) {
   appResponder = (text) => {
-    if (/FROM bench_session s/.test(text)) {
-      return [{ id: sessionId, room_id: "room_q", label: null, mic_label: null, started_at: startedAt, ended_at: endedAt, status: "ended", notes: null, room_name: "OPD Test", room_slug: "opd-test" }];
+    if (/FROM bench_session s/.test(text)) return []; // the old start-date walk-back: finds nothing
+    if (/FROM bench_window w/.test(text)) {
+      return [{ id: sessionId, started_at: startedAt, ended_at: endedAt }];
     }
     return [];
   };
@@ -1012,6 +1022,44 @@ describe("10 — arm D (jev): scribe_fuse_run writes visits with arm='jev'", () 
     expect(v.state).toBe("in_chair");
     expect(v.individual_uid).toBe("ind_jev1");
     expect(v.opened_by_kind).toBe("jev_window");
+  });
+
+  // THE DATE-DRIFT REGRESSION. A session that BEGAN before the day under test still owns that day's
+  // windows: the IST-midnight rollover leaves them, and live on 20 Sep 2026 carried 447 such windows
+  // over 5 sessions and 8 room-days — 7 of those days had NO session whose START date matched, so
+  // the first walk-back (listBenchSessions, selecting on
+  // `(started_at AT TIME ZONE 'Asia/Kolkata')::date = ist_date`) found nothing and the arm answered
+  // no_bench_sessions_for_day while the signals sat there unread. Fail-closed and correct-looking.
+  // The suite could not see it because it mocked both sides of the date. This asserts the one case
+  // that distinguishes the two rules, and it MUST go red if the walk-back ever selects by start date
+  // again — seedJevSession answers that query EMPTY on purpose.
+  it("DATE DRIFT: a session that STARTED the previous IST day still reaches the day's signals", async () => {
+    // 2026-08-18T17:00Z is 22:30 IST on the 18th — the IST day BEFORE the room-day under test
+    // (rd_scratch_…_20260819, ist_date 2026-08-19). Its windows are attributed to the 19th.
+    const STARTED_PREVIOUS_IST_DAY = new Date("2026-08-18T17:00:00.000Z");
+    seedJevSession("bs_prevday", STARTED_PREVIOUS_IST_DAY);
+    CUES = [];
+    const SIGNALS = [
+      { window_id: "pw1", room_day_id: "rd_live_placeholder", session_id: "bs_prevday", start_ms: 0, end_ms: 30000, phase: "history", phase_probs: {}, phase_confidence: 0.85, p_start: 0.85, p_end: 0.1, p_clinician: 0.8, p_clinical: 0.8 },
+      { window_id: "pw2", room_day_id: "rd_live_placeholder", session_id: "bs_prevday", start_ms: 30000, end_ms: 60000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "pw3", room_day_id: "rd_live_placeholder", session_id: "bs_prevday", start_ms: 60000, end_ms: 90000, phase: "history", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.1, p_clinician: 0.75, p_clinical: 0.8 },
+      { window_id: "pw4", room_day_id: "rd_live_placeholder", session_id: "bs_prevday", start_ms: 90000, end_ms: 120000, phase: "plan", phase_probs: {}, phase_confidence: 0.8, p_start: 0.1, p_end: 0.85, p_clinician: 0.7, p_clinical: 0.7 },
+    ];
+    const orig = brainResponder;
+    brainResponder = (text, values) => {
+      if (/FROM jev_window_signal WHERE session_id = ANY/.test(text)) {
+        expect(values[0]).toEqual(["bs_prevday"]); // reached, despite starting on another IST date
+        return SIGNALS as unknown as Row[];
+      }
+      return orig(text, values);
+    };
+    appCalls.length = 0; // not reset globally; scope the assertions below to this call
+    const out = await call({ room_day_id: DAY, arm: "jev", dry_run: false });
+    expect(out).toMatchObject({ ok: true, arm: "jev", written: 1, already_existed: 0, failed: 0 });
+    expect(visitRows.size).toBe(1);
+    // and the walk-back asked by ATTRIBUTION, never by the session's start date
+    expect(appCalls.some((c) => /FROM bench_window w/.test(c.text)), "walk-back keyed on the day's windows").toBe(true);
+    expect(appCalls.some((c) => /FROM bench_session s/.test(c.text)), "no start-date session query").toBe(false);
   });
 
   it("re-running the same arm on the same day writes nothing new (already_existed)", async () => {

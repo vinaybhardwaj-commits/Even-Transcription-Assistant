@@ -27,7 +27,7 @@ import { runJevArm, type JevWindowSignal } from "@/lib/brain/fuse/jev-arm";
 import type { TapeSession } from "@/lib/brain/fuse/rules";
 import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
 import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
-import { listBenchSessions } from "@/lib/bench";
+import { listSessionsWithWindowsOnDay } from "@/lib/bench";
 import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
@@ -157,14 +157,24 @@ async function readJevSignals(sessionIds: string[]): Promise<JevWindowSignal[]> 
  * apart; a live day resolves to itself, so the walk-back is correct (a no-op) on the one kind of
  * day that can never reach this arm anyway.
  *
- * Also doubles as readSessionsForJev used to: listBenchSessions already returns everything
- * TapeSession needs (id, started_at, ended_at), so there is no second bench_session query.
+ * KEYED ON THE DAY'S OWN WINDOWS, NOT ON A SESSION'S START DATE. The first version of this walk-back
+ * asked listBenchSessions for the day's sessions, which selects on
+ * `(started_at AT TIME ZONE 'Asia/Kolkata')::date = ist_date` — the IST date a session STARTED. That
+ * is a different fact from the day a window belongs to, and they drift apart for any session that
+ * outlives the date it began on. Measured on live 20 Sep 2026: 447 windows over 5 sessions and 8
+ * room-days where the two disagreed, and 7 of those days had NO session matching the start-date
+ * filter at all — so this arm returned `no_bench_sessions_for_day` for days that held 25–96 windows
+ * and would have had signals. Fail-closed, correct-looking, and unreachable.
+ *
+ * listSessionsWithWindowsOnDay keys on `bench_window.room_day_id` — the same fact J2 keys its
+ * jev_window_signal rows on — so the two cannot drift: the day's own rows name the day's own
+ * sessions. It also returns everything TapeSession needs, so there is still no second query.
  */
 async function resolveTapeSessionsForJev(day: RoomDayByIdRow): Promise<TapeSession[]> {
   const isScratch = day.room_id.startsWith(SCRATCH_ROOM_PREFIX);
   const realRoomId = isScratch ? realRoomIdFor(day.room_id) : day.room_id;
   if (!realRoomId) return [];
-  const rows = await listBenchSessions({ room_id: realRoomId, ist_date: day.ist_date });
+  const rows = await listSessionsWithWindowsOnDay({ room_id: realRoomId, ist_date: day.ist_date });
   return rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
 }
 
