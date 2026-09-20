@@ -20,9 +20,20 @@ export type ErrorCode =
   | "PIPELINE_FAILED"
   | "SEND_FAILED"
   | "UPSTREAM_UNAVAILABLE"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  // Record-time attestation (0109). Each is a NAMED refusal: the recorder can tell an operator
+  // which thing was wrong, and none of them can be confused with a wrong PIN.
+  | "UNKNOWN_ROOM"
+  | "ROOM_NOT_RECORDING"
+  | "CLINICIAN_ELSEWHERE"
+  | "OVERLAPPING_SITTING";
 
 const HTTP_STATUS: Record<ErrorCode, number> = {
+  UNKNOWN_ROOM: 404,
+  // 409: the request is well formed and the PIN is right; the WORLD disagrees with it.
+  ROOM_NOT_RECORDING: 409,
+  CLINICIAN_ELSEWHERE: 409,
+  OVERLAPPING_SITTING: 409,
   PIN_INVALID: 401,
   PIN_LOCKED: 423,
   PIN_NOT_SET: 401,
