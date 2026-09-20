@@ -27,6 +27,8 @@ import { runJevArm, type JevWindowSignal } from "@/lib/brain/fuse/jev-arm";
 import type { TapeSession } from "@/lib/brain/fuse/rules";
 import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
 import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
+import { listBenchSessions } from "@/lib/bench";
+import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
 type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
@@ -111,13 +113,25 @@ type JevSignalRow = {
   p_start: number; p_end: number; p_clinician: number; p_clinical: number;
 };
 
-/** Slice J2 — jev_window_signal for one room-day, in start_ms order. No transcript text. */
-async function readJevSignals(roomDayId: string): Promise<JevWindowSignal[]> {
+/**
+ * Slice J2 — jev_window_signal for a set of bench sessions, in start_ms order. No transcript text.
+ *
+ * KEYED ON session_id, NOT room_day_id. J2 (lib/jobs/kinds/jev-window.ts) writes signals against
+ * the LIVE room-day, because that is where the diarized windows and the text are — but the only
+ * room-day this tool is ever allowed to run over is a SCRATCH one (the guard above refuses every
+ * other kind before a single row is read). A scratch day's own id therefore never appears in
+ * jev_window_signal by construction, and a lookup keyed on it finds nothing FOR EVERY INPUT. The
+ * tape a scratch day replays is identified by its SESSIONS, not by any room_day_id — the same fact
+ * scribe_fuse_report already leans on — so session_id is the one honest key. See
+ * resolveTapeSessionsForJev, which is what supplies the ids passed in here.
+ */
+async function readJevSignals(sessionIds: string[]): Promise<JevWindowSignal[]> {
+  if (sessionIds.length === 0) return [];
   const r = await query<JevSignalRow>(
     `SELECT window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence,
             p_start, p_end, p_clinician, p_clinical
-       FROM jev_window_signal WHERE room_day_id = $1 ORDER BY start_ms`,
-    [roomDayId],
+       FROM jev_window_signal WHERE session_id = ANY($1) ORDER BY start_ms`,
+    [sessionIds],
   );
   return r.rows.map((row) => ({
     window_id: row.window_id,
@@ -135,27 +149,43 @@ async function readJevSignals(roomDayId: string): Promise<JevWindowSignal[]> {
   }));
 }
 
-/** bench_session rows for the sessions Arm D's signals reference, so tape ms can be anchored to wall clock. */
-async function readSessionsForJev(sessionIds: string[]): Promise<TapeSession[]> {
-  if (sessionIds.length === 0) return [];
-  const r = await query<{ id: string; started_at: string; ended_at: string | null }>(
-    `SELECT id, started_at, ended_at FROM bench_session WHERE id = ANY($1)`,
-    [sessionIds],
-  );
-  return r.rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
+/**
+ * Arm D's tape sessions, walked back from the room-day exactly the way scribe_fuse_report does
+ * (fuse-report.ts's own comment: "a scratch room has NO TAPE — bench_session rows belong to the
+ * real room — so the report has to walk back from the scratch day to the room that actually
+ * recorded"). realRoomIdFor is the exported inverse of scratchRoomIdFor, so the two cannot drift
+ * apart; a live day resolves to itself, so the walk-back is correct (a no-op) on the one kind of
+ * day that can never reach this arm anyway.
+ *
+ * Also doubles as readSessionsForJev used to: listBenchSessions already returns everything
+ * TapeSession needs (id, started_at, ended_at), so there is no second bench_session query.
+ */
+async function resolveTapeSessionsForJev(day: RoomDayByIdRow): Promise<TapeSession[]> {
+  const isScratch = day.room_id.startsWith(SCRATCH_ROOM_PREFIX);
+  const realRoomId = isScratch ? realRoomIdFor(day.room_id) : day.room_id;
+  if (!realRoomId) return [];
+  const rows = await listBenchSessions({ room_id: realRoomId, ist_date: day.ist_date });
+  return rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
 }
 
-async function runArm(arm: Arm, cues: FuseCue[], roomDayId: string): Promise<ArmResult> {
+async function runArm(arm: Arm, cues: FuseCue[], day: RoomDayByIdRow): Promise<ArmResult> {
   // B3 — scribe_fuse_run is scratch-only and runs over a day that is DONE (0046's scratch days
   // are replays of finished sessions), so the rollover pass applies. Stated here rather than
   // inferred inside rules.ts, which must not decide this for itself.
   if (arm === "rules") return { ok: true, provider: "none", output: runRulesArm(cues, { day_complete: true }) };
   if (arm === "hybrid") return runHybridArm(cues);
   if (arm === "jev") {
-    // X4-style guard (gemini-arms.ts:70-77): no signals means nothing is written, named.
-    const signals = await readJevSignals(roomDayId);
-    if (signals.length === 0) return { ok: false, error: "no_jev_signals", provider: "none" };
-    const sessions = await readSessionsForJev([...new Set(signals.map((s) => s.session_id))]);
+    // X4-style guard (gemini-arms.ts:70-77): no signals means nothing is written, named. The two
+    // ways to get there are different facts and `detail` says which: no tape at all for the day,
+    // versus tape that has simply never been run through J2 yet.
+    const sessions = await resolveTapeSessionsForJev(day);
+    if (sessions.length === 0) {
+      return { ok: false, error: "no_jev_signals", provider: "none", detail: "no_bench_sessions_for_day" };
+    }
+    const signals = await readJevSignals(sessions.map((s) => s.id));
+    if (signals.length === 0) {
+      return { ok: false, error: "no_jev_signals", provider: "none", detail: "sessions_found_no_signals" };
+    }
     return { ok: true, provider: "none", output: runJevArm(cues, signals, sessions) };
   }
   return runFlashArm(cues);
@@ -164,13 +194,13 @@ async function runArm(arm: Arm, cues: FuseCue[], roomDayId: string): Promise<Arm
 const fuseRun: McpTool = {
   name: "scribe_fuse_run",
   description:
-    "WRITES — run one fuse arm over one SCRATCH room-day and write its visits. arm ∈ rules | hybrid | flash. `rules` is a pure function over the cue list (no model, provider 'none'); `hybrid` runs rules then asks Gemini only about the cases rules could not settle; `flash` asks Gemini to produce the visits. Arms hybrid and flash FAIL CLOSED: if the provider that answers is not gemini:… they write nothing at all and return error 'provider_not_gemini' with the provider they actually got — a fuse served by a local model cannot be scored as Flash. Refuses any room-day whose scratch flag is not true (not_a_scratch_day) before reading anything: no arm ever writes a live clinic day. dry_run defaults TRUE and FAILS DRY — only an explicit false (or the string 'false') writes; anything else returns the visits it would write without writing them. Re-running the same arm on the same day writes nothing that exists — the visits are keyed (arm, opened_by). Returns { arm, provider, written, already_existed, failed, visits[] }.",
+    "WRITES — run one fuse arm over one SCRATCH room-day and write its visits. arm ∈ rules | hybrid | flash | jev. `rules` is a pure function over the cue list (no model, provider 'none'); `hybrid` runs rules then asks Gemini only about the cases rules could not settle; `flash` asks Gemini to produce the visits. `jev` (Arm D) is also pure and provider 'none': it reads jev_window_signal for the bench sessions the room-day's tape actually is — walked back from a scratch day to its real room the same way scribe_fuse_report does, since a scratch room has no tape of its own — and FAILS CLOSED by name 'no_jev_signals' when there is nothing to read, with `detail` telling apart no bench sessions for the day at all from sessions that simply have never been run through the J2 job. Arms hybrid and flash also FAIL CLOSED: if the provider that answers is not gemini:… they write nothing at all and return error 'provider_not_gemini' with the provider they actually got — a fuse served by a local model cannot be scored as Flash. Refuses any room-day whose scratch flag is not true (not_a_scratch_day) before reading anything, for every arm including jev: no arm ever writes a live clinic day. dry_run defaults TRUE and FAILS DRY — only an explicit false (or the string 'false') writes; anything else returns the visits it would write without writing them. Re-running the same arm on the same day writes nothing that exists — the visits are keyed (arm, opened_by). Returns { arm, provider, written, already_existed, failed, visits[] }.",
   scope: "write",
   inputSchema: {
     type: "object",
     properties: {
       room_day_id: { type: "string", description: "rd_scratch_… — must be a scratch day" },
-      arm: { type: "string", enum: [...ARMS], description: "rules | hybrid | flash" },
+      arm: { type: "string", enum: [...ARMS], description: "rules | hybrid | flash | jev" },
       dry_run: { type: "boolean", default: true, description: "default TRUE and fails dry — only an explicit false writes; anything unrecognised returns the visits without writing them" },
     },
     required: ["room_day_id", "arm"],
@@ -202,7 +232,7 @@ const fuseRun: McpTool = {
       }
 
       const cues = await readCuesForFuse(roomDayId);
-      const res = await runArm(arm, cues, roomDayId);
+      const res = await runArm(arm, cues, day);
       if (!res.ok) {
         // X4 — nothing was written, and the provider that answered is named.
         return { ok: false, error: res.error, provider: res.provider, arm, room_day_id: roomDayId, ...(res.detail ? { detail: res.detail } : {}), visits: [], written: 0, already_existed: 0, failed: 0 };
