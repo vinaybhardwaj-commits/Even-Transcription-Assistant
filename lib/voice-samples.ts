@@ -13,6 +13,36 @@ import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { runEnroll, averageEmbeddings } from "@/lib/enroll";
 import { putObjectBytes } from "@/lib/r2";
+import { webmDurationMs } from "@/lib/audio-duration";
+
+/**
+ * ─── THE ENROLMENT FLOORS, AND WHAT THEY REST ON ────────────────────────────────────────────────
+ *
+ * The gate was `ok.length < 3` — a COUNT that has never measured a clip, so three one-second clips
+ * enrolled exactly as readily as three good ones. These are the two numbers that replace it.
+ *
+ * MIN_CLIP_MS = 3000. Basis, and the weaker half is stated first: three seconds is the ordinary
+ * utterance length for ECAPA speaker verification, which is EXTERNAL knowledge and not something
+ * this repository measured. What the repository does show is that the Mini embeds a speaker from
+ * its LONGEST SEGMENT ALONE (eta-diarize server.py:169-173, recorded in
+ * docs/handoff/ETA-VOICE-MATCH-ROOT-CAUSE-19-SEP-2026.md), and that a real match was made off a
+ * 5.6 s longest segment while shorter fragments of the same speaker landed at 0.628 — under the
+ * 0.65 floor. A clip near one second cannot produce a longest segment worth embedding.
+ *
+ * MIN_SESSION_MS = 30000. Basis: the only enrolment row in production carrying a duration at all is
+ * a curated print built from 121.4 s of room audio (lx survey §3), and that print is the one that
+ * matches at 0.908; the six-clip near-field prints, whose clips are short scripted sentences, sit
+ * at 0.535 against a 0.65 threshold. Thirty seconds is chosen conservatively BELOW that 121 s
+ * exemplar and above 3 x MIN_CLIP_MS.
+ *
+ * WHAT I COULD NOT GROUND: the optimum. Nothing in this repository measures enrolment length
+ * against match quality, so 30 s is a floor argued from two data points, not a tuned figure. If V
+ * wants a different number this is the one line to change, and S2b's re-enrolment measurements are
+ * what should set it.
+ */
+export const MIN_CLIP_MS = 3_000;
+export const MIN_SESSION_MS = 30_000;
+export const MIN_CLIPS = 3;
 
 const nano = customAlphabet("abcdefghjkmnpqrstuvwxyz23456789", 12);
 export const newSampleId = (): string => `vs_${nano()}`;
@@ -97,40 +127,104 @@ export async function storeEnrollmentSession(opts: {
     .filter((x) => !x.r.ok)
     .map((x) => (x.r as { ok: false; error: string }).error);
 
-  if (ok.length < 3) {
+  if (ok.length < MIN_CLIPS) {
     return { ok: false, error: `only ${ok.length}/${clips.length} clips embedded (${errors.slice(0, 2).join("; ")})` };
   }
 
-  const sessionId = newSessionId();
-  let stored = 0;
-  for (const x of ok) {
-    const id = newSampleId();
-    const ext = extForContentType(x.contentType);
-    let audioKey: string | null = sampleAudioKey(clinicianId, id, ext);
-    try {
-      await putObjectBytes(audioKey, x.buf, x.contentType);
-    } catch {
-      audioKey = null; // keep the embedding even if the audio upload fails
-    }
-    try {
-      await sql`
-        INSERT INTO voice_sample
-          (id, clinician_id, source, embedding, audio_r2_key, content_type,
-           duration_ms, session_id, sample_index, captured_by_admin_id, included, created_at)
-        VALUES
-          (${id}, ${clinicianId}, 'enrollment', decode(${x.r.embeddingBase64}, 'base64'),
-           ${audioKey}, ${x.contentType}, ${null}, ${sessionId}, ${x.i},
-           ${opts.capturedByAdminId ?? null}, true, NOW())
-      `;
-      stored++;
-    } catch {
-      // skip a row that fails to insert; others still count
-    }
+  // ── DEFECT 2. Measure every clip. A duration we cannot READ is not a duration we may assume:
+  // an unparseable clip is rejected, because "we do not know" must not pass a floor.
+  const measured = ok.map((x) => ({ ...x, dur: webmDurationMs(x.buf) }));
+  const tooShort = measured.filter((m) => m.dur === null || m.dur.ms < MIN_CLIP_MS);
+  if (measured.length - tooShort.length < MIN_CLIPS) {
+    const unreadable = tooShort.filter((m) => m.dur === null).length;
+    return {
+      ok: false,
+      error: `clips too short: ${tooShort.length}/${measured.length} under ${MIN_CLIP_MS} ms`
+        + (unreadable ? ` (${unreadable} unreadable)` : ""),
+    };
   }
-  if (stored === 0) return { ok: false, error: "all_sample_inserts_failed" };
+  const usable = measured.filter((m) => m.dur !== null && m.dur.ms >= MIN_CLIP_MS) as Array<
+    typeof measured[number] & { dur: { ms: number; basis: string } }
+  >;
+  const totalMs = usable.reduce((a, m) => a + m.dur.ms, 0);
+  if (totalMs < MIN_SESSION_MS) {
+    return { ok: false, error: `enrolment total ${totalMs} ms is under the ${MIN_SESSION_MS} ms minimum` };
+  }
 
-  const { sampleCount } = await recomputeCentroid(clinicianId);
-  return { ok: true, stored, failed: errors.length, totalSamples: sampleCount, errors };
+  // ── DEFECT 1. The audio is the point: without it no centroid can ever be recomputed with a
+  // better model, which is how six of seven live prints became irreversible. Upload EVERY clip
+  // BEFORE any row is written, and refuse the whole session if one cannot be retained. The old
+  // code caught the failure and stored the sample with a null key.
+  const sessionId = newSessionId();
+  const prepared: Array<{ id: string; key: string; x: typeof usable[number] }> = [];
+  for (const x of usable) {
+    const id = newSampleId();
+    const key = sampleAudioKey(clinicianId, id, extForContentType(x.contentType));
+    try {
+      await putObjectBytes(key, x.buf, x.contentType);
+    } catch (e) {
+      return {
+        ok: false,
+        error: `audio retention failed for clip ${x.i}; refusing the enrolment (${String(e).slice(0, 80)})`,
+      };
+    }
+    prepared.push({ id, key, x });
+  }
+
+  // ── DEFECT 3. ATOMIC, not self-healing. The centroid is a pure average of embeddings we already
+  // hold (recomputeCentroid needs no service call), so it can be computed HERE, in memory, and
+  // written in the same batch as the samples it summarises. The Neon HTTP driver has no
+  // interactive transaction, but it does take an array of statements as one — which is exactly
+  // enough, because nothing in this batch needs to read what another statement wrote.
+  // Self-healing was the alternative: mark the print stale and repair on the next read. It was
+  // rejected because it leaves a window in which a stale centroid is served as though it were
+  // current, and the repair needs a sweeper nobody runs.
+  const priorRows = (await sql`
+    SELECT encode(embedding, 'base64') AS emb
+      FROM voice_sample
+     WHERE clinician_id = ${clinicianId} AND included = true
+     ORDER BY created_at ASC
+  `) as Array<{ emb: string }>;
+  const allEmbeddings = [...priorRows.map((r) => r.emb).filter(Boolean), ...prepared.map((p) => p.x.r.embeddingBase64)];
+  const centroidB64 = averageEmbeddings(allEmbeddings);
+
+  const batch = [
+    ...prepared.map((p) => sql`
+      INSERT INTO voice_sample
+        (id, clinician_id, source, embedding, audio_r2_key, content_type,
+         duration_ms, session_id, sample_index, captured_by_admin_id, included, created_at)
+      VALUES
+        (${p.id}, ${clinicianId}, 'enrollment', decode(${p.x.r.embeddingBase64}, 'base64'),
+         ${p.key}, ${p.x.contentType}, ${p.x.dur.ms}, ${sessionId}, ${p.x.i},
+         ${opts.capturedByAdminId ?? null}, true, NOW())
+    `),
+    sql`
+      INSERT INTO voice_print
+        (doctor_id, centroid, sample_count, samples_json, enrolled_at, last_sample_at, needs_reenrollment)
+      VALUES
+        (${clinicianId}, decode(${centroidB64}, 'base64'), ${allEmbeddings.length},
+         ${JSON.stringify(allEmbeddings)}::jsonb, NOW(), NOW(), FALSE)
+      ON CONFLICT (doctor_id) DO UPDATE SET
+        centroid           = EXCLUDED.centroid,
+        sample_count       = EXCLUDED.sample_count,
+        samples_json       = EXCLUDED.samples_json,
+        last_sample_at     = NOW(),
+        needs_reenrollment = FALSE
+    `,
+  ];
+  try {
+    await (sql as unknown as { transaction: (q: unknown[]) => Promise<unknown> }).transaction(batch);
+  } catch (e) {
+    return { ok: false, error: `atomic write failed; no sample or centroid was stored (${String(e).slice(0, 80)})` };
+  }
+
+  return {
+    ok: true,
+    stored: prepared.length,
+    failed: errors.length,
+    totalSamples: allEmbeddings.length,
+    errors,
+  };
 }
 
 // ---- read / manage helpers (Sprint A3) -------------------------------------
