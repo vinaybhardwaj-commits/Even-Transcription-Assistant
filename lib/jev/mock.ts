@@ -49,3 +49,66 @@ export class MockJevClient implements JevClient {
     };
   }
 }
+
+// ── Module-level fixture surface, for the job kinds' own suites ─────────────────────────────────
+//
+// jev-window and jev-role drive the mock through `getJevClient()`, so they cannot pass fixtures to a
+// constructor: they set them on the module before the job runs. This is that surface. Its default
+// answers AND its token estimate are kept byte-identical to the implementation those suites were
+// written against — F6(b) asserts per-window `input_tokens` apportioned from the batch total, so a
+// different estimator here would silently change what those tests measure.
+
+export type JevFixtureAnswers = Record<string, JevAnswer>;
+
+let fixture: JevFixtureAnswers = {};
+
+export function setMockJevAnswers(answers: JevFixtureAnswers): void {
+  fixture = { ...answers };
+}
+
+export function clearMockJevAnswers(): void {
+  fixture = {};
+}
+
+function defaultAnswerFor(q: JevRequest["questions"][string]): JevAnswer {
+  if (q.type === "noul") return { type: "noul", noul: 0 };
+  if (q.type === "choice") {
+    const keys = Object.keys(q.criteria);
+    const first = keys[0] ?? "other";
+    const probabilities: Record<string, number> = {};
+    for (const k of keys) probabilities[k] = k === first ? 1 : 0;
+    return { type: "choice", choice: first, probabilities, confidence: 0.5 };
+  }
+  const levels = q.criteria;
+  const mid = levels[Math.floor(levels.length / 2)] ?? levels[0] ?? "";
+  const probabilities: Record<string, number> = {};
+  const legend: Record<string, string> = {};
+  levels.forEach((l, i) => {
+    probabilities[String(i + 1)] = l === mid ? 1 : 0;
+    legend[String(i + 1)] = l;
+  });
+  return { type: "score", score: Math.floor(levels.length / 2) + 1, probabilities, legend, confidence: 0.5 };
+}
+
+function estimateTokens(state: unknown, questions: Record<string, JevRequest["questions"][string]>): number {
+  const chars = JSON.stringify(state ?? null).length + JSON.stringify(questions).length;
+  return Math.max(1, Math.round(chars / 4));
+}
+
+/** The client `getJevClient()` returns under ETA_JEV_MOCK, reading the fixtures set above. */
+export function getMockJevClient(): JevClient {
+  return {
+    async systemOne(req: JevRequest): Promise<JevResult> {
+      const answers: Record<string, JevAnswer> = {};
+      for (const [id, q] of Object.entries(req.questions)) {
+        answers[id] = fixture[id] ?? defaultAnswerFor(q);
+      }
+      return {
+        model: req.model ?? "jev-mock",
+        answers,
+        usage: { input_tokens: estimateTokens(req.state, req.questions), output_tokens: Object.keys(req.questions).length * 8 },
+        latency_ms: 1,
+      };
+    },
+  };
+}

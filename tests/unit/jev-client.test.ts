@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { McpJevClient, getJevClient, JEV_STATE_MAX_CHARS } from "@/lib/jev/client";
-import { MockJevClient } from "@/lib/jev/mock";
+import { MockJevClient, setMockJevAnswers, clearMockJevAnswers } from "@/lib/jev/mock";
 import { JevDisabledError, JevStateTooLargeError, JevTransportError, type JevAnswer, type JevRequest } from "@/lib/jev/types";
 import type { TraceHandle } from "@/lib/llm-trace/log";
 
@@ -144,14 +144,21 @@ describe("J1 — the trace is the cost/PHI boundary", () => {
 describe("J1 — the mock provider", () => {
   it("getJevClient returns the deterministic mock when ETA_JEV_MOCK is set", async () => {
     process.env.ETA_JEV_MOCK = "1";
+    clearMockJevAnswers();
     const client = getJevClient();
-    expect(client).toBeInstanceOf(MockJevClient);
+    // NOT an instanceof check. Under ETA_JEV_MOCK this is the module-level, fixture-driven mock
+    // (getMockJevClient) — the only shape whose answers a caller reaching Jev through getJevClient
+    // can set. What matters is that it is deterministic, fixture-driven, and reaches no vendor.
     const r1 = await client.systemOne(noulReq);
     const r2 = await client.systemOne(noulReq);
     expect(r1).toEqual(r2);
     expect(r1.answers.q_noul).toEqual({ type: "noul", noul: 0 }); // absence-safe default
     expect(r1.usage.input_tokens).toBeGreaterThan(0);
-    // breaks if: the mock is non-deterministic, reaches the network, or defaults noul to "yes".
+    setMockJevAnswers({ q_noul: { type: "noul", noul: 0.91 } });
+    expect((await getJevClient().systemOne(noulReq)).answers.q_noul).toEqual({ type: "noul", noul: 0.91 });
+    clearMockJevAnswers();
+    // breaks if: the mock is non-deterministic, reaches the network, defaults noul to "yes", or
+    // stops honouring the fixtures a job's suite sets through setMockJevAnswers.
   });
 
   it("MockJevClient returns fixture answers keyed by question id", async () => {

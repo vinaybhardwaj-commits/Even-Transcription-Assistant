@@ -29,7 +29,7 @@ import {
   type JevRequest,
   type JevResult,
 } from "./types";
-import { MockJevClient } from "./mock";
+import { MockJevClient, getMockJevClient } from "./mock";
 
 export const ETA_JEV_ENABLED = "ETA_JEV_ENABLED";
 export const ETA_JEV_MOCK = "ETA_JEV_MOCK";
@@ -226,6 +226,8 @@ export class McpJevClient implements JevClient {
  * client. `deps` lets a test inject a fake transport/trace; production passes nothing.
  */
 export function getJevClient(deps: ClientDeps = {}): JevClient {
-  if (parseFlag(ETA_JEV_MOCK)) return new MockJevClient();
+  // getMockJevClient reads the module-level fixtures a job's suite sets with setMockJevAnswers,
+  // which is the only way a caller reaching Jev through this function can supply them.
+  if (parseFlag(ETA_JEV_MOCK)) return getMockJevClient();
   return new McpJevClient(deps);
 }
