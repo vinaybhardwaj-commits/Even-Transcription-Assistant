@@ -69,6 +69,8 @@ export type RunSummary = {
   failed: number;
   refused: number;
   abandoned: number;
+  /** `done` jobs whose English check could not be read: not counted as done, counted toward the failure stop. */
+  unverified: number;
   overridden: number;
   fatal: FatalCode | null;
   stop: StopReason;
@@ -79,7 +81,7 @@ const EMPTY_SUMMARY: Summary = {
   backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
 
-const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
+const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
 
 /** The args of the job for one candidate. Exported so a test pins exactly what goes on the wire. */
 export function jobArgsFor(c: Candidate, origin: string): RoomWindowSubmit {
@@ -259,18 +261,29 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
     const wall_s = Math.round((deps.now() - t0) / 1000);
     if (terminal.status === "done") {
       // THE ENGLISH CANARY. `done` says the job ran; it does not say it made English. A window with text and no
-      // `transcript_english` is a failure of THIS driver's purpose, counted like any other. If the check itself
-      // cannot be read, the window is not failed for that: the job did finish.
-      let english: "ok" | "missing" = "ok";
+      // `transcript_english` is a failure of THIS driver's purpose, counted like any other.
+      // IT FAILS CLOSED (V's engineering ruling, 21 Sep 2026, on the Refuter's flag). If the check itself cannot be read,
+      // nothing is known about the window, so it is NOT recorded as done, it does NOT reset the counter, and it counts
+      // toward the same consecutive-failure stop. Otherwise a database blip would switch off the only bound that caps a
+      // silent no-English night at five windows. The window is left unverified (a separate count, `unverified`) and its
+      // id and room-day are logged, so a later run can look at it again (see the report on how).
+      let english: "ok" | "missing" | "unavailable" = "ok";
+      let checkError = "";
       try {
         english = await deps.store.englishCheck(c.window_id);
       } catch (e) {
-        deps.log({ event: "english_check_unavailable", window_id: c.window_id, error_name: (e as Error)?.name ?? "Error" });
+        english = "unavailable";
+        checkError = (e as Error)?.name ?? "Error"; // the NAME only: the message can carry SQL or connection detail
       }
-      if (english === "missing") {
-        s.failed += 1;
+      if (english !== "ok") {
         consecutiveFailures += 1;
-        deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: "done", step: terminal.step, error_code: "no_english", wall_s });
+        if (english === "missing") {
+          s.failed += 1;
+          deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: "done", step: terminal.step, error_code: "no_english", wall_s });
+        } else {
+          s.unverified += 1;
+          deps.log({ event: "english_check_unavailable", window_id: c.window_id, room_day_id: c.room_day_id, job_id: sub.job_id, error_name: checkError, consecutive: consecutiveFailures });
+        }
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break; }
         continue;
       }

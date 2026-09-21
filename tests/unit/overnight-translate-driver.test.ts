@@ -452,12 +452,43 @@ describe("THE ENGLISH CANARY — a `done` that made no English is a failure (the
     expect(s.done + s.failed).toBe(8);
   });
 
-  it("if the check ITSELF cannot be read, the window is not failed — the job did finish; only the error's name is logged", async () => {
-    const h = harness({ cands: [cand("A")], englishThrows: true });
+  it("if the check ITSELF cannot be read, the window is NOT recorded done — it is unverified and counts as a failure; only the error's name is logged", async () => {
+    const h = harness({ cands: [cand("A", { room_day_id: "rd_A" })], englishThrows: true });
     const s = await h.run();
-    expect(s).toMatchObject({ done: 1, failed: 0, fatal: null });
-    expect(evs(h.log, "english_check_unavailable")).toEqual([{ event: "english_check_unavailable", window_id: "A", error_name: "NeonDbError" }]);
+    expect(s).toMatchObject({ done: 0, failed: 0, unverified: 1, started: 1, fatal: null });
+    expect(evs(h.log, "window_done")).toHaveLength(0);
+    expect(evs(h.log, "english_check_unavailable")).toEqual([
+      { event: "english_check_unavailable", window_id: "A", room_day_id: "rd_A", job_id: "job_1", error_name: "NeonDbError", consecutive: 1 },
+    ]);
     expect(JSON.stringify(h.log)).not.toContain("postgres://");
+  });
+
+  it(`a check that keeps THROWING stops the night after ${CONSECUTIVE_FAILURE_LIMIT}, like a check that keeps saying missing (it was done=40, failed=0)`, async () => {
+    const h = harness({ cands: Array.from({ length: 40 }, (_, i) => cand(`W${i}`)), englishThrows: true });
+    const s = await h.run();
+    expect(s).toMatchObject({ done: 0, unverified: CONSECUTIVE_FAILURE_LIMIT, started: CONSECUTIVE_FAILURE_LIMIT, fatal: "too_many_failures", stop: "fatal" });
+    expect(h.submits, "the night stopped after five, not after forty").toHaveLength(CONSECUTIVE_FAILURE_LIMIT);
+    expect(evs(h.log, "english_check_unavailable")).toHaveLength(CONSECUTIVE_FAILURE_LIMIT);
+    expect(evs(h.log, "window_done")).toHaveLength(0);
+  });
+
+  it("an unreadable check does NOT reset the counter: missing x2, unreadable x1, missing x2 is five in a row and stops", async () => {
+    const h = harness({
+      cands: Array.from({ length: 10 }, (_, i) => cand(`W${i}`)),
+      english: (w) => { if (w === "W2") throw new Error("read failed"); return "missing"; },
+    });
+    const s = await h.run();
+    expect(s).toMatchObject({ failed: 4, unverified: 1, done: 0, fatal: "too_many_failures", started: 5 });
+    expect(h.submits).toHaveLength(5);
+  });
+
+  it("an OK answer after unreadable ones resets the count: unreadable x4 then ok never trips the limit", async () => {
+    const h = harness({
+      cands: Array.from({ length: 6 }, (_, i) => cand(`W${i}`)),
+      english: (w) => { if (Number(w.slice(1)) < CONSECUTIVE_FAILURE_LIMIT - 1) throw new Error("read failed"); return "ok"; },
+    });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: null, unverified: CONSECUTIVE_FAILURE_LIMIT - 1, done: 2, started: 6 });
   });
 
   it("a dry run never asks it (nothing was submitted)", async () => {
@@ -526,7 +557,7 @@ describe("LOG HYGIENE — ids, counts, durations and closed codes only; never th
   const KEYS = new Set([
     "event", "mode", "limit", "n", "window_id", "job_id", "room_day_id", "klass", "has_run", "room_transcript_on", "switch_override", "translate",
     "code", "reason", "streak", "ms", "status", "step", "error_code", "wall_s", "why", "consecutive",
-    "started", "done", "failed", "refused", "abandoned", "overridden", "fatal", "stop", "error_name",
+    "started", "done", "failed", "refused", "abandoned", "unverified", "overridden", "fatal", "stop", "error_name",
     ...Object.keys(SUMMARY),
   ]);
 
