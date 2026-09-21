@@ -172,3 +172,54 @@ describe("roomEnergyFloor now uses its room", () => {
     expect(globalEnergyFloor({ ROOM_ENERGY_FLOOR: "0.03" })).toBe(0.03);
   });
 });
+
+describe("the VAD client — every failure is fail-safe", () => {
+  const audio = new Uint8Array([1, 2, 3]);
+  const withFetch = async (impl: typeof fetch, env: Record<string, string | undefined>) => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      const { fetchWindowSpeech } = await import("@/lib/stt/speech-gate");
+      return await fetchWindowSpeech(audio, "audio/wav", { env });
+    } finally {
+      globalThis.fetch = orig;
+    }
+  };
+  const ok = (body: unknown) =>
+    (async () => ({ ok: true, json: async () => body })) as unknown as typeof fetch;
+
+  it("refuses without an endpoint, and never reaches the network", async () => {
+    // The refusal must come from the GUARD, not from a thrown URL being swallowed by the catch:
+    // those are indistinguishable by return value, so the proof is that fetch was never called.
+    let called = 0;
+    const counting = (async () => { called += 1; return { ok: true, json: async () => ({ spans: [] }) }; }) as unknown as typeof fetch;
+    const r = await withFetch(counting, {});
+    expect(r).toEqual({ ok: false, reason: "vad_unavailable" });
+    expect(called).toBe(0);
+  });
+
+  it("reads spans when the router answers", async () => {
+    const r = await withFetch(ok({ spans: [{ start_ms: 0, end_ms: 1500 }] }), { ETA_VAD_URL: "http://x" });
+    expect(r).toEqual({ ok: true, spans: [{ start_ms: 0, end_ms: 1500 }] });
+  });
+
+  it("treats NO SPANS as vad_empty_window, never as silence", async () => {
+    const r = await withFetch(ok({ spans: [] }), { ETA_VAD_URL: "http://x" });
+    expect(r).toEqual({ ok: false, reason: "vad_empty_window" });
+  });
+
+  it("drops malformed spans rather than trusting them", async () => {
+    const r = await withFetch(
+      ok({ spans: [{ start_ms: 0, end_ms: 0 }, { start_ms: "a", end_ms: 5 }, { start_ms: 10, end_ms: 20 }] }),
+      { ETA_VAD_URL: "http://x" },
+    );
+    expect(r).toEqual({ ok: true, spans: [{ start_ms: 10, end_ms: 20 }] });
+  });
+
+  it("a non-200 or a thrown fetch judges nothing", async () => {
+    expect(await withFetch((async () => ({ ok: false, json: async () => ({}) })) as unknown as typeof fetch,
+      { ETA_VAD_URL: "http://x" })).toEqual({ ok: false, reason: "vad_unavailable" });
+    expect(await withFetch((async () => { throw new Error("down"); }) as unknown as typeof fetch,
+      { ETA_VAD_URL: "http://x" })).toEqual({ ok: false, reason: "vad_unavailable" });
+  });
+});
