@@ -11,10 +11,10 @@
  * P1/P2/P3 below reproduce fleet's probes and fail if the original defects return.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { isNativeEnglish, languageMix, classifyWindow } from "@/lib/jev/english";
+import { isNativeEnglish, languageMix, classifyWindow, nativeEnglishVotes, votesRecord } from "@/lib/jev/english";
 
 // ── the three-way agreement rule, PURE ───────────────────────────────────────────────────────────
-describe("J0 — isNativeEnglish: all three signals must agree to skip translation", () => {
+describe("J0 — isNativeEnglish: an absent signal abstains, a present one that disagrees vetoes", () => {
   const en = (mix: Record<string, number>, full = "english", sarvam = "en") =>
     ({ full_window_language: full, sarvam_language: sarvam, language_timeline: { language_mix: mix } });
 
@@ -37,11 +37,54 @@ describe("J0 — isNativeEnglish: all three signals must agree to skip translati
     expect(isNativeEnglish(en({ en: 2 }, "english", "hi"))).toBe(false);
     expect(isNativeEnglish(en({ en: 2 }, "english", "en-IN"))).toBe(true);
   });
-  it("a missing or empty mix is NOT agreement (absent metric never reads as English)", () => {
-    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(false);
+  it("an ABSENT mix abstains: the other two signals carry it (V, 21 Sep — was false before)", () => {
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
+  });
+  it("an EMPTY mix is present and names no language, so it still vetoes", () => {
     expect(isNativeEnglish(en({}))).toBe(false);
+  });
+  it("no metrics at all is never English — nothing voted", () => {
     expect(isNativeEnglish(null)).toBe(false);
     expect(isNativeEnglish(undefined)).toBe(false);
+    expect(isNativeEnglish({})).toBe(false);
+  });
+
+  // ── the rule the order names, case by case ────────────────────────────────────────────────────
+  it("(1) three present, all English → pass", () => {
+    expect(isNativeEnglish(en({ en: 2, und: 1 }, "english", "en-IN"))).toBe(true);
+    expect(nativeEnglishVotes(en({ en: 2 }))).toEqual({ full: "english", sarvam: "english", mix: "english" });
+  });
+  it("(2) two present and English, one absent → pass, whichever one is missing", () => {
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
+    expect(isNativeEnglish({ full_window_language: "english", language_timeline: { language_mix: { en: 1 } } })).toBe(true);
+    expect(isNativeEnglish({ sarvam_language: "en", language_timeline: { language_mix: { en: 1, und: 2 } } })).toBe(true);
+  });
+  it("(3) ONE present is never enough — this is the >= 2 condition, and a mutation to >= 1 fails here", () => {
+    expect(isNativeEnglish({ full_window_language: "english" })).toBe(false);
+    expect(isNativeEnglish({ sarvam_language: "en" })).toBe(false);
+    expect(isNativeEnglish({ language_timeline: { language_mix: { en: 4 } } })).toBe(false);
+    for (const m of [{ full_window_language: "english" }, { sarvam_language: "en" }, { language_timeline: { language_mix: { en: 4 } } }]) {
+      const v = nativeEnglishVotes(m);
+      expect(Object.values(v).filter((x) => x === "english")).toHaveLength(1);
+      expect(Object.values(v).filter((x) => x === "absent")).toHaveLength(2);
+    }
+  });
+  it("(4) ANY present signal that disagrees vetoes, even with the other two saying English", () => {
+    expect(isNativeEnglish(en({ en: 2 }, "hindi", "en"))).toBe(false);
+    expect(isNativeEnglish(en({ en: 2 }, "english", "hi"))).toBe(false);
+    expect(isNativeEnglish(en({ en: 2, kn: 1 }, "english", "en"))).toBe(false);
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "kn" })).toBe(false);
+  });
+  it("a present-but-malformed signal is a disagreement, not an abstention", () => {
+    expect(isNativeEnglish({ full_window_language: 42, sarvam_language: "en", language_timeline: { language_mix: { en: 1 } } } as never)).toBe(false);
+    expect(nativeEnglishVotes({ full_window_language: "", sarvam_language: "en" } as never).full).toBe("other");
+  });
+  it("the vote record names who voted and who abstained, in a fixed order", () => {
+    expect(votesRecord(nativeEnglishVotes({ full_window_language: "english", sarvam_language: "en" })))
+      .toBe("full=english,sarvam=english,mix=absent");
+    expect(votesRecord(nativeEnglishVotes(en({ en: 1, hi: 1 }))))
+      .toBe("full=english,sarvam=english,mix=other");
+    expect(votesRecord(nativeEnglishVotes(null))).toBe("full=absent,sarvam=absent,mix=absent");
   });
   it("languageMix digs out the nested map and ignores non-number values", () => {
     expect(languageMix(en({ en: 2, hi: 1 }))).toEqual({ en: 2, hi: 1 });

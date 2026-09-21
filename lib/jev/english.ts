@@ -3,14 +3,23 @@
  * rule and the source-decision, decided from metrics_json — NEVER from detected_language, which is
  * NULL on every bench window (see the amendment banner in the spec).
  *
- * THE THREE-WAY AGREEMENT RULE. All three signals must agree to SKIP translation and store
- * transcript_original as-is (source='native_en'):
+ * THE MAJORITY-OF-PRESENT RULE (V, 21 Sep 2026 — supersedes the three-way agreement rule).
+ * An ABSENT language signal ABSTAINS; it does not veto. A PRESENT signal that disagrees still does.
+ * Three signals vote:
  *   1. metrics_json.full_window_language === "english"   (Whisper on the whole window)
  *   2. metrics_json.sarvam_language starts with "en"     (the router's ASR language)
  *   3. metrics_json.language_timeline.language_mix has no key other than "en" / "und"
- * Any signal missing, disagreeing, or a mix carrying "hi"/"mr"/anything else → NOT native English;
- * the window goes to translation. The rule is deliberately conservative: a code-mixed window
- * ({"en":2,"hi":1,"und":1}) must translate; an en/und-only window must not.
+ * native_en requires ALL of:
+ *   (a) at least TWO of the three signals present,
+ *   (b) every PRESENT signal says English,
+ *   (c) transcript_original non-empty (enforced in classifyWindow).
+ * The rule stays conservative where it counts: a code-mixed window ({"en":2,"hi":1,"und":1}) still
+ * translates, and one lone signal is never enough. What changed is that a window whose other two
+ * signals say English is no longer sent to translation merely because a third metric was never
+ * written — the situation that left 135 of 139 fixture windows not_ready on 21 Sep.
+ *
+ * An EMPTY mix ({}) counts as PRESENT and not English, exactly as before: it is a language claim
+ * that names no language, not a metric that was never written.
  *
  * "und" (undetermined) is tolerated in the mix because it is silence/noise spans, not another
  * language — a window that is English plus some untagged silence is still English to translate-past.
@@ -43,29 +52,65 @@ export function languageMix(metrics: WindowMetrics): Record<string, number> | nu
   return out;
 }
 
+/** How one language signal voted. `absent` abstains; `other` vetoes. */
+export type LanguageVote = "english" | "other" | "absent";
+
+/** The three votes, in the order the banner lists them. Recorded so a decision can be explained later. */
+export type NativeEnglishVotes = { full: LanguageVote; sarvam: LanguageVote; mix: LanguageVote };
+
+/** `full_window_language`: absent when the key is missing or not a string. */
+function voteFull(metrics: WindowMetrics): LanguageVote {
+  const v = (metrics as { full_window_language?: unknown } | null | undefined)?.full_window_language;
+  if (v === undefined || v === null) return "absent";
+  if (typeof v !== "string" || v.trim() === "") return "other";
+  return v.trim().toLowerCase() === "english" ? "english" : "other";
+}
+
+/** `sarvam_language`: absent when the key is missing or not a string. */
+function voteSarvam(metrics: WindowMetrics): LanguageVote {
+  const v = (metrics as { sarvam_language?: unknown } | null | undefined)?.sarvam_language;
+  if (v === undefined || v === null) return "absent";
+  if (typeof v !== "string" || v.trim() === "") return "other";
+  return v.trim().toLowerCase().startsWith("en") ? "english" : "other";
+}
+
 /**
- * TRUE only when all three signals agree the window is English. Missing or malformed signals read
- * as "not confirmed English" (→ translate), never as English: J0 must not skip translation on the
- * strength of an absent metric.
+ * `language_timeline.language_mix`: absent when the timeline or the mix was never written. An empty
+ * mix is PRESENT and not English — it claims a language breakdown and names none.
+ */
+function voteMix(metrics: WindowMetrics): LanguageVote {
+  const mix = languageMix(metrics);
+  if (mix === null) return "absent";
+  const keys = Object.keys(mix);
+  if (keys.length === 0) return "other";
+  for (const k of keys) {
+    if (!ENGLISH_OR_UNDETERMINED.has(k.trim().toLowerCase())) return "other";
+  }
+  return "english";
+}
+
+/** The three votes for one window. Pure; safe on null, undefined and malformed metrics. */
+export function nativeEnglishVotes(metrics: WindowMetrics): NativeEnglishVotes {
+  return { full: voteFull(metrics), sarvam: voteSarvam(metrics), mix: voteMix(metrics) };
+}
+
+/**
+ * A stable one-line record of who voted and who abstained, for the J0 row and for reports:
+ * `full=english,sarvam=english,mix=absent`. Key order is fixed so it can be compared across rows.
+ */
+export function votesRecord(votes: NativeEnglishVotes): string {
+  return `full=${votes.full},sarvam=${votes.sarvam},mix=${votes.mix}`;
+}
+
+/**
+ * TRUE when at least two of the three signals are present and every present signal says English.
+ * An absent signal abstains; a present one that disagrees vetoes; one signal alone is never enough.
  */
 export function isNativeEnglish(metrics: WindowMetrics): boolean {
-  if (!metrics || typeof metrics !== "object") return false;
-
-  const full = (metrics as { full_window_language?: unknown }).full_window_language;
-  if (typeof full !== "string" || full.trim().toLowerCase() !== "english") return false;
-
-  const sarvam = (metrics as { sarvam_language?: unknown }).sarvam_language;
-  if (typeof sarvam !== "string" || !sarvam.trim().toLowerCase().startsWith("en")) return false;
-
-  const mix = languageMix(metrics);
-  // The mix must be present AND carry only en/und. An absent or empty mix is not agreement.
-  if (mix === null) return false;
-  const keys = Object.keys(mix);
-  if (keys.length === 0) return false;
-  for (const k of keys) {
-    if (!ENGLISH_OR_UNDETERMINED.has(k.trim().toLowerCase())) return false;
-  }
-  return true;
+  const votes = nativeEnglishVotes(metrics);
+  const all = [votes.full, votes.sarvam, votes.mix];
+  if (all.some((v) => v === "other")) return false;
+  return all.filter((v) => v === "english").length >= 2;
 }
 
 /**
