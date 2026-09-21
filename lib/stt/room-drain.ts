@@ -36,7 +36,7 @@
  */
 
 import { sql } from "@/lib/db";
-import { getObjectBytes } from "@/lib/r2";
+import { deleteObject, getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { resolveRange, type CoveringChunk, type RangeChunk } from "@/lib/bench-range";
@@ -566,7 +566,7 @@ export type PhaseOutcome = DrainOutcome & { next_progress?: Record<string, unkno
 export type RoomWindowJobOptions = { translate?: boolean; switchOverride?: boolean };
 
 /** Everything every phase re-derives for itself, so a step is resumable from the window id alone. */
-type WindowContext = {
+export type WindowContext = {
   // room_day_id is NON-NULL here: the loader refuses a window without one, exactly as the drain
   // did, so every phase downstream can write cues without re-proving it.
   w: WindowRow & { room_id: string; room_day_id: string };
@@ -580,8 +580,12 @@ type WindowContext = {
 /**
  * Re-read the window and re-resolve its covering chunks. Three cheap reads, paid once per step,
  * and the price of steps that do not depend on a process that may no longer exist.
+ *
+ * EXPORTED for the join-only path (lib/stt/join-only.ts), so chunk resolution has exactly one
+ * implementation. It reports `state` and `grid_aligned` rather than judging them: which states a
+ * caller will accept is the caller's policy, and phase 1's answer is not the backfill's answer.
  */
-async function loadWindowContext(windowId: string): Promise<WindowContext | { error: DrainStep; detail?: string }> {
+export async function loadWindowContext(windowId: string): Promise<WindowContext | { error: DrainStep; detail?: string }> {
   const wr = (await sql`
     SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic,
            w.clip_r2_key, w.grid_aligned, w.state, s.room_id
@@ -645,6 +649,46 @@ export function readWindowProgress(raw: Record<string, unknown>): WindowProgress
 }
 
 /** PHASE 1 — join the clip and read one language off its first seconds. No engine work. */
+/**
+ * THE JOIN STEP, on its own — the only place a window's clip is produced.
+ *
+ * Extracted from `roomWindowPrepare` so the join-only path reuses it instead of copying it. It is
+ * exactly what phase 1 did inline: build the request from the covering pieces, call the joining
+ * service, and record the key on the window. Nothing here probes, transcribes or decides whether a
+ * window SHOULD be joined — that judgement belongs to the caller.
+ *
+ * COMPENSATION. If the service produced an object and the UPDATE then fails, the object belongs to
+ * nothing, so it is deleted. R2 is not in the transaction and cannot be; best effort is the most
+ * that is available, and leaving the leak was not.
+ */
+export async function joinClipForWindow(args: {
+  windowId: string;
+  sessionId: string;
+  covering: Parameters<typeof buildJoinRequest>[1];
+  startMs: number;
+  endMs: number;
+  source: "primary" | "backup";
+}): Promise<{ ok: true; key: string } | { ok: false; error: string; hop?: string }> {
+  const join = await callJoinService(
+    buildJoinRequest(args.sessionId, args.covering, args.startMs, args.endMs, args.source),
+  );
+  if (!join.ok) return { ok: false, error: join.error, ...(join.hop ? { hop: join.hop } : {}) };
+  try {
+    await sql`UPDATE bench_window SET clip_r2_key = ${join.key} WHERE id = ${args.windowId}`;
+  } catch (e) {
+    // A failed cleanup must not mask the write failure that caused it, so it does not throw —
+    // but it is NAMED. A leaked clip object that nobody ever hears about is the silent failure
+    // this compensation exists to prevent, one level down.
+    await deleteObject(join.key).catch((de) => {
+      console.error("[drain] clip compensation failed — object left in R2", JSON.stringify({
+        window: args.windowId, key: join.key, err: String(de).slice(0, 200),
+      }));
+    });
+    return { ok: false, error: `clip_key_write_failed: ${String(e).slice(0, 120)}` };
+  }
+  return { ok: true, key: join.key };
+}
+
 export async function roomWindowPrepare(windowId: string, opts: RunActor): Promise<PhaseOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
   const ctx = await loadWindowContext(windowId);
@@ -655,12 +699,15 @@ export async function roomWindowPrepare(windowId: string, opts: RunActor): Promi
   const { w, startMs, endMs, source, covering, audioSeconds } = ctx;
 
     // --- C2. JOIN -------------------------------------------------------------------------
-    const join = await callJoinService(buildJoinRequest(w.session_id, covering, startMs, endMs, source));
+    // THE SEAM. This is the whole of clip production, and it is now a named function so a
+    // join-only path can run it WITHOUT phase 1's probe below or phase 2's Whisper — see
+    // lib/stt/join-only.ts. The drain's own behaviour is unchanged: same request, same UPDATE,
+    // same failure step, in the same order.
+    const join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
     if (!join.ok) {
       const attempts = await recordFailure(windowId, "join_failed", `${join.error}${join.hop ? ` @${join.hop}` : ""}`);
       return { ...out, step: "join_failed", detail: join.error, attempts };
     }
-    await sql`UPDATE bench_window SET clip_r2_key = ${join.key} WHERE id = ${windowId}`;
     out.clip_r2_key = join.key;
 
     // --- C3. LANGUAGE PROBE ---------------------------------------------------------------
