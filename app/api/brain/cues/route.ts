@@ -143,6 +143,27 @@ function parseBatch(v: unknown, top: { sessionId: string | null; source: string 
   return out;
 }
 
+/**
+ * V's ruling, 21 Sep 2026 — `switch_override`: THE BACKLOG RUN MAY WRITE A ROOM WHOSE OWN TRANSCRIPT
+ * SWITCH IS OFF, and the room's setting is not touched to allow it.
+ *
+ * It is a fact about ONE REQUEST, so it lives in the request body and nowhere else — not an
+ * environment variable, not a room column — which keeps the property the guard below is proud of:
+ * there is no single value of anything that opens every room at once. Each override names one day
+ * (`room_day_id` is required on every batch) and applies to that one call.
+ *
+ * REFUSED, NOT IGNORED, in every case but the one it exists for. A caller that sent it and got a 200
+ * would believe it had been honoured, and one that sent it wrongly would believe it had not been
+ * needed. The one accepted shape is the literal `true` on a `replay` BATCH — the room drain's own
+ * window-as-unit write. It is not offered to the single-cue paths, which "do not need one".
+ */
+function parseSwitchOverride(v: unknown, ctx: { isBatch: boolean; source: string | null }): boolean {
+  if (v === undefined) return false;
+  if (v !== true) throw new HttpError(400, "invalid_switch_override");
+  if (!ctx.isBatch || ctx.source !== "replay") throw new HttpError(400, "switch_override_requires_replay_batch");
+  return true;
+}
+
 /** K3 §1 — the window to clear. All three fields required together or the object is refused. */
 function parseReplaceWindow(v: unknown): { session_id: string; start_ms: number; end_ms: number } | null {
   if (v === undefined || v === null) return null;
@@ -218,6 +239,14 @@ export async function POST(req: Request) {
     if (batch !== null && (b.type !== undefined || b.payload !== undefined || b.source_ref !== undefined)) {
       throw new HttpError(400, "cues_and_single_cue_are_exclusive");
     }
+    // Parsed HERE, with the other refusals, so a malformed override is told what is wrong before any
+    // lock is taken or any row is read.
+    const switchOverride = parseSwitchOverride(b.switch_override, { isBatch: isBatchBody, source });
+    // The override exists to WRITE a window's turns onto an off room's day, so a request that writes nothing has no
+    // business unlocking that day. The documented DELETE-ONLY shape (`cues: []` with a replace_window — K3 §7's
+    // cleanup) would otherwise let it strip a live day's turns and log nothing but `written: 0`. Every request
+    // the room drain makes carries at least the window marker, so this costs it nothing.
+    if (switchOverride && (batch === null || batch.length === 0)) throw new HttpError(400, "switch_override_requires_cues");
 
     if (!(await roomExists(roomId))) throw new HttpError(404, "unknown_room");
 
@@ -242,6 +271,8 @@ export async function POST(req: Request) {
         if (seenKeys.has(k)) withinWriteDuplicates++;
         else seenKeys.add(k);
       }
+      // Set inside the lock, only when the override actually got past a switch that was off.
+      let overrideUsed = false;
       const out = await withRoomDayLock(roomDayId, async (client) => {
         const day = await findRoomDayById(client, roomDayId);
         if (!day) throw new HttpError(404, "room_day_not_found");
@@ -268,8 +299,15 @@ export async function POST(req: Request) {
         //
         // The read is cached, so the common case adds no query inside this lock; a miss adds one
         // app-handle round trip at most once per ROOM_SWITCH_CACHE_MS per room.
+        //
+        // THE OVERRIDE (V, 21 Sep 2026) adds exactly one branch INSIDE this refusal and changes nothing
+        // outside it: the condition below is the one that was here, evaluated the same way, and a
+        // request that does not carry `switch_override` still meets the same 409. With it, a live
+        // day whose room's switch is off is written anyway — once, for this request — and the fact
+        // that the override was actually USED (not merely sent) is logged and echoed back.
         if (day.scratch !== true && !(await isTranscriptEnabled(day.room_id))) {
-          throw new HttpError(409, "not_a_scratch_day");
+          if (!switchOverride) throw new HttpError(409, "not_a_scratch_day");
+          overrideUsed = true;
         }
         // The replace, in this order and inside this one transaction. A throw anywhere below
         // rolls the delete back too, so a failed write leaves the PREVIOUS window intact rather
@@ -291,6 +329,8 @@ export async function POST(req: Request) {
         const state = await readGraph(client, day.room_id, day.ist_date, day.id);
         return { deleted, ins, markersUpserted, state };
       });
+      // Logged AFTER the commit, so a line here means rows landed. Ids and counts only.
+      if (overrideUsed) brainLog("info", "switch_override_used", { room_id: roomId, room_day_id: roomDayId, written: out.ins.written + out.markersUpserted, deleted: out.deleted });
 
       return NextResponse.json(
         {
@@ -298,6 +338,8 @@ export async function POST(req: Request) {
           batch: true,
           room_day_id: roomDayId,
           scratch: true,
+          // Present only when the caller asked; true only when it was needed.
+          ...(switchOverride ? { switch_override_used: overrideUsed } : {}),
           deleted: out.deleted,
           // Everything this transaction committed: the turn rows the insert returned, plus the
           // markers, which DO UPDATE guarantees a row for on both the insert and the update path.

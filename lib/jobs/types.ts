@@ -117,6 +117,15 @@ export type JobKind = {
   scope: "read" | "invoke" | "write";
   /** PURE where it can be — validates and normalises args at SUBMIT, so a bad job never queues. */
   parseArgs: (raw: unknown) => Record<string, unknown>;
+  /**
+   * A scope that ONE ARGUMENT needs beyond the kind's own `scope` — for an argument that widens what the job may do
+   * (V's ruling, 21 Sep 2026: `room_window`'s `switch_override` needs `write`, because it lets a job write a room whose own
+   * Transcript switch is off). Called by `submitJob` on the PARSED args, so it sees exactly what would be stored and every
+   * submit path meets it. Returns null when the args need nothing extra. It only ever ADDS a requirement: the kind's own
+   * scope is still checked first, and a caller lacking the extra scope is refused with the same error a missing kind scope
+   * gets, plus the name of the argument, so a refusal says which argument it was.
+   */
+  scopeForArgs?: (args: Record<string, unknown>) => { scope: "read" | "invoke" | "write"; arg: string } | null;
   run: (ctx: StepContext) => Promise<StepOutcome>;
 };
 

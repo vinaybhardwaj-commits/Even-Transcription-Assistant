@@ -1428,6 +1428,9 @@ export async function postTurnBatch(
     /** OPTIONAL (K4 §3). Absent → the route issues NO DELETE, which is what lets the marker-only
      *  request record a failure without needing the verb the failed write needed. */
     replace_window?: { session_id: string; start_ms: number; end_ms: number };
+    /** OPTIONAL, and present ONLY when a backlog job was explicitly told to write a room whose own
+     *  Transcript switch is off (V, 21 Sep 2026). Per request, never a default: see writeWindowCues. */
+    switch_override?: true;
     cues: Array<{ type: string; at: string; payload: Record<string, unknown>; source_ref: string }>;
   },
 ): Promise<BatchPost> {
@@ -1489,9 +1492,22 @@ export async function writeWindowCues(
   window: { startMs: number; endMs: number },
   turns: readonly TurnDraft[],
   windowCueFor: (complete: boolean, stoppedEarly: string | null) => TurnDraft,
+  /**
+   * `switchOverride` — V's ruling of 21 Sep 2026: a backlog run must not be stopped by a room's
+   * Transcript switch, and the room's own setting must not be changed to make it run. So the
+   * override is a fact about THIS CALL. It is sent as `switch_override: true` on the request(s) this
+   * function makes, the route honours it only for a `replay` batch, and it is never read from the
+   * environment or remembered. Absent or false → the body is byte-identical to what it was, and the
+   * route's guard is exactly what it was.
+   */
+  opts: { switchOverride?: boolean } = {},
 ): Promise<TurnWriteCounts> {
   const replace_window = { session_id: sessionId, start_ms: Math.floor(window.startMs), end_ms: Math.floor(window.endMs) };
-  const common = { room_id: roomId, room_day_id: roomDayId, session_id: sessionId, source: TURN_CUE_SOURCE };
+  // Spread into BOTH requests below: the failure marker lands on the same day and meets the same guard.
+  const common = {
+    room_id: roomId, room_day_id: roomDayId, session_id: sessionId, source: TURN_CUE_SOURCE,
+    ...(opts.switchOverride === true ? { switch_override: true as const } : {}),
+  };
 
   const whole = await postTurnBatch(origin, {
     ...common,

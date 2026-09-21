@@ -549,6 +549,22 @@ export async function drainRoomWindow(
 /** A phase returns a DrainOutcome; on success it also says what the next step must be handed. */
 export type PhaseOutcome = DrainOutcome & { next_progress?: Record<string, unknown> };
 
+/**
+ * PER-JOB CHOICES, from the `room_window` job's own args (lib/jobs/kinds/room-window.ts). Both default
+ * to false and both are facts about ONE job, never a setting: the overnight backlog run passes them
+ * per window, and the daytime cron passes neither, so it behaves exactly as it always has.
+ *
+ *   translate       — ask the router for `transcript_english` in the same pass it transcribes (the
+ *                     router translates non-English segments and passes English through), which is
+ *                     what the Jev arm's J0 reads. Was the literal `false` in the engine step.
+ *   switchOverride  — V's ruling of 21 Sep 2026: write this window's turns even though its room's own
+ *                     Transcript switch is off, WITHOUT changing that switch. It is forwarded to the
+ *                     one place the switch is enforced for a job that already exists (the brain cue
+ *                     route). The drain ENTRY (`drainRoomWindow`) still refuses an off room; this is
+ *                     for jobs an operator submits by name.
+ */
+export type RoomWindowJobOptions = { translate?: boolean; switchOverride?: boolean };
+
 /** Everything every phase re-derives for itself, so a step is resumable from the window id alone. */
 type WindowContext = {
   // room_day_id is NON-NULL here: the loader refuses a window without one, exactly as the drain
@@ -702,7 +718,9 @@ export async function roomWindowPrepare(windowId: string, opts: RunActor): Promi
  * deliberate consequence and an improvement: the turns are whisper's product, so a paid engine
  * failing no longer erases the transcript from the day view. `cues_refused` still stops the window.
  */
-export async function roomWindowSegment(windowId: string, origin: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
+export async function roomWindowSegment(
+  windowId: string, origin: string, opts: RunActor, progress: Record<string, unknown>, jobOpts: RoomWindowJobOptions = {},
+): Promise<PhaseOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
   const p = readWindowProgress(progress);
   const ctx = await loadWindowContext(windowId);
@@ -774,6 +792,7 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
           sourceUsed: source,
           stoppedEarly,
         }),
+        { switchOverride: jobOpts.switchOverride === true },
       );
       out.turns_written = counts.written;
       out.turns_deleted = counts.deleted;
@@ -975,6 +994,7 @@ export async function roomWindowSegment(windowId: string, origin: string, opts: 
         sourceUsed: source,
         stoppedEarly,
       }),
+      { switchOverride: jobOpts.switchOverride === true },
     );
     out.turns_written = counts.written;
     out.turns_deleted = counts.deleted;
@@ -1127,7 +1147,9 @@ export async function writeRoutedRun(
  * `capabilities.async` is handed the router's submit/poll protocol; one that does not is called
  * and answers inside this step. Adding an engine means declaring what it is, not editing this.
  */
-export async function roomWindowEngine(windowId: string, opts: RunActor, progress: Record<string, unknown>): Promise<PhaseOutcome> {
+export async function roomWindowEngine(
+  windowId: string, opts: RunActor, progress: Record<string, unknown>, jobOpts: RoomWindowJobOptions = {},
+): Promise<PhaseOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
   const p = readWindowProgress(progress);
   const ctxOrErr = await loadWindowContext(windowId);
@@ -1240,7 +1262,9 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
     // D8 — "we turned it off" and "it broke" are different facts and must not share a code. The
     // adapter reports the kill switch by name; the row keeps that name instead of flattening it
     // into a generic submit failure.
-    const sub = await adapter.submit({ audioUrl, durationMs: Math.round(audioSeconds * 1000), translate: false, ...(languageSent ? { language: languageSent } : {}) });
+    // `translate` is the JOB's choice (RoomWindowJobOptions), false unless the job said true. It used to
+    // be the literal `false`, which is why `transcription_run.transcript_english` was NULL on every room window.
+    const sub = await adapter.submit({ audioUrl, durationMs: Math.round(audioSeconds * 1000), translate: jobOpts.translate === true, ...(languageSent ? { language: languageSent } : {}) });
     if (!sub.ok) {
       // The provider's message can quote a path or the audio; it goes to the log, not the row.
       console.error("[drain] async submit failed", JSON.stringify({ window: windowId, engine: engineId, err: String(sub.error).slice(0, 200) }));
@@ -1253,6 +1277,21 @@ export async function roomWindowEngine(windowId: string, opts: RunActor, progres
       ...out, ok: true, step: "ok",
       next_progress: { ...progress, router_job_id: sub.jobRef, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
     };
+  }
+
+  // ── A JOB THAT ASKED FOR ENGLISH MUST NOT BE ANSWERED WITH A SILENT NO ───────────────────────────
+  // `translate` is honoured on the ASYNC router path above, where the router does the ASR and the
+  // English in one pass. A synchronous engine (whisper, sarvam, gemini) is called below with its own
+  // fixed mode and has no such switch, so a job that asked for English and was routed here would run,
+  // be paid for, finish `done` — and leave `transcript_english` NULL. Worse, it would then still look
+  // like a window that needs English, be picked again the next night, and never settle.
+  // So it fails BY NAME, before any spend: `engine_failed` / `translate_unsupported_by_engine`. That
+  // counts as a failed job (the driver's per-window cap and its consecutive-failure stop both see it),
+  // and it is loud the night `stt_routing` is changed under a running backlog. Today's routing for the
+  // room stage is `route` for both language buckets (async), so this is a guard, not a live path.
+  if (jobOpts.translate === true) {
+    const attempts = await recordFailure(windowId, "engine_failed", "translate_unsupported_by_engine");
+    return { ...out, step: "engine_failed", detail: "translate_unsupported_by_engine", attempts };
   }
 
   // ── ITEM 4: ROUTING INHERITANCE MAY NOT REACH A PAID ENGINE ──────────────────────────────────

@@ -50,10 +50,32 @@ const actorOf = (ctx: StepContext) => ({
   via: ctx.args.via as "mcp" | "admin_route" | "cron",
 });
 
+/**
+ * A per-job choice must be the boolean `true` to count. Absent is false; a present value that is not a
+ * boolean is REFUSED at submit rather than coerced, because one of these two args reaches a
+ * cross-room override and a paid translation, and the string "false" must never be read as yes.
+ */
+function optionalBool(o: Record<string, unknown>, key: string): boolean {
+  const v = o[key];
+  if (v === undefined) return false;
+  if (typeof v !== "boolean") throw new JobArgsError(`${key} must be a boolean`);
+  return v;
+}
+
 export const roomWindowKind: JobKind = {
   name: ROOM_WINDOW_KIND,
   first: STEPS.prepare,
   scope: "invoke",
+
+  /**
+   * `switch_override` NEEDS `write`, NOT JUST `invoke` (V's ruling, 21 Sep 2026, on the Reviewer's finding that any invoke
+   * holder could otherwise make a job write an off room's live day for any window). `translate` stays at the kind's `invoke`:
+   * it costs Mini time, it does not widen what may be written. Read on the PARSED args, where the flag exists only when it
+   * was the boolean true (see parseArgs), so `switch_override:false` needs nothing.
+   */
+  scopeForArgs(args) {
+    return args.switch_override === true ? { scope: "write", arg: "switch_override" } : null;
+  },
 
   parseArgs(raw) {
     const o = (raw ?? {}) as Record<string, unknown>;
@@ -65,13 +87,19 @@ export const roomWindowKind: JobKind = {
     if (!actor) throw new JobArgsError("actor is required");
     const via = o.via === "mcp" || o.via === "admin_route" || o.via === "cron" ? o.via : null;
     if (!via) throw new JobArgsError("via must be mcp, admin_route or cron");
-    return { window_id, origin, actor, via };
+    // Per-job choices (RoomWindowJobOptions in lib/stt/room-drain.ts), stored ONLY when true so a job
+    // that asks for neither has exactly the args it always had — same shape, same row, same dedupe.
+    const translate = optionalBool(o, "translate");
+    const switch_override = optionalBool(o, "switch_override");
+    return { window_id, origin, actor, via, ...(translate ? { translate: true } : {}), ...(switch_override ? { switch_override: true } : {}) };
   },
 
   async run(ctx: StepContext) {
     const windowId = String(ctx.args.window_id ?? "");
     const origin = String(ctx.args.origin ?? "");
     const who = actorOf(ctx);
+    // Read from the persisted args at every step, so a job resumed after a lease expiry keeps its choices.
+    const jobOpts = { translate: ctx.args.translate === true, switchOverride: ctx.args.switch_override === true };
 
     switch (ctx.step) {
       case STEPS.prepare: {
@@ -81,7 +109,7 @@ export const roomWindowKind: JobKind = {
       }
 
       case STEPS.segment: {
-        const o = await roomWindowSegment(windowId, origin, who, ctx.progress);
+        const o = await roomWindowSegment(windowId, origin, who, ctx.progress, jobOpts);
         if (!o.ok) return failFromPhase(o);
         const next = { ...(o.next_progress ?? ctx.progress) };
         // E11 — a SILENT window has nothing to route. Its silence and marker are already written, so
@@ -91,7 +119,7 @@ export const roomWindowKind: JobKind = {
       }
 
       case STEPS.engine: {
-        const o = await roomWindowEngine(windowId, who, ctx.progress);
+        const o = await roomWindowEngine(windowId, who, ctx.progress, jobOpts);
         if (!o.ok) return failFromPhase(o);
         const next = o.next_progress ?? ctx.progress;
         // `done_engine` is the SYNCHRONOUS transport reporting that the run is already written.
