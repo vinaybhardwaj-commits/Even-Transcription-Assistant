@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'eta-shell-v4';   // bump on every SW change — v4 (B22): stop proxying non-GET (/process stream) + v3 cache-miss fix
+const SHELL_CACHE = 'eta-shell-v5';   // bump on every SW change — v5: retired /room/{slug} must never be served from cache (excluded below) + v4 (B22): stop proxying non-GET (/process stream) + v3 cache-miss fix
 const SHELL_URLS = ['/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -52,6 +52,16 @@ self.addEventListener('fetch', (e) => {
   // Network-first for navigations (page loads). If network fails, fall back to cache.
   // This means a broken cached response can never permanently block the page.
   if (e.request.mode === 'navigate') {
+    // /room/{slug} is retired (blank page, no PIN screen, no recorder) and must
+    // never be served from an offline cache — a leftover Chrome tab on a room
+    // Mac falling back to a stale cached PIN/recorder page would recreate the
+    // exact second-listener risk this route was retired to close. Never cache
+    // it, and never fall back to a cached copy of it: on failure it gets the
+    // plain offline response like any other never-cached path.
+    if (url.pathname.startsWith('/room/')) {
+      e.respondWith(fetch(e.request).catch(() => new Response('Offline', { status: 503 })));
+      return;
+    }
     e.respondWith(
       fetch(e.request).then((resp) => {
         if (resp.ok) {
