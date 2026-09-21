@@ -92,3 +92,52 @@ at the 1 s floor, −33.5pp at Silero 0.3). `/vad` makes the gate *runnable*, no
 stays OFF.
 
 **Superseded:** nothing. I have not superseded another pane's line.
+
+---
+
+# Addendum 2 — Refuter's findings fixed. READY FOR REFUTER.
+
+| repo | branch | commit |
+|---|---|---|
+| Even-Transcription-Assistant | `vinay/speech-gate` | **`2599664`** (base `45eedda`) |
+| `~/eta-router` | `vinay/vad-endpoint` | **`108ff19`** (base `86661c6`) |
+
+**F1 (blocker) — wired.** `lib/jobs/kinds/diarize-window.ts:65` fetches the VAD where the audio
+already is, and only when the flag is on. Proved by `tests/unit/diarize-window-job-gate.test.ts`:
+flag ON asks once with the window's own audio and records `["speech","non_speech"]`; flag OFF never
+asks; flag ON with the VAD down asks, is refused, and stamps `unjudged`.
+
+**F2 — M5 and M6 killed, on output.** M6 stays a defect and is pinned: ON with no VAD is
+`unjudged`, never `non_speech`. M5 **inverts** — OFF storing `rawSegments` is now the required
+behaviour, so the assertion is that OFF carries no gate key at all.
+
+**F3 — stale comment rewritten** (`lib/stt/speech-gate.ts`).
+
+**OFF is byte-identical.** `ungatedSegments` deleted, not fixed: 44 → 174 bytes per segment was the
+cost of saying "unjudged" five times. Asserted by comparing `JSON.stringify` length and key sets
+against the raw segments.
+
+**Router.** `/vad` has its own `_VAD_SEM` (`ETA_VAD_MAX_INFLIGHT`, default 1), no longer queues
+behind `/route`, and drops work whose client disconnected (499). `ETA_VAD_MAX_BYTES` (256 MB)
+refuses a declared oversize **413 without reading the body**; `ETA_VAD_MAX_AUDIO_S` (3600) refuses
+after decode, because Silero's cost tracks duration, not bytes.
+
+Verified on **8092/8093**: empty body 400, bad threshold 400, declared oversize 413, 900 s against a
+5 s cap 413 `audio_too_long`, garbage 400 `decode_failed`, happy path still exactly 265 spans /
+782,281 ms. **:8083 was never restarted** and `~/eta-router` stayed on `main` throughout.
+
+**Gate.** typecheck clean; `Tests 3287 passed | 1 skipped (3288)`, 147 files; `✓ Compiled
+successfully`; `check:silent` at the accepted 9, none mine; `swift build` complete; `swift test`
+UNPROVEN (no Xcode). **36 gate tests; 6 mutations, all red.**
+
+**A correction to Addendum 1.** That mutation round ran against a baseline that was already red: I
+deleted `ungatedSegments` without re-running the file importing it, so one "kill" I reported was a
+pre-existing failure. This round is against a verified-green 36. The Refuter's F2 was right about
+more than it knew.
+
+**Not fixed, and not asked to be:** M8 (`if (!roomId) return global`) and M12
+(`Array.isArray(parsed)`) remain unobservable guards, the same class as the `if (!base)` one —
+three in this diff, as the verdict says.
+
+**Unchanged:** the measurement still refutes enabling the gate (−34.4pp at the 1 s floor, −33.5pp at
+Silero 0.3). The flag stays OFF. **Superseded:** nothing.
