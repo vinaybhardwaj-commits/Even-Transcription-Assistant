@@ -332,6 +332,44 @@ describe("THE CANARY RETRY — a window this driver ran that still has no Englis
     }
   });
 
+  // Q5 — the SQL half of the attempts bound. The TypeScript verdict (fixtureVerdict, `>= RETRY_MAX_ATTEMPTS`) is a second guard for the
+  // same rule; these pin the STATEMENT, so removing the verdict in favour of "the SQL already does it" would still be caught, and so
+  // would a `<` quietly becoming `<=` (which lets a 4th attempt through the statement).
+  it("the SQL holds the attempts bound itself: a strict `< ?` on the count of done attempts, parked windows only when asked for", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const q = calls.find(isRetryQuery)!;
+    expect(q.text).toContain("AND (?::boolean OR (SELECT count(*) FROM scribe_job j WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id");
+    expect(q.text, "the bound compares the attempts count strictly: < ?, once").toContain("AND j.args->>'translate' = 'true' AND j.status = 'done') < ?)");
+    expect(q.text.split("j.status = 'done') < ?)").length - 1).toBe(1);
+    expect(q.text, "never <=").not.toMatch(/j\.status = 'done'\)\s*<=/);
+    expect(q.text, "never a literal in place of the parameter").not.toMatch(/j\.status = 'done'\)\s*<\s*\d/);
+  });
+
+  // Q6 — the row cap. LIVE-RELEVANT: 211 windows already have text and no English on their newest run (Refuter, 21 Sep, read-only), which is
+  // MORE than 200, so correctness depends on the scan being re-run with a growing skip list rather than on one pass. The cap therefore has to
+  // be there, and at this number: without it a pick would pull every such row, and a different number changes how many passes it takes.
+  it("the retry scan is capped at 200 rows, oldest first, in the statement text (the same way the backlog pick is pinned)", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    await makeStore(sql, CFG).summarize();
+    const retry = calls.filter(isRetryQuery);
+    expect(retry.length, "one for the pick, one for the summary count").toBe(2);
+    for (const q of retry) {
+      expect(q.text).toContain("ORDER BY w.end_ms ASC, w.id ASC LIMIT 200");
+      expect(q.text.endsWith("LIMIT 200")).toBe(true);
+    }
+  });
+
+  it("the retry scan ends its order and cap exactly like the backlog pick ends its order and cap, only with a different number", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const backlog = calls.find(isBacklogQuery)!.text;
+    const retry = calls.find(isRetryQuery)!.text;
+    expect(backlog).toContain("ORDER BY w.end_ms ASC, w.id ASC LIMIT 1");
+    expect(retry.slice(retry.indexOf("ORDER BY w.end_ms"))).toBe("ORDER BY w.end_ms ASC, w.id ASC LIMIT 200");
+  });
+
   it("an actor given in the config is the one sent (not the default)", async () => {
     const { sql, calls } = fakeSql([]);
     await makeStore(sql, { ...CFG, actor: "some-other-actor" }).next(new Set());
