@@ -9,7 +9,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeStore, fixtureVerdict, isClosedHourIst, type SqlTag } from "@/lib/overnight-translate/select";
+import { makeStore, fixtureVerdict, isClosedHourIst, RETRY_MAX_ATTEMPTS, RETRY_ACTOR, type SqlTag } from "@/lib/overnight-translate/select";
+import { ACTOR } from "@/lib/overnight-translate/driver";
 
 type Call = { text: string; values: unknown[] };
 const flat = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -263,7 +264,153 @@ describe("candidate mapping and summarize", () => {
     ]);
     expect(await makeStore(sql, CFG).summarize()).toEqual({
       fixture_windows: 4, fixture_need_asr: 1, fixture_need_english_only: 1, fixture_skipped_native_english: 0, fixture_skipped_proxy: 1,
+      retry_pending: 0, parked: 0,
       backlog_remaining: 2100, backlog_in_transcript_off_rooms: 180, excluded_closed_hours: 182, excluded_no_speakers: 41,
     });
+  });
+});
+
+
+// ===========================================================================
+// THE CANARY RETRY (V's engineering ruling, 21 Sep 2026, RULINGS-21-SEP-1730)
+const isRetryQuery = (c: Call) => c.text.includes("JOIN LATERAL") && !c.text.includes("LEFT JOIN LATERAL") && !c.text.includes("AS remaining");
+const retryRow = (over: Record<string, unknown> = {}) => ({
+  id: "bw_r1", room_id: "room_3", room_day_id: "rd_r", start_ms: "3000", end_ms: "903000", transcript_enabled: true,
+  run_id: "tr_1", orig_len: 900, eng_len: 0, metrics_json: null, hour_ist: 0, no_speakers: false, attempts: 1, ...over,
+});
+
+describe("THE CANARY RETRY — a window this driver ran that still has no English is re-picked, up to 3 attempts in all, then parked", () => {
+  it("the bound is 3, the first attempt counts, and the actor is the driver's own", () => {
+    expect(RETRY_MAX_ATTEMPTS).toBe(3);
+    expect(RETRY_ACTOR, "select.ts's default must be the name the driver submits under").toBe(ACTOR);
+  });
+
+  it("comes AFTER the fixtures and BEFORE the never-transcribed backlog, and the backlog is not even asked when a retry is found", async () => {
+    const { sql, calls } = fakeSql([(c) => (isRetryQuery(c) ? [retryRow()] : undefined), (c) => (isBacklogQuery(c) ? [backlogRow()] : undefined)]);
+    const c = await makeStore(sql, CFG).next(new Set());
+    expect(c).toMatchObject({ window_id: "bw_r1", klass: "retry", has_run: true, attempt: 2, room_transcript_on: true });
+    expect(calls.filter(isBacklogQuery)).toHaveLength(0);
+    const order = calls.map((x) => (isFixtureQuery(x) ? "fixture" : isRetryQuery(x) ? "retry" : "backlog"));
+    expect(order.indexOf("fixture")).toBeLessThan(order.indexOf("retry"));
+  });
+
+  it("the attempt number is the count of finished attempts plus one: 1 -> 2, 2 -> 3", async () => {
+    for (const [attempts, want] of [[1, 2], ["2", 3]] as const) {
+      const { sql } = fakeSql([(c) => (isRetryQuery(c) ? [retryRow({ attempts })] : undefined)]);
+      expect((await makeStore(sql, CFG).next(new Set()))!.attempt).toBe(want);
+    }
+  });
+
+  it("a window with 3 finished attempts and still no English is PARKED: never returned, the scan falls through to the backlog", async () => {
+    const { sql } = fakeSql([(c) => (isRetryQuery(c) ? [retryRow({ attempts: 3 }), retryRow({ id: "bw_r2", attempts: "4" })] : undefined), (c) => (isBacklogQuery(c) ? [backlogRow()] : undefined)]);
+    expect((await makeStore(sql, CFG).next(new Set()))!.klass).toBe("backlog");
+  });
+
+  it("the SQL itself holds the bound: attempts < 3 is a bound parameter, and parked windows are only fetched when asked for (summarize)", async () => {
+    const { sql, calls } = fakeSql([]);
+    const store = makeStore(sql, CFG);
+    await store.next(new Set());
+    await store.summarize();
+    const [forNext, forSummary] = calls.filter(isRetryQuery);
+    expect(forNext!.values).toContain(RETRY_MAX_ATTEMPTS);
+    expect(forNext!.values, "includeParked = false for a pick").toContain(false);
+    expect(forSummary!.values, "includeParked = true for the count").toContain(true);
+  });
+
+  it("counts attempts as DONE translate jobs of this actor — nothing written anywhere, the state is the app's own job rows", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const q = calls.find(isRetryQuery)!;
+    expect(q.text).toContain("j.args->>'actor' = ?");
+    expect(q.text).toContain("j.args->>'translate' = 'true'");
+    expect(q.text).toContain("j.status = 'done'");
+    expect(q.values).toContain(RETRY_ACTOR);
+    // ...in EVERY place it is needed: the attempts column, the attempts bound, and the EXISTS that says this driver ran the window at all
+    // (attempts >= 1), so an older run from somewhere else with no English is never swept in.
+    for (const frag of ["j.args->>'actor' = ?", "j.args->>'translate' = 'true'", "j.status = 'done'"]) {
+      expect(q.text.split(frag).length - 1, frag).toBe(3);
+    }
+  });
+
+  it("an actor given in the config is the one sent (not the default)", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, { ...CFG, actor: "some-other-actor" }).next(new Set());
+    expect(calls.find(isRetryQuery)!.values).toContain("some-other-actor");
+    expect(calls.find(isRetryQuery)!.values).not.toContain(RETRY_ACTOR);
+  });
+
+  it("only a window whose NEWEST run has text and no English, that this driver ran, and that has no job in flight", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const q = calls.find(isRetryQuery)!;
+    expect(q.text).toContain("length(coalesce(t.transcript_original, '')) > 0");
+    expect(q.text).toContain("length(coalesce(t.transcript_english, '')) = 0");
+    expect(q.text).toContain("ORDER BY created_at DESC FETCH FIRST 1 ROW ONLY");
+    expect(q.text).toContain("EXISTS ( SELECT 1 FROM scribe_job j WHERE j.kind = 'room_window'");
+    expect(q.text).toContain("j.status IN ('queued', 'running')");
+    expect(q.text).toContain("j.status = 'failed') < ?");
+  });
+
+  it("does not take a fixture room-day (the fixture path holds the same bound) and skips windows already tried this run", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set(["bw_x", "bw_y"]));
+    const q = calls.find(isRetryQuery)!;
+    expect(q.text).toContain("w.room_day_id <> ALL(?::text[])");
+    expect(q.values).toContainEqual(["rd_fix1", "rd_fix2"]);
+    expect(q.values[q.values.length - 1]).toEqual(["bw_x", "bw_y"]);
+  });
+
+  it("a NATIVE-English run is not this driver's to redo (same J0 rule as the fixtures)", async () => {
+    const native = { full_window_language: "english", sarvam_language: "en", language_timeline: { language_mix: { en: 3, und: 1 } } };
+    const { sql } = fakeSql([(c) => (isRetryQuery(c) ? [retryRow({ metrics_json: native })] : undefined), (c) => (isBacklogQuery(c) ? [backlogRow()] : undefined)]);
+    expect((await makeStore(sql, CFG).next(new Set()))!.klass).toBe("backlog");
+  });
+
+  it("a retry scan that came up empty is not run again on the next pick in the same run", async () => {
+    const { sql, calls } = fakeSql([(c) => (isBacklogQuery(c) ? [backlogRow(), backlogRow({ id: "bw_b2" })] : undefined)]);
+    const store = makeStore(sql, CFG);
+    await store.next(new Set());
+    await store.next(new Set(["bw_b1"]));
+    expect(calls.filter(isRetryQuery)).toHaveLength(1);
+  });
+
+  it("a Transcript-OFF room is retried like any other, flagged so the job carries the override", async () => {
+    const { sql } = fakeSql([(c) => (isRetryQuery(c) ? [retryRow({ transcript_enabled: false })] : undefined)]);
+    expect((await makeStore(sql, CFG).next(new Set()))!.room_transcript_on).toBe(false);
+  });
+
+  it("the FIXTURE path holds the same bound: a fixture window re-driven 3 times with no English is parked, not picked", async () => {
+    const base = { run_id: "tr_1", orig_len: 500, eng_len: 0 };
+    expect(fixtureVerdict(fixtureRow({ ...base, attempts: 2 }))).toBe("english_only");
+    expect(fixtureVerdict(fixtureRow({ ...base, attempts: 3 }))).toBe("skip_parked");
+    expect(fixtureVerdict(fixtureRow({ ...base }))).toBe("english_only");
+    const { sql } = fakeSql([(c) => (isFixtureQuery(c) ? [fixtureRow({ ...base, attempts: 3 })] : undefined), (c) => (isBacklogQuery(c) ? [backlogRow()] : undefined)]);
+    expect((await makeStore(sql, CFG).next(new Set()))!.klass).toBe("backlog");
+  });
+
+  it("a fixture candidate carries its attempt number too", async () => {
+    const { sql } = fakeSql([(c) => (isFixtureQuery(c) ? [fixtureRow({ run_id: "tr_1", orig_len: 500, eng_len: 0, attempts: 1 })] : undefined)]);
+    expect((await makeStore(sql, CFG).next(new Set()))).toMatchObject({ klass: "fixture", attempt: 2 });
+  });
+
+  it("summarize counts the retries pending and the parked ones (retry scan + fixtures), so a parked window is COUNTED, not forgotten", async () => {
+    const { sql } = fakeSql([
+      (c) => (isFixtureQuery(c) ? [fixtureRow({ id: "f", run_id: "t", orig_len: 10, eng_len: 0, attempts: 3 })] : undefined),
+      (c) => (isRetryQuery(c) ? [retryRow({ id: "r1", attempts: 1 }), retryRow({ id: "r2", attempts: 2 }), retryRow({ id: "r3", attempts: 3 })] : undefined),
+      (c) => (c.text.includes("AS remaining") ? [{ remaining: "10", in_off_rooms: "1" }] : undefined),
+      (c) => (c.text.includes("AS closed_hours") ? [{ closed_hours: "0", no_speakers: "0" }] : undefined),
+    ]);
+    expect(await makeStore(sql, CFG).summarize()).toMatchObject({ retry_pending: 2, parked: 2, fixture_need_english_only: 0 });
+  });
+
+  it("every statement the retry adds is still a read", async () => {
+    const { sql, calls } = fakeSql([]);
+    const store = makeStore(sql, CFG);
+    await store.next(new Set());
+    await store.summarize();
+    for (const c of calls.filter(isRetryQuery)) {
+      expect(c.text).toMatch(/^SELECT\b/);
+      expect(c.text).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|COPY)\b/i);
+    }
   });
 });

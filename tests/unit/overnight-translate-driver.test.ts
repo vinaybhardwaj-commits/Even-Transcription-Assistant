@@ -22,11 +22,11 @@ const NIGHT = at(22, 0, 0);                      // 22:00 IST — well inside th
 const ORIGIN = "https://www.evenscribe.app";
 
 const cand = (id: string, over: Partial<Candidate> = {}): Candidate => ({
-  window_id: id, room_id: "room_1", room_day_id: "rd_x", start_ms: 0, end_ms: 900_000, klass: "backlog", room_transcript_on: true, has_run: false, ...over,
+  window_id: id, room_id: "room_1", room_day_id: "rd_x", start_ms: 0, end_ms: 900_000, klass: "backlog", room_transcript_on: true, has_run: false, attempt: 1, ...over,
 });
 const SUMMARY: Summary = {
   fixture_windows: 0, fixture_need_asr: 0, fixture_need_english_only: 0, fixture_skipped_native_english: 0, fixture_skipped_proxy: 0,
-  backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
+  retry_pending: 0, parked: 0, backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
 const done = (): StatusResult => ({ ok: true, status: "done", step: "finish", error_code: null, attempts: 5, failures: 0 });
 const running = (): StatusResult => ({ ok: true, status: "running", step: "engine", error_code: null, attempts: 1, failures: 0 });
@@ -458,7 +458,7 @@ describe("THE ENGLISH CANARY — a `done` that made no English is a failure (the
     expect(s).toMatchObject({ done: 0, failed: 0, unverified: 1, started: 1, fatal: null });
     expect(evs(h.log, "window_done")).toHaveLength(0);
     expect(evs(h.log, "english_check_unavailable")).toEqual([
-      { event: "english_check_unavailable", window_id: "A", room_day_id: "rd_A", job_id: "job_1", error_name: "NeonDbError", consecutive: 1 },
+      { event: "english_check_unavailable", window_id: "A", room_day_id: "rd_A", job_id: "job_1", error_name: "NeonDbError", attempt: 1, consecutive: 1 },
     ]);
     expect(JSON.stringify(h.log)).not.toContain("postgres://");
   });
@@ -555,7 +555,7 @@ describe("DRY RUN — the plan, and nothing else", () => {
 describe("LOG HYGIENE — ids, counts, durations and closed codes only; never the token", () => {
   const TOKEN = "TOKEN-SECRET-abc123-do-not-leak";
   const KEYS = new Set([
-    "event", "mode", "limit", "n", "window_id", "job_id", "room_day_id", "klass", "has_run", "room_transcript_on", "switch_override", "translate",
+    "event", "mode", "limit", "n", "window_id", "job_id", "room_day_id", "klass", "has_run", "attempt", "room_transcript_on", "switch_override", "translate",
     "code", "reason", "streak", "ms", "status", "step", "error_code", "wall_s", "why", "consecutive",
     "started", "done", "failed", "refused", "abandoned", "unverified", "overridden", "fatal", "stop", "error_name",
     ...Object.keys(SUMMARY),

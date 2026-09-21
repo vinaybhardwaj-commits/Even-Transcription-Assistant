@@ -3,7 +3,9 @@
  *
  * ORDER (Fable's ruling of 21 Sep 2026, part c):
  *   1. the Jev FIXTURE room-days, first;
- *   2. then the rest of the backlog, oldest window first, with the label-free proxies removing what is
+ *   2. then the CANARY RETRY (V's ruling, 21 Sep 17:30): a window this driver already ran that still has no
+ *      English, up to RETRY_MAX_ATTEMPTS attempts in all, then parked (see RETRY_MAX_ATTEMPTS below);
+ *   3. then the rest of the backlog, oldest window first, with the label-free proxies removing what is
  *      clearly empty.
  *
  * TRANSCRIPT-OFF ROOMS ARE INCLUDED (V, 21 Sep 2026). There is no filter on `room.transcript_enabled`
@@ -26,7 +28,7 @@
  * (lib/jev/english.ts isNativeEnglish — imported, not copied, so "already English" always means what J0
  * will decide). A fixture window with NO run gets the proxies like any other.
  *
- * NEVER WRITES. `Store` has three read methods. The SQL below is SELECT-only and a test asserts it.
+ * NEVER WRITES, and the retry adds no state: an attempt is a `done` job row the app already wrote. `Store` has three read methods. The SQL below is SELECT-only and a test asserts it.
  * Ids, counts and timestamps only — no transcript text is selected, only its LENGTH.
  */
 import { isNativeEnglish } from "@/lib/jev/english";
@@ -37,11 +39,13 @@ export type Candidate = {
   room_day_id: string;
   start_ms: number;
   end_ms: number;
-  klass: "fixture" | "backlog";
+  klass: "fixture" | "retry" | "backlog";
   /** false → the room's own Transcript switch is off, so the job must carry switch_override. */
   room_transcript_on: boolean;
   /** true → a run exists and only English is missing (a re-drain); false → never transcribed. */
   has_run: boolean;
+  /** 1 for a first attempt; 2 or 3 for a window this driver already ran and found without English (see RETRY_MAX_ATTEMPTS). */
+  attempt: number;
 };
 
 export type Summary = {
@@ -50,6 +54,10 @@ export type Summary = {
   fixture_need_english_only: number;
   fixture_skipped_native_english: number;
   fixture_skipped_proxy: number;
+  /** Windows this driver already ran that have text and no English, with attempts left: they are re-picked. */
+  retry_pending: number;
+  /** Windows (fixture or not) that used up RETRY_MAX_ATTEMPTS with no English. Counted here, never picked again, never called done. */
+  parked: number;
   backlog_remaining: number;
   backlog_in_transcript_off_rooms: number;
   excluded_closed_hours: number;
@@ -77,7 +85,22 @@ export type StoreConfig = {
   fixtureRoomDays: readonly string[];
   /** A window whose room_window jobs have failed this many times is skipped for good. */
   maxFailedJobs: number;
+  /** The `actor` the driver's own jobs carry (args->>'actor'). Defaults to RETRY_ACTOR; the driver passes its own ACTOR. */
+  actor?: string;
 };
+
+/**
+ * THE CANARY RETRY (V's engineering ruling, 21 Sep 2026, RULINGS-21-SEP-1730). A window this driver ran to `done` whose newest run has
+ * text and no English is picked again, up to this many attempts IN ALL (the first one counts), and is then PARKED: still counted in the
+ * summary, never picked again, never called done. It is one rule for both the fixture and the backlog path.
+ *
+ * NO NEW STATE. An "attempt" is a `done` `room_window` job with `args.actor` = the driver's actor and `args.translate` = 'true', counted
+ * in scribe_job, which the app writes and this selector only reads. "No English yet" is read from the newest run, not remembered, so a
+ * window whose check merely failed to READ but which does have English drops out by itself, and one that truly has none is re-driven.
+ * The database cannot tell an unreadable check from a no-English answer, so both are retried under the same bound.
+ */
+export const RETRY_MAX_ATTEMPTS = 3;
+export const RETRY_ACTOR = "overnight-translate";
 
 /** Window start hour in IST, 0-23. Closed hours = 21:00-06:59 (the ledger's "21:00-07:00"). */
 export const isClosedHourIst = (hourIst: number): boolean => hourIst >= 21 || hourIst < 7;
@@ -86,12 +109,14 @@ type FixtureRow = {
   id: string; room_id: string; room_day_id: string; start_ms: string | number; end_ms: string | number;
   transcript_enabled: boolean; run_id: string | null; orig_len: string | number | null; eng_len: string | number | null;
   metrics_json: unknown; hour_ist: string | number; no_speakers: boolean;
+  /** `done` translate jobs of this driver's actor for this window. Absent = 0. */
+  attempts?: string | number | null;
 };
 
 const num = (v: unknown): number => Number(v);
 
 /** PURE — the decision for one fixture window. */
-export function fixtureVerdict(r: FixtureRow): "asr" | "english_only" | "skip_native_english" | "skip_proxy" | "skip_nothing_to_translate" {
+export function fixtureVerdict(r: FixtureRow): "asr" | "english_only" | "skip_native_english" | "skip_proxy" | "skip_nothing_to_translate" | "skip_parked" {
   if (!r.run_id) {
     // Never transcribed: only if it is not clearly empty by the label-free proxies.
     return isClosedHourIst(num(r.hour_ist)) || r.no_speakers ? "skip_proxy" : "asr";
@@ -100,7 +125,8 @@ export function fixtureVerdict(r: FixtureRow): "asr" | "english_only" | "skip_na
   const eng = num(r.eng_len ?? 0);
   if (eng > 0) return "skip_nothing_to_translate";       // English already there
   if (orig === 0) return "skip_nothing_to_translate";    // a run with no text has nothing to translate
-  return isNativeEnglish(r.metrics_json as never) ? "skip_native_english" : "english_only";
+  if (isNativeEnglish(r.metrics_json as never)) return "skip_native_english";
+  return num(r.attempts ?? 0) >= RETRY_MAX_ATTEMPTS ? "skip_parked" : "english_only";
 }
 
 export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
@@ -109,6 +135,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
   // window's need is decided by what is already in the database, so a scan that came up empty stays empty: the
   // ~100-row lateral join is not re-run on every later call.
   let fixturesExhausted = fixtures.length === 0;
+  const actor = cfg.actor ?? RETRY_ACTOR;
+  // Same reasoning for the retry scan: within a run `exclude` only grows, and the windows this run finishes are all in it, so a scan that
+  // found nothing left to re-pick stays empty.
+  let retriesExhausted = false;
 
   /** Every fixture window that could need work, oldest first. ~100 rows; no text, only lengths. */
   async function fixtureRows(): Promise<FixtureRow[]> {
@@ -118,7 +148,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
              t.id AS run_id, length(coalesce(t.transcript_original, '')) AS orig_len,
              length(coalesce(t.transcript_english, '')) AS eng_len, t.metrics_json,
              extract(hour FROM (to_timestamp(w.start_ms / 1000.0) AT TIME ZONE 'Asia/Kolkata'))::int AS hour_ist,
-             EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state = 'no_speakers') AS no_speakers
+             EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state = 'no_speakers') AS no_speakers,
+             (SELECT count(*) FROM scribe_job j
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                  AND j.args->>'translate' = 'true' AND j.status = 'done') AS attempts
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
         JOIN room r ON r.id = s.room_id
@@ -140,6 +173,55 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
     `) as FixtureRow[];
   }
 
+  /**
+   * THE RETRY SCAN. Windows OUTSIDE the fixtures (those go through fixtureRows, under the same bound) that this driver already ran to `done`
+   * and whose newest run has text and no English. `attempts` counts those jobs. `includeParked` false = only windows with attempts left
+   * (what `next` picks from); true = also the parked ones (what `summarize` counts). At most 200 rows, oldest first; no text, only lengths.
+   * The lateral uses FETCH FIRST rather than LIMIT so this statement is never mistaken for the one-row backlog pick.
+   */
+  async function retryRows(includeParked: boolean, skip: string[]): Promise<FixtureRow[]> {
+    return (await sql`
+      SELECT w.id, s.room_id, w.room_day_id, w.start_ms, w.end_ms, r.transcript_enabled,
+             t.id AS run_id, length(coalesce(t.transcript_original, '')) AS orig_len,
+             length(coalesce(t.transcript_english, '')) AS eng_len, t.metrics_json,
+             0 AS hour_ist, FALSE AS no_speakers,
+             (SELECT count(*) FROM scribe_job j
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                  AND j.args->>'translate' = 'true' AND j.status = 'done') AS attempts
+        FROM bench_window w
+        JOIN bench_session s ON s.id = w.session_id
+        JOIN room r ON r.id = s.room_id
+        JOIN LATERAL (
+          SELECT id, transcript_original, transcript_english, metrics_json
+            FROM transcription_run
+           WHERE subject_type = 'bench_window' AND subject_id = w.id
+           ORDER BY created_at DESC FETCH FIRST 1 ROW ONLY
+        ) t ON TRUE
+       WHERE w.state IN ('closed', 'transcribed')
+         AND w.grid_aligned = TRUE
+         AND w.room_day_id IS NOT NULL
+         AND w.room_day_id <> ALL(${fixtures}::text[])
+         AND length(coalesce(t.transcript_original, '')) > 0
+         AND length(coalesce(t.transcript_english, '')) = 0
+         AND EXISTS (
+               SELECT 1 FROM scribe_job j
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                  AND j.args->>'translate' = 'true' AND j.status = 'done')
+         AND (${includeParked}::boolean OR
+              (SELECT count(*) FROM scribe_job j
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                  AND j.args->>'translate' = 'true' AND j.status = 'done') < ${RETRY_MAX_ATTEMPTS})
+         AND NOT EXISTS (
+               SELECT 1 FROM scribe_job j
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status IN ('queued', 'running'))
+         AND (SELECT count(*) FROM scribe_job j
+               WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${cfg.maxFailedJobs}
+         AND w.id <> ALL(${skip}::text[])
+       ORDER BY w.end_ms ASC, w.id ASC
+       LIMIT 200
+    `) as FixtureRow[];
+  }
+
   return {
     async next(exclude) {
       const skip = [...exclude];
@@ -154,13 +236,28 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
               window_id: r.id, room_id: r.room_id, room_day_id: r.room_day_id,
               start_ms: num(r.start_ms), end_ms: num(r.end_ms), klass: "fixture",
               room_transcript_on: Boolean(r.transcript_enabled), has_run: v === "english_only",
+              attempt: num(r.attempts ?? 0) + 1,
             };
           }
         }
         fixturesExhausted = true;
       }
 
-      // 2. THE BACKLOG. Never transcribed, oldest first, minus the two label-free proxies. NO filter on the
+      // 2. THE CANARY RETRY. A window this driver ran to `done` that still has no English, while it has attempts left.
+      if (!retriesExhausted) {
+        for (const r of await retryRows(false, skip)) {
+          if (fixtureVerdict(r) !== "english_only") continue;   // native English is not this driver's to redo
+          return {
+            window_id: r.id, room_id: r.room_id, room_day_id: r.room_day_id,
+            start_ms: num(r.start_ms), end_ms: num(r.end_ms), klass: "retry",
+            room_transcript_on: Boolean(r.transcript_enabled), has_run: true,
+            attempt: num(r.attempts ?? 0) + 1,
+          };
+        }
+        retriesExhausted = true;
+      }
+
+      // 3. THE BACKLOG. Never transcribed, oldest first, minus the two label-free proxies. NO filter on the
       //    room's Transcript switch (V's ruling) — `transcript_enabled` is selected, not tested.
       const rows = (await sql`
         SELECT w.id, s.room_id, w.room_day_id, w.start_ms, w.end_ms, r.transcript_enabled
@@ -189,7 +286,7 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
       return {
         window_id: b.id, room_id: b.room_id, room_day_id: b.room_day_id,
         start_ms: num(b.start_ms), end_ms: num(b.end_ms), klass: "backlog",
-        room_transcript_on: Boolean(b.transcript_enabled), has_run: false,
+        room_transcript_on: Boolean(b.transcript_enabled), has_run: false, attempt: 1,
       };
     },
 
@@ -207,8 +304,13 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
 
     async summarize() {
       const fx = await fixtureRows();
-      const tally = { asr: 0, english_only: 0, skip_native_english: 0, skip_proxy: 0, skip_nothing_to_translate: 0 };
+      const tally = { asr: 0, english_only: 0, skip_native_english: 0, skip_proxy: 0, skip_nothing_to_translate: 0, skip_parked: 0 };
       for (const r of fx) tally[fixtureVerdict(r)] += 1;
+      const rt = { english_only: 0, skip_parked: 0 };
+      for (const r of await retryRows(true, [])) {
+        const v = fixtureVerdict(r);
+        if (v === "english_only" || v === "skip_parked") rt[v] += 1;
+      }
 
       const [c] = (await sql`
         SELECT
@@ -247,6 +349,8 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
         fixture_need_english_only: tally.english_only,
         fixture_skipped_native_english: tally.skip_native_english,
         fixture_skipped_proxy: tally.skip_proxy,
+        retry_pending: rt.english_only,
+        parked: tally.skip_parked + rt.skip_parked,
         backlog_remaining: num(c?.remaining ?? 0),
         backlog_in_transcript_off_rooms: num(c?.in_off_rooms ?? 0),
         excluded_closed_hours: num(x?.closed_hours ?? 0),

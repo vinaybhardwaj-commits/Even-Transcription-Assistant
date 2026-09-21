@@ -78,7 +78,7 @@ export type RunSummary = {
 
 const EMPTY_SUMMARY: Summary = {
   fixture_windows: 0, fixture_need_asr: 0, fixture_need_english_only: 0, fixture_skipped_native_english: 0, fixture_skipped_proxy: 0,
-  backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
+  retry_pending: 0, parked: 0, backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
 
 const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
@@ -122,7 +122,7 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
       if (!c) break;
       tried.add(c.window_id);
       deps.log({
-        event: "plan", n, window_id: c.window_id, room_day_id: c.room_day_id, klass: c.klass, has_run: c.has_run,
+        event: "plan", n, window_id: c.window_id, room_day_id: c.room_day_id, klass: c.klass, has_run: c.has_run, attempt: c.attempt,
         room_transcript_on: c.room_transcript_on, switch_override: !c.room_transcript_on, translate: true,
       });
     }
@@ -225,7 +225,7 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
     if (!c.room_transcript_on) s.overridden += 1;
     const t0 = deps.now();
     deps.log({
-      event: "window_submitted", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, has_run: c.has_run,
+      event: "window_submitted", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, has_run: c.has_run, attempt: c.attempt,
       room_transcript_on: c.room_transcript_on, switch_override: !c.room_transcript_on,
     });
 
@@ -266,7 +266,8 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
       // nothing is known about the window, so it is NOT recorded as done, it does NOT reset the counter, and it counts
       // toward the same consecutive-failure stop. Otherwise a database blip would switch off the only bound that caps a
       // silent no-English night at five windows. The window is left unverified (a separate count, `unverified`) and its
-      // id and room-day are logged, so a later run can look at it again (see the report on how).
+      // id, room-day and attempt number are logged. A LATER run re-picks it by itself (select.ts, the canary retry: up to
+      // RETRY_MAX_ATTEMPTS attempts in all, then parked and counted, never called done).
       let english: "ok" | "missing" | "unavailable" = "ok";
       let checkError = "";
       try {
@@ -279,10 +280,10 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
         consecutiveFailures += 1;
         if (english === "missing") {
           s.failed += 1;
-          deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: "done", step: terminal.step, error_code: "no_english", wall_s });
+          deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: "done", step: terminal.step, error_code: "no_english", attempt: c.attempt, wall_s });
         } else {
           s.unverified += 1;
-          deps.log({ event: "english_check_unavailable", window_id: c.window_id, room_day_id: c.room_day_id, job_id: sub.job_id, error_name: checkError, consecutive: consecutiveFailures });
+          deps.log({ event: "english_check_unavailable", window_id: c.window_id, room_day_id: c.room_day_id, job_id: sub.job_id, error_name: checkError, attempt: c.attempt, consecutive: consecutiveFailures });
         }
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break; }
         continue;

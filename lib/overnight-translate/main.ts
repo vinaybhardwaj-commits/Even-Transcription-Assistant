@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { sql } from "@/lib/db";
 import { makeStore, type SqlTag } from "./select";
 import { makeDoor } from "./door";
-import { runOvernight, DEFAULT_MAX_FAILED_JOBS, type Deps } from "./driver";
+import { runOvernight, ACTOR, DEFAULT_MAX_FAILED_JOBS, type Deps } from "./driver";
 import { DEFAULT_PRESSURE_FILE, gateDecision, readLastLine, freeDiskGb } from "./gate";
 
 export const DEFAULT_APP_URL = "https://www.evenscribe.app";
@@ -95,7 +95,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
 
   const pressureFile = env.OVERNIGHT_TRANSLATE_PRESSURE_FILE ?? DEFAULT_PRESSURE_FILE;
   const deps: Deps = {
-    store: makeStore(sql as unknown as SqlTag, { fixtureRoomDays: p.fixtures, maxFailedJobs: DEFAULT_MAX_FAILED_JOBS }),
+    store: makeStore(sql as unknown as SqlTag, { fixtureRoomDays: p.fixtures, maxFailedJobs: DEFAULT_MAX_FAILED_JOBS, actor: ACTOR }),
     door: makeDoor({ baseUrl: appUrl, token }),
     origin: appUrl,
     now: () => Date.now(),
