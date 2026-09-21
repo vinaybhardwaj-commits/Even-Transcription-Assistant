@@ -62,7 +62,13 @@ export type GatedSegment = DiarizeSegment & {
   speech_ratio: number | null;
   verdict: SegmentVerdict;
   /** Why, when the verdict is `unjudged`. Absent otherwise. */
-  unjudged_reason?: "vad_unavailable" | "vad_empty_window" | "gate_off";
+  /**
+   * Why, when the verdict is `unjudged`. Two reasons, and they are NOT interchangeable: the gate
+   * refuses on either, but only `vad_empty_window` says the VAD answered and found nothing — the
+   * failure signature that appeared on 12 of 80 real windows. Collapsing them loses the count.
+   * (`gate_off` was a third, and went with `ungatedSegments`: OFF now writes no key at all.)
+   */
+  unjudged_reason?: "vad_unavailable" | "vad_empty_window";
   speech_basis: string;
 };
 

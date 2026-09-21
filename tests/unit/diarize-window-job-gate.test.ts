@@ -91,6 +91,22 @@ describe("F1 — the drain path asks the VAD, and stores what it answered", () =
     for (const s of segs) expect(Object.keys(s).sort()).toEqual(["end_ms", "speaker_idx", "start_ms"]);
   });
 
+  it("R5 — carries WHICH refusal it was: empty is not the same as unreachable", async () => {
+    // Both refusals stamp `unjudged`, which is why swapping them passed the suite. They answer
+    // different questions: `vad_empty_window` means Silero ANSWERED and found nothing — the
+    // failure seen on 12 of 80 real windows — and `vad_unavailable` means no answer arrived.
+    // A hand-off that only forwards `speech.ok` turns the first into the second and the count
+    // of VAD failures silently becomes zero.
+    process.env.DIARIZE_SPEECH_GATE = "1";
+    H.vadReply = { ok: false, reason: "vad_empty_window" };
+    await runStep();
+    const ok = H.recorded.find((r) => r.state !== "failed");
+    const segs = ok!.segments as Array<Record<string, unknown>>;
+    expect(segs.every((s) => s.verdict === "unjudged")).toBe(true);
+    expect(segs.every((s) => s.unjudged_reason === "vad_empty_window")).toBe(true);
+    expect(segs.some((s) => s.unjudged_reason === "vad_unavailable")).toBe(false);
+  });
+
   it("FLAG ON with the VAD down: asks, is refused, and convicts nothing", async () => {
     process.env.DIARIZE_SPEECH_GATE = "1";
     H.vadReply = { ok: false, reason: "vad_unavailable" };
