@@ -11,10 +11,10 @@
  * P1/P2/P3 below reproduce fleet's probes and fail if the original defects return.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { isNativeEnglish, languageMix, classifyWindow } from "@/lib/jev/english";
+import { isNativeEnglish, languageMix, classifyWindow, nativeEnglishVotes, votesRecord } from "@/lib/jev/english";
 
 // ── the three-way agreement rule, PURE ───────────────────────────────────────────────────────────
-describe("J0 — isNativeEnglish: all three signals must agree to skip translation", () => {
+describe("J0 — isNativeEnglish: an absent signal abstains, a present one that disagrees vetoes", () => {
   const en = (mix: Record<string, number>, full = "english", sarvam = "en") =>
     ({ full_window_language: full, sarvam_language: sarvam, language_timeline: { language_mix: mix } });
 
@@ -37,11 +37,62 @@ describe("J0 — isNativeEnglish: all three signals must agree to skip translati
     expect(isNativeEnglish(en({ en: 2 }, "english", "hi"))).toBe(false);
     expect(isNativeEnglish(en({ en: 2 }, "english", "en-IN"))).toBe(true);
   });
-  it("a missing or empty mix is NOT agreement (absent metric never reads as English)", () => {
-    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(false);
-    expect(isNativeEnglish(en({}))).toBe(false);
+  it("an ABSENT mix abstains: the other two signals carry it (V, 21 Sep — was false before)", () => {
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
+  });
+  it("an EMPTY mix ABSTAINS: it names no language, so it carries no information (V, 21 Sep)", () => {
+    expect(isNativeEnglish(en({}))).toBe(true);
+    expect(nativeEnglishVotes(en({})).mix).toBe("absent");
+  });
+  it("an empty mix cannot rescue a window on its own — the other two must still agree", () => {
+    expect(isNativeEnglish(en({}, "hindi", "en"))).toBe(false);
+    expect(isNativeEnglish({ full_window_language: "english", language_timeline: { language_mix: {} } })).toBe(false);
+  });
+  it("a mix whose values are all non-numeric reduces to empty, so it abstains as well", () => {
+    expect(nativeEnglishVotes({ full_window_language: "english", sarvam_language: "en", language_timeline: { language_mix: { hi: "x" } } } as never).mix).toBe("absent");
+  });
+  it("no metrics at all is never English — nothing voted", () => {
     expect(isNativeEnglish(null)).toBe(false);
     expect(isNativeEnglish(undefined)).toBe(false);
+    expect(isNativeEnglish({})).toBe(false);
+  });
+
+  // ── the rule the order names, case by case ────────────────────────────────────────────────────
+  it("(1) three present, all English → pass", () => {
+    expect(isNativeEnglish(en({ en: 2, und: 1 }, "english", "en-IN"))).toBe(true);
+    expect(nativeEnglishVotes(en({ en: 2 }))).toEqual({ full: "english", sarvam: "english", mix: "english" });
+  });
+  it("(2) two present and English, one absent → pass, whichever one is missing", () => {
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
+    expect(isNativeEnglish({ full_window_language: "english", language_timeline: { language_mix: { en: 1 } } })).toBe(true);
+    expect(isNativeEnglish({ sarvam_language: "en", language_timeline: { language_mix: { en: 1, und: 2 } } })).toBe(true);
+  });
+  it("(3) ONE present is never enough — this is the >= 2 condition, and a mutation to >= 1 fails here", () => {
+    expect(isNativeEnglish({ full_window_language: "english" })).toBe(false);
+    expect(isNativeEnglish({ sarvam_language: "en" })).toBe(false);
+    expect(isNativeEnglish({ language_timeline: { language_mix: { en: 4 } } })).toBe(false);
+    for (const m of [{ full_window_language: "english" }, { sarvam_language: "en" }, { language_timeline: { language_mix: { en: 4 } } }]) {
+      const v = nativeEnglishVotes(m);
+      expect(Object.values(v).filter((x) => x === "english")).toHaveLength(1);
+      expect(Object.values(v).filter((x) => x === "absent")).toHaveLength(2);
+    }
+  });
+  it("(4) ANY present signal that disagrees vetoes, even with the other two saying English", () => {
+    expect(isNativeEnglish(en({ en: 2 }, "hindi", "en"))).toBe(false);
+    expect(isNativeEnglish(en({ en: 2 }, "english", "hi"))).toBe(false);
+    expect(isNativeEnglish(en({ en: 2, kn: 1 }, "english", "en"))).toBe(false);
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "kn" })).toBe(false);
+  });
+  it("a present-but-malformed signal is a disagreement, not an abstention", () => {
+    expect(isNativeEnglish({ full_window_language: 42, sarvam_language: "en", language_timeline: { language_mix: { en: 1 } } } as never)).toBe(false);
+    expect(nativeEnglishVotes({ full_window_language: "", sarvam_language: "en" } as never).full).toBe("other");
+  });
+  it("the vote record names who voted and who abstained, in a fixed order", () => {
+    expect(votesRecord(nativeEnglishVotes({ full_window_language: "english", sarvam_language: "en" })))
+      .toBe("full=english,sarvam=english,mix=absent");
+    expect(votesRecord(nativeEnglishVotes(en({ en: 1, hi: 1 }))))
+      .toBe("full=english,sarvam=english,mix=other");
+    expect(votesRecord(nativeEnglishVotes(null))).toBe("full=absent,sarvam=absent,mix=absent");
   });
   it("languageMix digs out the nested map and ignores non-number values", () => {
     expect(languageMix(en({ en: 2, hi: 1 }))).toEqual({ en: 2, hi: 1 });
@@ -56,6 +107,18 @@ describe("J0 — classifyWindow: run_english > native_en > needs-translation", (
     const c = classifyWindow({ ...base, transcript_english: "already english", transcript_original: "kuch bhi", metrics: null });
     expect("done" in c && c.done.source).toBe("run_english");
   });
+  it("G1/N13 — all three signals English but NO original text is never native_en, and never throws", () => {
+    // The live shape: bw_wwq9p6eb_1789821900000_primary (rd_jqj96amk) votes
+    // full=english,sarvam=english,mix=english and has no transcript_original.
+    for (const original of [null, undefined, "", "   "]) {
+      const c = classifyWindow({ ...base, transcript_english: null, transcript_original: original as never });
+      expect("done" in c).toBe(false);
+      expect("needsTranslation" in c && c.original).toBeNull();
+    }
+    // and the guard is not doing this by accident — the same metrics WITH text do pass
+    expect("done" in classifyWindow({ ...base, transcript_english: null, transcript_original: "hello doctor" })).toBe(true);
+  });
+
   it("native_en stores the original when the three signals agree", () => {
     const c = classifyWindow({ ...base, transcript_english: null, transcript_original: "hello doctor" });
     expect("done" in c && c.done).toMatchObject({ source: "native_en", english: "hello doctor" });
@@ -164,6 +227,46 @@ describe("J0 — success branches, and the model is never loaded unless translat
     expect(r.done).toMatchObject({ native_en: 1 });
     expect(DB.written.w1).toMatchObject({ source: "native_en", english: "good morning, sit down" });
     expect(QWEN.calls).toBe(0);
+  });
+
+  it("the run REPORTS how the three signals voted, per window, and persists none of it", async () => {
+    DB.windows = [{ id: "w1" }, { id: "w2" }];
+    // w1: whisper and sarvam say English, the timeline was never written -> the abstain case.
+    DB.runs.w1 = { transcript_english: null, transcript_original: "good morning", metrics_json: { full_window_language: "english", sarvam_language: "en" }, detected_language: null };
+    // w2: the timeline says code-mixed -> a present signal that disagrees.
+    DB.runs.w2 = { transcript_english: null, transcript_original: "aap kaise hain", metrics_json: { full_window_language: "english", sarvam_language: "en", language_timeline: { language_mix: { en: 2, hi: 1 } } }, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ native_en: 1, not_ready: 1 });
+    expect((r.done as { votes: Record<string, number> }).votes).toEqual({
+      "full=english,sarvam=english,mix=absent": 1,
+      "full=english,sarvam=english,mix=other": 1,
+    });
+    // the record is a RUN artefact: nothing about voting reaches the row
+    expect(Object.keys(DB.written.w1)).not.toContain("votes");
+    expect(DB.written.w1).toMatchObject({ source: "native_en" });
+  });
+
+  it("G1/N13 — a live-shaped window, all three signals English with no text, is recorded empty not native_en", async () => {
+    DB.windows = [{ id: "w1" }];
+    DB.runs.w1 = { transcript_english: null, transcript_original: null, metrics_json: ENGLISH_METRICS, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ empty: 1, native_en: 0 });
+    expect(DB.written.w1).toMatchObject({ source: "empty", english: null, char_count: 0 });
+    expect(QWEN.calls).toBe(0);
+  });
+
+  it("G2/N17 — two windows sharing a vote record are COUNTED, not overwritten", async () => {
+    DB.windows = [{ id: "w1" }, { id: "w2" }, { id: "w3" }];
+    const abstained = { full_window_language: "english", sarvam_language: "en" };
+    DB.runs.w1 = { transcript_english: null, transcript_original: "good morning", metrics_json: abstained, detected_language: null };
+    DB.runs.w2 = { transcript_english: null, transcript_original: "please sit", metrics_json: abstained, detected_language: null };
+    DB.runs.w3 = { transcript_english: null, transcript_original: "aap kaise hain", metrics_json: { ...abstained, language_timeline: { language_mix: { en: 2, hi: 1 } } }, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect((r.done as { votes: Record<string, number> }).votes).toEqual({
+      "full=english,sarvam=english,mix=absent": 2,
+      "full=english,sarvam=english,mix=other": 1,
+    });
+    expect(r.done).toMatchObject({ native_en: 2, not_ready: 1 });
   });
 
   it("FLAG ON: a code-mixed window is translated locally, source=translated with model + input_chars", async () => {
