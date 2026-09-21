@@ -28,36 +28,52 @@ export const CLOSED_END_MIN = 7 * 60 + 30;
 /** The last minute-of-day at which a NEW window may be submitted is just before this. */
 export const STOP_SUBMIT_MIN = 7 * 60 + 10;
 
+/**
+ * OPEN EARLY — a deliberate, per-run override (Fable's order of 21 Sep 2026, 20:45; V: "the clinic day is over").
+ * With ETA_OVERNIGHT_OPEN_EARLY=1 in the driver's environment, submits may start from 19:00 IST instead of 21:30.
+ * NOTHING ELSE MOVES: the 07:10 stop is unchanged, and between 07:10 and 19:00 the override does nothing (the clinic
+ * day is still the clinic day). Only the exact string "1" counts; unset, empty, "0", "true" all mean today's behaviour.
+ *
+ * It moves the START of the closed period for `isClosed` / `closedHoursOver` too, not only for `maySubmit`. The driver
+ * abandons a job it is standing by for when `closedHoursOver` turns true (the closed period ended, clinic side is open),
+ * so an override that only opened the submit gate would have the driver walk away from its first job at 19:01. The END
+ * (07:30) is untouched.
+ */
+export const OPEN_EARLY_ENV = "ETA_OVERNIGHT_OPEN_EARLY";
+export const OPEN_EARLY_START_MIN = 19 * 60;
+export const openEarlyEnabled = (env: Record<string, string | undefined> = process.env): boolean => env[OPEN_EARLY_ENV] === "1";
+const startMin = (openEarly: boolean): number => (openEarly ? OPEN_EARLY_START_MIN : CLOSED_START_MIN);
+
 /** Milliseconds since IST midnight, in [0, DAY_MS). */
 export function istMsOfDay(nowMs: number): number {
   return (((nowMs + IST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS;
 }
 
 /** True while `nowMs` is inside closed hours (start inclusive, end exclusive, wrapping midnight). */
-export function isClosed(nowMs: number): boolean {
+export function isClosed(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
   const t = istMsOfDay(nowMs);
-  return t >= CLOSED_START_MIN * MIN_MS || t < CLOSED_END_MIN * MIN_MS;
+  return t >= startMin(openEarly) * MIN_MS || t < CLOSED_END_MIN * MIN_MS;
 }
 
 /**
- * May a NEW window be submitted now? Only from 21:30 up to (not including) 07:10 IST. Between 07:10 and
+ * May a NEW window be submitted now? Only from 21:30 (19:00 with the open-early override) up to (not including) 07:10 IST. Between 07:10 and
  * 07:30 the clinic is still closed but no new work starts, so whatever is in flight can finish.
  */
-export function maySubmit(nowMs: number): boolean {
+export function maySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
   const t = istMsOfDay(nowMs);
-  return t >= CLOSED_START_MIN * MIN_MS || t < STOP_SUBMIT_MIN * MIN_MS;
+  return t >= startMin(openEarly) * MIN_MS || t < STOP_SUBMIT_MIN * MIN_MS;
 }
 
 /** Milliseconds until the next moment `maySubmit` is true; 0 when it already is. */
-export function msUntilMaySubmit(nowMs: number): number {
-  if (maySubmit(nowMs)) return 0;
-  return CLOSED_START_MIN * MIN_MS - istMsOfDay(nowMs);
+export function msUntilMaySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled()): number {
+  if (maySubmit(nowMs, openEarly)) return 0;
+  return startMin(openEarly) * MIN_MS - istMsOfDay(nowMs);
 }
 
 /**
  * Has the closed period itself ended? A job still running past this moment is running into clinic
  * hours: the driver stops WAITING for it (it cannot cancel it) and says so.
  */
-export function closedHoursOver(nowMs: number): boolean {
-  return !isClosed(nowMs);
+export function closedHoursOver(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
+  return !isClosed(nowMs, openEarly);
 }

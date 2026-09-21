@@ -498,6 +498,77 @@ describe("THE ENGLISH CANARY — a `done` that made no English is a failure (the
   });
 });
 
+describe("OPEN EARLY (ETA_OVERNIGHT_OPEN_EARLY=1) — the driver, end to end, on the fake clock", () => {
+  /** Runs `body` with the variable set (or unset), restoring what was there. The driver reads process.env at call time. */
+  async function withEarly<T>(v: string | undefined, body: () => Promise<T>): Promise<T> {
+    const was = process.env.ETA_OVERNIGHT_OPEN_EARLY;
+    try {
+      if (v === undefined) delete process.env.ETA_OVERNIGHT_OPEN_EARLY; else process.env.ETA_OVERNIGHT_OPEN_EARLY = v;
+      return await body();
+    } finally {
+      if (was === undefined) delete process.env.ETA_OVERNIGHT_OPEN_EARLY; else process.env.ETA_OVERNIGHT_OPEN_EARLY = was;
+    }
+  }
+
+  it("UNSET at 20:45: it waits for 21:30 and the first submit is at or after 21:30 — today's behaviour", async () => {
+    await withEarly(undefined, async () => {
+      const h = harness({ start: at(20, 45, 0), cands: [cand("A")] });
+      await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")[0]!.ms).toBe(45 * 60_000);
+      expect(h.submits[0]!.at).toBeGreaterThanOrEqual(at(21, 30, 0));
+    });
+  });
+
+  it("SET at 20:45: the first submit is at 20:45 exactly, with no wait", async () => {
+    await withEarly("1", async () => {
+      const h = harness({ start: at(20, 45, 0), cands: [cand("A"), cand("B")] });
+      const s = await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")).toHaveLength(0);
+      expect(h.submits[0]!.at).toBe(at(20, 45, 0));
+      expect(s).toMatchObject({ started: 2, done: 2, fatal: null });
+    });
+  });
+
+  it("SET: a job stood by for at 20:45 is NOT abandoned as 'running into clinic hours' (closedHoursOver must move with the start)", async () => {
+    await withEarly("1", async () => {
+      const h = harness({ start: at(20, 45, 0), cands: [cand("A")], polls: 6 });
+      const s = await h.run();
+      expect(evs(h.log, "left_running")).toHaveLength(0);
+      expect(s).toMatchObject({ abandoned: 0, done: 1, stop: "backlog_empty" });
+    });
+  });
+
+  it("SET at 18:30: still blocked — it waits 30 minutes for 19:00, and the first submit is at 19:00", async () => {
+    await withEarly("1", async () => {
+      const h = harness({ start: at(18, 30, 0), cands: [cand("A")] });
+      await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")[0]!.ms).toBe(30 * 60_000);
+      expect(h.submits[0]!.at).toBeGreaterThanOrEqual(at(19, 0, 0));
+      expect(h.submits[0]!.at).toBeLessThan(at(19, 2, 0));
+    });
+  });
+
+  it("SET: the 07:10 stop is unchanged — a night that reaches 07:10 stops submitting exactly as before", async () => {
+    await withEarly("1", async () => {
+      const cands = Array.from({ length: 40 }, (_, i) => cand(`W${i}`));
+      const h = harness({ start: at(7, 5, 0, 22), cands, polls: 11 });
+      const s = await h.run();
+      expect(s.stop).toBe("submit_window_closed");
+      for (const sub of h.submits) expect(maySubmit(sub.at, true), "every submit was inside the window").toBe(true);
+      expect(Math.max(...h.submits.map((x) => x.at))).toBeLessThan(at(7, 10, 0, 22));
+    });
+  });
+
+  it("SET: started at 07:20 (the dead zone) it still waits — for 19:00, not for 07:10 — and never submits in the clinic day", async () => {
+    await withEarly("1", async () => {
+      const h = harness({ start: at(7, 20, 0, 22), cands: [cand("A")] });
+      await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")[0]!.ms).toBe((11 * 60 + 40) * 60_000);
+      expect(h.submits[0]!.at).toBeGreaterThanOrEqual(at(19, 0, 0, 22));
+    });
+  });
+});
+
 describe("A STUCK JOB", () => {
   it("still running past the deadline: stop with job_stuck, name the job, submit nothing more", async () => {
     const h = harness({ cands: [cand("A"), cand("B")], status: () => running() });

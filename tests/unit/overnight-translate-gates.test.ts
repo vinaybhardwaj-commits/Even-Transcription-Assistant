@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   IST_OFFSET_MS, isClosed, maySubmit, msUntilMaySubmit, closedHoursOver, istMsOfDay,
-  CLOSED_START_MIN, CLOSED_END_MIN, STOP_SUBMIT_MIN,
+  CLOSED_START_MIN, CLOSED_END_MIN, STOP_SUBMIT_MIN, OPEN_EARLY_ENV, OPEN_EARLY_START_MIN, openEarlyEnabled,
 } from "@/lib/overnight-translate/hours";
 import {
   pressureDecision, parsePressureLine, diskDecision, gateDecision, readLastLine, freeDiskGb,
@@ -96,6 +96,76 @@ describe("msUntilMaySubmit", () => {
 // ===========================================================================
 const NOW = Date.parse("2026-09-21T20:00:00Z");
 const line = (o: Record<string, unknown>) => JSON.stringify({ t: new Date(NOW - 5_000).toISOString(), verdict: "ok", diarize_ms: 7, ...o });
+
+describe("OPEN EARLY — ETA_OVERNIGHT_OPEN_EARLY=1 moves the START to 19:00 IST and nothing else (Fable, 21 Sep 20:45)", () => {
+  it("the switch is the exact string \"1\" in the environment; anything else, or nothing, is today's behaviour", () => {
+    expect(OPEN_EARLY_ENV).toBe("ETA_OVERNIGHT_OPEN_EARLY");
+    expect(openEarlyEnabled({ ETA_OVERNIGHT_OPEN_EARLY: "1" })).toBe(true);
+    for (const v of [undefined, "", "0", "true", "yes", " 1", "1 ", "on"]) expect(openEarlyEnabled({ ETA_OVERNIGHT_OPEN_EARLY: v }), String(v)).toBe(false);
+    expect(openEarlyEnabled({})).toBe(false);
+  });
+  it("the default reads process.env at CALL time, so a launchd plist entry is enough", () => {
+    const was = process.env[OPEN_EARLY_ENV];
+    try {
+      delete process.env[OPEN_EARLY_ENV];
+      expect(maySubmit(at(20, 45))).toBe(false);
+      process.env[OPEN_EARLY_ENV] = "1";
+      expect(maySubmit(at(20, 45))).toBe(true);
+      process.env[OPEN_EARLY_ENV] = "0";
+      expect(maySubmit(at(20, 45))).toBe(false);
+    } finally {
+      if (was === undefined) delete process.env[OPEN_EARLY_ENV]; else process.env[OPEN_EARLY_ENV] = was;
+    }
+  });
+  it("UNSET: 20:45 is blocked and 21:31 is open — exactly today's behaviour", () => {
+    expect(maySubmit(at(20, 45), false)).toBe(false);
+    expect(maySubmit(at(21, 29, 59), false)).toBe(false);
+    expect(maySubmit(at(21, 31), false)).toBe(true);
+    expect(msUntilMaySubmit(at(20, 45), false)).toBe(45 * 60_000);
+    expect(isClosed(at(20, 45), false)).toBe(false);
+    expect(closedHoursOver(at(20, 45), false)).toBe(true);
+  });
+  it("SET: 20:45 is open and 18:59 is still blocked; 19:00:00 is the first open second", () => {
+    expect(maySubmit(at(20, 45), true)).toBe(true);
+    expect(maySubmit(at(18, 59), true)).toBe(false);
+    expect(maySubmit(at(18, 59, 59), true)).toBe(false);
+    expect(maySubmit(at(19, 0, 0), true)).toBe(true);
+    expect(OPEN_EARLY_START_MIN).toBe(19 * 60);
+  });
+  it("SET: 07:11 is blocked — the stop still wins — and 07:09:59 is still open", () => {
+    expect(maySubmit(at(7, 11), true)).toBe(false);
+    expect(maySubmit(at(7, 10, 0), true)).toBe(false);
+    expect(maySubmit(at(7, 9, 59), true)).toBe(true);
+    expect(maySubmit(at(7, 29), true)).toBe(false);
+  });
+  it("SET: between 07:10 and 19:00 the override does nothing — the whole clinic day stays blocked", () => {
+    for (const [h, m] of [[7, 10], [7, 30], [9, 0], [12, 0], [15, 30], [18, 30], [18, 59]] as const) {
+      expect(maySubmit(at(h, m), true), `${h}:${m}`).toBe(false);
+      expect(maySubmit(at(h, m), true)).toBe(maySubmit(at(h, m), false));
+    }
+  });
+  it("SET changes NOTHING at or after 21:30 or before 07:10 — the two settings agree outside 19:00-21:30", () => {
+    for (let mins = 0; mins < 24 * 60; mins += 7) {
+      const t = at(0, mins);
+      const inWindow = mins >= 19 * 60 && mins < 21 * 60 + 30;
+      if (!inWindow) expect(maySubmit(t, true), `minute ${mins}`).toBe(maySubmit(t, false));
+      if (!inWindow) expect(isClosed(t, true), `minute ${mins}`).toBe(isClosed(t, false));
+    }
+  });
+  it("SET: the closed period, for the driver's \"has the clinic side opened\" question, starts at 19:00 and still ends at 07:30", () => {
+    expect(isClosed(at(19, 0), true)).toBe(true);
+    expect(isClosed(at(18, 59, 59), true)).toBe(false);
+    expect(isClosed(at(7, 29, 59), true)).toBe(true);
+    expect(isClosed(at(7, 30), true)).toBe(false);
+    expect(closedHoursOver(at(20, 45), true), "a job stood by for at 20:45 is NOT abandoned as running into clinic hours").toBe(false);
+    expect(closedHoursOver(at(7, 30), true)).toBe(true);
+  });
+  it("SET: msUntilMaySubmit counts to 19:00, and is 0 once open", () => {
+    expect(msUntilMaySubmit(at(18, 0), true)).toBe(60 * 60_000);
+    expect(msUntilMaySubmit(at(20, 45), true)).toBe(0);
+    expect(msUntilMaySubmit(at(7, 20), true)).toBe(11 * 60 * 60_000 + 40 * 60_000);
+  });
+});
 
 describe("pressureDecision — the watchdog rule, failing closed", () => {
   it("GO on a fresh ok line with diarize_ms under the limit", () => {
