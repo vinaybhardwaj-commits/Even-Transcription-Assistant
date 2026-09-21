@@ -18,8 +18,8 @@
  * signals say English is no longer sent to translation merely because a third metric was never
  * written — the situation that left 135 of 139 fixture windows not_ready on 21 Sep.
  *
- * An EMPTY mix ({}) counts as PRESENT and not English, exactly as before: it is a language claim
- * that names no language, not a metric that was never written.
+ * An EMPTY mix ({}) ABSTAINS too (V, 21 Sep): a language claim that names no language carries no
+ * information, so it is treated exactly like a metric that was never written.
  *
  * "und" (undetermined) is tolerated in the mix because it is silence/noise spans, not another
  * language — a window that is English plus some untagged silence is still English to translate-past.
@@ -75,14 +75,15 @@ function voteSarvam(metrics: WindowMetrics): LanguageVote {
 }
 
 /**
- * `language_timeline.language_mix`: absent when the timeline or the mix was never written. An empty
- * mix is PRESENT and not English — it claims a language breakdown and names none.
+ * `language_timeline.language_mix`: absent when the timeline or the mix was never written, and ALSO
+ * when the mix is empty (V, 21 Sep) — a language claim that names no language carries no
+ * information, so it abstains rather than vetoes.
  */
 function voteMix(metrics: WindowMetrics): LanguageVote {
   const mix = languageMix(metrics);
   if (mix === null) return "absent";
   const keys = Object.keys(mix);
-  if (keys.length === 0) return "other";
+  if (keys.length === 0) return "absent";
   for (const k of keys) {
     if (!ENGLISH_OR_UNDETERMINED.has(k.trim().toLowerCase())) return "other";
   }

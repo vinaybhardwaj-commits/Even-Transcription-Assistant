@@ -25,7 +25,7 @@
  */
 import { sql } from "@/lib/db";
 import { parseFlag, FlagValueError } from "@/lib/flags";
-import { classifyWindow, emptyRow, notReadyRow, failedRow, translatedRow, TERMINAL_SOURCES, type JevWindowText } from "@/lib/jev/english";
+import { classifyWindow, emptyRow, notReadyRow, failedRow, translatedRow, TERMINAL_SOURCES, nativeEnglishVotes, votesRecord, type JevWindowText } from "@/lib/jev/english";
 import { translateToEnglish } from "@/lib/jev/translate";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 
@@ -35,6 +35,15 @@ export const ETA_JEV_TRANSLATE_ENABLED = "ETA_JEV_TRANSLATE_ENABLED";
 export const JEV_TRANSLATE_BATCH = 3;
 
 type Counts = { run_english: number; native_en: number; translated: number; empty: number; not_ready: number; failed: number };
+
+/**
+ * How the three language signals voted, tallied per run (V, 21 Sep). NOT persisted: jev_window_text
+ * has no column for it and this is not the place to invent one. It rides in the job result so a run
+ * can be explained — "mix=absent x10" is why ten windows stopped needing translation — and it holds
+ * vote names and counts only, never text.
+ */
+type Votes = Record<string, number>;
+const tallyVote = (v: Votes, metrics: unknown) => { const k = votesRecord(nativeEnglishVotes(metrics as never)); v[k] = (v[k] ?? 0) + 1; };
 const zero = (): Counts => ({ run_english: 0, native_en: 0, translated: 0, empty: 0, not_ready: 0, failed: 0 });
 const bump = (c: Counts, s: JevWindowText["source"]) => { c[s] += 1; };
 
@@ -117,6 +126,7 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
   }
 
   const counts = zero();
+  const votes: Votes = {};
   const toTranslate: string[] = [];
   let skipped = 0;
 
@@ -129,6 +139,7 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
       bump(counts, "not_ready");
       continue;
     }
+    tallyVote(votes, run.metrics_json ?? null);
     const c = classifyWindow({
       window_id: w.id,
       room_day_id: roomDayId,
@@ -155,15 +166,16 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
   }
 
   if (toTranslate.length === 0) {
-    return doneWith({ room_day_id: roomDayId, windows: windows.length, skipped, ...counts });
+    return doneWith({ room_day_id: roomDayId, windows: windows.length, skipped, ...counts, votes });
   }
-  return nextStep("translate", { room_day_id: roomDayId, windows: windows.length, skipped, to_translate: toTranslate, counts });
+  return nextStep("translate", { room_day_id: roomDayId, windows: windows.length, skipped, to_translate: toTranslate, counts, votes });
 }
 
 async function translate(ctx: StepContext): Promise<StepOutcome> {
   const roomDayId = ctx.progress.room_day_id as string;
   const remaining = [...((ctx.progress.to_translate as string[]) ?? [])];
   const counts = { ...zero(), ...((ctx.progress.counts as Counts) ?? {}) };
+  const votes = ((ctx.progress.votes as Votes) ?? {});
   const windows = (ctx.progress.windows as number) ?? 0;
   const skipped = (ctx.progress.skipped as number) ?? 0;
 
@@ -183,9 +195,9 @@ async function translate(ctx: StepContext): Promise<StepOutcome> {
   }
 
   if (remaining.length > 0) {
-    return nextStep("translate", { room_day_id: roomDayId, windows, skipped, to_translate: remaining, counts });
+    return nextStep("translate", { room_day_id: roomDayId, windows, skipped, to_translate: remaining, counts, votes });
   }
-  return doneWith({ room_day_id: roomDayId, windows, skipped, ...counts });
+  return doneWith({ room_day_id: roomDayId, windows, skipped, ...counts, votes });
 }
 
 export const jevEnglishKind: JobKind = {

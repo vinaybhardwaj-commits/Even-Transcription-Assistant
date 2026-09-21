@@ -40,8 +40,16 @@ describe("J0 — isNativeEnglish: an absent signal abstains, a present one that 
   it("an ABSENT mix abstains: the other two signals carry it (V, 21 Sep — was false before)", () => {
     expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
   });
-  it("an EMPTY mix is present and names no language, so it still vetoes", () => {
-    expect(isNativeEnglish(en({}))).toBe(false);
+  it("an EMPTY mix ABSTAINS: it names no language, so it carries no information (V, 21 Sep)", () => {
+    expect(isNativeEnglish(en({}))).toBe(true);
+    expect(nativeEnglishVotes(en({})).mix).toBe("absent");
+  });
+  it("an empty mix cannot rescue a window on its own — the other two must still agree", () => {
+    expect(isNativeEnglish(en({}, "hindi", "en"))).toBe(false);
+    expect(isNativeEnglish({ full_window_language: "english", language_timeline: { language_mix: {} } })).toBe(false);
+  });
+  it("a mix whose values are all non-numeric reduces to empty, so it abstains as well", () => {
+    expect(nativeEnglishVotes({ full_window_language: "english", sarvam_language: "en", language_timeline: { language_mix: { hi: "x" } } } as never).mix).toBe("absent");
   });
   it("no metrics at all is never English — nothing voted", () => {
     expect(isNativeEnglish(null)).toBe(false);
@@ -207,6 +215,23 @@ describe("J0 — success branches, and the model is never loaded unless translat
     expect(r.done).toMatchObject({ native_en: 1 });
     expect(DB.written.w1).toMatchObject({ source: "native_en", english: "good morning, sit down" });
     expect(QWEN.calls).toBe(0);
+  });
+
+  it("the run REPORTS how the three signals voted, per window, and persists none of it", async () => {
+    DB.windows = [{ id: "w1" }, { id: "w2" }];
+    // w1: whisper and sarvam say English, the timeline was never written -> the abstain case.
+    DB.runs.w1 = { transcript_english: null, transcript_original: "good morning", metrics_json: { full_window_language: "english", sarvam_language: "en" }, detected_language: null };
+    // w2: the timeline says code-mixed -> a present signal that disagrees.
+    DB.runs.w2 = { transcript_english: null, transcript_original: "aap kaise hain", metrics_json: { full_window_language: "english", sarvam_language: "en", language_timeline: { language_mix: { en: 2, hi: 1 } } }, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ native_en: 1, not_ready: 1 });
+    expect((r.done as { votes: Record<string, number> }).votes).toEqual({
+      "full=english,sarvam=english,mix=absent": 1,
+      "full=english,sarvam=english,mix=other": 1,
+    });
+    // the record is a RUN artefact: nothing about voting reaches the row
+    expect(Object.keys(DB.written.w1)).not.toContain("votes");
+    expect(DB.written.w1).toMatchObject({ source: "native_en" });
   });
 
   it("FLAG ON: a code-mixed window is translated locally, source=translated with model + input_chars", async () => {
