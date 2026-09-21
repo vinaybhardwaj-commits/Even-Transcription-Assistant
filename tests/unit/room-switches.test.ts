@@ -155,19 +155,30 @@ describe("the environment variables are GONE, not ignored", () => {
   });
 });
 
-describe("all nine call sites read the room", () => {
-  /** PRD §5.2, by file. The count is asserted so a tenth cannot appear unnoticed.
+describe("all ten call sites read the room", () => {
+  /** PRD §5.2, by file. The count is asserted so an eleventh cannot appear unnoticed.
    *  Build 3 §2.1 adds the ninth: drainRoomWaitingWindows re-reads the switch per piece (HAZARD 3),
-   *  so one enabled room's waiting batch never carries a disabled room's audio through. */
+   *  so one enabled room's waiting batch never carries a disabled room's audio through.
+   *
+   *  THE TENTH is `lib/stt/join-only.ts`, and it is deliberately not routed through an existing
+   *  site. It asks the same room question every other site asks — may this room be turned into
+   *  words — but it is the ONE site allowed to be overruled, by an explicit
+   *  `includeTranscriptDisabled` parameter, because producing a clip is joining audio and not
+   *  transcribing it. Folding it into another site would hide that exception inside a guard whose
+   *  whole purpose is to have none. It is counted here instead, in the open.
+   *
+   *  This census is `git grep`, so it sees TRACKED files only: a new call site is invisible until
+   *  it is committed. Run the gate after staging, not before. */
   const EXPECTED: Record<string, number> = {
     "lib/stt/room-drain.ts": 3,
     "lib/bench-window.ts": 1,
     "app/api/brain/cues/route.ts": 2,
     "app/api/admin/bench/drain/route.ts": 1,
     "lib/brain/fuse/live.ts": 2,
+    "lib/stt/join-only.ts": 1,
   };
 
-  it("every guard calls the room reader, and there are exactly nine", () => {
+  it("every guard calls the room reader, and there are exactly ten", () => {
     const hits = execFileSync(
       "git", ["grep", "-n", "-E", "isTranscriptEnabled\\(|isVisitsEnabled\\(|readRoomSwitches\\(", "--", "lib", "app"],
       { encoding: "utf8" },
@@ -180,7 +191,7 @@ describe("all nine call sites read the room", () => {
       byFile[f] = (byFile[f] ?? 0) + 1;
     }
     expect(byFile).toEqual(EXPECTED);
-    expect(Object.values(byFile).reduce((a, b) => a + b, 0)).toBe(9);
+    expect(Object.values(byFile).reduce((a, b) => a + b, 0)).toBe(10);
   });
 
   it("nothing snapshots a switch at module scope — the mistake being undone", () => {
