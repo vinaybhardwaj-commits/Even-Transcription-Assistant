@@ -19,6 +19,7 @@
  * dominant `speaker_idx` and gets NO role — `no_role_reason: 'straddle'` — rather than a name
  * smeared across someone else's speech.
  */
+import { gateSegments, speechGateEnabled, ungatedSegments, type WindowSpeech } from "./speech-gate";
 import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
 import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
@@ -143,6 +144,12 @@ export async function diarizeWindow(opts: {
   centroids?: ClinicianCentroid[];
   /** One id per run, stamped on every turn row this run writes (0090). */
   runId: string;
+  /**
+   * What the VAD said about this window's audio, when the caller asked it. Supplied by the caller
+   * rather than fetched here so this function stays testable without a service, and so a caller
+   * that has no VAD simply does not pass one — which judges nothing.
+   */
+  speech?: WindowSpeech;
 }): Promise<
   | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
   | { ok: false; error: string; retryable: boolean; timing: unknown }
@@ -161,7 +168,21 @@ export async function diarizeWindow(opts: {
 
   const speakers = (res.result.speakers ?? []) as DiarizeSpeaker[];
   const roles = rolesByIndex(speakers);
-  const segments = parseDiarizeSegments(res.result.transcript_segments);
+  const rawSegments = parseDiarizeSegments(res.result.transcript_segments);
+
+  // ── THE SPEECH GATE ──────────────────────────────────────────────────────────────────────
+  // Between pyannote and storage, which is the only place a re-check can happen: the service has
+  // already decided, and the rows below are what everything downstream reads. DEFAULT OFF, and
+  // it FLAGS rather than drops — `segments` keeps every span pyannote returned either way, so a
+  // window stores the same count it always did and the gate can be retuned against stored data.
+  const gateOn = speechGateEnabled();
+  const gated = gateOn
+    ? gateSegments(rawSegments, opts.speech ?? { ok: false, reason: "vad_unavailable" })
+    : { segments: ungatedSegments(rawSegments), summary: null };
+  const segments = gated.segments;
+  if (gateOn && gated.summary) {
+    console.log(`[diarize-window] ${opts.windowId}: speech gate ` + JSON.stringify(gated.summary));
+  }
   const turns = await loadWindowTurns(opts.roomDayId, opts.window);
 
   // Clip-relative → wall clock, once, here: the service times from the start of the audio it was
