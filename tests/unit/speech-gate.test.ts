@@ -11,7 +11,7 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_MIN_SPEECH_MS, SPEECH_GATE_FLAG, SPEECH_GATE_BASIS,
-  gateSegments, overlapMs, speechMsIn, speechGateEnabled, ungatedSegments,
+  gateSegments, overlapMs, speechMsIn, speechGateEnabled,
   type SpeechSpan,
 } from "@/lib/stt/speech-gate";
 import { roomEnergyFloor, globalEnergyFloor, DEFAULT_ROOM_ENERGY_FLOOR } from "@/lib/stt/window-measure";
@@ -127,14 +127,9 @@ describe("AN EMPTY VAD ANSWER CONVICTS NOTHING — the router's lesson, not repe
   });
 });
 
-describe("OFF means unjudged, not passed", () => {
-  it("marks segments unjudged with the reason gate_off", () => {
-    const out = ungatedSegments([seg(0, 2000)]);
-    expect(out[0].verdict).toBe("unjudged");
-    expect(out[0].unjudged_reason).toBe("gate_off");
-    expect(out[0].speech_ms).toBeNull();
-  });
-});
+// The "OFF means unjudged" block lived here and is GONE with `ungatedSegments`. OFF no longer
+// stamps anything — it stores the raw segments, byte for byte — and that is asserted where it can
+// actually be observed, on the real call site, in speech-gate-wiring.test.ts.
 
 describe("roomEnergyFloor now uses its room", () => {
   it("falls back to the global floor when no per-room value exists", () => {

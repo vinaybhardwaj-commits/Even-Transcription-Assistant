@@ -150,21 +150,17 @@ export function gateSegments(
 }
 
 /**
- * PURE — what to store when the gate is OFF: the segments exactly as they arrived.
+ * WHAT IS STORED WHEN THE GATE IS OFF: the segments exactly as pyannote returned them.
  *
- * Deliberately NOT "everything is speech". Off means unjudged, and a row written with the gate off
- * must not later read as though the gate had passed it.
+ * There is no `ungatedSegments` any more, and its absence is the point. It used to stamp five keys
+ * on every segment to say "unjudged", which made OFF a different row from production — 44 bytes per
+ * segment became 174, about 8 MB a day at 320 window closings, and ~60 MB to re-diarize the 2,514
+ * never-handled windows. A flag that is off must cost nothing and change nothing, so OFF now writes
+ * the raw segments and `diarizeWindow` skips this module entirely.
+ *
+ * "Off means unjudged" still holds, and is now said by the ABSENCE of the gate's keys rather than
+ * by five copies of the word: a segment with no `verdict` was never judged.
  */
-export function ungatedSegments(segments: readonly DiarizeSegment[]): GatedSegment[] {
-  return segments.map((sg) => ({
-    ...sg,
-    speech_ms: null,
-    speech_ratio: null,
-    verdict: "unjudged" as const,
-    unjudged_reason: "gate_off" as const,
-    speech_basis: SPEECH_GATE_BASIS,
-  }));
-}
 
 // ---------------------------------------------------------------------------
 // Asking the VAD
@@ -175,11 +171,11 @@ export function ungatedSegments(segments: readonly DiarizeSegment[]): GatedSegme
  * (`~/eta-router/router_server.py:258 vad_segments`, threshold `ETA_VAD_THRESHOLD`, default 0.5).
  * It is loaded there already — nothing is installed or downloaded for this gate.
  *
- * THE ENDPOINT DOES NOT EXIST YET. The router serves `/healthz`, `/route`, `/route/job` and
- * `/route/job/{id}`; there is no way to ask it for speech spans without also paying for a full
- * transcription. Adding a spans-only route to the router and restarting it is a change to a live
- * service on the Mini, which this order does not authorise — so the client is written against the
- * shape it needs and refuses cleanly until `ETA_VAD_URL` names something.
+ * THE ENDPOINT EXISTS: `POST /vad` on the router (`router_server.py`, branch `vinay/vad-endpoint`)
+ * returns speech spans and runs no transcription. It reports an empty answer as `spans: []` rather
+ * than masking it the way `vad_segments()` does for `/route`, which is the distinction this gate
+ * depends on. `ETA_VAD_URL` names the router; unset, the client refuses cleanly and judges
+ * nothing. Production was not restarted to add it — see the build report.
  *
  * Refusing is safe BY DESIGN: an absent VAD yields `vad_unavailable`, which judges nothing.
  */

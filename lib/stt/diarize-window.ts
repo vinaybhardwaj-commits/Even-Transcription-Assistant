@@ -19,7 +19,7 @@
  * dominant `speaker_idx` and gets NO role — `no_role_reason: 'straddle'` — rather than a name
  * smeared across someone else's speech.
  */
-import { gateSegments, speechGateEnabled, ungatedSegments, type WindowSpeech } from "./speech-gate";
+import { gateSegments, speechGateEnabled, type WindowSpeech } from "./speech-gate";
 import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
 import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
@@ -175,12 +175,17 @@ export async function diarizeWindow(opts: {
   // already decided, and the rows below are what everything downstream reads. DEFAULT OFF, and
   // it FLAGS rather than drops — `segments` keeps every span pyannote returned either way, so a
   // window stores the same count it always did and the gate can be retuned against stored data.
+  // OFF IS BYTE-IDENTICAL TO PRODUCTION. Not "off and annotated" — the raw segments, unchanged,
+  // so a flag nobody has turned on costs nothing in the row. (It used to add five keys per segment:
+  // 44 bytes became 174.)
+  //
+  // ON with no VAD answer is NOT "everything is noise". `opts.speech` absent means nobody asked the
+  // VAD, and a gate that convicted on that would be the router's own fixed-window bug, one layer up.
   const gateOn = speechGateEnabled();
-  const gated = gateOn
-    ? gateSegments(rawSegments, opts.speech ?? { ok: false, reason: "vad_unavailable" })
-    : { segments: ungatedSegments(rawSegments), summary: null };
-  const segments = gated.segments;
-  if (gateOn && gated.summary) {
+  let segments: typeof rawSegments = rawSegments;
+  if (gateOn) {
+    const gated = gateSegments(rawSegments, opts.speech ?? { ok: false, reason: "vad_unavailable" });
+    segments = gated.segments;
     console.log(`[diarize-window] ${opts.windowId}: speech gate ` + JSON.stringify(gated.summary));
   }
   const turns = await loadWindowTurns(opts.roomDayId, opts.window);
