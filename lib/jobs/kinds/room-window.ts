@@ -67,6 +67,16 @@ export const roomWindowKind: JobKind = {
   first: STEPS.prepare,
   scope: "invoke",
 
+  /**
+   * `switch_override` NEEDS `write`, NOT JUST `invoke` (V's ruling, 21 Sep 2026, on the Reviewer's finding that any invoke
+   * holder could otherwise make a job write an off room's live day for any window). `translate` stays at the kind's `invoke`:
+   * it costs Mini time, it does not widen what may be written. Read on the PARSED args, where the flag exists only when it
+   * was the boolean true (see parseArgs), so `switch_override:false` needs nothing.
+   */
+  scopeForArgs(args) {
+    return args.switch_override === true ? { scope: "write", arg: "switch_override" } : null;
+  },
+
   parseArgs(raw) {
     const o = (raw ?? {}) as Record<string, unknown>;
     const window_id = typeof o.window_id === "string" ? o.window_id.trim() : "";

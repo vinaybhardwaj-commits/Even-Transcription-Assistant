@@ -26,7 +26,8 @@
  *
  * PER-WINDOW ARGS: `translate: true` always; `switch_override: true` ONLY when the window's room has its own
  * Transcript switch off (V's ruling of 21 Sep 2026: those rooms are in scope, and their switch is not
- * touched). A room whose switch is on does not get the override — least privilege per job.
+ * touched). A room whose switch is on does not get the override — least privilege per job. The override needs
+ * `write` scope (V, 16:00 ruling), so the driver's token must carry read, invoke AND write.
  *
  * LOGGING: one JSON object per event, ids / counts / durations / closed codes only. No transcript text is
  * ever read by this module, and the token is never in scope here (door.ts holds it).

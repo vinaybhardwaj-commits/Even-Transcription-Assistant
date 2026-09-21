@@ -10,8 +10,9 @@
  *             so it is read here, in memory, and never touched again.
  *   the door  OVERNIGHT_TRANSLATE_TOKEN from a mode-600 file (OVERNIGHT_TRANSLATE_TOKEN_FILE, default
  *             ~/.claude/secrets/overnight_translate_mcp_token). NO SUCH FILE EXISTS TODAY and this build does not
- *             create one: the token is V's to issue at deploy (an `invoke`-scope SCRIBE_MCP_TOKENS entry for actor
- *             `overnight-translate`). Without it, `--mode run` refuses to start; `--mode dry-run` needs none.
+ *             create one: the token is V's to issue at deploy (a SCRIBE_MCP_TOKENS entry for actor
+ *             `overnight-translate` with scopes read, invoke and WRITE — write is what `switch_override` needs for
+ *             Transcript-off rooms). Without it, `--mode run` refuses to start; `--mode dry-run` needs none.
  *   APP_URL   defaults to https://www.evenscribe.app. The apex host is refused by main.ts (it redirects and drops
  *             the bearer).
  *

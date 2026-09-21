@@ -1,12 +1,14 @@
 /**
  * lib/overnight-translate/door.ts — the driver's only way into the app: the Scribe MCP door.
  *
- * TWO CALLS, TWO SCOPES. `scribe_job_submit` (scope `invoke`) queues a `room_window` job; `scribe_job_status`
- * (scope `read`) reads it back. So the token this driver needs is an `invoke` token — one `SCRIBE_MCP_TOKENS`
- * entry with scopes ["read","invoke"] for its own actor, NOT the night-drain's read-only one. `write` is not
- * needed. `invoke` is coarse (it also covers the door's other invoking tools), which is the smallest scope
- * that can submit a job at all; the driver only ever calls the two tools above, and the token sits in a 0600
- * file, sent in one header and never logged.
+ * TWO CALLS, THREE SCOPES. `scribe_job_submit` (scope `invoke`) queues a `room_window` job; `scribe_job_status`
+ * (scope `read`) reads it back. A window in a Transcript-OFF room is submitted with `switch_override:true`, and
+ * `room_window` requires `write` for that one argument (V's ruling of 21 Sep 2026, enforced in `submitJob`, so the
+ * caller cannot skip it). So the token this driver needs is one `SCRIBE_MCP_TOKENS` entry for its own actor with
+ * scopes ["read","invoke","write"] — NOT the night-drain's read-only one. A token with only read+invoke works for
+ * every Transcript-ON window and is refused (403, FATAL `mcp_scope_refused`, the run stops) at the first
+ * Transcript-OFF one. The scopes are coarse (`invoke` and `write` also cover the door's other tools); the driver
+ * only ever calls the two tools above, and the token sits in a 0600 file, sent in one header and never logged.
  *
  * FAILURE IS CLASSIFIED, because the three kinds call for three different actions:
  *   fatal     401/403 (refused credential, or scope missing: JSON-RPC -32001). Every window would fail the same
@@ -41,7 +43,7 @@ export type RoomWindowSubmit = {
   actor: string;
   via: "mcp";
   translate: true;
-  /** Present (true) ONLY for a window in a room whose own Transcript switch is off. */
+  /** Present (true) ONLY for a window in a room whose own Transcript switch is off. Needs `write` scope. */
   switch_override?: true;
 };
 

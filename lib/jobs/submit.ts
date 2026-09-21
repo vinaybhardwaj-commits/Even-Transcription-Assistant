@@ -69,6 +69,12 @@ export async function submitJob(input: {
   }
   // Throws JobArgsError, which the tool turns into a refusal — a job that cannot run never queues.
   const args = kind.parseArgs(input.args);
+  // An ARGUMENT that needs more than the kind does (room_window's switch_override needs `write`). Checked on the PARSED args,
+  // here, for the same reason the kind check is here: three submit paths, and a rule in one of them is not a rule.
+  const extra = kind.scopeForArgs?.(args) ?? null;
+  if (extra && !scopes.has(extra.scope)) {
+    throw new ToolScopeError(extra.scope, { kind: kind.name, kind_scope: kind.scope, arg: extra.arg, arg_scope: extra.scope });
+  }
   const job = await insertJob({ id: newJobId(), kind: kind.name, args, actor: input.actor });
   if (input.origin) kickRunner(input.origin);
   return job;
