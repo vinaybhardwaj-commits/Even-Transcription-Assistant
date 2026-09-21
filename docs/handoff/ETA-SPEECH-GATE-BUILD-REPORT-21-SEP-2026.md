@@ -38,3 +38,57 @@ answers judge nothing: 12 of 80 windows returned zero spans. (3) Closed hours me
 reading it as `<7` loses 858 segments.
 
 **Manual steps.** None. **Subagents.** None.
+
+---
+
+# Addendum — /vad built, D15 recorded. READY FOR REFUTER.
+
+**READY FOR REFUTER.** Two branches, both unpushed:
+
+| repo | branch | commit |
+|---|---|---|
+| Even-Transcription-Assistant | `vinay/speech-gate` | **`69ae896`** (base `45eedda`) |
+| ~/eta-router | `vinay/vad-endpoint` | **`6126ebc`** (base `86661c6`) |
+
+**/vad** — `router_server.py:905`. Posted audio → `normalize_to_wav` (16 kHz mono) → the Silero
+already loaded here → `{ok, spans[], span_count, speech_ms, audio_ms, threshold, latency_ms}`.
+`?threshold=` overrides, default `ETA_VAD_THRESHOLD`. Behind `_ROUTE_SEM`, so a backlog pass waits
+for a transcription rather than racing it.
+
+It deliberately does **not** call `vad_segments()`: that helper merges spans into `SEG_SEC` chunks
+and, on emptiness, returns fixed windows (`fixed-window-vad-empty`). Right for `/route`, fatal
+here — a gate that cannot tell "found nothing" from "found these" would condemn a window on a VAD
+failure. `/vad` returns `[]` honestly; the client maps that to `vad_empty_window`, which judges
+nothing.
+
+**Verified.** Against the direct silero run on two real 15-minute windows: 265 spans / 782.3 s and
+0 spans / 0.0 s — both exact. End-to-end through the real client and gate: 346 segments → 213
+speech / 133 non-speech / 0 unjudged. Tested on a second instance on **port 8091**; production
+**8083 was not restarted** and its tree is unmodified on `main`.
+
+Restart the test instance with:
+`cd <router worktree> && ETA_ROUTER_PORT=8091 ~/eta-router/.venv/bin/uvicorn router_server:app --host 127.0.0.1 --port 8091`
+
+**D15, the behaviour relied on** (per ruling §2):
+- `lib/bench-join.ts:113-125` — D15 is a CLIENT-side guard, not a refusal the joining service
+  issues. `callJoinService` would join mid-clinic.
+- `lib/mcp/tools/bench.ts:977-987` — `roomsRecordingNow()` refuses with `error: "room_recording"`
+  **and still returns `covering_chunks`**, each carrying `presigned_get`, `offset_in_chunk_s` and
+  `duration_s`, with the hint "the covering pieces below are available now".
+- 20 h of window audio was assembled from those pieces with ffmpeg locally. No join was requested;
+  no clip was created; nothing was written back.
+
+**Gate (final).** typecheck clean; `Tests 3279 passed | 1 skipped (3280)`, 145 files; `✓ Compiled
+successfully`; `check:silent` at the accepted 9, none mine; `swift build` complete; `swift test`
+UNPROVEN (no Xcode, `TestingMacros`). **28 tests; 13 mutations, 12 red.**
+
+**The one mutation that will not go red, stated rather than hidden:** removing the `if (!base)`
+guard in `fetchWindowSpeech` changes nothing observable — with no URL, `base.replace(…)` throws
+before `fetch` is reached and the catch returns the same `vad_unavailable`. The test asserts fetch
+is never called, which is true either way. The guard is defence in depth, not proven behaviour.
+
+**Unchanged by all of this:** the measurement still refutes enabling the gate (separation −34.4pp
+at the 1 s floor, −33.5pp at Silero 0.3). `/vad` makes the gate *runnable*, not *right*. The flag
+stays OFF.
+
+**Superseded:** nothing. I have not superseded another pane's line.
