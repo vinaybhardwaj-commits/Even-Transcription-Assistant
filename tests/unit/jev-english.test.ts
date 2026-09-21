@@ -107,6 +107,18 @@ describe("J0 — classifyWindow: run_english > native_en > needs-translation", (
     const c = classifyWindow({ ...base, transcript_english: "already english", transcript_original: "kuch bhi", metrics: null });
     expect("done" in c && c.done.source).toBe("run_english");
   });
+  it("G1/N13 — all three signals English but NO original text is never native_en, and never throws", () => {
+    // The live shape: bw_wwq9p6eb_1789821900000_primary (rd_jqj96amk) votes
+    // full=english,sarvam=english,mix=english and has no transcript_original.
+    for (const original of [null, undefined, "", "   "]) {
+      const c = classifyWindow({ ...base, transcript_english: null, transcript_original: original as never });
+      expect("done" in c).toBe(false);
+      expect("needsTranslation" in c && c.original).toBeNull();
+    }
+    // and the guard is not doing this by accident — the same metrics WITH text do pass
+    expect("done" in classifyWindow({ ...base, transcript_english: null, transcript_original: "hello doctor" })).toBe(true);
+  });
+
   it("native_en stores the original when the three signals agree", () => {
     const c = classifyWindow({ ...base, transcript_english: null, transcript_original: "hello doctor" });
     expect("done" in c && c.done).toMatchObject({ source: "native_en", english: "hello doctor" });
@@ -232,6 +244,29 @@ describe("J0 — success branches, and the model is never loaded unless translat
     // the record is a RUN artefact: nothing about voting reaches the row
     expect(Object.keys(DB.written.w1)).not.toContain("votes");
     expect(DB.written.w1).toMatchObject({ source: "native_en" });
+  });
+
+  it("G1/N13 — a live-shaped window, all three signals English with no text, is recorded empty not native_en", async () => {
+    DB.windows = [{ id: "w1" }];
+    DB.runs.w1 = { transcript_english: null, transcript_original: null, metrics_json: ENGLISH_METRICS, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ empty: 1, native_en: 0 });
+    expect(DB.written.w1).toMatchObject({ source: "empty", english: null, char_count: 0 });
+    expect(QWEN.calls).toBe(0);
+  });
+
+  it("G2/N17 — two windows sharing a vote record are COUNTED, not overwritten", async () => {
+    DB.windows = [{ id: "w1" }, { id: "w2" }, { id: "w3" }];
+    const abstained = { full_window_language: "english", sarvam_language: "en" };
+    DB.runs.w1 = { transcript_english: null, transcript_original: "good morning", metrics_json: abstained, detected_language: null };
+    DB.runs.w2 = { transcript_english: null, transcript_original: "please sit", metrics_json: abstained, detected_language: null };
+    DB.runs.w3 = { transcript_english: null, transcript_original: "aap kaise hain", metrics_json: { ...abstained, language_timeline: { language_mix: { en: 2, hi: 1 } } }, detected_language: null };
+    const r = await drive({ room_day_id: "rd1" });
+    expect((r.done as { votes: Record<string, number> }).votes).toEqual({
+      "full=english,sarvam=english,mix=absent": 2,
+      "full=english,sarvam=english,mix=other": 1,
+    });
+    expect(r.done).toMatchObject({ native_en: 2, not_ready: 1 });
   });
 
   it("FLAG ON: a code-mixed window is translated locally, source=translated with model + input_chars", async () => {

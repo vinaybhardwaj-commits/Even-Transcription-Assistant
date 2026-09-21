@@ -58,7 +58,12 @@ export type LanguageVote = "english" | "other" | "absent";
 /** The three votes, in the order the banner lists them. Recorded so a decision can be explained later. */
 export type NativeEnglishVotes = { full: LanguageVote; sarvam: LanguageVote; mix: LanguageVote };
 
-/** `full_window_language`: absent when the key is missing or not a string. */
+/**
+ * `full_window_language`: ABSENT only when the key is missing or null. A present value that is not
+ * a usable string — a number, an empty string — votes `other` and therefore VETOES. That is the
+ * conservative reading and it is deliberate: a metric that was written and is unreadable is not the
+ * same as a metric that was never written.
+ */
 function voteFull(metrics: WindowMetrics): LanguageVote {
   const v = (metrics as { full_window_language?: unknown } | null | undefined)?.full_window_language;
   if (v === undefined || v === null) return "absent";
@@ -66,7 +71,7 @@ function voteFull(metrics: WindowMetrics): LanguageVote {
   return v.trim().toLowerCase() === "english" ? "english" : "other";
 }
 
-/** `sarvam_language`: absent when the key is missing or not a string. */
+/** `sarvam_language`: ABSENT only when the key is missing or null; a present non-string votes `other`, as above. */
 function voteSarvam(metrics: WindowMetrics): LanguageVote {
   const v = (metrics as { sarvam_language?: unknown } | null | undefined)?.sarvam_language;
   if (v === undefined || v === null) return "absent";
