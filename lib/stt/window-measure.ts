@@ -111,17 +111,63 @@ export type WindowMeasure = WindowPartition & {
 
 const msOf = (t: string | Date): number => (t instanceof Date ? t.getTime() : Date.parse(t));
 
+/** The env var holding per-room floors: a JSON object of `{ "<room_id>": <floor> }`. */
+export const ROOM_ENERGY_FLOORS_KEY = "ROOM_ENERGY_FLOORS";
+
 /**
- * PURE — the per-room energy floor.
+ * PURE — one room's floor, or the global one.
  *
- * One default for every room today, because the PRD settles no per-room value and there is
- * nowhere on the `room` row to put one. `ROOM_ENERGY_FLOOR` overrides it globally so the
- * orchestrator can retune without a deploy once real coverage is known. A non-finite or
- * out-of-range override is IGNORED rather than honoured: a floor of NaN would silently call
- * every comparison false and report an entire day as silent, which is exactly the confident
- * falsehood this whole build exists to stop.
+ * IT NOW USES ITS ROOM. It did not: the argument was `_roomId` and every room got the single
+ * global value, though a 9 Sep measurement showed one floor cannot work across rooms — they
+ * differ in mic, room size and ambient noise, so a floor that is right for a quiet room calls a
+ * noisy one permanently loud.
+ *
+ * ─── WHERE THE PER-ROOM VALUES COME FROM ────────────────────────────────────────────────────
+ *
+ * NOT FROM HERE, and not from this build. This function reads `ROOM_ENERGY_FLOORS`, a JSON map of
+ * room id to floor, and the map is EMPTY until someone measures it. No value in it is invented:
+ * a floor is a measured property of a room, and the measurement that would produce one is the
+ * closed-hours distribution of that room's own energy — the hours when nothing is happening are
+ * exactly the hours that say what "nothing happening" sounds like IN THAT ROOM.
+ *
+ * Until that measurement exists, every room falls back to the global value and behaviour is
+ * unchanged. An env map rather than a `room` column because there is still nowhere on the `room`
+ * row to put one, and inventing a schema for numbers nobody has measured would be the worse half
+ * of the same mistake.
+ *
+ * FAIL-SAFE, TWICE OVER: unparseable JSON is ignored in favour of the global floor, and a
+ * per-room entry that is non-finite or out of range is ignored in favour of it too. A floor of
+ * NaN would call every comparison false and report a room as silent all day, which is the
+ * confident falsehood this build exists to stop.
  */
-export function roomEnergyFloor(_roomId?: string | null, env: Record<string, string | undefined> = process.env): number {
+export function roomEnergyFloor(roomId?: string | null, env: Record<string, string | undefined> = process.env): number {
+  const global = globalEnergyFloor(env);
+  if (!roomId) return global;
+  const raw = env[ROOM_ENERGY_FLOORS_KEY];
+  if (raw === undefined || raw.trim() === "") return global;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Length only: an env value is not something to echo into a log.
+    console.warn(`[window-measure] ${ROOM_ENERGY_FLOORS_KEY} is not valid JSON (length ${raw.length}) — using the global floor`);
+    return global;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return global;
+  const value = (parsed as Record<string, unknown>)[roomId];
+  if (value === undefined) return global;
+  // A NUMBER, not something Number() will coerce into one. `null` coerces to 0, which is a finite
+  // in-range floor that would call the room never-silent — a wrong answer arrived at confidently.
+  const n = typeof value === "number" ? value : NaN;
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    console.warn(`[window-measure] ${ROOM_ENERGY_FLOORS_KEY} entry for ${roomId} is out of range — using the global floor`);
+    return global;
+  }
+  return n;
+}
+
+/** PURE — the global floor: `ROOM_ENERGY_FLOOR`, or the default when unset or unusable. */
+export function globalEnergyFloor(env: Record<string, string | undefined> = process.env): number {
   const raw = env.ROOM_ENERGY_FLOOR;
   if (raw === undefined || raw === "") return DEFAULT_ROOM_ENERGY_FLOOR;
   const n = Number(raw);

@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { getObjectBytes } from "@/lib/r2";
 import { sql } from "@/lib/db";
+import { fetchWindowSpeech, speechGateEnabled } from "@/lib/stt/speech-gate";
 import { diarizeWindow, recordDiarizeWindow, repairStaleDiarizeSegments } from "@/lib/stt/diarize-window";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, type JobKind, type StepContext } from "../types";
@@ -55,12 +56,26 @@ export const diarizeWindowKind: JobKind = {
       return failWith(jobError("clip_missing_in_r2", w.clip_r2_key));
     }
 
+    // THE SPEECH GATE'S ONE CALLER. `diarizeWindow` takes the VAD's answer rather than fetching it,
+    // so it stays testable without a service — which means SOMEBODY has to fetch it, and this is the
+    // only place holding the audio. Without this the flag would be inert: every segment `unjudged`.
+    //
+    // Only when the gate is on. Off, no VAD is called, nothing is paid for, and the row is the row
+    // production writes today.
+    const speech = speechGateEnabled() ? await fetchWindowSpeech(bytes, "audio/webm") : undefined;
+    if (speech && !speech.ok) {
+      // Named, not swallowed: a gate that silently judges nothing looks exactly like a gate that is
+      // working, and the difference is the whole point of the flag being on.
+      console.warn("[jobs] speech gate: no VAD answer", JSON.stringify({ window: windowId, reason: speech.reason }));
+    }
+
     const res = await diarizeWindow({
       windowId,
       roomDayId: w.room_day_id,
       window: { start: windowStart(Number(w.start_ms)), end: windowEnd(Number(w.end_ms)) },
       audio: bytes,
       runId,
+      ...(speech ? { speech } : {}),
     });
     if (!res.ok) {
       // The service's message can describe the audio; the row gets a code. `retryable` means we
