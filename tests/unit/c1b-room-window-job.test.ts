@@ -13,9 +13,12 @@ const DB = vi.hoisted(() => ({
   routing: "route",
   log: [] as string[],
 }));
-const ROUTER = vi.hoisted(() => ({ submits: 0, states: [] as Array<Record<string, unknown>>, lastUrl: "" }));
-const WHISPER = vi.hoisted(() => ({ calls: 0 }));
-const CUES = vi.hoisted(() => ({ written: 0 }));
+// `lastOpts` / `opts` capture what the job passed DOWN — the per-job choices (translate, switch override)
+// are only real if they reach the router submit and the cue writer, so the tests below read these.
+const ROUTER = vi.hoisted(() => ({ submits: 0, states: [] as Array<Record<string, unknown>>, lastUrl: "", lastOpts: undefined as unknown }));
+// `silent` makes Whisper report an empty transcript — the quiet-room case the segment step records as a silent window.
+const WHISPER = vi.hoisted(() => ({ calls: 0, silent: false }));
+const CUES = vi.hoisted(() => ({ written: 0, opts: [] as unknown[] }));
 
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
@@ -62,6 +65,7 @@ vi.mock("@/lib/r2", () => ({
 vi.mock("@/lib/whisper", () => ({
   transcribeWithWhisper: async () => {
     WHISPER.calls += 1;
+    if (WHISPER.silent) return { ok: false, error: "empty_transcript", latency_ms: 10, attempts: 1 };
     return { ok: true, transcript: "whisper words", language: "kn", latency_ms: 120, attempts: 1,
              // The REAL WhisperSegment shape: seconds, not milliseconds. One segment inside the
     // 120 s shadow bound and one outside it, so the bounding is observable.
@@ -80,11 +84,11 @@ vi.mock("@/lib/mcp/tools/bench", () => ({
   buildWindowCue: () => ({}),
   // `complete` is the field cueWriteFailed actually reads — `written` is non-zero even when
   // every turn was rolled back, which is the trap the real helper documents.
-  writeWindowCues: async () => { CUES.written += 1; return { written: 2, deleted: 0, failed: 0, complete: true, window_recorded: true }; },
+  writeWindowCues: async (...a: unknown[]) => { CUES.written += 1; CUES.opts.push(a[7]); return { written: 2, deleted: 0, failed: 0, complete: true, window_recorded: true }; },
 }));
 vi.mock("@/lib/stt/eta-router", () => ({
   ROUTER_JOB_ON: () => true,
-  submitRouteJob: async () => { ROUTER.submits += 1; return { ok: true, job_id: `rj_${ROUTER.submits}` }; },
+  submitRouteJob: async (_url: string, opts?: unknown) => { ROUTER.submits += 1; ROUTER.lastOpts = opts; return { ok: true, job_id: `rj_${ROUTER.submits}` }; },
   pollRouteJob: async () => ROUTER.states.shift() ?? { ok: true, state: "running" },
   routeTranscribe: async () => ({ ok: true }),
 }));
@@ -93,14 +97,14 @@ const ACTOR = { actor: "admin_1", via: "admin_route" as const };
 const ARGS = { window_id: "bw_1", origin: "https://x.test", ...ACTOR };
 
 /** Drive the machine exactly as the runner does: one step per claim, progress carried on the row. */
-async function drive(maxSteps = 20) {
+async function drive(maxSteps = 20, args: Record<string, unknown> = ARGS) {
   const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
   let step = roomWindowKind.first;
   let progress: Record<string, unknown> = {};
   const visited: string[] = [];
   for (let i = 0; i < maxSteps; i += 1) {
     visited.push(step);
-    const out = await roomWindowKind.run({ job: {} as never, step, args: ARGS, progress, runner: "r1" });
+    const out = await roomWindowKind.run({ job: {} as never, step, args, progress, runner: "r1" });
     if (out.kind === "done") return { visited, result: (out as { result: Record<string, unknown> }).result, progress };
     if (out.kind === "fail") return { visited, error: (out as { error: string }).error, progress };
     progress = (out as { progress: Record<string, unknown> }).progress;
@@ -111,7 +115,7 @@ async function drive(maxSteps = 20) {
 
 beforeEach(() => {
   DB.runs = []; DB.deletes = 0; DB.windowState = "closed"; DB.routing = "route"; DB.log = [];
-  ROUTER.submits = 0; ROUTER.states = []; WHISPER.calls = 0; CUES.written = 0;
+  ROUTER.submits = 0; ROUTER.states = []; ROUTER.lastOpts = undefined; WHISPER.calls = 0; WHISPER.silent = false; CUES.written = 0; CUES.opts = [];
   vi.useRealTimers();
 });
 
@@ -322,5 +326,139 @@ describe("failFromPhase — the phase stays where it was, the detail joins it", 
     const withoutDetail = failFromPhase({ window_id: "bw_1", ok: false, step: "no_room_day" } as never) as { kind: "fail"; error: string };
     expect(errorCodeOf(withDetail.error)).toBe("room_window_failed");
     expect(errorCodeOf(withoutDetail.error)).toBe("room_window_failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Overnight translate (V, 21 Sep 2026) — two PER-JOB choices, both default false.
+//   translate        must reach the router submit (it used to be the literal `false`)
+//   switch_override  must reach the cue writer (it is what lets a Transcript-off room's turns land)
+// A choice that is parsed but never passed down is worth nothing, so these read what the calls received.
+// ---------------------------------------------------------------------------
+describe("overnight-translate — the per-job choices reach the calls that use them", () => {
+  const routed = () => {
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "w", transcript_english: "w", language_timeline: [], sec: 1 }];
+  };
+  const submitted = () => ROUTER.lastOpts as { translate?: boolean };
+
+  it("a job that asks for neither behaves exactly as before: translate false and no override", async () => {
+    routed();
+    const r = await drive();
+    expect(r.error).toBeUndefined();
+    expect(submitted().translate, "the router is asked NOT to translate").toBe(false);
+    expect(CUES.opts.length, "at least one cue write happened").toBeGreaterThan(0);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: false });
+  });
+
+  it("translate:true is what the router submit receives — and does not touch the cue override", async () => {
+    routed();
+    const r = await drive(20, { ...ARGS, translate: true });
+    expect(r.error).toBeUndefined();
+    expect(submitted().translate).toBe(true);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: false });
+  });
+
+  it("switch_override:true reaches EVERY cue write of the job — and does not turn translation on", async () => {
+    routed();
+    const r = await drive(20, { ...ARGS, switch_override: true });
+    expect(r.error).toBeUndefined();
+    expect(CUES.opts.length).toBeGreaterThan(0);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: true });
+    expect(submitted().translate, "the two choices are independent").toBe(false);
+  });
+
+  it("both at once: each goes where it belongs", async () => {
+    routed();
+    const r = await drive(20, { ...ARGS, translate: true, switch_override: true });
+    expect(r.error).toBeUndefined();
+    expect(submitted().translate).toBe(true);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: true });
+  });
+
+  it("the SILENT-window path forwards the override too — it is the OTHER cue write in the segment step", async () => {
+    WHISPER.silent = true;
+    const r = await drive(20, { ...ARGS, switch_override: true });
+    expect(r.error).toBeUndefined();
+    expect(r.result).toMatchObject({ silent_window: true });
+    expect(ROUTER.submits, "a silent window never reaches the routed engine, so translate has nothing to do").toBe(0);
+    expect(CUES.opts.length).toBeGreaterThan(0);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: true });
+  });
+
+  it("and without the override the silent path writes with it OFF", async () => {
+    WHISPER.silent = true;
+    const r = await drive();
+    expect(r.error).toBeUndefined();
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: false });
+  });
+
+  it("anything but the boolean true in the persisted args is NOT a yes (the step re-reads them, so a bad row cannot widen)", async () => {
+    routed();
+    const r = await drive(20, { ...ARGS, translate: "true", switch_override: 1 });
+    expect(r.error).toBeUndefined();
+    expect(submitted().translate).toBe(false);
+    for (const o of CUES.opts) expect(o).toEqual({ switchOverride: false });
+  });
+});
+
+describe("room_window parseArgs — the two choices are strict booleans, stored only when true", () => {
+  const base = { window_id: "bw_1", origin: "https://x.test", actor: "overnight-translate", via: "mcp" };
+
+  it("no choices: the args are exactly what they always were — same keys, same row, same dedupe", async () => {
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    expect(roomWindowKind.parseArgs(base)).toEqual(base);
+  });
+
+  it("true is stored; false is not stored at all", async () => {
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    expect(roomWindowKind.parseArgs({ ...base, translate: true })).toEqual({ ...base, translate: true });
+    expect(roomWindowKind.parseArgs({ ...base, switch_override: true })).toEqual({ ...base, switch_override: true });
+    expect(roomWindowKind.parseArgs({ ...base, translate: true, switch_override: true })).toEqual({ ...base, translate: true, switch_override: true });
+    expect(roomWindowKind.parseArgs({ ...base, translate: false, switch_override: false })).toEqual(base);
+  });
+
+  it("a string, a number or null is REFUSED at submit — 'false' must never be read as yes", async () => {
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const { JobArgsError } = await import("@/lib/jobs/types");
+    for (const key of ["translate", "switch_override"]) {
+      for (const bad of ["true", "false", "", 1, 0, null, {}, []]) {
+        let thrown: unknown;
+        try { roomWindowKind.parseArgs({ ...base, [key]: bad }); } catch (e) { thrown = e; }
+        expect(thrown, `${key}=${JSON.stringify(bad)} must be refused`).toBeInstanceOf(JobArgsError);
+        expect(String((thrown as Error).message)).toContain(key);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A job that asked for English must not be answered with a silent no. `translate` is honoured on the
+// ASYNC router path; a synchronous engine has no such switch. Reviewer finding A: without this guard the job
+// would run, be paid for, finish `done` with transcript_english NULL, and be picked again every night.
+// ---------------------------------------------------------------------------
+describe("overnight-translate — translate on a SYNCHRONOUS engine fails by name, before any spend", () => {
+  it("routed to a synchronous engine, translate:true FAILS with a closed detail and writes no run", async () => {
+    DB.routing = "whisper";
+    const r = await drive(20, { ...ARGS, translate: true });
+    expect(r.error).toBe("room_window_failed: engine_failed: translate_unsupported_by_engine");
+    expect(DB.windowState, "the window is NOT marked transcribed").not.toBe("transcribed");
+    expect(DB.runs.filter((x) => x.engine === "whisper"), "the engine step wrote no run").toHaveLength(0);
+    expect(ROUTER.submits).toBe(0);
+  });
+
+  it("the same window WITHOUT translate still completes on that engine — nothing else changed", async () => {
+    DB.routing = "whisper";
+    const r = await drive();
+    expect(r.error).toBeUndefined();
+    expect(DB.runs.some((x) => x.engine === "whisper")).toBe(true);
+    expect(DB.windowState).toBe("transcribed");
+  });
+
+  it("routed to the async router, translate:true is accepted and reaches the router (no regression)", async () => {
+    DB.routing = "route";
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "w", transcript_english: "w", language_timeline: [], sec: 1 }];
+    const r = await drive(20, { ...ARGS, translate: true });
+    expect(r.error).toBeUndefined();
+    expect((ROUTER.lastOpts as { translate?: boolean }).translate).toBe(true);
   });
 });
