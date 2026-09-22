@@ -82,7 +82,7 @@ export default function NoteComposerClient({ slug }: { slug: string }) {
   useEffect(() => {
     let cancelled = false;
     api(`/api/notegen/nabh-requirements?note_type=${noteType}`).then((r) => r.json())
-      .then((j) => { if (!cancelled) setFloor((j.fields || []) as FloorField[]); }).catch(() => {});
+      .then((j) => { if (!cancelled) setFloor((j.fields || []) as FloorField[]); }).catch(() => { /* intentional: floor load is best-effort UI; composer stays usable without NABH fields */ });
     return () => { cancelled = true; };
   }, [noteType, api]);
 
@@ -160,7 +160,7 @@ export default function NoteComposerClient({ slug }: { slug: string }) {
   function acceptRewrite(r: { from: string; to: string }) {
     const ed = editorRef.current;
     if (ed) ed.chain().focus().acceptRewrite(r.from, r.to).run();
-    if (encIdRef.current) api(`/api/encounters/${encIdRef.current}/editor`, { method: "PUT", body: JSON.stringify({ editor_text: editorRef.current?.getText() ?? textRef.current, expansion: { from: r.from, to: r.to } }) }).catch(() => {});
+    if (encIdRef.current) api(`/api/encounters/${encIdRef.current}/editor`, { method: "PUT", body: JSON.stringify({ editor_text: editorRef.current?.getText() ?? textRef.current, expansion: { from: r.from, to: r.to } }) }).catch(() => { /* intentional: expansion audit write is best-effort; rewrite already applied locally */ });
     setRewrites([]);
   }
   function dismissRewrite(r: { from: string; to: string }) {

@@ -10,23 +10,28 @@ jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
+          cache: npm
 
-      - name: Install dependencies (npm install — repo has no lockfile; matches Vercel)
-        run: npm install --no-audit --no-fund
+      # package-lock.json is committed (since Bench v0.3); npm ci matches Vercel when a lockfile is present.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
 
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit tests (vitest installed ephemerally — not a committed dep; same pattern as e2e's playwright)
-        run: |
-          npm i -D vitest@^2 --no-audit --no-fund
-          npx vitest run
+      # vitest is a committed devDependency (^5); do not overlay an ephemeral vitest@^2.
+      - name: Unit tests
+        run: npm test
 
       - name: Silent-failure gate (no empty catch/.catch in critical paths; annotate deliberate ones)
         run: npm run check:silent
+
+      # next lint exits 0 today (warnings only). Kept as a soft hygiene gate; do not churn the codebase for style.
+      - name: Lint
+        run: npm run lint

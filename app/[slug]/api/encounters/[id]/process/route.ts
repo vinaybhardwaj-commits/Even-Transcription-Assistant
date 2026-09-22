@@ -295,7 +295,7 @@ export async function POST(
               if (sub.ok && sub.job_id) {
                 jobId = sub.job_id;
                 row.router_job_id = jobId;
-                await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => {});
+                await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => { /* intentional: best-effort job-id persist; poll can still use in-memory jobId */ });
                 emit?.({ stage: "progress", msg: "Long recording — chunked transcription job submitted…" });
               } else {
                 emit?.({ stage: "progress", msg: `Chunked job submit failed (${sub.error ?? "?"}); falling back to Whisper` });
@@ -323,7 +323,7 @@ export async function POST(
                                     detected_language = ${st.dominant_language ?? row.detected_language},
                                     language_timeline = ${JSON.stringify(st.language_timeline ?? null)}::jsonb,
                                     router_job_id = NULL
-                              WHERE id = ${id}`.catch(() => {});
+                              WHERE id = ${id}`.catch(() => { /* intentional: best-effort transcript persist; in-memory row already updated for this step */ });
                     row.router_job_id = null;
                   }
                   emit?.({ stage: "progress", msg: `Chunked transcript ready (${eng.length} chars, ${st.dominant_language ?? "?"})` });
@@ -331,7 +331,7 @@ export async function POST(
                   break;
                 }
                 if (!st.ok || st.state === "failed") {
-                  await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => {});
+                  await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => { /* intentional: best-effort clear so next tick can fall back to Whisper */ });
                   row.router_job_id = null;
                   emit?.({ stage: "progress", msg: `Chunked job ${st.state ?? "error"} (${st.error ?? "?"}); falling back to Whisper` });
                   break;
@@ -719,7 +719,7 @@ export async function POST(
             body: JSON.stringify({ step: true }),
             cache: "no-store",
           });
-          await res.text().catch(() => {}); // target ACKs fast and runs its step in its own after()
+          await res.text().catch(() => { /* intentional: target ACKs fast and runs its step in its own after() */ });
         } catch { /* resume cron (every 3 min) is the safety net */ }
       });
     };
@@ -829,7 +829,7 @@ export async function POST(
           if (jobPending) {
             // Long-file chunked job still running: release the lock (WITHOUT resetting
             // attempts, so a stuck job still gives up at the cap) and re-poll next tick.
-            await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
+            await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => { /* intentional: best-effort lock release so next tick can re-poll the chunked job */ });
             return { progressed: false, jobPending: true };
           }
           await guardTranscripts();

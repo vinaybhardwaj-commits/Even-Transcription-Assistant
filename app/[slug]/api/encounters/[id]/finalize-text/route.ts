@@ -61,7 +61,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
           body: JSON.stringify({ step: true }),
           cache: "no-store",
         });
-        await res.text().catch(() => {});
+        await res.text().catch(() => { /* intentional: discard ACK body; step runs in target after() */ });
       } catch { /* the /3-min resume cron recovers stuck 'processing' rows */ }
     });
   }
