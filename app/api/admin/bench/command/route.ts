@@ -30,6 +30,7 @@ import {
   classifyBusError,
   decideStart,
   findActiveSession,
+  getCommand,
   getListener,
   insertCommand,
   type CommandKind,
@@ -42,6 +43,34 @@ export const dynamic = "force-dynamic";
 const noStore = { headers: { "cache-control": "no-store" } };
 const fail = (status: number, error: string, extra: Record<string, unknown> = {}) =>
   NextResponse.json({ ok: false, error, ...extra }, { status, ...noStore });
+
+/** Read one command's real bus lifecycle for the per-room outcome row. */
+export async function GET(req: Request) {
+  const guard = await benchAdminGuard();
+  if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, ...noStore });
+  const id = new URL(req.url).searchParams.get("id");
+  if (!id || !/^cmd_[a-z0-9]{8}$/.test(id)) return fail(400, "command_id_required");
+  try {
+    const row = await getCommand(id);
+    if (!row) return fail(404, "command_not_found");
+    return NextResponse.json({
+      ok: true,
+      command: {
+        id: row.id,
+        room_id: row.room_id,
+        kind: row.kind,
+        status: row.status,
+        error: row.error,
+        result: row.result,
+        created_at: new Date(row.created_at).toISOString(),
+        acked_at: row.acked_at ? new Date(row.acked_at).toISOString() : null,
+      },
+    }, noStore);
+  } catch (e) {
+    const b = e instanceof BusError ? e : classifyBusError(e);
+    return fail(503, b.code);
+  }
+}
 
 /**
  * The monitor's only write is also the only admin action that can start, pause or STOP a

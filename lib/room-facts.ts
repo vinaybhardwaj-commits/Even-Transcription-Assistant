@@ -358,3 +358,82 @@ export function strandedTotal(all: readonly Stranded[]): Stranded {
   ].filter((r) => r.ms > 0 || r.slots > 0);
   return { total_ms: waiting_ms + no_day_ms + never_closed_ms, waiting_ms, no_day_ms, never_closed_ms, reasons };
 }
+
+// ---------------------------------------------------------------------------
+// Fleet-board operational alerts — shared by the admin board and scribe_diff_room
+// ---------------------------------------------------------------------------
+
+export type ActiveMicAlert = "device_missing" | "digital_silence" | "encoder_stalled";
+export type OperationalAlertCode =
+  | ActiveMicAlert
+  | "kiosk_not_listening"
+  | "audio_upload_stalled"
+  | "tape_without_cues";
+export type OperationalAlert = {
+  code: OperationalAlertCode;
+  severity: "red" | "amber";
+  label: string;
+  detail: string;
+};
+
+/**
+ * One vocabulary for tape-risk facts. Inputs are evidence assembled by each server-side reader;
+ * the decision and operator wording live here so the board and MCP door cannot drift.
+ */
+export function roomOperationalAlerts(input: {
+  recording: boolean;
+  kioskListening: boolean | null;
+  stalled: boolean;
+  stalledAgeMs: number | null;
+  activeMicAlert: ActiveMicAlert | null;
+  tapeWithoutCues: boolean | null;
+}): OperationalAlert[] {
+  const out: OperationalAlert[] = [];
+  if (input.recording && input.activeMicAlert === "device_missing") {
+    out.push({
+      code: "device_missing",
+      severity: "red",
+      label: "Device missing",
+      detail: "The main microphone was reported missing. Check the microphone and host in this room.",
+    });
+  } else if (input.recording && input.activeMicAlert === "encoder_stalled") {
+    out.push({
+      code: "encoder_stalled",
+      severity: "red",
+      label: "Encoder stalled",
+      detail: "The recorder reported that its encoder stalled. Go to the room and check the recording host.",
+    });
+  } else if (input.recording && input.activeMicAlert === "digital_silence") {
+    out.push({
+      code: "digital_silence",
+      severity: "red",
+      label: "Recording is digitally silent",
+      detail: "The recorder reported silence while the tape still says recording. Check the microphone in the room.",
+    });
+  }
+  if (input.recording && input.kioskListening === false) {
+    out.push({
+      code: "kiosk_not_listening",
+      severity: "red",
+      label: "Recording with kiosk offline",
+      detail: "No kiosk page is listening. Open the room page on the clinic Mac.",
+    });
+  }
+  if (input.recording && input.stalled) {
+    out.push({
+      code: "audio_upload_stalled",
+      severity: "red",
+      label: "Says recording, no audio arriving",
+      detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}.`,
+    });
+  }
+  if (input.tapeWithoutCues === true) {
+    out.push({
+      code: "tape_without_cues",
+      severity: "amber",
+      label: "Tape has no room cues",
+      detail: "Audio exists today, but no room cue has arrived. The tape is safe; check the room-day feed.",
+    });
+  }
+  return out;
+}
