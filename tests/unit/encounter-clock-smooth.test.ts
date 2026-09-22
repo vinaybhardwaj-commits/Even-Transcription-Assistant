@@ -193,10 +193,19 @@ describe("E-4 — accounting the Refuter's mutants reached", () => {
     expect(r[0].closed_by).toBe("end_of_input");        // not "non_speech": N S N N is not three in a row
     expect(span(r[0])).toEqual([0, 3]);
   });
-  it("M14 — dead_mic_ms is structurally 0 under this ruling, because a dead mic ends the run", () => {
+  it("M14 — dead_mic_ms is 0 at the default constants: a dead mic ends the run, and no gap fits one", () => {
     const r = smoothEncounters(seq("SS" + "D".repeat(10) + "SS"));
     expect(r.every((e) => e.dead_mic_ms === 0)).toBe(true);
     expect(r.every((e) => e.unjudged_ms === 0)).toBe(true);
+    expect(smoothEncounters(seq("SSNDSS")).map((e) => e.dead_mic_ms)).toEqual([0, 0]);
+  });
+  it("M14 — but it is a live field: lower `exit` and a merged span DOES count the dead mic inside it", () => {
+    // At exit 3 the gap a non_speech close leaves is exactly filled by the probes that caused it, so a
+    // dead mic cannot fit. At exit 1 the gap opens and the merge re-tallies across it (ETA-Refuter).
+    const r = smoothEncounters(seq("SSNDSS"), { exit: 1 });
+    expect(r).toHaveLength(1);
+    expect(r[0].merged_from).toBe(2);
+    expect(r[0].dead_mic_ms).toBe(HOP);
   });
 });
 

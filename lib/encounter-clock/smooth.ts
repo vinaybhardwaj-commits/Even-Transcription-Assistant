@@ -72,10 +72,13 @@ export type Encounter = {
   unjudged_ms: number;
   longest_unjudged_run_ms: number;
   /**
-   * The part of unjudged_ms the gate attributed to a dead mic. Under the 23 Sep ruling this is always
-   * 0: a dead mic closes an open encounter and discards a pending run, so no dead-mic probe can fall
-   * between an encounter's first and last speech probe. Kept because it stops being 0 the moment the
-   * dead-mic rule is softened, and a reader should see the zero rather than infer it.
+   * The part of unjudged_ms the gate attributed to a dead mic. **0 at the default constants**, and not
+   * by accident: a dead mic closes an open encounter and discards a pending run, and the gap a
+   * non_speech close leaves (EXIT_NON_SPEECH_PROBES hops) is exactly filled by the non_speech probes
+   * that caused it, so no dead-mic probe fits in a merged span either. Lower `exit` and the gap opens:
+   * with { exit: 1 } a dead mic between two runs lands inside the merged interval and is counted here
+   * (ETA-Refuter, 23 Sep, measured both ways). The constants are provisional, so this is a live field,
+   * not dead code.
    */
   dead_mic_ms: number;
   doctor_present: { yes: number; no: number; unknown: number };
