@@ -84,6 +84,14 @@ describe("E-1 scheduleProbes — a 180 s probe every 60 s", () => {
     expect(one(samples(0.0005, 0))).toMatchObject({ preselect: "skip_quiet", preselect_source: "levels" });
     expect(one(samples(0.0005, 0.99))).toMatchObject({ preselect: "skip_dead_mic", preselect_source: "levels" });
   });
+  it("works on production-shaped rows (no avg): quiet peaks skip, a typical peak is fetched, zero_ratio is a dead mic", () => {
+    const prodRows = (peak: number, zero = 0) => Array.from({ length: 91 }, (_, i): BenchLevelSample =>
+      ({ t_ms: i * 2000, peak, avg: null, zero_ratio: zero, session_open: false, tape_advancing: false, samples: 1 }));
+    const one = (s: BenchLevelSample[]) => scheduleProbes({ day_start_ms: 0, day_end_ms: 180_000, level_samples: s })[0];
+    expect(one(prodRows(0.071))).toMatchObject({ preselect: "extract", preselect_source: "levels" });
+    expect(one(prodRows(0.002))).toMatchObject({ preselect: "skip_quiet", preselect_source: "levels" });
+    expect(one(prodRows(0.071, 0.99))).toMatchObject({ preselect: "skip_dead_mic", preselect_source: "levels" });
+  });
   it("level samples covering only part of a probe are not evidence: the probe is extracted", () => {
     const partial = Array.from({ length: 30 }, (_, i) => lvl(i * 2000, 0.0005, 0.99));   // first 58 s only
     expect(scheduleProbes({ day_start_ms: 0, day_end_ms: 180_000, level_samples: partial })[0])
@@ -115,6 +123,50 @@ describe("E-1 mapProbeToChunks — exact sample offsets from each chunk's own st
     const m = mapProbeToChunks({ start_ms: start, end_ms: start + 180_000 }, gapped);
     expect(m.mapped_samples).toBe(150 * SR);
     expect(m.coverage).toBeCloseTo(150 / 180, 6);
+  });
+});
+
+describe("E-1 overlapping chunks — each stretch of clock time from ONE chunk", () => {
+  // Production has overlapping consecutive chunks: 9 of 11,140 pairs in 14 days, the largest by 82.6 s.
+  it("an 82.6 s overlap is taken once, from the earlier chunk, and coverage stays honest", () => {
+    const { chunks } = makeChunks();
+    const overlapped = [chunks[0], { ...chunks[1], start_ms: chunks[1].start_ms - 82_600 }];
+    const start = T0 + 250_000;
+    const m = mapProbeToChunks({ start_ms: start, end_ms: start + 180_000 }, overlapped);
+    expect(m.mapped_samples).toBe(180 * SR);                       // not 180 s + the overlap
+    expect(m.coverage).toBe(1);
+    expect(m.overlap_dropped_ms).toBe(50_000);                     // the overlap that fell inside this probe
+    expect(m.pieces[0]).toMatchObject({ chunk_idx: 0, sample_start: 250 * SR, sample_end: 300 * SR });
+    expect(m.pieces[1].chunk_idx).toBe(1);
+    expect(m.pieces[1].sample_start).toBe(Math.round(82.6 * SR));  // chunk 1 starts where chunk 0 left off
+  });
+  it("a chunk wholly inside an earlier one contributes nothing", () => {
+    const { chunks } = makeChunks();
+    const inner = { ...chunks[1], idx: 9, r2_key: "inner", start_ms: chunks[0].start_ms + 260_000, end_ms: chunks[0].start_ms + 290_000 };
+    const start = T0 + 250_000;
+    const m = mapProbeToChunks({ start_ms: start, end_ms: start + 180_000 }, [chunks[0], inner, chunks[1]]);
+    expect(m.pieces.map((p) => p.chunk_idx)).toEqual([0, 1]);
+    expect(m.mapped_samples).toBe(180 * SR);
+    expect(m.overlap_dropped_ms).toBe(30_000);
+  });
+  it("the extracted probe audio is exactly 180 s, and the contract records the overlap it dropped", async () => {
+    const { chunks, store } = makeChunks();
+    const overlapped = [chunks[0], { ...chunks[1], start_ms: chunks[1].start_ms - 82_600 }];
+    const probe = { start_ms: T0 + 250_000, end_ms: T0 + 430_000 };
+    const { contract } = await extractProbe(probe, overlapped, ioFor(store));
+    expect(contract.total_samples).toBe(contract.expected_samples);
+    expect(contract.overlap_dropped_ms).toBe(50_000);
+    expect(await verifyContract(contract, overlapped, ioFor(store))).toEqual({ ok: true, mismatches: [] });
+  });
+  it("piece lengths come from the probe grid, so fractional boundaries still sum exactly", () => {
+    // Found by search: with these sub-sample offsets, lengths taken on each CHUNK's grid come out one
+    // sample short (2,879,999); taken on the probe's grid they sum to 2,880,000 exactly.
+    const { chunks } = makeChunks();
+    const odd = [chunks[0], { ...chunks[1], start_ms: chunks[1].start_ms - 82_600 + 0.01 }];
+    const start = T0 + 250_000 + 0.04;
+    const m = mapProbeToChunks({ start_ms: start, end_ms: start + 180_000 }, odd);
+    expect(m.expected_samples).toBe(180 * SR);
+    expect(m.mapped_samples).toBe(180 * SR);
   });
 });
 

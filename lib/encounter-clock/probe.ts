@@ -78,22 +78,42 @@ export type ChunkPiece = {
 const toSample = (ms: number, rate: number): number => Math.round((ms / 1000) * rate);
 
 /**
- * The chunks a probe needs and the exact samples from each. Chunks are not grid-aligned (a chunk
- * can start at 13:57:12.558), so offsets are computed from each chunk's own start. A gap between
- * chunks shows up as coverage below 1; it is never papered over.
+ * The chunks a probe needs and the exact samples from each.
+ *
+ * Chunks are not grid-aligned (a chunk can start at 13:57:12.558), so offsets are computed from each
+ * chunk's own start. Chunks can also OVERLAP on the clock — 9 of 11,140 consecutive pairs in 14 days,
+ * the largest by 82.6 s (ETA-Refuter, 22 Sep) — so each stretch of the probe's clock is taken from
+ * ONE chunk only: the earliest-starting chunk that covers it (ties by idx), and a later chunk
+ * contributes only what the earlier ones did not. The overlap dropped is reported, never silently
+ * doubled into the probe audio.
+ *
+ * Piece lengths come from the PROBE's sample grid (probe-relative start and end, each rounded once),
+ * so contiguous pieces always sum to the probe's expected sample count exactly; the offset into each
+ * chunk comes from that chunk's own start. A gap between chunks lowers coverage; it is never filled.
  */
 export function mapProbeToChunks(probe: { start_ms: number; end_ms: number }, chunks: ClockChunk[], rate = PROBE_SAMPLE_RATE):
-  { pieces: ChunkPiece[]; expected_samples: number; mapped_samples: number; coverage: number } {
+  { pieces: ChunkPiece[]; expected_samples: number; mapped_samples: number; coverage: number; overlap_dropped_ms: number } {
   const expected = toSample(probe.end_ms - probe.start_ms, rate);
   const pieces: ChunkPiece[] = [];
-  for (const c of [...chunks].sort((a, b) => a.start_ms - b.start_ms)) {
-    const a = Math.max(probe.start_ms, c.start_ms), b = Math.min(probe.end_ms, c.end_ms);
-    if (b <= a) continue;
-    const s0 = toSample(a - c.start_ms, rate), s1 = toSample(b - c.start_ms, rate);
-    if (s1 > s0) pieces.push({ chunk_idx: c.idx, r2_key: c.r2_key, sample_start: s0, sample_end: s1 });
+  let reached = probe.start_ms;                 // the probe clock is taken up to here
+  let dropped = 0;
+  const sorted = [...chunks].sort((a, b) => a.start_ms - b.start_ms || a.idx - b.idx);
+  for (const c of sorted) {
+    const lo = Math.max(probe.start_ms, c.start_ms), hi = Math.min(probe.end_ms, c.end_ms);
+    if (hi <= lo) continue;
+    const a = Math.max(lo, reached);              // skip what an earlier chunk already gave
+    dropped += Math.max(0, Math.min(hi, reached) - lo);   // the part an earlier chunk already covered
+    if (hi <= a) continue;
+    const p0 = toSample(a - probe.start_ms, rate), p1 = toSample(hi - probe.start_ms, rate);
+    if (p1 > p0) {
+      const s0 = toSample(a - c.start_ms, rate);
+      pieces.push({ chunk_idx: c.idx, r2_key: c.r2_key, sample_start: s0, sample_end: s0 + (p1 - p0) });
+    }
+    reached = Math.max(reached, hi);
   }
   const mapped = pieces.reduce((n, p) => n + (p.sample_end - p.sample_start), 0);
-  return { pieces, expected_samples: expected, mapped_samples: mapped, coverage: expected ? Math.min(1, mapped / expected) : 0 };
+  return { pieces, expected_samples: expected, mapped_samples: mapped,
+           coverage: expected ? Math.min(1, mapped / expected) : 0, overlap_dropped_ms: dropped };
 }
 
 // ── extraction and its contract ──────────────────────────────────────────────────────────────────
@@ -112,7 +132,11 @@ export type ExtractContract = {
   pieces: Array<ChunkPiece & { chunk_sha256: string; decoded_samples: number }>;
   expected_samples: number;
   total_samples: number;
+  /** Unique clock time covered over the probe's length. Overlap is taken once, so this can reach 1
+   *  only when the probe is genuinely covered; it is never inflated by audio taken twice. */
   coverage: number;
+  /** Clock time that more than one chunk covered and that was taken from the earlier chunk only. */
+  overlap_dropped_ms: number;
   /** sha256 of the probe's PCM as little-endian int16 — fixed byte order, so it is platform-free. */
   pcm_sha256: string;
 };
@@ -152,6 +176,7 @@ export async function extractProbe(probe: { start_ms: number; end_ms: number }, 
     version: EXTRACT_CONTRACT_VERSION, probe: { start_ms: probe.start_ms, end_ms: probe.end_ms }, sample_rate: rate,
     pieces, expected_samples: map.expected_samples, total_samples: total,
     coverage: map.expected_samples ? Math.min(1, total / map.expected_samples) : 0,
+    overlap_dropped_ms: map.overlap_dropped_ms,
     pcm_sha256: sha256Hex(pcmToLeBytes(pcm)),
   };
   return { contract, pcm };

@@ -4,6 +4,12 @@
  * Two halves, and a verdict of speech | non_speech | unjudged:
  *   ENERGY      from the level log (bench_level_sample) or from RMS frames decoded off the original
  *               chunks. Dead mic = zero_ratio >= 0.98, or a median level at or below -90 dBFS.
+ *               A level sample is read by its `avg` when the recorder reports one, else by its `peak`.
+ *               Production reports no `avg` (0 of 2,160 rows, 22 Sep), so on real data the level half
+ *               runs on `peak`. That is safe in one direction only, which is the direction that
+ *               matters: peak >= RMS always, so a peak under the floor proves the RMS is under it too.
+ *               A peak-based "quiet" is a strict subset of the RMS-based one: it can call a quiet room
+ *               active (and the probe then gets fetched), never an active room quiet.
  *   TRANSCRIPT  unique characters per second of the text placed inside the probe (see
  *               uniqueCharsPerSecond), passing at UNIQUE_CHARS_PER_SECOND_MIN.
  *
@@ -15,8 +21,13 @@
  *   dead mic                          -> unjudged   (dead_mic: the mic heard nothing, so it says
  *                                                     nothing about the room)
  *   no energy evidence                -> unjudged   (no_energy_evidence)
- *   energy quiet, text present        -> non_speech (text_on_quiet_audio: the recogniser's
- *                                                     hallucination signature)
+ *   energy quiet, text present        -> unjudged   (halves_disagree: ETA-Refuter, 22 Sep. Text
+ *                                                     reaching 0.15 unique chars/s is not the looping
+ *                                                     signature — repeats count once — and a
+ *                                                     soft-spoken or far-field consult can sit under
+ *                                                     the quiet line. Until a bench shows how often
+ *                                                     quiet-with-text is real speech, the gate does
+ *                                                     not pick a side.)
  *   energy quiet                      -> non_speech (quiet_room)
  *   energy active, no transcript      -> unjudged   (no_transcript_evidence: at the production
  *                                                     floor a room's ambient passes the energy
@@ -62,6 +73,8 @@ export type EnergyState = "dead_mic" | "quiet" | "active" | "missing";
 export type EnergyResult = {
   state: EnergyState;
   source: "levels" | "frames" | null;
+  /** Which level field was read: "avg" when every usable sample had one, "peak" otherwise. */
+  level_basis: "avg" | "peak" | null;
   active_frac: number | null;
   median_dbfs: number | null;
   median_zero_ratio: number | null;
@@ -69,7 +82,7 @@ export type EnergyResult = {
 };
 
 const missingEnergy = (source: EnergyResult["source"], n = 0): EnergyResult =>
-  ({ state: "missing", source, active_frac: null, median_dbfs: null, median_zero_ratio: null, n });
+  ({ state: "missing", source, level_basis: null, active_frac: null, median_dbfs: null, median_zero_ratio: null, n });
 
 /**
  * Level samples inside [t0, t1). Evidence only when they span LEVEL_MIN_COVERAGE of the probe: a
@@ -83,17 +96,23 @@ export function levelSamplesIn(samples: BenchLevelSample[], t0: number, t1: numb
 }
 
 /**
- * The energy half. Level samples read `avg` (a sample with no avg is absent, not zero); frames are
- * RMS amplitudes in 0..1, one per 20 ms, decoded from the original chunks.
+ * The energy half. Level samples are read by `avg` when EVERY usable sample has one, otherwise by
+ * `peak` for all of them — never a mix of the two scales in one probe. A sample with neither is
+ * absent, not zero. Frames are RMS amplitudes in 0..1, one per 20 ms, decoded from the chunks.
  */
 export function energyHalf(ev: EnergyEvidence | null | undefined, floor: number = DEFAULT_ROOM_ENERGY_FLOOR): EnergyResult {
   if (!ev) return missingEnergy(null);
   let levels: number[];
   let zero: number | null = null;
+  let basis: EnergyResult["level_basis"] = null;
   if (ev.kind === "levels") {
-    levels = ev.samples.map((s) => s.avg).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    zero = median(ev.samples.map((s) => s.zero_ratio).filter((v): v is number => typeof v === "number" && Number.isFinite(v)));
+    const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+    const usable = ev.samples.filter((s) => fin(s.avg) || fin(s.peak));
+    basis = usable.length > 0 && usable.every((s) => fin(s.avg)) ? "avg" : "peak";
+    levels = usable.map((s) => (basis === "avg" ? s.avg : s.peak)).filter(fin);
+    zero = median(ev.samples.map((s) => s.zero_ratio).filter(fin));
     if (levels.length === 0 && zero === null) return missingEnergy("levels", ev.samples.length);
+    if (levels.length === 0) basis = null;
   } else {
     levels = ev.frame_rms.filter((v) => Number.isFinite(v));
     if (levels.length === 0) return missingEnergy("frames");
@@ -103,7 +122,7 @@ export function energyHalf(ev: EnergyEvidence | null | undefined, floor: number 
   const dead = (zero !== null && zero >= DEAD_MIC_ZERO_RATIO) || (medDb !== null && medDb <= DEAD_MIC_DBFS);
   const activeFrac = levels.length ? levels.filter((v) => v >= floor).length / levels.length : null;
   const state: EnergyState = dead ? "dead_mic" : activeFrac === null ? "missing" : activeFrac >= ENERGY_ACTIVE_MIN ? "active" : "quiet";
-  return { state, source: ev.kind, active_frac: activeFrac, median_dbfs: medDb, median_zero_ratio: zero, n: levels.length };
+  return { state, source: ev.kind, level_basis: basis, active_frac: activeFrac, median_dbfs: medDb, median_zero_ratio: zero, n: levels.length };
 }
 
 // ── transcript half ──────────────────────────────────────────────────────────────────────────────
@@ -188,7 +207,7 @@ export function splitWindowText(text: string, spans: TimelineSpan[], windowStart
 
 export type GateVerdict = "speech" | "non_speech" | "unjudged";
 export type GateReason =
-  | "dead_mic" | "no_energy_evidence" | "text_on_quiet_audio" | "quiet_room"
+  | "dead_mic" | "no_energy_evidence" | "halves_disagree" | "quiet_room"
   | "no_transcript_evidence" | "speech" | "no_text";
 
 export type GateResult = {
@@ -215,7 +234,7 @@ export function gateProbe(input: {
     ({ version: GATE_VERSION, start_ms, end_ms, verdict, reason, energy, transcript });
   if (energy.state === "dead_mic") return out("unjudged", "dead_mic");
   if (energy.state === "missing") return out("unjudged", "no_energy_evidence");
-  if (energy.state === "quiet") return out("non_speech", transcript.state === "text" ? "text_on_quiet_audio" : "quiet_room");
+  if (energy.state === "quiet") return transcript.state === "text" ? out("unjudged", "halves_disagree") : out("non_speech", "quiet_room");
   if (transcript.state === "missing") return out("unjudged", "no_transcript_evidence");
   return transcript.state === "text" ? out("speech", "speech") : out("non_speech", "no_text");
 }

@@ -37,10 +37,12 @@ describe("E-2 gateProbe — the truth table", () => {
     expect(g(null, TEXT)).toMatchObject({ verdict: "unjudged", reason: "no_energy_evidence" });
     expect(g(null, NO_TEXT)).toMatchObject({ verdict: "unjudged", reason: "no_energy_evidence" });
   });
-  it("quiet room -> non_speech; text on quiet audio is the hallucination signature, still non_speech", () => {
+  it("quiet room -> non_speech", () => {
     expect(g(QUIET, NO_TEXT)).toMatchObject({ verdict: "non_speech", reason: "quiet_room" });
     expect(g(QUIET, null)).toMatchObject({ verdict: "non_speech", reason: "quiet_room" });
-    expect(g(QUIET, TEXT)).toMatchObject({ verdict: "non_speech", reason: "text_on_quiet_audio" });
+  });
+  it("quiet room WITH text -> unjudged: the halves disagree and the gate does not pick silence (ETA-Refuter)", () => {
+    expect(g(QUIET, TEXT)).toMatchObject({ verdict: "unjudged", reason: "halves_disagree" });
   });
   it("active room with no transcript -> unjudged: energy alone is not speech", () => {
     expect(g(ACTIVE, null)).toMatchObject({ verdict: "unjudged", reason: "no_transcript_evidence" });
@@ -56,7 +58,9 @@ describe("E-2 — missing evidence is unjudged, never silence", () => {
     expect(energyHalf(null).state).toBe("missing");
     expect(energyHalf({ kind: "frames", frame_rms: [] }).state).toBe("missing");
     expect(energyHalf({ kind: "levels", samples: [] }).state).toBe("missing");
-    expect(energyHalf({ kind: "levels", samples: [lvl(null, null), lvl(null, null)] }).state).toBe("missing");
+    // a row with neither avg nor peak is no evidence (a row with only peak IS evidence: that is production)
+    const blank = { ...lvl(null, null), peak: Number.NaN };
+    expect(energyHalf({ kind: "levels", samples: [blank, blank] }).state).toBe("missing");
   });
   it("a transcript that does not cover the whole probe is missing, not empty", () => {
     const partial: TranscriptEvidence = { coverage: [{ start_ms: T0, end_ms: T0 + 90_000 }], spans: [] };
@@ -91,10 +95,34 @@ describe("E-2 energy half — dead mic and the active boundary", () => {
     expect(energyHalf(e).state).toBe("active");                   // 0.005 >= 0.00398
     expect(energyHalf(e, 0.01).state).toBe("quiet");              // a louder room's floor
   });
-  it("a level sample with no avg is absent, not zero", () => {
+  it("scales are never mixed: if any sample lacks avg, every sample in the probe is read by peak", () => {
     const r = energyHalf({ kind: "levels", samples: [lvl(null), lvl(0.02), lvl(0.02)] });
-    expect(r.n).toBe(2);
-    expect(r.state).toBe("active");
+    expect(r.level_basis).toBe("peak");
+    expect(r.n).toBe(3);
+  });
+  it("avg is read when every sample has one", () => {
+    expect(energyHalf({ kind: "levels", samples: [lvl(0.02), lvl(0.02)] }).level_basis).toBe("avg");
+  });
+});
+
+describe("E-2 energy half — production-shaped level rows (no avg; peak and zero_ratio only)", () => {
+  // 22 Sep: 0 of 2,160 production rows carry avg; every row has peak and zero_ratio.
+  const prodRow = (peak: number, zero = 0): BenchLevelSample =>
+    ({ t_ms: T0, peak, avg: null, zero_ratio: zero, session_open: false, tape_advancing: false, samples: 1 });
+  const rows = (peak: number, zero = 0) => Array.from({ length: 90 }, () => prodRow(peak, zero));
+  it("reads peak, and a typical production peak (0.071, about -23 dBFS) is active", () => {
+    const r = energyHalf({ kind: "levels", samples: rows(0.071) });
+    expect(r).toMatchObject({ level_basis: "peak", state: "active", n: 90 });
+  });
+  it("a peak under the floor is quiet — and must be, since peak >= RMS", () => {
+    expect(energyHalf({ kind: "levels", samples: rows(0.002) }).state).toBe("quiet");
+  });
+  it("zero_ratio >= 0.98 is a dead mic whatever the peak", () => {
+    expect(energyHalf({ kind: "levels", samples: rows(0.071, 0.99) }).state).toBe("dead_mic");
+  });
+  it("rows with neither avg nor peak are missing evidence, not quiet", () => {
+    const none = [{ ...prodRow(0), peak: Number.NaN, zero_ratio: null }, { ...prodRow(0), peak: Number.NaN, zero_ratio: null }];
+    expect(energyHalf({ kind: "levels", samples: none }).state).toBe("missing");
   });
 });
 
