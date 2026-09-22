@@ -18,14 +18,16 @@
 --   retired_at       NULL = active. At most one active row per (clinician, domain, model) is the
 --                    writer's rule (lib/voice-centroid.ts), not a constraint here — see the flag in
 --                    the build report.
---   retired_by       who retired it (an actor id) and retired_reason why (e.g. superseded_by:vc_…,
---   retired_reason   or a revocation reason). A retired row always carries both (CHECK): revoking a
---                    biometric template records who and why, not only when (Refuter F2, 22 Sep).
+--
+-- RETIREMENT PROVENANCE (retired_by, retired_reason) IS MIGRATION 0115, NOT THIS FILE. It was written
+-- here first; an environment that had already applied this version would never have received the new
+-- columns, because the runner skips a migration by version number. 0115 adds them with
+-- ADD COLUMN IF NOT EXISTS, so every environment converges whatever it has applied.
 --
 -- Voice biometric data at rest, the same category as voice_print.centroid and
 -- room_diarize_window.speakers_json, under the same (app-owned) grants.
 --
--- ADDITIVE AND IDEMPOTENT. One new table (two CHECKs, one unique constraint), one partial index, all IF NOT EXISTS.
+-- ADDITIVE AND IDEMPOTENT. One new table, one unique constraint, one partial index, all IF NOT EXISTS.
 -- No existing table is touched. App-owned: no GRANTs (the convention of 0107 and 0112; only the
 -- brain graph grants to brain_svc, 0053).
 -- =====================================================================
@@ -42,11 +44,7 @@ CREATE TABLE IF NOT EXISTS voice_centroid (
   source          jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at      timestamptz DEFAULT now(),
   retired_at      timestamptz,
-  retired_by      text,
-  retired_reason  text,
   CONSTRAINT voice_centroid_domain_chk CHECK (domain IN ('room_primary', 'phone', 'meet')),
-  CONSTRAINT voice_centroid_retirement_chk CHECK (
-    retired_at IS NULL OR (retired_by IS NOT NULL AND retired_reason IS NOT NULL)),
   CONSTRAINT voice_centroid_generation_uq UNIQUE (clinician_id, domain, embedding_model, generation)
 );
 
@@ -60,8 +58,6 @@ COMMENT ON COLUMN voice_centroid.domain IS
   'room_primary | phone | meet (CHECK). The capture domain the centroid was built from and is matched against.';
 COMMENT ON COLUMN voice_centroid.retired_at IS
   'NULL = active. A new generation retires the previous one; nothing is deleted.';
-COMMENT ON COLUMN voice_centroid.retired_reason IS
-  'Why it was retired: superseded_by:<id> when a new generation replaced it, otherwise the revocation reason. Set with retired_by whenever retired_at is (CHECK).';
 COMMENT ON COLUMN voice_centroid.source IS
   'Provenance of the build: ids, counts, seconds. Never transcript text, never audio.';
 

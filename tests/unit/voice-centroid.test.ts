@@ -6,13 +6,15 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const db: { calls: Array<{ q: string; vals: unknown[] }>; rows: unknown[] } = { calls: [], rows: [] };
+const db: { calls: Array<{ q: string; vals: unknown[] }>; rows: unknown[]; fail: Error | null } = { calls: [], rows: [], fail: null };
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...vals: unknown[]) => {
     db.calls.push({ q: strings.join("?").replace(/\s+/g, " ").trim(), vals });
-    return Promise.resolve(db.rows);
+    return db.fail ? Promise.reject(db.fail) : Promise.resolve(db.rows);
   },
 }));
+/** What Postgres answers when 0115 has not been applied to this database. */
+const MISSING_COLUMN = new Error('column "retired_by" of relation "voice_centroid" does not exist');
 
 import {
   checkCentroidInput,
@@ -43,6 +45,7 @@ const row = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   db.calls.length = 0;
   db.rows = [];
+  db.fail = null;
 });
 
 describe("migration 0113", () => {
@@ -59,9 +62,9 @@ describe("migration 0113", () => {
     ]) expect(code).toMatch(col);
     expect(code).toMatch(/CHECK \(domain IN \('room_primary', 'phone', 'meet'\)\)/);
     expect(code).toMatch(/UNIQUE \(clinician_id, domain, embedding_model, generation\)/);
-    expect(code).toMatch(/retired_by\s+text,\s+retired_reason\s+text,/);
-    // A retired row always says who and why (Refuter F2).
-    expect(code).toMatch(/CONSTRAINT voice_centroid_retirement_chk CHECK \(\s*retired_at IS NULL OR \(retired_by IS NOT NULL AND retired_reason IS NOT NULL\)\)/);
+    // The retirement columns are 0115's, not this file's: an environment that already applied 0113
+    // would never receive a column added here (the runner skips by version).
+    expect(code).not.toMatch(/retired_by|retired_reason|voice_centroid_retirement_chk/);
     expect(code).toMatch(/CREATE INDEX IF NOT EXISTS voice_centroid_active_idx\s+ON voice_centroid \(clinician_id, domain\)\s+WHERE retired_at IS NULL/);
   });
 
@@ -73,6 +76,34 @@ describe("migration 0113", () => {
 
   it("113 is the only migration with that number", () => {
     expect(readdirSync("db/migrations").filter((f) => f.startsWith("0113_"))).toEqual(["0113_voice_centroid.sql"]);
+  });
+});
+
+describe("migration 0115 — retirement provenance", () => {
+  const code = readFileSync("db/migrations/0115_voice_centroid_retirement_provenance.sql", "utf8")
+    .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+
+  it("adds both columns idempotently and creates no table", () => {
+    expect(code).toMatch(/ALTER TABLE voice_centroid ADD COLUMN IF NOT EXISTS retired_by\s+text;/);
+    expect(code).toMatch(/ALTER TABLE voice_centroid ADD COLUMN IF NOT EXISTS retired_reason text;/);
+    expect(code).not.toMatch(/CREATE TABLE|DROP|TRUNCATE|GRANT/i);
+  });
+
+  it("backfills only rows retired before it, and says exactly that", () => {
+    expect(code).toMatch(/SET retired_by\s+= coalesce\(retired_by, 'unknown_pre_0115'\)/);
+    expect(code).toMatch(/WHERE retired_at IS NOT NULL\s+AND \(retired_by IS NULL OR retired_reason IS NULL\)/);
+    // An active row is never touched, and a row that already has provenance keeps it.
+    expect(code).toMatch(/coalesce\(retired_reason, 'retired before 0115; provenance not recorded'\)/);
+  });
+
+  it("adds the CHECK only when it is absent", () => {
+    expect(code).toMatch(/IF NOT EXISTS \(SELECT 1 FROM pg_constraint WHERE conname = 'voice_centroid_retirement_chk'\)/);
+    expect(code).toMatch(/ADD CONSTRAINT voice_centroid_retirement_chk\s+CHECK \(retired_at IS NULL OR \(retired_by IS NOT NULL AND retired_reason IS NOT NULL\)\)/);
+  });
+
+  it("records itself as 115 and is the only 0115", () => {
+    expect(code).toMatch(/VALUES \(115, '0115_voice_centroid_retirement_provenance'\)\s+ON CONFLICT DO NOTHING/);
+    expect(readdirSync("db/migrations").filter((f) => f.startsWith("0115_"))).toEqual(["0115_voice_centroid_retirement_provenance.sql"]);
   });
 });
 
@@ -218,6 +249,14 @@ describe("writes", () => {
     expect(c.vals.slice(0, 2)).toEqual(["operator-v1", "revoked: enrolment was another speaker"]);
     db.rows = [];
     expect(await retireCentroid("vc_abc", { actor: "operator-v1", reason: "again" })).toEqual({ ok: true, retired: false });
+  });
+
+  it("a database without 0115 fails loudly: the column error is not swallowed", async () => {
+    db.fail = MISSING_COLUMN;
+    await expect(writeCentroidGeneration(input())).rejects.toThrow(/retired_by.*does not exist/);
+    await expect(retireCentroid("vc_abc", { actor: "operator-v1", reason: "revoked" })).rejects.toThrow(/retired_by.*does not exist/);
+    // Both reached the database and neither reported success.
+    expect(db.calls).toHaveLength(2);
   });
 
   it("retireCentroid refuses without who or why, and sends nothing", async () => {
