@@ -89,7 +89,7 @@ export async function POST(
           body: JSON.stringify({ step: true }),
           cache: "no-store",
         });
-        await res.text().catch(() => {}); // ACK only; the step runs in the target's own after()
+        await res.text().catch(() => { /* intentional: ACK only — the step runs in the target's own after(), and the resume cron recovers a kick that never landed */ });
       } catch { /* resume cron recovers stuck processing rows */ }
     });
   }

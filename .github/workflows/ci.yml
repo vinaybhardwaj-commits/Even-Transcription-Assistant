@@ -10,23 +10,33 @@ jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
-      - name: Install dependencies (npm install — repo has no lockfile; matches Vercel)
-        run: npm install --no-audit --no-fund
+      # `npm ci` installs exactly the committed lockfile. The fallback keeps the job
+      # working if the lockfile is ever removed — `npm ci` hard-fails without one.
+      # setup-node's npm cache is deliberately not enabled: it also hard-fails when
+      # there is no lockfile, which is what kept this job red before the lockfile landed.
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Lint
+        run: npm run lint
 
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit tests (vitest installed ephemerally — not a committed dep; same pattern as e2e's playwright)
-        run: |
-          npm i -D vitest@^2 --no-audit --no-fund
-          npx vitest run
+      - name: Unit tests
+        run: npm test
 
       - name: Silent-failure gate (no empty catch/.catch in critical paths; annotate deliberate ones)
         run: npm run check:silent
