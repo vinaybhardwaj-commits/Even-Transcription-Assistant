@@ -27,6 +27,8 @@
  */
 
 import * as React from "react";
+import { BenchLevelMeter } from "@/components/admin/BenchLevelMeter";
+import { isDigitalSilence } from "@/lib/bench-meter";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
@@ -96,7 +98,7 @@ type LaneLevel = "ok" | "amber" | "red" | "off";
 type LaneView = { level: LaneLevel; state: string; enabled: boolean | null; note?: string };
 type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number; stranded?: Stranded };
 
-type Levels = { peak: number; avg: number } | null;
+type Levels = { peak: number; avg: number; zero_ratio?: number } | null;
 
 type ListenerRowView = {
   room_id: string;
@@ -1208,12 +1210,14 @@ export function BenchRoomsLive() {
                     ONE bar and says nothing at all about a spare (D32) — most rooms have one, and
                     a grey "no spare" placeholder would make the normal case look degraded. The
                     spare's bar appears only where a second device has actually recorded. */}
-                {l?.mic ? (
-                  <div className="pt-1 space-y-1.5">
-                    <LevelBar label="Main mic" levels={l.mic} />
-                    {r.spare_exists && l.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
-                  </div>
-                ) : null}
+                <div className="pt-1 space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                  <BenchLevelMeter
+                    levels={l?.mic}
+                    live={Boolean(l?.listening) && (st.state === "recording" || st.state === "ready")}
+                    digitalSilence={isDigitalSilence(l?.mic)}
+                  />
+                  {r.spare_exists && l?.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
+                </div>
 
                 {/* ── §2.3 THE SIZE VITAL, beside freshness and never instead of it ───────────
                     Freshness says audio is ARRIVING. This says what arrives is actually audio.

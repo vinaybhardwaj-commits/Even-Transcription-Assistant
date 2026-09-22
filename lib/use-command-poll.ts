@@ -53,7 +53,10 @@ export type CommandActions = {
    * permission yet) simply does not provide it, the fields never reach the query string, and the
    * columns stay NULL — which every reader renders as "not measured", never as silence.
    */
-  getLevels?: () => { mic: { peak: number; avg: number } | null; spare: { peak: number; avg: number } | null } | null;
+  getLevels?: () => {
+    mic: { peak: number; avg: number; zero_ratio?: number } | null;
+    spare: { peak: number; avg: number } | null;
+  } | null;
   /** existing start-of-day flow; resolves with the new session id */
   start: () => Promise<{ session_id: string }>;
   pause: () => Promise<void>;
@@ -255,7 +258,11 @@ export function useCommandPoll(opts: { enabled: boolean; actions: CommandActions
         const put = (key: string, v: number | undefined) => {
           if (typeof v === "number" && Number.isFinite(v) && v >= 0) qs.set(key, v.toFixed(4));
         };
-        if (lv?.mic) { put("mic_peak", lv.mic.peak); put("mic_avg", lv.mic.avg); }
+        if (lv?.mic) {
+          put("mic_peak", lv.mic.peak);
+          put("mic_avg", lv.mic.avg);
+          put("mic_zero_ratio", lv.mic.zero_ratio);
+        }
         if (lv?.spare) { put("spare_peak", lv.spare.peak); put("spare_avg", lv.spare.avg); }
       } catch {
         /* a meter fault is never the room's problem */
