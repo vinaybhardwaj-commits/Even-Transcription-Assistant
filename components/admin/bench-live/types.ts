@@ -108,10 +108,19 @@ export type BusCommandView = {
   created_at: string;
 };
 
+export type CommandOutcome = {
+  commandId?: string;
+  kind: string;
+  state: "queued" | "acked" | "timeout" | "failed" | "conflict";
+  detail: string;
+  at: number;
+};
+
 export type Attention = {
   roomId: string;
   room: string;
   severity: "red" | "amber";
+  rank: number;
   title: string;
   detail: string;
 };

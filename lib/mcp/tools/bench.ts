@@ -130,6 +130,7 @@ import {
   tapeLane,
   transcriptLane,
   visitsLane,
+  hostCloudDesync,
   ZERO_STRANDED_RAW,
   type ActiveMicAlert,
   type TranscriptCounts,
@@ -2420,6 +2421,12 @@ const diffRoom: McpTool = {
           );
           const tapeWithoutCues = cueCountKnown ? anyTapeToday && lastCue === null : null;
           const pausedDisagrees = listener !== null && pausedListener !== pausedSession;
+          const sessionDesync = hostCloudDesync({
+            listenerKnown: pageOpen !== null,
+            kioskListening: pageOpen === true,
+            hostSessionId: listener?.recording_session_id ?? null,
+            cloudSessionId: recordingSession?.id ?? null,
+          });
           const operationalAlerts = roomOperationalAlerts({
             recording: recordingSession !== null,
             kioskListening: pageOpen,
@@ -2428,6 +2435,7 @@ const diffRoom: McpTool = {
             activeMicAlert: (live.active_mic_alert as ActiveMicAlert | null | undefined) ?? null,
             tapeWithoutCues,
             pausedDisagrees,
+            hostCloudDesync: sessionDesync,
           });
 
           return {
