@@ -136,13 +136,16 @@ import {
   doctorClockSilentMs,
   endedAtLies as endedAtLiesShared,
   hasDoctorClock,
+  roomOperationalAlerts,
   strandedAudio,
   tapeLane,
   transcriptLane,
   visitsLane,
   ZERO_STRANDED_RAW,
+  type ActiveMicAlert,
   type TranscriptCounts,
 } from "@/lib/room-facts";
+import { activeMicAlert } from "@/lib/mic-health";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, type InstallStateFlag } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
@@ -2396,6 +2399,7 @@ async function liveMonitorExtras(
   let backupChunks = 0;
   let audioRecordedMs = 0;
   let marksNotSent = 0;
+  let micAlert: ReturnType<typeof activeMicAlert> = null;
   try {
     // Per-source maxima on the UPLOAD clock (created_at), the same FILTER shape the kiosk's
     // active-session route uses. HALF-OPEN started_at range so 0054's index is usable.
@@ -2444,6 +2448,20 @@ async function liveMonitorExtras(
     marksNotSent = Number(rows[0]?.marks_not_sent) || 0;
   } catch (e) {
     reasons.push(`marks_not_sent_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+  }
+  if (sessionIds.length) {
+    try {
+      const events = (await sql`
+        SELECT e.kind, e.payload
+          FROM bench_event e
+         WHERE e.session_id = ANY(${sessionIds}::text[])
+           AND e.kind IN ('mic_primary_lost', 'mic_primary_restored')
+         ORDER BY e.at, e.created_at, e.id
+      `) as Array<{ kind: string; payload: unknown }>;
+      micAlert = activeMicAlert(events);
+    } catch (e) {
+      reasons.push(`mic_events_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+    }
   }
 
   let lastWarehouse: string | null = null;
@@ -2574,6 +2592,7 @@ async function liveMonitorExtras(
     spare_exists: spareExists,
     mic_size: micSize,
     spare_size: spareSize,
+    active_mic_alert: micAlert,
     audio_recorded_ms: audioRecordedMs,
     last_warehouse_at: lastWarehouse,
     has_doctor_clock: hasDoctorClock(lastWarehouse),
@@ -2790,6 +2809,15 @@ const diffRoom: McpTool = {
             room.id, today, now, recordingSession !== null, pausedListener || pausedSession,
             sessions.map((sn) => sn.id), reasons, listener,
           );
+          const tapeWithoutCues = cueCountKnown ? anyTapeToday && lastCue === null : null;
+          const operationalAlerts = roomOperationalAlerts({
+            recording: recordingSession !== null,
+            kioskListening: pageOpen,
+            stalled,
+            stalledAgeMs,
+            activeMicAlert: (live.active_mic_alert as ActiveMicAlert | null | undefined) ?? null,
+            tapeWithoutCues,
+          });
 
           const full = {
             room: { id: room.id, slug: room.slug, name: room.name },
@@ -2846,9 +2874,10 @@ const diffRoom: McpTool = {
             flags: {
               kiosk_not_listening: pageOpen === null ? null : !pageOpen,
               stalled,
-              tape_without_cues: cueCountKnown ? anyTapeToday && lastCue === null : null,
+              tape_without_cues: tapeWithoutCues,
               ended_at_lies: liars.length > 0,
             },
+            operational_alerts: operationalAlerts,
             ...(liars.length ? { ended_at_lies_sessions: liars.map((s) => s.id) } : {}),
             ...(reasons.length ? { degraded: reasons } : {}),
           };

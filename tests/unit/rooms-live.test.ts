@@ -55,6 +55,7 @@ import {
   type LiveSession,
 } from "@/lib/admin/rooms-live";
 import { LISTENER_FRESH_MS } from "@/lib/bench-commands";
+import { roomOperationalAlerts } from "@/lib/room-facts";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 
 const migration = readFileSync(join(process.cwd(), "db", "migrations", "0054_live_monitor_indexes.sql"), "utf8");
@@ -110,6 +111,25 @@ describe("mic freshness", () => {
     expect(micLevel(7 * 60_000)).toBe("amber");
     expect(micLevel(10 * 60_000)).toBe("red");
     expect(micLevel(null)).toBe("unknown");
+  });
+});
+
+describe("fleet operational alerts", () => {
+  it("uses one vocabulary for device loss, kiosk offline, and stalled audio", () => {
+    const alerts = roomOperationalAlerts({
+      recording: true,
+      kioskListening: false,
+      stalled: true,
+      stalledAgeMs: 12 * 60_000,
+      activeMicAlert: "device_missing",
+      tapeWithoutCues: false,
+    });
+    expect(alerts.map((a) => a.code)).toEqual([
+      "device_missing",
+      "kiosk_not_listening",
+      "audio_upload_stalled",
+    ]);
+    expect(alerts.every((a) => a.severity === "red")).toBe(true);
   });
 });
 

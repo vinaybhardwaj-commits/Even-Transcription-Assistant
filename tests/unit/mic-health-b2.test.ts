@@ -20,6 +20,7 @@ import {
   HEARD_SOUND_RMS,
   TINY_FRACTION,
   TINY_RUN_TO_DIE,
+  activeMicAlert,
   decideBinding,
   deviceReportedGone,
   heardSound,
@@ -28,6 +29,24 @@ import {
   rateOf,
   type MicPiece,
 } from "@/lib/mic-health";
+
+describe("current microphone alert", () => {
+  it("promotes a current device-missing report and clears it on restore", () => {
+    expect(activeMicAlert([
+      { kind: "mic_primary_lost", payload: { reason: "device_missing" } },
+    ])).toBe("device_missing");
+    expect(activeMicAlert([
+      { kind: "mic_primary_lost", payload: { reason: "device_missing_on_resume" } },
+      { kind: "mic_primary_restored", payload: { reason: "default_on_resume" } },
+    ])).toBeNull();
+  });
+
+  it("keeps silence distinct from device loss and encoder stall", () => {
+    expect(activeMicAlert([{ kind: "mic_primary_lost", payload: { reason: "silence" } }])).toBe("digital_silence");
+    expect(activeMicAlert([{ kind: "mic_primary_lost", payload: { reason: "encoder_stalled" } }])).toBe("encoder_stalled");
+    expect(activeMicAlert([{ kind: "mic_primary_lost", payload: { reason: "unknown" } }])).toBeNull();
+  });
+});
 import {
   LevelAccumulator,
   SILENCE_TRIP_SAMPLES,

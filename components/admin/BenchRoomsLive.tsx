@@ -43,7 +43,11 @@ import {
 // browser bundle: lib/room-facts.ts imports lib/bench-bus-constants and nothing else.
 import {
   STRANDED_MEASURE_NOTE,
+  STRANDED_WAITING,
   WAITING_PHRASE,
+  roomOperationalAlerts,
+  type ActiveMicAlert,
+  type OperationalAlert,
   type Stranded,
 } from "@/lib/room-facts";
 
@@ -150,6 +154,9 @@ type RoomLive = {
   mic_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
   spare_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
   spare_exists?: boolean;
+  active_mic_alert?: ActiveMicAlert | null;
+  tape_without_cues?: boolean | null;
+  operational_alerts?: OperationalAlert[];
   stalled: boolean;
   stalled_age_ms: number | null;
   transcript_enabled: boolean;
@@ -446,6 +453,21 @@ function fmtMinutes(ms: number): string {
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} m`;
 }
 
+type CommandOutcome = {
+  kind: string;
+  state: "queued" | "acked" | "timeout" | "failed" | "conflict";
+  detail: string;
+  at: number;
+};
+
+const COMMAND_LABEL: Record<string, string> = {
+  start_day: "Start",
+  pause_day: "Pause",
+  resume_day: "Resume",
+  end_day: "Stop",
+  close_orphan: "Close abandoned session",
+};
+
 // ---------------------------------------------------------------------------
 // The attention list — pure, and tested
 // ---------------------------------------------------------------------------
@@ -465,12 +487,22 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     const name = r.room.name;
     const l = listeners.get(r.room.id);
 
-    if (r.recording && listenersKnown && (!l || !l.listening)) {
+    const operational = roomOperationalAlerts({
+      recording: r.recording,
+      kioskListening: listenersKnown ? Boolean(l?.listening) : null,
+      stalled: r.stalled,
+      stalledAgeMs: r.stalled_age_ms,
+      activeMicAlert: r.active_mic_alert ?? null,
+      tapeWithoutCues: r.tape_without_cues ?? null,
+    });
+    for (const alert of operational) {
       out.push({
         room: name,
-        severity: "red",
-        title: "recording with no kiosk page open",
-        detail: l ? `the room page last polled ${fmtAge(l.age_ms)} ago` : "no kiosk tab has ever polled this room",
+        severity: alert.severity,
+        title: alert.label,
+        detail: alert.code === "kiosk_not_listening" && l
+          ? `${alert.detail} The room page last polled ${fmtAge(l.age_ms)} ago.`
+          : alert.detail,
       });
     }
     // ENDED DISAGREES — beside "recording with no kiosk page open" because it is the same
@@ -514,19 +546,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         detail: `${n === 1 ? "one recording says" : `${n} recordings say`} they ran on after the last audio arrived. The audio is safe and complete — it is the end time on the record that is wrong.`,
       });
     }
-    // R10 — THE TWO EMERGENCIES ARE DIFFERENT AND MUST READ DIFFERENTLY.
-    // This one is the tape gone quiet: audio is BEING LOST, and the answer is to walk to the
-    // room. The processing rows below are the other kind, where the audio is already safe on
-    // disk and the only cost is delay. Reading one as the other is how somebody stops a
-    // recording to "fix" a transcription backlog.
-    if (r.stalled) {
-      out.push({
-        room: name,
-        severity: "red",
-        title: "no audio arriving — audio is being lost",
-        detail: `it says recording but no piece has arrived from either mic for ${fmtAge(r.stalled_age_ms)}. Go to the room and open the room page on that Mac.`,
-      });
-    } else if (r.mic_level === "red" || r.mic_level === "amber") {
+    if (!r.stalled && (r.mic_level === "red" || r.mic_level === "amber")) {
       out.push({
         room: name,
         severity: r.mic_level,
@@ -625,6 +645,7 @@ export function BenchRoomsLive() {
    */
   const [confirmOrphan, setConfirmOrphan] = React.useState<string | null>(null);
   const [note, setNote] = React.useState<string | null>(null);
+  const [commandOutcomes, setCommandOutcomes] = React.useState<Record<string, CommandOutcome>>({});
   // §3.10 (Build 3 §2.1) — RUN THIS ROOM'S WAITING AUDIO. Armed per room, because every window in
   // the batch is a paid call and a one-tap money-spender on a tablet in a pocket is exactly the
   // trap this build's other confirms guard against. `running` disables the button while a batch is
@@ -701,13 +722,34 @@ export function BenchRoomsLive() {
     return m;
   }, [listeners]);
   const listenersKnown = Boolean(listeners) && !(listeners?.degraded?.length);
-  const rooms = rollup?.rooms ?? [];
+  const rooms = React.useMemo(() => rollup?.rooms ?? [], [rollup?.rooms]);
   /** §3.5 — THE THRESHOLDS THEMSELVES, so a person can see that amber means seven minutes.
    *  They have been computed and sent on every poll since this screen shipped and rendered
    *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */
   const thresholds = rollup?.thresholds ?? null;
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
   const selectedId = useSelectedRoom()?.roomId ?? null;
+  const deepLinkApplied = React.useRef(false);
+
+  const chooseRoom = React.useCallback((room: RoomLive["room"]) => {
+    selectedRoom.choose(room.id);
+    const url = new URL(window.location.href);
+    url.searchParams.set("room", room.slug || room.id);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
+  React.useEffect(() => {
+    if (deepLinkApplied.current || rooms.length === 0) return;
+    deepLinkApplied.current = true;
+    const wanted = new URL(window.location.href).searchParams.get("room");
+    if (!wanted) return;
+    const room = rooms.find((r) => r.room.id === wanted || r.room.slug === wanted);
+    if (!room) return;
+    selectedRoom.choose(room.room.id);
+    globalThis.setTimeout(() => {
+      document.getElementById(`bench-room-${room.room.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+  }, [rooms]);
 
   // DEFAULT SELECTION, first rule: the room that is RECORDING. `suggest` never overrides a click,
   // so this cannot fight the operator, and it outranks BenchClient's "most recent session" default
@@ -777,6 +819,52 @@ export function BenchRoomsLive() {
     }
   }, [fetchRollup]);
 
+  const watchCommand = React.useCallback(async (roomId: string, commandId: string, kind: string) => {
+    const started = Date.now();
+    for (;;) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 600));
+      try {
+        const res = await fetch(`/api/admin/bench/command?id=${encodeURIComponent(commandId)}`, { cache: "no-store" });
+        const j = (await res.json()) as {
+          command?: { status?: "pending" | "acked" | "failed" | "expired"; error?: string | null };
+        };
+        const status = j.command?.status;
+        if (res.ok && status && status !== "pending") {
+          setCommandOutcomes((prev) => ({
+            ...prev,
+            [roomId]: {
+              kind,
+              state: status === "acked" ? "acked" : status === "expired" ? "timeout" : "failed",
+              detail: status === "acked"
+                ? "Kiosk acknowledged this command."
+                : status === "expired"
+                  ? "No kiosk picked up this command before it expired."
+                  : `Kiosk refused this command${j.command?.error ? `: ${j.command.error}` : "."}`,
+              at: Date.now(),
+            },
+          }));
+          void fetchListeners();
+          void fetchRollup();
+          return;
+        }
+      } catch {
+        // Keep polling until the honest timeout below; one failed status read is not an outcome.
+      }
+      if (Date.now() - started >= 10_000) {
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: {
+            kind,
+            state: "timeout",
+            detail: "No acknowledgment arrived within 10 seconds. Check the kiosk before assuming it changed.",
+            at: Date.now(),
+          },
+        }));
+        return;
+      }
+    }
+  }, [fetchListeners, fetchRollup]);
+
   /**
    * K5 A2 — the repair. Its own sender, not `send`, because the answer shape is different: it
    * returns the closed session and the chunk counts either side, and those are what the
@@ -784,6 +872,10 @@ export function BenchRoomsLive() {
    */
   const closeOrphan = React.useCallback(async (roomId: string) => {
     setNote(null);
+    setCommandOutcomes((prev) => ({
+      ...prev,
+      [roomId]: { kind: "close_orphan", state: "queued", detail: "Closing the abandoned session on the server…", at: Date.now() },
+    }));
     try {
       const res = await fetch("/api/admin/bench/command", {
         method: "POST",
@@ -794,14 +886,26 @@ export function BenchRoomsLive() {
       const j = (await res.json()) as Record<string, unknown>;
       if (!res.ok || j.ok !== true) {
         setNote(`close abandoned session: ${String(j.error ?? `http_${res.status}`)}${j.hint ? ` — ${String(j.hint)}` : ""}`);
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: { kind: "close_orphan", state: "conflict", detail: String(j.hint ?? j.error ?? `http_${res.status}`), at: Date.now() },
+        }));
       } else {
         const kept = j.chunks_before === j.chunks_after;
         setNote(
           `closed ${String(j.session_id)} — ${String(j.chunks_before)} chunk${j.chunks_before === 1 ? "" : "s"} ${kept ? "kept, untouched" : "CHANGED — investigate"}. The room can record again.`,
         );
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: { kind: "close_orphan", state: "acked", detail: "Abandoned session closed; stored audio was kept.", at: Date.now() },
+        }));
       }
     } catch (e) {
       setNote(`close abandoned session: ${e instanceof Error ? e.message : String(e)}`);
+      setCommandOutcomes((prev) => ({
+        ...prev,
+        [roomId]: { kind: "close_orphan", state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
+      }));
     } finally {
       setConfirmOrphan(null);
       void fetchListeners();
@@ -821,19 +925,46 @@ export function BenchRoomsLive() {
       const j = (await res.json()) as Record<string, unknown>;
       if (!res.ok || j.ok !== true) {
         setNote(`${kind}: ${String(j.error ?? `http_${res.status}`)}${j.hint ? ` — ${String(j.hint)}` : ""}`);
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: {
+            kind,
+            state: "conflict",
+            detail: String(j.hint ?? j.error ?? `http_${res.status}`),
+            at: Date.now(),
+          },
+        }));
       } else if (j.already_recording) {
         setNote(`${kind}: already recording (${String(j.session_id)})`);
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: { kind, state: "acked", detail: "Already recording; no duplicate tape was started.", at: Date.now() },
+        }));
       } else {
         setNote(`${kind}: queued for the kiosk`);
+        setCommandOutcomes((prev) => ({
+          ...prev,
+          [roomId]: {
+            kind,
+            state: "queued",
+            detail: "Queued for the kiosk; waiting for acknowledgment.",
+            at: Date.now(),
+          },
+        }));
+        if (typeof j.command_id === "string") void watchCommand(roomId, j.command_id, kind);
       }
     } catch (e) {
       setNote(`${kind}: ${e instanceof Error ? e.message : String(e)}`);
+      setCommandOutcomes((prev) => ({
+        ...prev,
+        [roomId]: { kind, state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
+      }));
     } finally {
       setConfirmStop(null);
       void fetchListeners();
       void fetchRollup();
     }
-  }, [fetchListeners, fetchRollup]);
+  }, [fetchListeners, fetchRollup, watchCommand]);
 
   /**
    * §3.10 (Build 3 §2.1) — run one bounded batch of a room's waiting audio. EVERY WINDOW IS A PAID
@@ -893,52 +1024,6 @@ export function BenchRoomsLive() {
       {rollup?.degraded?.length ? <p className="text-caption text-warning-700">degraded: {rollup.degraded.join(" · ")}</p> : null}
       {listeners?.degraded?.length ? <p className="text-caption text-warning-700">kiosk state unknown: {listeners.degraded.join(" · ")}</p> : null}
 
-      {/* ── STOP ALL PROCESSING (PRD §8, R9) ────────────────────────────────────────────────
-          The move you want nine times out of ten, and it should not require thinking. Under
-          pressure the instinct is to stop everything, and stopping a recording is the only
-          irreversible act available — so the safer act is made the easier one.
-
-          THE COPY IS THE SAFETY FEATURE. "Recording carries on and no audio is lost" is on the
-          card itself, because that sentence is what makes this pressable by somebody frightened.
-          There is no single-tap undo: turning things back on is per-room and deliberate. */}
-      <div className="mb-3 rounded-xl border border-danger-200 bg-danger-100 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-3">
-        <div className="flex-1 min-w-0">
-          <p className="font-semibold text-danger-700">Stop all processing</p>
-          <p className="text-caption text-even-ink-600 leading-snug max-w-[56ch]">
-            Turns Transcript and Visits off in every room. Recording carries on and no audio is lost.
-            Use this first if something looks wrong.
-          </p>
-        </div>
-        {confirmStopAll ? (
-          <div className="flex gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setConfirmStopAll(false)}
-              className="min-h-11 px-4 py-2 rounded-lg text-label bg-even-white border border-even-ink-200 hover:bg-even-ink-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => void stopAllProcessing()}
-              className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700"
-            >
-              Yes — stop all processing
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            data-testid="stop-all-processing"
-            onClick={() => setConfirmStopAll(true)}
-            className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700 shrink-0"
-          >
-            Stop all processing
-          </button>
-        )}
-      </div>
-      {stopAllNote ? <p className="mb-3 text-caption font-semibold text-even-navy-800">{stopAllNote}</p> : null}
-
       {attention.length > 0 ? (
         <div className="rounded-lg border border-even-ink-200 divide-y divide-even-ink-100">
           <p className="px-3 py-2 text-caption uppercase tracking-wide text-even-ink-500">Needs your attention</p>
@@ -973,14 +1058,22 @@ export function BenchRoomsLive() {
             lastSessionEnded: Boolean(r.last_session_ended),
             recordedMsToday: r.audio_recorded_ms ?? null,
           });
+          const operational = roomOperationalAlerts({
+            recording: r.recording,
+            kioskListening: listenersKnown ? Boolean(l?.listening) : null,
+            stalled: r.stalled,
+            stalledAgeMs: r.stalled_age_ms,
+            activeMicAlert: r.active_mic_alert ?? null,
+            tapeWithoutCues: r.tape_without_cues ?? null,
+          });
           // The card's edge carries the WORST condition on it. `backup_reads_no_chunks` is no
           // longer one of them (D32): most rooms have one microphone, so it promoted almost
           // every card to amber for the whole of every session and said nothing true about any
           // of them. The doctor clock can only reach amber or red where a genuine cue exists,
           // which since §3.1 it almost never does.
-          const worst: Level = r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red" || Boolean(r.recording && r.mic_size?.proven_dead_by_size)
+          const worst: Level = operational.some((a) => a.severity === "red") || r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red" || Boolean(r.recording && r.mic_size?.proven_dead_by_size)
             ? "red"
-            : st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.ended_at_lies || r.marks_not_sent > 0
+            : operational.some((a) => a.severity === "amber") || st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.ended_at_lies || r.marks_not_sent > 0
               ? "amber"
               : st.level === "unknown" ? "unknown" : "ok";
           // K5 A2 — the deadlock condition, computed from the two facts the page already has.
@@ -988,6 +1081,7 @@ export function BenchRoomsLive() {
           // null, a different id, or a stale poll all mean the session has been abandoned.
           const kioskClaimsThis = Boolean(l && l.listening && l.recording_session_id === r.session_id);
           const orphaned = listenersKnown && (r.recording || r.paused_session) && !kioskClaimsThis;
+          const canReachKiosk = !listenersKnown || Boolean(l?.listening);
           const isSelected = selectedId === r.room.id;
           return (
             // B3 — this WAS a <button> with five more <button>s inside it, which is invalid
@@ -997,13 +1091,14 @@ export function BenchRoomsLive() {
             // stop and Enter/Space, so selection is still fully keyboard-reachable.
             <div
               key={r.room.id}
+              id={`bench-room-${r.room.id}`}
               role="button"
               tabIndex={0}
-              onClick={() => selectedRoom.choose(r.room.id)}
+              onClick={() => chooseRoom(r.room)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  selectedRoom.choose(r.room.id);
+                  chooseRoom(r.room);
                 }
               }}
               aria-pressed={isSelected}
@@ -1024,6 +1119,34 @@ export function BenchRoomsLive() {
 
               <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
               {st.hint ? <p className="text-caption text-even-ink-500">{st.hint}</p> : null}
+              {operational.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5" aria-label={`${r.room.name} operational alerts`}>
+                  {operational.map((alert) => (
+                    <Pill key={alert.code} level={alert.severity} title={alert.detail}>
+                      {alert.label}
+                    </Pill>
+                  ))}
+                </div>
+              ) : null}
+              {commandOutcomes[r.room.id] ? (
+                <div
+                  className={`mt-3 rounded-lg border px-3 py-2 ${
+                    commandOutcomes[r.room.id]!.state === "acked"
+                      ? "border-success-200 bg-success-100"
+                      : commandOutcomes[r.room.id]!.state === "queued"
+                        ? "border-even-blue-100 bg-even-blue-50"
+                        : "border-warning-200 bg-warning-50"
+                  }`}
+                  data-testid="command-outcome"
+                  aria-live="polite"
+                >
+                  <p className="text-caption font-semibold text-even-navy-800">
+                    Last command · {COMMAND_LABEL[commandOutcomes[r.room.id]!.kind] ?? commandOutcomes[r.room.id]!.kind} ·{" "}
+                    {commandOutcomes[r.room.id]!.state === "acked" ? "acknowledged" : commandOutcomes[r.room.id]!.state}
+                  </p>
+                  <p className="text-caption text-even-ink-600">{commandOutcomes[r.room.id]!.detail}</p>
+                </div>
+              ) : null}
 
               {/* THE THREE LANES (PRD R4/R5/R6). Tape has no switch — recording is started and
                   stopped by the buttons below, as it always was. Only the two processing lanes
@@ -1073,6 +1196,9 @@ export function BenchRoomsLive() {
                   runs a bounded batch, and reports engine, characters, seconds and cost per piece.
                   The interface never says "window" — the operator vocabulary is pieces of audio. */}
               {(() => {
+                // The count is s1-auto-drain's own waiting_audio_count (favoured per the rebase order: the
+                // newer, more accurate source). waitingReason is kept only for its .ms, still used below.
+                const waitingReason = r.stranded?.reasons.find((x) => x.reason === STRANDED_WAITING);
                 const waiting = r.waiting_audio_count ?? 0;
                 if (!r.transcript_enabled || waiting < 1) return null;
                 const run = runResult[r.room.id];
@@ -1081,8 +1207,10 @@ export function BenchRoomsLive() {
                 return (
                   <div className="mt-3 rounded-lg border border-even-navy-200 bg-even-navy-50 p-3" onClick={(e) => e.stopPropagation()}>
                     <p className="text-caption text-even-navy-800 leading-snug">
-                      <span className="font-semibold">{waiting} piece{waiting === 1 ? "" : "s"} of audio {WAITING_PHRASE}.</span>{" "}
-                      Nothing runs on its own — press to turn them into words. Each one is a paid call.
+                      <span className="font-semibold">
+                        Waiting: {waiting} piece{waiting === 1 ? "" : "s"} · {fmtMinutes(waitingReason?.ms ?? 0)} of 15-minute slot time.
+                      </span>{" "}
+                      Nothing runs on its own. Running starts up to 4 paid transcription calls; the exact cost is reported after each call.
                     </p>
                     {armed ? (
                       <button
@@ -1105,7 +1233,7 @@ export function BenchRoomsLive() {
                     )}
                     {armed ? (
                       <p className="mt-1 text-caption text-even-ink-500 leading-snug">
-                        Runs up to 4 at a time, so you see what each one cost before running any more.
+                        Paid batch: {Math.min(4, waiting)} piece{Math.min(4, waiting) === 1 ? "" : "s"} maximum. Exact cost appears per piece before you run another batch.
                       </p>
                     ) : null}
                     {run ? (
@@ -1355,7 +1483,8 @@ export function BenchRoomsLive() {
                 </button>
                 <button
                   type="button"
-                  disabled={!r.recording}
+                  disabled={!r.recording || !canReachKiosk}
+                  title={!canReachKiosk ? "No kiosk is listening; pause would be queued into the dark." : undefined}
                   onClick={() => void send(r.room.id, "pause_day")}
                   className={CTRL_BTN}
                 >
@@ -1363,7 +1492,8 @@ export function BenchRoomsLive() {
                 </button>
                 <button
                   type="button"
-                  disabled={st.state !== "paused"}
+                  disabled={st.state !== "paused" || !canReachKiosk}
+                  title={!canReachKiosk ? "No kiosk is listening; resume would be queued into the dark." : undefined}
                   onClick={() => void send(r.room.id, "resume_day")}
                   className={CTRL_BTN}
                 >
@@ -1375,15 +1505,17 @@ export function BenchRoomsLive() {
                 {confirmStop === r.room.id ? (
                   <button
                     type="button"
+                    disabled={!canReachKiosk}
                     onClick={() => void send(r.room.id, "end_day")}
-                    className="min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white ring-2 ring-danger-700 ring-offset-1 hover:bg-danger-700"
+                    className="min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white ring-2 ring-danger-700 ring-offset-1 hover:bg-danger-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     confirm stop
                   </button>
                 ) : (
                   <button
                     type="button"
-                    disabled={!r.recording && !r.paused_session}
+                    disabled={(!r.recording && !r.paused_session) || !canReachKiosk}
+                    title={!canReachKiosk ? "No kiosk is listening; stop would be queued into the dark." : undefined}
                     onClick={() => setConfirmStop(r.room.id)}
                     className={CTRL_BTN}
                   >
@@ -1391,6 +1523,11 @@ export function BenchRoomsLive() {
                   </button>
                 )}
               </div>
+              {!canReachKiosk && (r.recording || r.paused_session) ? (
+                <p className="mt-2 text-caption font-semibold text-warning-700 leading-snug">
+                  Kiosk offline — pause, resume, and stop are disabled because they would be queued into the dark.
+                </p>
+              ) : null}
 
               {/* A4 — THE LOAD-BEARING SENTENCE. This is the only place that says why Start is
                   disabled, and it used to be a `title`, which iOS Safari never renders: on the
@@ -1538,6 +1675,54 @@ export function BenchRoomsLive() {
           </p>
         </div>
       ) : null}
+
+      {/* Global writes are deliberately separated from the live scan. The destructive colour
+          appears only after the operator opens this processing danger zone. */}
+      <details className="rounded-xl border border-even-ink-200 bg-even-white">
+        <summary className="min-h-11 cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-3 text-label font-semibold text-even-ink-600">
+          <span>Processing danger zone</span>
+          <span className="text-caption font-normal text-even-ink-400">global controls</span>
+        </summary>
+        <div className="border-t border-even-ink-100 p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-even-navy-800">Stop all processing</p>
+              <p className="text-caption text-even-ink-600 leading-snug max-w-[60ch]">
+                Turns Transcript and Visits off in every room. Recording carries on and no audio is lost.
+                Turn lanes back on room by room when it is safe.
+              </p>
+            </div>
+            {confirmStopAll ? (
+              <div className="flex flex-wrap gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setConfirmStopAll(false)}
+                  className="min-h-11 px-4 py-2 rounded-lg text-label bg-even-white border border-even-ink-200 hover:bg-even-ink-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void stopAllProcessing()}
+                  className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700"
+                >
+                  Yes — stop all processing
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                data-testid="stop-all-processing"
+                onClick={() => setConfirmStopAll(true)}
+                className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold border border-danger-200 bg-even-white text-danger-700 hover:bg-danger-100 shrink-0"
+              >
+                Stop all processing
+              </button>
+            )}
+          </div>
+          {stopAllNote ? <p className="mt-3 text-caption font-semibold text-even-navy-800">{stopAllNote}</p> : null}
+        </div>
+      </details>
 
       {/* ── TURNING VISITS ON (PRD §6, mockup tab C) ────────────────────────────────────────
           The one dialog on this screen. Turning Transcript on only costs money and load, both

@@ -370,7 +370,12 @@ export function decideBinding(input: {
  * present device is not evidence that anything is broken, and treating it as such cost Cardiology
  * four hours of transcription.
  */
-export const DEVICE_GONE_REASONS: ReadonlySet<string> = new Set(["track_ended", "silence_device_missing", "device_missing"]);
+export const DEVICE_GONE_REASONS: ReadonlySet<string> = new Set([
+  "track_ended",
+  "silence_device_missing",
+  "device_missing",
+  "device_missing_on_resume",
+]);
 
 /** PURE — did any loss event in this session report the DEVICE as gone? Flags alone never count. */
 export function deviceReportedGone(events: ReadonlyArray<{ kind: string; payload?: unknown }>): boolean {
@@ -384,4 +389,36 @@ export function deviceReportedGone(events: ReadonlyArray<{ kind: string; payload
     if (typeof reason === "string" && DEVICE_GONE_REASONS.has(reason)) return true;
   }
   return false;
+}
+
+export type ActiveMicAlert = "device_missing" | "digital_silence" | "encoder_stalled";
+
+/**
+ * The unresolved microphone fact at the end of an event stream.
+ *
+ * A restore clears every earlier loss. A bare historical loss must not keep a room red after the
+ * microphone recovered, which is why callers pass events in time order instead of asking whether
+ * a loss ever happened. Unknown reasons remain unknown rather than acquiring a new UI meaning.
+ */
+export function activeMicAlert(
+  events: ReadonlyArray<{ kind: string; payload?: unknown }>,
+): ActiveMicAlert | null {
+  let activeReason: string | null = null;
+  for (const event of events) {
+    if (event.kind === "mic_primary_restored") {
+      activeReason = null;
+      continue;
+    }
+    if (event.kind !== "mic_primary_lost") continue;
+    const payload =
+      typeof event.payload === "object" && event.payload !== null && !Array.isArray(event.payload)
+        ? event.payload as Record<string, unknown>
+        : null;
+    activeReason = typeof payload?.reason === "string" ? payload.reason.toLowerCase() : null;
+  }
+  if (!activeReason) return null;
+  if (DEVICE_GONE_REASONS.has(activeReason)) return "device_missing";
+  if (activeReason.includes("encoder") && activeReason.includes("stall")) return "encoder_stalled";
+  if (activeReason === "silence" || activeReason.includes("digital_silence")) return "digital_silence";
+  return null;
 }
