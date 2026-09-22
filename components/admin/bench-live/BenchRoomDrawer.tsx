@@ -9,6 +9,11 @@ import {
   fmtMinutes,
   StatusPill,
 } from "@/components/admin/bench-live/BenchRoomVitals";
+import {
+  BenchLevelMeter,
+  isDigitalSilence,
+} from "@/components/admin/bench-live/BenchLevelMeter";
+import { BenchLevelTimeline } from "@/components/admin/bench-live/BenchLevelTimeline";
 import { STRANDED_MEASURE_NOTE } from "@/lib/room-facts";
 import type { RoomPresentation } from "@/components/admin/bench-live/roomPresentation";
 import type {
@@ -37,6 +42,7 @@ export function BenchRoomDrawer({
   nowMs,
   factsAsOf,
   listenerAsOf,
+  istDate,
   thresholds,
   onClose,
   children,
@@ -49,6 +55,7 @@ export function BenchRoomDrawer({
   nowMs: number;
   factsAsOf: number | null;
   listenerAsOf: number | null;
+  istDate: string;
   thresholds: RoomsLiveResp["thresholds"] | null;
   onClose: () => void;
   children?: React.ReactNode;
@@ -63,6 +70,19 @@ export function BenchRoomDrawer({
   }, [open, onClose]);
 
   if (!open || !room || !presentation) return null;
+  const deviceUnavailable = presentation.operational.some(
+    (alert) => alert.code === "device_missing",
+  );
+  const meterLive = Boolean(
+    listener?.listening
+    && listener.mic
+    && presentation.state.state !== "finished"
+    && !deviceUnavailable,
+  );
+  const digitalSilence = isDigitalSilence(
+    listener?.mic,
+    presentation.operational.some((alert) => alert.code === "digital_silence"),
+  );
 
   return (
     <div className="fixed inset-0 z-40" data-testid="room-drawer">
@@ -114,6 +134,18 @@ export function BenchRoomDrawer({
           syncUnknown={presentation.hostCloudDesync === null}
           listener={listener}
         />
+
+        <section className="mt-4 rounded-xl border border-even-blue-100 bg-even-blue-50/40 p-4">
+          <h4 className="text-label font-semibold text-even-navy-800">Live room level</h4>
+          <BenchLevelMeter
+            levels={listener?.mic}
+            live={meterLive}
+            digitalSilence={digitalSilence}
+            size="drawer"
+          />
+        </section>
+
+        <BenchLevelTimeline roomId={room.room.id} istDate={istDate} />
 
         <section className="mt-4 rounded-xl border border-even-blue-100 bg-even-blue-50/40 p-4">
           <h4 className="text-label font-semibold text-even-navy-800">Why this room is placed here</h4>

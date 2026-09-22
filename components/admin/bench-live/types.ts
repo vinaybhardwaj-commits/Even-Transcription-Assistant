@@ -10,7 +10,7 @@ export type DaySummary = {
   visits_built: number;
   stranded?: Stranded;
 };
-export type Levels = { peak: number; avg: number } | null;
+export type Levels = { peak: number; avg: number; zero_ratio?: number } | null;
 
 export type ListenerRowView = {
   room_id: string;
@@ -33,6 +33,24 @@ export type ListenersResp = {
   freshness_window_ms: number;
   listeners: ListenerRowView[];
   degraded?: string[];
+};
+
+export type LevelSample = {
+  t_ms: number;
+  peak: number;
+  avg: number | null;
+  zero_ratio: number | null;
+  session_open: boolean;
+  tape_advancing: boolean;
+  samples: number;
+};
+
+export type LevelTimelineResp = {
+  room_id: string;
+  ist_date: string;
+  bucket_seconds: number;
+  sample_count: number;
+  samples: LevelSample[];
 };
 
 export type RoomLive = {

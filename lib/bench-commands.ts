@@ -68,6 +68,7 @@ export type ListenerRow = {
    *  never silent: an older kiosk, a refused AudioContext, or a rig with no second device. */
   mic_peak?: number | null;
   mic_avg?: number | null;
+  mic_zero_ratio?: number | null;
   spare_peak?: number | null;
   spare_avg?: number | null;
   levels_at?: string | Date | null;
@@ -97,7 +98,7 @@ export type PendingCommand = { id: string; kind: CommandKind; args: unknown; cre
 // Kiosk side — poll + ack
 // ---------------------------------------------------------------------------
 
-export type MicLevels = { peak: number; avg: number };
+export type MicLevels = { peak: number; avg: number | null; zeroRatio: number | null };
 
 export type PollInput = {
   roomId: string;
@@ -130,9 +131,14 @@ export function cleanLevels(v: unknown): MicLevels | null {
     return Number.isFinite(q) && q >= 0 && q <= 1 ? q : null;
   };
   const peak = n(o.peak);
-  const avg = n(o.avg);
-  if (peak === null || avg === null) return null;
-  return { peak, avg };
+  const avg = o.avg === undefined || o.avg === null ? null : n(o.avg);
+  const zeroRatio = o.zero_ratio === undefined || o.zero_ratio === null
+    ? null
+    : n(o.zero_ratio);
+  if (peak === null || (o.avg != null && avg === null) || (o.zero_ratio != null && zeroRatio === null)) {
+    return null;
+  }
+  return { peak, avg, zeroRatio };
 }
 
 export type PollResult =
@@ -147,7 +153,7 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
   return guarded(async () => {
     const existing = (await sql`
       SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
-             mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
+             mic_peak, mic_avg, mic_zero_ratio, spare_peak, spare_avg, levels_at, spare_device
         FROM bench_listener
        WHERE room_id = ${input.roomId}
        LIMIT 1
@@ -181,11 +187,11 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     await sql`
       INSERT INTO bench_listener (
         room_id, tab_id, last_poll_at, recording_session_id, paused,
-        mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
+        mic_peak, mic_avg, mic_zero_ratio, spare_peak, spare_avg, levels_at, spare_device
       )
       VALUES (
         ${input.roomId}, ${input.tabId}, now(), ${input.recordingSessionId}, ${input.paused},
-        ${mic?.peak ?? null}, ${mic?.avg ?? null},
+        ${mic?.peak ?? null}, ${mic?.avg ?? null}, ${mic?.zeroRatio ?? null},
         ${spare?.peak ?? null}, ${spare?.avg ?? null},
         ${anyLevel ? "now()" : null}::timestamptz, ${spareDevice}
       )
@@ -196,11 +202,37 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
              paused = EXCLUDED.paused,
              mic_peak     = COALESCE(EXCLUDED.mic_peak,     bench_listener.mic_peak),
              mic_avg      = COALESCE(EXCLUDED.mic_avg,      bench_listener.mic_avg),
+             mic_zero_ratio = COALESCE(EXCLUDED.mic_zero_ratio, bench_listener.mic_zero_ratio),
              spare_peak   = COALESCE(EXCLUDED.spare_peak,   bench_listener.spare_peak),
              spare_avg    = COALESCE(EXCLUDED.spare_avg,    bench_listener.spare_avg),
              levels_at    = COALESCE(EXCLUDED.levels_at,    bench_listener.levels_at),
              spare_device = COALESCE(EXCLUDED.spare_device, bench_listener.spare_device)
     `;
+    // The day log is deliberately independent of tape pieces and STT windows. It is also
+    // best-effort for command-bus safety: a missing new migration or a logging fault must never
+    // stop a room from receiving start/pause/end commands.
+    if (mic) {
+      try {
+        await sql`
+          INSERT INTO bench_level_sample (
+            room_id, ist_date, sampled_at, peak, avg, zero_ratio,
+            session_open, tape_advancing, source
+          )
+          VALUES (
+            ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
+            ${mic.peak}, ${mic.avg}, ${mic.zeroRatio},
+            ${input.recordingSessionId !== null},
+            ${input.recordingSessionId !== null && !input.paused},
+            'command_poll'
+          )
+        `;
+      } catch (error) {
+        console.warn("[bench-levels] append failed", JSON.stringify({
+          room_id: input.roomId,
+          error: String((error as Error)?.message ?? error).slice(0, 160),
+        }));
+      }
+    }
     // Lazy expiry (PRD §8.2 "pending > 15 s WITHOUT a poll"): a command older than 15 s that no
     // poll has delivered — i.e. created after this room's previous poll (`cur.last_poll_at`,
     // read above before the upsert) — is expired and will NOT be executed on reconnect. A
@@ -258,7 +290,7 @@ export async function getListener(roomId: string): Promise<ListenerRow | null> {
   return guarded(async () => {
     const rows = (await sql`
       SELECT room_id, tab_id, last_poll_at, recording_session_id, paused,
-             mic_peak, mic_avg, spare_peak, spare_avg, levels_at, spare_device
+             mic_peak, mic_avg, mic_zero_ratio, spare_peak, spare_avg, levels_at, spare_device
         FROM bench_listener
        WHERE room_id = ${roomId}
        LIMIT 1
@@ -273,7 +305,7 @@ export async function listListeners(now: Date = new Date()): Promise<ListenerVie
   return guarded(async () => {
     const rows = (await sql`
       SELECT l.room_id, l.tab_id, l.last_poll_at, l.recording_session_id, l.paused,
-             l.mic_peak, l.mic_avg, l.spare_peak, l.spare_avg, l.levels_at, l.spare_device,
+             l.mic_peak, l.mic_avg, l.mic_zero_ratio, l.spare_peak, l.spare_avg, l.levels_at, l.spare_device,
              r.slug, r.name
         FROM bench_listener l
         JOIN room r ON r.id = l.room_id
