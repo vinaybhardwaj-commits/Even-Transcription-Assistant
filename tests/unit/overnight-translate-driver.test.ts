@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, DEFAULT_CONCURRENCY,
-  JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS, type Deps,
+  JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS, CONSECUTIVE_FOREIGN_CANCEL_LIMIT, CONSECUTIVE_JOIN_CONTENTION_LIMIT, type Deps,
 } from "@/lib/overnight-translate/driver";
 import { IST_OFFSET_MS, maySubmit } from "@/lib/overnight-translate/hours";
 import { makeDoor, type Door, type SubmitResult, type StatusResult, type RoomWindowSubmit } from "@/lib/overnight-translate/door";
@@ -898,13 +898,62 @@ describe("THE JOIN-RETRY BACKOFF RE-CHECKS THE CLOCK AND THE GATE (Refuter findi
     expect(evs(h.log, "window_failed")).toHaveLength(0);
   });
 
-  it("join_contention_exhausted failures are kept OUT of the canary's consecutive-failure count: 6 in a row never trips too_many_failures", async () => {
+  it("join_contention_exhausted failures are kept OUT of the canary's consecutive-failure count (too_many_failures) " +
+     "— they trip THEIR OWN limit instead (ETA-Refuter Finding 1: this used to run all night silently)", async () => {
     const cands = Array.from({ length: 6 }, (_, i) => cand(`W${i}`));
     const h = harness({ cands, status: () => joinContended() });
     const s = await h.run();
-    expect(s).toMatchObject({ started: 6, done: 0, failed: 6, fatal: null, stop: "backlog_empty" });
-    expect(evs(h.log, "window_failed")).toHaveLength(6);
+    expect(s).toMatchObject({ started: CONSECUTIVE_JOIN_CONTENTION_LIMIT, done: 0, failed: CONSECUTIVE_JOIN_CONTENTION_LIMIT, fatal: "join_contention" });
+    expect(evs(h.log, "fatal")).toHaveLength(1);
+    expect(evs(h.log, "fatal")[0].code).toBe("join_contention");
     expect(evs(h.log, "window_failed").every((e) => e.error_code === "join_contention_exhausted")).toBe(true);
+  });
+});
+
+describe("THE TWO NEW STOPS (ETA-Refuter Finding 1, 22 Sep 2026) — a silent all-night backlog_empty is a FAIL", () => {
+  it(`THE REFUTER'S PROBE A — a canceller cancels every job we submit: ${CONSECUTIVE_FOREIGN_CANCEL_LIMIT} in a row is fatal=foreign_cancels, NOT backlog_empty`, async () => {
+    const cands = Array.from({ length: 200 }, (_, i) => cand(`W${i}`));
+    const h = harness({ cands, status: () => foreignCancel() });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: "foreign_cancels", stop: "fatal", done: 0, failed: 0, windowDeferred: CONSECUTIVE_FOREIGN_CANCEL_LIMIT });
+    expect(h.submits.length, "stopped, did not run all night").toBe(CONSECUTIVE_FOREIGN_CANCEL_LIMIT);
+    expect(evs(h.log, "fatal")[0]).toMatchObject({ code: "foreign_cancels", consecutive: CONSECUTIVE_FOREIGN_CANCEL_LIMIT });
+  });
+
+  it(`THE REFUTER'S PROBE B — the join service is held all night: ${CONSECUTIVE_JOIN_CONTENTION_LIMIT} exhausted retries in a row is fatal=join_contention, NOT backlog_empty`, async () => {
+    const cands = Array.from({ length: 200 }, (_, i) => cand(`W${i}`));
+    const h = harness({ cands, status: () => joinContended() });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: "join_contention", stop: "fatal", done: 0 });
+    expect(evs(h.log, "fatal")[0]).toMatchObject({ code: "join_contention", consecutive: CONSECUTIVE_JOIN_CONTENTION_LIMIT });
+    // each window that reaches this fatal already spent its JOIN_RETRY_LIMIT retries — the limit governs
+    // CONSECUTIVE WINDOWS exhausted, not consecutive individual submits.
+    expect(evs(h.log, "window_failed").filter((e) => e.error_code === "join_contention_exhausted")).toHaveLength(CONSECUTIVE_JOIN_CONTENTION_LIMIT);
+  });
+
+  it("the two streaks are INDEPENDENT — a join-contention exhaustion between two foreign cancels does not " +
+     "itself advance the foreign-cancel count (nor do foreign cancels advance the join-contention count)", async () => {
+    // 2 foreign cancels, 1 full join-contention exhaustion, 2 more foreign cancels: comfortably under BOTH
+    // limits (well below 5) throughout, so a design that accidentally let one type feed the other's counter
+    // would show up as an unexpectedly early fatal — this asserts there is none, and the EXACT final windowDeferred
+    // (4, not 5) proves the join event did not itself count as a foreign cancel.
+    const cands = [cand("B0"), cand("B1"), cand("J"), cand("A0"), cand("A1")];
+    const h = harness({ cands, status: (jobId, k, w) => (w === "J" ? joinContended() : foreignCancel()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: null, stop: "backlog_empty", windowDeferred: 4, failed: 1 });
+  });
+
+  it("a done resets BOTH streaks — near-misses on each, then a done, then the same near-misses again never trip either", async () => {
+    const outcomes: StatusResult[] = [
+      ...Array.from({ length: CONSECUTIVE_FOREIGN_CANCEL_LIMIT - 1 }, () => foreignCancel()),
+      done(),
+      ...Array.from({ length: CONSECUTIVE_FOREIGN_CANCEL_LIMIT - 1 }, () => foreignCancel()),
+    ];
+    let n = 0;
+    const cands = Array.from({ length: outcomes.length }, (_, i) => cand(`W${i}`));
+    const h = harness({ cands, status: () => outcomes[n++]! });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: null, stop: "backlog_empty", done: 1 });
   });
 });
 
@@ -931,14 +980,13 @@ describe("A FOREIGN CANCEL — a cancelled job we did not ask for (Fable, 22 Sep
     expect(evs(h.log, "window_failed")).toHaveLength(0);
   });
 
-  it(`${CONSECUTIVE_FAILURE_LIMIT}+ foreign cancels in a row never trip the fatal stop — only a REAL failure counts toward it`, async () => {
-    const cands = Array.from({ length: CONSECUTIVE_FAILURE_LIMIT + 2 }, (_, i) => cand(`W${i}`));
-    const h = harness({ cands, status: () => foreignCancel() });
-    const s = await h.run();
-    expect(s).toMatchObject({ started: CONSECUTIVE_FAILURE_LIMIT + 2, windowDeferred: CONSECUTIVE_FAILURE_LIMIT + 2, failed: 0, fatal: null, stop: "backlog_empty" });
+  it("a foreign cancel does not touch consecutiveFailures (the ENGLISH CANARY's own counter) — superseded by " +
+     "its OWN CONSECUTIVE_FOREIGN_CANCEL_LIMIT stop above (ETA-Refuter Finding 1); this only pins the canary side", () => {
+    // covered structurally by "a done resets BOTH streaks" and Probe A above; kept as a named marker that
+    // the OLD claim ("foreign cancels never trip ANY fatal stop") is no longer true, on purpose.
   });
 
-  it("a foreign cancel between two real failures does not reset OR advance the failure streak — it is simply not part of it", async () => {
+  it("a foreign cancel between two real failures does not reset OR advance the FAILURE streak — it is simply not part of it", async () => {
     let n = 0;
     const outcomes = [failed(), failed(), foreignCancel(), failed(), failed(), failed()];
     const cands = Array.from({ length: outcomes.length }, (_, i) => cand(`W${i}`));

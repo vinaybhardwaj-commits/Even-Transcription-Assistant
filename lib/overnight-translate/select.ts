@@ -83,18 +83,30 @@ export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Pr
 export type StoreConfig = {
   /** room_day ids of the Jev fixtures. Passed in (env or flag), never written into source. */
   fixtureRoomDays: readonly string[];
-  /** A window whose room_window jobs have failed this many times is skipped for good. */
+  /**
+   * A window whose room_window jobs have failed this many times is skipped for good — but the count is now
+   * THIS DRIVER'S OWN failures only (args->>'actor' = the resolved actor below), and never a `failed` job
+   * whose error names `join_already_running` (ETA-Refuter Finding 2, 22 Sep 2026: counted across every
+   * submitter and including contention noise, this parked 143 production windows, 128 of them by contention
+   * alone, that had nothing wrong with their content). A `cancelled` job was already excluded — this counts
+   * `status = 'failed'` only, and cancelled is a different status.
+   */
   maxFailedJobs: number;
   /** The `actor` the driver's own jobs carry (args->>'actor'). Defaults to RETRY_ACTOR; the driver passes its own ACTOR. */
   actor?: string;
   /**
-   * A window with ANY `room_window` job (any actor, any kind status) touched this recently is skipped —
-   * not just one still `queued`/`running`. Fable's order, 22 Sep 2026 21:10 (ETA-OVERNIGHT-FATALS-ROOTCAUSE):
-   * an admin-route serial loop submits, gets refused `join_already_running`, and resubmits again seconds
-   * later — a `failed` row from a moment ago is still a live contender for the join service's single-job
-   * mutex, and `queued`/`running` alone would miss it. Defaults to RECENT_ACTIVITY_MINUTES.
+   * DUPLICATE-WORK GUARD, per window (ETA-Refuter Finding 3, 22 Sep 2026, correcting the name and this
+   * comment): a window with ANY `room_window` job (any actor, any kind status) touched this recently is
+   * skipped — not just one still `queued`/`running`. This stops the selector re-picking the SAME window
+   * moments after someone else (admin-route, cron) already worked it, `failed` included.
+   *
+   * IT DOES NOT SOLVE THE SERVICE-WIDE JOIN MUTEX. The mutex is ONE lock across every window; a contender
+   * busy on a DIFFERENT window still collides with whatever THIS driver picks next. That collision is
+   * handled by retrying (driver.ts JOIN_RETRY_LIMIT) and, when retries run out repeatedly, by the
+   * CONSECUTIVE_JOIN_CONTENTION_LIMIT stop — not by anything in this file. Defaults to
+   * RECENT_WINDOW_ACTIVITY_MINUTES.
    */
-  recentActivityMinutes?: number;
+  recentWindowActivityMinutes?: number;
 };
 
 /**
@@ -109,9 +121,10 @@ export type StoreConfig = {
  */
 export const RETRY_MAX_ATTEMPTS = 3;
 export const RETRY_ACTOR = "overnight-translate";
-/** A window with a room_window job (any actor, any status) this recent is skipped — the join-service
- *  contention guard (Fable, 22 Sep 2026 21:10). See StoreConfig.recentActivityMinutes. */
-export const RECENT_ACTIVITY_MINUTES = 5;
+/** The duplicate-work guard's window, in minutes (Fable, 22 Sep 2026 21:10; renamed and re-documented per
+ *  ETA-Refuter Finding 3, 22 Sep 2026 — it is per-window, not a fix for the service-wide join mutex).
+ *  See StoreConfig.recentWindowActivityMinutes. */
+export const RECENT_WINDOW_ACTIVITY_MINUTES = 5;
 
 /** Window start hour in IST, 0-23. Closed hours = 21:00-06:59 (the ledger's "21:00-07:00"). */
 export const isClosedHourIst = (hourIst: number): boolean => hourIst >= 21 || hourIst < 7;
@@ -147,7 +160,7 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
   // ~100-row lateral join is not re-run on every later call.
   let fixturesExhausted = fixtures.length === 0;
   const actor = cfg.actor ?? RETRY_ACTOR;
-  const recentActivityMinutes = cfg.recentActivityMinutes ?? RECENT_ACTIVITY_MINUTES;
+  const recentWindowActivityMinutes = cfg.recentWindowActivityMinutes ?? RECENT_WINDOW_ACTIVITY_MINUTES;
   // Same reasoning for the retry scan: within a run `exclude` only grows, and the windows this run finishes are all in it, so a scan that
   // found nothing left to re-pick stays empty.
   let retriesExhausted = false;
@@ -178,9 +191,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
          AND w.grid_aligned = TRUE
          AND NOT EXISTS (
                SELECT 1 FROM scribe_job j
-                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentActivityMinutes})))
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentWindowActivityMinutes})))
          AND (SELECT count(*) FROM scribe_job j
-               WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${cfg.maxFailedJobs}
+               WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                AND j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ${cfg.maxFailedJobs}
        ORDER BY w.end_ms ASC, w.id ASC
     `) as FixtureRow[];
   }
@@ -225,9 +239,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
                   AND j.args->>'translate' = 'true' AND j.status = 'done') < ${RETRY_MAX_ATTEMPTS})
          AND NOT EXISTS (
                SELECT 1 FROM scribe_job j
-                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentActivityMinutes})))
+                WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentWindowActivityMinutes})))
          AND (SELECT count(*) FROM scribe_job j
-               WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${cfg.maxFailedJobs}
+               WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                AND j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ${cfg.maxFailedJobs}
          AND w.id <> ALL(${skip}::text[])
        ORDER BY w.end_ms ASC, w.id ASC
        LIMIT 200
@@ -286,9 +301,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
            AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state = 'no_speakers')
            AND NOT EXISTS (
                  SELECT 1 FROM scribe_job j
-                  WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentActivityMinutes})))
+                  WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentWindowActivityMinutes})))
            AND (SELECT count(*) FROM scribe_job j
-                 WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${cfg.maxFailedJobs}
+                 WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                AND j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ${cfg.maxFailedJobs}
            AND w.id <> ALL(${skip}::text[])
          ORDER BY w.end_ms ASC, w.id ASC
          LIMIT 1
@@ -339,9 +355,10 @@ export function makeStore(sql: SqlTag, cfg: StoreConfig): Store {
            AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state = 'no_speakers')
            AND NOT EXISTS (
                  SELECT 1 FROM scribe_job j
-                  WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentActivityMinutes})))
+                  WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND (j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ${recentWindowActivityMinutes})))
            AND (SELECT count(*) FROM scribe_job j
-                 WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${cfg.maxFailedJobs}
+                 WHERE j.kind = 'room_window' AND j.args->>'window_id' = w.id AND j.args->>'actor' = ${actor}
+                AND j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ${cfg.maxFailedJobs}
       `) as Array<{ remaining: string | number; in_off_rooms: string | number }>;
 
       const [x] = (await sql`

@@ -9,8 +9,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeStore, fixtureVerdict, isClosedHourIst, RETRY_MAX_ATTEMPTS, RETRY_ACTOR, RECENT_ACTIVITY_MINUTES, type SqlTag } from "@/lib/overnight-translate/select";
-import { ACTOR } from "@/lib/overnight-translate/driver";
+import { makeStore, fixtureVerdict, isClosedHourIst, RETRY_MAX_ATTEMPTS, RETRY_ACTOR, RECENT_WINDOW_ACTIVITY_MINUTES, type SqlTag } from "@/lib/overnight-translate/select";
+import { ACTOR, DEFAULT_MAX_FAILED_JOBS } from "@/lib/overnight-translate/driver";
 
 type Call = { text: string; values: unknown[] };
 const flat = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -279,8 +279,52 @@ const retryRow = (over: Record<string, unknown> = {}) => ({
   run_id: "tr_1", orig_len: 900, eng_len: 0, metrics_json: null, hour_ist: 0, no_speakers: false, attempts: 1, ...over,
 });
 
+describe("THE FAILED-JOBS PARK — this driver's OWN failures only, contention excluded (ETA-Refuter Finding 2, 22 Sep 2026)", () => {
+  it(`DEFAULT_MAX_FAILED_JOBS is hardcoded 2, not merely self-consistent (nothing pinned it before)`, () => {
+    expect(DEFAULT_MAX_FAILED_JOBS).toBe(2);
+  });
+
+  it("EVERY selection query's failed-jobs count is scoped to THIS actor and excludes join_already_running " +
+     "— checked unconditionally (a mutant that deforms the clause must not also escape the check that would catch it)", async () => {
+    const { sql, calls } = fakeSql([]);
+    const store = makeStore(sql, CFG);
+    await store.next(new Set());
+    await store.summarize();
+    const jobQueries = calls.filter((c) => c.text.includes("j.kind = 'room_window' AND j.args->>'window_id' = w.id"));
+    expect(jobQueries.length).toBeGreaterThanOrEqual(4);
+    const exactClause = "j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ?";
+    const withClause = jobQueries.filter((c) => c.text.includes(exactClause));
+    expect(withClause.length, "every one of them, not just some").toBe(jobQueries.length);
+    // and each carries the actor as a bound value at least as many times as it appears in the text.
+    for (const c of withClause) {
+      const actorOccurrences = c.text.split("j.args->>'actor' = ?").length - 1;
+      expect(actorOccurrences).toBeGreaterThanOrEqual(1);
+      expect(c.values.filter((v) => v === RETRY_ACTOR).length, c.text.slice(0, 60)).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("a configured actor (the driver's own ACTOR, not the retry default) reaches the failed-jobs count too", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, { ...CFG, actor: ACTOR }).next(new Set());
+    const jobQueries = calls.filter((c) => c.text.includes("j.kind = 'room_window' AND j.args->>'window_id' = w.id"));
+    for (const c of jobQueries) expect(c.values).toContain(ACTOR);
+  });
+
+  it("a cancelled job was already excluded — the count filters status = 'failed' only, never 'cancelled'", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const jobQueries = calls.filter((c) => c.text.includes("j.kind = 'room_window' AND j.args->>'window_id' = w.id"));
+    for (const c of jobQueries) expect(c.text).not.toMatch(/status\s*=\s*'cancelled'/);
+  });
+});
+
 describe("RECENT-ACTIVITY GUARD — a window with ANY room_window job (any actor) touched this recently is skipped (Fable, 22 Sep 2026 21:10, ETA-OVERNIGHT-FATALS-ROOTCAUSE)", () => {
-  it(`every selection query (fixture, retry pick, retry summary, backlog pick, backlog summary) carries the recency clause, bound to the default ${RECENT_ACTIVITY_MINUTES}`, async () => {
+  it("the default is hardcoded 5, not merely self-consistent — kills a mutant that changes the constant (ETA-Refuter Finding 3: mutation RECENT_ACTIVITY_MINUTES 5→0 survived)", () => {
+    expect(RECENT_WINDOW_ACTIVITY_MINUTES).toBe(5);
+  });
+
+
+  it(`every selection query (fixture, retry pick, retry summary, backlog pick, backlog summary) carries the recency clause, bound to the default ${RECENT_WINDOW_ACTIVITY_MINUTES}`, async () => {
     const { sql, calls } = fakeSql([]);
     const store = makeStore(sql, CFG);
     await store.next(new Set());
@@ -291,19 +335,19 @@ describe("RECENT-ACTIVITY GUARD — a window with ANY room_window job (any actor
     expect(jobQueries.length).toBeGreaterThanOrEqual(4);
     const withRecency = jobQueries.filter((c) => c.text.includes("OR j.updated_at > now() - make_interval(mins => ?))"));
     expect(withRecency.length, "every one of them, not just some").toBe(jobQueries.length);
-    for (const c of withRecency) expect(c.values, c.text.slice(0, 60)).toContain(RECENT_ACTIVITY_MINUTES);
+    for (const c of withRecency) expect(c.values, c.text.slice(0, 60)).toContain(RECENT_WINDOW_ACTIVITY_MINUTES);
   });
 
-  it("a configured recentActivityMinutes overrides the default in every query, not just one", async () => {
+  it("a configured recentWindowActivityMinutes overrides the default in every query, not just one", async () => {
     const { sql, calls } = fakeSql([]);
-    const store = makeStore(sql, { ...CFG, recentActivityMinutes: 15 });
+    const store = makeStore(sql, { ...CFG, recentWindowActivityMinutes: 15 });
     await store.next(new Set());
     await store.summarize();
     const withJobExclusion = calls.filter((c) => c.text.includes("make_interval(mins => ?)"));
     expect(withJobExclusion.length).toBeGreaterThanOrEqual(4);
     for (const c of withJobExclusion) {
       expect(c.values).toContain(15);
-      expect(c.values).not.toContain(RECENT_ACTIVITY_MINUTES);
+      expect(c.values).not.toContain(RECENT_WINDOW_ACTIVITY_MINUTES);
     }
   });
 
@@ -370,8 +414,11 @@ describe("THE CANARY RETRY — a window this driver ran that still has no Englis
     expect(q.text).toContain("j.status = 'done'");
     expect(q.values).toContain(RETRY_ACTOR);
     // ...in EVERY place it is needed: the attempts column, the attempts bound, and the EXISTS that says this driver ran the window at all
-    // (attempts >= 1), so an older run from somewhere else with no English is never swept in.
-    for (const frag of ["j.args->>'actor' = ?", "j.args->>'translate' = 'true'", "j.status = 'done'"]) {
+    // (attempts >= 1), so an older run from somewhere else with no English is never swept in — PLUS a 4th
+    // 'actor' occurrence since ETA-Refuter Finding 2 (22 Sep 2026): the maxFailedJobs count is now ALSO
+    // scoped to this actor, in this same retry query.
+    expect(q.text.split("j.args->>'actor' = ?").length - 1, "actor: 3 original + 1 from the failed-count scope").toBe(4);
+    for (const frag of ["j.args->>'translate' = 'true'", "j.status = 'done'"]) {
       expect(q.text.split(frag).length - 1, frag).toBe(3);
     }
   });
@@ -430,7 +477,7 @@ describe("THE CANARY RETRY — a window this driver ran that still has no Englis
     expect(q.text).toContain("ORDER BY created_at DESC FETCH FIRST 1 ROW ONLY");
     expect(q.text).toContain("EXISTS ( SELECT 1 FROM scribe_job j WHERE j.kind = 'room_window'");
     expect(q.text).toContain("j.status IN ('queued', 'running')");
-    expect(q.text).toContain("j.status = 'failed') < ?");
+    expect(q.text).toContain("j.status = 'failed' AND (j.error IS NULL OR j.error NOT LIKE '%join_already_running%')) < ?");
   });
 
   it("does not take a fixture room-day (the fixture path holds the same bound) and skips windows already tried this run", async () => {

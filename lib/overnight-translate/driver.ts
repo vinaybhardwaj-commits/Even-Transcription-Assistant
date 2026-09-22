@@ -77,9 +77,19 @@ export const JOIN_RETRY_LIMIT = 2;
  *  sides retrying instantly only raises the odds of colliding again. */
 export const JOIN_RETRY_DELAY_MS = 5_000;
 export const DEFAULT_MAX_FAILED_JOBS = 2;
+/**
+ * ETA-Refuter, 22 Sep 2026, Finding 1: removing foreign-cancel and join-contention-exhausted from the
+ * failure count also removed the ONLY signal that exposed the admin-route loop and the direct-SQL
+ * canceller — a night where nothing succeeds now ends `backlog_empty`, silently. Two SEPARATE streaks,
+ * each stopping the run on its own kind of trouble; a `done` resets BOTH (a window going through cleanly
+ * means whatever was contending has let up, at least for now).
+ */
+export const CONSECUTIVE_FOREIGN_CANCEL_LIMIT = 5;
+export const CONSECUTIVE_JOIN_CONTENTION_LIMIT = 5;
 
 export type FatalCode =
-  | "mcp_not_configured" | "mcp_auth_refused" | "mcp_scope_refused" | "door_unreachable" | "too_many_failures" | "job_stuck" | "store_unreadable";
+  | "mcp_not_configured" | "mcp_auth_refused" | "mcp_scope_refused" | "door_unreachable" | "too_many_failures" | "job_stuck" | "store_unreadable"
+  | "foreign_cancels" | "join_contention";
 export type StopReason = "backlog_empty" | "submit_window_closed" | "closed_hours_over" | "aborted" | "fatal" | "limit" | "dry_run_done";
 
 export type Deps = {
@@ -180,6 +190,11 @@ export async function runOvernight(
   let heldReason: string | null = null;
   let deferredStreak = 0;
   let consecutiveFailures = 0;
+  // Two INDEPENDENT streaks (ETA-Refuter Finding 1, 22 Sep 2026): neither foreign_cancel nor
+  // join_contention_exhausted touches `consecutiveFailures` above, and each other's activity does not
+  // reset the other — only a real `done` resets both, below.
+  let consecutiveForeignCancels = 0;
+  let consecutiveJoinContentionExhausted = 0;
   let storeFailures = 0;
   let nightBegun = false;   // true once we have been inside the submit window in THIS process
   let waitLogged = false;
@@ -261,10 +276,17 @@ export async function runOvernight(
       // JOIN CONTENTION EXHAUSTED (Refuter finding 2, 22 Sep 2026): a distinct, non-generic outcome — this
       // window's fate was decided by contention timing, not by anything about the window's own content — so
       // it is recorded as a real failure for the run's tally, but kept OUT of the canary's consecutive-
-      // failure count (unlike a generic `window_failed`, which does count toward it).
+      // failure count (unlike a generic `window_failed`, which does count toward it). It DOES advance its OWN
+      // streak (ETA-Refuter Finding 1): the join mutex held all night, every window exhausting its retries,
+      // is exactly the silent-`backlog_empty` failure mode the stop below exists to catch.
       const wall_s = Math.round((deps.now() - a.t0) / 1000);
       s.failed += 1;
+      consecutiveJoinContentionExhausted += 1;
       deps.log({ event: "window_failed", window_id: a.c.window_id, job_id: jobId, status: terminal.status, step: terminal.step, error_code: "join_contention_exhausted", wall_s });
+      if (consecutiveJoinContentionExhausted >= CONSECUTIVE_JOIN_CONTENTION_LIMIT) {
+        fatal("join_contention", { consecutive: consecutiveJoinContentionExhausted });
+        return true;
+      }
       return false;
     }
 
@@ -273,11 +295,18 @@ export async function runOvernight(
     // cancel method at all; a test asserts the door calls only submit and status). The 16:21 and 19:43 IST
     // fatals were an admin-route serial loop and a direct-SQL canceller outside the app cancelling OUR jobs
     // and this driver counting each as its own failure. A cancel we did not ask for is a fact about someone
-    // ELSE's action, not about this window's content, so — exactly like `unverified` — it is neither a
-    // failure nor a touch of `consecutiveFailures`, and the window is left for a later run to re-pick.
+    // ELSE's action, not about this window's content, so, UNLIKE `unverified` (which DOES count toward
+    // `consecutiveFailures` — ETA-Refuter Finding 4, 22 Sep 2026, correcting an earlier wrong comment here),
+    // it never touches that counter. It DOES advance its own streak: a canceller cancelling everything we
+    // submit is exactly the silent-`backlog_empty` failure mode the stop below exists to catch.
     if (terminal.status === "cancelled") {
       s.windowDeferred += 1;
+      consecutiveForeignCancels += 1;
       deps.log({ event: "window_deferred", window_id: a.c.window_id, job_id: jobId, reason: "foreign_cancel" });
+      if (consecutiveForeignCancels >= CONSECUTIVE_FOREIGN_CANCEL_LIMIT) {
+        fatal("foreign_cancels", { consecutive: consecutiveForeignCancels });
+        return true;
+      }
       return false;
     }
 
@@ -313,6 +342,11 @@ export async function runOvernight(
       }
       s.done += 1;
       consecutiveFailures = 0;
+      // A window going through cleanly means whatever was contending has let up, at least for now
+      // (ETA-Refuter Finding 1, 22 Sep 2026): a done resets BOTH the foreign-cancel and the
+      // join-contention-exhausted streaks, not just the canary's own.
+      consecutiveForeignCancels = 0;
+      consecutiveJoinContentionExhausted = 0;
       deps.log({ event: "window_done", window_id: a.c.window_id, job_id: jobId, klass: a.c.klass, wall_s });
       return false;
     }
