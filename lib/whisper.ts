@@ -49,14 +49,22 @@
  */
 // One declaration, in a module nothing needs to mock — see lib/whisper-constants.ts.
 import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
+import {
+  dropWhisperNonSpeech,
+  WHISPER_AVG_LOGPROB_MAX,
+  WHISPER_GATE_BASIS,
+  WHISPER_NO_SPEECH_MIN,
+} from "@/lib/stt/speech-gate";
 export { EMPTY_TRANSCRIPT };
 
 export type WhisperSegment = {
   start_s: number;
   end_s: number;
   text: string;
-  /** whisper.cpp's own no-speech probability, when it sends one. Reported, never acted on here. */
+  /** whisper.cpp's own no-speech probability, when it sends one. Judged by the speech gate. */
   no_speech_prob?: number;
+  /** whisper.cpp's mean token log-probability for the segment, when it sends one. */
+  avg_logprob?: number;
 };
 
 export type WhisperResult =
@@ -68,6 +76,8 @@ export type WhisperResult =
       latency_ms: number;
       /** Always present, possibly empty — a server that sent none is not an error. */
       segments: WhisperSegment[];
+      /** How many segments the speech gate dropped as decoded-from-silence (A-ETA-3). */
+      no_speech_dropped?: number;
       /**
        * Build 3 (PRD §5 amendment) — the model whisper.cpp REPORTED, when it reports one.
        *
@@ -126,7 +136,12 @@ export function parseWhisperSegments(raw: unknown): WhisperSegment[] {
     if (start === null || end === null || end < start) continue;
     const text = typeof o.text === "string" ? o.text.trim() : "";
     const nsp = typeof o.no_speech_prob === "number" && Number.isFinite(o.no_speech_prob) ? o.no_speech_prob : undefined;
-    out.push({ start_s: start, end_s: end, text, ...(nsp === undefined ? {} : { no_speech_prob: nsp }) });
+    const lp = typeof o.avg_logprob === "number" && Number.isFinite(o.avg_logprob) ? o.avg_logprob : undefined;
+    out.push({
+      start_s: start, end_s: end, text,
+      ...(nsp === undefined ? {} : { no_speech_prob: nsp }),
+      ...(lp === undefined ? {} : { avg_logprob: lp }),
+    });
   }
   return out;
 }
@@ -267,6 +282,11 @@ async function whisperAttempt(
   form.append('temperature', '0.0');
   form.append('beam_size', '1');
   form.append('best_of', '1');
+  // No previous-text conditioning (A-ETA-1). With context on, one invented phrase is fed back as the
+  // prompt for the next window, which is how a sticky loop propagates. The Mini's shim already
+  // defaults this to 0 when absent; sending it here keeps it true on any path that is not the shim.
+  // whisper.cpp's server parses it (`req.has_file("max_context")` → n_max_text_ctx).
+  form.append('max_context', '0');
   //
   // THERE IS NO SEED. K3 §5 asked for a fixed seed; this endpoint has no such parameter. Posting
   // `seed` returns HTTP 200 and changes nothing — it is silently ignored, exactly as an invented
@@ -315,11 +335,20 @@ async function whisperAttempt(
       model_name?: unknown;
     };
 
-    const segments = parseWhisperSegments(json.segments);
-    // The transcript is still the server's own `text` when it sent one. Only when it did not —
-    // some builds answer verbose_json with segments and no top-level text — is it rebuilt from
-    // the segments, so widening the request cannot narrow the answer.
-    const transcript = ((json.text ?? '').trim() || segments.map((s) => s.text).filter(Boolean).join(' ')).trim();
+    const parsed = parseWhisperSegments(json.segments);
+    // A-ETA-3 — the speech gate's Whisper rule (lib/stt/speech-gate.ts). Segments Whisper itself
+    // says were decoded out of silence are dropped, and counted; their text never reaches a caller.
+    const { kept: segments, dropped: no_speech_dropped } = dropWhisperNonSpeech(parsed);
+    if (no_speech_dropped > 0) {
+      console.log(`[whisper] speech gate dropped ${no_speech_dropped} of ${parsed.length} segments ` +
+        `(no_speech_prob>=${WHISPER_NO_SPEECH_MIN} and avg_logprob<${WHISPER_AVG_LOGPROB_MAX}, ${WHISPER_GATE_BASIS})`);
+    }
+    // The transcript is still the server's own `text` when it sent one and nothing was dropped. Only
+    // when it did not — some builds answer verbose_json with segments and no top-level text — or when
+    // the gate dropped a segment (the server's text still carries it) is it rebuilt from the kept
+    // segments, so widening the request cannot narrow the answer and a dropped segment cannot return.
+    const fromSegments = segments.map((s) => s.text).filter(Boolean).join(' ');
+    const transcript = (no_speech_dropped > 0 ? fromSegments : ((json.text ?? '').trim() || fromSegments)).trim();
     if (!transcript) {
       return { ok: false, error: EMPTY_TRANSCRIPT, latency_ms };
     }
@@ -331,6 +360,7 @@ async function whisperAttempt(
       duration_seconds: json.duration,
       latency_ms,
       segments,
+      no_speech_dropped,
       engineVersion: reportedWhisperModel(json),
     };
   } catch (e: unknown) {

@@ -169,6 +169,44 @@ export function gateSegments(
  */
 
 // ---------------------------------------------------------------------------
+// Whisper's own evidence (A-ETA-3) — the same gate, judging a transcript segment
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE GATE, TWO KINDS OF EVIDENCE. This module is where "is this speech?" is decided. Above, the
+ * evidence is Silero's spans against a DIARIZER segment, and it only flags (flag-gated, OFF). Here the
+ * evidence is Whisper's own report on a TRANSCRIPT segment, and it drops — because what it removes is
+ * text, and a word Whisper invented on silence is worse than no word: "prefer empty over invented".
+ *
+ * The rule is Whisper's own default (openai/whisper `transcribe`: no_speech_threshold 0.6 AND
+ * logprob_threshold -1.0). BOTH must hold: a high no-speech probability alone also fires on real
+ * quiet speech the decoder was sure of, and a low log-prob alone fires on hard accents. Only the two
+ * together are the signature of text decoded out of nothing.
+ *
+ * A segment missing either number is UNJUDGED and KEPT, for the same reason the VAD gate refuses to
+ * convict on an empty answer: absent evidence is not evidence of silence.
+ */
+export const WHISPER_NO_SPEECH_MIN = 0.6;
+export const WHISPER_AVG_LOGPROB_MAX = -1.0;
+export const WHISPER_GATE_BASIS = "whisper-nsp0.6-lp-1.0/v1";
+
+export type WhisperGateInput = { no_speech_prob?: number; avg_logprob?: number };
+
+/** PURE — `non_speech` only when both of Whisper's numbers say so. */
+export function whisperSegmentVerdict(seg: WhisperGateInput): SegmentVerdict {
+  const nsp = seg.no_speech_prob;
+  const lp = seg.avg_logprob;
+  if (typeof nsp !== "number" || !Number.isFinite(nsp) || typeof lp !== "number" || !Number.isFinite(lp)) return "unjudged";
+  return nsp >= WHISPER_NO_SPEECH_MIN && lp < WHISPER_AVG_LOGPROB_MAX ? "non_speech" : "speech";
+}
+
+/** PURE — the segments that survive, in order, and how many did not. */
+export function dropWhisperNonSpeech<T extends WhisperGateInput>(segments: readonly T[]): { kept: T[]; dropped: number } {
+  const kept = segments.filter((s) => whisperSegmentVerdict(s) !== "non_speech");
+  return { kept, dropped: segments.length - kept.length };
+}
+
+// ---------------------------------------------------------------------------
 // Asking the VAD
 // ---------------------------------------------------------------------------
 
