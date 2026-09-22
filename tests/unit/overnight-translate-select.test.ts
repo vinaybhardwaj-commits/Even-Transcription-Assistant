@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeStore, fixtureVerdict, isClosedHourIst, RETRY_MAX_ATTEMPTS, RETRY_ACTOR, type SqlTag } from "@/lib/overnight-translate/select";
+import { makeStore, fixtureVerdict, isClosedHourIst, RETRY_MAX_ATTEMPTS, RETRY_ACTOR, RECENT_ACTIVITY_MINUTES, type SqlTag } from "@/lib/overnight-translate/select";
 import { ACTOR } from "@/lib/overnight-translate/driver";
 
 type Call = { text: string; values: unknown[] };
@@ -277,6 +277,50 @@ const isRetryQuery = (c: Call) => c.text.includes("JOIN LATERAL") && !c.text.inc
 const retryRow = (over: Record<string, unknown> = {}) => ({
   id: "bw_r1", room_id: "room_3", room_day_id: "rd_r", start_ms: "3000", end_ms: "903000", transcript_enabled: true,
   run_id: "tr_1", orig_len: 900, eng_len: 0, metrics_json: null, hour_ist: 0, no_speakers: false, attempts: 1, ...over,
+});
+
+describe("RECENT-ACTIVITY GUARD — a window with ANY room_window job (any actor) touched this recently is skipped (Fable, 22 Sep 2026 21:10, ETA-OVERNIGHT-FATALS-ROOTCAUSE)", () => {
+  it(`every selection query (fixture, retry pick, retry summary, backlog pick, backlog summary) carries the recency clause, bound to the default ${RECENT_ACTIVITY_MINUTES}`, async () => {
+    const { sql, calls } = fakeSql([]);
+    const store = makeStore(sql, CFG);
+    await store.next(new Set());
+    await store.summarize();
+    // UNCONDITIONAL: every query that names `scribe_job` for the window at all must carry the clause. Filtering
+    // by the clause's own shape first would let a mutant that deformed exactly this text slip past unnoticed.
+    const jobQueries = calls.filter((c) => c.text.includes("j.kind = 'room_window' AND j.args->>'window_id' = w.id"));
+    expect(jobQueries.length).toBeGreaterThanOrEqual(4);
+    const withRecency = jobQueries.filter((c) => c.text.includes("OR j.updated_at > now() - make_interval(mins => ?))"));
+    expect(withRecency.length, "every one of them, not just some").toBe(jobQueries.length);
+    for (const c of withRecency) expect(c.values, c.text.slice(0, 60)).toContain(RECENT_ACTIVITY_MINUTES);
+  });
+
+  it("a configured recentActivityMinutes overrides the default in every query, not just one", async () => {
+    const { sql, calls } = fakeSql([]);
+    const store = makeStore(sql, { ...CFG, recentActivityMinutes: 15 });
+    await store.next(new Set());
+    await store.summarize();
+    const withJobExclusion = calls.filter((c) => c.text.includes("make_interval(mins => ?)"));
+    expect(withJobExclusion.length).toBeGreaterThanOrEqual(4);
+    for (const c of withJobExclusion) {
+      expect(c.values).toContain(15);
+      expect(c.values).not.toContain(RECENT_ACTIVITY_MINUTES);
+    }
+  });
+
+  it("the guard is an OR alongside queued/running, not a replacement — a queued/running job still excludes with no recency needed", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const backlog = calls.find((c) => c.text.includes("LIMIT 1") && !c.text.includes("LEFT JOIN LATERAL"))!;
+    expect(backlog.text).toContain("j.status IN ('queued', 'running') OR j.updated_at > now() - make_interval(mins => ?)");
+  });
+
+  it("the exclusion is by window_id and kind alone — ANY actor's job counts, not just this driver's own", async () => {
+    const { sql, calls } = fakeSql([]);
+    await makeStore(sql, CFG).next(new Set());
+    const backlog = calls.find((c) => c.text.includes("LIMIT 1") && !c.text.includes("LEFT JOIN LATERAL"))!;
+    const clause = backlog.text.slice(backlog.text.indexOf("AND NOT EXISTS"), backlog.text.indexOf("make_interval(mins => ?))") + 26);
+    expect(clause, clause).not.toMatch(/actor/i);
+  });
 });
 
 describe("THE CANARY RETRY — a window this driver ran that still has no English is re-picked, up to 3 attempts in all, then parked", () => {

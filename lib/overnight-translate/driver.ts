@@ -268,6 +268,19 @@ export async function runOvernight(
       return false;
     }
 
+    // A FOREIGN CANCEL (Fable, 22 Sep 2026 21:10, ETA-OVERNIGHT-FATALS-ROOTCAUSE): a `cancelled` terminal that
+    // THIS driver did not ask for — it never calls `scribe_job_cancel` on its own jobs (door.ts exposes no
+    // cancel method at all; a test asserts the door calls only submit and status). The 16:21 and 19:43 IST
+    // fatals were an admin-route serial loop and a direct-SQL canceller outside the app cancelling OUR jobs
+    // and this driver counting each as its own failure. A cancel we did not ask for is a fact about someone
+    // ELSE's action, not about this window's content, so — exactly like `unverified` — it is neither a
+    // failure nor a touch of `consecutiveFailures`, and the window is left for a later run to re-pick.
+    if (terminal.status === "cancelled") {
+      s.windowDeferred += 1;
+      deps.log({ event: "window_deferred", window_id: a.c.window_id, job_id: jobId, reason: "foreign_cancel" });
+      return false;
+    }
+
     const wall_s = Math.round((deps.now() - a.t0) / 1000);
     if (terminal.status === "done") {
       // THE ENGLISH CANARY. `done` says the job ran; it does not say it made English. A window with text and no

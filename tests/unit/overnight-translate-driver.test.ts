@@ -9,6 +9,8 @@
  * rooms do not; and no log line ever carries the token or any free text.
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, DEFAULT_CONCURRENCY,
   JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS, type Deps,
@@ -33,6 +35,7 @@ const done = (): StatusResult => ({ ok: true, status: "done", step: "finish", er
 const running = (): StatusResult => ({ ok: true, status: "running", step: "engine", error_code: null, attempts: 1, failures: 0, join_contended: false });
 const failed = (): StatusResult => ({ ok: true, status: "failed", step: "segment", error_code: "room_window_failed", attempts: 2, failures: 1, join_contended: false });
 const joinContended = (): StatusResult => ({ ok: true, status: "failed", step: "prepare", error_code: "room_window_failed", attempts: 1, failures: 1, join_contended: true });
+const foreignCancel = (): StatusResult => ({ ok: true, status: "cancelled", step: "engine", error_code: null, attempts: 1, failures: 0, join_contended: false });
 
 type Opts = {
   start?: number;
@@ -836,10 +839,10 @@ describe("JOIN-SERVICE CONTENTION — a bounded retryable deferral, not a counte
     expect(s).toMatchObject({ done: 1, joinDeferred: 0 });
   });
 
-  it("join_contended on a CANCELLED job (not failed) never retries — only `failed` carries the signal", async () => {
+  it("join_contended on a CANCELLED job (not failed) never retries — a cancelled job is a foreign cancel (deferred), not a failure at all", async () => {
     const h = harness({ cands: [cand("A")], status: () => ({ ok: true, status: "cancelled", step: null, error_code: null, attempts: 1, failures: 0, join_contended: true }) });
     const s = await h.run();
-    expect(s).toMatchObject({ failed: 1, joinDeferred: 0 });
+    expect(s).toMatchObject({ failed: 0, joinDeferred: 0, windowDeferred: 1 });
     expect(h.submits).toHaveLength(1);
   });
 
@@ -902,6 +905,60 @@ describe("THE JOIN-RETRY BACKOFF RE-CHECKS THE CLOCK AND THE GATE (Refuter findi
     expect(s).toMatchObject({ started: 6, done: 0, failed: 6, fatal: null, stop: "backlog_empty" });
     expect(evs(h.log, "window_failed")).toHaveLength(6);
     expect(evs(h.log, "window_failed").every((e) => e.error_code === "join_contention_exhausted")).toBe(true);
+  });
+});
+
+describe("A FOREIGN CANCEL — a cancelled job we did not ask for (Fable, 22 Sep 2026 21:10, ETA-OVERNIGHT-FATALS-ROOTCAUSE)", () => {
+  it("this driver never calls a cancel tool — driver.ts contains no `.cancel(`-shaped call, and Door itself has no cancel method to call", () => {
+    // TypeScript already makes `deps.door.cancel(...)` a compile error if Door has no such method (the harness's
+    // fake Door below is exhaustively typed against the real one). This confirms both halves at once: no CALL
+    // site in driver.ts's own source, and the object the harness builds — shaped exactly like the real Door —
+    // has no key that could be one. Deliberately NOT a "never says the word cancel" check: this file legitimately
+    // talks ABOUT foreign cancels, in this very test file and in driver.ts's own explanatory comments.
+    const src = readFileSync(join(process.cwd(), "lib/overnight-translate/driver.ts"), "utf8");
+    expect(src).not.toMatch(/\.cancel\w*\(/i);
+    const doorSrc = readFileSync(join(process.cwd(), "lib/overnight-translate/door.ts"), "utf8");
+    expect(doorSrc).not.toMatch(/scribe_job_cancel/);
+    const fakeDoorKeys = Object.keys({ submitRoomWindow: async () => {}, jobStatus: async () => {} });
+    expect(fakeDoorKeys.some((k) => /cancel/i.test(k))).toBe(false);
+  });
+
+  it("a cancelled job is window_deferred reason=foreign_cancel — not a failure, no touch of consecutiveFailures", async () => {
+    const h = harness({ cands: [cand("A"), cand("B")], status: (jobId, k, w) => (w === "A" ? foreignCancel() : done()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ started: 2, done: 1, failed: 0, windowDeferred: 1 });
+    expect(evs(h.log, "window_deferred")[0]).toMatchObject({ window_id: "A", reason: "foreign_cancel" });
+    expect(evs(h.log, "window_failed")).toHaveLength(0);
+  });
+
+  it(`${CONSECUTIVE_FAILURE_LIMIT}+ foreign cancels in a row never trip the fatal stop — only a REAL failure counts toward it`, async () => {
+    const cands = Array.from({ length: CONSECUTIVE_FAILURE_LIMIT + 2 }, (_, i) => cand(`W${i}`));
+    const h = harness({ cands, status: () => foreignCancel() });
+    const s = await h.run();
+    expect(s).toMatchObject({ started: CONSECUTIVE_FAILURE_LIMIT + 2, windowDeferred: CONSECUTIVE_FAILURE_LIMIT + 2, failed: 0, fatal: null, stop: "backlog_empty" });
+  });
+
+  it("a foreign cancel between two real failures does not reset OR advance the failure streak — it is simply not part of it", async () => {
+    let n = 0;
+    const outcomes = [failed(), failed(), foreignCancel(), failed(), failed(), failed()];
+    const cands = Array.from({ length: outcomes.length }, (_, i) => cand(`W${i}`));
+    const h = harness({ cands, status: () => outcomes[n++]! });
+    const s = await h.run();
+    // 5 real failures (the cancel does not interrupt the count) trips the stop on the 5th REAL one.
+    expect(s).toMatchObject({ failed: 5, windowDeferred: 1, fatal: "too_many_failures" });
+  });
+
+  it("n=3: a foreign cancel on one slot is independent — the others are untouched", async () => {
+    const h = harness({ cands: [cand("A"), cand("B"), cand("C")], status: (jobId, k, w) => (w === "B" ? foreignCancel() : done()) });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s).toMatchObject({ started: 3, done: 2, windowDeferred: 1, failed: 0 });
+  });
+
+  it("the log carries only ids and a closed reason — no free text", async () => {
+    const h = harness({ cands: [cand("A")], status: () => foreignCancel() });
+    await h.run();
+    const line = evs(h.log, "window_deferred").find((e) => e.reason === "foreign_cancel")!;
+    expect(Object.keys(line).sort()).toEqual(["event", "job_id", "reason", "window_id"].sort());
   });
 });
 
