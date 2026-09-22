@@ -318,6 +318,7 @@ describe("§2.2 — peak and average over an interval, never one instantaneous s
     expect(out.peak).toBeCloseTo(0.15, 6);
     expect(out.avg).toBeGreaterThan(0);
     expect(out.avg).toBeLessThan(out.peak);
+    expect(out.zero_ratio).toBeCloseTo(4 / 7, 6);
   });
 
   it("TAKE RESETS, so consecutive polls describe consecutive spans and never overlap", () => {
@@ -332,7 +333,7 @@ describe("§2.2 — peak and average over an interval, never one instantaneous s
     // and a zero is a real measurement, which is a different fact
     const acc = new LevelAccumulator();
     acc.add(0);
-    expect(acc.take()).toEqual({ peak: 0, avg: 0 });
+    expect(acc.take()).toEqual({ peak: 0, avg: 0, zero_ratio: 1 });
   });
 
   it("nonsense readings are ignored rather than counted as silence", () => {
