@@ -164,6 +164,14 @@ export function BenchRoomDrawer({
           ) : null}
           <dl className="mt-3 space-y-1.5 border-t border-even-ink-100 pt-3">
             <div className="flex justify-between gap-3 text-caption">
+              <dt className="text-even-ink-500">Kiosk listener</dt>
+              <dd className="font-semibold text-even-navy-800">
+                {listener
+                  ? `${listener.listening ? "listening" : "offline"} · last poll ${fmtAge(ageMs(listener.last_poll_at, nowMs))} ago`
+                  : "unknown"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3 text-caption">
               <dt className="text-even-ink-500">Room facts last success</dt>
               <dd className="font-semibold text-even-navy-800">
                 {factsAsOf ? `${fmtAge(nowMs - factsAsOf)} ago` : "unknown"}
