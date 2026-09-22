@@ -5,6 +5,9 @@
  *   ENERGY      from the level log (bench_level_sample) or from RMS frames decoded off the original
  *               chunks. Dead mic = zero_ratio >= 0.98, or a median level at or below -90 dBFS.
  *               A level sample is read by its `avg` when the recorder reports one, else by its `peak`.
+ *               ACCEPTED AS INERT FOR NOW (Fable, 22 Sep): the level log only began at 19:53 on 22 Sep,
+ *               so no full room-day has one yet and every probe is still fetched and decoded. The code
+ *               stays; it becomes meaningful the first full day the recorder reports levels.
  *               Production reports no `avg` (0 of 2,160 rows, 22 Sep), so on real data the level half
  *               runs on `peak`. That is safe in one direction only, which is the direction that
  *               matters: peak >= RMS always, so a peak under the floor proves the RMS is under it too.

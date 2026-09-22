@@ -13,12 +13,22 @@
  *   open     -> it CLOSES once EXIT_NON_SPEECH_PROBES non_speech probes accumulate with no speech
  *               between them; its end is the LAST SPEECH PROBE — the last positive evidence, never
  *               the non_speech run that closed it.
- *   unjudged -> never counts, never resets, never closes. It is missing evidence. An encounter stays
- *               open across an unjudged stretch, so speech after it continues the same encounter;
- *               unjudged time after the last speech is never claimed as encounter time.
- * A hole in the probe series (no probe at all) is unjudged time, never silence.
+ *   unjudged -> never counts and never resets, and it cannot close an encounter on its own — but it
+ *               can only BRIDGE one for BRIDGE_UNJUDGED_MAX_MS (Fable, 22 Sep, after the E-4 eval
+ *               produced 352-minute encounters). Past that the encounter closes at its last speech
+ *               probe and a later speech run opens a new one. Unjudged time after the last speech is
+ *               never claimed as encounter time.
+ * A hole in the probe series (no probe at all) is unjudged time, never silence, and the same bridge
+ * limit applies to it.
  *
- * GAP-MERGE. Encounters whose gap is at most MERGE_GAP_MS are merged.
+ * TAPE-OFF AND A DEAD MIC CLOSE AN ENCOUNTER IMMEDIATELY (Fable, 22 Sep): no audio means no visit, and
+ * a dead mic must never extend a visit. Tape-off comes from the caller as the stretches where the
+ * recorder was not running; a dead mic arrives as a probe whose gate reason is `dead_mic`. Both close
+ * at the last speech probe, and neither can open an encounter.
+ *
+ * GAP-MERGE. Encounters whose gap is at most MERGE_GAP_MS are merged — except across a close that
+ * evidence forced: a tape-off or dead-mic close is never merged over, and an unjudged-bridge close is
+ * merged over only within the bridge limit, so a split the bridge limit made cannot be undone here.
  *
  * `doctor_present` is carried, not decided on: each interval reports it among its speech probes.
  * Every constant is exported and PROVISIONAL.
@@ -33,6 +43,9 @@ export const ENTER_SPEECH_PROBES = 2;
 export const EXIT_NON_SPEECH_PROBES = 3;
 /** PROVISIONAL: encounters this close or closer are one encounter (PLAN: ±2–3 min). */
 export const MERGE_GAP_MS = 180_000;
+/** PROVISIONAL: the most unjudged time (or empty series) an encounter may bridge. Default: the merge
+ *  window, so a bridged hole is never longer than a gap the merge step would have joined anyway. */
+export const BRIDGE_UNJUDGED_MAX_MS = MERGE_GAP_MS;
 export const SMOOTH_HOP_MS = HOP_SECONDS * 1000;
 /** A gap between consecutive probes wider than this many hops is a hole in the series. */
 const HOLE_HOPS = 1.5;
@@ -46,6 +59,9 @@ export type ProbeVerdict = {
   doctor_present?: boolean | null;
 };
 
+/** A stretch where the recorder was NOT running, from chunk continuity. */
+export type TapeOff = { start_ms: number; end_ms: number };
+
 export type Encounter = {
   version: typeof SMOOTHER_VERSION;
   start_ms: number;
@@ -58,53 +74,78 @@ export type Encounter = {
   /** The part of unjudged_ms the gate attributed to a dead mic. */
   dead_mic_ms: number;
   doctor_present: { yes: number; no: number; unknown: number };
-  /** "non_speech" when the exit run closed it; "end_of_input" when the probes ran out while open. */
-  closed_by: "non_speech" | "end_of_input";
+  /**
+   * "non_speech"    the exit run closed it
+   * "unjudged_gap"  evidence went missing for longer than the bridge limit
+   * "tape_off"      the recorder stopped
+   * "dead_mic"      the gate reported a dead mic
+   * "end_of_input"  the probes ran out while it was open
+   */
+  closed_by: "non_speech" | "unjudged_gap" | "tape_off" | "dead_mic" | "end_of_input";
   /** How many hysteresis intervals the gap-merge joined into this one. */
   merged_from: number;
 };
 
-type Opts = { enter?: number; exit?: number; merge_gap_ms?: number; hop_ms?: number };
+type Opts = { enter?: number; exit?: number; merge_gap_ms?: number; hop_ms?: number; bridge_ms?: number; tape_off?: TapeOff[] };
 
 export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encounter[] {
   const enter = opts.enter ?? ENTER_SPEECH_PROBES;
   const exit = opts.exit ?? EXIT_NON_SPEECH_PROBES;
   const hop = opts.hop_ms ?? SMOOTH_HOP_MS;
   const gap = opts.merge_gap_ms ?? MERGE_GAP_MS;
-  if (!(enter >= 1) || !(exit >= 1) || !(hop > 0) || !(gap >= 0)) throw new Error("smoother constants out of range");
+  const bridge = opts.bridge_ms ?? BRIDGE_UNJUDGED_MAX_MS;
+  if (!(enter >= 1) || !(exit >= 1) || !(hop > 0) || !(gap >= 0) || !(bridge >= 0)) throw new Error("smoother constants out of range");
   const ps = [...probes].sort((a, b) => a.t - b.t);
+  const off = [...(opts.tape_off ?? [])].sort((a, b) => a.start_ms - b.start_ms);
   const half = hop / 2;
 
   const raw: Encounter[] = [];
   let state: "idle" | "pending" | "open" = "idle";
   let enterCount = 0, exitCount = 0;
-  let first = -1, lastSpeech = -1;                  // indexes into ps
+  let first = -1, lastSpeech = -1, lastJudged = -1;    // indexes into ps
 
   const close = (by: Encounter["closed_by"]) => {
     raw.push(summarise(ps, first, lastSpeech, hop, by));
-    state = "idle"; enterCount = 0; exitCount = 0; first = -1; lastSpeech = -1;
+    state = "idle"; enterCount = 0; exitCount = 0; first = -1; lastSpeech = -1; lastJudged = -1;
   };
+  /** A tape-off stretch that starts after `from` and begins at or before `to`. */
+  const tapeOffBetween = (from: number, to: number): TapeOff | undefined =>
+    off.find((o) => o.start_ms > from && o.start_ms <= to);
 
   for (let i = 0; i < ps.length; i++) {
-    const v = ps[i].verdict;
-    if (v === "unjudged") continue;                 // never counts, never resets, never closes
+    const p = ps[i], v = p.verdict;
+    if (state === "open") {
+      // the recorder stopping closes it, before this probe is read at all
+      if (tapeOffBetween(ps[lastSpeech].t, p.t)) close("tape_off");
+    }
+    if (state === "open" && p.reason === "dead_mic") { close("dead_mic"); continue; }
+    if (state === "open" && lastJudged >= 0 && p.t - ps[lastJudged].t > bridge) close("unjudged_gap");
+    if (v === "unjudged") continue;                 // never counts, never resets, never closes by itself
     if (state === "idle") {
-      if (v === "speech") { state = "pending"; enterCount = 1; first = i; lastSpeech = i; if (enterCount >= enter) state = "open"; }
+      if (v === "speech") { state = "pending"; enterCount = 1; first = i; lastSpeech = i; lastJudged = i; if (enterCount >= enter) state = "open"; }
+      else lastJudged = i;
     } else if (state === "pending") {
+      lastJudged = i;
       if (v === "speech") { enterCount++; lastSpeech = i; if (enterCount >= enter) { state = "open"; exitCount = 0; } }
       else { state = "idle"; enterCount = 0; first = -1; lastSpeech = -1; }
     } else {
+      lastJudged = i;
       if (v === "speech") { lastSpeech = i; exitCount = 0; }
       else if (++exitCount >= exit) close("non_speech");
     }
   }
-  if (state === "open") close("end_of_input");      // a pending run at the end never opened
+  if (state === "open") {
+    // the recorder stopping after the last speech still closes it, not the end of input
+    close(tapeOffBetween(ps[lastSpeech].t, Infinity) ? "tape_off" : "end_of_input");
+  }
 
-  // gap-merge
+  // gap-merge — never over a close that evidence forced
   const out: Encounter[] = [];
   for (const e of raw) {
     const prev = out[out.length - 1];
-    if (prev && e.start_ms - prev.end_ms <= gap) {
+    const forced = prev && (prev.closed_by === "tape_off" || prev.closed_by === "dead_mic");
+    const overBridge = prev && prev.closed_by === "unjudged_gap" && e.start_ms - prev.end_ms > bridge;
+    if (prev && !forced && !overBridge && e.start_ms - prev.end_ms <= gap) {
       out[out.length - 1] = mergeTwo(prev, e, ps, half);
     } else out.push(e);
   }

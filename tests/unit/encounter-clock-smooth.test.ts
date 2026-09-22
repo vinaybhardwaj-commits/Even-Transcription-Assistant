@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   smoothEncounters, ENTER_SPEECH_PROBES, EXIT_NON_SPEECH_PROBES, MERGE_GAP_MS, SMOOTH_HOP_MS, SMOOTHER_VERSION,
-  type ProbeVerdict,
+  BRIDGE_UNJUDGED_MAX_MS, type ProbeVerdict,
 } from "@/lib/encounter-clock/smooth";
 
 const T0 = 1_790_000_000_000, HOP = SMOOTH_HOP_MS, HALF = HOP / 2, MIN = 60_000;
@@ -54,54 +54,83 @@ describe("E-4 hysteresis — leaving", () => {
     expect(span(r[0])).toEqual([0, 5]);
     expect(r[0].non_speech_probes).toBe(2);
   });
-  it("unjudged does not reset the exit run: non_speech evidence adds up across it", () => {
-    const [e] = smoothEncounters(seq("SSNN" + "U".repeat(30) + "N"));
+  it("unjudged does not reset the exit run WITHIN the bridge limit: non_speech evidence adds up", () => {
+    const [e] = smoothEncounters(seq("SSNN" + "UU" + "N"));
     expect(e.closed_by).toBe("non_speech");
     expect(span(e)).toEqual([0, 1]);
   });
 });
 
-describe("E-4 — unjudged never closes an encounter by itself", () => {
-  it("speech followed by a long unjudged stretch to the end of the day: one encounter, ending at the last speech", () => {
-    const [e, ...rest] = smoothEncounters(seq("SS" + "U".repeat(100)));
-    expect(rest).toEqual([]);
-    expect(span(e)).toEqual([0, 1]);
-    expect(e.closed_by).toBe("end_of_input");
-    expect(e.unjudged_ms).toBe(0);                                  // the stretch after the last speech is not claimed
+describe(`E-4 — unjudged bridges an encounter, but only for ${BRIDGE_UNJUDGED_MAX_MS / MIN} min`, () => {
+  it("speech then a long unjudged stretch to the end of the day: one encounter, ending at the last speech", () => {
+    const r = smoothEncounters(seq("SS" + "U".repeat(100)));
+    expect(r).toHaveLength(1);
+    expect(span(r[0])).toEqual([0, 1]);
+    expect(r[0].closed_by).toBe("unjudged_gap");                    // the day did not simply run out
+    expect(r[0].unjudged_ms).toBe(0);                               // unjudged after the last speech is never claimed
   });
-  it("a long unjudged stretch INSIDE an encounter bridges it, and the interval says how much was unjudged", () => {
+  it("a SHORT unjudged stretch still bridges: speech either side is ONE encounter", () => {
+    const r = smoothEncounters(seq("SSS" + "U".repeat(3) + "SSS")); // 3 min of unjudged, at the limit
+    expect(r).toHaveLength(1);
+    expect(span(r[0])).toEqual([0, 8]);
+    expect(r[0].unjudged_ms).toBe(3 * HOP);
+  });
+  it("a LONG unjudged stretch SPLITS it: it closes at its last speech and a later run opens a new one", () => {
     const r = smoothEncounters(seq("SSS" + "U".repeat(60) + "SSS"));
-    expect(r).toHaveLength(1);
-    expect(span(r[0])).toEqual([0, 65]);
-    expect(r[0].speech_probes).toBe(6);
-    expect(r[0].unjudged_ms).toBe(60 * HOP);
-    expect(r[0].longest_unjudged_run_ms).toBe(60 * HOP);
+    expect(r).toHaveLength(2);
+    expect(r.map(span)).toEqual([[0, 2], [63, 65]]);
+    expect(r[0].closed_by).toBe("unjudged_gap");
+    expect(r[0].unjudged_ms).toBe(0);
+    expect(r[1].unjudged_ms).toBe(0);
   });
-  it("a hole in the probe series is unjudged time, never silence", () => {
-    const ps: ProbeVerdict[] = [
+  it("the split survives the gap-merge — a limit the merge step could undo would be no limit at all", () => {
+    expect(smoothEncounters(seq("SSS" + "U".repeat(60) + "SSS"), { merge_gap_ms: 60 * MIN })).toHaveLength(2);
+  });
+  it("a hole in the probe series is bridged by the same limit, and a long hole splits", () => {
+    const short: ProbeVerdict[] = [
       { t: at(0), verdict: "speech" }, { t: at(1), verdict: "speech" },
-      { t: at(1) + 40 * MIN, verdict: "speech" }, { t: at(1) + 40 * MIN + HOP, verdict: "speech" },
+      { t: at(1) + 2 * MIN, verdict: "speech" }, { t: at(1) + 2 * MIN + HOP, verdict: "speech" },
     ];
-    const r = smoothEncounters(ps);
-    expect(r).toHaveLength(1);
-    expect(r[0].unjudged_ms).toBe(40 * MIN - HOP);
+    expect(smoothEncounters(short)).toHaveLength(1);
+    const long = short.map((p, i) => (i < 2 ? p : { ...p, t: p.t + 40 * MIN }));
+    const r = smoothEncounters(long);
+    expect(r).toHaveLength(2);
+    expect(r[0].closed_by).toBe("unjudged_gap");
   });
 });
 
-describe("E-4 — dead-mic runs", () => {
-  it("a dead mic after speech holds the encounter open but is not claimed; non_speech then closes it at the last speech", () => {
-    const [e] = smoothEncounters(seq("SS" + "D".repeat(30) + "NNN"));
-    expect(span(e)).toEqual([0, 1]);
-    expect(e.closed_by).toBe("non_speech");
-    expect(e.dead_mic_ms).toBe(0);
+describe("E-4 — tape-off and a dead mic close an encounter immediately", () => {
+  const tape = (a: number, b: number) => [{ start_ms: at(a), end_ms: at(b) }];
+  it("tape-off INSIDE a run of speech probes closes the encounter at the last speech before it", () => {
+    const r = smoothEncounters(seq("SSSSSSSS"), { tape_off: tape(3, 5) });
+    expect(r.length).toBeGreaterThanOrEqual(2);
+    expect(r[0].closed_by).toBe("tape_off");
+    expect(span(r[0])).toEqual([0, 2]);
+    expect(r[1].start_ms).toBeGreaterThanOrEqual(at(3) - HALF);
   });
-  it("a dead mic inside an encounter is bridged and reported as dead-mic time", () => {
-    const [e] = smoothEncounters(seq("SS" + "D".repeat(10) + "SS"));
-    expect(e.dead_mic_ms).toBe(10 * HOP);
-    expect(e.unjudged_ms).toBe(10 * HOP);
+  it("the gap-merge never rejoins across a tape-off, however short the gap", () => {
+    expect(smoothEncounters(seq("SSSSSSSS"), { tape_off: tape(3, 5), merge_gap_ms: 60 * MIN })).toHaveLength(2);
+  });
+  it("tape-off after the last speech closes it as tape_off, not as the day running out", () => {
+    expect(smoothEncounters(seq("SSS"), { tape_off: [{ start_ms: at(3), end_ms: at(9) }] })[0].closed_by).toBe("tape_off");
+  });
+  it("a dead mic closes an encounter immediately — it must never extend one", () => {
+    const r = smoothEncounters(seq("SS" + "D".repeat(30) + "NNN"));
+    expect(r[0].closed_by).toBe("dead_mic");
+    expect(span(r[0])).toEqual([0, 1]);
+    expect(r[0].dead_mic_ms).toBe(0);
+  });
+  it("speech after a dead mic is a new encounter, never a continuation", () => {
+    const r = smoothEncounters(seq("SS" + "D".repeat(10) + "SS"));
+    expect(r).toHaveLength(2);
+    expect(r[0].closed_by).toBe("dead_mic");
+    expect(r.map(span)).toEqual([[0, 1], [12, 13]]);
   });
   it("a day that is all dead mic opens nothing", () => {
     expect(smoothEncounters(seq("D".repeat(500)))).toEqual([]);
+  });
+  it("tape-off cannot open an encounter", () => {
+    expect(smoothEncounters(seq("UU"), { tape_off: tape(0, 2) })).toEqual([]);
   });
 });
 
@@ -129,7 +158,7 @@ describe("E-4 — inputs and constants", () => {
     expect(e.doctor_present).toEqual({ yes: 1, no: 1, unknown: 2 });
   });
   it("the constants are exported, provisional, and guarded", () => {
-    expect([ENTER_SPEECH_PROBES, EXIT_NON_SPEECH_PROBES, MERGE_GAP_MS, SMOOTH_HOP_MS]).toEqual([2, 3, 180_000, 60_000]);
+    expect([ENTER_SPEECH_PROBES, EXIT_NON_SPEECH_PROBES, MERGE_GAP_MS, SMOOTH_HOP_MS, BRIDGE_UNJUDGED_MAX_MS]).toEqual([2, 3, 180_000, 60_000, 180_000]);
     expect(() => smoothEncounters(seq("SS"), { enter: 0 })).toThrow();
     expect(() => smoothEncounters(seq("SS"), { hop_ms: 0 })).toThrow();
   });
