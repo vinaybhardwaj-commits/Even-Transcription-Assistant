@@ -54,6 +54,7 @@ import { RoomCard } from "@/components/admin/bench-live/RoomCard";
 import { useBenchLivePolling } from "@/components/admin/bench-live/useBenchLivePolling";
 import type {
   Attention,
+  LaneLevel,
   LaneView,
   Level,
   Levels,
@@ -528,7 +529,7 @@ export function BenchRoomsLive() {
   const {
     listeners,
     rollup,
-    pendingCommands,
+    busCommands,
     error,
     busy,
     lastFetchAt,
@@ -603,24 +604,42 @@ export function BenchRoomsLive() {
   const deepLinkApplied = React.useRef(false);
 
   React.useEffect(() => {
-    if (pendingCommands.length === 0) return;
+    if (busCommands.length === 0) return;
     setCommandOutcomes((previous) => {
       const next = { ...previous };
-      for (const command of pendingCommands) {
+      const seenRooms = new Set<string>();
+      for (const command of busCommands) {
+        if (seenRooms.has(command.room_id)) continue;
+        seenRooms.add(command.room_id);
         const commandAt = Date.parse(command.created_at);
         const current = next[command.room_id];
         if (current && current.at > commandAt) continue;
+        const state: CommandOutcome["state"] =
+          command.status === "pending"
+            ? "queued"
+            : command.status === "acked"
+              ? "acked"
+              : command.status === "expired"
+                ? "timeout"
+                : "failed";
         next[command.room_id] = {
           commandId: command.id,
           kind: command.kind,
-          state: "queued",
-          detail: "Pending on the command bus; waiting for the kiosk to acknowledge it.",
+          state,
+          detail:
+            command.status === "pending"
+              ? "Pending on the command bus; waiting for the kiosk to acknowledge it."
+              : command.status === "acked"
+                ? "Kiosk acknowledged this command."
+                : command.status === "expired"
+                  ? "No kiosk picked up this command before it expired."
+                  : `Kiosk refused this command${command.error ? `: ${command.error}` : "."}`,
           at: Number.isFinite(commandAt) ? commandAt : Date.now(),
         };
       }
       return next;
     });
-  }, [pendingCommands]);
+  }, [busCommands]);
 
   const chooseRoom = React.useCallback((room: RoomLive["room"]) => {
     selectedRoom.choose(room.id);
@@ -1047,7 +1066,7 @@ export function BenchRoomsLive() {
                 <div
                   className={`mt-3 rounded-lg border px-3 py-2 ${
                     commandOutcomes[r.room.id]!.state === "acked"
-                      ? "border-success-200 bg-success-100"
+                      ? "border-success-500/40 bg-success-100"
                       : commandOutcomes[r.room.id]!.state === "queued"
                         ? "border-even-blue-100 bg-even-blue-50"
                         : "border-warning-200 bg-warning-50"
@@ -1123,7 +1142,7 @@ export function BenchRoomsLive() {
                       <span className="font-semibold">
                         Waiting: {waiting} piece{waiting === 1 ? "" : "s"} · {fmtMinutes(waitingReason?.ms ?? 0)} of 15-minute slot time.
                       </span>{" "}
-                      Nothing runs on its own. Running starts up to 4 paid transcription calls; the exact cost is reported after each call.
+                      Nothing runs on its own. Running starts up to 4 paid transcription calls. Each one is a paid call; the exact cost is reported after each call.
                     </p>
                     {armed ? (
                       <button

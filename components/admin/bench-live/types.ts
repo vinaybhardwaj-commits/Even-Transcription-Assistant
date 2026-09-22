@@ -99,11 +99,12 @@ export type RoomsLiveResp = {
   degraded?: string[];
 };
 
-export type PendingCommandView = {
+export type BusCommandView = {
   id: string;
   room_id: string;
   kind: string;
-  status: "pending";
+  status: "pending" | "acked" | "failed" | "expired";
+  error?: string | null;
   created_at: string;
 };
 

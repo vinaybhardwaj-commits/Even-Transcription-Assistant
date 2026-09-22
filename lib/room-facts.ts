@@ -425,8 +425,8 @@ export function roomOperationalAlerts(input: {
     out.push({
       code: "audio_upload_stalled",
       severity: "red",
-      label: "Says recording, no audio arriving",
-      detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}.`,
+      label: "Says recording, audio is being lost — no audio arriving",
+      detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}. Go to the room and check the recording host.`,
     });
   }
   if (input.tapeWithoutCues === true) {

@@ -51,9 +51,10 @@ export async function GET(req: Request) {
   const guard = await benchAdminGuard();
   if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, ...noStore });
   const params = new URL(req.url).searchParams;
-  if (params.get("status") === "pending") {
+  const status = params.get("status");
+  if (status === "pending" || status === "recent") {
     try {
-      const commands = await listCommands({ status: "pending", limit: 200 });
+      const commands = await listCommands({ status: status === "pending" ? "pending" : null, limit: 200 });
       return NextResponse.json({
         ok: true,
         commands: commands.map((row) => ({
@@ -61,6 +62,7 @@ export async function GET(req: Request) {
           room_id: row.room_id,
           kind: row.kind,
           status: row.status,
+          error: row.error,
           created_at: new Date(row.created_at).toISOString(),
         })),
       }, noStore);

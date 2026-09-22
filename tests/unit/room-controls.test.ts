@@ -188,7 +188,8 @@ describe("R9 / S3 — stop all processing, and what its copy promises", () => {
   const route = readFileSync("app/api/admin/bench/processing/route.ts", "utf8");
 
   it("the button's own card states that recording continues and no audio is lost", () => {
-    expect(ui).toContain("Recording carries on and no audio is lost");
+    expect(readFileSync("components/admin/bench-live/BenchDangerZone.tsx", "utf8"))
+      .toContain("Recording carries on and no audio is lost");
   });
 
   it("the route's stop-all statement names no recording table and no room kill switch", () => {
@@ -209,7 +210,8 @@ describe("R11 — no money figure anywhere on this screen", () => {
   const agg = readFileSync("lib/admin/rooms-live.ts", "utf8");
 
   it("the day summary carries minutes, and no PATIENT-FACING currency is rendered on the passive monitor", () => {
-    expect(ui).toMatch(/fmtMinutes\(rollup\.day\.audio_recorded_ms\)/);
+    const day = readFileSync("components/admin/bench-live/BenchDaySummary.tsx", "utf8");
+    expect(day).toMatch(/fmtMinutes\(day\.audio_recorded_ms\)/);
     // R11 stands: no rupee figure on the clinical monitor — that is the one that "invites the wrong
     // conversation in front of the wrong person". Never a ₹, never a rupee, never an INR amount.
     expect(rendered("components/admin/BenchRoomsLive.tsx")).not.toMatch(/₹|\brupee|\binr\b|cost_inr/i);
@@ -267,6 +269,10 @@ describe("every colour class this screen asks for actually exists", () => {
 
   it.each([
     "components/admin/BenchRoomsLive.tsx",
+    "components/admin/bench-live/BenchAttentionList.tsx",
+    "components/admin/bench-live/BenchDangerZone.tsx",
+    "components/admin/bench-live/BenchDaySummary.tsx",
+    "components/admin/bench-live/RoomCard.tsx",
     "components/room/RoomRecorderClient.tsx",
   ])("%s uses no shade the palette does not define", (file) => {
     const bad: string[] = [];
