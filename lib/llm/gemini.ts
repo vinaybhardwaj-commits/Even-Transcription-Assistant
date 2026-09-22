@@ -2,7 +2,9 @@
  * Gemini (Vertex AI) router — every ETA chat completion goes through here.
  *
  * ORDER: Vertex Gemini for the surface (when configured + flagged) → OpenRouter
- * (LLM_FALLBACK_MODELS, default google/gemini-2.5-flash then meta-llama/llama-4-scout).
+ * (LLM_FALLBACK_MODELS, default google/gemini-3.8-flash then meta-llama/llama-4-scout — the same
+ * pair lib/jev/translate.ts defaults to, V's choice, matching the router; ETA-Refuter round 2, 22
+ * Sep, D5).
  *
  * THERE IS NO OLLAMA IN ANY CHAIN (V, 22 Sep: qwen out of ETA entirely). qwen2.5:14b was the
  * local default and the fallback; it cost 11.55 GB on a 24 GB Mini and was reached from Vercel
@@ -15,6 +17,8 @@
  * reads this value verbatim and names a fallback on a Gemini-flagged surface `silent_fallback`.
  *
  * Vertex env: GCP_SA_KEY, GCP_PROJECT, GCP_LOCATION, and a flag — GEMINI_ALL=1 or GEMINI_<SURFACE>=1.
+ * The Vertex primary models (GEMINI_MODEL, GEMINI_FLASH_MODEL) are UNCHANGED by D5 — only the
+ * OpenRouter fallback pair moved.
  * OpenRouter: OPENROUTER_API_KEY (Vercel) or OPENROUTER_API_KEY_FILE (the Mini); ZDR on every call
  * (lib/openrouter.ts — one client for all of ETA).
  */
@@ -107,7 +111,7 @@ export async function geminiChatIfOn(
 }
 
 /** The OpenRouter fallback chain, in order. Only the env can change it; never Ollama. */
-export const LLM_FALLBACK_DEFAULT = ["google/gemini-2.5-flash", "meta-llama/llama-4-scout"];
+export const LLM_FALLBACK_DEFAULT = ["google/gemini-3.8-flash", "meta-llama/llama-4-scout"];
 export function llmFallbackModels(env: Record<string, string | undefined> = process.env): string[] {
   const raw = (env.LLM_FALLBACK_MODELS ?? "").trim();
   const list = raw ? raw.split(",").map((m) => m.trim()).filter(Boolean) : LLM_FALLBACK_DEFAULT;

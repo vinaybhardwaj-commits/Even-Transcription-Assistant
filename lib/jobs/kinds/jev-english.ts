@@ -31,7 +31,14 @@ import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepCont
 
 export const JEV_ENGLISH_KIND = "jev_english"; // name underscore (matches diarize_window/emotion_window); file stays jev-english.ts. Spec wrote "jev-english" — see report.
 export const ETA_JEV_TRANSLATE_ENABLED = "ETA_JEV_TRANSLATE_ENABLED";
-/** Windows translated per step. Sized so a step of up-to-60 s calls stays under MAX_STEP_MS (~200 s). */
+/**
+ * Windows translated per step. Sized so a step stays under MAX_STEP_MS (~200 s, lib/jobs/types.ts):
+ * each window's translateToEnglish call is now bounded by ONE shared total deadline across every
+ * model it tries (JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT, 40 s — lib/jev/translate.ts, D4, ETA-Refuter
+ * round 2, 22 Sep), so the worst case for a step is 3 x 40 s = 120 s, leaving ~80 s for this step's DB
+ * reads and writes. (Was sized for 3 x 60 s PER MODEL with no chain-wide cap — 3 x 2 x 60 s = 360 s,
+ * over budget; that is what D4 fixed.)
+ */
 export const JEV_TRANSLATE_BATCH = 3;
 
 type Counts = { run_english: number; native_en: number; translated: number; empty: number; not_ready: number; failed: number };

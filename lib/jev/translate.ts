@@ -8,8 +8,11 @@
  * (`~/eta-router/router_server.py`): the same system prompt, the same verified-English skip, ZDR on
  * every call. There is no qwen in the default or the fallback, and no import of `lib/qwen.ts`.
  *
- *   model     JEV_TRANSLATE_MODEL     default google/gemini-2.5-flash-lite
- *   fallback  JEV_TRANSLATE_FALLBACK  default openai/gpt-5-nano (comma list, tried in order)
+ *   model     JEV_TRANSLATE_MODEL     default google/gemini-3.8-flash
+ *   fallback  JEV_TRANSLATE_FALLBACK  default meta-llama/llama-4-scout (comma list, tried in order)
+ *
+ * (ETA-Refuter round 2, 22 Sep, D5): these are V's choice, matching the router. `lib/llm/gemini.ts`
+ * (`routedChat`'s OpenRouter fallback) uses the same pair — only the Vertex primary models differ.
  *
  * ─── FAILURE IS NOT ABSENCE (Refuter round 2, unchanged) ───────────────────────────────────────
  * Every model failing returns `{ status: "failed", reason }` with a CLOSED code, so the kind records
@@ -22,6 +25,16 @@
  * ─── TRUNCATION IS RECORDED, NOT SILENT (unchanged) ────────────────────────────────────────────
  * `input_chars` is the pre-truncation length, so a window clipped at TRANSLATE_CHAR_CAP is visible.
  *
+ * ─── A SHARED DEADLINE BOUNDS THE WHOLE CHAIN (ETA-Refuter round 2, 22 Sep, D4) ─────────────────
+ * The fallback used to give EVERY model in the chain its own full `timeoutMs` with no ceiling across
+ * them — with JEV_TRANSLATE_BATCH (3, lib/jobs/kinds/jev-english.ts) windows per step and a 2-model
+ * chain at 60 s each, the worst case was 3 x 2 x 60 s = 360 s against MAX_STEP_MS (200 s,
+ * lib/jobs/types.ts). Now one window's ENTIRE translateToEnglish call — every model it tries — is
+ * bounded by JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT (40 s), itself built from a per-call cap
+ * (JEV_TRANSLATE_CALL_TIMEOUT_MS_DEFAULT, 20 s) that shrinks to whatever budget remains for a later
+ * model in the chain. Worst case is now 3 x 40 s = 120 s, comfortably under 200 s with ~80 s left for
+ * the step's DB reads and writes.
+ *
  * Logs carry nothing: this module does not log at all, and every error is a code.
  */
 import { openrouterChat, OpenRouterError } from "@/lib/openrouter";
@@ -33,9 +46,22 @@ export type TranslateOutcome =
 /** The seam the tests share: the real implementation is `openrouterChat`. */
 export type ChatFn = typeof openrouterChat;
 
-export const JEV_TRANSLATE_MODEL_DEFAULT = "google/gemini-2.5-flash-lite";
-export const JEV_TRANSLATE_FALLBACK_DEFAULT = "openai/gpt-5-nano";
+export const JEV_TRANSLATE_MODEL_DEFAULT = "google/gemini-3.8-flash";
+export const JEV_TRANSLATE_FALLBACK_DEFAULT = "meta-llama/llama-4-scout";
 export const SKIP_ENGLISH_LABEL = "skip:english";
+
+/**
+ * D4 (ETA-Refuter round 2, 22 Sep): what ONE model call may spend, before the shared total budget
+ * below shrinks it further for a later model in the chain.
+ */
+export const JEV_TRANSLATE_CALL_TIMEOUT_MS_DEFAULT = 20_000;
+/**
+ * D4: what the WHOLE chain — every model `translateChain` tries for one window — may spend. See the
+ * module header for the arithmetic against MAX_STEP_MS. `JEV_TRANSLATE_BATCH * this` is pinned
+ * against `MAX_STEP_MS` by a test (tests/unit/jev-translate.test.ts), the same pattern as the
+ * LEASE_MS/MAX_STEP_MS invariant in lib/jobs/types.ts.
+ */
+export const JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT = 40_000;
 
 /** Verbatim from the router's TRANSLATE_SYSTEM_PROMPT, so both paths translate the same way. */
 export const TRANSLATE_SYSTEM_PROMPT =
@@ -66,9 +92,29 @@ export const EN_FUNCTION_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Verified English only: at least 90% ASCII letters AND at least 20% English function words. The
- * language label is not an argument, so it cannot decide — it is unreliable in both directions
- * (Whisper tags romanised Hindi `en`; sessions tagged kn-IN/hi-IN have held English).
+ * D1 (ETA-Refuter round 2, 22 Sep): romanised-Indic tokens that VETO the English skip, ported
+ * verbatim from the router's `ROMANISED_INDIC_VETO` (`~/eta-router/router_server.py:366-374`, live
+ * at commit cd62569). The function-word ratio alone let Hindi homographs through (`the` = "were",
+ * `is` = "this", `to` is a particle) and code-mix that borrows clinical English ("two days",
+ * "morning", "take") — 6 of the Refuter's 10 synthetic non-English cases skipped. One hit here sends
+ * the segment to the translator (whose prompt already returns English unchanged), so a false veto
+ * costs one call and a missed one would store Indic text as English. Words that are ALSO common
+ * English (`to`, `is`, `the`, `me`, `main`, `sir`) are deliberately absent: vetoing them would stop
+ * true English from skipping.
+ */
+export const ROMANISED_INDIC_VETO: ReadonlySet<string> = new Set([
+  "hai", "hain", "nahi", "nahin", "kya", "kaise", "aap", "aapko", "mujhe", "mera", "meri", "kitne",
+  "din", "se", "ko", "ka", "ki", "ke", "bhi", "toh", "tho", "haan", "accha", "theek", "dard",
+  "bukhar", "dawai", "goli", "beta", "amma", "appa", "illa", "beku", "maadi", "yenu", "hogi",
+  "hoga", "raha", "rahi", "wala",
+  "vo", "kal", "hum", "wahan", "subah", "karta", "hoon", "matlab",
+]);
+
+/**
+ * Verified English only: at least 90% ASCII letters AND at least 20% English function words AND
+ * zero romanised-Indic veto tokens (D1). The language label is not an argument, so it cannot decide
+ * — it is unreliable in both directions (Whisper tags romanised Hindi `en`; sessions tagged
+ * kn-IN/hi-IN have held English).
  */
 export function verifiedEnglish(text: string): boolean {
   const letters = [...text].filter((c) => /\p{L}/u.test(c));
@@ -77,6 +123,8 @@ export function verifiedEnglish(text: string): boolean {
   if (ascii / letters.length < 0.9) return false;
   const words = (text.match(/[A-Za-z']+/g) ?? []).map((w) => w.toLowerCase());
   if (words.length === 0) return false;
+  // D1: any romanised-Indic token vetoes the skip, however English the rest of the segment looks.
+  if (words.some((w) => ROMANISED_INDIC_VETO.has(w))) return false;
   return words.filter((w) => EN_FUNCTION_WORDS.has(w)).length / words.length >= 0.2;
 }
 
@@ -118,16 +166,22 @@ export async function translateToEnglish(
 
   const env = deps.env ?? process.env;
   const chat = deps.chat ?? openrouterChat;
-  const timeoutMs = Number(env.JEV_TRANSLATE_TIMEOUT_MS) > 0 ? Number(env.JEV_TRANSLATE_TIMEOUT_MS) : 60_000;
+  const perCallTimeoutMs = Number(env.JEV_TRANSLATE_TIMEOUT_MS) > 0 ? Number(env.JEV_TRANSLATE_TIMEOUT_MS) : JEV_TRANSLATE_CALL_TIMEOUT_MS_DEFAULT;
+  const totalBudgetMs = Number(env.JEV_TRANSLATE_TOTAL_MS) > 0 ? Number(env.JEV_TRANSLATE_TOTAL_MS) : JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT;
+  // D4: one deadline for the whole chain, not one per model. A later model's own timeoutMs shrinks
+  // to whatever is left of it, and once it is gone no further model is tried at all.
+  const deadline = Date.now() + totalBudgetMs;
   const codes: string[] = [];
 
   for (const model of translateChain(env)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { codes.push("translate_deadline_exceeded"); break; }
     try {
       const r = await chat({
         model,
         system: TRANSLATE_SYSTEM_PROMPT,
         user: original.slice(0, TRANSLATE_CHAR_CAP),
-        timeoutMs,
+        timeoutMs: Math.min(perCallTimeoutMs, remaining),
         signal: deps.signal,
         env,
       });

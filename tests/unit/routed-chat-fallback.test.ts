@@ -74,20 +74,22 @@ describe("the chain: Vertex Gemini first, then OpenRouter — never Ollama", () 
 
   it("Gemini fails → OpenRouter answers, labelled with the model the RESPONSE reported", async () => {
     geminiOn();
-    script = [() => new Response("", { status: 500 }), () => ok("ok", "google/gemini-2.5-flash-001")];
+    script = [() => new Response("", { status: 500 }), () => ok("ok", "google/gemini-3.8-flash-001")];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS });
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:google/gemini-2.5-flash-001" });
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:google/gemini-3.8-flash-001" });
     expect(hits.map((h) => (isVertex(h.url) ? "vertex" : isOpenRouter(h.url) ? "openrouter" : h.url))).toEqual(["vertex", "openrouter"]);
-    expect(hits[1]!.body.model).toBe("google/gemini-2.5-flash");
+    // D5: the OpenRouter fallback default moved to gemini-3.8-flash (V's choice, matching the router).
+    // The Vertex primary model (asserted above as gemini-2.5-flash) is untouched by D5.
+    expect(hits[1]!.body.model).toBe("google/gemini-3.8-flash");
     noOllama();
   });
 
   it("Gemini off for the surface → straight to OpenRouter, no Vertex call", async () => {
-    script = [() => ok("ok", "google/gemini-2.5-flash")];
+    script = [() => ok("ok", "google/gemini-3.8-flash")];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS });
-    expect(r.provider).toBe("openrouter:google/gemini-2.5-flash");
+    expect(r.provider).toBe("openrouter:google/gemini-3.8-flash");
     expect(hits.every((h) => isOpenRouter(h.url))).toBe(true);
     noOllama();
   });
@@ -96,7 +98,7 @@ describe("the chain: Vertex Gemini first, then OpenRouter — never Ollama", () 
     script = [() => new Response("", { status: 503 }), () => ok("ok", "meta-llama/llama-4-scout-17b")];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS });
-    expect(hits.map((h) => h.body.model)).toEqual(["google/gemini-2.5-flash", "meta-llama/llama-4-scout"]);
+    expect(hits.map((h) => h.body.model)).toEqual(["google/gemini-3.8-flash", "meta-llama/llama-4-scout"]);
     expect(r.provider).toBe("openrouter:meta-llama/llama-4-scout-17b");
     noOllama();
   });
@@ -105,7 +107,9 @@ describe("the chain: Vertex Gemini first, then OpenRouter — never Ollama", () 
     process.env.LLM_FALLBACK_MODELS = "x/one, y/two";
     const { llmFallbackModels, LLM_FALLBACK_DEFAULT } = await router();
     expect(llmFallbackModels()).toEqual(["x/one", "y/two"]);
-    expect(LLM_FALLBACK_DEFAULT).toEqual(["google/gemini-2.5-flash", "meta-llama/llama-4-scout"]);
+    // D5 (ETA-Refuter round 2, 22 Sep): V's choice, matching the router — gemini-3.8-flash then
+    // llama-4-scout. The Vertex primary (gemini-2.5-flash/pro above) is a separate, unchanged knob.
+    expect(LLM_FALLBACK_DEFAULT).toEqual(["google/gemini-3.8-flash", "meta-llama/llama-4-scout"]);
     for (const m of LLM_FALLBACK_DEFAULT) expect(m).not.toMatch(/qwen|ollama/i);
   });
 });
@@ -118,20 +122,20 @@ describe("total failure is honest", () => {
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS });
     expect(r).toMatchObject({ ok: false, content: "", provider: "none" });
     expect(r.error).toContain("gemini:http_500");
-    expect(r.error).toContain("openrouter:google/gemini-2.5-flash=openrouter_http_502");
+    expect(r.error).toContain("openrouter:google/gemini-3.8-flash=openrouter_http_502");
     expect(r.error).toContain("openrouter:meta-llama/llama-4-scout=openrouter_http_503");
     noOllama();
   });
 
   it("routedChatJson reports a parse failure as a failure, provider still named", async () => {
-    script = [() => ok("this is not json", "google/gemini-2.5-flash")];
+    script = [() => ok("this is not json", "google/gemini-3.8-flash")];
     const { routedChatJson } = await router();
     const r = await routedChatJson({ surface: "note", tier: "flash", messages: MSGS });
-    expect(r).toMatchObject({ ok: false, json: null, error: "json_parse_failed", provider: "openrouter:google/gemini-2.5-flash" });
+    expect(r).toMatchObject({ ok: false, json: null, error: "json_parse_failed", provider: "openrouter:google/gemini-3.8-flash" });
   });
 
   it("routedChatJson parses a good answer and sends JSON mode", async () => {
-    script = [() => ok('{"a":1}', "google/gemini-2.5-flash")];
+    script = [() => ok('{"a":1}', "google/gemini-3.8-flash")];
     const { routedChatJson } = await router();
     const r = await routedChatJson<{ a: number }>({ surface: "note", tier: "flash", messages: MSGS });
     expect(r).toMatchObject({ ok: true, json: { a: 1 } });

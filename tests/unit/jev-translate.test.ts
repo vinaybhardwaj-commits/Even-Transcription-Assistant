@@ -16,7 +16,10 @@ import { openrouterChat, readOpenRouterKey, OpenRouterError } from "@/lib/openro
 import {
   translateToEnglish, translateChain, verifiedEnglish, TRANSLATE_SYSTEM_PROMPT,
   JEV_TRANSLATE_MODEL_DEFAULT, JEV_TRANSLATE_FALLBACK_DEFAULT, SKIP_ENGLISH_LABEL,
+  JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT, ROMANISED_INDIC_VETO,
 } from "@/lib/jev/translate";
+import { JEV_TRANSLATE_BATCH } from "@/lib/jobs/kinds/jev-english";
+import { MAX_STEP_MS } from "@/lib/jobs/types";
 
 const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
 const ENV = { OPENROUTER_API_KEY: FAKE_KEY } as Record<string, string | undefined>;
@@ -25,7 +28,7 @@ const ROMANISED = "aapko kitne din se bukhar hai";
 
 type Call = { url: string; init: RequestInit; body: Record<string, unknown> };
 
-function ok(content = "I have a fever", model = "google/gemini-2.5-flash-lite-001") {
+function ok(content = "I have a fever", model = "google/gemini-3.8-flash-001") {
   return new Response(JSON.stringify({ model, choices: [{ message: { content } }] }), { status: 200 });
 }
 
@@ -51,16 +54,16 @@ describe("dispatch — the default model, and the env that overrides it", () => 
     const r = await run(HINDI, s.chat);
     expect(r).toMatchObject({ status: "ok", english: "I have a fever" });
     expect(s.calls[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
-    expect(s.calls[0]!.body.model).toBe("google/gemini-2.5-flash-lite");
+    expect(s.calls[0]!.body.model).toBe("google/gemini-3.8-flash");
   });
 
   it("JEV_TRANSLATE_MODEL / JEV_TRANSLATE_FALLBACK override the chain", () => {
     expect(translateChain({ JEV_TRANSLATE_MODEL: "a/x", JEV_TRANSLATE_FALLBACK: "b/y, c/z" })).toEqual(["a/x", "b/y", "c/z"]);
   });
 
-  it("the defaults are gemini then gpt-5-nano — and nothing is qwen", () => {
+  it("the defaults are gemini-3.8-flash then llama-4-scout (D5) — and nothing is qwen", () => {
     expect(translateChain({})).toEqual([JEV_TRANSLATE_MODEL_DEFAULT, JEV_TRANSLATE_FALLBACK_DEFAULT]);
-    expect(translateChain({})).toEqual(["google/gemini-2.5-flash-lite", "openai/gpt-5-nano"]);
+    expect(translateChain({})).toEqual(["google/gemini-3.8-flash", "meta-llama/llama-4-scout"]);
     for (const m of translateChain({})) expect(m).not.toMatch(/qwen/i);
   });
 
@@ -84,10 +87,10 @@ describe("dispatch — the default model, and the env that overrides it", () => 
 
 describe("fallback — in order, on a 5xx or a timeout", () => {
   it("a 5xx falls to the fallback model", async () => {
-    const s = script(new Response("", { status: 503 }), ok("I have a fever", "openai/gpt-5-nano-2025"));
+    const s = script(new Response("", { status: 503 }), ok("I have a fever", "meta-llama/llama-4-scout-2025"));
     const r = await run(HINDI, s.chat);
-    expect(s.calls.map((c) => c.body.model)).toEqual(["google/gemini-2.5-flash-lite", "openai/gpt-5-nano"]);
-    expect(r).toMatchObject({ status: "ok", model: "openai/gpt-5-nano-2025" });
+    expect(s.calls.map((c) => c.body.model)).toEqual(["google/gemini-3.8-flash", "meta-llama/llama-4-scout"]);
+    expect(r).toMatchObject({ status: "ok", model: "meta-llama/llama-4-scout-2025" });
   });
 
   it("a network failure falls to the fallback model", async () => {
@@ -106,7 +109,7 @@ describe("fallback — in order, on a 5xx or a timeout", () => {
     };
     const r = await translateToEnglish(HINDI, "hi", { chat, env: ENV });
     expect(n).toBe(2);
-    expect(r).toMatchObject({ status: "ok", model: "openai/gpt-5-nano" });
+    expect(r).toMatchObject({ status: "ok", model: "meta-llama/llama-4-scout" });
   });
 
   it("an empty answer is a failure, not a translation", async () => {
@@ -139,6 +142,68 @@ describe("fallback — in order, on a 5xx or a timeout", () => {
   });
 });
 
+describe("non-string content never becomes a translation (D3)", () => {
+  it("content: null on the primary falls through to the fallback, which answers", async () => {
+    const badNull = new Response(JSON.stringify({ model: "x", choices: [{ message: { content: null } }] }), { status: 200 });
+    const s = script(badNull, ok("I have a fever", "meta-llama/llama-4-scout-2025"));
+    const r = await run(HINDI, s.chat);
+    expect(s.calls.length).toBe(2);
+    expect(r).toMatchObject({ status: "ok", english: "I have a fever", model: "meta-llama/llama-4-scout-2025" });
+  });
+
+  it("content as a list, and both models non-string, is `failed` — never the literal string \"null\"", async () => {
+    const badList = new Response(JSON.stringify({ model: "x", choices: [{ message: { content: ["not", "a", "string"] } }] }), { status: 200 });
+    const badNull = new Response(JSON.stringify({ model: "y", choices: [{ message: { content: null } }] }), { status: 200 });
+    const s = script(badList, badNull);
+    const r = await run(HINDI, s.chat);
+    expect(r).toEqual({ status: "failed", reason: "openrouter_bad_response" });
+    expect(JSON.stringify(r)).not.toContain('"null"');
+  });
+});
+
+describe("the timeout bounds the WHOLE call, including the body (D2)", () => {
+  it("a response whose body never finishes still fails around timeoutMs, not after it", async () => {
+    // A real fetch() with an AbortSignal rejects an in-flight res.json() when the signal fires. This
+    // fake mirrors that: headers arrive fine (status 200), but json() hangs until the SAME signal
+    // openrouterChat passed to `doFetch` aborts it — exactly what a server that sends headers and
+    // then never closes the body looks like.
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const signal = init.signal as AbortSignal;
+      return {
+        status: 200,
+        json: () => new Promise((_resolve, reject) => {
+          if (signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+          signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const start = Date.now();
+    await expect(openrouterChat({ model: "x", system: "s", user: "u", env: ENV, timeoutMs: 300, fetchImpl })).rejects.toThrow();
+    // Before the fix, the timer cleared as soon as `doFetch` resolved (i.e. as soon as headers
+    // arrived), so this body-read hang was NEVER bounded — ETA-Refuter's probe found it still
+    // pending at 3,000 ms against a 300 ms timeout. It must now settle close to the timeout.
+    expect(Date.now() - start).toBeLessThan(2_000);
+  });
+});
+
+describe("a shared total deadline bounds the whole chain, not just one call (D4)", () => {
+  it("does not spend a later model once the total budget is gone", async () => {
+    let n = 0;
+    const chat: typeof openrouterChat = async () => {
+      n += 1;
+      await new Promise((r) => setTimeout(r, 30));
+      throw new OpenRouterError("openrouter_http_500");
+    };
+    const r = await translateToEnglish(HINDI, "hi", { chat, env: { ...ENV, JEV_TRANSLATE_TOTAL_MS: "10" } });
+    expect(n).toBe(1);
+    expect(r.status).toBe("failed");
+  });
+
+  it("JEV_TRANSLATE_BATCH windows, each paying the full total budget, still fit under MAX_STEP_MS", () => {
+    expect(JEV_TRANSLATE_BATCH * JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT).toBeLessThan(MAX_STEP_MS);
+  });
+});
+
 describe("ZDR — every body, every model", () => {
   it("carries provider zdr + data_collection deny, and temperature 0", async () => {
     const s = script(new Response("", { status: 503 }), ok());
@@ -153,14 +218,14 @@ describe("ZDR — every body, every model", () => {
 
 describe("the label is derived from the RESPONSE", () => {
   it("records the model the response reported, not the one requested", async () => {
-    const s = script(ok("I have a fever", "google/gemini-2.5-flash-lite-preview-09-2025"));
+    const s = script(ok("I have a fever", "google/gemini-3.8-flash-preview-09-2025"));
     const r = await run(HINDI, s.chat);
-    expect(r).toMatchObject({ model: "google/gemini-2.5-flash-lite-preview-09-2025" });
+    expect(r).toMatchObject({ model: "google/gemini-3.8-flash-preview-09-2025" });
   });
 
   it("names the fallback that answered", async () => {
-    const s = script(new Response("", { status: 500 }), ok("x", "openai/gpt-5-nano-2025"));
-    expect(await run(HINDI, s.chat)).toMatchObject({ model: "openai/gpt-5-nano-2025" });
+    const s = script(new Response("", { status: 500 }), ok("x", "meta-llama/llama-4-scout-2025"));
+    expect(await run(HINDI, s.chat)).toMatchObject({ model: "meta-llama/llama-4-scout-2025" });
   });
 
   it("a skipped window is labelled skip:english, never as a translation", async () => {
@@ -204,6 +269,32 @@ describe("the verified-English skip — the label never decides", () => {
     expect(verifiedEnglish("the zzz zzz zzz zzz")).toBe(true);          // 20%
     expect(verifiedEnglish("the zzz zzz zzz zzz zzz")).toBe(false);     // < 20%
     expect(verifiedEnglish("... 123 ...")).toBe(false);                 // no letters
+  });
+
+  // D1 (ETA-Refuter round 2, 22 Sep): the router's romanised-Indic veto, ported. The function-word
+  // ratio alone let these through — both are pure Hindi/Hinglish that borrows clinical English.
+  describe("D1 — the romanised-Indic veto", () => {
+    it("vetoes even when the function-word ratio would otherwise pass", async () => {
+      const cases = [
+        "aapko kitne din se bukhar hai to take the goli morning and night",
+        "vo kal the two days morning",
+      ];
+      for (const text of cases) {
+        expect(verifiedEnglish(text)).toBe(false);
+        const s = script(ok());
+        await run(text, s.chat);
+        expect(s.calls.length).toBe(1);
+      }
+    });
+    it("true English with no veto tokens still skips", () => {
+      expect(verifiedEnglish("Take one tablet twice a day after food for two days")).toBe(true);
+      expect(verifiedEnglish("How many days have you had the fever, morning or night")).toBe(true);
+    });
+    it("veto tokens that are ALSO common English are deliberately absent", () => {
+      for (const safe of ["to", "is", "the", "me", "main", "sir"]) {
+        expect(ROMANISED_INDIC_VETO.has(safe)).toBe(false);
+      }
+    });
   });
 });
 

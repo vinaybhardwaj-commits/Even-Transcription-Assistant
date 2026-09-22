@@ -16,6 +16,14 @@
  *
  * THE LABEL. `model` in the result is the string the RESPONSE reported, so a caller records the
  * model that actually answered rather than the one it asked for.
+ *
+ * THE DEADLINE BOUNDS THE WHOLE CALL (ETA-Refuter round 2, 22 Sep, D2). It used to clear its timer
+ * in a `finally` right after `doFetch` resolved — which happens as soon as the RESPONSE HEADERS
+ * arrive — so `res.json()` (reading the body) ran with no deadline at all: a server that sent
+ * headers and then never closed the body would hang here until the platform's own ceiling killed
+ * the step. The timer now stays armed for the entire function (one `try/finally` around the fetch
+ * AND the body read), so aborting it also aborts an in-flight body read, and a slow-body failure
+ * reads as a timeout rather than as a generic bad response.
  */
 import { readFileSync } from "node:fs";
 
@@ -82,6 +90,8 @@ export async function openrouterChat(args: {
   const doFetch = args.fetchImpl ?? fetch;
 
   const controller = new AbortController();
+  // D2: this timer must outlive the fetch call itself — it is cleared only in the `finally` below,
+  // once the response body has been read one way or another.
   const timer = setTimeout(() => controller.abort(), args.timeoutMs ?? 60_000);
   if (args.signal) {
     if (args.signal.aborted) controller.abort();
@@ -89,47 +99,52 @@ export async function openrouterChat(args: {
   }
 
   const t0 = Date.now();
-  let res: Response;
   try {
-    res = await doFetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: args.model,
-        temperature: args.temperature ?? 0,
-        provider: { zdr: true, data_collection: "deny" },
-        messages,
-        ...(args.responseJson ? { response_format: { type: "json_object" } } : {}),
-        ...(args.maxTokens ? { max_tokens: args.maxTokens } : {}),
-      }),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (e) {
-    // The exception CLASS only. Its message can describe the request, which carries the key.
-    if (controller.signal.aborted) throw new OpenRouterError(args.signal?.aborted ? "openrouter_abort" : "openrouter_timeout");
-    throw new OpenRouterError(`openrouter_unreachable:${(e as { name?: string } | null)?.name ?? "Error"}`);
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model: args.model,
+          temperature: args.temperature ?? 0,
+          provider: { zdr: true, data_collection: "deny" },
+          messages,
+          ...(args.responseJson ? { response_format: { type: "json_object" } } : {}),
+          ...(args.maxTokens ? { max_tokens: args.maxTokens } : {}),
+        }),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+    } catch (e) {
+      // The exception CLASS only. Its message can describe the request, which carries the key.
+      if (controller.signal.aborted) throw new OpenRouterError(args.signal?.aborted ? "openrouter_abort" : "openrouter_timeout");
+      throw new OpenRouterError(`openrouter_unreachable:${(e as { name?: string } | null)?.name ?? "Error"}`);
+    }
+
+    if (res.status !== 200) throw new OpenRouterError(`openrouter_http_${res.status}`);
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      // D2: a body that never closes hits this SAME still-armed timer, which aborts the read — that
+      // reads as a timeout, not as a generic bad response.
+      if (controller.signal.aborted) throw new OpenRouterError(args.signal?.aborted ? "openrouter_abort" : "openrouter_timeout");
+      throw new OpenRouterError("openrouter_bad_response");
+    }
+    const b = body as { model?: unknown; choices?: Array<{ message?: { content?: unknown } }> };
+    const content = b?.choices?.[0]?.message?.content;
+    if (typeof content !== "string") throw new OpenRouterError("openrouter_bad_response");
+    if (!content.trim()) throw new OpenRouterError("openrouter_empty");
+    return {
+      content: content.trim(),
+      // What the RESPONSE says answered. The requested id is the fallback only for a response that
+      // omits the field — the same rule as the router.
+      model: typeof b.model === "string" && b.model ? b.model : args.model,
+      latency_ms: Date.now() - t0,
+    };
   } finally {
     clearTimeout(timer);
   }
-
-  if (res.status !== 200) throw new OpenRouterError(`openrouter_http_${res.status}`);
-
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    throw new OpenRouterError("openrouter_bad_response");
-  }
-  const b = body as { model?: unknown; choices?: Array<{ message?: { content?: unknown } }> };
-  const content = b?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new OpenRouterError("openrouter_bad_response");
-  if (!content.trim()) throw new OpenRouterError("openrouter_empty");
-  return {
-    content: content.trim(),
-    // What the RESPONSE says answered. The requested id is the fallback only for a response that
-    // omits the field — the same rule as the router.
-    model: typeof b.model === "string" && b.model ? b.model : args.model,
-    latency_ms: Date.now() - t0,
-  };
 }
