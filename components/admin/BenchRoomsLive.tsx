@@ -835,6 +835,7 @@ export function BenchRoomsLive() {
         nowMs={nowMs}
         factsAsOf={lastRollupSuccessAt}
         listenerAsOf={lastListenerSuccessAt}
+        istDate={rollup?.ist_date ?? new Date(nowMs + 5.5 * 3_600_000).toISOString().slice(0, 10)}
         thresholds={thresholds}
         onClose={closeDrawer}
       >

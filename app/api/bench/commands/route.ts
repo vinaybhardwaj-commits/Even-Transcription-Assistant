@@ -42,9 +42,22 @@ export async function GET(req: NextRequest) {
   // than clamping it, so a malformed reading leaves the columns NULL instead of putting a number
   // on a clinical screen that no microphone produced. Nothing here can make the poll fail: an
   // absent, partial or nonsense pair simply becomes null.
-  const levelPair = (peakKey: string, avgKey: string) =>
-    cleanLevels({ peak: Number(sp.get(peakKey)), avg: Number(sp.get(avgKey)) });
-  const mic = levelPair("mic_peak", "mic_avg");
+  const levelPair = (peakKey: string, avgKey: string, zeroRatioKey?: string) => {
+    const peak = sp.get(peakKey);
+    if (peak === null) return null;
+    const avg = sp.get(avgKey);
+    const zeroRatio = zeroRatioKey ? sp.get(zeroRatioKey) : null;
+    return cleanLevels({
+      peak: Number(peak),
+      ...(avg === null ? {} : { avg: Number(avg) }),
+      ...(zeroRatio === null ? {} : { zero_ratio: Number(zeroRatio) }),
+    });
+  };
+  // Native installs may call these fields peak/zero_ratio; the browser kiosk has historically
+  // used mic_peak/mic_avg. Both names enter the same listener ingest and the same level log.
+  const mic = sp.has("mic_peak")
+    ? levelPair("mic_peak", "mic_avg", "mic_zero_ratio")
+    : levelPair("peak", "mic_avg", "zero_ratio");
   const spare = levelPair("spare_peak", "spare_avg");
   // §2.4 — an EXPLICITLY chosen second device. Only ever true when the client says `spare_device=true`;
   // any other value (including absent — the browser kiosk never sends it) leaves it unreported, and

@@ -26,14 +26,21 @@ const noStore = { headers: { "cache-control": "no-store" } };
 /** A stored level pair → the wire shape, or null where it was never measured. Tolerant on
  *  purpose: a row written before migration 0066 has no columns at all and must read as null
  *  rather than as zero, which the page would draw as an empty bar over a working microphone. */
-function levelsOf(peak: unknown, avg: unknown): { peak: number; avg: number } | null {
+function levelsOf(
+  peak: unknown,
+  avg: unknown,
+  zeroRatio?: unknown,
+): { peak: number; avg: number; zero_ratio?: number } | null {
   const n = (v: unknown): number | null => {
     const x = Number(v);
     return Number.isFinite(x) && x >= 0 ? x : null;
   };
   const p = n(peak);
   const a = n(avg);
-  return p === null && a === null ? null : { peak: p ?? 0, avg: a ?? 0 };
+  const z = n(zeroRatio);
+  return p === null && a === null
+    ? null
+    : { peak: p ?? 0, avg: a ?? 0, ...(z === null ? {} : { zero_ratio: z }) };
 }
 
 export async function GET() {
@@ -62,7 +69,7 @@ export async function GET() {
           // §2.2 — what the microphones heard since this room's previous poll. NULL travels as
           // null all the way to the card, which renders NO BAR for it: not measured is not the
           // same fact as silent, and only one of them is a reason to walk to a room.
-          mic: levelsOf(l.mic_peak, l.mic_avg),
+          mic: levelsOf(l.mic_peak, l.mic_avg, l.mic_zero_ratio),
           spare: levelsOf(l.spare_peak, l.spare_avg),
           levels_at: l.levels_at ? new Date(l.levels_at).toISOString() : null,
           // §2.4 — a spare exists only when the client reported an explicitly chosen second device.

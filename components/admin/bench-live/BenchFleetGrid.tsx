@@ -8,6 +8,10 @@ import {
   StatusPill,
 } from "@/components/admin/bench-live/BenchRoomVitals";
 import { severityBandForRank } from "@/components/admin/bench-live/fleetOrdering";
+import {
+  BenchLevelMeter,
+  isDigitalSilence,
+} from "@/components/admin/bench-live/BenchLevelMeter";
 import { RoomCard } from "@/components/admin/bench-live/RoomCard";
 import { roomPresentation } from "@/components/admin/bench-live/roomPresentation";
 import type {
@@ -70,6 +74,19 @@ export function BenchFleetGrid({
         const reasons = attentionByRoom.get(room.room.id) ?? [];
         const topReason = reasons[0];
         const band = severityBandForRank(topReason?.rank ?? null);
+        const deviceUnavailable = presentation.operational.some(
+          (alert) => alert.code === "device_missing",
+        );
+        const meterLive = Boolean(
+          listener?.listening
+          && listener.mic
+          && presentation.state.state !== "finished"
+          && !deviceUnavailable,
+        );
+        const digitalSilence = isDigitalSilence(
+          listener?.mic,
+          presentation.operational.some((alert) => alert.code === "digital_silence"),
+        );
         return (
           <RoomCard
             key={room.room.id}
@@ -105,6 +122,12 @@ export function BenchFleetGrid({
               operational={presentation.operational}
               syncUnknown={presentation.hostCloudDesync === null}
               listener={listener}
+            />
+
+            <BenchLevelMeter
+              levels={listener?.mic}
+              live={meterLive}
+              digitalSilence={digitalSilence}
             />
 
             <dl className="mt-3 space-y-1.5">

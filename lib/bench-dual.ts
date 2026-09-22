@@ -209,12 +209,13 @@ export class SilenceWatchdog {
  * Deliberately not a hook and not React-aware: it is fed from a bare interval and read from a
  * poll, both outside the render cycle, and made a class so a test can drive it directly.
  */
-export type LevelSummary = { peak: number; avg: number };
+export type LevelSummary = { peak: number; avg: number; zero_ratio: number };
 
 export class LevelAccumulator {
   private peak = 0;
   private sum = 0;
   private n = 0;
+  private zeroN = 0;
 
   /** Feed one RMS reading. Non-finite and negative values are ignored, never counted as zero. */
   add(rms: number): void {
@@ -222,6 +223,7 @@ export class LevelAccumulator {
     if (rms > this.peak) this.peak = rms;
     this.sum += rms;
     this.n++;
+    if (rms <= SILENCE_RMS) this.zeroN++;
   }
 
   /** How many samples this interval has so far. */
@@ -232,7 +234,11 @@ export class LevelAccumulator {
   /** The summary WITHOUT resetting — for a reader that must not disturb another's interval. */
   peek(): LevelSummary | null {
     if (this.n === 0) return null;
-    return { peak: this.peak, avg: this.sum / this.n };
+    return {
+      peak: this.peak,
+      avg: this.sum / this.n,
+      zero_ratio: this.zeroN / this.n,
+    };
   }
 
   /** The summary, and start a fresh interval. NULL when nothing was measured. */
@@ -246,6 +252,7 @@ export class LevelAccumulator {
     this.peak = 0;
     this.sum = 0;
     this.n = 0;
+    this.zeroN = 0;
   }
 }
 
