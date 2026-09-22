@@ -78,7 +78,7 @@ const winRow = (over: Partial<WindowRow> = {}): WindowRow => ({
   last_run_id: "run_2",
   speakers_json: poisonedSpeakers,
   segments_json: poisonedSegments,
-  timing_json: { provider: "eta-diarize" },
+  timing_json: { wall_ms: 5100, producer: { worker: "night-drain", arch: "arm64", platform: "darwin", service_device: "mps", worker_version: "1.4.0", host: "mini" } },
   ...over,
 });
 
@@ -159,10 +159,33 @@ describe("shaping", () => {
     expect(shapeSegments({ a: 1 }, [], "x")).toEqual([]);
   });
 
-  it("source: a stored provider string wins, otherwise the Mini service", () => {
-    expect(sourceOf({ provider: "pyannote-ai" })).toBe("pyannote-ai");
-    expect(sourceOf({ provider: "<script>" })).toBe(DIARIZE_SOURCE_DEFAULT);
+  it("source: the producer's worker/arch when the row records one, eta-diarize when it does not", () => {
+    // Producer-shaped row, as the night-drain worker writes it (859 room windows).
+    expect(sourceOf({ wall_ms: 1, producer: { worker: "night-drain", arch: "arm64", platform: "darwin", service_device: "mps" } }))
+      .toBe("night-drain/arm64");
+    // A second diarizer on another architecture must not share a label with the first (19 Sep ruling).
+    expect(sourceOf({ producer: { worker: "yoga-drain", arch: "x86_64" } })).toBe("yoga-drain/x86_64");
+    // Bare rows (534 room windows, every encounter): the app against the Mini's eta-diarize.
+    expect(sourceOf({ wall_ms: 2600, service_ms: 2400 })).toBe(DIARIZE_SOURCE_DEFAULT);
     expect(sourceOf(null)).toBe(DIARIZE_SOURCE_DEFAULT);
+    // Partial producers.
+    expect(sourceOf({ producer: { worker: "night-drain" } })).toBe("night-drain");
+    expect(sourceOf({ producer: { arch: "arm64" } })).toBe("eta-diarize/arm64");
+    // Not a token: ignored, never echoed.
+    expect(sourceOf({ producer: { worker: "<script>", arch: "arm64 && rm" } })).toBe(DIARIZE_SOURCE_DEFAULT);
+    // The key no writer uses is not read.
+    expect(sourceOf({ provider: "pyannote-ai" })).toBe(DIARIZE_SOURCE_DEFAULT);
+  });
+
+  it("a producer-shaped window and a bare one carry different sources on every segment", () => {
+    const withProducer = windowPayload(winRow());
+    const bare = windowPayload(winRow({ timing_json: { wall_ms: 5100 } }));
+    expect(withProducer.source).toBe("night-drain/arm64");
+    expect(withProducer.segments.every((sg) => sg.source === "night-drain/arm64")).toBe(true);
+    expect(bare.source).toBe(DIARIZE_SOURCE_DEFAULT);
+    expect(bare.segments.every((sg) => sg.source === DIARIZE_SOURCE_DEFAULT)).toBe(true);
+    // Only the label leaves the row: no host, platform or version field reaches the payload.
+    expect(JSON.stringify(withProducer)).not.toMatch(/"host"|"platform"|worker_version|service_device|"mini"/);
   });
 
   it("an encounter is recording-relative and keeps its ids", () => {
@@ -176,7 +199,7 @@ describe("shaping", () => {
 
   it("a window is clip-relative with the wall-clock origin from bench_window.start_ms", () => {
     const p = windowPayload(winRow());
-    expect(p).toMatchObject({ kind: "window", clock: "clip_relative", origin_ms: 1789999200000, segments_stale: false, source: "eta-diarize" });
+    expect(p).toMatchObject({ kind: "window", clock: "clip_relative", origin_ms: 1789999200000, segments_stale: false, source: "night-drain/arm64" });
   });
 
   it("a window whose segments came from an older run, or from no recorded run, is stale", () => {

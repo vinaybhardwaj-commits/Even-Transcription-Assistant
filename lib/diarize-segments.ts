@@ -16,9 +16,12 @@
  * Nothing from a stored object reaches the output unless it is named below and has the expected type.
  * speaker_label is therefore NEUTRAL (`S0`, `S1`, … from the index), never the stored label.
  *
- * `source` names the diarize PROVIDER. Neither store records one today, so every row is the one
- * service that has written them, the Mini's eta-diarize (lib/diarize.ts, DIARIZE_BASE). A stored
- * `provider` string on the timing JSON, if a later writer adds one, is preferred.
+ * `source` names WHICH DIARIZER PRODUCED THE TIMINGS, because two diarizers do not agree at speaker
+ * switches (the 19 Sep arm64/x86_64 ruling) and this route is the doctor-ID feed. The writers record
+ * that as `producer` on the timing JSON (`{worker, arch, platform, service_device, worker_version,
+ * host}`; 859 room windows carry it). `source` is `<worker>/<arch>` from it, e.g. `night-drain/arm64`.
+ * A row with no producer (534 room windows, and every encounter so far) was written by the app
+ * against the Mini's eta-diarize, and says `eta-diarize`.
  */
 import { sql } from "@/lib/db";
 
@@ -172,13 +175,26 @@ export function shapeSegments(raw: unknown, speakers: readonly SpeakerTiming[], 
   return out.sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms || a.speaker_idx - b.speaker_idx);
 }
 
-/** PURE — the provider name: a stored `provider` string on the timing JSON if one exists, else the default. */
+const PRODUCER_PART_RE = /^[a-z0-9._-]{1,40}$/i;
+
+/**
+ * PURE — the source label from a stored timing JSON: `<worker>/<arch>` from its `producer` object,
+ * `<worker>` when it has no arch, `eta-diarize/<arch>` when it has an arch and no worker, and
+ * `eta-diarize` when it has neither. A part that is not a short token is ignored, never echoed.
+ */
 export function sourceOf(timing: unknown): string {
+  let worker: string | null = null;
+  let arch: string | null = null;
   if (timing && typeof timing === "object" && !Array.isArray(timing)) {
-    const p = (timing as Record<string, unknown>).provider;
-    if (typeof p === "string" && /^[a-z0-9._-]{1,40}$/i.test(p)) return p;
+    const p = (timing as Record<string, unknown>).producer;
+    if (p && typeof p === "object" && !Array.isArray(p)) {
+      const o = p as Record<string, unknown>;
+      if (typeof o.worker === "string" && PRODUCER_PART_RE.test(o.worker)) worker = o.worker;
+      if (typeof o.arch === "string" && PRODUCER_PART_RE.test(o.arch)) arch = o.arch;
+    }
   }
-  return DIARIZE_SOURCE_DEFAULT;
+  const base = worker ?? DIARIZE_SOURCE_DEFAULT;
+  return arch ? `${base}/${arch}` : base;
 }
 
 const iso = (v: unknown): string | null => {
