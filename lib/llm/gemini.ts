@@ -146,28 +146,48 @@ export type RoutedChatResult = { ok: boolean; content: string; error?: string; l
 
 export const ROUTED_CHAT_DEADLINE_ENV = "ETA_ROUTED_CHAT_DEADLINE_MS";
 
+/** primary (Gemini) + this many OpenRouter fallback attempts in the SUM below. Fixed at 2 per
+ * Fable's ruling — it does NOT scale with a custom `LLM_FALLBACK_MODELS` list of a different
+ * length; a chain configured with 3+ fallbacks would still be summed as if it had 2. */
+const FALLBACK_STAGE_COUNT = 2;
+
+/** Ceiling on a single fallback stage's OWN slice of the deadline — openrouterChat's own default
+ * per-call timeout, so a fallback stage is never budgeted more than it would use unprompted. */
+const FALLBACK_STAGE_CAP_MS = 60_000;
+
 /**
  * PURE. The overall wall-clock budget for one routedChat call.
  *
  * `ETA_ROUTED_CHAT_DEADLINE_MS` overrides outright, when it parses as a positive number.
- * Otherwise: 1.5x the per-call timeout THIS call is using (or GEMINI_DEFAULT_TIMEOUT_MS, the
- * larger of the two per-stage defaults, when the caller passed none).
  *
- * WHY 1.5x, NOT 3x AND NOT 1x. 1x would cut off the very first stage before its own declared
- * timeout could ever elapse, silently shrinking every caller's existing SLA — the opposite of
- * "no overall deadline" is not "no per-call deadline". 3x is the exact pathological number this
- * exists to bound, so setting the cap there would cap nothing. 1.5x sits in between BY DESIGN: it
- * is exactly enough for one stage to run its full declared timeout AND the next stage to still get
- * a genuine, if truncated, attempt (half of one more full timeout) — one full hang is survivable,
- * two full hangs in a row is what this refuses to wait out. Because the default is always >= the
- * per-call timeout in effect, a call that succeeds within its own stage's timeout — the normal
- * case — is NEVER affected by this deadline; only the multi-stage-stall case the order describes.
+ * RULING (Fable, 22 Sep, on the Refuter's PASS-with-flag): the previous rule — 1.5x the per-call
+ * timeout applied uniformly to every stage — collapsed for the case nearly every real caller is
+ * in: an explicit `timeoutMs` shared by all three stages. There, 1.5x gave a hung primary stage
+ * its own full timeout and left only HALF a timeout for the first fallback, with the second
+ * fallback unreachable — the exact failure this deadline exists to prevent, just moved one stage
+ * later. Measured by the Refuter: timeoutMs=200ms, deadline=300ms, a fallback that would have
+ * answered at 150ms (inside its own 200ms budget) was killed at 300ms instead.
+ *
+ * THE NEW RULE budgets each KIND of stage separately instead of scaling one number three ways:
+ *   primary budget  = the caller's timeoutMs, or GEMINI_DEFAULT_TIMEOUT_MS (240 s) when none given
+ *                      — Vertex's OWN default, unchanged from before;
+ *   fallback budget = min(caller's timeoutMs, FALLBACK_STAGE_CAP_MS) — an OpenRouter stage never
+ *                      inherits a giant primary timeout, and never needs more than its own default
+ *                      would give it unprompted;
+ *   deadline        = (primary + FALLBACK_STAGE_COUNT x fallback) x 1.10.
+ * The 10% slack absorbs `Date.now()` skew between this timer and each stage's own internal one; it
+ * is not meant to cover a fourth stage.
+ *
+ * This is still NEVER TIGHTER than the primary stage's own timeout (the sum only adds to it), and
+ * a call that succeeds within its own stage's timeout — the normal case — is unaffected either way.
  */
 export function routedChatDeadlineMs(perCallTimeoutMs: number | undefined, env: Record<string, string | undefined> = process.env): number {
   const raw = env[ROUTED_CHAT_DEADLINE_ENV];
   const override = raw !== undefined ? Number(raw) : NaN;
   if (Number.isFinite(override) && override > 0) return override;
-  return Math.round((perCallTimeoutMs ?? GEMINI_DEFAULT_TIMEOUT_MS) * 1.5);
+  const primaryBudget = perCallTimeoutMs ?? GEMINI_DEFAULT_TIMEOUT_MS;
+  const fallbackBudget = Math.min(perCallTimeoutMs ?? FALLBACK_STAGE_CAP_MS, FALLBACK_STAGE_CAP_MS);
+  return Math.round((primaryBudget + FALLBACK_STAGE_COUNT * fallbackBudget) * 1.10);
 }
 
 /** Thrown internally when the overall deadline (or the caller's own signal) fires while something

@@ -73,19 +73,40 @@ function geminiOn() {
 }
 async function router() { return import("@/lib/llm/gemini"); }
 
-describe("routedChatDeadlineMs — pure", () => {
-  it("defaults to 1.5x the per-call timeout in effect", async () => {
+describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the flat 1.5x)", () => {
+  // deadline = round((primaryBudget + 2 x fallbackBudget) * 1.10)
+  //   primaryBudget  = perCallTimeoutMs, or 240_000 (GEMINI_DEFAULT_TIMEOUT_MS) when none given
+  //   fallbackBudget = min(perCallTimeoutMs, 60_000) — never the caller's own value uncapped
+
+  it("caller's timeoutMs under the 60s fallback cap: every stage gets the SAME budget", async () => {
     const { routedChatDeadlineMs } = await router();
-    expect(routedChatDeadlineMs(100_000, {})).toBe(150_000);
-    expect(routedChatDeadlineMs(1_000, {})).toBe(1_500);
+    // primary=1000, fallback=min(1000,60000)=1000 -> (1000 + 2*1000) * 1.10 = 3300
+    expect(routedChatDeadlineMs(1_000, {})).toBe(3_300);
   });
 
-  it("defaults to 1.5x GEMINI_DEFAULT_TIMEOUT_MS (240_000) when no per-call timeout was passed", async () => {
+  it("caller's timeoutMs over the 60s cap: the fallback budget is capped, the primary budget is not", async () => {
     const { routedChatDeadlineMs } = await router();
-    expect(routedChatDeadlineMs(undefined, {})).toBe(360_000);
+    // primary=100_000 (uncapped), fallback=min(100_000,60_000)=60_000 -> (100000+120000)*1.10 = 242000
+    expect(routedChatDeadlineMs(100_000, {})).toBe(242_000);
   });
 
-  it("is never tighter than the per-call timeout itself (the ordinary case is never affected)", async () => {
+  it("no per-call timeoutMs: primary defaults to 240s, fallback to the 60s cap — same as before, arithmetic aside", async () => {
+    const { routedChatDeadlineMs } = await router();
+    // (240000 + 2*60000) * 1.10 = 396000
+    expect(routedChatDeadlineMs(undefined, {})).toBe(396_000);
+  });
+
+  it("this fixes the case the Refuter measured: after a full primary hang, a fast fallback now fits inside its OWN budget", async () => {
+    const { routedChatDeadlineMs } = await router();
+    // timeoutMs=200: old rule gave 300ms total (150ms of run-room after a 200ms primary hang).
+    // new rule: primary=200, fallback=min(200,60000)=200 -> (200+400)*1.10 = 660ms — the fallback's
+    // own full 200ms budget survives the primary's hang, with room to spare for a second fallback.
+    const deadline = routedChatDeadlineMs(200, {});
+    expect(deadline).toBe(660);
+    expect(deadline - 200).toBeGreaterThanOrEqual(200); // full first-fallback budget after the hang
+  });
+
+  it("is never tighter than the primary budget itself (the ordinary case is never affected)", async () => {
     const { routedChatDeadlineMs } = await router();
     for (const t of [1, 100, 60_000, 240_000, 999_999]) {
       expect(routedChatDeadlineMs(t, {})).toBeGreaterThanOrEqual(t);
@@ -100,7 +121,7 @@ describe("routedChatDeadlineMs — pure", () => {
   it("an unparseable, zero, or negative override falls back to the formula, not to 0 or NaN", async () => {
     const { routedChatDeadlineMs } = await router();
     for (const bad of ["", "not-a-number", "0", "-5", "   "]) {
-      expect(routedChatDeadlineMs(1_000, { ETA_ROUTED_CHAT_DEADLINE_MS: bad })).toBe(1_500);
+      expect(routedChatDeadlineMs(1_000, { ETA_ROUTED_CHAT_DEADLINE_MS: bad })).toBe(3_300);
     }
   });
 });
@@ -155,6 +176,35 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     controller.abort();
     const r = await p;
     expect(r).toMatchObject({ ok: false, error: "aborted", provider: "none" });
+  }, 5_000);
+});
+
+describe("the DEFAULT deadline (no env override) after a REAL first-stage hang — the Refuter's missing test", () => {
+  // No ETA_ROUTED_CHAT_DEADLINE_MS here: routedChatDeadlineMs computes its default from timeoutMs.
+  // timeoutMs=100 -> primary budget 100, fallback budget min(100,60000)=100, deadline (100+200)*1.10
+  // = 330ms. The primary's hang ends at its OWN 100ms per-call timer (openaiChat's `tid`), not at
+  // the external deadline — a genuinely hung stage running to its own declared timeout, exactly the
+  // production shape. That leaves ~230ms of the 330ms deadline for the fallbacks that follow.
+  const TIMEOUT_MS = 100;
+
+  it("the first fallback still ANSWERS after the primary's full hang (old rule would have starved it)", async () => {
+    geminiOn();
+    script = [{ kind: "hang" }, { kind: "ok", content: "answer", model: "google/gemini-3.8-flash-001" }];
+    const { routedChat } = await router();
+    const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: TIMEOUT_MS });
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:google/gemini-3.8-flash-001" });
+    expect(hits).toHaveLength(2);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter"]);
+  }, 5_000);
+
+  it("a THIRD stage (the second fallback) is reachable: primary hangs, first fallback fails fast, second fallback still runs and can answer", async () => {
+    geminiOn();
+    script = [{ kind: "hang" }, { kind: "http", status: 500 }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    const { routedChat } = await router();
+    const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: TIMEOUT_MS });
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(hits).toHaveLength(3);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
   }, 5_000);
 });
 
