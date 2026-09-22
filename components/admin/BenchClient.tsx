@@ -18,6 +18,7 @@ import { selectedRoom, useSelectedRoom } from "@/components/admin/BenchRoomsLive
  */
 const ROW_BTN =
   "min-h-11 px-3 py-2 rounded-lg text-label text-even-blue-700 hover:bg-even-ink-50 active:bg-even-ink-100";
+const SESSION_LIST_CAP = 200;
 
 type SessionRow = {
   id: string;
@@ -211,6 +212,16 @@ export function BenchClient() {
   // cards above, and the selection survives every poll because it lives outside this component.
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const roomById = React.useMemo(() => new Map((rooms ?? []).map((r) => [r.id, r])), [rooms]);
+  const deepLinkApplied = React.useRef(false);
+
+  React.useEffect(() => {
+    if (deepLinkApplied.current || !rooms?.length) return;
+    deepLinkApplied.current = true;
+    const wanted = new URL(window.location.href).searchParams.get("room");
+    if (!wanted) return;
+    const room = rooms.find((candidate) => candidate.id === wanted || candidate.slug === wanted);
+    if (room) selectedRoom.choose(room.id);
+  }, [rooms]);
 
   // DEFAULT, second and third rules: the room with the most recent session, else the first room.
   // (The first rule — the room that is RECORDING — is suggested by the monitor, which is the
@@ -233,6 +244,14 @@ export function BenchClient() {
     () => (selectedRoomRow && sessions ? sessions.filter((x) => x.room_slug === selectedRoomRow.slug) : []),
     [sessions, selectedRoomRow],
   );
+  const chooseArchiveRoom = React.useCallback((roomId: string) => {
+    const room = roomById.get(roomId);
+    if (!room) return;
+    selectedRoom.choose(room.id);
+    const url = new URL(window.location.href);
+    url.searchParams.set("room", room.slug || room.id);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [roomById]);
 
   return (
     <div className="space-y-6">
@@ -258,9 +277,26 @@ export function BenchClient() {
             </span>
           </h2>
           {rooms && rooms.length > 1 ? (
-            <p className="text-caption text-even-ink-400">select a room card above to switch</p>
+            <label className="flex items-center gap-2 text-caption text-even-ink-500">
+              Room
+              <select
+                value={selectedRoomRow?.id ?? ""}
+                onChange={(event) => chooseArchiveRoom(event.target.value)}
+                className="min-h-11 rounded-lg border border-even-ink-200 bg-even-white px-3 py-2 text-base text-even-navy-800"
+                aria-label="Choose room recordings"
+              >
+                {rooms.map((room) => (
+                  <option key={room.id} value={room.id}>{room.name}</option>
+                ))}
+              </select>
+            </label>
           ) : null}
         </div>
+        {sessions && sessions.length >= SESSION_LIST_CAP ? (
+          <p className="mb-3 rounded-lg border border-warning-200 bg-warning-50 px-3 py-2 text-caption text-warning-700" role="status">
+            Showing the newest {SESSION_LIST_CAP} sessions across all rooms. Older recordings may not appear here; open a known session link directly when needed.
+          </p>
+        ) : null}
         <table className="w-full text-body">
           <thead>
             <tr className="text-left border-b border-even-ink-100">

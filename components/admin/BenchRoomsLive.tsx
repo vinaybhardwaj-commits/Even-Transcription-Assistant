@@ -46,10 +46,21 @@ import {
   STRANDED_WAITING,
   WAITING_PHRASE,
   roomOperationalAlerts,
-  type ActiveMicAlert,
-  type OperationalAlert,
-  type Stranded,
 } from "@/lib/room-facts";
+import { BenchAttentionList } from "@/components/admin/bench-live/BenchAttentionList";
+import { BenchDangerZone } from "@/components/admin/bench-live/BenchDangerZone";
+import { BenchDaySummary } from "@/components/admin/bench-live/BenchDaySummary";
+import { RoomCard } from "@/components/admin/bench-live/RoomCard";
+import { useBenchLivePolling } from "@/components/admin/bench-live/useBenchLivePolling";
+import type {
+  Attention,
+  LaneLevel,
+  LaneView,
+  Level,
+  Levels,
+  ListenerRowView,
+  RoomLive,
+} from "@/components/admin/bench-live/types";
 
 // ---------------------------------------------------------------------------
 // The selected room — shared with BenchClient, which renders that room's sessions
@@ -94,35 +105,6 @@ export function useSelectedRoom(): Selection {
 // Wire shapes (mirrors of the two routes)
 // ---------------------------------------------------------------------------
 
-type Level = "ok" | "amber" | "red" | "unknown";
-/** The four lamp colours from the approved mockup: working, act, audio-at-risk, off-or-idle. */
-type LaneLevel = "ok" | "amber" | "red" | "off";
-type LaneView = { level: LaneLevel; state: string; enabled: boolean | null; note?: string };
-type DaySummary = { audio_recorded_ms: number; turned_into_words_ms: number; gave_up: number; visits_built: number; stranded?: Stranded };
-
-type Levels = { peak: number; avg: number } | null;
-
-type ListenerRowView = {
-  room_id: string;
-  room_slug: string;
-  room_name: string;
-  listening: boolean;
-  age_ms: number;
-  paused: boolean;
-  recording_session_id: string | null;
-  tab_id: string;
-  last_poll_at: string;
-  /** §2.2 — what each microphone heard since this room's previous poll. NULL = NOT MEASURED,
-   *  which draws NO BAR: an unmeasured microphone and a silent one are different facts and only
-   *  one of them is a reason to walk to a room. */
-  mic?: Levels;
-  spare?: Levels;
-  levels_at?: string | null;
-  /** §2.4 — the client reported an EXPLICITLY chosen second device. The card draws no spare lane,
-   *  no spare vital and no spare line unless this is true — never from a backup piece arriving. */
-  spare_device?: boolean;
-};
-
 /** §3.10 — one window's line in a run-waiting-audio report: what engine ran it, characters out,
  *  seconds taken, and what it cost. `step` names why a window did not run (flag_off, no_chunks…). */
 type RunOutcome = {
@@ -135,78 +117,6 @@ type RunOutcome = {
   sarvam_ms?: number | null;
   audio_seconds?: number | null;
 };
-
-type ListenersResp = { now: string; freshness_window_ms: number; listeners: ListenerRowView[]; degraded?: string[] };
-
-type RoomLive = {
-  room: { id: string; slug: string; name: string };
-  recording: boolean;
-  paused_session: boolean;
-  session_id: string | null;
-  session_started_at: string | null;
-  last_primary_at: string | null;
-  last_backup_at: string | null;
-  last_piece_at: string | null;
-  mic_level: Level;
-  backup_chunks_today: number;
-  backup_reads_no_chunks: boolean;
-  /** §2.3 — the size vital, per microphone. */
-  mic_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
-  spare_size?: { newest: "ok" | "tiny" | "unknown"; tiny_run: number; proven_dead_by_size: boolean; baseline_bytes_per_ms: number | null } | null;
-  spare_exists?: boolean;
-  active_mic_alert?: ActiveMicAlert | null;
-  tape_without_cues?: boolean | null;
-  operational_alerts?: OperationalAlert[];
-  stalled: boolean;
-  stalled_age_ms: number | null;
-  transcript_enabled: boolean;
-  visits_enabled: boolean;
-  transcript_counts: { done: number; waiting: number; no_day: number; in_progress: number; failed: number; words_ms: number };
-  has_room_day_today: boolean | null;
-  visit_counts: { built: number; open: number };
-  /** D7 — minutes that cannot currently be turned into words, split by reason. */
-  stranded?: Stranded;
-  /** Audio recorded in this room today, summed from the PIECES. A different measure from the
-   *  window spans in `stranded` and in `words_ms` — see STRANDED_MEASURE_NOTE. */
-  audio_recorded_ms?: number;
-  lanes: { tape: LaneView; transcript: LaneView; visits: LaneView };
-  /** ENDED DISAGREES — the session row says over and pieces are still landing. */
-  ended_disagrees: boolean;
-  ended_disagrees_session_id: string | null;
-  ended_disagrees_ended_at: string | null;
-  ended_disagrees_last_piece_at: string | null;
-  ended_disagrees_chunks: number;
-  /** The door's mirror-image check, now on the screen too (§3.6). */
-  ended_at_lies?: boolean;
-  ended_at_lies_sessions?: string[];
-  /** D30 — the most recent session today is ended. The seventh state's own input. */
-  last_session_ended?: boolean;
-  last_warehouse_at: string | null;
-  /** Is there a genuine warehouse-typed cue today? With none, the This-doctor row does not
-   *  render at all — a vital nothing feeds should not hold a line saying nothing (§3.1). */
-  has_doctor_clock?: boolean;
-  doctor_clock_silent_ms: number | null;
-  doctor_clock_level: Level;
-  marks_today: number;
-  last_mark_at: string | null;
-  marks_not_sent: number;
-  last_window_asked_at: string | null;
-  last_window_complete: boolean | null;
-  degraded: string[];
-};
-
-type RoomsLiveResp = {
-  ist_date: string;
-  now: string;
-  day?: DaySummary;
-  rooms: RoomLive[];
-  thresholds?: { mic_amber_ms: number; mic_red_ms: number; doctor_clock_amber_ms: number; doctor_clock_red_ms: number; listener_fresh_ms: number; stall_minutes: number };
-  degraded?: string[];
-};
-
-const LISTENER_POLL_MS = 3_000;
-const ROLLUP_POLL_MS = 20_000;
-const TICK_MS = 1_000;
 
 /**
  * B4 — how long an armed Stop stays armed.
@@ -295,14 +205,6 @@ const LEVEL_CLASS: Record<Level, string> = {
 function Pill({ level, children, title }: { level: Level; children: React.ReactNode; title?: string }) {
   return <span className={`${PILL} ${LEVEL_CLASS[level]}`} title={title}>{children}</span>;
 }
-
-/** The card's edge carries the WORST condition on it, so trouble is found before it is read. */
-const CARD_EDGE: Record<Level, string> = {
-  ok: "border-even-ink-200 bg-even-white",
-  amber: "border-warning-200 bg-warning-50",
-  red: "border-danger-200 bg-danger-50",
-  unknown: "border-even-ink-200 bg-even-ink-50",
-};
 
 /** The chip word for each state. The full sentence is roomState()'s `label`. */
 const STATE_WORD: Record<RoomState, string> = {
@@ -452,6 +354,7 @@ function fmtMinutes(ms: number): string {
 }
 
 type CommandOutcome = {
+  commandId?: string;
   kind: string;
   state: "queued" | "acked" | "timeout" | "failed" | "conflict";
   detail: string;
@@ -470,7 +373,7 @@ const COMMAND_LABEL: Record<string, string> = {
 // The attention list — pure, and tested
 // ---------------------------------------------------------------------------
 
-export type Attention = { room: string; severity: "red" | "amber"; title: string; detail: string };
+export type { Attention } from "@/components/admin/bench-live/types";
 
 /**
  * PURE — what an operator should walk over to, worst first.
@@ -492,9 +395,11 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
       stalledAgeMs: r.stalled_age_ms,
       activeMicAlert: r.active_mic_alert ?? null,
       tapeWithoutCues: r.tape_without_cues ?? null,
+      pausedDisagrees: listenersKnown && l ? l.paused !== r.paused_session : null,
     });
     for (const alert of operational) {
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: alert.severity,
         title: alert.label,
@@ -509,6 +414,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     // an alarm that does not answer it gets read as data loss. bs_g3dwud4p lost nothing.
     if (r.ended_disagrees) {
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: "red",
         title: ENDED_DISAGREES_TITLE,
@@ -523,6 +429,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     // must not raise anything. A piece carrying no level reading can never satisfy it.
     if (r.recording && r.mic_size?.proven_dead_by_size) {
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: "red",
         title: "the main microphone is producing pieces that are not audio",
@@ -538,6 +445,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     if (r.ended_at_lies) {
       const n = r.ended_at_lies_sessions?.length ?? 0;
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: "amber",
         title: "a recording's stored end time is later than its last piece",
@@ -546,6 +454,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     }
     if (!r.stalled && (r.mic_level === "red" || r.mic_level === "amber")) {
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: r.mic_level,
         title: r.mic_level === "red" ? "no audio uploading" : "audio slowing down",
@@ -558,6 +467,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     // which turned every room red thirty minutes in.
     if (r.has_doctor_clock && (r.doctor_clock_level === "red" || r.doctor_clock_level === "amber")) {
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: r.doctor_clock_level,
         title: `no clock from this doctor for ${fmtAge(r.doctor_clock_silent_ms)}`,
@@ -571,6 +481,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     if (r.transcript_enabled && r.transcript_counts.no_day > 0 && r.has_room_day_today === false) {
       const n = r.transcript_counts.no_day;
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: "amber",
         title: NO_DAY_TITLE,
@@ -589,6 +500,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
       if (r.transcript_counts.waiting > 0) bits.push(`${r.transcript_counts.waiting} piece${r.transcript_counts.waiting === 1 ? "" : "s"} of audio ${WAITING_PHRASE}`);
       if (r.transcript_counts.failed > 0) bits.push(`${r.transcript_counts.failed} gave up`);
       out.push({
+        roomId: r.room.id,
         room: name,
         severity: "amber",
         title: `transcript ${WAITING_PHRASE} — the audio is safe`,
@@ -600,10 +512,10 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     // every session. Most rooms have one microphone and that is normal. Removed, not softened:
     // the field is still computed and still on the wire for Build 2, and nothing renders it.
     if (r.marks_not_sent > 0) {
-      out.push({ room: name, severity: "amber", title: `${r.marks_not_sent} mark${r.marks_not_sent === 1 ? "" : "s"} did not reach the brain`, detail: "the kiosk recorded the press but the cue never landed" });
+      out.push({ roomId: r.room.id, room: name, severity: "amber", title: `${r.marks_not_sent} mark${r.marks_not_sent === 1 ? "" : "s"} did not reach the brain`, detail: "the kiosk recorded the press but the cue never landed" });
     }
     if (r.last_window_complete === false) {
-      out.push({ room: name, severity: "amber", title: "a transcription window did not finish", detail: `asked ${fmtAge(ageMs(r.last_window_asked_at, nowMs))} ago and rolled back — re-run it` });
+      out.push({ roomId: r.room.id, room: name, severity: "amber", title: "a transcription window did not finish", detail: `asked ${fmtAge(ageMs(r.last_window_asked_at, nowMs))} ago and rolled back — re-run it` });
     }
   }
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "red" ? -1 : 1));
@@ -614,12 +526,16 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
 // ---------------------------------------------------------------------------
 
 export function BenchRoomsLive() {
-  const [listeners, setListeners] = React.useState<ListenersResp | null>(null);
-  const [rollup, setRollup] = React.useState<RoomsLiveResp | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [busy, setBusy] = React.useState(false);
-  const [lastFetchAt, setLastFetchAt] = React.useState<number | null>(null);
-  const [, setTick] = React.useState(0);
+  const {
+    listeners,
+    rollup,
+    busCommands,
+    error,
+    busy,
+    lastFetchAt,
+    fetchListeners,
+    fetchRollup,
+  } = useBenchLivePolling();
   /** Stop is two clicks: the first arms this, the second sends. */
   const [confirmStop, setConfirmStop] = React.useState<string | null>(null);
   /**
@@ -644,6 +560,7 @@ export function BenchRoomsLive() {
   const [confirmOrphan, setConfirmOrphan] = React.useState<string | null>(null);
   const [note, setNote] = React.useState<string | null>(null);
   const [commandOutcomes, setCommandOutcomes] = React.useState<Record<string, CommandOutcome>>({});
+  const [severityFilter, setSeverityFilter] = React.useState<"all" | "attention">("all");
   // §3.10 (Build 3 §2.1) — RUN THIS ROOM'S WAITING AUDIO. Armed per room, because every window in
   // the batch is a paid call and a one-tap money-spender on a tablet in a pocket is exactly the
   // trap this build's other confirms guard against. `running` disables the button while a batch is
@@ -651,53 +568,6 @@ export function BenchRoomsLive() {
   const [confirmRun, setConfirmRun] = React.useState<string | null>(null);
   const [runningWaiting, setRunningWaiting] = React.useState<string | null>(null);
   const [runResult, setRunResult] = React.useState<Record<string, { drained: RunOutcome[]; remaining: number }>>({});
-
-  const fetchListeners = React.useCallback(async () => {
-    try {
-      const res = await fetch("/api/admin/bench/listeners", { cache: "no-store" });
-      const j = (await res.json()) as ListenersResp & { error?: { message?: string } };
-      if (!res.ok) throw new Error(j.error?.message ?? `http_${res.status}`);
-      setListeners(j);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  const fetchRollup = React.useCallback(async () => {
-    setBusy(true);
-    try {
-      const res = await fetch("/api/admin/bench/rooms-live", { cache: "no-store" });
-      const j = (await res.json()) as RoomsLiveResp & { error?: { message?: string } };
-      if (!res.ok) throw new Error(j.error?.message ?? `http_${res.status}`);
-      setRollup(j);
-      setLastFetchAt(Date.now());
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
-  React.useEffect(() => { void fetchListeners(); void fetchRollup(); }, [fetchListeners, fetchRollup]);
-
-  React.useEffect(() => {
-    const i = globalThis.setInterval(() => { if (!document.hidden) void fetchListeners(); }, LISTENER_POLL_MS);
-    return () => globalThis.clearInterval(i);
-  }, [fetchListeners]);
-
-  React.useEffect(() => {
-    const i = globalThis.setInterval(() => { if (!document.hidden) void fetchRollup(); }, ROLLUP_POLL_MS);
-    return () => globalThis.clearInterval(i);
-  }, [fetchRollup]);
-
-  // The tick fetches NOTHING. It only forces a re-render so every age below is recomputed from
-  // the instants already in state.
-  React.useEffect(() => {
-    const i = globalThis.setInterval(() => setTick((t) => t + 1), TICK_MS);
-    return () => globalThis.clearInterval(i);
-  }, []);
 
   // B4 — an armed Stop disarms itself. Re-armed by a second tap; cleared on unmount.
   React.useEffect(() => {
@@ -726,8 +596,50 @@ export function BenchRoomsLive() {
    *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */
   const thresholds = rollup?.thresholds ?? null;
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
+  const attentionRoomIds = React.useMemo(() => new Set(attention.map((item) => item.roomId)), [attention]);
+  const visibleRooms = severityFilter === "attention"
+    ? rooms.filter((room) => attentionRoomIds.has(room.room.id))
+    : rooms;
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const deepLinkApplied = React.useRef(false);
+
+  React.useEffect(() => {
+    if (busCommands.length === 0) return;
+    setCommandOutcomes((previous) => {
+      const next = { ...previous };
+      const seenRooms = new Set<string>();
+      for (const command of busCommands) {
+        if (seenRooms.has(command.room_id)) continue;
+        seenRooms.add(command.room_id);
+        const commandAt = Date.parse(command.created_at);
+        const current = next[command.room_id];
+        if (current && current.at > commandAt) continue;
+        const state: CommandOutcome["state"] =
+          command.status === "pending"
+            ? "queued"
+            : command.status === "acked"
+              ? "acked"
+              : command.status === "expired"
+                ? "timeout"
+                : "failed";
+        next[command.room_id] = {
+          commandId: command.id,
+          kind: command.kind,
+          state,
+          detail:
+            command.status === "pending"
+              ? "Pending on the command bus; waiting for the kiosk to acknowledge it."
+              : command.status === "acked"
+                ? "Kiosk acknowledged this command."
+                : command.status === "expired"
+                  ? "No kiosk picked up this command before it expired."
+                  : `Kiosk refused this command${command.error ? `: ${command.error}` : "."}`,
+          at: Number.isFinite(commandAt) ? commandAt : Date.now(),
+        };
+      }
+      return next;
+    });
+  }, [busCommands]);
 
   const chooseRoom = React.useCallback((room: RoomLive["room"]) => {
     selectedRoom.choose(room.id);
@@ -828,19 +740,23 @@ export function BenchRoomsLive() {
         };
         const status = j.command?.status;
         if (res.ok && status && status !== "pending") {
-          setCommandOutcomes((prev) => ({
-            ...prev,
-            [roomId]: {
-              kind,
-              state: status === "acked" ? "acked" : status === "expired" ? "timeout" : "failed",
-              detail: status === "acked"
-                ? "Kiosk acknowledged this command."
-                : status === "expired"
-                  ? "No kiosk picked up this command before it expired."
-                  : `Kiosk refused this command${j.command?.error ? `: ${j.command.error}` : "."}`,
-              at: Date.now(),
-            },
-          }));
+          setCommandOutcomes((prev) => {
+            if (prev[roomId]?.commandId !== commandId) return prev;
+            return {
+              ...prev,
+              [roomId]: {
+                commandId,
+                kind,
+                state: status === "acked" ? "acked" : status === "expired" ? "timeout" : "failed",
+                detail: status === "acked"
+                  ? "Kiosk acknowledged this command."
+                  : status === "expired"
+                    ? "No kiosk picked up this command before it expired."
+                    : `Kiosk refused this command${j.command?.error ? `: ${j.command.error}` : "."}`,
+                at: Date.now(),
+              },
+            };
+          });
           void fetchListeners();
           void fetchRollup();
           return;
@@ -849,15 +765,19 @@ export function BenchRoomsLive() {
         // Keep polling until the honest timeout below; one failed status read is not an outcome.
       }
       if (Date.now() - started >= 10_000) {
-        setCommandOutcomes((prev) => ({
-          ...prev,
-          [roomId]: {
-            kind,
-            state: "timeout",
-            detail: "No acknowledgment arrived within 10 seconds. Check the kiosk before assuming it changed.",
-            at: Date.now(),
-          },
-        }));
+        setCommandOutcomes((prev) => {
+          if (prev[roomId]?.commandId !== commandId) return prev;
+          return {
+            ...prev,
+            [roomId]: {
+              commandId,
+              kind,
+              state: "timeout",
+              detail: "No acknowledgment arrived within 10 seconds. Check the kiosk before assuming it changed.",
+              at: Date.now(),
+            },
+          };
+        });
         return;
       }
     }
@@ -913,6 +833,17 @@ export function BenchRoomsLive() {
 
   const send = React.useCallback(async (roomId: string, kind: string, overridePause = false) => {
     setNote(null);
+    const requestId = `sending_${Date.now()}`;
+    setCommandOutcomes((prev) => ({
+      ...prev,
+      [roomId]: {
+        commandId: requestId,
+        kind,
+        state: "queued",
+        detail: "Sending to the server; no previous command outcome applies.",
+        at: Date.now(),
+      },
+    }));
     try {
       const res = await fetch("/api/admin/bench/command", {
         method: "POST",
@@ -926,6 +857,7 @@ export function BenchRoomsLive() {
         setCommandOutcomes((prev) => ({
           ...prev,
           [roomId]: {
+            commandId: requestId,
             kind,
             state: "conflict",
             detail: String(j.hint ?? j.error ?? `http_${res.status}`),
@@ -936,13 +868,14 @@ export function BenchRoomsLive() {
         setNote(`${kind}: already recording (${String(j.session_id)})`);
         setCommandOutcomes((prev) => ({
           ...prev,
-          [roomId]: { kind, state: "acked", detail: "Already recording; no duplicate tape was started.", at: Date.now() },
+          [roomId]: { commandId: requestId, kind, state: "acked", detail: "Already recording; no duplicate tape was started.", at: Date.now() },
         }));
       } else {
         setNote(`${kind}: queued for the kiosk`);
         setCommandOutcomes((prev) => ({
           ...prev,
           [roomId]: {
+            commandId: typeof j.command_id === "string" ? j.command_id : requestId,
             kind,
             state: "queued",
             detail: "Queued for the kiosk; waiting for acknowledgment.",
@@ -955,7 +888,7 @@ export function BenchRoomsLive() {
       setNote(`${kind}: ${e instanceof Error ? e.message : String(e)}`);
       setCommandOutcomes((prev) => ({
         ...prev,
-        [roomId]: { kind, state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
+        [roomId]: { commandId: requestId, kind, state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
       }));
     } finally {
       setConfirmStop(null);
@@ -1004,6 +937,12 @@ export function BenchRoomsLive() {
           <h2 className="text-heading text-even-navy-800">Rooms, right now</h2>
         </div>
         <div className="flex items-center gap-2 text-caption text-even-ink-400">
+          <a
+            href={`/admin/bench/archive${selectedId ? `?room=${encodeURIComponent(rooms.find((room) => room.room.id === selectedId)?.room.slug ?? selectedId)}` : ""}`}
+            className="min-h-11 inline-flex items-center px-3 rounded-lg font-semibold text-even-blue-700 hover:bg-even-ink-50"
+          >
+            Archive &amp; room setup
+          </a>
           {busy ? <span>Refreshing…</span> : null}
           {lastFetchAt ? <span suppressHydrationWarning>updated {new Date(lastFetchAt).toLocaleTimeString()}</span> : null}
           <button
@@ -1022,28 +961,32 @@ export function BenchRoomsLive() {
       {rollup?.degraded?.length ? <p className="text-caption text-warning-700">degraded: {rollup.degraded.join(" · ")}</p> : null}
       {listeners?.degraded?.length ? <p className="text-caption text-warning-700">kiosk state unknown: {listeners.degraded.join(" · ")}</p> : null}
 
-      {attention.length > 0 ? (
-        <div className="rounded-lg border border-even-ink-200 divide-y divide-even-ink-100">
-          <p className="px-3 py-2 text-caption uppercase tracking-wide text-even-ink-500">Needs your attention</p>
-          {attention.map((a, i) => (
-            <div key={`${a.room}-${i}`} className="px-3 py-2 flex items-start gap-3">
-              <Pill level={a.severity}>{a.severity === "red" ? "act now" : "watch"}</Pill>
-              <div className="min-w-0">
-                <p className="text-body text-even-navy-800"><span className="font-semibold">{a.room}</span> — {a.title}</p>
-                <p className="text-caption text-even-ink-500">{a.detail}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : rooms.length > 0 ? (
-        <p className="text-caption text-success-700">Nothing needs attention.</p>
-      ) : null}
+      <BenchAttentionList items={attention} hasRooms={rooms.length > 0} />
+
+      <div className="flex flex-wrap items-center gap-2" aria-label="Fleet filters">
+        <span className="text-caption font-semibold text-even-ink-500">Show</span>
+        {(["all", "attention"] as const).map((filter) => (
+          <button
+            key={filter}
+            type="button"
+            aria-pressed={severityFilter === filter}
+            onClick={() => setSeverityFilter(filter)}
+            className={`min-h-11 px-4 rounded-lg text-label font-semibold ${
+              severityFilter === filter
+                ? "bg-even-navy-800 text-even-white"
+                : "bg-even-ink-100 text-even-ink-600 hover:bg-even-ink-200"
+            }`}
+          >
+            {filter === "all" ? `All rooms (${rooms.length})` : `Needs attention (${attentionRoomIds.size})`}
+          </button>
+        ))}
+      </div>
 
       {/* CARDS, not rows (E1). A table is for comparing rooms; the operator is not comparing,
           they are scanning for trouble — so the worst condition promotes the whole card and finds
           the eye without being read. Selecting a card reveals that room's recordings below. */}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {rooms.map((r) => {
+        {visibleRooms.map((r) => {
           const l = listenerMap.get(r.room.id);
           const st = roomState({
             listenerReadFailed: !listenersKnown,
@@ -1063,6 +1006,7 @@ export function BenchRoomsLive() {
             stalledAgeMs: r.stalled_age_ms,
             activeMicAlert: r.active_mic_alert ?? null,
             tapeWithoutCues: r.tape_without_cues ?? null,
+            pausedDisagrees: listenersKnown && l ? l.paused !== r.paused_session : null,
           });
           // The card's edge carries the WORST condition on it. `backup_reads_no_chunks` is no
           // longer one of them (D32): most rooms have one microphone, so it promoted almost
@@ -1087,21 +1031,13 @@ export function BenchRoomsLive() {
             // outside the card in the real DOM and only a stopPropagation on a wrapping div was
             // holding the behaviour together. It is a div now, with an explicit role, a tab
             // stop and Enter/Space, so selection is still fully keyboard-reachable.
-            <div
+            <RoomCard
               key={r.room.id}
-              id={`bench-room-${r.room.id}`}
-              role="button"
-              tabIndex={0}
-              onClick={() => chooseRoom(r.room)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  chooseRoom(r.room);
-                }
-              }}
-              aria-pressed={isSelected}
-              aria-label={`Select ${r.room.name}`}
-              className={`text-left rounded-xl border p-4 transition cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-even-blue-400 ${CARD_EDGE[worst]} ${isSelected ? "ring-2 ring-even-blue-400" : "hover:bg-even-ink-50"}`}
+              id={r.room.id}
+              name={r.room.name}
+              level={worst}
+              selected={isSelected}
+              onSelect={() => chooseRoom(r.room)}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -1130,7 +1066,7 @@ export function BenchRoomsLive() {
                 <div
                   className={`mt-3 rounded-lg border px-3 py-2 ${
                     commandOutcomes[r.room.id]!.state === "acked"
-                      ? "border-success-200 bg-success-100"
+                      ? "border-success-500/40 bg-success-100"
                       : commandOutcomes[r.room.id]!.state === "queued"
                         ? "border-even-blue-100 bg-even-blue-50"
                         : "border-warning-200 bg-warning-50"
@@ -1206,7 +1142,7 @@ export function BenchRoomsLive() {
                       <span className="font-semibold">
                         Waiting: {waiting} piece{waiting === 1 ? "" : "s"} · {fmtMinutes(waitingReason?.ms ?? 0)} of 15-minute slot time.
                       </span>{" "}
-                      Nothing runs on its own. Running starts up to 4 paid transcription calls; the exact cost is reported after each call.
+                      Nothing runs on its own. Running starts up to 4 paid transcription calls. Each one is a paid call; the exact cost is reported after each call.
                     </p>
                     {armed ? (
                       <button
@@ -1616,109 +1552,27 @@ export function BenchRoomsLive() {
                   )}
                 </div>
               ) : null}
-            </div>
+            </RoomCard>
           );
         })}
         {rooms.length === 0 ? (
           <p className="text-caption text-even-ink-400">{rollup ? "no enabled rooms" : "loading…"}</p>
+        ) : visibleRooms.length === 0 ? (
+          <p className="text-caption text-even-ink-400">No rooms match this filter.</p>
         ) : null}
       </div>
 
-      {/* ── TODAY, ALL ROOMS (PRD R11) ──────────────────────────────────────────────────────
-          A day summary exists so that "on" is visible as WORK DONE rather than as a switch
-          position — which is the same argument as the lane states, at the scale of a day.
-
-          MINUTES OF AUDIO, NEVER MONEY. A rupee figure on a clinical monitor invites the wrong
-          conversation in front of the wrong person. There is no field on DaySummary that could
-          carry one. */}
-      {rollup?.day ? (
-        <div className="rounded-xl border border-even-ink-200 bg-even-white p-4">
-          <p className="text-caption uppercase tracking-wide text-even-ink-500 mb-2">Today, all rooms</p>
-          <dl className="grid grid-cols-2 sm:grid-cols-5 gap-3" data-testid="day-summary">
-            {[
-              [fmtMinutes(rollup.day.audio_recorded_ms), "audio recorded"],
-              [fmtMinutes(rollup.day.turned_into_words_ms), "turned into words"],
-              // D7 — THE FIGURE THAT WAS OVER EIGHT HOURS ON 24 AUGUST AND WAS INVISIBLE.
-              [fmtMinutes(rollup.day.stranded?.total_ms ?? 0), "cannot be turned into words"],
-              [String(rollup.day.gave_up), "gave up"],
-              [String(rollup.day.visits_built), "visits built"],
-            ].map(([v, k]) => (
-              <div key={k} className="rounded-lg bg-even-ink-50 px-3 py-2.5">
-                <dt className="sr-only">{k}</dt>
-                <dd className="text-heading font-bold text-even-navy-800 tabular-nums">{v}</dd>
-                <span className="text-caption text-even-ink-500">{k}</span>
-              </div>
-            ))}
-          </dl>
-          {/* The reasons, so the total is actionable rather than alarming. Each one names a
-              different fix and two of them are one press. */}
-          {rollup.day.stranded && rollup.day.stranded.reasons.length > 0 ? (
-            <ul className="mt-2 space-y-0.5" data-testid="day-stranded-reasons">
-              {rollup.day.stranded.reasons.map((x) => (
-                <li key={x.reason} className="text-caption text-even-ink-600 leading-snug">
-                  {fmtMinutes(x.ms)} — {x.reason}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {/* THREE OF THESE FIVE NUMBERS ARE MINUTES AND THEY ARE NOT ALL THE SAME MINUTES.
-              "audio recorded" sums the pieces themselves; "turned into words" and "cannot be
-              turned into words" sum fifteen-minute slots. Every one is honest and they do not
-              subtract, and saying so here is cheaper than the conversation that follows somebody
-              doing the arithmetic. */}
-          <p className="mt-2 text-caption text-even-ink-400 leading-snug">
-            “Turned into words” and “cannot be turned into words” are {STRANDED_MEASURE_NOTE}.
-          </p>
-        </div>
-      ) : null}
+      {rollup?.day ? <BenchDaySummary day={rollup.day} /> : null}
 
       {/* Global writes are deliberately separated from the live scan. The destructive colour
           appears only after the operator opens this processing danger zone. */}
-      <details className="rounded-xl border border-even-ink-200 bg-even-white">
-        <summary className="min-h-11 cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-3 text-label font-semibold text-even-ink-600">
-          <span>Processing danger zone</span>
-          <span className="text-caption font-normal text-even-ink-400">global controls</span>
-        </summary>
-        <div className="border-t border-even-ink-100 p-4">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-even-navy-800">Stop all processing</p>
-              <p className="text-caption text-even-ink-600 leading-snug max-w-[60ch]">
-                Turns Transcript and Visits off in every room. Recording carries on and no audio is lost.
-                Turn lanes back on room by room when it is safe.
-              </p>
-            </div>
-            {confirmStopAll ? (
-              <div className="flex flex-wrap gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setConfirmStopAll(false)}
-                  className="min-h-11 px-4 py-2 rounded-lg text-label bg-even-white border border-even-ink-200 hover:bg-even-ink-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void stopAllProcessing()}
-                  className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white hover:bg-danger-700"
-                >
-                  Yes — stop all processing
-                </button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                data-testid="stop-all-processing"
-                onClick={() => setConfirmStopAll(true)}
-                className="min-h-11 px-4 py-2 rounded-lg text-label font-semibold border border-danger-200 bg-even-white text-danger-700 hover:bg-danger-100 shrink-0"
-              >
-                Stop all processing
-              </button>
-            )}
-          </div>
-          {stopAllNote ? <p className="mt-3 text-caption font-semibold text-even-navy-800">{stopAllNote}</p> : null}
-        </div>
-      </details>
+      <BenchDangerZone
+        confirming={confirmStopAll}
+        note={stopAllNote}
+        onArm={() => setConfirmStopAll(true)}
+        onCancel={() => setConfirmStopAll(false)}
+        onConfirm={() => void stopAllProcessing()}
+      />
 
       {/* ── TURNING VISITS ON (PRD §6, mockup tab C) ────────────────────────────────────────
           The one dialog on this screen. Turning Transcript on only costs money and load, both

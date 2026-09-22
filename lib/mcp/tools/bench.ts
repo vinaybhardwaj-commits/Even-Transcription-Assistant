@@ -2419,6 +2419,7 @@ const diffRoom: McpTool = {
             sessions.map((sn) => sn.id), reasons, listener,
           );
           const tapeWithoutCues = cueCountKnown ? anyTapeToday && lastCue === null : null;
+          const pausedDisagrees = listener !== null && pausedListener !== pausedSession;
           const operationalAlerts = roomOperationalAlerts({
             recording: recordingSession !== null,
             kioskListening: pageOpen,
@@ -2426,6 +2427,7 @@ const diffRoom: McpTool = {
             stalledAgeMs,
             activeMicAlert: (live.active_mic_alert as ActiveMicAlert | null | undefined) ?? null,
             tapeWithoutCues,
+            pausedDisagrees,
           });
 
           return {
@@ -2465,7 +2467,7 @@ const diffRoom: McpTool = {
             paused_session: pausedSession,
             // Named rather than resolved: the kiosk and the tape are two witnesses, and when they
             // disagree an operator needs to know that, not a winner picked for them.
-            paused_disagrees: listener !== null && pausedListener !== pausedSession,
+            paused_disagrees: pausedDisagrees,
             stalled_age_ms: stalledAgeMs,
             ...live,
             flags: {

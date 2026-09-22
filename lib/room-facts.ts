@@ -368,7 +368,8 @@ export type OperationalAlertCode =
   | ActiveMicAlert
   | "kiosk_not_listening"
   | "audio_upload_stalled"
-  | "tape_without_cues";
+  | "tape_without_cues"
+  | "paused_disagrees";
 export type OperationalAlert = {
   code: OperationalAlertCode;
   severity: "red" | "amber";
@@ -387,6 +388,7 @@ export function roomOperationalAlerts(input: {
   stalledAgeMs: number | null;
   activeMicAlert: ActiveMicAlert | null;
   tapeWithoutCues: boolean | null;
+  pausedDisagrees?: boolean | null;
 }): OperationalAlert[] {
   const out: OperationalAlert[] = [];
   if (input.recording && input.activeMicAlert === "device_missing") {
@@ -423,8 +425,8 @@ export function roomOperationalAlerts(input: {
     out.push({
       code: "audio_upload_stalled",
       severity: "red",
-      label: "Says recording, no audio arriving",
-      detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}.`,
+      label: "Says recording, audio is being lost — no audio arriving",
+      detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}. Go to the room and check the recording host.`,
     });
   }
   if (input.tapeWithoutCues === true) {
@@ -433,6 +435,14 @@ export function roomOperationalAlerts(input: {
       severity: "amber",
       label: "Tape has no room cues",
       detail: "Audio exists today, but no room cue has arrived. The tape is safe; check the room-day feed.",
+    });
+  }
+  if (input.pausedDisagrees === true) {
+    out.push({
+      code: "paused_disagrees",
+      severity: "amber",
+      label: "Pause state disagrees",
+      detail: "The kiosk and the stored tape disagree about whether consent is paused. Check the room before changing recording state.",
     });
   }
   return out;
