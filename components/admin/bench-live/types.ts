@@ -111,9 +111,20 @@ export type BusCommandView = {
 export type CommandOutcome = {
   commandId?: string;
   kind: string;
-  state: "queued" | "acked" | "timeout" | "failed" | "conflict";
+  state: "queued" | "acked" | "timeout" | "conflict";
   detail: string;
   at: number;
+};
+
+export type RunOutcome = {
+  window_id: string;
+  ok: boolean;
+  step: string;
+  engine?: string | null;
+  transcript_chars?: number | null;
+  cost_usd?: number | null;
+  sarvam_ms?: number | null;
+  audio_seconds?: number | null;
 };
 
 export type Attention = {

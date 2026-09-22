@@ -42,13 +42,15 @@ export function startBlockedReason(state: RoomStateView): string | null {
 
 export function CommandOutcomeView({
   outcome,
+  compact = false,
 }: {
   outcome: CommandOutcome | undefined;
+  compact?: boolean;
 }) {
   if (!outcome) {
     return (
       <p className="text-caption text-even-ink-500">
-        No command outcome is available for this room yet.
+        {compact ? "Last command · unknown" : "No command outcome is available for this room yet."}
       </p>
     );
   }
@@ -68,7 +70,7 @@ export function CommandOutcomeView({
         Last command · {COMMAND_LABEL[outcome.kind] ?? outcome.kind} ·{" "}
         {outcome.state === "acked" ? "acknowledged" : outcome.state}
       </p>
-      <p className="text-caption text-even-ink-600">{outcome.detail}</p>
+      {!compact ? <p className="text-caption text-even-ink-600">{outcome.detail}</p> : null}
     </div>
   );
 }

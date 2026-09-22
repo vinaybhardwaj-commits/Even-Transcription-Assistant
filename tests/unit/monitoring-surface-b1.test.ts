@@ -346,7 +346,7 @@ describe("§3.3 D7 — minutes that cannot currently be turned into words", () =
     expect(STRANDED_MEASURE_NOTE).toMatch(/15-minute slots/);
     expect(STRANDED_MEASURE_NOTE).toMatch(/pieces themselves/);
     expect(STRANDED_MEASURE_NOTE).toMatch(/do not subtract/);
-    const ui = readFileSync(join(process.cwd(), "components", "admin", "BenchRoomsLive.tsx"), "utf8");
+    const ui = readFileSync(join(process.cwd(), "components", "admin", "bench-live", "BenchRoomDrawer.tsx"), "utf8");
     expect(ui).toMatch(/STRANDED_MEASURE_NOTE/);
   });
 });
@@ -579,7 +579,7 @@ describe("§4 — what this build was not allowed to change", () => {
   });
 
   it("green still means working — a finished day is not green", () => {
-    const ui = code("components", "admin", "BenchRoomsLive.tsx");
+    const ui = code("components", "admin", "bench-live", "BenchFleetGrid.tsx");
     // Grey, from shades the palette actually defines.
     expect(ui).toMatch(/FINISHED_PILL = "bg-even-ink-100 text-even-ink-600"/);
   });
