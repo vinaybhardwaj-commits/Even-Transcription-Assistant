@@ -71,7 +71,15 @@ export type Encounter = {
   /** Unjudged time inside the interval, holes in the probe series included. */
   unjudged_ms: number;
   longest_unjudged_run_ms: number;
-  /** The part of unjudged_ms the gate attributed to a dead mic. */
+  /**
+   * The part of unjudged_ms the gate attributed to a dead mic. **0 at the default constants**, and not
+   * by accident: a dead mic closes an open encounter and discards a pending run, and the gap a
+   * non_speech close leaves (EXIT_NON_SPEECH_PROBES hops) is exactly filled by the non_speech probes
+   * that caused it, so no dead-mic probe fits in a merged span either. Lower `exit` and the gap opens:
+   * with { exit: 1 } a dead mic between two runs lands inside the merged interval and is counted here
+   * (ETA-Refuter, 23 Sep, measured both ways). The constants are provisional, so this is a live field,
+   * not dead code.
+   */
   dead_mic_ms: number;
   doctor_present: { yes: number; no: number; unknown: number };
   /**
@@ -114,12 +122,23 @@ export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encou
 
   for (let i = 0; i < ps.length; i++) {
     const p = ps[i], v = p.verdict;
-    if (state === "open") {
-      // the recorder stopping closes it, before this probe is read at all
-      if (tapeOffBetween(ps[lastSpeech].t, p.t)) close("tape_off");
+    // A BREAK IS JUDGED BEFORE THE STATE. The bridge limit, a tape-off and a dead mic apply to a run
+    // that has not opened yet just as much as to an open encounter (ETA-Refuter, 23 Sep: guarding
+    // these on `state === "open"` let a single speech probe bridge 16.7 hours, because `pending` is
+    // reset only by non_speech and production almost never produces one — every probe reads active
+    // against the floor, so an empty room returns unjudged, not non_speech). A pending run has no
+    // encounter to close, so it is DISCARDED; the probe that broke it may start a new run below.
+    if (state !== "idle") {
+      const broken: Encounter["closed_by"] | null =
+        tapeOffBetween(ps[lastSpeech].t, p.t) ? "tape_off"
+          : p.reason === "dead_mic" ? "dead_mic"
+            : lastJudged >= 0 && p.t - ps[lastJudged].t > bridge ? "unjudged_gap"
+              : null;
+      if (broken) {
+        if (state === "open") close(broken);
+        else { state = "idle"; enterCount = 0; first = -1; lastSpeech = -1; lastJudged = -1; }
+      }
     }
-    if (state === "open" && p.reason === "dead_mic") { close("dead_mic"); continue; }
-    if (state === "open" && lastJudged >= 0 && p.t - ps[lastJudged].t > bridge) close("unjudged_gap");
     if (v === "unjudged") continue;                 // never counts, never resets, never closes by itself
     if (state === "idle") {
       if (v === "speech") { state = "pending"; enterCount = 1; first = i; lastSpeech = i; lastJudged = i; if (enterCount >= enter) state = "open"; }

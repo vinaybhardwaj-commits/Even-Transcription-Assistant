@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  gateProbe, energyHalf, transcriptHalf, uniqueCharsPerSecond, normaliseLine, covers, splitWindowText,
+  gateProbe, energyHalf, transcriptHalf, uniqueCharsPerSecond, normaliseLine, covers, splitWindowText, dbfs,
   UNIQUE_CHARS_PER_SECOND_MIN, ENERGY_ACTIVE_MIN, DEAD_MIC_ZERO_RATIO, DEAD_MIC_DBFS, GATE_VERSION,
   type EnergyEvidence, type TranscriptEvidence,
 } from "@/lib/encounter-clock/gate";
@@ -84,11 +84,14 @@ describe("E-2 energy half — dead mic and the active boundary", () => {
     expect(energyHalf(frames([at, at, at])).state).toBe("dead_mic");
     expect(energyHalf(frames([at * 1.2, at * 1.2, at * 1.2])).state).toBe("quiet");
   });
-  it(`active at exactly ${ENERGY_ACTIVE_MIN} of frames at or above the floor; quiet just below`, () => {
-    const n = 100, k = Math.round(ENERGY_ACTIVE_MIN * n);
+  it("active at exactly 5 of 100 frames at or above the floor; quiet at 4 — the VALUE is pinned, not just the comparison", () => {
+    // Hard-coded on purpose: a fixture computed from ENERGY_ACTIVE_MIN moves with the constant, so it
+    // could never catch 0.05 becoming 0.5 (ETA-Refuter, 22 Sep). This constant decides skip-vs-extract.
+    expect(ENERGY_ACTIVE_MIN).toBe(0.05);
+    const n = 100;
     const mk = (hot: number) => frames([...Array(hot).fill(DEFAULT_ROOM_ENERGY_FLOOR), ...Array(n - hot).fill(0.0005)]);
-    expect(energyHalf(mk(k)).state).toBe("active");
-    expect(energyHalf(mk(k - 1)).state).toBe("quiet");
+    expect(energyHalf(mk(5)).state).toBe("active");
+    expect(energyHalf(mk(4)).state).toBe("quiet");
   });
   it("uses the production floor by default and a room's own floor when given", () => {
     const e = frames(Array(100).fill(0.005));
@@ -96,9 +99,14 @@ describe("E-2 energy half — dead mic and the active boundary", () => {
     expect(energyHalf(e, 0.01).state).toBe("quiet");              // a louder room's floor
   });
   it("scales are never mixed: if any sample lacks avg, every sample in the probe is read by peak", () => {
+    // lvl() gives every sample peak 0.5 and the named avg. Reading avg where it exists and peak where
+    // it does not would leave the label and the count untouched, so assert the NUMBERS: all three
+    // samples must be the peak 0.5, never a mix of 0.5 and 0.02 (ETA-Refuter, 22 Sep).
     const r = energyHalf({ kind: "levels", samples: [lvl(null), lvl(0.02), lvl(0.02)] });
     expect(r.level_basis).toBe("peak");
     expect(r.n).toBe(3);
+    expect(r.median_dbfs).toBeCloseTo(dbfs(0.5), 9);              // a mixed read medians on 0.02, not 0.5
+    expect(r.active_frac).toBe(1);
   });
   it("avg is read when every sample has one", () => {
     expect(energyHalf({ kind: "levels", samples: [lvl(0.02), lvl(0.02)] }).level_basis).toBe("avg");
