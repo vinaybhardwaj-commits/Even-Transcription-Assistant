@@ -122,6 +122,7 @@ export async function runWhisperProbe(opts: {
     form.append("temperature", "0.0");
     form.append("beam_size", "1");
     form.append("best_of", "1");
+    form.append("max_context", "0");
 
     const res = await doFetch(`${base}/inference`, { method: "POST", body: form, signal: ac.signal });
     const elapsed_ms = now() - started;
