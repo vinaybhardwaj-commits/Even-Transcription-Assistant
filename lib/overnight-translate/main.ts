@@ -25,14 +25,19 @@ import { join } from "node:path";
 import { sql } from "@/lib/db";
 import { makeStore, type SqlTag } from "./select";
 import { makeDoor } from "./door";
-import { runOvernight, ACTOR, DEFAULT_MAX_FAILED_JOBS, type Deps } from "./driver";
+import { runOvernight, ACTOR, DEFAULT_MAX_FAILED_JOBS, DEFAULT_CONCURRENCY, type Deps } from "./driver";
 import { DEFAULT_PRESSURE_FILE, gateDecision, readLastLine, freeDiskGb } from "./gate";
 
 export const DEFAULT_APP_URL = "https://www.evenscribe.app";
 
 export type Parsed =
-  | { ok: true; mode: "run" | "dry-run"; limit: number; fixtures: string[] }
+  | { ok: true; mode: "run" | "dry-run"; limit: number; fixtures: string[]; concurrency: number }
   | { ok: false; code: string };
+
+/** Above this, a typo in the env var (or an over-eager hand) could overrun the router's own ETA_MAX_INFLIGHT=3
+ *  by enough to matter; the order that asked for concurrency named 3 specifically. A generous but finite ceiling. */
+export const MAX_CONCURRENCY = 10;
+export const CONCURRENCY_ENV = "ETA_OVERNIGHT_CONCURRENCY";
 
 /** PURE — argv + env → options, or a closed refusal code. */
 export function parseArgs(argv: readonly string[], env: Record<string, string | undefined>): Parsed {
@@ -48,7 +53,16 @@ export function parseArgs(argv: readonly string[], env: Record<string, string | 
   const raw = arg("--fixtures") ?? env.OVERNIGHT_FIXTURE_ROOM_DAYS ?? "";
   const fixtures = raw.split(",").map((x) => x.trim()).filter(Boolean);
   for (const f of fixtures) if (!/^rd_[A-Za-z0-9_]{1,60}$/.test(f)) return { ok: false, code: "bad_fixture_id" };
-  return { ok: true, mode, limit, fixtures };
+  // ETA_OVERNIGHT_CONCURRENCY — Fable's order of 22 Sep 2026, 07:00. Unset/empty means exactly today's
+  // behaviour (DEFAULT_CONCURRENCY, 1); anything present must be a whole number in [1, MAX_CONCURRENCY].
+  const concRaw = env[CONCURRENCY_ENV];
+  let concurrency = DEFAULT_CONCURRENCY;
+  if (concRaw !== undefined && concRaw.trim() !== "") {
+    const n = Number(concRaw);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CONCURRENCY) return { ok: false, code: "bad_concurrency" };
+    concurrency = n;
+  }
+  return { ok: true, mode, limit, fixtures, concurrency };
 }
 
 /** PURE — is this base URL the canonical host? Refuses the apex, which redirects and drops the bearer. */
@@ -110,9 +124,9 @@ export async function main(argv: string[], env: Record<string, string | undefine
   process.on("SIGTERM", onTerm);
   process.on("SIGINT", onInt);
 
-  log({ event: "start", mode: p.mode, pid: process.pid, fixtures: p.fixtures.length, limit: p.limit > 0 ? p.limit : null });
+  log({ event: "start", mode: p.mode, pid: process.pid, fixtures: p.fixtures.length, limit: p.limit > 0 ? p.limit : null, concurrency: p.concurrency });
   try {
-    const s = await runOvernight(deps, p.mode, p.limit, ac.signal);
+    const s = await runOvernight(deps, p.mode, p.limit, ac.signal, p.concurrency);
     return s.fatal ? 2 : 0;
   } finally {
     // A function that returns must not leave process-wide handlers behind (a test host would inherit them).

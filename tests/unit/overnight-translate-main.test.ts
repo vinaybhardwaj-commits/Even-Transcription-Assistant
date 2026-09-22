@@ -13,7 +13,8 @@ vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray) => { dbCalls.push(strings.raw.join("?").replace(/\s+/g, " ").trim()); return []; },
 }));
 
-import { parseArgs, originProblem, main, DEFAULT_APP_URL } from "@/lib/overnight-translate/main";
+import { parseArgs, originProblem, main, DEFAULT_APP_URL, CONCURRENCY_ENV, MAX_CONCURRENCY } from "@/lib/overnight-translate/main";
+import { DEFAULT_CONCURRENCY } from "@/lib/overnight-translate/driver";
 
 let errors: string[];
 let logs: string[];
@@ -25,8 +26,8 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("parseArgs", () => {
-  it("defaults to run mode, no limit, no fixtures", () => {
-    expect(parseArgs([], {})).toEqual({ ok: true, mode: "run", limit: 0, fixtures: [] });
+  it("defaults to run mode, no limit, no fixtures, concurrency 1", () => {
+    expect(parseArgs([], {})).toEqual({ ok: true, mode: "run", limit: 0, fixtures: [], concurrency: DEFAULT_CONCURRENCY });
   });
   it("reads fixtures from the flag, or from OVERNIGHT_FIXTURE_ROOM_DAYS — never from source", () => {
     expect(parseArgs(["--fixtures", "rd_a, rd_b"], {})).toMatchObject({ ok: true, fixtures: ["rd_a", "rd_b"] });
@@ -52,6 +53,27 @@ describe("parseArgs", () => {
     expect(parseArgs(["--limit", "1.5"], {})).toEqual({ ok: false, code: "bad_limit" });
     expect(parseArgs(["--limit", "-1"], {})).toEqual({ ok: false, code: "bad_limit" });
     expect(parseArgs(["--limit", "10"], {})).toMatchObject({ ok: true, limit: 10 });
+  });
+});
+
+describe("ETA_OVERNIGHT_CONCURRENCY (Fable's order, 22 Sep 2026 07:00)", () => {
+  it("is DEFAULT_CONCURRENCY (1) when unset or empty — exactly today's behaviour", () => {
+    expect(CONCURRENCY_ENV).toBe("ETA_OVERNIGHT_CONCURRENCY");
+    expect(parseArgs([], {})).toMatchObject({ concurrency: DEFAULT_CONCURRENCY });
+    expect(parseArgs([], { ETA_OVERNIGHT_CONCURRENCY: "" })).toMatchObject({ concurrency: DEFAULT_CONCURRENCY });
+    expect(parseArgs([], { ETA_OVERNIGHT_CONCURRENCY: "  " })).toMatchObject({ concurrency: DEFAULT_CONCURRENCY });
+  });
+  it("reads a whole number from the env, e.g. 3 (what the router's own ETA_MAX_INFLIGHT allows)", () => {
+    expect(parseArgs([], { ETA_OVERNIGHT_CONCURRENCY: "3" })).toMatchObject({ ok: true, concurrency: 3 });
+    expect(parseArgs([], { ETA_OVERNIGHT_CONCURRENCY: String(MAX_CONCURRENCY) })).toMatchObject({ ok: true, concurrency: MAX_CONCURRENCY });
+  });
+  it("refuses anything not a whole number in [1, MAX_CONCURRENCY] — never silently clamped or coerced", () => {
+    for (const bad of ["0", "-1", "1.5", "abc", String(MAX_CONCURRENCY + 1), "1e2", "Infinity", "NaN"]) {
+      expect(parseArgs([], { ETA_OVERNIGHT_CONCURRENCY: bad }), bad).toEqual({ ok: false, code: "bad_concurrency" });
+    }
+  });
+  it("there is no --flag form, only the env — matches the order's naming and keeps the CLI surface small", () => {
+    expect(parseArgs(["--concurrency", "3"], {})).toMatchObject({ concurrency: DEFAULT_CONCURRENCY });
   });
 });
 
