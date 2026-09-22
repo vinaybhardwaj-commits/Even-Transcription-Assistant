@@ -98,7 +98,7 @@ export type PendingCommand = { id: string; kind: CommandKind; args: unknown; cre
 // Kiosk side — poll + ack
 // ---------------------------------------------------------------------------
 
-export type MicLevels = { peak: number; avg: number | null; zeroRatio: number | null };
+export type MicLevels = { peak: number; avg: number | null; zeroRatio?: number };
 
 export type PollInput = {
   roomId: string;
@@ -138,7 +138,7 @@ export function cleanLevels(v: unknown): MicLevels | null {
   if (peak === null || (o.avg != null && avg === null) || (o.zero_ratio != null && zeroRatio === null)) {
     return null;
   }
-  return { peak, avg, zeroRatio };
+  return { peak, avg, ...(zeroRatio === null ? {} : { zeroRatio }) };
 }
 
 export type PollResult =

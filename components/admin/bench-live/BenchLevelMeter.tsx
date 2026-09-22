@@ -6,7 +6,7 @@ import type { Levels } from "@/components/admin/bench-live/types";
 const DIGITAL_SILENCE_ZERO_RATIO = 0.98;
 
 export function isDigitalSilence(
-  levels: Levels,
+  levels: Levels | undefined,
   reportedSilence = false,
 ): boolean {
   return reportedSilence

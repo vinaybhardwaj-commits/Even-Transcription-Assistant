@@ -24,6 +24,7 @@ vi.mock("@/lib/db", () => {
 import {
   ackCommand,
   classifyBusError,
+  cleanLevels,
   COMMAND_EXPIRY_SECONDS,
   decideStart,
   getListener,
@@ -124,6 +125,45 @@ describe("pollCommands — poll lifecycle", () => {
     const r = await pollCommands({ roomId: "room_1", tabId: "tab_A", prevPollAt: secondsAgo(10), recordingSessionId: null, paused: true });
     expect(r.superseded).toBe(false);
     expect(findCall(/INSERT INTO bench_listener/)!.values).toContain(true); // paused flag stored
+  });
+
+  it("appends a PHI-free IST-day sample when a measured level arrives", async () => {
+    responder = () => [];
+    await pollCommands({
+      roomId: "room_1",
+      tabId: "tab_A",
+      prevPollAt: null,
+      recordingSessionId: "bs_live",
+      paused: false,
+      mic: { peak: 0.42, avg: 0.12, zeroRatio: 0.07 },
+    });
+    const append = findCall(/INSERT INTO bench_level_sample/);
+    expect(append).toBeTruthy();
+    expect(append!.text).toContain("AT TIME ZONE 'Asia/Kolkata'");
+    expect(append!.values).toEqual([
+      "room_1",
+      0.42,
+      0.12,
+      0.07,
+      true,
+      true,
+    ]);
+  });
+});
+
+describe("cleanLevels", () => {
+  it("accepts peak-only native heartbeats and optional zero ratio", () => {
+    expect(cleanLevels({ peak: 0.4, zero_ratio: 0.98 })).toEqual({
+      peak: 0.4,
+      avg: null,
+      zeroRatio: 0.98,
+    });
+  });
+
+  it("rejects missing or out-of-range peaks instead of inventing silence", () => {
+    expect(cleanLevels({})).toBeNull();
+    expect(cleanLevels({ peak: 2, avg: 0.1 })).toBeNull();
+    expect(cleanLevels({ peak: 0.1, zero_ratio: -1 })).toBeNull();
   });
 });
 
