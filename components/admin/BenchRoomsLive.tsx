@@ -30,13 +30,11 @@ import * as React from "react";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
-  roomState,
   ENDED_DISAGREES_TITLE,
   ENDED_DISAGREES_HINT,
   NO_DAY_TITLE,
   NO_DAY_FIX,
   type RoomState,
-  type RoomStateView,
 } from "@/lib/bench-bus-constants";
 // The lane words, the stranded-audio reasons and the measurement warning come from the same
 // pure module the server renders them with and the MCP door reports them from (§3.6). Safe in a
@@ -45,19 +43,32 @@ import {
   STRANDED_MEASURE_NOTE,
   STRANDED_WAITING,
   WAITING_PHRASE,
-  roomOperationalAlerts,
 } from "@/lib/room-facts";
 import { BenchAttentionList } from "@/components/admin/bench-live/BenchAttentionList";
+import { BenchCommandTransport } from "@/components/admin/bench-live/BenchCommandTransport";
 import { BenchDangerZone } from "@/components/admin/bench-live/BenchDangerZone";
 import { BenchDaySummary } from "@/components/admin/bench-live/BenchDaySummary";
+import { BenchRoomFocus } from "@/components/admin/bench-live/BenchRoomFocus";
+import {
+  ageMs,
+  BenchRoomVitals,
+  BenchRoomStatusChips,
+  fmtAge,
+  fmtMinutes,
+} from "@/components/admin/bench-live/BenchRoomVitals";
 import { RoomCard } from "@/components/admin/bench-live/RoomCard";
+import { roomPresentation } from "@/components/admin/bench-live/roomPresentation";
+import {
+  resolveRoomQuery,
+  roomSelectionUrl,
+} from "@/components/admin/bench-live/roomSelection";
 import { useBenchLivePolling } from "@/components/admin/bench-live/useBenchLivePolling";
 import type {
   Attention,
+  CommandOutcome,
   LaneLevel,
   LaneView,
   Level,
-  Levels,
   ListenerRowView,
   RoomLive,
 } from "@/components/admin/bench-live/types";
@@ -128,73 +139,13 @@ type RunOutcome = {
  */
 const CONFIRM_STOP_MS = 10_000;
 
-/**
- * A4 — WHY START IS OFF, as a sentence the operator can read without a mouse.
- *
- * iOS Safari never renders a `title`, and this was the only place the rule was written down, so
- * on a tablet a disabled Start button simply looked broken. Each branch names the CAUSE and the
- * FIX, because "not ready" alone sends someone to the wrong room.
- *
- * Returns null when start IS available — the caller renders nothing at all then.
- */
-export function startBlockedReason(st: RoomStateView): string | null {
-  // D30 SPLIT THIS QUESTION IN TWO. `finished` outranks `ready`, so "is the state ready" is no
-  // longer the same question as "would a start work". The view answers the second one directly;
-  // asking it here is what keeps the seventh state's own hint — press start to record again —
-  // from being contradicted by a greyed-out button two lines below it.
-  if (st.start_available) return null;
-  switch (st.state) {
-    case "ready":
-      return null;
-    case "finished":
-      // The day is over AND no kiosk page is listening. The state stays `finished`, because why
-      // the page is quiet stopped being the operator's question when the day was ended on
-      // purpose — but the button cannot pretend, so this says what to do before pressing it.
-      return "This day is finished. To record again, open the room page on the clinic Mac — no kiosk page is listening in this room right now.";
-    case "recording":
-      return "Start is off because this room is already recording. Use stop to end the day first.";
-    case "paused":
-      return "Start is off because this room is paused for consent. Use resume, not start.";
-    case "dropped":
-      return "Start is off because the kiosk page stopped responding. Reopen the room page on the clinic Mac.";
-    case "offline":
-      return "Start is off because no kiosk page is open in this room. Open the room page on the clinic Mac.";
-    case "cant_tell":
-      return "Start is off because the kiosk state could not be read just now. It will offer itself when the next poll succeeds.";
-    default:
-      return "Start is off until the kiosk is listening and the room is neither recording nor paused.";
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Presentation helpers — pure
 // ---------------------------------------------------------------------------
 
-/** m:ss up to an hour, then h:mm. Ages are read at a glance, never parsed. */
-export function fmtAge(ms: number | null): string {
-  if (ms === null || !Number.isFinite(ms) || ms < 0) return "—";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
-}
-
-const ageMs = (iso: string | null, nowMs: number): number | null => {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? Math.max(0, nowMs - t) : null;
-};
-
 /** BenchClient's classes, reused verbatim so the two tables read as one surface. */
 const PILL = "inline-block px-2 py-0.5 rounded-full text-caption font-semibold";
 
-/**
- * A3 — one class for every room-card control, so a sixth button cannot be added at 20px.
- * min-h-11/min-w-11 is 2.75rem = 44px, the iOS/WCAG touch minimum, in BOTH directions.
- */
-const CTRL_BTN =
-  "min-h-11 min-w-11 px-4 py-2 rounded-lg text-label bg-even-ink-100 hover:bg-even-ink-200 active:bg-even-ink-200 disabled:opacity-40 disabled:cursor-not-allowed";
 const LEVEL_CLASS: Record<Level, string> = {
   ok: "bg-success-100 text-success-700",
   amber: "bg-warning-100 text-warning-700",
@@ -296,79 +247,6 @@ function laneWithPending(view: LaneView, pendingOn: boolean | undefined): LaneVi
   return pendingOn ? { level: "off", state: "On, nothing to do", enabled: true } : { level: "off", state: "Off", enabled: false };
 }
 
-/**
- * §2.2 — THE LEVEL BAR. One per microphone THAT ACTUALLY EXISTS on that rig (D32).
- *
- * TWO MARKS, NOT ONE, because they answer different questions. The filled bar is the AVERAGE
- * since the last report — how much of the interval had sound in it — and the tick is the PEAK,
- * which says somebody spoke at all. A single instantaneous reading would be neither: an analyser
- * sample is about eleven milliseconds of audio, shorter than the pause between two words, so a
- * snapshot reads zero on a room in full conversation.
- *
- * RMS IS LOGARITHMIC TO THE EAR AND LINEAR IN THE DATA. Speech sits between roughly 0.02 and 0.2,
- * so a linear bar would leave every real room in the leftmost tenth and look broken. The square
- * root spreads that range across most of the bar, which is what makes it readable at a glance
- * while walking — the only way this is ever looked at.
- *
- * NULL DRAWS NOTHING AT ALL. Not an empty bar, not a grey placeholder: an unmeasured microphone
- * is not a silent one, and a room with one microphone must say nothing whatsoever about a spare.
- */
-function LevelBar({ label, levels }: { label: string; levels: Levels }) {
-  if (!levels) return null;
-  const scale = (v: number) => Math.max(0, Math.min(1, Math.sqrt(Math.max(0, Math.min(1, v)) / 0.3)));
-  const avg = scale(levels.avg);
-  const peak = scale(levels.peak);
-  // Grey until something is actually heard, then green: GREEN MEANS WORKING on this screen, and
-  // a microphone in a silent room is not working, it is waiting.
-  const heard = levels.peak > 0.0015;
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-caption text-even-ink-500 w-[70px] shrink-0">{label}</span>
-      <span
-        className="relative flex-1 h-2 rounded-full bg-even-ink-100 overflow-hidden"
-        role="meter"
-        aria-label={`${label} level`}
-        aria-valuenow={Math.round(levels.avg * 100)}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        <span
-          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ${heard ? "bg-success-500" : "bg-even-ink-200"}`}
-          style={{ width: `${Math.round(avg * 100)}%` }}
-        />
-        {/* the peak, as a tick rather than a second fill: it is a moment, not a duration */}
-        <span
-          className="absolute inset-y-0 w-0.5 bg-even-navy-800/60"
-          style={{ left: `calc(${Math.round(peak * 100)}% - 1px)` }}
-        />
-      </span>
-    </div>
-  );
-}
-
-/** Minutes, never money (R11). There is deliberately no code path here that could render one. */
-function fmtMinutes(ms: number): string {
-  const m = Math.round((Number(ms) || 0) / 60_000);
-  if (m < 60) return `${m} m`;
-  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} m`;
-}
-
-type CommandOutcome = {
-  commandId?: string;
-  kind: string;
-  state: "queued" | "acked" | "timeout" | "failed" | "conflict";
-  detail: string;
-  at: number;
-};
-
-const COMMAND_LABEL: Record<string, string> = {
-  start_day: "Start",
-  pause_day: "Pause",
-  resume_day: "Resume",
-  end_day: "Stop",
-  close_orphan: "Close abandoned session",
-};
-
 // ---------------------------------------------------------------------------
 // The attention list — pure, and tested
 // ---------------------------------------------------------------------------
@@ -388,20 +266,13 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     const name = r.room.name;
     const l = listeners.get(r.room.id);
 
-    const operational = roomOperationalAlerts({
-      recording: r.recording,
-      kioskListening: listenersKnown ? Boolean(l?.listening) : null,
-      stalled: r.stalled,
-      stalledAgeMs: r.stalled_age_ms,
-      activeMicAlert: r.active_mic_alert ?? null,
-      tapeWithoutCues: r.tape_without_cues ?? null,
-      pausedDisagrees: listenersKnown && l ? l.paused !== r.paused_session : null,
-    });
+    const operational = roomPresentation(r, l, listenersKnown, nowMs).operational;
     for (const alert of operational) {
       out.push({
         roomId: r.room.id,
         room: name,
         severity: alert.severity,
+        rank: alert.severity === "red" ? 0 : 1,
         title: alert.label,
         detail: alert.code === "kiosk_not_listening" && l
           ? `${alert.detail} The room page last polled ${fmtAge(l.age_ms)} ago.`
@@ -417,6 +288,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: "red",
+        rank: 0,
         title: ENDED_DISAGREES_TITLE,
         detail: `${r.ended_disagrees_chunks} piece${r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was marked ended ${fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago — ${ENDED_DISAGREES_HINT}`,
       });
@@ -432,6 +304,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: "red",
+        rank: 0,
         title: "the main microphone is producing pieces that are not audio",
         detail: "two full-length pieces in a row came back a fraction of this microphone's usual size while the meter could hear the room. Go to the room and check the microphone.",
       });
@@ -448,6 +321,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: "amber",
+        rank: 1,
         title: "a recording's stored end time is later than its last piece",
         detail: `${n === 1 ? "one recording says" : `${n} recordings say`} they ran on after the last audio arrived. The audio is safe and complete — it is the end time on the record that is wrong.`,
       });
@@ -457,6 +331,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: r.mic_level,
+        rank: 0,
         title: r.mic_level === "red" ? "no audio uploading" : "audio slowing down",
         detail: `last piece ${fmtAge(ageMs(r.last_piece_at, nowMs))} ago`,
       });
@@ -470,6 +345,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: r.doctor_clock_level,
+        rank: 2,
         title: `no clock from this doctor for ${fmtAge(r.doctor_clock_silent_ms)}`,
         // NEVER "warehouse silent". This vital cannot see the room.
         detail: "another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty",
@@ -484,6 +360,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: "amber",
+        rank: 2,
         title: NO_DAY_TITLE,
         detail: `${n} piece${n === 1 ? "" : "s"} of audio recorded and safe, but this room has no day record for today, so none of it can be turned into words yet. ${NO_DAY_FIX}`,
       });
@@ -503,6 +380,7 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
         roomId: r.room.id,
         room: name,
         severity: "amber",
+        rank: 3,
         title: `transcript ${WAITING_PHRASE} — the audio is safe`,
         detail: `${bits.join(", ")}. Nothing is lost: the audio is saved and stays until somebody runs it. No pass is scheduled — each one is started by hand.`,
       });
@@ -512,13 +390,13 @@ export function attentionItems(rooms: readonly RoomLive[], listeners: ReadonlyMa
     // every session. Most rooms have one microphone and that is normal. Removed, not softened:
     // the field is still computed and still on the wire for Build 2, and nothing renders it.
     if (r.marks_not_sent > 0) {
-      out.push({ roomId: r.room.id, room: name, severity: "amber", title: `${r.marks_not_sent} mark${r.marks_not_sent === 1 ? "" : "s"} did not reach the brain`, detail: "the kiosk recorded the press but the cue never landed" });
+      out.push({ roomId: r.room.id, room: name, severity: "amber", rank: 2, title: `${r.marks_not_sent} mark${r.marks_not_sent === 1 ? "" : "s"} did not reach the brain`, detail: "the kiosk recorded the press but the cue never landed" });
     }
     if (r.last_window_complete === false) {
-      out.push({ roomId: r.room.id, room: name, severity: "amber", title: "a transcription window did not finish", detail: `asked ${fmtAge(ageMs(r.last_window_asked_at, nowMs))} ago and rolled back — re-run it` });
+      out.push({ roomId: r.room.id, room: name, severity: "amber", rank: 2, title: "a transcription request did not finish", detail: `asked ${fmtAge(ageMs(r.last_window_asked_at, nowMs))} ago and rolled back — re-run it` });
     }
   }
-  return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "red" ? -1 : 1));
+  return out.sort((a, b) => a.rank - b.rank);
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +446,7 @@ export function BenchRoomsLive() {
   const [confirmRun, setConfirmRun] = React.useState<string | null>(null);
   const [runningWaiting, setRunningWaiting] = React.useState<string | null>(null);
   const [runResult, setRunResult] = React.useState<Record<string, { drained: RunOutcome[]; remaining: number }>>({});
+  const [invalidRoom, setInvalidRoom] = React.useState<string | null>(null);
 
   // B4 — an armed Stop disarms itself. Re-armed by a second tap; cleared on unmount.
   React.useEffect(() => {
@@ -602,6 +481,18 @@ export function BenchRoomsLive() {
     : rooms;
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const deepLinkApplied = React.useRef(false);
+  const selectedRoomData = rooms.find((room) => room.room.id === selectedId) ?? null;
+  const selectedListener = selectedRoomData
+    ? listenerMap.get(selectedRoomData.room.id)
+    : undefined;
+  const selectedPresentation = selectedRoomData
+    ? roomPresentation(
+        selectedRoomData,
+        selectedListener,
+        listenersKnown,
+        nowMs,
+      )
+    : null;
 
   React.useEffect(() => {
     if (busCommands.length === 0) return;
@@ -643,21 +534,26 @@ export function BenchRoomsLive() {
 
   const chooseRoom = React.useCallback((room: RoomLive["room"]) => {
     selectedRoom.choose(room.id);
-    const url = new URL(window.location.href);
-    url.searchParams.set("room", room.slug || room.id);
-    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    setInvalidRoom(null);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      roomSelectionUrl(window.location.href, room),
+    );
   }, []);
 
   React.useEffect(() => {
     if (deepLinkApplied.current || rooms.length === 0) return;
     deepLinkApplied.current = true;
-    const wanted = new URL(window.location.href).searchParams.get("room");
-    if (!wanted) return;
-    const room = rooms.find((r) => r.room.id === wanted || r.room.slug === wanted);
-    if (!room) return;
-    selectedRoom.choose(room.room.id);
+    const result = resolveRoomQuery(rooms, window.location.search);
+    if (result.kind === "none") return;
+    if (result.kind === "invalid") {
+      setInvalidRoom(result.value);
+      return;
+    }
+    selectedRoom.choose(result.room.room.id);
     globalThis.setTimeout(() => {
-      document.getElementById(`bench-room-${room.room.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      document.getElementById(`bench-room-${result.room.room.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 0);
   }, [rooms]);
 
@@ -961,7 +857,32 @@ export function BenchRoomsLive() {
       {rollup?.degraded?.length ? <p className="text-caption text-warning-700">degraded: {rollup.degraded.join(" · ")}</p> : null}
       {listeners?.degraded?.length ? <p className="text-caption text-warning-700">kiosk state unknown: {listeners.degraded.join(" · ")}</p> : null}
 
-      <BenchAttentionList items={attention} hasRooms={rooms.length > 0} />
+      <BenchAttentionList
+        items={attention}
+        hasRooms={rooms.length > 0}
+        onSelect={(roomId) => {
+          const room = rooms.find((candidate) => candidate.room.id === roomId);
+          if (room) chooseRoom(room.room);
+        }}
+      />
+
+      <BenchRoomFocus
+        room={selectedRoomData}
+        listener={selectedListener}
+        presentation={selectedPresentation}
+        outcome={selectedRoomData ? commandOutcomes[selectedRoomData.room.id] : undefined}
+        confirmingStop={Boolean(selectedRoomData && confirmStop === selectedRoomData.room.id)}
+        invalidRoom={invalidRoom}
+        nowMs={nowMs}
+        thresholds={thresholds}
+        confirmWindowSeconds={CONFIRM_STOP_MS / 1000}
+        onArmStop={() => {
+          if (selectedRoomData) setConfirmStop(selectedRoomData.room.id);
+        }}
+        onSend={(kind) => {
+          if (selectedRoomData) void send(selectedRoomData.room.id, kind);
+        }}
+      />
 
       <div className="flex flex-wrap items-center gap-2" aria-label="Fleet filters">
         <span className="text-caption font-semibold text-even-ink-500">Show</span>
@@ -988,42 +909,11 @@ export function BenchRoomsLive() {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {visibleRooms.map((r) => {
           const l = listenerMap.get(r.room.id);
-          const st = roomState({
-            listenerReadFailed: !listenersKnown,
-            listener: l ? { last_poll_at: l.last_poll_at, paused: l.paused } : null,
-            pausedSession: r.paused_session,
-            recording: r.recording,
-            recordingSince: r.session_started_at,
-            nowMs,
-            // D30 — a day that was ended on purpose is not a kiosk that vanished by accident.
-            lastSessionEnded: Boolean(r.last_session_ended),
-            recordedMsToday: r.audio_recorded_ms ?? null,
-          });
-          const operational = roomOperationalAlerts({
-            recording: r.recording,
-            kioskListening: listenersKnown ? Boolean(l?.listening) : null,
-            stalled: r.stalled,
-            stalledAgeMs: r.stalled_age_ms,
-            activeMicAlert: r.active_mic_alert ?? null,
-            tapeWithoutCues: r.tape_without_cues ?? null,
-            pausedDisagrees: listenersKnown && l ? l.paused !== r.paused_session : null,
-          });
-          // The card's edge carries the WORST condition on it. `backup_reads_no_chunks` is no
-          // longer one of them (D32): most rooms have one microphone, so it promoted almost
-          // every card to amber for the whole of every session and said nothing true about any
-          // of them. The doctor clock can only reach amber or red where a genuine cue exists,
-          // which since §3.1 it almost never does.
-          const worst: Level = operational.some((a) => a.severity === "red") || r.ended_disagrees || r.stalled || st.level === "red" || r.mic_level === "red" || r.doctor_clock_level === "red" || Boolean(r.recording && r.mic_size?.proven_dead_by_size)
-            ? "red"
-            : operational.some((a) => a.severity === "amber") || st.level === "amber" || r.mic_level === "amber" || r.doctor_clock_level === "amber" || r.ended_at_lies || r.marks_not_sent > 0
-              ? "amber"
-              : st.level === "unknown" ? "unknown" : "ok";
-          // K5 A2 — the deadlock condition, computed from the two facts the page already has.
-          // A kiosk "claims" this session only if it is polling FRESH and naming THIS session;
-          // null, a different id, or a stale poll all mean the session has been abandoned.
-          const kioskClaimsThis = Boolean(l && l.listening && l.recording_session_id === r.session_id);
-          const orphaned = listenersKnown && (r.recording || r.paused_session) && !kioskClaimsThis;
-          const canReachKiosk = !listenersKnown || Boolean(l?.listening);
+          const presentation = roomPresentation(r, l, listenersKnown, nowMs);
+          const st = presentation.state;
+          const operational = presentation.operational;
+          const orphaned = presentation.orphaned;
+          const canReachKiosk = presentation.canReachKiosk;
           const isSelected = selectedId === r.room.id;
           return (
             // B3 — this WAS a <button> with five more <button>s inside it, which is invalid
@@ -1035,7 +925,7 @@ export function BenchRoomsLive() {
               key={r.room.id}
               id={r.room.id}
               name={r.room.name}
-              level={worst}
+              level={presentation.worst}
               selected={isSelected}
               onSelect={() => chooseRoom(r.room)}
             >
@@ -1053,34 +943,12 @@ export function BenchRoomsLive() {
 
               <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
               {st.hint ? <p className="text-caption text-even-ink-500">{st.hint}</p> : null}
-              {operational.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-1.5" aria-label={`${r.room.name} operational alerts`}>
-                  {operational.map((alert) => (
-                    <Pill key={alert.code} level={alert.severity} title={alert.detail}>
-                      {alert.label}
-                    </Pill>
-                  ))}
-                </div>
-              ) : null}
-              {commandOutcomes[r.room.id] ? (
-                <div
-                  className={`mt-3 rounded-lg border px-3 py-2 ${
-                    commandOutcomes[r.room.id]!.state === "acked"
-                      ? "border-success-500/40 bg-success-100"
-                      : commandOutcomes[r.room.id]!.state === "queued"
-                        ? "border-even-blue-100 bg-even-blue-50"
-                        : "border-warning-200 bg-warning-50"
-                  }`}
-                  data-testid="command-outcome"
-                  aria-live="polite"
-                >
-                  <p className="text-caption font-semibold text-even-navy-800">
-                    Last command · {COMMAND_LABEL[commandOutcomes[r.room.id]!.kind] ?? commandOutcomes[r.room.id]!.kind} ·{" "}
-                    {commandOutcomes[r.room.id]!.state === "acked" ? "acknowledged" : commandOutcomes[r.room.id]!.state}
-                  </p>
-                  <p className="text-caption text-even-ink-600">{commandOutcomes[r.room.id]!.detail}</p>
-                </div>
-              ) : null}
+              <BenchRoomStatusChips
+                roomName={r.room.name}
+                operational={operational}
+                syncUnknown={presentation.hostCloudDesync === null}
+                listener={l}
+              />
 
               {/* THE THREE LANES (PRD R4/R5/R6). Tape has no switch — recording is started and
                   stopped by the buttons below, as it always was. Only the two processing lanes
@@ -1232,258 +1100,28 @@ export function BenchRoomsLive() {
                 </div>
               ) : null}
 
-              <dl className="mt-3 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  {/* A4 — "on the UPLOAD clock, 0–5 min is healthy" used to live only in the
-                      pill's title, which iOS never renders, so the number had no units. */}
-                  <dt className="text-caption text-even-ink-500">
-                    Main mic{" "}
-                    <span className="text-even-ink-400">
-                      · newest piece, 0–5 min is healthy
-                      {thresholds ? ` · amber at ${Math.round(thresholds.mic_amber_ms / 60_000)} min, red at ${Math.round(thresholds.mic_red_ms / 60_000)}` : ""}
-                    </span>
-                  </dt>
-                  <dd>
-                    {/* READY CLAIMS NOTHING ABOUT THE MICROPHONES. Before a session starts there
-                        are no chunks, so mic health is unknown by construction — the mockup's
-                        "both mics seen" was not buildable and is not built. */}
-                    {st.state === "ready" || (!r.recording && r.last_piece_at === null) ? (
-                      <span className="text-caption text-even-ink-400">no tape yet</span>
-                    ) : (
-                      // §3.5 — THE MAIN MICROPHONE'S OWN AGE. Both per-source instants have
-                      // been on the wire since this screen shipped and only the NEWER OF THE TWO
-                      // was ever shown, so a main mic that had stopped an hour ago read healthy
-                      // for as long as the spare kept uploading. The lamp still follows either
-                      // mic — that rule is Build 2's and is untouched — but the number beside it
-                      // now names which microphone it belongs to.
-                      <Pill level={r.mic_level} title="the lamp follows the newest piece on EITHER mic, on the UPLOAD clock — a healthy mic cycles 0–5 min">
-                        {r.last_primary_at ? fmtAge(ageMs(r.last_primary_at, nowMs)) : r.recording ? "no piece yet" : "—"}
-                      </Pill>
-                    )}
-                  </dd>
-                </div>
+              <BenchRoomVitals
+                room={r}
+                listener={l}
+                state={st}
+                operational={operational}
+                syncUnknown={presentation.hostCloudDesync === null}
+                nowMs={nowMs}
+                thresholds={thresholds}
+                showStatus={false}
+              />
 
-                {/* ── §2.2 THE LEVEL BARS ────────────────────────────────────────────────
-                    One per microphone THAT EXISTS on this rig. A room with one microphone shows
-                    ONE bar and says nothing at all about a spare (D32) — most rooms have one, and
-                    a grey "no spare" placeholder would make the normal case look degraded. The
-                    spare's bar appears only where a second device has actually recorded. */}
-                {l?.mic ? (
-                  <div className="pt-1 space-y-1.5">
-                    <LevelBar label="Main mic" levels={l.mic} />
-                    {r.spare_exists && l.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
-                  </div>
-                ) : null}
-
-                {/* ── §2.3 THE SIZE VITAL, beside freshness and never instead of it ───────────
-                    Freshness says audio is ARRIVING. This says what arrives is actually audio.
-                    Cardiology's spare wrote full-length pieces at a sixty-eighth of the main's
-                    rate and nothing on this page could show it.
-
-                    RENDERED ONLY WHEN IT HAS SOMETHING TO SAY. `unknown` — too few pieces to have
-                    learned a baseline, or pieces carrying no measurements — renders nothing at
-                    all, because a vital that cannot be computed must read as absent rather than
-                    as healthy. */}
-                {r.mic_size && r.mic_size.newest !== "unknown" ? (
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-caption text-even-ink-500">
-                      Piece size <span className="text-even-ink-400">· against this room&rsquo;s own recent pieces</span>
-                    </dt>
-                    <dd>
-                      {r.mic_size.newest === "tiny" ? (
-                        <Pill level="amber" title="full-length pieces are coming back a fraction of this microphone's usual size">
-                          {r.mic_size.tiny_run > 1 ? `${r.mic_size.tiny_run} pieces tiny` : "tiny"}
-                        </Pill>
-                      ) : (
-                        <Pill level="ok" title="pieces are the size this microphone usually produces">normal here</Pill>
-                      )}
-                    </dd>
-                  </div>
-                ) : null}
-                {r.spare_exists && r.spare_size && r.spare_size.newest === "tiny" ? (
-                  <p className="text-caption text-warning-700 leading-snug">
-                    The spare microphone is recording pieces a fraction of its usual size. The main
-                    microphone is unaffected and is still the source of record.
-                  </p>
-                ) : null}
-
-                {/* §3.1 — THE ROW RENDERS ONLY WHERE THERE IS A CLOCK TO SHOW.
-                    Nothing in production writes a warehouse clock event; the only writer is a
-                    script somebody runs by hand. The screen used to fall back to the time
-                    RECORDING STARTED when no cue existed, so the number displayed was the length
-                    of the recording wearing a clock gap's label — every room amber at fifteen
-                    minutes and red at thirty, every day, one of the four alarms that fired on
-                    healthy behaviour. The fallback is deleted and the row is gone with it. The
-                    vital, its label and its thresholds are untouched: it returns the day
-                    something feeds it. */}
-                {r.has_doctor_clock ? (
-                  <>
-                    <div className="flex items-center justify-between gap-2">
-                      <dt className="text-caption text-even-ink-500" title="Pulse clocks from the LABELLED doctor only. The warehouse holds no room.">
-                        This doctor
-                        {thresholds ? <span className="text-even-ink-400"> · amber at {Math.round(thresholds.doctor_clock_amber_ms / 60_000)} min</span> : null}
-                      </dt>
-                      <dd>
-                        {r.doctor_clock_silent_ms === null ? (
-                          <span className="text-caption text-even-ink-400">—</span>
-                        ) : (
-                          <Pill
-                            level={r.doctor_clock_level}
-                            title="Pulse clocks from the LABELLED doctor only. Another doctor may be in this room and seeing patients — the warehouse holds no room, so this cannot tell you the room is empty."
-                          >
-                            {fmtAge(r.doctor_clock_silent_ms)}
-                          </Pill>
-                        )}
-                      </dd>
-                    </div>
-                    {/* A4 — THE MISREADING THIS PREVENTS is the one that turned a busy morning
-                        into an apparent six-hour blackout on 19 August. It lived only in a
-                        `title`, which is exactly nowhere on the iPad this screen targets. Shown
-                        only when the vital is actually complaining, so a healthy card stays
-                        short. */}
-                    {r.doctor_clock_level === "amber" || r.doctor_clock_level === "red" ? (
-                      <p className="text-caption text-even-ink-500 leading-snug">
-                        A gap here means the labelled doctor has not clocked — not that the room is
-                        empty. Another doctor may be in it seeing patients.
-                      </p>
-                    ) : null}
-                  </>
-                ) : null}
-
-                <div className="flex items-center justify-between gap-2">
-                  <dt className="text-caption text-even-ink-500">Marks</dt>
-                  <dd className="text-caption text-even-navy-800">
-                    {r.marks_today}
-                    {/* §3.5 — WHEN, not just how many. The instant was already on the wire and
-                        thrown away, and "3 marks" without a time cannot answer the only question
-                        an operator asks about it: is this room still being marked? */}
-                    {r.last_mark_at ? <span className="text-even-ink-400"> · last {fmtAge(ageMs(r.last_mark_at, nowMs))} ago</span> : null}
-                    {r.marks_not_sent > 0 ? <span className={`${PILL} ${LEVEL_CLASS.amber} ml-1.5`}>{r.marks_not_sent} not sent</span> : null}
-                  </dd>
-                </div>
-
-                {/* §3.5 — PIECES FROM A SPARE, AS A NUMBER. Rendered only where a spare has
-                    actually recorded something (D32): most rooms have one microphone and a room
-                    with one microphone says NOTHING about a spare — no empty lane, no grey
-                    placeholder, no amber vital. The old "backup mic reads no chunks" row fired on
-                    every single-mic room for the whole of every session. */}
-                {r.spare_exists && r.backup_chunks_today > 0 ? (
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-caption text-even-ink-500">Spare mic</dt>
-                    <dd className="text-caption text-even-navy-800">
-                      {r.backup_chunks_today} piece{r.backup_chunks_today === 1 ? "" : "s"} today
-                      {r.last_backup_at ? <span className="text-even-ink-400"> · newest {fmtAge(ageMs(r.last_backup_at, nowMs))} ago</span> : null}
-                    </dd>
-                  </div>
-                ) : null}
-
-                {/* §3.5 — MINUTES TURNED INTO WORDS, PER ROOM. Computed per room since this
-                    screen shipped and only ever shown as an all-rooms total. */}
-                {r.transcript_counts.words_ms > 0 ? (
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-caption text-even-ink-500">Turned into words</dt>
-                    <dd className="text-caption text-even-navy-800">{fmtMinutes(r.transcript_counts.words_ms)}</dd>
-                  </div>
-                ) : null}
-
-                {r.last_window_complete === false ? (
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-caption text-even-ink-500">Transcription</dt>
-                    <dd><Pill level="amber" title="the turns were rolled back — re-run this window">window did not finish</Pill></dd>
-                  </div>
-                ) : null}
-                {r.last_window_complete === false ? (
-                  <p className="text-caption text-even-ink-500 leading-snug">
-                    The turns were rolled back, so that window holds nothing. Re-run it.
-                  </p>
-                ) : null}
-              </dl>
-
-              {/* Controls live inside the card but are not part of its click target.
-                  A3 — every one of these was `px-2 py-0.5 text-caption`, about 20px tall, which
-                  is under half the 44pt minimum and unhittable while walking. The TEXT grew from
-                  caption to label and the PADDING carries the rest; nothing was shrunk. */}
-              <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  disabled={!st.start_available}
-                  title={st.start_available ? "queue start_day" : startBlockedReason(st) ?? undefined}
-                  onClick={() => void send(r.room.id, "start_day")}
-                  className={CTRL_BTN}
-                >
-                  start
-                </button>
-                <button
-                  type="button"
-                  disabled={!r.recording || !canReachKiosk}
-                  title={!canReachKiosk ? "No kiosk is listening; pause would be queued into the dark." : undefined}
-                  onClick={() => void send(r.room.id, "pause_day")}
-                  className={CTRL_BTN}
-                >
-                  pause
-                </button>
-                <button
-                  type="button"
-                  disabled={st.state !== "paused" || !canReachKiosk}
-                  title={!canReachKiosk ? "No kiosk is listening; resume would be queued into the dark." : undefined}
-                  onClick={() => void send(r.room.id, "resume_day")}
-                  className={CTRL_BTN}
-                >
-                  resume
-                </button>
-                {/* TWO TAPS. Ending a day is not undoable from here — and since K3 the armed
-                    state also EXPIRES (B4), so a tablet in a pocket is not one stray tap from
-                    ending a clinic. Armed is solid danger, not a tint, so it is unmistakable. */}
-                {confirmStop === r.room.id ? (
-                  <button
-                    type="button"
-                    disabled={!canReachKiosk}
-                    onClick={() => void send(r.room.id, "end_day")}
-                    className="min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-danger-500 text-even-white ring-2 ring-danger-700 ring-offset-1 hover:bg-danger-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    confirm stop
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={(!r.recording && !r.paused_session) || !canReachKiosk}
-                    title={!canReachKiosk ? "No kiosk is listening; stop would be queued into the dark." : undefined}
-                    onClick={() => setConfirmStop(r.room.id)}
-                    className={CTRL_BTN}
-                  >
-                    stop
-                  </button>
-                )}
-              </div>
-              {!canReachKiosk && (r.recording || r.paused_session) ? (
-                <p className="mt-2 text-caption font-semibold text-warning-700 leading-snug">
-                  Kiosk offline — pause, resume, and stop are disabled because they would be queued into the dark.
-                </p>
-              ) : null}
-
-              {/* A4 — THE LOAD-BEARING SENTENCE. This is the only place that says why Start is
-                  disabled, and it used to be a `title`, which iOS Safari never renders: on the
-                  iPad this screen now targets, a greyed Start had no explanation anywhere at
-                  all. It names the cause and the fix, and it is only rendered when Start is
-                  actually off. */}
-              {startBlockedReason(st) ? (
-                <p className="mt-2 text-caption text-even-ink-600 leading-snug">{startBlockedReason(st)}</p>
-              ) : null}
-              {/* §3.8 part 3 — THE CONTROL STATES ITS COST BEFORE IT IS USED, not afterwards on
-                  the room card. An operator can stop a room from here and, until Build 2's
-                  heartbeat is PROVEN on a clinic Mac, may not be able to start it again: stopping
-                  is what used to make a room stop listening, and on 24 August that cost one walk
-                  downstairs on three rooms out of three. A control that can be used but not undone
-                  from the same place is worse than no control, because it looks safe — so the
-                  second tap says what it will cost while there is still time not to take it. */}
-              {confirmStop === r.room.id ? (
-                <p className="mt-2 text-caption text-danger-700 leading-snug">
-                  Tap “confirm stop” to end this day. This disarms itself in {CONFIRM_STOP_MS / 1000} seconds.{" "}
-                  {l?.listening
-                    ? "This room is reporting itself, so start should be available again from here. If it goes quiet after stopping, it has to be restarted at the Mac in the room."
-                    : "This room is NOT reporting itself right now, so you will not be able to start it again from this screen — somebody has to open the room page on the Mac in that room."}
-                </p>
-              ) : null}
+              <BenchCommandTransport
+                room={r}
+                listener={l}
+                state={st}
+                canReachKiosk={canReachKiosk}
+                outcome={commandOutcomes[r.room.id]}
+                confirmingStop={confirmStop === r.room.id}
+                confirmWindowSeconds={CONFIRM_STOP_MS / 1000}
+                onArmStop={() => setConfirmStop(r.room.id)}
+                onSend={(kind) => void send(r.room.id, kind)}
+              />
 
               {/* ENDED DISAGREES — on the card as well as in the attention list, because the card
                   is what somebody is looking at when they click a room. No control: there is

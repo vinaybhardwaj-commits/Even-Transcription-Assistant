@@ -367,6 +367,7 @@ export type ActiveMicAlert = "device_missing" | "digital_silence" | "encoder_sta
 export type OperationalAlertCode =
   | ActiveMicAlert
   | "kiosk_not_listening"
+  | "host_cloud_desync"
   | "audio_upload_stalled"
   | "tape_without_cues"
   | "paused_disagrees";
@@ -376,6 +377,23 @@ export type OperationalAlert = {
   label: string;
   detail: string;
 };
+
+/**
+ * Compare the kiosk's claimed recording with the cloud's open session only while the kiosk is
+ * fresh. A failed listener read is unknown, and an offline kiosk is already its own tape-risk
+ * condition; neither is evidence of a second, invented desync.
+ */
+export function hostCloudDesync(input: {
+  listenerKnown: boolean;
+  kioskListening: boolean;
+  hostSessionId: string | null | undefined;
+  cloudSessionId: string | null;
+}): boolean | null {
+  if (!input.listenerKnown) return null;
+  if (!input.kioskListening) return false;
+  if (input.hostSessionId === undefined) return null;
+  return input.hostSessionId !== input.cloudSessionId;
+}
 
 /**
  * One vocabulary for tape-risk facts. Inputs are evidence assembled by each server-side reader;
@@ -389,6 +407,7 @@ export function roomOperationalAlerts(input: {
   activeMicAlert: ActiveMicAlert | null;
   tapeWithoutCues: boolean | null;
   pausedDisagrees?: boolean | null;
+  hostCloudDesync?: boolean | null;
 }): OperationalAlert[] {
   const out: OperationalAlert[] = [];
   if (input.recording && input.activeMicAlert === "device_missing") {
@@ -427,6 +446,14 @@ export function roomOperationalAlerts(input: {
       severity: "red",
       label: "Says recording, audio is being lost — no audio arriving",
       detail: `No piece has arrived from either microphone for ${fmtCoarse(input.stalledAgeMs ?? 0)}. Go to the room and check the recording host.`,
+    });
+  }
+  if (input.hostCloudDesync === true) {
+    out.push({
+      code: "host_cloud_desync",
+      severity: "red",
+      label: "Host and cloud recording disagree",
+      detail: "The kiosk and cloud name different open recordings. Check the room before changing recording state.",
     });
   }
   if (input.tapeWithoutCues === true) {
