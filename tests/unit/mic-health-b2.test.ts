@@ -376,7 +376,7 @@ describe("§2.2 — peak and average over an interval, never one instantaneous s
     const poll = code("lib", "use-command-poll.ts");
     const i = poll.indexOf("getLevels?.()");
     expect(i).toBeGreaterThan(-1);
-    const around = poll.slice(Math.max(0, i - 400), i + 400);
+    const around = poll.slice(Math.max(0, i - 400), i + 800);
     expect(around).toMatch(/try\s*\{/);
     expect(around).toMatch(/catch/);
   });

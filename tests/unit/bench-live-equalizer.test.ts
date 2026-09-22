@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isDigitalSilence } from "@/components/admin/BenchLevelMeter";
+import { isDigitalSilence } from "@/lib/bench-meter";
 import { isIsoDate } from "@/lib/bench-levels";
 
 describe("Bench Live Equalizer", () => {

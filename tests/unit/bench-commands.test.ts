@@ -137,7 +137,7 @@ describe("pollCommands — poll lifecycle", () => {
       spare: { peak: 0.4, avg: 0.1 },
     });
     let upsert = findCall(/INSERT INTO bench_listener/)!;
-    expect(upsert.values.slice(6, 8)).toEqual([null, null]);
+    expect(upsert.values.slice(7, 9)).toEqual([null, null]);
 
     calls.length = 0;
     responder = (text) => {
@@ -151,7 +151,7 @@ describe("pollCommands — poll lifecycle", () => {
       spare: { peak: 0.4, avg: 0.1 },
     });
     upsert = findCall(/INSERT INTO bench_listener/)!;
-    expect(upsert.values.slice(6, 8)).toEqual([0.4, 0.1]);
+    expect(upsert.values.slice(7, 9)).toEqual([0.4, 0.1]);
     expect(upsert.text).toMatch(/EXCLUDED\.spare_device IS FALSE THEN NULL/);
   });
 

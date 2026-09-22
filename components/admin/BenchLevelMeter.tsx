@@ -1,26 +1,7 @@
 "use client";
 
 import * as React from "react";
-
-export type BenchMeterLevels = {
-  peak: number;
-  avg: number;
-  zero_ratio?: number;
-};
-
-const DIGITAL_SILENCE_ZERO_RATIO = 0.98;
-
-export function isDigitalSilence(
-  levels: BenchMeterLevels | null | undefined,
-  reportedSilence = false,
-): boolean {
-  return reportedSilence
-    || Boolean(
-      levels
-      && typeof levels.zero_ratio === "number"
-      && levels.zero_ratio >= DIGITAL_SILENCE_ZERO_RATIO,
-    );
-}
+import type { BenchMeterLevels } from "@/lib/bench-meter";
 
 function scaledPeak(peak: number): number {
   return Math.max(0, Math.min(1, Math.sqrt(Math.max(0, peak) / 0.3)));

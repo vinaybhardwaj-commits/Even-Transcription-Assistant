@@ -27,7 +27,8 @@
  */
 
 import * as React from "react";
-import { BenchLevelMeter, isDigitalSilence } from "@/components/admin/BenchLevelMeter";
+import { BenchLevelMeter } from "@/components/admin/BenchLevelMeter";
+import { isDigitalSilence } from "@/lib/bench-meter";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
