@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 30 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep)
+## The surface: 31 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; segments, 22 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -62,6 +62,10 @@ The other 19 are listed exactly as before: `scribe_get_state`, `scribe_list_cues
 (19 Sep, bench-only Arm D) added two more ungrouped tools: `scribe_jev_window_run` (invoke; runs the
 `jev_window` job) and `scribe_jev_signals` (read; reads `jev_window_signal` rows for a room-day),
 bringing the total to 29.
+Plan §D (22 Sep) added one more ungrouped read tool, `scribe_diarize_segments`: speaker timings with
+no text for an encounter, a room window or a bench session, the same payload as
+`GET /api/diarize-segments`. It is listed on its own rather than as a `scribe_voice` view because a
+group member must appear in a committed live capture (`fixtures/mcp/`), and none exists for it yet.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app

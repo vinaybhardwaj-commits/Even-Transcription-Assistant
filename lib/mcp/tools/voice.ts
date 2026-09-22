@@ -19,7 +19,8 @@ import { query } from "@/lib/brain/db";
 import { findRoomDay, roomExists, readClustersForDay, CLUSTERING_STATUS } from "@/lib/brain/state";
 import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
-import { argBool, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
 
@@ -163,4 +164,31 @@ const getClusters: McpTool = {
     }),
 };
 
-export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters];
+const diarizeSegments: McpTool = {
+  name: "scribe_diarize_segments",
+  description:
+    "Speaker timings WITHOUT text for one phone encounter (encounter_id), one room window (window_id) or one bench session's diarized windows (session_id, limit): [{start_ms, end_ms, speaker_idx, speaker_label S0/S1…, source, overlap, confidence?}] plus per-speaker total_speech_ms and, only where the diarize service matched a voiceprint, matched_clinician_id. Labels are neutral indices, never roles or names. Same payload as GET /api/diarize-segments.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      encounter_id: { type: "string", description: "enc_… id" },
+      window_id: { type: "string", description: "bw_… id" },
+      session_id: { type: "string", description: "bs_… id" },
+      limit: { type: "integer", minimum: 1, maximum: SESSION_WINDOW_LIMIT_MAX, default: SESSION_WINDOW_LIMIT_DEFAULT },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ segments: null as unknown }, async () => {
+      const r = await lookupSegments({
+        encounter_id: argStr(args, "encounter_id", 64),
+        window_id: argStr(args, "window_id", 64),
+        session_id: argStr(args, "session_id", 64),
+        limit: argInt(args, "limit", SESSION_WINDOW_LIMIT_DEFAULT, 1, SESSION_WINDOW_LIMIT_MAX),
+      });
+      return r.ok ? { segments: r.payload } : { segments: null, error: r.error };
+    }),
+};
+
+export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments];
