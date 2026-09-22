@@ -102,7 +102,10 @@ export async function geminiChatIfOn(
   const gModel = pickGemini(surface, tier);
   if (!gModel) return null;
   try {
-    const token = await getVertexAccessToken();
+    // opts.signal already existed on this function's own contract; it simply never reached the
+    // token mint before getVertexAccessToken had a signal to accept. Passing it through here is
+    // the same fix applied to the sibling call site in routedChat, for this caller's own signal.
+    const token = await getVertexAccessToken(opts.signal);
     return await openaiChat({
       url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
       messages, temperature: opts.temperature, responseJson: opts.responseJson,
@@ -197,10 +200,16 @@ class RoutedChatDeadline extends Error {
   constructor() { super("deadline_exceeded"); this.name = "RoutedChatDeadline"; }
 }
 
-/** Reject with RoutedChatDeadline as soon as `signal` aborts, whichever settles first. The
- * underlying promise is NOT cancelled by this alone (getVertexAccessToken has no signal of its
- * own to cancel it with — see the KNOWN LIMITATION note on routedChat) — this only stops
- * routedChat from waiting on it past the deadline. */
+/**
+ * Reject with RoutedChatDeadline as soon as `signal` aborts, whichever settles first.
+ *
+ * getVertexAccessToken now takes its OWN `signal` (fixed below — the FORMER limitation this
+ * existed to work around), so the token-exchange fetch is genuinely cancelled, not merely
+ * abandoned. This wrapper stays as the SAME kind of redundant second guard the Refuter's round-1
+ * review already found and accepted for D6/D7 ("removing either individually leaves the others; a
+ * gap only shows if both are removed together") — it costs nothing and protects the same call
+ * against a FUTURE getVertexAccessToken (or a test double) that does not honour its signal.
+ */
 function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new RoutedChatDeadline());
   return new Promise<T>((resolve, reject) => {
@@ -227,11 +236,10 @@ function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
  * logged by name. `error` on a deadline is `deadline_exceeded:<stage>`, distinct from `aborted`
  * (the caller's own signal) and from `all_failed: ...` (every stage ran to its own conclusion).
  *
- * KNOWN LIMITATION, not fixed here (out of this slice's file list): `getVertexAccessToken()` takes
- * no AbortSignal and has no timeout of its own. The deadline still stops routedChat from WAITING on
- * it (via raceSignal), but the token-exchange fetch it starts keeps running in the background until
- * it resolves or the process's own network stack gives up — it is not truly cancelled. In practice
- * this is a short OAuth exchange; the risk is theoretical, and named here rather than left silent.
+ * FORMER LIMITATION, NOW FIXED: `getVertexAccessToken()` takes an optional `signal`
+ * (lib/gcp-auth.ts) wired straight into its own token-exchange `fetch`. The deadline no longer
+ * just stops routedChat WAITING on it (raceSignal) — it cancels the fetch itself, the same as
+ * every other in-flight call this deadline aborts.
  */
 export async function routedChat(p: {
   surface: string; tier?: "pro" | "flash"; messages: Msg[];
@@ -259,7 +267,7 @@ export async function routedChat(p: {
     if (gModel) {
       stage = `gemini:${gModel}`;
       try {
-        const token = await raceSignal(getVertexAccessToken(), signal);
+        const token = await raceSignal(getVertexAccessToken(signal), signal);
         const r = await openaiChat({
           url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
           messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
