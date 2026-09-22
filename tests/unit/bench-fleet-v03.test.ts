@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { attentionItems } from "@/components/admin/BenchRoomsLive";
 import {
+  clearRoomSelectionUrl,
   resolveRoomQuery,
   roomSelectionUrl,
 } from "@/components/admin/bench-live/roomSelection";
+import { sortFleetRooms } from "@/components/admin/bench-live/fleetOrdering";
 import type {
   ListenerRowView,
   RoomLive,
@@ -173,7 +175,7 @@ describe("Bench fleet v0.3 room focus query", () => {
     });
   });
 
-  it("writes the selected room into the URL and renders the focus panel", () => {
+  it("writes the selected room into the URL and renders the full drawer", () => {
     expect(
       roomSelectionUrl(
         "https://www.evenscribe.app/admin/bench?foo=1#fleet",
@@ -181,11 +183,50 @@ describe("Bench fleet v0.3 room focus query", () => {
       ),
     ).toBe("/admin/bench?foo=1&room=dietary#fleet");
     const source = readFileSync(
-      "components/admin/bench-live/BenchRoomFocus.tsx",
+      "components/admin/bench-live/BenchRoomDrawer.tsx",
       "utf8",
     );
-    expect(source).toContain('data-testid="room-focus-panel"');
-    expect(source).toContain("<BenchCommandTransport");
+    expect(source).toContain('data-testid="room-drawer"');
     expect(source).toContain("<BenchRoomVitals");
+  });
+
+  it("clears only the room parameter when the drawer closes", () => {
+    expect(
+      clearRoomSelectionUrl(
+        "https://www.evenscribe.app/admin/bench?foo=1&room=dietary#fleet",
+      ),
+    ).toBe("/admin/bench?foo=1#fleet");
+  });
+});
+
+describe("Bench fleet v1 contracts", () => {
+  it("orders tape-at-risk before desync, watch, and healthy rooms", () => {
+    const rooms = [
+      room({ room: { id: "healthy", slug: "healthy", name: "Healthy" } }),
+      room({ room: { id: "watch", slug: "watch", name: "Watch" } }),
+      room({ room: { id: "critical", slug: "critical", name: "Critical" } }),
+      room({ room: { id: "high", slug: "high", name: "High" } }),
+    ];
+    expect(sortFleetRooms(rooms, [
+      { roomId: "watch", room: "Watch", severity: "amber", rank: 2, title: "aging", detail: "aging" },
+      { roomId: "high", room: "High", severity: "amber", rank: 1, title: "desync", detail: "desync" },
+      { roomId: "critical", room: "Critical", severity: "red", rank: 0, title: "device missing", detail: "at risk" },
+    ]).map((item) => item.room.id)).toEqual([
+      "critical",
+      "high",
+      "watch",
+      "healthy",
+    ]);
+  });
+
+  it("keeps degraded-poll honesty and the full drawer in separate modules", () => {
+    const shell = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
+    const drawer = readFileSync("components/admin/bench-live/BenchRoomDrawer.tsx", "utf8");
+    const polling = readFileSync("components/admin/bench-live/useBenchLivePolling.ts", "utf8");
+    expect(shell).toContain('data-testid="poll-failure-banner"');
+    expect(shell).toContain('data-testid="bench-auth-gate"');
+    expect(drawer).toContain('data-testid="room-drawer"');
+    expect(drawer).toContain("Room facts last success");
+    expect(polling).toContain('"auth" | "network" | "server"');
   });
 });

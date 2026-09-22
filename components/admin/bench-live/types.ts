@@ -116,6 +116,17 @@ export type CommandOutcome = {
   at: number;
 };
 
+export type RunOutcome = {
+  window_id: string;
+  ok: boolean;
+  step: string;
+  engine?: string | null;
+  transcript_chars?: number | null;
+  cost_usd?: number | null;
+  sarvam_ms?: number | null;
+  audio_seconds?: number | null;
+};
+
 export type Attention = {
   roomId: string;
   room: string;

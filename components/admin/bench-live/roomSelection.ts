@@ -28,3 +28,9 @@ export function roomSelectionUrl(
   url.searchParams.set("room", room.slug || room.id);
   return `${url.pathname}${url.search}${url.hash}`;
 }
+
+export function clearRoomSelectionUrl(currentHref: string): string {
+  const url = new URL(currentHref);
+  url.searchParams.delete("room");
+  return `${url.pathname}${url.search}${url.hash}`;
+}

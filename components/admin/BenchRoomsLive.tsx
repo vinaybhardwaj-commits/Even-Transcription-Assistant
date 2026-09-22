@@ -34,29 +34,20 @@ import {
   ENDED_DISAGREES_HINT,
   NO_DAY_TITLE,
   NO_DAY_FIX,
-  type RoomState,
 } from "@/lib/bench-bus-constants";
-// The lane words, the stranded-audio reasons and the measurement warning come from the same
-// pure module the server renders them with and the MCP door reports them from (§3.6). Safe in a
-// browser bundle: lib/room-facts.ts imports lib/bench-bus-constants and nothing else.
-import {
-  STRANDED_MEASURE_NOTE,
-  STRANDED_WAITING,
-  WAITING_PHRASE,
-} from "@/lib/room-facts";
+// The lane words come from the same pure module the server renders them with and the MCP door
+// reports them from (§3.6). Safe in a browser bundle: lib/room-facts.ts imports
+// lib/bench-bus-constants and nothing else.
+import { WAITING_PHRASE } from "@/lib/room-facts";
 import { BenchAttentionList } from "@/components/admin/bench-live/BenchAttentionList";
-import { BenchCommandTransport } from "@/components/admin/bench-live/BenchCommandTransport";
+import { BenchCommandPanel } from "@/components/admin/bench-live/BenchCommandPanel";
 import { BenchDangerZone } from "@/components/admin/bench-live/BenchDangerZone";
 import { BenchDaySummary } from "@/components/admin/bench-live/BenchDaySummary";
-import { BenchRoomFocus } from "@/components/admin/bench-live/BenchRoomFocus";
-import {
-  ageMs,
-  BenchRoomVitals,
-  BenchRoomStatusChips,
-  fmtAge,
-  fmtMinutes,
-} from "@/components/admin/bench-live/BenchRoomVitals";
-import { RoomCard } from "@/components/admin/bench-live/RoomCard";
+import { BenchFleetGrid } from "@/components/admin/bench-live/BenchFleetGrid";
+import { sortFleetRooms } from "@/components/admin/bench-live/fleetOrdering";
+import { BenchRoomActions } from "@/components/admin/bench-live/BenchRoomActions";
+import { BenchRoomDrawer } from "@/components/admin/bench-live/BenchRoomDrawer";
+import { ageMs, fmtAge } from "@/components/admin/bench-live/BenchRoomVitals";
 import { roomPresentation } from "@/components/admin/bench-live/roomPresentation";
 import {
   resolveRoomQuery,
@@ -66,11 +57,9 @@ import { useBenchLivePolling } from "@/components/admin/bench-live/useBenchLiveP
 import type {
   Attention,
   CommandOutcome,
-  LaneLevel,
-  LaneView,
-  Level,
   ListenerRowView,
   RoomLive,
+  RunOutcome,
 } from "@/components/admin/bench-live/types";
 
 // ---------------------------------------------------------------------------
@@ -116,19 +105,6 @@ export function useSelectedRoom(): Selection {
 // Wire shapes (mirrors of the two routes)
 // ---------------------------------------------------------------------------
 
-/** §3.10 — one window's line in a run-waiting-audio report: what engine ran it, characters out,
- *  seconds taken, and what it cost. `step` names why a window did not run (flag_off, no_chunks…). */
-type RunOutcome = {
-  window_id: string;
-  ok: boolean;
-  step: string;
-  engine?: string | null;
-  transcript_chars?: number | null;
-  cost_usd?: number | null;
-  sarvam_ms?: number | null;
-  audio_seconds?: number | null;
-};
-
 /**
  * B4 — how long an armed Stop stays armed.
  *
@@ -138,114 +114,6 @@ type RunOutcome = {
  * tap and far shorter than a walk down a corridor.
  */
 const CONFIRM_STOP_MS = 10_000;
-
-// ---------------------------------------------------------------------------
-// Presentation helpers — pure
-// ---------------------------------------------------------------------------
-
-/** BenchClient's classes, reused verbatim so the two tables read as one surface. */
-const PILL = "inline-block px-2 py-0.5 rounded-full text-caption font-semibold";
-
-const LEVEL_CLASS: Record<Level, string> = {
-  ok: "bg-success-100 text-success-700",
-  amber: "bg-warning-100 text-warning-700",
-  red: "bg-danger-100 text-danger-700",
-  unknown: "bg-even-ink-100 text-even-ink-500",
-};
-
-function Pill({ level, children, title }: { level: Level; children: React.ReactNode; title?: string }) {
-  return <span className={`${PILL} ${LEVEL_CLASS[level]}`} title={title}>{children}</span>;
-}
-
-/** The chip word for each state. The full sentence is roomState()'s `label`. */
-const STATE_WORD: Record<RoomState, string> = {
-  cant_tell: "can't tell",
-  paused: "paused",
-  recording: "recording",
-  finished: "finished",
-  ready: "ready",
-  dropped: "dropped",
-  offline: "offline",
-};
-
-/**
- * D30 — FINISHED WEARS GREY, not green and never amber.
- *
- * Its level is `ok`, which is right for the card edge and for the worst-condition rollup: a
- * finished day is not a problem. But GREEN MEANS WORKING on this screen, and a day that is over
- * is not working — the same argument that makes a switched-on lane with nothing to do grey. Both
- * shades are defined in tailwind.config.ts; an undefined one would render as nothing at all and
- * has three times before.
- */
-const FINISHED_PILL = "bg-even-ink-100 text-even-ink-600";
-
-// ---------------------------------------------------------------------------
-// The three lanes — Tape, Transcript, Visits (PRD R4)
-// ---------------------------------------------------------------------------
-//
-// THE INTERFACE NEVER SAYS DRAIN, FUSE, WINDOW OR SUBJECT. Those are our words. A clinic manager
-// reads this while walking between rooms, and the three words on this card are the ones that will
-// end up in every conversation about this system from now on.
-
-const LED: Record<LaneLevel, string> = {
-  ok: "bg-success-500",
-  amber: "bg-warning-500",
-  red: "bg-danger-500",
-  off: "bg-even-ink-200",
-};
-
-/**
- * The switch. 52x30 as drawn in the approved mockup, inside a 44-point-tall tap target — the
- * visual and the target are different things, and only one of them is a design decision. This is
- * operated on a tablet by somebody walking.
- */
-function LaneSwitch({ on, busy, label, onToggle }: { on: boolean; busy: boolean; label: string; onToggle: () => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={busy}
-      onClick={(e) => { e.stopPropagation(); onToggle(); }}
-      className="flex items-center justify-center h-11 min-w-11 px-0 shrink-0 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-even-blue-400 rounded-lg"
-    >
-      <span className={`relative block w-[52px] h-[30px] rounded-full transition-colors ${on ? "bg-success-500" : "bg-even-ink-200"}`}>
-        <span className={`absolute top-[3px] w-6 h-6 rounded-full bg-even-white shadow transition-all ${on ? "left-[25px]" : "left-[3px]"}`} />
-      </span>
-    </button>
-  );
-}
-
-function Lane({ name, view, sw }: { name: string; view: LaneView; sw?: React.ReactNode }) {
-  return (
-    <div className="py-1.5">
-      <div className="flex items-center gap-2.5">
-        <i className={`w-2.5 h-2.5 rounded-full shrink-0 ${LED[view.level]}`} aria-hidden />
-        <span className="text-caption font-semibold text-even-navy-800 w-[74px] shrink-0">{name}</span>
-        <span className="text-caption text-even-ink-600 leading-snug flex-1 min-w-0">{view.state}</span>
-        {sw}
-      </div>
-      {/* WHAT TO DO, under the state that needs it. A lane only carries a note when there is an
-          action, so a healthy card stays as short as it was. */}
-      {view.note ? (
-        <p className="mt-1 ml-[22px] mr-[62px] text-caption font-semibold text-warning-700 leading-snug">
-          {view.note}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * While a switch write is in flight the lamp must not keep claiming the old truth. An optimistic
- * ON has nothing to show yet, so it reads "On, nothing to do" in grey — never green. Green means
- * working, and nothing has worked yet.
- */
-function laneWithPending(view: LaneView, pendingOn: boolean | undefined): LaneView {
-  if (pendingOn === undefined || pendingOn === view.enabled) return view;
-  return pendingOn ? { level: "off", state: "On, nothing to do", enabled: true } : { level: "off", state: "Off", enabled: false };
-}
 
 // ---------------------------------------------------------------------------
 // The attention list — pure, and tested
@@ -408,9 +276,11 @@ export function BenchRoomsLive() {
     listeners,
     rollup,
     busCommands,
-    error,
+    issues,
+    authFailed,
     busy,
-    lastFetchAt,
+    lastListenerSuccessAt,
+    lastRollupSuccessAt,
     fetchListeners,
     fetchRollup,
   } = useBenchLivePolling();
@@ -447,6 +317,7 @@ export function BenchRoomsLive() {
   const [runningWaiting, setRunningWaiting] = React.useState<string | null>(null);
   const [runResult, setRunResult] = React.useState<Record<string, { drained: RunOutcome[]; remaining: number }>>({});
   const [invalidRoom, setInvalidRoom] = React.useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
 
   // B4 — an armed Stop disarms itself. Re-armed by a second tap; cleared on unmount.
   React.useEffect(() => {
@@ -468,17 +339,30 @@ export function BenchRoomsLive() {
     for (const l of listeners?.listeners ?? []) m.set(l.room_id, l);
     return m;
   }, [listeners]);
-  const listenersKnown = Boolean(listeners) && !(listeners?.degraded?.length);
+  const listenersKnown =
+    Boolean(listeners)
+    && !(listeners?.degraded?.length)
+    && !issues.some((issue) => issue.source === "listeners");
   const rooms = React.useMemo(() => rollup?.rooms ?? [], [rollup?.rooms]);
   /** §3.5 — THE THRESHOLDS THEMSELVES, so a person can see that amber means seven minutes.
    *  They have been computed and sent on every poll since this screen shipped and rendered
    *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */
   const thresholds = rollup?.thresholds ?? null;
+  const pollDegraded =
+    issues.length > 0
+    || Boolean(rollup?.degraded?.length)
+    || Boolean(listeners?.degraded?.length)
+    || Boolean(lastRollupSuccessAt && nowMs - lastRollupSuccessAt > 45_000)
+    || Boolean(lastListenerSuccessAt && nowMs - lastListenerSuccessAt > 10_000);
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
   const attentionRoomIds = React.useMemo(() => new Set(attention.map((item) => item.roomId)), [attention]);
-  const visibleRooms = severityFilter === "attention"
+  const filteredRooms = severityFilter === "attention"
     ? rooms.filter((room) => attentionRoomIds.has(room.room.id))
     : rooms;
+  const visibleRooms = React.useMemo(
+    () => sortFleetRooms(filteredRooms, attention),
+    [filteredRooms, attention],
+  );
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const deepLinkApplied = React.useRef(false);
   const selectedRoomData = rooms.find((room) => room.room.id === selectedId) ?? null;
@@ -535,6 +419,7 @@ export function BenchRoomsLive() {
   const chooseRoom = React.useCallback((room: RoomLive["room"]) => {
     selectedRoom.choose(room.id);
     setInvalidRoom(null);
+    setDrawerOpen(true);
     window.history.replaceState(
       window.history.state,
       "",
@@ -552,10 +437,39 @@ export function BenchRoomsLive() {
       return;
     }
     selectedRoom.choose(result.room.room.id);
+    setDrawerOpen(true);
     globalThis.setTimeout(() => {
       document.getElementById(`bench-room-${result.room.room.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 0);
   }, [rooms]);
+
+  React.useEffect(() => {
+    if (rooms.length === 0) return;
+    const syncFromUrl = () => {
+      const result = resolveRoomQuery(rooms, window.location.search);
+      if (result.kind === "match") {
+        selectedRoom.choose(result.room.room.id);
+        setInvalidRoom(null);
+        setDrawerOpen(true);
+      } else {
+        setDrawerOpen(false);
+        setInvalidRoom(result.kind === "invalid" ? result.value : null);
+      }
+    };
+    globalThis.addEventListener("popstate", syncFromUrl);
+    return () => globalThis.removeEventListener("popstate", syncFromUrl);
+  }, [rooms]);
+
+  const closeDrawer = React.useCallback(() => {
+    setDrawerOpen(false);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("room");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, []);
 
   // DEFAULT SELECTION, first rule: the room that is RECORDING. `suggest` never overrides a click,
   // so this cannot fight the operator, and it outranks BenchClient's "most recent session" default
@@ -823,6 +737,24 @@ export function BenchRoomsLive() {
     }
   }, [fetchRollup]);
 
+  if (authFailed) {
+    return (
+      <section className="eta-card border-danger-200 p-6" role="alert" data-testid="bench-auth-gate">
+        <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-danger-700">Admin session required</p>
+        <h2 className="mt-1 text-heading text-even-navy-800">The fleet board is locked</h2>
+        <p className="mt-2 text-body text-even-ink-600">
+          Your admin session is missing or expired. Live facts and write controls are hidden until you sign in again.
+        </p>
+        <a
+          href="/admin"
+          className="mt-4 inline-flex min-h-11 items-center rounded-lg bg-even-navy-800 px-4 py-2 text-label font-semibold text-even-white"
+        >
+          Sign in again
+        </a>
+      </section>
+    );
+  }
+
   return (
     <section className="space-y-4 mb-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -840,7 +772,11 @@ export function BenchRoomsLive() {
             Archive &amp; room setup
           </a>
           {busy ? <span>Refreshing…</span> : null}
-          {lastFetchAt ? <span suppressHydrationWarning>updated {new Date(lastFetchAt).toLocaleTimeString()}</span> : null}
+          {lastRollupSuccessAt ? (
+            <span suppressHydrationWarning>
+              room facts {fmtAge(nowMs - lastRollupSuccessAt)} old
+            </span>
+          ) : null}
           <button
             type="button"
             onClick={() => { void fetchListeners(); void fetchRollup(); }}
@@ -852,7 +788,23 @@ export function BenchRoomsLive() {
         </div>
       </div>
 
-      {error ? <p className="text-caption text-danger-700">monitor read failed: {error} — showing the last good picture</p> : null}
+      {issues.length ? (
+        <div
+          className="rounded-lg border border-warning-200 bg-warning-50 px-3 py-2 text-caption text-warning-700"
+          role="status"
+          data-testid="poll-failure-banner"
+        >
+          Poll degraded · {issues.map((issue) => `${issue.source} ${issue.kind}: ${issue.message}`).join(" · ")}.
+          {" "}Showing the last-known picture
+          {lastRollupSuccessAt ? ` from ${fmtAge(nowMs - lastRollupSuccessAt)} ago` : ""}; write controls remain fact-gated.
+        </div>
+      ) : null}
+      {issues.length === 0 && pollDegraded ? (
+        <div className="rounded-lg border border-warning-200 bg-warning-50 px-3 py-2 text-caption text-warning-700" role="status">
+          Polls are late. Cards are dimmed because they show last-known facts
+          {lastRollupSuccessAt ? ` from ${fmtAge(nowMs - lastRollupSuccessAt)} ago` : ""}.
+        </div>
+      ) : null}
       {note ? <p className="text-caption text-even-ink-600">{note}</p> : null}
       {rollup?.degraded?.length ? <p className="text-caption text-warning-700">degraded: {rollup.degraded.join(" · ")}</p> : null}
       {listeners?.degraded?.length ? <p className="text-caption text-warning-700">kiosk state unknown: {listeners.degraded.join(" · ")}</p> : null}
@@ -866,23 +818,56 @@ export function BenchRoomsLive() {
         }}
       />
 
-      <BenchRoomFocus
+      {invalidRoom ? (
+        <p className="rounded-lg border border-warning-200 bg-warning-50 px-3 py-2 text-caption text-warning-700">
+          Room “{invalidRoom}” is not on this fleet. Choose a room card below.
+        </p>
+      ) : null}
+
+      <BenchRoomDrawer
+        open={drawerOpen}
         room={selectedRoomData}
         listener={selectedListener}
         presentation={selectedPresentation}
-        outcome={selectedRoomData ? commandOutcomes[selectedRoomData.room.id] : undefined}
-        confirmingStop={Boolean(selectedRoomData && confirmStop === selectedRoomData.room.id)}
-        invalidRoom={invalidRoom}
+        attention={selectedRoomData ? attention.filter((item) => item.roomId === selectedRoomData.room.id) : []}
         nowMs={nowMs}
+        factsAsOf={lastRollupSuccessAt}
+        listenerAsOf={lastListenerSuccessAt}
         thresholds={thresholds}
-        confirmWindowSeconds={CONFIRM_STOP_MS / 1000}
-        onArmStop={() => {
-          if (selectedRoomData) setConfirmStop(selectedRoomData.room.id);
-        }}
-        onSend={(kind) => {
-          if (selectedRoomData) void send(selectedRoomData.room.id, kind);
-        }}
-      />
+        onClose={closeDrawer}
+      >
+        {selectedRoomData && selectedPresentation ? (
+          <BenchCommandPanel
+            room={selectedRoomData}
+            listener={selectedListener}
+            state={selectedPresentation.state}
+            canReachKiosk={selectedPresentation.canReachKiosk}
+            outcome={commandOutcomes[selectedRoomData.room.id]}
+            history={busCommands.filter((command) => command.room_id === selectedRoomData.room.id)}
+            confirmingStop={confirmStop === selectedRoomData.room.id}
+            confirmWindowSeconds={CONFIRM_STOP_MS / 1000}
+            onArmStop={() => setConfirmStop(selectedRoomData.room.id)}
+            onSend={(kind) => void send(selectedRoomData.room.id, kind)}
+          >
+            <BenchRoomActions
+              room={selectedRoomData}
+              pending={pending}
+              switchError={switchError}
+              orphaned={selectedPresentation.orphaned}
+              confirmingOrphan={confirmOrphan === selectedRoomData.room.id}
+              confirmingRun={confirmRun === selectedRoomData.room.id}
+              runningWaiting={runningWaiting === selectedRoomData.room.id}
+              runResult={runResult[selectedRoomData.room.id]}
+              onSetLane={(lane, enabled) => void setLane(selectedRoomData.room.id, lane, enabled)}
+              onConfirmVisits={() => setConfirmVisits({ roomId: selectedRoomData.room.id, roomName: selectedRoomData.room.name })}
+              onArmOrphan={() => setConfirmOrphan(selectedRoomData.room.id)}
+              onCloseOrphan={() => void closeOrphan(selectedRoomData.room.id)}
+              onArmRun={() => setConfirmRun(selectedRoomData.room.id)}
+              onRunWaiting={() => void runWaiting(selectedRoomData.room.id)}
+            />
+          </BenchCommandPanel>
+        ) : null}
+      </BenchRoomDrawer>
 
       <div className="flex flex-wrap items-center gap-2" aria-label="Fleet filters">
         <span className="text-caption font-semibold text-even-ink-500">Show</span>
@@ -906,7 +891,39 @@ export function BenchRoomsLive() {
       {/* CARDS, not rows (E1). A table is for comparing rooms; the operator is not comparing,
           they are scanning for trouble — so the worst condition promotes the whole card and finds
           the eye without being read. Selecting a card reveals that room's recordings below. */}
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <BenchFleetGrid
+        rooms={visibleRooms}
+        listeners={listenerMap}
+        listenersKnown={listenersKnown}
+        selectedId={selectedId}
+        attention={attention}
+        outcomes={commandOutcomes}
+        nowMs={nowMs}
+        degraded={pollDegraded}
+        factsAsOf={lastRollupSuccessAt}
+        onSelect={chooseRoom}
+      />
+      {rollup && rooms.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-even-ink-200 bg-even-ink-50 p-6 text-center" data-testid="empty-fleet">
+          <h3 className="text-heading text-even-navy-800">No enabled rooms</h3>
+          <p className="mt-1 text-caption text-even-ink-600">
+            Create or enable a room in the archive workspace, then sign the clinic Mac into its room URL.
+          </p>
+          <a
+            href="/admin/bench/archive"
+            className="mt-3 inline-flex min-h-11 items-center rounded-lg bg-even-navy-800 px-4 py-2 text-label font-semibold text-even-white"
+          >
+            Open room setup
+          </a>
+        </div>
+      ) : rollup && visibleRooms.length === 0 ? (
+        <p className="rounded-lg bg-even-ink-50 px-3 py-4 text-caption text-even-ink-500">
+          No rooms match this filter.
+        </p>
+      ) : !rollup ? (
+        <p className="text-caption text-even-ink-400">Loading fleet facts…</p>
+      ) : null}
+      <div className="hidden">
         {visibleRooms.map((r) => {
           const l = listenerMap.get(r.room.id);
           const presentation = roomPresentation(r, l, listenersKnown, nowMs);
