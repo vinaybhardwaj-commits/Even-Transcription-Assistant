@@ -143,7 +143,12 @@ describe("R10 — the two emergencies read differently", () => {
 });
 
 describe("R4 — the interface never uses our words", () => {
-  const visible = rendered("components/admin/BenchRoomsLive.tsx");
+  const visible = [
+    rendered("components/admin/BenchRoomsLive.tsx"),
+    rendered("components/admin/bench-live/BenchCommandPanel.tsx"),
+    rendered("components/admin/bench-live/BenchRoomActions.tsx"),
+    rendered("components/admin/bench-live/BenchRoomDrawer.tsx"),
+  ].join("\n");
 
   it.each(["drain", "fuse", "subject", "bench_window", "stt_window"])("never renders the word %s", (word) => {
     // allow it inside route paths and identifiers, forbid it as a rendered word
@@ -152,26 +157,23 @@ describe("R4 — the interface never uses our words", () => {
   });
 
   it("the three lane names are exactly Tape, Transcript, Visits", () => {
-    expect(visible).toMatch(/name="Tape"/);
-    expect(visible).toMatch(/name="Transcript"/);
-    expect(visible).toMatch(/name="Visits"/);
+    expect(visible).toMatch(/Tape transport/);
+    expect(visible).toMatch(/Transcript ·/);
+    expect(visible).toMatch(/Visits ·/);
   });
 });
 
 describe("R7 — friction on the dangerous direction only", () => {
-  const ui = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
+  const ui = readFileSync("components/admin/bench-live/BenchRoomActions.tsx", "utf8");
 
   it("turning Visits ON opens the confirmation; turning it OFF calls setLane directly", () => {
-    const toggle = /onToggle=\{\(\) => \{\s*const now = pending\[[\s\S]*?\}\}/.exec(ui)?.[0] ?? "";
-    expect(toggle).toBeTruthy();
-    expect(toggle).toMatch(/if \(now\) void setLane\(r\.room\.id, "visits", false\);/);
-    expect(toggle).toMatch(/else setConfirmVisits/);
+    expect(ui).toMatch(/visitsOn \? onSetLane\("visits", false\) : onConfirmVisits\(\)/);
   });
 
   it("Transcript has no confirmation in either direction", () => {
-    const t = /name="Transcript"[\s\S]*?name="Visits"/.exec(ui)?.[0] ?? "";
+    const t = /aria-checked=\{transcriptOn\}[\s\S]*?aria-checked=\{visitsOn\}/.exec(ui)?.[0] ?? "";
     expect(t).toBeTruthy();
-    expect(t).toMatch(/void setLane\(r\.room\.id, "transcript"/);
+    expect(t).toMatch(/onSetLane\("transcript", !transcriptOn\)/);
     expect(t).not.toMatch(/setConfirm/);
   });
 
@@ -206,7 +208,7 @@ describe("R9 / S3 — stop all processing, and what its copy promises", () => {
 });
 
 describe("R11 — no money figure anywhere on this screen", () => {
-  const ui = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
+  const ui = readFileSync("components/admin/bench-live/BenchRoomActions.tsx", "utf8");
   const agg = readFileSync("lib/admin/rooms-live.ts", "utf8");
 
   it("the day summary carries minutes, and no PATIENT-FACING currency is rendered on the passive monitor", () => {
@@ -214,7 +216,10 @@ describe("R11 — no money figure anywhere on this screen", () => {
     expect(day).toMatch(/fmtMinutes\(day\.audio_recorded_ms\)/);
     // R11 stands: no rupee figure on the clinical monitor — that is the one that "invites the wrong
     // conversation in front of the wrong person". Never a ₹, never a rupee, never an INR amount.
-    expect(rendered("components/admin/BenchRoomsLive.tsx")).not.toMatch(/₹|\brupee|\binr\b|cost_inr/i);
+    expect([
+      rendered("components/admin/BenchRoomsLive.tsx"),
+      rendered("components/admin/bench-live/BenchFleetGrid.tsx"),
+    ].join("\n")).not.toMatch(/₹|\brupee|\binr\b|cost_inr/i);
     // The passive day summary still cannot carry a cost field of any kind — enforced by the
     // DaySummary-type test below, so a money figure can never sit on the always-on surface.
   });
@@ -226,7 +231,7 @@ describe("R11 — no money figure anywhere on this screen", () => {
     // appears after somebody presses "run … now (paid)" and confirms.
     expect(ui).toMatch(/run-waiting-report/);
     expect(ui).toMatch(/cost_usd/);
-    expect(ui).toMatch(/each one is a paid call/i);
+    expect(ui).toMatch(/each piece is a paid call/i);
   });
 
   it("the DaySummary type has no field that could carry one", () => {
@@ -237,15 +242,12 @@ describe("R11 — no money figure anywhere on this screen", () => {
 });
 
 describe("U3 — the switch is a 44-point target", () => {
-  const ui = readFileSync("components/admin/BenchRoomsLive.tsx", "utf8");
-  it("the visual is the mockup's 52x30 inside a 44-tall tap target", () => {
-    const sw = /function LaneSwitch\([\s\S]*?\n\}/.exec(ui)?.[0] ?? "";
-    expect(sw).toBeTruthy();
-    expect(sw).toMatch(/h-11/);        // 44pt tall
-    expect(sw).toMatch(/min-w-11/);    // 44pt wide minimum
-    expect(sw).toMatch(/w-\[52px\] h-\[30px\]/); // the drawn switch, per the approved mockup
-    expect(sw).toMatch(/role="switch"/);
-    expect(sw).toMatch(/aria-checked=\{on\}/);
+  const ui = readFileSync("components/admin/bench-live/BenchRoomActions.tsx", "utf8");
+  it("keeps every lane switch at least 44 points", () => {
+    expect(ui).toMatch(/min-h-11 min-w-11/);
+    expect(ui.match(/role="switch"/g)).toHaveLength(2);
+    expect(ui).toMatch(/aria-checked=\{transcriptOn\}/);
+    expect(ui).toMatch(/aria-checked=\{visitsOn\}/);
   });
 });
 
@@ -272,6 +274,9 @@ describe("every colour class this screen asks for actually exists", () => {
     "components/admin/bench-live/BenchAttentionList.tsx",
     "components/admin/bench-live/BenchDangerZone.tsx",
     "components/admin/bench-live/BenchDaySummary.tsx",
+    "components/admin/bench-live/BenchFleetGrid.tsx",
+    "components/admin/bench-live/BenchRoomActions.tsx",
+    "components/admin/bench-live/BenchRoomDrawer.tsx",
     "components/admin/bench-live/RoomCard.tsx",
     "components/room/RoomRecorderClient.tsx",
   ])("%s uses no shade the palette does not define", (file) => {

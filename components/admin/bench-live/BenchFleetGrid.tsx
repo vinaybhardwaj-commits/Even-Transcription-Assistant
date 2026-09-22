@@ -26,6 +26,7 @@ const STATE_WORD = {
   dropped: "dropped",
   offline: "offline",
 } as const;
+const FINISHED_PILL = "bg-even-ink-100 text-even-ink-600";
 
 export function BenchFleetGrid({
   rooms,
@@ -87,9 +88,15 @@ export function BenchFleetGrid({
                 <span className="text-[10px] font-bold text-even-ink-400" title="Severity band">
                   {band}
                 </span>
-                <StatusPill level={presentation.state.level}>
-                  {STATE_WORD[presentation.state.state]}
-                </StatusPill>
+                {presentation.state.state === "finished" ? (
+                  <span className={`inline-block rounded-full px-2 py-0.5 text-caption font-semibold ${FINISHED_PILL}`}>
+                    {STATE_WORD.finished}
+                  </span>
+                ) : (
+                  <StatusPill level={presentation.state.level}>
+                    {STATE_WORD[presentation.state.state]}
+                  </StatusPill>
+                )}
               </div>
             </div>
 

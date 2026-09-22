@@ -6,8 +6,10 @@ import {
   BenchRoomStatusChips,
   BenchRoomVitals,
   fmtAge,
+  fmtMinutes,
   StatusPill,
 } from "@/components/admin/bench-live/BenchRoomVitals";
+import { STRANDED_MEASURE_NOTE } from "@/lib/room-facts";
 import type { RoomPresentation } from "@/components/admin/bench-live/roomPresentation";
 import type {
   Attention,
@@ -145,6 +147,21 @@ export function BenchRoomDrawer({
             thresholds={thresholds}
             showStatus={false}
           />
+          {room.stranded && room.stranded.total_ms > 0 ? (
+            <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50 p-3" data-testid="stranded-audio">
+              <p className="text-caption text-even-navy-800">
+                <span className="font-semibold">{fmtMinutes(room.stranded.total_ms)}</span> of audio cannot currently be turned into words. It is recorded and safe.
+              </p>
+              <ul className="mt-1 space-y-0.5">
+                {room.stranded.reasons.map((reason) => (
+                  <li key={reason.reason} className="text-caption text-even-ink-600">
+                    {fmtMinutes(reason.ms)} · {reason.reason}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-caption text-even-ink-400">{STRANDED_MEASURE_NOTE}</p>
+            </div>
+          ) : null}
           <dl className="mt-3 space-y-1.5 border-t border-even-ink-100 pt-3">
             <div className="flex justify-between gap-3 text-caption">
               <dt className="text-even-ink-500">Room facts last success</dt>
