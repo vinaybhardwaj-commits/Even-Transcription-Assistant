@@ -12,8 +12,21 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const gcpMock = vi.hoisted(() => ({ getToken: async (): Promise<string> => "vertex-token-not-a-secret" }));
-vi.mock("@/lib/gcp-auth", () => ({ getVertexAccessToken: () => gcpMock.getToken() }));
+// ETA-Refuter, 23 Sep (routedchat-deadline r2 recheck): a zero-arity mock discards whatever
+// signal the caller passes, so no test through this mock could ever observe that routedChat and
+// geminiChatIfOn actually FORWARD their combined deadline signal into getVertexAccessToken(signal)
+// — lib/gcp-auth.ts's own handling of that signal is proven sound (gcp-auth-abort.test.ts), but the
+// JOIN between the two was untested. `lastSignal` records exactly what each call received.
+const gcpMock = vi.hoisted(() => ({
+  getToken: async (_signal?: AbortSignal): Promise<string> => "vertex-token-not-a-secret",
+  lastSignal: undefined as AbortSignal | undefined,
+}));
+vi.mock("@/lib/gcp-auth", () => ({
+  getVertexAccessToken: (signal?: AbortSignal) => {
+    gcpMock.lastSignal = signal;
+    return gcpMock.getToken(signal);
+  },
+}));
 
 const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
 const MSGS = [{ role: "system", content: "Reply with one word." }, { role: "user", content: "ok" }];
@@ -38,6 +51,7 @@ beforeEach(() => {
   hits = [];
   script = [];
   gcpMock.getToken = async () => "vertex-token-not-a-secret";
+  gcpMock.lastSignal = undefined;
   globalThis.fetch = (async (url: string, init: RequestInit) => {
     const signal = init.signal ?? undefined;
     hits.push({ url: String(url), signal });
@@ -166,7 +180,25 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     expect(r).toMatchObject({ ok: false, provider: "none" });
     expect(r.error).toMatch(/^deadline_exceeded:gemini:/);
     expect(hits).toEqual([]); // no fetch ever happened — it never got past the token
+    // THE JOIN (ETA-Refuter, 23 Sep): not just "getVertexAccessToken can be aborted" (proven
+    // separately, unmocked, in gcp-auth-abort.test.ts) but that routedChat actually PASSES a
+    // signal — and that it is the deadline's own live signal, not an inert or unrelated one: the
+    // exact object captured at call time has since transitioned to aborted.
+    expect(gcpMock.lastSignal).toBeInstanceOf(AbortSignal);
+    expect(gcpMock.lastSignal?.aborted).toBe(true);
   }, 5_000);
+
+  it("the join, on the happy path: a signal is passed even when the token call succeeds fast, and it is NOT aborted", async () => {
+    geminiOn();
+    script = [{ kind: "ok", content: "hi" }];
+    const { routedChat } = await router();
+    const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 30_000 });
+    expect(r.ok).toBe(true);
+    // Catches the mutant the Refuter named: dropping the argument at either call site
+    // (lib/llm/gemini.ts routedChat or geminiChatIfOn) leaves `gcpMock.lastSignal` undefined.
+    expect(gcpMock.lastSignal).toBeInstanceOf(AbortSignal);
+    expect(gcpMock.lastSignal?.aborted).toBe(false);
+  });
 
   it("a caller's own AbortSignal still works exactly as before: 'aborted', not 'deadline_exceeded'", async () => {
     script = [{ kind: "hang" }];
@@ -177,6 +209,19 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     const r = await p;
     expect(r).toMatchObject({ ok: false, error: "aborted", provider: "none" });
   }, 5_000);
+
+  it("the join at geminiChatIfOn's own call site too (ETA-Refuter, 23 Sep, the second named site)", async () => {
+    geminiOn();
+    script = [{ kind: "ok", content: "hi" }];
+    const { geminiChatIfOn } = await router();
+    const controller = new AbortController();
+    const r = await geminiChatIfOn("note", "flash", MSGS, { signal: controller.signal });
+    expect(r?.ok).toBe(true);
+    // geminiChatIfOn has no raceSignal of its own (only routedChat's deadline plumbing does) —
+    // this is the caller's OWN signal, passed straight through to getVertexAccessToken. Proves the
+    // fix applies at both named sites, not just the one routedChat exercises via the deadline.
+    expect(gcpMock.lastSignal).toBe(controller.signal);
+  });
 });
 
 describe("the DEFAULT deadline (no env override) after a REAL first-stage hang — the Refuter's missing test", () => {
