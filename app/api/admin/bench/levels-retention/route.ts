@@ -4,11 +4,14 @@
  * WHY (plan §2). The table grows ~850 KB/room-hour with no retention: at fleet scale that is
  * several GB a month with no cap. Raw rows are kept 7 IST days; nothing downsamples yet.
  *
- * NOT SCHEDULED YET, ON PURPOSE. This route is not in vercel.json's `crons` — Fable adds that
- * entry once this is refuted. Even if it is invoked manually, or later run by cron, an actual
- * DELETE only happens when `BENCH_LEVEL_RETENTION=on`; otherwise every call is a dry run
- * regardless of the `dryRun` flag, and says so (`forced_dry_run: true`). A `dryRun: true` request
- * is always a dry run, with or without the flag, so counts can be inspected before it is enabled.
+ * SCHEDULED, BUT SAFE UNTIL ENABLED (ETA-LEVEL-LOG-OPS-REFUTER-22-SEP-2026.md PASS). vercel.json
+ * now runs this hourly — sized to the fleet's growth (Refuter finding 1: a daily cron falls behind
+ * once past ~9-23 rooms posting continuously; hourly keeps one call's 250,000-row cap far ahead of
+ * any room's ~1,100 rows/hour). The schedule alone deletes nothing: an actual DELETE only happens
+ * when `BENCH_LEVEL_RETENTION=on`; otherwise every call is a dry run regardless of the `dryRun`
+ * flag, and says so (`forced_dry_run: true`). A `dryRun: true` request is always a dry run, with or
+ * without the flag. See GET /api/admin/bench/levels-retention/report for a per-room breakdown of
+ * what turning the flag on would delete, without ever touching a row.
  *
  * POST — Auth: Bearer MIGRATION_SECRET (manual) OR an admin cookie. Body: { dryRun?: boolean }.
  * GET  — Vercel Cron. Auth: the un-spoofable x-vercel-cron header, or Bearer CRON_SECRET if that
@@ -112,6 +115,13 @@ async function runRetention(dryRunRequested: boolean): Promise<RetentionResult> 
   };
 }
 
+/** Refuter finding 2: a successful run logged nothing; only failures did. A cron's JSON body is
+ * otherwise invisible anywhere. Logged at every outcome, including a forced dry run, so "the flag
+ * is off" is visible in the logs too, not just in the response body a cron caller never reads. */
+function logResult(source: "POST" | "GET", r: RetentionResult): void {
+  console.log(`[bench-levels-retention] ${source}`, JSON.stringify(r));
+}
+
 export async function POST(req: NextRequest) {
   if (!(await adminOrSecret(req))) return respondError("AUTH_REQUIRED", "Sign in required");
   let body: { dryRun?: unknown } = {};
@@ -122,7 +132,9 @@ export async function POST(req: NextRequest) {
   }
   const dryRun = body.dryRun === true;
   try {
-    return respondOk(await runRetention(dryRun));
+    const result = await runRetention(dryRun);
+    logResult("POST", result);
+    return respondOk(result);
   } catch (e) {
     console.warn("[bench-levels-retention] failed", JSON.stringify({ err: String((e as Error)?.message ?? e).slice(0, 200) }));
     return respondError("PIPELINE_FAILED", "levels_retention_failed");
@@ -132,7 +144,9 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   if (!cronAuthorized(req)) return respondError("AUTH_REQUIRED", "Sign in required");
   try {
-    return respondOk(await runRetention(false));
+    const result = await runRetention(false);
+    logResult("GET", result);
+    return respondOk(result);
   } catch (e) {
     console.warn("[bench-levels-retention] failed", JSON.stringify({ err: String((e as Error)?.message ?? e).slice(0, 200) }));
     return respondError("PIPELINE_FAILED", "levels_retention_failed");

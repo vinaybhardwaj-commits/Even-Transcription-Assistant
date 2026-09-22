@@ -24,8 +24,12 @@ import {
   levelRetentionCutoffIstDate,
   countOldLevelSamples,
   purgeOldLevelSamplesBatch,
+  oldLevelSamplesByRoom,
 } from "@/lib/bench-levels";
 import { GET, POST } from "@/app/api/admin/bench/levels-retention/route";
+import { GET as reportGET } from "@/app/api/admin/bench/levels-retention/report/route";
+import fs from "node:fs";
+import path from "node:path";
 
 const ENV = "BENCH_LEVEL_RETENTION";
 let savedEnv: string | undefined;
@@ -80,6 +84,10 @@ describe("countOldLevelSamples / purgeOldLevelSamplesBatch — SQL shape", () =>
     const text = String(H.sql.mock.calls[0]![0]);
     expect(text).toMatch(/SELECT\s+count\(\*\)/i);
     expect(text).not.toMatch(/DELETE/i);
+    // Refuter finding 4 (ETA-LEVEL-LOG-OPS-REFUTER-22-SEP-2026.md, L7): a mock-`sql` test cannot
+    // prove the comparison is right, but it CAN prove the string says `<` and not `<=` — a plain
+    // `/</` match is satisfied by either, which is exactly why the mutant survived before.
+    expect(text).toMatch(/ist_date\s*<(?!=)/i);
   });
 
   it("count with no matching rows is 0, not null or undefined", async () => {
@@ -93,7 +101,7 @@ describe("countOldLevelSamples / purgeOldLevelSamplesBatch — SQL shape", () =>
     expect(n).toBe(3);
     const [text, values] = H.sql.mock.calls[0]!;
     expect(String(text)).toMatch(/DELETE FROM bench_level_sample/i);
-    expect(String(text)).toMatch(/ist_date\s*<.*::date/i);
+    expect(String(text)).toMatch(/ist_date\s*<(?!=).*::date/i); // L8: `<`, never `<=`
     expect(String(text)).toMatch(/LIMIT/i);
     expect(values).toContain("2026-09-15");
     expect(values).toContain(100);
@@ -222,5 +230,125 @@ describe("route auth: same shape as reap-stuck (admin cookie OR MIGRATION_SECRET
     process.env[ENV] = "on";
     H.sql.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
     expect((await get({ authorization: "Bearer cronsekret" })).status).toBe(200);
+  });
+});
+
+describe("Refuter finding 2 — a successful run is logged, not only a failed one", () => {
+  it("POST logs the result at console.log, unmuted", async () => {
+    process.env.MIGRATION_SECRET = "sekret";
+    delete process.env[ENV];
+    H.sql.mockResolvedValueOnce([{ n: 4 }]);
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await post({}, { authorization: "Bearer sekret" });
+    expect(spy.mock.calls.some((c) => String(c[0]).includes("[bench-levels-retention]") && String(c[1]).includes("matched_before"))).toBe(true);
+    spy.mockRestore();
+  });
+
+  it("GET (cron) logs the result too, including a forced dry run", async () => {
+    delete process.env[ENV];
+    H.sql.mockResolvedValueOnce([{ n: 0 }]);
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await get({ "x-vercel-cron": "1" });
+    expect(spy.mock.calls.some((c) => String(c[0]).includes("[bench-levels-retention]"))).toBe(true);
+    spy.mockRestore();
+  });
+
+  it("a refused call (bad auth) logs nothing — there is no result to log", async () => {
+    delete process.env.MIGRATION_SECRET;
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await post({});
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
+describe("vercel.json — the cron entry is wired, hourly, offset from the top of the hour", () => {
+  it("lists /api/admin/bench/levels-retention", () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "vercel.json"), "utf8")) as {
+      crons: Array<{ path: string; schedule: string }>;
+    };
+    const entry = cfg.crons.find((c) => c.path === "/api/admin/bench/levels-retention");
+    expect(entry, "the retention route must be scheduled").toBeDefined();
+    // Refuter finding 1: hourly, not daily — a daily cron falls behind past ~9-23 rooms.
+    expect(entry!.schedule).toMatch(/^\S+\s+\*\s+\*\s+\*\s+\*$/);
+    expect(entry!.schedule).not.toBe("0 * * * *"); // offset from reap-stuck, not required but tidy
+  });
+
+  it("the report route is NOT scheduled — it is for a human to call, not a cron", () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "vercel.json"), "utf8")) as {
+      crons: Array<{ path: string }>;
+    };
+    expect(cfg.crons.some((c) => c.path.includes("levels-retention/report"))).toBe(false);
+  });
+});
+
+describe("oldLevelSamplesByRoom — SQL shape and mapping", () => {
+  it("groups by room, orders largest first, and never deletes", async () => {
+    H.sql.mockResolvedValueOnce([
+      { room_id: "room_b", n: 500, oldest: "2026-09-01", newest: "2026-09-14" },
+      { room_id: "room_a", n: 9000, oldest: "2026-08-20", newest: "2026-09-14" },
+    ]);
+    const rows = await oldLevelSamplesByRoom("2026-09-15");
+    expect(rows).toEqual([
+      { room_id: "room_b", count: 500, oldest_ist_date: "2026-09-01", newest_ist_date: "2026-09-14" },
+      { room_id: "room_a", count: 9000, oldest_ist_date: "2026-08-20", newest_ist_date: "2026-09-14" },
+    ]);
+    const text = String(H.sql.mock.calls[0]![0]);
+    expect(text).toMatch(/GROUP BY room_id/i);
+    expect(text).toMatch(/ist_date\s*<(?!=).*::date/i);
+    expect(text).not.toMatch(/DELETE|UPDATE|INSERT/i);
+  });
+
+  it("a Date object from the driver is normalised to YYYY-MM-DD, same as a string", async () => {
+    H.sql.mockResolvedValueOnce([{ room_id: "room_x", n: 1, oldest: new Date("2026-09-01T00:00:00Z"), newest: new Date("2026-09-01T00:00:00Z") }]);
+    const rows = await oldLevelSamplesByRoom("2026-09-15");
+    expect(rows[0]).toMatchObject({ oldest_ist_date: "2026-09-01", newest_ist_date: "2026-09-01" });
+  });
+
+  it("no old rows in any room is an empty list, not an error", async () => {
+    H.sql.mockResolvedValueOnce([]);
+    expect(await oldLevelSamplesByRoom("2026-09-15")).toEqual([]);
+  });
+});
+
+describe("GET /api/admin/bench/levels-retention/report — read-only, never deletes", () => {
+  const reportGet = (headers: Record<string, string> = {}) =>
+    reportGET(new NextRequest("http://localhost/api/admin/bench/levels-retention/report", { headers }));
+
+  it("requires auth, same as the retention route", async () => {
+    delete process.env.MIGRATION_SECRET;
+    const res = await reportGet();
+    expect(res.status).toBe(401);
+    expect(H.sql).not.toHaveBeenCalled();
+  });
+
+  it("reports the total and the per-room breakdown, and issues no DELETE regardless of BENCH_LEVEL_RETENTION", async () => {
+    process.env.MIGRATION_SECRET = "sekret";
+    process.env[ENV] = "on"; // even enabled, this route must never delete
+    H.sql
+      .mockResolvedValueOnce([{ n: 12_000 }])
+      .mockResolvedValueOnce([{ room_id: "room_a", n: 12_000, oldest: "2026-09-01", newest: "2026-09-14" }]);
+    const res = await reportGet({ authorization: "Bearer sekret" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      would_delete_total: 12_000,
+      rooms_affected: 1,
+      would_delete_by_room: [{ room_id: "room_a", count: 12_000, oldest_ist_date: "2026-09-01", newest_ist_date: "2026-09-14" }],
+    });
+    for (const [text] of H.sql.mock.calls) expect(String(text)).not.toMatch(/DELETE|UPDATE|INSERT/i);
+  });
+
+  it("has no POST export — the file cannot be called to write", async () => {
+    const mod = await import("@/app/api/admin/bench/levels-retention/report/route");
+    expect((mod as Record<string, unknown>).POST).toBeUndefined();
+  });
+
+  it("an empty fleet reports zero, not an error", async () => {
+    process.env.MIGRATION_SECRET = "sekret";
+    H.sql.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    const res = await reportGet({ authorization: "Bearer sekret" });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ would_delete_total: 0, rooms_affected: 0, would_delete_by_room: [] });
   });
 });

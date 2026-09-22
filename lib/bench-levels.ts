@@ -124,6 +124,27 @@ export async function countOldLevelSamples(cutoffIstDate: string): Promise<numbe
   return rows[0]?.n ?? 0;
 }
 
+/** One room's share of what a retention run would remove. */
+export type OldLevelSamplesByRoom = { room_id: string; count: number; oldest_ist_date: string; newest_ist_date: string };
+
+/**
+ * Per-room breakdown of rows older than `cutoffIstDate`, without touching any of them. For the
+ * dry-run report (GET /api/admin/bench/levels-retention/report): so "how much, and from which
+ * rooms" is visible before BENCH_LEVEL_RETENTION is ever turned on. Ordered by count, largest
+ * first, so the rooms that matter most are the ones a reader sees without scrolling.
+ */
+export async function oldLevelSamplesByRoom(cutoffIstDate: string): Promise<OldLevelSamplesByRoom[]> {
+  const rows = (await sql`
+    SELECT room_id, count(*)::int AS n, min(ist_date) AS oldest, max(ist_date) AS newest
+    FROM bench_level_sample
+    WHERE ist_date < ${cutoffIstDate}::date
+    GROUP BY room_id
+    ORDER BY n DESC, room_id ASC
+  `) as Array<{ room_id: string; n: number; oldest: string | Date; newest: string | Date }>;
+  const isoDate = (v: string | Date) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+  return rows.map((r) => ({ room_id: r.room_id, count: r.n, oldest_ist_date: isoDate(r.oldest), newest_ist_date: isoDate(r.newest) }));
+}
+
 /**
  * Delete up to `batchSize` rows older than `cutoffIstDate`. Returns how many were actually removed
  * (0 when nothing qualifies) — the caller loops this until a batch comes back short of `batchSize`.
