@@ -54,6 +54,14 @@ describe("Fleet board v0.2 facts and IA", () => {
     expect(source("app/admin/bench/archive/page.tsx")).toContain("<BenchClient />");
   });
 
+  it("keeps archive history room-keyed and discloses the API's 200-session cap", () => {
+    const archive = source("components/admin/BenchClient.tsx");
+    expect(archive).toContain("Choose room recordings");
+    expect(archive).toContain("selectedRoom.choose(room.id)");
+    expect(archive).toContain("Showing the newest {SESSION_LIST_CAP} sessions across all rooms");
+    expect(archive).toContain("Older recordings may not appear here");
+  });
+
   it("has focused polling, attention, card, danger-zone, and day-summary boundaries", () => {
     for (const path of [
       "components/admin/bench-live/useBenchLivePolling.ts",
