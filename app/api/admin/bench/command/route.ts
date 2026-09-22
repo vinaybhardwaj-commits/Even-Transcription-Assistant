@@ -33,6 +33,8 @@ import {
   getCommand,
   getListener,
   insertCommand,
+  isListening,
+  listCommands,
   type CommandKind,
 } from "@/lib/bench-commands";
 import { closeOrphanedSession, CLOSE_ORPHAN_KIND } from "@/lib/bench-orphan";
@@ -48,7 +50,26 @@ const fail = (status: number, error: string, extra: Record<string, unknown> = {}
 export async function GET(req: Request) {
   const guard = await benchAdminGuard();
   if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, ...noStore });
-  const id = new URL(req.url).searchParams.get("id");
+  const params = new URL(req.url).searchParams;
+  if (params.get("status") === "pending") {
+    try {
+      const commands = await listCommands({ status: "pending", limit: 200 });
+      return NextResponse.json({
+        ok: true,
+        commands: commands.map((row) => ({
+          id: row.id,
+          room_id: row.room_id,
+          kind: row.kind,
+          status: row.status,
+          created_at: new Date(row.created_at).toISOString(),
+        })),
+      }, noStore);
+    } catch (e) {
+      const b = e instanceof BusError ? e : classifyBusError(e);
+      return fail(503, b.code);
+    }
+  }
+  const id = params.get("id");
   if (!id || !/^cmd_[a-z0-9]{8}$/.test(id)) return fail(400, "command_id_required");
   try {
     const row = await getCommand(id);
@@ -176,8 +197,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, command_id: id, kind, room_id: roomId, queued: true }, noStore);
     }
 
-    // pause / resume / end carry no pre-check: the kiosk is the authority on its own tape, and
-    // queuing a no-op is harmless — the command expires if nothing picks it up.
+    // MCP parity: every kiosk command is listener-gated on the SERVER. Client-side disabled
+    // buttons are useful guidance, but they are not a safety boundary and can be bypassed by a
+    // stale tab or a direct request. Refuse explicitly rather than queueing into the dark.
+    const listener = await getListener(roomId);
+    if (!isListening(listener)) {
+      return fail(409, "kiosk_not_listening", {
+        queued: false,
+        hint: "no kiosk page is polling this room — open the room page on the clinic Mac, then try again",
+      });
+    }
     const id = await insertCommand({ roomId, kind, source: "admin" });
     await auditCommand(adminId, roomId, kind, overridePause, { queued: true, command_id: id });
     return NextResponse.json({ ok: true, command_id: id, kind, room_id: roomId, queued: true }, noStore);

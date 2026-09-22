@@ -211,6 +211,16 @@ export function BenchClient() {
   // cards above, and the selection survives every poll because it lives outside this component.
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const roomById = React.useMemo(() => new Map((rooms ?? []).map((r) => [r.id, r])), [rooms]);
+  const deepLinkApplied = React.useRef(false);
+
+  React.useEffect(() => {
+    if (deepLinkApplied.current || !rooms?.length) return;
+    deepLinkApplied.current = true;
+    const wanted = new URL(window.location.href).searchParams.get("room");
+    if (!wanted) return;
+    const room = rooms.find((candidate) => candidate.id === wanted || candidate.slug === wanted);
+    if (room) selectedRoom.choose(room.id);
+  }, [rooms]);
 
   // DEFAULT, second and third rules: the room with the most recent session, else the first room.
   // (The first rule — the room that is RECORDING — is suggested by the monitor, which is the
