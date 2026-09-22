@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, type Deps,
+  runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, DEFAULT_CONCURRENCY, type Deps,
 } from "@/lib/overnight-translate/driver";
 import { IST_OFFSET_MS, maySubmit } from "@/lib/overnight-translate/hours";
 import { makeDoor, type Door, type SubmitResult, type StatusResult, type RoomWindowSubmit } from "@/lib/overnight-translate/door";
@@ -111,7 +111,7 @@ function harness(o: Opts = {}) {
     gate: () => { gateCalls += 1; return o.gate ? o.gate(clock.t, gateCalls) : { go: true, reason: "ok" }; },
     log: (ev) => log.push(ev),
   };
-  const run = (mode: "run" | "dry-run" = "run", limit = 0, ac = new AbortController()) => runOvernight(deps, mode, limit, ac.signal);
+  const run = (mode: "run" | "dry-run" = "run", limit = 0, ac = new AbortController(), concurrency = 1) => runOvernight(deps, mode, limit, ac.signal, concurrency);
   return { clock, log, events, submits, nextCalls, englishChecks, deps, run, gateCalls: () => gateCalls, statusCalls: () => statusCalls };
 }
 const evs = (log: Array<Record<string, unknown>>, name: string) => log.filter((e) => e.event === name);
@@ -615,6 +615,141 @@ describe("ALLOW DAYTIME (ETA_OVERNIGHT_ALLOW_DAYTIME=1) — the driver, end to e
       await h.run();
       expect(evs(h.log, "waiting_for_closed_hours")[0]!.ms).toBe(11.5 * 3_600_000);
     });
+  });
+});
+
+describe("CONCURRENCY (ETA_OVERNIGHT_CONCURRENCY) — Fable's order of 22 Sep 2026, 07:00", () => {
+  it("the default is 1 — exactly today's behaviour when the caller passes nothing", () => {
+    expect(DEFAULT_CONCURRENCY).toBe(1);
+  });
+
+  it("a malformed concurrency (0, negative, fractional) never means zero slots — it floors to at least 1", async () => {
+    for (const bad of [0, -1, 0.5]) {
+      const h = harness({ cands: [cand("A")], polls: 1 });
+      const s = await h.run("run", 0, new AbortController(), bad);
+      expect(s, `concurrency=${bad}`).toMatchObject({ started: 1, done: 1 });
+    }
+  });
+
+  it("n=3: three candidates are submitted in ONE fill pass, at the same instant, before any is polled", async () => {
+    const h = harness({ cands: [cand("A"), cand("B"), cand("C")], polls: 5 });
+    const run = h.run("run", 0, new AbortController(), 3);
+    // let the fill pass happen; the fake clock only advances on `sleep`, so all three submits land at NIGHT.
+    await Promise.race([run, new Promise((r) => setTimeout(r, 20))]);
+    expect(h.submits).toHaveLength(3);
+    expect(h.submits.every((x) => x.at === NIGHT)).toBe(true);
+    expect(h.submits.map((x) => x.args.window_id)).toEqual(["A", "B", "C"]);
+    await run;
+  });
+
+  it("n=3 over 6 windows: never more than 3 in flight at once, and the 4th-6th are only submitted as slots free", async () => {
+    const h = harness({ cands: Array.from({ length: 6 }, (_, i) => cand(`W${i}`)), polls: 1 });
+    let inFlight = 0, maxInFlight = 0;
+    const origLog = h.deps.log;
+    h.deps.log = (ev) => {
+      if (ev.event === "window_submitted") { inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight); }
+      if (ev.event === "window_done" || ev.event === "window_failed") inFlight -= 1;
+      origLog(ev);
+    };
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBe(3);
+    expect(s).toMatchObject({ started: 6, done: 6 });
+  });
+
+  it("the gate is checked fresh before EVERY submit, not once per batch — 3 fills cost at least 3 gate reads", async () => {
+    const h = harness({ cands: [cand("A"), cand("B"), cand("C")], polls: 1 });
+    await h.run("run", 0, new AbortController(), 3);
+    expect(h.gateCalls()).toBeGreaterThanOrEqual(3);
+  });
+
+  it("a Transcript-OFF window still gets the override and only the off windows are counted, with 3 in flight", async () => {
+    const h = harness({ cands: [cand("A"), cand("B", { room_transcript_on: false }), cand("C")], polls: 1 });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(h.submits.find((x) => x.args.window_id === "B")!.args).toMatchObject({ switch_override: true });
+    expect(h.submits.find((x) => x.args.window_id === "A")!.args).not.toHaveProperty("switch_override");
+    expect(s.overridden).toBe(1);
+  });
+
+  it(`THE CANARY ACROSS INTERLEAVED COMPLETIONS: one shared counter, updated in submission order within a batch, ` +
+     `and carried across batches — 5 no-English in a row (spread over two batches of 3) still stops the run`, async () => {
+    const cands = Array.from({ length: 6 }, (_, i) => cand(`W${i}`));
+    const h = harness({
+      cands, polls: 0,   // every jobStatus call is immediately terminal — all of a batch finishes together
+      english: (w) => (w === "W0" ? "ok" : "missing"),
+    });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    // batch 1 (W0,W1,W2): ok resets to 0, then two "missing" take it to 2 — nowhere near the limit yet.
+    // batch 2 (W3,W4,W5): missing,missing,missing take it 3->4->5, tripping the stop on the THIRD of this batch.
+    expect(s).toMatchObject({ started: 6, done: 1, failed: 5, fatal: "too_many_failures", stop: "fatal", abandoned: 0 });
+    expect(evs(h.log, "window_failed").map((e) => e.window_id)).toEqual(["W1", "W2", "W3", "W4", "W5"]);
+  });
+
+  it("a job stuck past the deadline fatals the run and abandons the OTHER jobs still in flight, not just itself", async () => {
+    const h = harness({
+      cands: [cand("A"), cand("B"), cand("C")],
+      status: (jobId, k, w) => (w === "B" ? running() : running()),   // nobody ever finishes; B is the one we let time out
+    });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s).toMatchObject({ fatal: "job_stuck", stop: "fatal" });
+    // all three were still active when the deadline fired: the stuck one plus the two abandoned bystanders.
+    expect(s.abandoned).toBe(3);
+    expect(evs(h.log, "left_running")).toHaveLength(2);
+    expect(evs(h.log, "fatal")[0]).toMatchObject({ code: "job_stuck" });
+  });
+
+  it("closed hours ending mid-run abandons EVERY job still in flight, not just one", async () => {
+    const h = harness({ start: at(7, 5, 0, 22), cands: [cand("A"), cand("B"), cand("C")], status: () => running() });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s.stop).toBe("closed_hours_over");
+    expect(s.abandoned).toBe(3);
+    expect(evs(h.log, "left_running")).toHaveLength(3);
+    expect(evs(h.log, "left_running").every((e) => e.why === "closed_hours_over")).toBe(true);
+  });
+
+  it("a fatal (401/403) door read on ONE job stops the run and abandons the OTHERS still in flight", async () => {
+    const h = harness({
+      cands: [cand("A"), cand("B"), cand("C")],
+      status: (jobId, k, w) => (w === "B" ? { ok: false, kind: "fatal", code: "mcp_auth_refused" } : running()),
+    });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s).toMatchObject({ fatal: "mcp_auth_refused", stop: "fatal" });
+    // B itself is not counted as "abandoned" (it is the CAUSE, reported via the fatal event's own window_id/job_id) —
+    // A and C, still in flight with no verdict, ARE the bystanders left running.
+    expect(s.abandoned).toBe(2);
+    expect(evs(h.log, "left_running")).toHaveLength(2);
+    expect(evs(h.log, "left_running").map((e) => e.window_id).sort()).toEqual(["A", "C"]);
+    expect(evs(h.log, "fatal")[0]).toMatchObject({ code: "mcp_auth_refused", window_id: "B" });
+  });
+
+  it("n=3 with only 2 candidates: fills what it can, never blocks waiting for a 3rd that will never come", async () => {
+    const h = harness({ cands: [cand("A"), cand("B")], polls: 1 });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s).toMatchObject({ started: 2, done: 2, stop: "backlog_empty" });
+  });
+
+  it("dry-run ignores concurrency entirely — it never submits, so the plan is identical regardless of n", async () => {
+    const h1 = harness({ cands: [cand("A"), cand("B"), cand("C")] });
+    const h3 = harness({ cands: [cand("A"), cand("B"), cand("C")] });
+    await h1.run("dry-run", 3, new AbortController(), 1);
+    await h3.run("dry-run", 3, new AbortController(), 3);
+    expect(evs(h1.log, "plan").map((e) => e.window_id)).toEqual(evs(h3.log, "plan").map((e) => e.window_id));
+    expect(h1.submits).toHaveLength(0);
+    expect(h3.submits).toHaveLength(0);
+  });
+
+  it("aborted mid-poll with 3 in flight: every one of them is logged left_running, not just the first", async () => {
+    const ac = new AbortController();
+    const h = harness({
+      cands: [cand("A"), cand("B"), cand("C")],
+      status: (jobId, k, w) => { if (w === "A" && k === 1) ac.abort(); return running(); },
+    });
+    const s = await h.run("run", 0, ac, 3);
+    expect(s.stop).toBe("aborted");
+    expect(s.abandoned).toBe(3);
+    expect(evs(h.log, "left_running")).toHaveLength(3);
+    expect(evs(h.log, "left_running").every((e) => e.why === "aborted")).toBe(true);
+    expect(h.submits).toHaveLength(3);   // no MORE submissions after the abort was noticed
   });
 });
 

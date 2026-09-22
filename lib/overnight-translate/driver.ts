@@ -1,10 +1,15 @@
 /**
  * lib/overnight-translate/driver.ts — the overnight transcribe + translate loop.
  *
- * ONE WINDOW AT A TIME: pick → submit a `room_window` job (translate:true) → poll it to a terminal state →
- * next. Concurrency stays 1 (V: "do not raise concurrency"); the Mini's Ollama already serialises
- * translation (`OLLAMA_NUM_PARALLEL=1`) and the join service is a single-job container, so a second job
- * in flight would only queue against the first.
+ * UP TO `ETA_OVERNIGHT_CONCURRENCY` WINDOWS AT ONCE (default 1, the original behaviour). Fable's order
+ * of 22 Sep 2026, 07:00, after the diarize-leak thrash was fixed and the real cost was found to be serial
+ * work, not memory: the router already runs `ETA_MAX_INFLIGHT=3` in parallel, so up to 3 jobs in flight
+ * matches what the router can actually do at once. ALL gates (clock, pressure/disk, the failure and
+ * deferred streaks, the English canary) are checked fresh before EVERY submit, exactly as with one job —
+ * concurrency changes how many SLOTS are filled, never what a slot is allowed to do. The consecutive-
+ * failure counter is ONE counter shared across every slot, updated in the order completions actually
+ * land (see `finishSlot`), so a bad run trips the same 5-in-a-row stop whether the failures come from one
+ * job or from several finishing close together.
  *
  * WHAT IT DECLINES TO DO, and where each is enforced:
  *   - submit outside 21:30-07:10 IST ............ hours.ts `maySubmit`, checked before EVERY submit;
@@ -95,7 +100,11 @@ export function jobArgsFor(c: Candidate, origin: string): RoomWindowSubmit {
   };
 }
 
-export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: number, signal: AbortSignal): Promise<RunSummary> {
+export const DEFAULT_CONCURRENCY = 1;
+
+export async function runOvernight(
+  deps: Deps, mode: "run" | "dry-run", limit: number, signal: AbortSignal, concurrency: number = DEFAULT_CONCURRENCY,
+): Promise<RunSummary> {
   const s = newSummary();
   const tried = new Set<string>();
   // The counts are for the log; not being able to read them must not stop a night that can still select windows.
@@ -131,6 +140,8 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
     return s;
   }
 
+  const n = Math.max(1, Math.floor(concurrency) || 1);
+
   let heldReason: string | null = null;
   let deferredStreak = 0;
   let consecutiveFailures = 0;
@@ -144,121 +155,29 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
     deps.log({ event: "fatal", code, ...extra });
   };
 
-  outer: while (!signal.aborted) {
-    if (limit > 0 && s.started >= limit) { s.stop = "limit"; break; }
+  type Slot = { c: Candidate; t0: number };
+  // Insertion order = submission order, which JS Maps preserve — the order `finishSlot` and the poll batch
+  // below iterate a tick's completions in, so a shared `consecutiveFailures` counts interleaved completions
+  // deterministically (the order they actually landed), not the order slots were opened.
+  const active = new Map<string, Slot>();
 
-    // ── 1. THE CLOCK. Before every submit, never remembered. ──────────────────────────────────────────
-    const t = deps.now();
-    if (!maySubmit(t)) {
-      if (nightBegun) { s.stop = closedHoursOver(t) ? "closed_hours_over" : "submit_window_closed"; break; }
-      // Started in the day: wait for tonight, in bounded steps so an abort or a clock jump is noticed.
-      if (!waitLogged) { deps.log({ event: "waiting_for_closed_hours", ms: msUntilMaySubmit(t) }); waitLogged = true; }
-      await deps.sleep(Math.min(60_000, Math.max(1_000, msUntilMaySubmit(t))), signal);
-      continue;
+  /** Every job still in `active` is left running server-side; the driver only stops WATCHING it. */
+  function abandonAll(why: string): void {
+    for (const [jobId, a] of active) {
+      s.abandoned += 1;
+      deps.log({ event: "left_running", window_id: a.c.window_id, job_id: jobId, why });
     }
-    nightBegun = true;
+    active.clear();
+  }
 
-    // ── 2. THE GATES: watchdog + disk. Before every submit, read fresh. ───────────────────────────────
-    const g = deps.gate();
-    if (!g.go) {
-      if (g.reason !== heldReason) deps.log({ event: "gate_hold", reason: g.reason });
-      heldReason = g.reason;
-      await deps.sleep(GATE_POLL_MS, signal);
-      continue;
-    }
-    if (heldReason !== null) { deps.log({ event: "gate_go" }); heldReason = null; }
-
-    // ── 3. THE NEXT WINDOW ────────────────────────────────────────────────────────────────────────────
-    let c: Candidate | null;
-    try {
-      c = await deps.store.next(tried);
-      storeFailures = 0;
-    } catch (e) {
-      // A database blip is not a verdict on any window. Retry a few times, then stop with a name. Only the
-      // error's NAME is logged: its message can carry SQL or connection detail.
-      storeFailures += 1;
-      deps.log({ event: "store_error", error_name: (e as Error)?.name ?? "Error", streak: storeFailures });
-      if (storeFailures >= DEFERRED_LIMIT) { fatal("store_unreadable", { streak: storeFailures }); break; }
-      await deps.sleep(GATE_POLL_MS, signal);
-      continue;
-    }
-    if (!c) { s.stop = "backlog_empty"; break; }
-
-    // ── 3b. RE-CHECK, IMMEDIATELY BEFORE THE CALL ─────────────────────────────────────────────────────
-    // Steps 1 and 2 were read BEFORE the selection above, and selection is a database round trip (the
-    // fixture query alone joins a lateral over ~100 rows). A slow query that starts at 07:09:58 must not
-    // become a submit at 07:10:23, and a watchdog STOP that lands during it must be seen. So the two
-    // decisions are taken again here, on the far side of the wait, and the candidate is dropped (it is not
-    // marked tried) if either has turned.
-    if (!maySubmit(deps.now())) continue;                 // the top of the loop names the stop
-    const g2 = deps.gate();
-    if (!g2.go) {
-      if (g2.reason !== heldReason) deps.log({ event: "gate_hold", reason: g2.reason });
-      heldReason = g2.reason;
-      await deps.sleep(GATE_POLL_MS, signal);             // no busy loop against the database
-      continue;
-    }
-
-    // ── 4. SUBMIT ─────────────────────────────────────────────────────────────────────────────────────
-    const args = jobArgsFor(c, deps.origin);
-    const sub = await deps.door.submitRoomWindow(args, signal);
-    if (!sub.ok) {
-      if (sub.kind === "fatal") { fatal(sub.code, { window_id: c.window_id }); break; }
-      if (sub.kind === "deferred") {
-        deferredStreak += 1;
-        deps.log({ event: "door_deferred", code: sub.code, streak: deferredStreak });
-        if (deferredStreak >= DEFERRED_LIMIT) { fatal("door_unreachable", { streak: deferredStreak }); break; }
-        await deps.sleep(GATE_POLL_MS, signal);
-        continue;
-      }
-      // refused: about THIS window. Recorded, not retried this run, and it counts toward the failure limit.
-      tried.add(c.window_id);
-      s.refused += 1;
-      consecutiveFailures += 1;
-      deps.log({ event: "window_refused", window_id: c.window_id, code: sub.code });
-      if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break; }
-      continue;
-    }
-    deferredStreak = 0;
-    tried.add(c.window_id);
-    s.started += 1;
-    if (!c.room_transcript_on) s.overridden += 1;
-    const t0 = deps.now();
-    deps.log({
-      event: "window_submitted", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, has_run: c.has_run, attempt: c.attempt,
-      room_transcript_on: c.room_transcript_on, switch_override: !c.room_transcript_on,
-    });
-
-    // ── 5. POLL THE ONE JOB TO A TERMINAL STATE ───────────────────────────────────────────────────────
-    let terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null } | null = null;
-    while (!terminal) {
-      if (signal.aborted) { s.stop = "aborted"; s.abandoned += 1; deps.log({ event: "left_running", window_id: c.window_id, job_id: sub.job_id, why: "aborted" }); break outer; }
-      const st = await deps.door.jobStatus(sub.job_id, signal);
-      if (!st.ok) {
-        if (st.kind === "fatal") { fatal(st.code, { window_id: c.window_id, job_id: sub.job_id }); break outer; }
-        if (st.kind === "refused") { terminal = { status: "failed", step: null, error_code: st.code }; break; }
-        deferredStreak += 1;
-        if (deferredStreak >= DEFERRED_LIMIT) { fatal("door_unreachable", { streak: deferredStreak, job_id: sub.job_id }); break outer; }
-      } else {
-        deferredStreak = 0;
-        if (st.status === "done" || st.status === "failed" || st.status === "cancelled") {
-          terminal = { status: st.status, step: st.step, error_code: st.error_code };
-          break;
-        }
-      }
-      const now = deps.now();
-      if (closedHoursOver(now)) {
-        // Into clinic hours. The job cannot be cancelled; stop waiting and say exactly which one is left.
-        s.abandoned += 1; s.stop = "closed_hours_over";
-        deps.log({ event: "left_running", window_id: c.window_id, job_id: sub.job_id, why: "closed_hours_over" });
-        break outer;
-      }
-      if (now - t0 > WINDOW_DEADLINE_MS) { s.abandoned += 1; fatal("job_stuck", { window_id: c.window_id, job_id: sub.job_id }); break outer; }
-      await deps.sleep(STATUS_POLL_MS, signal);
-    }
-    if (!terminal) break;
-
-    const wall_s = Math.round((deps.now() - t0) / 1000);
+  /**
+   * One finished job (`done` / `failed` / `cancelled`), exactly the original per-window ending — the English
+   * canary included — just callable per slot instead of inline. Returns true if this finish set `s.fatal`
+   * (too_many_failures), so the caller knows to stop filling and drain.
+   */
+  async function finishSlot(jobId: string, a: Slot, terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null }): Promise<boolean> {
+    active.delete(jobId);
+    const wall_s = Math.round((deps.now() - a.t0) / 1000);
     if (terminal.status === "done") {
       // THE ENGLISH CANARY. `done` says the job ran; it does not say it made English. A window with text and no
       // `transcript_english` is a failure of THIS driver's purpose, counted like any other.
@@ -271,7 +190,7 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
       let english: "ok" | "missing" | "unavailable" = "ok";
       let checkError = "";
       try {
-        english = await deps.store.englishCheck(c.window_id);
+        english = await deps.store.englishCheck(a.c.window_id);
       } catch (e) {
         english = "unavailable";
         checkError = (e as Error)?.name ?? "Error"; // the NAME only: the message can carry SQL or connection detail
@@ -280,23 +199,187 @@ export async function runOvernight(deps: Deps, mode: "run" | "dry-run", limit: n
         consecutiveFailures += 1;
         if (english === "missing") {
           s.failed += 1;
-          deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: "done", step: terminal.step, error_code: "no_english", attempt: c.attempt, wall_s });
+          deps.log({ event: "window_failed", window_id: a.c.window_id, job_id: jobId, status: "done", step: terminal.step, error_code: "no_english", attempt: a.c.attempt, wall_s });
         } else {
           s.unverified += 1;
-          deps.log({ event: "english_check_unavailable", window_id: c.window_id, room_day_id: c.room_day_id, job_id: sub.job_id, error_name: checkError, attempt: c.attempt, consecutive: consecutiveFailures });
+          deps.log({ event: "english_check_unavailable", window_id: a.c.window_id, room_day_id: a.c.room_day_id, job_id: jobId, error_name: checkError, attempt: a.c.attempt, consecutive: consecutiveFailures });
         }
-        if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break; }
-        continue;
+        if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); return true; }
+        return false;
       }
       s.done += 1;
       consecutiveFailures = 0;
-      deps.log({ event: "window_done", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, wall_s });
-    } else {
-      s.failed += 1;
-      consecutiveFailures += 1;
-      deps.log({ event: "window_failed", window_id: c.window_id, job_id: sub.job_id, status: terminal.status, step: terminal.step, error_code: terminal.error_code, wall_s });
-      if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break; }
+      deps.log({ event: "window_done", window_id: a.c.window_id, job_id: jobId, klass: a.c.klass, wall_s });
+      return false;
     }
+    s.failed += 1;
+    consecutiveFailures += 1;
+    deps.log({ event: "window_failed", window_id: a.c.window_id, job_id: jobId, status: terminal.status, step: terminal.step, error_code: terminal.error_code, wall_s });
+    if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); return true; }
+    return false;
+  }
+
+  outer: while (true) {
+    if (signal.aborted) { abandonAll("aborted"); s.stop = "aborted"; break; }
+    if (limit > 0 && s.started >= limit && active.size === 0) { s.stop = "limit"; break; }
+
+    // ── FILL: open slots up to `n`, one candidate at a time, each with its own fresh clock+gate check. ──
+    // A submission this pass counts as progress (see `progressed` below); a slot left open because the
+    // clock/gate/backlog/door said no is NOT an error — it just means this pass filled fewer than `n`.
+    let progressed = false;
+    fill: while (active.size < n && !(limit > 0 && s.started >= limit)) {
+      // ── 1. THE CLOCK. Before every submit, never remembered. ──────────────────────────────────────
+      const t = deps.now();
+      if (!maySubmit(t)) {
+        if (active.size > 0) break fill;   // jobs in flight: stop trying to fill, go poll them instead
+        if (nightBegun) { s.stop = closedHoursOver(t) ? "closed_hours_over" : "submit_window_closed"; break outer; }
+        // Started in the day: wait for tonight, in bounded steps so an abort or a clock jump is noticed.
+        if (!waitLogged) { deps.log({ event: "waiting_for_closed_hours", ms: msUntilMaySubmit(t) }); waitLogged = true; }
+        await deps.sleep(Math.min(60_000, Math.max(1_000, msUntilMaySubmit(t))), signal);
+        continue outer;
+      }
+      nightBegun = true;
+
+      // ── 2. THE GATES: watchdog + disk. Before every submit, read fresh. ───────────────────────────
+      const g = deps.gate();
+      if (!g.go) {
+        if (g.reason !== heldReason) deps.log({ event: "gate_hold", reason: g.reason });
+        heldReason = g.reason;
+        if (active.size > 0) break fill;
+        await deps.sleep(GATE_POLL_MS, signal);
+        continue outer;
+      }
+      if (heldReason !== null) { deps.log({ event: "gate_go" }); heldReason = null; }
+
+      // ── 3. THE NEXT WINDOW ──────────────────────────────────────────────────────────────────────
+      let c: Candidate | null;
+      try {
+        c = await deps.store.next(tried);
+        storeFailures = 0;
+      } catch (e) {
+        // A database blip is not a verdict on any window. Retry a few times, then stop with a name. Only the
+        // error's NAME is logged: its message can carry SQL or connection detail.
+        storeFailures += 1;
+        deps.log({ event: "store_error", error_name: (e as Error)?.name ?? "Error", streak: storeFailures });
+        if (storeFailures >= DEFERRED_LIMIT) { fatal("store_unreadable", { streak: storeFailures }); break outer; }
+        if (active.size > 0) break fill;
+        await deps.sleep(GATE_POLL_MS, signal);
+        continue outer;
+      }
+      if (!c) {
+        if (active.size === 0) { s.stop = "backlog_empty"; break outer; }
+        break fill;   // nothing new to submit right now; the jobs in flight may still free a window later
+      }
+
+      // ── 3b. RE-CHECK, IMMEDIATELY BEFORE THE CALL ──────────────────────────────────────────────
+      // Steps 1 and 2 were read BEFORE the selection above, and selection is a database round trip (the
+      // fixture query alone joins a lateral over ~100 rows). A slow query that starts at 07:09:58 must not
+      // become a submit at 07:10:23, and a watchdog STOP that lands during it must be seen. So the two
+      // decisions are taken again here, on the far side of the wait, and the candidate is dropped (it is not
+      // marked tried) if either has turned — this fill pass simply stops early.
+      if (!maySubmit(deps.now())) break fill;
+      const g2 = deps.gate();
+      if (!g2.go) {
+        if (g2.reason !== heldReason) deps.log({ event: "gate_hold", reason: g2.reason });
+        heldReason = g2.reason;
+        // n=1 (nothing else in flight): sleep GATE_POLL_MS right here, exactly as the single-job original did
+        // ("no busy loop against the database"). n>1 with other jobs running: just stop filling and go poll
+        // them instead — STATUS_POLL_MS will pace the next attempt, and sleeping here would delay watching them.
+        if (active.size === 0) { await deps.sleep(GATE_POLL_MS, signal); continue outer; }
+        break fill;
+      }
+
+      // ── 4. SUBMIT ───────────────────────────────────────────────────────────────────────────────
+      const args = jobArgsFor(c, deps.origin);
+      const sub = await deps.door.submitRoomWindow(args, signal);
+      if (!sub.ok) {
+        if (sub.kind === "fatal") { fatal(sub.code, { window_id: c.window_id }); break outer; }
+        if (sub.kind === "deferred") {
+          deferredStreak += 1;
+          deps.log({ event: "door_deferred", code: sub.code, streak: deferredStreak });
+          if (deferredStreak >= DEFERRED_LIMIT) { fatal("door_unreachable", { streak: deferredStreak }); break outer; }
+          break fill;
+        }
+        // refused: about THIS window. Recorded, not retried this run, and it counts toward the failure limit.
+        tried.add(c.window_id);
+        s.refused += 1;
+        consecutiveFailures += 1;
+        deps.log({ event: "window_refused", window_id: c.window_id, code: sub.code });
+        if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) { fatal("too_many_failures", { consecutive: consecutiveFailures }); break outer; }
+        continue fill;   // try another candidate in the same fill pass
+      }
+      deferredStreak = 0;
+      tried.add(c.window_id);
+      s.started += 1;
+      if (!c.room_transcript_on) s.overridden += 1;
+      const t0 = deps.now();
+      deps.log({
+        event: "window_submitted", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, has_run: c.has_run, attempt: c.attempt,
+        room_transcript_on: c.room_transcript_on, switch_override: !c.room_transcript_on,
+      });
+      active.set(sub.job_id, { c, t0 });
+      progressed = true;
+    }
+
+    if (signal.aborted) { abandonAll("aborted"); s.stop = "aborted"; break; }
+    if (active.size === 0) continue;   // fill made no progress and left nothing running: re-evaluate from the top
+
+    // ── 5. POLL EVERY JOB IN FLIGHT ────────────────────────────────────────────────────────────────
+    // The first poll of a freshly filled slot happens with NO sleep first (matches n=1: `door.jobStatus` is
+    // called immediately after submit). A sleep only happens when a whole pass makes no progress at all —
+    // nothing filled and nothing finished — so as not to spin against the door.
+    const entries = [...active.entries()];
+    const results = await Promise.all(entries.map(([jobId]) => deps.door.jobStatus(jobId, signal)));
+
+    let anyStillRunning = false;
+    for (let i = 0; i < entries.length; i += 1) {
+      const [jobId, a] = entries[i]!;
+      const st = results[i]!;
+      let terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null } | null = null;
+      if (!st.ok) {
+        if (st.kind === "fatal") { fatal(st.code, { window_id: a.c.window_id, job_id: jobId }); active.delete(jobId); abandonAll("fatal"); break outer; }
+        if (st.kind === "refused") {
+          terminal = { status: "failed", step: null, error_code: st.code };
+        } else {
+          deferredStreak += 1;
+          if (deferredStreak >= DEFERRED_LIMIT) { fatal("door_unreachable", { streak: deferredStreak, job_id: jobId }); active.delete(jobId); abandonAll("fatal"); break outer; }
+          anyStillRunning = true;
+        }
+      } else {
+        deferredStreak = 0;
+        if (st.status === "done" || st.status === "failed" || st.status === "cancelled") {
+          terminal = { status: st.status, step: st.step, error_code: st.error_code };
+        } else {
+          anyStillRunning = true;
+        }
+      }
+
+      if (terminal) {
+        progressed = true;
+        const stopNow = await finishSlot(jobId, a, terminal);
+        if (stopNow) { abandonAll("fatal"); break outer; }
+        continue;
+      }
+
+      // Still running (or a deferred status read that did not exceed the streak): the same two checks the
+      // single-job loop made on every "still running" tick, before it slept.
+      const now = deps.now();
+      if (closedHoursOver(now)) {
+        // Into clinic hours. The job cannot be cancelled; stop waiting on ALL of them and say which are left.
+        abandonAll("closed_hours_over");
+        s.stop = "closed_hours_over";
+        break outer;
+      }
+      if (now - a.t0 > WINDOW_DEADLINE_MS) {
+        s.abandoned += 1;   // the stuck job itself, same as the single-job original
+        fatal("job_stuck", { window_id: a.c.window_id, job_id: jobId });
+        active.delete(jobId);
+        abandonAll("fatal");   // any OTHER jobs still in flight
+        break outer;
+      }
+    }
+
+    if (!progressed && anyStillRunning) await deps.sleep(STATUS_POLL_MS, signal);
   }
 
   if (signal.aborted && s.stop === "backlog_empty") s.stop = "aborted";
