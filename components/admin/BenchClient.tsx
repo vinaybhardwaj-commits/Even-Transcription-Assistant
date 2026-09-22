@@ -568,24 +568,18 @@ export function BenchClient() {
 /**
  * PART C — the desk-work fold.
  *
- * Below `lg` the children are behind a tapped summary and CLOSED by default; at `lg` and above
- * the summary is hidden and the children are simply rendered, so a desktop sees exactly what it
- * saw before — no <details>, no marker, no extra chrome.
- *
- * `open` is set from the breakpoint at mount rather than tracked live: a tablet that is rotated
- * mid-day should not have its fold snap shut under the operator's hand. The `lg:hidden` summary
- * and the `lg:block` content mean the desktop rendering does not depend on that state at all.
+ * Fleet cards are the primary product, so recordings and room administration are secondary on
+ * every viewport. Both remain one 44px tap away and preserve their state after opening.
  */
 function Disclosure({ summary, count, children }: { summary: string; count?: string | null; children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
   return (
     <div>
-      {/* The tapped summary row. `lg:hidden`, so a desktop never sees it. 44pt minimum. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="lg:hidden w-full eta-card px-4 min-h-11 flex items-center justify-between gap-3 text-left active:bg-even-ink-50"
+        className="w-full eta-card px-4 min-h-11 flex items-center justify-between gap-3 text-left active:bg-even-ink-50"
       >
         <span className="text-heading text-even-navy-800">{summary}</span>
         <span className="flex items-center gap-2 text-caption text-even-ink-400">
@@ -594,11 +588,7 @@ function Disclosure({ summary, count, children }: { summary: string; count?: str
         </span>
       </button>
 
-      {/* THE BREAKPOINT IS THE CLASS, not the state. Closed reads `hidden lg:block`: gone below
-          `lg`, present at `lg` and above — so a desktop is expanded WITHOUT this component ever
-          measuring a viewport, and there is no first-paint flash and no resize handler to get
-          wrong. Open reads `block`, which is visible at every width. */}
-      <div className={`${open ? "block" : "hidden lg:block"} mt-3 lg:mt-0`}>{children}</div>
+      <div className={`${open ? "block" : "hidden"} mt-3`}>{children}</div>
     </div>
   );
 }

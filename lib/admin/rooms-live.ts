@@ -32,12 +32,12 @@ import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse } from "@/lib/bench-bus-consta
 import {
   MIC_AMBER_MS, MIC_RED_MS, DOCTOR_CLOCK_AMBER_MS, DOCTOR_CLOCK_RED_MS,
   micLevel, doctorClockLevel, doctorClockSilentMs, hasDoctorClock, endedAtLies,
-  tapeLane, transcriptLane, visitsLane, strandedAudio, strandedTotal, ZERO_STRANDED_RAW,
+  tapeLane, transcriptLane, visitsLane, strandedAudio, strandedTotal, roomOperationalAlerts, ZERO_STRANDED_RAW,
   type Level, type LaneView, type TranscriptCounts, type VisitCounts,
-  type Stranded, type StrandedRaw,
+  type ActiveMicAlert, type OperationalAlert, type Stranded, type StrandedRaw,
 } from "@/lib/room-facts";
 import { readAudioMs, readMicSizes, readTranscriptAndStranded } from "@/lib/admin/room-reads";
-import type { MicHealth } from "@/lib/mic-health";
+import { activeMicAlert, type MicHealth } from "@/lib/mic-health";
 
 /** The mark cue's type on the brain side. fuse-report keeps its own copy private; this is that
  *  same literal, and tests hold the two in agreement with 0054's index predicate. */
@@ -167,6 +167,10 @@ export type RoomLive = {
   /** D32 — a spare EXISTS only where one actually recorded. Most rooms have one microphone and
    *  the card says nothing at all about a spare for them: no lane, no placeholder, no vital. */
   spare_exists: boolean;
+  /** Current unresolved recorder-reported microphone fault, never a historical sticky flag. */
+  active_mic_alert: ActiveMicAlert | null;
+  tape_without_cues: boolean | null;
+  operational_alerts: OperationalAlert[];
   stalled: boolean;
   stalled_age_ms: number | null;
   /**
@@ -298,6 +302,7 @@ export type RoomsLiveResult = {
 export const SQL_ROOM_DAY_ROLLUP =
   "SELECT rd.room_id, " +
   "MAX(c.at) FILTER (WHERE c.type IN ('pqm_called', 'pstart', 'dx_event', 'pulse_note')) AS last_warehouse_at, " +
+  "COUNT(c.id)::int AS cues_today, " +
   "COUNT(c.id) FILTER (WHERE c.type = 'consult_mark')::int AS marks_today, " +
   "MAX(c.at)   FILTER (WHERE c.type = 'consult_mark') AS last_mark_at " +
   "FROM room_day rd LEFT JOIN cue c ON c.room_day_id = rd.id " +
@@ -352,9 +357,12 @@ export function buildRoomLive(
     mic_size?: MicHealth | null;
     spare_size?: MicHealth | null;
     spare_exists?: boolean;
+    active_mic_alert?: ActiveMicAlert | null;
+    tape_without_cues?: boolean | null;
   },
   brain: {
     last_warehouse_at: string | null;
+    cues_today?: number;
     marks_today: number;
     last_mark_at: string | null;
     last_window_asked_at: string | null;
@@ -461,6 +469,16 @@ export function buildRoomLive(
   const lastSessionEnded = newest?.status === "ended" && !recording && !pausedSession;
 
   const stranded = strandedAudio(counts.stranded_raw ?? ZERO_STRANDED_RAW, hasRoomDayToday);
+  const tapeWithoutCues = counts.tape_without_cues ?? null;
+  const micAlert = counts.active_mic_alert ?? null;
+  const operationalAlerts = roomOperationalAlerts({
+    recording: Boolean(recording),
+    kioskListening: null,
+    stalled: stalledSession !== null,
+    stalledAgeMs: stalledAge,
+    activeMicAlert: micAlert,
+    tapeWithoutCues,
+  });
 
   return {
     room: { id: room.id, slug: room.slug, name: room.name },
@@ -477,6 +495,9 @@ export function buildRoomLive(
     mic_size: counts.mic_size ?? null,
     spare_size: counts.spare_size ?? null,
     spare_exists: Boolean(counts.spare_exists),
+    active_mic_alert: micAlert,
+    tape_without_cues: tapeWithoutCues,
+    operational_alerts: operationalAlerts,
     stalled: stalledSession !== null,
     stalled_age_ms: stalledAge,
     transcript_enabled: transcriptEnabled,
@@ -601,6 +622,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   }
 
   const notSent = new Map<string, number>();
+  const activeMicAlertByRoom = new Map<string, ActiveMicAlert>();
   const sessionIds = sessions.map((s) => s.id);
   if (sessionIds.length) {
     try {
@@ -616,6 +638,28 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       for (const row of rows) notSent.set(row.session_id, Number(row.n) || 0);
     } catch (e) {
       topDegraded.push(`marks_not_sent_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+    try {
+      const rows = (await sql`
+        SELECT s.room_id, e.kind, e.payload
+          FROM bench_event e
+          JOIN bench_session s ON s.id = e.session_id
+         WHERE e.session_id = ANY(${sessionIds}::text[])
+           AND e.kind IN ('mic_primary_lost', 'mic_primary_restored')
+         ORDER BY s.room_id, e.at, e.created_at, e.id
+      `) as Array<{ room_id: string; kind: string; payload: unknown }>;
+      const eventsByRoom = new Map<string, Array<{ kind: string; payload: unknown }>>();
+      for (const row of rows) {
+        const list = eventsByRoom.get(row.room_id) ?? [];
+        list.push({ kind: row.kind, payload: row.payload });
+        eventsByRoom.set(row.room_id, list);
+      }
+      for (const [roomId, events] of eventsByRoom) {
+        const alert = activeMicAlert(events);
+        if (alert) activeMicAlertByRoom.set(roomId, alert);
+      }
+    } catch (e) {
+      topDegraded.push(`mic_events_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
     }
   }
 
@@ -651,15 +695,16 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     topDegraded.push(`spare_device_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
   }
 
-  const brainByRoom = new Map<string, { last_warehouse_at: string | null; marks_today: number; last_mark_at: string | null; last_window_asked_at: string | null; last_window_complete: boolean | null }>();
+  const brainByRoom = new Map<string, { last_warehouse_at: string | null; cues_today: number; marks_today: number; last_mark_at: string | null; last_window_asked_at: string | null; last_window_complete: boolean | null }>();
   const brainDegraded: string[] = [];
   const visitsByRoom = new Map<string, VisitCounts>();
   if (roomIds.length) {
     try {
-      const r = await brainQuery<{ room_id: string; last_warehouse_at: Date | null; marks_today: number; last_mark_at: Date | null }>(SQL_ROOM_DAY_ROLLUP, [istDate, roomIds]);
+      const r = await brainQuery<{ room_id: string; last_warehouse_at: Date | null; cues_today: number; marks_today: number; last_mark_at: Date | null }>(SQL_ROOM_DAY_ROLLUP, [istDate, roomIds]);
       for (const row of r.rows) {
         brainByRoom.set(row.room_id, {
           last_warehouse_at: iso(row.last_warehouse_at),
+          cues_today: Number(row.cues_today) || 0,
           marks_today: Number(row.marks_today) || 0,
           last_mark_at: iso(row.last_mark_at),
           last_window_asked_at: null,
@@ -679,7 +724,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     try {
       const r = await brainQuery<{ room_id: string; at: Date; payload: unknown }>(SQL_LAST_WINDOW_MARKER, [istDate, roomIds]);
       for (const row of r.rows) {
-        const prev = brainByRoom.get(row.room_id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
+        const prev = brainByRoom.get(row.room_id) ?? { last_warehouse_at: null, cues_today: 0, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
         brainByRoom.set(row.room_id, { ...prev, last_window_asked_at: iso(row.at), last_window_complete: markerComplete(row.payload) });
       }
     } catch (e) {
@@ -690,7 +735,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
   const ZERO_TRANSCRIPT: TranscriptCounts = { done: 0, waiting: 0, no_day: 0, in_progress: 0, failed: 0, words_ms: 0 };
   const out = rooms.map((room) => {
     const mine = byRoom.get(room.id) ?? [];
-    const brain = brainByRoom.get(room.id) ?? { last_warehouse_at: null, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
+    const brain = brainByRoom.get(room.id) ?? { last_warehouse_at: null, cues_today: 0, marks_today: 0, last_mark_at: null, last_window_asked_at: null, last_window_complete: null };
     const marksNotSent = mine.reduce((a, s) => a + (notSent.get(s.id) ?? 0), 0);
     // Does today's room_day exist for this room? SQL_ROOM_DAY_ROLLUP selects FROM room_day, so a
     // room with no day yields no row and is absent from the map. If the brain read FAILED we
@@ -709,6 +754,8 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
       // wrote backup pieces from an auto-picked phantom device but reported no second device has
       // no spare here.
       spare_exists: spareDeviceByRoom.get(room.id) ?? false,
+      active_mic_alert: activeMicAlertByRoom.get(room.id) ?? null,
+      tape_without_cues: dayKnown ? mine.some((sn) => sn.primary_chunks + sn.backup_chunks > 0) && (brainByRoom.get(room.id)?.cues_today ?? 0) === 0 : null,
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });
