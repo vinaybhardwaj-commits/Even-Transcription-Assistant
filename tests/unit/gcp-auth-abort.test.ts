@@ -34,7 +34,12 @@ beforeEach(() => {
   savedKey = process.env.GCP_SA_KEY;
   process.env.GCP_SA_KEY = SA_KEY;
   lastSignal = undefined;
-  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+  // NOT an async function: an async wrapper around a manually-constructed `new Promise` adds an
+  // extra microtask hop to unwrap it, and under fake timers that gap can make a rejection that
+  // fires synchronously inside a timer callback look briefly unhandled to Node's detector before
+  // the chain finishes propagating it — a real false positive this file hit once. A plain function
+  // returning the Promise directly has no such gap.
+  globalThis.fetch = ((_url: string, init?: RequestInit) => {
     lastSignal = init?.signal ?? undefined;
     // Settles ONLY on its own signal's abort — a genuinely hung endpoint, not one that errors.
     return new Promise<Response>((_resolve, reject) => {
@@ -77,13 +82,25 @@ describe("getVertexAccessToken(signal) — the fetch is actually cancelled, not 
   it("no signal passed: fully backward compatible — still pending, not thrown, not aborted early", async () => {
     const { getVertexAccessToken } = await loadFresh();
     let settled = false;
-    getVertexAccessToken().then(() => { settled = true; }, () => { settled = true; });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(settled).toBe(false); // genuinely still in flight — nothing invisibly cancelled it
-    expect(lastSignal).toBeUndefined(); // fetch received no signal at all, exactly as before
+    // Round-3 fix: getVertexAccessToken now ALWAYS builds its own internal AbortController (the
+    // same pattern openaiChat/openrouterChat already use), so `lastSignal` is never undefined any
+    // more even with no external `signal` passed — the short explicit timeoutMs here only avoids a
+    // real dangling 30 s timer in this test process (MINT_DEFAULT_TIMEOUT_MS). The thing under test
+    // is that omitting `signal` does not change behaviour.
+    const p = getVertexAccessToken(undefined, 50).then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false); // genuinely still in flight — nothing invisibly cancelled it early
+    expect(lastSignal).toBeInstanceOf(AbortSignal);
+    expect(lastSignal?.aborted).toBe(false);
+    // Drain the internal 50ms REAL timer fully within this test's own scope. Left dangling, it
+    // fires later, during a DIFFERENT (fake-timer) test in this file, and its rejection — though it
+    // has a handler here — races Vitest's own bookkeeping closely enough to be flagged as an
+    // "unhandled error" once. Waiting it out here removes the race rather than arguing with it.
+    await p;
+    expect(settled).toBe(true);
   }, 5_000);
 
-  it("a resolved (unaborted) call still works normally: the fetch call carries the caller's signal object", async () => {
+  it("a resolved (unaborted) call still works normally, with an internal signal that was never aborted", async () => {
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
       lastSignal = init?.signal ?? undefined;
       return new Response(JSON.stringify({ access_token: "fixture-token-not-a-secret", expires_in: 3600 }), { status: 200 });
@@ -92,6 +109,36 @@ describe("getVertexAccessToken(signal) — the fetch is actually cancelled, not 
     const controller = new AbortController();
     const token = await getVertexAccessToken(controller.signal);
     expect(token).toBe("fixture-token-not-a-secret");
-    expect(lastSignal).toBe(controller.signal);
+    // Not the literal external object — an internal controller mediates it (same as
+    // openaiChat/openrouterChat); "aborting the caller's signal..." above already proves that
+    // external abort genuinely propagates to this internal one.
+    expect(lastSignal).toBeInstanceOf(AbortSignal);
+    expect(lastSignal?.aborted).toBe(false);
+  }, 5_000);
+});
+
+describe("getVertexAccessToken(signal, timeoutMs) — its OWN timeout, independent of any external signal", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("aborts on its own timeoutMs even with no external signal at all (round-3 fix: the mint used to have no timer of its own)", async () => {
+    const { getVertexAccessToken } = await loadFresh();
+    const p = getVertexAccessToken(undefined, 5_000);
+    // A handler attached NOW, before advancing time — the abort (and so the rejection) happens
+    // synchronously inside advanceTimersByTimeAsync, below, which is BEFORE `rejects.toThrow()`
+    // would otherwise attach the first one; Node's detector can flag that gap as unhandled even
+    // though the real assertion, a line later, does fully observe it. The no-op here only closes
+    // that window — it asserts nothing on its own.
+    p.catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_050);
+    await expect(p).rejects.toThrow();
+  }, 5_000);
+
+  it("a generous timeoutMs does not fire early: still pending well before its own budget elapses", async () => {
+    const { getVertexAccessToken } = await loadFresh();
+    let settled = false;
+    getVertexAccessToken(undefined, 5_000).then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(settled).toBe(false);
   }, 5_000);
 });
