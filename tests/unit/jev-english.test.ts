@@ -156,14 +156,17 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-vi.mock("@/lib/qwen", () => ({
-  QWEN_MODEL: "qwen2.5:14b",
-  // translate.ts imports QwenError and does `e instanceof QwenError`; the mock must export the class.
-  QwenError: class QwenError extends Error { kind: string; constructor(kind: string, msg: string) { super(msg); this.name = "QwenError"; this.kind = kind; } },
-  qwenJson: async (sys: string, user: string) => {
-    QWEN.calls += 1; QWEN.userLens.push(user.length);
-    if (!QWEN.impl) throw new Error("MODEL LOADED IN TEST — qwenJson called with no impl; this must never happen");
-    return QWEN.impl(sys, user);
+// The model call is faked at the NETWORK seam translate.ts now uses (22 Sep: off qwen, onto
+// OpenRouter). Same tripwire and counters as before, so every existing impl still reads as it did:
+// an impl returns the old `{ json: { english } }` shape and the adapter maps it to a chat result.
+// Nothing here can reach the real OpenRouter, and this shell has a live key in its environment.
+vi.mock("@/lib/openrouter", () => ({
+  OpenRouterError: class OpenRouterError extends Error { code: string; constructor(code: string) { super(code); this.name = "OpenRouterError"; this.code = code; } },
+  openrouterChat: async (a: { system: string; user: string; model: string }) => {
+    QWEN.calls += 1; QWEN.userLens.push(a.user.length);
+    if (!QWEN.impl) throw new Error("MODEL CALLED IN TEST — openrouterChat called with no impl; this must never happen");
+    const r = await QWEN.impl(a.system, a.user);
+    return { content: typeof r.json?.english === "string" ? r.json.english : "", model: r.model ?? a.model, latency_ms: r.latency_ms ?? 0 };
   },
 }));
 
@@ -338,7 +341,7 @@ describe("J0 — P2: a translation outage is a retryable failure, never swallowe
     const r = await drive({ room_day_id: "rd1" });
     expect(r.done, "the outage must surface, not finish done{empty:1}").toMatchObject({ failed: 1, empty: 0, translated: 0 });
     expect(DB.written.w1).toMatchObject({ source: "failed", english: null, model: null });
-    expect(DB.written.w1.error).toBe("qwen_error");
+    expect(DB.written.w1.error).toBe("translate_error");   // a closed code, never the exception text
     // retryable: failed is not skipped, so a re-run without force re-attempts it.
     DB.existing = [{ window_id: "w1", source: "failed" }];
     QWEN.impl = okImpl("recovered");
@@ -360,12 +363,14 @@ describe("J0 — P2: a translation outage is a retryable failure, never swallowe
 });
 
 describe("J0 — P3: input is not silently truncated; input_chars records the true length", () => {
-  it("a 9,500-char window is sent to qwen in FULL (was clipped to 8,000)", async () => {
+  it("a 9,500-char window is sent to the model in FULL (was clipped to 8,000)", async () => {
     process.env.ETA_JEV_TRANSLATE_ENABLED = "1";
     QWEN.impl = okImpl("t");
     DB.windows = [{ id: "w1" }]; DB.runs.w1 = { transcript_english: null, transcript_original: "a".repeat(9500), metrics_json: MIXED_METRICS, detected_language: "hi" };
     await drive({ room_day_id: "rd1" });
-    expect(QWEN.userLens[0], "the whole 9,500 chars must reach qwen").toBeGreaterThan(9500);
+    // Exactly 9,500: the user message is now the original alone, as on the router — the old
+    // "Language: …\nTranscript:\n" prefix is gone, which is what `> 9500` was really measuring.
+    expect(QWEN.userLens[0], "the whole 9,500 chars must reach the model").toBe(9500);
     expect(DB.written.w1).toMatchObject({ source: "translated", input_chars: 9500 });
     // would fail if TRANSLATE_CHAR_CAP dropped back to 8,000 (userLens ~8,025 < 9,500).
   });
