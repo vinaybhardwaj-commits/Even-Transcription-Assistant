@@ -4,13 +4,13 @@
  * For each encounter with >=2 successful ASR engine runs:
  *  (a) inter-engine AGREEMENT — each engine's mean token-similarity to the
  *      others (flags outliers; zero human input).
- *  (b) N-engine LLM JUDGE — a BLINDED qwen call rates each transcript 1-10 +
+ *  (b) N-engine LLM JUDGE — a BLINDED LLM call (routedChat) rates each transcript 1-10 +
  *      ranks them (no engine names shown, to avoid brand bias).
  * Results are written back onto each transcription_run row (agreement_score,
  * judge_score, metrics_json{judge_rank,judge_reasoning,...}) + is_winner.
  */
 import { sql } from "@/lib/db";
-import { qwenJson } from "@/lib/qwen";
+import { routedChatJson } from "@/lib/llm/gemini";
 import { wer, cer, termRecall } from "./wer";
 
 const MAX_TOKENS = 1500;
@@ -70,8 +70,13 @@ async function judgeTranscripts(items: ScoreItem[], labels: string[]): Promise<J
   if (items.length < 2) return null;
   const user = items.map((it, i) => `Transcript ${labels[i]}:\n${(it.text || "").slice(0, 4000)}`).join("\n\n---\n\n");
   try {
-    const r = await qwenJson<JudgeOut>(JUDGE_SYSTEM, user, { temperature: 0, timeoutMs: 60_000 });
-    return r.json ?? null;
+    // STT lab judge: routedChat (stt_lab surface, flash) — Vertex Gemini, then OpenRouter. Was qwen.
+    const r = await routedChatJson<JudgeOut>({
+      surface: "stt_lab", tier: "flash",
+      messages: [{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }],
+      temperature: 0, timeoutMs: 60_000,
+    });
+    return r.ok ? r.json : null;
   } catch {
     return null;
   }
@@ -173,7 +178,7 @@ const EXTRACT_SYSTEM = `You extract the clinically critical terms from a medical
 type Term = { term: string; type: string };
 
 /** Extract critical terms from the gold reference. Prefers a cloud LLM (OPENAI_API_KEY)
- *  per the Q1 decision; falls back to the Mac-Mini qwen so it works without a key. */
+ *  per the Q1 decision; falls back to routedChat (Gemini, then OpenRouter) so it works without one. */
 export async function extractCriticalTerms(reference: string): Promise<{ terms: Term[]; model: string }> {
   const text = (reference || "").slice(0, 8000);
   if (!text.trim()) return { terms: [], model: "none" };
@@ -189,11 +194,17 @@ export async function extractCriticalTerms(reference: string): Promise<{ terms: 
       });
       const j = JSON.parse(r.choices[0]?.message?.content || "{}") as { terms?: Term[] };
       return { terms: Array.isArray(j.terms) ? j.terms.filter((t) => t && t.term) : [], model: `cloud:${model}` };
-    } catch { /* fall through to qwen */ }
+    } catch { /* fall through to routedChat */ }
   }
   try {
-    const r = await qwenJson<{ terms?: Term[] }>(EXTRACT_SYSTEM, text, { temperature: 0, timeoutMs: 60_000 });
-    return { terms: Array.isArray(r.json?.terms) ? r.json!.terms!.filter((t) => t && t.term) : [], model: "qwen2.5:14b" };
+    const r = await routedChatJson<{ terms?: Term[] }>({
+      surface: "stt_lab", tier: "flash",
+      messages: [{ role: "system", content: EXTRACT_SYSTEM }, { role: "user", content: text }],
+      temperature: 0, timeoutMs: 60_000,
+    });
+    if (!r.ok) return { terms: [], model: "extract_failed" };
+    // The label is the provider that ANSWERED — it used to be a hard-coded local model id.
+    return { terms: Array.isArray(r.json?.terms) ? r.json!.terms!.filter((t) => t && t.term) : [], model: r.provider };
   } catch {
     return { terms: [], model: "extract_failed" }; // B19 P2: distinguish failure from "ran, found 0"
   }
@@ -336,8 +347,15 @@ export async function scoreScribe(encounterId: string): Promise<{ ok: boolean; s
     let rubric: ScribeRubric | null = null;
     if (cand) {
       try {
-        const j = await qwenJson<ScribeRubric>(SCRIBE_RUBRIC_SYSTEM, `REFERENCE NOTE:\n${refText.slice(0, 6000)}\n\nCANDIDATE NOTE:\n${cand.slice(0, 6000)}`, { temperature: 0, timeoutMs: 60_000 });
-        rubric = j.json ?? null;
+        const j = await routedChatJson<ScribeRubric>({
+          surface: "stt_lab", tier: "flash",
+          messages: [
+            { role: "system", content: SCRIBE_RUBRIC_SYSTEM },
+            { role: "user", content: `REFERENCE NOTE:\n${refText.slice(0, 6000)}\n\nCANDIDATE NOTE:\n${cand.slice(0, 6000)}` },
+          ],
+          temperature: 0, timeoutMs: 60_000,
+        });
+        rubric = j.ok ? j.json : null;
       } catch { rubric = null; }
     }
     const overall = rubric && typeof rubric.overall === "number" ? Math.max(0, Math.min(10, rubric.overall)) : null;

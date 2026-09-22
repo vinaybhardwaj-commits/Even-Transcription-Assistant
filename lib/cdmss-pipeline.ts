@@ -5,10 +5,10 @@
  *   1. Build seed question from the encounter note
  *   2. HyDE-expand the seed
  *   3. Retrieve top-K excerpts from MKSAP/StatPearls/UpToDate KB
- *   4. Draft pass (qwen2.5:14b, JSON mode): generate CDS suggestions
+ *   4. Draft pass (routedChat, cds surface, JSON mode): generate CDS suggestions
  *      with [N] citation markers pointing to retrieved excerpt indices
  *   5. Critique pass (llama3.1:8b): audit each claim for citation support
- *   6. Revise pass (qwen2.5:14b, JSON mode): rewrite to fix unsupported
+ *   6. Revise pass (routedChat, cds surface, JSON mode): rewrite to fix unsupported
  *      claims (either cite or remove)
  *
  * Returns CdmssOutput (back-compatible shape) plus retrieval metadata
@@ -26,7 +26,7 @@ import { expandQuery } from "@/lib/hyde";
 import { retrieve } from "@/lib/kb-retrieve";
 import type { KbChunkHit } from "@/lib/kb-db";
 import { runCdmssStub, type CdmssOutput } from "@/lib/cdmss-stub";
-import { routedChat } from "@/lib/llm/gemini";
+import { routedChat, firstRoute } from "@/lib/llm/gemini";
 
 export type CdmssPipelineEvent =
   | { stage: "seed"; state: "done"; ms: number; seed_chars: number }
@@ -47,9 +47,8 @@ export type CdmssPipelineEvent =
   | { stage: "fallback"; state: "done"; ms: number; source: "stub" | "empty"; reason: string };
 
 
-const DRAFT_MODEL = process.env.CDS_DRAFT_MODEL || "qwen2.5:14b";
-const CRITIQUE_MODEL = process.env.CDS_CRITIQUE_MODEL || "llama3.1:8b";
-const REVISE_MODEL = process.env.CDS_REVISE_MODEL || "qwen2.5:14b";
+// No per-pass local model: every pass routes through routedChat (cds surface, pro tier) — Vertex
+// Gemini, then OpenRouter. The provider that answered is recorded per pass in llmCalls.
 const DRAFT_TIMEOUT_MS = 100_000;
 const CRITIQUE_TIMEOUT_MS = 30_000;
 const REVISE_TIMEOUT_MS = 75_000;
@@ -138,17 +137,15 @@ function noteToSeedQuery(note: AnyNote, noteType?: string): string {
 }
 
 async function callJson<T>(
-  model: string,
   timeoutMs: number,
   system: string,
   user: string,
   opts: { signal?: AbortSignal; temperature?: number } = {},
 ): Promise<{ ok: true; data: T; latency_ms: number; raw: string; provider: string } | { ok: false; error: string; latency_ms: number; provider: string }> {
-  // CDS reasoning passes (draft/critique/revise) run on Gemini (cds surface, pro
-  // tier) when GEMINI_ALL/GEMINI_CDS=1 + Vertex configured; otherwise local llama/
-  // qwen. Soft-fails to the local model on any error.
+  // CDS reasoning passes (draft/critique/revise): Gemini (cds surface, pro tier) when flagged +
+  // configured, then OpenRouter. No local model in the chain.
   const rc = await routedChat({
-    surface: "cds", tier: "pro", ollamaModel: model,
+    surface: "cds", tier: "pro",
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -157,7 +154,7 @@ async function callJson<T>(
   });
   const latency_ms = rc.latency_ms;
   // Verbatim, per call. Each pass routes independently, so draft can be served by Gemini and
-  // critique by Ollama in the same run — one label for the whole pipeline would hide that.
+  // critique by an OpenRouter fallback in the same run — one label for the whole run would hide that.
   const provider = rc.provider;
   if (!rc.ok) return { ok: false, error: rc.error ?? "llm_failed", latency_ms, provider };
   const content = rc.content;
@@ -389,9 +386,8 @@ export async function runCdmssPipeline(
   const { numbered, sources } = formatSources(r.hits);
 
   // 4. Draft
-  opts.onEvent?.({ stage: "draft", state: "start", model: DRAFT_MODEL });
+  opts.onEvent?.({ stage: "draft", state: "start", model: firstRoute("cds", "pro") });
   const draftRes = await callJson<RawDraft>(
-    DRAFT_MODEL,
     Math.min(DRAFT_TIMEOUT_MS, remainingMs()),
     DRAFT_SYSTEM,
     buildDraftUser(seed, numbered),
@@ -412,9 +408,8 @@ export async function runCdmssPipeline(
   const maxIndex = sources.length;
 
   // 5. Critique
-  opts.onEvent?.({ stage: "critique", state: "start", model: CRITIQUE_MODEL });
+  opts.onEvent?.({ stage: "critique", state: "start", model: firstRoute("cds", "pro") });
   const critiqueRes = await callJson<RawCritique>(
-    CRITIQUE_MODEL,
     Math.min(CRITIQUE_TIMEOUT_MS, remainingMs()),
     CRITIQUE_SYSTEM,
     buildCritiqueUser(draftRaw, numbered),
@@ -446,9 +441,8 @@ export async function runCdmssPipeline(
     critiqueRes.data.unsupported_items.length > 0 &&
     remainingMs() > 25_000  // only attempt the revise pass if there is real budget left
   ) {
-    opts.onEvent?.({ stage: "revise", state: "start", model: REVISE_MODEL });
+    opts.onEvent?.({ stage: "revise", state: "start", model: firstRoute("cds", "pro") });
     const reviseRes = await callJson<RawDraft>(
-      REVISE_MODEL,
       Math.min(REVISE_TIMEOUT_MS, remainingMs()),
       REVISE_SYSTEM,
       buildReviseUser(seed, numbered, draftRaw, critiqueRes.raw),

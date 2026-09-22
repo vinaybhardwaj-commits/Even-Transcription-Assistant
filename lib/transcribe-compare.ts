@@ -4,7 +4,7 @@
  * Runs the same audio through:
  *   1. Deepgram nova-3-medical (cloud, existing)   — ./transcribe.ts
  *   2. Whisper large-v3-turbo on the Mac Mini       — ./whisper.ts
- * In parallel. Then asks qwen2.5:14b on the same Mac Mini to judge the
+ * In parallel. Then asks routedChat (Gemini, then OpenRouter) to judge the
  * two transcripts on a 1-10 quality scale and pick a winner.
  *
  * Returns the full comparison record. Callers persist it to
@@ -17,7 +17,7 @@
  */
 import { transcribeAudio } from './transcribe';
 import { transcribeWithWhisper } from './whisper';
-import { qwenJson, QwenError } from './qwen';
+import { routedChatJson } from './llm/gemini';
 import type { ProgressEvent } from './llm-trace/stream';
 
 export type CompareEmit = (ev: ProgressEvent) => void;
@@ -185,20 +185,25 @@ export async function runTranscriptionCompare(
     };
   }
 
-  // 3. Both succeeded — ask qwen2.5:14b to judge.
-  emit({ type: 'progress', stage: 'drafting' as any, msg: 'qwen scoring both transcripts (1-10) and picking a winner' });
+  // 3. Both succeeded — ask routedChat (stt_lab surface, flash) to judge.
+  emit({ type: 'progress', stage: 'drafting' as any, msg: 'scoring both transcripts (1-10) and picking a winner' });
   let judge: JudgeResult;
   try {
-    const result = await qwenJson<{
+    const result = await routedChatJson<{
       deepgram_score: number;
       whisper_score: number;
       winner: 'deepgram' | 'whisper' | 'tie';
       reasoning: string;
-    }>(
-      JUDGE_SYSTEM,
-      buildJudgeUserMessage(deepgram.transcript!, whisper.transcript!, opts.context),
-      { temperature: 0, timeoutMs: 30_000 },
-    );
+    }>({
+      surface: 'stt_lab', tier: 'flash',
+      messages: [
+        { role: 'system', content: JUDGE_SYSTEM },
+        { role: 'user', content: buildJudgeUserMessage(deepgram.transcript!, whisper.transcript!, opts.context) },
+      ],
+      temperature: 0, timeoutMs: 30_000,
+    });
+    // A failed call is handled by the catch below, exactly as a thrown one always was.
+    if (!result.ok || !result.json) throw new Error(result.error ?? 'judge_failed');
     const j = result.json;
     const dgs =
       typeof j.deepgram_score === 'number'
@@ -223,12 +228,7 @@ export async function runTranscriptionCompare(
       error: null,
     };
   } catch (e: unknown) {
-    const msg =
-      e instanceof QwenError
-        ? `${e.kind}: ${e.message}`
-        : e instanceof Error
-          ? e.message
-          : String(e);
+    const msg = e instanceof Error ? e.message : String(e);
     judge = {
       winner: null,
       deepgram_score: null,

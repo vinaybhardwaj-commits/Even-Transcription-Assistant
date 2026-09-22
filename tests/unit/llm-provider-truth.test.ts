@@ -1,8 +1,8 @@
 /**
  * Provider truth — scribe_llm_health, and traces that record what actually served.
  *
- * The defect these guard: routedChat() has always returned 'gemini:<model>' | 'ollama' |
- * 'none', and the traces recorded the string literal "qwen2.5:14b" regardless. Nothing
+ * The defect these guard: routedChat() returns 'gemini:<model>' | 'openrouter:<model>' | 'none'
+ * ('ollama' until qwen left ETA on 22 Sep), and the traces once recorded the string literal "qwen2.5:14b" regardless. Nothing
  * errored, so nothing surfaced it for two months. The tests below therefore assert on
  * VALUES THAT FLOW, not on the presence of a field — a regression that reintroduces a
  * constant has to fail here.
@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 type Rc = { ok: boolean; content: string; error?: string; latency_ms: number; provider: string };
 
 let rcImpl: (p: { surface: string; tier?: string }) => Promise<Rc> | Rc = () => ({
-  ok: true, content: "ok", latency_ms: 5, provider: "ollama",
+  ok: true, content: "ok", latency_ms: 5, provider: "openrouter:google/gemini-2.5-flash",
 });
 const rcCalls: Array<{ surface: string; tier?: string; maxTokens?: number; timeoutMs?: number; messages: Array<{ role: string; content: string }> }> = [];
 
@@ -36,6 +36,12 @@ vi.mock("@/lib/llm/gemini", () => ({
   GEMINI_MODEL: "gemini-2.5-pro",
   GEMINI_FLASH_MODEL: "gemini-2.5-flash",
   geminiChatIfOn: async () => null,
+  // What the router will try first: Gemini when flagged + configured, else the OpenRouter head.
+  firstRoute: (surface: string, tier: "pro" | "flash") => {
+    const on = Boolean(process.env.GCP_PROJECT && process.env.GCP_SA_KEY) &&
+      (process.env.GEMINI_ALL === "1" || process.env[`GEMINI_${surface.toUpperCase()}`] === "1");
+    return on ? `gemini:${tier === "flash" ? "gemini-2.5-flash" : "gemini-2.5-pro"}` : "openrouter:google/gemini-2.5-flash";
+  },
 }));
 
 import { LLM_TOOLS, LLM_SURFACES, probeLlmSurface } from "@/lib/mcp/tools/llm";
@@ -54,7 +60,7 @@ beforeEach(() => {
   saved = Object.fromEntries(GEMINI_ENV.map((k) => [k, process.env[k]]));
   for (const k of GEMINI_ENV) delete process.env[k];
   rcCalls.length = 0;
-  rcImpl = () => ({ ok: true, content: "ok", latency_ms: 5, provider: "ollama" });
+  rcImpl = () => ({ ok: true, content: "ok", latency_ms: 5, provider: "openrouter:google/gemini-2.5-flash" });
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -94,7 +100,7 @@ describe("1 — scribe_llm_health: one row per surface, provider verbatim", () =
     configured();
     process.env.GEMINI_ALL = "1";
     // deliberately odd strings: the tool must not touch any of them
-    const answers = ["gemini:gemini-2.5-flash", "gemini:gemini-2.5-pro", "ollama", "none", "gemini:some-preview-model-0827", "OLLAMA"];
+    const answers = ["gemini:gemini-2.5-flash", "gemini:gemini-2.5-pro", "openrouter:meta-llama/llama-4-scout", "none", "gemini:some-preview-model-0827", "OpenRouter:Mixed-Case"];
     let i = 0;
     rcImpl = () => ({ ok: true, content: "ok", latency_ms: 3, provider: answers[i++]! });
 
@@ -134,10 +140,10 @@ describe("1 — scribe_llm_health: one row per surface, provider verbatim", () =
 });
 
 describe("2 — the silent fallback names itself", () => {
-  it("configured + flagged but answered by ollama → warning: silent_fallback", async () => {
+  it("configured + flagged but answered by the OpenRouter fallback → warning: silent_fallback", async () => {
     configured();
     process.env.GEMINI_ALL = "1";
-    rcImpl = () => ({ ok: true, content: "ok", latency_ms: 4, provider: "ollama" });
+    rcImpl = () => ({ ok: true, content: "ok", latency_ms: 4, provider: "openrouter:google/gemini-2.5-flash" });
 
     const rows = (await run()).surfaces as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(6);
@@ -156,8 +162,8 @@ describe("2 — the silent fallback names itself", () => {
     expect(rows.every((r) => r.warning === undefined)).toBe(true);
   });
 
-  it("no warning when nobody asked for Gemini — ollama is the correct answer there", async () => {
-    // unconfigured and unflagged: ollama is not a fallback, it is the design
+  it("no warning when nobody asked for Gemini — OpenRouter is the correct answer there", async () => {
+    // unconfigured and unflagged: OpenRouter is not a fallback, it is the design
     const rows = (await run()).surfaces as Array<Record<string, unknown>>;
     expect(rows.every((r) => r.configured === false)).toBe(true);
     expect(rows.every((r) => r.flag_on === false)).toBe(true);
@@ -179,7 +185,7 @@ describe("2 — the silent fallback names itself", () => {
   it("a per-surface flag warns only on that surface", async () => {
     configured();
     process.env.GEMINI_CDS = "1";
-    rcImpl = () => ({ ok: true, content: "ok", latency_ms: 4, provider: "ollama" });
+    rcImpl = () => ({ ok: true, content: "ok", latency_ms: 4, provider: "openrouter:google/gemini-2.5-flash" });
     const rows = (await run()).surfaces as Array<Record<string, unknown>>;
     const byName = Object.fromEntries(rows.map((r) => [r.surface, r]));
     expect(byName.cds!.warning).toBe("silent_fallback");
@@ -262,14 +268,14 @@ describe("5 — generateNote returns the provider it was given", () => {
       GEMINI_MODEL: "gemini-2.5-pro",
       GEMINI_FLASH_MODEL: "gemini-2.5-flash",
     }));
-    process.env.OLLAMA_BASE_URL = "http://localhost:11434/v1";
     const { generateNote } = await import("@/lib/note-generation");
     const r = await generateNote("patient reports a cough for three days");
     expect(seen).toHaveLength(1);
     expect(r.provider).toBe("gemini:gemini-2.5-flash");
     expect(r.latency_ms).toBe(42);
-    // the legacy `model` field is the LOCAL name and is explicitly NOT the provider
-    if (r.ok) expect(r.model).not.toBe(r.provider);
+    // `model` used to be the constant "qwen" local name on every note, whoever wrote it. With no local
+    // model left it is the provider itself — derived, never a literal.
+    if (r.ok) expect(r.model).toBe(r.provider);
     vi.doUnmock("@/lib/llm/gemini");
     vi.resetModules();
   });
@@ -277,18 +283,37 @@ describe("5 — generateNote returns the provider it was given", () => {
   it("a failed call still reports which provider failed", async () => {
     vi.resetModules();
     vi.doMock("@/lib/llm/gemini", () => ({
-      routedChat: async () => ({ ok: false, content: "", error: "http_503", latency_ms: 11, provider: "ollama" }),
+      routedChat: async () => ({ ok: false, content: "", error: "all_failed", latency_ms: 11, provider: "none" }),
       geminiChatIfOn: async () => null,
       geminiConfigured: () => false,
       pickGemini: () => undefined,
       GEMINI_MODEL: "gemini-2.5-pro",
       GEMINI_FLASH_MODEL: "gemini-2.5-flash",
     }));
-    process.env.OLLAMA_BASE_URL = "http://localhost:11434/v1";
     const { generateNote } = await import("@/lib/note-generation");
     const r = await generateNote("patient reports a cough");
     expect(r.ok).toBe(false);
-    expect(r.provider).toBe("ollama");
+    expect(r.provider).toBe("none");
+    vi.doUnmock("@/lib/llm/gemini");
+    vi.resetModules();
+  });
+
+  it("writes a note with NO OLLAMA_BASE_URL at all — the old gate refused to", async () => {
+    vi.resetModules();
+    delete process.env.OLLAMA_BASE_URL;
+    delete process.env.LLM_BASE_URL;
+    vi.doMock("@/lib/llm/gemini", () => ({
+      routedChat: async () => ({ ok: true, content: JSON.stringify({ chief_complaint: "cough" }), latency_ms: 9, provider: "openrouter:google/gemini-2.5-flash" }),
+      geminiChatIfOn: async () => null,
+      geminiConfigured: () => false,
+      pickGemini: () => undefined,
+      GEMINI_MODEL: "gemini-2.5-pro",
+      GEMINI_FLASH_MODEL: "gemini-2.5-flash",
+    }));
+    const { generateNote } = await import("@/lib/note-generation");
+    const r = await generateNote("patient reports a cough for three days");
+    expect(r.ok).toBe(true);
+    expect(r.provider).toBe("openrouter:google/gemini-2.5-flash");
     vi.doUnmock("@/lib/llm/gemini");
     vi.resetModules();
   });
@@ -296,14 +321,13 @@ describe("5 — generateNote returns the provider it was given", () => {
   it("nothing ran → 'unknown', never a default that looks like a real model name", async () => {
     vi.resetModules();
     vi.doMock("@/lib/llm/gemini", () => ({
-      routedChat: async () => ({ ok: true, content: "{}", latency_ms: 1, provider: "ollama" }),
+      routedChat: async () => ({ ok: true, content: "{}", latency_ms: 1, provider: "openrouter:google/gemini-2.5-flash" }),
       geminiChatIfOn: async () => null,
       geminiConfigured: () => false,
       pickGemini: () => undefined,
       GEMINI_MODEL: "gemini-2.5-pro",
       GEMINI_FLASH_MODEL: "gemini-2.5-flash",
     }));
-    process.env.OLLAMA_BASE_URL = "http://localhost:11434/v1";
     const { generateNote } = await import("@/lib/note-generation");
     const empty = await generateNote("   ");
     expect(empty.ok).toBe(false);

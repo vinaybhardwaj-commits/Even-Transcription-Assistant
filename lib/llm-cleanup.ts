@@ -1,18 +1,21 @@
 /**
- * Per-utterance cleanup via llama3.1:8b on the Mac Mini (Ollama).
+ * Per-utterance cleanup of a live transcript.
  *
  * Receives a single transcribed utterance from Deepgram (or Whisper)
  * and returns it minus filler words, false starts, and common
  * mispronunciations. Critically — clinical content (drug, dose,
  * frequency, exam findings, numbers) is preserved verbatim.
  *
- * Target latency: <1s on llama3.1:8b warm. Soft-fail: on any error
+ * Target latency: ~1-2 s on Gemini flash. Soft-fail: on any error
  * the caller falls back to the raw text.
  *
- * Uses the OpenAI-compatible Ollama endpoint at $OLLAMA_BASE_URL (already includes /v1).
+ * Runs through routedChat (live surface, flash tier): Vertex Gemini, then OpenRouter. It used to
+ * call llama3.1:8b on the Mini's Ollama directly; no local chat model remains in ETA. `model` on the
+ * result is the provider that ANSWERED, so the client is told what actually cleaned the text.
  */
 
-const CLEANUP_MODEL = process.env.CLEANUP_MODEL || "llama3.1:8b";
+import { routedChat } from "@/lib/llm/gemini";
+
 const CLEANUP_TIMEOUT_MS = 8_000;
 const CLEANUP_TEMPERATURE = 0;
 const CLEANUP_MAX_TOKENS = 384;
@@ -101,86 +104,36 @@ export async function cleanUtterance(
   raw: string,
   opts: { signal?: AbortSignal } = {},
 ): Promise<CleanupResult> {
-  const base = process.env.OLLAMA_BASE_URL;
-  if (!base) {
-    return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0 };
-  }
   const trimmed = raw.trim();
+  // Nothing to clean, and nothing was called: `none`, not the name of a model that never ran.
   if (trimmed.length === 0) {
-    return { ok: true, cleaned: "", latency_ms: 0, model: CLEANUP_MODEL };
+    return { ok: true, cleaned: "", latency_ms: 0, model: "none" };
   }
-
-  const url = `${base.replace(/\/+$/, "")}/chat/completions`;
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  const rc = await routedChat({
+    surface: "live", tier: "flash",
+    messages: [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: trimmed },
+    ],
+    temperature: CLEANUP_TEMPERATURE, maxTokens: CLEANUP_MAX_TOKENS, timeoutMs: CLEANUP_TIMEOUT_MS, signal: opts.signal,
+  });
+  if (!rc.ok) {
+    return { ok: false, error: rc.error ?? "llm_failed", latency_ms: rc.latency_ms };
   }
-
-  const t0 = Date.now();
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}`,
-      },
-      body: JSON.stringify({
-        model: CLEANUP_MODEL,
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user", content: trimmed },
-        ],
-        temperature: CLEANUP_TEMPERATURE,
-        max_tokens: CLEANUP_MAX_TOKENS,
-        stream: false,
-      }),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    clearTimeout(tid);
-    const latency_ms = Date.now() - t0;
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: `http_${res.status}: ${text.slice(0, 120)}`,
-        latency_ms,
-      };
-    }
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const cleaned = (json.choices?.[0]?.message?.content ?? "").trim();
-    if (cleaned.length === 0) {
-      return { ok: false, error: "empty_response", latency_ms };
-    }
-    // Defensive: catch the LLM 'breaking character' and chat-replying to the
-    // doctor's utterance instead of cleaning it up (B3, 27 May 2026). If the
-    // model returns something that starts like a chatbot opener and is also
-    // substantially LONGER than the input (chat replies tend to be 5×+ the
-    // input), drop the cleaned text and fall back to the raw transcript.
-    if (looksLikeChatReply(cleaned, trimmed)) {
-      return {
-        ok: true,
-        cleaned: trimmed,
-        latency_ms,
-        model: CLEANUP_MODEL + "+rawfallback",
-      };
-    }
-    const revertedClean = revertAbbrevExpansions(trimmed, cleaned);
-    return { ok: true, cleaned: revertedClean, latency_ms, model: CLEANUP_MODEL };
-  } catch (e: unknown) {
-    clearTimeout(tid);
-    const latency_ms = Date.now() - t0;
-    if (controller.signal.aborted) {
-      return { ok: false, error: `timeout_${CLEANUP_TIMEOUT_MS}ms`, latency_ms };
-    }
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg.slice(0, 200), latency_ms };
+  const cleaned = rc.content.trim();
+  if (cleaned.length === 0) {
+    return { ok: false, error: "empty_response", latency_ms: rc.latency_ms };
   }
+  // Defensive: catch the LLM 'breaking character' and chat-replying to the
+  // doctor's utterance instead of cleaning it up (B3, 27 May 2026). If the
+  // model returns something that starts like a chatbot opener and is also
+  // substantially LONGER than the input (chat replies tend to be 5×+ the
+  // input), drop the cleaned text and fall back to the raw transcript.
+  if (looksLikeChatReply(cleaned, trimmed)) {
+    return { ok: true, cleaned: trimmed, latency_ms: rc.latency_ms, model: rc.provider + "+rawfallback" };
+  }
+  const revertedClean = revertAbbrevExpansions(trimmed, cleaned);
+  return { ok: true, cleaned: revertedClean, latency_ms: rc.latency_ms, model: rc.provider };
 }
 
 /**

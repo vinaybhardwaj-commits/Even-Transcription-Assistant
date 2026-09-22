@@ -51,16 +51,32 @@ export function readOpenRouterKey(env: Env = process.env, readFile: (p: string) 
   return key;
 }
 
+export type OpenRouterMessage = { role: string; content: string };
+
+/**
+ * ONE client for every OpenRouter call in ETA — the Jev translator (system + user) and routedChat's
+ * fallback (a full message list, JSON mode, a token cap). Whatever the caller passes, ZDR and
+ * data_collection:"deny" are on the body; there is no parameter that turns them off.
+ */
 export async function openrouterChat(args: {
   model: string;
-  system: string;
-  user: string;
+  /** Either `messages`, or `system` + `user`. `messages` wins when both are given. */
+  messages?: OpenRouterMessage[];
+  system?: string;
+  user?: string;
+  temperature?: number;
+  responseJson?: boolean;
+  maxTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
   env?: Env;
   fetchImpl?: typeof fetch;
 }): Promise<OpenRouterChatResult> {
   const env = args.env ?? process.env;
+  const messages: OpenRouterMessage[] = args.messages ?? [
+    { role: "system", content: args.system ?? "" },
+    { role: "user", content: args.user ?? "" },
+  ];
   const key = readOpenRouterKey(env);
   const url = (env.OPENROUTER_API_URL ?? "").trim() || OPENROUTER_DEFAULT_URL;
   const doFetch = args.fetchImpl ?? fetch;
@@ -80,12 +96,11 @@ export async function openrouterChat(args: {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: args.model,
-        temperature: 0,
+        temperature: args.temperature ?? 0,
         provider: { zdr: true, data_collection: "deny" },
-        messages: [
-          { role: "system", content: args.system },
-          { role: "user", content: args.user },
-        ],
+        messages,
+        ...(args.responseJson ? { response_format: { type: "json_object" } } : {}),
+        ...(args.maxTokens ? { max_tokens: args.maxTokens } : {}),
       }),
       signal: controller.signal,
       cache: "no-store",

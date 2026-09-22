@@ -63,7 +63,6 @@ async function gemini(surface: string, tier: "pro" | "flash", system: string, us
     rc = await routedChat({
       surface,
       tier,
-      ollamaModel: process.env.NOTE_MODEL || "qwen2.5:14b",
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },

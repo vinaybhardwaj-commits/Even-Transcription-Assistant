@@ -17,7 +17,7 @@
  * the clinically-critical English terms live).
  */
 import { indicconformerAdapter } from "./adapters/indicconformer";
-import { qwenJson } from "@/lib/qwen";
+import { routedChatJson } from "@/lib/llm/gemini";
 
 export const INDIC_NOTE_ASSIST_ON = () => process.env.ETA_NOTE_PARALLEL_INDIC === "1";
 
@@ -33,11 +33,13 @@ async function translateNativeToEnglish(native: string, lang: string): Promise<s
     "You are a clinical translator. Translate the Indian-language clinical transcript to natural English. " +
     "CRITICAL: keep English medical terms, drug names, doses, units, and abbreviations exactly as a clinician writes them. " +
     "Do NOT add, omit, summarize, or invent content. Return JSON {\"english\":\"...\"}.";
-  try {
-    const r = await qwenJson<{ english?: string }>(sys, `Language: ${lang}\nTranscript:\n${native.slice(0, 8000)}`, { temperature: 0, timeoutMs: 60_000 });
-    const t = (r.json?.english ?? "").trim();
-    return t || null;
-  } catch { return null; }
+  const r = await routedChatJson<{ english?: string }>({
+    surface: "native", tier: "flash",
+    messages: [{ role: "system", content: sys }, { role: "user", content: `Language: ${lang}\nTranscript:\n${native.slice(0, 8000)}` }],
+    temperature: 0, timeoutMs: 60_000,
+  });
+  const t = (r.ok ? r.json?.english ?? "" : "").trim();
+  return t || null;
 }
 
 async function pickBetter(sarvamEn: string, indicEn: string): Promise<{ winner: "sarvam" | "indicconformer"; reason: string }> {
@@ -46,7 +48,13 @@ async function pickBetter(sarvamEn: string, indicEn: string): Promise<{ winner: 
     "Pick the one that is more COMPLETE and clinically FAITHFUL: better preserves findings, drug names, doses and units, more coherent, fewer dropped segments. " +
     "Do NOT reward length alone. If they are equivalent or you are unsure, pick A. Return JSON {\"winner\":\"A\"|\"B\",\"reason\":\"...\"}.";
   try {
-    const r = await qwenJson<{ winner?: string; reason?: string }>(sys, `TRANSCRIPT A:\n${sarvamEn.slice(0, 6000)}\n\nTRANSCRIPT B:\n${indicEn.slice(0, 6000)}`, { temperature: 0, timeoutMs: 60_000 });
+    const rc = await routedChatJson<{ winner?: string; reason?: string }>({
+      surface: "native", tier: "flash",
+      messages: [{ role: "system", content: sys }, { role: "user", content: `TRANSCRIPT A:\n${sarvamEn.slice(0, 6000)}\n\nTRANSCRIPT B:\n${indicEn.slice(0, 6000)}` }],
+      temperature: 0, timeoutMs: 60_000,
+    });
+    if (!rc.ok) return { winner: "sarvam", reason: "pick_failed" };
+    const r = { json: rc.json };
     const w = (r.json?.winner ?? "A").trim().toUpperCase().startsWith("B") ? "indicconformer" : "sarvam";
     return { winner: w, reason: (r.json?.reason ?? "").slice(0, 200) };
   } catch { return { winner: "sarvam", reason: "pick_failed" }; }

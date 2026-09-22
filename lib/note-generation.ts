@@ -5,7 +5,7 @@
  * Output: structured JSON document covering the clinical sections a
  * receiving physician needs — CC, HPI, exam, assessment, plan.
  *
- * Model: qwen2.5:14b on the Mac Mini Ollama (already used by CDMSS).
+ * Model: routedChat (note surface, flash tier) — Vertex Gemini, then OpenRouter. No local model.
  * JSON mode via response_format. Temperature 0 for determinism.
  *
  * Fail mode: caller catches; encounter status stays "processing" and
@@ -21,7 +21,6 @@ export type NoteEvent =
   | { stage: "note"; state: "done"; ms: number; chief_complaint?: string }
   | { stage: "note"; state: "error"; message: string; ms: number };
 
-const NOTE_MODEL = process.env.NOTE_MODEL || "qwen2.5:14b";
 const NOTE_TIMEOUT_MS = 240_000;
 const NOTE_TEMPERATURE = 0;
 
@@ -496,14 +495,15 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
 }
 
 /**
- * `provider` is routedChat's verbatim answer — 'gemini:<model>' | 'ollama' | 'none' — and it
+ * `provider` is routedChat's verbatim answer — 'gemini:<model>' | 'openrouter:<model>' | 'none' — and it
  * is on BOTH branches because a failed note still ran somewhere, and which somewhere is
  * exactly what a trace needs to record. `unknown` when nothing ran (bad config, empty
  * transcript) or when the call threw: never a guess, and never a default that looks like a
  * real model name.
  *
- * `model` is the LOCAL model name and is kept only for backwards compatibility with existing
- * readers. It is NOT the provider and never was — it is a constant. Read `provider`.
+ * `model` is kept for type compatibility. It used to be the constant "qwen2.5:14b" on every
+ * note, whoever wrote it — a label that lied. It is now the same string as `provider`: what the
+ * call reported. No caller reads it; read `provider`.
  */
 export type NoteResult =
   | { ok: true; note: AnyNote; latency_ms: number; model: string; provider: string; raw_response: string }
@@ -513,9 +513,8 @@ export async function generateNote(
   transcript: string,
   opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string; nativeReference?: string } = {},
 ): Promise<NoteResult> {
-  const base = process.env.OLLAMA_BASE_URL;
-  // Nothing has run yet, so there is no provider to report. 'unknown' is the honest answer.
-  if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0, provider: "unknown" };
+  // No OLLAMA_BASE_URL gate: nothing here uses Ollama, and requiring it would refuse to write a
+  // note on a deployment that simply has no local model configured.
   const cleanTranscript = (transcript ?? "").trim();
   if (cleanTranscript.length === 0) {
     return { ok: false, error: "empty_transcript", latency_ms: 0, provider: "unknown" };
@@ -541,10 +540,9 @@ export async function generateNote(
   // the provider that actually served rather than a literal.
   let provider = "unknown";
   try {
-    // Note generation: Gemini (note surface, flash tier) when GEMINI_ALL/GEMINI_NOTE=1
-    // + Vertex configured; otherwise local qwen. Soft-fails to qwen on any error.
+    // Note generation: Gemini (note surface, flash tier) when flagged + configured, then OpenRouter.
     const rc = await routedChat({
-      surface: "note", tier: "flash", ollamaModel: NOTE_MODEL,
+      surface: "note", tier: "flash",
       messages: [
         { role: "system", content: system },
         { role: "user", content: userContent },
@@ -739,7 +737,7 @@ export async function generateNote(
       };
     }
     opts.onEvent?.({ stage: "note", state: "done", ms: latency_ms, chief_complaint: noteHeadline(note, opts.noteType) });
-    return { ok: true, note, latency_ms, model: NOTE_MODEL, provider, raw_response: content };
+    return { ok: true, note, latency_ms, model: provider, provider, raw_response: content };
   } catch (e: unknown) {
     const latency_ms = Date.now() - t0;
     const err =

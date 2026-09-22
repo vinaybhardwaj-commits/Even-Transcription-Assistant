@@ -12,8 +12,7 @@ import { NextRequest } from "next/server";
 import { respondError, respondOk } from "@/lib/respond";
 import {
   geminiConfigured, pickGemini, routedChat,
-  GEMINI_MODEL, GEMINI_FLASH_MODEL,
-} from "@/lib/llm/gemini";
+  GEMINI_MODEL, GEMINI_FLASH_MODEL, firstRoute } from "@/lib/llm/gemini";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -36,16 +35,16 @@ export async function GET(req: NextRequest) {
 
   const results = [];
   for (const s of surfaces) {
-    const wouldUse = pickGemini(s.surface, s.tier); // undefined => Ollama
+    const wouldUse = pickGemini(s.surface, s.tier); // undefined => straight to the OpenRouter chain
     const t0 = Date.now();
     try {
       const rc = await routedChat({
-        surface: s.surface, tier: s.tier, ollamaModel: "qwen2.5:14b",
+        surface: s.surface, tier: s.tier,
         messages: PING, temperature: 0, responseJson: false, timeoutMs: 45_000,
       });
       results.push({
         surface: s.surface, tier: s.tier,
-        flag_on: Boolean(wouldUse), would_use: wouldUse ?? "ollama",
+        flag_on: Boolean(wouldUse), would_use: firstRoute(s.surface, s.tier),
         provider: rc.provider, ok: rc.ok,
         sample: (rc.content || "").slice(0, 40), error: rc.error,
         latency_ms: rc.latency_ms,

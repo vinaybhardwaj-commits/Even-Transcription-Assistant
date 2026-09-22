@@ -89,7 +89,6 @@ Return JSON:
   try {
     const r = await routedChat({
       surface: "notegen_analyze", tier: "flash",
-      ollamaModel: process.env.NOTE_MODEL || "qwen2.5:14b",
       messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       temperature: 0, responseJson: true, maxTokens: MAX_OUTPUT_TOKENS, timeoutMs: 25_000, signal: req.signal,
     });
