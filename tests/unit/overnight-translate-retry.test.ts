@@ -78,7 +78,7 @@ function night(m: Model, mode: "run" | "dry-run" = "run", limit = 0) {
       // The job finishes: one more `done` attempt, and (only if the world says so) English appears.
       const w = m.wins.find((x) => x.id === jobWindow.get(jobId))!;
       if (!finished.has(jobId)) { finished.add(jobId); w.attempts += 1; if (m.giveEnglish) w.english = true; }
-      return { ok: true, status: "done", step: "finish", error_code: null, attempts: 5, failures: 0 };
+      return { ok: true, status: "done", step: "finish", error_code: null, attempts: 5, failures: 0, join_contended: false };
     },
   };
   const deps: Deps = {

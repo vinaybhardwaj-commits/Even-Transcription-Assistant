@@ -12,6 +12,13 @@
  * job or from several finishing close together.
  *
  * WHAT IT DECLINES TO DO, and where each is enforced:
+ *   - count a JOIN-SERVICE COLLISION as a real failure ... the audio-join service has its own single-job mutex
+ *                                                 (lib/bench-join.ts), so a second simultaneous join for a
+ *                                                 DIFFERENT window is refused `join_already_running` — a fact
+ *                                                 about TIMING, not about the window. Retried up to
+ *                                                 JOIN_RETRY_LIMIT times after a short backoff (V, 22 Sep 2026
+ *                                                 08:20, option b), not counted toward the failure stop unless
+ *                                                 the retries themselves run out;
  *   - submit outside 21:30-07:10 IST ............ hours.ts `maySubmit`, checked before EVERY submit;
  *   - submit while the watchdog says STOP or disk is under 40 GB ... gate.ts, checked before EVERY submit;
  *   - retry a refused credential ................ door.ts `fatal`, the run stops on the first one;
@@ -50,6 +57,13 @@ export const STATUS_POLL_MS = 10_000;
 export const WINDOW_DEADLINE_MS = 25 * 60_000;
 export const CONSECUTIVE_FAILURE_LIMIT = 5;
 export const DEFERRED_LIMIT = 5;
+/** A join-service collision (`join_already_running`) is retried this many times before it counts as a real
+ *  failure. Bounded, per V's ruling: a window that keeps colliding is no longer just unlucky timing. */
+export const JOIN_RETRY_LIMIT = 2;
+/** Backoff before a retry, so a resubmit right into the same contention is less likely — the collision is
+ *  between this driver and whatever ELSE just joined audio (the cron auto-drain, an admin route), and both
+ *  sides retrying instantly only raises the odds of colliding again. */
+export const JOIN_RETRY_DELAY_MS = 5_000;
 export const DEFAULT_MAX_FAILED_JOBS = 2;
 
 export type FatalCode =
@@ -76,6 +90,9 @@ export type RunSummary = {
   abandoned: number;
   /** `done` jobs whose English check could not be read: not counted as done, counted toward the failure stop. */
   unverified: number;
+  /** Job attempts that collided with the join service's own mutex and were retried — not counted as failures
+   *  unless JOIN_RETRY_LIMIT ran out (that outcome lands in `failed`, like any other exhausted retry). */
+  joinDeferred: number;
   overridden: number;
   fatal: FatalCode | null;
   stop: StopReason;
@@ -86,7 +103,7 @@ const EMPTY_SUMMARY: Summary = {
   retry_pending: 0, parked: 0, backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
 
-const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
+const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, joinDeferred: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
 
 /** The args of the job for one candidate. Exported so a test pins exactly what goes on the wire. */
 export function jobArgsFor(c: Candidate, origin: string): RoomWindowSubmit {
@@ -155,7 +172,7 @@ export async function runOvernight(
     deps.log({ event: "fatal", code, ...extra });
   };
 
-  type Slot = { c: Candidate; t0: number };
+  type Slot = { c: Candidate; t0: number; joinRetries: number };
   // Insertion order = submission order, which JS Maps preserve — the order `finishSlot` and the poll batch
   // below iterate a tick's completions in, so a shared `consecutiveFailures` counts interleaved completions
   // deterministically (the order they actually landed), not the order slots were opened.
@@ -175,8 +192,27 @@ export async function runOvernight(
    * canary included — just callable per slot instead of inline. Returns true if this finish set `s.fatal`
    * (too_many_failures), so the caller knows to stop filling and drain.
    */
-  async function finishSlot(jobId: string, a: Slot, terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null }): Promise<boolean> {
+  async function finishSlot(
+    jobId: string, a: Slot, terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null; joinContended: boolean },
+  ): Promise<boolean> {
     active.delete(jobId);
+
+    // A JOIN-SERVICE COLLISION: a fact about timing, not about the window. Retry it — under the bound — rather
+    // than spend one of the run's consecutive-failure slots on contention that has nothing to do with this
+    // window's content. Not attempted for `done`/`cancelled`; only a `failed` job can carry this signal.
+    if (terminal.status === "failed" && terminal.joinContended && a.joinRetries < JOIN_RETRY_LIMIT) {
+      await deps.sleep(JOIN_RETRY_DELAY_MS, signal);
+      const sub = await deps.door.submitRoomWindow(jobArgsFor(a.c, deps.origin), signal);
+      if (sub.ok) {
+        s.joinDeferred += 1;
+        deps.log({ event: "window_join_deferred", window_id: a.c.window_id, job_id: jobId, retry_job_id: sub.job_id, retry: a.joinRetries + 1 });
+        active.set(sub.job_id, { c: a.c, t0: deps.now(), joinRetries: a.joinRetries + 1 });
+        return false;
+      }
+      // The RETRY submit itself failed. Kept simple, per the order's "bounded": this window counts as a real
+      // failure this cycle (below), on the ORIGINAL terminal — the retry submit's own error kind is not chased.
+    }
+
     const wall_s = Math.round((deps.now() - a.t0) / 1000);
     if (terminal.status === "done") {
       // THE ENGLISH CANARY. `done` says the job ran; it does not say it made English. A window with text and no
@@ -317,7 +353,7 @@ export async function runOvernight(
         event: "window_submitted", window_id: c.window_id, job_id: sub.job_id, klass: c.klass, has_run: c.has_run, attempt: c.attempt,
         room_transcript_on: c.room_transcript_on, switch_override: !c.room_transcript_on,
       });
-      active.set(sub.job_id, { c, t0 });
+      active.set(sub.job_id, { c, t0, joinRetries: 0 });
       progressed = true;
     }
 
@@ -335,11 +371,11 @@ export async function runOvernight(
     for (let i = 0; i < entries.length; i += 1) {
       const [jobId, a] = entries[i]!;
       const st = results[i]!;
-      let terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null } | null = null;
+      let terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null; joinContended: boolean } | null = null;
       if (!st.ok) {
         if (st.kind === "fatal") { fatal(st.code, { window_id: a.c.window_id, job_id: jobId }); active.delete(jobId); abandonAll("fatal"); break outer; }
         if (st.kind === "refused") {
-          terminal = { status: "failed", step: null, error_code: st.code };
+          terminal = { status: "failed", step: null, error_code: st.code, joinContended: false };
         } else {
           deferredStreak += 1;
           if (deferredStreak >= DEFERRED_LIMIT) { fatal("door_unreachable", { streak: deferredStreak, job_id: jobId }); active.delete(jobId); abandonAll("fatal"); break outer; }
@@ -348,7 +384,7 @@ export async function runOvernight(
       } else {
         deferredStreak = 0;
         if (st.status === "done" || st.status === "failed" || st.status === "cancelled") {
-          terminal = { status: st.status, step: st.step, error_code: st.error_code };
+          terminal = { status: st.status, step: st.step, error_code: st.error_code, joinContended: st.join_contended };
         } else {
           anyStillRunning = true;
         }

@@ -115,7 +115,7 @@ describe("submitRoomWindow — outcomes", () => {
 describe("jobStatus", () => {
   it("reads status, step, the published error_code and the attempt counters", async () => {
     const { f } = fakeFetch(() => rpc({ ok: true, job_id: "job_1", status: "failed", step: "segment", attempts: 2, failures: 1, error_code: "room_window_failed" }));
-    expect(await door(f).jobStatus("job_1")).toEqual({ ok: true, status: "failed", step: "segment", error_code: "room_window_failed", attempts: 2, failures: 1 });
+    expect(await door(f).jobStatus("job_1")).toEqual({ ok: true, status: "failed", step: "segment", error_code: "room_window_failed", attempts: 2, failures: 1, join_contended: false });
   });
   it("every published state parses; an unknown one is 'unknown', never trusted", async () => {
     for (const st of ["queued", "running", "done", "failed", "cancelled"]) {
@@ -131,6 +131,28 @@ describe("jobStatus", () => {
     expect(await door(fakeFetch(() => json(401)).f).jobStatus("j")).toMatchObject({ kind: "fatal", code: "mcp_auth_refused" });
     expect(await door(fakeFetch(() => json(403)).f).jobStatus("j")).toMatchObject({ kind: "fatal", code: "mcp_scope_refused" });
     expect(await door(fakeFetch(() => json(503)).f).jobStatus("j")).toMatchObject({ kind: "deferred" });
+  });
+});
+
+describe("join_contended — the ONE place this driver reads the raw (invoke-scope-only) error string (V, 22 Sep 2026 08:20)", () => {
+  it("true when the raw error names the join service's own mutex refusal", async () => {
+    const r = await door(fakeFetch(() => rpc({ ok: true, status: "failed", error_code: "room_window_failed", error: "room_window_failed: join_failed: join_already_running" })).f).jobStatus("j");
+    expect(r).toMatchObject({ ok: true, join_contended: true });
+  });
+  it("false for every OTHER failure, including a different join_failed reason (e.g. ffmpeg_failed)", async () => {
+    for (const err of ["room_window_failed: join_failed: ffmpeg_failed", "room_window_failed: whisper_failed", "", undefined]) {
+      const r = await door(fakeFetch(() => rpc({ ok: true, status: "failed", error_code: "room_window_failed", ...(err === undefined ? {} : { error: err }) })).f).jobStatus("j");
+      expect(r, JSON.stringify(err)).toMatchObject({ join_contended: false });
+    }
+  });
+  it("false for a done job (no error at all)", async () => {
+    const r = await door(fakeFetch(() => rpc({ ok: true, status: "done" })).f).jobStatus("j");
+    expect(r).toMatchObject({ ok: true, status: "done", join_contended: false });
+  });
+  it("the raw error string itself is NEVER on the returned object — only the reduced boolean", async () => {
+    const r = await door(fakeFetch(() => rpc({ ok: true, status: "failed", error: "room_window_failed: join_failed: join_already_running — some free text that could quote audio" })).f).jobStatus("j");
+    expect(JSON.stringify(r)).not.toContain("free text");
+    expect(Object.keys(r)).not.toContain("error");
   });
 });
 

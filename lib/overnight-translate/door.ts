@@ -33,7 +33,18 @@ export type SubmitResult = { ok: true; job_id: string } | DoorFailure;
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled";
 export type StatusResult =
-  | { ok: true; status: JobState | "unknown"; step: string | null; error_code: string | null; attempts: number | null; failures: number | null }
+  | {
+      ok: true; status: JobState | "unknown"; step: string | null; error_code: string | null; attempts: number | null; failures: number | null;
+      /**
+       * True iff the job's raw error (invoke-scope only, never logged — see `jobView`'s comment in
+       * lib/mcp/tools/jobs.ts) names the audio-join service's own "another join is already running" refusal.
+       * The ONE place this driver reads the free-text error string; it is matched against one fixed substring
+       * and reduced to this boolean immediately, so no prose ever leaves this function. V's engineering
+       * decision, 22 Sep 2026 08:20 (option b): a window failing on join contention is a fact about TIMING,
+       * not about the window, so the driver retries it rather than counting it toward the failure stop.
+       */
+      join_contended: boolean;
+    }
   | DoorFailure;
 
 /** The args of one `room_window` job as this driver submits it. Two booleans beyond the usual four. */
@@ -120,6 +131,9 @@ export function makeDoor(cfg: DoorConfig, f: FetchFn = fetch): Door {
         error_code: typeof sc.error_code === "string" && /^[a-z_]{1,60}$/.test(sc.error_code) ? sc.error_code : null,
         attempts: typeof sc.attempts === "number" ? sc.attempts : null,
         failures: typeof sc.failures === "number" ? sc.failures : null,
+        // The raw `error` is read ONCE, right here, for this one substring — never assigned to a variable
+        // that outlives this expression, never returned, never logged.
+        join_contended: typeof sc.error === "string" && sc.error.includes("join_already_running"),
       };
     },
   };

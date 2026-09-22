@@ -10,7 +10,8 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, DEFAULT_CONCURRENCY, type Deps,
+  runOvernight, jobArgsFor, ACTOR, WINDOW_DEADLINE_MS, CONSECUTIVE_FAILURE_LIMIT, DEFERRED_LIMIT, STATUS_POLL_MS, GATE_POLL_MS, DEFAULT_CONCURRENCY,
+  JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS, type Deps,
 } from "@/lib/overnight-translate/driver";
 import { IST_OFFSET_MS, maySubmit } from "@/lib/overnight-translate/hours";
 import { makeDoor, type Door, type SubmitResult, type StatusResult, type RoomWindowSubmit } from "@/lib/overnight-translate/door";
@@ -28,9 +29,10 @@ const SUMMARY: Summary = {
   fixture_windows: 0, fixture_need_asr: 0, fixture_need_english_only: 0, fixture_skipped_native_english: 0, fixture_skipped_proxy: 0,
   retry_pending: 0, parked: 0, backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
-const done = (): StatusResult => ({ ok: true, status: "done", step: "finish", error_code: null, attempts: 5, failures: 0 });
-const running = (): StatusResult => ({ ok: true, status: "running", step: "engine", error_code: null, attempts: 1, failures: 0 });
-const failed = (): StatusResult => ({ ok: true, status: "failed", step: "segment", error_code: "room_window_failed", attempts: 2, failures: 1 });
+const done = (): StatusResult => ({ ok: true, status: "done", step: "finish", error_code: null, attempts: 5, failures: 0, join_contended: false });
+const running = (): StatusResult => ({ ok: true, status: "running", step: "engine", error_code: null, attempts: 1, failures: 0, join_contended: false });
+const failed = (): StatusResult => ({ ok: true, status: "failed", step: "segment", error_code: "room_window_failed", attempts: 2, failures: 1, join_contended: false });
+const joinContended = (): StatusResult => ({ ok: true, status: "failed", step: "prepare", error_code: "room_window_failed", attempts: 1, failures: 1, join_contended: true });
 
 type Opts = {
   start?: number;
@@ -753,6 +755,102 @@ describe("CONCURRENCY (ETA_OVERNIGHT_CONCURRENCY) — Fable's order of 22 Sep 20
   });
 });
 
+describe("JOIN-SERVICE CONTENTION — a bounded retryable deferral, not a counted failure (V, 22 Sep 2026 08:20, option b)", () => {
+  it(`a single collision retries after ${JOIN_RETRY_DELAY_MS}ms and succeeds: counted joinDeferred, then done — never failed`, async () => {
+    let n = 0;
+    const h = harness({ cands: [cand("A")], status: () => (++n === 1 ? joinContended() : done()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ started: 1, done: 1, failed: 0, joinDeferred: 1 });
+    expect(h.submits.filter((x) => x.args.window_id === "A")).toHaveLength(2);
+    expect(evs(h.log, "window_join_deferred")).toHaveLength(1);
+    expect(evs(h.log, "window_join_deferred")[0]).toMatchObject({ window_id: "A", job_id: "job_1", retry_job_id: "job_2", retry: 1 });
+    expect(evs(h.log, "window_failed")).toHaveLength(0);
+  });
+
+  it("the retry waits the backoff on the fake clock, then resubmits — not instantly", async () => {
+    let n = 0;
+    const h = harness({ cands: [cand("A")], status: () => (++n === 1 ? joinContended() : done()) });
+    await h.run();
+    const [first, second] = h.submits;
+    expect(second!.at - first!.at).toBeGreaterThanOrEqual(JOIN_RETRY_DELAY_MS);
+  });
+
+  it(`exhausting JOIN_RETRY_LIMIT (${JOIN_RETRY_LIMIT}) collisions in a row: the LAST one counts as a real failure`, async () => {
+    const h = harness({ cands: [cand("A")], status: () => joinContended() });
+    const s = await h.run();
+    expect(s).toMatchObject({ started: 1, done: 0, failed: 1, joinDeferred: JOIN_RETRY_LIMIT });
+    expect(h.submits.filter((x) => x.args.window_id === "A")).toHaveLength(JOIN_RETRY_LIMIT + 1);
+    expect(evs(h.log, "window_join_deferred")).toHaveLength(JOIN_RETRY_LIMIT);
+    expect(evs(h.log, "window_failed")).toHaveLength(1);
+  });
+
+  it("collisions that eventually succeed do NOT count toward the 5-in-a-row stop, however many windows hit them", async () => {
+    const cands = Array.from({ length: 6 }, (_, i) => cand(`W${i}`));
+    const counts = new Map<string, number>();
+    const h = harness({
+      cands,
+      status: (jobId, k, w) => {
+        const n = (counts.get(w) ?? 0) + 1;
+        counts.set(w, n);
+        return n === 1 ? joinContended() : done();
+      },
+    });
+    const s = await h.run();
+    expect(s).toMatchObject({ started: 6, done: 6, failed: 0, joinDeferred: 6, fatal: null, stop: "backlog_empty" });
+  });
+
+  it("a retry that ALSO collides keeps counting the retry number and eventually still resolves", async () => {
+    let n = 0;
+    const h = harness({ cands: [cand("A")], status: () => (++n <= JOIN_RETRY_LIMIT ? joinContended() : done()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ done: 1, failed: 0, joinDeferred: JOIN_RETRY_LIMIT });
+    expect(evs(h.log, "window_join_deferred").map((e) => e.retry)).toEqual(Array.from({ length: JOIN_RETRY_LIMIT }, (_, i) => i + 1));
+  });
+
+  it("if the RETRY submit itself is refused/deferred, this cycle counts the ORIGINAL as a real failure (kept simple, per 'bounded')", async () => {
+    const h = harness({
+      cands: [cand("A"), cand("B")],
+      status: (jobId, k, w) => (w === "A" && k === 1 ? joinContended() : done()),
+      submit: (args, n) => (n === 2 ? { ok: false, kind: "refused", code: "bad_args" } : { ok: true, job_id: `job_${n}` }),
+    });
+    const s = await h.run();
+    expect(s).toMatchObject({ failed: 1, joinDeferred: 0 });
+    expect(evs(h.log, "window_failed")[0]).toMatchObject({ window_id: "A", error_code: "room_window_failed" });
+  });
+
+  it("n=3: a collision on one slot retries independently — the OTHER two slots are untouched", async () => {
+    let bCollided = false;
+    const h = harness({
+      cands: [cand("A"), cand("B"), cand("C")],
+      status: (jobId, k, w) => (w === "B" && !bCollided ? ((bCollided = true), joinContended()) : done()),
+    });
+    const s = await h.run("run", 0, new AbortController(), 3);
+    expect(s).toMatchObject({ started: 3, done: 3, failed: 0, joinDeferred: 1 });
+  });
+
+  it("the join_contended flag alone (without the failed status) never triggers a retry — done/running are unaffected", async () => {
+    const h = harness({ cands: [cand("A")], status: () => ({ ok: true, status: "done", step: "finish", error_code: null, attempts: 1, failures: 0, join_contended: true }) });
+    const s = await h.run();
+    // A done job is a done job regardless of a stray join_contended flag — that field only matters on `failed`.
+    expect(s).toMatchObject({ done: 1, joinDeferred: 0 });
+  });
+
+  it("join_contended on a CANCELLED job (not failed) never retries — only `failed` carries the signal", async () => {
+    const h = harness({ cands: [cand("A")], status: () => ({ ok: true, status: "cancelled", step: null, error_code: null, attempts: 1, failures: 0, join_contended: true }) });
+    const s = await h.run();
+    expect(s).toMatchObject({ failed: 1, joinDeferred: 0 });
+    expect(h.submits).toHaveLength(1);
+  });
+
+  it("the log for a deferred collision carries only ids/counts — no free text, and the token never appears", async () => {
+    let n = 0;
+    const h = harness({ cands: [cand("A")], status: () => (++n === 1 ? joinContended() : done()) });
+    await h.run();
+    const line = evs(h.log, "window_join_deferred")[0]!;
+    expect(Object.keys(line).sort()).toEqual(["event", "job_id", "retry", "retry_job_id", "window_id"].sort());
+  });
+});
+
 describe("A STUCK JOB", () => {
   it("still running past the deadline: stop with job_stuck, name the job, submit nothing more", async () => {
     const h = harness({ cands: [cand("A"), cand("B")], status: () => running() });
@@ -812,7 +910,8 @@ describe("LOG HYGIENE — ids, counts, durations and closed codes only; never th
   const KEYS = new Set([
     "event", "mode", "limit", "n", "window_id", "job_id", "room_day_id", "klass", "has_run", "attempt", "room_transcript_on", "switch_override", "translate",
     "code", "reason", "streak", "ms", "status", "step", "error_code", "wall_s", "why", "consecutive",
-    "started", "done", "failed", "refused", "abandoned", "unverified", "overridden", "fatal", "stop", "error_name",
+    "started", "done", "failed", "refused", "abandoned", "unverified", "joinDeferred", "overridden", "fatal", "stop", "error_name",
+    "retry_job_id", "retry",
     ...Object.keys(SUMMARY),
   ]);
 
