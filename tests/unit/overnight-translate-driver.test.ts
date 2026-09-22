@@ -569,6 +569,55 @@ describe("OPEN EARLY (ETA_OVERNIGHT_OPEN_EARLY=1) — the driver, end to end, on
   });
 });
 
+describe("ALLOW DAYTIME (ETA_OVERNIGHT_ALLOW_DAYTIME=1) — the driver, end to end", () => {
+  async function withDaytime<T>(v: string | undefined, body: () => Promise<T>): Promise<T> {
+    const was = process.env.ETA_OVERNIGHT_ALLOW_DAYTIME;
+    try {
+      if (v === undefined) delete process.env.ETA_OVERNIGHT_ALLOW_DAYTIME; else process.env.ETA_OVERNIGHT_ALLOW_DAYTIME = v;
+      return await body();
+    } finally {
+      if (was === undefined) delete process.env.ETA_OVERNIGHT_ALLOW_DAYTIME; else process.env.ETA_OVERNIGHT_ALLOW_DAYTIME = was;
+    }
+  }
+
+  it("SET at 10:00: the first submit is at 10:00 exactly, no wait, past the 07:10 stop too", async () => {
+    await withDaytime("1", async () => {
+      const h = harness({ start: at(10, 0, 0), cands: [cand("A")] });
+      await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")).toHaveLength(0);
+      expect(h.submits[0]!.at).toBe(at(10, 0, 0));
+    });
+  });
+
+  it("SET: the pressure/disk gate STILL holds a submit at 10:00 — daytime lifts the clock, not the gate", async () => {
+    await withDaytime("1", async () => {
+      // The gate says NO-GO for its first 3 calls (pressure), then GO. Daytime never touches this gate at all.
+      const h = harness({ start: at(10, 0, 0), cands: [cand("A")], gate: (_t, call) => (call <= 3 ? { go: false, reason: "stop:STOP_sustained_pressure" } : { go: true, reason: "ok" }) });
+      const s = await h.run();
+      expect(evs(h.log, "gate_hold").length).toBeGreaterThanOrEqual(1);
+      expect(evs(h.log, "gate_hold")[0]).toMatchObject({ reason: "stop:STOP_sustained_pressure" });
+      expect(s).toMatchObject({ started: 1, done: 1 });
+    });
+  });
+
+  it("SET: a job is never abandoned mid-day — closedHoursOver never fires", async () => {
+    await withDaytime("1", async () => {
+      const h = harness({ start: at(14, 0, 0), cands: [cand("A")], polls: 6 });
+      const s = await h.run();
+      expect(evs(h.log, "left_running")).toHaveLength(0);
+      expect(s).toMatchObject({ abandoned: 0, done: 1 });
+    });
+  });
+
+  it("UNSET at 10:00: today's behaviour — it waits for 21:30", async () => {
+    await withDaytime(undefined, async () => {
+      const h = harness({ start: at(10, 0, 0), cands: [cand("A")] });
+      await h.run();
+      expect(evs(h.log, "waiting_for_closed_hours")[0]!.ms).toBe(11.5 * 3_600_000);
+    });
+  });
+});
+
 describe("A STUCK JOB", () => {
   it("still running past the deadline: stop with job_stuck, name the job, submit nothing more", async () => {
     const h = harness({ cands: [cand("A"), cand("B")], status: () => running() });

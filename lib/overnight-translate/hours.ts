@@ -44,13 +44,24 @@ export const OPEN_EARLY_START_MIN = 19 * 60;
 export const openEarlyEnabled = (env: Record<string, string | undefined> = process.env): boolean => env[OPEN_EARLY_ENV] === "1";
 const startMin = (openEarly: boolean): number => (openEarly ? OPEN_EARLY_START_MIN : CLOSED_START_MIN);
 
+/**
+ * ALLOW DAYTIME — a second, separate override (Fable's order of 22 Sep 2026, 06:40, after the diarize-leak
+ * thrash was fixed): ETA_OVERNIGHT_ALLOW_DAYTIME=1 lifts the CLOCK entirely — submits are allowed 24h, and a
+ * job in flight is never abandoned as "running into clinic hours". It does NOT touch the pressure/disk gate
+ * (gate.ts): that is what protects live clinic work, and it stays fully in force under this override. It
+ * trumps open-early (a stricter override implies the looser one). Only the exact string "1" counts.
+ */
+export const ALLOW_DAYTIME_ENV = "ETA_OVERNIGHT_ALLOW_DAYTIME";
+export const allowDaytimeEnabled = (env: Record<string, string | undefined> = process.env): boolean => env[ALLOW_DAYTIME_ENV] === "1";
+
 /** Milliseconds since IST midnight, in [0, DAY_MS). */
 export function istMsOfDay(nowMs: number): number {
   return (((nowMs + IST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS;
 }
 
 /** True while `nowMs` is inside closed hours (start inclusive, end exclusive, wrapping midnight). */
-export function isClosed(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
+export function isClosed(nowMs: number, openEarly: boolean = openEarlyEnabled(), allowDaytime: boolean = allowDaytimeEnabled()): boolean {
+  if (allowDaytime) return true;   // never "clinic side opened" for abandonment purposes; the gate protects live work instead
   const t = istMsOfDay(nowMs);
   return t >= startMin(openEarly) * MIN_MS || t < CLOSED_END_MIN * MIN_MS;
 }
@@ -59,14 +70,15 @@ export function isClosed(nowMs: number, openEarly: boolean = openEarlyEnabled())
  * May a NEW window be submitted now? Only from 21:30 (19:00 with the open-early override) up to (not including) 07:10 IST. Between 07:10 and
  * 07:30 the clinic is still closed but no new work starts, so whatever is in flight can finish.
  */
-export function maySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
+export function maySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled(), allowDaytime: boolean = allowDaytimeEnabled()): boolean {
+  if (allowDaytime) return true;
   const t = istMsOfDay(nowMs);
   return t >= startMin(openEarly) * MIN_MS || t < STOP_SUBMIT_MIN * MIN_MS;
 }
 
 /** Milliseconds until the next moment `maySubmit` is true; 0 when it already is. */
-export function msUntilMaySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled()): number {
-  if (maySubmit(nowMs, openEarly)) return 0;
+export function msUntilMaySubmit(nowMs: number, openEarly: boolean = openEarlyEnabled(), allowDaytime: boolean = allowDaytimeEnabled()): number {
+  if (maySubmit(nowMs, openEarly, allowDaytime)) return 0;
   return startMin(openEarly) * MIN_MS - istMsOfDay(nowMs);
 }
 
@@ -74,6 +86,6 @@ export function msUntilMaySubmit(nowMs: number, openEarly: boolean = openEarlyEn
  * Has the closed period itself ended? A job still running past this moment is running into clinic
  * hours: the driver stops WAITING for it (it cannot cancel it) and says so.
  */
-export function closedHoursOver(nowMs: number, openEarly: boolean = openEarlyEnabled()): boolean {
-  return !isClosed(nowMs, openEarly);
+export function closedHoursOver(nowMs: number, openEarly: boolean = openEarlyEnabled(), allowDaytime: boolean = allowDaytimeEnabled()): boolean {
+  return !isClosed(nowMs, openEarly, allowDaytime);
 }

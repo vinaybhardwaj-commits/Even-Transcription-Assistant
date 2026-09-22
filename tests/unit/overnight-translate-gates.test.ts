@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   IST_OFFSET_MS, isClosed, maySubmit, msUntilMaySubmit, closedHoursOver, istMsOfDay,
   CLOSED_START_MIN, CLOSED_END_MIN, STOP_SUBMIT_MIN, OPEN_EARLY_ENV, OPEN_EARLY_START_MIN, openEarlyEnabled,
+  ALLOW_DAYTIME_ENV, allowDaytimeEnabled,
 } from "@/lib/overnight-translate/hours";
 import {
   pressureDecision, parsePressureLine, diskDecision, gateDecision, readLastLine, freeDiskGb,
@@ -164,6 +165,40 @@ describe("OPEN EARLY — ETA_OVERNIGHT_OPEN_EARLY=1 moves the START to 19:00 IST
     expect(msUntilMaySubmit(at(18, 0), true)).toBe(60 * 60_000);
     expect(msUntilMaySubmit(at(20, 45), true)).toBe(0);
     expect(msUntilMaySubmit(at(7, 20), true)).toBe(11 * 60 * 60_000 + 40 * 60_000);
+  });
+});
+
+describe("ALLOW DAYTIME — ETA_OVERNIGHT_ALLOW_DAYTIME=1 lifts the clock entirely (Fable, 22 Sep 06:40)", () => {
+  it("the switch is the exact string \"1\"; anything else, or nothing, is today's behaviour", () => {
+    expect(ALLOW_DAYTIME_ENV).toBe("ETA_OVERNIGHT_ALLOW_DAYTIME");
+    expect(allowDaytimeEnabled({ ETA_OVERNIGHT_ALLOW_DAYTIME: "1" })).toBe(true);
+    for (const v of [undefined, "", "0", "true"]) expect(allowDaytimeEnabled({ ETA_OVERNIGHT_ALLOW_DAYTIME: v })).toBe(false);
+  });
+  it("SET: 10:00 is open — the clock is lifted for the whole day, not just 07:10-19:00", () => {
+    expect(maySubmit(at(10, 0), false, true)).toBe(true);
+    expect(maySubmit(at(2, 0), false, true)).toBe(true);
+    expect(maySubmit(at(21, 45), false, true)).toBe(true);
+    expect(msUntilMaySubmit(at(10, 0), false, true)).toBe(0);
+  });
+  it("UNSET: 10:00 is still blocked — exactly today's behaviour", () => {
+    expect(maySubmit(at(10, 0), false, false)).toBe(false);
+  });
+  it("SET: a job is never abandoned as 'running into clinic hours' at any hour", () => {
+    for (const [h, m] of [[10, 0], [14, 0], [20, 0]] as const) expect(closedHoursOver(at(h, m), false, true), `${h}:${m}`).toBe(false);
+  });
+  it("SET trumps open-early: both true behaves as daytime (submits allowed at 10:00, which open-early alone would not do)", () => {
+    expect(maySubmit(at(10, 0), true, true)).toBe(true);
+  });
+  it("the default reads process.env at call time, so a launchd plist entry is enough", () => {
+    const was = process.env[ALLOW_DAYTIME_ENV];
+    try {
+      delete process.env[ALLOW_DAYTIME_ENV];
+      expect(maySubmit(at(10, 0))).toBe(false);
+      process.env[ALLOW_DAYTIME_ENV] = "1";
+      expect(maySubmit(at(10, 0))).toBe(true);
+    } finally {
+      if (was === undefined) delete process.env[ALLOW_DAYTIME_ENV]; else process.env[ALLOW_DAYTIME_ENV] = was;
+    }
   });
 });
 
