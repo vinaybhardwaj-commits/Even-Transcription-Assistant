@@ -192,6 +192,28 @@ export const WHISPER_GATE_BASIS = "whisper-nsp0.6-lp-1.0/v1";
 
 export type WhisperGateInput = { no_speech_prob?: number; avg_logprob?: number };
 
+/**
+ * Kill switch for the Whisper drop. DEFAULT ON — unlike the diarizer half above, because what it
+ * removes is invented text. `off` (any of lib/flags' falsy words) restores the pre-gate behaviour
+ * exactly: nothing dropped, the server's own text used as sent.
+ *
+ * Unset or blank is ON. A value in neither of lib/flags' sets is ALSO ON, and says so: this switch
+ * exists to turn the drop off on purpose, and a typo is not a purpose. It never throws — it runs
+ * inside every transcription call.
+ */
+export const WHISPER_NOSPEECH_DROP_FLAG = "ETA_WHISPER_NOSPEECH_DROP";
+
+export function whisperNoSpeechDropEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env[WHISPER_NOSPEECH_DROP_FLAG];
+  if (raw === undefined || raw.trim() === "") return true;
+  try {
+    return parseFlag(WHISPER_NOSPEECH_DROP_FLAG, env);
+  } catch {
+    console.warn(`[speech-gate] ${WHISPER_NOSPEECH_DROP_FLAG} has an unrecognised value (length ${raw.length}); the drop stays ON`);
+    return true;
+  }
+}
+
 /** PURE — `non_speech` only when both of Whisper's numbers say so. */
 export function whisperSegmentVerdict(seg: WhisperGateInput): SegmentVerdict {
   const nsp = seg.no_speech_prob;

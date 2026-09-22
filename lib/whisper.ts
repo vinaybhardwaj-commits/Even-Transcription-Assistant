@@ -54,6 +54,7 @@ import {
   WHISPER_AVG_LOGPROB_MAX,
   WHISPER_GATE_BASIS,
   WHISPER_NO_SPEECH_MIN,
+  whisperNoSpeechDropEnabled,
 } from "@/lib/stt/speech-gate";
 export { EMPTY_TRANSCRIPT };
 
@@ -338,7 +339,10 @@ async function whisperAttempt(
     const parsed = parseWhisperSegments(json.segments);
     // A-ETA-3 — the speech gate's Whisper rule (lib/stt/speech-gate.ts). Segments Whisper itself
     // says were decoded out of silence are dropped, and counted; their text never reaches a caller.
-    const { kept: segments, dropped: no_speech_dropped } = dropWhisperNonSpeech(parsed);
+    // ETA_WHISPER_NOSPEECH_DROP=off restores the behaviour before the gate, byte for byte.
+    const { kept: segments, dropped: no_speech_dropped } = whisperNoSpeechDropEnabled()
+      ? dropWhisperNonSpeech(parsed)
+      : { kept: parsed, dropped: 0 };
     if (no_speech_dropped > 0) {
       console.log(`[whisper] speech gate dropped ${no_speech_dropped} of ${parsed.length} segments ` +
         `(no_speech_prob>=${WHISPER_NO_SPEECH_MIN} and avg_logprob<${WHISPER_AVG_LOGPROB_MAX}, ${WHISPER_GATE_BASIS})`);

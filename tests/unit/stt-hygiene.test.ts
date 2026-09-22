@@ -18,6 +18,7 @@ import {
   whisperSegmentVerdict,
   WHISPER_AVG_LOGPROB_MAX,
   WHISPER_NO_SPEECH_MIN,
+  whisperNoSpeechDropEnabled,
 } from "@/lib/stt/speech-gate";
 import { detectRepeatRuns } from "@/lib/transcript/repeat-runs";
 
@@ -36,6 +37,7 @@ beforeEach(() => {
   process.env.WHISPER_BASE_URL = "https://whisper.example";
 });
 afterEach(() => {
+  delete process.env.ETA_WHISPER_NOSPEECH_DROP;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -110,6 +112,53 @@ describe("A-ETA-3 — the speech gate's Whisper rule", () => {
     const r = await transcribeWithWhisper(new Uint8Array([1]));
     expect(r.ok && r.transcript).toBe("Server text, verbatim.");
     expect(r.ok && r.no_speech_dropped).toBe(0);
+  });
+});
+
+describe("ETA_WHISPER_NOSPEECH_DROP — the kill switch (default ON)", () => {
+  const mixed = {
+    text: "Take one tablet at night. Thank you for watching. Come back in two weeks.",
+    segments: [speech(0, "Take one tablet at night."), invented(2, "Thank you for watching."), speech(4, "Come back in two weeks.")],
+  };
+
+  it("parses: unset, blank and truthy are ON; falsy words are OFF; an unknown value stays ON and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(whisperNoSpeechDropEnabled({})).toBe(true);
+    expect(whisperNoSpeechDropEnabled({ ETA_WHISPER_NOSPEECH_DROP: "  " })).toBe(true);
+    for (const on of ["1", "true", "ON", " yes "]) expect(whisperNoSpeechDropEnabled({ ETA_WHISPER_NOSPEECH_DROP: on })).toBe(true);
+    for (const off of ["off", "OFF", "0", "false", "no"]) expect(whisperNoSpeechDropEnabled({ ETA_WHISPER_NOSPEECH_DROP: off })).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    expect(whisperNoSpeechDropEnabled({ ETA_WHISPER_NOSPEECH_DROP: "ofF-typo" })).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).not.toContain("ofF-typo"); // the value itself is never echoed
+  });
+
+  it("ON (unset): the invented segment is dropped", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    mockWhisper(mixed);
+    const r = await transcribeWithWhisper(new Uint8Array([1]));
+    expect(r.ok && r.transcript).toBe("Take one tablet at night. Come back in two weeks.");
+    expect(r.ok && r.no_speech_dropped).toBe(1);
+  });
+
+  it("off: the behaviour before the gate — every segment, the server's own text, nothing logged", async () => {
+    process.env.ETA_WHISPER_NOSPEECH_DROP = "off";
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockWhisper(mixed);
+    const r = await transcribeWithWhisper(new Uint8Array([1]));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.transcript).toBe(mixed.text);
+    expect(r.segments).toHaveLength(3);
+    expect(r.no_speech_dropped).toBe(0);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("off: a silent clip's invented words come back as they did before", async () => {
+    process.env.ETA_WHISPER_NOSPEECH_DROP = "off";
+    mockWhisper({ text: "Thank you.", segments: [invented(0, "Thank you.")] });
+    const r = await transcribeWithWhisper(new Uint8Array([1]));
+    expect(r.ok && r.transcript).toBe("Thank you.");
   });
 });
 
