@@ -17,12 +17,28 @@
 import { NextResponse } from "next/server";
 import { benchAdminGuard } from "@/lib/bench";
 import { listListeners, isListening, LISTENER_FRESH_MS, classifyBusError, BusError } from "@/lib/bench-commands";
-import { parseMicLevelPair } from "@/lib/bench-levels";
+import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const noStore = { headers: { "cache-control": "no-store" } };
+
+function mainLevels(
+  peak: unknown,
+  avg: unknown,
+  zeroRatio: unknown,
+): { peak: number; avg: number; zero_ratio?: number } | null {
+  const p = finiteNumberOrNull(peak);
+  if (p === null || p < 0 || p > 1) return null;
+  const a = finiteNumberOrNull(avg);
+  const z = finiteNumberOrNull(zeroRatio);
+  return {
+    peak: p,
+    avg: a !== null && a >= 0 && a <= p ? a : 0,
+    ...(z !== null && z >= 0 && z <= 1 ? { zero_ratio: z } : {}),
+  };
+}
 
 export async function GET() {
   const guard = await benchAdminGuard();
@@ -50,7 +66,7 @@ export async function GET() {
           // §2.2 — what the microphones heard since this room's previous poll. NULL travels as
           // null all the way to the card, which renders NO BAR for it: not measured is not the
           // same fact as silent, and only one of them is a reason to walk to a room.
-          mic: parseMicLevelPair(l.mic_peak, l.mic_avg),
+          mic: mainLevels(l.mic_peak, l.mic_avg, l.mic_zero_ratio),
           spare: l.spare_device === true ? parseMicLevelPair(l.spare_peak, l.spare_avg) : null,
           levels_at: l.levels_at ? new Date(l.levels_at).toISOString() : null,
           // §2.4 — a spare exists only when the client reported an explicitly chosen second device.
