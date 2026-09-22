@@ -30,7 +30,16 @@ function loadServiceAccount(): ServiceAccount {
   return sa;
 }
 
-export async function getVertexAccessToken(): Promise<string> {
+/**
+ * `signal` is OPTIONAL and additive — every existing caller that passes none behaves exactly as
+ * before. When given, it is wired straight into the token-exchange `fetch`, so a caller with its
+ * own deadline (routedChat's overall deadline, F1) can actually cancel this call instead of only
+ * abandoning the wait on it. Previously this had no signal of its own at all: routedChat's deadline
+ * could stop WAITING on it but never stop the fetch itself (lib/llm/gemini.ts raceSignal). The
+ * cached-token fast path never reaches `fetch`, so a signal that fires after a cache hit does
+ * nothing — there is nothing left to cancel by then.
+ */
+export async function getVertexAccessToken(signal?: AbortSignal): Promise<string> {
   const now = Date.now();
   if (cached && cached.expiresAt - 5 * 60_000 > now) return cached.token;
   const sa = loadServiceAccount();
@@ -44,6 +53,7 @@ export async function getVertexAccessToken(): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${signingInput}.${signature}` }),
+    signal,
   });
   if (!res.ok) { const d = await res.text().catch(() => ""); throw new Error(`Vertex token exchange failed (${res.status}): ${d.slice(0, 300)}`); }
   const json = (await res.json()) as { access_token?: string; expires_in?: number };
