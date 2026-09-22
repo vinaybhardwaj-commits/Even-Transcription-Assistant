@@ -148,6 +148,58 @@ describe(`E-4 gap-merge — encounters at most ${MERGE_GAP_MS / MIN} min apart a
   });
 });
 
+describe("E-4 — a run that has NOT yet opened is broken by the same rules", () => {
+  // ETA-Refuter, 23 Sep: the ruling was enforced in `open` only, so a single speech probe bridged
+  // without limit. `pending` is reset only by non_speech, and production almost never yields one (every
+  // probe reads active against the floor), so a stray speech probe at the end of a clinic day and the
+  // first one next morning became ONE encounter across the night.
+  it("a speech probe, a long unjudged stretch, then speech: no encounter — the first probe's run is discarded", () => {
+    expect(smoothEncounters(seq("S" + "U".repeat(20) + "S"))).toEqual([]);
+    expect(smoothEncounters(seq("S" + "U".repeat(1000) + "S"))).toEqual([]);
+  });
+  it("two speech probes ten hours apart with NO probes between them are not one encounter", () => {
+    const far: ProbeVerdict[] = [{ t: at(0), verdict: "speech" }, { t: at(600), verdict: "speech" }];
+    expect(smoothEncounters(far)).toEqual([]);
+  });
+  it("a dead mic discards a pending run", () => {
+    expect(smoothEncounters(seq("SDS"))).toEqual([]);
+  });
+  it("a tape-off discards a pending run", () => {
+    expect(smoothEncounters(seq("SS"), { tape_off: [{ start_ms: at(0) + HALF, end_ms: at(1) - HALF }] })).toEqual([]);
+  });
+  it("WITHIN the bridge limit a pending run still survives an unjudged gap and opens", () => {
+    const r = smoothEncounters(seq("S" + "UU" + "S"));
+    expect(r).toHaveLength(1);
+    expect(span(r[0])).toEqual([0, 3]);
+  });
+  it("CONTROL — an OPEN encounter is unaffected: two speech probes either side still split", () => {
+    expect(smoothEncounters(seq("SS" + "U".repeat(20) + "SS"))).toHaveLength(2);
+  });
+});
+
+describe("E-4 — accounting the Refuter's mutants reached", () => {
+  it("M12 — a hole inside an encounter is counted as unjudged time, by its length", () => {
+    const ps: ProbeVerdict[] = [
+      { t: at(0), verdict: "speech" }, { t: at(1), verdict: "speech" },
+      { t: at(1) + 2 * MIN, verdict: "speech" }, { t: at(1) + 2 * MIN + HOP, verdict: "speech" },
+    ];
+    const [e] = smoothEncounters(ps);
+    expect(e.unjudged_ms).toBe(2 * MIN - HOP);          // the hole, less the hop each probe already owns
+    expect(e.longest_unjudged_run_ms).toBe(2 * MIN - HOP);
+  });
+  it("M13 — speech resets the exit run: non-consecutive non_speech never closes an encounter", () => {
+    const r = smoothEncounters(seq("SSNSNN"));
+    expect(r).toHaveLength(1);
+    expect(r[0].closed_by).toBe("end_of_input");        // not "non_speech": N S N N is not three in a row
+    expect(span(r[0])).toEqual([0, 3]);
+  });
+  it("M14 — dead_mic_ms is structurally 0 under this ruling, because a dead mic ends the run", () => {
+    const r = smoothEncounters(seq("SS" + "D".repeat(10) + "SS"));
+    expect(r.every((e) => e.dead_mic_ms === 0)).toBe(true);
+    expect(r.every((e) => e.unjudged_ms === 0)).toBe(true);
+  });
+});
+
 describe("E-4 — inputs and constants", () => {
   it("order of input does not matter", () => {
     const s = seq("SSSNNNSS" + "U".repeat(5) + "SSNNN");
