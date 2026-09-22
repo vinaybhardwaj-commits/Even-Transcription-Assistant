@@ -1,4 +1,5 @@
 import { sql } from "@/lib/db";
+import { istDate as todayIstDate } from "@/lib/bench-reaper-core";
 
 export const LEVEL_TIMELINE_BUCKET_SECONDS = 15;
 
@@ -88,4 +89,55 @@ export async function readRoomLevelDay(
     samples,
     sampleCount: samples.reduce((total, sample) => total + sample.samples, 0),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Retention (plan §2: raw kept 7 IST days)
+// ---------------------------------------------------------------------------
+
+/** How many IST calendar days of raw bench_level_sample rows to keep. */
+export const LEVEL_RETENTION_DAYS = 7;
+
+/** Rows are deleted in slices this size, so one invocation never holds a long-running statement. */
+export const LEVEL_RETENTION_BATCH_SIZE = 5_000;
+
+/** Hard cap on batches per invocation — a safety bound against a route that never catches up. */
+export const LEVEL_RETENTION_MAX_BATCHES = 50;
+
+/**
+ * PURE. The `ist_date` cutoff: a row is old iff its `ist_date` is before this. `ist_date` is
+ * already a plain calendar date (the writer's IST day, not a timestamp), so retention is exact
+ * calendar-day arithmetic on that column — no timezone conversion of `sampled_at` needed here.
+ */
+export function levelRetentionCutoffIstDate(now: Date = new Date(), days: number = LEVEL_RETENTION_DAYS): string {
+  const today = todayIstDate(now);
+  const cutoff = new Date(`${today}T00:00:00.000Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  return cutoff.toISOString().slice(0, 10);
+}
+
+/** How many rows are older than `cutoffIstDate`, without touching any of them. */
+export async function countOldLevelSamples(cutoffIstDate: string): Promise<number> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n FROM bench_level_sample WHERE ist_date < ${cutoffIstDate}::date
+  `) as Array<{ n: number }>;
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * Delete up to `batchSize` rows older than `cutoffIstDate`. Returns how many were actually removed
+ * (0 when nothing qualifies) — the caller loops this until a batch comes back short of `batchSize`.
+ * IDEMPOTENT BY CONSTRUCTION: a row is targeted by `ist_date`, never by "have I seen this id
+ * before", so a rerun after a partial run (or after everything is already gone) deletes exactly
+ * what still qualifies and nothing else — running it twice in a row is a no-op the second time.
+ */
+export async function purgeOldLevelSamplesBatch(cutoffIstDate: string, batchSize: number = LEVEL_RETENTION_BATCH_SIZE): Promise<number> {
+  const rows = (await sql`
+    WITH doomed AS (
+      SELECT id FROM bench_level_sample WHERE ist_date < ${cutoffIstDate}::date LIMIT ${batchSize}
+    )
+    DELETE FROM bench_level_sample WHERE id IN (SELECT id FROM doomed)
+    RETURNING id
+  `) as Array<{ id: number }>;
+  return rows.length;
 }
