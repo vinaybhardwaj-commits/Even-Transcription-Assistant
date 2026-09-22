@@ -53,12 +53,16 @@ export function pickGemini(surface: string, tier: "pro" | "flash" = "pro"): stri
 type Msg = { role: string; content: string };
 type ChatOut = { ok: boolean; content: string; error?: string; status?: number };
 
+/** openaiChat's own per-call ceiling when a caller passes none. Named so routedChat's overall
+ * deadline default (below) can reference the same number instead of a second magic constant. */
+const GEMINI_DEFAULT_TIMEOUT_MS = 240_000;
+
 async function openaiChat(p: {
   url: string; authToken: string; model: string; messages: Msg[];
   temperature?: number; responseJson?: boolean; maxTokens?: number; timeoutMs?: number; signal?: AbortSignal;
 }): Promise<ChatOut> {
   const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), p.timeoutMs ?? 240_000);
+  const tid = setTimeout(() => controller.abort(), p.timeoutMs ?? GEMINI_DEFAULT_TIMEOUT_MS);
   if (p.signal) {
     if (p.signal.aborted) controller.abort();
     else p.signal.addEventListener("abort", () => controller.abort(), { once: true });
@@ -130,11 +134,84 @@ export function firstRoute(surface: string, tier: "pro" | "flash" = "pro"): stri
 
 export type RoutedChatResult = { ok: boolean; content: string; error?: string; latency_ms: number; provider: string };
 
+// ---------------------------------------------------------------------------
+// F1 — an OVERALL deadline, on top of each stage's own per-call timeout
+// ---------------------------------------------------------------------------
+//
+// routedChat is Gemini once, then up to two OpenRouter models — each already bounded by its own
+// `timeoutMs` (or GEMINI_DEFAULT_TIMEOUT_MS / openrouterChat's 60_000 default when none is
+// passed). Nothing bounded the SUM: a caller with a generous per-call timeout could wait 3x it if
+// every stage stalled to its own ceiling. This is that missing outer bound — it changes nothing
+// for the ordinary case where one stage answers within its own timeout.
+
+export const ROUTED_CHAT_DEADLINE_ENV = "ETA_ROUTED_CHAT_DEADLINE_MS";
+
+/**
+ * PURE. The overall wall-clock budget for one routedChat call.
+ *
+ * `ETA_ROUTED_CHAT_DEADLINE_MS` overrides outright, when it parses as a positive number.
+ * Otherwise: 1.5x the per-call timeout THIS call is using (or GEMINI_DEFAULT_TIMEOUT_MS, the
+ * larger of the two per-stage defaults, when the caller passed none).
+ *
+ * WHY 1.5x, NOT 3x AND NOT 1x. 1x would cut off the very first stage before its own declared
+ * timeout could ever elapse, silently shrinking every caller's existing SLA — the opposite of
+ * "no overall deadline" is not "no per-call deadline". 3x is the exact pathological number this
+ * exists to bound, so setting the cap there would cap nothing. 1.5x sits in between BY DESIGN: it
+ * is exactly enough for one stage to run its full declared timeout AND the next stage to still get
+ * a genuine, if truncated, attempt (half of one more full timeout) — one full hang is survivable,
+ * two full hangs in a row is what this refuses to wait out. Because the default is always >= the
+ * per-call timeout in effect, a call that succeeds within its own stage's timeout — the normal
+ * case — is NEVER affected by this deadline; only the multi-stage-stall case the order describes.
+ */
+export function routedChatDeadlineMs(perCallTimeoutMs: number | undefined, env: Record<string, string | undefined> = process.env): number {
+  const raw = env[ROUTED_CHAT_DEADLINE_ENV];
+  const override = raw !== undefined ? Number(raw) : NaN;
+  if (Number.isFinite(override) && override > 0) return override;
+  return Math.round((perCallTimeoutMs ?? GEMINI_DEFAULT_TIMEOUT_MS) * 1.5);
+}
+
+/** Thrown internally when the overall deadline (or the caller's own signal) fires while something
+ * is awaited that does not itself accept an AbortSignal (getVertexAccessToken). Never escapes
+ * routedChat — caught and turned into the same RoutedChatResult shape every other failure returns. */
+class RoutedChatDeadline extends Error {
+  constructor() { super("deadline_exceeded"); this.name = "RoutedChatDeadline"; }
+}
+
+/** Reject with RoutedChatDeadline as soon as `signal` aborts, whichever settles first. The
+ * underlying promise is NOT cancelled by this alone (getVertexAccessToken has no signal of its
+ * own to cancel it with — see the KNOWN LIMITATION note on routedChat) — this only stops
+ * routedChat from waiting on it past the deadline. */
+function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new RoutedChatDeadline());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new RoutedChatDeadline());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 /**
  * Run a chat completion: Vertex Gemini for `surface` when flagged + configured, then the OpenRouter
  * chain. `provider` names whichever call answered — `gemini:<model>` or `openrouter:<model>` — and
  * `none` only when nothing did. A Gemini failure is logged by name before the fallback runs, so a
  * fallback is never silent in the logs either.
+ *
+ * OVERALL DEADLINE (F1, ETA_ROUTED_CHAT_DEADLINE_MS / routedChatDeadlineMs): a single AbortSignal
+ * — `deadline.signal` below — is passed to every stage's `signal` argument INSTEAD OF `p.signal`
+ * directly (it still fires on `p.signal` too; the two are combined). When it fires mid-stage,
+ * openaiChat / openrouterChat abort their own in-flight fetch immediately, exactly as they already
+ * do for `p.signal` today — nothing new was needed there. The stage running when it fires is
+ * logged by name. `error` on a deadline is `deadline_exceeded:<stage>`, distinct from `aborted`
+ * (the caller's own signal) and from `all_failed: ...` (every stage ran to its own conclusion).
+ *
+ * KNOWN LIMITATION, not fixed here (out of this slice's file list): `getVertexAccessToken()` takes
+ * no AbortSignal and has no timeout of its own. The deadline still stops routedChat from WAITING on
+ * it (via raceSignal), but the token-exchange fetch it starts keeps running in the background until
+ * it resolves or the process's own network stack gives up — it is not truly cancelled. In practice
+ * this is a short OAuth exchange; the risk is theoretical, and named here rather than left silent.
  */
 export async function routedChat(p: {
   surface: string; tier?: "pro" | "flash"; messages: Msg[];
@@ -142,40 +219,69 @@ export async function routedChat(p: {
 }): Promise<RoutedChatResult> {
   const t0 = Date.now();
   const errors: string[] = [];
-  const gModel = pickGemini(p.surface, p.tier ?? "pro");
-  if (gModel) {
-    try {
-      const token = await getVertexAccessToken();
-      const r = await openaiChat({
-        url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
-        messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-        maxTokens: p.maxTokens ?? 8192, timeoutMs: p.timeoutMs, signal: p.signal,
-      });
-      if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
-      errors.push(`gemini:${r.status ? `http_${r.status}` : "failed"}`);
-      console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> openrouter fallback`);
-    } catch (e) {
-      errors.push("gemini:threw");
-      console.warn(`[llm] gemini (${p.surface}) threw -> openrouter fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
-    }
+  const deadlineMs = routedChatDeadlineMs(p.timeoutMs);
+  const deadline = new AbortController();
+  let deadlineFired = false;
+  let stage = "start";
+  const deadlineTimer = setTimeout(() => { deadlineFired = true; deadline.abort(); }, deadlineMs);
+  if (p.signal) {
+    if (p.signal.aborted) deadline.abort();
+    else p.signal.addEventListener("abort", () => deadline.abort(), { once: true });
   }
-  if (p.signal?.aborted) return { ok: false, content: "", error: "aborted", latency_ms: Date.now() - t0, provider: "none" };
+  const signal = deadline.signal;
+  const onDeadline = (): RoutedChatResult => {
+    console.warn(`[llm] routedChat (${p.surface}) deadline exceeded after ${deadlineMs}ms during ${stage}`);
+    return { ok: false, content: "", error: `deadline_exceeded:${stage}`, latency_ms: Date.now() - t0, provider: "none" };
+  };
 
-  for (const model of llmFallbackModels()) {
-    try {
-      const r = await openrouterChat({
-        model, messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-        maxTokens: p.maxTokens, timeoutMs: p.timeoutMs, signal: p.signal,
-      });
-      return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `openrouter:${r.model}` };
-    } catch (e) {
-      // A closed code only (lib/openrouter.ts never puts a message, a header or the key in one).
-      const code = e instanceof OpenRouterError ? e.code : "openrouter_error";
-      errors.push(`openrouter:${model}=${code}`);
-      if (p.signal?.aborted) break;
+  try {
+    const gModel = pickGemini(p.surface, p.tier ?? "pro");
+    if (gModel) {
+      stage = `gemini:${gModel}`;
+      try {
+        const token = await raceSignal(getVertexAccessToken(), signal);
+        const r = await openaiChat({
+          url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
+          messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
+          maxTokens: p.maxTokens ?? 8192, timeoutMs: p.timeoutMs, signal,
+        });
+        if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
+        if (deadlineFired) return onDeadline();
+        errors.push(`gemini:${r.status ? `http_${r.status}` : "failed"}`);
+        console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> openrouter fallback`);
+      } catch (e) {
+        if (e instanceof RoutedChatDeadline || deadlineFired) return onDeadline();
+        errors.push("gemini:threw");
+        console.warn(`[llm] gemini (${p.surface}) threw -> openrouter fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
+      }
     }
+    if (p.signal?.aborted) return { ok: false, content: "", error: "aborted", latency_ms: Date.now() - t0, provider: "none" };
+    if (deadlineFired) return onDeadline();
+
+    for (const model of llmFallbackModels()) {
+      stage = `openrouter:${model}`;
+      try {
+        const r = await openrouterChat({
+          model, messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
+          maxTokens: p.maxTokens, timeoutMs: p.timeoutMs, signal,
+        });
+        return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `openrouter:${r.model}` };
+      } catch (e) {
+        if (deadlineFired) return onDeadline();
+        // A closed code only (lib/openrouter.ts never puts a message, a header or the key in one).
+        const code = e instanceof OpenRouterError ? e.code : "openrouter_error";
+        errors.push(`openrouter:${model}=${code}`);
+        if (p.signal?.aborted) break;
+      }
+    }
+    // PRE-EXISTING GAP, fixed in passing (F1): the caller-abort check existed BEFORE this loop but
+    // not after it, so a signal that aborted mid-loop fell through to `all_failed` instead of the
+    // `aborted` shape every other abort path already returns.
+    if (p.signal?.aborted) return { ok: false, content: "", error: "aborted", latency_ms: Date.now() - t0, provider: "none" };
+    return { ok: false, content: "", error: `all_failed: ${errors.join("; ")}`.slice(0, 300), latency_ms: Date.now() - t0, provider: "none" };
+  } finally {
+    clearTimeout(deadlineTimer);
   }
-  return { ok: false, content: "", error: `all_failed: ${errors.join("; ")}`.slice(0, 300), latency_ms: Date.now() - t0, provider: "none" };
 }
 
 /**
