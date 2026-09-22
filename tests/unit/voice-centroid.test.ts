@@ -16,6 +16,7 @@ vi.mock("@/lib/db", () => ({
 
 import {
   checkCentroidInput,
+  isActive,
   isVoiceDomain,
   listActiveCentroids,
   newCentroidId,
@@ -31,7 +32,7 @@ const DOC = "doc_fake0001";
 const vec = (n: number, f = (i: number) => (i % 7) - 3 + 0.5) => Array.from({ length: n }, (_, i) => f(i));
 const input = (over: Partial<CentroidInput> = {}): CentroidInput => ({
   clinician_id: DOC, domain: "phone", embedding: vec(192), embedding_model: "ecapa-voxceleb", n_samples: 4,
-  source: { sessions: 3, seconds: 74.5 }, ...over,
+  source: { sessions: 3, seconds: 74.5 }, actor: "operator-v1", ...over,
 });
 const row = (over: Record<string, unknown> = {}) => ({
   id: "vc_abc", clinician_id: DOC, domain: "phone", generation: 2, embedding: vec(192),
@@ -58,6 +59,9 @@ describe("migration 0113", () => {
     ]) expect(code).toMatch(col);
     expect(code).toMatch(/CHECK \(domain IN \('room_primary', 'phone', 'meet'\)\)/);
     expect(code).toMatch(/UNIQUE \(clinician_id, domain, embedding_model, generation\)/);
+    expect(code).toMatch(/retired_by\s+text,\s+retired_reason\s+text,/);
+    // A retired row always says who and why (Refuter F2).
+    expect(code).toMatch(/CONSTRAINT voice_centroid_retirement_chk CHECK \(\s*retired_at IS NULL OR \(retired_by IS NOT NULL AND retired_reason IS NOT NULL\)\)/);
     expect(code).toMatch(/CREATE INDEX IF NOT EXISTS voice_centroid_active_idx\s+ON voice_centroid \(clinician_id, domain\)\s+WHERE retired_at IS NULL/);
   });
 
@@ -87,6 +91,8 @@ describe("pure checks", () => {
     expect(checkCentroidInput(input({ n_samples: 0 }))).toEqual(["bad_n_samples"]);
     expect(checkCentroidInput(input({ n_samples: 1.5 }))).toEqual(["bad_n_samples"]);
     expect(checkCentroidInput(input({ source: [] as never }))).toEqual(["bad_source"]);
+    expect(checkCentroidInput(input({ actor: "" }))).toEqual(["bad_actor"]);
+    expect(checkCentroidInput(input({ actor: "a b" }))).toEqual(["bad_actor"]);
   });
 
   it("the domain set is exactly the migration's", () => {
@@ -113,6 +119,14 @@ describe("pure checks", () => {
     expect(rowToCentroid(row({ embedding_dim: 191 }))).toBeNull();
     expect(rowToCentroid(row({ domain: "room" }))).toBeNull();
   });
+
+  it("a stored row carries its retirement provenance, and isActive is retired_at === null", () => {
+    const retired = rowToCentroid(row({ retired_at: "2026-09-22T18:00:00Z", retired_by: "operator-v1", retired_reason: "revoked: wrong speaker" }));
+    expect(retired).toMatchObject({ retired_by: "operator-v1", retired_reason: "revoked: wrong speaker" });
+    expect(isActive(retired)).toBe(false);
+    expect(isActive(rowToCentroid(row()))).toBe(true);
+    expect(isActive(null)).toBe(false);
+  });
 });
 
 describe("reads", () => {
@@ -128,7 +142,30 @@ describe("reads", () => {
   it("readActiveCentroid refuses a bad key without a query", async () => {
     expect(await readActiveCentroid("doc x", "phone", "m")).toBeNull();
     expect(await readActiveCentroid(DOC, "room" as never, "m")).toBeNull();
+    expect(await readActiveCentroid(DOC, "phone", "bad model name")).toBeNull();
+    expect(await listActiveCentroids("phone", "bad model name")).toEqual([]);
     expect(db.calls).toHaveLength(0);
+  });
+
+  // --- Refuter F1: the guard against loading a revoked centroid, both halves. ---
+  it("listActiveCentroids asks the database for active rows only", async () => {
+    await listActiveCentroids("phone", "ecapa-voxceleb");
+    expect(db.calls[0]!.q).toMatch(/WHERE domain = \? AND embedding_model = \? AND retired_at IS NULL ORDER BY clinician_id, generation DESC/);
+  });
+
+  it("a retired row the database hands back anyway is never loaded (list and read)", async () => {
+    const revoked = row({ id: "vc_revoked", retired_at: "2026-09-22T16:00:00Z", retired_by: "operator-v1", retired_reason: "revoked" });
+    db.rows = [revoked, row({ id: "vc_two", clinician_id: "doc_fake0002" })];
+    expect((await listActiveCentroids("phone", "ecapa-voxceleb")).map((c) => c.id)).toEqual(["vc_two"]);
+    db.rows = [revoked];
+    expect(await readActiveCentroid(DOC, "phone", "ecapa-voxceleb")).toBeNull();
+  });
+
+  it("a revoked newest generation does not let an older one through", async () => {
+    // Only active rows are candidates; the revoked gen 3 is dropped, not replaced by gen 2 from the same answer.
+    db.rows = [row({ id: "vc_g3", generation: 3, retired_at: "2026-09-22T16:00:00Z", retired_by: "a", retired_reason: "r" }),
+      row({ id: "vc_g2", generation: 2 })];
+    expect((await listActiveCentroids("phone", "ecapa-voxceleb")).map((c) => c.id)).toEqual(["vc_g2"]);
   });
 
   it("listActiveCentroids keeps the newest generation per clinician and skips unreadable rows", async () => {
@@ -152,7 +189,8 @@ describe("writes", () => {
     expect(r).toMatchObject({ ok: true, retired: 1, centroid: { generation: 3 } });
     expect(db.calls).toHaveLength(1);
     const q = db.calls[0]!.q;
-    expect(q).toMatch(/^WITH retired AS \( UPDATE voice_centroid SET retired_at = now\(\)/);
+    // retired_at never moves without retired_by and retired_reason (the helper's half of the CHECK).
+    expect(q).toMatch(/^WITH retired AS \( UPDATE voice_centroid SET retired_at = now\(\), retired_by = \?, retired_reason = \?/);
     expect(q).toMatch(/AND retired_at IS NULL RETURNING id \), next_gen AS \( SELECT coalesce\(max\(generation\), 0\) \+ 1 AS g/);
     expect(q).toMatch(/INSERT INTO voice_centroid/);
     expect(q).toMatch(/\?::real\[\]/);
@@ -161,6 +199,9 @@ describe("writes", () => {
     expect(emb).toHaveLength(192);
     expect(vals).toContain(192); // embedding_dim is the embedding's own length, never a separate claim
     expect(vals).toContain(JSON.stringify({ sessions: 3, seconds: 74.5 }));
+    expect(vals[0]).toBe("operator-v1");
+    const newId = vals.find((v) => typeof v === "string" && /^vc_[a-z0-9]{12}$/.test(v)) as string;
+    expect(vals[1]).toBe(`superseded_by:${newId}`);
   });
 
   it("an empty answer from the insert is a loud error, not a quiet success", async () => {
@@ -168,13 +209,23 @@ describe("writes", () => {
     await expect(writeCentroidGeneration(input())).rejects.toThrow(/no readable row/);
   });
 
-  it("retireCentroid retires only an active row, by a well-formed id", async () => {
+  it("retireCentroid records who and why with the timestamp, and retires only an active row", async () => {
     db.rows = [{ id: "vc_abc" }];
-    expect(await retireCentroid("vc_abc")).toBe(true);
-    expect(db.calls[0]!.q).toMatch(/WHERE id = \? AND retired_at IS NULL/);
+    expect(await retireCentroid("vc_abc", { actor: "operator-v1", reason: "revoked: enrolment was another speaker" }))
+      .toEqual({ ok: true, retired: true });
+    const c = db.calls[0]!;
+    expect(c.q).toMatch(/SET retired_at = now\(\), retired_by = \?, retired_reason = \? WHERE id = \? AND retired_at IS NULL/);
+    expect(c.vals.slice(0, 2)).toEqual(["operator-v1", "revoked: enrolment was another speaker"]);
     db.rows = [];
-    expect(await retireCentroid("vc_abc")).toBe(false);
-    expect(await retireCentroid("x; DROP")).toBe(false);
-    expect(db.calls).toHaveLength(2);
+    expect(await retireCentroid("vc_abc", { actor: "operator-v1", reason: "again" })).toEqual({ ok: true, retired: false });
+  });
+
+  it("retireCentroid refuses without who or why, and sends nothing", async () => {
+    expect(await retireCentroid("x; DROP", { actor: "a", reason: "r" })).toEqual({ ok: false, error: "bad_id" });
+    expect(await retireCentroid("vc_abc", { actor: "", reason: "r" })).toEqual({ ok: false, error: "bad_actor" });
+    expect(await retireCentroid("vc_abc", { actor: "a", reason: "" })).toEqual({ ok: false, error: "bad_reason" });
+    expect(await retireCentroid("vc_abc", { actor: "a", reason: "   " })).toEqual({ ok: false, error: "bad_reason" });
+    expect(await retireCentroid("vc_abc", { actor: "a", reason: "two\nlines" })).toEqual({ ok: false, error: "bad_reason" });
+    expect(db.calls).toHaveLength(0);
   });
 });
