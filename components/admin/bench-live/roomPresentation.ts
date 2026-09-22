@@ -72,7 +72,7 @@ export function roomPresentation(
         || room.ended_at_lies
         || room.marks_not_sent > 0
         ? "amber"
-        : state.level === "unknown"
+        : state.level === "unknown" || room.degraded.length > 0
           ? "unknown"
           : "ok";
   const kioskClaimsThis = Boolean(
@@ -86,7 +86,7 @@ export function roomPresentation(
     operational,
     hostCloudDesync: sessionDesync,
     worst,
-    canReachKiosk: !listenersKnown || Boolean(listener?.listening),
+    canReachKiosk: listenersKnown && Boolean(listener?.listening),
     orphaned:
       listenersKnown
       && (room.recording || room.paused_session)

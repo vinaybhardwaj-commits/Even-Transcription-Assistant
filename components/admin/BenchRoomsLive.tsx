@@ -27,6 +27,7 @@
  */
 
 import * as React from "react";
+import Link from "next/link";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
@@ -50,6 +51,7 @@ import { BenchRoomDrawer } from "@/components/admin/bench-live/BenchRoomDrawer";
 import { ageMs, fmtAge } from "@/components/admin/bench-live/BenchRoomVitals";
 import { roomPresentation } from "@/components/admin/bench-live/roomPresentation";
 import {
+  clearRoomSelectionUrl,
   resolveRoomQuery,
   roomSelectionUrl,
 } from "@/components/admin/bench-live/roomSelection";
@@ -102,7 +104,7 @@ export function useSelectedRoom(): Selection {
 }
 
 // ---------------------------------------------------------------------------
-// Wire shapes (mirrors of the two routes)
+// Confirm timing
 // ---------------------------------------------------------------------------
 
 /**
@@ -356,12 +358,14 @@ export function BenchRoomsLive() {
     || Boolean(lastListenerSuccessAt && nowMs - lastListenerSuccessAt > 10_000);
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
   const attentionRoomIds = React.useMemo(() => new Set(attention.map((item) => item.roomId)), [attention]);
-  const filteredRooms = severityFilter === "attention"
-    ? rooms.filter((room) => attentionRoomIds.has(room.room.id))
-    : rooms;
   const visibleRooms = React.useMemo(
-    () => sortFleetRooms(filteredRooms, attention),
-    [filteredRooms, attention],
+    () => sortFleetRooms(
+      severityFilter === "attention"
+        ? rooms.filter((room) => attentionRoomIds.has(room.room.id))
+        : rooms,
+      attention,
+    ),
+    [severityFilter, rooms, attentionRoomIds, attention],
   );
   const selectedId = useSelectedRoom()?.roomId ?? null;
   const deepLinkApplied = React.useRef(false);
@@ -396,7 +400,7 @@ export function BenchRoomsLive() {
               ? "acked"
               : command.status === "expired"
                 ? "timeout"
-                : "failed";
+                : "conflict";
         next[command.room_id] = {
           commandId: command.id,
           kind: command.kind,
@@ -462,12 +466,10 @@ export function BenchRoomsLive() {
 
   const closeDrawer = React.useCallback(() => {
     setDrawerOpen(false);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("room");
     window.history.replaceState(
       window.history.state,
       "",
-      `${url.pathname}${url.search}${url.hash}`,
+      clearRoomSelectionUrl(window.location.href),
     );
   }, []);
 
@@ -557,7 +559,7 @@ export function BenchRoomsLive() {
               [roomId]: {
                 commandId,
                 kind,
-                state: status === "acked" ? "acked" : status === "expired" ? "timeout" : "failed",
+                state: status === "acked" ? "acked" : status === "expired" ? "timeout" : "conflict",
                 detail: status === "acked"
                   ? "Kiosk acknowledged this command."
                   : status === "expired"
@@ -632,7 +634,7 @@ export function BenchRoomsLive() {
       setNote(`close abandoned session: ${e instanceof Error ? e.message : String(e)}`);
       setCommandOutcomes((prev) => ({
         ...prev,
-        [roomId]: { kind: "close_orphan", state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
+        [roomId]: { kind: "close_orphan", state: "conflict", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
       }));
     } finally {
       setConfirmOrphan(null);
@@ -698,7 +700,7 @@ export function BenchRoomsLive() {
       setNote(`${kind}: ${e instanceof Error ? e.message : String(e)}`);
       setCommandOutcomes((prev) => ({
         ...prev,
-        [roomId]: { commandId: requestId, kind, state: "failed", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
+        [roomId]: { commandId: requestId, kind, state: "conflict", detail: e instanceof Error ? e.message : String(e), at: Date.now() },
       }));
     } finally {
       setConfirmStop(null);
@@ -745,12 +747,12 @@ export function BenchRoomsLive() {
         <p className="mt-2 text-body text-even-ink-600">
           Your admin session is missing or expired. Live facts and write controls are hidden until you sign in again.
         </p>
-        <a
+        <Link
           href="/admin"
           className="mt-4 inline-flex min-h-11 items-center rounded-lg bg-even-navy-800 px-4 py-2 text-label font-semibold text-even-white"
         >
           Sign in again
-        </a>
+        </Link>
       </section>
     );
   }
@@ -765,12 +767,12 @@ export function BenchRoomsLive() {
           <h2 className="text-heading text-even-navy-800">Rooms, right now</h2>
         </div>
         <div className="flex items-center gap-2 text-caption text-even-ink-400">
-          <a
+          <Link
             href={`/admin/bench/archive${selectedId ? `?room=${encodeURIComponent(rooms.find((room) => room.room.id === selectedId)?.room.slug ?? selectedId)}` : ""}`}
             className="min-h-11 inline-flex items-center px-3 rounded-lg font-semibold text-even-blue-700 hover:bg-even-ink-50"
           >
             Archive &amp; room setup
-          </a>
+          </Link>
           {busy ? <span>Refreshing…</span> : null}
           {lastRollupSuccessAt ? (
             <span suppressHydrationWarning>
@@ -909,12 +911,12 @@ export function BenchRoomsLive() {
           <p className="mt-1 text-caption text-even-ink-600">
             Create or enable a room in the archive workspace, then sign the clinic Mac into its room URL.
           </p>
-          <a
+          <Link
             href="/admin/bench/archive"
             className="mt-3 inline-flex min-h-11 items-center rounded-lg bg-even-navy-800 px-4 py-2 text-label font-semibold text-even-white"
           >
             Open room setup
-          </a>
+          </Link>
         </div>
       ) : rollup && visibleRooms.length === 0 ? (
         <p className="rounded-lg bg-even-ink-50 px-3 py-4 text-caption text-even-ink-500">
@@ -923,300 +925,6 @@ export function BenchRoomsLive() {
       ) : !rollup ? (
         <p className="text-caption text-even-ink-400">Loading fleet facts…</p>
       ) : null}
-      <div className="hidden">
-        {visibleRooms.map((r) => {
-          const l = listenerMap.get(r.room.id);
-          const presentation = roomPresentation(r, l, listenersKnown, nowMs);
-          const st = presentation.state;
-          const operational = presentation.operational;
-          const orphaned = presentation.orphaned;
-          const canReachKiosk = presentation.canReachKiosk;
-          const isSelected = selectedId === r.room.id;
-          return (
-            // B3 — this WAS a <button> with five more <button>s inside it, which is invalid
-            // HTML: browsers reparent nested interactive content, so the controls were living
-            // outside the card in the real DOM and only a stopPropagation on a wrapping div was
-            // holding the behaviour together. It is a div now, with an explicit role, a tab
-            // stop and Enter/Space, so selection is still fully keyboard-reachable.
-            <RoomCard
-              key={r.room.id}
-              id={r.room.id}
-              name={r.room.name}
-              level={presentation.worst}
-              selected={isSelected}
-              onSelect={() => chooseRoom(r.room)}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="font-semibold text-even-navy-800 truncate">{r.room.name}</p>
-                  <p className="text-caption text-even-ink-400 truncate">{r.room.slug}</p>
-                </div>
-                {st.state === "finished" ? (
-                  <span className={`${PILL} ${FINISHED_PILL}`} title={st.hint ?? undefined}>{STATE_WORD.finished}</span>
-                ) : (
-                  <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
-                )}
-              </div>
-
-              <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
-              {st.hint ? <p className="text-caption text-even-ink-500">{st.hint}</p> : null}
-              <BenchRoomStatusChips
-                roomName={r.room.name}
-                operational={operational}
-                syncUnknown={presentation.hostCloudDesync === null}
-                listener={l}
-              />
-
-              {/* THE THREE LANES (PRD R4/R5/R6). Tape has no switch — recording is started and
-                  stopped by the buttons below, as it always was. Only the two processing lanes
-                  are switchable, because only those can be turned off without losing anything. */}
-              <div className="mt-3 border-t border-even-ink-100 pt-2" onClick={(e) => e.stopPropagation()}>
-                <Lane name="Tape" view={r.lanes.tape} />
-                <Lane
-                  name="Transcript"
-                  view={laneWithPending(r.lanes.transcript, pending[`${r.room.id}:transcript`])}
-                  sw={
-                    <LaneSwitch
-                      on={pending[`${r.room.id}:transcript`] ?? r.transcript_enabled}
-                      busy={false}
-                      label={`Transcript for ${r.room.name}`}
-                      onToggle={() => void setLane(r.room.id, "transcript", !(pending[`${r.room.id}:transcript`] ?? r.transcript_enabled))}
-                    />
-                  }
-                />
-                <Lane
-                  name="Visits"
-                  view={laneWithPending(r.lanes.visits, pending[`${r.room.id}:visits`])}
-                  sw={
-                    <LaneSwitch
-                      on={pending[`${r.room.id}:visits`] ?? r.visits_enabled}
-                      busy={false}
-                      label={`Visits for ${r.room.name}`}
-                      onToggle={() => {
-                        const now = pending[`${r.room.id}:visits`] ?? r.visits_enabled;
-                        // R7 — friction on the dangerous direction ONLY. Turning it OFF is
-                        // immediate; stopping must never take two taps in a clinic.
-                        if (now) void setLane(r.room.id, "visits", false);
-                        else setConfirmVisits({ roomId: r.room.id, roomName: r.room.name });
-                      }}
-                    />
-                  }
-                />
-                {switchError && switchError.key.startsWith(`${r.room.id}:`) ? (
-                  <p className="mt-1 text-caption font-semibold text-danger-700 leading-snug">{switchError.message}</p>
-                ) : null}
-              </div>
-
-              {/* §3.10 (Build 3 §2.1) — RUN THIS ROOM'S WAITING AUDIO. On 24 August Cardiology's
-                  finished audio had no job row and no control anywhere would run it; the card said
-                  "17 waiting" over a queue that did not exist. This is the control that runs it.
-                  Shown only when Transcript is on and something is actually waiting with no worker.
-                  EVERY ONE IS A PAID CALL, so it arms with a first tap and spends on the second,
-                  runs a bounded batch, and reports engine, characters, seconds and cost per piece.
-                  The interface never says "window" — the operator vocabulary is pieces of audio. */}
-              {(() => {
-                const waitingReason = r.stranded?.reasons.find((x) => x.reason === STRANDED_WAITING);
-                const waiting = waitingReason?.slots ?? 0;
-                if (!r.transcript_enabled || waiting < 1) return null;
-                const run = runResult[r.room.id];
-                const isRunning = runningWaiting === r.room.id;
-                const armed = confirmRun === r.room.id;
-                return (
-                  <div className="mt-3 rounded-lg border border-even-navy-200 bg-even-navy-50 p-3" onClick={(e) => e.stopPropagation()}>
-                    <p className="text-caption text-even-navy-800 leading-snug">
-                      <span className="font-semibold">
-                        Waiting: {waiting} piece{waiting === 1 ? "" : "s"} · {fmtMinutes(waitingReason?.ms ?? 0)} of 15-minute slot time.
-                      </span>{" "}
-                      Nothing runs on its own. Running starts up to 4 paid transcription calls. Each one is a paid call; the exact cost is reported after each call.
-                    </p>
-                    {armed ? (
-                      <button
-                        type="button"
-                        disabled={isRunning}
-                        onClick={() => void runWaiting(r.room.id)}
-                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-even-navy-800 text-even-white ring-2 ring-even-navy-900 ring-offset-1 hover:bg-even-navy-900 disabled:opacity-50"
-                      >
-                        {isRunning ? "running…" : `confirm — run ${Math.min(4, waiting)} now (paid)`}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={isRunning}
-                        onClick={() => setConfirmRun(r.room.id)}
-                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-even-navy-800 text-even-white hover:bg-even-navy-900 disabled:opacity-50"
-                      >
-                        Run this room’s waiting audio
-                      </button>
-                    )}
-                    {armed ? (
-                      <p className="mt-1 text-caption text-even-ink-500 leading-snug">
-                        Paid batch: {Math.min(4, waiting)} piece{Math.min(4, waiting) === 1 ? "" : "s"} maximum. Exact cost appears per piece before you run another batch.
-                      </p>
-                    ) : null}
-                    {run ? (
-                      <div className="mt-2 border-t border-even-navy-100 pt-2" data-testid="run-waiting-report">
-                        {run.drained.length === 0 ? (
-                          <p className="text-caption text-even-ink-500 leading-snug">
-                            Nothing ran{run.remaining < 0 ? " — the run failed; see the note above." : "."}
-                          </p>
-                        ) : (
-                          <ul className="space-y-0.5">
-                            {run.drained.map((w) => (
-                              <li key={w.window_id} className="text-caption text-even-navy-800 leading-snug">
-                                {w.ok ? (
-                                  <>
-                                    ✓ {w.engine ?? "engine"} · {w.transcript_chars ?? 0} chars ·{" "}
-                                    {w.sarvam_ms != null ? `${(w.sarvam_ms / 1000).toFixed(1)} s` : "—"} ·{" "}
-                                    {w.cost_usd != null ? `$${w.cost_usd.toFixed(4)}` : "no cost reported"}
-                                  </>
-                                ) : (
-                                  <span className="text-warning-700">✗ did not run — {w.step}</span>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {run.remaining > 0 ? (
-                          <p className="mt-1 text-caption text-even-ink-500 leading-snug">
-                            {run.remaining} still waiting — press again to run the next {Math.min(4, run.remaining)}.
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })()}
-
-              {/* ── STRANDED AUDIO (D7) ────────────────────────────────────────────────────
-                  MINUTES, NOT PIECES. The card counted pieces and never said how much TIME
-                  could not be turned into words. On 24 August that figure was over eight hours
-                  across the estate and it was nowhere on this screen — while the one count that
-                  WAS shown, "17 waiting", described a queue that did not exist: all seventeen
-                  were finished slots with no job row at all, so nothing had ever been enqueued.
-
-                  NOT RED. Every minute counted here is audio that is safely stored; what is
-                  missing is the words, and the instinct on seeing red is to stop the recording,
-                  which would be exactly wrong. */}
-              {r.stranded && r.stranded.total_ms > 0 ? (
-                <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50 p-3" data-testid="stranded-audio" onClick={(e) => e.stopPropagation()}>
-                  <p className="text-caption text-even-navy-800 leading-snug">
-                    <span className="font-semibold">{fmtMinutes(r.stranded.total_ms)}</span> of audio cannot
-                    currently be turned into words. It is recorded and safe.
-                  </p>
-                  <ul className="mt-1 space-y-0.5">
-                    {r.stranded.reasons.map((x) => (
-                      <li key={x.reason} className="text-caption text-even-ink-600 leading-snug">
-                        {fmtMinutes(x.ms)} — {x.reason}
-                      </li>
-                    ))}
-                  </ul>
-                  {/* THE TWO NUMBERS ARE MEASURED DIFFERENTLY AND THEY DO NOT SUBTRACT. Said
-                      out loud rather than left to be discovered by someone doing the arithmetic
-                      on a clinic floor. */}
-                  <p className="mt-1 text-caption text-even-ink-400 leading-snug">{STRANDED_MEASURE_NOTE}</p>
-                </div>
-              ) : null}
-
-              <BenchRoomVitals
-                room={r}
-                listener={l}
-                state={st}
-                operational={operational}
-                syncUnknown={presentation.hostCloudDesync === null}
-                nowMs={nowMs}
-                thresholds={thresholds}
-                showStatus={false}
-              />
-
-              <BenchCommandTransport
-                room={r}
-                listener={l}
-                state={st}
-                canReachKiosk={canReachKiosk}
-                outcome={commandOutcomes[r.room.id]}
-                confirmingStop={confirmStop === r.room.id}
-                confirmWindowSeconds={CONFIRM_STOP_MS / 1000}
-                onArmStop={() => setConfirmStop(r.room.id)}
-                onSend={(kind) => void send(r.room.id, kind)}
-              />
-
-              {/* ENDED DISAGREES — on the card as well as in the attention list, because the card
-                  is what somebody is looking at when they click a room. No control: there is
-                  nothing safe for the monitor to DO here. The session is already ended, the audio
-                  is already stored, and the kiosk has already been told to stop on its next chunk.
-                  What is needed is a person in the room pressing start, which is what it says. */}
-              {r.ended_disagrees ? (
-                <div className="mt-3 rounded-lg border border-danger-200 bg-danger-100 p-3" data-testid="ended-disagrees">
-                  <p className="text-caption text-danger-700 leading-snug">
-                    <span className="font-semibold">{ENDED_DISAGREES_TITLE}.</span>{" "}
-                    {r.ended_disagrees_chunks} piece{r.ended_disagrees_chunks === 1 ? "" : "s"} stored since it was
-                    marked ended {fmtAge(ageMs(r.ended_disagrees_ended_at, nowMs))} ago
-                    {r.ended_disagrees_last_piece_at ? `, newest ${fmtAge(ageMs(r.ended_disagrees_last_piece_at, nowMs))} ago` : ""}.
-                  </p>
-                  <p className="text-caption text-even-ink-500 leading-snug mt-1">{ENDED_DISAGREES_HINT}.</p>
-                </div>
-              ) : null}
-
-              {/* §3.5 — WHAT THIS CARD COULD NOT READ. Assembled per room on every poll since
-                  this screen shipped and never rendered anywhere, so a card quietly missing a
-                  whole section looked identical to a card with nothing to report. Grey, because
-                  it is not a fault in the room — it is a gap in what we can currently see of it. */}
-              {r.degraded?.length ? (
-                <p className="mt-2 text-caption text-even-ink-500 leading-snug">
-                  Some of this room’s picture could not be read: {r.degraded.join(" · ")}
-                </p>
-              ) : null}
-
-              {/* K5 A2 — THE REPAIR. Shown ONLY on a room whose session is open while no kiosk
-                  claims it: the room is deadlocked, because end_day has no kiosk to act on and
-                  start_day is refused by the open session. On a healthy room this control is
-                  not rendered at all, and the server refuses it as well (A4) — the UI decides
-                  what to OFFER, the server decides what is allowed. */}
-              {orphaned ? (
-                <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50 p-3" onClick={(e) => e.stopPropagation()}>
-                  <p className="text-caption text-even-navy-800 leading-snug">
-                    <span className="font-semibold">This room is stuck.</span> Its session is still open but no
-                    kiosk page is recording it, so stop has nothing to act on and start is refused. Closing the
-                    abandoned session lets the room record again.
-                  </p>
-                  <p className="text-caption text-even-ink-500 leading-snug mt-1">
-                    Every chunk already uploaded is kept — this only ends the session row.
-                    {l ? ` The room page last polled ${fmtAge(l.age_ms)} ago.` : " No kiosk page has ever polled this room."}
-                  </p>
-                  {confirmOrphan === r.room.id ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void closeOrphan(r.room.id)}
-                        className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label font-semibold bg-warning-500 text-even-navy-800 ring-2 ring-warning-700 ring-offset-1 hover:bg-warning-700 hover:text-even-white"
-                      >
-                        confirm — close abandoned session
-                      </button>
-                      <p className="mt-1 text-caption text-warning-700">
-                        Disarms itself in {CONFIRM_STOP_MS / 1000} seconds.
-                      </p>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setConfirmOrphan(r.room.id)}
-                      className="mt-2 min-h-11 min-w-11 px-4 py-2 rounded-lg text-label bg-even-white border border-warning-200 hover:bg-warning-100"
-                    >
-                      Close abandoned session
-                    </button>
-                  )}
-                </div>
-              ) : null}
-            </RoomCard>
-          );
-        })}
-        {rooms.length === 0 ? (
-          <p className="text-caption text-even-ink-400">{rollup ? "no enabled rooms" : "loading…"}</p>
-        ) : visibleRooms.length === 0 ? (
-          <p className="text-caption text-even-ink-400">No rooms match this filter.</p>
-        ) : null}
-      </div>
-
       {rollup?.day ? <BenchDaySummary day={rollup.day} /> : null}
 
       {/* Global writes are deliberately separated from the live scan. The destructive colour

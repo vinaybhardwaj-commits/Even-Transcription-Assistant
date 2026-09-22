@@ -111,7 +111,7 @@ export type BusCommandView = {
 export type CommandOutcome = {
   commandId?: string;
   kind: string;
-  state: "queued" | "acked" | "timeout" | "failed" | "conflict";
+  state: "queued" | "acked" | "timeout" | "conflict";
   detail: string;
   at: number;
 };
