@@ -18,7 +18,19 @@
  *                                                 about TIMING, not about the window. Retried up to
  *                                                 JOIN_RETRY_LIMIT times after a short backoff (V, 22 Sep 2026
  *                                                 08:20, option b), not counted toward the failure stop unless
- *                                                 the retries themselves run out;
+ *                                                 the retries themselves run out. THE RETRY RESUBMIT IS NOT
+ *                                                 EXEMPT FROM THE CLOCK OR THE WATCHDOG GATE: both are re-checked
+ *                                                 on the far side of the backoff sleep, exactly as they are
+ *                                                 before every other submit (Refuter finding 1, 22 Sep 2026). If
+ *                                                 either says stop, the retry is abandoned — logged as
+ *                                                 `window_deferred` (reason `clock_closed` or `gate_hold`), which
+ *                                                 is neither a failure nor a touch of `consecutiveFailures`. When
+ *                                                 the retries themselves run out, that is logged as `window_failed`
+ *                                                 with `error_code: "join_contention_exhausted"` — a real failure
+ *                                                 for the run's tally, but kept OUT of the canary's consecutive-
+ *                                                 failure count (Refuter finding 2). A FATAL answer (401/403,
+ *                                                 `mcp_scope_refused`) on the retry submit stops the run the same
+ *                                                 way a fatal answer on any other submit does (Refuter finding 3);
  *   - submit outside 21:30-07:10 IST ............ hours.ts `maySubmit`, checked before EVERY submit;
  *   - submit while the watchdog says STOP or disk is under 40 GB ... gate.ts, checked before EVERY submit;
  *   - retry a refused credential ................ door.ts `fatal`, the run stops on the first one;
@@ -93,6 +105,10 @@ export type RunSummary = {
   /** Job attempts that collided with the join service's own mutex and were retried — not counted as failures
    *  unless JOIN_RETRY_LIMIT ran out (that outcome lands in `failed`, like any other exhausted retry). */
   joinDeferred: number;
+  /** A join-retry resubmit that was abandoned because the clock closed or the watchdog/disk gate said stop
+   *  during the backoff — not a failure, not a touch of the consecutive-failure count; the window is simply
+   *  left for a later run (`window_deferred`, reason `clock_closed` or `gate_hold`). */
+  windowDeferred: number;
   overridden: number;
   fatal: FatalCode | null;
   stop: StopReason;
@@ -103,7 +119,9 @@ const EMPTY_SUMMARY: Summary = {
   retry_pending: 0, parked: 0, backlog_remaining: 0, backlog_in_transcript_off_rooms: 0, excluded_closed_hours: 0, excluded_no_speakers: 0,
 };
 
-const newSummary = (): RunSummary => ({ started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, joinDeferred: 0, overridden: 0, fatal: null, stop: "backlog_empty" });
+const newSummary = (): RunSummary => ({
+  started: 0, done: 0, failed: 0, refused: 0, abandoned: 0, unverified: 0, joinDeferred: 0, windowDeferred: 0, overridden: 0, fatal: null, stop: "backlog_empty",
+});
 
 /** The args of the job for one candidate. Exported so a test pins exactly what goes on the wire. */
 export function jobArgsFor(c: Candidate, origin: string): RoomWindowSubmit {
@@ -190,7 +208,8 @@ export async function runOvernight(
   /**
    * One finished job (`done` / `failed` / `cancelled`), exactly the original per-window ending — the English
    * canary included — just callable per slot instead of inline. Returns true if this finish set `s.fatal`
-   * (too_many_failures), so the caller knows to stop filling and drain.
+   * (too_many_failures, or a fatal answer on a join-contention retry submit), so the caller knows to stop
+   * filling and drain.
    */
   async function finishSlot(
     jobId: string, a: Slot, terminal: { status: "done" | "failed" | "cancelled"; step: string | null; error_code: string | null; joinContended: boolean },
@@ -200,17 +219,53 @@ export async function runOvernight(
     // A JOIN-SERVICE COLLISION: a fact about timing, not about the window. Retry it — under the bound — rather
     // than spend one of the run's consecutive-failure slots on contention that has nothing to do with this
     // window's content. Not attempted for `done`/`cancelled`; only a `failed` job can carry this signal.
-    if (terminal.status === "failed" && terminal.joinContended && a.joinRetries < JOIN_RETRY_LIMIT) {
-      await deps.sleep(JOIN_RETRY_DELAY_MS, signal);
-      const sub = await deps.door.submitRoomWindow(jobArgsFor(a.c, deps.origin), signal);
-      if (sub.ok) {
-        s.joinDeferred += 1;
-        deps.log({ event: "window_join_deferred", window_id: a.c.window_id, job_id: jobId, retry_job_id: sub.job_id, retry: a.joinRetries + 1 });
-        active.set(sub.job_id, { c: a.c, t0: deps.now(), joinRetries: a.joinRetries + 1 });
-        return false;
+    if (terminal.status === "failed" && terminal.joinContended) {
+      if (a.joinRetries < JOIN_RETRY_LIMIT) {
+        await deps.sleep(JOIN_RETRY_DELAY_MS, signal);
+
+        // THE SAME TWO GATES EVERY OTHER SUBMIT CHECKS (driver.ts's own steps 1 and 2), re-read on the far
+        // side of the backoff sleep — real time the retry itself just spent. A clock that closed, or a
+        // watchdog/disk gate that said STOP, while this retry waited is not a fact about THIS window, so it
+        // is not a failure and it does not touch `consecutiveFailures`: the retry is simply abandoned and the
+        // window is left for a later run to re-pick (Refuter finding 1, 22 Sep 2026).
+        if (!maySubmit(deps.now())) {
+          s.windowDeferred += 1;
+          deps.log({ event: "window_deferred", window_id: a.c.window_id, job_id: jobId, reason: "clock_closed", retry: a.joinRetries + 1 });
+          return false;
+        }
+        const g = deps.gate();
+        if (!g.go) {
+          s.windowDeferred += 1;
+          deps.log({ event: "window_deferred", window_id: a.c.window_id, job_id: jobId, reason: "gate_hold", retry: a.joinRetries + 1 });
+          return false;
+        }
+
+        const sub = await deps.door.submitRoomWindow(jobArgsFor(a.c, deps.origin), signal);
+        if (sub.ok) {
+          s.joinDeferred += 1;
+          deps.log({ event: "window_join_deferred", window_id: a.c.window_id, job_id: jobId, retry_job_id: sub.job_id, retry: a.joinRetries + 1 });
+          active.set(sub.job_id, { c: a.c, t0: deps.now(), joinRetries: a.joinRetries + 1 });
+          return false;
+        }
+        // A FATAL answer on the RETRY submit (401/403, `mcp_scope_refused`) is exactly what it would be on
+        // any other submit: every window would fail the credential the same way, so the run stops here —
+        // NOT counted as a window failure (Refuter finding 3, 22 Sep 2026).
+        if (sub.kind === "fatal") {
+          fatal(sub.code, { window_id: a.c.window_id, job_id: jobId });
+          return true;
+        }
+        // The RETRY submit itself was refused or deferred: retries are exhausted from here, same as running
+        // the bound out below.
       }
-      // The RETRY submit itself failed. Kept simple, per the order's "bounded": this window counts as a real
-      // failure this cycle (below), on the ORIGINAL terminal — the retry submit's own error kind is not chased.
+
+      // JOIN CONTENTION EXHAUSTED (Refuter finding 2, 22 Sep 2026): a distinct, non-generic outcome — this
+      // window's fate was decided by contention timing, not by anything about the window's own content — so
+      // it is recorded as a real failure for the run's tally, but kept OUT of the canary's consecutive-
+      // failure count (unlike a generic `window_failed`, which does count toward it).
+      const wall_s = Math.round((deps.now() - a.t0) / 1000);
+      s.failed += 1;
+      deps.log({ event: "window_failed", window_id: a.c.window_id, job_id: jobId, status: terminal.status, step: terminal.step, error_code: "join_contention_exhausted", wall_s });
+      return false;
     }
 
     const wall_s = Math.round((deps.now() - a.t0) / 1000);

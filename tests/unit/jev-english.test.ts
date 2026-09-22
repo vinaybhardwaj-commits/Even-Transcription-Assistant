@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { isNativeEnglish, languageMix, classifyWindow } from "@/lib/jev/english";
 
 // ── the three-way agreement rule, PURE ───────────────────────────────────────────────────────────
-describe("J0 — isNativeEnglish: all three signals must agree to skip translation", () => {
+describe("J0 — isNativeEnglish: at least two of three PRESENT signals must agree; none may disagree (majority-of-present, V 21 Sep 2026)", () => {
   const en = (mix: Record<string, number>, full = "english", sarvam = "en") =>
     ({ full_window_language: full, sarvam_language: sarvam, language_timeline: { language_mix: mix } });
 
@@ -37,11 +37,25 @@ describe("J0 — isNativeEnglish: all three signals must agree to skip translati
     expect(isNativeEnglish(en({ en: 2 }, "english", "hi"))).toBe(false);
     expect(isNativeEnglish(en({ en: 2 }, "english", "en-IN"))).toBe(true);
   });
-  it("a missing or empty mix is NOT agreement (absent metric never reads as English)", () => {
-    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(false);
-    expect(isNativeEnglish(en({}))).toBe(false);
+  it("an ABSENT mix ABSTAINS rather than vetoes: the other two signals carry it (supersedes the old three-way-agreement rule)", () => {
+    expect(isNativeEnglish({ full_window_language: "english", sarvam_language: "en" })).toBe(true);
+  });
+  it("an EMPTY mix ABSTAINS too: it names no language, so it carries no information", () => {
+    expect(isNativeEnglish(en({}))).toBe(true);
+  });
+  it("an absent/empty mix cannot rescue a window alone — the other two signals must still agree", () => {
+    expect(isNativeEnglish(en({}, "hindi", "en"))).toBe(false);
+    expect(isNativeEnglish({ full_window_language: "english", language_timeline: { language_mix: {} } })).toBe(false);
+  });
+  it("one signal alone is never enough — at least two of the three must be present and say English", () => {
+    expect(isNativeEnglish({ full_window_language: "english" })).toBe(false);
+    expect(isNativeEnglish({ sarvam_language: "en" })).toBe(false);
+    expect(isNativeEnglish({ language_timeline: { language_mix: { en: 4 } } })).toBe(false);
+  });
+  it("no metrics at all is never English — nothing voted", () => {
     expect(isNativeEnglish(null)).toBe(false);
     expect(isNativeEnglish(undefined)).toBe(false);
+    expect(isNativeEnglish({})).toBe(false);
   });
   it("languageMix digs out the nested map and ignores non-number values", () => {
     expect(languageMix(en({ en: 2, hi: 1 }))).toEqual({ en: 2, hi: 1 });
