@@ -190,9 +190,9 @@ describe("§2.4 — a spare exists from a chosen device, never from the arrival 
   });
 
   it("the card draws no spare lane, no spare vital and no spare line unless a device exists", () => {
-    const ui = code("components", "admin", "BenchRoomsLive.tsx");
-    expect(ui).toMatch(/r\.spare_exists && l\.spare \? <LevelBar label="Spare mic"/);
-    expect(ui).toMatch(/r\.spare_exists && r\.backup_chunks_today > 0/);
+    const vitals = code("components", "admin", "bench-live", "BenchRoomVitals.tsx");
+    expect(vitals).toMatch(/room\.spare_exists && listener\.spare/);
+    expect(vitals).toMatch(/room\.spare_exists && room\.backup_chunks_today > 0/);
   });
 });
 

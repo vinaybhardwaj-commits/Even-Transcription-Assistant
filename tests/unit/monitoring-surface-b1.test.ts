@@ -418,13 +418,13 @@ describe("§3.4 — the copy that described a worker that does not exist", () =>
   });
 
   it("D32 — a room with one microphone says NOTHING about a spare", () => {
-    const rendered = code("components", "admin", "BenchRoomsLive.tsx");
+    const rendered = code("components", "admin", "bench-live", "BenchRoomVitals.tsx");
     // no amber vital, no attention row, no grey placeholder
     expect(rendered).not.toMatch(/reads no chunks/);
     // the field stays on the wire for Build 2; nothing on the card or in the list reads it
-    expect(rendered).not.toMatch(/r\.backup_reads_no_chunks/);
+    expect(rendered).not.toMatch(/room\.backup_reads_no_chunks/);
     // and the spare is mentioned only where it has actually recorded something
-    expect(rendered).toMatch(/backup_chunks_today > 0/);
+    expect(rendered).toMatch(/room\.backup_chunks_today > 0/);
   });
 });
 
