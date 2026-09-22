@@ -955,6 +955,41 @@ describe("THE TWO NEW STOPS (ETA-Refuter Finding 1, 22 Sep 2026) — a silent al
     const s = await h.run();
     expect(s).toMatchObject({ fatal: null, stop: "backlog_empty", done: 1 });
   });
+
+  it("a done resets the JOIN streak TOO, not just the foreign one (ETA-Refuter round 2, M4: the prior test only used foreign cancels)", async () => {
+    // (LIMIT-1) windows that each exhaust their own join retries, a done, then (LIMIT-1) more — if the done
+    // failed to reset consecutiveJoinContentionExhausted, the second batch alone would trip it.
+    const before = CONSECUTIVE_JOIN_CONTENTION_LIMIT - 1;
+    const after = CONSECUTIVE_JOIN_CONTENTION_LIMIT - 1;
+    const cands = [
+      ...Array.from({ length: before }, (_, i) => cand(`B${i}`)),
+      cand("D"),
+      ...Array.from({ length: after }, (_, i) => cand(`A${i}`)),
+    ];
+    const h = harness({ cands, status: (jobId, k, w) => (w === "D" ? done() : joinContended()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: null, stop: "backlog_empty", done: 1, failed: before + after });
+  });
+
+  it(`CONSECUTIVE_FOREIGN_CANCEL_LIMIT is hardcoded 5, not merely self-consistent (ETA-Refuter round 2, M5: a probe ` +
+     `that reads the constant moves with it and never catches a mutant that changes the constant itself)`, () => {
+    expect(CONSECUTIVE_FOREIGN_CANCEL_LIMIT).toBe(5);
+  });
+
+  it(`CONSECUTIVE_JOIN_CONTENTION_LIMIT is hardcoded 5 too, for the same reason`, () => {
+    expect(CONSECUTIVE_JOIN_CONTENTION_LIMIT).toBe(5);
+  });
+
+  it("a JOIN failure does NOT reset the FOREIGN streak (ETA-Refuter round 2, M13: the earlier independence test " +
+     "stayed under both limits, so a wrong reset and a correct no-reset looked the same)", async () => {
+    // 3 foreign cancels, one full join-contention exhaustion, then 2 MORE foreign cancels — 3+2 = the foreign
+    // limit exactly. If the join event had reset the foreign streak, the last 2 alone would not reach it.
+    const cands = [cand("B0"), cand("B1"), cand("B2"), cand("J"), cand("A0"), cand("A1")];
+    const h = harness({ cands, status: (jobId, k, w) => (w === "J" ? joinContended() : foreignCancel()) });
+    const s = await h.run();
+    expect(s).toMatchObject({ fatal: "foreign_cancels", stop: "fatal" });
+    expect(evs(h.log, "fatal")[0]).toMatchObject({ code: "foreign_cancels", consecutive: CONSECUTIVE_FOREIGN_CANCEL_LIMIT });
+  });
 });
 
 describe("A FOREIGN CANCEL — a cancelled job we did not ask for (Fable, 22 Sep 2026 21:10, ETA-OVERNIGHT-FATALS-ROOTCAUSE)", () => {
@@ -978,12 +1013,6 @@ describe("A FOREIGN CANCEL — a cancelled job we did not ask for (Fable, 22 Sep
     expect(s).toMatchObject({ started: 2, done: 1, failed: 0, windowDeferred: 1 });
     expect(evs(h.log, "window_deferred")[0]).toMatchObject({ window_id: "A", reason: "foreign_cancel" });
     expect(evs(h.log, "window_failed")).toHaveLength(0);
-  });
-
-  it("a foreign cancel does not touch consecutiveFailures (the ENGLISH CANARY's own counter) — superseded by " +
-     "its OWN CONSECUTIVE_FOREIGN_CANCEL_LIMIT stop above (ETA-Refuter Finding 1); this only pins the canary side", () => {
-    // covered structurally by "a done resets BOTH streaks" and Probe A above; kept as a named marker that
-    // the OLD claim ("foreign cancels never trip ANY fatal stop") is no longer true, on purpose.
   });
 
   it("a foreign cancel between two real failures does not reset OR advance the FAILURE streak — it is simply not part of it", async () => {
