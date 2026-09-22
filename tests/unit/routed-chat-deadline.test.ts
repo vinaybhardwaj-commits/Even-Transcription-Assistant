@@ -127,6 +127,17 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
     }
   });
 
+  it("round 2 (ETA-Refuter, 23 Sep, 'second, smaller instance'): the fallback count SCALES with LLM_FALLBACK_MODELS, never a fixed 2", async () => {
+    const { routedChatDeadlineMs } = await router();
+    // default (2 fallbacks): (1000 + 2*1000) * 1.10 = 3300 — same figure as the earlier test above.
+    expect(routedChatDeadlineMs(1_000, {})).toBe(3_300);
+    // a 3-model chain must be summed as 3, not silently still 2:
+    // (1000 + 3*1000) * 1.10 = 4400.
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" })).toBe(4_400);
+    // a single-model chain: (1000 + 1*1000) * 1.10 = 2200.
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one" })).toBe(2_200);
+  });
+
   it("ETA_ROUTED_CHAT_DEADLINE_MS overrides the formula outright", async () => {
     const { routedChatDeadlineMs } = await router();
     expect(routedChatDeadlineMs(100_000, { ETA_ROUTED_CHAT_DEADLINE_MS: "5000" })).toBe(5000);
@@ -251,6 +262,48 @@ describe("the DEFAULT deadline (no env override) after a REAL first-stage hang �
     expect(hits).toHaveLength(3);
     expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
   }, 5_000);
+});
+
+describe("round 2 (ETA-Refuter, 23 Sep): a fallback is capped to ITS OWN budget, not handed the caller's raw timeoutMs", () => {
+  // The arithmetic in routedChatDeadlineMs assumed a fallback stage is bounded to
+  // FALLBACK_STAGE_CAP_MS (60 s) even when the caller's own timeoutMs is much larger — but until
+  // this fix, the fallback was CALLED with the caller's raw timeoutMs, so nothing actually enforced
+  // that cap. Note generation (NOTE_TIMEOUT_MS = 240_000) is the caller the Refuter named: with the
+  // old code, a fallback could run for up to 240 s instead of the 60 s the sum assumed, consuming
+  // the whole remaining deadline and leaving the second fallback unreachable.
+  //
+  // Real timers would need real minutes to exercise a 60 s / 240 s boundary, so this uses fake
+  // timers exactly as tests/unit/whisper-retry.test.ts does: advance the virtual clock while the
+  // call is in flight, so a stage's own setTimeout fires without the test waiting on it for real.
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("note-generation's exact shape: primary hangs its full 240s, the first fallback aborts at its OWN 60s cap (not 240s), the second fallback still runs and answers", async () => {
+    geminiOn();
+    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    const { routedChat } = await router();
+    const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 240_000 });
+    // 240,000 (primary's own timer) + 60,000 (the fallback's CAPPED timer, if the fix holds) + a
+    // hair of slack. An uncapped fallback would need 240,000 more (480,000 total) to abort on its
+    // own — nowhere near what is advanced here, so a regression leaves `p` pending past this point
+    // and the assertions below never run before the test's own timeout fails it.
+    await vi.advanceTimersByTimeAsync(300_050);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(hits).toHaveLength(3);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
+  }, 15_000);
+
+  it("isolates the fallback cap itself: a fast-failing primary, then a hung fallback that must abort by ~60s regardless of the caller's 240s timeoutMs", async () => {
+    geminiOn();
+    script = [{ kind: "http", status: 500 }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    const { routedChat } = await router();
+    const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 240_000 });
+    await vi.advanceTimersByTimeAsync(60_050); // only the fallback's own cap, not anywhere near 240s
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(hits).toHaveLength(3);
+  }, 15_000);
 });
 
 describe("the ordinary case is never affected", () => {
