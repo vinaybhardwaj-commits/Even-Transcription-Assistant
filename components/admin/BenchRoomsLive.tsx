@@ -720,7 +720,7 @@ export function BenchRoomsLive() {
     return m;
   }, [listeners]);
   const listenersKnown = Boolean(listeners) && !(listeners?.degraded?.length);
-  const rooms = rollup?.rooms ?? [];
+  const rooms = React.useMemo(() => rollup?.rooms ?? [], [rollup?.rooms]);
   /** §3.5 — THE THRESHOLDS THEMSELVES, so a person can see that amber means seven minutes.
    *  They have been computed and sent on every poll since this screen shipped and rendered
    *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */

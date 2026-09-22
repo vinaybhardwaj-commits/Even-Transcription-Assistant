@@ -8,7 +8,8 @@ export type InputProps = React.InputHTMLAttributes<HTMLInputElement> & {
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ label, error, helper, className = "", id, ...rest }, ref) => {
-    const inputId = id ?? `in-${React.useId()}`;
+    const generatedId = React.useId();
+    const inputId = id ?? `in-${generatedId}`;
     const hasError = !!error;
     return (
       <div className={className}>
