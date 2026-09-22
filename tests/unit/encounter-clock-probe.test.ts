@@ -140,6 +140,20 @@ describe("E-1 overlapping chunks — each stretch of clock time from ONE chunk",
     expect(m.pieces[1].chunk_idx).toBe(1);
     expect(m.pieces[1].sample_start).toBe(Math.round(82.6 * SR));  // chunk 1 starts where chunk 0 left off
   });
+  it("two chunks sharing a start are taken in idx order, so the contract always cites the same one", () => {
+    // Without the idx tie-break the input order decides which chunk_idx and r2_key the contract names
+    // — same samples, different provenance, and the contract is meant to be reproducible
+    // (ETA-Refuter, 22 Sep).
+    const { chunks } = makeChunks();
+    const twin = { ...chunks[0], idx: 7, r2_key: "twin" };
+    const probe = { start_ms: T0 + 10_000, end_ms: T0 + 190_000 };
+    const a = mapProbeToChunks(probe, [chunks[0], twin]);
+    const b = mapProbeToChunks(probe, [twin, chunks[0]]);
+    expect(a.pieces[0]).toMatchObject({ chunk_idx: 0, r2_key: chunks[0].r2_key });
+    expect(b.pieces[0]).toMatchObject({ chunk_idx: 0, r2_key: chunks[0].r2_key });
+    expect(a.pieces).toEqual(b.pieces);
+  });
+
   it("a chunk wholly inside an earlier one contributes nothing", () => {
     const { chunks } = makeChunks();
     const inner = { ...chunks[1], idx: 9, r2_key: "inner", start_ms: chunks[0].start_ms + 260_000, end_ms: chunks[0].start_ms + 290_000 };
