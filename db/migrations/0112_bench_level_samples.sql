@@ -31,5 +31,5 @@ COMMENT ON TABLE bench_level_sample IS
   'PHI-free main-microphone level heartbeats for the Bench room timeline. Contains levels and recorder state only; never audio.';
 
 INSERT INTO schema_migrations (version, name)
-VALUES (69, '0069_bench_level_samples')
+VALUES (112, '0112_bench_level_samples')
 ON CONFLICT DO NOTHING;
