@@ -105,7 +105,7 @@ export async function geminiChatIfOn(
     // opts.signal already existed on this function's own contract; it simply never reached the
     // token mint before getVertexAccessToken had a signal to accept. Passing it through here is
     // the same fix applied to the sibling call site in routedChat, for this caller's own signal.
-    const token = await getVertexAccessToken(opts.signal);
+    const token = await getVertexAccessToken(opts.signal, MINT_TIMEOUT_MS);
     return await openaiChat({
       url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
       messages, temperature: opts.temperature, responseJson: opts.responseJson,
@@ -156,6 +156,29 @@ export const ROUTED_CHAT_DEADLINE_ENV = "ETA_ROUTED_CHAT_DEADLINE_MS";
 export const FALLBACK_STAGE_CAP_MS = 60_000;
 
 /**
+ * A fallback stage's own budget: never more than FALLBACK_STAGE_CAP_MS, and never more than the
+ * caller's own timeoutMs when that is smaller. ONE place, used by both the deadline sum and the
+ * actual openrouterChat call (round-3 Refuter trivia: the expression used to be duplicated
+ * textually in both places, which made "the same number" a claim rather than something the code
+ * enforced).
+ */
+function fallbackBudgetMs(perCallTimeoutMs: number | undefined): number {
+  return Math.min(perCallTimeoutMs ?? FALLBACK_STAGE_CAP_MS, FALLBACK_STAGE_CAP_MS);
+}
+
+/**
+ * The mint's own budget: getVertexAccessToken's RSA-sign (synchronous, effectively free) plus its
+ * OAuth token-exchange fetch. Round-3 Refuter note, promoted to a fix: this used to have no timer
+ * of its own at all, so it was paid entirely out of the overall deadline's 10% slack — and because
+ * the slack scales with the CALLER's budget, the smallest callers were the tightest (llm-cleanup's
+ * 8 s timeout left only 2.4 s of slack to cover both clock skew and a cold OAuth exchange). Now
+ * counted in the sum below AND passed to getVertexAccessToken as its own timeout, so the two agree.
+ * 10 s is generous for a single HTTPS POST (typically sub-second) and small next to every real
+ * caller's primary budget, so it does not meaningfully tighten anyone's deadline.
+ */
+export const MINT_TIMEOUT_MS = 10_000;
+
+/**
  * PURE. The overall wall-clock budget for one routedChat call.
  *
  * `ETA_ROUTED_CHAT_DEADLINE_MS` overrides outright, when it parses as a positive number.
@@ -168,38 +191,44 @@ export const FALLBACK_STAGE_CAP_MS = 60_000;
  * later. Measured by the Refuter: timeoutMs=200ms, deadline=300ms, a fallback that would have
  * answered at 150ms (inside its own 200ms budget) was killed at 300ms instead.
  *
- * THE NEW RULE budgets each KIND of stage separately instead of scaling one number three ways:
+ * THE RULE budgets each KIND of step separately instead of scaling one number three ways:
+ *   mint budget      = MINT_TIMEOUT_MS — always counted, even on a call where Gemini turns out to
+ *                       be off for this surface: a token that is never minted costs nothing at
+ *                       runtime, and a few extra seconds of headroom on that path is harmless;
  *   primary budget   = the caller's timeoutMs, or GEMINI_DEFAULT_TIMEOUT_MS (240 s) when none given
  *                       — Vertex's OWN default, unchanged from before;
- *   fallback budget  = min(caller's timeoutMs, FALLBACK_STAGE_CAP_MS) — an OpenRouter stage never
- *                       inherits a giant primary timeout, and never needs more than its own default
- *                       would give it unprompted;
- *   fallback count   = llmFallbackModels(env).length — the chain routedChat WILL actually attempt,
- *                       not a hardcoded 2 (round-2 Refuter finding: a fixed count silently
- *                       mis-summed the moment `LLM_FALLBACK_MODELS` configured a different-length
- *                       chain — a third configured fallback would have been unreachable by
- *                       construction, the same class of bug as the one below, one size smaller);
- *   deadline         = (primary + fallback count x fallback budget) x 1.10.
+ *   fallback budget  = fallbackBudgetMs(timeoutMs) = min(caller's timeoutMs, FALLBACK_STAGE_CAP_MS)
+ *                       — an OpenRouter stage never inherits a giant primary timeout, and never
+ *                       needs more than its own default would give it unprompted;
+ *   fallback count   = `fallbackCount`, the caller's resolved chain length when routedChat passes
+ *                       one (so this and the loop that actually iterates the chain are PROVABLY
+ *                       reading the same list, not two separately-resolved calls to
+ *                       llmFallbackModels that happen to agree today — round-3 Refuter trivia), or
+ *                       llmFallbackModels(env).length when called standalone (round-2 fix: a fixed
+ *                       2 silently mis-summed the moment `LLM_FALLBACK_MODELS` configured a
+ *                       different-length chain);
+ *   deadline         = (mint + primary + fallback count x fallback budget) x 1.10.
  * The 10% slack absorbs `Date.now()` skew between this timer and each stage's own internal one; it
- * is not meant to cover a stage the sum did not already count.
+ * is not meant to cover a step the sum did not already count.
  *
  * This is still NEVER TIGHTER than the primary stage's own timeout (the sum only adds to it), and
  * a call that succeeds within its own stage's timeout — the normal case — is unaffected either way.
  *
- * THE SUM IS ONLY HONEST IF THE RUNTIME MATCHES IT — see routedChat below, which now calls each
- * fallback stage with EXACTLY `fallbackBudget`, never the caller's raw `timeoutMs` (round-2 fix:
- * the arithmetic capped a fallback at 60 s, but the stage itself was still handed the caller's
- * full timeout, so for any caller above 60 s — note generation at 240 s among them — a slow-but-
- * not-hung fallback could consume far more than its budgeted share and starve the stage after it).
+ * THE SUM IS ONLY HONEST IF THE RUNTIME MATCHES IT — see routedChat below, which calls each
+ * fallback stage with EXACTLY `fallbackBudgetMs(timeoutMs)`, never the caller's raw `timeoutMs`
+ * (round-2 fix), and now calls getVertexAccessToken with EXACTLY `MINT_TIMEOUT_MS` (round-3 fix).
  */
-export function routedChatDeadlineMs(perCallTimeoutMs: number | undefined, env: Record<string, string | undefined> = process.env): number {
+export function routedChatDeadlineMs(
+  perCallTimeoutMs: number | undefined,
+  env: Record<string, string | undefined> = process.env,
+  fallbackCount: number = llmFallbackModels(env).length,
+): number {
   const raw = env[ROUTED_CHAT_DEADLINE_ENV];
   const override = raw !== undefined ? Number(raw) : NaN;
   if (Number.isFinite(override) && override > 0) return override;
   const primaryBudget = perCallTimeoutMs ?? GEMINI_DEFAULT_TIMEOUT_MS;
-  const fallbackBudget = Math.min(perCallTimeoutMs ?? FALLBACK_STAGE_CAP_MS, FALLBACK_STAGE_CAP_MS);
-  const fallbackCount = llmFallbackModels(env).length;
-  return Math.round((primaryBudget + fallbackCount * fallbackBudget) * 1.10);
+  const fallbackBudget = fallbackBudgetMs(perCallTimeoutMs);
+  return Math.round((MINT_TIMEOUT_MS + primaryBudget + fallbackCount * fallbackBudget) * 1.10);
 }
 
 /** Thrown internally when the overall deadline (or the caller's own signal) fires while something
@@ -256,7 +285,12 @@ export async function routedChat(p: {
 }): Promise<RoutedChatResult> {
   const t0 = Date.now();
   const errors: string[] = [];
-  const deadlineMs = routedChatDeadlineMs(p.timeoutMs);
+  // Resolved ONCE and reused for both the sum below and the loop that actually iterates it, so the
+  // two are provably the same list rather than two separate calls to llmFallbackModels that happen
+  // to agree today (round-3 Refuter trivia: budgeting one chain and running another was possible
+  // only in theory, since both read plain `process.env` here, but nothing enforced it).
+  const fallbackModels = llmFallbackModels();
+  const deadlineMs = routedChatDeadlineMs(p.timeoutMs, process.env, fallbackModels.length);
   const deadline = new AbortController();
   let deadlineFired = false;
   let stage = "start";
@@ -276,7 +310,7 @@ export async function routedChat(p: {
     if (gModel) {
       stage = `gemini:${gModel}`;
       try {
-        const token = await raceSignal(getVertexAccessToken(signal), signal);
+        const token = await raceSignal(getVertexAccessToken(signal, MINT_TIMEOUT_MS), signal);
         const r = await openaiChat({
           url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
           messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
@@ -299,8 +333,8 @@ export async function routedChat(p: {
     // the caller's raw timeoutMs. Handing a fallback the primary's own (possibly 240 s) budget was
     // the bug: the arithmetic capped it, the runtime didn't, so a merely-slow fallback (not even
     // hung) could consume the whole remaining deadline and leave the next stage unreachable.
-    const fallbackTimeoutMs = Math.min(p.timeoutMs ?? FALLBACK_STAGE_CAP_MS, FALLBACK_STAGE_CAP_MS);
-    for (const model of llmFallbackModels()) {
+    const fallbackTimeoutMs = fallbackBudgetMs(p.timeoutMs);
+    for (const model of fallbackModels) {
       stage = `openrouter:${model}`;
       try {
         const r = await openrouterChat({

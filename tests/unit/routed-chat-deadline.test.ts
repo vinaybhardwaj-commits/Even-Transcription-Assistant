@@ -17,14 +17,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // geminiChatIfOn actually FORWARD their combined deadline signal into getVertexAccessToken(signal)
 // — lib/gcp-auth.ts's own handling of that signal is proven sound (gcp-auth-abort.test.ts), but the
 // JOIN between the two was untested. `lastSignal` records exactly what each call received.
+//
+// Round 3 (mint budget): the mock had the SAME shape of blind spot waiting for its second
+// argument — `getVertexAccessToken(signal, timeoutMs)` now carries a `timeoutMs` too, and a mock
+// that only accepted `signal` would silently discard it exactly as it once discarded the signal.
+// `lastTimeoutMs` closes that before a third round has to find it.
 const gcpMock = vi.hoisted(() => ({
-  getToken: async (_signal?: AbortSignal): Promise<string> => "vertex-token-not-a-secret",
+  getToken: async (_signal?: AbortSignal, _timeoutMs?: number): Promise<string> => "vertex-token-not-a-secret",
   lastSignal: undefined as AbortSignal | undefined,
+  lastTimeoutMs: undefined as number | undefined,
 }));
 vi.mock("@/lib/gcp-auth", () => ({
-  getVertexAccessToken: (signal?: AbortSignal) => {
+  getVertexAccessToken: (signal?: AbortSignal, timeoutMs?: number) => {
     gcpMock.lastSignal = signal;
-    return gcpMock.getToken(signal);
+    gcpMock.lastTimeoutMs = timeoutMs;
+    return gcpMock.getToken(signal, timeoutMs);
   },
 }));
 
@@ -52,6 +59,7 @@ beforeEach(() => {
   script = [];
   gcpMock.getToken = async () => "vertex-token-not-a-secret";
   gcpMock.lastSignal = undefined;
+  gcpMock.lastTimeoutMs = undefined;
   globalThis.fetch = (async (url: string, init: RequestInit) => {
     const signal = init.signal ?? undefined;
     hits.push({ url: String(url), signal });
@@ -94,30 +102,30 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
 
   it("caller's timeoutMs under the 60s fallback cap: every stage gets the SAME budget", async () => {
     const { routedChatDeadlineMs } = await router();
-    // primary=1000, fallback=min(1000,60000)=1000 -> (1000 + 2*1000) * 1.10 = 3300
-    expect(routedChatDeadlineMs(1_000, {})).toBe(3_300);
+    // primary=1000, fallback=min(1000,60000)=1000 -> (10000 mint + 1000 + 2*1000) * 1.10 = 14300
+    expect(routedChatDeadlineMs(1_000, {})).toBe(14_300);
   });
 
   it("caller's timeoutMs over the 60s cap: the fallback budget is capped, the primary budget is not", async () => {
     const { routedChatDeadlineMs } = await router();
-    // primary=100_000 (uncapped), fallback=min(100_000,60_000)=60_000 -> (100000+120000)*1.10 = 242000
-    expect(routedChatDeadlineMs(100_000, {})).toBe(242_000);
+    // primary=100_000 (uncapped), fallback=min(100_000,60_000)=60_000 -> (10000+100000+120000)*1.10 = 253000
+    expect(routedChatDeadlineMs(100_000, {})).toBe(253_000);
   });
 
   it("no per-call timeoutMs: primary defaults to 240s, fallback to the 60s cap — same as before, arithmetic aside", async () => {
     const { routedChatDeadlineMs } = await router();
-    // (240000 + 2*60000) * 1.10 = 396000
-    expect(routedChatDeadlineMs(undefined, {})).toBe(396_000);
+    // (10000 mint + 240000 + 2*60000) * 1.10 = 407000
+    expect(routedChatDeadlineMs(undefined, {})).toBe(407_000);
   });
 
   it("this fixes the case the Refuter measured: after a full primary hang, a fast fallback now fits inside its OWN budget", async () => {
-    const { routedChatDeadlineMs } = await router();
+    const { routedChatDeadlineMs, MINT_TIMEOUT_MS } = await router();
     // timeoutMs=200: old rule gave 300ms total (150ms of run-room after a 200ms primary hang).
-    // new rule: primary=200, fallback=min(200,60000)=200 -> (200+400)*1.10 = 660ms — the fallback's
-    // own full 200ms budget survives the primary's hang, with room to spare for a second fallback.
+    // new rule: primary=200, fallback=min(200,60000)=200 -> (mint+200+400)*1.10 = 11660ms — the
+    // fallback's own full 200ms budget survives the primary's hang, with room for a second one.
     const deadline = routedChatDeadlineMs(200, {});
-    expect(deadline).toBe(660);
-    expect(deadline - 200).toBeGreaterThanOrEqual(200); // full first-fallback budget after the hang
+    expect(deadline).toBe(11_660);
+    expect(deadline - MINT_TIMEOUT_MS - 200).toBeGreaterThanOrEqual(200); // full fallback budget after mint + hang
   });
 
   it("is never tighter than the primary budget itself (the ordinary case is never affected)", async () => {
@@ -129,13 +137,19 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
 
   it("round 2 (ETA-Refuter, 23 Sep, 'second, smaller instance'): the fallback count SCALES with LLM_FALLBACK_MODELS, never a fixed 2", async () => {
     const { routedChatDeadlineMs } = await router();
-    // default (2 fallbacks): (1000 + 2*1000) * 1.10 = 3300 — same figure as the earlier test above.
-    expect(routedChatDeadlineMs(1_000, {})).toBe(3_300);
-    // a 3-model chain must be summed as 3, not silently still 2:
-    // (1000 + 3*1000) * 1.10 = 4400.
-    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" })).toBe(4_400);
-    // a single-model chain: (1000 + 1*1000) * 1.10 = 2200.
-    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one" })).toBe(2_200);
+    // default (2 fallbacks): (10000 mint + 1000 + 2*1000) * 1.10 = 14300 — same as the earlier test.
+    expect(routedChatDeadlineMs(1_000, {})).toBe(14_300);
+    // a 3-model chain must be summed as 3, not silently still 2: (10000+1000+3*1000)*1.10 = 15400.
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" })).toBe(15_400);
+    // a single-model chain: (10000+1000+1*1000)*1.10 = 13200.
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one" })).toBe(13_200);
+  });
+
+  it("round 3: an explicit fallbackCount override (what routedChat itself passes) wins over resolving LLM_FALLBACK_MODELS again", async () => {
+    const { routedChatDeadlineMs } = await router();
+    // env says a 3-model chain, but the caller (routedChat) hands its OWN already-resolved count —
+    // proving the two can never silently disagree once routedChat threads its count through.
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" }, 2)).toBe(14_300);
   });
 
   it("ETA_ROUTED_CHAT_DEADLINE_MS overrides the formula outright", async () => {
@@ -146,7 +160,7 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
   it("an unparseable, zero, or negative override falls back to the formula, not to 0 or NaN", async () => {
     const { routedChatDeadlineMs } = await router();
     for (const bad of ["", "not-a-number", "0", "-5", "   "]) {
-      expect(routedChatDeadlineMs(1_000, { ETA_ROUTED_CHAT_DEADLINE_MS: bad })).toBe(3_300);
+      expect(routedChatDeadlineMs(1_000, { ETA_ROUTED_CHAT_DEADLINE_MS: bad })).toBe(14_300);
     }
   });
 });
@@ -209,6 +223,10 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     // (lib/llm/gemini.ts routedChat or geminiChatIfOn) leaves `gcpMock.lastSignal` undefined.
     expect(gcpMock.lastSignal).toBeInstanceOf(AbortSignal);
     expect(gcpMock.lastSignal?.aborted).toBe(false);
+    // Round 3: the mint's own explicit timeout is likewise actually PASSED, not merely budgeted
+    // for on paper — same class of mock blind spot the signal check above already closed once.
+    const { MINT_TIMEOUT_MS } = await router();
+    expect(gcpMock.lastTimeoutMs).toBe(MINT_TIMEOUT_MS);
   });
 
   it("a caller's own AbortSignal still works exactly as before: 'aborted', not 'deadline_exceeded'", async () => {
@@ -232,6 +250,8 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     // this is the caller's OWN signal, passed straight through to getVertexAccessToken. Proves the
     // fix applies at both named sites, not just the one routedChat exercises via the deadline.
     expect(gcpMock.lastSignal).toBe(controller.signal);
+    const { MINT_TIMEOUT_MS } = await router();
+    expect(gcpMock.lastTimeoutMs).toBe(MINT_TIMEOUT_MS);
   });
 });
 
@@ -303,6 +323,33 @@ describe("round 2 (ETA-Refuter, 23 Sep): a fallback is capped to ITS OWN budget,
     const r = await p;
     expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
     expect(hits).toHaveLength(3);
+  }, 15_000);
+});
+
+describe("round 3 (ETA-Refuter, 23 Sep note, promoted to a fix): the mint gets its OWN budgeted line in the sum", () => {
+  // Numbers chosen so the fixed and unfixed deadlines straddle the elapsed time, so this test can
+  // only pass with the mint counted: timeoutMs=T=6_000 -> fallback=min(6000,60000)=6000.
+  //   fixed deadline   = (MINT_TIMEOUT_MS + T + 2T) * 1.10 = (10000+18000)*1.10 = 30,800ms
+  //   UNFIXED deadline (mint removed from the sum) = (T + 2T) * 1.10 = 19,800ms
+  //   elapsed if the mint takes 9,000ms then the primary and first fallback each hang their own
+  //   full 6,000ms: 9,000+6,000+6,000 = 21,000ms — inside the fixed deadline, PAST the unfixed one.
+  // A version that forgot the mint would abort the first fallback's hang early (at 19,800ms) and
+  // return `deadline_exceeded:openrouter:...` instead of ever reaching the second fallback.
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("a cold mint (9s) + a hung primary (6s) + a hung first fallback (6s, capped) still leaves room for the second fallback to answer", async () => {
+    geminiOn();
+    // A "cold" mint: slow, but it succeeds — distinct from a mint that times out on its own cap.
+    gcpMock.getToken = () => new Promise<string>((resolve) => { setTimeout(() => resolve("vertex-token-not-a-secret"), 9_000); });
+    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    const { routedChat } = await router();
+    const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 6_000 });
+    await vi.advanceTimersByTimeAsync(21_100);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(hits).toHaveLength(3);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
   }, 15_000);
 });
 
