@@ -171,6 +171,51 @@ describe("scribe_room_levels", () => {
       expect(parseIstBound("2026-09-22", "2026-09-22")).toBeNull();
     });
 
+    it("L1 — an ISO stamp with NO offset is refused: it would mean IST on the Mini and UTC on Vercel", () => {
+      // Date.parse reads a naive stamp in the HOST's zone. The same request would name two windows
+      // 5.5 h apart depending on where the door ran, so it is refused rather than guessed.
+      for (const naive of ["2026-09-22T10:00:00", "2026-09-22T10:00:00.000", "2026-09-22 10:00:00"]) {
+        expect(parseIstBound(naive, "2026-09-22")).toBeNull();
+      }
+    });
+
+    it("L1 — and the handler refuses it too, without querying", async () => {
+      responder = () => [row({ sampled_at: "2026-09-22T05:00:00.000Z" })];
+      const out = (await tool.handler(
+        { room_id: "r", ist_date: "2026-09-22", from: "2026-09-22T10:00:00", to: "12:00" }, ctx)) as Row;
+      expect(out).toMatchObject({ error: "bad_range", samples: [] });
+      expect(calls).toHaveLength(0);
+    });
+
+    it("an ISO stamp that names its offset is taken at that offset, in any of its spellings", () => {
+      expect(parseIstBound("2026-09-22T04:00:00Z", "2026-09-22")).toBe(Date.parse("2026-09-22T04:00:00Z"));
+      expect(parseIstBound("2026-09-22T09:30:00+05:30", "2026-09-22")).toBe(Date.parse("2026-09-22T09:30:00+05:30"));
+      expect(parseIstBound("2026-09-22T09:30:00+0530", "2026-09-22")).toBe(Date.parse("2026-09-22T09:30:00+05:30"));
+      expect(parseIstBound("2026-09-21T20:00:00-08:00", "2026-09-22")).toBe(Date.parse("2026-09-21T20:00:00-08:00"));
+    });
+
+    it("an omitted `to` runs to the START of the next IST day, because `to` is exclusive", async () => {
+      const lastMs = Date.parse("2026-09-22T23:59:59.999+05:30");
+      responder = () => [row({ sampled_at: new Date(lastMs).toISOString() })];
+      const out = (await tool.handler({ room_id: "r", ist_date: "2026-09-22", from: "00:00" }, ctx)) as Row;
+      expect(out.to_ms).toBe(Date.parse("2026-09-23T00:00:00.000+05:30"));
+      expect((out.samples as Row[]).map((x) => x.t_ms)).toEqual([lastMs]);   // the last bucket is kept
+    });
+
+    it("a range ending EXACTLY at IST midnight reads one day, not two", async () => {
+      responder = () => [row({ sampled_at: "2026-09-22T10:00:00.000+05:30" })];
+      const out = (await tool.handler(
+        { room_id: "r", ist_date: "2026-09-22", from: "09:00", to: "2026-09-23T00:00:00+05:30" }, ctx)) as Row;
+      expect(out.ist_days_read).toEqual(["2026-09-22"]);
+      expect(calls).toHaveLength(1);
+    });
+
+    it("istDaysSpanned stops at the instant before an exclusive end", () => {
+      const midnight = Date.parse("2026-09-23T00:00:00.000+05:30");
+      expect(istDaysSpanned(Date.parse("2026-09-22T09:00:00.000+05:30"), midnight)).toEqual(["2026-09-22"]);
+      expect(istDaysSpanned(Date.parse("2026-09-22T09:00:00.000+05:30"), midnight + 1)).toEqual(["2026-09-22", "2026-09-23"]);
+    });
+
     it("istDaysSpanned names one day inside a day and two across midnight", () => {
       const d = (c: string) => Date.parse(`2026-09-22T${c}+05:30`);
       expect(istDaysSpanned(d("09:00:00"), d("17:00:00"))).toEqual(["2026-09-22"]);

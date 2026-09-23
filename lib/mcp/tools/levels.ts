@@ -30,30 +30,46 @@ export const MAX_LIMIT = (MAX_RANGE_HOURS * 3600) / LEVEL_TIMELINE_BUCKET_SECOND
 const IST_OFFSET = "+05:30";
 const CLOCK_RE = /^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/;
 
+/** An ISO stamp that names its own offset: ...Z, ...+05:30, ...-0800. */
+const ISO_WITH_OFFSET_RE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
 /**
- * "HH:MM[:SS]" on `day` read as IST, or a full ISO timestamp. Returns null for anything else — a
- * malformed bound is refused, never quietly taken as midnight. IST has no daylight saving, so the
- * fixed +05:30 is exact.
+ * "HH:MM[:SS]" on `day` read as IST, or a full ISO timestamp THAT CARRIES ITS OWN OFFSET. Returns
+ * null for anything else — a malformed bound is refused, never quietly taken as midnight.
+ *
+ * AN ISO STAMP WITHOUT AN OFFSET IS REFUSED (ETA-Refuter L1, 23 Sep). `Date.parse` reads a naive
+ * "2026-09-22T10:00:00" in the HOST's zone: IST on the Mini, UTC on Vercel — the same request would
+ * mean two windows 5.5 h apart depending on where the door happened to run. A caller who means IST
+ * has the clock form; a caller who means anything else says so with an offset.
+ *
+ * IST has no daylight saving, so the fixed +05:30 on the clock form is exact.
  */
 export function parseIstBound(value: string, day: string): number | null {
-  const clock = CLOCK_RE.exec(value.trim());
+  const v = value.trim();
+  const clock = CLOCK_RE.exec(v);
   if (clock) {
     const [, hh, mm, ss] = clock;
     const t = Date.parse(`${day}T${hh}:${mm}:${ss ?? "00"}.000${IST_OFFSET}`);
     return Number.isNaN(t) ? null : t;
   }
-  if (!/[T ]/.test(value)) return null;                     // a bare date is a day, not a bound
-  const t = Date.parse(value.trim());
+  if (!/[T ]/.test(v)) return null;                         // a bare date is a day, not a bound
+  if (!ISO_WITH_OFFSET_RE.test(v)) return null;             // naive stamp: whose clock? refuse
+  const t = Date.parse(v);
   return Number.isNaN(t) ? null : t;
 }
 
-/** The IST calendar days a [from, to) range touches, in order — one or two for any legal range. */
+/**
+ * The IST calendar days a [from, to) range touches, in order — one or two for any legal range.
+ * `to` is EXCLUSIVE, so a range ending exactly at IST midnight touches only the day before it and
+ * the next day is never read (ETA-Refuter, 23 Sep).
+ */
 export function istDaysSpanned(fromMs: number, toMs: number): string[] {
+  const last = Math.max(fromMs, toMs - 1);                  // exclusive end: the final instant inside
   const days: string[] = [];
   for (let t = fromMs; ; t += 86_400_000) {
-    const day = istDate(new Date(Math.min(t, toMs)));
+    const day = istDate(new Date(Math.min(t, last)));
     if (!days.includes(day)) days.push(day);
-    if (t >= toMs) break;
+    if (t >= last) break;
   }
   return days;
 }
@@ -88,7 +104,9 @@ const roomLevels: McpTool = {
       let toMs: number | null = null;
       if (fromArg || toArg) {
         fromMs = fromArg ? parseIstBound(fromArg, day) : Date.parse(`${day}T00:00:00.000${IST_OFFSET}`);
-        toMs = toArg ? parseIstBound(toArg, day) : Date.parse(`${day}T23:59:59.999${IST_OFFSET}`);
+        // `to` is exclusive, so an omitted one is the START of the next IST day, not its last
+        // millisecond — otherwise a from-only range quietly dropped the final 1 ms bucket.
+        toMs = toArg ? parseIstBound(toArg, day) : Date.parse(`${day}T00:00:00.000${IST_OFFSET}`) + 86_400_000;
         if (fromMs === null || toMs === null) {
           return { room_id: roomId, samples: [], sample_count: 0, error: "bad_range" };
         }
