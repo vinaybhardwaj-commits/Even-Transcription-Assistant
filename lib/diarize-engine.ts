@@ -1,3 +1,5 @@
+import { parseFlag } from "@/lib/flags";
+
 /**
  * lib/diarize-engine.ts — WHICH diarizer runs, as one strict parser.
  *
@@ -58,4 +60,23 @@ export function diarizeEngine(env: Record<string, string | undefined> = process.
 /** True when a value names an engine this build knows. Pure; used by tests and by arg validation. */
 export function isDiarizeEngine(v: unknown): v is DiarizeEngine {
   return typeof v === "string" && (DIARIZE_ENGINES as readonly string[]).includes(v);
+}
+
+/**
+ * `DIARIZE_TEACHER_LABELS` — whether each engine's raw turns are stored as training labels.
+ *
+ * SEPARATE FROM `DIARIZE_ENGINE` ON PURPOSE (Fable's ruling, 23 Sep). One chooses what production
+ * consumes; this one chooses whether we keep a record of what each diarizer said. They move
+ * independently: labelling can be turned off while the hybrid keeps running, and — the case that
+ * matters — labelling can be turned off INSTANTLY without touching the engine that clinicians'
+ * notes depend on, which is what a permission being withdrawn would require.
+ *
+ * Same strict rule as every other flag in this system: unrecognised values throw rather than
+ * reading as off, because a label store that silently stopped collecting would look exactly like
+ * one that was working.
+ */
+export const DIARIZE_TEACHER_LABELS_ENV = "DIARIZE_TEACHER_LABELS";
+
+export function teacherLabelsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return parseFlag(DIARIZE_TEACHER_LABELS_ENV, env);
 }

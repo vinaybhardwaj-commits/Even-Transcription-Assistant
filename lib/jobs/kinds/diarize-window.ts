@@ -9,24 +9,29 @@
  *                   step. There is no submit/poll because /diarize has none: it answers on the
  *                   same request. THIS PATH IS UNCHANGED, and that is the point of the default.
  *
- *   pyannoteai      SUBMIT then POLL, because pyannote.ai's API is asynchronous. The submit hands
- *                   over a short-lived presigned R2 URL and gets a job id; the poll step waits
- *                   under its own budget and hands the row back to the queue rather than outlive
- *                   its lease. The shape is `route_transcribe`'s, deliberately — that kind solved
- *                   this exact problem and a second idiom for it would be a second set of bugs.
+ *   pyannoteai      THE HYBRID. pyannote.ai segments (V chose it 5 of 5 on the windows where the
+ *                   two disagreed most); the Mini supplies the embeddings its turns lack, from the
+ *                   SAME ECAPA model that produced every enrolled centroid, so identity still
+ *                   comes from a voiceprint match and every downstream reader keeps its input.
+ *                   Submit/poll, because pyannote.ai's API is asynchronous.
+ *
+ * ─── THE STEP MACHINE ──────────────────────────────────────────────────────────────────────────
+ *   diarize        pick the engine; local answers here, pyannote.ai is submitted here
+ *   pyannote_poll  poll the submission, embed its speakers, store the window
+ *   local_label    (teacher labels only) run the local diarizer for COMPARISON and record what it
+ *                  said — it writes no turns and cannot disturb what the hybrid already stored
  *
  * ─── THE POLL STEP DOES NOT READ THE ENV ───────────────────────────────────────────────────────
  * It reads the engine and the job id out of `progress`. A submission is PAID FOR the moment it is
  * accepted, so the engine that made it is the engine that finishes it — even if `DIARIZE_ENGINE`
- * is changed, or rolled back, while the row is in flight. Reading the env in the poll step would
- * mean a rollback silently abandoned work already bought, and a row whose two halves came from two
- * engines.
+ * is changed, or rolled back, while the row is in flight.
  *
- * ─── FALLBACK ──────────────────────────────────────────────────────────────────────────────────
- * If pyannote.ai errors, times out, or returns no spans, the LOCAL diarizer runs for that window
- * and the row records that it fell back and from what. A fallback is never silent: `timing_json`
- * carries `engine.fallback_from` and `engine.fallback_reason` (a code, never a provider message),
- * and the job result counts it.
+ * ─── pyannote.ai IS A TEACHER ──────────────────────────────────────────────────────────────────
+ * V's ruling of 23 Sep, with written permission from pyannote.ai to train on its outputs: both
+ * engines' raw turns are kept in `diarize_window_label` (migration 0117) so the local diarizer can
+ * be trained to match the teacher, and so the lab can measure the gap night by night. Labelling is
+ * its own flag (`DIARIZE_TEACHER_LABELS`) and its failures never fail a window: a clinician's
+ * window must not depend on whether a lab table was reachable.
  */
 import { randomUUID } from "node:crypto";
 import { getObjectBytes, headObject, signGetUrl } from "@/lib/r2";
@@ -35,20 +40,28 @@ import { DEFAULT_MIN_SPEECH_MS, fetchWindowSpeech, speechGateEnabled, type Windo
 import {
   diarizeWindow,
   finishDiarizeWindow,
+  loadClinicianCentroids,
+  localModelLabel,
   recordDiarizeWindow,
   repairStaleDiarizeSegments,
   speakersFromLabels,
+  DIARIZE_BATCH_THRESHOLD,
   type DiarizeEngineProvenance,
 } from "@/lib/stt/diarize-window";
-import { diarizeEngine, type DiarizeEngine } from "@/lib/diarize-engine";
+import { runDiarize } from "@/lib/diarize";
+import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
+import { diarizeEngine, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/diarize-engine";
 import { PRESIGN_TTL_SECONDS, fetchJobRecord, pollDiarize, submitDiarize } from "@/lib/diarize-pyannoteai";
+import { embedSpeakers, embeddedCount, longestSpanPerSpeaker, mergeEmbeddings } from "@/lib/diarize-embed";
+import { writeWindowLabel } from "@/lib/diarize-labels";
+import { levelGateForWindow } from "@/lib/diarize-level-gate";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
 
 export const DIARIZE_WINDOW_KIND = "diarize_window";
 
-const STEPS = { diarize: "diarize", pyannotePoll: "pyannote_poll" } as const;
+const STEPS = { diarize: "diarize", pyannotePoll: "pyannote_poll", localLabel: "local_label" } as const;
 
 /**
  * What one claim may spend polling before handing the row back to the queue, and how long it
@@ -72,6 +85,15 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 type WindowRow = { id: string; room_day_id: string; start_ms: number; end_ms: number; clip_r2_key: string };
 
+/**
+ * ONE TABLE, exactly as this has always read it.
+ *
+ * It briefly joined `room_day` to fetch the room and IST date the level gate wants, and that broke
+ * eleven e2e tests: the C2 harness builds a minimal schema in which `room_day` does not exist, so
+ * the join made the load path of EVERY window — local included — depend on a table it never needed.
+ * A cost guard for one engine must not be able to fail the other engine's query. The gate resolves
+ * what it needs separately, and fails safe when it cannot.
+ */
 async function loadWindow(windowId: string): Promise<WindowRow | { error: JobErrorCode; detail?: string }> {
   const rows = (await sql`
     SELECT id, room_day_id, start_ms, end_ms, clip_r2_key
@@ -84,6 +106,27 @@ async function loadWindow(windowId: string): Promise<WindowRow | { error: JobErr
   return { id: w.id, room_day_id: w.room_day_id, start_ms: Number(w.start_ms), end_ms: Number(w.end_ms), clip_r2_key: w.clip_r2_key };
 }
 
+/**
+ * The room and IST date a room-day belongs to — for the level gate, and nothing else.
+ *
+ * SEPARATE, AND IT SWALLOWS ITS OWN FAILURE. Returning null means "we could not find out", which
+ * the gate treats exactly as it treats a level log with no readings: no verdict, no skip. A cost
+ * guard that could not read its inputs must never stop a clinical window.
+ */
+async function resolveRoomDay(roomDayId: string): Promise<{ roomId: string; istDate: string } | null> {
+  try {
+    const rows = (await sql`
+      SELECT room_id, ist_date::text AS ist_date FROM room_day WHERE id = ${roomDayId} LIMIT 1
+    `) as Array<{ room_id: string | null; ist_date: string | null }>;
+    const r = rows[0];
+    if (!r?.room_id || !r.ist_date) return null;
+    return { roomId: r.room_id, istDate: r.ist_date };
+  } catch (e) {
+    console.warn("[jobs] level gate: room_day unreadable", JSON.stringify({ room_day: roomDayId, err: String(e).slice(0, 120) }));
+    return null;
+  }
+}
+
 /** Window length from its own bounds — what we hand a paid engine, so cost is countable. */
 export function windowAudioSeconds(w: { start_ms: number; end_ms: number }): number | null {
   const ms = w.end_ms - w.start_ms;
@@ -91,16 +134,14 @@ export function windowAudioSeconds(w: { start_ms: number; end_ms: number }): num
 }
 
 /**
- * THE COST GUARD, and the narrowest honest version of it.
+ * The VAD cost guard, kept for the case where the speech gate is already on and has answered.
  *
- * True only when the VAD gave a REAL ANSWER and that answer holds less than the speech gate's own
- * floor across the whole window. `ok: false` — either "we could not ask" or "we asked and it said
- * nothing" — NEVER skips: lib/stt/speech-gate.ts records that on this audio an empty VAD answer is
- * more often a VAD failure than a quiet room, and convicting a window of silence on evidence that
- * file says must not convict would buy a few cents by throwing away consultations.
+ * True only when the VAD gave a REAL ANSWER holding less than the gate's own floor. `ok: false` —
+ * either "we could not ask" or "we asked and it said nothing" — NEVER skips: lib/stt/speech-gate.ts
+ * records that on this audio an empty VAD answer is more often a VAD failure than a quiet room.
  *
- * It uses DEFAULT_MIN_SPEECH_MS, the constant the local path's own gate judges segments by, rather
- * than a second threshold of its own.
+ * The LEVEL GATE is the primary guard now and runs whether or not that flag is on; this remains
+ * because a VAD answer already in hand is better evidence than a level log, and free.
  */
 export function vadSaysSilent(speech: WindowSpeech | undefined): boolean {
   if (!speech || speech.ok !== true) return false;
@@ -127,6 +168,8 @@ export const diarizeWindowKind: JobKind = {
         return diarizeStep(ctx);
       case STEPS.pyannotePoll:
         return pollStep(ctx);
+      case STEPS.localLabel:
+        return localLabelStep(ctx);
       default:
         return failWith(jobError("unknown_step", ctx.step));
     }
@@ -138,8 +181,7 @@ export const diarizeWindowKind: JobKind = {
  *
  * `diarizeEngine()` THROWS on a value it does not recognise, and that throw is allowed to leave
  * this step. The runner counts it and retries, and three of them fail the job loudly — which is
- * the outcome a mistyped `DIARIZE_ENGINE` must have. The alternative, reading an unrecognised
- * value as "local", would leave an operator believing they had switched engines when they had not.
+ * the outcome a mistyped `DIARIZE_ENGINE` must have.
  */
 async function diarizeStep(ctx: StepContext) {
   const windowId = String(ctx.args.window_id ?? "");
@@ -147,11 +189,28 @@ async function diarizeStep(ctx: StepContext) {
   if ("error" in w) return failWith(jobError(w.error, w.detail));
 
   const engine: DiarizeEngine = diarizeEngine();
-
-  // ONE ID PER RUN, on every turn row and on the window row (0090). A successful re-run gets a new
-  // one, so a reader that planned from the old turns can tell they were rewritten. On the two-step
-  // path it is minted HERE and carried in progress, so both steps of one run share one id.
   const runId = randomUUID();
+
+  // ── THE LEVEL GATE, BEFORE ANY AUDIO IS FETCHED ────────────────────────────────────────────
+  // It runs only for the paid engine, because it is a COST guard and the local path's behaviour is
+  // not ours to change. It asks the level log, not a service, so it needs no flag and no clip: a
+  // window skipped here costs one query and no download.
+  const rd = engine === "pyannoteai" ? await resolveRoomDay(w.room_day_id) : null;
+  if (rd) {
+    const level = await levelGateForWindow({ roomId: rd.roomId, istDate: rd.istDate, window: { start_ms: w.start_ms, end_ms: w.end_ms } });
+    if (level.verdict === "silent") {
+      const provenance = engineProvenance("pyannoteai", { audio_seconds_sent: 0, skipped: `silent_window:${level.reason}` });
+      await recordDiarizeWindow({
+        windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
+        state: "no_speakers", error: null, speakers: [], segments: [], timing: { engine: provenance, level },
+      });
+      console.log("[jobs] diarize skipped, level log flat", JSON.stringify({ window: windowId, ...level }));
+      return doneWith({
+        window_id: windowId, engine: "pyannoteai", skipped: "silent_window",
+        level_basis: level.basis, level_coverage: level.coverage, audio_seconds_sent: 0, spans: 0, speakers: 0,
+      });
+    }
+  }
 
   const bytes = await getObjectBytes(w.clip_r2_key);
   if (!bytes) {
@@ -162,47 +221,34 @@ async function diarizeStep(ctx: StepContext) {
     return failWith(jobError("clip_missing_in_r2", w.clip_r2_key));
   }
 
-  // THE SPEECH GATE'S ONE CALLER. `diarizeWindow` takes the VAD's answer rather than fetching it,
-  // so it stays testable without a service — which means SOMEBODY has to fetch it, and this is the
-  // only place holding the audio. Without this the flag would be inert: every segment `unjudged`.
-  //
-  // Only when the gate is on. Off, no VAD is called, nothing is paid for, and the row is the row
-  // production writes today.
+  // THE SPEECH GATE'S ONE CALLER. Off, no VAD is called and nothing is paid for.
   const speech = speechGateEnabled() ? await fetchWindowSpeech(bytes, "audio/webm") : undefined;
   if (speech && !speech.ok) {
-    // Named, not swallowed: a gate that silently judges nothing looks exactly like a gate that is
-    // working, and the difference is the whole point of the flag being on.
     console.warn("[jobs] speech gate: no VAD answer", JSON.stringify({ window: windowId, reason: speech.reason }));
   }
 
   if (engine === "local") return localRun({ w, runId, speech, fallback: null, audio: bytes });
 
-  // ── pyannote.ai ────────────────────────────────────────────────────────────────────────────
   const audioSeconds = windowAudioSeconds(w);
 
   if (vadSaysSilent(speech)) {
-    // Not sent, not paid for, and SAID SO on the row: `skipped` distinguishes a window the engine
-    // found empty from one the engine never saw.
-    const provenance = engineProvenance("pyannoteai", { audio_seconds_sent: 0, skipped: "silent_window" });
+    const provenance = engineProvenance("pyannoteai", { audio_seconds_sent: 0, skipped: "silent_window:vad" });
     await recordDiarizeWindow({
       windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
       state: "no_speakers", error: null, speakers: [], segments: [], timing: { engine: provenance },
     });
-    console.log("[jobs] diarize skipped, VAD found no speech", JSON.stringify({ window: windowId, audio_seconds: audioSeconds }));
     return doneWith({ window_id: windowId, engine: "pyannoteai", skipped: "silent_window", audio_seconds_sent: 0, spans: 0, speakers: 0 });
   }
 
-  // Prove the object is there BEFORE minting a URL for it. A presigned URL to a missing key is a
-  // 404 that pyannote.ai reports as its own failure, which sends the reader to the wrong service.
+  // Prove the object is there BEFORE minting a URL for it.
   const head = await headObject(w.clip_r2_key);
   if (!head || head.size === null) return failWith(jobError("clip_missing_in_r2"));
 
   let audioUrl: string;
   try {
-    // READ-ONLY, ONE OBJECT, MINUTES. signGetUrl builds a GetObject signature for this key alone:
-    // it grants no listing, no write, and nothing about any other key. It points at R2 — the audio
-    // never goes near the Mini tunnel — and it is never logged, because for as long as it lives it
-    // is a bearer credential for patient audio.
+    // READ-ONLY, ONE OBJECT, MINUTES. It points at R2 — the audio never goes near the Mini tunnel —
+    // and it is never logged, because for as long as it lives it is a bearer credential for
+    // patient audio.
     audioUrl = await signGetUrl({ key: w.clip_r2_key, expiresInSeconds: PRESIGN_TTL_SECONDS });
   } catch (e) {
     console.error("[jobs] presign failed", JSON.stringify({ window: windowId, err: String(e).slice(0, 120) }));
@@ -221,8 +267,6 @@ async function diarizeStep(ctx: StepContext) {
     run_id: runId,
     window_id: windowId,
     audio_seconds_sent: audioSeconds,
-    // The VAD's answer is NOT carried across the step boundary: it is a span list, it would bloat
-    // progress, and the local fallback re-fetches the clip anyway. A fallback run re-asks.
     submitted_at: new Date().toISOString(),
   });
 }
@@ -261,27 +305,65 @@ async function pollStep(ctx: StepContext) {
 
     if (st.state === "done") {
       // The model is read back from the job's own record, never echoed from what we asked for.
-      // `null` when the record cannot be found: an unknown model is recorded as unknown.
       const record = await fetchJobRecord(jobId);
-      const speakers = speakersFromLabels(st.speakerLabels, st.segments);
+
+      // ── THE HYBRID: pyannote.ai's turns, this system's identities ────────────────────────
+      const bare = speakersFromLabels(st.speakerLabels, st.segments);
+      const bytes = await getObjectBytes(w.clip_r2_key);
+      let speakers: typeof bare = bare;
+      let embedded = 0;
+      let embedError: string | null = null;
+      if (bytes) {
+        const centroids = await loadClinicianCentroids();
+        const spans = longestSpanPerSpeaker(st.segments);
+        const emb = await embedSpeakers(bytes, spans, centroids, { batchThreshold: DIARIZE_BATCH_THRESHOLD, label: windowId });
+        if (emb.ok) {
+          speakers = mergeEmbeddings(bare, emb.speakers) as typeof bare;
+          embedded = embeddedCount(speakers);
+        } else {
+          embedError = emb.error;
+        }
+      } else {
+        embedError = "clip_missing_in_r2";
+      }
+      if (embedError) {
+        // Named, never swallowed. A window with no embeddings is a window where nobody COULD be
+        // named, and that must not read as "nobody matched".
+        console.warn("[jobs] hybrid embeddings unavailable", JSON.stringify({ window: windowId, reason: embedError }));
+      }
+
       const provenance = engineProvenance("pyannoteai", {
         model: record?.model ?? null,
         job_id: jobId,
         audio_seconds_sent: audioSeconds,
+        // EARNED, NOT ASSUMED: the hybrid can attribute only when embeddings actually came back.
+        // Zero embeddings is `none`, the honest word for "nothing was compared".
+        attribution: embedded > 0 ? "voiceprint" : "none",
+        ...(embedError ? { embed_error: embedError } : {}),
       });
       const out = await finishDiarizeWindow(
-        {
-          windowId,
-          roomDayId: w.room_day_id,
-          window: { start: windowStart(w.start_ms), end: windowEnd(w.end_ms) },
-          runId,
-          // No embeddings come back from pyannote.ai, so the losing-score control has nothing to
-          // recompute against. An empty list says that outright and skips a pointless query.
-          centroids: [],
-        },
+        { windowId, roomDayId: w.room_day_id, window: { start: windowStart(w.start_ms), end: windowEnd(w.end_ms) }, runId },
         { speakers, rawSegments: st.segments, timing: { polls, provider_job_id: jobId }, latencyMs: null, provenance },
       );
-      return storeAndFinish({ w, runId, out, extra: { engine: "pyannoteai", pyannoteai_job_id: jobId, polls, audio_seconds_sent: audioSeconds } });
+
+      await labelWindow({
+        w, runId, engine: "pyannoteai", model: record?.model ?? null, providerJobId: jobId,
+        segments: st.segments, speakerCount: st.speakerLabels.length, audioSeconds,
+      });
+
+      const stored = await storeAndFinish({
+        w, runId, out,
+        extra: {
+          engine: "pyannoteai", pyannoteai_job_id: jobId, polls, audio_seconds_sent: audioSeconds,
+          speakers_embedded: embedded, ...(embedError ? { embed_error: embedError } : {}),
+        },
+      });
+      // The teacher needs something to be measured against, so the local diarizer runs too — in
+      // its OWN step, after production is safely stored, writing a label and no turns.
+      if (teacherLabelsEnabled() && stored.kind === "done") {
+        return nextStep(STEPS.localLabel, { ...ctx.progress, run_id: runId, window_id: windowId, hybrid_result: stored.result });
+      }
+      return stored;
     }
 
     if (Date.now() + interval >= deadline) {
@@ -291,17 +373,82 @@ async function pollStep(ctx: StepContext) {
   }
 }
 
+/**
+ * Step 3 — run the LOCAL diarizer for comparison only.
+ *
+ * IT WRITES NO TURNS AND NO WINDOW ROW. `diarizeWindow` would bind and write `room_turn_speaker`,
+ * overwriting the identities the hybrid just stored for this window; this calls the service
+ * directly and keeps only what it said. That is the whole job: a second opinion, recorded.
+ *
+ * IT CANNOT FAIL THE JOB. Production's window is already stored by the time this runs, and a lab
+ * comparison is not worth failing a clinician's window over — so every outcome here is `done`,
+ * with the reason recorded in the result.
+ */
+async function localLabelStep(ctx: StepContext) {
+  const windowId = String(ctx.progress.window_id ?? ctx.args.window_id ?? "");
+  const runId = String(ctx.progress.run_id ?? "");
+  const hybrid = (ctx.progress.hybrid_result ?? {}) as Record<string, unknown>;
+  const w = await loadWindow(windowId);
+  if ("error" in w) return doneWith({ ...hybrid, local_label: "window_gone" });
+
+  try {
+    const bytes = await getObjectBytes(w.clip_r2_key);
+    if (!bytes) return doneWith({ ...hybrid, local_label: "clip_missing" });
+    const res = await runDiarize(bytes, "audio/webm", {
+      encounterId: windowId,
+      // NO CENTROIDS. This run exists to compare SEGMENTATION; handing it voiceprints would spend
+      // the match for an answer nobody reads, and this window's identities are already settled.
+      clinicianCentroids: [],
+      batchThreshold: DIARIZE_BATCH_THRESHOLD,
+    });
+    if (!res.ok) {
+      console.warn("[jobs] local label run failed", JSON.stringify({ window: windowId, retryable: res.retryable }));
+      return doneWith({ ...hybrid, local_label: "diarize_failed" });
+    }
+    const segments = parseDiarizeSegments(res.result.transcript_segments);
+    await labelWindow({
+      w, runId, engine: "local",
+      model: localModelLabel(res.result.model_versions),
+      providerJobId: null, segments,
+      speakerCount: (res.result.speakers ?? []).length,
+      audioSeconds: windowAudioSeconds(w),
+    });
+    return doneWith({ ...hybrid, local_label: "ok", local_spans: segments.length, local_speakers: (res.result.speakers ?? []).length });
+  } catch (e) {
+    console.warn("[jobs] local label step threw", JSON.stringify({ window: windowId, err: String(e).slice(0, 120) }));
+    return doneWith({ ...hybrid, local_label: "threw" });
+  }
+}
+
+/** Write a training label, never letting its failure reach the window. */
+async function labelWindow(args: {
+  w: WindowRow; runId: string; engine: DiarizeEngine; model: string | null; providerJobId: string | null;
+  segments: ReadonlyArray<{ start_ms: number; end_ms: number; speaker_idx: number }>;
+  speakerCount: number; audioSeconds: number | null;
+}): Promise<void> {
+  if (!teacherLabelsEnabled()) return;
+  try {
+    await writeWindowLabel({
+      windowId: args.w.id, roomDayId: args.w.room_day_id, engine: args.engine, model: args.model,
+      providerJobId: args.providerJobId, runId: args.runId, segments: args.segments,
+      speakerCount: args.speakerCount, audioSeconds: args.audioSeconds,
+    });
+  } catch (e) {
+    console.warn("[jobs] label write failed", JSON.stringify({ window: args.w.id, engine: args.engine, err: String(e).slice(0, 120) }));
+  }
+}
+
 /** Provenance with the fields this engine can actually fill, and nulls — never guesses — elsewhere. */
 function engineProvenance(
   name: DiarizeEngine,
-  over: Partial<DiarizeEngineProvenance> & { skipped?: string } = {},
+  over: Partial<DiarizeEngineProvenance> & { skipped?: string; embed_error?: string } = {},
 ): DiarizeEngineProvenance {
   return {
     name,
     model: null,
     job_id: null,
-    // Only the local service matches enrolled voiceprints; pyannote.ai returns no embeddings, so a
-    // pyannote.ai window's every turn is `no_match` because nothing tried, not because nobody won.
+    // The local service matches voiceprints itself. The hybrid earns "voiceprint" only when the
+    // Mini actually returned embeddings — see the poll step.
     attribution: name === "local" ? "voiceprint" : "none",
     fallback_from: null,
     fallback_reason: null,
@@ -353,15 +500,21 @@ async function localRun(args: {
     ...(fallback ? { fallback } : {}),
   });
   if (!res.ok) {
-    // The service's message can describe the audio; the row gets a code. `retryable` means we
-    // never reached it (no slot) — no state row, exactly as the pass did, so the window is
-    // picked up again rather than recorded as a failure it did not have.
     console.error("[jobs] diarize failed", JSON.stringify({ window: w.id, err: String(res.error).slice(0, 200), retryable: res.retryable }));
     if (!res.retryable) {
       await recordDiarizeWindow({ ...base, state: "failed", error: res.error, speakers: null, segments: null, timing: res.timing });
     }
     return failWith(jobError(res.retryable ? "diarize_unavailable" : "diarize_failed"));
   }
+
+  await labelWindow({
+    w, runId, engine: "local",
+    model: res.outcome.engine.model ?? null,
+    providerJobId: null,
+    segments: res.segments as ReadonlyArray<{ start_ms: number; end_ms: number; speaker_idx: number }>,
+    speakerCount: res.speakers.length,
+    audioSeconds: windowAudioSeconds(w),
+  });
 
   return storeAndFinish({
     w,
@@ -391,9 +544,7 @@ async function storeAndFinish(args: {
     windowId: w.id, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
     state: runState, error: null, speakers: out.speakers, segments: out.segments, timing: out.timing,
   });
-  // E24 R10 — if the emotion job already recorded this window `diarize_stale`, this fresh run is the cure:
-  // the named repair path accepts its segments for that window, and only that window — and only when this
-  // run ended ok (E25 R13). Otherwise it changes nothing and the keep-rule above stands.
+  // E24 R10 — if the emotion job already recorded this window `diarize_stale`, this fresh run is the cure.
   const repaired = await repairStaleDiarizeSegments({
     windowId: w.id, runId, runState, speakers: out.speakers, segments: out.segments,
   });
