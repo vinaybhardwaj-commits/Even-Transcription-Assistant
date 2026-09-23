@@ -14,7 +14,8 @@ const DB = vi.hoisted(() => ({
   failures: [] as string[],
   attempts: 0,
 }));
-const ROUTER = vi.hoisted(() => ({ submits: 0, polls: 0, states: [] as Array<Record<string, unknown>> }));
+const ROUTER = vi.hoisted(() => ({ submits: 0, polls: 0, states: [] as Array<Record<string, unknown>>,
+  impl: null as null | ((jobId: string) => Record<string, unknown>) }));
 
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...v: unknown[]) => {
@@ -63,7 +64,7 @@ vi.mock("@/lib/mcp/tools/bench", () => ({
 vi.mock("@/lib/stt/eta-router", () => ({
   ROUTER_JOB_ON: () => true,
   submitRouteJob: async () => { ROUTER.submits += 1; return { ok: true, job_id: `rj_${ROUTER.submits}` }; },
-  pollRouteJob: async () => { ROUTER.polls += 1; return ROUTER.states.shift() ?? { ok: true, state: "running" }; },
+  pollRouteJob: async (jobId: string) => { ROUTER.polls += 1; return ROUTER.impl ? ROUTER.impl(jobId) : (ROUTER.states.shift() ?? { ok: true, state: "running" }); },
   routeTranscribe: async () => ({ ok: true }),
 }));
 
@@ -95,7 +96,7 @@ const T0 = Date.UTC(2026, 8, 23, 7, 47, 0); // 13:17 IST, the restart
 
 beforeEach(() => {
   DB.windowState = "closed"; DB.failures = []; DB.attempts = 0;
-  ROUTER.submits = 0; ROUTER.polls = 0; ROUTER.states = [];
+  ROUTER.submits = 0; ROUTER.polls = 0; ROUTER.states = []; ROUTER.impl = null;
   // Fake Date only: the poll loop's own 3 s sleep stays real, so time moves only when a test moves it.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(T0);
@@ -141,63 +142,148 @@ describe("case 1 — the router says it does not know the job", () => {
   });
 });
 
-describe("case 2 — the router still says running, past the bound", () => {
-  it("31 minutes after submit, a 900 s window's job is lost: router_job_lost, window back to the drain", async () => {
-    // The restart case: the file says `running` for ever.
-    const r = await drive({ beforePoll: () => vi.setSystemTime(T0 + 31 * MIN) });
-    expect(r.error).toMatch(/^router_job_lost\b/);
-    expect(ROUTER.polls).toBe(1);
-    expect(ROUTER.submits).toBe(1);
+describe("case 2 — the clock is time since the router's answer last CHANGED (Refuter, 206acbf)", () => {
+  const who = { actor: "admin_1", via: "admin_route" as const };
+  const base = { router_job_id: "rj_1", router_submitted_at: T0, engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 900 };
+
+  it("the bounds: running 30 min, waiting (running, nothing done) 4x = 2 h, for a 900 s window", async () => {
+    const { routerJobMaxWaitingMs, ROUTER_JOB_WAIT_FACTOR } = await import("@/lib/stt/room-drain");
+    expect(ROUTER_JOB_WAIT_FACTOR).toBe(4);
+    expect(routerJobMaxWaitingMs(900)).toBe(120 * MIN);
+    expect(routerJobMaxWaitingMs(1800)).toBe(240 * MIN);
+  });
+
+  it("the Refuter's case: a job first polled 31 min after submit is NOT lost — submit time no longer counts", async () => {
+    // Called directly: with Date frozen, the poll step's own 150 s in-step loop would never reach its deadline.
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    vi.setSystemTime(T0 + 31 * MIN);
+    const o = await roomWindowPoll("bw_1", who, { ...base }); // stamped at T0, never polled
+    expect(o.ok).toBe(true);
+    expect(o.still_running, "a waiting job is not a lost job").toBe(true);
+    expect(o.next_progress?.router_last_change_at, "its clock starts at its first answer").toBe(T0 + 31 * MIN);
+    expect(DB.failures).toEqual([]);
+  });
+
+  it("PROGRESSED then frozen for 31 min (the restart signature): lost", async () => {
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    vi.setSystemTime(T0 + 31 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 2, total: 5 } }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, router_last_change_at: T0, router_last_seen: "running:2" });
+    expect(o.ok).toBe(false);
+    expect(o.detail).toBe("router_job_lost");
     expect(DB.failures).toEqual(["engine_failed: router_job_lost"]);
     expect(DB.windowState).toBe("closed");
   });
 
-  it("29 minutes after submit it is NOT lost: a live job is left alone and the same ref is polled again", async () => {
+  it("the same freeze at 29 min: not lost, and the clock is not reset by an unchanged answer", async () => {
     const { roomWindowPoll } = await import("@/lib/stt/room-drain");
     vi.setSystemTime(T0 + 29 * MIN);
-    ROUTER.states = [{ ok: true, state: "running", progress: { done: 3, total: 5 } }];
-    const progress = { router_job_id: "rj_1", router_submitted_at: T0, engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 900 };
-    const o = await roomWindowPoll("bw_1", { actor: "admin_1", via: "admin_route" }, progress);
-    expect(o.ok).toBe(true);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 2, total: 5 } }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, router_last_change_at: T0, router_last_seen: "running:2" });
     expect(o.still_running).toBe(true);
-    expect(o.next_progress?.router_submitted_at, "the clock is not reset by a poll").toBe(T0);
+    expect(o.next_progress?.router_last_change_at).toBe(T0);
     expect(DB.failures).toEqual([]);
   });
 
-  it("a poll that keeps FAILING (router down) past the bound is lost too — it never ends otherwise", async () => {
+  it("progress MOVES at 40 min: not lost, and the clock restarts at that poll", async () => {
     const { roomWindowPoll } = await import("@/lib/stt/room-drain");
-    vi.setSystemTime(T0 + 45 * MIN);
-    ROUTER.states = [{ ok: false, error: "fetch failed" }];
-    const progress = { router_job_id: "rj_1", router_submitted_at: T0, engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 900 };
-    const o = await roomWindowPoll("bw_1", { actor: "admin_1", via: "admin_route" }, progress);
-    expect(o.ok).toBe(false);
-    expect(o.detail).toBe("router_job_lost");
-    expect(DB.failures).toEqual(["engine_failed: router_job_lost"]);
+    vi.setSystemTime(T0 + 40 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 3, total: 5 } }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, router_last_change_at: T0, router_last_seen: "running:2" });
+    expect(o.still_running).toBe(true);
+    expect(o.next_progress?.router_last_change_at).toBe(T0 + 40 * MIN);
+    expect(o.next_progress?.router_last_seen).toBe("running:3");
   });
 
-  it("a longer window gets a longer bound: 31 minutes is fine for 1,800 s of audio", async () => {
+  it("running with NOTHING done is waiting: alive at 90 min, lost only past the 2 h waiting bound", async () => {
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    const waiting = { ...base, router_last_change_at: T0, router_last_seen: "running:0" };
+    vi.setSystemTime(T0 + 90 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 0, total: 5 } }];
+    expect((await roomWindowPoll("bw_1", who, waiting)).still_running).toBe(true);
+    vi.setSystemTime(T0 + 121 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 0, total: 5 } }];
+    const o = await roomWindowPoll("bw_1", who, waiting);
+    expect(o.detail, "a job a restart left waiting is still caught, just later").toBe("router_job_lost");
+  });
+
+  it("`queued` is never lost on time — not even after 5 hours", async () => {
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    vi.setSystemTime(T0 + 300 * MIN);
+    ROUTER.states = [{ ok: true, state: "queued" }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, router_last_change_at: T0, router_last_seen: "queued:" });
+    expect(o.still_running).toBe(true);
+    expect(DB.failures).toEqual([]);
+  });
+
+  it("polls that keep FAILING are lost after the running bound from the router's last answer; before that, kept", async () => {
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    const last = { ...base, router_last_change_at: T0, router_last_seen: "running:0" };
+    vi.setSystemTime(T0 + 20 * MIN);
+    ROUTER.states = [{ ok: false, error: "fetch failed" }];
+    const early = await roomWindowPoll("bw_1", who, last);
+    expect(early.still_running).toBe(true);
+    expect(early.next_progress?.router_last_change_at, "an error never resets the clock").toBe(T0);
+    vi.setSystemTime(T0 + 45 * MIN);
+    ROUTER.states = [{ ok: false, error: "fetch failed" }];
+    expect((await roomWindowPoll("bw_1", who, last)).detail).toBe("router_job_lost");
+  });
+
+  it("a longer window gets a longer bound: 31 min frozen is fine for 1,800 s of audio", async () => {
     const { roomWindowPoll } = await import("@/lib/stt/room-drain");
     vi.setSystemTime(T0 + 31 * MIN);
-    const progress = { router_job_id: "rj_1", router_submitted_at: T0, engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 1800 };
-    const o = await roomWindowPoll("bw_1", { actor: "admin_1", via: "admin_route" }, progress);
-    expect(o.ok).toBe(true);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 2, total: 10 } }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, audio_seconds: 1800, router_last_change_at: T0, router_last_seen: "running:2" });
     expect(o.still_running).toBe(true);
   });
 
-  it("a job submitted BEFORE this fix (no stamp) is bounded from its first poll, not exempt for ever", async () => {
+  it("a job with no clock yet (first poll, or submitted before this change) starts it now — never lost on that poll", async () => {
     const { roomWindowPoll } = await import("@/lib/stt/room-drain");
-    const who = { actor: "admin_1", via: "admin_route" as const };
+    vi.setSystemTime(T0 + 300 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 4, total: 5 } }];
     const legacy = { router_job_id: "rj_old", engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 900 };
-    const first = await roomWindowPoll("bw_1", who, legacy);
-    expect(first.still_running).toBe(true);
-    expect(first.next_progress?.router_first_polled_at, "the first poll starts the clock").toBe(T0);
-
-    vi.setSystemTime(T0 + 31 * MIN);
-    const later = await roomWindowPoll("bw_1", who, first.next_progress!);
-    expect(later.ok).toBe(false);
-    expect(later.detail).toBe("router_job_lost");
-    expect(DB.failures).toEqual(["engine_failed: router_job_lost"]);
+    const o = await roomWindowPoll("bw_1", who, legacy);
+    expect(o.still_running).toBe(true);
+    expect(o.next_progress?.router_last_change_at).toBe(T0 + 300 * MIN);
   });
+});
+
+describe("the Refuter's batch: FIVE windows submitted together (AUTO_DRAIN_BATCH_LIMIT=5) all finish, none is lost", () => {
+  // The router at its worst for waiting: ONE job holds the window semaphore for its whole window (Python's
+  // semaphore is not fair), every window takes the worst observed 640 s in 5 sub-windows, and the others
+  // wait. Job k starts at k x 640 s — the fifth waits 42.7 min, past the 30-min running bound.
+  const W = 640_000;
+  const SUB = W / 5;
+  const done = { ok: true, state: "done", transcript_native: "router words", dominant_language: "kn",
+                 language_timeline: [{ start_s: 0, end_s: 900, lang: "kn", engine: "indicconformer", chars: 12 }], sec: 640 };
+  for (const waitingState of ["running", "queued"] as const) {
+    it(`waiting jobs report \`${waitingState}\` (router ${waitingState === "running" ? "as built: running from thread start" : "as Fable described it"}): polled every 2.5 min for 60 min, 0 lost, 5 done`, async () => {
+      const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+      const who = { actor: "admin_1", via: "admin_route" as const };
+      ROUTER.impl = (jobId: string) => {
+        const k = Number(jobId.replace("rj_", "")) - 1;
+        const t = Date.now() - T0 - k * W;
+        if (t < 0) return waitingState === "running" ? { ok: true, state: "running", progress: { done: 0, total: 5 } } : { ok: true, state: "queued" };
+        if (t >= W) return done;
+        return { ok: true, state: "running", progress: { done: Math.floor(t / SUB), total: 5 } };
+      };
+      const jobs = [1, 2, 3, 4, 5].map((i) => ({ id: `bw_${i}`, finished: false, lost: false,
+        progress: { router_job_id: `rj_${i}`, router_submitted_at: T0, engine_id: "route", engine_key: "route", clip_r2_key: "clips/joined.webm", audio_seconds: 900 } as Record<string, unknown> }));
+      for (let t = 0; t <= 60 * MIN; t += 2.5 * MIN) {
+        vi.setSystemTime(T0 + t);
+        for (const j of jobs) {
+          if (j.finished || j.lost) continue;
+          const o = await roomWindowPoll(j.id, who, j.progress);
+          if (!o.ok) { j.lost = true; continue; }
+          if (!o.still_running) { j.finished = true; continue; }
+          j.progress = o.next_progress!;
+        }
+      }
+      expect(jobs.filter((j) => j.lost).map((j) => j.id), "no waiting window is declared lost").toEqual([]);
+      expect(jobs.filter((j) => j.finished).length, "all five finish").toBe(5);
+      expect(DB.failures).toEqual([]);
+    });
+  }
 });
 
 describe("the healthy path is unchanged", () => {
