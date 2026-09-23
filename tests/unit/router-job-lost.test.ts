@@ -185,6 +185,16 @@ describe("case 2 — the clock is time since the router's answer last CHANGED (R
     expect(DB.failures).toEqual([]);
   });
 
+  it("the clock is the LAST CHANGE, not the submit: submitted 2 h ago, last moved 20 min ago -> alive", async () => {
+    const { roomWindowPoll } = await import("@/lib/stt/room-drain");
+    vi.setSystemTime(T0 + 120 * MIN);
+    ROUTER.states = [{ ok: true, state: "running", progress: { done: 3, total: 5 } }];
+    const o = await roomWindowPoll("bw_1", who, { ...base, router_last_change_at: T0 + 100 * MIN, router_last_seen: "running:3" });
+    expect(o.still_running, "20 min unchanged is inside the 30 min bound, whatever the submit time").toBe(true);
+    expect(o.next_progress?.router_last_change_at).toBe(T0 + 100 * MIN);
+    expect(DB.failures).toEqual([]);
+  });
+
   it("progress MOVES at 40 min: not lost, and the clock restarts at that poll", async () => {
     const { roomWindowPoll } = await import("@/lib/stt/room-drain");
     vi.setSystemTime(T0 + 40 * MIN);
