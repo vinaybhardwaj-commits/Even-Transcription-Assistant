@@ -10,6 +10,7 @@
  * decision log every use writes through lib/jev/ask.ts. No FK on subject_id (it is polymorphic on
  * subject_type, see the migration), so filtering is by exact match on the columns given, ANDed.
  */
+import { JEV_SUBJECT_TYPES } from "@/lib/jev/types";
 import { query } from "@/lib/brain/db";
 import { submitJob } from "@/lib/jobs/submit";
 import { argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
@@ -117,7 +118,7 @@ const jevDecisions: McpTool = {
   inputSchema: {
     type: "object",
     properties: {
-      subject_type: { type: "string", enum: ["window", "turn", "note_sentence", "encounter", "collapse"] },
+      subject_type: { type: "string", enum: [...JEV_SUBJECT_TYPES] },
       subject_id: { type: "string" },
       question_id: { type: "string" },
       prompt_version: { type: "string" },

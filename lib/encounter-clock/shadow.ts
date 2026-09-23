@@ -33,6 +33,9 @@ import {
 
 export const SHADOW_VERSION = "encounter-clock-shadow-v1";
 
+/** One judged probe as the gate saw it — the grid the E-6 fusion reuses, index for index. */
+export type AcousticProbe = { t: number; verdict: GateVerdict; reason: string; start_ms: number; end_ms: number };
+
 /** One transcribed window as stored: its text and the timeline that places the text on the clock. */
 export type ShadowWindow = { start_ms: number; end_ms: number; text: string; timeline: TimelineSpan[] | null };
 
@@ -143,7 +146,7 @@ export function checkTriggers(s: Omit<ShadowSummary, "triggers" | "triggers_trip
 }
 
 export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: number } = {}):
-  { run: HypothesisRunInput; summary: ShadowSummary; encounters: Encounter[] } {
+  { run: HypothesisRunInput; summary: ShadowSummary; encounters: Encounter[]; verdicts: AcousticProbe[]; transcript: TranscriptEvidence } {
   // ── transcript evidence: the stored text, placed on the clock. An unplaceable window is MISSING
   //    evidence for its probes, never an empty one.
   const coverage: Array<{ start_ms: number; end_ms: number }> = [];
@@ -164,7 +167,7 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
     level_samples: ev.level_samples, probe_s: opts.probe_s, hop_s: opts.hop_s,
   });
 
-  const verdicts: Array<{ t: number; verdict: GateVerdict; reason: string }> = [];
+  const verdicts: AcousticProbe[] = [];
   const reasons: string[] = [];
   for (const p of probes) {
     const samples = levelSamplesIn(ev.level_samples, p.start_ms, p.end_ms);
@@ -173,7 +176,7 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
       energy: samples ? { kind: "levels", samples } : null,
       transcript,
     });
-    verdicts.push({ t: (p.start_ms + p.end_ms) / 2, verdict: g.verdict, reason: g.reason });
+    verdicts.push({ t: (p.start_ms + p.end_ms) / 2, verdict: g.verdict, reason: g.reason, start_ms: p.start_ms, end_ms: p.end_ms });
     reasons.push(g.reason);
   }
 
@@ -229,5 +232,6 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
     probes: counts,
     intervals: encounters.map(toInterval),
   };
-  return { run, summary, encounters };
+  // verdicts and transcript are returned for the E-6 fusion, which judges the same probes' content
+  return { run, summary, encounters, verdicts, transcript };
 }

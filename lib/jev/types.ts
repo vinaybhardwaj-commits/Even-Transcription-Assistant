@@ -22,7 +22,13 @@ export type JevRequest = { state: unknown; questions: Record<string, JevQuestion
 /** J-CORE-2 (PLAN-v3.md §2, migration 116 jev_decision): the closed set of things a Jev decision
  * can be about. Polymorphic on purpose — jev_decision.subject_id has no FK because its referent
  * depends on this value (see the migration's own column comment). */
-export type JevSubjectType = "window" | "turn" | "note_sentence" | "encounter" | "collapse";
+/**
+ * Every subject a Jev decision can be about. ONE list: the type, the MCP filter and the migration's
+ * CHECK all answer to it, and a drift test compares the CHECK's values against it. 'probe' (0118) is a
+ * 60 s slice of a room-day, asked about by the E-6 fusion.
+ */
+export const JEV_SUBJECT_TYPES = ["window", "turn", "note_sentence", "encounter", "collapse", "probe"] as const;
+export type JevSubjectType = (typeof JEV_SUBJECT_TYPES)[number];
 
 export type JevResult = {
   model: string;

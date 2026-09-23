@@ -76,8 +76,11 @@ export type TapeOff = { start_ms: number; end_ms: number };
  *   "tape_off"      the recorder stopped
  *   "dead_mic"      the gate reported a dead mic
  *   "end_of_input"  the probes ran out while it was open
+ *   "content_boundary"  the E-6 fusion split the encounter where Jev placed a boundary (a new patient's
+ *                       consultation starts inside a long acoustic run). The acoustic smoother never
+ *                       emits it; only lib/encounter-clock/fusion.ts does, and 0118 admits it.
  */
-export const CLOSED_BY = ["non_speech", "unjudged_gap", "tape_off", "dead_mic", "end_of_input"] as const;
+export const CLOSED_BY = ["non_speech", "unjudged_gap", "tape_off", "dead_mic", "end_of_input", "content_boundary"] as const;
 export type ClosedBy = (typeof CLOSED_BY)[number];
 export const isClosedBy = (v: unknown): v is ClosedBy =>
   typeof v === "string" && (CLOSED_BY as readonly string[]).includes(v);
@@ -183,6 +186,14 @@ export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encou
     } else out.push(e);
   }
   return out;
+}
+
+/**
+ * Build one interval from probe indexes a..b. Exported so the E-6 fusion can re-tally a SPLIT piece of
+ * an acoustic encounter with the smoother's own arithmetic, instead of inventing counts for it.
+ */
+export function summariseSpan(ps: ProbeVerdict[], a: number, b: number, hop: number, by: ClosedBy): Encounter {
+  return summarise(ps, a, b, hop, by);
 }
 
 /** Build one interval from the probe indexes of its first and last speech probe. */
