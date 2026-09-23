@@ -1,0 +1,110 @@
+name: Gate (sharded)
+
+# The ETA gate split across parallel runners (orders/CI-GH-SHARDS.md, 23 Sep). An ADDITIONAL path: the E2E box /
+# Yoga runner stays. Triggered only on demand — never on every push:
+#   · push to a `ci/**` branch (eta-lab kit/gh-gate.sh pushes `ci/<sha>` and watches the run), or
+#   · workflow_dispatch with a ref (works once this file is on the default branch).
+# No secrets are used by any job; tests that need Docker (the postgres:16 migration proofs) get it from the
+# runner. No patient data is in the repo or the logs.
+
+on:
+  push:
+    branches: ["ci/**"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "commit SHA or branch to gate"
+        required: true
+
+concurrency:
+  group: gate-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_MAJOR: "22"          # the box's Node major (v22)
+  TZ: Asia/Kolkata          # the box and the Mini run in IST; room-install-update renders local times (shard 5, run 1)
+  VITEST_PIN: "2.1.9"       # vitest is not declared in package.json; the box runner pins the same version
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ github.event.inputs.ref || github.sha }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_MAJOR }}", cache: npm, cache-dependency-path: package.json }
+      - name: Install (npm install — no lockfile, as on Vercel and the box)
+        run: npm install --no-audit --no-fund && npm install --no-save --no-audit --no-fund vitest@$VITEST_PIN
+      - run: npm run typecheck
+      - run: npm run typecheck:tests
+      - name: check:silent (fails on any finding NOT in .github/check-silent-baseline.txt)
+        run: |
+          set +e
+          out="$(npm run -s check:silent 2>&1)"; rc=$?
+          echo "$out"
+          [ $rc -eq 0 ] && exit 0
+          echo "$out" | grep -q "^Found [0-9]* silent-failure" || { echo "::error::check:silent failed without a findings list"; exit 1; }
+          CHECK_OUT="$out" python3 - <<'PYCHK'
+          import os, re, sys
+          from collections import Counter
+          key = lambda path, text: f"{path}\t{text.strip()}"
+          found = Counter()
+          for l in os.environ["CHECK_OUT"].splitlines():
+              m = re.match(r"^\s+(\S+?):(\d+)\s+(.*?)\s*$", l)
+              if m: found[key(m.group(1), m.group(3))] += 1
+          base = Counter(l.rstrip("\n") for l in open(".github/check-silent-baseline.txt") if l.strip() and not l.startswith("#"))
+          new = found - base
+          for k in sorted(new): print(f"::error::NEW silent-failure handler (not in the accepted baseline): {k.replace(chr(9), '  ')}")
+          for k in sorted(base - found): print(f"::notice::accepted finding no longer present (remove it from the baseline): {k.replace(chr(9), '  ')}")
+          print(f"check:silent: {sum(found.values())} found, {sum(new.values())} new vs the accepted baseline")
+          sys.exit(1 if new else 0)
+          PYCHK
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ github.event.inputs.ref || github.sha }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_MAJOR }}", cache: npm, cache-dependency-path: package.json }
+      - name: Install
+        run: npm install --no-audit --no-fund && npm install --no-save --no-audit --no-fund vitest@$VITEST_PIN
+      - name: vitest shard ${{ matrix.shard }}/8
+        # Never piped: the exit code is vitest's own.
+        # PUBLIC LOGS (the repo is public): the dot reporter prints no test names or values, and --silent drops
+        # console output from the code under test; github-actions keeps failure annotations for gh-gate.sh.
+        run: >-
+          npx vitest run --shard=${{ matrix.shard }}/8
+          --reporter=dot --reporter=github-actions --silent
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ github.event.inputs.ref || github.sha }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_MAJOR }}", cache: npm, cache-dependency-path: package.json }
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - run: npm run build
+
+  gate:
+    # one job whose conclusion IS the gate, so a watcher reads a single status
+    needs: [typecheck, test, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: verdict
+        run: |
+          echo "typecheck=${{ needs.typecheck.result }} test=${{ needs.test.result }} build=${{ needs.build.result }}"
+          [ "${{ needs.typecheck.result }}" = success ] && [ "${{ needs.test.result }}" = success ] && [ "${{ needs.build.result }}" = success ]

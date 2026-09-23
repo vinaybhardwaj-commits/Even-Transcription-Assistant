@@ -36,12 +36,8 @@ const pg = pgContainer("eta-attest-method");
 /** The migration body without its bookkeeping row — schema_migrations does not exist in the fixture. */
 const noRecord = (sql: string) => sql.replace(/INSERT INTO schema_migrations[\s\S]*?;/g, "");
 
-/** 0109 lives on vinay/attest-capture, which is not merged; read it from git rather than copy it. */
-const M0109 = () =>
-  execFileSync("git", ["show", "vinay/attest-capture:db/migrations/0109_room_clinician_attestation.sql"], {
-    encoding: "utf8",
-    cwd: process.cwd(),
-  });
+/** 0109 is merged (byte-identical to vinay/attest-capture's, blob adb3177); read it from the tree like 0111. */
+const M0109 = () => readFileSync("db/migrations/0109_room_clinician_attestation.sql", "utf8");
 const M0111 = () => readFileSync("db/migrations/0111_attestation_method_testimony.sql", "utf8");
 
 describe("REQUIRED PROOF — the constraint is exercised against a real postgres", () => {
