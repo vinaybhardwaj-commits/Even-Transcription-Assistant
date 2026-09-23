@@ -1514,6 +1514,34 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(e[0]!.diarize_run_id).toBe(before[0]!.last_run_id);
   }, 300_000);
 
+  it("EMOTION_BATCH_LIMIT — the enqueue scan offers exactly the configured count per tick, not just one, when more are eligible", async () => {
+    // 23 Sep backlog fix: EMOTION_BATCH_LIMIT (default 1, env override 1..10 via the SAME
+    // clampedIntEnv AUTO_DRAIN_BATCH_LIMIT already uses) replaces the hardcoded `LIMIT 1`. This
+    // does not re-test clampedIntEnv's own env-parsing (covered where it is defined) — it proves
+    // the SQL actually uses the live constant, the same shape as auto-drain's own
+    // "the cap cannot be raised by the caller's limit" test.
+    reset();
+    const sql = G.__pgsql;
+    const { EMOTION_BATCH_LIMIT } = await import("@/lib/emotion/enqueue");
+    const ids = Array.from({ length: EMOTION_BATCH_LIMIT + 2 }, (_, i) => `bw_emo_batch${i}`);
+    for (const [i, id] of ids.entries()) await seedEmotionWindow(id, (28 + i) * WINDOW_MS);
+
+    const { enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
+    const e = await enqueueEmotionWindows({ actor: "cron:test", log: () => {} });
+
+    expect(e.enqueued, `offered more than EMOTION_BATCH_LIMIT=${EMOTION_BATCH_LIMIT} in one tick`).toHaveLength(EMOTION_BATCH_LIMIT);
+    // Oldest first (w.start_ms ASC), so the ones NOT offered this tick are exactly the newest.
+    expect(e.enqueued.map((x) => x.window_id)).toEqual(ids.slice(0, EMOTION_BATCH_LIMIT));
+    const q = (await sql`SELECT count(*)::int AS n FROM scribe_job WHERE kind = 'emotion_window' AND status IN ('queued', 'running')`) as Array<{ n: number }>;
+    expect(q[0]!.n, "one scribe_job row per offered window, no more").toBe(EMOTION_BATCH_LIMIT);
+    // CLEANUP, not left queued: every other test in this file drives its job(s) to a terminal
+    // status before ending, because a left-behind queued/running emotion_window row trips the
+    // "busy" gate for every later enqueue call in the same file. This test's job is never run.
+    // One at a time, not `= ANY($array)` — the psql-backed harness here serialises a JS array to
+    // a JSON literal, not a Postgres array literal, and ANY(jsonb) does not parse the same way.
+    for (const x of e.enqueued) await sql`DELETE FROM scribe_job WHERE id = ${x.job_id}`;
+  }, 300_000);
+
   it("P1 — AN UNHEALTHY /health FAILS THE WINDOW even when it carries a cap; an implausible cap fails it by name and sends no audio", async () => {
     const sql = G.__pgsql;
     const cases: Array<[string, () => void, RegExp]> = [
