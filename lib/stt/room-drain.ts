@@ -87,6 +87,36 @@ export function cueWriteFailed(counts: { complete?: boolean }): boolean {
 export const DRAIN_MAX_ATTEMPTS = 3;
 
 /**
+ * ROUTER_JOB_LOST — the router can forget a job and never say so.
+ *
+ * The router keeps each job as a file and a worker thread. When it restarts (23 Sep, ~13:17 IST) the
+ * thread dies but the file does not: it still says `running`, and nothing will ever change it. The poll
+ * step used to treat `running` as "come back later" forever, re-queue itself every 150 s and hold the
+ * window — one room_window job polled a dead router job for 4.5 h while the overnight driver
+ * (concurrency 1) waited behind it.
+ *
+ * So a router job is LOST when either
+ *   - the router says it does not know the id (its own `unknown job_id`, or any 404 for the id), or
+ *   - it is still not done after `routerJobMaxRunningMs` since this job submitted it.
+ * A lost job is a window FAILURE, recorded like any other: the window returns to `closed` (or parks at
+ * DRAIN_MAX_ATTEMPTS), the room_window job fails with `router_job_lost`, and the next drain submits a
+ * NEW router job from fresh progress. Nothing here resubmits in place — the router has no idempotency
+ * key, so an in-place resubmit next to a job that might still be alive would pay for the window twice.
+ *
+ * THE BOUND: twice the audio, never under 30 minutes. A 900 s window takes 12-640 s on the router
+ * (bake-off, 22 Sep); 30 minutes leaves room for a few windows queued ahead of it on the router's single
+ * window semaphore, and a longer window gets proportionally longer.
+ */
+export const ROUTER_JOB_LOST_FLOOR_MS = 30 * 60_000;
+export const ROUTER_JOB_LOST = "router_job_lost";
+
+/** PURE — how long a router job may stay not-done before it is declared lost. */
+export function routerJobMaxRunningMs(audioSeconds: number | null | undefined): number {
+  const a = typeof audioSeconds === "number" && Number.isFinite(audioSeconds) && audioSeconds > 0 ? audioSeconds : 0;
+  return Math.max(ROUTER_JOB_LOST_FLOOR_MS, Math.round(2 * a * 1000));
+}
+
+/**
  * C1b fix-up 1 — how much of the window the CONTROL run covers. Two minutes, deliberately.
  *
  * The shadow exists to compare engines, not to produce a second production transcript of every
@@ -1346,7 +1376,8 @@ export async function roomWindowEngine(
     // Persisted BEFORE anything else can fail, so a retry finds it and polls instead of resubmitting.
     return {
       ...out, ok: true, step: "ok",
-      next_progress: { ...progress, router_job_id: sub.jobRef, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
+      // `router_submitted_at` starts the ROUTER_JOB_LOST clock (epoch ms).
+      next_progress: { ...progress, router_job_id: sub.jobRef, router_submitted_at: Date.now(), engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
     };
   }
 
@@ -1423,17 +1454,43 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
     return { ...out, step: "engine_failed", detail: "async_engine_missing_submit_poll", attempts };
   }
 
+  // ROUTER_JOB_LOST clock. A job submitted before this field existed has no stamp; its clock starts at
+  // the first poll that sees it, so an in-flight job is bounded too rather than exempt forever.
+  const now = Date.now();
+  const submittedAt = Number(progress.router_submitted_at);
+  const firstPolledAt = Number(progress.router_first_polled_at);
+  const clockStart = Number.isFinite(submittedAt) && submittedAt > 0 ? submittedAt
+    : Number.isFinite(firstPolledAt) && firstPolledAt > 0 ? firstPolledAt
+    : now;
+  const clock = Number.isFinite(submittedAt) && submittedAt > 0 ? {} : { router_first_polled_at: clockStart };
+  const maxRunningMs = routerJobMaxRunningMs(p.audio_seconds);
+  const lost = async (why: "unknown" | "overdue", routerState: string) => {
+    // Ids, states and durations only — never the router's body.
+    console.error("[drain] router job lost", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, why, router_state: routerState, age_ms: now - clockStart, max_ms: maxRunningMs }));
+    const attempts = await recordFailure(windowId, "engine_failed", ROUTER_JOB_LOST);
+    return { ...out, step: "engine_failed" as const, detail: ROUTER_JOB_LOST, attempts };
+  };
+  const overdue = now - clockStart > maxRunningMs;
+
   const st = await adapter.poll(p.router_job_id);
   if (!st.ok) {
     console.error("[drain] async poll failed", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, err: String(st.error).slice(0, 200), terminal: st.terminal }));
-    // A non-terminal failure is worth another claim: the ref is still good, the hop was not.
-    if (!st.terminal) return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: "poll_error" } };
+    // The router answering "no such job" is the restart case said out loud: lost, not failed.
+    if (st.terminal && st.error === "route_job_unknown") return lost("unknown", "unknown");
+    // A non-terminal failure is worth another claim: the ref is still good, the hop was not —
+    // unless it has been failing (or running) past the bound, which a live job never is.
+    if (!st.terminal) {
+      if (overdue) return lost("overdue", "poll_error");
+      return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, ...clock, last_router_state: "poll_error" } };
+    }
     const attempts = await recordFailure(windowId, "engine_failed", "async_job_failed");
     return { ...out, step: "engine_failed", detail: "async_job_failed", attempts };
   }
   if (st.state !== "done") {
+    // A router job file left `running` by a restart answers exactly like a live one. Time tells them apart.
+    if (overdue) return lost("overdue", st.state);
     // Still working. The row goes back to the queue; the next claim polls the same ref.
-    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: st.state } };
+    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, ...clock, last_router_state: st.state } };
   }
 
   const asr = st.result;

@@ -38,6 +38,9 @@ export const JOB_ERROR_CODES = [
   "presign_failed",
   // room_window (Slice C1b) — detail is a DrainStep, a closed union of our own names.
   "room_window_failed",
+  // room_window: the router forgot the job (restart) or never finished it inside the bound. The window is
+  // recorded as a failure and returns to the drain, which submits a NEW router job.
+  "router_job_lost",
   // diarize_window (Slice C2)
   "diarize_failed",
   "diarize_unavailable",

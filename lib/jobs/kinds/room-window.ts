@@ -16,6 +16,7 @@ import { jobError } from "../errors";
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
 import {
   roomWindowPrepare, roomWindowSegment, roomWindowEngine, roomWindowPoll, roomWindowFinish,
+  ROUTER_JOB_LOST,
   type PhaseOutcome,
 } from "@/lib/stt/room-drain";
 
@@ -43,7 +44,11 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * `invoke`-scope callers see the raw `error` string at all, and they already saw the phase name;
  * this adds the detail to what they already had access to, not a new audience for it.
  */
-export const failFromPhase = (o: PhaseOutcome) => failWith(jobError("room_window_failed", o.detail ? `${o.step}: ${o.detail}` : o.step));
+export const failFromPhase = (o: PhaseOutcome) =>
+  o.detail === ROUTER_JOB_LOST
+    // Its own code, so a job list can tell "the router lost it" from every other engine failure at a glance.
+    ? failWith(jobError("router_job_lost", `${o.step}: ${o.detail}`))
+    : failWith(jobError("room_window_failed", o.detail ? `${o.step}: ${o.detail}` : o.step));
 
 const actorOf = (ctx: StepContext) => ({
   actor: String(ctx.args.actor ?? ""),
