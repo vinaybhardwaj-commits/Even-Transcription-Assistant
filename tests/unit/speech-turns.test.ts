@@ -441,3 +441,68 @@ describe("scribe_transcribe_range — turns, and writing them", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4. STT-HALLUCINATION-PACK item 2 — the low_signal marker on each returned turn
+// ---------------------------------------------------------------------------
+
+describe("scribe_transcribe_range — level marker (lib/bench-levels.ts, read-only)", () => {
+  beforeEach(() => seedWorld());
+
+  /** Layers a bench_level_sample response onto whatever seedWorld already answers everything
+   * else with, so this describe block never has to restate the room/session/chunk matching. */
+  function withLevelRows(rows: Row[]) {
+    const under = responder;
+    responder = (text, values) => (/FROM bench_level_sample/.test(text) ? rows : under(text, values));
+  }
+
+  it("no level-log rows at all: low_signal is null on every turn — unmeasured, not checked-and-fine", async () => {
+    withLevelRows([]);
+    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
+    const turns = out.turns as Row[];
+    expect(turns).toHaveLength(2);
+    for (const t of turns) expect(t.level).toEqual({ peak: null, avg: null, samples: 0, low_signal: null });
+  });
+
+  it("a quiet room over both turns: low_signal true, and nothing is written or altered", async () => {
+    withLevelRows([
+      { sampled_at: "2026-08-19T05:06:01.000Z", peak: "0.004", avg: "0.003" },
+      { sampled_at: "2026-08-19T05:07:05.000Z", peak: "0.006", avg: "0.004" },
+    ]);
+    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
+    const turns = out.turns as Row[];
+    expect((turns[0]!.level as Row).low_signal).toBe(true);
+    expect((turns[1]!.level as Row).low_signal).toBe(true);
+    // the text itself is untouched by this build — same assertion the dry-run test already makes
+    expect(turns.map((t) => t.text)).toEqual(["hello there", "and later"]);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("a loud moment inside the first turn's own span: low_signal false there, and the query is scoped to this room", async () => {
+    withLevelRows([{ sampled_at: "2026-08-19T05:06:01.000Z", peak: "0.3", avg: "0.2" }]);
+    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
+    const turns = out.turns as Row[];
+    expect((turns[0]!.level as Row).low_signal).toBe(false);
+    expect((turns[0]!.level as Row).peak).toBeCloseTo(0.3);
+    const levelCall = calls.find((c) => /FROM bench_level_sample/.test(c.text));
+    expect(levelCall).toBeDefined();
+    expect(levelCall!.values[0]).toBe(SESSION.room_id);
+  });
+
+  it("ONE level query per response, not one per turn", async () => {
+    withLevelRows([{ sampled_at: "2026-08-19T05:06:01.000Z", peak: "0.004", avg: "0.003" }]);
+    await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx);
+    expect(calls.filter((c) => /FROM bench_level_sample/.test(c.text))).toHaveLength(1);
+  });
+
+  it("a silence also carries a level, not just a spoken turn (ETA-E13 R-E13c: peak 0.31 vs 0.0000 are different facts)", async () => {
+    // A window that survives nothing: no segments overlap it at all.
+    whisperOut = { ok: true, transcript: "", language: "en", duration_seconds: 300, latency_ms: 10, segments: [] };
+    withLevelRows([{ sampled_at: "2026-08-19T05:06:30.000Z", peak: "0.002", avg: "0.001" }]);
+    const out = (await tool("scribe_transcribe_range").handler({ ...WINDOW }, ctx)) as Row;
+    const turns = out.turns as Row[];
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.type).toBe("stt_silence");
+    expect((turns[0]!.level as Row).low_signal).toBe(true);
+  });
+});
