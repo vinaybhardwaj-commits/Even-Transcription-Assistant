@@ -205,8 +205,22 @@ describe("reads", () => {
     const r = await readLatestRun("rd_test1");
     expect(r.runs_for_day).toBe(3);
     expect(r.run).toMatchObject({ id: "ehr_abc", probes: { total: 30, unjudged: 4 }, hypotheses: [{ id: "eh_1" }] });
-    expect(db.calls[0]!.q).toMatch(/WHERE room_day_id = \? ORDER BY created_at DESC, id DESC LIMIT 1/);
+    // The version filter is inert when no version is asked for: the query still keys on the room-day
+    // alone and still takes the newest row (split-speaker, 23 Sep — readLatestRun gained an optional
+    // smoother_version so every reader can key on (room-day, version) through this one function).
+    expect(db.calls[0]!.q).toMatch(/WHERE room_day_id = \?.*ORDER BY created_at DESC, id DESC LIMIT 1/);
+    expect(db.calls[0]!.vals).toEqual(["rd_test1", null, null]);
     expect(db.calls[1]!.q).toMatch(/WHERE run_id = \? ORDER BY start_ms/);
+  });
+
+  it("a smoother_version keys the read on (room-day, version), and a malformed one sends no query", async () => {
+    db.queue = [[runRow()], [hypRow()]];
+    await readLatestRun("rd_test1", "encounter-clock-smooth-v1");
+    expect(db.calls[0]!.q).toMatch(/smoother_version = \?/);
+    expect(db.calls[0]!.vals).toEqual(["rd_test1", "encounter-clock-smooth-v1", "encounter-clock-smooth-v1"]);
+    db.calls.length = 0;
+    expect(await readLatestRun("rd_test1", "not a version!")).toEqual({ run: null, runs_for_day: 0 });
+    expect(db.calls).toHaveLength(0);
   });
 
   it("no run is null with a zero count, and a bad id sends no query", async () => {
