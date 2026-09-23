@@ -40,7 +40,7 @@ python3 ~/dev/Even-Transcription-Assistant/scripts/eta-diarize/test_shape_region
 ## Smoke after a restart (a 3 s tone; Silero will likely call it non-speech, which is a valid answer)
 
 ```bash
-python3 -c "import wave,struct,math;w=wave.open('/tmp/eta-vad-smoke.wav','wb');w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b''.join(struct.pack('<h',int(8000*math.sin(2*math.pi*220*t/16000))) for t in range(48000)));w.close()" && curl -s -m 180 -F audio=@/tmp/eta-vad-smoke.wav -F pad_s=0.4 -F merge_gap_s=1.5 -F min_region_s=0.5 http://127.0.0.1:8001/speech_regions | python3 -c "import sys,json;d=json.load(sys.stdin);print('SMOKE OK' if d.get('ok') and d.get('sample_rate')==16000 and d.get('total_samples')==48000 and isinstance(d.get('regions'),list) and d.get('vad_model') else 'SMOKE FAIL',{k:v for k,v in d.items() if k not in ('regions','audio_b64')})"
+python3 -c "import wave,struct,math;w=wave.open('/tmp/eta-vad-smoke.wav','wb');w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b''.join(struct.pack('<h',int(8000*math.sin(2*math.pi*220*t/16000))) for t in range(48000)));w.close()" && curl -s -m 180 -F audio=@/tmp/eta-vad-smoke.wav http://127.0.0.1:8001/speech_regions | python3 -c "import sys,json;d=json.load(sys.stdin);print('SMOKE OK' if d.get('ok') and d.get('sample_rate')==16000 and d.get('total_samples')==48000 and isinstance(d.get('regions'),list) and d.get('vad_model') else 'SMOKE FAIL',{k:v for k,v in d.items() if k not in ('regions','audio_b64')})"
 ```
 
 `SMOKE OK` proves the model loaded and the contract shape is right. `SMOKE FAIL` with

@@ -28,7 +28,8 @@ _VAD_GET_TS = None
 _VAD_MODEL_NAME = None
 _VAD_LOCK = _vad_threading.Lock()
 _VAD_SR = 16000
-_VAD_MAX = {"pad_s": 5.0, "merge_gap_s": 30.0, "min_region_s": 30.0}
+_VAD_MAX = {"pad_s": 5.0, "merge_gap_s": 30.0, "min_region_s": 30.0,
+            "min_silence_duration_ms": 10000, "speech_pad_ms": 10000, "min_speech_duration_ms": 10000}
 
 
 def _vad_load():
@@ -81,11 +82,15 @@ def _shape_regions(spans, total, sr, pad_s, merge_gap_s, min_region_s):
     return out
 
 
-def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s):
+def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s, threshold, min_silence_ms, speech_pad_ms, min_speech_ms):
     """Blocking body of /speech_regions. Returns (payload, error). Runs under _HEAVY_SEM."""
-    for name, v in (("pad_s", pad_s), ("merge_gap_s", merge_gap_s), ("min_region_s", min_region_s)):
+    for name, v in (("pad_s", pad_s), ("merge_gap_s", merge_gap_s), ("min_region_s", min_region_s),
+                    ("min_silence_duration_ms", min_silence_ms), ("speech_pad_ms", speech_pad_ms),
+                    ("min_speech_duration_ms", min_speech_ms)):
         if not (v == v) or v < 0 or v > _VAD_MAX[name]:        # NaN, negative, absurd: refuse
             return None, f"bad_param: {name}"
+    if not (threshold == threshold) or not (0.0 < threshold < 1.0):
+        return None, "bad_param: threshold"
     try:
         model, get_ts, model_name = _vad_load()
     except Exception as e:
@@ -106,8 +111,12 @@ def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s):
         total = int(wav.shape[-1])
         if total <= 0:
             return None, "empty_audio"
-        # speech_pad_ms=0: OUR pad is the only pad, so the params mean what the caller set.
-        spans = get_ts(wav, model, sampling_rate=_VAD_SR, speech_pad_ms=0)
+        # SILERO'S OWN KNOBS, as lab-mover measured them on the 20-window bake set (23 Sep): threshold
+        # 0.15, min_silence 1200 ms, speech_pad 500 ms, min_speech 250 ms -> 2.36% of pyannote-confirmed
+        # speech cut on the 16 normal windows. Silero's default threshold is 0.5 and would cut far more.
+        spans = get_ts(wav, model, sampling_rate=_VAD_SR, threshold=float(threshold),
+                       min_silence_duration_ms=int(min_silence_ms), speech_pad_ms=int(speech_pad_ms),
+                       min_speech_duration_ms=int(min_speech_ms))
         regions = _shape_regions([(t["start"], t["end"]) for t in spans], total, _VAD_SR, pad_s, merge_gap_s, min_region_s)
         payload = {"ok": True, "sample_rate": _VAD_SR, "total_samples": total, "regions": regions, "vad_model": model_name}
         if regions:
@@ -131,9 +140,15 @@ def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s):
 @app.post("/speech_regions")
 async def speech_regions(
     audio: UploadFile = File(...),
-    pad_s: float = Form(0.4),
-    merge_gap_s: float = Form(1.5),
-    min_region_s: float = Form(0.5),
+    # Post-processing on top of Silero. Defaults are a NO-OP, so this endpoint reproduces exactly what
+    # lab-mover measured; the knobs stay for tuning. (merge_gap 0 with a strict "<" merges only overlaps.)
+    pad_s: float = Form(0.0),
+    merge_gap_s: float = Form(0.0),
+    min_region_s: float = Form(0.0),
+    threshold: float = Form(0.15),
+    min_silence_duration_ms: float = Form(1200),
+    speech_pad_ms: float = Form(500),
+    min_speech_duration_ms: float = Form(250),
 ):
     t0 = time.time()
     if not audio.filename:
@@ -142,7 +157,10 @@ async def speech_regions(
     if len(raw) == 0:
         raise HTTPException(400, "audio empty")
     async with _HEAVY_SEM:
-        payload, err = await asyncio.to_thread(_speech_regions_blocking, raw, pad_s, merge_gap_s, min_region_s)
+        payload, err = await asyncio.to_thread(
+            _speech_regions_blocking, raw, pad_s, merge_gap_s, min_region_s,
+            threshold, min_silence_duration_ms, speech_pad_ms, min_speech_duration_ms,
+        )
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
     payload["latency_ms"] = int((time.time() - t0) * 1000)

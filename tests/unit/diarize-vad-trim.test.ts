@@ -128,16 +128,30 @@ describe("the flag and the parameters", () => {
     expect(() => vadTrimEnabled({ DIARIZE_VAD_TRIM: "maybe" })).toThrow(FlagValueError);
   });
 
-  it("defaults are Fable's starting values, 0.4 / 1.5 / 0.5", () => {
-    expect(VAD_TRIM_DEFAULTS).toEqual({ pad_s: 0.4, merge_gap_s: 1.5, min_region_s: 0.5 });
-    expect(vadTrimParams({})).toEqual({ pad_s: 0.4, merge_gap_s: 1.5, min_region_s: 0.5 });
+  it("defaults are lab-mover's MEASURED Silero params, with post-processing a no-op", () => {
+    // threshold 0.15 / min_silence 1200 / speech_pad 500 / min_speech 250 -> 2.36% cut on the 16
+    // normal bake windows. Silero's own default threshold (0.5) would cut far more.
+    expect(VAD_TRIM_DEFAULTS).toEqual({
+      pad_s: 0, merge_gap_s: 0, min_region_s: 0,
+      threshold: 0.15, min_silence_ms: 1200, speech_pad_ms: 500, min_speech_ms: 250,
+    });
+    expect(vadTrimParams({})).toEqual(VAD_TRIM_DEFAULTS);
   });
 
-  it("measured values from env are honoured; blank, nonsense and out-of-range are not", () => {
-    expect(vadTrimParams({ DIARIZE_VAD_PAD_S: "0.25", DIARIZE_VAD_MERGE_GAP_S: "2", DIARIZE_VAD_MIN_REGION_S: "0" }))
-      .toEqual({ pad_s: 0.25, merge_gap_s: 2, min_region_s: 0 });
-    for (const bad of ["", "  ", "abc", "-1", "999"]) {
-      expect(vadTrimParams({ DIARIZE_VAD_PAD_S: bad }).pad_s, `value ${JSON.stringify(bad)}`).toBe(0.4);
+  it("env overrides are honoured; blank, nonsense and out-of-range are not", () => {
+    const p = vadTrimParams({ DIARIZE_VAD_PAD_S: "0.4", DIARIZE_VAD_THRESHOLD: "0.3", DIARIZE_VAD_MIN_SILENCE_MS: "800" });
+    expect(p.pad_s).toBe(0.4);
+    expect(p.threshold).toBe(0.3);
+    expect(p.min_silence_ms).toBe(800);
+    for (const bad of ["", "  ", "abc", "-1", "99999"]) {
+      expect(vadTrimParams({ DIARIZE_VAD_MIN_SILENCE_MS: bad }).min_silence_ms, `value ${JSON.stringify(bad)}`).toBe(1200);
     }
+  });
+
+  it("the threshold is a probability: 0, 1 and beyond are refused", () => {
+    for (const bad of ["0", "1", "1.5", "-0.1", ""]) {
+      expect(vadTrimParams({ DIARIZE_VAD_THRESHOLD: bad }).threshold, `value ${JSON.stringify(bad)}`).toBe(0.15);
+    }
+    expect(vadTrimParams({ DIARIZE_VAD_THRESHOLD: "0.5" }).threshold).toBe(0.5);
   });
 });

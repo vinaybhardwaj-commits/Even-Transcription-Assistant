@@ -39,25 +39,49 @@ export function vadTrimEnabled(env: Record<string, string | undefined> = process
 }
 
 /**
- * The shaping parameters. The defaults are Fable's starting values (23 Sep): pad 0.4 s, merge gaps up
- * to 1.5 s, drop kept regions shorter than 0.5 s. lab-mover is measuring better ones; they arrive as
- * env overrides, so tuning needs a redeploy and no code.
+ * The parameters, as MEASURED — lab-mover, 23 Sep, Silero over the 20 bake windows that have
+ * pyannote.ai teacher labels (/home/eta/eta-data/vad-measure/REPORT.md on the E2E box):
  *
- *   pad        added to each side of every VAD speech span, so a word's onset and tail are not cut.
- *   merge_gap  two padded spans closer than this become one region — pyannote.ai needs context to
- *              tell speakers apart, and a thousand 0.3 s islands would give it none.
- *   min_region a kept region shorter than this is dropped, AFTER merging.
+ *   threshold 0.15, min_silence_duration_ms 1200, speech_pad_ms 500, min_speech_duration_ms 250
+ *   -> 2.36% of pyannote-confirmed speech cut on the 16 normal windows, worst single window 6.5%.
+ *
+ * These are SILERO'S OWN knobs, so they go into Silero. The post-processing on top (pad / merge_gap
+ * / min_region, Fable's first 0.4 / 1.5 / 0.5) now defaults to a NO-OP, so the Mini reproduces the
+ * measurement exactly instead of padding and merging a second time on top of it. Both sets stay
+ * overridable by env; the order said to use lab-mover's values when they landed, and they have.
+ *
+ * WHAT THIS DOES NOT FIX: on 4 of the 20 windows Silero cut 19-91% of real speech whatever the
+ * params, because its frame probabilities stay near zero through normal-RMS speech. No setting here
+ * addresses that; see the recommendation that DIARIZE_VAD_TRIM stays off until it is understood.
  */
-export const VAD_TRIM_DEFAULTS = { pad_s: 0.4, merge_gap_s: 1.5, min_region_s: 0.5 } as const;
+export const VAD_TRIM_DEFAULTS = {
+  pad_s: 0,
+  merge_gap_s: 0,
+  min_region_s: 0,
+  threshold: 0.15,
+  min_silence_ms: 1200,
+  speech_pad_ms: 500,
+  min_speech_ms: 250,
+} as const;
 export const VAD_TRIM_ENV = {
   pad_s: "DIARIZE_VAD_PAD_S",
   merge_gap_s: "DIARIZE_VAD_MERGE_GAP_S",
   min_region_s: "DIARIZE_VAD_MIN_REGION_S",
+  threshold: "DIARIZE_VAD_THRESHOLD",
+  min_silence_ms: "DIARIZE_VAD_MIN_SILENCE_MS",
+  speech_pad_ms: "DIARIZE_VAD_SPEECH_PAD_MS",
+  min_speech_ms: "DIARIZE_VAD_MIN_SPEECH_MS",
 } as const;
-/** Upper bounds, so a typo cannot quietly make every window one region (or none). */
-const VAD_TRIM_MAX = { pad_s: 5, merge_gap_s: 30, min_region_s: 30 } as const;
+/** Bounds, so a typo cannot quietly make every window one region (or none). Threshold is open (0,1). */
+const VAD_TRIM_MAX = {
+  pad_s: 5, merge_gap_s: 30, min_region_s: 30,
+  threshold: 1, min_silence_ms: 10000, speech_pad_ms: 10000, min_speech_ms: 10000,
+} as const;
 
-export type VadTrimParams = { pad_s: number; merge_gap_s: number; min_region_s: number };
+export type VadTrimParams = {
+  pad_s: number; merge_gap_s: number; min_region_s: number;
+  threshold: number; min_silence_ms: number; speech_pad_ms: number; min_speech_ms: number;
+};
 
 export function vadTrimParams(env: Record<string, string | undefined> = process.env): VadTrimParams {
   const pick = (k: keyof VadTrimParams): number => {
@@ -65,9 +89,15 @@ export function vadTrimParams(env: Record<string, string | undefined> = process.
     // Blank is absent, not zero — the same rule as the spend rate.
     if (raw === undefined || raw.trim() === "") return VAD_TRIM_DEFAULTS[k];
     const n = Number(raw);
+    // Threshold is a probability: strictly between 0 and 1. 0 would keep everything, 1 nothing.
+    if (k === "threshold") return Number.isFinite(n) && n > 0 && n < 1 ? n : VAD_TRIM_DEFAULTS.threshold;
     return Number.isFinite(n) && n >= 0 && n <= VAD_TRIM_MAX[k] ? n : VAD_TRIM_DEFAULTS[k];
   };
-  return { pad_s: pick("pad_s"), merge_gap_s: pick("merge_gap_s"), min_region_s: pick("min_region_s") };
+  return {
+    pad_s: pick("pad_s"), merge_gap_s: pick("merge_gap_s"), min_region_s: pick("min_region_s"),
+    threshold: pick("threshold"), min_silence_ms: pick("min_silence_ms"),
+    speech_pad_ms: pick("speech_pad_ms"), min_speech_ms: pick("min_speech_ms"),
+  };
 }
 
 /** One kept region, as the Mini cut it: original sample range, and where it starts in the trimmed file. */
@@ -179,6 +209,11 @@ export async function requestSpeechRegions(
   form.append("pad_s", String(params.pad_s));
   form.append("merge_gap_s", String(params.merge_gap_s));
   form.append("min_region_s", String(params.min_region_s));
+  // Silero's own knobs, named as the endpoint names them.
+  form.append("threshold", String(params.threshold));
+  form.append("min_silence_duration_ms", String(params.min_silence_ms));
+  form.append("speech_pad_ms", String(params.speech_pad_ms));
+  form.append("min_speech_duration_ms", String(params.min_speech_ms));
 
   const timeoutMs = Number(env.DIARIZE_VAD_TRIM_TIMEOUT_MS || VAD_TRIM_TIMEOUT_MS_DEFAULT);
   const controller = new AbortController();

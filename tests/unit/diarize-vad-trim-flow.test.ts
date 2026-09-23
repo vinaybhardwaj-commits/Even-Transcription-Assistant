@@ -126,11 +126,14 @@ describe("the submit step with the trim on", () => {
     expect((p.vad_trim as { speech_s: number }).speech_s).toBe(7);
   });
 
-  it("sends the Mini the configured params", async () => {
+  it("sends the Mini lab-mover's measured Silero params, and a no-op post-process", async () => {
     await submitted();
-    expect(vad.lastForm!.get("pad_s")).toBe("0.4");
-    expect(vad.lastForm!.get("merge_gap_s")).toBe("1.5");
-    expect(vad.lastForm!.get("min_region_s")).toBe("0.5");
+    const f = vad.lastForm!;
+    expect(f.get("threshold")).toBe("0.15");
+    expect(f.get("min_silence_duration_ms")).toBe("1200");
+    expect(f.get("speech_pad_ms")).toBe("500");
+    expect(f.get("min_speech_duration_ms")).toBe("250");
+    expect([f.get("pad_s"), f.get("merge_gap_s"), f.get("min_region_s")]).toEqual(["0", "0", "0"]);
   });
 
   it("A REAL ANSWER OF NO SPEECH skips the paid call and says so", async () => {
