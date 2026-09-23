@@ -265,7 +265,7 @@ async function diarizeStep(ctx: StepContext) {
     const vr = await requestSpeechRegions(bytes, params, { label: windowId });
     if (vr.ok && vr.regionsEmpty) {
       const provenance = engineProvenance("pyannoteai", {
-        attribution: "none", audio_seconds_sent: 0, skipped: "silent_window:vad_trim",
+        attribution: "none", audio_seconds_sent: 0, skipped: "vad_no_speech",
         vad_trim: { applied: false, reason: "no_speech", original_s: vr.originalSeconds, params, vad_model: vr.vadModel },
       });
       await recordDiarizeWindow({
@@ -273,7 +273,8 @@ async function diarizeStep(ctx: StepContext) {
         state: "no_speakers", error: null, speakers: [], segments: [], timing: { engine: provenance },
       });
       console.log("[jobs] diarize skipped, VAD trim found no speech", JSON.stringify({ window: windowId, original_s: vr.originalSeconds }));
-      return doneWith({ window_id: windowId, engine: "pyannoteai", skipped: "silent_window", audio_seconds_sent: 0, spans: 0, speakers: 0 });
+      // The order's reason code: a window with no speech is never sent.
+      return doneWith({ window_id: windowId, engine: "pyannoteai", skipped: "vad_no_speech", audio_seconds_sent: 0, spans: 0, speakers: 0 });
     }
     if (vr.ok) {
       const key = trimmedAudioKey(windowId, runId);
@@ -453,7 +454,17 @@ async function pollStep(ctx: StepContext) {
       });
       const out = await finishDiarizeWindow(
         { windowId, roomDayId: w.room_day_id, window: { start: windowStart(w.start_ms), end: windowEnd(w.end_ms) }, runId },
-        { speakers, rawSegments: segs, timing: { polls, provider_job_id: jobId }, latencyMs: null, provenance },
+        {
+          speakers, rawSegments: segs,
+          // The order's pair, at the top of timing_json: what pyannote.ai was sent against the
+          // window it came from. Equal when the trim did not apply; the saving when it did.
+          timing: {
+            polls, provider_job_id: jobId,
+            sent_seconds: audioSeconds,
+            window_seconds: typeof ctx.progress.original_audio_seconds === "number" ? ctx.progress.original_audio_seconds : windowAudioSeconds(w),
+          },
+          latencyMs: null, provenance,
+        },
       );
 
       await labelWindow({

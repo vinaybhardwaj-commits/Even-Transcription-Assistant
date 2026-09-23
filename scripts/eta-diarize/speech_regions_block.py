@@ -37,24 +37,30 @@ def _vad_load():
     with _VAD_LOCK:
         if _VAD_MODEL is not None:
             return _VAD_MODEL, _VAD_GET_TS, _VAD_MODEL_NAME
+        # ONNX on CPU, as ordered: tiny, and it keeps VAD off the MPS device /diarize is using.
         try:
             from silero_vad import load_silero_vad, get_speech_timestamps  # pip package
-            _VAD_MODEL, _VAD_GET_TS = load_silero_vad(), get_speech_timestamps
-            _VAD_MODEL_NAME = "silero-vad (pip)"
+            try:
+                _VAD_MODEL, _VAD_MODEL_NAME = load_silero_vad(onnx=True), "silero-vad onnx cpu (pip)"
+            except Exception:
+                # onnxruntime absent: the same model as TorchScript, still on CPU.
+                _VAD_MODEL, _VAD_MODEL_NAME = load_silero_vad(onnx=False), "silero-vad jit cpu (pip)"
+            _VAD_GET_TS = get_speech_timestamps
         except Exception:
             # The torch.hub cache, LOCAL ONLY — never a network fetch from inside a request.
             hub = os.path.expanduser("~/.cache/torch/hub/snakers4_silero-vad_master")
-            model, utils = torch.hub.load(hub, "silero_vad", source="local", trust_repo=True)
+            model, utils = torch.hub.load(hub, "silero_vad", source="local", trust_repo=True, onnx=True)
             _VAD_MODEL, _VAD_GET_TS = model, utils[0]
-            _VAD_MODEL_NAME = "silero-vad (torch.hub local)"
+            _VAD_MODEL_NAME = "silero-vad onnx cpu (torch.hub local)"
         return _VAD_MODEL, _VAD_GET_TS, _VAD_MODEL_NAME
 
 
 def _shape_regions(spans, total, sr, pad_s, merge_gap_s, min_region_s):
     """PURE. Silero's speech spans (sample indices) -> the kept regions, with their trim offsets.
 
-    pad each span (clamped to the clip), merge any two closer than merge_gap_s (an overlap is a gap of
-    less than zero, so padding collisions merge too), THEN drop regions shorter than min_region_s, then
+    pad each span (clamped to the clip), merge any two whose gap is strictly under merge_gap_s (an
+    overlap is a gap below zero, so padding collisions merge too), THEN drop regions shorter than
+    min_region_s, then
     lay the survivors end to end. trim_start is the running sum of the lengths before it, by
     construction — the property the caller checks.
     """
@@ -62,7 +68,7 @@ def _shape_regions(spans, total, sr, pad_s, merge_gap_s, min_region_s):
     padded = sorted((max(0, int(s) - pad), min(total, int(e) + pad)) for s, e in spans if int(e) > int(s))
     merged = []
     for s, e in padded:
-        if merged and s - merged[-1][1] <= gap:
+        if merged and s - merged[-1][1] < gap:     # gaps STRICTLY under merge_gap_s merge (order: "< 1.5 s")
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
@@ -96,7 +102,7 @@ def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s):
         mono = waveform.mean(dim=0, keepdim=True) if waveform.shape[0] > 1 else waveform
         if sr != _VAD_SR:
             mono = torchaudio.functional.resample(mono, sr, _VAD_SR)
-        wav = mono.squeeze(0).float()
+        wav = mono.squeeze(0).float().cpu()
         total = int(wav.shape[-1])
         if total <= 0:
             return None, "empty_audio"

@@ -24,6 +24,14 @@ check("pad clamped at clip end", r[0]["end_sample"] == total)
 r = shape([(100000, 120000), (148800, 170000)], total, SR, P, G, M)
 check("spans closer than merge gap become one region", len(r) == 1 and r[0]["start_sample"] == 93600 and r[0]["end_sample"] == 176400)
 
+# a gap of EXACTLY merge_gap after padding is NOT merged: the order says "< 1.5 s".
+# (100000,120000) pads to end 126400. A second span starting 156800 pads to start 150400:
+# gap = 150400 - 126400 = 24000 samples = exactly 1.5 s -> two regions.
+r = shape([(100000, 120000), (156800, 170000)], total, SR, P, G, M)
+check("a gap of exactly merge_gap_s is NOT merged (strict <)", len(r) == 2)
+r = shape([(100000, 120000), (156799, 170000)], total, SR, P, G, M)
+check("one sample under merge_gap_s IS merged", len(r) == 1)
+
 # two spans far apart -> two regions, trim offset = first length
 r = shape([(100000, 120000), (400000, 420000)], total, SR, P, G, M)
 L0 = r[0]["end_sample"] - r[0]["start_sample"]

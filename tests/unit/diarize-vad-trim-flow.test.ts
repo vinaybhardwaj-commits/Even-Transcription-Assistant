@@ -140,7 +140,9 @@ describe("the submit step with the trim on", () => {
     expect(fetchCalls.some((c) => c.url.includes("/v1/diarize"))).toBe(false);
     const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
     const engine = JSON.parse(String(ins.values.find((v) => typeof v === "string" && v.includes('"engine"')))).engine;
-    expect(engine).toMatchObject({ attribution: "none", audio_seconds_sent: 0, skipped: "silent_window:vad_trim" });
+    expect(engine).toMatchObject({ attribution: "none", audio_seconds_sent: 0, skipped: "vad_no_speech" });
+    if (out.kind !== "done") throw new Error("x");
+    expect(out.result.skipped).toBe("vad_no_speech");
   });
 
   for (const [name, setup, why] of [
@@ -158,6 +160,34 @@ describe("the submit step with the trim on", () => {
       expect(p.vad_trim_skipped).toBe(why);
     });
   }
+
+  it("FLAG OFF: the request to pyannote.ai is byte-identical to today's", async () => {
+    // The order's test. The trim changes WHICH object is presigned; with the flag off it must not
+    // change the request at all — the same body, the same two keys, the clip's own URL.
+    delete (process.env as Record<string, string | undefined>).DIARIZE_VAD_TRIM;
+    await submitted();
+    const submit = fetchCalls.find((c) => c.url.includes("/v1/diarize"))!;
+    expect(String(submit.body)).toBe(JSON.stringify({ url: "https://r2.example/c/w1.webm?X-Amz-Signature=SIG", model: "precision-3" }));
+  });
+
+  it("timing_json records sent_seconds against window_seconds", async () => {
+    const p = await submitted();
+    await runStep("pyannote_poll", p);
+    const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
+    const timing = JSON.parse(String(ins.values.find((v) => typeof v === "string" && v.includes('"sent_seconds"'))));
+    expect(timing.sent_seconds).toBe(7);      // the speech we paid for
+    expect(timing.window_seconds).toBe(60);   // the window it came from
+  });
+
+  it("…and with the flag off they are equal: nothing was trimmed", async () => {
+    delete (process.env as Record<string, string | undefined>).DIARIZE_VAD_TRIM;
+    const p = await submitted();
+    await runStep("pyannote_poll", p);
+    const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
+    const timing = JSON.parse(String(ins.values.find((v) => typeof v === "string" && v.includes('"sent_seconds"'))));
+    expect(timing.sent_seconds).toBe(60);
+    expect(timing.window_seconds).toBe(60);
+  });
 
   it("with the flag OFF the Mini is not asked and the whole clip goes, exactly as before", async () => {
     delete (process.env as Record<string, string | undefined>).DIARIZE_VAD_TRIM;
