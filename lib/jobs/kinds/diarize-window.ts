@@ -34,7 +34,7 @@
  * window must not depend on whether a lab table was reachable.
  */
 import { randomUUID } from "node:crypto";
-import { getObjectBytes, headObject, signGetUrl } from "@/lib/r2";
+import { deleteObject, getObjectBytes, headObject, putObjectBytes, signGetUrl } from "@/lib/r2";
 import { sql } from "@/lib/db";
 import { DEFAULT_MIN_SPEECH_MS, fetchWindowSpeech, speechGateEnabled, type WindowSpeech } from "@/lib/stt/speech-gate";
 import {
@@ -55,7 +55,9 @@ import { diarizeEngine, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/d
 import { PRESIGN_TTL_SECONDS, fetchJobRecord, pollDiarize, submitDiarize } from "@/lib/diarize-pyannoteai";
 import { embedSpeakers, embeddedCount, longestSpanPerSpeaker, mergeEmbeddings } from "@/lib/diarize-embed";
 import { writeWindowLabel } from "@/lib/diarize-labels";
-import { levelGateForWindow } from "@/lib/diarize-level-gate";
+import { judgeLevels } from "@/lib/diarize-level-gate";
+import { readRoomLevelDay, type BenchLevelSample } from "@/lib/bench-levels";
+import { observedQuietSpans, remapSegments, requestSpeechRegions, trimmedAudioKey, vadTrimEnabled, vadTrimParams, type RegionMap } from "@/lib/diarize-vad-trim";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -197,8 +199,13 @@ async function diarizeStep(ctx: StepContext) {
   // not ours to change. It asks the level log, not a service, so it needs no flag and no clip: a
   // window skipped here costs one query and no download.
   const rd = engine === "pyannoteai" ? await resolveRoomDay(w.room_day_id) : null;
+  // ONE read of the level log, used twice: the whole-window silence gate below, and the dead-air
+  // trim's allowed cuts further down. An unreadable room_day leaves it empty, which the gate reads
+  // as "no verdict" and the trim reads as "nothing may be cut".
+  let levelSamples: BenchLevelSample[] = [];
   if (rd) {
-    const level = await levelGateForWindow({ roomId: rd.roomId, istDate: rd.istDate, window: { start_ms: w.start_ms, end_ms: w.end_ms } });
+    levelSamples = (await readRoomLevelDay(rd.roomId, rd.istDate)).samples;
+    const level = judgeLevels(levelSamples, { start_ms: w.start_ms, end_ms: w.end_ms });
     if (level.verdict === "silent") {
       const provenance = // Nothing ran on this window, so nothing was compared. It says so rather than inheriting
       // a claim from an engine that never saw it.
@@ -247,12 +254,68 @@ async function diarizeStep(ctx: StepContext) {
   const head = await headObject(w.clip_r2_key);
   if (!head || head.size === null) return failWith(jobError("clip_missing_in_r2"));
 
+  // ── DEAD-AIR TRIM (DIARIZE_VAD_TRIM, default off) ─────────────────────────────────────────
+  // pyannote.ai bills per audio-hour and a room window is mostly silence. With the flag on, the Mini
+  // runs Silero VAD and hands back the speech regions plus a speech-only WAV; that file is what
+  // pyannote.ai fetches, and its timestamps are mapped back onto this clip in the poll step.
+  //
+  // EVERY failure here falls back to sending the WHOLE clip — the pre-trim behaviour. Only a REAL
+  // answer that there is no speech may skip the paid call; an unreachable VAD, a malformed map or a
+  // failed upload is "we could not trim", never "there was nothing to hear".
+  let sendKey = w.clip_r2_key;
+  let sentSeconds = audioSeconds;
+  let trimProgress: Record<string, unknown> | null = null;
+  let trimNote: string | null = null;
+  if (vadTrimEnabled()) {
+    const params = vadTrimParams();
+    // RULING (b), Fable 23 Sep: a VAD-silent span is cut ONLY where the level log also showed no
+    // activity. These are those spans. None means nothing may be cut — and then there is no point
+    // spending a VAD pass on the Mini for a window it is not allowed to trim.
+    const allowCut = observedQuietSpans(levelSamples, { start_ms: w.start_ms, end_ms: w.end_ms });
+    const vr = allowCut.length === 0 ? null : await requestSpeechRegions(bytes, params, { label: windowId, allowCut });
+    if (vr === null) {
+      trimNote = "level_log_no_quiet";
+    } else if (vr.ok && vr.regionsEmpty) {
+      // RULING (a): Silero found no speech. That is NOT a skip, and NOT a trim — the window is
+      // diarized WHOLE. On some rooms Silero confidently finds none through real, normal-level speech
+      // (lab-mover: 19-91% of real speech lost on 4 of 20 windows), so "no speech" from VAD alone is
+      // never allowed to decide what a clinician's window loses.
+      trimNote = "vad_empty";
+    } else if (vr.ok && vr.map.speechSeconds >= vr.map.originalSeconds) {
+      // Once the level log had its say, nothing was cuttable: a WAV of the whole clip saves nothing.
+      trimNote = "nothing_cuttable";
+    } else if (vr.ok) {
+      const key = trimmedAudioKey(windowId, runId);
+      try {
+        await putObjectBytes(key, vr.audio, "audio/wav");
+        sendKey = key;
+        sentSeconds = vr.map.speechSeconds;
+        // The map travels to the poll step in progress: times and counts only, no audio.
+        trimProgress = {
+          key,
+          regions: vr.map.regions,
+          sample_rate: vr.map.sampleRate,
+          speech_s: vr.map.speechSeconds,
+          original_s: vr.map.originalSeconds,
+          vad_model: vr.vadModel,
+          params,
+        };
+      } catch (e) {
+        console.warn("[jobs] vad-trim upload failed, sending whole clip", JSON.stringify({ window: windowId, err: String(e).slice(0, 120) }));
+        trimNote = "upload_failed";
+      }
+    } else {
+      console.warn("[jobs] vad-trim unavailable, sending whole clip", JSON.stringify({ window: windowId, reason: vr.error }));
+      trimNote = vr.error;
+    }
+  }
+
   let audioUrl: string;
   try {
     // READ-ONLY, ONE OBJECT, MINUTES. It points at R2 — the audio never goes near the Mini tunnel —
     // and it is never logged, because for as long as it lives it is a bearer credential for
-    // patient audio.
-    audioUrl = await signGetUrl({ key: w.clip_r2_key, expiresInSeconds: PRESIGN_TTL_SECONDS });
+    // patient audio. With the trim on, the one object is the speech-only file.
+    audioUrl = await signGetUrl({ key: sendKey, expiresInSeconds: PRESIGN_TTL_SECONDS });
   } catch (e) {
     console.error("[jobs] presign failed", JSON.stringify({ window: windowId, err: String(e).slice(0, 120) }));
     return localRun({ w, runId, speech, fallback: { from: "pyannoteai", reason: "presign_failed" }, audio: bytes });
@@ -261,7 +324,7 @@ async function diarizeStep(ctx: StepContext) {
   const sub = await submitDiarize(audioUrl, { label: windowId });
   if (!sub.ok) return localRun({ w, runId, speech, fallback: { from: "pyannoteai", reason: sub.error }, audio: bytes });
 
-  console.log("[jobs] pyannote.ai submitted", JSON.stringify({ window: windowId, job: sub.jobId, audio_seconds: audioSeconds }));
+  console.log("[jobs] pyannote.ai submitted", JSON.stringify({ window: windowId, job: sub.jobId, audio_seconds: sentSeconds, original_seconds: audioSeconds, trimmed: trimProgress !== null }));
   // The id is persisted before anything else can fail. Every later claim polls it; none resubmits.
   return nextStep(STEPS.pyannotePoll, {
     ...ctx.progress,
@@ -269,9 +332,42 @@ async function diarizeStep(ctx: StepContext) {
     pyannoteai_job_id: sub.jobId,
     run_id: runId,
     window_id: windowId,
-    audio_seconds_sent: audioSeconds,
+    // WHAT WE PAY FOR: the trimmed length when the trim applied, the whole window otherwise.
+    audio_seconds_sent: sentSeconds,
+    original_audio_seconds: audioSeconds,
+    ...(trimProgress ? { vad_trim: trimProgress } : {}),
+    ...(trimNote ? { vad_trim_skipped: trimNote } : {}),
     submitted_at: new Date().toISOString(),
   });
+}
+
+/**
+ * The trim map, back out of progress. It was written by the submit step, so its shape is ours; a
+ * progress row without one simply means the whole clip was sent, and the segments need no remap.
+ */
+function trimMapFromProgress(p: unknown): { map: RegionMap; key: string; info: Record<string, unknown> } | null {
+  if (typeof p !== "object" || p === null) return null;
+  const o = p as Record<string, unknown>;
+  if (typeof o.key !== "string" || !Array.isArray(o.regions)) return null;
+  return {
+    key: o.key,
+    map: {
+      sampleRate: Number(o.sample_rate),
+      regions: o.regions as RegionMap["regions"],
+      speechSeconds: Number(o.speech_s),
+      originalSeconds: Number(o.original_s),
+    },
+    info: {
+      applied: true,
+      // Ruling (c): kept out of the training set, and said so on the row a lab query will read.
+      teacher_label: "excluded_trimmed",
+      regions: (o.regions as unknown[]).length,
+      speech_s: o.speech_s,
+      original_s: o.original_s,
+      vad_model: o.vad_model ?? null,
+      params: o.params ?? null,
+    },
+  };
 }
 
 /** Step 2 — poll the submission this job made, under a budget. Never resubmits, never reads env. */
@@ -284,6 +380,10 @@ async function pollStep(ctx: StepContext) {
   const w = await loadWindow(windowId);
   if ("error" in w) return failWith(jobError(w.error, w.detail));
   const audioSeconds = typeof ctx.progress.audio_seconds_sent === "number" ? (ctx.progress.audio_seconds_sent as number) : null;
+  const trim = trimMapFromProgress(ctx.progress.vad_trim);
+  // The speech-only file is a derived copy of patient audio in our bucket. It lives exactly as long
+  // as the job needs it: removed on every terminal path, kept only while the poll hands itself back.
+  const dropTrimmed = async () => { if (trim) await deleteObject(trim.key); };
 
   const budget = pollBudgetMs();
   const interval = pollIntervalMs();
@@ -302,16 +402,29 @@ async function pollStep(ctx: StepContext) {
         return nextStep(STEPS.pyannotePoll, { ...ctx.progress, polls_so_far: Number(ctx.progress.polls_so_far ?? 0) + polls });
       }
       // Terminal on pyannote.ai's side — the window still deserves a diarization, so the local
-      // service gets it, and the row says where it came from and why.
+      // service gets it, from the ORIGINAL clip, and the row says where it came from and why.
+      await dropTrimmed();
       return localRun({ w, runId, speech: undefined, fallback: { from: "pyannoteai", reason: st.error }, pyannoteJobId: jobId });
     }
 
     if (st.state === "done") {
+      // BACK ONTO THE ORIGINAL CLOCK, before anything reads a segment. pyannote.ai heard the
+      // speech-only file; every reader below — the turn binding, the embeddings, the teacher label —
+      // works in the original clip's time, so the remap happens once, here, and nothing downstream
+      // ever sees trimmed time. A segment across a join comes back split (lib/diarize-vad-trim.ts).
+      const segs = trim ? remapSegments(st.segments, trim.map) : st.segments;
+      await dropTrimmed();
+      if (segs.length === 0) {
+        // pyannote.ai answered, but nothing it said lands inside a kept region. That is not a
+        // result to store; the local diarizer gets the window, from the original clip.
+        return localRun({ w, runId, speech: undefined, fallback: { from: "pyannoteai", reason: "vad_trim_remap_empty" }, pyannoteJobId: jobId });
+      }
+
       // The model is read back from the job's own record, never echoed from what we asked for.
       const record = await fetchJobRecord(jobId);
 
       // ── THE HYBRID: pyannote.ai's turns, this system's identities ────────────────────────
-      const bare = speakersFromLabels(st.speakerLabels, st.segments);
+      const bare = speakersFromLabels(st.speakerLabels, segs);
       const bytes = await getObjectBytes(w.clip_r2_key);
       let speakers: typeof bare = bare;
       let embedded = 0;
@@ -320,7 +433,7 @@ async function pollStep(ctx: StepContext) {
       if (bytes) {
         const centroids = await loadClinicianCentroids();
         centroidsOffered = centroids.length;
-        const spans = longestSpanPerSpeaker(st.segments);
+        const spans = longestSpanPerSpeaker(segs);
         const emb = await embedSpeakers(bytes, spans, centroids, { batchThreshold: DIARIZE_BATCH_THRESHOLD, label: windowId });
         if (emb.ok) {
           speakers = mergeEmbeddings(bare, emb.speakers) as typeof bare;
@@ -346,23 +459,41 @@ async function pollStep(ctx: StepContext) {
         // voiceprint attribution on a day when nobody is enrolled.
         attribution: attributionFor(speakers, centroidsOffered),
         centroids_offered: centroidsOffered,
+        ...(trim ? { vad_trim: trim.info } : {}),
         ...(embedError ? { embed_error: embedError } : {}),
       });
       const out = await finishDiarizeWindow(
         { windowId, roomDayId: w.room_day_id, window: { start: windowStart(w.start_ms), end: windowEnd(w.end_ms) }, runId },
-        { speakers, rawSegments: st.segments, timing: { polls, provider_job_id: jobId }, latencyMs: null, provenance },
+        {
+          speakers, rawSegments: segs,
+          // The order's pair, at the top of timing_json: what pyannote.ai was sent against the
+          // window it came from. Equal when the trim did not apply; the saving when it did.
+          timing: {
+            polls, provider_job_id: jobId,
+            sent_seconds: audioSeconds,
+            window_seconds: typeof ctx.progress.original_audio_seconds === "number" ? ctx.progress.original_audio_seconds : windowAudioSeconds(w),
+          },
+          latencyMs: null, provenance,
+        },
       );
 
-      await labelWindow({
-        w, runId, engine: "pyannoteai", model: record?.model ?? null, providerJobId: jobId,
-        segments: st.segments, speakerCount: st.speakerLabels.length, audioSeconds,
-      });
+      // RULING (c): NO TEACHER LABEL FROM A TRIMMED RUN. pyannote.ai heard only what VAD kept; on the
+      // windows where VAD is wrong that is exactly the speech missing from its answer, and a label
+      // missing speech teaches the local model to miss it too. The run is still stored for production
+      // — it is marked (timing_json.engine.vad_trim) and kept out of the training set.
+      if (!trim) {
+        await labelWindow({
+          w, runId, engine: "pyannoteai", model: record?.model ?? null, providerJobId: jobId,
+          segments: segs, speakerCount: st.speakerLabels.length, audioSeconds,
+        });
+      }
 
       const stored = await storeAndFinish({
         w, runId, out,
         extra: {
           engine: "pyannoteai", pyannoteai_job_id: jobId, polls, audio_seconds_sent: audioSeconds,
           speakers_embedded: embedded, ...(embedError ? { embed_error: embedError } : {}),
+          ...(trim ? { teacher_label: "excluded_trimmed" } : {}),
         },
       });
       // The teacher needs something to be measured against, so the local diarizer runs too — in
@@ -457,7 +588,7 @@ async function labelWindow(args: {
  */
 function engineProvenance(
   name: DiarizeEngine,
-  over: Partial<DiarizeEngineProvenance> & { attribution: "voiceprint" | "none"; skipped?: string; embed_error?: string },
+  over: Partial<DiarizeEngineProvenance> & { attribution: "voiceprint" | "none"; skipped?: string; embed_error?: string; vad_trim?: Record<string, unknown> },
 ): DiarizeEngineProvenance {
   return {
     name,
