@@ -74,6 +74,21 @@ export class DuplicateAskKeyError extends Error {
 }
 
 /**
+ * ETA-NOTE-SAFETY-SHADOW-REFUTER-VERDICT-23-SEP-2026.md finding 2, Fable's ruling: `answer` being
+ * jsonb satisfies "no text column" on its face while jsonb carries text perfectly well —
+ * `scribe_jev_decisions` describes `choice` as "a structured, closed-vocabulary value", but
+ * nothing enforced that a returned `choice` is actually one of the question's own registered
+ * options before this function persisted it. A `choice` outside that closed set is rejected here,
+ * before the row is built — never stored, never returned in `results` (the same "absent means
+ * unanswered" shape an ask Jev never answered already has). The rejected VALUE is never logged —
+ * only its length — because the whole point is that it could be arbitrary text.
+ */
+function isValidChoice(question: JevQuestion, choice: string): boolean {
+  if (question.type !== "choice") return true;
+  return Object.prototype.hasOwnProperty.call(question.criteria, choice);
+}
+
+/**
  * ONE systemOne call for the whole batch (fan-out, plan principle 7), whatever `asks.length` is.
  * `opts.persist` defaults true; a caller benching against a labelled set with no intent to keep
  * the answers (lib/jev/bench.ts) passes persist:false so a bench run does not pollute jev_decision.
@@ -110,6 +125,13 @@ export async function askJev(
   for (const ask of asks) {
     const answer = result.answers[ask.answerKey];
     if (!answer) continue;
+    if (answer.type === "choice" && !isValidChoice(questions[ask.answerKey]!, answer.choice)) {
+      console.warn(
+        "[jev] answer rejected: choice is not one of the question's own registered options",
+        JSON.stringify({ questionId: ask.questionId, promptVersion: ask.promptVersion, subjectType: ask.subjectType, choiceLength: answer.choice.length }),
+      );
+      continue; // not stored, not returned — same shape as "Jev did not answer this key"
+    }
     const confidence = extractConfidence(answer);
     const band = confidenceBand(confidence, ask.thresholds);
     results[ask.answerKey] = {

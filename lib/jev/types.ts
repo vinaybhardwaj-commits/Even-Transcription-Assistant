@@ -49,9 +49,33 @@ export class JevStateTooLargeError extends Error {
   }
 }
 
-/** A vendor error the client itself could not recover (401/422, or retries exhausted on 429/529). */
+/**
+ * A vendor error the client itself could not recover (401/422, or retries exhausted on 429/529).
+ *
+ * `.message` is the status plus the provider's own error CODE only (a `code` field, when the body
+ * is JSON and has one) — NEVER the raw body. A 400 that echoes the offending input back is the
+ * ordinary shape of a validation error, and this is the FIRST wire-level error type a caller's own
+ * state can flow into (ETA-NOTE-SAFETY-SHADOW-REFUTER-VERDICT-23-SEP-2026.md, finding 1):
+ * lib/jev/note-safety-shadow.ts sends a note sentence and a transcript excerpt as Jev state, and a
+ * naive `catch (e) { log(e.message) }` — exactly what that file did — would put that text in a
+ * log line the moment a provider error happened to quote it back. `.body` still carries the raw
+ * text, for a caller that explicitly wants it for debugging; it is a separate field precisely so
+ * nothing that merely reads `.message` (the normal thing to do with any Error) can reach it.
+ */
 export class JevHttpError extends Error {
   constructor(public status: number, public body: string) {
-    super(`jev http ${status}: ${body.slice(0, 200)}`);
+    super(JevHttpError.safeMessage(status, body));
+  }
+
+  private static safeMessage(status: number, body: string): string {
+    try {
+      const parsed = JSON.parse(body) as { code?: unknown };
+      if (typeof parsed.code === "string" && parsed.code.length > 0) {
+        return `jev http ${status}: ${parsed.code.slice(0, 64)}`;
+      }
+    } catch {
+      /* body is not JSON, or has no code field — fall through to status only */
+    }
+    return `jev http ${status}`;
   }
 }

@@ -38,6 +38,7 @@ afterEach(() => {
 
 import { runNoteSafetyShadow, runNoteSafetyShadowAsync } from "@/lib/jev/note-safety-shadow";
 import { FlagValueError } from "@/lib/flags";
+import { JevHttpError } from "@/lib/jev/types";
 
 describe("runNoteSafetyShadowAsync — flag off => zero Jev calls, zero DB reads", () => {
   it("flag unset: returns {ran:false}, never touches sql or askJev", async () => {
@@ -143,6 +144,31 @@ describe("runNoteSafetyShadow — the fire-and-forget wrapper", () => {
     const [, payload] = warn.mock.calls[0]!;
     expect(String(payload)).toContain("enc_secret_patient_context");
     expect(String(payload)).toContain("db unreachable");
+    warn.mockRestore();
+  });
+
+  // ETA-NOTE-SAFETY-SHADOW-REFUTER-VERDICT-23-SEP-2026.md finding 1, Fable's ruling: the test
+  // above only ever asserted what SHOULD be present in the log, never what should be ABSENT — a
+  // test with that shape stayed green when the Refuter swapped the injected error for one
+  // carrying synthetic note text. THIS test asserts absence, the only shape that can actually
+  // fail for a leak, against the REAL failure mode: a Jev HTTP error whose body echoes the
+  // caller's own input (the ordinary shape of a 400 validation error) — exactly what a note
+  // sentence or transcript excerpt sent as Jev state can trigger.
+  it("a JevHttpError whose body echoes SYNTHETIC note text does NOT put that text in the logged warning", async () => {
+    process.env[ENV] = "on";
+    const SYNTHETIC_NOTE_TEXT = "Invented finding: chest pain not mentioned by the patient anywhere.";
+    dbResponder = () => [{ id: "enc_1", note_json: { chief_complaint: "Fever." }, transcript_clean: "the transcript" }];
+    askJevMock.mockRejectedValueOnce(
+      new JevHttpError(400, JSON.stringify({ error: `validation failed: unexpected content "${SYNTHETIC_NOTE_TEXT}"` })),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    runNoteSafetyShadow("enc_1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(warn).toHaveBeenCalled();
+    const [, payload] = warn.mock.calls[0]!;
+    expect(String(payload)).not.toContain(SYNTHETIC_NOTE_TEXT);
+    expect(String(payload)).not.toContain("unexpected content");
+    expect(String(payload)).toContain("enc_1"); // the encounter id is still there — only the text is gone
     warn.mockRestore();
   });
 });

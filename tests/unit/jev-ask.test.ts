@@ -161,3 +161,60 @@ describe("askJev — cost/latency counters", () => {
     expect(snap.byQuestion.test_noul!.inputTokens).toBeCloseTo(100);
   });
 });
+
+// ETA-NOTE-SAFETY-SHADOW-REFUTER-VERDICT-23-SEP-2026.md finding 2, Fable's ruling: a returned
+// `choice` was never checked against the question's own registered options before this function
+// persisted it. `answer` being jsonb satisfied "no text column" on its face while carrying
+// arbitrary text perfectly well if a choice were ever off-menu.
+describe("askJev — a choice answer is validated against the question's own registered options", () => {
+  it("a choice that IS one of the registered options is accepted, returned, and persisted as before", async () => {
+    fakeResult = { model: "jev-x", answers: { k1: { type: "choice", choice: "a", probabilities: { a: 0.9, b: 0.1 }, confidence: 0.9 } }, usage: { input_tokens: 10, output_tokens: 1 }, latency_ms: 5 };
+    const out = await askJev({}, [{ answerKey: "k1", subjectType: "window", subjectId: "w1", questionId: "test_choice", promptVersion: "v1", args: ["w1"] }]);
+    expect(out.results.k1!.answer).toEqual({ type: "choice", choice: "a", probabilities: { a: 0.9, b: 0.1 }, confidence: 0.9 });
+    expect(out.persisted).toEqual({ ok: true, written: 1 });
+    expect(dbCalls).toHaveLength(1);
+  });
+
+  it("an OFF-MENU choice is rejected: absent from results, not persisted, never a fabricated answer", async () => {
+    const SENSITIVE = "leaked transcript excerpt that should never be a valid option";
+    fakeResult = { model: "jev-x", answers: { k1: { type: "choice", choice: SENSITIVE, probabilities: {}, confidence: 0.9 } }, usage: { input_tokens: 10, output_tokens: 1 }, latency_ms: 5 };
+    const out = await askJev({}, [{ answerKey: "k1", subjectType: "window", subjectId: "w1", questionId: "test_choice", promptVersion: "v1", args: ["w1"] }]);
+    expect(out.results.k1).toBeUndefined(); // same "absent means unanswered" shape as no answer at all
+    expect(dbCalls).toHaveLength(0); // never reached insertJevDecisions
+  });
+
+  it("the rejection is logged, but the invalid choice's VALUE never appears in the log — only its length", async () => {
+    const SENSITIVE = "leaked transcript excerpt that should never be a valid option";
+    fakeResult = { model: "jev-x", answers: { k1: { type: "choice", choice: SENSITIVE, probabilities: {}, confidence: 0.9 } }, usage: { input_tokens: 10, output_tokens: 1 }, latency_ms: 5 };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await askJev({}, [{ answerKey: "k1", subjectType: "window", subjectId: "w1", questionId: "test_choice", promptVersion: "v1", args: ["w1"] }]);
+    expect(warn).toHaveBeenCalled();
+    const logged = JSON.stringify(warn.mock.calls[0]);
+    expect(logged).not.toContain(SENSITIVE);
+    expect(logged).toContain("test_choice");
+    expect(logged).toContain(String(SENSITIVE.length));
+    warn.mockRestore();
+  });
+
+  it("a batch with one valid and one off-menu choice persists only the valid one", async () => {
+    fakeResult = {
+      model: "jev-x",
+      answers: { good: { type: "choice", choice: "b", probabilities: { a: 0.1, b: 0.9 }, confidence: 0.9 }, bad: { type: "choice", choice: "not_an_option", probabilities: {}, confidence: 0.5 } },
+      usage: { input_tokens: 20, output_tokens: 2 },
+      latency_ms: 8,
+    };
+    const out = await askJev({}, [
+      { answerKey: "good", subjectType: "window", subjectId: "w1", questionId: "test_choice", promptVersion: "v1", args: ["w1"] },
+      { answerKey: "bad", subjectType: "window", subjectId: "w2", questionId: "test_choice", promptVersion: "v1", args: ["w2"] },
+    ]);
+    expect(out.results.good).toBeDefined();
+    expect(out.results.bad).toBeUndefined();
+    expect(out.persisted).toEqual({ ok: true, written: 1 });
+  });
+
+  it("noul and score answers are never subject to the choice check — it only applies to type:choice", async () => {
+    fakeResult = { model: "jev-x", answers: { k1: { type: "noul", noul: 0.5 } }, usage: { input_tokens: 5, output_tokens: 1 }, latency_ms: 5 };
+    const out = await askJev({}, [{ answerKey: "k1", subjectType: "window", subjectId: "w1", questionId: "test_noul", promptVersion: "v1", args: ["w1"] }]);
+    expect(out.results.k1).toBeDefined();
+  });
+});
