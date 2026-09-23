@@ -22,7 +22,8 @@
 import { gateSegments, speechGateEnabled, type WindowSpeech } from "./speech-gate";
 import { sql } from "@/lib/db";
 import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
-import { parseDiarizeSegments, type TurnSpan } from "./speaker-clusters";
+import type { DiarizeEngine } from "@/lib/diarize-engine";
+import { parseDiarizeSegments, type DiarizeSegment, type TurnSpan } from "./speaker-clusters";
 import { rolesByIndex, UNATTRIBUTED, noRole, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
 import { shadowMatch, shadowTrusted, SCORE_BASIS_APP_RECOMPUTED } from "./losing-score";
 import { ms, type WindowStartMs, type WindowEndMs } from "./window-bounds";
@@ -113,6 +114,55 @@ export async function loadWindowTurns(roomDayId: string, window: { start: Window
     .filter((t) => Number.isFinite(t.start_ms) && Number.isFinite(t.end_ms));
 }
 
+/**
+ * WHICH DIARIZER PRODUCED A ROW, recorded on the row itself.
+ *
+ * From 23 Sep 2026 two engines write this table. A reader that cannot tell them apart is comparing
+ * two diarizers under one label — the 19 Sep arm64-vs-x86_64 ruling in a new form — so every row
+ * carries this, both engines, always, and a fallback says what it fell back FROM and why.
+ *
+ * `attribution` is the field that matters most and the one nobody would think to ask for. The
+ * local service matches enrolled voiceprints INSIDE itself and returns `clinician_id` and
+ * `confidence` per speaker; pyannote.ai's /v1/diarize returns `{start, end, speaker}` and nothing
+ * else. So a pyannote.ai window has NO voiceprint identity at all — every turn lands `no_match`,
+ * not because no clinician was recognised but because nothing tried. Those two states look
+ * identical in `room_turn_speaker` and mean opposite things, and this field is the only place the
+ * difference survives.
+ *
+ * `model` is read back from the engine's own answer and is NULL when the engine did not say.
+ * It is never the model we asked for: a label that restates our own request reads as evidence and
+ * is none.
+ */
+export type DiarizeEngineProvenance = {
+  name: DiarizeEngine;
+  model: string | null;
+  /** The provider's job id, when the engine has one. Ours is opaque and carries no credential. */
+  job_id: string | null;
+  /** Whether this engine could attribute a voice to an enrolled clinician at all. */
+  attribution: "voiceprint" | "none";
+  /** Set only on a row produced after another engine was tried and did not deliver. */
+  fallback_from: DiarizeEngine | null;
+  /** A CODE, never a provider message. */
+  fallback_reason: string | null;
+  /** Audio seconds handed to a paid engine, so cost is countable from the rows. */
+  audio_seconds_sent: number | null;
+  /**
+   * Why this engine was never called, when it was not. A window the engine found empty and a
+   * window the engine never saw both land `no_speakers`, and only this tells them apart.
+   */
+  skipped?: string;
+};
+
+/** What an engine hands back, before any of this file's storage work. */
+export type DiarizeEngineAnswer = {
+  speakers: DiarizeSpeaker[];
+  /** Clip-relative, in the local service's shape. */
+  rawSegments: DiarizeSegment[];
+  timing: unknown;
+  latencyMs: number | null;
+  provenance: DiarizeEngineProvenance;
+};
+
 export type DiarizeWindowOutcome = {
   spans: number;
   turns: number;
@@ -121,6 +171,8 @@ export type DiarizeWindowOutcome = {
   straddled: number;
   speakers: number;
   latency_ms: number | null;
+  /** Which diarizer produced this window, and whether it could name anyone. */
+  engine: DiarizeEngineProvenance;
   /** E20: no_match turns that got a losing score and clinician (score_basis 'app_recomputed'). */
   losing_recorded: number;
   /** E20: the control on the app-side recomputation, for THIS window (lib/stt/losing-score.ts). */
@@ -150,6 +202,12 @@ export async function diarizeWindow(opts: {
    * that has no VAD simply does not pass one — which judges nothing.
    */
   speech?: WindowSpeech;
+  /**
+   * Set when this local run is standing in for an engine that did not deliver. It changes nothing
+   * about the diarization — it is recorded on the row, so a reader can see that this window's
+   * spans came from a different engine than its neighbours'.
+   */
+  fallback?: { from: DiarizeEngine; reason: string };
 }): Promise<
   | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
   | { ok: false; error: string; retryable: boolean; timing: unknown }
@@ -166,9 +224,98 @@ export async function diarizeWindow(opts: {
   // and a client that reads status learns the wrong lesson from whichever it meets first.
   if (!res.ok) return { ok: false, error: res.error, retryable: res.retryable === true, timing: res.timing ?? null };
 
-  const speakers = (res.result.speakers ?? []) as DiarizeSpeaker[];
+  return {
+    ok: true,
+    ...(await finishDiarizeWindow(
+      { ...opts, centroids },
+      {
+        speakers: (res.result.speakers ?? []) as DiarizeSpeaker[],
+        rawSegments: parseDiarizeSegments(res.result.transcript_segments),
+        timing: res.timing ?? null,
+        latencyMs: res.latencyMs ?? null,
+        provenance: {
+          name: "local",
+          // DERIVED, like pyannote.ai's: the service reports `model_versions`, and when it reports
+          // nothing readable the label is null rather than the name of the service we called.
+          model: localModelLabel(res.result.model_versions),
+          job_id: null,
+          // The local service matches enrolled voiceprints inside itself — this is the engine that
+          // can name a clinician, and the only one.
+          attribution: "voiceprint",
+          fallback_from: opts.fallback?.from ?? null,
+          fallback_reason: opts.fallback?.reason ?? null,
+          audio_seconds_sent: null,
+        },
+      },
+    )),
+  };
+}
+
+/** The local service's own model label, when it gives one. Never the name of the service. */
+export function localModelLabel(modelVersions: unknown): string | null {
+  if (typeof modelVersions === "string" && modelVersions.trim()) return modelVersions.trim();
+  if (typeof modelVersions === "object" && modelVersions !== null) {
+    const o = modelVersions as Record<string, unknown>;
+    // The Mini reports a map of component -> version. `diarization` is the one that names the
+    // segmenter; anything else is a component we are not claiming to have identified.
+    const v = o.diarization ?? o.diarize ?? o.pyannote;
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/**
+ * Speaker rows for an engine that returns LABELS AND NOTHING ELSE.
+ *
+ * pyannote.ai answers with `{start, end, speaker}`: no embedding, no voiceprint match, no guess
+ * about who anyone is. So these rows carry no `clinician_id`, no `confidence` and no
+ * `embedding_base64` — absent, not null-filled — which is what makes `rolesByIndex` return
+ * UNATTRIBUTED for every one of them rather than a name nothing earned.
+ *
+ * `type` is "unknown" on purpose. The local service guesses a type and that guess is filed under
+ * `unverified_service_guess`; this engine makes no guess, and "other" would be a guess spelled as
+ * an answer. Speech totals ARE included because they are arithmetic on the response, not a claim.
+ */
+export const UNKNOWN_SPEAKER_TYPE = "unknown";
+export function speakersFromLabels(labels: string[], segments: DiarizeSegment[]): DiarizeSpeaker[] {
+  return labels.map((label, idx) => {
+    const mine = segments.filter((s) => s.speaker_idx === idx);
+    const speechMs = mine.reduce((n, s) => n + (s.end_ms - s.start_ms), 0);
+    const firstMs = mine.length ? Math.min(...mine.map((s) => s.start_ms)) : null;
+    return {
+      idx,
+      label,
+      type: UNKNOWN_SPEAKER_TYPE,
+      total_speech_sec: Math.round(speechMs) / 1000,
+      ...(firstMs === null ? {} : { first_heard_at_sec: Math.round(firstMs) / 1000 }),
+    };
+  });
+}
+
+/**
+ * EVERYTHING AFTER THE DIARIZER, for whichever diarizer ran.
+ *
+ * Extracted from `diarizeWindow` when the second engine arrived (23 Sep 2026), unchanged in
+ * behaviour: the speech gate, the turn join, the exclusive binding, the losing-score control and
+ * the `room_turn_speaker` write are ONE path, shared. A second copy of this for the second engine
+ * is how the two engines would come to store subtly different rows and nobody would notice for a
+ * month.
+ */
+export async function finishDiarizeWindow(
+  opts: {
+    windowId: string;
+    roomDayId: string;
+    window: { start: WindowStartMs; end: WindowEndMs };
+    centroids?: ClinicianCentroid[];
+    runId: string;
+    speech?: WindowSpeech;
+  },
+  answer: DiarizeEngineAnswer,
+): Promise<{ outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }> {
+  const centroids = opts.centroids ?? (await loadClinicianCentroids());
+  const speakers = answer.speakers;
   const roles = rolesByIndex(speakers);
-  const rawSegments = parseDiarizeSegments(res.result.transcript_segments);
+  const rawSegments = answer.rawSegments;
 
   // ── THE SPEECH GATE ──────────────────────────────────────────────────────────────────────
   // Between pyannote and storage, which is the only place a re-check can happen: the service has
@@ -246,11 +393,13 @@ export async function diarizeWindow(opts: {
   const diffs = shadow.guard.diffs;
 
   return {
-    ok: true,
     // PASSED THROUGH, not derived: the exact response the caller needs for room_diarize_window.
     speakers,
     segments,
-    timing: res.timing ?? null,
+    // The engine's own timing, plus WHICH ENGINE under one key. `timing_json` is the row's per-run
+    // metadata and its only reader passes it through whole (lib/diarize-segments.ts), so the
+    // provenance travels with the run that produced it and needs no migration to be readable.
+    timing: { ...(typeof answer.timing === "object" && answer.timing !== null ? answer.timing : {}), engine: answer.provenance },
     outcome: {
       spans: segments.length,
       turns: turns.length,
@@ -258,7 +407,8 @@ export async function diarizeWindow(opts: {
       named,
       straddled,
       speakers: roles.size,
-      latency_ms: res.latencyMs ?? null,
+      latency_ms: answer.latencyMs,
+      engine: answer.provenance,
       losing_recorded: losingRecorded,
       shadow: {
         matched_checked: shadow.guard.matched_checked,
