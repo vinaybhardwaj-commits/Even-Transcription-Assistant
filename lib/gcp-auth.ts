@@ -30,13 +30,24 @@ function loadServiceAccount(): ServiceAccount {
   return sa;
 }
 
-/** This function's own fallback when no `timeoutMs` is given at all — generous, since a caller
- * that cares about the mint's timing (lib/llm/gemini.ts) always passes its own explicit budget. */
-const MINT_DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * The mint's own budget: RSA-sign (synchronous, effectively free) plus the OAuth token-exchange
+ * fetch. This function's own fallback when no `timeoutMs` is given at all, AND the single value
+ * lib/llm/gemini.ts imports and counts in routedChatDeadlineMs's sum — one mint budget, not two
+ * (Fable's ruling, 23 Sep, closing the round-4 Refuter calibration note: this file used to default
+ * to its own uncoordinated 30 s literal here while gemini.ts separately budgeted 10 s for the exact
+ * same call).
+ *
+ * PROVISIONAL: 10 s is a guess, generous for a single HTTPS POST (typically sub-second) but not
+ * calibrated from real timings, because none existed yet. `mintElapsedMs` below logs the elapsed
+ * time of every actual (non-cached) mint so a real production distribution can replace this guess
+ * once enough of them have accumulated.
+ */
+export const MINT_TIMEOUT_MS = 10_000;
 
 /**
  * `signal` and `timeoutMs` are both OPTIONAL and additive — every existing caller that passes
- * neither behaves exactly as before, bounded only by `MINT_DEFAULT_TIMEOUT_MS`. Builds its OWN
+ * neither behaves exactly as before, bounded only by `MINT_TIMEOUT_MS`. Builds its OWN
  * `AbortController` and combines it with a caller's `signal`, the same pattern openaiChat and
  * openrouterChat already use, so this fetch can be bounded by ITS OWN timer as well as cancelled
  * from outside — previously it had neither: routedChat's deadline could stop WAITING on it (F1
@@ -44,11 +55,12 @@ const MINT_DEFAULT_TIMEOUT_MS = 30_000;
  * all (round-3 Refuter note: the mint was paid entirely out of the overall deadline's 10% slack,
  * which the smallest callers do not have much of). The cached-token fast path never reaches
  * `fetch`, so neither a signal nor a timer that fires after a cache hit does anything — there is
- * nothing left to cancel by then.
+ * nothing left to cancel by then, and it logs nothing (there is no real mint elapsed time to log).
  */
 export async function getVertexAccessToken(signal?: AbortSignal, timeoutMs?: number): Promise<string> {
   const now = Date.now();
   if (cached && cached.expiresAt - 5 * 60_000 > now) return cached.token;
+  const mintStart = Date.now();
   const sa = loadServiceAccount();
   const tokenUri = sa.token_uri || "https://oauth2.googleapis.com/token";
   const iat = Math.floor(now / 1000);
@@ -57,7 +69,7 @@ export async function getVertexAccessToken(signal?: AbortSignal, timeoutMs?: num
   const signingInput = `${header}.${claims}`;
   const signature = b64url(createSign("RSA-SHA256").update(signingInput).sign(sa.private_key));
   const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), timeoutMs ?? MINT_DEFAULT_TIMEOUT_MS);
+  const tid = setTimeout(() => controller.abort(), timeoutMs ?? MINT_TIMEOUT_MS);
   if (signal) {
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", () => controller.abort(), { once: true });
@@ -76,5 +88,9 @@ export async function getVertexAccessToken(signal?: AbortSignal, timeoutMs?: num
     return cached.token;
   } finally {
     clearTimeout(tid);
+    // Bare number only, no other detail — calibration input for MINT_TIMEOUT_MS above, not a debug
+    // trace. Runs on every non-cached mint regardless of outcome (success, HTTP failure, or abort):
+    // a mint that got aborted near the cap is itself useful signal about whether the cap is right.
+    console.log("[gcp-auth] mint_elapsed_ms", Date.now() - mintStart);
   }
 }
