@@ -108,6 +108,11 @@ about each 60 s probe and writes a second run, `source = 'fused'`, next to the a
 v2 writes one more table than v1: `jev_decision`, with `subject_type = 'probe'` and metadata only.
 Readers that ask for no source get the latest run of any source, which after a v2 run is the fused
 one. Read by `run_id` (v2 returns both ids) to get a particular one.
+E-6.1 (fusion v1.1): a fused run can also hold intervals that Jev proposed where the acoustic run had
+none. A U2 start marker, then at least 3 consecutive consultation-phase probes, then a U2 end marker,
+with non_speech edges trimmed by acoustics. At least one remaining probe must be acoustically `speech`:
+Jev never proposes an encounter nobody heard. They close as `content_boundary`. They are marked in the run's
+`params.jev_origin` by start and end time, and every interval not listed there is acoustic-origin.
 
 The note-safety shadow (order NOTE-SAFETY-SHADOW.md, 23 Sep) added a seventh ungrouped tool,
 invoke, `scribe_note_safety_replay`: runs U4 (note faithfulness) and U8 (completeness prompts)

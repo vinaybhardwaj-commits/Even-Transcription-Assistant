@@ -30,7 +30,7 @@ import { loadDayEvidence } from "@/lib/encounter-clock/shadow-io";
 import { runShadow, toInterval, type ShadowSummary } from "@/lib/encounter-clock/shadow";
 import { HOP_SECONDS } from "@/lib/encounter-clock/probe";
 import {
-  fuseEncounters, phaseOf, FUSION_VERSION, START_P,
+  fuseEncounters, phaseOf, FUSION_VERSION, START_P, END_P, JEV_MIN_RUN,
   type FusionResult, type ProbeJudgement,
 } from "@/lib/encounter-clock/fusion";
 import { slotsFromCentres, textForSlots, probeSubjectId, windowState, boundaryState, type ProbeText } from "@/lib/encounter-clock/fusion-state";
@@ -50,6 +50,8 @@ export const FUSION_CONCURRENCY = 4;
 
 export type FusionDeps = {
   load: typeof loadDayEvidence;
+  /** The acoustic run (probes → gate → smoother). A seam like the others; production uses runShadow. */
+  shadow: typeof runShadow;
   translate: (text: string) => Promise<TranslateOutcome>;
   ask: typeof askJev;
   write: typeof writeHypothesisRun;
@@ -58,6 +60,7 @@ export type FusionDeps = {
 
 const defaultDeps: FusionDeps = {
   load: loadDayEvidence,
+  shadow: runShadow,
   translate: (text) => translateToEnglish(text, "auto"),
   ask: askJev,
   write: writeHypothesisRun,
@@ -74,7 +77,9 @@ export type FusionRunSummary = {
     english: number; translate_failed: number; judged: number; jev_failed: number;
   };
   jev: { calls: number; latency_ms_total: number; persisted: number };
-  fusion: FusionResult["counts"] & { acoustic_encounters: number; fused_encounters: number };
+  fusion: FusionResult["counts"] & { acoustic_encounters: number; fused_encounters: number; jev_encounters: number };
+  /** E-6.1: what Jev's own proposals did. */
+  proposals: FusionResult["proposals"];
 };
 
 export type FusionRunResult =
@@ -127,7 +132,7 @@ export async function runFusionShadowForRoomDay(
   if (!evidence) return { ok: false, error: "no_recorded_audio" };
 
   const hopMs = HOP_SECONDS * 1000;
-  const { run: acousticRun, summary: acoustic, encounters, verdicts, transcript } = runShadow(evidence);
+  const { run: acousticRun, summary: acoustic, encounters, verdicts, transcript } = d.shadow(evidence);
   const slots = slotsFromCentres(verdicts.map((v) => v.t), hopMs);
   const texts: ProbeText[] = textForSlots(slots, transcript.spans, transcript.coverage);
 
@@ -207,6 +212,10 @@ export async function runFusionShadowForRoomDay(
       ...acousticRun.params,
       shadow_v2_version: SHADOW_V2_VERSION, fusion_version: FUSION_VERSION, start_p: START_P,
       prompt_versions: promptVersions, fusion_counts: fused.counts,
+      // E-6.1: an interval Jev proposed, marked origin 'jev' by its span (the store has no per-interval
+      // origin column; a run's intervals are unique by span). Every other interval is acoustic-origin.
+      end_p: END_P, jev_min_run: JEV_MIN_RUN, jev_proposals: fused.proposals,
+      jev_origin: fused.encounters.filter((_, k) => fused.origins[k] === "jev").map((e) => ({ start_ms: e.start_ms, end_ms: e.end_ms })),
       probes_judged: judgedCount, probes_eligible: eligible.length,
     },
     intervals: fused.encounters.map(toInterval),
@@ -243,7 +252,11 @@ export async function runFusionShadowForRoomDay(
         english: eligible.length, translate_failed: translateFailed, judged: judgedCount, jev_failed: jevFailed,
       },
       jev: { calls, latency_ms_total: latency, persisted },
-      fusion: { ...fused.counts, acoustic_encounters: encounters.length, fused_encounters: fused.encounters.length },
+      fusion: {
+        ...fused.counts, acoustic_encounters: encounters.length, fused_encounters: fused.encounters.length,
+        jev_encounters: fused.origins.filter((o) => o === "jev").length,
+      },
+      proposals: fused.proposals,
     },
   };
 }
