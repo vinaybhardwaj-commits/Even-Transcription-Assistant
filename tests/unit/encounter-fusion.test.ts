@@ -13,6 +13,7 @@ vi.mock("@/lib/db", () => ({
 import { join } from "node:path";
 import {
   clinicalVerdict, fuseEncounters, phaseOf, startVerdict, START_P, FUSION_VERSION, type ProbeJudgement,
+  proposeFromJev, inConsultation, END_P, JEV_MIN_RUN,
 } from "@/lib/encounter-clock/fusion";
 import {
   slotsFromCentres, textForSlots, probeSubjectId, windowState, boundaryState, FUSION_HOP_MS,
@@ -164,6 +165,138 @@ describe("fuseEncounters", () => {
     const r = fuseEncounters([enc(5, 7), enc(0, 2)], probes, probes.map((_, i) => clinical(i)), HOP);
     expect(r.decisions.map((d) => d.probes)).toEqual([3, 3]);
     expect(r.encounters.map((e) => e.start_ms)).toEqual([T0 - 30_000, T0 + 5 * HOP - 30_000]);
+  });
+});
+
+describe("E-6.1 — Jev proposes where acoustics proposed nothing", () => {
+  const phase = (p: "pre" | "consult" | "post" | "none") => ({
+    choice: ({ pre: "greeting", consult: "history_taking", post: "closing", none: "not_a_consultation" } as const)[p],
+    phase: p, confidence: 0.95, band: "act" as const,
+  });
+  /** A clinical probe in the given phase, with U2 start/end probabilities. */
+  const cj = (index: number, p: "pre" | "consult" | "post", start = 0.1, end = 0.1): ProbeJudgement =>
+    clinical(index, { phase: phase(p), start, end });
+  /** The textbook consultation: greeting with a start marker, consult, closing with an end marker. */
+  const visit = (a: number, len: number): ProbeJudgement[] =>
+    Array.from({ length: len }, (_, k) => cj(a + k, k === 0 ? "pre" : k === len - 1 ? "post" : "consult", k === 0 ? 0.95 : 0.1, k === len - 1 ? 0.95 : 0.1));
+  const withVerdicts = (n: number, v: Record<number, "non_speech" | "unjudged">): AcousticProbe[] =>
+    grid(n).map((p, i) => (v[i] ? { ...p, verdict: v[i]!, reason: v[i] === "non_speech" ? "non_speech" : "no_energy_evidence" } : p));
+
+  it("the order's constants: at least 3 probes; start and end at the act band", () => {
+    expect(JEV_MIN_RUN).toBe(3);
+    expect(END_P).toBe(0.9);
+    expect(FUSION_VERSION).toBe("encounter-fusion-v1.1");
+  });
+
+  it("consultation phases are pre, consult and post, on a clinical probe", () => {
+    expect(inConsultation(cj(0, "pre"))).toBe(true);
+    expect(inConsultation(cj(0, "consult"))).toBe(true);
+    expect(inConsultation(cj(0, "post"))).toBe(true);
+    expect(inConsultation(clinical(0, { phase: phase("none") }))).toBe(false);
+    // U6 clinical with U1 "none" at the CAUTION band: clinical (no contradiction fires), but not in a consultation phase
+    const cautiousNone = clinical(0, { phase: { ...phase("none"), confidence: 0.7, band: "caution" } });
+    expect(clinicalVerdict(cautiousNone).clinical).toBe(true);
+    expect(inConsultation(cautiousNone)).toBe(false);
+    expect(inConsultation(clinical(0, { phase: undefined }))).toBe(false);
+    expect(inConsultation(chatter(0, { phase: phase("consult") }))).toBe(false);
+  });
+
+  it("start marker → consultation run → end marker, 3 probes, no acoustic encounter: one candidate, origin jev", () => {
+    const r = proposeFromJev([], grid(6), visit(1, 3), HOP);
+    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, trimmed_probes: 0 });
+    expect(r.encounters).toHaveLength(1);
+    // probes 1..3 by hand: centres T0+HOP..T0+3*HOP, each owning half a hop either side
+    expect(r.encounters[0]).toMatchObject({ start_ms: T0 + HOP - 30_000, end_ms: T0 + 3 * HOP + 30_000, speech_probes: 3, closed_by: "content_boundary" });
+  });
+
+  it("markers at exactly the act band count: start 0.9 opens, end 0.9 closes", () => {
+    const js = visit(1, 3).map((j, k) => ({ ...j, start: k === 0 ? START_P : j.start, end: k === 2 ? END_P : j.end }));
+    expect(proposeFromJev([], grid(6), js, HOP).counts).toMatchObject({ proposed: 1 });
+    const below = js.map((j, k) => (k === 2 ? { ...j, end: 0.8999 } : j));
+    expect(proposeFromJev([], grid(6), below, HOP).counts).toMatchObject({ proposed: 0, unclosed: 1 });
+  });
+
+  it("two probes is too short", () => {
+    const r = proposeFromJev([], grid(6), visit(1, 2), HOP);
+    expect(r.encounters).toEqual([]);
+    expect(r.counts).toMatchObject({ proposed: 0, short: 1 });
+  });
+
+  it("no start marker, no candidate — however long the consultation run", () => {
+    const js = visit(0, 5).map((j, k) => (k === 0 ? { ...j, start: 0.5 } : j));
+    const r = proposeFromJev([], grid(6), js, HOP);
+    expect(r.encounters).toEqual([]);
+    expect(r.counts).toMatchObject({ proposed: 0, unclosed: 0 });
+  });
+
+  it("no end marker: unclosed, and no end is invented", () => {
+    const js = visit(0, 5).map((j, k) => (k === 4 ? { ...j, end: 0.5 } : j));
+    const r = proposeFromJev([], grid(6), js, HOP);
+    expect(r.encounters).toEqual([]);
+    expect(r.counts).toMatchObject({ proposed: 0, unclosed: 1 });
+  });
+
+  it("a non-consultation probe, a review-band probe, or an unjudged probe breaks the run", () => {
+    const breakAt2 = (b: ProbeJudgement | null) => {
+      const js = visit(0, 5).filter((j) => j.index !== 2);
+      return proposeFromJev([], grid(6), b ? [...js, b] : js, HOP).counts;
+    };
+    expect(breakAt2(chatter(2))).toMatchObject({ proposed: 0, unclosed: 1 });
+    expect(breakAt2(cj(2, "consult"))).toMatchObject({ proposed: 1, unclosed: 0 }); // control: the unbroken run
+    expect(breakAt2(clinical(2, { phase: phase("consult"), kind: { choice: "clinical_consultation", confidence: 0.4, band: "review" } }))).toMatchObject({ proposed: 0, unclosed: 1 });
+    expect(breakAt2(null)).toMatchObject({ proposed: 0, unclosed: 1 });
+  });
+
+  it("a hole in the probe series breaks the run", () => {
+    const probes = grid(6).map((p, i) => (i >= 3 ? { ...p, t: p.t + 5 * HOP } : p));
+    const r = proposeFromJev([], probes, visit(1, 4), HOP);
+    expect(r.counts).toMatchObject({ proposed: 0, unclosed: 1 });
+  });
+
+  it("a second start marker before any end is a new patient: the first is abandoned, the second is proposed", () => {
+    const js = [cj(0, "pre", 0.95), cj(1, "consult"), ...visit(2, 3)];
+    const r = proposeFromJev([], grid(6), js, HOP);
+    expect(r.counts).toMatchObject({ proposed: 1, unclosed: 1 });
+    expect(r.encounters[0]!.start_ms).toBe(T0 + 2 * HOP - 30_000);
+  });
+
+  it("never proposes inside an acoustic encounter: acoustics already proposed there, fusion arbitrates it", () => {
+    expect(proposeFromJev([enc(1, 3)], grid(6), visit(1, 3), HOP).counts).toMatchObject({ proposed: 0 });
+    // an acoustic encounter covering the middle probe only breaks the run
+    expect(proposeFromJev([enc(2, 2)], grid(6), visit(1, 3), HOP).counts).toMatchObject({ proposed: 0, unclosed: 1 });
+  });
+
+  it("ACOUSTICS TRIMS: non_speech edges are cut, the rest kept", () => {
+    const probes = withVerdicts(7, { 1: "non_speech", 5: "non_speech" });
+    const r = proposeFromJev([], probes, visit(1, 5), HOP);
+    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, trimmed_probes: 2 });
+    expect(r.encounters[0]).toMatchObject({ start_ms: T0 + 2 * HOP - 30_000, end_ms: T0 + 4 * HOP + 30_000, speech_probes: 3 });
+  });
+
+  it("trimmed below the floor is dropped; unjudged edges are NOT trimmed (no evidence is not silence)", () => {
+    const cut = proposeFromJev([], withVerdicts(7, { 1: "non_speech", 2: "non_speech", 5: "non_speech" }), visit(1, 5), HOP);
+    expect(cut.counts).toMatchObject({ proposed: 0, trimmed_away: 1 });
+    const kept = proposeFromJev([], withVerdicts(7, { 1: "unjudged", 5: "unjudged" }), visit(1, 5), HOP);
+    expect(kept.counts).toMatchObject({ proposed: 1, trimmed_probes: 0 });
+    expect(kept.encounters[0]).toMatchObject({ start_ms: T0 + HOP - 30_000, end_ms: T0 + 5 * HOP + 30_000, speech_probes: 3, unjudged_ms: 2 * HOP });
+  });
+
+  it("fuseEncounters carries both origins, in time order, index for index", () => {
+    const probes = grid(10);
+    const acoustic = enc(6, 8);
+    const js = [...visit(1, 3), clinical(6), clinical(7), clinical(8)];
+    const r = fuseEncounters([acoustic], probes, js, HOP);
+    expect(r.encounters.map((e) => e.start_ms)).toEqual([T0 + HOP - 30_000, acoustic.start_ms]);
+    expect(r.origins).toEqual(["jev", "acoustic"]);
+    expect(r.counts).toMatchObject({ confirm: 1 });
+    expect(r.proposals.proposed).toBe(1);
+  });
+
+  it("a rejected acoustic encounter does not become a Jev proposal on the same probes", () => {
+    // acoustics proposed 1..3, Jev says none of it is clinical: rejected, and not re-proposed
+    const r = fuseEncounters([enc(1, 3)], grid(6), [chatter(1, { start: 0.95 }), chatter(2), chatter(3, { end: 0.95 })], HOP);
+    expect(r.encounters).toEqual([]);
+    expect(r.origins).toEqual([]);
   });
 });
 
@@ -416,6 +549,34 @@ describe("shadow-runner v2", () => {
     const s = JSON.stringify(r);
     expect(s).not.toMatch(/placeholder/);
     expect(s).not.toMatch(/tr\(/);
+  });
+
+  it("E-6.1: with no acoustic encounter, a Jev start → end run is written as a fused interval marked origin jev", async () => {
+    const line = (x: unknown) => Math.max(...(String(x).match(/\d+/g) ?? ["-1"]).map(Number));
+    const ask: FusionDeps["ask"] = async (state, asks) => {
+      const st = state as { W2?: string; window_text?: string };
+      const n = line(st.W2 ?? st.window_text);
+      return answers(asks, (a) =>
+        a.answerKey === "phase" ? { type: "choice", choice: n === 5 ? "greeting" : n === 9 ? "closing" : "history_taking", probabilities: {}, confidence: 0.95 }
+        : a.answerKey === "kind" ? { type: "choice", choice: n >= 5 && n <= 9 ? "clinical_consultation" : "social_chatter", probabilities: {}, confidence: 0.95 }
+        : a.answerKey === "start" ? { type: "noul", noul: n === 5 ? 0.97 : 0.02 }
+        : { type: "noul", noul: n === 9 ? 0.97 : 0.02 });
+    };
+    const h = harness({ ask, load: async () => ({ ...day(), level_samples: [] }) });
+    const r = await runFusionShadowForRoomDay(INPUT, h.deps);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.summary.fusion).toMatchObject({ acoustic_encounters: 0, jev_encounters: 1, fused_encounters: 1 });
+    expect(r.summary.proposals).toMatchObject({ proposed: 1 });
+    const [acousticRun, fusedRun] = h.writes;
+    expect(acousticRun!.intervals).toEqual([]);
+    expect(fusedRun!.source).toBe("fused");
+    expect(fusedRun!.intervals).toHaveLength(1);
+    const iv = fusedRun!.intervals[0]!;
+    expect(iv.closed_by).toBe("content_boundary");
+    expect(fusedRun!.params).toMatchObject({ jev_origin: [{ start_ms: iv.start_ms, end_ms: iv.end_ms }], jev_min_run: 3, end_p: 0.9, fusion_version: "encounter-fusion-v1.1" });
+    // lines 5..9 are a minute each: five probes, 5 minutes of span
+    expect(iv.end_ms - iv.start_ms).toBe(5 * MIN);
   });
 
   it("no recorded audio: nothing asked, nothing written", async () => {
