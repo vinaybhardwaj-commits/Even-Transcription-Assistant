@@ -48,6 +48,7 @@ import { sanitizeEnglish, sanitizeOriginal, trimLeadingNoiseEntries } from "@/li
 import { transcribeDiarized } from "@/lib/transcribe";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { assessTranscriptQuality } from "@/lib/transcript-quality";
+import { runNoteSafetyShadow } from "@/lib/jev/note-safety-shadow";
 import type { SarvamDiarEntry } from "@/lib/sarvam";
 
 export const runtime = "nodejs";
@@ -932,6 +933,7 @@ export async function POST(
           const noteRes = await generateNote(row!.transcript_raw!, { noteType: row!.note_type ?? undefined, nativeReference: nativeRef, onEvent: stepEmit });
           if (noteRes.ok) {
             await sql`UPDATE encounter SET note_json = ${JSON.stringify(noteRes.note)}::jsonb, transcript_clean = ${row!.transcript_raw} WHERE id = ${id}`;
+            runNoteSafetyShadow(id); // U4/U8 shadow (order NOTE-SAFETY-SHADOW.md) — fire-and-forget, flag off by default
             progressed = true;
           } else {
             console.warn(`[process:step] enc=${id} note not ok: ${noteRes.error}`);
@@ -1146,6 +1148,7 @@ export async function POST(
             clearInterval(hbInterval);
             return;
           }
+          runNoteSafetyShadow(id); // U4/U8 shadow (order NOTE-SAFETY-SHADOW.md) — fire-and-forget, flag off by default
 
           // ---- CDMSS pipeline (surface=cdmss-analysis) — OFF for operative/dietetic/physio (note matrix) ----
           let cdmssToStore: CdmssRich | CdmssOutput | null = row.cdmss_json;
@@ -1365,6 +1368,7 @@ export async function POST(
     const msg = e instanceof Error ? e.message : String(e);
     return respondError("PIPELINE_FAILED", `note_persist_failed: ${msg.slice(0, 120)}`);
   }
+  runNoteSafetyShadow(id); // U4/U8 shadow (order NOTE-SAFETY-SHADOW.md) — fire-and-forget, flag off by default
 
   let cdmssToStore: CdmssRich | CdmssOutput | null = null;
   let cdmssErr: string | undefined;
