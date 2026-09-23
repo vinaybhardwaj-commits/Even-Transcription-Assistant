@@ -8,6 +8,7 @@
  *   2. AFTER 0118: the pre-existing run reads back as 'acoustic' (the DEFAULT, no row rewritten); a fused
  *      run with a `content_boundary` interval writes and reads back by source; an unknown source, an
  *      unknown closed_by and an unknown jev_decision subject_type are refused; 'probe' is admitted.
+ *      readLatestAcousticRun (v1's `supersedes`) falls back before 0118 and skips a fused run after it.
  *   3. IDEMPOTENT: applying 0118 again changes nothing and errors on nothing.
  *
  * Only the driver is a stand-in: `@/lib/db` is the harness's psql-backed sql. Values synthetic.
@@ -19,7 +20,7 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>) }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v) }));
 
-import { readLatestRun, writeHypothesisRun, type HypothesisInterval, type HypothesisRunInput } from "@/lib/encounter-hypotheses";
+import { readLatestAcousticRun, readLatestRun, writeHypothesisRun, type HypothesisInterval, type HypothesisRunInput } from "@/lib/encounter-hypotheses";
 
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -60,6 +61,9 @@ describe.skipIf(!HAVE_DOCKER)("0118 (encounter fusion) over a real 0001-0117 sch
       const preRead = await readLatestRun("rd_e6proof");
       expect(preRead.run?.id).toBe(pre.ok ? pre.run_id : "");
       expect(preRead.run?.source).toBeUndefined();
+      // the v1 runner's supersedes read: scoped read refused by THIS database, fallback returns the same run
+      await expect(readLatestRun("rd_e6proof", undefined, "acoustic")).rejects.toThrow();
+      expect((await readLatestAcousticRun("rd_e6proof", "encounter-clock-smooth-v1")).run?.id).toBe(pre.ok ? pre.run_id : "");
       await expect(writeHypothesisRun(run({ source: "fused" }))).rejects.toThrow();
 
       // ── 2. the act
@@ -79,6 +83,9 @@ describe.skipIf(!HAVE_DOCKER)("0118 (encounter fusion) over a real 0001-0117 sch
       expect(fusedRead.run!.hypotheses.map((h) => h.closed_by)).toEqual(["content_boundary", "non_speech"]);
       // the acoustic reader still gets the acoustic run, not the newer fused one
       expect((await readLatestRun("rd_e6proof", undefined, "acoustic")).run?.id).toBe(pre.ok ? pre.run_id : "");
+      // the v1 runner's supersedes read skips the newer fused run (ETA-Refuter, E6 verdict)
+      expect((await readLatestRun("rd_e6proof", "encounter-clock-smooth-v1")).run?.id).toBe(fused.ok ? fused.run_id : "");
+      expect((await readLatestAcousticRun("rd_e6proof", "encounter-clock-smooth-v1")).run?.id).toBe(pre.ok ? pre.run_id : "");
       // an acoustic write after 0118 lands as 'acoustic' by default
       const post = await writeHypothesisRun(run());
       expect((await readLatestRun("rd_e6proof", undefined, "acoustic")).run).toMatchObject({ id: post.ok ? post.run_id : "", source: "acoustic" });

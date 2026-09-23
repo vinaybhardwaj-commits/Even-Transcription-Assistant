@@ -395,3 +395,29 @@ export async function readLatestRun(
   if (!r) return { run: null, runs_for_day: 0 };
   return { run: rowToRun(r, await hypothesesOf(String(r.id))), runs_for_day: num(r.runs_for_day) };
 }
+
+/** PURE — is this the database saying `encounter_hypothesis_run.source` does not exist (0118 not applied)? */
+export function isMissingSourceColumn(e: unknown): boolean {
+  const err = e as { code?: unknown; message?: unknown } | null;
+  if (err?.code === "42703") return true;
+  return typeof err?.message === "string" && /column "?(?:\w+\.)?source"? does not exist/i.test(err.message);
+}
+
+/**
+ * The latest ACOUSTIC run of a room-day: what an acoustic write displaces for readers (the v1 shadow
+ * runner's `supersedes`). Once 0118 is applied the read is scoped by source, so a fused run — same
+ * smoother version, written by v2 — is never reported as displaced by an acoustic one (ETA-Refuter,
+ * E6 verdict). Before 0118 the column does not exist, and neither can a fused run (its write needs the
+ * column), so the unscoped read IS the acoustic read: the fallback is exact, not a guess.
+ */
+export async function readLatestAcousticRun(
+  roomDayId: string,
+  smootherVersion?: string,
+): Promise<{ run: StoredRun | null; runs_for_day: number }> {
+  try {
+    return await readLatestRun(roomDayId, smootherVersion, "acoustic");
+  } catch (e) {
+    if (isMissingSourceColumn(e)) return readLatestRun(roomDayId, smootherVersion);
+    throw e;
+  }
+}

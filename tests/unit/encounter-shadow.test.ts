@@ -363,6 +363,53 @@ describe("E-shadow — the write path", () => {
     expect(out).toMatchObject({ ok: true, supersedes: null });
   });
 
+  // E-6 (ETA-Refuter, E6 verdict): v2 writes a FUSED run under the same smoother version. An acoustic run
+  // does not displace it, so `supersedes` must come from a read scoped to source 'acoustic' — and before
+  // 0118 (no source column, so no fused run can exist) from the unscoped read, which is then the same thing.
+  const runRow = (id: string) => ({ id, room_day_id: "rd_test", smoother_version: SMOOTHER_VERSION, gate_version: GATE_VERSION, params: {}, probes_total: 0, probes_speech: 0, probes_non_speech: 0, probes_unjudged: 0, n_hypotheses: 0, created_at: iso(T0), runs_for_day: 2 });
+  const isRunRead = (text: string) => /^SELECT/i.test(text) && /FROM encounter_hypothesis_run/i.test(text);
+  const isScoped = (text: string) => /AND source = \?/i.test(text);
+
+  it("supersedes the latest ACOUSTIC run, never a newer fused one", async () => {
+    wire();
+    const base = responder;
+    responder = (text, values) => {
+      if (isRunRead(text)) return isScoped(text) && values.includes("acoustic") ? [runRow("ehr_acoustic")] : [runRow("ehr_fused_newer")];
+      return base(text, values);
+    };
+    const out = await runShadowForRoomDay({ room_id: "room_1", room_day_id: "rd_test", ist_date: "2026-09-23" });
+    expect(out).toMatchObject({ ok: true, supersedes: "ehr_acoustic" });
+  });
+
+  it("before 0118 (the source column is missing) it falls back to the unscoped read, which is then acoustic-only", async () => {
+    wire();
+    const base = responder;
+    responder = (text, values) => {
+      if (isRunRead(text)) {
+        if (isScoped(text)) throw Object.assign(new Error('column "source" does not exist'), { code: "42703" });
+        return [runRow("ehr_pre0118")];
+      }
+      return base(text, values);
+    };
+    const out = await runShadowForRoomDay({ room_id: "room_1", room_day_id: "rd_test", ist_date: "2026-09-23" });
+    expect(out).toMatchObject({ ok: true, supersedes: "ehr_pre0118" });
+  });
+
+  it("any OTHER database error on that read is not swallowed, and nothing is written", async () => {
+    wire();
+    const base = responder;
+    responder = (text, values) => {
+      // only the scoped read fails: a fallback that swallowed this error would succeed on the unscoped one
+      if (isRunRead(text)) {
+        if (isScoped(text)) throw Object.assign(new Error("connection reset"), { code: "08006" });
+        return [runRow("ehr_must_not_be_used")];
+      }
+      return base(text, values);
+    };
+    await expect(runShadowForRoomDay({ room_id: "room_1", room_day_id: "rd_test", ist_date: "2026-09-23" })).rejects.toThrow(/connection reset/);
+    expect(calls.some((c) => /INSERT/i.test(c.text))).toBe(false);
+  });
+
   it("a day with no recorded audio is refused, and nothing is written", async () => {
     responder = () => [];
     const out = await runShadowForRoomDay({ room_id: "room_1", room_day_id: "rd_none", ist_date: "2026-09-23" });

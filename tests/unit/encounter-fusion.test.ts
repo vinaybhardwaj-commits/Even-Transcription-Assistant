@@ -22,7 +22,7 @@ import type { AcousticProbe, DayEvidence } from "@/lib/encounter-clock/shadow";
 import { runShadow } from "@/lib/encounter-clock/shadow";
 import { encounterFusionShadowEnabled, ENCOUNTER_FUSION_SHADOW } from "@/lib/encounter-clock/flag";
 import { runFusionShadowForRoomDay, type FusionDeps } from "@/lib/encounter-clock/shadow-v2";
-import { RUN_SOURCES, checkRunInput, type HypothesisRunInput, type WriteRunResult } from "@/lib/encounter-hypotheses";
+import { RUN_SOURCES, checkRunInput, isMissingSourceColumn, type HypothesisRunInput, type WriteRunResult } from "@/lib/encounter-hypotheses";
 import { JEV_SUBJECT_TYPES, JevDisabledError } from "@/lib/jev/types";
 import type { JevAsk, JevAskOutcome } from "@/lib/jev/ask";
 import {
@@ -240,6 +240,21 @@ describe("0118 vocabularies match the code", () => {
     };
     expect(checkRunInput({ ...base, source: "fused" })).not.toContain("bad_source");
     expect(checkRunInput({ ...base, source: "made_up" as never })).toContain("bad_source");
+  });
+});
+
+describe("isMissingSourceColumn — the pre-0118 fallback fires on exactly one error", () => {
+  it("the Postgres code, or the message naming the source column", () => {
+    expect(isMissingSourceColumn({ code: "42703", message: "anything" })).toBe(true);
+    expect(isMissingSourceColumn(new Error('ERROR:  column "source" does not exist'))).toBe(true);
+    expect(isMissingSourceColumn(new Error("column encounter_hypothesis_run.source does not exist"))).toBe(true);
+  });
+  it("not another column, not another error, not nothing", () => {
+    expect(isMissingSourceColumn(new Error('column "sources" does not exist'))).toBe(false);
+    expect(isMissingSourceColumn(new Error('column "match_source" does not exist'))).toBe(false);
+    expect(isMissingSourceColumn({ code: "08006", message: "connection reset" })).toBe(false);
+    expect(isMissingSourceColumn(null)).toBe(false);
+    expect(isMissingSourceColumn(undefined)).toBe(false);
   });
 });
 
