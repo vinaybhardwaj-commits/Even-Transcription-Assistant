@@ -1514,6 +1514,50 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     expect(e[0]!.diarize_run_id).toBe(before[0]!.last_run_id);
   }, 300_000);
 
+  it("EMOTION_BATCH_LIMIT — the enqueue scan offers exactly the configured count per tick, not just one, when more are eligible", async () => {
+    // 23 Sep backlog fix: EMOTION_BATCH_LIMIT (default 1, env override 1..10 via the SAME
+    // clampedIntEnv AUTO_DRAIN_BATCH_LIMIT already uses) replaces the hardcoded `LIMIT 1`.
+    //
+    // ETA-Refuter PASS-WITH-FIXES, FIX 1: the previous version imported EMOTION_BATCH_LIMIT and
+    // asserted the result equals THAT SAME constant — so a mutant (or an honest change) that
+    // moves the hardcoded default from 1 to 5 shifts both the seed count and the expectation
+    // together and the test keeps passing either way. Fixed by setting the env var to a FIXED
+    // value (3) BEFORE a forced fresh import (vi.resetModules), seeding a FIXED count (5), and
+    // asserting a FIXED expected offered-count (3) that does not move if the default ever does.
+    reset();
+    const sql = G.__pgsql;
+    const PREV_LIMIT = process.env.EMOTION_BATCH_LIMIT;
+    process.env.EMOTION_BATCH_LIMIT = "3";
+    vi.resetModules();
+    const { EMOTION_BATCH_LIMIT, enqueueEmotionWindows } = await import("@/lib/emotion/enqueue");
+    expect(EMOTION_BATCH_LIMIT, "the env override must actually be read on this fresh import").toBe(3);
+
+    const ids = Array.from({ length: 5 }, (_, i) => `bw_emo_batch${i}`);
+    for (const [i, id] of ids.entries()) await seedEmotionWindow(id, (28 + i) * WINDOW_MS);
+
+    let e: Awaited<ReturnType<typeof enqueueEmotionWindows>>;
+    try {
+      e = await enqueueEmotionWindows({ actor: "cron:test", log: () => {} });
+    } finally {
+      // Restore BEFORE any assertion can throw and skip it — every later test in this file must
+      // see the true default (env unset), not this test's forced override.
+      if (PREV_LIMIT === undefined) delete process.env.EMOTION_BATCH_LIMIT; else process.env.EMOTION_BATCH_LIMIT = PREV_LIMIT;
+      vi.resetModules();
+    }
+
+    expect(e.enqueued, "offered more than the configured 3 in one tick, out of 5 eligible").toHaveLength(3);
+    // Oldest first (w.start_ms ASC), so the ones NOT offered this tick are exactly the newest 2.
+    expect(e.enqueued.map((x) => x.window_id)).toEqual(ids.slice(0, 3));
+    const q = (await sql`SELECT count(*)::int AS n FROM scribe_job WHERE kind = 'emotion_window' AND status IN ('queued', 'running')`) as Array<{ n: number }>;
+    expect(q[0]!.n, "one scribe_job row per offered window, no more").toBe(3);
+    // CLEANUP, not left queued: every other test in this file drives its job(s) to a terminal
+    // status before ending, because a left-behind queued/running emotion_window row trips the
+    // "busy" gate for every later enqueue call in the same file. This test's jobs are never run.
+    // One at a time, not `= ANY($array)` — the psql-backed harness here serialises a JS array to
+    // a JSON literal, not a Postgres array literal, and ANY(jsonb) does not parse the same way.
+    for (const x of e.enqueued) await sql`DELETE FROM scribe_job WHERE id = ${x.job_id}`;
+  }, 300_000);
+
   it("P1 — AN UNHEALTHY /health FAILS THE WINDOW even when it carries a cap; an implausible cap fails it by name and sends no audio", async () => {
     const sql = G.__pgsql;
     const cases: Array<[string, () => void, RegExp]> = [

@@ -6,15 +6,30 @@
  * been recorded for THAT diarize run — never, or against an earlier run (diarize re-ran, successfully
  * or not, so the turns were rewritten), or it FAILED with attempts left (EMOTION_MAX_ATTEMPTS).
  *
- * ONE AT A TIME. Nothing is enqueued while any emotion_window job is queued or running, and one
- * window is taken per tick. The Mini has one emotion model on shared RAM beside whisper, the router,
- * diarize and the recorder; a backlog should drain slowly rather than crowd them.
+ * ONE AT A TIME BY DEFAULT. Nothing is enqueued while any emotion_window job is queued or running
+ * (unchanged — this file never touches that gate), and EMOTION_BATCH_LIMIT windows are taken per
+ * tick once it is not busy (default 1). The Mini has one emotion model on shared RAM beside
+ * whisper, the router, diarize and the recorder; a backlog should drain slowly by default. The
+ * limit is an env override, not a hardcoded bump, so a night with the Mini otherwise idle (kiosks
+ * off) can pre-load more work per tick without touching this file's code.
+ *
+ * NOT LIVE-TUNABLE. EMOTION_BATCH_LIMIT below is a top-level `const`, read from `process.env`
+ * ONCE when this module is first loaded — so setting or changing the env var takes effect on the
+ * NEXT DEPLOY (a fresh module load), never on an already-running instance. Do not expect a
+ * dashboard env-var edit alone to change tonight's pacing; it has to ride a deploy.
  */
 import { sql } from "@/lib/db";
 import { emotionEnabled, EMOTION_ENABLED_ENV } from "./gate";
 import { emotionSecretConfigured, EMOTION_SECRET_ENV } from "./client";
+import { clampedIntEnv } from "@/lib/stt/auto-drain";
 
 export const EMOTION_MAX_ATTEMPTS = 3;
+
+/** Windows offered to the emotion queue per tick. Default 1 (see file header). Env override
+ *  clamped 1..10 — e.g. EMOTION_BATCH_LIMIT=10 for a backlog push while the Mini is idle. Frozen
+ *  at module load (see file header) — a new value needs a deploy, not just a dashboard edit. */
+export const EMOTION_BATCH_LIMIT_ENV = "EMOTION_BATCH_LIMIT";
+export const EMOTION_BATCH_LIMIT = clampedIntEnv(EMOTION_BATCH_LIMIT_ENV, 1, 1, 10);
 
 export type EmotionEnqueueResult = {
   enabled: boolean;
@@ -62,7 +77,7 @@ export async function enqueueEmotionWindows(opts: { actor: string; origin?: stri
             OR e.diarize_run_id IS DISTINCT FROM d.last_run_id
             OR (e.state = 'failed' AND e.attempts < ${EMOTION_MAX_ATTEMPTS}))
      ORDER BY (e.window_id IS NOT NULL) ASC, w.start_ms ASC
-     LIMIT 1
+     LIMIT ${EMOTION_BATCH_LIMIT}
   `) as Array<{ window_id: string; attempts: number | null }>;
 
   const { submitJob } = await import("@/lib/jobs/submit");
