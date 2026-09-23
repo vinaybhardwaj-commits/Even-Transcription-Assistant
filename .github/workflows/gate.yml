@@ -70,13 +70,9 @@ jobs:
         # Never piped: the exit code is vitest's own.
         # PUBLIC LOGS (the repo is public): the dot reporter prints no test names or values, and --silent drops
         # console output from the code under test; github-actions keeps failure annotations for gh-gate.sh.
-        # CI-SKIP (marked, listed in the gate summary): attest-method-testimony reads
-        # `git show vinay/attest-capture:...`, a branch that exists only on the Mini/box CI mirror, never on
-        # GitHub, so it cannot run here. It still runs on the box gate.
         run: >-
           npx vitest run --shard=${{ matrix.shard }}/8
           --reporter=dot --reporter=github-actions --silent
-          --exclude tests/unit/attest-method-testimony.test.ts
 
   build:
     runs-on: ubuntu-latest
@@ -98,6 +94,5 @@ jobs:
     steps:
       - name: verdict
         run: |
-          echo "::notice::CI-SKIP tests/unit/attest-method-testimony.test.ts (needs branch vinay/attest-capture, not on GitHub; runs on the box gate)"
           echo "typecheck=${{ needs.typecheck.result }} test=${{ needs.test.result }} build=${{ needs.build.result }}"
           [ "${{ needs.typecheck.result }}" = success ] && [ "${{ needs.test.result }}" = success ] && [ "${{ needs.build.result }}" = success ]
