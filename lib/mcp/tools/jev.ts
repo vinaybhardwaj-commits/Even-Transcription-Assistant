@@ -9,9 +9,14 @@
  * scribe_jev_decisions is READ-only and returns jev_decision rows (migration 116) — the general
  * decision log every use writes through lib/jev/ask.ts. No FK on subject_id (it is polymorphic on
  * subject_type, see the migration), so filtering is by exact match on the columns given, ANDed.
+ * scribe_note_safety_replay (order NOTE-SAFETY-SHADOW.md §3) INVOKES U4/U8 against an EXISTING
+ * encounter's note_json/transcript_clean — no note is regenerated. Same JEV_NOTE_FAITHFULNESS
+ * gate as the automatic pipeline hook (lib/jev/note-safety-shadow.ts); off answers {ran:false}
+ * with zero Jev calls, exactly like the automatic path. For sampling flags during the shadow week.
  */
 import { query } from "@/lib/brain/db";
 import { submitJob } from "@/lib/jobs/submit";
+import { runNoteSafetyShadowAsync } from "@/lib/jev/note-safety-shadow";
 import { argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 const jevWindowRun: McpTool = {
@@ -148,4 +153,24 @@ const jevDecisions: McpTool = {
     }),
 };
 
-export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions];
+const noteSafetyReplay: McpTool = {
+  name: "scribe_note_safety_replay",
+  description:
+    "INVOKES — U4/U8 shadow evaluation (order NOTE-SAFETY-SHADOW.md) against ONE encounter's EXISTING note_json/transcript_clean. No note is regenerated, nothing is shown to a clinician, no change to the note. Gated by the SAME JEV_NOTE_FAITHFULNESS flag as the automatic pipeline hook (lib/jev/note-safety-shadow.ts): off answers { ran:false } with zero Jev calls. Returns counts only (sentences asked, questions asked) — never sentence, note, or transcript text. Results land in jev_decision only, for V to sample during the shadow week.",
+  scope: "invoke",
+  inputSchema: {
+    type: "object",
+    properties: { encounter_id: { type: "string", description: "enc_… id" } },
+    required: ["encounter_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ran: false as boolean }, async () => {
+      const encounterId = argStr(args, "encounter_id", 64);
+      if (!encounterId || !encounterId.startsWith("enc_")) return { ran: false, error: "bad_encounter_id" };
+      const outcome = await runNoteSafetyShadowAsync(encounterId);
+      return { ok: true, ...outcome };
+    }),
+};
+
+export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions, noteSafetyReplay];
