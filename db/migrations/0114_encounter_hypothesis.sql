@@ -18,6 +18,13 @@
 -- only by a voiceprint match; the raw cosine is logged whether or not it cleared a threshold. A
 -- heuristic role (the diarize service's guess, a Jev role label) is never written here as identity.
 --
+-- AMENDED IN PLACE, 23 Sep, on Fable's sign-off and only because it is applied on NO persistent
+-- database: the ETA Neon project holds one branch (production, at 112, without these tables), the file
+-- exists on one ref, and the only database it ever ran on was a test branch since deleted. The first
+-- version admitted two closed_by values while the smoother returns five, and left match_source free
+-- text (ETA-Refuter, 23 Sep). Both vocabularies now come from one exported array each, and a drift
+-- test compares the lists below against them.
+--
 -- NO TEXT, NO AUDIO: times, counts, versions and ids only.
 --
 -- ADDITIVE AND IDEMPOTENT. Two new tables, their indexes, all IF NOT EXISTS; no existing table is
@@ -67,7 +74,15 @@ CREATE TABLE IF NOT EXISTS encounter_hypothesis (
   doctor_cosine            real,
   created_at               timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT encounter_hypothesis_span_chk CHECK (end_ms > start_ms),
-  CONSTRAINT encounter_hypothesis_closed_by_chk CHECK (closed_by IN ('non_speech', 'end_of_input')),
+  -- The smoother's five reasons (lib/encounter-clock/smooth.ts CLOSED_BY). This list and that array
+  -- are compared by a drift test; an interval closed by a stopped recorder must not be refused here.
+  CONSTRAINT encounter_hypothesis_closed_by_chk CHECK (
+    closed_by IN ('non_speech', 'unjudged_gap', 'tape_off', 'dead_mic', 'end_of_input')),
+  -- Where an identity came from (MATCH_SOURCES in lib/encounter-hypotheses.ts): a centroid domain, or
+  -- the stored voice_print. Closed, because this is the column that says whether a name came from a
+  -- voiceprint at all — the distinction the identity CHECK below exists to protect.
+  CONSTRAINT encounter_hypothesis_match_source_chk CHECK (
+    match_source IS NULL OR match_source IN ('room_primary', 'phone', 'meet', 'voice_print')),
   CONSTRAINT encounter_hypothesis_counts_chk CHECK (
     speech_probes >= 0 AND non_speech_probes >= 0 AND unjudged_ms >= 0
     AND longest_unjudged_run_ms >= 0 AND longest_unjudged_run_ms <= unjudged_ms

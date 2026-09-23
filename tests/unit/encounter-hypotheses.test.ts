@@ -27,7 +27,11 @@ vi.mock("@/lib/mcp/tools/brain", async (orig) => ({
     args.room_slug === "cardio" ? { id: "room_a", slug: "cardio", name: "x", enabled: true } : null,
 }));
 
+import { CLOSED_BY } from "@/lib/encounter-clock/smooth";
+import { VOICE_DOMAINS } from "@/lib/voice-centroid";
+import { checkValues, stripSqlComments } from "../support/sql-check";
 import {
+  MATCH_SOURCES,
   checkInterval,
   checkRunInput,
   intervalRows,
@@ -83,7 +87,10 @@ describe("migration 0114", () => {
   it("carries the CHECKs the writer mirrors", () => {
     expect(code).toMatch(/probes_speech \+ probes_non_speech \+ probes_unjudged = probes_total/);
     expect(code).toMatch(/CHECK \(end_ms > start_ms\)/);
-    expect(code).toMatch(/CHECK \(closed_by IN \('non_speech', 'end_of_input'\)\)/);
+    // The VALUES are asserted by the drift test (value sets, formatting-immune); here we only check the
+    // constraint exists. A regex over the list's literal layout would fail on a harmless reformat.
+    expect(code).toMatch(/CONSTRAINT encounter_hypothesis_closed_by_chk CHECK/);
+    expect(code).toMatch(/CONSTRAINT encounter_hypothesis_match_source_chk CHECK/);
     expect(code).toMatch(/clinician_id IS NULL OR \(match_source IS NOT NULL AND doctor_cosine IS NOT NULL\)/);
   });
 
@@ -123,7 +130,9 @@ describe("pure checks", () => {
   it("an identity needs its match source and a cosine in [-1, 1]", () => {
     expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: "room_primary", centroid_id: "vc_x", doctor_cosine: 0.71 } }))).toEqual([]);
     expect(checkInterval(iv({ identity: { clinician_id: null, match_source: "room_primary", centroid_id: null, doctor_cosine: 0.4 } }))).toEqual([]);
-    expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: "", centroid_id: null, doctor_cosine: 0.7 } }))).toEqual(["bad_identity"]);
+    // An empty match_source is now a type error as well as a validation error; the cast is what a
+    // caller without the types (a raw JSON payload) would hand in.
+    expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: "" as never, centroid_id: null, doctor_cosine: 0.7 } }))).toEqual(["bad_identity"]);
     expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: "room_primary", centroid_id: null, doctor_cosine: 1.2 } }))).toEqual(["bad_identity"]);
   });
 
@@ -132,6 +141,16 @@ describe("pure checks", () => {
     const rows = intervalRows("ehr_r", "rd_test1", [iv({ start_ms: T0 + 900_000, end_ms: T0 + 1_000_000 }), iv()], () => `eh_${++n}`);
     expect(rows.map((r) => r.start_ms)).toEqual([T0, T0 + 900_000]);
     expect(rows[0]).toMatchObject({ id: "eh_1", run_id: "ehr_r", doctor_unknown: 8, clinician_id: null, doctor_cosine: null });
+  });
+
+  it("an unknown closed_by or match_source throws instead of being coerced", () => {
+    expect(() => rowToHypothesis(hypRow({ closed_by: "tape_off" }))).not.toThrow();
+    expect(() => rowToHypothesis(hypRow({ closed_by: "timeout" }))).toThrow(/unknown closed_by "timeout"/);
+    expect(() => rowToHypothesis(hypRow({ closed_by: null }))).toThrow(/unknown closed_by null/);
+    expect(() => rowToHypothesis(hypRow({ match_source: "heuristic", clinician_id: "doc_fake0001", doctor_cosine: 0.7 })))
+      .toThrow(/unknown match_source "heuristic"/);
+    // The five real values all read back as themselves.
+    for (const v of CLOSED_BY) expect(rowToHypothesis(hypRow({ closed_by: v })).closed_by).toBe(v);
   });
 
   it("a stored row reads back as the smoother shape", () => {
@@ -202,6 +221,95 @@ describe("reads", () => {
     await readLatestRun("rd_test1");
     await readRun("ehr_abc");
     for (const c of db.calls) expect(c.q).not.toMatch(/transcript|note_json|tagged|label/);
+  });
+});
+
+// The drift guard lives in tests/support/sql-check.ts: it compares VALUE SETS, strips comments first
+// (a header quoting a constraint must not answer for it), and throws rather than matching nothing.
+describe("vocabulary drift between the code and the migration", () => {
+  const sql = readFileSync("db/migrations/0114_encounter_hypothesis.sql", "utf8");
+
+
+  it("closed_by: the CHECK admits exactly the smoother's CLOSED_BY", () => {
+    expect(checkValues(sql, "encounter_hypothesis_closed_by_chk", "closed_by")).toEqual(new Set(CLOSED_BY));
+    expect(CLOSED_BY).toHaveLength(5); // a shrunken array must not silently satisfy this
+  });
+
+  it("match_source: the CHECK admits exactly MATCH_SOURCES", () => {
+    expect(checkValues(sql, "encounter_hypothesis_match_source_chk", "match_source")).toEqual(new Set(MATCH_SOURCES));
+  });
+
+  it("match_source covers every voice_centroid domain, and adds only voice_print", () => {
+    // MATCH_SOURCES is derived from VOICE_DOMAINS; this pins the relationship so a fourth capture
+    // domain added to 0113 cannot leave this store (or its CHECK) behind.
+    for (const d of VOICE_DOMAINS) expect(MATCH_SOURCES, d).toContain(d);
+    expect(new Set(MATCH_SOURCES)).toEqual(new Set([...VOICE_DOMAINS, "voice_print"]));
+    const inCheck = checkValues(sql, "encounter_hypothesis_match_source_chk", "match_source");
+    for (const d of VOICE_DOMAINS) expect(inCheck, `${d} missing from the CHECK`).toContain(d);
+  });
+
+  it("the validator accepts every value the CHECK admits, and nothing else", () => {
+    for (const v of CLOSED_BY) expect(checkInterval(iv({ closed_by: v })), v).toEqual([]);
+    for (const v of ["timeout", "non_speech ", "NON_SPEECH", ""]) {
+      expect(checkInterval(iv({ closed_by: v as never })), v).toEqual(["bad_interval"]);
+    }
+    for (const v of MATCH_SOURCES) {
+      expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: v, centroid_id: null, doctor_cosine: 0.7 } })), v).toEqual([]);
+    }
+    for (const v of ["heuristic", "room", "jev", ""]) {
+      expect(checkInterval(iv({ identity: { clinician_id: "doc_fake0001", match_source: v as never, centroid_id: null, doctor_cosine: 0.7 } })), v).toEqual(["bad_identity"]);
+    }
+  });
+
+  it("the parser reads values, not formatting", () => {
+    const one = "CONSTRAINT c CHECK (x IN ('a', 'b', 'c'))";
+    const reformatted = [
+      "CONSTRAINT c CHECK (\n    x IN (\n      'a',\n      'b',\n      'c'\n    )\n  )",
+      "CONSTRAINT c CHECK (x IN ('c','b','a'))",
+      "CONSTRAINT c CHECK ((y IS NULL) OR x   IN   ( 'a' , 'b' , 'c' ))",
+    ];
+    for (const v of reformatted) expect(checkValues(v, "c", "x"), v).toEqual(checkValues(one, "c", "x"));
+  });
+
+  it("F1: a comment quoting the constraint cannot answer for it", () => {
+    // ETA-Refuter's exact mutation: document the five-value clause in a header, narrow the real CHECK
+    // to two. Before the fix the parser read the comment and stayed green; the real database refused
+    // tape_off, unjudged_gap and dead_mic again — the original FAIL, restored invisibly.
+    const mutated = [
+      "-- CONSTRAINT encounter_hypothesis_closed_by_chk CHECK (",
+      "--   closed_by IN ('non_speech', 'unjudged_gap', 'tape_off', 'dead_mic', 'end_of_input')),",
+      "CREATE TABLE x (",
+      "  CONSTRAINT encounter_hypothesis_closed_by_chk CHECK (",
+      "    closed_by IN ('non_speech', 'end_of_input'))",
+      ");",
+    ].join("\n");
+    expect(checkValues(mutated, "encounter_hypothesis_closed_by_chk", "closed_by")).toEqual(new Set(["non_speech", "end_of_input"]));
+    expect(checkValues(mutated, "encounter_hypothesis_closed_by_chk", "closed_by")).not.toEqual(new Set(CLOSED_BY));
+  });
+
+  it("F1: a constraint that exists ONLY in a comment is not found at all", () => {
+    const commentedOut = "-- CONSTRAINT ghost_chk CHECK (x IN ('a', 'b'))\nCREATE TABLE y (z text);";
+    expect(() => checkValues(commentedOut, "ghost_chk", "x")).toThrow(/no CONSTRAINT ghost_chk/);
+    // Trailing comments too, not just whole-line ones.
+    const trailing = "CREATE TABLE y (\n  z text  -- CONSTRAINT ghost_chk CHECK (x IN ('a'))\n);";
+    expect(() => checkValues(trailing, "ghost_chk", "x")).toThrow(/no CONSTRAINT ghost_chk/);
+  });
+
+  it("F1: stripping leaves quoted strings alone, comment markers included", () => {
+    expect(stripSqlComments("SELECT 'a -- b' -- gone\n")).toBe("SELECT 'a -- b' \n");
+    expect(stripSqlComments("SELECT 'it''s -- fine' -- gone")).toBe("SELECT 'it''s -- fine' \n");
+    // A value containing a comment marker still parses as that value.
+    const odd = "CONSTRAINT c CHECK (x IN ('a--b', 'c'))";
+    expect(checkValues(odd, "c", "x")).toEqual(new Set(["a--b", "c"]));
+  });
+
+  it("the parser catches a disagreement in EITHER direction, and a missing list loudly", () => {
+    const base = new Set(["a", "b", "c"]);
+    expect(checkValues("CONSTRAINT c CHECK (x IN ('a', 'b'))", "c", "x")).not.toEqual(base);        // CHECK missing one
+    expect(checkValues("CONSTRAINT c CHECK (x IN ('a', 'b', 'c', 'd'))", "c", "x")).not.toEqual(base); // CHECK has an extra
+    expect(() => checkValues("CONSTRAINT other CHECK (x IN ('a'))", "c", "x")).toThrow(/no CONSTRAINT c/);
+    expect(() => checkValues("CONSTRAINT c CHECK (x = 'a')", "c", "x")).toThrow(/no x IN/);
+    expect(() => checkValues("CONSTRAINT c CHECK (x IN ('a',))", "c", "x")).toThrow(/empty value/);
   });
 });
 
