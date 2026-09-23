@@ -27,12 +27,17 @@ const gcpMock = vi.hoisted(() => ({
   lastSignal: undefined as AbortSignal | undefined,
   lastTimeoutMs: undefined as number | undefined,
 }));
+// Calibration follow-up (Fable's ruling, 23 Sep): MINT_TIMEOUT_MS now lives in lib/gcp-auth.ts and
+// gemini.ts imports it from there (one mint budget, not two) — a mock of this module that omits it
+// breaks every call site inside gemini.ts that reads MINT_TIMEOUT_MS, not just this file's own
+// direct references to it below.
 vi.mock("@/lib/gcp-auth", () => ({
   getVertexAccessToken: (signal?: AbortSignal, timeoutMs?: number) => {
     gcpMock.lastSignal = signal;
     gcpMock.lastTimeoutMs = timeoutMs;
     return gcpMock.getToken(signal, timeoutMs);
   },
+  MINT_TIMEOUT_MS: 10_000,
 }));
 
 const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
