@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 37 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend and the note-safety shadow, 23 Sep)
+## The surface: 38 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -117,6 +117,13 @@ pipeline hook; off answers `{ran:false}` with zero Jev calls. Returns counts onl
 the same reason as the six above — bringing the ungrouped tools to 27 and the listed surface to
 37 (27 + 10 groups). It merged after the diarization teacher spend tool in the 23 Sep night train;
 each branch counted itself as the 26th, so the combined count is set here by hand.
+U6 clinical routing (order JEV-U6-ROUTE, PLAN-v3 §A, 23 Sep) added one more ungrouped tool,
+invoke, `scribe_clinical_route_replay`: runs U6 clinical-or-not routing (the same trialled
+question E-6's shadow-v2 already asks, `lib/jev/prompts/encounter-v1.ts`) over one room-day's
+`bench_window` rows, `subject_type='window'` in `jev_decision` — a different granularity and
+purpose from E-6's own `subject_type='probe'` use. Same `JEV_CLINICAL_ROUTE` gate; off answers
+`{ran:false}` with zero Jev calls. Returns per-category counts only. It is the eighth ungrouped tool:
+the ungrouped tools reach 28 and the listed surface 38 (28 + 10 groups), set by hand in the 23 Sep night train.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app
