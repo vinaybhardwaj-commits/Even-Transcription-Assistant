@@ -9,10 +9,16 @@
  * scribe_jev_decisions is READ-only and returns jev_decision rows (migration 116) — the general
  * decision log every use writes through lib/jev/ask.ts. No FK on subject_id (it is polymorphic on
  * subject_type, see the migration), so filtering is by exact match on the columns given, ANDed.
+ * scribe_clinical_route_replay (order JEV-U6-ROUTE, PLAN-v3 §A) INVOKES U6 clinical-or-not routing
+ * over one room-day's bench_window rows — the already-trialled question E-6's shadow-v2 also asks
+ * (lib/jev/prompts/encounter-v1.ts), reused here at bench_window/subject_type='window' granularity
+ * for the transcript-hygiene workstream, not E-6's own 'probe' granularity. Same JEV_CLINICAL_ROUTE
+ * gate as the standalone runner; off answers {ran:false} with zero Jev calls and zero DB reads.
  */
 import { JEV_SUBJECT_TYPES } from "@/lib/jev/types";
 import { query } from "@/lib/brain/db";
 import { submitJob } from "@/lib/jobs/submit";
+import { runClinicalRouteAsync } from "@/lib/jev/clinical-route";
 import { argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 const jevWindowRun: McpTool = {
@@ -149,4 +155,24 @@ const jevDecisions: McpTool = {
     }),
 };
 
-export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions];
+const clinicalRouteReplay: McpTool = {
+  name: "scribe_clinical_route_replay",
+  description:
+    "INVOKES — U6 clinical-or-not routing (order JEV-U6-ROUTE, PLAN-v3 §A) over every bench_window in one room-day with English text (jev_window_text). Classifies each window clinical_consultation / staff_or_admin_talk / phone_call / social_chatter / garbled_or_no_real_speech / cannot_tell, one call per window, stored in jev_decision (subject_type='window'). Same JEV_CLINICAL_ROUTE gate as automatic use: off answers { ran:false } with zero Jev calls. Nothing excluded from notes yet — read + classify + log only. Returns per-category COUNTS only, never window text.",
+  scope: "invoke",
+  inputSchema: {
+    type: "object",
+    properties: { room_day_id: { type: "string" } },
+    required: ["room_day_id"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ran: false as boolean }, async () => {
+      const roomDayId = argStr(args, "room_day_id", 128);
+      if (!roomDayId) return { ran: false, error: "room_day_id_required" };
+      const outcome = await runClinicalRouteAsync(roomDayId);
+      return { ok: true, ...outcome };
+    }),
+};
+
+export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions, clinicalRouteReplay];

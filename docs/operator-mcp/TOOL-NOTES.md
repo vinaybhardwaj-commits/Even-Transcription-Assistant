@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 36 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2 and the diarization teacher spend, 23 Sep)
+## The surface: 37 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend and U6 clinical routing, 23 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -108,6 +108,13 @@ about each 60 s probe and writes a second run, `source = 'fused'`, next to the a
 v2 writes one more table than v1: `jev_decision`, with `subject_type = 'probe'` and metadata only.
 Readers that ask for no source get the latest run of any source, which after a v2 run is the fused
 one. Read by `run_id` (v2 returns both ids) to get a particular one.
+
+U6 clinical routing (order JEV-U6-ROUTE, PLAN-v3 §A, 23 Sep) added one more ungrouped tool,
+invoke, `scribe_clinical_route_replay`: runs U6 clinical-or-not routing (the same trialled
+question E-6's shadow-v2 already asks, `lib/jev/prompts/encounter-v1.ts`) over one room-day's
+`bench_window` rows, `subject_type='window'` in `jev_decision` — a different granularity and
+purpose from E-6's own `subject_type='probe'` use. Same `JEV_CLINICAL_ROUTE` gate; off answers
+`{ran:false}` with zero Jev calls. Returns per-category counts only.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app
