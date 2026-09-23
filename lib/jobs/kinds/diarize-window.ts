@@ -18,8 +18,9 @@
  * ─── THE STEP MACHINE ──────────────────────────────────────────────────────────────────────────
  *   diarize        pick the engine; local answers here, pyannote.ai is submitted here
  *   pyannote_poll  poll the submission, embed its speakers, store the window
- *   local_label    (teacher labels only) run the local diarizer for COMPARISON and record what it
- *                  said — it writes no turns and cannot disturb what the hybrid already stored
+ *   local_label    (DIARIZE_LOCAL_LABEL, default = DIARIZE_TEACHER_LABELS) run the local diarizer for
+ *                  COMPARISON and record what it said — it writes no turns and cannot disturb what the
+ *                  hybrid already stored
  *
  * ─── THE POLL STEP DOES NOT READ THE ENV ───────────────────────────────────────────────────────
  * It reads the engine and the job id out of `progress`. A submission is PAID FOR the moment it is
@@ -51,7 +52,7 @@ import {
 } from "@/lib/stt/diarize-window";
 import { runDiarize } from "@/lib/diarize";
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
-import { diarizeEngine, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/diarize-engine";
+import { diarizeEngine, localLabelEnabled, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/diarize-engine";
 import { PRESIGN_TTL_SECONDS, fetchJobRecord, pollDiarize, submitDiarize } from "@/lib/diarize-pyannoteai";
 import { embedSpeakers, embeddedCount, longestSpanPerSpeaker, mergeEmbeddings } from "@/lib/diarize-embed";
 import { writeWindowLabel } from "@/lib/diarize-labels";
@@ -497,8 +498,9 @@ async function pollStep(ctx: StepContext) {
         },
       });
       // The teacher needs something to be measured against, so the local diarizer runs too — in
-      // its OWN step, after production is safely stored, writing a label and no turns.
-      if (teacherLabelsEnabled() && stored.kind === "done") {
+      // its OWN step, after production is safely stored, writing a label and no turns. Its own flag, so
+      // the comparison can be switched off while pyannote.ai's labels (written above) keep coming.
+      if (localLabelEnabled() && stored.kind === "done") {
         return nextStep(STEPS.localLabel, { ...ctx.progress, run_id: runId, window_id: windowId, hybrid_result: stored.result });
       }
       return stored;
@@ -526,6 +528,9 @@ async function localLabelStep(ctx: StepContext) {
   const windowId = String(ctx.progress.window_id ?? ctx.args.window_id ?? "");
   const runId = String(ctx.progress.run_id ?? "");
   const hybrid = (ctx.progress.hybrid_result ?? {}) as Record<string, unknown>;
+  // READ AGAIN HERE, not only at the handoff: a job already parked at this step when the flag is turned
+  // off must finish at once, not hold the Mini for a comparison nobody wants any more.
+  if (!localLabelEnabled()) return doneWith({ ...hybrid, local_label: "skipped_flag_off" });
   const w = await loadWindow(windowId);
   if ("error" in w) return doneWith({ ...hybrid, local_label: "window_gone" });
 

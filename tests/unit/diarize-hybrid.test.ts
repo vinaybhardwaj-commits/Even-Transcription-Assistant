@@ -555,6 +555,61 @@ describe("teacher labels", () => {
     expect(writeWindowLabel).toBeDefined();
   });
 
+  // ── DIARIZE_LOCAL_LABEL (Fable, 24 Sep 01:55): the comparison run off, the teacher's labels kept ──
+  it("LOCAL_LABEL=0: the teacher's label AND the clinical row are written, and NO comparison step follows", async () => {
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    process.env.DIARIZE_TEACHER_LABELS = "1";
+    process.env.DIARIZE_LOCAL_LABEL = "0";
+    try {
+      const out = await runStep("pyannote_poll", pollProgress);
+      expect(out.kind).toBe("done");
+      const label = sqlCalls.find((c) => /INSERT INTO diarize_window_label/.test(c.text));
+      expect(label?.values).toContain("pyannoteai");
+      expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
+      expect(local.calls).toBe(0);
+    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
+  });
+
+  it("LOCAL_LABEL=0: a job ALREADY PARKED at local_label finishes at once, without touching the Mini", async () => {
+    process.env.DIARIZE_TEACHER_LABELS = "1";
+    process.env.DIARIZE_LOCAL_LABEL = "0";
+    try {
+      const out = await runStep("local_label", { run_id: "r1", window_id: "w1", hybrid_result: { window_id: "w1" } });
+      expect(out.kind).toBe("done");
+      if (out.kind !== "done") throw new Error("x");
+      expect(out.result.local_label).toBe("skipped_flag_off");
+      expect(out.result.window_id).toBe("w1");
+      expect(local.calls).toBe(0);
+      expect(sqlCalls.some((c) => /INSERT INTO diarize_window_label/.test(c.text))).toBe(false);
+    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
+  });
+
+  it("the clinical row is already written when the hybrid hands off to the comparison step", async () => {
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    process.env.DIARIZE_TEACHER_LABELS = "1";
+    process.env.DIARIZE_LOCAL_LABEL = "1";
+    try {
+      const out = await runStep("pyannote_poll", pollProgress);
+      expect(out.kind).toBe("next");
+      if (out.kind !== "next") throw new Error("x");
+      expect(out.step).toBe("local_label");
+      expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
+      expect(local.calls).toBe(0);
+    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
+  });
+
+  it("LOCAL_LABEL: unset follows TEACHER_LABELS; set needs teacher labels too; strict on a typo", async () => {
+    const { localLabelEnabled } = await import("@/lib/diarize-engine");
+    const { FlagValueError } = await import("@/lib/flags");
+    expect(localLabelEnabled({})).toBe(false);
+    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1" })).toBe(true);
+    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "0" })).toBe(false);
+    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "1" })).toBe(true);
+    expect(localLabelEnabled({ DIARIZE_LOCAL_LABEL: "1" })).toBe(false);
+    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "0", DIARIZE_LOCAL_LABEL: "1" })).toBe(false);
+    expect(() => localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "nope" })).toThrow(FlagValueError);
+  });
+
   it("the flag is strict — a typo throws rather than silently not collecting", async () => {
     const { teacherLabelsEnabled } = await import("@/lib/diarize-engine");
     const { FlagValueError } = await import("@/lib/flags");

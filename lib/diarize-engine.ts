@@ -80,3 +80,23 @@ export const DIARIZE_TEACHER_LABELS_ENV = "DIARIZE_TEACHER_LABELS";
 export function teacherLabelsEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return parseFlag(DIARIZE_TEACHER_LABELS_ENV, env);
 }
+
+/**
+ * `DIARIZE_LOCAL_LABEL` — whether the hybrid's LOCAL COMPARISON run (the `local_label` step) happens.
+ *
+ * WHY IT EXISTS (Fable, 24 Sep 01:55). The comparison run holds the Mini's diarizer for a whole window
+ * per job, and on the night of 23→24 Sep every running diarize job sat in that step while ~90 windows
+ * waited for their CLINICAL diarization. This flag turns the comparison off WITHOUT turning off
+ * pyannote.ai's teacher labels, which are written in the poll step and are what diar-lab trains on.
+ *
+ * UNSET = WHATEVER `DIARIZE_TEACHER_LABELS` SAYS, so shipping this flag changes nothing until someone sets
+ * it. SET = the strict parse every flag gets (a typo throws), AND teacher labels must also be on: with
+ * them off the comparison run's only output, its label, would be discarded, so running it would spend
+ * the Mini for nothing.
+ */
+export const DIARIZE_LOCAL_LABEL_ENV = "DIARIZE_LOCAL_LABEL";
+
+export function localLabelEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  if (env[DIARIZE_LOCAL_LABEL_ENV] === undefined) return teacherLabelsEnabled(env);
+  return parseFlag(DIARIZE_LOCAL_LABEL_ENV, env) && teacherLabelsEnabled(env);
+}
