@@ -39,9 +39,20 @@ export class UnrecognisedStatementError extends Error {
 
 const KNOWN_FIRST_WORDS = new Set(["select", "with", "insert", "update", "delete"]);
 
+/** eta-refuter-2 D1 (23 Sep): no timeout meant a hung docker socket stalled the gate until the
+ * 1800s hard-timeout watchdog killed the whole run. 15s is enough for a real daemon to answer;
+ * a genuinely down/hung one now fails fast and loud instead. */
 export function dockerAvailable(): boolean {
-  try { execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" }); return true; }
-  catch { return false; }
+  try {
+    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15_000 });
+    return true;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException & { stderr?: Buffer | string };
+    if (err.code === "ENOENT") console.error("dockerAvailable: docker CLI not found");
+    else if ((err as { signal?: string }).signal === "SIGTERM") console.error("dockerAvailable: docker daemon did not answer within 15s (server unreachable)");
+    else console.error(`dockerAvailable: server unreachable: ${String(err.stderr ?? err.message).slice(0, 200)}`);
+    return false;
+  }
 }
 
 /** A JS array as the Postgres array literal the driver sends: {"a","b"}, NULL unquoted, nested arrays nested. */
