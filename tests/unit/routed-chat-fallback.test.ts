@@ -12,7 +12,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-vi.mock("@/lib/gcp-auth", () => ({ getVertexAccessToken: async () => "vertex-token-not-a-secret" }));
+// Calibration follow-up (Fable's ruling, 23 Sep): MINT_TIMEOUT_MS now lives in lib/gcp-auth.ts and
+// gemini.ts imports it from there (one mint budget, not two) — a mock of this module that omits it
+// breaks routedChatDeadlineMs, which every routedChat/routedChatJson call in this file goes through.
+vi.mock("@/lib/gcp-auth", () => ({ getVertexAccessToken: async () => "vertex-token-not-a-secret", MINT_TIMEOUT_MS: 10_000 }));
 
 const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
 const MSGS = [{ role: "system", content: "Reply with one word." }, { role: "user", content: "ok" }];

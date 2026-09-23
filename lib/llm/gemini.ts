@@ -22,7 +22,7 @@
  * OpenRouter: OPENROUTER_API_KEY (Vercel) or OPENROUTER_API_KEY_FILE (the Mini); ZDR on every call
  * (lib/openrouter.ts — one client for all of ETA).
  */
-import { getVertexAccessToken } from "../gcp-auth";
+import { getVertexAccessToken, MINT_TIMEOUT_MS } from "../gcp-auth";
 import { openrouterChat, OpenRouterError } from "../openrouter";
 
 const GCP_LOCATION = process.env.GCP_LOCATION || "asia-south1";
@@ -173,10 +173,14 @@ function fallbackBudgetMs(perCallTimeoutMs: number | undefined): number {
  * the slack scales with the CALLER's budget, the smallest callers were the tightest (llm-cleanup's
  * 8 s timeout left only 2.4 s of slack to cover both clock skew and a cold OAuth exchange). Now
  * counted in the sum below AND passed to getVertexAccessToken as its own timeout, so the two agree.
- * 10 s is generous for a single HTTPS POST (typically sub-second) and small next to every real
- * caller's primary budget, so it does not meaningfully tighten anyone's deadline.
+ *
+ * Defined in lib/gcp-auth.ts (the file that actually does the minting, and the one that needs this
+ * value as its own internal default) and re-exported here so every existing importer of it from
+ * this module keeps working unchanged — one mint budget, not two, per Fable's ruling, 23 Sep,
+ * closing the round-4 Refuter calibration note. See that file's comment for the PROVISIONAL note on
+ * the value itself and where the calibration data will come from.
  */
-export const MINT_TIMEOUT_MS = 10_000;
+export { MINT_TIMEOUT_MS };
 
 /**
  * PURE. The overall wall-clock budget for one routedChat call.

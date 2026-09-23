@@ -85,8 +85,8 @@ describe("getVertexAccessToken(signal) — the fetch is actually cancelled, not 
     // Round-3 fix: getVertexAccessToken now ALWAYS builds its own internal AbortController (the
     // same pattern openaiChat/openrouterChat already use), so `lastSignal` is never undefined any
     // more even with no external `signal` passed — the short explicit timeoutMs here only avoids a
-    // real dangling 30 s timer in this test process (MINT_DEFAULT_TIMEOUT_MS). The thing under test
-    // is that omitting `signal` does not change behaviour.
+    // real dangling MINT_TIMEOUT_MS (10 s) timer in this test process. The thing under test is that
+    // omitting `signal` does not change behaviour.
     const p = getVertexAccessToken(undefined, 50).then(() => { settled = true; }, () => { settled = true; });
     await new Promise((r) => setTimeout(r, 10));
     expect(settled).toBe(false); // genuinely still in flight — nothing invisibly cancelled it early
@@ -140,5 +140,38 @@ describe("getVertexAccessToken(signal, timeoutMs) — its OWN timeout, independe
     getVertexAccessToken(undefined, 5_000).then(() => { settled = true; }, () => { settled = true; });
     await vi.advanceTimersByTimeAsync(4_000);
     expect(settled).toBe(false);
+  }, 5_000);
+});
+
+describe("round-4 W7 (ETA-Refuter mutation-coverage gap, promoted to a test by Fable's ruling, 23 Sep): finally{} really clears the timer it started", () => {
+  // Not a bug fix — the code was already right. Nothing here previously PROVED that dropping
+  // `clearTimeout(tid)` from the `finally` block would be caught: every other test only observes
+  // getVertexAccessToken's resolved/rejected VALUE, which is identical whether or not the timer is
+  // cleared (it only matters for whether a stray `controller.abort()` fires uselessly later, after
+  // the call has already settled — invisible to a value-only assertion). Spying on setTimeout lets
+  // an assertion reach the exact timer id clearTimeout is supposed to receive.
+  it("clears the timer it started, on the SUCCESS path", async () => {
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      lastSignal = init?.signal ?? undefined;
+      return new Response(JSON.stringify({ access_token: "fixture-token-not-a-secret", expires_in: 3600 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const { getVertexAccessToken } = await loadFresh();
+    await getVertexAccessToken(undefined, 5_000);
+    const tid = setTimeoutSpy.mock.results[0]?.value;
+    expect(tid).toBeDefined();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(tid);
+  }, 5_000);
+
+  it("clears the timer it started, on the FAILURE path too — finally runs on a throw, not only on success", async () => {
+    globalThis.fetch = (async () => { throw new Error("network exploded"); }) as unknown as typeof fetch;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const { getVertexAccessToken } = await loadFresh();
+    await expect(getVertexAccessToken(undefined, 5_000)).rejects.toThrow();
+    const tid = setTimeoutSpy.mock.results[0]?.value;
+    expect(tid).toBeDefined();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(tid);
   }, 5_000);
 });
