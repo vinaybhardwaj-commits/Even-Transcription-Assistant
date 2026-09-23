@@ -3,10 +3,17 @@
  * measures that prove it is safe. Ported from the router's fixed rule (`~/eta-router` `router_server.py`,
  * `vinay/router-stt-hygiene`, round 2, ETA-ROUTER-STT-HYGIENE-REFUTER-22-SEP-2026.md, Refuter PASS) so the
  * SAME behaviour this repo depends on for clinical safety is pinned by this repo's own test suite, not only
- * by a different repo's Python tests. It is a PORT, not the source of truth for the router — the router is
- * still what runs in production; lx's item-1 build (23 Sep, ~/dev/_fable/for-minibot-lexicon-23-sep.md) is
- * the parity check between the router's real number lexicon and the shim's. This module's own NUMBER_WORDS
- * is a small representative subset for these fixtures, not the 0-100 lexicon (see NUMBER_WORDS below).
+ * by a different repo's Python tests. It is a PORT, not the source of truth — the router is still what runs
+ * in production. It is NOT, as of the Refuter's 23 Sep verdict (ETA-STT-REGRESSION-PACK-REFUTER-VERDICT-
+ * 23-SEP-2026.md), a partial port any more: NUMBER_WORDS now loads `./number-words.json`, the same real
+ * 772-word lexicon (English/Hindi/Kannada, romanised and native script) lx's `assembled-collapse.ts` loads,
+ * generated from the router's own NUMBER_WORDS and carrying a reproducible sha256. Before this fix the file
+ * shipped its own 24-word representative subset; on synthetic dose phrases the subset lexicon covered, that
+ * was internally consistent, but it diverged from the router on exactly the cases the exemption exists for
+ * (pachas/पचास/aivattu milligram, pachhattar goli, half half half, "the patient sat" — sat is Hindi for
+ * seven) — the router kept all of them, the subset-lexicon port collapsed them. Loading the real lexicon
+ * closes that divergence; the collapse RULE itself (identical-after-fold, 3+ repeats, number-exempt) was
+ * already correctly ported and is unchanged by this fix.
  *
  * THE ONE RULE THAT MATTERS CLINICALLY (round 2's fix, replacing round 1's Jaccard-on-word-sets rule that
  * FAILED review): a segment is dropped as a duplicate only when it is IDENTICAL TO THE PREVIOUS ONE AFTER
@@ -18,6 +25,7 @@
  *
  * WHAT THIS FILE DOES NOT DO: read or write any real transcript. Every fixture below is synthetic.
  */
+import lexicon from "./number-words.json";
 
 // ── Folding — the one normalisation the duplicate test is allowed to use ─────────────────────────────────
 const WS = /\s+/g;
@@ -37,21 +45,17 @@ export function identicalAfterFold(a: string | null | undefined, b: string | nul
   return fa.length > 0 && fa === fb;
 }
 
-// ── Number words — a REPRESENTATIVE SUBSET for these fixtures, not the production 0-100 lexicon ──────────
+// ── Number words — the REAL router lexicon, not a subset ────────────────────────────────────────────────
 /**
- * The router builds its real set from `number_lexicon()` (0-100, English/Hindi/Kannada, romanised and
- * native script) plus fraction/ordinal/magnitude extras. Porting that whole table here would duplicate lx's
- * parity job for no benefit — this file only needs enough words to prove the EXEMPTION RULE itself: that a
- * number token is never collapsed regardless of script or transliteration. Kept small and named per fixture.
+ * `number-words.json` is generated from the router's own NUMBER_WORDS (0-100, English/Hindi/Kannada,
+ * romanised and native script, plus fraction/ordinal/magnitude extras) and carries its own sha256, which
+ * lx's `assembled-collapse.test.ts` recomputes against it. Loading it here, rather than a hand-picked
+ * subset, is what makes this file's header claim true: the SAME exemption list the router runs is what
+ * this pack's fixtures are checked against, not a lookalike that happens to agree on cases someone thought
+ * to include. See NUMBER_WORDS_SHA below if a future check wants to assert this file matches the JSON.
  */
-export const NUMBER_WORDS: ReadonlySet<string> = new Set([
-  // English, spelled
-  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-  // Hindi, romanised and Devanagari (dose-relevant: one/two/three, and the 1-1-1 regimen word)
-  "ek", "do", "teen", "एक", "दो", "तीन",
-  // Kannada, romanised and script (dose-relevant: one/two/three)
-  "ondu", "eradu", "moru", "mooru", "ಒಂದು", "ಎರಡು", "ಮೂರು",
-]);
+export const NUMBER_WORDS: ReadonlySet<string> = new Set(lexicon.words as string[]);
+export const NUMBER_WORDS_SHA: string = lexicon.lexicon_sha256 as string;
 
 const NUMBER_PART_SPLIT = /[-/]/;
 /** Any character with a Unicode numeric value: ASCII and Indic digits, ½, ¼, ¾, Roman numerals — same test

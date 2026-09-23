@@ -185,6 +185,37 @@ describe("9 — a Hindi and a Kannada dose number, repeated 3x, survive — the 
   });
 });
 
+describe("10 — lexicon parity with the router (the Refuter's 23 Sep differential, closed)", () => {
+  // ETA-STT-REGRESSION-PACK-REFUTER-VERDICT-23-SEP-2026.md fed these lines through the TS port and the
+  // router's live _collapse_line on main. The port's old 24-word subset lexicon collapsed all six of these;
+  // the router kept every one, because each contains a word the real 772-word lexicon protects as a number
+  // ("sat" is Hindi for seven, not the English past tense of sit — over-inclusion is the safe direction).
+  // "one one one" / "एक एक एक" (also disclosed as agreeing, both kept) are already pinned in blocks 8-9;
+  // not repeated here. The verdict disclosed 9 of the 11 differential lines it ran; these are all 9.
+  const disagreements: Array<[string, string]> = [
+    ["pachas milligram", "pachas milligram pachas milligram pachas milligram"],
+    ["पचास milligram", "पचास milligram पचास milligram पचास milligram"],
+    ["aivattu milligram", "aivattu milligram aivattu milligram aivattu milligram"],
+    ["pachhattar goli", "pachhattar goli pachhattar goli pachhattar goli"],
+    ["half half half", "half half half half half half half half half"],
+    ["the patient sat", "the patient sat the patient sat the patient sat"],
+  ];
+
+  it.each(disagreements)("%s ×3 is KEPT — the router's call, now the port's too", (_label, text) => {
+    expect(collapsePhraseLoops(text)).toBe(text);
+  });
+
+  it("a repeated phrase with no number word still collapses — the fix widens the exemption, not the rule", () => {
+    expect(collapsePhraseLoops("thank you doctor thank you doctor thank you doctor")).toBe("thank you doctor");
+  });
+
+  it("every disagreement word is in the real lexicon (guards against the fixtures above passing for the wrong reason)", () => {
+    for (const w of ["pachas", "पचास", "aivattu", "pachhattar", "half", "sat"]) {
+      expect(isNumberToken(w)).toBe(true);
+    }
+  });
+});
+
 describe("cross-cutting: DEDUPE_MAX_GAP_S and folding, pinned once so the fixtures above rest on a fixed floor", () => {
   it("adjacent, same speaker, gap exactly at the floor still merges; one tick over does not", () => {
     const p = seg("please repeat that", 0, 1);
