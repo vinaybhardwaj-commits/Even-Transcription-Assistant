@@ -21,6 +21,7 @@
  */
 import { sql } from "@/lib/db";
 import { readRoomLevelDay } from "@/lib/bench-levels";
+import { istDate as istDate2 } from "@/lib/bench-reaper-core";
 import { writeHypothesisRun, readLatestRun, type WriteRunResult } from "@/lib/encounter-hypotheses";
 import { runShadow, type DayEvidence, type ShadowSummary, type ShadowWindow } from "@/lib/encounter-clock/shadow";
 import { SMOOTHER_VERSION, type TapeOff } from "@/lib/encounter-clock/smooth";
@@ -28,6 +29,12 @@ import type { TimelineSpan } from "@/lib/encounter-clock/gate";
 
 /** Chunks closer together than this are one continuous tape; a wider gap is tape-off. */
 export const TAPE_GAP_MS = 5_000;
+/**
+ * A day whose last chunk is younger than this, on today's date, is still being recorded. The run is
+ * then a PREFIX of the day, not the day, and the triggers a prefix can falsely trip are marked
+ * provisional (ETA-Refuter, 23 Sep).
+ */
+export const STILL_RECORDING_MS = 30 * 60_000;
 
 type ChunkRow = { started_at: string | Date; ended_at: string | Date | null };
 type WindowRow = { start_ms: string | number; end_ms: string | number; txt: string | null; lt: unknown };
@@ -69,7 +76,15 @@ export function timelineOf(lt: unknown): TimelineSpan[] | null {
 
 const safeJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return null; } };
 
-export async function loadDayEvidence(roomId: string, roomDayId: string, istDate: string): Promise<DayEvidence | null> {
+/** Whether `istDate` is over: an earlier date always is; today is only once recording has stopped. */
+export function dayIsComplete(istDate: string, dayEndMs: number, now: Date = new Date()): boolean {
+  const today = istDate2(now);
+  if (istDate < today) return true;
+  if (istDate > today) return false;                       // a future date records nothing yet
+  return now.getTime() - dayEndMs > STILL_RECORDING_MS;
+}
+
+export async function loadDayEvidence(roomId: string, roomDayId: string, istDate: string, now: Date = new Date()): Promise<DayEvidence | null> {
   const chunks = (await sql`
     SELECT c.started_at, c.ended_at
       FROM bench_chunk c
@@ -102,6 +117,7 @@ export async function loadDayEvidence(roomId: string, roomDayId: string, istDate
     room_day_id: roomDayId,
     day_start_ms: tape.day_start_ms, day_end_ms: tape.day_end_ms,
     tape_off: tape.tape_off, level_samples: levels.samples, windows,
+    day_complete: dayIsComplete(istDate, tape.day_end_ms, now),
   };
 }
 
@@ -110,8 +126,8 @@ export type ShadowRunResult =
   | { ok: false; error: "no_recorded_audio" | "write_refused"; detail?: unknown };
 
 /** Run the clock over one room-day and store the result. The ONLY write is the E-5 insert. */
-export async function runShadowForRoomDay(input: { room_id: string; room_day_id: string; ist_date: string }): Promise<ShadowRunResult> {
-  const evidence = await loadDayEvidence(input.room_id, input.room_day_id, input.ist_date);
+export async function runShadowForRoomDay(input: { room_id: string; room_day_id: string; ist_date: string; now?: Date }): Promise<ShadowRunResult> {
+  const evidence = await loadDayEvidence(input.room_id, input.room_day_id, input.ist_date, input.now ?? new Date());
   if (!evidence) return { ok: false, error: "no_recorded_audio" };
   const { run, summary } = runShadow(evidence);
   // the run this one displaces for readers: the latest of the SAME smoother version

@@ -23,7 +23,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { runShadow, checkTriggers, toInterval, SHADOW_VERSION, type DayEvidence, type ShadowSummary } from "@/lib/encounter-clock/shadow";
-import { runShadowForRoomDay, tapeFromChunks, timelineOf, loadDayEvidence } from "@/lib/encounter-clock/shadow-io";
+import { runShadowForRoomDay, tapeFromChunks, timelineOf, loadDayEvidence, dayIsComplete, STILL_RECORDING_MS } from "@/lib/encounter-clock/shadow-io";
 import { SMOOTHER_VERSION, type Encounter } from "@/lib/encounter-clock/smooth";
 import { GATE_VERSION } from "@/lib/encounter-clock/gate";
 import type { BenchLevelSample } from "@/lib/bench-levels";
@@ -82,7 +82,7 @@ const denseWindow = (start: number, tag: number) => {
 
 const evidence = (over: Partial<DayEvidence> = {}): DayEvidence => ({
   room_day_id: "rd_test", day_start_ms: T0, day_end_ms: T0 + 60 * MIN,
-  level_samples: levels(T0, T0 + 60 * MIN), tape_off: [],
+  level_samples: levels(T0, T0 + 60 * MIN), tape_off: [], day_complete: true,
   windows: [windowWith(T0, ["the patient reports chest pain since monday", "and the cough has not settled"])],
   ...over,
 });
@@ -163,12 +163,12 @@ describe("E-shadow — the pure run", () => {
 });
 
 describe("E-shadow — the rollback triggers travel with the run", () => {
-  type Base = Omit<ShadowSummary, "triggers" | "triggers_tripped">;
+  type Base = Omit<ShadowSummary, "triggers" | "triggers_tripped" | "triggers_tripped_firm">;
   const base: Base = {
     room_day_id: "rd", shadow_version: SHADOW_VERSION, gate_version: GATE_VERSION, smoother_version: SMOOTHER_VERSION,
     probes: { total: 10, speech: 5, non_speech: 3, unjudged: 2 }, unjudged_share: 0.2, reasons: {}, preselect: {},
     windows: { with_text: 2, placed: 2, unplaceable: 0 }, encounters: 3, median_minutes: 20, longest_minutes: 40,
-    closed_by: {},
+    closed_by: {}, day_complete: true,
   };
   const trip = (s: Partial<Base>) =>
     checkTriggers({ ...base, ...s }).filter((t) => t.tripped).map((t) => t.trigger);
@@ -214,6 +214,65 @@ describe("E-shadow — T7: ANY trigger tripping stops the experiment", () => {
     const { summary } = runShadow(evidence());
     expect(summary.triggers.some((t) => t.tripped)).toBe(false);
     expect(summary.triggers_tripped).toBe(false);
+  });
+});
+
+describe("E-shadow — a PARTIAL day cannot manufacture a rollback signal", () => {
+  // Fable re-ordered this to run the moment it deploys, mid-clinic. Recording runs ahead of
+  // transcription, so an early day is legitimately mostly unjudged — which trips a trigger whose
+  // plan text says "roll back within the hour" (ETA-Refuter, 23 Sep).
+  it("on a partial day the two prefix-sensitive triggers are marked provisional, and firm stays false", () => {
+    const { summary } = runShadow(evidence({ windows: [], day_complete: false }));
+    expect(summary.day_complete).toBe(false);
+    expect(summary.unjudged_share).toBe(1);
+    const unjudged = summary.triggers.find((t) => t.trigger === "unjudged_over_90pct")!;
+    expect(unjudged).toMatchObject({ tripped: true, provisional: true });
+    expect(summary.triggers_tripped).toBe(true);              // the number is still reported honestly
+    expect(summary.triggers_tripped_firm).toBe(false);        // but it is not a stop signal
+  });
+
+  it("the SAME numbers on a COMPLETE day are a real stop signal", () => {
+    const { summary } = runShadow(evidence({ windows: [], day_complete: true }));
+    expect(summary.triggers.find((t) => t.trigger === "unjudged_over_90pct")).toMatchObject({ tripped: true, provisional: false });
+    expect(summary.triggers_tripped_firm).toBe(true);
+  });
+
+  it("the three triggers a prefix can only UNDERCOUNT are never provisional", () => {
+    const { summary } = runShadow(evidence({ day_complete: false }));
+    for (const name of ["encounter_over_2h", "median_over_60min", "encounters_over_15"]) {
+      expect(summary.triggers.find((t) => t.trigger === name)!.provisional, name).toBe(false);
+    }
+  });
+
+  it("a three-hour encounter still stops the experiment even on a partial day", () => {
+    const long = evidence({
+      day_start_ms: T0, day_end_ms: T0 + 200 * MIN, day_complete: false,
+      level_samples: levels(T0, T0 + 200 * MIN),
+      windows: Array.from({ length: 14 }, (_, i) => denseWindow(T0 + i * 15 * MIN, i)),
+    });
+    const { summary } = runShadow(long);
+    expect(summary.triggers_tripped_firm).toBe(true);
+  });
+
+  it("the run row records which kind of day it measured", () => {
+    expect(runShadow(evidence({ day_complete: false })).run.params).toMatchObject({ day_complete: false });
+  });
+
+  it("dayIsComplete: a past date is over; today is over only once recording has stopped", () => {
+    const now = new Date("2026-09-23T09:00:00.000Z");        // 14:30 IST
+    const endedJustNow = now.getTime() - 60_000;
+    expect(dayIsComplete("2026-09-22", endedJustNow, now)).toBe(true);
+    expect(dayIsComplete("2026-09-23", endedJustNow, now)).toBe(false);
+    expect(dayIsComplete("2026-09-23", now.getTime() - STILL_RECORDING_MS - 1, now)).toBe(true);
+    expect(dayIsComplete("2026-09-24", endedJustNow, now)).toBe(false);
+  });
+
+  it("loadDayEvidence marks today's still-recording day incomplete", async () => {
+    wireDay();
+    const ev = (await loadDayEvidence("room_1", "rd_test", "2026-09-23", new Date(T0 + 61 * MIN)))!;
+    expect(ev.day_complete).toBe(false);
+    const done = (await loadDayEvidence("room_1", "rd_test", "2026-09-23", new Date(T0 + 200 * MIN)))!;
+    expect(done.day_complete).toBe(true);
   });
 });
 

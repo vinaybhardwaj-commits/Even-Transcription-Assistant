@@ -45,9 +45,28 @@ export type DayEvidence = {
   windows: ShadowWindow[];
   /** Stretches where the recorder was NOT running, from the gaps between chunks. */
   tape_off: TapeOff[];
+  /**
+   * Whether this is the WHOLE day or a prefix of one still being recorded. A run mid-clinic sees a
+   * day that ends at the last chunk, which is not the day the flag-on plan's triggers were written
+   * about (ETA-Refuter, 23 Sep, after the run-on-deploy re-order).
+   */
+  day_complete: boolean;
 };
 
-export type TriggerCheck = { trigger: string; value: number | null; limit: number; tripped: boolean };
+export type TriggerCheck = {
+  trigger: string;
+  value: number | null;
+  limit: number;
+  tripped: boolean;
+  /**
+   * True when this trigger cannot be trusted on this run: a partial day can trip it for no reason
+   * but the hour it was run. Only the triggers that can FALSELY trip on a prefix are marked —
+   * "unjudged over 90%" (recording runs ahead of transcription, so an early day is legitimately
+   * mostly unjudged) and "no encounters on a day with transcripts" (one transcribed window before
+   * two speech probes have accumulated). The other three can only undercount on a prefix.
+   */
+  provisional: boolean;
+};
 
 export type ShadowSummary = {
   room_day_id: string;
@@ -65,9 +84,17 @@ export type ShadowSummary = {
   median_minutes: number | null;
   longest_minutes: number | null;
   closed_by: Record<string, number>;
+  /** Whether the day was whole when this ran, or a prefix still being recorded. */
+  day_complete: boolean;
   triggers: TriggerCheck[];
   /** True when any rollback trigger tripped. The caller still writes the run: the row is the evidence. */
   triggers_tripped: boolean;
+  /**
+   * True when a trigger tripped that this run can be trusted on. On a whole day this equals
+   * triggers_tripped; on a prefix it excludes the two a prefix can trip by itself, so "run it now"
+   * cannot manufacture a rollback signal out of STT simply not having caught up.
+   */
+  triggers_tripped_firm: boolean;
 };
 
 const minutes = (ms: number) => ms / 60_000;
@@ -97,18 +124,20 @@ export function toInterval(e: Encounter): HypothesisInterval {
  * the plan says stop; `tripped` is whether this run reached it. A checksum trigger has no meaning in
  * this version (nothing is extracted), so it is not invented here.
  */
-export function checkTriggers(s: Omit<ShadowSummary, "triggers" | "triggers_tripped">): TriggerCheck[] {
+export function checkTriggers(s: Omit<ShadowSummary, "triggers" | "triggers_tripped" | "triggers_tripped_firm">): TriggerCheck[] {
   const longest = s.longest_minutes;
   const median_ = s.median_minutes;
+  const partial = !s.day_complete;
   return [
-    { trigger: "encounter_over_2h", value: longest, limit: 120, tripped: longest !== null && longest > 120 },
-    { trigger: "unjudged_over_90pct", value: s.unjudged_share, limit: 0.9, tripped: s.unjudged_share !== null && s.unjudged_share > 0.9 },
-    { trigger: "median_over_60min", value: median_, limit: 60, tripped: median_ !== null && median_ > 60 },
-    { trigger: "encounters_over_15", value: s.encounters, limit: 15, tripped: s.encounters > 15 },
+    { trigger: "encounter_over_2h", value: longest, limit: 120, tripped: longest !== null && longest > 120, provisional: false },
+    { trigger: "unjudged_over_90pct", value: s.unjudged_share, limit: 0.9, tripped: s.unjudged_share !== null && s.unjudged_share > 0.9, provisional: partial },
+    { trigger: "median_over_60min", value: median_, limit: 60, tripped: median_ !== null && median_ > 60, provisional: false },
+    { trigger: "encounters_over_15", value: s.encounters, limit: 15, tripped: s.encounters > 15, provisional: false },
     {
       trigger: "no_encounters_on_a_day_with_transcripts",
       value: s.encounters, limit: 0,
       tripped: s.encounters === 0 && s.windows.placed > 0,
+      provisional: partial,
     },
   ];
 }
@@ -171,11 +200,16 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
     median_minutes: median(durations),
     longest_minutes: durations.length ? Math.max(...durations) : null,
     closed_by: count(encounters.map((e) => e.closed_by)),
+    day_complete: ev.day_complete,
   };
   const triggers = checkTriggers(base);
   // ANY trigger tripping stops the experiment: `some`, never `every` — a single three-hour encounter
   // is a stop on its own, and a test pins exactly that (ETA-Refuter T7, 23 Sep).
-  const summary: ShadowSummary = { ...base, triggers, triggers_tripped: triggers.some((t) => t.tripped) };
+  const summary: ShadowSummary = {
+    ...base, triggers,
+    triggers_tripped: triggers.some((t) => t.tripped),
+    triggers_tripped_firm: triggers.some((t) => t.tripped && !t.provisional),
+  };
 
   const run: HypothesisRunInput = {
     room_day_id: ev.room_day_id,
@@ -189,6 +223,8 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
       unique_chars_per_s_min: UNIQUE_CHARS_PER_SECOND_MIN, energy_active_min: ENERGY_ACTIVE_MIN,
       dead_mic_zero_ratio: DEAD_MIC_ZERO_RATIO, dead_mic_dbfs: DEAD_MIC_DBFS,
       energy_source: "bench_level_sample", transcripts: "stored_only_no_stt",
+      // stored with the run: a prefix and a whole day are not the same measurement (E-7 will care)
+      day_complete: ev.day_complete,
     },
     probes: counts,
     intervals: encounters.map(toInterval),
