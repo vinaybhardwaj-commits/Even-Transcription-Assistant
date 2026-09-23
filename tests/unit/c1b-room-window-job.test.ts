@@ -552,20 +552,83 @@ describe("Drain throughput fix (23 Sep) — join_already_running is a wait, not 
     ).toBe(false);
   });
 
-  it("MUTATION CONTROL — a real join failure (not busy) is unretried and fails the job exactly as before", async () => {
-    mockJoin(async () => ({ ok: false, error: "join_unreachable" }));
+  // MUTATION CONTROL — every OTHER join error, named explicitly, is unretried and fails the job
+  // exactly as before this change. One test per error string, not a single generic one, because a
+  // generic "join_unreachable" case does not by itself prove the classification is an EXACT string
+  // match rather than a looser test (e.g. a mutant that folds join_timeout into the busy set, or one
+  // that matches on a substring) — see the two dedicated kill tests below this block for those.
+  for (const errorCode of ["join_timeout", "join_unreachable", "join_http_502"]) {
+    it(`MUTATION CONTROL — ${errorCode} is unretried and fails the job exactly as before`, async () => {
+      mockJoin(async () => ({ ok: false, error: errorCode }));
+      vi.resetModules();
+      const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+      const { errorCodeOf } = await import("@/lib/jobs/errors");
+
+      const out = await roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+
+      expect(out.kind, `${errorCode} must fail the job, unretried`).toBe("fail");
+      expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
+      expect(
+        DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
+        "an ordinary failure DOES record, same as before this change",
+      ).toBe(true);
+    });
+  }
+
+  it("MUTATION CONTROL — join_timeout is not folded into the busy set even after two real busy answers", async () => {
+    // Kills a mutant that widens the retry condition to `error === "join_already_running" ||
+    // error === "join_timeout"` (or any variant that treats timeout as busy): two genuine busy
+    // answers retry as designed, but the THIRD answer is a real timeout and must fail the job,
+    // not retry a third time.
+    let calls = 0;
+    mockJoin(async () => {
+      calls += 1;
+      if (calls <= 2) return { ok: false, error: "join_already_running" };
+      return { ok: false, error: "join_timeout" };
+    });
     vi.resetModules();
     const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
     const { errorCodeOf } = await import("@/lib/jobs/errors");
 
-    const out = await roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    vi.useFakeTimers();
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(150_000);
+    const out = await p;
+    vi.useRealTimers();
 
-    expect(out.kind, "an ordinary join failure must still fail the job, unretried").toBe("fail");
+    expect(calls).toBe(3);
+    expect(out.kind, "the timeout on the third call must fail the job, not retry it").toBe("fail");
     expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
-    expect(
-      DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
-      "an ordinary failure DOES record, same as before this change",
-    ).toBe(true);
+  });
+
+  it("MUTATION CONTROL — a string that merely CONTAINS 'already_running' is not retried (exact match, not substring)", async () => {
+    // Kills a mutant that loosens `error === "join_already_running"` to
+    // `error.includes("already_running")`. This string is not one the real join service emits
+    // (it always emits exactly "join_already_running") — it exists purely to pin that the
+    // classification is an exact-equality check, not a looser one.
+    //
+    // MUST resolve WITHOUT any timer advancement. A plain `out.kind === "fail"` assertion alone
+    // is too weak here: under the includes() mutant this error retries in a genuine sleep loop,
+    // and if given enough advanced fake time it too would eventually exceed the busy cap and
+    // settle to "fail" — the SAME final verdict, just late, which would make the assertion pass
+    // for the wrong reason and let the mutant survive. Racing the run() promise against a
+    // zero-advance of the fake clock instead proves the real code path never enters the retry
+    // loop at all for this string, deterministically and fast.
+    mockJoin(async () => ({ ok: false, error: "stale_join_already_running_result" }));
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const { errorCodeOf } = await import("@/lib/jobs/errors");
+
+    vi.useFakeTimers();
+    const PENDING = Symbol("pending");
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(0);
+    const out = await Promise.race([p, Promise.resolve(PENDING)]);
+    vi.useRealTimers();
+
+    expect(out, "must settle instantly — any retry sleep means it is still pending here").not.toBe(PENDING);
+    expect((out as { kind: string }).kind, "a substring match on 'already_running' must NOT be treated as busy").toBe("fail");
+    expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
   });
 
   it("BOUND — still busy past the per-claim budget hands the row back to prepare, not a failure", async () => {
