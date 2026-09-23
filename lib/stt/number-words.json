@@ -1,5 +1,6 @@
 {
-"source": "eta-router vinay/lexicon-export eta_number_words.py",
+"source": "eta-router main 5e841f0 (eta_number_words.py)",
+"router_main_sha": "5e841f0",
 "lexicon_sha256": "08ffdfde64ecc886",
 "count": 772,
 "words": [
