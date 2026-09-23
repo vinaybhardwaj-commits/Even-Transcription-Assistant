@@ -20,6 +20,7 @@ import { findRoomDay, roomExists, readClustersForDay, CLUSTERING_STATUS } from "
 import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { readLatestRun, readRun } from "@/lib/encounter-hypotheses";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
@@ -191,4 +192,47 @@ const diarizeSegments: McpTool = {
     }),
 };
 
-export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments];
+const encounterHypotheses: McpTool = {
+  name: "scribe_encounter_hypotheses",
+  description:
+    "Encounter-clock hypotheses (E-5 store, 0114) for a room-day: the LATEST smoother run (versions, probe counts, runs_for_day) and its encounter intervals (start_ms/end_ms epoch, speech/non_speech probes, unjudged and dead-mic ms, closed_by — one of the smoother's five values — doctor_present counts, and E-3 identity only where a voiceprint match filled it). Pass room_day_id, or room_id/room_slug + ist_date, or run_id for one run. run:null means no run was ever stored for that day, which is not the same as a run that found nothing (n_hypotheses 0). No text, no audio.",
+  scope: "read",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room_day_id: { type: "string" },
+      run_id: { type: "string", description: "ehr_… — one specific run instead of the latest" },
+      room_id: { type: "string" },
+      room_slug: { type: "string" },
+      ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ run: null as unknown }, async () => {
+      const runId = argStr(args, "run_id", 64);
+      if (runId) {
+        const run = await readRun(runId);
+        return run ? { run } : { run: null, error: "run_not_found" };
+      }
+      let roomDayId = argStr(args, "room_day_id", 64);
+      let resolved: Record<string, unknown> = {};
+      if (!roomDayId) {
+        if (!argStr(args, "room_id", 64) && !argStr(args, "room_slug", 64)) {
+          return { run: null, error: "room_day_id, run_id, or room_id/room_slug is required" };
+        }
+        const room = await resolveRoom(args);
+        if (!room) return { run: null, error: "unknown_room" };
+        const d = pickIstDate(args);
+        if ("error" in d) return { run: null, error: d.error };
+        const day = await findRoomDay(room.id, d.date);
+        if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, run: null, runs_for_day: 0 };
+        roomDayId = day.id;
+        resolved = { room_id: room.id, ist_date: d.date };
+      }
+      const r = await readLatestRun(roomDayId);
+      return { ...resolved, room_day_id: roomDayId, runs_for_day: r.runs_for_day, run: r.run };
+    }),
+};
+
+export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses];

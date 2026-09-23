@@ -62,6 +62,26 @@ export type ProbeVerdict = {
 /** A stretch where the recorder was NOT running, from chunk continuity. */
 export type TapeOff = { start_ms: number; end_ms: number };
 
+/**
+ * WHY AN EXPORTED ARRAY AND NOT A BARE UNION. Every reason an encounter can close, in one place, with
+ * the type derived from it. A second store (the E-5 `encounter_hypothesis` table, migration 0114) has
+ * to admit exactly these values in its own CHECK; when this was a union written out by hand, that
+ * store re-declared it by hand too, fell three values behind, and the typechecker could not see it —
+ * a room-day whose recorder stopped would have had its last interval refused (ETA-Refuter, 23 Sep).
+ * Importing CLOSED_BY makes that drift a type error, and the store's drift test compares its CHECK
+ * against this array.
+ *
+ *   "non_speech"    the exit run closed it
+ *   "unjudged_gap"  evidence went missing for longer than the bridge limit
+ *   "tape_off"      the recorder stopped
+ *   "dead_mic"      the gate reported a dead mic
+ *   "end_of_input"  the probes ran out while it was open
+ */
+export const CLOSED_BY = ["non_speech", "unjudged_gap", "tape_off", "dead_mic", "end_of_input"] as const;
+export type ClosedBy = (typeof CLOSED_BY)[number];
+export const isClosedBy = (v: unknown): v is ClosedBy =>
+  typeof v === "string" && (CLOSED_BY as readonly string[]).includes(v);
+
 export type Encounter = {
   version: typeof SMOOTHER_VERSION;
   start_ms: number;
@@ -82,14 +102,8 @@ export type Encounter = {
    */
   dead_mic_ms: number;
   doctor_present: { yes: number; no: number; unknown: number };
-  /**
-   * "non_speech"    the exit run closed it
-   * "unjudged_gap"  evidence went missing for longer than the bridge limit
-   * "tape_off"      the recorder stopped
-   * "dead_mic"      the gate reported a dead mic
-   * "end_of_input"  the probes ran out while it was open
-   */
-  closed_by: "non_speech" | "unjudged_gap" | "tape_off" | "dead_mic" | "end_of_input";
+  /** One of CLOSED_BY — see that array for what each value means. */
+  closed_by: ClosedBy;
   /** How many hysteresis intervals the gap-merge joined into this one. */
   merged_from: number;
 };
@@ -112,7 +126,7 @@ export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encou
   let enterCount = 0, exitCount = 0;
   let first = -1, lastSpeech = -1, lastJudged = -1;    // indexes into ps
 
-  const close = (by: Encounter["closed_by"]) => {
+  const close = (by: ClosedBy) => {
     raw.push(summarise(ps, first, lastSpeech, hop, by));
     state = "idle"; enterCount = 0; exitCount = 0; first = -1; lastSpeech = -1; lastJudged = -1;
   };
@@ -129,7 +143,7 @@ export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encou
     // against the floor, so an empty room returns unjudged, not non_speech). A pending run has no
     // encounter to close, so it is DISCARDED; the probe that broke it may start a new run below.
     if (state !== "idle") {
-      const broken: Encounter["closed_by"] | null =
+      const broken: ClosedBy | null =
         tapeOffBetween(ps[lastSpeech].t, p.t) ? "tape_off"
           : p.reason === "dead_mic" ? "dead_mic"
             : lastJudged >= 0 && p.t - ps[lastJudged].t > bridge ? "unjudged_gap"
@@ -172,7 +186,7 @@ export function smoothEncounters(probes: ProbeVerdict[], opts: Opts = {}): Encou
 }
 
 /** Build one interval from the probe indexes of its first and last speech probe. */
-function summarise(ps: ProbeVerdict[], a: number, b: number, hop: number, by: Encounter["closed_by"]): Encounter {
+function summarise(ps: ProbeVerdict[], a: number, b: number, hop: number, by: ClosedBy): Encounter {
   const half = hop / 2;
   const start = ps[a].t - half, end = ps[b].t + half;
   const e: Encounter = {

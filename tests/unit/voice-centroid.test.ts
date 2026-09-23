@@ -5,6 +5,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { checkValues } from "../support/sql-check";
 
 const db: { calls: Array<{ q: string; vals: unknown[] }>; rows: unknown[]; fail: Error | null } = { calls: [], rows: [], fail: null };
 vi.mock("@/lib/db", () => ({
@@ -17,6 +18,7 @@ vi.mock("@/lib/db", () => ({
 const MISSING_COLUMN = new Error('column "retired_by" of relation "voice_centroid" does not exist');
 
 import {
+  VOICE_DOMAINS,
   checkCentroidInput,
   isActive,
   isVoiceDomain,
@@ -60,7 +62,7 @@ describe("migration 0113", () => {
       /embedding_dim\s+integer NOT NULL/, /n_samples\s+integer NOT NULL/, /source\s+jsonb NOT NULL DEFAULT '\{\}'::jsonb/,
       /created_at\s+timestamptz DEFAULT now\(\)/, /retired_at\s+timestamptz/,
     ]) expect(code).toMatch(col);
-    expect(code).toMatch(/CHECK \(domain IN \('room_primary', 'phone', 'meet'\)\)/);
+    expect(code).toMatch(/CONSTRAINT voice_centroid_domain_chk CHECK/);
     expect(code).toMatch(/UNIQUE \(clinician_id, domain, embedding_model, generation\)/);
     // The retirement columns are 0115's, not this file's: an environment that already applied 0113
     // would never receive a column added here (the runner skips by version).
@@ -127,7 +129,13 @@ describe("pure checks", () => {
   });
 
   it("the domain set is exactly the migration's", () => {
-    for (const d of ["room_primary", "phone", "meet"]) expect(isVoiceDomain(d)).toBe(true);
+    // VALUE SETS, not a regex over the file's layout: a verbatim assertion never mentioned
+    // VOICE_DOMAINS, so it compared nothing to the code, and a harmless reformat of 0113 would have
+    // broken it (ETA-Refuter's observation on the E-5 re-check, 23 Sep). The parser strips comments,
+    // so 0113's header cannot answer for its own CHECK.
+    const sql = readFileSync("db/migrations/0113_voice_centroid.sql", "utf8");
+    expect(checkValues(sql, "voice_centroid_domain_chk", "domain")).toEqual(new Set(VOICE_DOMAINS));
+    for (const d of VOICE_DOMAINS) expect(isVoiceDomain(d), d).toBe(true);
     for (const d of ["room", "tonor", "", null]) expect(isVoiceDomain(d)).toBe(false);
   });
 
