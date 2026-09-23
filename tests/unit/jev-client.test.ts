@@ -25,6 +25,7 @@ vi.mock("@/lib/llm-trace/log", () => ({
 
 import { createHttpJevClient, _resetJevClientForTests } from "@/lib/jev/client";
 import { JevDisabledError, JevStateTooLargeError } from "@/lib/jev/types";
+import { FlagValueError } from "@/lib/flags";
 
 const OLD_ENV = { ...process.env };
 
@@ -40,6 +41,27 @@ describe("J1 — jev client: disabled flag", () => {
     const fetchImpl = vi.fn();
     const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(JevDisabledError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // ETA-JEV-CORE-REFUTER-VERDICT-23-SEP-2026.md: only the TRUTHY half of the flag convention was
+  // pinned (this describe block only ever set ETA_JEV_ENABLED="1") — Boolean(process.env[name])
+  // would have left this suite green, and under that mutant "off"/"false"/"0" would all ENABLE
+  // Jev, and a malformed value would enable it too rather than throwing. For a layer whose flags
+  // are specified default-OFF, one per use, that is the dangerous direction: enabling by accident.
+  it("ETA_JEV_ENABLED=off DISABLES it, the same as unset — the falsy half of the flag convention", async () => {
+    process.env.ETA_JEV_ENABLED = "off";
+    const fetchImpl = vi.fn();
+    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(JevDisabledError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("an unrecognised ETA_JEV_ENABLED value THROWS FlagValueError rather than enabling it", async () => {
+    process.env.ETA_JEV_ENABLED = "maybe";
+    const fetchImpl = vi.fn();
+    const client = createHttpJevClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(FlagValueError);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 33 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, 23 Sep)
+## The surface: 34 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, 23 Sep; J-CORE-2, 23 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -74,6 +74,13 @@ E-5 (23 Sep) added a third ungrouped read tool, `scribe_encounter_hypotheses`: a
 encounter-clock run and the encounter intervals it produced, from the 0114 store (times, probe counts,
 versions, `closed_by`; no text, no audio). Ungrouped for the same reason as the two above — bringing
 the ungrouped tools to 23 and the listed surface to 33 (23 + 10 groups).
+
+J-CORE-2 (PLAN-v3.0 §2, 23 Sep) added a fourth ungrouped read tool, `scribe_jev_decisions`:
+`jev_decision` rows (migration 116) — every Jev decision logged through `lib/jev/ask.ts`, across
+every use, filtered by `subject_type`/`subject_id`/`question_id`/`prompt_version`. `answer` is a
+structured, closed-vocabulary value (noul/choice/score), never transcript or state text. Ungrouped
+for the same reason as the three above — bringing the ungrouped tools to 24 and the listed surface
+to 34 (24 + 10 groups).
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app
