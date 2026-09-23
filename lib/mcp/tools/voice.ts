@@ -22,6 +22,7 @@ import { signGetUrl } from "@/lib/r2";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 import { readLatestRun, readRun } from "@/lib/encounter-hypotheses";
 import { runShadowForRoomDay } from "@/lib/encounter-clock/shadow-io";
+import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
@@ -206,11 +207,16 @@ const encounterHypotheses: McpTool = {
       room_id: { type: "string" },
       room_slug: { type: "string" },
       ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+      smoother_version: { type: "string", description: `Which smoother's runs to read; default the current ${SMOOTHER_VERSION}. Pass "any" to take the newest run whatever produced it.` },
     },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs) =>
     failSafe({ run: null as unknown }, async () => {
+      // The store is append-only, so the answer is the LATEST run of one smoother version. Readers
+      // key on (room-day, version) through readLatestRun; nothing here queries the table itself.
+      const askedVersion = argStr(args, "smoother_version", 80);
+      const version = askedVersion === "any" ? undefined : askedVersion || SMOOTHER_VERSION;
       const runId = argStr(args, "run_id", 64);
       if (runId) {
         const run = await readRun(runId);
@@ -231,8 +237,8 @@ const encounterHypotheses: McpTool = {
         roomDayId = day.id;
         resolved = { room_id: room.id, ist_date: d.date };
       }
-      const r = await readLatestRun(roomDayId);
-      return { ...resolved, room_day_id: roomDayId, runs_for_day: r.runs_for_day, run: r.run };
+      const r = await readLatestRun(roomDayId, version);
+      return { ...resolved, room_day_id: roomDayId, smoother_version: version ?? "any", runs_for_day: r.runs_for_day, run: r.run };
     }),
 };
 

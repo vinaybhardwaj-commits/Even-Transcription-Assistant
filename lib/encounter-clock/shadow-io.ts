@@ -23,7 +23,7 @@ import { sql } from "@/lib/db";
 import { readRoomLevelDay } from "@/lib/bench-levels";
 import { writeHypothesisRun, readLatestRun, type WriteRunResult } from "@/lib/encounter-hypotheses";
 import { runShadow, type DayEvidence, type ShadowSummary, type ShadowWindow } from "@/lib/encounter-clock/shadow";
-import type { TapeOff } from "@/lib/encounter-clock/smooth";
+import { SMOOTHER_VERSION, type TapeOff } from "@/lib/encounter-clock/smooth";
 import type { TimelineSpan } from "@/lib/encounter-clock/gate";
 
 /** Chunks closer together than this are one continuous tape; a wider gap is tape-off. */
@@ -114,7 +114,8 @@ export async function runShadowForRoomDay(input: { room_id: string; room_day_id:
   const evidence = await loadDayEvidence(input.room_id, input.room_day_id, input.ist_date);
   if (!evidence) return { ok: false, error: "no_recorded_audio" };
   const { run, summary } = runShadow(evidence);
-  const previous = await readLatestRun(input.room_day_id);
+  // the run this one displaces for readers: the latest of the SAME smoother version
+  const previous = await readLatestRun(input.room_day_id, SMOOTHER_VERSION);
   const written: WriteRunResult = await writeHypothesisRun(run);
   if (!written.ok) return { ok: false, error: "write_refused", detail: written.problems };
   return { ok: true, run_id: written.run_id, supersedes: previous.run?.id ?? null, summary };

@@ -173,6 +173,8 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
     closed_by: count(encounters.map((e) => e.closed_by)),
   };
   const triggers = checkTriggers(base);
+  // ANY trigger tripping stops the experiment: `some`, never `every` — a single three-hour encounter
+  // is a stop on its own, and a test pins exactly that (ETA-Refuter T7, 23 Sep).
   const summary: ShadowSummary = { ...base, triggers, triggers_tripped: triggers.some((t) => t.tripped) };
 
   const run: HypothesisRunInput = {

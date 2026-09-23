@@ -6,6 +6,8 @@
  * `sql` is mocked; no database, no audio, no STT.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 type Row = Record<string, unknown>;
 type Call = { text: string; values: unknown[] };
@@ -39,6 +41,45 @@ const windowWith = (start: number, lines: string[]) => ({
   start_ms: start, end_ms: start + 15 * MIN, text: lines.join("\n"),
   timeline: lines.map((l, i) => ({ start_s: i * 60, end_s: i * 60 + 55, chars: l.length })),
 });
+const iso = (t: number) => new Date(t).toISOString();
+/** A day with chunks, one transcribed window, and level samples, wired into the mocked sql. */
+const wireDay = (opts: { previousRun?: string | null } = {}) => {
+  responder = (text, values) => {
+    if (/FROM bench_chunk/i.test(text)) return [{ started_at: iso(T0), ended_at: iso(T0 + 60 * MIN) }];
+    if (/FROM bench_window/i.test(text)) {
+      const lines = ["the patient reports chest pain since monday", "and the cough has not settled"];
+      return [{
+        start_ms: T0, end_ms: T0 + 15 * MIN, txt: lines.join("\n"),
+        lt: { spans: lines.map((l, i) => ({ start_s: i * 60, end_s: i * 60 + 55, chars: l.length })) },
+      }];
+    }
+    if (/FROM bench_level_sample/i.test(text)) {
+      return levels(T0, T0 + 60 * MIN).map((s) => ({
+        sampled_at: iso(s.t_ms), peak: s.peak, avg: null, zero_ratio: s.zero_ratio,
+        session_open: true, tape_advancing: true, samples: 1,
+      }));
+    }
+    if (/FROM encounter_hypothesis_run/i.test(text)) return opts.previousRun ? [{ id: opts.previousRun, room_day_id: "rd_test", smoother_version: SMOOTHER_VERSION, gate_version: GATE_VERSION, params: {}, probes_total: 0, probes_speech: 0, probes_non_speech: 0, probes_unjudged: 0, n_hypotheses: 0, created_at: iso(T0), runs_for_day: 1 }] : [];
+    if (/FROM encounter_hypothesis\b/i.test(text)) return [];
+    if (/INSERT INTO encounter_hypothesis_run/i.test(text)) {
+      const runId = String(values[0]);
+      const jsonArg = values.find((v) => typeof v === "string" && v.trim().startsWith("[")) as string | undefined;
+      const inserted = jsonArg ? (JSON.parse(jsonArg) as unknown[]).length : 0;
+      return [{ run_id: runId, inserted }];
+    }
+    return [];
+  };
+};
+
+/** A 15-minute window whose text runs the WHOLE window: one distinct line a minute. */
+const denseWindow = (start: number, tag: number) => {
+  const lines = Array.from({ length: 15 }, (_, i) => `the patient reports chest pain and the cough has not settled ${tag}-${i}`);
+  return {
+    start_ms: start, end_ms: start + 15 * MIN, text: lines.join("\n"),
+    timeline: lines.map((l, i) => ({ start_s: i * 60, end_s: i * 60 + 58, chars: l.length })),
+  };
+};
+
 const evidence = (over: Partial<DayEvidence> = {}): DayEvidence => ({
   room_day_id: "rd_test", day_start_ms: T0, day_end_ms: T0 + 60 * MIN,
   level_samples: levels(T0, T0 + 60 * MIN), tape_off: [],
@@ -150,6 +191,56 @@ describe("E-shadow — the rollback triggers travel with the run", () => {
   });
 });
 
+describe("E-shadow — T7: ANY trigger tripping stops the experiment", () => {
+  // `some`, never `every`: one three-hour encounter is a stop on its own, even when everything else
+  // about the run looks ordinary (ETA-Refuter T7).
+  it("a single three-hour encounter reports triggers_tripped, with the others untripped", () => {
+    const long = evidence({
+      day_start_ms: T0, day_end_ms: T0 + 200 * MIN,
+      level_samples: levels(T0, T0 + 200 * MIN),
+      windows: Array.from({ length: 14 }, (_, i) => denseWindow(T0 + i * 15 * MIN, i)),
+    });
+    const { summary } = runShadow(long);
+    expect(summary.longest_minutes).toBeGreaterThan(120);
+    expect(summary.triggers.map((t) => t.trigger)).toContain("encounter_over_2h");
+    expect(summary.triggers.find((t) => t.trigger === "encounter_over_2h")!.tripped).toBe(true);
+    // T7 exactly: SOME triggers are untripped, so `every` would report false here — `some` must not
+    // become `every`, or a three-hour encounter would be reported as a clean run.
+    expect(summary.triggers.some((t) => !t.tripped)).toBe(true);
+    expect(summary.triggers_tripped).toBe(true);
+  });
+
+  it("a clean run reports triggers_tripped false, so the flag is not stuck on", () => {
+    const { summary } = runShadow(evidence());
+    expect(summary.triggers.some((t) => t.tripped)).toBe(false);
+    expect(summary.triggers_tripped).toBe(false);
+  });
+});
+
+describe("E-shadow — one reader, keyed on (room-day, smoother_version)", () => {
+  it("NOTHING outside the store queries encounter_hypothesis_run — every reader goes through the helper", () => {
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) { if (name !== "node_modules") walk(full); continue; }
+        if (!/\.tsx?$/.test(name)) continue;
+        if (full.endsWith("lib/encounter-hypotheses.ts")) continue;         // the store itself
+        if (/(FROM|INTO|UPDATE|JOIN)\s+encounter_hypothesis(_run)?\b/i.test(readFileSync(full, "utf8"))) hits.push(full);
+      }
+    };
+    for (const root of ["lib", "app"]) walk(root);
+    expect(hits, `these query the E-5 tables directly instead of using readLatestRun/writeHypothesisRun: ${hits.join(", ")}`).toEqual([]);
+  });
+
+  it("the shadow run asks for the latest run OF ITS OWN smoother version", async () => {
+    wireDay();
+    await runShadowForRoomDay({ room_id: "room_1", room_day_id: "rd_test", ist_date: "2026-09-23" });
+    const read = calls.find((c) => /FROM encounter_hypothesis_run/i.test(c.text))!;
+    expect(read.values).toContain(SMOOTHER_VERSION);
+  });
+});
+
 describe("E-shadow — tape and timeline from what is stored", () => {
   it("tapeFromChunks finds the recorded day and the gaps wider than 5 s", () => {
     const iso = (t: number) => new Date(t).toISOString();
@@ -175,36 +266,7 @@ describe("E-shadow — tape and timeline from what is stored", () => {
 });
 
 describe("E-shadow — the write path", () => {
-  const iso = (t: number) => new Date(t).toISOString();
-  /** A day with chunks, one transcribed window, and level samples. */
-  const wire = (opts: { previousRun?: string | null } = {}) => {
-    responder = (text, values) => {
-      if (/FROM bench_chunk/i.test(text)) return [{ started_at: iso(T0), ended_at: iso(T0 + 60 * MIN) }];
-      if (/FROM bench_window/i.test(text)) {
-        const lines = ["the patient reports chest pain since monday", "and the cough has not settled"];
-        return [{
-          start_ms: T0, end_ms: T0 + 15 * MIN, txt: lines.join("\n"),
-          lt: { spans: lines.map((l, i) => ({ start_s: i * 60, end_s: i * 60 + 55, chars: l.length })) },
-        }];
-      }
-      if (/FROM bench_level_sample/i.test(text)) {
-        return levels(T0, T0 + 60 * MIN).map((s) => ({
-          sampled_at: iso(s.t_ms), peak: s.peak, avg: null, zero_ratio: s.zero_ratio,
-          session_open: true, tape_advancing: true, samples: 1,
-        }));
-      }
-      if (/FROM encounter_hypothesis_run/i.test(text)) return opts.previousRun ? [{ id: opts.previousRun, room_day_id: "rd_test", smoother_version: SMOOTHER_VERSION, gate_version: GATE_VERSION, params: {}, probes_total: 0, probes_speech: 0, probes_non_speech: 0, probes_unjudged: 0, n_hypotheses: 0, created_at: iso(T0), runs_for_day: 1 }] : [];
-      if (/FROM encounter_hypothesis\b/i.test(text)) return [];
-      if (/INSERT INTO encounter_hypothesis_run/i.test(text)) {
-        // mirror the store's own contract: it verifies the run id it generated and the row count
-        const runId = String(values[0]);
-        const jsonArg = values.find((v) => typeof v === "string" && v.trim().startsWith("[")) as string | undefined;
-        const inserted = jsonArg ? (JSON.parse(jsonArg) as unknown[]).length : 0;
-        return [{ run_id: runId, inserted }];
-      }
-      return [];
-    };
-  };
+  const wire = wireDay;
 
   it("writes NOTHING outside the two E-5 tables — asserted on every statement the run causes", async () => {
     wire();
