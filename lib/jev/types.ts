@@ -19,6 +19,11 @@ export type JevAnswer =
 
 export type JevRequest = { state: unknown; questions: Record<string, JevQuestion>; model?: string };
 
+/** J-CORE-2 (PLAN-v3.md §2, migration 116 jev_decision): the closed set of things a Jev decision
+ * can be about. Polymorphic on purpose — jev_decision.subject_id has no FK because its referent
+ * depends on this value (see the migration's own column comment). */
+export type JevSubjectType = "window" | "turn" | "note_sentence" | "encounter" | "collapse";
+
 export type JevResult = {
   model: string;
   answers: Record<string, JevAnswer>;
