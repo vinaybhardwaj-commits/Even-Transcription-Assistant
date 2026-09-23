@@ -89,6 +89,8 @@ const server = {
   /** What GET /v2/jobs reports. The model here is NOT what this build asks for, on purpose. */
   records: [{ id: "job-abc-123", status: "succeeded", type: "diarize", model: "precision-4-fake" }] as unknown[],
   recordsStatus: 200,
+  /** Every endpoint answers 400 and QUOTES BACK the URLs it was given. */
+  echoUrls: false,
 };
 
 const logs: string[] = [];
@@ -118,7 +120,7 @@ beforeEach(() => {
   server.submitStatus = 200; server.submitBody = { jobId: "job-abc-123", status: "created" };
   server.jobAnswers = [okJob()]; server.jobStatus = 200;
   server.records = [{ id: "job-abc-123", status: "succeeded", type: "diarize", model: "precision-4-fake" }];
-  server.recordsStatus = 200;
+  server.recordsStatus = 200; server.echoUrls = false;
   process.env.PYANNOTEAI_API_KEY = KEY;
   // A test must not sit through the shipped poll cadence; the values themselves are pinned below.
   process.env.DIARIZE_POLL_INTERVAL_MS = "1";
@@ -133,6 +135,13 @@ beforeEach(() => {
     fetchCalls.push({ url, method: init?.method ?? "GET", headers, body: typeof init?.body === "string" ? init.body : null });
     const reply = (status: number, body: unknown) =>
       ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) }) as unknown as Response;
+    if (server.echoUrls) {
+      // What a real API does when it cannot fetch the media: it names the thing it could not
+      // fetch. Both the endpoint we called and the presigned URL we handed over come straight
+      // back in the error body.
+      const handed = typeof init?.body === "string" ? String(JSON.parse(init.body).url ?? "") : "";
+      return reply(400, { message: `could not fetch ${handed || r2.signed} while serving ${url}`, requestId: "abc" });
+    }
     if (url.includes("/v1/diarize")) return reply(server.submitStatus, server.submitBody);
     if (url.includes("/v2/jobs")) return reply(server.recordsStatus, { items: server.records, nextCursor: null });
     if (url.includes("/v1/jobs/")) {
@@ -602,6 +611,39 @@ describe("neither the API key nor the presigned URL ever leaves this process in 
     await runStep("pyannote_poll", { pyannoteai_job_id: "job-abc-123", run_id: "r", window_id: "w1", engine: "pyannoteai" });
     const all = JSON.stringify(sqlCalls);
     expect(all).not.toContain("audio contained the phrase");
+  });
+
+  it("scrubUrls removes a URL with a scheme AND a bare signed query string", async () => {
+    const { scrubUrls } = await import("@/lib/diarize-pyannoteai");
+    expect(scrubUrls("could not fetch https://r2.example/c.webm?X-Amz-Signature=SIGNATURE_SECRET now"))
+      .toBe("could not fetch [url removed] now");
+    // No scheme, so an https?:// pattern alone would walk straight past this one.
+    expect(scrubUrls("ref r2.example/c.webm?X-Amz-Signature=SIGNATURE_SECRET")).toBe("ref [url removed]");
+    expect(scrubUrls("plain text with no url")).toBe("plain text with no url");
+  });
+
+  it("A PROVIDER THAT ECHOES OUR URL BACK STILL LEAKS NOTHING — submit, poll and records", async () => {
+    // The one channel the rest of this file did not check: `detail` is the provider's own body,
+    // and a provider that quotes the request it could not serve hands the presigned URL to the
+    // log through it. All three sites that log `detail` are driven here.
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    server.echoUrls = true;
+    await runStep("diarize");                                   // submit -> 400 echoing the URL
+    await runStep("pyannote_poll", { pyannoteai_job_id: "job-abc-123", run_id: "r", window_id: "w1", engine: "pyannoteai" });
+    server.echoUrls = false;
+    server.jobAnswers = [okJob()];
+    server.recordsStatus = 400;                                 // the records lookup alone fails
+    server.echoUrls = true;
+    await runStep("pyannote_poll", { pyannoteai_job_id: "job-abc-123", run_id: "r", window_id: "w1", engine: "pyannoteai" });
+
+    const logged = logs.join("\n");
+    expect(logs.length, "the failures really were logged").toBeGreaterThan(2);
+    expect(logged).not.toContain("X-Amz-Signature");
+    expect(logged).not.toContain("SIGNATURE_SECRET");
+    expect(logged).not.toContain("https://r2.example");
+    expect(logged).not.toMatch(/https?:\/\//);
+    // and the scrub fired rather than the body simply being absent
+    expect(logged).toContain("[url removed]");
   });
 
   it("a missing key does not reach the wire at all", async () => {

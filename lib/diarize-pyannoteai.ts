@@ -136,7 +136,7 @@ async function call(
       cache: "no-store",
     });
     const text = await res.text().catch(() => "");
-    if (!res.ok) return { ok: false, status: res.status, detail: text.slice(0, 180) };
+    if (!res.ok) return { ok: false, status: res.status, detail: scrubUrls(text.slice(0, 180)) };
     let json: unknown;
     try {
       json = JSON.parse(text);
@@ -153,6 +153,25 @@ async function call(
   } finally {
     clearTimeout(tid);
   }
+}
+
+/**
+ * STRIP EVERY URL OUT OF A PROVIDER MESSAGE BEFORE IT CAN BE LOGGED.
+ *
+ * ETA-Refuter, 23 Sep 2026. The rest of this file is careful never to log the presigned URL — and
+ * then logs `detail`, which is up to 180 characters of the provider's own response body. An API
+ * that echoes the offending request back in its error ("could not fetch https://...") hands the
+ * URL straight to the log through the one channel that was not checked, and that URL is a bearer
+ * credential for patient audio for as long as it lives.
+ *
+ * Applied ONCE, where `detail` is built, rather than at each of the three call sites that log it:
+ * a scrub that must be remembered at every site is a scrub that will be missed at the fourth.
+ *
+ * The second pattern catches a signature that arrives without a scheme (a bare
+ * `host/key?X-Amz-Signature=...`), which `https?://` alone would walk straight past.
+ */
+export function scrubUrls(s: string): string {
+  return s.replace(/https?:\/\/\S+/gi, "[url removed]").replace(/\S*X-Amz-[A-Za-z-]+=\S*/gi, "[url removed]");
 }
 
 /** A 4xx that is not 408/429 will not become a success on a retry; anything else might. */
