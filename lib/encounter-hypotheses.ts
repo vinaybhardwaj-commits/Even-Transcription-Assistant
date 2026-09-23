@@ -301,15 +301,28 @@ export async function readRun(runId: string): Promise<StoredRun | null> {
   return rows[0] ? rowToRun(rows[0], await hypothesesOf(runId)) : null;
 }
 
-/** The newest run for a room-day, with its intervals, plus how many runs the day has; null run if none. */
-export async function readLatestRun(roomDayId: string): Promise<{ run: StoredRun | null; runs_for_day: number }> {
+/**
+ * The newest run for a room-day, with its intervals, plus how many runs match; null run if none.
+ *
+ * THE ONE READER. The store is append-only, so "the answer for this room-day" is always the LATEST
+ * run of a given smoother version, and every reader takes it through this function — nothing else in
+ * the codebase queries encounter_hypothesis_run, and a test asserts that. Pass `smootherVersion` to
+ * key on (room-day, version), which is what a caller comparing like with like wants; omit it to take
+ * the newest run of any version. `runs_for_day` counts the same set the answer was chosen from.
+ */
+export async function readLatestRun(
+  roomDayId: string,
+  smootherVersion?: string,
+): Promise<{ run: StoredRun | null; runs_for_day: number }> {
   if (!ID_RE.test(roomDayId)) return { run: null, runs_for_day: 0 };
+  if (smootherVersion !== undefined && !VERSION_RE.test(smootherVersion)) return { run: null, runs_for_day: 0 };
   const rows = (await sql`
     SELECT id, room_day_id, smoother_version, gate_version, params, probes_total, probes_speech,
            probes_non_speech, probes_unjudged, n_hypotheses, created_at,
            count(*) OVER ()::int AS runs_for_day
       FROM encounter_hypothesis_run
      WHERE room_day_id = ${roomDayId}
+       AND (${smootherVersion ?? null}::text IS NULL OR smoother_version = ${smootherVersion ?? null})
      ORDER BY created_at DESC, id DESC
      LIMIT 1
   `) as Row[];

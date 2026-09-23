@@ -21,6 +21,8 @@ import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 import { readLatestRun, readRun } from "@/lib/encounter-hypotheses";
+import { runShadowForRoomDay } from "@/lib/encounter-clock/shadow-io";
+import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
@@ -205,11 +207,16 @@ const encounterHypotheses: McpTool = {
       room_id: { type: "string" },
       room_slug: { type: "string" },
       ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+      smoother_version: { type: "string", description: `Which smoother's runs to read; default the current ${SMOOTHER_VERSION}. Pass "any" to take the newest run whatever produced it.` },
     },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs) =>
     failSafe({ run: null as unknown }, async () => {
+      // The store is append-only, so the answer is the LATEST run of one smoother version. Readers
+      // key on (room-day, version) through readLatestRun; nothing here queries the table itself.
+      const askedVersion = argStr(args, "smoother_version", 80);
+      const version = askedVersion === "any" ? undefined : askedVersion || SMOOTHER_VERSION;
       const runId = argStr(args, "run_id", 64);
       if (runId) {
         const run = await readRun(runId);
@@ -230,9 +237,50 @@ const encounterHypotheses: McpTool = {
         roomDayId = day.id;
         resolved = { room_id: room.id, ist_date: d.date };
       }
-      const r = await readLatestRun(roomDayId);
-      return { ...resolved, room_day_id: roomDayId, runs_for_day: r.runs_for_day, run: r.run };
+      const r = await readLatestRun(roomDayId, version);
+      return { ...resolved, room_day_id: roomDayId, smoother_version: version ?? "any", runs_for_day: r.runs_for_day, run: r.run };
     }),
 };
 
-export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses];
+/**
+ * scribe_encounter_shadow_run — the E-shadow run: E-1 probes, E-2 gate, E-4 smoother, E-5 write, for
+ * one room-day. Operator triggered, never a cron. INVOKE scope: it writes.
+ *
+ * It writes to the two E-5 tables and nothing else, calls no STT, fetches no audio, and changes
+ * nothing a clinician sees. Where a window has no stored transcript the gate's own rule applies and
+ * the probe is unjudged. A rerun appends a new run (the E-5 store is append-only by design) and names
+ * the run it supersedes for readers, who take the latest.
+ */
+const encounterShadowRun: McpTool = {
+  name: "scribe_encounter_shadow_run",
+  description:
+    "Run the encounter clock over one room-day and store the hypotheses (E-5). Operator triggered. Reads the level log and the transcripts already stored for that day — no STT, no audio fetch, no clinician-facing write. Pass room_day_id, or room_id/room_slug + ist_date. Returns the run id, the run it supersedes, and a numbers-only summary including every rollback trigger from the flag-on plan. A rerun appends a new run; readers take the latest.",
+  scope: "invoke",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room_day_id: { type: "string" },
+      room_id: { type: "string" },
+      room_slug: { type: "string" },
+      ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+    },
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ ok: false as const }, async () => {
+      const room = await resolveRoom(args);
+      if (!room) return { ok: false, error: "unknown_room" };
+      const d = pickIstDate(args);
+      if ("error" in d) return { ok: false, error: d.error };
+      let roomDayId = argStr(args, "room_day_id", 64);
+      if (!roomDayId) {
+        const day = await findRoomDay(room.id, d.date);
+        if (!day) return { ok: false, error: "no_room_day", room_id: room.id, ist_date: d.date };
+        roomDayId = day.id;
+      }
+      const res = await runShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
+      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, ...res };
+    }),
+};
+
+export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses, encounterShadowRun];

@@ -36,6 +36,10 @@
     {
       "path": "/api/admin/room-watchdog",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/admin/bench/levels-retention",
+      "schedule": "5 * * * *"
     }
   ]
 }

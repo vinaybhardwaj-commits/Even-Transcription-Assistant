@@ -145,7 +145,7 @@ import {
 } from "@/lib/room-facts";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, type InstallStateFlag } from "@/lib/bench-bus-constants";
-import { parseMicLevelPair } from "@/lib/bench-levels";
+import { levelForSpan, parseMicLevelPair, QUIET_FLOOR_RMS, readLevelSamplesInRange, type SegmentLevel } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { boundInstallForRoom, InstallError, readFleet } from "@/lib/room-install";
@@ -1645,6 +1645,23 @@ async function writeWindowMarkerOnly(
 const shownTurns = (b: TurnBuild) =>
   b.turns.map((t) => ({ type: t.type, at: t.at, start_ms: t.start_ms, end_ms: t.end_ms, speaker: t.speaker, text: t.text, source_ref: t.source_ref }));
 
+/**
+ * STT-HALLUCINATION-PACK item 2 — attaches `level` (peak/avg/low_signal, lib/bench-levels.ts)
+ * to each shown turn, INCLUDING a silence: "peak 0.31, no speech" and "peak 0.0000, no speech"
+ * are different clinical facts (ETA-E13, R-E13c) and only one number tells them apart. ONE
+ * query for the whole batch's span, not one per turn — the same shape readRoomLevelDay already
+ * uses. Read-only: no turn, cue, or write is touched; a level-log failure degrades to
+ * low_signal:null on every turn (readLevelSamplesInRange's own empty-array fallback) rather
+ * than failing the transcript answer, which is the actual thing an operator asked for.
+ */
+async function withLevels<T extends { start_ms: number; end_ms: number }>(turns: T[], roomId: string): Promise<Array<T & { level: SegmentLevel }>> {
+  if (turns.length === 0) return [];
+  const startMs = Math.min(...turns.map((t) => t.start_ms));
+  const endMs = Math.max(...turns.map((t) => t.end_ms));
+  const samples = await readLevelSamplesInRange(roomId, startMs, endMs).catch(() => []);
+  return turns.map((t) => ({ ...t, level: levelForSpan(samples, t.start_ms, t.end_ms, QUIET_FLOOR_RMS) }));
+}
+
 type TurnAnswer = Record<string, unknown>;
 
 /**
@@ -1737,7 +1754,7 @@ async function turnsAnswer(
       stoppedEarly,
     });
   const base = {
-    turns: shownTurns(build),
+    turns: await withLevels(shownTurns(build), session.room_id),
     turn_counts: {
       turns: build.turns.filter((t) => t.type === TURN_CUE_TYPE).length,
       silences: build.turns.filter((t) => t.type === SILENCE_CUE_TYPE).length,

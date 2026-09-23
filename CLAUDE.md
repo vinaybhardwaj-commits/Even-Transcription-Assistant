@@ -19,6 +19,7 @@ The standing rules are in `~/.claude/CLAUDE.md`. This file adds only what is spe
 - `npm test` (vitest)
 - `npm run build`
 - `npm run check:silent` — 9 findings pre-existing at `1193083` are accepted; say so, do not fix files outside the contract
+- `scripts/check-number-words.sh` — on the Mini, when `lib/stt/number-words.json` or the router's lexicon changes: compares the JSON's lexicon sha256 with the header hash of `eta_number_words.py` on eta-router `main` (read through git). Exit 1 is drift (regenerate the JSON from router main); exit 2 means it could not check. Not part of the Yoga run — the Yoga has no `~/eta-router`.
 - `cd apps/room-recorder && swift build`
 - `cd apps/room-recorder && swift test` — over SSH the login keychain is locked, so `needsEnrolment` issues mean UNPROVEN, not failed; say which
 - Signing over SSH works once V has unlocked the keychain himself (`security unlock-keychain` then `security set-key-partition-list -S apple-tool:,apple: -s` on `~/Library/Keychains/login.keychain-db`, password at the prompt). Never script the unlock; never ask for the password.
