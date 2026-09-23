@@ -38,11 +38,13 @@ L0 = r[0]["end_sample"] - r[0]["start_sample"]
 check("far spans stay separate", len(r) == 2)
 check("trim offsets are the running sum of lengths", r[0]["trim_start_sample"] == 0 and r[1]["trim_start_sample"] == L0)
 
+# (Not DIARIZE_TIMEOUT_MS_DEFAULT's value: diarize-dispatch B3 allows that number in exactly one place,
+#  and it greps Python comments too — so this line does not spell it either.)
 # a tiny isolated blip: 0.1 s span + 0.8 s padding = 0.9 s >= 0.5 -> KEPT (min applies after pad)
-r = shape([(300000, 301600)], total, SR, P, G, M)
+r = shape([(290000, 291600)], total, SR, P, G, M)
 check("min is applied AFTER padding", len(r) == 1)
 # with pad 0 a 0.1 s blip is dropped
-r = shape([(300000, 301600)], total, SR, 0.0, G, M)
+r = shape([(290000, 291600)], total, SR, 0.0, G, M)
 check("a region shorter than min is dropped", r == [])
 
 check("no spans -> no regions", shape([], total, SR, P, G, M) == [])
