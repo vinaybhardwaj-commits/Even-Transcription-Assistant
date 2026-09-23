@@ -8,15 +8,24 @@
  * reformat of the list, which a verbatim regex does not.
  *
  * COMMENTS ARE STRIPPED FIRST, AND THAT IS THE LOAD-BEARING PART. The parser finds a constraint by its
- * first textual occurrence, and this house writes migration headers that QUOTE the constraint they are
- * documenting (0113 and 0115 both do). Handed the raw file, the guard reads the comment and never sees
- * the real CHECK — so someone documenting a constraint, and someone else later narrowing it, silently
- * restore the drift between them (ETA-Refuter's F1 mutation, 23 Sep). Neither edit looks reckless.
+ * first textual occurrence, so a comment that quotes a constraint would answer for the real one:
+ * document a clause in the header, narrow the real clause later, and the drift between them is restored
+ * with the guard green (ETA-Refuter's F1 and G2 mutations, 23 Sep). Neither edit looks reckless, and
+ * they need not be the same person.
+ *
+ * BOTH SYNTAXES, because stripping only one leaves the same hole in the other. `--` to end of line, and
+ * `/* … *\/` including NESTED blocks, which Postgres supports and this repo writes (0074 uses `/** … *\/`
+ * doc comments). To be clear about what is NOT claimed: this is a test helper reading migration files,
+ * not a SQL parser. Dollar-quoted bodies ($$ … $$) are not treated as strings, so a comment marker
+ * inside one is still stripped; no migration's CHECK lives inside a dollar-quoted body, and a CHECK that
+ * did would need this to grow.
  */
 
 /**
- * PURE — SQL with its `--` comments removed, to end of line, ignoring `--` inside a single-quoted
- * string. Whole-line and trailing comments both go; line structure is preserved so offsets stay readable.
+ * PURE — SQL with its comments removed: `--` to end of line, and `/* … *\/` blocks including nested
+ * ones. A marker inside a single-quoted string is not a comment ('a -- b' and 'a /* b' survive intact).
+ * Whole-line and trailing comments both go, and newlines are preserved so the result still lines up
+ * with the file.
  */
 export function stripSqlComments(sql: string): string {
   let out = "";
@@ -35,6 +44,19 @@ export function stripSqlComments(sql: string): string {
     if (c === "-" && sql[i + 1] === "-") {
       while (i < sql.length && sql[i] !== "\n") i++;
       out += "\n";
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      // Nested, as Postgres reads them: /* /* */ */ closes once, not twice. Newlines are kept so the
+      // stripped text still lines up with the file.
+      let depth = 1;
+      i += 2;
+      for (; i < sql.length && depth > 0; i++) {
+        if (sql[i] === "/" && sql[i + 1] === "*") { depth++; i++; }
+        else if (sql[i] === "*" && sql[i + 1] === "/") { depth--; i++; }
+        else if (sql[i] === "\n") out += "\n";
+      }
+      i--; // the loop's own i++ consumes the character after the close
       continue;
     }
     out += c;
