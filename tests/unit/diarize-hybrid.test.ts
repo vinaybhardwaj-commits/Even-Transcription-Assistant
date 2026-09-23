@@ -366,6 +366,57 @@ describe("the level gate stops a paid call only on evidence", () => {
     expect(fetchCalls.filter((c) => c.url.includes("/v1/diarize"))).toHaveLength(0);
   });
 
+  // ── THE DECISION, not the value. `unknown` is pinned as a RETURN of judgeLevels by the tests
+  // above; these pin what the JOB DOES with it. ETA-Refuter's L1: `=== "silent"` mutated to
+  // `!== "has_sound"` passed 91/91, because the two fail-safe tests below are guarded by `if (rd)`
+  // and so never reach the comparison at all — they pin resolution, not judgement.
+  //
+  // Each asserts the gate WAS consulted (a bench_level_sample read happened). Without that the
+  // test would pass for the wrong reason the moment the gate stopped running, which is the exact
+  // shape of the hole it is closing.
+  it("an UNKNOWN verdict still diarizes — a window we could not judge is not a window we judged silent", async () => {
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    levelRows = [];                                        // no readings at all -> no_samples
+    const out = await runStep("diarize");
+    expect(sqlCalls.some((c) => /FROM bench_level_sample/.test(c.text)), "the gate really ran").toBe(true);
+    expect(out.kind).toBe("next");
+    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize")), "the paid call was made").toBe(true);
+  });
+
+  it("THIN COVERAGE still diarizes — three quiet readings do not convict a 15-minute window", async () => {
+    // The direction matters: `!== "has_sound"` reads as MORE careful ("only pay when we know there
+    // is sound") and silently stores every thinly-logged window as no_speakers, asserting a
+    // judgement that was never made. It costs data, not money.
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    levelRows = [0, 1, 2].map((i) => ({
+      sampled_at: new Date(i * 15_000).toISOString(), peak: 0, avg: null, zero_ratio: null,
+      session_open: true, tape_advancing: true, samples: 1,
+    }));
+    const out = await runStep("diarize");
+    expect(sqlCalls.some((c) => /FROM bench_level_sample/.test(c.text)), "the gate really ran").toBe(true);
+    expect(out.kind).toBe("next");
+    if (out.kind !== "next") throw new Error("unreachable");
+    expect(out.progress.pyannoteai_job_id).toBeTruthy();
+  });
+
+  it("ONLY 'silent' skips — the three verdicts are not two", async () => {
+    // Named so the next person reading the job sees that `unknown` is a third state with its own
+    // behaviour, not a synonym for either neighbour.
+    const { judgeLevels } = await import("@/lib/diarize-level-gate");
+    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
+    const win = { start_ms: 0, end_ms: 900_000 };
+    const bucket = (t: number, peak: number) => ({ t_ms: t, peak, avg: null, zero_ratio: null, session_open: true, tape_advancing: true, samples: 1 });
+    const verdicts = new Set([
+      judgeLevels([], win).verdict,
+      judgeLevels([bucket(0, 0)], win).verdict,
+      judgeLevels(Array.from({ length: 60 }, (_, i) => bucket(i * 15_000, 0)), win).verdict,
+      judgeLevels([bucket(0, DEFAULT_ROOM_ENERGY_FLOOR)], win).verdict,
+    ]);
+    expect([...verdicts].sort()).toEqual(["has_sound", "silent", "unknown"]);
+    const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
+    expect(src, "the job skips on the one verdict, never on the absence of another").toContain('level.verdict === "silent"');
+  });
+
   it("a room_day it cannot read NEVER skips — the gate fails safe, it does not fail the window", async () => {
     // The window load deliberately no longer joins room_day (that join broke eleven e2e tests on a
     // schema without the table). The gate resolves it separately and swallows the failure, because
