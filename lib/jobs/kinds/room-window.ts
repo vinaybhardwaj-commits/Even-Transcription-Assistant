@@ -108,8 +108,18 @@ export const roomWindowKind: JobKind = {
 
     switch (ctx.step) {
       case STEPS.prepare: {
-        const o = await roomWindowPrepare(windowId, who);
-        if (!o.ok) return failFromPhase(o);
+        const o = await roomWindowPrepare(windowId, who, ctx.progress);
+        if (!o.ok) {
+          // The join service's own mutex said "come back" — not a failure. Requeue on the SAME
+          // step, carrying the busy-retry bookkeeping (attempt count, first-busy timestamp)
+          // forward so the next claim knows how much of the bound is already spent. Every other
+          // failure (including a busy retry that finally exceeded its bound, which comes back as
+          // ordinary `join_failed`) falls through to the unchanged failure path.
+          if (o.step === "join_busy") {
+            return nextStep(STEPS.prepare, { ...ctx.progress, ...(o.next_progress ?? {}) });
+          }
+          return failFromPhase(o);
+        }
         return nextStep(STEPS.segment, { ...ctx.progress, ...(o.next_progress ?? {}) });
       }
 

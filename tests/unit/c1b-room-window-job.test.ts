@@ -4,7 +4,7 @@
  * These drive the real step machine against a fake database and fake tunnels, so what is asserted
  * is what the code DOES: which rows land, how many router jobs are created, and where a step stops.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const DB = vi.hoisted(() => ({
   runs: [] as Array<{ id: string; window: string; engine: string; text?: string; metrics: Record<string, unknown> }>,
@@ -460,5 +460,221 @@ describe("overnight-translate — translate on a SYNCHRONOUS engine fails by nam
     const r = await drive(20, { ...ARGS, translate: true });
     expect(r.error).toBeUndefined();
     expect((ROUTER.lastOpts as { translate?: boolean }).translate).toBe(true);
+  });
+});
+
+describe("Drain throughput fix (23 Sep) — join_already_running is a wait, not a failure", () => {
+  // A dedicated, stateful callJoinService mock per test, applied with vi.doMock + vi.resetModules
+  // so it does not leak into the shared "callJoinService always ok" mock every other test in this
+  // file relies on.
+  const mockJoin = (impl: () => Promise<{ ok: boolean; error?: string; key?: string }>) =>
+    vi.doMock("@/lib/bench-join", async (orig) => ({
+      ...(await orig<Record<string, unknown>>()),
+      joinServiceConfigured: () => true,
+      callJoinService: impl,
+    }));
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.doUnmock("@/lib/bench-join");
+    vi.resetModules();
+  });
+
+  it("CLASSIFICATION — busy twice then ok: prepare advances to segment, not a failure", async () => {
+    // The mock is stateful across EVERY callJoinService call the step makes, including the
+    // language-probe join that runs right after the main clip join succeeds (C3) — so `calls`
+    // legitimately exceeds `busyCalls` by one once the main join stops being busy. Assert on
+    // `busyCalls`, which is what this test is actually about.
+    let calls = 0;
+    let busyCalls = 0;
+    mockJoin(async () => {
+      calls += 1;
+      if (calls <= 2) { busyCalls += 1; return { ok: false, error: "join_already_running" }; }
+      return { ok: true, key: "clips/joined.webm" };
+    });
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+
+    vi.useFakeTimers();
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(150_000);
+    const out = await p;
+    vi.useRealTimers();
+
+    expect(busyCalls, "two busy answers before it stopped being busy").toBe(2);
+    expect(calls, "at least the two busy answers plus the ok that unblocked it").toBeGreaterThanOrEqual(3);
+    expect(out.kind, "a busy-then-ok join must ADVANCE the job, never fail it").toBe("next");
+    expect((out as { step: string }).step).toBe("segment");
+    expect(
+      DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
+      "a busy retry must not touch the per-window failure accounting (no cooldown row either — that keys off THIS write)",
+    ).toBe(false);
+  });
+
+  it("CLASSIFICATION — the job runs end to end to done after two busy answers (attempts recorded on the finished result)", async () => {
+    // See the busyCalls/calls note in the previous test — the language probe's own join call
+    // also goes through this mock once the main join stops being busy.
+    let calls = 0;
+    let busyCalls = 0;
+    mockJoin(async () => {
+      calls += 1;
+      if (calls <= 2) { busyCalls += 1; return { ok: false, error: "join_already_running" }; }
+      return { ok: true, key: "clips/joined.webm" };
+    });
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    ROUTER.states = [{ ok: true, state: "done", transcript_native: "router words", dominant_language: "kn",
+                       language_timeline: [{ start_s: 0, end_s: 900, lang: "kn", engine: "indicconformer", chars: 12 }], sec: 700 }];
+
+    let step = roomWindowKind.first;
+    let progress: Record<string, unknown> = {};
+    const visited: string[] = [];
+    vi.useFakeTimers();
+    let out: Awaited<ReturnType<typeof roomWindowKind.run>> | null = null;
+    for (let i = 0; i < 10; i += 1) {
+      visited.push(step);
+      const p = roomWindowKind.run({ job: {} as never, step, args: ARGS, progress, runner: "r1" });
+      await vi.advanceTimersByTimeAsync(150_000);
+      out = await p;
+      if (out.kind === "done") break;
+      if (out.kind === "fail") break;
+      progress = (out as { progress: Record<string, unknown> }).progress;
+      step = (out as { step: string }).step;
+    }
+    vi.useRealTimers();
+
+    expect(out?.kind, `visited: ${visited.join(" -> ")}`).toBe("done");
+    expect(visited).toEqual(["prepare", "segment", "engine", "poll", "finish"]);
+    expect(busyCalls, "two busy answers then one ok unblocked the whole run").toBe(2);
+    expect(
+      DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
+      "the whole run reached done without ever recording a per-window failure",
+    ).toBe(false);
+  });
+
+  // MUTATION CONTROL — every OTHER join error, named explicitly, is unretried and fails the job
+  // exactly as before this change. One test per error string, not a single generic one, because a
+  // generic "join_unreachable" case does not by itself prove the classification is an EXACT string
+  // match rather than a looser test (e.g. a mutant that folds join_timeout into the busy set, or one
+  // that matches on a substring) — see the two dedicated kill tests below this block for those.
+  for (const errorCode of ["join_timeout", "join_unreachable", "join_http_502"]) {
+    it(`MUTATION CONTROL — ${errorCode} is unretried and fails the job exactly as before`, async () => {
+      mockJoin(async () => ({ ok: false, error: errorCode }));
+      vi.resetModules();
+      const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+      const { errorCodeOf } = await import("@/lib/jobs/errors");
+
+      const out = await roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+
+      expect(out.kind, `${errorCode} must fail the job, unretried`).toBe("fail");
+      expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
+      expect(
+        DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
+        "an ordinary failure DOES record, same as before this change",
+      ).toBe(true);
+    });
+  }
+
+  it("MUTATION CONTROL — join_timeout is not folded into the busy set even after two real busy answers", async () => {
+    // Kills a mutant that widens the retry condition to `error === "join_already_running" ||
+    // error === "join_timeout"` (or any variant that treats timeout as busy): two genuine busy
+    // answers retry as designed, but the THIRD answer is a real timeout and must fail the job,
+    // not retry a third time.
+    let calls = 0;
+    mockJoin(async () => {
+      calls += 1;
+      if (calls <= 2) return { ok: false, error: "join_already_running" };
+      return { ok: false, error: "join_timeout" };
+    });
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const { errorCodeOf } = await import("@/lib/jobs/errors");
+
+    vi.useFakeTimers();
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(150_000);
+    const out = await p;
+    vi.useRealTimers();
+
+    expect(calls).toBe(3);
+    expect(out.kind, "the timeout on the third call must fail the job, not retry it").toBe("fail");
+    expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
+  });
+
+  it("MUTATION CONTROL — a string that merely CONTAINS 'already_running' is not retried (exact match, not substring)", async () => {
+    // Kills a mutant that loosens `error === "join_already_running"` to
+    // `error.includes("already_running")`. This string is not one the real join service emits
+    // (it always emits exactly "join_already_running") — it exists purely to pin that the
+    // classification is an exact-equality check, not a looser one.
+    //
+    // MUST resolve WITHOUT any timer advancement. A plain `out.kind === "fail"` assertion alone
+    // is too weak here: under the includes() mutant this error retries in a genuine sleep loop,
+    // and if given enough advanced fake time it too would eventually exceed the busy cap and
+    // settle to "fail" — the SAME final verdict, just late, which would make the assertion pass
+    // for the wrong reason and let the mutant survive. Racing the run() promise against a
+    // zero-advance of the fake clock instead proves the real code path never enters the retry
+    // loop at all for this string, deterministically and fast.
+    mockJoin(async () => ({ ok: false, error: "stale_join_already_running_result" }));
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const { errorCodeOf } = await import("@/lib/jobs/errors");
+
+    vi.useFakeTimers();
+    const PENDING = Symbol("pending");
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(0);
+    const out = await Promise.race([p, Promise.resolve(PENDING)]);
+    vi.useRealTimers();
+
+    expect(out, "must settle instantly — any retry sleep means it is still pending here").not.toBe(PENDING);
+    expect((out as { kind: string }).kind, "a substring match on 'already_running' must NOT be treated as busy").toBe("fail");
+    expect(errorCodeOf((out as { error: string }).error)).toBe("room_window_failed");
+  });
+
+  it("BOUND — still busy past the per-claim budget hands the row back to prepare, not a failure", async () => {
+    mockJoin(async () => ({ ok: false, error: "join_already_running" }));
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+    const { JOIN_BUSY_STEP_BUDGET_MS } = await import("@/lib/stt/room-drain");
+    const { MAX_STEP_MS } = await import("@/lib/jobs/types");
+    expect(JOIN_BUSY_STEP_BUDGET_MS, "one claim's busy-retry loop must fit inside a step").toBeLessThan(MAX_STEP_MS);
+
+    vi.useFakeTimers();
+    const p = roomWindowKind.run({ job: {} as never, step: "prepare", args: ARGS, progress: {}, runner: "r1" });
+    await vi.advanceTimersByTimeAsync(JOIN_BUSY_STEP_BUDGET_MS + 10_000);
+    const out = await p;
+    vi.useRealTimers();
+
+    expect(out.kind, "still busy past this claim's budget must hand back, not fail").toBe("next");
+    expect((out as { step: string }).step).toBe("prepare");
+    const progress = (out as { progress: Record<string, unknown> }).progress;
+    expect(progress.join_busy_attempts as number).toBeGreaterThan(0);
+    expect(DB.log.some((q) => q.includes("UPDATE stt_subject_job")), "still only busy, never a failure").toBe(false);
+  });
+
+  it("BOUND — exceeding the cap finally fails the job like an ordinary join failure (never retries forever)", async () => {
+    mockJoin(async () => ({ ok: false, error: "join_already_running" }));
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+
+    vi.useFakeTimers();
+    let step = "prepare";
+    let progress: Record<string, unknown> = {};
+    let out: Awaited<ReturnType<typeof roomWindowKind.run>> | null = null;
+    for (let i = 0; i < 40; i += 1) {
+      const p = roomWindowKind.run({ job: {} as never, step, args: ARGS, progress, runner: "r1" });
+      await vi.advanceTimersByTimeAsync(200_000);
+      out = await p;
+      if (out.kind !== "next") break;
+      step = (out as { step: string }).step;
+      progress = (out as { progress: Record<string, unknown> }).progress;
+    }
+    vi.useRealTimers();
+
+    expect(out?.kind, "an unbroken run of busy answers must eventually fail the job, not loop forever").toBe("fail");
+    expect(
+      DB.log.some((q) => q.includes("UPDATE stt_subject_job")),
+      "the terminal failure, once the cap is exceeded, DOES record — exactly like today's unretried failure",
+    ).toBe(true);
   });
 });

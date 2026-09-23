@@ -23,6 +23,12 @@ import {
   cueWriteFailed,
   PROBE_SECONDS,
   DRAIN_MAX_ATTEMPTS,
+  joinBusyBackoffMs,
+  JOIN_BUSY_BACKOFF_MIN_MS,
+  JOIN_BUSY_BACKOFF_MAX_MS,
+  JOIN_BUSY_MAX_WAIT_MS,
+  JOIN_BUSY_MAX_ATTEMPTS,
+  JOIN_BUSY_STEP_BUDGET_MS,
 } from "@/lib/stt/room-drain";
 
 const FIFTEEN = 15 * 60_000;
@@ -304,5 +310,29 @@ describe("the leaderboard filters by subject kind", () => {
     // bg-danger-50 and friends were silently dropped for weeks because the shades did not exist.
     const cfg = readFileSync("tailwind.config.ts", "utf8");
     expect(cfg).toMatch(/warning:\s*\{[^}]*700:/);
+  });
+});
+
+describe("Drain throughput fix (23 Sep) — join-busy backoff, PURE", () => {
+  it("is always within [MIN, MAX)", () => {
+    for (const r of [0, 0.1, 0.5, 0.999, 0.9999999]) {
+      const ms = joinBusyBackoffMs(() => r);
+      expect(ms).toBeGreaterThanOrEqual(JOIN_BUSY_BACKOFF_MIN_MS);
+      expect(ms).toBeLessThan(JOIN_BUSY_BACKOFF_MAX_MS);
+    }
+  });
+
+  it("is deterministic for a given rand() — same input, same backoff", () => {
+    const rand = () => 0.37;
+    expect(joinBusyBackoffMs(rand)).toBe(joinBusyBackoffMs(rand));
+  });
+
+  it("the bounds are the ones the order asked for: 30-60s backoff, a step budget under MAX_STEP_MS, a 15 min / 30 attempt cap", () => {
+    expect(JOIN_BUSY_BACKOFF_MIN_MS).toBe(30_000);
+    expect(JOIN_BUSY_BACKOFF_MAX_MS).toBe(60_000);
+    expect(JOIN_BUSY_MAX_WAIT_MS).toBe(15 * 60_000);
+    expect(JOIN_BUSY_MAX_ATTEMPTS).toBeGreaterThan(0);
+    // A per-claim budget that could not fit even one backoff would never actually retry.
+    expect(JOIN_BUSY_STEP_BUDGET_MS).toBeGreaterThan(JOIN_BUSY_BACKOFF_MAX_MS);
   });
 });

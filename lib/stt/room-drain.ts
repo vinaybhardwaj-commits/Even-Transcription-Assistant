@@ -132,6 +132,34 @@ export function routerJobMaxWaitingMs(audioSeconds: number | null | undefined): 
 }
 
 /**
+ * Drain throughput fix (23 Sep) — `join_already_running` is the join service's own one-at-a-time
+ * mutex saying "come back", not a failure. A busy answer is retried in place, never counted
+ * against DRAIN_MAX_ATTEMPTS and never recorded as a failure (no `stt_subject_job` write, so
+ * auto-drain's refusal cooldown is never touched either — that cooldown keys off a REFUSAL to
+ * enqueue, and this window's job is already enqueued and simply waiting its turn).
+ *
+ * Two independent caps, whichever is hit first: elapsed time since the FIRST busy answer, and a
+ * defensive attempt ceiling (backoff is jittered 30-60 s, so ~15 min is ~15-30 attempts; the
+ * count cap exists only to bound a pathological clock, not to be the normal stop condition).
+ * Past either cap this fails EXACTLY as an ordinary join failure did before this change.
+ */
+export const JOIN_BUSY_MAX_WAIT_MS = 15 * 60_000;
+export const JOIN_BUSY_MAX_ATTEMPTS = 30;
+export const JOIN_BUSY_BACKOFF_MIN_MS = 30_000;
+export const JOIN_BUSY_BACKOFF_MAX_MS = 60_000;
+/** One claim's retry loop must fit inside MAX_STEP_MS with real margin — the same shape as the
+ *  poll step's ROOM_POLL_BUDGET_MS. Past this budget the row goes back to the queue, not through
+ *  another claim's sleep held open past its lease. */
+export const JOIN_BUSY_STEP_BUDGET_MS = 150_000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** PURE — a jittered backoff in [JOIN_BUSY_BACKOFF_MIN_MS, JOIN_BUSY_BACKOFF_MAX_MS). */
+export function joinBusyBackoffMs(rand: () => number = Math.random): number {
+  return JOIN_BUSY_BACKOFF_MIN_MS + rand() * (JOIN_BUSY_BACKOFF_MAX_MS - JOIN_BUSY_BACKOFF_MIN_MS);
+}
+
+/**
  * C1b fix-up 1 — how much of the window the CONTROL run covers. Two minutes, deliberately.
  *
  * The shadow exists to compare engines, not to produce a second production transcript of every
@@ -331,7 +359,15 @@ export function bucketFor(lang: string | null): "english" | "indic" {
 
 export type DrainStep =
   | "flag_off" | "not_found" | "wrong_state" | "no_room_day" | "no_chunks"
-  | "too_long" | "join_failed" | "clip_missing" | "probe_failed"
+  | "too_long" | "join_failed"
+  /**
+   * Drain throughput fix (23 Sep) — the join service's own mutex answered `join_already_running`,
+   * not a failure of the window. `roomWindowPrepare` retries in place (backoff+jitter, bounded);
+   * this step name is what it returns to the caller ONLY when that bound is not yet exceeded and
+   * the caller should requeue rather than fail. It never reaches `recordFailure`, so it costs
+   * nothing against DRAIN_MAX_ATTEMPTS and writes no `stt_subject_job` row.
+   */
+  | "join_busy" | "clip_missing" | "probe_failed"
   /**
    * Build 1 §C.3 — Whisper answered on NEITHER attempt. Distinct from `probe_failed`, which this
    * step replaces for the full-window call: the old name blamed the 30-second probe for a
@@ -735,7 +771,11 @@ export async function joinClipForWindow(args: {
   return { ok: true, key: join.key };
 }
 
-export async function roomWindowPrepare(windowId: string, opts: RunActor): Promise<PhaseOutcome> {
+export async function roomWindowPrepare(
+  windowId: string,
+  opts: RunActor,
+  incomingProgress: Record<string, unknown> = {},
+): Promise<PhaseOutcome> {
   const out: DrainOutcome = { window_id: windowId, ok: false, step: "not_found", initiated_by: opts.actor, initiated_via: opts.via };
   const ctx = await loadWindowContext(windowId);
   if ("error" in ctx) {
@@ -749,7 +789,41 @@ export async function roomWindowPrepare(windowId: string, opts: RunActor): Promi
     // join-only path can run it WITHOUT phase 1's probe below or phase 2's Whisper — see
     // lib/stt/join-only.ts. The drain's own behaviour is unchanged: same request, same UPDATE,
     // same failure step, in the same order.
-    const join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
+    //
+    // `join_already_running` is classified separately (and ONLY that string — every other error,
+    // including join_timeout/join_unreachable/a real join_http_5xx, falls straight through to the
+    // unchanged failure path below). It retries in place, backoff+jitter, bounded by elapsed time
+    // and an attempt ceiling; see JOIN_BUSY_* above.
+    let join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
+    let joinBusyAttempts = Number(incomingProgress.join_busy_attempts ?? 0);
+    const joinBusyFirstAtMs = Number(incomingProgress.join_busy_first_at_ms ?? 0) || null;
+    const claimDeadline = Date.now() + JOIN_BUSY_STEP_BUDGET_MS;
+    while (!join.ok && join.error === "join_already_running") {
+      const firstAtMs = joinBusyFirstAtMs ?? Date.now();
+      joinBusyAttempts += 1;
+      const elapsedMs = Date.now() - firstAtMs;
+      if (elapsedMs >= JOIN_BUSY_MAX_WAIT_MS || joinBusyAttempts >= JOIN_BUSY_MAX_ATTEMPTS) {
+        // Cap exceeded — fail exactly as an ordinary join failure did before this change.
+        const attempts = await recordFailure(
+          windowId, "join_failed",
+          `join_already_running after ${joinBusyAttempts} busy retries over ${Math.round(elapsedMs / 1000)}s`,
+        );
+        return { ...out, step: "join_failed", detail: join.error, attempts };
+      }
+      const backoff = joinBusyBackoffMs();
+      if (Date.now() + backoff > claimDeadline) {
+        // Still busy, but this claim's budget is spent — hand the row back to the queue for a
+        // later claim, exactly like the poll step does for a still-running router job. No
+        // recordFailure: this is not a failure, so DRAIN_MAX_ATTEMPTS and the refusal cooldown
+        // are both untouched.
+        return {
+          ...out, step: "join_busy", detail: join.error,
+          next_progress: { join_busy_attempts: joinBusyAttempts, join_busy_first_at_ms: firstAtMs },
+        };
+      }
+      await sleep(backoff);
+      join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
+    }
     if (!join.ok) {
       const attempts = await recordFailure(windowId, "join_failed", `${join.error}${join.hop ? ` @${join.hop}` : ""}`);
       return { ...out, step: "join_failed", detail: join.error, attempts };
