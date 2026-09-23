@@ -151,6 +151,72 @@ describe("route: not enabled by default — every call is a dry run until BENCH_
   });
 });
 
+describe("ETA-LEVEL-RETENTION-ENABLE-REFUTER-VERDICT-23-SEP-2026.md R2 — the flag is lib/flags.ts's parseFlag, not a hand-rolled === \"on\"", () => {
+  // R2: "replacing process.env[RETENTION_ENV] === 'on' with a truthiness check leaves the suite
+  // green" — a later Boolean(env)-style tidy-up would flip every falsy-INTENT value, including
+  // "false" and "off", into ENABLED. This test fails under that refactor and passes under
+  // parseFlag, which is exactly the strictness the finding says nothing was pinning.
+  it("BENCH_LEVEL_RETENTION=true enables it — the value that works everywhere else in this repo, previously silently ignored", async () => {
+    process.env[ENV] = "true";
+    process.env.MIGRATION_SECRET = "sekret";
+    H.sql.mockResolvedValueOnce([{ n: 5 }]).mockResolvedValueOnce([]);
+    const res = await post({}, { authorization: "Bearer sekret" });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ enabled: true, forced_dry_run: false, dry_run: false });
+  });
+
+  it("BENCH_LEVEL_RETENTION=1 also enables it", async () => {
+    process.env[ENV] = "1";
+    process.env.MIGRATION_SECRET = "sekret";
+    H.sql.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    const res = await post({}, { authorization: "Bearer sekret" });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ enabled: true, dry_run: false });
+  });
+
+  it("BENCH_LEVEL_RETENTION=false stays DISABLED — a non-empty, JS-truthy string that a Boolean(env) refactor would wrongly enable", async () => {
+    process.env[ENV] = "false";
+    process.env.MIGRATION_SECRET = "sekret";
+    H.sql.mockResolvedValueOnce([{ n: 5 }]); // the count only — no DELETE call reaches sql
+    const res = await post({}, { authorization: "Bearer sekret" });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ enabled: false, forced_dry_run: true, dry_run: true, deleted: 0 });
+    expect(H.sql).toHaveBeenCalledTimes(1);
+  });
+
+  it("BENCH_LEVEL_RETENTION=off also stays disabled, and is case-insensitive (ON/On/on all enable)", async () => {
+    process.env[ENV] = "off";
+    process.env.MIGRATION_SECRET = "sekret";
+    H.sql.mockResolvedValueOnce([{ n: 0 }]);
+    const off = await post({}, { authorization: "Bearer sekret" });
+    expect((await off.json() as Record<string, unknown>)).toMatchObject({ enabled: false });
+
+    for (const v of ["ON", "On", "TRUE", "Yes"]) {
+      process.env[ENV] = v;
+      H.sql.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+      const res = await post({}, { authorization: "Bearer sekret" });
+      expect((await res.json() as Record<string, unknown>), `BENCH_LEVEL_RETENTION=${v}`).toMatchObject({ enabled: true });
+    }
+  });
+
+  it("a malformed value THROWS rather than reading as off — surfaced as a route failure, before any DB call", async () => {
+    process.env[ENV] = "maybe";
+    process.env.MIGRATION_SECRET = "sekret";
+    const res = await post({}, { authorization: "Bearer sekret" });
+    // PIPELINE_FAILED -> 500 (lib/respond.ts), not a 200 with enabled:false — a typo must be
+    // visible, not silently treated as "the flag is off".
+    expect(res.status).toBe(500);
+    expect(H.sql).not.toHaveBeenCalled(); // parseFlag throws before countOldLevelSamples runs
+  });
+
+  it("the cron GET path is subject to the same strict parsing as POST", async () => {
+    process.env[ENV] = "not-a-flag";
+    const res = await get({ "x-vercel-cron": "1" });
+    expect(res.status).toBe(500);
+    expect(H.sql).not.toHaveBeenCalled();
+  });
+});
+
 describe("route: enabled — it actually deletes, batched, idempotent, capped", () => {
   it("loops batches until one comes back short, and sums the deleted count", async () => {
     process.env[ENV] = "on";

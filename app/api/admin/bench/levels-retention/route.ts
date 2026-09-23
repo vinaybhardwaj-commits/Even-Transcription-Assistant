@@ -8,10 +8,12 @@
  * now runs this hourly — sized to the fleet's growth (Refuter finding 1: a daily cron falls behind
  * once past ~9-23 rooms posting continuously; hourly keeps one call's 250,000-row cap far ahead of
  * any room's ~1,100 rows/hour). The schedule alone deletes nothing: an actual DELETE only happens
- * when `BENCH_LEVEL_RETENTION=on`; otherwise every call is a dry run regardless of the `dryRun`
- * flag, and says so (`forced_dry_run: true`). A `dryRun: true` request is always a dry run, with or
- * without the flag. See GET /api/admin/bench/levels-retention/report for a per-room breakdown of
- * what turning the flag on would delete, without ever touching a row.
+ * when BENCH_LEVEL_RETENTION is enabled per lib/flags.ts's parseFlag (1 | true | yes | on,
+ * case-insensitive — an unrecognised value THROWS rather than reading as off); otherwise every
+ * call is a dry run regardless of the `dryRun` flag, and says so (`forced_dry_run: true`). A
+ * `dryRun: true` request is always a dry run, with or without the flag. See GET
+ * /api/admin/bench/levels-retention/report for a per-room breakdown of what turning the flag on
+ * would delete, without ever touching a row.
  *
  * POST — Auth: Bearer MIGRATION_SECRET (manual) OR an admin cookie. Body: { dryRun?: boolean }.
  * GET  — Vercel Cron. Auth: the un-spoofable x-vercel-cron header, or Bearer CRON_SECRET if that
@@ -30,6 +32,7 @@ import { NextRequest } from "next/server";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { parseFlag } from "@/lib/flags";
 import {
   LEVEL_RETENTION_DAYS,
   LEVEL_RETENTION_BATCH_SIZE,
@@ -81,7 +84,13 @@ type RetentionResult = {
 };
 
 async function runRetention(dryRunRequested: boolean): Promise<RetentionResult> {
-  const enabled = process.env[RETENTION_ENV] === "on";
+  // ETA-LEVEL-RETENTION-ENABLE-REFUTER-VERDICT-23-SEP-2026.md R2, Fable's ruling: this used to
+  // hand-roll `=== "on"`, which read every value the repo's OWN flag convention accepts as true
+  // — 1 | true | yes | ON — as OFF. An operator who wrote BENCH_LEVEL_RETENTION=true (the value
+  // that works everywhere else in this codebase) got a silent forced dry run while believing
+  // deletion was capping the table. parseFlag also THROWS on an unrecognised value instead of
+  // reading it as off, which `=== "on"` could never do.
+  const enabled = parseFlag(RETENTION_ENV);
   const forcedDryRun = !enabled && !dryRunRequested;
   const dryRun = dryRunRequested || !enabled;
   const cutoff = levelRetentionCutoffIstDate();
