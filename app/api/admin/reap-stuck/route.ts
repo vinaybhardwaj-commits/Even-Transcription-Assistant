@@ -26,6 +26,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { reapBenchSessions, type BenchReapResult } from "@/lib/bench-reaper";
+import { reapOrphanedRoomWindows, type RoomWindowReapResult } from "@/lib/room-window-reaper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +64,8 @@ type ReapResult = {
   reaped_failed: string[];
   /** K-A (19 Aug 2026): the Room Bench session sweep that runs after the encounter sweep. */
   bench?: BenchReapResult;
+  /** 23 Sep 2026: the orphaned-transcribing room_window sweep that runs after the bench sweep. */
+  room_windows?: RoomWindowReapResult;
 };
 
 async function reap(minutes: number, dryRun: boolean): Promise<ReapResult> {
@@ -150,6 +153,12 @@ async function reapWithBench(minutes: number, dryRun: boolean): Promise<ReapResu
   } catch (e) {
     console.error("[reap-stuck] bench sweep failed — no-op", (e as Error)?.message ?? e);
     result.bench = { dry_run: dryRun, candidates: 0, reaped: [], error: String((e as Error)?.message ?? e).slice(0, 150) };
+  }
+  try {
+    result.room_windows = await reapOrphanedRoomWindows({ dryRun });
+  } catch (e) {
+    console.error("[reap-stuck] room_window sweep failed — no-op", (e as Error)?.message ?? e);
+    result.room_windows = { dry_run: dryRun, candidates: 0, reaped: [], error: String((e as Error)?.message ?? e).slice(0, 150) };
   }
   return result;
 }
