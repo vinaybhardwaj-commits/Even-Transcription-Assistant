@@ -11,13 +11,25 @@ import { makeFakeClinician } from "../support/fake-identity";
 const DOC = makeFakeClinician(1);
 const sqlCalls: Array<{ text: string; values: unknown[] }> = [];
 let windowRow: Array<Record<string, unknown>> = [];
+let levelRows: Array<Record<string, unknown>> = [];
+// One 15 s level bucket. `peak` 0 is confirmed quiet; 0.5 is well above the shared room floor.
+const bucket = (startMs: number, peak: number) => ({
+  sampled_at: new Date(startMs + 5_000).toISOString(), peak, avg: null, zero_ratio: null,
+  session_open: true, tape_advancing: true, samples: 3,
+});
+// The window has SOME sound (bucket 15-30 s is active), so the whole-window silence gate does not
+// skip it; the other three buckets are confirmed quiet, so the trim is ALLOWED to cut there only.
+const MIXED_LEVELS = [bucket(0, 0), bucket(15_000, 0.5), bucket(30_000, 0), bucket(45_000, 0)];
+// Those quiet buckets as allow_cut, by hand, in 16 kHz samples: 0-15 s and 30-60 s.
+const MIXED_ALLOW_CUT = [[0, 240000], [480000, 960000]];
 
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?").replace(/\s+/g, " ").trim();
     sqlCalls.push({ text, values });
     if (/FROM bench_window/.test(text)) return Promise.resolve(windowRow);
-    if (/FROM room_day/.test(text)) return Promise.resolve([]);          // no level gate verdict
+    if (/FROM room_day/.test(text)) return Promise.resolve([{ room_id: "room1", ist_date: "2026-09-23" }]);
+    if (/FROM bench_level_sample/.test(text)) return Promise.resolve(levelRows);
     if (/FROM voice_print/.test(text)) return Promise.resolve([{ clinician_id: DOC.id, full_name: DOC.full_name, centroid_base64: "AAAA" }]);
     return Promise.resolve([]);
   },
@@ -62,6 +74,7 @@ beforeEach(() => {
   sqlCalls.length = 0; logs.length = 0; fetchCalls.length = 0;
   r2.puts = []; r2.deletes = []; r2.signed = []; r2.putThrows = false;
   local.calls = 0; vad.calls = 0; vad.status = 200; vad.lastForm = null;
+  levelRows = [...MIXED_LEVELS];
   vad.body = { ok: true, sample_rate: 16000, total_samples: 960000, regions: REGIONS, audio_b64: Buffer.from("WAVBYTES").toString("base64"), vad_model: "silero-vad-5" };
   windowRow = [{ id: "w1", room_day_id: "rd1", start_ms: 0, end_ms: 60_000, clip_r2_key: "c/w1.webm" }];
   process.env.DIARIZE_ENGINE = "pyannoteai";
@@ -136,16 +149,55 @@ describe("the submit step with the trim on", () => {
     expect([f.get("pad_s"), f.get("merge_gap_s"), f.get("min_region_s")]).toEqual(["0", "0", "0"]);
   });
 
-  it("A REAL ANSWER OF NO SPEECH skips the paid call and says so", async () => {
+  it("RULING (a): VAD FINDING NO SPEECH IS NEVER A SKIP — the window is diarized WHOLE", async () => {
+    // lab-mover, 23 Sep: on 4 of 20 windows Silero found (almost) no speech through real,
+    // normal-level speech. "No speech" from VAD alone must not decide what a window loses.
     vad.body = { ok: true, sample_rate: 16000, total_samples: 960000, regions: [], vad_model: "silero-vad-5" };
-    const out = await runStep("diarize");
-    expect(out.kind).toBe("done");
-    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize"))).toBe(false);
-    const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
-    const engine = JSON.parse(String(ins.values.find((v) => typeof v === "string" && v.includes('"engine"')))).engine;
-    expect(engine).toMatchObject({ attribution: "none", audio_seconds_sent: 0, skipped: "vad_no_speech" });
-    if (out.kind !== "done") throw new Error("x");
-    expect(out.result.skipped).toBe("vad_no_speech");
+    const p = await submitted();                                   // next -> submitted, not done
+    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize"))).toBe(true);
+    expect(r2.signed).toEqual(["c/w1.webm"]);                     // the WHOLE clip
+    expect(r2.puts).toEqual([]);                                   // nothing trimmed
+    expect(p.audio_seconds_sent).toBe(60);
+    expect(p.vad_trim_skipped).toBe("vad_empty");
+    expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(false); // no skip row
+  });
+
+  it("RULING (b): the Mini is told exactly where the level log confirmed quiet", async () => {
+    await submitted();
+    expect(JSON.parse(String(vad.lastForm!.get("allow_cut")))).toEqual(MIXED_ALLOW_CUT);
+  });
+
+  it("RULING (b): a level log with NO confirmed-quiet bucket means no cut — the Mini is not even asked", async () => {
+    levelRows = [bucket(0, 0.5), bucket(15_000, 0.5), bucket(30_000, 0.5), bucket(45_000, 0.5)];
+    const p = await submitted();
+    expect(vad.calls).toBe(0);
+    expect(r2.signed).toEqual(["c/w1.webm"]);
+    expect(p.vad_trim_skipped).toBe("level_log_no_quiet");
+  });
+
+  it("RULING (b): NO level log at all means no cut — absence of a reading is not a reading of silence", async () => {
+    levelRows = [];
+    const p = await submitted();
+    expect(vad.calls).toBe(0);
+    expect(r2.signed).toEqual(["c/w1.webm"]);
+    expect(p.vad_trim_skipped).toBe("level_log_no_quiet");
+  });
+
+  it("when the level guard leaves nothing cuttable, the whole clip goes and no WAV is uploaded", async () => {
+    vad.body = { ok: true, sample_rate: 16000, total_samples: 960000, vad_model: "silero-vad-5",
+      regions: [{ start_sample: 0, end_sample: 960000, trim_start_sample: 0 }], audio_b64: "QQ==" };
+    const p = await submitted();
+    expect(r2.puts).toEqual([]);
+    expect(r2.signed).toEqual(["c/w1.webm"]);
+    expect(p.vad_trim_skipped).toBe("nothing_cuttable");
+  });
+
+  it("a map returned at a different sample rate is rejected — allow_cut was sent at 16 kHz", async () => {
+    vad.body = { ok: true, sample_rate: 8000, total_samples: 480000, vad_model: "x",
+      regions: [{ start_sample: 80000, end_sample: 112000, trim_start_sample: 0 }], audio_b64: "QQ==" };
+    const p = await submitted();
+    expect(r2.signed).toEqual(["c/w1.webm"]);
+    expect(p.vad_trim_skipped).toBe("vad_bad_map");
   });
 
   for (const [name, setup, why] of [
@@ -237,15 +289,28 @@ describe("the poll step puts pyannote.ai's answer back on the original clock", (
     ]);
   });
 
-  it("the teacher label is stored in original time, with the TRIMMED seconds as the paid length", async () => {
+  it("RULING (c): a TRIMMED run writes NO teacher label, and says it was excluded", async () => {
+    // pyannote.ai heard only what VAD kept; where VAD is wrong, that is exactly the speech missing
+    // from its answer — and a label missing speech teaches the local model to miss it.
     process.env.DIARIZE_TEACHER_LABELS = "1";
     const p = await submitted();
+    const out = await runStep("pyannote_poll", p);
+    const teacher = sqlCalls.filter((c) => /INSERT INTO diarize_window_label/.test(c.text) && c.values.includes("pyannoteai"));
+    expect(teacher).toHaveLength(0);
+    const res = out.kind === "next" ? (out.progress.hybrid_result as Record<string, unknown>) : (out as { result: Record<string, unknown> }).result;
+    expect(res.teacher_label).toBe("excluded_trimmed");
+    const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
+    const engine = JSON.parse(String(ins.values.find((v) => typeof v === "string" && v.includes('"engine"')))).engine;
+    expect(engine.vad_trim.teacher_label).toBe("excluded_trimmed");
+  });
+
+  it("RULING (c): an UNTRIMMED run still writes its teacher label", async () => {
+    process.env.DIARIZE_TEACHER_LABELS = "1";
+    delete (process.env as Record<string, string | undefined>).DIARIZE_VAD_TRIM;
+    const p = await submitted();
     await runStep("pyannote_poll", p);
-    const lab = sqlCalls.find((c) => /INSERT INTO diarize_window_label/.test(c.text))!;
-    const json = String(lab.values.find((v) => typeof v === "string" && v.includes("speaker_idx")));
-    expect(json).toContain('"start_ms":30000');
-    expect(json).not.toContain('"start_ms":3000,');
-    expect(lab.values).toContain(7);           // audio_seconds: what pyannote.ai was sent
+    const teacher = sqlCalls.filter((c) => /INSERT INTO diarize_window_label/.test(c.text) && c.values.includes("pyannoteai"));
+    expect(teacher).toHaveLength(1);
   });
 
   it("the provenance says the trim applied, with its evidence", async () => {

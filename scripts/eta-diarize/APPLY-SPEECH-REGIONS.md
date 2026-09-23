@@ -43,6 +43,16 @@ python3 ~/dev/Even-Transcription-Assistant/scripts/eta-diarize/test_shape_region
 python3 -c "import wave,struct,math;w=wave.open('/tmp/eta-vad-smoke.wav','wb');w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b''.join(struct.pack('<h',int(8000*math.sin(2*math.pi*220*t/16000))) for t in range(48000)));w.close()" && curl -s -m 180 -F audio=@/tmp/eta-vad-smoke.wav http://127.0.0.1:8001/speech_regions | python3 -c "import sys,json;d=json.load(sys.stdin);print('SMOKE OK' if d.get('ok') and d.get('sample_rate')==16000 and d.get('total_samples')==48000 and isinstance(d.get('regions'),list) and d.get('vad_model') else 'SMOKE FAIL',{k:v for k,v in d.items() if k not in ('regions','audio_b64')})"
 ```
 
-`SMOKE OK` proves the model loaded and the contract shape is right. `SMOKE FAIL` with
+`SMOKE OK` proves the model loaded and the contract shape is right. The smoke sends no `allow_cut`,
+so nothing is cuttable and nothing is cut — the right answer for a call with no level-log corroboration.
+
+## The three rulings this endpoint enforces (Fable, 23 Sep 19:05)
+
+- **(a)** Silero finding no speech returns `regions: []` and no audio. The caller then diarizes the
+  window WHOLE. It never skips a window and never trims one on VAD alone (`_final_regions`).
+- **(b)** A VAD-silent span is cut only inside `allow_cut` — the spans the level log itself confirmed
+  quiet, sent by the caller. Level-active and level-unobserved stretches are always kept
+  (`_apply_level_guard`). No `allow_cut`, no cut.
+- **(c)** is the caller's: a trimmed run writes no teacher label. `SMOKE FAIL` with
 `vad_model_unavailable` means Silero is missing (see above). Before the restart it prints
 `SMOKE FAIL` / Not Found — which is how you know it discriminates.

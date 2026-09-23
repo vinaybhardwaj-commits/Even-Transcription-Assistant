@@ -56,6 +56,88 @@ def _vad_load():
         return _VAD_MODEL, _VAD_GET_TS, _VAD_MODEL_NAME
 
 
+def _vad_intervals(spans, total, sr, pad_s, merge_gap_s, min_region_s):
+    """PURE. Silero's spans -> padded, merged, min-filtered [start, end] sample intervals (sorted)."""
+    pad, gap, mn = int(round(pad_s * sr)), int(round(merge_gap_s * sr)), int(round(min_region_s * sr))
+    padded = sorted((max(0, int(s) - pad), min(total, int(e) + pad)) for s, e in spans if int(e) > int(s))
+    merged = []
+    for s, e in padded:
+        if merged and s - merged[-1][1] < gap:     # gaps STRICTLY under merge_gap_s merge (order: "< 1.5 s")
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [[s, e] for s, e in merged if e - s >= mn and e > s]
+
+
+def _layout(intervals):
+    """PURE. Kept intervals, in order, laid end to end: each region's trim_start is the running sum of
+    the lengths before it — exactly the property the caller verifies before trusting the map."""
+    out, trim = [], 0
+    for s, e in intervals:
+        out.append({"start_sample": int(s), "end_sample": int(e), "trim_start_sample": trim})
+        trim += int(e) - int(s)
+    return out
+
+
+def _merge_intervals(iv):
+    """PURE. Sort and merge overlapping or touching [start, end] intervals."""
+    out = []
+    for s, e in sorted((int(a), int(b)) for a, b in iv if int(b) > int(a)):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return out
+
+
+def _apply_level_guard(vad, allow_cut, total):
+    """PURE. Fable's ruling (b), 23 Sep: a VAD-silent span is cut ONLY where the level log ALSO showed
+    no activity. `allow_cut` is exactly those level-confirmed-quiet spans; everywhere else — the level
+    log active, OR the level log simply silent on the matter — is kept. So:
+
+        cuttable = allow_cut minus VAD speech
+        kept     = [0, total] minus cuttable
+
+    With allow_cut empty nothing is cuttable and the whole clip is kept: no corroboration, no cut.
+    """
+    allow = _merge_intervals([[max(0, a), min(total, b)] for a, b in allow_cut])
+    speech = _merge_intervals(vad)
+    cuttable = []
+    for a, b in allow:
+        cur = a
+        for s, e in speech:
+            if e <= cur or s >= b:
+                continue
+            if s > cur:
+                cuttable.append([cur, min(s, b)])
+            cur = max(cur, e)
+            if cur >= b:
+                break
+        if cur < b:
+            cuttable.append([cur, b])
+    kept, cur = [], 0
+    for a, b in _merge_intervals(cuttable):
+        if a > cur:
+            kept.append([cur, a])
+        cur = max(cur, b)
+    if cur < total:
+        kept.append([cur, total])
+    return kept
+
+
+def _final_regions(vad, allow_cut, total):
+    """PURE. The whole cutting decision, both rulings, in one testable place.
+
+    RULING (a): VAD-empty stays EMPTY — no regions, no audio. The caller then diarizes the window
+    UNTRIMMED. Silero finding no speech is never enough to skip a window, or even to trim one: on some
+    rooms it confidently finds none through real, normal-level speech (lab-mover, 4 of 20 windows).
+    RULING (b): otherwise cut only where the level log agreed there was nothing.
+    """
+    if not vad:
+        return []
+    return _layout(_apply_level_guard(vad, allow_cut, total))
+
+
 def _shape_regions(spans, total, sr, pad_s, merge_gap_s, min_region_s):
     """PURE. Silero's speech spans (sample indices) -> the kept regions, with their trim offsets.
 
@@ -65,24 +147,10 @@ def _shape_regions(spans, total, sr, pad_s, merge_gap_s, min_region_s):
     lay the survivors end to end. trim_start is the running sum of the lengths before it, by
     construction — the property the caller checks.
     """
-    pad, gap, mn = int(round(pad_s * sr)), int(round(merge_gap_s * sr)), int(round(min_region_s * sr))
-    padded = sorted((max(0, int(s) - pad), min(total, int(e) + pad)) for s, e in spans if int(e) > int(s))
-    merged = []
-    for s, e in padded:
-        if merged and s - merged[-1][1] < gap:     # gaps STRICTLY under merge_gap_s merge (order: "< 1.5 s")
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    out, trim = [], 0
-    for s, e in merged:
-        if e - s < mn or e <= s:
-            continue
-        out.append({"start_sample": s, "end_sample": e, "trim_start_sample": trim})
-        trim += e - s
-    return out
+    return _layout(_vad_intervals(spans, total, sr, pad_s, merge_gap_s, min_region_s))
 
 
-def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s, threshold, min_silence_ms, speech_pad_ms, min_speech_ms):
+def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s, threshold, min_silence_ms, speech_pad_ms, min_speech_ms, allow_cut_json):
     """Blocking body of /speech_regions. Returns (payload, error). Runs under _HEAVY_SEM."""
     for name, v in (("pad_s", pad_s), ("merge_gap_s", merge_gap_s), ("min_region_s", min_region_s),
                     ("min_silence_duration_ms", min_silence_ms), ("speech_pad_ms", speech_pad_ms),
@@ -91,6 +159,13 @@ def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s, threshold, m
             return None, f"bad_param: {name}"
     if not (threshold == threshold) or not (0.0 < threshold < 1.0):
         return None, "bad_param: threshold"
+    try:
+        allow_cut = json.loads(allow_cut_json or "[]")
+        if not isinstance(allow_cut, list):
+            raise ValueError("not a list")
+        allow_cut = [[int(a), int(b)] for a, b in allow_cut]
+    except Exception:
+        return None, "bad_param: allow_cut"
     try:
         model, get_ts, model_name = _vad_load()
     except Exception as e:
@@ -117,8 +192,10 @@ def _speech_regions_blocking(raw, pad_s, merge_gap_s, min_region_s, threshold, m
         spans = get_ts(wav, model, sampling_rate=_VAD_SR, threshold=float(threshold),
                        min_silence_duration_ms=int(min_silence_ms), speech_pad_ms=int(speech_pad_ms),
                        min_speech_duration_ms=int(min_speech_ms))
-        regions = _shape_regions([(t["start"], t["end"]) for t in spans], total, _VAD_SR, pad_s, merge_gap_s, min_region_s)
-        payload = {"ok": True, "sample_rate": _VAD_SR, "total_samples": total, "regions": regions, "vad_model": model_name}
+        vad = _vad_intervals([(t["start"], t["end"]) for t in spans], total, _VAD_SR, pad_s, merge_gap_s, min_region_s)
+        regions = _final_regions(vad, allow_cut, total)          # rulings (a) and (b)
+        payload = {"ok": True, "sample_rate": _VAD_SR, "total_samples": total, "regions": regions,
+                   "vad_regions": len(vad), "vad_model": model_name}
         if regions:
             kept = torch.cat([wav[r["start_sample"]:r["end_sample"]] for r in regions])
             pcm = (kept.clamp(-1.0, 1.0) * 32767.0).round().to(torch.int16).cpu().numpy().tobytes()
@@ -149,6 +226,9 @@ async def speech_regions(
     min_silence_duration_ms: float = Form(1200),
     speech_pad_ms: float = Form(500),
     min_speech_duration_ms: float = Form(250),
+    # Level-log-confirmed quiet spans, [[start_sample, end_sample], ...] at 16 kHz, clip-relative. The
+    # ONLY places a cut is allowed. Absent or empty means nothing is cuttable: no corroboration, no cut.
+    allow_cut: str = Form("[]"),
 ):
     t0 = time.time()
     if not audio.filename:
@@ -159,7 +239,7 @@ async def speech_regions(
     async with _HEAVY_SEM:
         payload, err = await asyncio.to_thread(
             _speech_regions_blocking, raw, pad_s, merge_gap_s, min_region_s,
-            threshold, min_silence_duration_ms, speech_pad_ms, min_speech_duration_ms,
+            threshold, min_silence_duration_ms, speech_pad_ms, min_speech_duration_ms, allow_cut,
         )
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)

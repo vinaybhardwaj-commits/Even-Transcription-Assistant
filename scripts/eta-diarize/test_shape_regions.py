@@ -1,8 +1,8 @@
 """Offline test of _shape_regions — the pure half of /speech_regions. No torch, no Silero."""
 import json, sys
 src = open(sys.argv[1]).read()
-fn_src = src[src.index("def _shape_regions"):src.index("def _speech_regions_blocking")]
-ns = {}; exec(fn_src, ns); shape = ns["_shape_regions"]
+fn_src = src[src.index("def _vad_intervals"):src.index("def _speech_regions_blocking")]
+ns = {}; exec(fn_src, ns); shape = ns["_shape_regions"]; guard = ns["_apply_level_guard"]; final = ns["_final_regions"]
 SR = 16000; fails = []
 def check(n, c):
     print(("  ok   " if c else "  FAIL ") + n)
@@ -60,4 +60,40 @@ many = [(i * 48000 + 1000, i * 48000 + 9000) for i in range(40)]
 r = shape(many, total * 2, SR, P, 0.2, M)
 json.dump({"regions": r, "sample_rate": SR, "total_samples": total * 2}, open(sys.argv[2], "w"))
 print(f"  --   wrote {len(r)} regions for the TS contract check")
+
+# ── RULING (b): a VAD-silent span is cut ONLY where the level log also showed no activity ──
+# Clip of 100 000 samples. VAD found speech at 20 000-30 000 and 60 000-70 000.
+T = 100000
+VAD = [[20000, 30000], [60000, 70000]]
+# The level log confirmed quiet ONLY over 0-50 000. So:
+#   cut   = 0-20 000 and 30 000-50 000   (VAD-silent AND level-quiet)
+#   kept  = 20 000-30 000 (speech) and 50 000-100 000 (the level log did not confirm quiet there,
+#           including 70 000-100 000 where VAD was silent -> disagreement keeps it)
+k = guard(VAD, [[0, 50000]], T)
+check("cut only where VAD-silent AND level-quiet", k == [[20000, 30000], [50000, 100000]])
+
+check("NO level corroboration -> nothing is cut, whole clip kept", guard(VAD, [], T) == [[0, T]])
+
+# level-quiet everywhere: only VAD speech survives (the most a cut can ever do)
+check("level quiet everywhere -> exactly the VAD speech is kept", guard(VAD, [[0, T]], T) == VAD)
+
+# VAD speech INSIDE a level-quiet span is still kept: the level log cannot overrule speech
+check("VAD speech inside a quiet span is kept", guard([[40000, 45000]], [[0, T]], T) == [[40000, 45000]])
+
+# the outlier shape: VAD sees almost nothing, level log sees sound (so confirms NO quiet) -> keep all
+check("outlier: VAD misses speech, level log active -> nothing cut", guard([[1000, 2000]], [], T) == [[0, T]])
+
+# allow_cut spans are clamped to the clip and tolerate overlap / disorder
+check("allow_cut clamped and merged", guard([], [[90000, 150000], [-5, 1000], [500, 2000]], T) == [[2000, 90000]])
+check("touching quiet spans behave as one", guard([], [[0, 10], [10, 20]], 100) == [[20, 100]])
+
+
+# ── RULING (a): VAD-empty is never trimmed, whatever the level log says ──
+check("VAD-empty -> no regions, even with the level log quiet everywhere", final([], [[0, T]], T) == [])
+check("VAD-empty -> no regions with no level log either", final([], [], T) == [])
+r = final(VAD, [[0, 50000]], T)
+check("VAD non-empty -> the guarded regions, laid end to end",
+      r == [{"start_sample": 20000, "end_sample": 30000, "trim_start_sample": 0},
+            {"start_sample": 50000, "end_sample": 100000, "trim_start_sample": 10000}])
+
 print("\nFAILURES:", fails or "none"); sys.exit(1 if fails else 0)

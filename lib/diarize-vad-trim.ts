@@ -30,6 +30,53 @@
  */
 import { parseFlag } from "@/lib/flags";
 import type { DiarizeSegment } from "@/lib/stt/speaker-clusters";
+import type { BenchLevelSample } from "@/lib/bench-levels";
+import { DEFAULT_ROOM_ENERGY_FLOOR } from "@/lib/stt/window-measure";
+
+/** The Mini's VAD sample rate. `allow_cut` is sent in these units BEFORE the Mini answers, so a map
+ *  that comes back at any other rate is rejected: the spans it was cut against would be misaligned. */
+export const VAD_SAMPLE_RATE = 16000;
+/** The level log's bucket, as `readRoomLevelDay` groups it. */
+const LEVEL_BUCKET_MS = 15_000;
+
+/**
+ * PURE — Fable's ruling (b), 23 Sep: the spans where a cut is ALLOWED, because the level log itself
+ * confirmed quiet there. Clip-relative, in samples at VAD_SAMPLE_RATE.
+ *
+ * A bucket qualifies only if it was OBSERVED and its peak stayed under the shared room floor. An
+ * ACTIVE bucket is not cuttable, and — the half that matters — neither is a bucket the log has no
+ * reading for: absence of a reading is not a reading of silence. So a window the level log did not
+ * cover produces no allowed cuts at all, and is diarized whole.
+ *
+ * A bucket's extent is its 15 s slot (the SQL groups by floor(epoch/15)). The level log samples every
+ * few seconds, so a quiet bucket is quiet at the log's own resolution and no finer; a cut inside it
+ * can still meet a sub-bucket sound the log did not catch. Silero's own speech regions protect that
+ * case — a cut only ever happens where VAD ALSO found nothing (see the Mini's _apply_level_guard).
+ */
+export function observedQuietSpans(
+  samples: readonly BenchLevelSample[],
+  window: { start_ms: number; end_ms: number },
+  floor: number = DEFAULT_ROOM_ENERGY_FLOOR,
+): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const toSamples = (ms: number) => Math.round((ms * VAD_SAMPLE_RATE) / 1000);
+  for (const s of samples) {
+    if (!Number.isFinite(s.peak) || !(s.samples >= 1)) continue;   // not observed
+    if (s.peak >= floor) continue;                                   // active: never cuttable
+    const bStart = Math.floor(s.t_ms / LEVEL_BUCKET_MS) * LEVEL_BUCKET_MS;
+    const a = Math.max(bStart, window.start_ms) - window.start_ms;
+    const b = Math.min(bStart + LEVEL_BUCKET_MS, window.end_ms) - window.start_ms;
+    if (b > a) spans.push([toSamples(a), toSamples(b)]);
+  }
+  spans.sort((x, y) => x[0] - y[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [a, b] of spans) {
+    const last = merged[merged.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  return merged;
+}
 
 export const DIARIZE_VAD_TRIM_ENV = "DIARIZE_VAD_TRIM";
 
@@ -198,7 +245,7 @@ export const VAD_TRIM_TIMEOUT_MS_DEFAULT = 120_000;
 export async function requestSpeechRegions(
   audio: Uint8Array,
   params: VadTrimParams,
-  opts: { label: string; env?: Record<string, string | undefined> },
+  opts: { label: string; allowCut: ReadonlyArray<readonly [number, number]>; env?: Record<string, string | undefined> },
 ): Promise<SpeechRegionsOutcome> {
   const env = opts.env ?? process.env;
   const base = env.DIARIZE_BASE_URL;
@@ -214,6 +261,8 @@ export async function requestSpeechRegions(
   form.append("min_silence_duration_ms", String(params.min_silence_ms));
   form.append("speech_pad_ms", String(params.speech_pad_ms));
   form.append("min_speech_duration_ms", String(params.min_speech_ms));
+  // Ruling (b): the ONLY places the Mini may cut. Empty means nothing is cuttable.
+  form.append("allow_cut", JSON.stringify(opts.allowCut));
 
   const timeoutMs = Number(env.DIARIZE_VAD_TRIM_TIMEOUT_MS || VAD_TRIM_TIMEOUT_MS_DEFAULT);
   const controller = new AbortController();
@@ -245,7 +294,7 @@ export async function requestSpeechRegions(
       if (!Number.isInteger(total) || !Number.isInteger(sr) || sr <= 0) return { ok: false, error: "vad_bad_map", retryable: false };
       return { ok: true, regionsEmpty: true, originalSeconds: total / sr, vadModel, latencyMs };
     }
-    const map = buildRegionMap(j.regions, j.sample_rate, j.total_samples);
+    const map = Number(j.sample_rate) === VAD_SAMPLE_RATE ? buildRegionMap(j.regions, j.sample_rate, j.total_samples) : null;
     if (!map) {
       console.error("[vad-trim] map rejected", JSON.stringify({ window: opts.label, regions: j.regions.length }));
       return { ok: false, error: "vad_bad_map", retryable: false };

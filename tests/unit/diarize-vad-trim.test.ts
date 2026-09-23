@@ -5,7 +5,8 @@
  * function under test. A remap test whose expectation is itself a remap cannot fail.
  */
 import { describe, it, expect } from "vitest";
-import { buildRegionMap, remapSegments, vadTrimParams, vadTrimEnabled, VAD_TRIM_DEFAULTS } from "@/lib/diarize-vad-trim";
+import { buildRegionMap, remapSegments, vadTrimParams, vadTrimEnabled, VAD_TRIM_DEFAULTS, observedQuietSpans } from "@/lib/diarize-vad-trim";
+import { DEFAULT_ROOM_ENERGY_FLOOR } from "@/lib/stt/window-measure";
 
 // 16 kHz. Two regions kept from a 60 s clip:
 //   region A: original 10.0-14.0 s  (samples 160000-224000) -> trimmed 0.0-4.0 s
@@ -117,6 +118,48 @@ describe("remapSegments — trimmed time back onto the original clock", () => {
     const out = remapSegments([{ start_ms: trimMs, end_ms: trimMs + 50, speaker_idx: 0 }], m);
     const expectedOrigMs = Math.round((last * (len + gap) * 1000) / SR);
     expect(out[0]!.start_ms).toBe(expectedOrigMs);
+  });
+});
+
+describe("observedQuietSpans — where the level log CONFIRMED quiet (ruling b)", () => {
+  // Level buckets are 15 s slots aligned to the epoch; t_ms is the bucket's last sample.
+  const b = (slotStartMs: number, peak: number, samples = 3) => ({
+    t_ms: slotStartMs + 7_000, peak, avg: null, zero_ratio: null, session_open: true, tape_advancing: true, samples,
+  });
+  // A window from 100 000 ms to 160 000 ms, i.e. 60 s, starting mid-slot (slots at 90 000, 105 000 …).
+  const W = { start_ms: 100_000, end_ms: 160_000 };
+
+  it("a quiet bucket becomes a span, clamped to the window and clip-relative, in 16 kHz samples", () => {
+    // Slot 90 000-105 000 overlaps the window as 100 000-105 000 -> clip 0-5 000 ms -> 0-80 000 samples.
+    expect(observedQuietSpans([b(90_000, 0)], W)).toEqual([[0, 80000]]);
+    // Slot 120 000-135 000 -> clip 20 000-35 000 ms -> 320 000-560 000 samples.
+    expect(observedQuietSpans([b(120_000, 0)], W)).toEqual([[320000, 560000]]);
+  });
+
+  it("an ACTIVE bucket is never cuttable", () => {
+    expect(observedQuietSpans([b(120_000, DEFAULT_ROOM_ENERGY_FLOOR)], W)).toEqual([]);   // at the floor = active
+    expect(observedQuietSpans([b(120_000, 0.5)], W)).toEqual([]);
+  });
+
+  it("A BUCKET WITH NO READING IS NOT QUIET — absence of evidence is not silence", () => {
+    // No bucket at 135 000: that stretch must not appear, even between two quiet ones.
+    const spans = observedQuietSpans([b(120_000, 0), b(150_000, 0)], W);
+    expect(spans).toEqual([[320000, 560000], [800000, 960000]]);
+    // …and a bucket that claims zero samples was not observed at all.
+    expect(observedQuietSpans([b(120_000, 0, 0)], W)).toEqual([]);
+    expect(observedQuietSpans([], W)).toEqual([]);
+  });
+
+  it("adjacent quiet buckets join into one span", () => {
+    expect(observedQuietSpans([b(120_000, 0), b(135_000, 0)], W)).toEqual([[320000, 800000]]);
+  });
+
+  it("buckets outside the window contribute nothing", () => {
+    expect(observedQuietSpans([b(0, 0), b(300_000, 0)], W)).toEqual([]);
+  });
+
+  it("the floor is the shared room floor, compared strictly: just under it is quiet", () => {
+    expect(observedQuietSpans([b(120_000, DEFAULT_ROOM_ENERGY_FLOOR - 1e-9)], W)).toEqual([[320000, 560000]]);
   });
 });
 
