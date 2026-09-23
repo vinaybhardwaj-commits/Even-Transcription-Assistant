@@ -78,6 +78,17 @@ jobs:
         with: { node-version: "${{ env.NODE_MAJOR }}", cache: npm, cache-dependency-path: package.json }
       - name: Install
         run: npm install --no-audit --no-fund && npm install --no-save --no-audit --no-fund vitest@$VITEST_PIN
+      - name: Legacy-commit shim — vinay/attest-capture for targets before 39503a7 (eta-refuter-2 G1)
+        # Before 39503a7, attest-method-testimony read 0109 with `git show vinay/attest-capture:...`, a branch not on
+        # GitHub. 0109 is merged and byte-identical (adb3177), so pointing that name at the target's OWN commit makes
+        # git show read exactly the same bytes. Only when the ref is missing and the file is in the target.
+        run: |
+          f=db/migrations/0109_room_clinician_attestation.sql
+          if ! git rev-parse -q --verify vinay/attest-capture >/dev/null && git cat-file -e "HEAD:$f" 2>/dev/null \
+             && grep -q "vinay/attest-capture" tests/unit/attest-method-testimony.test.ts 2>/dev/null; then
+            git branch vinay/attest-capture HEAD
+            echo "::notice::legacy shim: vinay/attest-capture -> target HEAD (0109 blob $(git rev-parse HEAD:$f | cut -c1-7))"
+          fi
       - name: vitest shard ${{ matrix.shard }}/8
         # Never piped: the exit code is vitest's own.
         # PUBLIC LOGS (the repo is public): the dot reporter prints no test names or values, and --silent drops
