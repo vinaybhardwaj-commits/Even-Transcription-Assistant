@@ -1,0 +1,12 @@
+# check:silent findings accepted at 1193083 (still present at d519d7b). Key = path TAB trimmed line text,
+# no line number (lines shift with unrelated edits). The gate fails on any finding NOT listed here (a multiset:
+# a second copy of a listed line also fails). Remove a line when its handler is fixed.
+app/[slug]/api/encounters/[id]/finalize-text/route.ts	await res.text().catch(() => {});
+app/[slug]/api/encounters/[id]/finalize-upload/route.ts	await res.text().catch(() => {}); // ACK only; the step runs in the target's own after()
+app/[slug]/api/encounters/[id]/process/route.ts	await sql`UPDATE encounter SET router_job_id = ${jobId} WHERE id = ${id}`.catch(() => {});
+app/[slug]/api/encounters/[id]/process/route.ts	WHERE id = ${id}`.catch(() => {});
+app/[slug]/api/encounters/[id]/process/route.ts	await sql`UPDATE encounter SET router_job_id = NULL WHERE id = ${id}`.catch(() => {});
+app/[slug]/api/encounters/[id]/process/route.ts	await res.text().catch(() => {}); // target ACKs fast and runs its step in its own after()
+app/[slug]/api/encounters/[id]/process/route.ts	await sql`UPDATE encounter SET processing_step_at = NULL WHERE id = ${id}`.catch(() => {});
+app/[slug]/note/NoteComposerClient.tsx	.then((j) => { if (!cancelled) setFloor((j.fields || []) as FloorField[]); }).catch(() => {});
+app/[slug]/note/NoteComposerClient.tsx	if (encIdRef.current) api(`/api/encounters/${encIdRef.current}/editor`, { method: "PUT", body: JSON.
