@@ -180,7 +180,9 @@ export const routeAdapter: SttAdapter = {
     const st = await pollRouteJob(jobRef);
     // An expired or unknown job is TERMINAL: the router's job files live an hour, and polling a
     // ref that no longer exists can never start succeeding. Anything else is worth another claim.
-    if (!st.ok && /unknown job/i.test(String(st.error ?? ""))) {
+    // A 404 for the id is the same fact whatever the body says (a restarted router that lost its job
+    // file answers FastAPI's own 404), so the status decides, not the wording.
+    if (!st.ok && (/unknown job/i.test(String(st.error ?? "")) || /^http_404\b/.test(String(st.error ?? "")))) {
       return { ok: false, error: "route_job_unknown", terminal: true };
     }
     if (st.state === "failed" || (st.ok === false && st.state === undefined)) {

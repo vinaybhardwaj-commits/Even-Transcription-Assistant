@@ -87,6 +87,51 @@ export function cueWriteFailed(counts: { complete?: boolean }): boolean {
 export const DRAIN_MAX_ATTEMPTS = 3;
 
 /**
+ * ROUTER_JOB_LOST — the router can forget a job and never say so.
+ *
+ * The router keeps each job as a file and a worker thread. When it restarts (23 Sep, ~13:17 IST) the
+ * thread dies but the file does not: it still says `running`, and nothing will ever change it. The poll
+ * step used to treat `running` as "come back later" forever, re-queue itself every 150 s and hold the
+ * window — one room_window job polled a dead router job for 4.5 h while the overnight driver
+ * (concurrency 1) waited behind it.
+ *
+ * So a router job is LOST when either
+ *   - the router says it does not know the id (its own `unknown job_id`, or any 404 for the id), or
+ *   - the router reports it `running` and its answer (state and progress) has not changed for
+ *     `routerJobMaxRunningMs` — see the clock in `roomWindowPoll`. A `queued` job is never lost on time.
+ * A lost job is a window FAILURE, recorded like any other: the window returns to `closed` (or parks at
+ * DRAIN_MAX_ATTEMPTS), the room_window job fails with `router_job_lost`, and the next drain submits a
+ * NEW router job from fresh progress. Nothing here resubmits in place — the router has no idempotency
+ * key, so an in-place resubmit next to a job that might still be alive would pay for the window twice.
+ *
+ * THE BOUND: twice the audio, never under 30 minutes. A 900 s window takes 12-640 s on the router
+ * (bake-off, 22 Sep); 30 minutes leaves room for a few windows queued ahead of it on the router's single
+ * window semaphore, and a longer window gets proportionally longer.
+ */
+export const ROUTER_JOB_LOST_FLOOR_MS = 30 * 60_000;
+export const ROUTER_JOB_LOST = "router_job_lost";
+
+/** PURE — how long a router job may stay not-done before it is declared lost. */
+export function routerJobMaxRunningMs(audioSeconds: number | null | undefined): number {
+  const a = typeof audioSeconds === "number" && Number.isFinite(audioSeconds) && audioSeconds > 0 ? audioSeconds : 0;
+  return Math.max(ROUTER_JOB_LOST_FLOOR_MS, Math.round(2 * a * 1000));
+}
+
+/**
+ * A job the router reports `running` with NO sub-window done yet has started but is WAITING — on its
+ * download, or on the router's single window semaphore behind the jobs submitted with it. Python's
+ * semaphore is not fair, so one job can hold it for its whole window while the others sit at done 0.
+ * Worst real wait ≈ jobs ahead (a drain batch of 5 + the overnight driver + a night-drain) x the worst
+ * router time per 900 s window (~640 s, bake-off 22 Sep) ≈ 75 min. Four running bounds (2 h for a 900 s
+ * window) clears that with margin and still catches a job a restart left waiting, which otherwise would
+ * never be caught at all.
+ */
+export const ROUTER_JOB_WAIT_FACTOR = 4;
+export function routerJobMaxWaitingMs(audioSeconds: number | null | undefined): number {
+  return ROUTER_JOB_WAIT_FACTOR * routerJobMaxRunningMs(audioSeconds);
+}
+
+/**
  * C1b fix-up 1 — how much of the window the CONTROL run covers. Two minutes, deliberately.
  *
  * The shadow exists to compare engines, not to produce a second production transcript of every
@@ -1346,7 +1391,9 @@ export async function roomWindowEngine(
     // Persisted BEFORE anything else can fail, so a retry finds it and polls instead of resubmitting.
     return {
       ...out, ok: true, step: "ok",
-      next_progress: { ...progress, router_job_id: sub.jobRef, engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
+      // `router_submitted_at` stamps when this job submitted (epoch ms); the ROUTER_JOB_LOST clock runs from
+      // the router's last CHANGE of answer instead (roomWindowPoll).
+      next_progress: { ...progress, router_job_id: sub.jobRef, router_submitted_at: Date.now(), engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
     };
   }
 
@@ -1423,17 +1470,62 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
     return { ...out, step: "engine_failed", detail: "async_engine_missing_submit_poll", attempts };
   }
 
+  // ROUTER_JOB_LOST clock — TIME SINCE THE ROUTER LAST SHOWED LIFE, not time since submit (Refuter, 206acbf).
+  //
+  // A clock from submit declares a job lost while it is only WAITING: the drain offers
+  // AUTO_DRAIN_BATCH_LIMIT windows at once, the router works one sub-window at a time, so the last of a
+  // batch can wait past the bound while perfectly alive — and three false losses park a window whose
+  // audio was never transcribed. The router's `run_job` writes `running` the moment its thread starts and
+  // then WAITS on its single window semaphore still saying `running`; `queued` is only the instant before.
+  // What tells a waiting job from a forgotten one is PROGRESS: a live job's `done` count moves once it
+  // gets the semaphore; a job file a restart left behind never moves.
+  //
+  // So: the clock is reset whenever the router's answer CHANGES (state or progress.done). A job the
+  // router reports `queued` is never lost on time; one reported `running` with no sub-window done is
+  // waiting and gets routerJobMaxWaitingMs; one that has progressed and then stopped changing gets the
+  // running bound. A job whose polls have kept FAILING is lost after the running bound, measured from
+  // the last answer the router did give. `router_submitted_at` is kept as a stamp; it no longer drives
+  // the bound. A job with no clock yet (the first poll, or one submitted before this change) starts it now.
+  const now = Date.now();
+  const lastChangeAt = Number(progress.router_last_change_at);
+  const clockStart = Number.isFinite(lastChangeAt) && lastChangeAt > 0 ? lastChangeAt : now;
+  const lastSeen = typeof progress.router_last_seen === "string" ? progress.router_last_seen : null;
+  const maxRunningMs = routerJobMaxRunningMs(p.audio_seconds);
+  const lost = async (why: "unknown" | "stalled", routerState: string, sinceMs: number) => {
+    // Ids, states and durations only — never the router's body.
+    console.error("[drain] router job lost", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, why, router_state: routerState, unchanged_ms: now - sinceMs, max_ms: maxRunningMs }));
+    const attempts = await recordFailure(windowId, "engine_failed", ROUTER_JOB_LOST);
+    return { ...out, step: "engine_failed" as const, detail: ROUTER_JOB_LOST, attempts };
+  };
+
   const st = await adapter.poll(p.router_job_id);
   if (!st.ok) {
     console.error("[drain] async poll failed", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, err: String(st.error).slice(0, 200), terminal: st.terminal }));
-    // A non-terminal failure is worth another claim: the ref is still good, the hop was not.
-    if (!st.terminal) return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: "poll_error" } };
+    // The router answering "no such job" is the restart case said out loud: lost, not failed.
+    if (st.terminal && st.error === "route_job_unknown") return lost("unknown", "unknown", clockStart);
+    // A non-terminal failure is worth another claim: the ref is still good, the hop was not — unless the
+    // router has given no answer at all for longer than the bound. The clock is NOT reset by an error.
+    if (!st.terminal) {
+      if (now - clockStart > maxRunningMs) return lost("stalled", "poll_error", clockStart);
+      return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, router_last_change_at: clockStart, last_router_state: "poll_error" } };
+    }
     const attempts = await recordFailure(windowId, "engine_failed", "async_job_failed");
     return { ...out, step: "engine_failed", detail: "async_job_failed", attempts };
   }
   if (st.state !== "done") {
+    // The router's answer, reduced to what shows life: the state and how many sub-windows are done.
+    const seen = `${st.state}:${st.progress ? st.progress.done : ""}`;
+    const changed = seen !== lastSeen;
+    const since = changed ? now : clockStart;
+    const next = { ...progress, router_last_change_at: since, router_last_seen: seen, last_router_state: st.state };
+    // Waiting is not lost. `queued` has not started, whatever the clock says. `running` with no sub-window
+    // done is waiting its turn (routerJobMaxWaitingMs). Only a job that has PROGRESSED and then stopped
+    // changing gets the running bound — that is what a job file a restart left behind looks like.
+    const doneSubWindows = st.progress ? Number(st.progress.done) || 0 : 0;
+    const bound = doneSubWindows > 0 ? maxRunningMs : routerJobMaxWaitingMs(p.audio_seconds);
+    if (st.state === "running" && now - since > bound) return lost("stalled", `running:${doneSubWindows}`, since);
     // Still working. The row goes back to the queue; the next claim polls the same ref.
-    return { ...out, ok: true, step: "ok", still_running: true, next_progress: { ...progress, last_router_state: st.state } };
+    return { ...out, ok: true, step: "ok", still_running: true, next_progress: next };
   }
 
   const asr = st.result;
