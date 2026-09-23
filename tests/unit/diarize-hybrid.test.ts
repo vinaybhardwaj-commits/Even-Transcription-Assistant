@@ -206,6 +206,28 @@ describe("the hybrid stores pyannote.ai turns with this system's identities", ()
     expect(out.result.speakers_embedded).toBe(2);
   });
 
+  it("the WIRE carries the longest span per speaker and the summed total — the Mini's order depends on it", async () => {
+    // longestSpanPerSpeaker is pinned as a function above; this pins what actually crosses the
+    // HTTP boundary. The Mini orders its greedy match by total_speech_sec, so a wrong span or a
+    // wrong total does not fail — it names a different clinician.
+    await runStep("pyannote_poll", pollProgress);
+    const embed = fetchCalls.find((c) => c.url.includes("/embed_speakers"))!;
+    const form = embed.body as FormData;
+    const sent = JSON.parse(String(form.get("speakers")));
+    expect(sent).toEqual([
+      { idx: 0, start_s: 1, end_s: 9, total_speech_sec: 8 },      // SPEAKER_A, first to speak
+      { idx: 1, start_s: 10, end_s: 12, total_speech_sec: 2 },    // SPEAKER_B
+    ]);
+    // The threshold travels too — never the service's own stricter default.
+    expect(String(form.get("batch_threshold"))).toBe("0.65");
+    // AND THE CENTROIDS ACTUALLY CROSS THE WIRE. Without this, `centroids_offered: 1` could sit
+    // on a row whose request carried an empty list — the attribution bug one layer down, claiming
+    // a comparison against something that was never sent.
+    const wire = JSON.parse(String(form.get("clinician_centroids")));
+    expect(wire).toHaveLength(1);
+    expect(wire[0]).toMatchObject({ clinician_id: DOC.id, centroid_base64: "AAAA" });
+  });
+
   it("the stored speakers carry embedding_base64, so speaker-calibration keeps its input", async () => {
     await runStep("pyannote_poll", pollProgress);
     const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
