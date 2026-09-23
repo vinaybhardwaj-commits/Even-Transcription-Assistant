@@ -1122,6 +1122,9 @@ export async function writeRoutedRun(
     // held one). Identical-after-fold only, numbers exempt in both scripts, idempotent — so this is a
     // no-op on text the router already cleaned.
     const assembled = collapseAssembled(asr.original);
+    // The translation is assembled the same way and loops the same way, so it gets the same collapse —
+    // with the same number exemption, because a translated dose is still a dose (Fable, 23 Sep).
+    const assembledEnglish = collapseAssembled(asr.english);
     // E31 A7 — ONE STATEMENT. The DELETE of the previous run and the INSERT of its replacement were two
     // statements, so a failure between them left the window with NO run row at all: the previous transcript
     // destroyed, and "no run for this window" reads as "never transcribed". As one statement the delete cannot
@@ -1142,7 +1145,7 @@ export async function writeRoutedRun(
          audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
       VALUES
         (${id}, NULL, 'bench_window', ${windowId}, ${engineKey}, ${engineId}, 'batch', 'asr',
-         ${asr.language ?? decided}, ${assembled.text}, ${asr.english}, ${asr.latencyMs}, ${asr.costUsd},
+         ${asr.language ?? decided}, ${assembled.text}, ${assembledEnglish.text}, ${asr.latencyMs}, ${asr.costUsd},
          NULL, ${JSON.stringify({
            // C3 — the probe's language AND its length, on the run, so T4/T5 are answerable from
            // the row rather than from a log line.
@@ -1159,6 +1162,9 @@ export async function writeRoutedRun(
              units_collapsed: assembled.units_collapsed,
              lines_dropped: assembled.lines_dropped,
              changed: assembled.changed,
+             english_units_collapsed: assembledEnglish.units_collapsed,
+             english_lines_dropped: assembledEnglish.lines_dropped,
+             english_changed: assembledEnglish.changed,
            },
            // §C.2 — WHISPER'S LATENCY, on the run, at last. Grounding §A5: metrics_json carried
            // probe_engine, probe_seconds and segment_count but no whisper_ms, so the room path's

@@ -142,6 +142,55 @@ describe("assembled text", () => {
   });
 });
 
+describe("Y4 — matching is EXACT after folding, never fuzzy", () => {
+  // A word-set or similarity rule merged "2 in the morning and 1 at night" with its dose swap once
+  // (refuted 22 Sep). These cases all have high overlap and are NOT identical after folding, so a
+  // looser matcher would collapse them and fail here — which is the point of the test.
+  it("lines differing by one token are both kept", () => {
+    const pairs: Array<[string, string]> = [
+      ["blood pressure is 140 over 90 today", "blood pressure is 140 over 80 today"],
+      ["continue the same tablet every morning", "continue the same tablet every night"],
+      ["no pain today yes", "yes pain today no"],                      // same word set, different order
+      ["review after two weeks", "review after two weeks if worse"],   // one is a prefix of the other
+    ];
+    for (const [a, b] of pairs) {
+      const r = collapseAssembled([a, b].join("\n"));
+      expect(r.text, `${a} / ${b}`).toBe([a, b].join("\n"));
+      expect(r.lines_dropped, `${a} / ${b}`).toBe(0);
+    }
+  });
+
+  it("three near-identical units in a row are kept — only identical ones collapse", () => {
+    // Number-free phrases, so this isolates exactness: the number exemption is tested elsewhere and
+    // would otherwise protect these for the wrong reason.
+    const near = "swelling in the left ankle swelling in the right ankle swelling in the upper ankle";
+    expect(collapseLine(near)).toBe(near);
+    const exact = "swelling in the left ankle swelling in the left ankle swelling in the left ankle";
+    expect(collapseLine(exact)).toBe("swelling in the left ankle");
+  });
+
+  it("but folding-equal IS a match: case, punctuation, danda and spacing do not save a duplicate", () => {
+    const r = collapseAssembled(["Please take rest.", "  PLEASE   take rest  ", "next week"].join("\n"));
+    expect(r.lines_dropped).toBe(1);
+    expect(collapseLine("theek hai Theek hai. theek  hai")).toBe("theek hai");
+  });
+});
+
+describe("the English translation gets the same treatment", () => {
+  it("a looped translation collapses", () => {
+    const looped = "take rest and drink water take rest and drink water take rest and drink water";
+    expect(collapseLine(looped)).toBe("take rest and drink water");
+    const lines = ["Patient has fever.", "patient has fever", "Advised paracetamol."];
+    expect(collapseAssembled(lines.join("\n")).text).toBe(["Patient has fever.", "Advised paracetamol."].join("\n"));
+  });
+
+  it("a translated dose repeated three times survives", () => {
+    const dose = "fifty milligram twice daily";
+    expect(collapseLine([dose, dose, dose].join(" "))).toBe([dose, dose, dose].join(" "));
+    expect(collapseAssembled([dose, dose].join("\n")).lines_dropped).toBe(0);
+  });
+});
+
 describe("idempotence", () => {
   const bodies = [
     ["accha", "accha", "accha", "theek hai"].join(" "),
