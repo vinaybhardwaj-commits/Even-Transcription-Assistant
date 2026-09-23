@@ -28,17 +28,24 @@ const gcpMock = vi.hoisted(() => ({
   lastTimeoutMs: undefined as number | undefined,
 }));
 // Calibration follow-up (Fable's ruling, 23 Sep): MINT_TIMEOUT_MS now lives in lib/gcp-auth.ts and
-// gemini.ts imports it from there (one mint budget, not two) — a mock of this module that omits it
-// breaks every call site inside gemini.ts that reads MINT_TIMEOUT_MS, not just this file's own
-// direct references to it below.
-vi.mock("@/lib/gcp-auth", () => ({
-  getVertexAccessToken: (signal?: AbortSignal, timeoutMs?: number) => {
-    gcpMock.lastSignal = signal;
-    gcpMock.lastTimeoutMs = timeoutMs;
-    return gcpMock.getToken(signal, timeoutMs);
-  },
-  MINT_TIMEOUT_MS: 10_000,
-}));
+// gemini.ts imports it from there (one mint budget, not two). ETA-Refuter, round on 1686171 (P6):
+// restating MINT_TIMEOUT_MS as a literal HERE (an earlier version of this mock did exactly that)
+// un-pins the pure-function tests below — they'd assert against the MOCK's number forever, so
+// mutating the REAL constant in lib/gcp-auth.ts would never be caught, invisibly, because the
+// re-export still makes everything compile and pass green. importOriginal closes this for every
+// export of the module, not just this one constant — the same shape as r2's zero-arity mock hiding
+// whether a signal was passed, and the encounter-clock fixture that computed its own threshold.
+vi.mock("@/lib/gcp-auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gcp-auth")>();
+  return {
+    ...actual,
+    getVertexAccessToken: (signal?: AbortSignal, timeoutMs?: number) => {
+      gcpMock.lastSignal = signal;
+      gcpMock.lastTimeoutMs = timeoutMs;
+      return gcpMock.getToken(signal, timeoutMs);
+    },
+  };
+});
 
 const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
 const MSGS = [{ role: "system", content: "Reply with one word." }, { role: "user", content: "ok" }];
@@ -258,6 +265,21 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     const { MINT_TIMEOUT_MS } = await router();
     expect(gcpMock.lastTimeoutMs).toBe(MINT_TIMEOUT_MS);
   });
+
+  it("round-4/5 P2 (ETA-Refuter, on 1686171): openaiChat's own clearTimeout(tid) is the mint's twin in this same file, and it needed the same coverage W7 gave gcp-auth.ts", async () => {
+    geminiOn();
+    script = [{ kind: "ok", content: "hi" }];
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const { geminiChatIfOn } = await router();
+    // getVertexAccessToken is mocked out entirely in this file (gcpMock.getToken resolves with no
+    // real timer of its own), so the only setTimeout a successful call reaches is openaiChat's own.
+    const r = await geminiChatIfOn("note", "flash", MSGS);
+    expect(r?.ok).toBe(true);
+    const tid = setTimeoutSpy.mock.results[0]?.value;
+    expect(tid).toBeDefined();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(tid);
+  }, 5_000);
 });
 
 describe("the DEFAULT deadline (no env override) after a REAL first-stage hang — the Refuter's missing test", () => {
