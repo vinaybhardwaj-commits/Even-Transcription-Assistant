@@ -25,7 +25,7 @@ permissions:
 
 env:
   NODE_MAJOR: "22"          # the box's Node major (v22)
-  TZ: Asia/Kolkata          # the box and the Mini run in IST; tests that render local times expect it
+  TZ: Asia/Kolkata          # the box and the Mini run in IST; room-install-update renders local times (shard 5, run 1)
   VITEST_PIN: "2.1.9"       # vitest is not declared in package.json; the box runner pins the same version
 
 jobs:
@@ -66,11 +66,17 @@ jobs:
         with: { node-version: "${{ env.NODE_MAJOR }}", cache: npm, cache-dependency-path: package.json }
       - name: Install
         run: npm install --no-audit --no-fund && npm install --no-save --no-audit --no-fund vitest@$VITEST_PIN
-      - name: Branch tips some tests read by name (git show vinay/<branch>:<path>), depth 1, never pushed
-        run: git fetch --no-tags --depth=1 origin '+refs/heads/vinay/*:refs/heads/vinay/*'
       - name: vitest shard ${{ matrix.shard }}/8
-        # never piped: the exit code is vitest's own
-        run: npx vitest run --shard=${{ matrix.shard }}/8
+        # Never piped: the exit code is vitest's own.
+        # PUBLIC LOGS (the repo is public): the dot reporter prints no test names or values, and --silent drops
+        # console output from the code under test; github-actions keeps failure annotations for gh-gate.sh.
+        # CI-SKIP (marked, listed in the gate summary): attest-method-testimony reads
+        # `git show vinay/attest-capture:...`, a branch that exists only on the Mini/box CI mirror, never on
+        # GitHub, so it cannot run here. It still runs on the box gate.
+        run: >-
+          npx vitest run --shard=${{ matrix.shard }}/8
+          --reporter=dot --reporter=github-actions --silent
+          --exclude tests/unit/attest-method-testimony.test.ts
 
   build:
     runs-on: ubuntu-latest
@@ -92,5 +98,6 @@ jobs:
     steps:
       - name: verdict
         run: |
+          echo "::notice::CI-SKIP tests/unit/attest-method-testimony.test.ts (needs branch vinay/attest-capture, not on GitHub; runs on the box gate)"
           echo "typecheck=${{ needs.typecheck.result }} test=${{ needs.test.result }} build=${{ needs.build.result }}"
           [ "${{ needs.typecheck.result }}" = success ] && [ "${{ needs.test.result }}" = success ] && [ "${{ needs.build.result }}" = success ]
