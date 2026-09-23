@@ -54,6 +54,12 @@ function balanced(text: string, from: number): { body: string; end: number } {
   throw new Error("unbalanced parentheses");
 }
 
+/** Where `CONSTRAINT <name> CHECK` starts, with any whitespace (line breaks included) between the words. */
+function constraintAt(sql: string, constraint: string): number {
+  const name = constraint.replace(/[^A-Za-z0-9_]/g, (c) => `\\${c}`);
+  return new RegExp(`CONSTRAINT\\s+${name}\\s+CHECK\\b`).exec(sql)?.index ?? -1;
+}
+
 /**
  * The values of `<column> IN (...)` inside the named CHECK constraint, as a set. Comments are stripped
  * first, so a comment quoting the constraint cannot answer for it. Throws — loudly, naming what is
@@ -62,7 +68,7 @@ function balanced(text: string, from: number): { body: string; end: number } {
  */
 export function checkValues(rawSql: string, constraint: string, column: string): Set<string> {
   const sql = stripSqlComments(rawSql);
-  const at = sql.indexOf(`CONSTRAINT ${constraint} CHECK`);
+  const at = constraintAt(sql, constraint);
   if (at < 0) throw new Error(`no CONSTRAINT ${constraint} in the migration`);
   const check = balanced(sql, at);
   const m = new RegExp(`${column}\\s+IN\\s*\\(`).exec(check.body);
@@ -71,4 +77,23 @@ export function checkValues(rawSql: string, constraint: string, column: string):
   const values = list.body.split(",").map((v) => v.trim().replace(/^'|'$/g, ""));
   if (values.some((v) => !v)) throw new Error(`empty value in ${column} IN list`);
   return new Set(values);
+}
+
+/**
+ * The values of the EFFECTIVE CHECK: the constraint as the LAST migration that defines it leaves it.
+ * A later migration can drop and re-add a constraint with a wider set (0118 widens 0114's closed_by),
+ * and a drift test pinned to the first file would then compare the code against a list the database no
+ * longer enforces. Files are read in migration order; comments are stripped by checkValues.
+ */
+export function effectiveCheckValues(migrationsDir: string, constraint: string, column: string): { file: string; values: Set<string> } {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require("node:fs") as typeof import("node:fs");
+  const files = fs.readdirSync(migrationsDir).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
+  let found: { file: string; values: Set<string> } | null = null;
+  for (const f of files) {
+    const text = stripSqlComments(fs.readFileSync(`${migrationsDir}/${f}`, "utf8"));
+    if (constraintAt(text, constraint) >= 0) found = { file: f, values: checkValues(text, constraint, column) };
+  }
+  if (!found) throw new Error(`no migration defines CONSTRAINT ${constraint}`);
+  return found;
 }

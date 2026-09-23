@@ -22,7 +22,7 @@
 import { sql } from "@/lib/db";
 import { readRoomLevelDay } from "@/lib/bench-levels";
 import { istDate as istDate2 } from "@/lib/bench-reaper-core";
-import { writeHypothesisRun, readLatestRun, type WriteRunResult } from "@/lib/encounter-hypotheses";
+import { writeHypothesisRun, readLatestAcousticRun, type WriteRunResult } from "@/lib/encounter-hypotheses";
 import { runShadow, type DayEvidence, type ShadowSummary, type ShadowWindow } from "@/lib/encounter-clock/shadow";
 import { SMOOTHER_VERSION, type TapeOff } from "@/lib/encounter-clock/smooth";
 import type { TimelineSpan } from "@/lib/encounter-clock/gate";
@@ -130,8 +130,9 @@ export async function runShadowForRoomDay(input: { room_id: string; room_day_id:
   const evidence = await loadDayEvidence(input.room_id, input.room_day_id, input.ist_date, input.now ?? new Date());
   if (!evidence) return { ok: false, error: "no_recorded_audio" };
   const { run, summary } = runShadow(evidence);
-  // the run this one displaces for readers: the latest of the SAME smoother version
-  const previous = await readLatestRun(input.room_day_id, SMOOTHER_VERSION);
+  // the run this one displaces for readers: the latest ACOUSTIC run of the same smoother version — a
+  // fused run (E-6, same version) is not displaced by an acoustic one
+  const previous = await readLatestAcousticRun(input.room_day_id, SMOOTHER_VERSION);
   const written: WriteRunResult = await writeHypothesisRun(run);
   if (!written.ok) return { ok: false, error: "write_refused", detail: written.problems };
   return { ok: true, run_id: written.run_id, supersedes: previous.run?.id ?? null, summary };

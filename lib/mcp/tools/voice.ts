@@ -22,6 +22,8 @@ import { signGetUrl } from "@/lib/r2";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 import { readLatestRun, readRun } from "@/lib/encounter-hypotheses";
 import { runShadowForRoomDay } from "@/lib/encounter-clock/shadow-io";
+import { runFusionShadowForRoomDay } from "@/lib/encounter-clock/shadow-v2";
+import { encounterFusionShadowEnabled } from "@/lib/encounter-clock/flag";
 import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
@@ -254,7 +256,7 @@ const encounterHypotheses: McpTool = {
 const encounterShadowRun: McpTool = {
   name: "scribe_encounter_shadow_run",
   description:
-    "Run the encounter clock over one room-day and store the hypotheses (E-5). Operator triggered. Reads the level log and the transcripts already stored for that day — no STT, no audio fetch, no clinician-facing write. Pass room_day_id, or room_id/room_slug + ist_date. Returns the run id, the run it supersedes, and a numbers-only summary including every rollback trigger from the flag-on plan. A rerun appends a new run; readers take the latest.",
+    "Run the encounter clock over one room-day and store the hypotheses (E-5). Operator triggered. Reads the level log and the transcripts already stored for that day — no STT, no audio fetch, no clinician-facing write. Pass room_day_id, or room_id/room_slug + ist_date. Returns the run id, the run it supersedes, and a numbers-only summary including every rollback trigger from the flag-on plan. A rerun appends a new run; readers take the latest. E-6: with ENCOUNTER_FUSION_SHADOW on, or fusion:true for a one-off replay of a past day, it also asks Jev about each probe and writes a second, FUSED run (source 'fused') beside the acoustic one — still shadow only.",
   scope: "invoke",
   inputSchema: {
     type: "object",
@@ -263,6 +265,10 @@ const encounterShadowRun: McpTool = {
       room_id: { type: "string" },
       room_slug: { type: "string" },
       ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+      fusion: {
+        type: "boolean",
+        description: "E-6 replay: run shadow-runner v2 (acoustic + fused) for this call even with ENCOUNTER_FUSION_SHADOW off — for E-7 scoring of past days. Requires migration 0118.",
+      },
     },
     additionalProperties: false,
   },
@@ -278,8 +284,15 @@ const encounterShadowRun: McpTool = {
         if (!day) return { ok: false, error: "no_room_day", room_id: room.id, ist_date: d.date };
         roomDayId = day.id;
       }
+      // v2 when asked for this call (replay) or when the fusion flag is on; the flag parser throws on an
+      // unrecognised value, which failSafe reports rather than reading it as off.
+      const replay = argBool(args, "fusion");
+      if (replay || encounterFusionShadowEnabled()) {
+        const v2 = await runFusionShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
+        return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v2", replay, ...v2 };
+      }
       const res = await runShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
-      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, ...res };
+      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v1", ...res };
     }),
 };
 

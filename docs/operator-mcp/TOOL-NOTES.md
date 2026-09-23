@@ -101,6 +101,13 @@ structured, closed-vocabulary value (noul/choice/score), never transcript or sta
 for the same reason as the four above — bringing the ungrouped tools to 25 and the listed surface
 to 35 (25 + 10 groups). It landed in the same week as the E-shadow run; both counted themselves
 as the 24th on their own branches, so the combined count is set here by hand.
+E-6 (shadow-runner v2, 23 Sep) added no tool. `scribe_encounter_shadow_run` gained one argument,
+`fusion` (boolean). With `fusion: true`, or with `ENCOUNTER_FUSION_SHADOW` on, the run also asks Jev
+about each 60 s probe and writes a second run, `source = 'fused'`, next to the acoustic one (migration
+118). The answer says which runner ran (`runner: "v1" | "v2"`) and whether the call was a replay.
+v2 writes one more table than v1: `jev_decision`, with `subject_type = 'probe'` and metadata only.
+Readers that ask for no source get the latest run of any source, which after a v2 run is the fused
+one. Read by `run_id` (v2 returns both ids) to get a particular one.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app

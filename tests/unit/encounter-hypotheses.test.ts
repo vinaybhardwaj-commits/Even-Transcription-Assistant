@@ -29,7 +29,7 @@ vi.mock("@/lib/mcp/tools/brain", async (orig) => ({
 
 import { CLOSED_BY } from "@/lib/encounter-clock/smooth";
 import { VOICE_DOMAINS } from "@/lib/voice-centroid";
-import { checkValues, stripSqlComments } from "../support/sql-check";
+import { checkValues, effectiveCheckValues, stripSqlComments } from "../support/sql-check";
 import {
   MATCH_SOURCES,
   checkInterval,
@@ -244,9 +244,15 @@ describe("vocabulary drift between the code and the migration", () => {
   const sql = readFileSync("db/migrations/0114_encounter_hypothesis.sql", "utf8");
 
 
-  it("closed_by: the CHECK admits exactly the smoother's CLOSED_BY", () => {
-    expect(checkValues(sql, "encounter_hypothesis_closed_by_chk", "closed_by")).toEqual(new Set(CLOSED_BY));
-    expect(CLOSED_BY).toHaveLength(5); // a shrunken array must not silently satisfy this
+  it("closed_by: the EFFECTIVE CHECK admits exactly the smoother's CLOSED_BY", () => {
+    // 0118 widens 0114's CHECK with content_boundary, so the list the database enforces is the LAST
+    // migration's, not 0114's — comparing against 0114 would pin the code to a list no longer in force.
+    const eff = effectiveCheckValues("db/migrations", "encounter_hypothesis_closed_by_chk", "closed_by");
+    expect(eff.file).toBe("0118_encounter_fusion.sql");
+    expect(eff.values).toEqual(new Set(CLOSED_BY));
+    expect(CLOSED_BY).toHaveLength(6); // a shrunken array must not silently satisfy this
+    // 0114 itself still carries the five it was written with — history is not rewritten.
+    expect(checkValues(sql, "encounter_hypothesis_closed_by_chk", "closed_by").size).toBe(5);
   });
 
   it("match_source: the CHECK admits exactly MATCH_SOURCES", () => {

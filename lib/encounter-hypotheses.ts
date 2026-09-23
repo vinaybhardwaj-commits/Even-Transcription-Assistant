@@ -62,8 +62,25 @@ export type HypothesisInterval = {
   identity?: { clinician_id: string | null; match_source: MatchSource; centroid_id: string | null; doctor_cosine: number } | null;
 };
 
+/**
+ * Where a run's intervals came from (0118). "acoustic" = probes, gate, smoother; "fused" = the same
+ * with Jev confirming, splitting or rejecting each encounter (E-6). ONE list: the type, the validator
+ * and 0118's CHECK answer to it, and a drift test compares the CHECK against it.
+ *
+ * DEPLOY-ORDER SAFE BY CONSTRUCTION. Deploys do not run migrations, so this code can be live before
+ * 0118 is. An ACOUSTIC write and every read that does not ask for a source never mention the column, so
+ * the E-shadow keeps working on a database without it; only the fused path (flag on, or an explicit
+ * replay, both of which Fable enables after applying 0118) touches `source`.
+ */
+export const RUN_SOURCES = ["acoustic", "fused"] as const;
+export type RunSource = (typeof RUN_SOURCES)[number];
+export const isRunSource = (v: unknown): v is RunSource =>
+  typeof v === "string" && (RUN_SOURCES as readonly string[]).includes(v);
+
 export type HypothesisRunInput = {
   room_day_id: string;
+  /** Default "acoustic". "fused" requires migration 0118. */
+  source?: RunSource;
   smoother_version: string;
   gate_version: string;
   params?: Record<string, unknown>;
@@ -82,11 +99,14 @@ export type StoredRun = {
   probes: { total: number; speech: number; non_speech: number; unjudged: number };
   n_hypotheses: number;
   created_at: string | null;
+  /** Set when the run was read by source (0118); undefined when the reader did not ask. */
+  source?: RunSource;
   hypotheses: StoredHypothesis[];
 };
 
 export type RunProblem =
   | "bad_room_day_id"
+  | "bad_source"
   | "bad_version"
   | "bad_params"
   | "bad_probe_counts"
@@ -135,6 +155,7 @@ export function checkRunInput(r: HypothesisRunInput): RunProblem[] {
   if (typeof r.smoother_version !== "string" || !VERSION_RE.test(r.smoother_version) ||
       typeof r.gate_version !== "string" || !VERSION_RE.test(r.gate_version)) out.add("bad_version");
   if (r.params !== undefined && (r.params === null || typeof r.params !== "object" || Array.isArray(r.params))) out.add("bad_params");
+  if (r.source !== undefined && !isRunSource(r.source)) out.add("bad_source");
   const p = r.probes;
   if (!p || ![p.total, p.speech, p.non_speech, p.unjudged].every(nonNegInt) ||
       p.speech + p.non_speech + p.unjudged !== p.total) out.add("bad_probe_counts");
@@ -183,7 +204,36 @@ export async function writeHypothesisRun(input: HypothesisRunInput): Promise<Wri
   if (problems.length) return { ok: false, error: "invalid_input", problems };
   const runId = newRunId();
   const rows = intervalRows(runId, input.room_day_id, input.intervals);
-  const res = (await sql`
+  // Two statements, identical but for the run's `source` column: an acoustic write must not mention a
+  // column that exists only after 0118 (see RUN_SOURCES). A test pins that both write the same
+  // interval columns, so the copies cannot drift apart.
+  const res = (input.source === "fused" ? await sql`
+    WITH run AS (
+      INSERT INTO encounter_hypothesis_run
+        (id, room_day_id, smoother_version, gate_version, params,
+         probes_total, probes_speech, probes_non_speech, probes_unjudged, n_hypotheses, source)
+      VALUES (${runId}, ${input.room_day_id}, ${input.smoother_version}, ${input.gate_version},
+              ${JSON.stringify(input.params ?? {})}::jsonb,
+              ${input.probes.total}, ${input.probes.speech}, ${input.probes.non_speech}, ${input.probes.unjudged},
+              ${rows.length}, 'fused')
+      RETURNING id
+    ), ins AS (
+      INSERT INTO encounter_hypothesis
+        (id, run_id, room_day_id, start_ms, end_ms, speech_probes, non_speech_probes, unjudged_ms,
+         longest_unjudged_run_ms, dead_mic_ms, closed_by, merged_from, doctor_yes, doctor_no, doctor_unknown,
+         clinician_id, match_source, centroid_id, doctor_cosine)
+      SELECT x.id, run.id, x.room_day_id, x.start_ms, x.end_ms, x.speech_probes, x.non_speech_probes, x.unjudged_ms,
+             x.longest_unjudged_run_ms, x.dead_mic_ms, x.closed_by, x.merged_from, x.doctor_yes, x.doctor_no,
+             x.doctor_unknown, x.clinician_id, x.match_source, x.centroid_id, x.doctor_cosine
+        FROM run, jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(
+          id text, room_day_id text, start_ms bigint, end_ms bigint, speech_probes int, non_speech_probes int,
+          unjudged_ms bigint, longest_unjudged_run_ms bigint, dead_mic_ms bigint, closed_by text, merged_from int,
+          doctor_yes int, doctor_no int, doctor_unknown int, clinician_id text, match_source text,
+          centroid_id text, doctor_cosine real)
+      RETURNING id
+    )
+    SELECT (SELECT id FROM run) AS run_id, (SELECT count(*) FROM ins)::int AS inserted
+  ` : await sql`
     WITH run AS (
       INSERT INTO encounter_hypothesis_run
         (id, room_day_id, smoother_version, gate_version, params,
@@ -274,6 +324,7 @@ export function rowToRun(r: Row, hypotheses: StoredHypothesis[]): StoredRun {
     probes: { total: num(r.probes_total), speech: num(r.probes_speech), non_speech: num(r.probes_non_speech), unjudged: num(r.probes_unjudged) },
     n_hypotheses: num(r.n_hypotheses),
     created_at: iso(r.created_at),
+    ...(isRunSource(r.source) ? { source: r.source } : {}),
     hypotheses,
   };
 }
@@ -313,10 +364,24 @@ export async function readRun(runId: string): Promise<StoredRun | null> {
 export async function readLatestRun(
   roomDayId: string,
   smootherVersion?: string,
+  source?: RunSource,
 ): Promise<{ run: StoredRun | null; runs_for_day: number }> {
   if (!ID_RE.test(roomDayId)) return { run: null, runs_for_day: 0 };
   if (smootherVersion !== undefined && !VERSION_RE.test(smootherVersion)) return { run: null, runs_for_day: 0 };
-  const rows = (await sql`
+  if (source !== undefined && !isRunSource(source)) return { run: null, runs_for_day: 0 };
+  // Keyed by source only when the caller asks (0118): a reader that does not ask never mentions the
+  // column, so it keeps working on a database where 0118 is not yet applied.
+  const rows = (source !== undefined ? await sql`
+    SELECT id, room_day_id, smoother_version, gate_version, params, probes_total, probes_speech,
+           probes_non_speech, probes_unjudged, n_hypotheses, created_at, source,
+           count(*) OVER ()::int AS runs_for_day
+      FROM encounter_hypothesis_run
+     WHERE room_day_id = ${roomDayId}
+       AND (${smootherVersion ?? null}::text IS NULL OR smoother_version = ${smootherVersion ?? null})
+       AND source = ${source}
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1
+  ` : await sql`
     SELECT id, room_day_id, smoother_version, gate_version, params, probes_total, probes_speech,
            probes_non_speech, probes_unjudged, n_hypotheses, created_at,
            count(*) OVER ()::int AS runs_for_day
@@ -329,4 +394,30 @@ export async function readLatestRun(
   const r = rows[0];
   if (!r) return { run: null, runs_for_day: 0 };
   return { run: rowToRun(r, await hypothesesOf(String(r.id))), runs_for_day: num(r.runs_for_day) };
+}
+
+/** PURE — is this the database saying `encounter_hypothesis_run.source` does not exist (0118 not applied)? */
+export function isMissingSourceColumn(e: unknown): boolean {
+  const err = e as { code?: unknown; message?: unknown } | null;
+  if (err?.code === "42703") return true;
+  return typeof err?.message === "string" && /column "?(?:\w+\.)?source"? does not exist/i.test(err.message);
+}
+
+/**
+ * The latest ACOUSTIC run of a room-day: what an acoustic write displaces for readers (the v1 shadow
+ * runner's `supersedes`). Once 0118 is applied the read is scoped by source, so a fused run — same
+ * smoother version, written by v2 — is never reported as displaced by an acoustic one (ETA-Refuter,
+ * E6 verdict). Before 0118 the column does not exist, and neither can a fused run (its write needs the
+ * column), so the unscoped read IS the acoustic read: the fallback is exact, not a guess.
+ */
+export async function readLatestAcousticRun(
+  roomDayId: string,
+  smootherVersion?: string,
+): Promise<{ run: StoredRun | null; runs_for_day: number }> {
+  try {
+    return await readLatestRun(roomDayId, smootherVersion, "acoustic");
+  } catch (e) {
+    if (isMissingSourceColumn(e)) return readLatestRun(roomDayId, smootherVersion);
+    throw e;
+  }
 }
