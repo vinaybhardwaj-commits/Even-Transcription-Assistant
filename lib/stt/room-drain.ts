@@ -60,6 +60,7 @@ import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
 import { LEASE_MS } from "@/lib/jobs/types";
 import type { McpScope } from "@/lib/mcp/auth";
 import type { SttTranscribeResult } from "./types";
+import { collapseAssembled } from "./assembled-collapse";
 import { buildRouteMetrics } from "./route-run";
 import { shouldShadow } from "./shadow";
 import { readVadParams, readWindowAudioLevel, recordSilenceVerdict, SILENT_STATE, VERDICT_EMPTY_TRANSCRIPT } from "./silence";
@@ -973,7 +974,12 @@ export async function roomWindowSegment(
       // WhisperSegment times are SECONDS and are relative to the clip, which starts at the
       // window's own start — so this is literally "the segments inside the first two minutes".
       const shadowSegments = segments.filter((sg) => sg.end_s <= SHADOW_WINDOW_MS / 1000);
-      const shadowText = shadowSegments.map((sg) => sg.text).join(" ").trim();
+      // COLLAPSE AFTER THE JOIN. Each segment is collapsed by the router before it gets here, so a
+      // word repeated across three short segments is invisible until they are one string (measured on
+      // production, 23 Sep: 13 of 17 residual loops were exactly that). Identical-after-fold only, and
+      // a number is never collapsed.
+      const shadowCollapse = collapseAssembled(shadowSegments.map((sg) => sg.text).join(" ").trim());
+      const shadowText = shadowCollapse.text;
       const shadowEndMs = Math.min(endMs, startMs + SHADOW_WINDOW_MS);
       const shadowSeconds = Math.round(((shadowEndMs - startMs) / 1000) * 100) / 100;
       await sql`
@@ -1110,6 +1116,15 @@ export async function writeRoutedRun(
     // replaced. Two runs for one window would make "the window's transcript" ambiguous, and the
     // STT lab groups on (subject_type, subject_id).
     const id = runId();
+    // COLLAPSE AFTER ASSEMBLY. The router collapses each segment and then joins them, so a word repeated
+    // across three short segments survives as a loop in the stored text, and Indic-engine output was
+    // never collapsed at all (measured on production, 23 Sep: 14 of 136 stored window transcripts still
+    // held one). Identical-after-fold only, numbers exempt in both scripts, idempotent — so this is a
+    // no-op on text the router already cleaned.
+    const assembled = collapseAssembled(asr.original);
+    // The translation is assembled the same way and loops the same way, so it gets the same collapse —
+    // with the same number exemption, because a translated dose is still a dose (Fable, 23 Sep).
+    const assembledEnglish = collapseAssembled(asr.english);
     // E31 A7 — ONE STATEMENT. The DELETE of the previous run and the INSERT of its replacement were two
     // statements, so a failure between them left the window with NO run row at all: the previous transcript
     // destroyed, and "no run for this window" reads as "never transcribed". As one statement the delete cannot
@@ -1130,7 +1145,7 @@ export async function writeRoutedRun(
          audio_r2_key, audio_byte_start, audio_byte_end, audio_sha256)
       VALUES
         (${id}, NULL, 'bench_window', ${windowId}, ${engineKey}, ${engineId}, 'batch', 'asr',
-         ${asr.language ?? decided}, ${asr.original}, ${asr.english}, ${asr.latencyMs}, ${asr.costUsd},
+         ${asr.language ?? decided}, ${assembled.text}, ${assembledEnglish.text}, ${asr.latencyMs}, ${asr.costUsd},
          NULL, ${JSON.stringify({
            // C3 — the probe's language AND its length, on the run, so T4/T5 are answerable from
            // the row rather than from a log line.
@@ -1142,6 +1157,15 @@ export async function writeRoutedRun(
            sarvam_language: asr.language ?? null,
            segment_count: p.segment_count,
            activity,
+           // What the post-assembly collapse removed, so a row explains its own transcript.
+           assembled_collapse: {
+             units_collapsed: assembled.units_collapsed,
+             lines_dropped: assembled.lines_dropped,
+             changed: assembled.changed,
+             english_units_collapsed: assembledEnglish.units_collapsed,
+             english_lines_dropped: assembledEnglish.lines_dropped,
+             english_changed: assembledEnglish.changed,
+           },
            // §C.2 — WHISPER'S LATENCY, on the run, at last. Grounding §A5: metrics_json carried
            // probe_engine, probe_seconds and segment_count but no whisper_ms, so the room path's
            // local-compute time was unobservable from the database while Whisper was
