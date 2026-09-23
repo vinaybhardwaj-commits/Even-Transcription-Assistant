@@ -22,7 +22,7 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-import { runShadow, checkTriggers, toInterval, SHADOW_VERSION, type DayEvidence, type ShadowSummary } from "@/lib/encounter-clock/shadow";
+import { runShadow, checkTriggers, toInterval, SHADOW_VERSION, NO_ENERGY_PROVISIONAL_SHARE, type DayEvidence, type ShadowSummary } from "@/lib/encounter-clock/shadow";
 import { runShadowForRoomDay, tapeFromChunks, timelineOf, loadDayEvidence, dayIsComplete, STILL_RECORDING_MS } from "@/lib/encounter-clock/shadow-io";
 import { SMOOTHER_VERSION, type Encounter } from "@/lib/encounter-clock/smooth";
 import { GATE_VERSION } from "@/lib/encounter-clock/gate";
@@ -168,7 +168,7 @@ describe("E-shadow — the rollback triggers travel with the run", () => {
     room_day_id: "rd", shadow_version: SHADOW_VERSION, gate_version: GATE_VERSION, smoother_version: SMOOTHER_VERSION,
     probes: { total: 10, speech: 5, non_speech: 3, unjudged: 2 }, unjudged_share: 0.2, reasons: {}, preselect: {},
     windows: { with_text: 2, placed: 2, unplaceable: 0 }, encounters: 3, median_minutes: 20, longest_minutes: 40,
-    closed_by: {}, day_complete: true,
+    closed_by: {}, day_complete: true, no_energy_share: 0,
   };
   const trip = (s: Partial<Base>) =>
     checkTriggers({ ...base, ...s }).filter((t) => t.tripped).map((t) => t.trigger);
@@ -273,6 +273,58 @@ describe("E-shadow — a PARTIAL day cannot manufacture a rollback signal", () =
     expect(ev.day_complete).toBe(false);
     const done = (await loadDayEvidence("room_1", "rd_test", "2026-09-23", new Date(T0 + 200 * MIN)))!;
     expect(done.day_complete).toBe(true);
+  });
+});
+
+const base49: Omit<ShadowSummary, "triggers" | "triggers_tripped" | "triggers_tripped_firm"> = {
+  room_day_id: "rd", shadow_version: SHADOW_VERSION, gate_version: GATE_VERSION, smoother_version: SMOOTHER_VERSION,
+  probes: { total: 10, speech: 5, non_speech: 3, unjudged: 2 }, unjudged_share: 0.2, reasons: {}, preselect: {},
+  windows: { with_text: 2, placed: 2, unplaceable: 0 }, encounters: 3, median_minutes: 20, longest_minutes: 40,
+  closed_by: {}, day_complete: true, no_energy_share: 0,
+};
+
+describe("E-shadow — no ENERGY evidence is not bad evidence", () => {
+  // 23 Sep, the 22 Sep fragment: the level log began at 19:53 that evening, the room's tape had
+  // already stopped, and 742 of 742 probes came back no_energy_evidence. A COMPLETE day, so both
+  // tripped triggers read FIRM — "roll back" for a day that simply predates the level log.
+  /** A day whose level samples cover only `share` of it, so the rest has no energy evidence. */
+  const partlyBlind = (share: number, dayComplete = true): DayEvidence => {
+    const span = 120 * MIN;
+    return evidence({
+      day_start_ms: T0, day_end_ms: T0 + span, day_complete: dayComplete,
+      level_samples: levels(T0, T0 + Math.round(span * share)),
+      windows: [],                                     // no transcripts: unjudged either way
+    });
+  };
+
+  it("a complete day with MORE than half its probes lacking energy makes every trigger provisional", () => {
+    const { summary } = runShadow(partlyBlind(0.2));
+    expect(summary.day_complete).toBe(true);
+    expect(summary.no_energy_share!).toBeGreaterThan(NO_ENERGY_PROVISIONAL_SHARE);
+    expect(summary.triggers.every((t) => t.provisional)).toBe(true);
+    expect(summary.triggers.some((t) => t.tripped)).toBe(true);     // it still reports the numbers
+    expect(summary.triggers_tripped_firm).toBe(false);              // but never as a stop signal
+  });
+
+  it("the 22 Sep shape exactly: every probe blind, complete day, no firm stop", () => {
+    const { summary } = runShadow(evidence({ level_samples: [], windows: [], day_complete: true }));
+    expect(summary.no_energy_share).toBe(1);
+    expect(summary.reasons.no_energy_evidence).toBe(summary.probes.total);
+    expect(summary.triggers_tripped).toBe(true);
+    expect(summary.triggers_tripped_firm).toBe(false);
+  });
+
+  it("BELOW the threshold on a complete day a tripped trigger is still FIRM — a threshold, not a mood", () => {
+    const { summary } = runShadow(partlyBlind(0.65));
+    expect(summary.no_energy_share!).toBeLessThan(NO_ENERGY_PROVISIONAL_SHARE);
+    const unjudged = summary.triggers.find((t) => t.trigger === "unjudged_over_90pct")!;
+    expect(unjudged).toMatchObject({ tripped: true, provisional: false });
+    expect(summary.triggers_tripped_firm).toBe(true);
+  });
+
+  it("the threshold is EXCLUSIVE: exactly half blind is not enough to excuse a stop", () => {
+    expect(checkTriggers({ ...base49, no_energy_share: NO_ENERGY_PROVISIONAL_SHARE }).every((t) => !t.provisional)).toBe(true);
+    expect(checkTriggers({ ...base49, no_energy_share: 0.51 }).every((t) => t.provisional)).toBe(true);
   });
 });
 

@@ -33,6 +33,15 @@ import {
 
 export const SHADOW_VERSION = "encounter-clock-shadow-v1";
 
+/**
+ * Above this share of probes with NO energy evidence, every trigger is provisional (Fable, 23 Sep,
+ * after the 22 Sep run: the level log began at 19:53 that evening, the room's tape had already
+ * stopped, and 742 of 742 probes came back no_energy_evidence — a complete day whose two tripped
+ * triggers read as a firm "roll back" when the fact was that the day predates the level log).
+ * A day with no evidence must never produce a firm stop.
+ */
+export const NO_ENERGY_PROVISIONAL_SHARE = 0.5;
+
 /** One transcribed window as stored: its text and the timeline that places the text on the clock. */
 export type ShadowWindow = { start_ms: number; end_ms: number; text: string; timeline: TimelineSpan[] | null };
 
@@ -64,6 +73,9 @@ export type TriggerCheck = {
    * "unjudged over 90%" (recording runs ahead of transcription, so an early day is legitimately
    * mostly unjudged) and "no encounters on a day with transcripts" (one transcribed window before
    * two speech probes have accumulated). The other three can only undercount on a prefix.
+   *
+   * When ENERGY evidence is missing for more than NO_ENERGY_PROVISIONAL_SHARE of the probes, EVERY
+   * trigger is provisional: the run saw almost nothing, so none of its numbers is a stop signal.
    */
   provisional: boolean;
 };
@@ -86,6 +98,8 @@ export type ShadowSummary = {
   closed_by: Record<string, number>;
   /** Whether the day was whole when this ran, or a prefix still being recorded. */
   day_complete: boolean;
+  /** Share of probes the gate could not judge for want of ENERGY evidence (no level samples). */
+  no_energy_share: number | null;
   triggers: TriggerCheck[];
   /** True when any rollback trigger tripped. The caller still writes the run: the row is the evidence. */
   triggers_tripped: boolean;
@@ -128,16 +142,19 @@ export function checkTriggers(s: Omit<ShadowSummary, "triggers" | "triggers_trip
   const longest = s.longest_minutes;
   const median_ = s.median_minutes;
   const partial = !s.day_complete;
+  // No evidence is not bad evidence: past NO_ENERGY_PROVISIONAL_SHARE nothing here is a stop signal.
+  const blind = (s.no_energy_share ?? 0) > NO_ENERGY_PROVISIONAL_SHARE;
+  const prefix = partial || blind;
   return [
-    { trigger: "encounter_over_2h", value: longest, limit: 120, tripped: longest !== null && longest > 120, provisional: false },
-    { trigger: "unjudged_over_90pct", value: s.unjudged_share, limit: 0.9, tripped: s.unjudged_share !== null && s.unjudged_share > 0.9, provisional: partial },
-    { trigger: "median_over_60min", value: median_, limit: 60, tripped: median_ !== null && median_ > 60, provisional: false },
-    { trigger: "encounters_over_15", value: s.encounters, limit: 15, tripped: s.encounters > 15, provisional: false },
+    { trigger: "encounter_over_2h", value: longest, limit: 120, tripped: longest !== null && longest > 120, provisional: blind },
+    { trigger: "unjudged_over_90pct", value: s.unjudged_share, limit: 0.9, tripped: s.unjudged_share !== null && s.unjudged_share > 0.9, provisional: prefix },
+    { trigger: "median_over_60min", value: median_, limit: 60, tripped: median_ !== null && median_ > 60, provisional: blind },
+    { trigger: "encounters_over_15", value: s.encounters, limit: 15, tripped: s.encounters > 15, provisional: blind },
     {
       trigger: "no_encounters_on_a_day_with_transcripts",
       value: s.encounters, limit: 0,
       tripped: s.encounters === 0 && s.windows.placed > 0,
-      provisional: partial,
+      provisional: prefix,
     },
   ];
 }
@@ -201,6 +218,7 @@ export function runShadow(ev: DayEvidence, opts: { probe_s?: number; hop_s?: num
     longest_minutes: durations.length ? Math.max(...durations) : null,
     closed_by: count(encounters.map((e) => e.closed_by)),
     day_complete: ev.day_complete,
+    no_energy_share: counts.total ? (count(reasons).no_energy_evidence ?? 0) / counts.total : null,
   };
   const triggers = checkTriggers(base);
   // ANY trigger tripping stops the experiment: `some`, never `every` — a single three-hour encounter
