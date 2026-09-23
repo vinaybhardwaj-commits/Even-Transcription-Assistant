@@ -100,7 +100,8 @@ Readers that ask for no source get the latest run of any source, which after a v
 one. Read by `run_id` (v2 returns both ids) to get a particular one.
 E-6.1 (fusion v1.1): a fused run can also hold intervals that Jev proposed where the acoustic run had
 none. A U2 start marker, then at least 3 consecutive consultation-phase probes, then a U2 end marker,
-with non_speech edges trimmed by acoustics. They close as `content_boundary`. They are marked in the run's
+with non_speech edges trimmed by acoustics. At least one remaining probe must be acoustically `speech`:
+Jev never proposes an encounter nobody heard. They close as `content_boundary`. They are marked in the run's
 `params.jev_origin` by start and end time, and every interval not listed there is acoustic-origin.
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,

@@ -203,7 +203,7 @@ describe("E-6.1 — Jev proposes where acoustics proposed nothing", () => {
 
   it("start marker → consultation run → end marker, 3 probes, no acoustic encounter: one candidate, origin jev", () => {
     const r = proposeFromJev([], grid(6), visit(1, 3), HOP);
-    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, trimmed_probes: 0 });
+    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, no_speech: 0, trimmed_probes: 0 });
     expect(r.encounters).toHaveLength(1);
     // probes 1..3 by hand: centres T0+HOP..T0+3*HOP, each owning half a hop either side
     expect(r.encounters[0]).toMatchObject({ start_ms: T0 + HOP - 30_000, end_ms: T0 + 3 * HOP + 30_000, speech_probes: 3, closed_by: "content_boundary" });
@@ -269,7 +269,7 @@ describe("E-6.1 — Jev proposes where acoustics proposed nothing", () => {
   it("ACOUSTICS TRIMS: non_speech edges are cut, the rest kept", () => {
     const probes = withVerdicts(7, { 1: "non_speech", 5: "non_speech" });
     const r = proposeFromJev([], probes, visit(1, 5), HOP);
-    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, trimmed_probes: 2 });
+    expect(r.counts).toEqual({ proposed: 1, unclosed: 0, short: 0, trimmed_away: 0, no_speech: 0, trimmed_probes: 2 });
     expect(r.encounters[0]).toMatchObject({ start_ms: T0 + 2 * HOP - 30_000, end_ms: T0 + 4 * HOP + 30_000, speech_probes: 3 });
   });
 
@@ -279,6 +279,21 @@ describe("E-6.1 — Jev proposes where acoustics proposed nothing", () => {
     const kept = proposeFromJev([], withVerdicts(7, { 1: "unjudged", 5: "unjudged" }), visit(1, 5), HOP);
     expect(kept.counts).toMatchObject({ proposed: 1, trimmed_probes: 0 });
     expect(kept.encounters[0]).toMatchObject({ start_ms: T0 + HOP - 30_000, end_ms: T0 + 5 * HOP + 30_000, speech_probes: 3, unjudged_ms: 2 * HOP });
+  });
+
+  it("NOBODY HEARD IT: a run with no acoustically speech-judged probe is not proposed, however good the text", () => {
+    // the Refuter's probe: three acoustically unjudged probes, a textbook consultation on top
+    const none = proposeFromJev([], withVerdicts(3, { 0: "unjudged", 1: "unjudged", 2: "unjudged" }), visit(0, 3), HOP);
+    expect(none.encounters).toEqual([]);
+    expect(none.counts).toMatchObject({ proposed: 0, no_speech: 1 });
+    // one heard probe anywhere in the run is enough
+    const one = proposeFromJev([], withVerdicts(3, { 0: "unjudged", 2: "unjudged" }), visit(0, 3), HOP);
+    expect(one.counts).toMatchObject({ proposed: 1, no_speech: 0 });
+    expect(one.encounters[0]).toMatchObject({ speech_probes: 1, unjudged_ms: 2 * HOP });
+    // non_speech edges are not heard either: after the trim only unjudged probes remain (the trim cuts only
+    // non_speech, so no speech probe is ever trimmed off — counting before or after the trim is equivalent)
+    const trimmedOff = proposeFromJev([], withVerdicts(5, { 0: "non_speech", 1: "unjudged", 2: "unjudged", 3: "unjudged", 4: "non_speech" }), visit(0, 5), HOP);
+    expect(trimmedOff.counts).toMatchObject({ proposed: 0, no_speech: 1 });
   });
 
   it("fuseEncounters carries both origins, in time order, index for index", () => {
@@ -551,32 +566,58 @@ describe("shadow-runner v2", () => {
     expect(s).not.toMatch(/tr\(/);
   });
 
-  it("E-6.1: with no acoustic encounter, a Jev start → end run is written as a fused interval marked origin jev", async () => {
-    const line = (x: unknown) => Math.max(...(String(x).match(/\d+/g) ?? ["-1"]).map(Number));
-    const ask: FusionDeps["ask"] = async (state, asks) => {
-      const st = state as { W2?: string; window_text?: string };
-      const n = line(st.W2 ?? st.window_text);
-      return answers(asks, (a) =>
-        a.answerKey === "phase" ? { type: "choice", choice: n === 5 ? "greeting" : n === 9 ? "closing" : "history_taking", probabilities: {}, confidence: 0.95 }
-        : a.answerKey === "kind" ? { type: "choice", choice: n >= 5 && n <= 9 ? "clinical_consultation" : "social_chatter", probabilities: {}, confidence: 0.95 }
-        : a.answerKey === "start" ? { type: "noul", noul: n === 5 ? 0.97 : 0.02 }
-        : { type: "noul", noul: n === 9 ? 0.97 : 0.02 });
+  // E-6.1 end to end. Jev answers by the placeholder line number in the English it is shown: a greeting with
+  // a start marker on line 5, consultation through line 9, a closing with an end marker on line 9.
+  const e61Ask: FusionDeps["ask"] = async (state, asks) => {
+    const st = state as { W2?: string; window_text?: string };
+    const n = Math.max(...(String(st.W2 ?? st.window_text).match(/\d+/g) ?? ["-1"]).map(Number));
+    return answers(asks, (a) =>
+      a.answerKey === "phase" ? { type: "choice", choice: n === 5 ? "greeting" : n === 9 ? "closing" : "history_taking", probabilities: {}, confidence: 0.95 }
+      : a.answerKey === "kind" ? { type: "choice", choice: n >= 5 && n <= 9 ? "clinical_consultation" : "social_chatter", probabilities: {}, confidence: 0.95 }
+      : a.answerKey === "start" ? { type: "noul", noul: n === 5 ? 0.97 : 0.02 }
+      : { type: "noul", noul: n === 9 ? 0.97 : 0.02 });
+  };
+  /**
+   * The acoustic run with its encounters removed and every probe acoustically `unjudged` except those at the
+   * given centres, judged `speech`. Line i (i*60 s .. i*60+55 s) falls in the probe centred at T0 + i*60 + 30 s.
+   */
+  const acousticsHearing = (heardLines: number[]): FusionDeps["shadow"] => (ev) => {
+    const r = runShadow(ev);
+    const heard = new Set(heardLines.map((i) => T0 + i * MIN + 30_000));
+    return {
+      ...r, encounters: [], run: { ...r.run, intervals: [] },
+      verdicts: r.verdicts.map((v) => (heard.has(v.t) ? { ...v, verdict: "speech", reason: "speech" } : { ...v, verdict: "unjudged", reason: "no_energy_evidence" })),
     };
-    const h = harness({ ask, load: async () => ({ ...day(), level_samples: [] }) });
+  };
+
+  it("E-6.1: a heard Jev start → end run with no acoustic encounter is written as a fused interval marked origin jev", async () => {
+    const h = harness({ ask: e61Ask, shadow: acousticsHearing([7]) });
     const r = await runFusionShadowForRoomDay(INPUT, h.deps);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.summary.fusion).toMatchObject({ acoustic_encounters: 0, jev_encounters: 1, fused_encounters: 1 });
-    expect(r.summary.proposals).toMatchObject({ proposed: 1 });
+    expect(r.summary.proposals).toMatchObject({ proposed: 1, no_speech: 0 });
     const [acousticRun, fusedRun] = h.writes;
     expect(acousticRun!.intervals).toEqual([]);
     expect(fusedRun!.source).toBe("fused");
     expect(fusedRun!.intervals).toHaveLength(1);
     const iv = fusedRun!.intervals[0]!;
-    expect(iv.closed_by).toBe("content_boundary");
+    expect(iv).toMatchObject({ closed_by: "content_boundary", speech_probes: 1, unjudged_ms: 4 * MIN });
     expect(fusedRun!.params).toMatchObject({ jev_origin: [{ start_ms: iv.start_ms, end_ms: iv.end_ms }], jev_min_run: 3, end_p: 0.9, fusion_version: "encounter-fusion-v1.1" });
-    // lines 5..9 are a minute each: five probes, 5 minutes of span
+    // lines 5..9 are a minute each: five probes, 5 minutes of span, starting at line 5
+    expect(iv.start_ms).toBe(T0 + 5 * MIN);
     expect(iv.end_ms - iv.start_ms).toBe(5 * MIN);
+  });
+
+  it("E-6.1: the SAME run that nobody heard (a day with no level data) is not proposed, and is counted (ETA-Refuter)", async () => {
+    const h = harness({ ask: e61Ask, load: async () => ({ ...day(), level_samples: [] }) });
+    const r = await runFusionShadowForRoomDay(INPUT, h.deps);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.summary.fusion).toMatchObject({ acoustic_encounters: 0, jev_encounters: 0, fused_encounters: 0 });
+    expect(r.summary.proposals).toMatchObject({ proposed: 0, no_speech: 1 });
+    expect(h.writes[1]!.intervals).toEqual([]);
+    expect(h.writes[1]!.params).toMatchObject({ jev_origin: [] });
   });
 
   it("no recorded audio: nothing asked, nothing written", async () => {

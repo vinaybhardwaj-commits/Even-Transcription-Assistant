@@ -50,6 +50,8 @@ export const FUSION_CONCURRENCY = 4;
 
 export type FusionDeps = {
   load: typeof loadDayEvidence;
+  /** The acoustic run (probes → gate → smoother). A seam like the others; production uses runShadow. */
+  shadow: typeof runShadow;
   translate: (text: string) => Promise<TranslateOutcome>;
   ask: typeof askJev;
   write: typeof writeHypothesisRun;
@@ -58,6 +60,7 @@ export type FusionDeps = {
 
 const defaultDeps: FusionDeps = {
   load: loadDayEvidence,
+  shadow: runShadow,
   translate: (text) => translateToEnglish(text, "auto"),
   ask: askJev,
   write: writeHypothesisRun,
@@ -129,7 +132,7 @@ export async function runFusionShadowForRoomDay(
   if (!evidence) return { ok: false, error: "no_recorded_audio" };
 
   const hopMs = HOP_SECONDS * 1000;
-  const { run: acousticRun, summary: acoustic, encounters, verdicts, transcript } = runShadow(evidence);
+  const { run: acousticRun, summary: acoustic, encounters, verdicts, transcript } = d.shadow(evidence);
   const slots = slotsFromCentres(verdicts.map((v) => v.t), hopMs);
   const texts: ProbeText[] = textForSlots(slots, transcript.spans, transcript.coverage);
 
