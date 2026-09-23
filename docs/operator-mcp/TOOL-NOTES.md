@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 35 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run and J-CORE-2, 23 Sep)
+## The surface: 36 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2 and the note-safety shadow, 23 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -93,6 +93,14 @@ structured, closed-vocabulary value (noul/choice/score), never transcript or sta
 for the same reason as the four above — bringing the ungrouped tools to 25 and the listed surface
 to 35 (25 + 10 groups). It landed in the same week as the E-shadow run; both counted themselves
 as the 24th on their own branches, so the combined count is set here by hand.
+
+The note-safety shadow (order NOTE-SAFETY-SHADOW.md, 23 Sep) added a sixth ungrouped tool,
+invoke, `scribe_note_safety_replay`: runs U4 (note faithfulness) and U8 (completeness prompts)
+against ONE encounter's EXISTING note_json/transcript_clean, without regenerating the note —
+for sampling flags during the shadow week. Same `JEV_NOTE_FAITHFULNESS` gate as the automatic
+pipeline hook; off answers `{ran:false}` with zero Jev calls. Returns counts only. Ungrouped for
+the same reason as the five above — bringing the ungrouped tools to 26 and the listed surface to
+36 (26 + 10 groups).
 
 **Where each `scribe_room_command` kind executes.** `start_day`, `pause_day`, `resume_day`,
 `end_day` are queued as a `bench_command` for the room's listening kiosk. `set_audio_input` (app
