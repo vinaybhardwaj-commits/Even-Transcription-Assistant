@@ -47,8 +47,10 @@ describe("percentile — pure", () => {
     expect(percentile(values, 100)).toBe(5);
   });
 
-  it("unsorted input is sorted first", () => {
-    expect(percentile([5, 1, 3, 2, 4], 50)).toBe(3);
+  it("unsorted input is sorted first (X6, ETA-Refuter 23 Sep: the prior fixture [5,1,3,2,4] happened to put the sorted median AND the unsorted index-2 value at the same 3, so it passed even with the sort removed — this one does not)", () => {
+    // sorted [1,2,3,4,50] -> p50 index 2 -> 3. The unsorted array's own index 2 is 2 — a
+    // dropped sort would return 2, not 3, so this fixture actually distinguishes the two.
+    expect(percentile([50, 1, 2, 3, 4], 50)).toBe(3);
   });
 
   it("a single value is that value at any percentile", () => {
@@ -133,6 +135,19 @@ describe("levelForSpan — pure", () => {
       JSON.stringify(levelForSpan(samples, 1_000, 2_000, floor)),
     );
   });
+
+  it("X4 (ETA-Refuter, 23 Sep): low_signal is decided by PEAK, not (avg ?? peak) — a loud spike with a low overall avg is NOT low_signal", () => {
+    // peak 0.5 is well above QUIET_FLOOR_RMS; the only avg reading, 0.002, is well below it.
+    // (avg ?? peak) < floor would flip this to low_signal:true — that mutation left the suite
+    // green until now because avg was 0% populated when this file was first written; it is
+    // populated on most rows today (ETA-LOW-SIGNAL-MARKER-REFUTER-VERDICT-23-SEP-2026.md), so
+    // the deliberate peak-basis choice is now load-bearing and needed its own assertion.
+    const samples: LevelSample[] = [{ sampledAtMs: 1_100, peak: 0.5, avg: 0.002 }];
+    const r = levelForSpan(samples, 1_000, 2_000, QUIET_FLOOR_RMS);
+    expect(r.peak).toBeCloseTo(0.5);
+    expect(r.avg).toBeCloseTo(0.002);
+    expect(r.low_signal).toBe(false);
+  });
 });
 
 describe("readLevelSamplesInRange — the SQL shape and row mapping", () => {
@@ -170,6 +185,16 @@ describe("deriveQuietFloor — the real derivation this ruling asked for, not ca
     expect(c.text).toContain("tape_advancing = true");
   });
 
+  it("X6 (ETA-Refuter, 23 Sep): the percentile it derives is correct even when the DB returns rows out of order — proves percentile's own sort runs, not just that its unit test claims so", async () => {
+    // sorted peaks [0.01,0.02,0.03,0.04,0.05] -> p50 index 2 -> 0.03. Deliberately NOT the
+    // sorted order below, and NOT an order whose own index 2 happens to also be 0.03 (the same
+    // trap the old percentile unit test fell into) — index 2 of THIS order is 0.02.
+    responder = () => [{ peak: "0.05" }, { peak: "0.01" }, { peak: "0.02" }, { peak: "0.03" }, { peak: "0.04" }];
+    const r = await deriveQuietFloor(50, 14);
+    expect(r.sampleCount).toBe(5);
+    expect(r.floor).toBeCloseTo(0.03);
+  });
+
   it("no samples: floor null, sampleCount 0 — never a fabricated number", async () => {
     responder = () => [];
     const r = await deriveQuietFloor();
@@ -184,12 +209,20 @@ describe("deriveQuietFloor — the real derivation this ruling asked for, not ca
   });
 });
 
-describe("QUIET_FLOOR_RMS — the provisional constant itself", () => {
-  it("sits strictly between digital-zero territory and the constant it was derived from", () => {
+describe("QUIET_FLOOR_RMS — the measured constant itself (ETA-LOW-SIGNAL-MARKER-REFUTER-VERDICT-23-SEP-2026.md)", () => {
+  it("is exactly the measured p05 of peak over tape_advancing spans (n=51,074)", () => {
+    expect(QUIET_FLOOR_RMS).toBe(0.008);
+  });
+
+  it("sits strictly between digital-zero territory and the loudest reading on record", () => {
     // SILENCE_RMS in lib/bench-dual.ts, duplicated here as a literal rather than imported so
     // this assertion does not silently track a future change to that file's own constant.
     const SILENCE_RMS = 0.0015;
     expect(QUIET_FLOOR_RMS).toBeGreaterThan(SILENCE_RMS);
     expect(QUIET_FLOOR_RMS).toBeLessThan(0.5371); // the loudest reading ETA-E13 measured
+  });
+
+  it("sits AT OR BELOW the real median (0.0107) — a floor above the median is not a marker, it is a constant (the failure mode the first shipped value had)", () => {
+    expect(QUIET_FLOOR_RMS).toBeLessThanOrEqual(0.0107);
   });
 });

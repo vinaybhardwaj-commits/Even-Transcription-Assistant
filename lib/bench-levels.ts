@@ -165,24 +165,24 @@ export type SegmentLevel = {
 };
 
 /**
- * PROVISIONAL floor for low_signal, on the same 0..1 RMS scale as bench_level_sample.peak
- * (rmsOfBytes, lib/bench-dual.ts). SILENCE_RMS (0.0015, lib/bench-dual.ts) already marks
- * digital-zero / dead-mic territory; low_signal needs to sit clearly ABOVE that — "the mic
- * heard something, but not much" is a different, larger case than "the mic heard nothing".
+ * The floor for low_signal, on the same 0..1 RMS scale as bench_level_sample.peak (rmsOfBytes,
+ * lib/bench-dual.ts). SILENCE_RMS (0.0015, lib/bench-dual.ts) already marks digital-zero /
+ * dead-mic territory; low_signal needs to sit clearly ABOVE that — "the mic heard something, but
+ * not much" is a different, larger case than "the mic heard nothing".
  *
- * DERIVATION, and why it is a placeholder: the intended method (deriveQuietFloor below) is
- * the Nth percentile of peak across ACTIVELY RECORDING spans (tape_advancing = true, which
- * excludes idle/paused/closed-room rows that would pull the distribution toward digital zero
- * for the wrong reason) in bench_level_sample itself. This sandbox has no live database, so
- * that query has not been run. The nearest REAL number on record is docs/handoff's
- * ETA-E13-WE-CANNOT-TELL-A-QUIET-ROOM-FROM-A-DEAD-MIC-14-SEP-2026.md: a 25 Aug bring-up
- * sample in one room measured median peak 0.0079 (bench_chunk.peak_level, the sibling metric
- * bench_level_sample replaced — same rmsOfBytes scale) — "mostly near-silence with occasional
- * loud chunks". QUIET_FLOOR_RMS is set at 2x that median, clearly above SILENCE_RMS and below
- * where recognisable speech typically registers. Run deriveQuietFloor against production and
- * replace this constant with its result once bench_level_sample has enough of a history.
+ * MEASURED, not guessed (ETA-LOW-SIGNAL-MARKER-REFUTER-VERDICT-23-SEP-2026.md): deriveQuietFloor
+ * (below) was run read-only against production — the p05 of peak over ACTIVELY RECORDING spans
+ * (tape_advancing = true) in bench_level_sample, n=51,074. The first shipped value, 0.016, was 2x
+ * the nearest real number then available (ETA-E13's 25 Aug bench_chunk median, 0.0079) — and
+ * doubling a median guarantees the result sits ABOVE it, which a FLOOR must not do: 0.016 sat
+ * above the real median (0.0107) and flagged 74% of actively-recording samples, which is not a
+ * marker, it is a constant. The ETA-E13 reference itself was almost exactly right — it is within
+ * 0.0001 of the real p05 (0.0080) — so QUIET_FLOOR_RMS is now that measured p05 DIRECTLY, no
+ * doubling: expected to flag ~3.6% of actively-recording spans. deriveQuietFloor's own default
+ * percentile is p05 to match, so a future re-run reproduces this same calibration target rather
+ * than a different one.
  */
-export const QUIET_FLOOR_RMS = 0.016;
+export const QUIET_FLOOR_RMS = 0.008;
 
 /** PURE. The `p`th percentile (0-100) of `values`, nearest-rank. null on an empty input —
  * never 0, which would read as a real (very quiet) measurement rather than no data at all. */
@@ -229,12 +229,16 @@ export async function readLevelSamplesInRange(roomId: string, startMs: number, e
 
 /**
  * The REAL derivation QUIET_FLOOR_RMS's comment describes — the Nth percentile of peak over
- * actively-recording spans across all rooms, in the last `days` days. Not called anywhere in
- * this build; it is here so the derivation this ruling asked for is a method that can be run
- * against production, not just a number asserted in a comment. Fail-safe like every other MCP
- * read: a query failure returns floor:null with sampleCount 0, never a thrown error.
+ * actively-recording spans across all rooms, in the last `days` days. Already run once, read-only,
+ * against production (ETA-LOW-SIGNAL-MARKER-REFUTER-VERDICT-23-SEP-2026.md): n=51,074, p01=0.0077,
+ * p05=0.0080, p25=0.0091, p50=0.0107 — the bottom of the distribution is extremely tight (p01 to
+ * p25 is a 1.2x spread) then explodes toward p90=0.1362, so the exact percentile chosen barely
+ * moves the floor but moves the share flagged a lot: p05 flags ~3.6%, p01 ~0.4%. The default is
+ * p05 to match QUIET_FLOOR_RMS exactly, so a future re-run reproduces the same calibration target
+ * rather than a silently different one. Fail-safe like every other MCP read: a query failure
+ * returns floor:null with sampleCount 0, never a thrown error.
  */
-export async function deriveQuietFloor(percentileRank = 20, days = 14): Promise<{ floor: number | null; sampleCount: number }> {
+export async function deriveQuietFloor(percentileRank = 5, days = 14): Promise<{ floor: number | null; sampleCount: number }> {
   try {
     const rows = (await sql`
       SELECT peak
