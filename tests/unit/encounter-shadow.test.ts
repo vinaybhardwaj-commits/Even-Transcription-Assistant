@@ -20,7 +20,7 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-import { runShadow, checkTriggers, toInterval, SHADOW_VERSION, type DayEvidence } from "@/lib/encounter-clock/shadow";
+import { runShadow, checkTriggers, toInterval, SHADOW_VERSION, type DayEvidence, type ShadowSummary } from "@/lib/encounter-clock/shadow";
 import { runShadowForRoomDay, tapeFromChunks, timelineOf, loadDayEvidence } from "@/lib/encounter-clock/shadow-io";
 import { SMOOTHER_VERSION, type Encounter } from "@/lib/encounter-clock/smooth";
 import { GATE_VERSION } from "@/lib/encounter-clock/gate";
@@ -122,14 +122,15 @@ describe("E-shadow — the pure run", () => {
 });
 
 describe("E-shadow — the rollback triggers travel with the run", () => {
-  const base = {
+  type Base = Omit<ShadowSummary, "triggers" | "triggers_tripped">;
+  const base: Base = {
     room_day_id: "rd", shadow_version: SHADOW_VERSION, gate_version: GATE_VERSION, smoother_version: SMOOTHER_VERSION,
     probes: { total: 10, speech: 5, non_speech: 3, unjudged: 2 }, unjudged_share: 0.2, reasons: {}, preselect: {},
     windows: { with_text: 2, placed: 2, unplaceable: 0 }, encounters: 3, median_minutes: 20, longest_minutes: 40,
     closed_by: {},
-  } as const;
-  const trip = (s: Partial<typeof base>) =>
-    checkTriggers({ ...base, ...s } as never).filter((t) => t.tripped).map((t) => t.trigger);
+  };
+  const trip = (s: Partial<Base>) =>
+    checkTriggers({ ...base, ...s }).filter((t) => t.tripped).map((t) => t.trigger);
 
   it("a clean run trips nothing", () => { expect(trip({})).toEqual([]); });
   it("an encounter over 2 h trips, at 121 minutes and not at 120", () => {
