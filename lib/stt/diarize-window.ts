@@ -147,11 +147,40 @@ export type DiarizeEngineProvenance = {
   /** Audio seconds handed to a paid engine, so cost is countable from the rows. */
   audio_seconds_sent: number | null;
   /**
+   * How many enrolled voiceprints were offered for this window. The evidence for `attribution`:
+   * zero means nothing could have been compared, whatever the engine did.
+   */
+  centroids_offered?: number;
+  /**
    * Why this engine was never called, when it was not. A window the engine found empty and a
    * window the engine never saw both land `no_speakers`, and only this tells them apart.
    */
   skipped?: string;
 };
+
+/**
+ * THE ONE RULE FOR `attribution`, because two copies of it is how the two arms came to disagree.
+ *
+ * A comparison happened only when BOTH halves were present: something to compare (a speaker with
+ * an embedding) and something to compare it AGAINST (at least one enrolled centroid offered). Miss
+ * either and every turn lands `no_match` — which in `room_turn_speaker` is indistinguishable from
+ * a clinician who was looked for and not found, and means the opposite thing.
+ *
+ * ETA-Refuter found this on 286db74: the local arm asserted "voiceprint" BY CONSTRUCTION, on the
+ * grounds that /diarize runs its own matcher. It does — but `loadClinicianCentroids()` returns []
+ * when no active clinician has a voiceprint, and then the service compares each speaker against an
+ * empty list, matches nobody, and the row still claimed a voiceprint attribution. That is exactly
+ * the conflation the pyannote arm was written to close, one arm over. The pyannote arm had the
+ * same hole from the other side: it counted embeddings and never asked whether any centroid was
+ * offered.
+ */
+export function attributionFor(
+  speakers: ReadonlyArray<{ embedding_base64?: string | null }>,
+  centroidsOffered: number,
+): "voiceprint" | "none" {
+  if (centroidsOffered <= 0) return "none";
+  return speakers.some((s) => typeof s.embedding_base64 === "string" && s.embedding_base64.length > 0) ? "voiceprint" : "none";
+}
 
 /** What an engine hands back, before any of this file's storage work. */
 export type DiarizeEngineAnswer = {
@@ -241,7 +270,10 @@ export async function diarizeWindow(opts: {
           job_id: null,
           // The local service matches enrolled voiceprints inside itself — this is the engine that
           // can name a clinician, and the only one.
-          attribution: "voiceprint",
+          // EARNED, not asserted. The local service runs its own matcher, but a matcher handed
+          // an empty centroid list compares nothing — see attributionFor.
+          attribution: attributionFor((res.result.speakers ?? []) as DiarizeSpeaker[], centroids.length),
+          centroids_offered: centroids.length,
           fallback_from: opts.fallback?.from ?? null,
           fallback_reason: opts.fallback?.reason ?? null,
           audio_seconds_sent: null,

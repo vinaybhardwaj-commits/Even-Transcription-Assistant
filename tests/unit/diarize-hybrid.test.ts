@@ -25,6 +25,7 @@ let turnsRow: Array<Record<string, unknown>> = [];
 let countRows: Array<Record<string, unknown>> = [];
 let roomDayRows: Array<Record<string, unknown>> = [];
 let roomDayThrows = false;
+let voicePrintRows: Array<Record<string, unknown>> = [];
 
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -37,7 +38,7 @@ vi.mock("@/lib/db", () => ({
     if (/FROM bench_level_sample/.test(text)) return Promise.resolve(levelRows);
     if (/FROM diarize_window_label/.test(text)) return Promise.resolve(countRows);
     if (/FROM cue/.test(text)) return Promise.resolve(turnsRow);
-    if (/FROM voice_print/.test(text)) return Promise.resolve([{ clinician_id: DOC.id, full_name: DOC.full_name, centroid_base64: "AAAA" }]);
+    if (/FROM voice_print/.test(text)) return Promise.resolve(voicePrintRows);
     return Promise.resolve([]);
   },
 }));
@@ -50,6 +51,7 @@ vi.mock("@/lib/r2", () => ({
 }));
 
 const local = { calls: 0, ok: true as boolean, lastCentroids: null as unknown };
+const localOverride: { result: Record<string, unknown> | null } = { result: null };
 vi.mock("@/lib/diarize", () => ({
   runDiarize: async (_a: unknown, _c: unknown, o: { clinicianCentroids?: unknown[] }) => {
     local.calls += 1;
@@ -57,8 +59,8 @@ vi.mock("@/lib/diarize", () => ({
     if (!local.ok) return { ok: false, error: "nope", retryable: false, latencyMs: 1, timing: {} };
     return {
       ok: true, latencyMs: 9, timing: { wall_ms: 9 },
-      result: {
-        speakers: [{ idx: 0, label: "S1", type: "other" }],
+      result: localOverride.result ?? {
+        speakers: [{ idx: 0, label: "S1", type: "other", embedding_base64: "LOCALEMB" }],
         transcript_segments: [{ start_ms: 0, end_ms: 3000, speaker_idx: 0 }],
         overlap_windows: [], aggregates: {}, model_versions: { diarization: "mini-3.1" },
       },
@@ -86,8 +88,9 @@ beforeEach(() => {
   windowRow = [{ id: "w1", room_day_id: "rd1", start_ms: 0, end_ms: 900_000, clip_r2_key: "c/w1.webm" }];
   levelRows = []; turnsRow = []; countRows = [];
   roomDayRows = [{ room_id: "room1", ist_date: "2026-09-23" }]; roomDayThrows = false;
+  voicePrintRows = [{ clinician_id: DOC.id, full_name: DOC.full_name, centroid_base64: "AAAA" }];
   r2.bytes = new Uint8Array([1, 2, 3]);
-  local.calls = 0; local.ok = true; local.lastCentroids = null;
+  local.calls = 0; local.ok = true; local.lastCentroids = null; localOverride.result = null;
   server.job = { jobId: "job-1", status: "succeeded", output: { diarization: [
     { start: 1.0, end: 9.0, speaker: "SPEAKER_A" }, { start: 10.0, end: 12.0, speaker: "SPEAKER_B" },
   ] } };
@@ -243,6 +246,63 @@ describe("the hybrid stores pyannote.ai turns with this system's identities", ()
   });
 });
 
+// ── 3b. attribution is earned on BOTH arms ──────────────────────────────────────────────────
+describe("attribution is earned, on the local arm too", () => {
+  it("attributionFor needs BOTH halves: something to compare, and something to compare against", async () => {
+    const { attributionFor } = await import("@/lib/stt/diarize-window");
+    expect(attributionFor([{ embedding_base64: "E" }], 1)).toBe("voiceprint");
+    // Nothing to compare against — the matcher ran over an empty list and named nobody.
+    expect(attributionFor([{ embedding_base64: "E" }], 0)).toBe("none");
+    // Nothing to compare.
+    expect(attributionFor([{ embedding_base64: null }], 1)).toBe("none");
+    expect(attributionFor([{}], 1)).toBe("none");
+    expect(attributionFor([], 1)).toBe("none");
+    expect(attributionFor([{ embedding_base64: "" }], 1)).toBe("none");
+  });
+
+  it("LOCAL with an enrolled voiceprint and an embedding earns 'voiceprint'", async () => {
+    const out = await runStep("diarize");                    // engine unset = local
+    expect(out.kind).toBe("done");
+    expect(storedEngine()).toMatchObject({ name: "local", attribution: "voiceprint", centroids_offered: 1 });
+  });
+
+  it("LOCAL WITH NO ENROLLED VOICEPRINTS reports 'none' — the matcher compared against nothing", async () => {
+    // /diarize still runs its own matcher, but loadClinicianCentroids() returns [] when no active
+    // clinician has a voiceprint, so every turn lands no_match having been compared to nobody.
+    // Claiming "voiceprint" here is the same conflation the pyannote arm was written to close.
+    voicePrintRows = [];
+    await runStep("diarize");
+    expect(storedEngine()).toMatchObject({ name: "local", attribution: "none", centroids_offered: 0 });
+  });
+
+  it("LOCAL with centroids but no embedding back reports 'none'", async () => {
+    localOverride.result = {
+      speakers: [{ idx: 0, label: "S1", type: "other" }],     // no embedding_base64
+      transcript_segments: [{ start_ms: 0, end_ms: 3000, speaker_idx: 0 }],
+      overlap_windows: [], aggregates: {}, model_versions: {},
+    };
+    await runStep("diarize");
+    expect(storedEngine()).toMatchObject({ attribution: "none" });
+  });
+
+  it("THE HYBRID WITH NO ENROLLED VOICEPRINTS is 'none' even though embeddings came back", async () => {
+    // The hole on my own arm, found while fixing the Refuter's: counting embeddings alone claims
+    // an attribution on a day when nobody is enrolled.
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    voicePrintRows = [];
+    await runStep("pyannote_poll", pollProgress);
+    expect(storedEngine()).toMatchObject({ name: "pyannoteai", attribution: "none", centroids_offered: 0 });
+  });
+
+  it("the provenance carries the EVIDENCE for its own claim", async () => {
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    await runStep("pyannote_poll", pollProgress);
+    const e = storedEngine();
+    expect(e.centroids_offered).toBe(1);
+    expect(e.attribution).toBe("voiceprint");
+  });
+});
+
 // ── 4. the level gate ────────────────────────────────────────────────────────────────────────
 describe("the level gate stops a paid call only on evidence", () => {
   const win = { start_ms: 0, end_ms: 900_000 };
@@ -301,6 +361,8 @@ describe("the level gate stops a paid call only on evidence", () => {
     if (out.kind !== "done") throw new Error("x");
     expect(out.result.skipped).toBe("silent_window");
     expect(out.result.audio_seconds_sent).toBe(0);
+    // A window nothing ran on compared nothing; the row must not inherit a claim.
+    expect(storedEngine()).toMatchObject({ attribution: "none", audio_seconds_sent: 0 });
     expect(fetchCalls.filter((c) => c.url.includes("/v1/diarize"))).toHaveLength(0);
   });
 

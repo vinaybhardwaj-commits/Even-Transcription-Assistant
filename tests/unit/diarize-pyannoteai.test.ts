@@ -47,10 +47,10 @@ vi.mock("@/lib/r2", () => ({
 }));
 const signCalls: Array<{ key: string; expiresInSeconds?: number }> = [];
 
-const vad = { calls: 0 };
+const vad = { calls: 0, spans: [{ start_ms: 0, end_ms: 60_000 }] as Array<{ start_ms: number; end_ms: number }> };
 vi.mock("@/lib/stt/speech-gate", async (orig) => {
   const real = await orig<typeof import("@/lib/stt/speech-gate")>();
-  return { ...real, fetchWindowSpeech: async () => { vad.calls += 1; return { ok: true as const, spans: [{ start_ms: 0, end_ms: 60_000 }] }; } };
+  return { ...real, fetchWindowSpeech: async () => { vad.calls += 1; return { ok: true as const, spans: vad.spans }; } };
 });
 
 const localDiarize = { calls: 0, ok: true as boolean };
@@ -114,7 +114,8 @@ const okJob = (n = 1) => ({
 
 beforeEach(() => {
   sqlCalls.length = 0; fetchCalls.length = 0; signCalls.length = 0; logs.length = 0;
-  turnsRow = []; localDiarize.calls = 0; localDiarize.ok = true; localDiarizeOverride.result = null; vad.calls = 0;
+  turnsRow = []; localDiarize.calls = 0; localDiarize.ok = true; localDiarizeOverride.result = null;
+  vad.calls = 0; vad.spans = [{ start_ms: 0, end_ms: 60_000 }];
   r2.bytes = new Uint8Array([1, 2, 3]); r2.signThrows = false;
   windowRow = [{ id: "w1", room_day_id: "rd1", start_ms: 0, end_ms: 900_000, clip_r2_key: "clips/w1.webm" }];
   server.submitStatus = 200; server.submitBody = { jobId: "job-abc-123", status: "created" };
@@ -407,9 +408,9 @@ describe("fallback to the local diarizer", () => {
       name: "local",
       fallback_from: "pyannoteai",
       fallback_reason: "pyannoteai_submit_failed",
-      // The window WAS attributed, because the local service does that — the fallback is not a
-      // downgrade of identity, and the row must not imply it was.
-      attribution: "voiceprint",
+      // No enrolled voiceprint in this suite, so nothing was compared — see the earned rule in
+      // attributionFor. What matters here is that the FALLBACK is recorded, not the attribution.
+      attribution: "none",
     });
   });
 
@@ -551,6 +552,21 @@ describe("the cost guard skips only on a REAL answer of silence", () => {
     expect(vadSaysSilent({ ok: false, reason: "vad_empty_window" })).toBe(false);
   });
 
+  it("a VAD-skipped window claims NO attribution — nothing ran, so nothing was compared", async () => {
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    process.env.DIARIZE_SPEECH_GATE = "1";
+    vad.spans = [{ start_ms: 0, end_ms: 10 }];            // a real answer, far under the floor
+    const out = await runStep("diarize");
+    expect(out.kind).toBe("done");
+    if (out.kind !== "done") throw new Error("unreachable");
+    expect(out.result.skipped).toBe("silent_window");
+    expect(fetchCalls.filter((c) => c.url.includes("/v1/diarize"))).toHaveLength(0);
+    const insert = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
+    const stored = JSON.parse(String(insert.values.find((v) => typeof v === "string" && v.includes("\"engine\""))));
+    expect(stored.engine).toMatchObject({ attribution: "none", audio_seconds_sent: 0 });
+    delete (process.env as Record<string, string | undefined>).DIARIZE_SPEECH_GATE;
+  });
+
   it("several short spans are summed, not judged one at a time", async () => {
     const { vadSaysSilent } = await import("@/lib/jobs/kinds/diarize-window");
     expect(vadSaysSilent({ ok: true, spans: [{ start_ms: 0, end_ms: 600 }, { start_ms: 5_000, end_ms: 5_600 }] })).toBe(false);
@@ -664,11 +680,14 @@ describe("the default engine is untouched", () => {
     expect(signCalls).toHaveLength(0);
   });
 
-  it("the row records the local engine and that it CAN attribute a voice", async () => {
+  it("the row records the local engine, and with NO enrolled voiceprints claims no attribution", async () => {
+    // This suite's voice_print query answers [], so nothing was offered to compare against. The
+    // engine is still local and its model still derived — but "voiceprint" would be a claim the
+    // window did not earn. (The earned case is pinned in diarize-hybrid.test.ts.)
     await runStep("diarize");
     const insert = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
     const stored = JSON.parse(String(insert.values.find((v) => typeof v === "string" && v.includes("\"engine\""))));
-    expect(stored.engine).toMatchObject({ name: "local", attribution: "voiceprint", job_id: null, fallback_from: null });
+    expect(stored.engine).toMatchObject({ name: "local", attribution: "none", centroids_offered: 0, job_id: null, fallback_from: null });
     expect(stored.engine.model).toBe("mini-pyannote-3.1");
   });
 

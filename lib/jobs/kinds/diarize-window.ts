@@ -41,6 +41,7 @@ import {
   diarizeWindow,
   finishDiarizeWindow,
   loadClinicianCentroids,
+  attributionFor,
   localModelLabel,
   recordDiarizeWindow,
   repairStaleDiarizeSegments,
@@ -199,7 +200,9 @@ async function diarizeStep(ctx: StepContext) {
   if (rd) {
     const level = await levelGateForWindow({ roomId: rd.roomId, istDate: rd.istDate, window: { start_ms: w.start_ms, end_ms: w.end_ms } });
     if (level.verdict === "silent") {
-      const provenance = engineProvenance("pyannoteai", { audio_seconds_sent: 0, skipped: `silent_window:${level.reason}` });
+      const provenance = // Nothing ran on this window, so nothing was compared. It says so rather than inheriting
+      // a claim from an engine that never saw it.
+      engineProvenance("pyannoteai", { attribution: "none", audio_seconds_sent: 0, skipped: `silent_window:${level.reason}` });
       await recordDiarizeWindow({
         windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
         state: "no_speakers", error: null, speakers: [], segments: [], timing: { engine: provenance, level },
@@ -232,7 +235,7 @@ async function diarizeStep(ctx: StepContext) {
   const audioSeconds = windowAudioSeconds(w);
 
   if (vadSaysSilent(speech)) {
-    const provenance = engineProvenance("pyannoteai", { audio_seconds_sent: 0, skipped: "silent_window:vad" });
+    const provenance = engineProvenance("pyannoteai", { attribution: "none", audio_seconds_sent: 0, skipped: "silent_window:vad" });
     await recordDiarizeWindow({
       windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
       state: "no_speakers", error: null, speakers: [], segments: [], timing: { engine: provenance },
@@ -312,9 +315,11 @@ async function pollStep(ctx: StepContext) {
       const bytes = await getObjectBytes(w.clip_r2_key);
       let speakers: typeof bare = bare;
       let embedded = 0;
+      let centroidsOffered = 0;
       let embedError: string | null = null;
       if (bytes) {
         const centroids = await loadClinicianCentroids();
+        centroidsOffered = centroids.length;
         const spans = longestSpanPerSpeaker(st.segments);
         const emb = await embedSpeakers(bytes, spans, centroids, { batchThreshold: DIARIZE_BATCH_THRESHOLD, label: windowId });
         if (emb.ok) {
@@ -336,9 +341,11 @@ async function pollStep(ctx: StepContext) {
         model: record?.model ?? null,
         job_id: jobId,
         audio_seconds_sent: audioSeconds,
-        // EARNED, NOT ASSUMED: the hybrid can attribute only when embeddings actually came back.
-        // Zero embeddings is `none`, the honest word for "nothing was compared".
-        attribution: embedded > 0 ? "voiceprint" : "none",
+        // EARNED, NOT ASSUMED, and BOTH halves are required: embeddings to compare, and at least
+        // one enrolled centroid to compare them against. Counting embeddings alone would claim a
+        // voiceprint attribution on a day when nobody is enrolled.
+        attribution: attributionFor(speakers, centroidsOffered),
+        centroids_offered: centroidsOffered,
         ...(embedError ? { embed_error: embedError } : {}),
       });
       const out = await finishDiarizeWindow(
@@ -438,18 +445,24 @@ async function labelWindow(args: {
   }
 }
 
-/** Provenance with the fields this engine can actually fill, and nulls — never guesses — elsewhere. */
+/**
+ * Provenance with the fields this engine can actually fill, and nulls — never guesses — elsewhere.
+ *
+ * `attribution` IS REQUIRED, not defaulted. It began as `name === "local" ? "voiceprint" : "none"`
+ * — asserted by construction — and ETA-Refuter showed that mutating it away killed nothing, because
+ * the local arm had no test that it was earned. Giving it a default and always overriding it only
+ * moves the problem: the default becomes unreachable code no mutation can be caught changing. So
+ * there is no default. Every caller states what its window actually earned, and a caller that
+ * forgets does not compile.
+ */
 function engineProvenance(
   name: DiarizeEngine,
-  over: Partial<DiarizeEngineProvenance> & { skipped?: string; embed_error?: string } = {},
+  over: Partial<DiarizeEngineProvenance> & { attribution: "voiceprint" | "none"; skipped?: string; embed_error?: string },
 ): DiarizeEngineProvenance {
   return {
     name,
     model: null,
     job_id: null,
-    // The local service matches voiceprints itself. The hybrid earns "voiceprint" only when the
-    // Mini actually returned embeddings — see the poll step.
-    attribution: name === "local" ? "voiceprint" : "none",
     fallback_from: null,
     fallback_reason: null,
     audio_seconds_sent: null,
