@@ -16,31 +16,43 @@ export type EnrollOutcome =
   | { ok: true; embeddingBase64: string; served_by?: string }
   | { ok: false; error: string; served_by?: string };
 
-/** REDUNDANCY-R1 — transport, timeout or 5xx: try the next endpoint. A refusal or `ok:false` is the answer. */
+/**
+ * REDUNDANCY-R1 — transport, timeout, 5xx or 404 (R2: that endpoint does not serve /enroll): try the next endpoint.
+ * Any other refusal or `ok:false` is the answer.
+ */
 export function enrollVerdict(o: EnrollOutcome): Verdict {
   if (o.ok) return "ok";
   if (o.error === "timeout" || o.error.startsWith("network:")) return "failover";
   const m = /^http_(\d{3})/.exec(o.error);
-  return m && Number(m[1]) >= 500 ? "failover" : "final";
+  if (!m) return "final";
+  const status = Number(m[1]);
+  return status >= 500 || status === 404 ? "failover" : "final";
 }
 
 export async function runEnroll(
   audio: Buffer | Uint8Array,
   contentType: string,
 ): Promise<EnrollOutcome> {
-  const endpoints = endpointsFor("diarize");
+  // Its own route pool (R2), falling back to the diarize lists and then DIARIZE_BASE_URL.
+  const endpoints = endpointsFor("diarize_enroll");
   if (endpoints.length === 0) return { ok: false, error: "diarize_base_url_missing" };
-  const { value, served_by } = await runPool("diarize", endpoints, (base) => enrollAt(base, audio, contentType), enrollVerdict);
+  // R1: the whole pool gets the ONE timeout an enroll call always had.
+  const { value, served_by } = await runPool(
+    "diarize_enroll", endpoints,
+    (base, budgetMs) => enrollAt(base, audio, contentType, budgetMs),
+    enrollVerdict,
+    { budgetMs: ENROLL_TIMEOUT_MS },
+  );
   return served_by ? { ...value, served_by } : value;
 }
 
-async function enrollAt(base: string, audio: Buffer | Uint8Array, contentType: string): Promise<EnrollOutcome> {
+async function enrollAt(base: string, audio: Buffer | Uint8Array, contentType: string, timeoutMs: number): Promise<EnrollOutcome> {
   const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const ext = baseType.includes("webm") ? "webm" : baseType.includes("mp4") ? "mp4" : baseType.includes("wav") ? "wav" : "webm";
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: baseType }), `audio.${ext}`);
   const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), ENROLL_TIMEOUT_MS);
+  const tid = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${base.replace(/\/+$/, "")}/enroll`, {
       method: "POST", body: form, signal: ctrl.signal, cache: "no-store",

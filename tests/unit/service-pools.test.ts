@@ -18,9 +18,10 @@ vi.mock("@/lib/diarize-gate", () => ({
 }));
 
 import {
-  BREAKER_OPEN_MS, breakerOpen, bulkAgeMinutes, isBulkContext, isBulkWindow, poolConfigured, poolEndpoints,
-  resetBreakers, runPool, servedByOf, withPoolContext,
+  BREAKER_OPEN_MS, breakerOpen, bulkAgeMinutes, isBulkContext, isBulkWindow, poolConfigProblems, poolConfigured, poolEndpoints,
+  POOL_MIN_ENDPOINT_BUDGET_MS, resetBreakers, runPool, servedByOf, withPoolContext,
 } from "@/lib/service-pool";
+import { diarizeVerdict } from "@/lib/diarize";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { callJoinService, joinVerdict } from "@/lib/bench-join";
 import { runDiarize } from "@/lib/diarize";
@@ -34,7 +35,8 @@ import { roomWindowKind } from "@/lib/jobs/kinds/room-window";
 const POOL_VARS = [
   "WHISPER_BASE_URL", "WHISPER_BASE_URLS", "WHISPER_BULK_URLS",
   "AUDIO_JOIN_URL", "AUDIO_JOIN_URLS", "AUDIO_JOIN_BULK_URLS", "AUDIO_JOIN_TOKEN",
-  "DIARIZE_BASE_URL", "DIARIZE_BASE_URLS", "DIARIZE_BULK_URLS",
+  "DIARIZE_BASE_URL", "DIARIZE_BASE_URLS", "DIARIZE_BULK_URLS", "DIARIZE_EMBED_URLS", "DIARIZE_VAD_URLS", "DIARIZE_ENROLL_URLS",
+  "POOL_BULK_FALLBACK_LIVE",
   "EMOTION_BASE_URL", "EMOTION_BASE_URLS", "EMOTION_BULK_URLS", "EMOTION_SEGMENTS_SECRET",
   "BULK_AGE_MINUTES",
 ];
@@ -84,10 +86,18 @@ describe("poolEndpoints — which endpoints, in which order", () => {
     expect(poolEndpoints("diarize", {}, { DIARIZE_BASE_URL: "https://old", DIARIZE_BASE_URLS: " https://a , ,https://b " }))
       .toEqual(["https://a", "https://b"]);
   });
-  it("bulk puts the BULK list first, then the ordinary list, duplicates dropped; not bulk ignores it", () => {
+  it("R3: bulk uses ONLY the BULK list — never falls through to the live list (the Mini) unless the flag says so", () => {
     const env = { WHISPER_BASE_URLS: "https://mini,https://box", WHISPER_BULK_URLS: "https://box,https://gcp" };
-    expect(poolEndpoints("whisper", { bulk: true }, env)).toEqual(["https://box", "https://gcp", "https://mini"]);
+    expect(poolEndpoints("whisper", { bulk: true }, env)).toEqual(["https://box", "https://gcp"]);
+    expect(poolEndpoints("whisper", { bulk: true }, { ...env, POOL_BULK_FALLBACK_LIVE: "1" }))
+      .toEqual(["https://box", "https://gcp", "https://mini"]);
     expect(poolEndpoints("whisper", { bulk: false }, env)).toEqual(["https://mini", "https://box"]);
+  });
+  it("R3: bulk with NO bulk list for the service uses the ordinary list", () => {
+    expect(poolEndpoints("join", { bulk: true }, { AUDIO_JOIN_URL: "https://j" })).toEqual(["https://j"]);
+  });
+  it("N4: the single var passes through EXACTLY as written — no trim, no normalising", () => {
+    expect(poolEndpoints("whisper", {}, { WHISPER_BASE_URL: " https://mini// " })).toEqual([" https://mini// "]);
   });
   it("served_by is the ORIGIN only — never a path, query or credential", () => {
     expect(servedByOf("https://user:pw@example.com:8443/join/x?t=secret")).toBe("https://example.com:8443");
@@ -101,56 +111,56 @@ describe("runPool — failover and the breaker", () => {
 
   it("fails over past a down endpoint and returns the first good answer", async () => {
     const seen: string[] = [];
-    const r = await runPool("whisper", ["a", "b", "c"], async (b) => { seen.push(b); return b === "a" ? "down" : "ok"; }, cls);
+    const r = await runPool("whisper", ["a", "b", "c"], async (b) => { seen.push(b); return b === "a" ? "down" : "ok"; }, cls, { budgetMs: 60_000 });
     expect(seen).toEqual(["a", "b"]);
     expect(r.value).toBe("ok");
     expect(r.base).toBe("b");
   });
   it("a FINAL answer is the answer: no failover", async () => {
     const seen: string[] = [];
-    const r = await runPool("whisper", ["a", "b"], async (b) => { seen.push(b); return "refused"; }, cls);
+    const r = await runPool("whisper", ["a", "b"], async (b) => { seen.push(b); return "refused"; }, cls, { budgetMs: 60_000 });
     expect(seen).toEqual(["a"]);
     expect(r.value).toBe("refused");
   });
   it("the LAST endpoint's failover answer is returned as it came", async () => {
-    const r = await runPool("whisper", ["a", "b"], async () => "down", cls);
+    const r = await runPool("whisper", ["a", "b"], async () => "down", cls, { budgetMs: 60_000 });
     expect(r.value).toBe("down");
     expect(r.base).toBe("b");
   });
   it("a throw fails over; the last throw is rethrown unchanged", async () => {
     const e = new Error("boom-b");
-    await expect(runPool("join", ["a", "b"], async (b) => { throw b === "a" ? new Error("boom-a") : e; }, cls)).rejects.toBe(e);
+    await expect(runPool("join", ["a", "b"], async (b) => { throw b === "a" ? new Error("boom-a") : e; }, cls, { budgetMs: 60_000 })).rejects.toBe(e);
   });
   it("BREAKER: 3 consecutive failures open an endpoint for 5 minutes; it is skipped, then tried again", async () => {
     let t = 1_000_000;
     const now = () => t;
-    for (let i = 0; i < 3; i++) await runPool("diarize", ["a", "b"], async (b) => (b === "a" ? "down" : "ok"), cls, { now });
+    for (let i = 0; i < 3; i++) await runPool("diarize", ["a", "b"], async (b) => (b === "a" ? "down" : "ok"), cls, { budgetMs: 60_000, now });
     expect(breakerOpen("diarize", "a", t)).toBe(true);
     const seen: string[] = [];
-    await runPool("diarize", ["a", "b"], async (b) => { seen.push(b); return "ok"; }, cls, { now });
+    await runPool("diarize", ["a", "b"], async (b) => { seen.push(b); return "ok"; }, cls, { budgetMs: 60_000, now });
     expect(seen, "an open endpoint is skipped").toEqual(["b"]);
     t += BREAKER_OPEN_MS - 1;
     expect(breakerOpen("diarize", "a", t)).toBe(true);
     t += 2;
     expect(breakerOpen("diarize", "a", t)).toBe(false);
     seen.length = 0;
-    await runPool("diarize", ["a", "b"], async (b) => { seen.push(b); return "ok"; }, cls, { now });
+    await runPool("diarize", ["a", "b"], async (b) => { seen.push(b); return "ok"; }, cls, { budgetMs: 60_000, now });
     expect(seen, "after 5 min it is tried again, first").toEqual(["a"]);
   });
   it("BREAKER: two failures then a success do NOT open it (consecutive only)", async () => {
     const seq = ["down", "down", "ok", "down"];
-    for (const v of seq) await runPool("emotion", ["a", "b"], async (b) => (b === "a" ? v : "ok"), cls);
+    for (const v of seq) await runPool("emotion", ["a", "b"], async (b) => (b === "a" ? v : "ok"), cls, { budgetMs: 60_000 });
     expect(breakerOpen("emotion", "a")).toBe(false);
   });
   it("BREAKER: every endpoint open → all are tried anyway, in order (never 'nothing attempted')", async () => {
-    for (let i = 0; i < 3; i++) await runPool("join", ["a", "b"], async () => "down", cls);
+    for (let i = 0; i < 3; i++) await runPool("join", ["a", "b"], async () => "down", cls, { budgetMs: 60_000 });
     expect(breakerOpen("join", "a") && breakerOpen("join", "b")).toBe(true);
     const seen: string[] = [];
-    await runPool("join", ["a", "b"], async (b) => { seen.push(b); return "down"; }, cls);
+    await runPool("join", ["a", "b"], async (b) => { seen.push(b); return "down"; }, cls, { budgetMs: 60_000 });
     expect(seen).toEqual(["a", "b"]);
   });
   it("breakers are per SERVICE: the same URL down for join is not skipped for whisper", async () => {
-    for (let i = 0; i < 3; i++) await runPool("join", ["a", "b"], async (b) => (b === "a" ? "down" : "ok"), cls);
+    for (let i = 0; i < 3; i++) await runPool("join", ["a", "b"], async (b) => (b === "a" ? "down" : "ok"), cls, { budgetMs: 60_000 });
     expect(breakerOpen("join", "a")).toBe(true);
     expect(breakerOpen("whisper", "a")).toBe(false);
   });
@@ -158,12 +168,21 @@ describe("runPool — failover and the breaker", () => {
 
 // ── 3. bulk routing ─────────────────────────────────────────────────────────────────────────────
 describe("bulk routing", () => {
-  it("BULK_AGE_MINUTES: unset/blank = off; strict on a bad value", () => {
+  it("R4: BULK_AGE_MINUTES unset/blank = off; a bad value is OFF too — never a throw — and is reported by NAME", () => {
     expect(bulkAgeMinutes({})).toBeNull();
     expect(bulkAgeMinutes({ BULK_AGE_MINUTES: " " })).toBeNull();
     expect(bulkAgeMinutes({ BULK_AGE_MINUTES: "90" })).toBe(90);
-    expect(() => bulkAgeMinutes({ BULK_AGE_MINUTES: "ninety" })).toThrow();
-    expect(() => bulkAgeMinutes({ BULK_AGE_MINUTES: "0" })).toThrow();
+    expect(bulkAgeMinutes({ BULK_AGE_MINUTES: "ninety" })).toBeNull();
+    expect(bulkAgeMinutes({ BULK_AGE_MINUTES: "0" })).toBeNull();
+    expect(poolConfigProblems({ BULK_AGE_MINUTES: "ninety", POOL_BULK_FALLBACK_LIVE: "maybe", WHISPER_BULK_URLS: "not a url" }))
+      .toEqual(["BULK_AGE_MINUTES", "POOL_BULK_FALLBACK_LIVE", "WHISPER_BULK_URLS"]);
+    expect(poolConfigProblems({ BULK_AGE_MINUTES: "30", WHISPER_BASE_URLS: "https://a" })).toEqual([]);
+  });
+  it("R4: a room_window step with a TYPO in BULK_AGE_MINUTES is not bulk, and does not throw", async () => {
+    process.env.BULK_AGE_MINUTES = "sixty";
+    const ctx = { job: {} as never, step: "prepare", args: { window_id: "w1" }, progress: {}, runner: "r" };
+    await expect(roomWindowKind.poolBulk!(ctx)).resolves.toBe(false);
+    expect(db.calls, "an invalid setting is OFF: no query either").toEqual([]);
   });
   it("a window is bulk only when it closed MORE than the age ago", () => {
     const env = { BULK_AGE_MINUTES: "60" };
@@ -370,5 +389,128 @@ describe("served_by reaches the job, derived from the calls", () => {
     route = (u) => (u.startsWith("https://mini") ? { status: 503, body: {} } : { status: 200, body: WHISPER_OK });
     const { served_by } = await withPoolContext({ bulk: false }, async () => { await transcribeWithWhisper(new Uint8Array([1])); });
     expect(served_by).toEqual({ whisper: "https://box" });
+  });
+});
+
+// ── 6. enable-blockers from the refuters (R1, R2, N5, caller-abort) ─────────────────────────────
+describe("R1 — ONE deadline per pooled call: never longer than the unpooled call was", () => {
+  const cls = (v: string) => (v === "ok" ? "ok" : v === "down" ? "failover" : "final") as "ok" | "failover" | "final";
+
+  it("the first endpoint gets the WHOLE budget (the old timeout); a failover gets only what is left", async () => {
+    let t = 0;
+    const budgets: number[] = [];
+    await runPool("whisper", ["a", "b", "c"], async (b, budget) => { budgets.push(budget); t += 30_000; return b === "c" ? "ok" : "down"; },
+      cls, { budgetMs: 90_000, now: () => t });
+    expect(budgets).toEqual([90_000, 60_000, 30_000]);
+  });
+  it("wall time never exceeds the budget: endpoints that each use ALL they are given stop the pool at the budget", async () => {
+    let t = 0;
+    const seen: string[] = [];
+    const r = await runPool("join", ["a", "b", "c"], async (b, budget) => { seen.push(b); t += budget; return "down"; },
+      cls, { budgetMs: 90_000, now: () => t });
+    expect(seen, "the first one ate the budget: nobody else is started").toEqual(["a"]);
+    expect(t).toBe(90_000);
+    expect(r.value).toBe("down");
+  });
+  it("no endpoint is started with less than the floor left", async () => {
+    let t = 0;
+    const seen: string[] = [];
+    await runPool("emotion", ["a", "b"], async (b) => { seen.push(b); t += 90_000 - POOL_MIN_ENDPOINT_BUDGET_MS + 1; return "down"; },
+      cls, { budgetMs: 90_000, now: () => t });
+    expect(seen).toEqual(["a"]);
+  });
+  it("a fast connect failure still fails over (plenty of budget left)", async () => {
+    let t = 0;
+    const seen: string[] = [];
+    const r = await runPool("whisper", ["a", "b"], async (b) => { seen.push(b); t += 150; return b === "a" ? "down" : "ok"; },
+      cls, { budgetMs: 90_000, now: () => t });
+    expect(seen).toEqual(["a", "b"]);
+    expect(r.value).toBe("ok");
+  });
+  it("a throw past the floor is rethrown rather than starting another endpoint", async () => {
+    let t = 0;
+    const seen: string[] = [];
+    const e = new Error("slow-a");
+    await expect(runPool("join", ["a", "b"], async (b, budget) => { seen.push(b); t += budget; throw e; },
+      cls, { budgetMs: 90_000, now: () => t })).rejects.toBe(e);
+    expect(seen).toEqual(["a"]);
+  });
+  it("/diarize never fails over on its OWN timeout (the server may still be working); network, 5xx and 404 do; caller abort is final", () => {
+    const f = (error: string) => diarizeVerdict({ ok: false, error, latencyMs: 0, timing: {} as never });
+    expect(f("timeout_300000ms")).toBe("final");
+    expect(f("aborted")).toBe("final");
+    expect(f("network: fetch failed")).toBe("failover");
+    expect(f("http_503: x")).toBe("failover");
+    expect(f("http_404: not found")).toBe("failover");
+    expect(f("http_422: x")).toBe("final");
+  });
+  it("a real /diarize failover passes the REMAINING budget, not a fresh one", async () => {
+    process.env.DIARIZE_BASE_URLS = "https://mini,https://box";
+    route = (u) => (u.startsWith("https://mini") ? "throw" : { status: 200, body: { speakers: [] } });
+    const r = await runDiarize(new Uint8Array([1]), "audio/webm", { encounterId: "w" });
+    expect(r.ok && r.served_by).toBe("https://box");
+  });
+});
+
+describe("R2 — each eta-diarize route is its own pool", () => {
+  it("route lists fall back to DIARIZE_BASE_URLS, then DIARIZE_BASE_URL", () => {
+    expect(poolEndpoints("diarize_embed", {}, { DIARIZE_BASE_URL: "https://mini" })).toEqual(["https://mini"]);
+    expect(poolEndpoints("diarize_embed", {}, { DIARIZE_BASE_URL: "https://mini", DIARIZE_BASE_URLS: "https://mini,https://box" }))
+      .toEqual(["https://mini", "https://box"]);
+    expect(poolEndpoints("diarize_embed", {}, { DIARIZE_BASE_URLS: "https://mini,https://box", DIARIZE_EMBED_URLS: "https://mini,https://c3,https://box" }))
+      .toEqual(["https://mini", "https://c3", "https://box"]);
+    expect(poolEndpoints("diarize", {}, { DIARIZE_BASE_URLS: "https://mini,https://box", DIARIZE_EMBED_URLS: "https://c3" }))
+      .toEqual(["https://mini", "https://box"]);
+    expect(poolConfigured("diarize_vad", { DIARIZE_BASE_URLS: "https://mini" })).toBe(true);
+  });
+  it("the refuter's probe: [mini (down), c3 (no /diarize: 404), box] reaches the box", async () => {
+    process.env.DIARIZE_BASE_URLS = "https://mini,https://c3,https://box";
+    route = (u) => (u.startsWith("https://mini") ? "throw" : u.startsWith("https://c3") ? { status: 404, body: {} } : { status: 200, body: { speakers: [] } });
+    const r = await runDiarize(new Uint8Array([1]), "audio/webm", { encounterId: "w" });
+    expect(calls).toEqual(["https://mini/diarize", "https://c3/diarize", "https://box/diarize"]);
+    expect(r.ok && r.served_by).toBe("https://box");
+  });
+  it("embed uses DIARIZE_EMBED_URLS, and a 404 there fails over; the caller's result carries no status", async () => {
+    process.env.DIARIZE_BASE_URL = "https://mini";
+    process.env.DIARIZE_EMBED_URLS = "https://c3,https://box";
+    route = (u) => (u.startsWith("https://c3") ? { status: 404, body: {} } : { status: 200, body: { ok: true, speakers: [] } });
+    const sp = [{ idx: 0, start_s: 0, end_s: 2, total_speech_sec: 2 }];
+    const r = await embedSpeakers(new Uint8Array([1]), sp, [], { batchThreshold: 0.65, label: "w" });
+    expect(calls).toEqual(["https://c3/embed_speakers", "https://box/embed_speakers"]);
+    expect(r).toEqual({ ok: true, speakers: [], latencyMs: expect.any(Number), served_by: "https://box" });
+  });
+  it("breakers are per ROUTE: a box that is down for /diarize is not skipped for /embed_speakers", async () => {
+    const cls = (v: string) => (v === "down" ? "failover" : "ok") as "ok" | "failover" | "final";
+    for (let i = 0; i < 3; i++) await runPool("diarize", ["box", "mini"], async (b) => (b === "box" ? "down" : "ok"), cls, { budgetMs: 60_000 });
+    expect(breakerOpen("diarize", "box")).toBe(true);
+    expect(breakerOpen("diarize_embed", "box")).toBe(false);
+  });
+  it("/enroll: a 404 fails over", async () => {
+    process.env.DIARIZE_ENROLL_URLS = "https://c3,https://mini";
+    route = (u) => (u.startsWith("https://c3") ? { status: 404, body: {} } : { status: 200, body: { ok: true, embedding_base64: "AAAA" } });
+    expect(await runEnroll(new Uint8Array([1]), "audio/webm")).toEqual({ ok: true, embeddingBase64: "AAAA", served_by: "https://mini" });
+  });
+});
+
+describe("N5 — the breaker's DURATION is pinned, not just its threshold", () => {
+  it("it is five minutes, and an endpoint opened at t is still skipped at t + 4 min 59 s", async () => {
+    expect(BREAKER_OPEN_MS).toBe(5 * 60_000);
+    const cls = (v: string) => (v === "down" ? "failover" : "ok") as "ok" | "failover" | "final";
+    let t = 5_000_000;
+    for (let i = 0; i < 3; i++) await runPool("emotion", ["a", "b"], async (b) => (b === "a" ? "down" : "ok"), cls, { budgetMs: 60_000, now: () => t });
+    t += 4 * 60_000 + 59_000;
+    const seen: string[] = [];
+    await runPool("emotion", ["a", "b"], async (b) => { seen.push(b); return "ok"; }, cls, { budgetMs: 60_000, now: () => t });
+    expect(seen).toEqual(["b"]);
+  });
+});
+
+describe("R4 — invalid pool config is visible on health (names only)", () => {
+  it("absent when nothing is configured; lists configured services and invalid NAMES otherwise", async () => {
+    const { servicePoolHealth } = await import("@/lib/mcp/tools/health");
+    expect(servicePoolHealth()).toEqual({});
+    process.env.WHISPER_BASE_URLS = "https://mini,https://box";
+    process.env.BULK_AGE_MINUTES = "sixty";
+    expect(servicePoolHealth()).toEqual({ service_pools: { configured: ["whisper"], invalid: ["BULK_AGE_MINUTES"] } });
   });
 });

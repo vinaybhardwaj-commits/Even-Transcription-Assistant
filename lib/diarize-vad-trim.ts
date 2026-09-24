@@ -237,10 +237,14 @@ export type SpeechRegionsOutcome = (
   | { ok: false; error: "vad_base_url_missing" | "vad_failed" | "vad_bad_response" | "vad_bad_map"; retryable: boolean }
 ) & { /** REDUNDANCY-R1 — the origin that answered; present only when a diarize pool is configured. */ served_by?: string };
 
-/** REDUNDANCY-R1 — `retryable` is the endpoint-failed class (transport, timeout, 5xx); anything else is the answer. */
-export function speechRegionsVerdict(o: SpeechRegionsOutcome): Verdict {
-  if (o.ok) return "ok";
-  return o.retryable ? "failover" : "final";
+/**
+ * REDUNDANCY-R1 — `retryable` is the endpoint-failed class (transport, timeout, 5xx), and a 404 is failover too
+ * (R2: that endpoint does not serve /speech_regions). Anything else is the answer. The status travels beside the
+ * outcome and never reaches the caller.
+ */
+export function speechRegionsVerdict(r: { o: SpeechRegionsOutcome; status: number | null }): Verdict {
+  if (r.o.ok) return "ok";
+  return r.o.retryable || r.status === 404 ? "failover" : "final";
 }
 
 /** Budget for one /speech_regions call: a decode, a VAD pass and a re-encode of a 15-minute clip. */
@@ -256,11 +260,18 @@ export async function requestSpeechRegions(
   opts: { label: string; allowCut: ReadonlyArray<readonly [number, number]>; env?: Record<string, string | undefined> },
 ): Promise<SpeechRegionsOutcome> {
   const env = opts.env ?? process.env;
-  // The same service as /diarize and /embed_speakers, so the same pool.
-  const endpoints = poolEndpoints("diarize", { bulk: isBulkContext() }, env);
+  // Its own route pool (R2), falling back to the diarize lists and then DIARIZE_BASE_URL.
+  const endpoints = poolEndpoints("diarize_vad", { bulk: isBulkContext() }, env);
   if (endpoints.length === 0) return { ok: false, error: "vad_base_url_missing", retryable: false };
-  const { value, served_by } = await runPool("diarize", endpoints, (base) => speechRegionsAt(base, audio, params, opts, env), speechRegionsVerdict, { env });
-  return served_by ? { ...value, served_by } : value;
+  // R1: the whole pool gets the ONE timeout this call always had; a failover gets only what is left.
+  const timeoutMs = Number(env.DIARIZE_VAD_TRIM_TIMEOUT_MS || VAD_TRIM_TIMEOUT_MS_DEFAULT);
+  const { value, served_by } = await runPool(
+    "diarize_vad", endpoints,
+    (base, budgetMs) => speechRegionsAt(base, audio, params, opts, budgetMs),
+    speechRegionsVerdict,
+    { budgetMs: timeoutMs, env },
+  );
+  return served_by ? { ...value.o, served_by } : value.o;
 }
 
 async function speechRegionsAt(
@@ -268,8 +279,8 @@ async function speechRegionsAt(
   audio: Uint8Array,
   params: VadTrimParams,
   opts: { label: string; allowCut: ReadonlyArray<readonly [number, number]> },
-  env: Record<string, string | undefined>,
-): Promise<SpeechRegionsOutcome> {
+  timeoutMs: number,
+): Promise<{ o: SpeechRegionsOutcome; status: number | null }> {
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: "audio/webm" }), "audio.webm");
   form.append("pad_s", String(params.pad_s));
@@ -283,7 +294,6 @@ async function speechRegionsAt(
   // Ruling (b): the ONLY places the Mini may cut. Empty means nothing is cuttable.
   form.append("allow_cut", JSON.stringify(opts.allowCut));
 
-  const timeoutMs = Number(env.DIARIZE_VAD_TRIM_TIMEOUT_MS || VAD_TRIM_TIMEOUT_MS_DEFAULT);
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
@@ -295,35 +305,35 @@ async function speechRegionsAt(
     if (!res.ok) {
       // Status and length only: the body can describe the audio.
       console.error("[vad-trim] refused", JSON.stringify({ window: opts.label, status: res.status, body_len: text.length }));
-      return { ok: false, error: "vad_failed", retryable: res.status >= 500 };
+      return { o: { ok: false, error: "vad_failed", retryable: res.status >= 500 }, status: res.status };
     }
     let j: Record<string, unknown>;
     try {
       j = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      return { ok: false, error: "vad_bad_response", retryable: false };
+      return { o: { ok: false, error: "vad_bad_response", retryable: false }, status: null };
     }
     // Branch on `ok`, never on status: this service's /enroll answers 200 with ok:false.
-    if (j.ok !== true || !Array.isArray(j.regions)) return { ok: false, error: "vad_bad_response", retryable: false };
+    if (j.ok !== true || !Array.isArray(j.regions)) return { o: { ok: false, error: "vad_bad_response", retryable: false }, status: null };
     const vadModel = typeof j.vad_model === "string" && j.vad_model.trim() ? j.vad_model.trim() : null;
     const latencyMs = Date.now() - t0;
 
     if (j.regions.length === 0) {
       const total = Number(j.total_samples), sr = Number(j.sample_rate);
-      if (!Number.isInteger(total) || !Number.isInteger(sr) || sr <= 0) return { ok: false, error: "vad_bad_map", retryable: false };
-      return { ok: true, regionsEmpty: true, originalSeconds: total / sr, vadModel, latencyMs };
+      if (!Number.isInteger(total) || !Number.isInteger(sr) || sr <= 0) return { o: { ok: false, error: "vad_bad_map", retryable: false }, status: null };
+      return { o: { ok: true, regionsEmpty: true, originalSeconds: total / sr, vadModel, latencyMs }, status: null };
     }
     const map = Number(j.sample_rate) === VAD_SAMPLE_RATE ? buildRegionMap(j.regions, j.sample_rate, j.total_samples) : null;
     if (!map) {
       console.error("[vad-trim] map rejected", JSON.stringify({ window: opts.label, regions: j.regions.length }));
-      return { ok: false, error: "vad_bad_map", retryable: false };
+      return { o: { ok: false, error: "vad_bad_map", retryable: false }, status: null };
     }
     const b64 = typeof j.audio_b64 === "string" ? j.audio_b64 : "";
-    if (!b64) return { ok: false, error: "vad_bad_response", retryable: false };
-    return { ok: true, regionsEmpty: false, audio: new Uint8Array(Buffer.from(b64, "base64")), map, vadModel, latencyMs };
+    if (!b64) return { o: { ok: false, error: "vad_bad_response", retryable: false }, status: null };
+    return { o: { ok: true, regionsEmpty: false, audio: new Uint8Array(Buffer.from(b64, "base64")), map, vadModel, latencyMs }, status: null };
   } catch {
     console.error("[vad-trim] call failed", JSON.stringify({ window: opts.label, timed_out: controller.signal.aborted }));
-    return { ok: false, error: "vad_failed", retryable: true };
+    return { o: { ok: false, error: "vad_failed", retryable: true }, status: null };
   } finally {
     clearTimeout(tid);
   }

@@ -71,13 +71,17 @@ export const HEALTH_MIN_SPEECH_KEY = "min_speech_s";
  */
 export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<EmotionHealth> {
   const endpoints = endpointsFor("emotion", { fallback: EMOTION_FALLBACK_URL });
-  const { value, served_by } = await runPool("emotion", endpoints, (base) => emotionHealthAt(base, fetchImpl), emotionHealthVerdict);
+  // R1: the whole pool gets the ONE timeout a health call always had.
+  const { value, served_by } = await runPool(
+    "emotion", endpoints, (base, budgetMs) => emotionHealthAt(base, fetchImpl, budgetMs), emotionHealthVerdict,
+    { budgetMs: EMOTION_HEALTH_TIMEOUT_MS },
+  );
   return served_by ? { ...value, served_by } : value;
 }
 
-async function emotionHealthAt(base: string, fetchImpl: Fetcher): Promise<EmotionHealth> {
+async function emotionHealthAt(base: string, fetchImpl: Fetcher, timeoutMs: number): Promise<EmotionHealth> {
   try {
-    const res = await fetchImpl(`${trimBase(base)}/health`, { signal: AbortSignal.timeout(EMOTION_HEALTH_TIMEOUT_MS), cache: "no-store" });
+    const res = await fetchImpl(`${trimBase(base)}/health`, { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
     const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
     // TRUST NOTHING FROM AN UNHEALTHY ANSWER. A 500 with ok:false can still carry a max_duration_s;
     // a cap that arrives alongside a failure is not a cap.
@@ -205,7 +209,13 @@ export async function scoreSegments(
   const secret = (process.env[EMOTION_SECRET_ENV] ?? "").trim();
   if (!secret) return { ok: false, error: "emotion_secret_not_configured", retryable: false };
   const endpoints = endpointsFor("emotion", { fallback: EMOTION_FALLBACK_URL });
-  const { value, served_by } = await runPool("emotion", endpoints, (base) => scoreSegmentsAt(base, secret, audioUrl, segments, fetchImpl), emotionSegmentsVerdict);
+  // R1: the whole pool gets the ONE timeout a segments call always had.
+  const { value, served_by } = await runPool(
+    "emotion", endpoints,
+    (base, budgetMs) => scoreSegmentsAt(base, secret, audioUrl, segments, fetchImpl, budgetMs),
+    emotionSegmentsVerdict,
+    { budgetMs: EMOTION_CALL_TIMEOUT_MS },
+  );
   return served_by ? { ...value, served_by } : value;
 }
 
@@ -215,6 +225,7 @@ async function scoreSegmentsAt(
   audioUrl: string,
   segments: Array<{ start_s: number; end_s: number }>,
   fetchImpl: Fetcher,
+  timeoutMs: number,
 ): Promise<SegmentsResponse> {
   let res: Response;
   try {
@@ -222,7 +233,7 @@ async function scoreSegmentsAt(
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
       body: JSON.stringify({ audio_url: audioUrl, segments }),
-      signal: AbortSignal.timeout(EMOTION_CALL_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
     });
   } catch (e) {
