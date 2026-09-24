@@ -13,14 +13,8 @@
 
 import { sql } from "@/lib/db";
 
-export const MCP_AUDIT_ACTOR = "mcp:operator-v1";
-
-/** Tier 2 §2.3 — `mcp:<actor>`, the one shape every MCP audit row's actor_id takes. */
-export function mcpActorId(actor: string | null | undefined): string {
-  const t = typeof actor === "string" ? actor.trim() : "";
-  if (!t) return MCP_AUDIT_ACTOR;
-  return t.startsWith("mcp:") ? t.slice(0, 64) : `mcp:${t}`.slice(0, 64);
-}
+export { MCP_AUDIT_ACTOR, mcpActorId } from "./actor-id";
+import { mcpActorId } from "./actor-id";
 
 // Keys that may be echoed into the audit row (ids, dates, filters, flags — nothing free-text).
 const SAFE_ARG_KEYS = new Set([
