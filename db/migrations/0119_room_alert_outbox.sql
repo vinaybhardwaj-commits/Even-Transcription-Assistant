@@ -16,7 +16,14 @@
 -- room_watchdog_heartbeat IS ONE ROW (id = 1), upserted by every run, ok or not. It is how a dead cron shows up: the read door reports its AGE as
 -- the database computes it, and "no row yet" is reported as its own state, never as healthy.
 --
--- ADDITIVE. Two new tables. Nothing existing is touched.
+-- ADDITIVE. Two new tables. Nothing existing is touched: two CREATE TABLE IF NOT EXISTS, one CREATE INDEX IF NOT EXISTS, the schema_migrations row,
+-- and no ALTER, DROP, UPDATE or DELETE on any existing table. So the OLD code simply ignores it.
+--
+-- APPLY THIS BEFORE THE CODE THAT WRITES TO IT IS DEPLOYED (eta-refuter #422). Deployed first, every run fails its one statement (persist_failed) and
+-- advances nothing; that keeps an edge that is still standing, but a room that goes offline AND recovers entirely inside the gap is never announced.
+-- NOTE: POST /api/run-migrations reads db/migrations from the DEPLOYED build, so it cannot apply this before the deploy that carries the file. Applying
+-- it first means running this SQL directly against the app database (it is safe to run twice), which also records the schema_migrations row so the
+-- endpoint later sees it as applied.
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS room_alert_outbox (

@@ -152,6 +152,22 @@ describe.runIf(HAVE_DOCKER)("atomicity — the state advances if and only if the
     expect(await stateOf("r1")).toBe("offline");
   }, 120_000);
 
+  it("a planned message that cannot be queued (no kind or no rooms) is LOGGED, never dropped in silence (Refuter-2 #422 finding 3)", async () => {
+    const { persistPlan } = await import("@/lib/room-watchdog");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      seedRooms(["r1"]); setState("r1", "ok");
+      const plan = {
+        writes: [{ room_id: "r1", status: "offline" as const, since: nowIso }],
+        messages: [{ subject: "s", text: "t" }],   // no kind, no room_ids
+      };
+      expect(await persistPlan(plan)).toBe(0);
+      expect(err.mock.calls.some((c) => String(c[0]).includes("CANNOT be queued")), "the drop was logged").toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it("the same plan applied twice queues ONE alert: the second run finds nothing changed (IS DISTINCT FROM)", async () => {
     const { planWatchdogRun, persistPlan } = await import("@/lib/room-watchdog");
     seedRooms(["r1"]); setState("r1", "ok");
@@ -309,6 +325,8 @@ describe("heartbeatState — absent is never healthy (F9)", () => {
     expect(heartbeatState(undefined)).toEqual({ state: "none" });
     expect(heartbeatState({ age_s: Number.NaN, last_ok: true, evaluated: 1, last_error: null })).toEqual({ state: "none" });
     expect(heartbeatState({ age_s: 30, last_ok: true, evaluated: 1, last_error: null }).state).toBe("ok");
+    // Pinned from BELOW as well (eta-refuter #422 MC): a threshold lowered to 60 would false-alarm every minute of a healthy cron's slack.
+    for (const age of [61, 120, 299, 300]) expect(heartbeatState({ age_s: age, last_ok: true, evaluated: 1, last_error: null }).state, `age ${age}`).toBe("ok");
     expect(heartbeatState({ age_s: 301, last_ok: true, evaluated: 1, last_error: null }).state).toBe("stale");
     expect(heartbeatState({ age_s: 30, last_ok: false, evaluated: 1, last_error: "x" }).state).toBe("stale");
   });

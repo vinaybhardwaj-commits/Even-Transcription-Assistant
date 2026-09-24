@@ -456,9 +456,14 @@ export function pageVEnabled(env: Record<string, string | undefined> = process.e
  */
 export async function persistPlan(plan: WatchdogPlan): Promise<number> {
   const writes = JSON.stringify(plan.writes);
+  const queueable = plan.messages.filter((m) => m.kind && m.room_ids && m.room_ids.length > 0);
+  if (queueable.length !== plan.messages.length) {
+    // Today the planner drops nothing here (every message carries a kind and its rooms). If that ever changes, an alert would vanish silently
+    // through this filter, so say so, with counts only (eta-refuter #422 finding 3).
+    console.error(`[room-watchdog] ${plan.messages.length - queueable.length} of ${plan.messages.length} planned messages have no kind or rooms and CANNOT be queued`);
+  }
   const messages = JSON.stringify(
-    plan.messages
-      .filter((m) => m.kind && m.room_ids && m.room_ids.length > 0)
+    queueable
       .map((m) => ({
         kind: m.kind, room_ids: m.room_ids, room_name: m.room_name ?? null,
         status_from: m.status_from ?? null, status_to: m.status_to ?? null, subject: m.subject, body: m.text,
@@ -471,7 +476,7 @@ export async function persistPlan(plan: WatchdogPlan): Promise<number> {
        ORDER BY x.room_id
     ), changed AS (
       INSERT INTO room_alert_state (room_id, status, since, updated_at)
-      SELECT w.room_id, w.status, w.since, now() FROM w
+      SELECT w.room_id, w.status, w.since, now() FROM w ORDER BY w.room_id
       ON CONFLICT (room_id) DO UPDATE
         SET status = EXCLUDED.status, since = EXCLUDED.since, updated_at = now()
         WHERE room_alert_state.status IS DISTINCT FROM EXCLUDED.status
