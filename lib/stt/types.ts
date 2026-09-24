@@ -124,8 +124,13 @@ export type SttAsyncInput = {
   translate?: boolean;
 };
 
+/**
+ * `endpoint` (STT-STACK-PARITY) — the server that accepted the job, when the engine runs on a pool. The
+ * caller persists it beside `jobRef` and hands it back to `poll`, because a ref means nothing to any other
+ * server. Absent when no pool is configured, and then `poll` goes where it always went.
+ */
 export type SttAsyncSubmit =
-  | { ok: true; jobRef: string }
+  | { ok: true; jobRef: string; endpoint?: string }
   | { ok: false; error: string };
 
 /**
@@ -164,6 +169,6 @@ export interface SttAdapter {
    */
   submit?(input: SttAsyncInput): Promise<SttAsyncSubmit>;
   /** Ask after a ref from `submit`. Never starts work. Present iff `capabilities.async`. */
-  poll?(jobRef: string): Promise<SttAsyncPoll>;
+  poll?(jobRef: string, opts?: { endpoint?: string | null }): Promise<SttAsyncPoll>;
   health(): Promise<SttHealth>;
 }

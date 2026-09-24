@@ -317,7 +317,7 @@ export async function POST(
             let jobId = row.router_job_id;
             if (!jobId) {
               const audioUrl = await signGetUrl({ key: row.audio_object_key, expiresInSeconds: 3600 });
-              const sub = await submitRouteJob(audioUrl, { translate: true });
+              const sub = await submitRouteJob(audioUrl, { translate: true, singleOnly: true }); // only the id persists, so polls go to the single URL
               if (sub.ok && sub.job_id) {
                 jobId = sub.job_id;
                 row.router_job_id = jobId;

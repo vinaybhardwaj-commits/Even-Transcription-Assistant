@@ -47,7 +47,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
-export const POOL_SERVICES = ["whisper", "join", "diarize", "diarize_embed", "diarize_vad", "diarize_enroll", "emotion"] as const;
+export const POOL_SERVICES = ["whisper", "join", "diarize", "diarize_embed", "diarize_vad", "diarize_enroll", "emotion", "indic", "router"] as const;
 export type PoolService = (typeof POOL_SERVICES)[number];
 
 type Env = Record<string, string | undefined>;
@@ -64,6 +64,10 @@ export const POOL_ENV: Record<PoolService, { single: string; list: string; bulk:
   diarize_vad: { single: "DIARIZE_BASE_URL", list: "DIARIZE_VAD_URLS", bulk: "DIARIZE_VAD_BULK_URLS", inherit: "diarize" },
   diarize_enroll: { single: "DIARIZE_BASE_URL", list: "DIARIZE_ENROLL_URLS", bulk: "DIARIZE_ENROLL_BULK_URLS", inherit: "diarize" },
   emotion: { single: "EMOTION_BASE_URL", list: "EMOTION_BASE_URLS", bulk: "EMOTION_BULK_URLS" },
+  // STT-STACK-PARITY (Fable, 24 Sep): the other two thirds of the production stack. Until these existed a
+  // bulk room window reached the twins for whisper and the MINI for IndicConformer and the router.
+  indic: { single: "INDICCONFORMER_BASE_URL", list: "INDICCONFORMER_BASE_URLS", bulk: "INDICCONFORMER_BULK_URLS" },
+  router: { single: "ETA_ROUTER_URL", list: "ETA_ROUTER_URLS", bulk: "ETA_ROUTER_BULK_URLS" },
 };
 
 export const BULK_AGE_MINUTES_ENV = "BULK_AGE_MINUTES";

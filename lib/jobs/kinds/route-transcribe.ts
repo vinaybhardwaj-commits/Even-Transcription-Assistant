@@ -125,6 +125,8 @@ async function submitStep(ctx: StepContext) {
   return nextStep(STEPS.poll, {
     ...ctx.progress,
     router_job_id: sub.jobRef,
+    // Pins every poll to the router holding the job; present only when the router runs on a pool.
+    ...(sub.endpoint ? { router_endpoint: sub.endpoint } : {}),
     clip_key,
     audio_seconds: durationMs !== null ? Math.round(durationMs / 100) / 10 : null,
     submitted_at: new Date().toISOString(),
@@ -139,10 +141,11 @@ async function pollStep(ctx: StepContext) {
 
   const adapter = adapterFor(ROUTE_ADAPTER_KEY);
   if (!adapter || typeof adapter.poll !== "function") return failWith(jobError("route_job_failed", "adapter declares no async transport"));
+  const endpoint = typeof ctx.progress.router_endpoint === "string" && ctx.progress.router_endpoint ? ctx.progress.router_endpoint : null;
   const deadline = Date.now() + POLL_BUDGET_MS;
   let polls = 0;
   for (;;) {
-    const st = await adapter.poll(jobId);
+    const st = endpoint ? await adapter.poll(jobId, { endpoint }) : await adapter.poll(jobId);
     polls += 1;
 
     if (!st.ok) {

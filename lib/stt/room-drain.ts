@@ -1475,7 +1475,9 @@ export async function roomWindowEngine(
       ...out, ok: true, step: "ok",
       // `router_submitted_at` stamps when this job submitted (epoch ms); the ROUTER_JOB_LOST clock runs from
       // the router's last CHANGE of answer instead (roomWindowPoll).
-      next_progress: { ...progress, router_job_id: sub.jobRef, router_submitted_at: Date.now(), engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
+      // `router_endpoint` pins every later poll to the router that holds the job (STT-STACK-PARITY); it is
+      // written only when the engine runs on a pool, so a row with no pool keeps exactly the keys it had.
+      next_progress: { ...progress, router_job_id: sub.jobRef, ...(sub.endpoint ? { router_endpoint: sub.endpoint } : {}), router_submitted_at: Date.now(), engine_id: engineId, engine_key: engineKey, language_sent: languageSent },
     };
   }
 
@@ -1580,7 +1582,8 @@ export async function roomWindowPoll(windowId: string, opts: RunActor, progress:
     return { ...out, step: "engine_failed" as const, detail: ROUTER_JOB_LOST, attempts };
   };
 
-  const st = await adapter.poll(p.router_job_id);
+  const routerEndpoint = typeof progress.router_endpoint === "string" && progress.router_endpoint ? progress.router_endpoint : null;
+  const st = routerEndpoint ? await adapter.poll(p.router_job_id, { endpoint: routerEndpoint }) : await adapter.poll(p.router_job_id);
   if (!st.ok) {
     console.error("[drain] async poll failed", JSON.stringify({ window: windowId, job: p.router_job_id, engine: engineId, err: String(st.error).slice(0, 200), terminal: st.terminal }));
     // The router answering "no such job" is the restart case said out loud: lost, not failed.
