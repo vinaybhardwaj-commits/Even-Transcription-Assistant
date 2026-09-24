@@ -95,3 +95,12 @@ export function withServiceAccess<T extends RequestInit>(url: string, init: T = 
   for (const [k, v] of Object.entries(extra)) if (!merged.has(k)) merged.set(k, v);
   return { ...init, headers: merged, redirect: init.redirect ?? "error" };
 }
+
+/**
+ * A drop-in `fetch` for an SDK that takes one (the OpenAI client in lib/llm.ts). Each request gets `withServiceAccess` for ITS
+ * url, so the token still goes only to an allowed host. The global `fetch` is read at call time, not captured at load.
+ */
+export const serviceAccessFetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return fetch(input, withServiceAccess(url, init ?? {}));
+};

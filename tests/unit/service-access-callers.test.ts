@@ -26,19 +26,21 @@ import { indicconformerAdapter } from "@/lib/stt/adapters/indicconformer";
 import { whisperAdapter } from "@/lib/stt/adapters/whisper";
 import { runWhisperProbe } from "@/lib/health/whisper-probe";
 import { probePyannote } from "@/lib/mcp/tools/health";
+import { embedQuery as kbEmbedQuery } from "@/lib/kb-embed";
+import { fetchOllamaModels } from "@/lib/health/ollama-probe";
 import { resetBreakers } from "@/lib/service-pool";
 
 const VARS = [
   "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "CF_ACCESS_HOST_SUFFIXES",
   "WHISPER_BASE_URL", "DIARIZE_BASE_URL", "EMOTION_BASE_URL", "EMOTION_SEGMENTS_SECRET", "INDICCONFORMER_BASE_URL",
   "ETA_ROUTER_URL", "WHISPER_BASE_URLS", "WHISPER_BULK_URLS", "DIARIZE_BASE_URLS", "DIARIZE_BULK_URLS", "EMOTION_BASE_URLS",
-  "EMOTION_BULK_URLS", "ETA_ROUTER_URLS", "ETA_ROUTER_BULK_URLS", "INDICCONFORMER_BASE_URLS", "INDICCONFORMER_BULK_URLS", "BULK_AGE_MINUTES",
+  "OLLAMA_BASE_URL", "LLM_API_KEY", "EMOTION_BULK_URLS", "ETA_ROUTER_URLS", "ETA_ROUTER_BULK_URLS", "INDICCONFORMER_BASE_URLS", "INDICCONFORMER_BULK_URLS", "BULK_AGE_MINUTES",
 ];
 const saved: Record<string, string | undefined> = {};
 type Seen = { url: string; headers: Headers; redirect: RequestRedirect | undefined };
 let seen: Seen[] = [];
 
-const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
+const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 const record = (input: string | URL | Request, init?: RequestInit) => {
   seen.push({ url: typeof input === "string" ? input : input.toString(), headers: new Headers(init?.headers), redirect: init?.redirect });
 };
@@ -51,6 +53,8 @@ const reply = (url: string): unknown => {
   if (url.includes("/route/job/")) return { ok: true, state: "running" };
   if (url.endsWith("/route")) return { ok: true, transcript_native: "x" };
   if (url.endsWith("/health") || url.endsWith("/healthz")) return { ok: true, max_duration_s: 60, min_speech_s: 1.5, models: {}, device: "cpu" };
+  if (url.endsWith("/embeddings")) return { object: "list", data: [{ object: "embedding", index: 0, embedding: [0.1, 0.2] }], model: "m", usage: { prompt_tokens: 1, total_tokens: 1 } };
+  if (url.endsWith("/models")) return { object: "list", data: [] };
   if (url.endsWith("/inference")) return { text: "hello", language: "en", duration: 1, segments: [] };
   return { ok: true };
 };
@@ -78,6 +82,9 @@ const CALLERS: Array<[string, () => Promise<unknown>]> = [
   ["router probe", () => runRouteProbe({ readFixture: async () => new Uint8Array([1]), fetchImpl: svcFetch })],
   ["indicconformer /inference", () => indicconformerAdapter.transcribe(Buffer.from([1]), { contentType: "audio/webm", language: "kn" })],
   ["indicconformer /healthz", () => indicconformerAdapter.health()],
+  // Ruling 121 — the ollama host, before llm goes behind Access.
+  ["ollama /embeddings (lib/kb-embed.ts)", () => kbEmbedQuery("hello")],
+  ["ollama /models probe (health route + dashboard, one helper)", () => fetchOllamaModels(process.env.OLLAMA_BASE_URL!, 1000)],
 ];
 
 const setServiceEnv = () => {
@@ -87,6 +94,7 @@ const setServiceEnv = () => {
   process.env.EMOTION_SEGMENTS_SECRET = "seg";
   process.env.INDICCONFORMER_BASE_URL = `https://indic.${HOST}`;
   process.env.ETA_ROUTER_URL = `https://route.${HOST}`;
+  process.env.OLLAMA_BASE_URL = `https://llm.${HOST}/v1`;
 };
 
 beforeEach(() => {
@@ -205,7 +213,7 @@ describe("no caller can be added without the wrapper (source scan)", () => {
     // too (Refuter-2 R2). bench-join is the audio-join service: a Worker, not a tunnel hostname, with its own AUDIO_JOIN_TOKEN.
     const NOT_A_TUNNEL_HOST = new Set(["lib/bench-join.ts"]);
     const POOL_HELPERS = /\b(endpointsFor|poolEndpoints)\(/;
-    const SERVICE_ENVS = /\b(WHISPER_BASE_URLS?|WHISPER_BULK_URLS|DIARIZE_BASE_URLS?|DIARIZE_BULK_URLS|EMOTION_BASE_URLS?|EMOTION_BULK_URLS|INDICCONFORMER_BASE_URLS?|INDICCONFORMER_BULK_URLS|ETA_ROUTER_URLS?|ETA_ROUTER_BULK_URLS)\b/;
+    const SERVICE_ENVS = /\b(WHISPER_BASE_URLS?|WHISPER_BULK_URLS|DIARIZE_BASE_URLS?|DIARIZE_BULK_URLS|EMOTION_BASE_URLS?|EMOTION_BULK_URLS|INDICCONFORMER_BASE_URLS?|INDICCONFORMER_BULK_URLS|ETA_ROUTER_URLS?|ETA_ROUTER_BULK_URLS|OLLAMA_BASE_URL)\b/;
     const walk = (dir: string): string[] =>
       readdirSync(dir).flatMap((n) => {
         const p = join(dir, n);
@@ -217,8 +225,46 @@ describe("no caller can be added without the wrapper (source scan)", () => {
       const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
       if (NOT_A_TUNNEL_HOST.has(f)) continue;
       const reachesAService = SERVICE_ENVS.test(code) || POOL_HELPERS.test(code);
-      if (reachesAService && /\bfetch(Impl)?\(|doFetch\(/.test(code) && !/service-access/.test(code)) missing.push(f);
+      // `new OpenAI(` counts as a call only in a file that already reaches a service (lib/llm.ts): the vendor OpenAI client in
+      // lib/stt/scoring.ts reads no service URL and must NEVER carry the token.
+      if (reachesAService && /\bfetch(Impl)?\(|doFetch\(|new OpenAI\(/.test(code) && !/service-access|health\/ollama-probe/.test(code)) missing.push(f);
     }
     expect(missing, "a caller of a service hostname that never sends the Access headers").toEqual([]);
+  });
+});
+
+// LAST in the file on purpose: vi.resetModules() gives later dynamic imports a fresh module graph, which would split the
+// pool context the bulk test above depends on.
+describe("lib/llm.ts — the OpenAI SDK client (ruling 121)", () => {
+  const opts: Array<Record<string, unknown>> = [];
+  const load = async () => {
+    opts.length = 0;
+    vi.resetModules();
+    vi.doMock("openai", () => ({ default: class { constructor(o: Record<string, unknown>) { opts.push(o); } } }));
+    return import("@/lib/llm");
+  };
+  afterEach(() => { vi.doUnmock("openai"); vi.resetModules(); });
+
+  it("DARK: no token → the client is constructed with NO fetch option, exactly as before", async () => {
+    process.env.OLLAMA_BASE_URL = `https://llm.${HOST}/v1`;
+    await load();
+    expect(opts).toHaveLength(1);
+    expect("fetch" in opts[0]).toBe(false);
+    expect(opts[0]).toEqual({ baseURL: `https://llm.${HOST}/v1`, apiKey: "ollama" });
+  });
+  it("token configured → the client gets serviceAccessFetch, and each request carries the token to an allowed host only", async () => {
+    process.env.OLLAMA_BASE_URL = `https://llm.${HOST}/v1`;
+    process.env.CF_ACCESS_CLIENT_ID = "the-id";
+    process.env.CF_ACCESS_CLIENT_SECRET = "the-secret";
+    await load();
+    const f = opts[0].fetch as (u: string, i?: RequestInit) => Promise<Response>;
+    expect(typeof f).toBe("function");
+    await f(`https://llm.${HOST}/v1/embeddings`, { method: "POST", headers: { authorization: "Bearer ollama" } });
+    await f("https://api.sarvam.ai/x", { method: "POST" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0].headers.get("CF-Access-Client-Id")).toBe("the-id");
+    expect(seen[0].headers.get("authorization"), "the SDK's own header is kept").toBe("Bearer ollama");
+    expect(seen[0].redirect).toBe("error");
+    expect(seen[1].headers.has("CF-Access-Client-Id"), "another vendor's host gets nothing").toBe(false);
   });
 });

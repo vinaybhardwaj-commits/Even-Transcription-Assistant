@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { probeWhisperTranscription } from "@/lib/health/whisper-probe";
+import { fetchOllamaModels } from "@/lib/health/ollama-probe";
 
 /**
  * GET /api/health
@@ -54,10 +55,7 @@ export async function GET() {
     probe(async () => {
       const base = process.env.OLLAMA_BASE_URL;
       if (!base) throw new Error("OLLAMA_BASE_URL not set");
-      const r = await fetch(`${base}/models`, {
-        headers: { Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}` },
-        signal: AbortSignal.timeout(8000),
-      });
+      const r = await fetchOllamaModels(base, 8000);
       if (!r.ok) throw new Error(`Ollama probe failed: ${r.status}`);
     }),
     // Hotfix defect 2 — this used to be a GET that the Mini's shim answered with a static 404

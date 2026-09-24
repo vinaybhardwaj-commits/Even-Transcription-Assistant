@@ -12,6 +12,7 @@
 
 import { sql } from "@/lib/db";
 import { withServiceAccess } from "@/lib/service-access";
+import { fetchOllamaModels } from "@/lib/health/ollama-probe";
 
 export type DashboardWindow = "today" | "week" | "month" | "all";
 
@@ -428,10 +429,7 @@ async function getHealth(): Promise<{ status: "ok" | "degraded"; services: Healt
     probeService(async () => {
       const base = process.env.OLLAMA_BASE_URL;
       if (!base) throw new Error("no_ollama_url");
-      const r = await fetch(`${base}/models`, {
-        headers: { Authorization: `Bearer ${process.env.LLM_API_KEY ?? "ollama"}` },
-        signal: AbortSignal.timeout(5000),
-      });
+      const r = await fetchOllamaModels(base, 5000);
       if (!r.ok) throw new Error(`ollama_${r.status}`);
     }),
     probeService(async () => {

@@ -7,6 +7,7 @@
  *
  * Returns the embedding vector (typically 768-dim for nomic).
  */
+import { withServiceAccess } from "@/lib/service-access";
 
 const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
 const EMBED_TIMEOUT_MS = 15_000;
@@ -36,7 +37,7 @@ export async function embedQuery(
 
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
+    const res = await fetch(url, withServiceAccess(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -48,7 +49,7 @@ export async function embedQuery(
       }),
       signal: controller.signal,
       cache: "no-store",
-    });
+    }));
     clearTimeout(tid);
     const latency_ms = Date.now() - t0;
     if (!res.ok) {
