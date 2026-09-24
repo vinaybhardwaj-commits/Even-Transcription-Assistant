@@ -95,7 +95,28 @@ export function buildRuns(turns: AttributedTurn[], mergeGapMs = RUN_MERGE_GAP_MS
     open = { speaker_idx: t.speaker_idx, start_ms: t.start_ms, end_ms: t.end_ms, source_refs: [t.source_ref] };
     runs.push(open);
   }
-  return { runs, skipped };
+  return { runs: mergeRunsSharingAStart(runs), skipped };
+}
+
+/**
+ * ONE RUN PER (speaker, start). room_span_emotion is keyed on (window, run, speaker_idx, run_start_ms, chunk_idx),
+ * so two runs of one speaker that start on the same millisecond would be two rows with one key: a batch holding
+ * both is refused by Postgres on every retry, and split across batches the second silently overwrites the first.
+ * The loop above opens a NEW run whenever the open run belongs to another speaker or a straddle reset it, so
+ * [spk0 1000-1200, spk1 1000-1500, spk0 1000-9000] yields two spk0 runs starting at 1000. Same speaker, same
+ * start is one stretch of that speaker's speech: fold them, later end, refs unioned in first-seen order. The
+ * order of the surviving runs is the order they were first opened.
+ */
+function mergeRunsSharingAStart(runs: Run[]): Run[] {
+  const byKey = new Map<string, Run>();
+  for (const r of runs) {
+    const key = `${r.speaker_idx}|${r.start_ms}`;
+    const prev = byKey.get(key);
+    if (!prev) { byKey.set(key, r); continue; }
+    prev.end_ms = Math.max(prev.end_ms, r.end_ms);
+    for (const ref of r.source_refs) if (!prev.source_refs.includes(ref)) prev.source_refs.push(ref);
+  }
+  return Array.from(byKey.values());
 }
 
 /** A diarizer speech interval, as room_diarize_window.segments_json stores it: clip-relative ms. */
