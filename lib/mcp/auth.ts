@@ -25,6 +25,13 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 export const MCP_TOKEN_ENV = "SCRIBE_MCP_TOKEN";
 export const MCP_TOKENS_ENV = "SCRIBE_MCP_TOKENS";
+/**
+ * ADDITIVE TOKENS (24 Sep 2026, Fable ruling 137: the room-alert relay needs its own read-only token). `SCRIBE_MCP_TOKENS` is a write-only Vercel
+ * Secret: a pull returns a placeholder, so nobody can read it, add ONE entry and write it back without destroying every existing token, and a write
+ * cannot be undone. This second variable takes the SAME hash-keyed JSON, holds no usable credential either, and is merged in BEHIND the primary map:
+ * on a collision the primary entry wins whole (actor AND scopes), so nothing here can widen, rename or shadow an existing token. Absent = nothing changes.
+ */
+export const MCP_TOKENS_EXTRA_ENV = "SCRIBE_MCP_TOKENS_EXTRA";
 export const MCP_TOKEN_ID = "operator-v1";
 
 export type McpScope = "read" | "invoke" | "write";
@@ -51,14 +58,16 @@ function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope> } | nu
   return { actor, scopes };
 }
 
-/** PURE — the configured map, keyed by sha256 hex. `{}` for absent or unreadable JSON. */
-export function parseTokenMap(raw: string | undefined): Record<string, { actor: string; scopes: Set<McpScope> }> {
+type TokenMap = Record<string, { actor: string; scopes: Set<McpScope> }>;
+
+/** PURE — the configured map, keyed by sha256 hex. `{}` for absent or unreadable JSON. `envName` only names the variable in the warning. */
+export function parseTokenMap(raw: string | undefined, envName: string = MCP_TOKENS_ENV): TokenMap {
   if (!raw || !raw.trim()) return {};
   let v: unknown;
   try {
     v = JSON.parse(raw);
   } catch {
-    console.warn("[mcp-auth] SCRIBE_MCP_TOKENS is not valid JSON; falling back to the single token");
+    console.warn(`[mcp-auth] ${envName} is not valid JSON; ignoring it`);
     return {};
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
@@ -71,11 +80,29 @@ export function parseTokenMap(raw: string | undefined): Record<string, { actor: 
   return out;
 }
 
+/**
+ * PURE — the primary map with the additive one behind it. A hash in BOTH keeps the PRIMARY entry entirely: the additive map can add a token, never
+ * change one. The number of entries it could not add is logged (a count only, never a hash: a hash is the lookup key of a credential).
+ */
+export function mergeTokenMaps(primary: TokenMap, extra: TokenMap): TokenMap {
+  const out: TokenMap = { ...primary };
+  let shadowed = 0;
+  for (const [hash, entry] of Object.entries(extra)) {
+    if (hash in out) shadowed += 1;
+    else out[hash] = entry;
+  }
+  if (shadowed > 0) console.warn(`[mcp-auth] ${shadowed} entr${shadowed === 1 ? "y" : "ies"} in ${MCP_TOKENS_EXTRA_ENV} shadowed by ${MCP_TOKENS_ENV}; the primary entry wins`);
+  return out;
+}
+
 /** Returns the principal when authorized, else the failure to send. Never throws. */
 export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipal } | { ok: false; failure: McpAuthFailure } {
   const header = req.headers.get("authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-  const map = parseTokenMap(process.env[MCP_TOKENS_ENV]);
+  const map = mergeTokenMaps(
+    parseTokenMap(process.env[MCP_TOKENS_ENV]),
+    parseTokenMap(process.env[MCP_TOKENS_EXTRA_ENV], MCP_TOKENS_EXTRA_ENV),
+  );
   const single = process.env[MCP_TOKEN_ENV];
   const configured = Object.keys(map).length > 0 || Boolean(single);
   if (!configured) return { ok: false, failure: { status: 503, code: "mcp_token_not_configured" } };

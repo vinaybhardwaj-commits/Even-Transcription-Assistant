@@ -229,6 +229,15 @@ Resolved before `SCRIBE_MCP_TOKEN`, which still works and still grants all three
 
 `audit_log.actor_id` carries the resolved actor as `mcp:<actor>`.
 
+### Adding a token without touching `SCRIBE_MCP_TOKENS` (24 Sep, ruling 137)
+
+`SCRIBE_MCP_TOKENS` is a write-only Vercel Secret: it cannot be read back, so adding one entry means writing the whole value and destroying every entry you
+cannot see, and that cannot be undone. **`SCRIBE_MCP_TOKENS_EXTRA`** takes the same JSON (keyed by the token's SHA-256 hex, so it holds no usable credential) and
+is merged in behind the primary. On a collision the primary entry wins whole, actor and scopes, so the extra map can add a token and never widen, rename or
+shadow one. Set it as an ordinary readable variable, so it can be verified. To build an entry without the token ever appearing on a command line:
+`sha256sum < ~/.claude/secrets/<name>` (the file's content is read from stdin; strip the trailing ` -`), then put `{"<hash>": {"actor": "<name>", "scopes": ["read"]}}` in it.
+Env is baked at build time: set it, then deploy.
+
 ## Downstream budgets (§2.5)
 
 Every outbound call from a tool runs under an explicit budget **strictly below** the tool's own
