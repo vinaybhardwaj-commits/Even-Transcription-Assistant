@@ -27,8 +27,18 @@
  */
 
 import { acquireDiarizeSlot, DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
+import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 
-const DIARIZE_BASE = process.env.DIARIZE_BASE_URL;
+/**
+ * REDUNDANCY-R1 — which /diarize answers mean "try the next endpoint": transport failure, OUR timeout, or a
+ * 5xx. `aborted` is the CALLER cancelling, never a reason to ask another machine; a 4xx is the answer.
+ */
+export function diarizeVerdict(o: DiarizeOutcome): Verdict {
+  if (o.ok) return "ok";
+  if (o.error.startsWith("network:") || o.error.startsWith("timeout_")) return "failover";
+  const m = /^http_(\d{3})/.exec(o.error);
+  return m && Number(m[1]) >= 500 ? "failover" : "final";
+}
 
 /**
  * Budget for ONE DISPATCHED /diarize call — it starts when the request is actually sent, never
@@ -113,7 +123,7 @@ export type DiarizeTiming = {
 };
 
 export type DiarizeOutcome =
-  | { ok: true; result: DiarizeResult; latencyMs: number; timing: DiarizeTiming }
+  | { ok: true; result: DiarizeResult; latencyMs: number; timing: DiarizeTiming; served_by?: string }
   | {
       ok: false;
       error: string;
@@ -121,6 +131,8 @@ export type DiarizeOutcome =
       timing: DiarizeTiming;
       /** True when we never reached the service (no slot). Retry later; do NOT mark failed. */
       retryable?: boolean;
+      /** REDUNDANCY-R1 — the origin that answered; present only when a diarize pool is configured. */
+      served_by?: string;
     };
 
 export async function runDiarize(
@@ -154,7 +166,8 @@ export async function runDiarize(
     ...over,
   });
 
-  if (!DIARIZE_BASE) return { ok: false, error: "diarize_base_url_missing", latencyMs: 0, timing: blank() };
+  const endpoints = endpointsFor("diarize");
+  if (endpoints.length === 0) return { ok: false, error: "diarize_base_url_missing", latencyMs: 0, timing: blank() };
   const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const ext = baseType.includes("webm") ? "webm" : baseType.includes("mp4") ? "mp4" : baseType.includes("wav") ? "wav" : "webm";
 
@@ -178,76 +191,86 @@ export async function runDiarize(
   }
   const { hold } = slot;
 
-  // ── DISPATCH. The clock starts HERE, and not one millisecond earlier. ────────────────────────
-  const form = new FormData();
-  form.append("audio", new Blob([audio], { type: baseType }), `audio.${ext}`);
-  form.append("encounter_id", opts.encounterId);
-  form.append("clinician_centroids", JSON.stringify(opts.clinicianCentroids ?? []));
-  form.append("manual_relabels", JSON.stringify(opts.manualRelabels ?? []));
-  if (typeof opts.batchThreshold === "number") form.append("batch_threshold", String(opts.batchThreshold));
+  // ── DISPATCH, per endpoint. The clock starts HERE, and not one millisecond earlier. ─────────────
+  const dispatchAt = async (base: string): Promise<DiarizeOutcome> => {
+    const form = new FormData();
+    form.append("audio", new Blob([audio], { type: baseType }), `audio.${ext}`);
+    form.append("encounter_id", opts.encounterId);
+    form.append("clinician_centroids", JSON.stringify(opts.clinicianCentroids ?? []));
+    form.append("manual_relabels", JSON.stringify(opts.manualRelabels ?? []));
+    if (typeof opts.batchThreshold === "number") form.append("batch_threshold", String(opts.batchThreshold));
 
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), timeoutMs);
-  const onOuterAbort = () => controller.abort();
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", onOuterAbort, { once: true });
-  }
-  const t0 = Date.now();
-  const dispatchedAt = new Date();
-  const finish = (over: Partial<DiarizeTiming>): DiarizeTiming => {
-    const wall = Date.now() - t0;
-    const service = typeof over.service_ms === "number" ? over.service_ms : null;
-    return blank({
-      queue_wait_ms: hold.queueWaitMs,
-      wall_ms: wall,
-      service_ms: service,
-      transfer_ms: service == null ? null : Math.max(0, wall - service),
-      ungated: hold.ungated,
-      dispatched_at: dispatchedAt.toISOString(),
-      completed_at: new Date().toISOString(),
-      ...over,
-    });
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), timeoutMs);
+    const onOuterAbort = () => controller.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener("abort", onOuterAbort, { once: true });
+    }
+    const t0 = Date.now();
+    const dispatchedAt = new Date();
+    const finish = (over: Partial<DiarizeTiming>): DiarizeTiming => {
+      const wall = Date.now() - t0;
+      const service = typeof over.service_ms === "number" ? over.service_ms : null;
+      return blank({
+        queue_wait_ms: hold.queueWaitMs,
+        wall_ms: wall,
+        service_ms: service,
+        transfer_ms: service == null ? null : Math.max(0, wall - service),
+        ungated: hold.ungated,
+        dispatched_at: dispatchedAt.toISOString(),
+        completed_at: new Date().toISOString(),
+        ...over,
+      });
+    };
+
+    try {
+      const res = await fetch(`${base.replace(/\/+$/, "")}/diarize`, {
+        method: "POST", body: form, signal: controller.signal, cache: "no-store",
+      });
+      clearTimeout(tid);
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        const timing = finish({});
+        return { ok: false, error: `http_${res.status}: ${text.slice(0, 180)}`, latencyMs: timing.wall_ms, timing };
+      }
+      const j = JSON.parse(text) as Partial<DiarizeResult>;
+      const serviceMs = typeof j.latency_ms === "number" ? j.latency_ms : null;
+      const timing = finish({ service_ms: serviceMs });
+      return {
+        ok: true,
+        latencyMs: timing.wall_ms,
+        timing,
+        result: {
+          speakers: Array.isArray(j.speakers) ? (j.speakers as DiarizeSpeaker[]) : [],
+          transcript_segments: Array.isArray(j.transcript_segments) ? j.transcript_segments : [],
+          overlap_windows: Array.isArray(j.overlap_windows) ? j.overlap_windows : [],
+          aggregates: j.aggregates ?? {},
+          latency_ms: serviceMs ?? undefined,
+          model_versions: j.model_versions,
+        },
+      };
+    } catch (e: unknown) {
+      clearTimeout(tid);
+      // Distinguish OUR timeout from the caller cancelling the whole pipeline: the error names the
+      // budget that was actually in force, so a stored `timeout_300000ms` is self-explaining.
+      const outerAborted = !!opts.signal?.aborted;
+      const timedOut = controller.signal.aborted && !outerAborted;
+      const timing = finish({ timed_out: timedOut });
+      if (timedOut) return { ok: false, error: `timeout_${timeoutMs}ms`, latencyMs: timing.wall_ms, timing };
+      if (outerAborted) return { ok: false, error: "aborted", latencyMs: timing.wall_ms, timing, retryable: true };
+      return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs: timing.wall_ms, timing };
+    } finally {
+      if (opts.signal) opts.signal.removeEventListener("abort", onOuterAbort);
+    }
   };
 
+  // REDUNDANCY-R1: the dispatch, across the diarize pool (one endpoint when no pool is configured). The
+  // slot above is still ONE slot for the whole pool: conservative, and exactly today's behaviour.
   try {
-    const res = await fetch(`${DIARIZE_BASE.replace(/\/+$/, "")}/diarize`, {
-      method: "POST", body: form, signal: controller.signal, cache: "no-store",
-    });
-    clearTimeout(tid);
-    const text = await res.text().catch(() => "");
-    if (!res.ok) {
-      const timing = finish({});
-      return { ok: false, error: `http_${res.status}: ${text.slice(0, 180)}`, latencyMs: timing.wall_ms, timing };
-    }
-    const j = JSON.parse(text) as Partial<DiarizeResult>;
-    const serviceMs = typeof j.latency_ms === "number" ? j.latency_ms : null;
-    const timing = finish({ service_ms: serviceMs });
-    return {
-      ok: true,
-      latencyMs: timing.wall_ms,
-      timing,
-      result: {
-        speakers: Array.isArray(j.speakers) ? (j.speakers as DiarizeSpeaker[]) : [],
-        transcript_segments: Array.isArray(j.transcript_segments) ? j.transcript_segments : [],
-        overlap_windows: Array.isArray(j.overlap_windows) ? j.overlap_windows : [],
-        aggregates: j.aggregates ?? {},
-        latency_ms: serviceMs ?? undefined,
-        model_versions: j.model_versions,
-      },
-    };
-  } catch (e: unknown) {
-    clearTimeout(tid);
-    // Distinguish OUR timeout from the caller cancelling the whole pipeline: the error names the
-    // budget that was actually in force, so a stored `timeout_300000ms` is self-explaining.
-    const outerAborted = !!opts.signal?.aborted;
-    const timedOut = controller.signal.aborted && !outerAborted;
-    const timing = finish({ timed_out: timedOut });
-    if (timedOut) return { ok: false, error: `timeout_${timeoutMs}ms`, latencyMs: timing.wall_ms, timing };
-    if (outerAborted) return { ok: false, error: "aborted", latencyMs: timing.wall_ms, timing, retryable: true };
-    return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs: timing.wall_ms, timing };
+    const { value, served_by } = await runPool("diarize", endpoints, dispatchAt, diarizeVerdict);
+    return served_by ? { ...value, served_by } : value;
   } finally {
-    if (opts.signal) opts.signal.removeEventListener("abort", onOuterAbort);
     // Release BEFORE returning to the caller, so the next waiter starts its dispatch immediately
     // rather than sitting through the post-processing (tagging, role refinement) that follows.
     await hold.release();

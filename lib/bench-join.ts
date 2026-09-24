@@ -21,6 +21,7 @@
 import { listBenchSessions } from "@/lib/bench";
 import { getListener, isListening, type ListenerRow } from "@/lib/bench-commands";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
+import { endpointsFor, poolConfigured, runPool, type Verdict } from "@/lib/service-pool";
 
 /**
  * D2 — a joined window may be at most 30 minutes.
@@ -208,11 +209,11 @@ export type JoinRequest = {
 };
 
 export type JoinOutcome =
-  | { ok: true; key: string; bytes: number; duration_ms: number }
+  | { ok: true; key: string; bytes: number; duration_ms: number; served_by?: string }
   /** `hop` names WHICH of the joining service's three transfers failed — worker_to_do,
    *  do_to_container or clip_to_r2. Absent when the failure was not a transfer (a refusal, a
    *  timeout, an unreachable box). */
-  | { ok: false; error: string; detail?: string; hop?: string };
+  | { ok: false; error: string; detail?: string; hop?: string; served_by?: string };
 
 /**
  * PURE — the request body for a window that spans pieces.
@@ -249,7 +250,21 @@ export function buildJoinRequest(
 }
 
 export function joinServiceConfigured(): boolean {
-  return Boolean(process.env.AUDIO_JOIN_URL);
+  return Boolean(process.env.AUDIO_JOIN_URL) || poolConfigured("join");
+}
+
+/**
+ * REDUNDANCY-R1 — which join answers mean "try the next instance". Down (unreachable, timeout, a 5xx,
+ * or a 5xx whose body was not JSON) and BUSY: `join_already_running` is one instance's single-flight
+ * mutex, and a second instance is exactly what can take the job instead. Everything else — a refusal,
+ * a bad request, a failed transfer the service itself reported — is the answer.
+ */
+export function joinVerdict(o: JoinOutcome): Verdict {
+  if (o.ok) return "ok";
+  if (o.error === "join_unreachable" || o.error === "join_timeout" || o.error === "join_already_running") return "failover";
+  if (/^join_http_5\d\d$/.test(o.error)) return "failover";
+  if (o.error === "join_bad_response" && /^status 5\d\d$/.test(o.detail ?? "")) return "failover";
+  return "final";
 }
 
 /**
@@ -258,20 +273,26 @@ export function joinServiceConfigured(): boolean {
  * response instead of an error page (D10).
  */
 export async function callJoinService(req: JoinRequest, opts: { timeoutMs?: number } = {}): Promise<JoinOutcome> {
-  const base = process.env.AUDIO_JOIN_URL;
-  if (!base) return { ok: false, error: "join_service_not_configured" };
+  const endpoints = endpointsFor("join");
+  if (endpoints.length === 0) return { ok: false, error: "join_service_not_configured" };
+  // ONE token for every instance: the twins are the same service, deployed with the same secret.
   const token = process.env.AUDIO_JOIN_TOKEN;
   if (!token) return { ok: false, error: "join_token_not_configured" };
+  const { value, served_by } = await runPool("join", endpoints, (base) => callJoinAt(base, token, req, opts), joinVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
 
+async function callJoinAt(base: string, token: string, req: JoinRequest, opts: { timeoutMs?: number }): Promise<JoinOutcome> {
   // ONE id per caller request, logged by both layers of the service.
   //
   // A Worker and the Durable Object it calls each emit their own invocation log, so a single POST
   // from here appears in `wrangler tail` as TWO "POST /join" lines. This id is what tells that
   // pair apart from a genuine retry: the same id twice is one request seen at two layers; two ids
-  // is something calling twice. Nothing in this file retries — one fetch, no retry wrapper — and
-  // the service's own mutex answers `join_already_running` to a second job anyway, so a duplicate
-  // could never make the container do the work twice. The id is here so that is provable rather
-  // than argued.
+  // is something calling twice. One fetch per INSTANCE, no retry wrapper. With a pool configured, a
+  // failover to the next instance is a new call and gets a new id, so two ids for one window means two
+  // instances were asked, and `served_by` on the outcome says which one answered. Each instance's own
+  // mutex answers `join_already_running` to a second job, so a duplicate could never make one container
+  // do the work twice. The id is here so that is provable rather than argued.
   const rid = `j_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
 
   const controller = new AbortController();

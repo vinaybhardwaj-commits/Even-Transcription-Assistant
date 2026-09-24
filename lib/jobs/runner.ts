@@ -20,6 +20,35 @@ import {
 import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, type JobRow } from "./types";
 import { errorCodeOf, jobError } from "./errors";
 import { randomUUID } from "node:crypto";
+import { withPoolContext } from "@/lib/service-pool";
+import type { StepOutcome } from "./types";
+
+/**
+ * PURE — REDUNDANCY-R1: carry which endpoint served each pooled service onto the job. `served_by` is what this
+ * step's calls actually used, merged over what earlier steps recorded in `progress.served_by`: a `next` step
+ * carries it in its progress, a `done` job stores it on its result. A step that pooled nothing, in a job
+ * that never has, returns the outcome untouched (the no-env identity), and a `fail` is a string, left as is.
+ */
+export function withServedBy(
+  outcome: StepOutcome,
+  priorProgress: Record<string, unknown> | null | undefined,
+  served: Record<string, string>,
+): StepOutcome {
+  const prior = priorProgress?.served_by;
+  const priorMap = prior && typeof prior === "object" ? (prior as Record<string, string>) : null;
+  if (Object.keys(served).length === 0 && !priorMap) return outcome;
+  if (outcome.kind === "next") {
+    const carried = outcome.progress?.served_by;
+    const base = carried && typeof carried === "object" ? (carried as Record<string, string>) : priorMap ?? {};
+    return { ...outcome, progress: { ...outcome.progress, served_by: { ...base, ...served } } };
+  }
+  if (outcome.kind === "done") {
+    const own = outcome.result?.served_by;
+    const base = { ...(priorMap ?? {}), ...(own && typeof own === "object" ? (own as Record<string, string>) : {}) };
+    return { ...outcome, result: { ...outcome.result, served_by: { ...base, ...served } } };
+  }
+  return outcome;
+}
 
 export type StepReport = {
   job_id: string;
@@ -68,7 +97,12 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
   const step = job.step ?? kind.first;
   let outcome;
   try {
-    outcome = await kind.run({ job, step, args: job.args, progress: job.progress, runner });
+    const ctx = { job, step, args: job.args, progress: job.progress, runner };
+    // REDUNDANCY-R1 — every step runs inside a pool context: bulk routing in, served_by out. With no pool
+    // configured nothing is recorded and the outcome is returned exactly as the kind produced it.
+    const bulk = kind.poolBulk ? await kind.poolBulk(ctx) : false;
+    const pooled = await withPoolContext({ bulk }, () => kind.run(ctx));
+    outcome = withServedBy(pooled.value, job.progress, pooled.served_by);
   } catch (e) {
     // A throwing step is a FAILURE, counted, not (yet) a failed job: the lease is released and the
     // next claim retries the same step, up to the cap. ONE statement both counts it and decides

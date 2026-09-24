@@ -327,11 +327,12 @@ describe("Drain throughput fix (23 Sep) — join-busy backoff, PURE", () => {
     expect(joinBusyBackoffMs(rand)).toBe(joinBusyBackoffMs(rand));
   });
 
-  it("the bounds are the ones the order asked for: 30-60s backoff, a step budget under MAX_STEP_MS, a 15 min / 30 attempt cap", () => {
+  it("the bounds are the ones the orders asked for: 30-60s backoff, a step budget under MAX_STEP_MS, a 6 h cap (T2, REDUNDANCY-R1)", () => {
     expect(JOIN_BUSY_BACKOFF_MIN_MS).toBe(30_000);
     expect(JOIN_BUSY_BACKOFF_MAX_MS).toBe(60_000);
-    expect(JOIN_BUSY_MAX_WAIT_MS).toBe(15 * 60_000);
-    expect(JOIN_BUSY_MAX_ATTEMPTS).toBeGreaterThan(0);
+    expect(JOIN_BUSY_MAX_WAIT_MS).toBe(6 * 60 * 60_000);
+    // The count ceiling must not be the stop condition inside the 6 h: 6 h at the FASTEST backoff is 720 answers.
+    expect(JOIN_BUSY_MAX_ATTEMPTS).toBeGreaterThan((6 * 60 * 60_000) / JOIN_BUSY_BACKOFF_MIN_MS);
     // A per-claim budget that could not fit even one backoff would never actually retry.
     expect(JOIN_BUSY_STEP_BUDGET_MS).toBeGreaterThan(JOIN_BUSY_BACKOFF_MAX_MS);
   });

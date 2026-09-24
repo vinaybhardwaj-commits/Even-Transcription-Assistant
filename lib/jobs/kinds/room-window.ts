@@ -14,6 +14,8 @@
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
+import { sql } from "@/lib/db";
+import { bulkAgeMinutes, isBulkWindow } from "@/lib/service-pool";
 import {
   roomWindowPrepare, roomWindowSegment, roomWindowEngine, roomWindowPoll, roomWindowFinish,
   ROUTER_JOB_LOST,
@@ -97,6 +99,20 @@ export const roomWindowKind: JobKind = {
     const translate = optionalBool(o, "translate");
     const switch_override = optionalBool(o, "switch_override");
     return { window_id, origin, actor, via, ...(translate ? { translate: true } : {}), ...(switch_override ? { switch_override: true } : {}) };
+  },
+
+  /**
+   * REDUNDANCY-R1 — BULK when the window closed more than BULK_AGE_MINUTES ago: its join and whisper calls then
+   * try the *_BULK_URLS twins first, so the backlog runs off the Mini while live clinic audio stays on it.
+   * Unset = OFF, and then nothing is even read (no query, no change to the step). Read from the window row
+   * at every step, never from progress, so the answer is the window's own clock and not a stored guess.
+   */
+  async poolBulk(ctx: StepContext) {
+    if (bulkAgeMinutes() === null) return false;
+    const windowId = String(ctx.args.window_id ?? "");
+    const rows = (await sql`SELECT closed_at FROM bench_window WHERE id = ${windowId}`) as Array<{ closed_at: string | null }>;
+    const closed = rows[0]?.closed_at;
+    return isBulkWindow(closed ? new Date(closed).getTime() : null);
   },
 
   async run(ctx: StepContext) {

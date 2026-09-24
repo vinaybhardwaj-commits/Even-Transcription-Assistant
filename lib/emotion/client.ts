@@ -13,13 +13,28 @@
  *
  * BRANCH ON `ok`. The service answers inference errors with HTTP 200 and ok:false.
  */
+import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 export const EMOTION_MODEL_ID = "Aniemore/wavlm-emotion-v1-crosslingual";
 export const EMOTION_MODEL_KEY = "wavlm";
 export const EMOTION_LABELS = ["anger", "disgust", "enthusiasm", "fear", "happiness", "neutral", "sadness"] as const;
 export type EmotionLabel = (typeof EMOTION_LABELS)[number];
 
-/** Env first, literal behind it — the idiom every Mini tunnel adapter uses. */
-const BASE = () => (process.env.EMOTION_BASE_URL || "https://emotion.llmvinayminihome.uk").replace(/\/+$/, "");
+/** Env first, literal behind it — the idiom every Mini tunnel adapter uses. REDUNDANCY-R1: the literal is the
+ *  pool's fallback, used only when neither EMOTION_BASE_URLS nor EMOTION_BASE_URL is set. */
+export const EMOTION_FALLBACK_URL = "https://emotion.llmvinayminihome.uk";
+const trimBase = (b: string) => b.replace(/\/+$/, "");
+
+/** REDUNDANCY-R1 — health: unreachable or a 5xx is the endpoint; any other refusal is the answer. */
+export function emotionHealthVerdict(h: EmotionHealth): Verdict {
+  if (h.ok) return "ok";
+  return h.error.startsWith("health_unreachable") || /^health_http_5\d\d$/.test(h.error) ? "failover" : "final";
+}
+
+/** REDUNDANCY-R1 — segments: `retryable` is exactly the endpoint-failed class (unreachable, 5xx). */
+export function emotionSegmentsVerdict(r: SegmentsResponse): Verdict {
+  if (r.ok) return "ok";
+  return "retryable" in r && r.retryable === true ? "failover" : "final";
+}
 
 /**
  * THE PLAUSIBLE CAP. The service is configured for 60 s (EMOTION_MAX_DURATION_S in its launchd
@@ -41,9 +56,10 @@ export const EMOTION_HEALTH_TIMEOUT_MS = 10_000;
 
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
-export type EmotionHealth =
+export type EmotionHealth = (
   | { ok: true; cap_s: number; min_speech_s: number; loaded: boolean | "unknown"; model: string | null; subfolder: string | null }
-  | { ok: false; error: string };
+  | { ok: false; error: string }
+) & { /** REDUNDANCY-R1 — the origin that answered; present only when an emotion pool is configured. */ served_by?: string };
 
 /** The service's health field for the least speech it will score, spelled as the service spells it. */
 export const HEALTH_MIN_SPEECH_KEY = "min_speech_s";
@@ -54,8 +70,14 @@ export const HEALTH_MIN_SPEECH_KEY = "min_speech_s";
  * the service's EMOTION_MIN_SPEECH_S changes (E14 §4.3).
  */
 export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<EmotionHealth> {
+  const endpoints = endpointsFor("emotion", { fallback: EMOTION_FALLBACK_URL });
+  const { value, served_by } = await runPool("emotion", endpoints, (base) => emotionHealthAt(base, fetchImpl), emotionHealthVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
+
+async function emotionHealthAt(base: string, fetchImpl: Fetcher): Promise<EmotionHealth> {
   try {
-    const res = await fetchImpl(`${BASE()}/health`, { signal: AbortSignal.timeout(EMOTION_HEALTH_TIMEOUT_MS), cache: "no-store" });
+    const res = await fetchImpl(`${trimBase(base)}/health`, { signal: AbortSignal.timeout(EMOTION_HEALTH_TIMEOUT_MS), cache: "no-store" });
     const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
     // TRUST NOTHING FROM AN UNHEALTHY ANSWER. A 500 with ok:false can still carry a max_duration_s;
     // a cap that arrives alongside a failure is not a cap.
@@ -106,9 +128,10 @@ export const EMPTY_LABELS_UNFLAGGED = "empty_labels_without_unscorable_flag";
 const isEmptyObject = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0;
 const finiteOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 
-export type SegmentsResponse =
+export type SegmentsResponse = (
   | { ok: true; model: string; model_key: string; subfolder: string | null; device: string | null; cap_s: number; results: SegmentScore[]; fetch_s: number | null; decode_s: number | null }
-  | { ok: false; error: string; retryable: boolean };
+  | { ok: false; error: string; retryable: boolean }
+) & { /** REDUNDANCY-R1 — the origin that answered; present only when an emotion pool is configured. */ served_by?: string };
 
 const reasonText = (v: unknown) => String(v ?? "unknown").replace(/[^\x20-\x7e]/g, "?").slice(0, 120);
 
@@ -181,9 +204,21 @@ export async function scoreSegments(
 ): Promise<SegmentsResponse> {
   const secret = (process.env[EMOTION_SECRET_ENV] ?? "").trim();
   if (!secret) return { ok: false, error: "emotion_secret_not_configured", retryable: false };
+  const endpoints = endpointsFor("emotion", { fallback: EMOTION_FALLBACK_URL });
+  const { value, served_by } = await runPool("emotion", endpoints, (base) => scoreSegmentsAt(base, secret, audioUrl, segments, fetchImpl), emotionSegmentsVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
+
+async function scoreSegmentsAt(
+  base: string,
+  secret: string,
+  audioUrl: string,
+  segments: Array<{ start_s: number; end_s: number }>,
+  fetchImpl: Fetcher,
+): Promise<SegmentsResponse> {
   let res: Response;
   try {
-    res = await fetchImpl(`${BASE()}/inference/wavlm/segments`, {
+    res = await fetchImpl(`${trimBase(base)}/inference/wavlm/segments`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
       body: JSON.stringify({ audio_url: audioUrl, segments }),
