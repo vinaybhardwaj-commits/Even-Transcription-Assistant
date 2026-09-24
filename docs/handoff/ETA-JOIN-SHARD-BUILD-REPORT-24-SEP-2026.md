@@ -29,21 +29,21 @@ Order: `eta-lab/orders/JOIN-SHARD-AND-ENCOUNTER-FIRST.md` Part A. Branch `vinay/
    refused by name instead of quietly served by it.
 
 ## Cloudflare facts (checked 24 Sep; docs.cloudflare.com/containers)
-- Account `c7f665855e6e4d22090000b0397c4d0d` (verified with `wrangler whoami`). Account limits:
+- The Even Cloudflare account (verified with `wrangler whoami`; the id is in the lab's orders, not in this public repo). Account limits:
   6 TiB concurrent memory, 1,500 vCPU, 30 TB disk. 33 x `standard-1` = 16.5 vCPU / 132 GiB / 264 GB.
 - Price (Workers Paid): memory $0.0000025 / GiB-s, CPU $0.000020 / vCPU-s (ACTIVE use only), disk
   $0.00000007 / GB-s; billed per 10 ms while running. **A standard-1 running flat-out costs at most
   $0.074 per instance-hour** (memory $0.036 + CPU $0.036 + disk $0.002); CPU is less at partial use.
   Monthly inclusions: 25 GiB-h memory, 375 vCPU-min, 200 GB-h disk. `sleepAfter` 60 s unchanged.
   All 32 shards busy for an hour = about $2.4. Spend follows joins, not `max_instances`.
-- Deployed state now: container `eta-audio-join-joiner` (id `a039a474-...`), `max_instances: 1`,
+- Deployed state now: container `eta-audio-join-joiner` (id withheld), `max_instances: 1`,
   1 live instance, image built 29 Aug, `standard-1`, APAC.
 - **UNVERIFIED:** what the platform does when a start would exceed `max_instances`. The design
   makes it unreachable (shards + legacy <= max) rather than relying on the answer.
 
 ## How the Worker is deployed today
 - From `services/audio-join`: `npx wrangler deploy` (README). Worker `eta-audio-join`, last
-  deployments 20 Aug and 29 Aug, both authored by `vinay.bhardwaj@even.in`, source "Upload" — i.e.
+  deployments 20 Aug and 29 Aug, both authored by the account owner, source "Upload" — i.e.
   from a person's machine with `wrangler login`, not CI. This box (e2e-80-13) had no wrangler auth;
   it now reads the Cloudflare API token from a 0600 file into `CLOUDFLARE_API_TOKEN` (never argv).
 - `wrangler deploy --dry-run` here: builds the image (ffmpeg 8.1.2 layer), reports bindings
