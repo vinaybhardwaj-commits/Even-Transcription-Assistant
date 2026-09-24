@@ -56,7 +56,10 @@ jobs:
           for l in os.environ["CHECK_OUT"].splitlines():
               m = re.match(r"^\s+(\S+?):(\d+)\s+(.*?)\s*$", l)
               if m: found[key(m.group(1), m.group(3))] += 1
-          base = Counter(l.rstrip("\n") for l in open(".github/check-silent-baseline.txt") if l.strip() and not l.startswith("#"))
+          bp = ".github/check-silent-baseline.txt"
+          if not os.path.exists(bp):
+              print(f"::error::check:silent baseline missing ({bp}); gate with kit/gh-gate.sh, which overlays it"); sys.exit(1)
+          base = Counter(l.rstrip("\n") for l in open(bp) if l.strip() and not l.startswith("#"))
           new = found - base
           for k in sorted(new): print(f"::error::NEW silent-failure handler (not in the accepted baseline): {k.replace(chr(9), '  ')}")
           for k in sorted(base - found): print(f"::notice::accepted finding no longer present (remove it from the baseline): {k.replace(chr(9), '  ')}")
