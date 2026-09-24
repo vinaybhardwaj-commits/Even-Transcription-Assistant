@@ -310,6 +310,40 @@ describe("gap 3 — the number exemption: digits are NEVER removed; number words
     const hi = ["गोली", "२", "सुबह", "आराम", "करें"];
     expect(collapseLine(rep(hi, 3))).toBe(rep(hi, 3));
   });
+  it("a digit dose is never collapsed in ANY script: a table over the scripts this app serves (ETA-Refuter F1)", () => {
+    // Code points, so the file reads the same in every editor. Each is the digit five, from a different Unicode Nd block.
+    const FIVES: Array<[string, string]> = [
+      ["ASCII", "5"], ["Devanagari", "\u096B"], ["Kannada", "\u0CEB"], ["Tamil", "\u0BEB"], ["Telugu", "\u0C6B"],
+      ["Gujarati", "\u0AEB"], ["Bengali", "\u09EB"], ["Malayalam", "\u0D6B"], ["Gurmukhi", "\u0A6B"], ["Arabic-Indic", "\u0665"],
+      ["fullwidth", "\uFF15"],
+    ];
+    for (const [script, five] of FIVES) {
+      // a dose phrase, and a long phrase in which the digit is a tiny share (so only the DIGIT rule can protect it)
+      const dose = ["take", five, "mg", "daily"];
+      const long = ["please", "take", five, "drops", "in", "the", "affected", "eye", "twice", "today"];
+      for (const unit of [dose, long]) {
+        const line = rep(unit, 3);
+        expect(collapseLine(line), `${script}: ${unit.join(" ")}`).toBe(line);
+        expect(isNumberExemptUnit(unit), script).toBe(true);
+        // and across a line break
+        const split = [line.split(" ").slice(0, Math.ceil(line.split(" ").length / 2)).join(" "), line.split(" ").slice(Math.ceil(line.split(" ").length / 2)).join(" ")];
+        expect(collapseAssembled(split.join("\n")).text, `${script} across lines`).toBe(split.join("\n"));
+      }
+    }
+    // letter-numbers and vulgar fractions carry protection too (\p{Nl}, \p{No})
+    for (const glyph of ["\u00BD", "\u00BC", "\u2167"]) {
+      const line = rep(["take", glyph, "tablet", "after", "food"], 3);
+      expect(collapseLine(line), glyph).toBe(line);
+    }
+  });
+  it("1.5 and 15 are different doses: the punctuation-deleting fold must never let them merge", () => {
+    const a = rep(["take", "1.5", "mg", "daily"], 3);
+    expect(collapseLine(a)).toBe(a);
+    const mixed = "take 1.5 mg daily take 15 mg daily take 1.5 mg daily";
+    expect(collapseLine(mixed)).toBe(mixed);
+    const across = ["take 1.5 mg daily take 1.5 mg", "daily take 1.5 mg daily"].join("\n");
+    expect(collapseAssembled(across).text).toBe(across);
+  });
   it("short dose phrases stay: number words are at least a third of the unit", () => {
     for (const unit of [["ek", "goli", "subah"], [HI_FIFTY, "milligram"], [KN_QUARTER, KN_TABLET], ["do", "goli"], ["half", "tablet", "daily", "after", "food", "please"]]) {
       // (the last unit is 1 in 6: NOT exempt — see below; the first four are)
@@ -380,8 +414,86 @@ describe("properties over 400 seeded texts (a failure prints its seed)", () => {
   });
 });
 
-describe("cost", () => {
-  it("a 20,000-word text with loops collapses in well under a second", () => {
+describe("skipping a protected run must not change any RESULT (only the time)", () => {
+  it("a collapsible run that starts inside the LAST word of a protected run is still collapsed", () => {
+    // The digit-protected run is "1.5 wait" x4. The waits that follow begin a run of their own, overlapping its last word.
+    // Skipping the whole protected run would have missed it. Expected value = what the version before the skip produced.
+    const line = "1.5 wait 1.5 wait 1.5 wait 1.5 wait wait wait wait wait wait wait wait a night cough";
+    expect(collapseLine(line)).toBe("1.5 wait 1.5 wait 1.5 wait 1.5 wait wait a night cough");
+  });
+
+  // The plain algorithm, stepping ONE word at a time, as the guard did before the skip. Same rules and constants.
+  const PUNCT_RE = /[!-/:-@[-`{-~\u0964\u0965]/gu;
+  const fold = (w: string) => w.toLowerCase().replace(PUNCT_RE, "");
+  function referenceCollapseLine(line: string): string {
+    let cur = line.split(/\s+/u).filter(Boolean);
+    const original = cur;
+    for (let guard = 0; guard < 16; guard++) {
+      if (cur.length < 3) break;
+      let changed = false;
+      for (let plen = Math.min(Math.floor(cur.length / 3), MAX_PHRASE_WORDS); plen >= 1 && !changed; plen--) {
+        const out: string[] = [];
+        let i = 0;
+        while (i < cur.length) {
+          const unit = cur.slice(i, i + plen);
+          if (unit.length < plen) { out.push(...cur.slice(i)); break; }
+          let count = 1, j = i + plen;
+          while (j + plen <= cur.length && cur.slice(j, j + plen).every((w, k) => fold(w) === fold(unit[k]!))) { count++; j += plen; }
+          const longEnough = plen === 1 ? unit[0]!.replace(PUNCT_RE, "").length >= 3 : unit.join(" ").length >= 8;
+          if (count >= 3 && longEnough && !isNumberExemptUnit(unit)) { out.push(...unit); i = j; changed = true; continue; }
+          out.push(cur[i]!); i++;
+        }
+        if (changed) cur = out;
+      }
+      if (!changed) break;
+    }
+    return cur === original ? line : cur.join(" ");
+  }
+  const RV = ["take", "rest", "water", "please", "wait", "again", "fever", "cough", "night", "do", "one", "ek", "goli", "2", "500", "mg", "hello", "1.5", "15", "ok", "a", "five", "half"];
+  it("matches the one-word-at-a-time reference on 3,000 seeded lines rich in protected runs", () => {
+    for (let seed = 1; seed <= 3000; seed++) {
+      const r = rng(seed * 7919);
+      const line: string[] = [];
+      for (let k = 0, n = 1 + Math.floor(r() * 12); k < n; k++) {
+        const unit = Array.from({ length: 1 + Math.floor(r() * 5) }, () => RV[Math.floor(r() * RV.length)]);
+        const times = r() < 0.5 ? 3 + Math.floor(r() * 6) : r() < 0.3 ? 2 : 1;
+        for (let x = 0; x < times; x++) line.push(...unit);
+      }
+      const text = line.join(" ");
+      expect(collapseLine(text), `seed ${seed}`).toBe(referenceCollapseLine(text));
+    }
+  });
+});
+
+describe("cost — the LOOP shapes, which are what a hallucination looks like (ETA-Refuter F2)", () => {
+  // Measured 24 Sep on the box: a digit-protected 8,000-word loop took ~8.9 s before a protected run was skipped whole
+  // (quadratic: each step re-scanned the rest of the run) and ~0.1 s after. The bound is 10x the fixed time, far under the old.
+  const loopLine = (period: number, n: number, digit: boolean) => {
+    const unit = words(period);
+    if (digit) unit[2] = "5";
+    return Array.from({ length: Math.ceil(n / period) }, () => unit.join(" ")).join(" ");
+  };
+  it("a PROTECTED loop (a digit in the unit) of 8,000 words is linear, not quadratic", () => {
+    const t0 = Date.now();
+    const r = collapseAssembled(loopLine(8, 8000, true));
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(r.changed).toBe(false); // protected: the digit dose is never removed
+  });
+  it("a plain loop of 8,000 words collapses to one copy quickly", () => {
+    const t0 = Date.now();
+    const r = collapseAssembled(loopLine(8, 8000, false));
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(r.text.split(/\s+/)).toHaveLength(8);
+  });
+  it("a protected loop that strains across many lines is also linear", () => {
+    const ws = loopLine(9, 6000, true).split(" ");
+    const lines: string[] = [];
+    for (let k = 0; k < ws.length; k += 13) lines.push(ws.slice(k, k + 13).join(" "));
+    const t0 = Date.now();
+    collapseAssembled(lines.join("\n"));
+    expect(Date.now() - t0).toBeLessThan(1500);
+  });
+  it("a 20,000-word text with scattered loops still collapses fast", () => {
     const unit = words(7);
     const body = Array.from({ length: 2000 }, (_, i) => (i % 97 === 0 ? rep(unit, 4) : words(9, `t${letters(i)}z`).join(" "))).join("\n");
     const t0 = Date.now();

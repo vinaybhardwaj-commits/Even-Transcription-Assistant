@@ -90,6 +90,12 @@ export function isNumberToken(word: string): boolean {
   return false;
 }
 
+/**
+ * WARNING — foldToken DELETES punctuation, so "1.5" folds to "15" and two doses a factor of ten apart compare EQUAL here.
+ * Nothing but the digit rule in isNumberExemptUnit (a unit containing a digit is never collapsed) keeps them apart.
+ * Do not "tidy" this fold, and do not narrow that digit rule, without re-reading this line. (Line comparison uses
+ * foldText, which turns punctuation into a space, so that path is safe on its own.) ETA-Refuter, 24 Sep.
+ */
 const foldToken = (w: string): string => w.toLowerCase().replace(PUNCT, "");
 
 /** True when the word carries a digit of any script or a vulgar fraction. */
@@ -132,10 +138,23 @@ function collapseUnits<T>(items: readonly T[], word: (t: T) => string): readonly
           j += plen;
         }
         const longEnough = plen === 1 ? unitWords[0]!.replace(PUNCT, "").length >= MIN_WORD_CHARS : unitWords.join(" ").length >= MIN_PHRASE_CHARS;
-        if (count >= MIN_REPEATS && longEnough && !isNumberExemptUnit(unitWords)) {
-          out.push(...unit);
-          i = j;
-          changed = true;
+        if (count >= MIN_REPEATS) {
+          if (longEnough && !isNumberExemptUnit(unitWords)) {
+            out.push(...unit);
+            i = j;
+            changed = true;
+            continue;
+          }
+          // A real run that is PROTECTED (a number in it, or too short to trust). Every window that lies ENTIRELY inside
+          // the run is a rotation of the unit: the same words, so the same digits, number share and length, protected for
+          // the same reason. Stepping through them one at a time re-scanned the rest of the run at each step: quadratic,
+          // and a digit-protected 8,000-word loop took ~9 s (measured 24 Sep, ETA-Refuter F2). So step past them in one go.
+          // NOT past the whole run: the windows that START in the run's last plen-1 words reach beyond it and are different
+          // content, and a collapsible run can begin there ("1.5 wait 1.5 wait wait wait wait": the waits). The result is
+          // identical to stepping one word at a time; a differential test against the previous version pins that.
+          const next = Math.max(i + 1, j - plen + 1);
+          for (let k = i; k < next; k++) out.push(current[k]!);
+          i = next;
           continue;
         }
         out.push(current[i]!);
