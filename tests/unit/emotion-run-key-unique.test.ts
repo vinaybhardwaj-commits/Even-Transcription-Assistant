@@ -41,6 +41,11 @@ describe("buildRuns: one run per (speaker, start)", () => {
     ]);
   });
 
+  it("surviving runs keep the order they were first opened, the folded one at its first position", () => {
+    const turns = [T("a", 0, 1000, 1200), T("b", 1, 1000, 1500), T("c", 0, 1000, 9000), T("d", 1, 20000, 21000)];
+    expect(buildRuns(turns).runs.map((r) => `${r.speaker_idx}|${r.start_ms}`)).toEqual(["0|1000", "1|1000", "1|20000"]);
+  });
+
   it("random turn soups never yield a duplicate planned key", () => {
     let seed = 7;
     const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
