@@ -90,7 +90,7 @@ describe("poolEndpoints — which endpoints, in which order", () => {
     expect(poolEndpoints("whisper", { bulk: false }, env)).toEqual(["https://mini", "https://box"]);
   });
   it("served_by is the ORIGIN only — never a path, query or credential", () => {
-    expect(servedByOf("https://user:pw@box.example:8443/join/x?t=secret")).toBe("https://box.example:8443");
+    expect(servedByOf("https://user:pw@example.com:8443/join/x?t=secret")).toBe("https://example.com:8443");
     expect(servedByOf("not a url")).toBe("unparseable_endpoint");
   });
 });
