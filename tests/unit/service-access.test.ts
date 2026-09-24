@@ -69,7 +69,7 @@ describe("withServiceAccess — the init, untouched when there is nothing to add
     expect(out.method).toBe("POST");
   });
   it("REDIRECTS: refused when the token is attached (Refuter-2 R1), absent when it is not, the caller's own choice kept", () => {
-    expect(withServiceAccess("https://a.llmvinayminihome.uk/x", {}, ON).redirect).toBe("error");
+    expect(withServiceAccess<RequestInit>("https://a.llmvinayminihome.uk/x", {}, ON).redirect).toBe("error");
     expect(withServiceAccess("https://a.llmvinayminihome.uk/x", { redirect: "follow" }, ON).redirect).toBe("follow");
     expect("redirect" in withServiceAccess("https://a.llmvinayminihome.uk/x", { method: "GET" }, {})).toBe(false);
     expect("redirect" in withServiceAccess("https://api.sarvam.ai/x", { method: "GET" }, ON)).toBe(false);
