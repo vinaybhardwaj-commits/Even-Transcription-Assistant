@@ -56,7 +56,7 @@ other. It is now one flag **per shard**.
   because each shard is a container and `max_instances` is a hard ceiling. `JOIN_SHARDS` is 32 and
   `max_instances` is 33 (32 + legacy); a test fails if they drift. Two sessions that hash to one
   shard serialise; that is a collision cost, not a correctness one. With 11 rooms, expected
-  collisions at N=32 are ~1.6 refused joins per full-clinic burst (N=5 would be ~4.4).
+  collisions at N=32 are ~1.6 refused joins per full-clinic burst (N=5 would be ~6.4).
 - `/health` reports `shards` and `shard_header`; a pre-shard Worker answers without them.
 
 ### How the container reaches the recordings

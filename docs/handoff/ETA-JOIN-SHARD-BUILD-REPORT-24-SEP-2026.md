@@ -23,7 +23,7 @@ Order: `eta-lab/orders/JOIN-SHARD-AND-ENCOUNTER-FIRST.md` Part A. Branch `vinay/
    behaviour), and the second is refused with `join_already_running`, which the app's pool already
    treats as failover.
 2. **Sizing.** 11 rooms are enabled (6 with status `recording` in `scribe_rooms` at about 09:20 IST today). Expected refused joins for k
-   concurrent keys over N shards: k=11 -> N=5: 4.4, N=16: 2.9, N=32: 1.6. Idle shards cost nothing.
+   concurrent keys over N shards: k=11 -> N=5: 6.4, N=16: 2.9, N=32: 1.6. Idle shards cost nothing.
    The test pins `max_instances == JOIN_SHARDS + 1` so the two cannot drift.
 3. **A request with no header goes to the old `joiner`** (back-compat, tested). A malformed header is
    refused by name instead of quietly served by it.

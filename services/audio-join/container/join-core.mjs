@@ -91,8 +91,8 @@ export const JOIN_SERVICE_VERSION = "1.2.0";
 // The caller names the shard with a header — the session id, which the app already holds as
 // `meta.session_id`. The key is HASHED into a fixed number of instances rather than used as a raw
 // Durable Object name, because every instance is a container and `max_instances` in
-// wrangler.jsonc is a hard platform ceiling: a raw name per session would ask for a 7th container
-// the moment a 7th session joined at once. Two sessions hashing to one shard just serialise, which
+// wrangler.jsonc is a hard platform ceiling: a raw name per session would ask for a container past
+// `max_instances` the moment one more session than that joined at once. Two sessions hashing to one shard just serialise, which
 // is the behaviour they had before this change.
 // ---------------------------------------------------------------------------
 
@@ -109,13 +109,15 @@ export const LEGACY_INSTANCE = "joiner";
  *
  * WHY 32. 11 rooms are enabled and each has its own session, so up to 11 keys can join at once.
  * Hashing k keys into N shards is a birthday problem: two rooms on one shard serialise, and the
- * second is refused. Expected refusals with 11 concurrent keys: N=5 -> 4.4, N=16 -> 2.9,
- * N=32 -> 1.6. An idle shard costs nothing (its container sleeps after 60 s and billing is for
+ * second is refused. Expected refusals with 11 concurrent keys: N=5 -> 6.4, N=16 -> 2.9,
+ * N=32 -> 1.6 (k - N(1 - (1 - 1/N)^k)). An idle shard costs nothing (its container sleeps after 60 s and billing is for
  * active time), so the only price of a larger N is one more cold start per shard per quiet spell.
  */
 export const JOIN_SHARDS = 32;
 
-const SHARD_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+/** A plain id. `lib/bench-join.ts` (`shardHeader`) carries a copy of this pattern, because the app
+ *  does not import from services/; `tests/unit/join-shard.test.ts` fails if the two differ. */
+export const SHARD_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** PURE — FNV-1a, 32 bit. Deterministic and dependency free, so every colo and the twin agree. */
 export function fnv1a32(text) {

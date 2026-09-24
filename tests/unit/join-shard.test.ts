@@ -11,7 +11,7 @@
  *   - a second join on a busy shard is refused (never queued), and the flag clears afterwards;
  *   - a request with no key goes to the legacy "joiner" instance, exactly as before;
  *   - the number of instances a stream of keys can touch never exceeds `max_instances`.
- * What it does NOT prove: that Cloudflare starts six containers. That is the deploy's check.
+ * What it does NOT prove: that Cloudflare starts 33 containers. That is the deploy's check.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
@@ -35,7 +35,7 @@ class FakeFixedLengthStream extends TransformStream<Uint8Array, Uint8Array> {
 // @ts-expect-error — plain ESM Worker; no types, by design.
 import worker, { Joiner } from "../../services/audio-join/worker/index.js";
 // @ts-expect-error — plain ESM shipped inside the container image; no types, by design.
-import { JOIN_SHARDS, LEGACY_INSTANCE, SHARD_HEADER, fnv1a32, shardInstanceName, shardKeyFromHeaders } from "../../services/audio-join/container/join-core.mjs";
+import { JOIN_SHARDS, LEGACY_INSTANCE, SHARD_HEADER, SHARD_KEY_RE, fnv1a32, shardInstanceName, shardKeyFromHeaders } from "../../services/audio-join/container/join-core.mjs";
 // @ts-expect-error — the twin's front door; plain ESM, no types.
 import { createTwin } from "../../services/audio-join/twin/server.mjs";
 import { callJoinService, shardHeader } from "@/lib/bench-join";
@@ -148,6 +148,19 @@ describe("shard naming", () => {
     }
     expect(counts.size).toBe(JOIN_SHARDS);
     for (const n of counts.values()) expect(n).toBeLessThan((1000 / JOIN_SHARDS) * 3);
+  });
+
+  it("the app's copy of the key pattern is the service's pattern (drift would silently un-shard sessions)", () => {
+    const src = readFileSync("lib/bench-join.ts", "utf8");
+    const literal = /return typeof id === "string" && (\/\^[^\n]*?\$\/)\.test\(id\)/.exec(src)?.[1];
+    expect(literal).toBeDefined();
+    const client = new RegExp(literal!.slice(1, -1));
+    expect(client.source).toBe(SHARD_KEY_RE.source);
+    // and behaviourally, on the characters a drift would drop
+    for (const id of ["bs_a", "a.b", "a:b", "a-b", "a_b", "bs a", "a/b", "", "x".repeat(129)]) {
+      expect(client.test(id)).toBe(SHARD_KEY_RE.test(id));
+      expect(Object.keys(shardHeader({ meta: { session_id: id } } as never)).length === 1).toBe(SHARD_KEY_RE.test(id));
+    }
   });
 
   it("the header: absent is fine, a plain id is fine, anything else is refused by name", () => {
