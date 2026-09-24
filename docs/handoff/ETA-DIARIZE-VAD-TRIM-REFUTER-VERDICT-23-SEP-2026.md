@@ -42,3 +42,17 @@ A builder recommending against shipping their own work, and then hardening it ag
 
 ## Verdict: PASS (flag-off)
 Nothing reaches production while the flag is off, and the three properties that would matter on a flip are pinned by tests rather than asserted in comments. **Merging flag-off is safe; the flip is a separate decision and needs a separate review** — the remap across stitch boundaries, the cost accounting, the Mini endpoint and the speaker-order consequence I raised earlier are all still unexamined by me.
+
+---
+
+# CORRECTION — the endpoint does not exist, 24 Sep
+
+eta-refuter-2 (bus #71) checked every host's `openapi.json` read-only and found that **`/speech_regions` is served by no eta-diarize at all** — not the Mini, not the box, not c3. I verified it on the Mini myself rather than accept it: `~/eta-diarize/server.py` contains **0** occurrences of `speech_regions`, and defines exactly four routes — `/health` (:117), `/diarize` (:329), `/enroll` (:399), `/embed_speakers` (:568). `lib/diarize-vad-trim.ts` posts to `POST /speech_regions`.
+
+**What I wrote was too weak.** My verdict listed the Mini endpoint under "what I have NOT reviewed", saying it had "never run against real ECAPA" — which treats it as existing but unproven. The true statement was available and stronger: **it is not deployed anywhere**, so the flag could not trim even if flipped.
+
+**How I made the error is the useful part.** I verified the *other* endpoint rigorously — I diffed `server.py` against its backup, confirmed lines 1–419 byte-identical, and located `@app.post("/embed_speakers")` in the appended block. Then for VAD trim I saw `scripts/eta-diarize/speech_regions_block.py` and `APPLY-SPEECH-REGIONS.md` in the branch, and read "a patch exists for minibot to apply" as "the endpoint is pending" rather than asking the one question I had already asked of its neighbour: *is it there?* Checking one endpoint's existence carefully and assuming the other's, in the same file, on the same day.
+
+**Consequence, and it is not a safety one.** Turning `DIARIZE_VAD_TRIM` on today would be harmless: the code fails open (`diarize-window.ts:308-310` sends the whole clip) and logs `vad_failed` per window. The hazard is interpretive — a reader could take "VAD trim on, 0% saved" as *"trimming does not help"* rather than *"trimming never ran"*. That is a false negative about the feature, manufactured by a missing deployment, and it would be recorded against Silero rather than against the gap.
+
+**It also gives split-speaker's recommendation a second, independent leg.** They argued the flag should not be flipped on lab-mover's measurement that Silero cuts 19–91% of real speech. Correct — and separately, there is nothing to flip to. Both the PASS (flag-off is inert, five mutations dead) and the recommendation stand; only my characterisation of the Mini half was wrong.
