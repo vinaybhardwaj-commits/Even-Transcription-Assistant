@@ -101,6 +101,15 @@ export function withServiceAccess<T extends RequestInit>(url: string, init: T = 
  * url, so the token still goes only to an allowed host. The global `fetch` is read at call time, not captured at load.
  */
 export const serviceAccessFetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const isRequest = typeof input !== "string" && !(input instanceof URL);
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  return fetch(input, withServiceAccess(url, init ?? {}));
+  const wrapped = withServiceAccess(url, init ?? {});
+  // fetch(Request, init-with-headers) REPLACES the Request's own headers with init's. The OpenAI SDK passes a string URL today, so
+  // this is not reached, but the day something passes a Request its headers must survive: carry them across, init's winning.
+  if (isRequest && wrapped.headers !== undefined && wrapped.headers !== init?.headers) {
+    const merged = new Headers((input as Request).headers);
+    new Headers(wrapped.headers).forEach((v, k) => merged.set(k, v));
+    return fetch(input, { ...wrapped, headers: merged });
+  }
+  return fetch(input, wrapped);
 };
