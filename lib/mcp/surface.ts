@@ -44,6 +44,7 @@ import { JOB_TOOLS } from "./tools/jobs";
 import { JEV_TOOLS } from "./tools/jev";
 import { LEVEL_TOOLS } from "./tools/levels";
 import { DIARIZE_LABEL_TOOLS } from "./tools/diarize-labels";
+import { ROOM_ALERT_TOOLS } from "./tools/room-alerts";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -54,6 +55,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...STORE_TOOLS, ...LLM_TOOLS, ...FUSE_TOOLS, ...FUSE_REPORT_TOOLS, ...JOB_TOOLS, ...JEV_TOOLS,
   ...LEVEL_TOOLS,
   ...DIARIZE_LABEL_TOOLS,
+  ...ROOM_ALERT_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
