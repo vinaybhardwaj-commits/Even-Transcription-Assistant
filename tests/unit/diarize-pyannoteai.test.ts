@@ -333,6 +333,12 @@ describe("the pyannote.ai path", () => {
   });
 
   it("polls until the job finishes rather than deciding early", async () => {
+    // WHAT THIS TEST ASSERTS is "three polls, then done" — not how fast the host is. It used to run inside the shared 40 ms budget, so on a loaded
+    // host two waits plus the stubs overran it, the step handed the row back (`next`) and the test failed (24 Sep 20:31, box load 34; it passed 55/55
+    // alone and on an idle host). This test alone gets a budget far above any wall-clock the assertion could need, and a deliberately SLOW interval,
+    // so it holds however slowly the host runs. The budget-exhaustion tests below keep the 40 ms budget they are written for.
+    process.env.DIARIZE_POLL_INTERVAL_MS = "20";
+    process.env.DIARIZE_POLL_BUDGET_MS = "10000";
     server.jobAnswers = [{ jobId: "job-abc-123", status: "running" }, { jobId: "job-abc-123", status: "running" }, okJob()];
     const out = await runStep("pyannote_poll", { pyannoteai_job_id: "job-abc-123", run_id: "run-1", window_id: "w1", engine: "pyannoteai" });
     expect(out.kind).toBe("done");
