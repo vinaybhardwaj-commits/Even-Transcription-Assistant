@@ -213,6 +213,41 @@ export function skippedRow(w: SegmentWrite, s: SkippedSpan, speechMs: number): S
   };
 }
 
+/**
+ * ONE ROW PER KEY, BEFORE THE STATEMENT (fixes the 20 windows that exhausted on Postgres's "ON CONFLICT DO UPDATE
+ * command cannot affect row a second time", 19-21 Sep).
+ *
+ * A multi-row INSERT ... ON CONFLICT DO UPDATE refuses a batch in which two rows carry the same conflict key,
+ * and no retry can change that: prepare's rows are a pure function of the window's turns. Two straddle turns of
+ * one speaker that start on the same millisecond each become a `skipped` row at chunk 0 (skippedRow is per
+ * turn, not per run), and a skipped row can share (speaker, start, chunk 0) with an `unscorable` chunk of a run
+ * that starts there. Nothing is lost by collapsing them: same speaker, same start, same chunk is the same
+ * span of audio.
+ *
+ * Collapse rule: an `unscorable` row beats a `skipped` one (it carries a measured speech fraction; a skipped
+ * row carries a reason only); otherwise the first row stays. Either way the winner's end is the later end and
+ * its source_refs the union, so no turn reference is dropped. The order of the surviving rows is the order of
+ * their first appearance. `collapsed` is how many rows were folded away, for the caller to log.
+ */
+export function dedupeSpanRows(rows: SpanRowValues[]): { rows: SpanRowValues[]; collapsed: number } {
+  const byKey = new Map<string, SpanRowValues>();
+  for (const r of rows) {
+    const key = `${r.window_id}|${r.diarize_run_id}|${r.speaker_idx}|${r.run_start_ms}|${r.chunk_idx}`;
+    const prev = byKey.get(key);
+    if (!prev) { byKey.set(key, r); continue; }
+    const winner = r.state === "unscorable" && prev.state === "skipped" ? r : prev;
+    const loser = winner === r ? prev : r;
+    byKey.set(key, {
+      ...winner,
+      run_end_ms: Math.max(winner.run_end_ms, loser.run_end_ms),
+      segment_end_ms: Math.max(winner.segment_end_ms, loser.segment_end_ms),
+      clip_end_s: winner.clip_end_s === null || loser.clip_end_s === null ? winner.clip_end_s : Math.max(winner.clip_end_s, loser.clip_end_s),
+      source_refs: Array.from(new Set([...winner.source_refs, ...loser.source_refs])),
+    });
+  }
+  return { rows: Array.from(byKey.values()), collapsed: rows.length - byKey.size };
+}
+
 // The single-row spellings. Every caller that writes ONE span goes through the same statement as a caller
 // that writes sixteen; there is no second INSERT anywhere in this module to drift from the first.
 export const writeScoredOrFailed = (w: SegmentWrite, seg: MeasuredSegment, score: SegmentScore) => writeSpans([scoredOrFailedRow(w, seg, score)]);
