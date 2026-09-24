@@ -281,6 +281,13 @@ describe.runIf(HAVE_DOCKER)("E31 D3 — SECURITY: a lockout is never reported un
     // one-statement shape measured 0 rows and `ok` — no throttle at all.
     expect(await attempts("doc_rate_limited"), "twelve attempts, twelve rows").toBe(12);
     expect(new Set(decisions), "every one of them refused to claim a lock it had not taken").toEqual(new Set(["not_recorded"]));
+    // The gate counts rows from the last SECOND, and twelve docker-exec statements have just run: on a loaded host
+    // more than a second can pass after the last row, and the gate then (correctly) reads `ok`. That was a race in
+    // this test, not in the limiter (it failed 2 of 3 full gates on 24 Sep, and passed alone 26/26). Re-stamp this
+    // doctor's rows to now, so what is asserted is only what the test claims: the rows exist, and the gate counts
+    // them although the clinician write failed. The `twelve attempts, twelve rows` check above is what a one-statement
+    // (coupled) shape fails; time plays no part in either.
+    pg.exec(`UPDATE pin_attempt SET created_at = NOW() WHERE doctor_id = 'doc_rate_limited';`);
     const gate = await preAttemptCheck(d, "10.0.0.2");
     expect(gate.kind, "the 1/sec gate counts rows the clinician failure never touched").toBe("rate_limited");
   }, 300_000);
