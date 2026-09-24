@@ -37,6 +37,16 @@
  * that feature OFF, is logged once per value per instance, and is listed by `poolConfigProblems()` for the
  * health tool. It is never a throw inside a job step, where it would fail every room_window job.
  *
+ * ENABLING THE ROUTER POOL (ETA_ROUTER_URLS / ETA_ROUTER_BULK_URLS) — READ THIS FIRST (ETA-Refuter, 24 Sep).
+ * A router job is polled on the router that ACCEPTED it: the submit's endpoint is stored as `router_endpoint`
+ * beside the job id and every poll goes there. A job with NO stored endpoint (submitted before the pool was
+ * enabled, or with no pool set) is polled on `ETA_ROUTER_URL`, or the built-in default, AS IT STANDS AT POLL
+ * TIME. So in the deploy that enables the pool, leave ETA_ROUTER_URL exactly as it is, or let the in-flight
+ * router jobs finish first (their job files live about an hour). Changing or unsetting it in the same deploy
+ * sends those polls to a router that never had the job, and each one reads as ROUTER_JOB_LOST.
+ * The pool also fails over ONLY when an endpoint is down (unreachable or 5xx). Never on a 4xx, an unparseable
+ * 200 or its own timeout: that router may already hold the audio or the job, and it has no idempotency key.
+ *
  * NO-ENV IDENTITY. With none of the new variables set, the pool for a service is exactly [the old single
  * value, as written — no trim], the call is made once with the client's own timeout, and its result is
  * returned untouched. `served_by` is only reported when a pool variable is set, so a result's shape does not
