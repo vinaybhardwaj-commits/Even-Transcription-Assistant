@@ -173,11 +173,11 @@ export const routeAdapter: SttAdapter = {
     });
     // Branch on `ok`, never on transport.
     if (!sub.ok || !sub.job_id) return { ok: false, error: String(sub.error ?? "route_submit_failed").slice(0, 200) };
-    return { ok: true, jobRef: sub.job_id };
+    return sub.endpoint ? { ok: true, jobRef: sub.job_id, endpoint: sub.endpoint } : { ok: true, jobRef: sub.job_id };
   },
 
-  async poll(jobRef) {
-    const st = await pollRouteJob(jobRef);
+  async poll(jobRef, opts) {
+    const st = await pollRouteJob(jobRef, opts?.endpoint);
     // An expired or unknown job is TERMINAL: the router's job files live an hour, and polling a
     // ref that no longer exists can never start succeeding. Anything else is worth another claim.
     // A 404 for the id is the same fact whatever the body says (a restarted router that lost its job
