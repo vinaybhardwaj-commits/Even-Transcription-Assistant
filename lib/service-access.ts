@@ -113,3 +113,21 @@ export const serviceAccessFetch = (input: RequestInfo | URL, init?: RequestInit)
   }
   return fetch(input, wrapped);
 };
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// DIARIZE SHARED-SECRET BEARER (Fable ruling 134.5, eta-refuter #390). A machine-to-machine credential for eta-diarize's POST routes, NOT an Access
+// token: /diarize, /embed_speakers, /speech_regions and /enroll carry `Authorization: Bearer <DIARIZE_SHARED_SECRET>`, and /health stays open (the health
+// probes never call this). The server half lives on the Mini and enforces the three routes together; until a train carries this and the env is set
+// nothing is sent. Same rules as the Access token: dark with the env unset (the SAME init object comes back), https only, and only to a host inside the
+// service suffixes, so a mistyped or foreign base URL cannot receive the secret. A caller's own Authorization is never overridden. The value is never
+// logged, returned or thrown: it only ever goes into the header object handed to fetch.
+// ---------------------------------------------------------------------------------------------------------------------------------
+export const DIARIZE_SECRET_ENV = "DIARIZE_SHARED_SECRET";
+
+export function withDiarizeAuth<T extends RequestInit>(url: string, init: T = {} as T, env: Env = process.env): T {
+  const secret = clean(env[DIARIZE_SECRET_ENV]);
+  if (!secret || !hostAllowedForAccess(url, env)) return init;
+  const merged = new Headers(init.headers);
+  if (!merged.has("authorization")) merged.set("authorization", `Bearer ${secret}`);
+  return { ...init, headers: merged };
+}
