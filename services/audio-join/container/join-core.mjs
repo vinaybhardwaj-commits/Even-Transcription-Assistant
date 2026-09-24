@@ -78,7 +78,73 @@ export const DEFAULT_FORMAT = "webm";
  * rather than in package.json — nothing reads that file at runtime, and a version that is not
  * served is not evidence.
  */
-export const JOIN_SERVICE_VERSION = "1.1.0";
+export const JOIN_SERVICE_VERSION = "1.2.0";
+
+// ---------------------------------------------------------------------------
+// Sharding (JOIN-SHARD, 24 Sep) — PURE
+//
+// The join used to be ONE Durable Object ("joiner") with one in-memory `#busy` flag, so a single
+// join anywhere refused every other join in the account. The flag protects one container, not one
+// room, so it is now one flag PER SHARD: joins for different shards run in parallel, joins on the
+// same shard still refuse with `join_already_running`.
+//
+// The caller names the shard with a header — the session id, which the app already holds as
+// `meta.session_id`. The key is HASHED into a fixed number of instances rather than used as a raw
+// Durable Object name, because every instance is a container and `max_instances` in
+// wrangler.jsonc is a hard platform ceiling: a raw name per session would ask for a 7th container
+// the moment a 7th session joined at once. Two sessions hashing to one shard just serialise, which
+// is the behaviour they had before this change.
+// ---------------------------------------------------------------------------
+
+/** The request header the caller sets. Absent = the legacy single instance (back-compat). */
+export const SHARD_HEADER = "x-join-shard";
+
+/** The instance every request without a shard key goes to — the pre-shard behaviour, unchanged. */
+export const LEGACY_INSTANCE = "joiner";
+
+/**
+ * How many keyed shards exist. `max_instances` in wrangler.jsonc counts the legacy instance too,
+ * so this must stay at most `max_instances - 1`; `tests/unit/join-shard.test.ts` reads both files
+ * and fails if they drift apart.
+ *
+ * WHY 32. 11 rooms are enabled and each has its own session, so up to 11 keys can join at once.
+ * Hashing k keys into N shards is a birthday problem: two rooms on one shard serialise, and the
+ * second is refused. Expected refusals with 11 concurrent keys: N=5 -> 4.4, N=16 -> 2.9,
+ * N=32 -> 1.6. An idle shard costs nothing (its container sleeps after 60 s and billing is for
+ * active time), so the only price of a larger N is one more cold start per shard per quiet spell.
+ */
+export const JOIN_SHARDS = 32;
+
+const SHARD_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** PURE — FNV-1a, 32 bit. Deterministic and dependency free, so every colo and the twin agree. */
+export function fnv1a32(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * PURE — the shard key a request carries. `{ok:true, key:null}` when there is none (legacy path);
+ * `{ok:false, error:"bad_shard_key"}` when there is one and it is not a plain id. A malformed key
+ * is refused by name rather than quietly sent to the legacy instance: that would make a typo look
+ * like a working join that happens to serialise.
+ */
+export function shardKeyFromHeaders(headers) {
+  const raw = headers.get(SHARD_HEADER);
+  if (raw === null) return { ok: true, key: null };
+  if (!SHARD_KEY_RE.test(raw)) return { ok: false, error: "bad_shard_key" };
+  return { ok: true, key: raw };
+}
+
+/** PURE — the Durable Object name for a key: the legacy instance for no key, else `shard-<n>`. */
+export function shardInstanceName(key, shards = JOIN_SHARDS) {
+  if (key === null || key === undefined) return LEGACY_INSTANCE;
+  return `shard-${fnv1a32(key) % shards}`;
+}
 
 /** PURE — the format descriptor, or null when the name is not one this service emits. */
 export function formatSpec(format) {

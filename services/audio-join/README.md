@@ -32,13 +32,32 @@ POST /join ──► Worker ──► Joiner (Durable Object) ──► containe
                             env.AUDIO (R2 binding)
 ```
 
-- **`worker/index.js`** — the door. Bearer auth, then `getContainer(env.JOINER, "joiner")`.
-- **`Joiner`** (same file) — a `Container` subclass, hence a Durable Object. It holds the
+- **`worker/index.js`** — the door. Bearer auth, then `getContainer(env.JOINER, <shard>)` (see
+  "Sharding" below).
+- **`Joiner`** (same file) — a `Container` subclass, hence a Durable Object. It holds its shard's
   single-job mutex, reads the pieces through `env.AUDIO`, streams them to the container, and
   streams the finished clip back into `env.AUDIO` with its provenance.
 - **`container/server.mjs`** — Node's own `http` + one `ffmpeg` call. No dependencies.
 - **`container/join-core.mjs`** — every decision, pure. Shared by the Worker, the container and
   the tests.
+
+### Sharding (JOIN-SHARD, 24 Sep)
+
+The mutex used to be one flag on one global Durable Object, so any join anywhere refused every
+other. It is now one flag **per shard**.
+
+- The caller sets `x-join-shard: <session id>` (`lib/bench-join.ts`, from `meta.session_id`).
+- The Worker maps the key to `shard-<fnv1a32(key) % JOIN_SHARDS>` (`container/join-core.mjs`).
+  Same key, same shard, always: joins within a session stay serialised (`join_already_running`,
+  never queued). Different sessions on different shards run in parallel.
+- **No header → the legacy `joiner` instance**, unchanged. A malformed key is refused
+  (`bad_shard_key`) rather than quietly served by the legacy instance.
+- The key is **hashed into a fixed number of shards** rather than used as a raw object name,
+  because each shard is a container and `max_instances` is a hard ceiling. `JOIN_SHARDS` is 32 and
+  `max_instances` is 33 (32 + legacy); a test fails if they drift. Two sessions that hash to one
+  shard serialise; that is a collision cost, not a correctness one. With 11 rooms, expected
+  collisions at N=32 are ~1.6 refused joins per full-clinic burst (N=5 would be ~4.4).
+- `/health` reports `shards` and `shard_header`; a pre-shard Worker answers without them.
 
 ### How the container reaches the recordings
 
@@ -95,7 +114,8 @@ Every failure is a named reason at HTTP 200. There is no bare 500.
 | reason | meaning |
 |---|---|
 | `input_too_long` | the window is longer than 30 minutes (D2) |
-| `join_already_running` | a job is in flight; **not** queued |
+| `join_already_running` | a job is in flight on this key's shard; **not** queued |
+| `bad_shard_key` | `x-join-shard` is present but not `[A-Za-z0-9._:-]{1,128}` |
 | `bad_out_key` | the key does not sit under `clips/` |
 | `too_many_pieces` / `input_too_large` | 64 pieces / 128 MB ceilings |
 | `piece_missing` | a key is not in the bucket |
@@ -173,7 +193,7 @@ app can ship before the service does.
 |---|---|---|
 | `sleepAfter` | `60s` | at the 10-minute default this workload lands just outside the included monthly allowance; at 60 s it sits well inside |
 | `instance_type` | `standard-1` | ½ vCPU, 4 GiB, 8 GB disk — a 30-minute re-encode is seconds of CPU |
-| `max_instances` | `1` | the platform agrees with the one-job-at-a-time mutex |
+| `max_instances` | `33` | `JOIN_SHARDS` (32) keyed shards + the legacy instance; each is its own container, so this is the platform's agreement with the per-shard mutex |
 | `constraints.regions` | `["APAC"]` | D16 — pins to Asia Pacific. Cloudflare offers **no India region**; V has accepted that. Keeps the join next to the tape rather than moving it |
 | `enableInternet` | `false` | the container has nothing to reach |
 
@@ -196,3 +216,32 @@ probed duration drifts more than a second from the window asked for.
 
 Downloaded tape lands in `scripts/.scratch/`, which is git-ignored. **Delete it after a run** — it
 is a real consultation.
+
+---
+
+## The twin (`twin/`)
+
+`container/server.mjs` only ever sees bytes, so it runs unchanged anywhere Docker does. What a box
+lacks is the Worker's R2 binding. `twin/server.mjs` plays the Worker's part over R2's S3 API, and
+speaks the same `POST /join` contract, so the app lists it as a second entry in `AUDIO_JOIN_URLS`
+(`lib/service-pool.ts` does the failover on `join_already_running`, unreachable, timeout, 5xx).
+
+Unlike the Cloudflare deployment, **the twin holds an R2 S3 key pair.** Scope it to Object Read on
+the tape prefix and Object Write on `clips/`.
+
+```sh
+# 1. the unchanged container image, loopback only
+docker build -t eta-audio-join ./container
+docker run -d --restart unless-stopped --name eta-audio-join -p 127.0.0.1:8080:8080 eta-audio-join
+
+# 2. the front (Node 22)
+cd twin && npm install
+R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com R2_BUCKET=eta-audio \
+R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… JOIN_TOKEN=<the SAME secret as the Worker> \
+PORT=8090 TWIN_MAX_CONCURRENT=2 node server.mjs
+```
+
+It binds `127.0.0.1` only; the host's Cloudflare tunnel connector is the way in. `JOIN_TOKEN` must
+equal the Worker's because the app sends one token to every instance. `TWIN_MAX_CONCURRENT`
+(default 2) caps joins across shards, because a twin box is shared. Env names only are listed here;
+values never go in a file.

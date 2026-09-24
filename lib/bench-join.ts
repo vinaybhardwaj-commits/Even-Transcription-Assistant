@@ -288,6 +288,12 @@ export async function callJoinService(req: JoinRequest, opts: { timeoutMs?: numb
   return served_by ? { ...value, served_by } : value;
 }
 
+/** PURE — the shard header for a request, or nothing when it carries no usable session id. */
+export function shardHeader(req: JoinRequest): Record<string, string> {
+  const id = req.meta?.session_id;
+  return typeof id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? { "x-join-shard": id } : {};
+}
+
 async function callJoinAt(base: string, token: string, req: JoinRequest, opts: { timeoutMs?: number }): Promise<JoinOutcome> {
   // ONE id per caller request, logged by both layers of the service.
   //
@@ -310,6 +316,10 @@ async function callJoinAt(base: string, token: string, req: JoinRequest, opts: {
         "content-type": "application/json",
         Authorization: `Bearer ${token}`,
         "x-join-request-id": rid,
+        // JOIN-SHARD: the session id picks the join's shard, so joins for different sessions run in
+        // parallel and joins within one session stay serialised. A Worker deployed before sharding
+        // ignores the header; a request without it goes to the legacy single instance.
+        ...shardHeader(req),
       },
       body: JSON.stringify(req),
       signal: controller.signal,

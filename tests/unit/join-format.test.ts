@@ -152,7 +152,7 @@ describe("an unknown format is REFUSED, never silently defaulted", () => {
 
 describe("the deploy is verifiable from outside", () => {
   it("the version and the format list are what /health must carry", () => {
-    expect(JOIN_SERVICE_VERSION).toBe("1.1.0");
+    expect(JOIN_SERVICE_VERSION).toBe("1.2.0");
     expect(Object.keys(FORMATS)).toEqual(["webm", "ogg"]);
   });
 
