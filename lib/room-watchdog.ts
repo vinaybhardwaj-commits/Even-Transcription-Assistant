@@ -42,6 +42,7 @@ import { sql } from "@/lib/db";
 import { DISK_LOW_BYTES } from "@/lib/bench-bus-constants";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
 import { listBenchSessions } from "@/lib/bench";
+import { parseFlag } from "@/lib/flags";
 
 // ---------------------------------------------------------------------------
 // The watchdog's own vocabulary
@@ -128,7 +129,21 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
 // The four message shapes
 // ---------------------------------------------------------------------------
 
-export type WatchdogMessage = { subject: string; text: string };
+/**
+ * `kind`, `room_ids`, `room_name`, `status_from` and `status_to` are what the ALERT OUTBOX needs (migration 0119). `planWatchdogRun` always sets
+ * them; the four builders below still return just subject and text, so every existing caller of them is unchanged.
+ */
+export type WatchdogKind = "offline" | "degraded" | "recovered" | "fleet_outage";
+export type WatchdogMessage = {
+  subject: string;
+  text: string;
+  kind?: WatchdogKind;
+  /** The rooms this alert is about: one for an individual message, every room that crossed into offline for a fleet_outage. */
+  room_ids?: string[];
+  room_name?: string;
+  status_from?: RoomAlertStatus | null;
+  status_to?: RoomAlertStatus;
+};
 
 function fmtDuration(ms: number): string {
   const totalMins = Math.max(1, Math.round(ms / 60_000));
@@ -229,8 +244,9 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
   const messages: WatchdogMessage[] = [];
   const writes: RoomWrite[] = [];
 
-  const individualOffline: { room_name: string }[] = [];
-  let offlineTransitions = 0; // D3 numerator — every room crossing into offline, muted or not.
+  const individualOffline: { room_id: string; room_name: string; from: RoomAlertStatus }[] = [];
+  const offlineRoomIds: string[] = []; // D3 numerator — every room crossing into offline, muted or not.
+  let offlineTransitions = 0;
 
   for (const input of inputs) {
     const { status: newStatus, reasons } = computeRoomStatus(input.facts, nowMs);
@@ -249,9 +265,10 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
 
     if (newStatus === "offline") {
       offlineTransitions += 1;
+      offlineRoomIds.push(input.room_id);
       // D9: muted rooms still get the write above; they never get a message, individual or
       // fleet-wide, so they are simply left out of the individual-message candidate list here.
-      if (!input.muted) individualOffline.push({ room_name: input.room_name });
+      if (!input.muted) individualOffline.push({ room_id: input.room_id, room_name: input.room_name, from: input.prior.status });
       continue;
     }
 
@@ -259,11 +276,17 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
 
     if (newStatus === "degraded") {
       // V's ruling: name WHICH signal tripped — the classifier, not_delivering, or both.
-      messages.push(degradedMessage(input.room_name, reasons, nowIso));
+      messages.push({
+        ...degradedMessage(input.room_name, reasons, nowIso),
+        kind: "degraded", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "degraded",
+      });
     } else {
       // newStatus === "ok": D5, recovery is always sent, naming how long it was gone.
       const downForMs = nowMs - Date.parse(input.prior.since);
-      messages.push(recoveryMessage(input.room_name, input.prior.status, downForMs, nowIso));
+      messages.push({
+        ...recoveryMessage(input.room_name, input.prior.status, downForMs, nowIso),
+        kind: "recovered", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "ok",
+      });
     }
   }
 
@@ -277,9 +300,17 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
   // flagged in the report.
   const enabledCount = inputs.length;
   if (offlineTransitions >= 2 && offlineTransitions > enabledCount * FLEET_OUTAGE_FRACTION) {
-    messages.push(fleetOutageMessage(offlineTransitions, enabledCount, nowIso));
+    messages.push({
+      ...fleetOutageMessage(offlineTransitions, enabledCount, nowIso),
+      kind: "fleet_outage", room_ids: offlineRoomIds, status_from: null, status_to: "offline",
+    });
   } else {
-    for (const room of individualOffline) messages.push(offlineMessage(room.room_name, nowIso));
+    for (const room of individualOffline) {
+      messages.push({
+        ...offlineMessage(room.room_name, nowIso),
+        kind: "offline", room_ids: [room.room_id], room_name: room.room_name, status_from: room.from, status_to: "offline",
+      });
+    }
   }
 
   return { messages, writes };
@@ -388,11 +419,90 @@ type FleetRow = {
 export type WatchdogRunResult = {
   ok: boolean;
   evaluated: number;
+  /** The planner's messages this run. With ROOM_WATCHDOG_PAGE_V off (the default) NONE is emailed or WhatsApped; see alerts_queued. */
   messages_sent: number;
+  /** Outbox rows actually inserted by this run (the messages whose rooms really changed in the statement). */
+  alerts_queued: number;
   writes: number;
   channel_results: SendResult[];
   error?: string;
 };
+
+/**
+ * THE V-PAGING CHANNELS (email, WhatsApp) ARE OFF UNLESS ROOM_WATCHDOG_PAGE_V IS ON (Fable ruling 128(a): the alert path is the bus and the
+ * conductor board, no V pages). The senders stay in this file, marked not deleted. An unparseable value is OFF and logged: a typo in an env var
+ * must never take the watchdog down.
+ */
+export function pageVEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  try {
+    return parseFlag("ROOM_WATCHDOG_PAGE_V", env);
+  } catch {
+    console.error("[room-watchdog] ROOM_WATCHDOG_PAGE_V has an unrecognised value — treating it as OFF");
+    return false;
+  }
+}
+
+/**
+ * ONE STATEMENT: the state advance and the alert are the same fact (migration 0119; design rev 3).
+ *
+ *  - The outbox is fed from the planner's MESSAGES, never from the state writes. They are not one-to-one: a first observation (D2) and a muted
+ *    room (D9) are a write with no message, and a fleet outage (D3) is N writes and ONE message. Feeding it from the writes would alert on
+ *    history, alert muted rooms and split a fleet outage into N alerts.
+ *  - `changed` (RETURNING of the upsert) is ONLY the race gate: an individual message is inserted iff its room really changed in THIS statement,
+ *    a fleet_outage iff at least one of its rooms did. `IS DISTINCT FROM` means two overlapping runs cannot both win the same edge.
+ *  - Rows are upserted in room_id order, so overlapping runs take their locks in the same order and cannot deadlock.
+ *  - If the statement fails, NOTHING advanced and NOTHING was queued: the next minute re-plans the same edges and tries again.
+ * Returns the number of outbox rows inserted.
+ */
+export async function persistPlan(plan: WatchdogPlan): Promise<number> {
+  const writes = JSON.stringify(plan.writes);
+  const messages = JSON.stringify(
+    plan.messages
+      .filter((m) => m.kind && m.room_ids && m.room_ids.length > 0)
+      .map((m) => ({
+        kind: m.kind, room_ids: m.room_ids, room_name: m.room_name ?? null,
+        status_from: m.status_from ?? null, status_to: m.status_to ?? null, subject: m.subject, body: m.text,
+      })),
+  );
+  const rows = (await sql`
+    WITH w AS (
+      SELECT x.room_id, x.status, x.since::timestamptz AS since
+        FROM jsonb_to_recordset(${writes}::jsonb) AS x(room_id text, status text, since text)
+       ORDER BY x.room_id
+    ), changed AS (
+      INSERT INTO room_alert_state (room_id, status, since, updated_at)
+      SELECT w.room_id, w.status, w.since, now() FROM w
+      ON CONFLICT (room_id) DO UPDATE
+        SET status = EXCLUDED.status, since = EXCLUDED.since, updated_at = now()
+        WHERE room_alert_state.status IS DISTINCT FROM EXCLUDED.status
+      RETURNING room_id
+    )
+    INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body)
+    SELECT m.kind, m.room_ids, m.room_name, m.status_from, m.status_to, m.subject, m.body
+      FROM jsonb_to_recordset(${messages}::jsonb)
+           AS m(kind text, room_ids text[], room_name text, status_from text, status_to text, subject text, body text)
+     WHERE EXISTS (SELECT 1 FROM changed c WHERE c.room_id = ANY (m.room_ids))
+    RETURNING id
+  `) as Array<{ id: unknown }>;
+  return rows.length;
+}
+
+/**
+ * THE WATCHDOG'S OWN PULSE. Written by every run, ok or not, so a stopped cron shows up as an age the read door computes on the database's clock.
+ * A failure to write it is logged and swallowed: the pulse must never be the reason a run does not alert.
+ */
+export async function recordHeartbeat(ok: boolean, evaluated: number, error?: string): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO room_watchdog_heartbeat (id, last_run_at, last_ok, evaluated, last_error)
+      VALUES (1, now(), ${ok}, ${evaluated}, ${error ?? null})
+      ON CONFLICT (id) DO UPDATE
+        SET last_run_at = now(), last_ok = EXCLUDED.last_ok, evaluated = EXCLUDED.evaluated, last_error = EXCLUDED.last_error
+    `;
+  } catch (e) {
+    console.error("[room-watchdog] could not write the heartbeat:", e instanceof Error ? e.message : String(e));
+  }
+}
 
 /**
  * FAIL SAFE (the order's own words): "a watchdog that cannot read state must log loudly and send
@@ -426,7 +536,8 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
       "[room-watchdog] could not read fleet state — sending nothing this run:",
       e instanceof Error ? e.message : String(e),
     );
-    return { ok: false, evaluated: 0, messages_sent: 0, writes: 0, channel_results: [], error: "read_failed" };
+    await recordHeartbeat(false, 0, "read_failed");
+    return { ok: false, evaluated: 0, messages_sent: 0, alerts_queued: 0, writes: 0, channel_results: [], error: "read_failed" };
   }
 
   // ETA-DELIVERY-EVIDENCE's own join (lib/room-install.ts's readFleet), reused rather than
@@ -467,31 +578,37 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
 
   const plan = planWatchdogRun(inputs, nowMs);
 
-  for (const w of plan.writes) {
+  // THE STATE AND THE ALERT LAND TOGETHER (persistPlan). Nothing to write means nothing changed: no statement at all (D1).
+  let alertsQueued = 0;
+  if (plan.writes.length > 0) {
     try {
-      await sql`
-        INSERT INTO room_alert_state (room_id, status, since, updated_at)
-        VALUES (${w.room_id}, ${w.status}, ${w.since}, now())
-        ON CONFLICT (room_id) DO UPDATE
-          SET status = EXCLUDED.status, since = EXCLUDED.since, updated_at = now()
-      `;
+      alertsQueued = await persistPlan(plan);
     } catch (e) {
+      // Nothing advanced and nothing was queued, so the next minute plans the same edges again. Send NOTHING from here: an alert must
+      // never go out for a state that did not move.
       console.error(
-        `[room-watchdog] could not write alert state for ${w.room_id} — continuing:`,
+        "[room-watchdog] could not persist the plan — nothing advanced, nothing queued, will retry next run:",
         e instanceof Error ? e.message : String(e),
       );
+      await recordHeartbeat(false, inputs.length, "persist_failed");
+      return { ok: false, evaluated: inputs.length, messages_sent: 0, alerts_queued: 0, writes: 0, channel_results: [], error: "persist_failed" };
     }
   }
 
+  // The old email/WhatsApp channels, only when V's pages are explicitly switched on (default OFF; the alert path is the outbox).
   const channelResults: SendResult[] = [];
-  for (const msg of plan.messages) {
-    channelResults.push(...(await dispatch(msg)));
+  if (pageVEnabled()) {
+    for (const msg of plan.messages) {
+      channelResults.push(...(await dispatch(msg)));
+    }
   }
 
+  await recordHeartbeat(true, inputs.length);
   return {
     ok: true,
     evaluated: inputs.length,
     messages_sent: plan.messages.length,
+    alerts_queued: alertsQueued,
     writes: plan.writes.length,
     channel_results: channelResults,
   };

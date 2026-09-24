@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 38 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep)
+## The surface: 39 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -170,6 +170,12 @@ what cannot be honoured — and the stub is not to be restored.
 
 **Descriptions are not frozen** — they are meant to change as tools change. A recaptured fixture may
 add names; it must never drop one of the 51.
+
+The Room Watchdog alert path (24 Sep, Fable ruling 128(a)) added one more ungrouped read tool, `scribe_room_alerts`: the alert outbox
+(migration 0119) for the relay on the Mini that posts each alert to the bus. It returns `new` rows (`id > after_id`, capped) and `late` rows
+(committed after a higher id was read, found by a lookback on the database's clock) as two separate sets, plus the watchdog's heartbeat as an age
+the database computes (`ok` / `stale` / `none`). Every answer says `ok`; `ok: false` is a failed read and is deliberately NOT the usual `degraded`
+shape, because that would read as an empty outbox. Read scope, writes nothing, keeps no cursor. Ungrouped for the same reason as the tools above.
 
 ## `detail: "summary" | "full"`
 
