@@ -234,7 +234,9 @@ Resolved before `SCRIBE_MCP_TOKEN`, which still works and still grants all three
 `SCRIBE_MCP_TOKENS` is a write-only Vercel Secret: it cannot be read back, so adding one entry means writing the whole value and destroying every entry you
 cannot see, and that cannot be undone. **`SCRIBE_MCP_TOKENS_EXTRA`** takes the same JSON (keyed by the token's SHA-256 hex, so it holds no usable credential) and
 is merged in behind the primary. On a collision the primary entry wins whole, actor and scopes, so the extra map can add a token and never widen, rename or
-shadow one. Set it as an ordinary readable variable, so it can be verified. To build an entry without the token ever appearing on a command line:
+shadow one. Two more rules (Fable ruling 154): **every actor it adds is prefixed `extra:`** (so audit rows say where a token came from, e.g. `mcp:extra:room-alert-relay`;
+an extra entry whose prefixed audit id still equals a primary actor's is skipped), and **if `SCRIBE_MCP_TOKENS` is not fully readable the whole extra map is
+ignored** (invalid JSON, a key that is not a hash, an entry with no actor or with scopes that are not a list): fail closed, with a count logged and nothing else. Set it as an ordinary readable variable, so it can be verified. To build an entry without the token ever appearing on a command line:
 `tr -d '\r\n' < ~/.claude/secrets/<name> | sha256sum` (the file is read from stdin, so the token is never on a command line; take the first field), then put
 `{"<hash>": {"actor": "<name>", "scopes": ["read"]}}` in it. **The token file must hold the bare token and the hash must be of the bare token.** A trailing newline in
 the file changes the hash (`openssl rand -hex` writes one), and a client that strips the file sends the bare token, so a hash of the newline-terminated file is a
