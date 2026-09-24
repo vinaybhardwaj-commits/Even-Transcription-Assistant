@@ -17,7 +17,23 @@
  *   · within a line, a unit (word or phrase up to MAX_PHRASE_WORDS) repeated 3+ times IN A ROW keeps one
  *     copy — identical after folding only, never fuzzy;
  *   · across lines, a line identical after folding to the line before it is dropped;
- *   · a unit that is or contains a NUMBER is never collapsed, in either script.
+ *   · a loop whose repeats STRAIN ACROSS a line break (the router joins segments with newlines, and a
+ *     segment boundary rarely falls on a unit boundary) is collapsed too, layout kept (stage 3, below);
+ *   · a unit that is or contains a NUMBER is never collapsed, in either script — see NUMBER EXEMPTION.
+ *
+ * 24 SEP CHANGE (Fable rulings 116 and 141). Measured on production, 24 Sep: 13 of 168 window transcripts
+ * still held a canonical loop AFTER this guard, 12 of them blocked by ONE rule: any unit containing a lexicon
+ * number word was exempt, and the lexicon holds everyday words (`do`, `one`, `half`), so a 6-12 word phrase
+ * with one such word in it was never collapsed. Two more gaps hid behind that one: loops across a line break
+ * (12 of 13) and units of 9-12 words (5 of 13). Fixing any one alone cleared 0 of 13.
+ *
+ * NUMBER EXEMPTION, as it is now. Clinical content beats dedupe (Fable, ruling 141): repeated numbers and
+ * dosing are never removed.
+ *   · a unit containing a DIGIT of any script is NEVER collapsed, whatever else is in it;
+ *   · a unit is exempt when number WORDS are at least NUMBER_EXEMPT_FRACTION (a third) of it, so a short
+ *     dose phrase ("ek goli subah", "पचास milligram", "quarter tablet") is exempt while a long phrase that
+ *     happens to hold one everyday word is not;
+ *   · a single word that is a number is exempt, as before ("one one one" is 1-1-1).
  *
  * WHY IDENTICAL-ONLY AND NUMBER-EXEMPT. A word-set rule merged "2 in the morning and 1 at night" with
  * its dose swap (refuted 22 Sep); a repeated number is a regimen read aloud, not a loop ("one one one"
@@ -42,8 +58,10 @@ export const MIN_WORD_CHARS = 3;
 export const MIN_PHRASE_CHARS = 8;
 /** Repeats needed before anything is collapsed. */
 export const MIN_REPEATS = 3;
-/** The longest repeated unit considered. */
-export const MAX_PHRASE_WORDS = 8;
+/** The longest repeated unit considered. Was 8; production loops of 9 and 12 words slipped past it (24 Sep). */
+export const MAX_PHRASE_WORDS = 12;
+/** A unit is number-exempt when number WORDS are at least this share of its words (digits always exempt). */
+export const NUMBER_EXEMPT_FRACTION = 1 / 3;
 
 /** ASCII punctuation and the danda. Nothing else: a broader strip would delete Indic vowel signs. */
 const PUNCT = /[!-/:-@[-`{-~।॥]/gu;
@@ -72,46 +90,122 @@ export function isNumberToken(word: string): boolean {
   return false;
 }
 
+/**
+ * WARNING — foldToken DELETES punctuation, so "1.5" folds to "15" and two doses a factor of ten apart compare EQUAL here.
+ * Nothing but the digit rule in isNumberExemptUnit (a unit containing a digit is never collapsed) keeps them apart.
+ * Do not "tidy" this fold, and do not narrow that digit rule, without re-reading this line. (Line comparison uses
+ * foldText, which turns punctuation into a space, so that path is safe on its own.) ETA-Refuter, 24 Sep.
+ */
 const foldToken = (w: string): string => w.toLowerCase().replace(PUNCT, "");
 
-/** PURE — one line with its consecutive repeats collapsed. Runs to a fixed point. */
-export function collapseLine(line: string): string {
-  let current = line;
+/** True when the word carries a digit of any script or a vulgar fraction. */
+const hasNumericChar = (w: string): boolean => NUMERIC_CHAR.test(w);
+
+/**
+ * PURE — is this repeated unit protected from collapse because of the numbers in it?
+ * A digit anywhere protects it, absolutely. Otherwise it is protected when number WORDS are a third or more of it.
+ */
+export function isNumberExemptUnit(unit: readonly string[]): boolean {
+  if (unit.length === 0) return false;
+  if (unit.some(hasNumericChar)) return true;
+  return unit.filter((w) => isNumberToken(w)).length / unit.length >= NUMBER_EXEMPT_FRACTION;
+}
+
+/**
+ * PURE — collapse consecutive repeats over a list of items, where `word(item)` is the text of one word. Runs to a
+ * fixed point. Generic so the same rules serve one line (items are words) and a whole text (items carry their line).
+ * Returns the ORIGINAL array when nothing was collapsed.
+ */
+function collapseUnits<T>(items: readonly T[], word: (t: T) => string): readonly T[] {
+  let current: readonly T[] = items;
   for (let guard = 0; guard < 16; guard++) {
-    const words = current.split(/\s+/u).filter((w) => w.length > 0);
-    if (words.length < MIN_REPEATS) return current;
+    if (current.length < MIN_REPEATS) return current;
     let changed = false;
-    for (let plen = Math.min(Math.floor(words.length / MIN_REPEATS), MAX_PHRASE_WORDS); plen >= 1 && !changed; plen--) {
-      const out: string[] = [];
+    for (let plen = Math.min(Math.floor(current.length / MIN_REPEATS), MAX_PHRASE_WORDS); plen >= 1 && !changed; plen--) {
+      const out: T[] = [];
       let i = 0;
-      while (i < words.length) {
-        const unit = words.slice(i, i + plen);
+      while (i < current.length) {
+        const unit = current.slice(i, i + plen);
         if (unit.length < plen) {
-          out.push(...words.slice(i));
+          out.push(...current.slice(i));
           break;
         }
+        const unitWords = unit.map(word);
         let count = 1;
         let j = i + plen;
-        while (j + plen <= words.length && words.slice(j, j + plen).every((w, k) => foldToken(w) === foldToken(unit[k]!))) {
+        while (j + plen <= current.length && current.slice(j, j + plen).every((w, k) => foldToken(word(w)) === foldToken(unitWords[k]!))) {
           count++;
           j += plen;
         }
-        const longEnough = plen === 1 ? unit[0]!.replace(PUNCT, "").length >= MIN_WORD_CHARS : unit.join(" ").length >= MIN_PHRASE_CHARS;
-        const hasNumber = unit.some(isNumberToken);
-        if (count >= MIN_REPEATS && longEnough && !hasNumber) {
-          out.push(...unit);
-          i = j;
-          changed = true;
+        const longEnough = plen === 1 ? unitWords[0]!.replace(PUNCT, "").length >= MIN_WORD_CHARS : unitWords.join(" ").length >= MIN_PHRASE_CHARS;
+        if (count >= MIN_REPEATS) {
+          if (longEnough && !isNumberExemptUnit(unitWords)) {
+            out.push(...unit);
+            i = j;
+            changed = true;
+            continue;
+          }
+          // A real run that is PROTECTED (a number in it, or too short to trust). Every window that lies ENTIRELY inside
+          // the run is a rotation of the unit: the same words, so the same digits, number share and length, protected for
+          // the same reason. Stepping through them one at a time re-scanned the rest of the run at each step: quadratic,
+          // and a digit-protected 8,000-word loop took ~9 s (measured 24 Sep, ETA-Refuter F2). So step past them in one go.
+          // NOT past the whole run: the windows that START in the run's last plen-1 words reach beyond it and are different
+          // content, and a collapsible run can begin there ("1.5 wait 1.5 wait wait wait wait": the waits). The result is
+          // identical to stepping one word at a time; a differential test against the previous version pins that.
+          const next = Math.max(i + 1, j - plen + 1);
+          for (let k = i; k < next; k++) out.push(current[k]!);
+          i = next;
           continue;
         }
-        out.push(words[i]!);
+        out.push(current[i]!);
         i++;
       }
-      if (changed) current = out.join(" ");
+      if (changed) current = out;
     }
     if (!changed) return current;
   }
   return current;
+}
+
+/** PURE — one line with its consecutive repeats collapsed. Runs to a fixed point. */
+export function collapseLine(line: string): string {
+  const words = line.split(/\s+/u).filter((w) => w.length > 0);
+  const kept = collapseUnits(words, (w) => w);
+  return kept === words ? line : kept.join(" ");
+}
+
+/**
+ * PURE — STAGE 3: loops whose repeats strain across a line break. The router joins segments with newlines and a
+ * segment boundary rarely falls on a unit boundary, so a 6-word phrase said ten times is often 3-4 lines that no
+ * per-line pass can see whole. The words of the whole text are collapsed as one stream (same rules, same
+ * exemptions) and put back on their own lines. A line none of whose words were removed comes back BYTE-IDENTICAL;
+ * a line that lost every word is dropped; blank lines stay as layout.
+ */
+export function collapseAcrossLines(lines: readonly string[]): { lines: string[]; touched: number } {
+  type Tok = { w: string; line: number };
+  const toks: Tok[] = [];
+  lines.forEach((ln, line) => {
+    for (const w of ln.split(/\s+/u)) if (w.length > 0) toks.push({ w, line });
+  });
+  const kept = collapseUnits(toks, (t) => t.w);
+  if (kept === toks) return { lines: [...lines], touched: 0 };
+  const keptPerLine = new Map<number, string[]>();
+  for (const t of kept) keptPerLine.set(t.line, [...(keptPerLine.get(t.line) ?? []), t.w]);
+  const before = new Map<number, number>();
+  for (const t of toks) before.set(t.line, (before.get(t.line) ?? 0) + 1);
+  const out: string[] = [];
+  let touched = 0;
+  lines.forEach((ln, line) => {
+    const had = before.get(line) ?? 0;
+    const now = keptPerLine.get(line)?.length ?? 0;
+    if (had === 0) out.push(ln); // blank line: layout
+    else if (now === had) out.push(ln); // untouched: byte-identical
+    else {
+      touched++;
+      if (now > 0) out.push(keptPerLine.get(line)!.join(" "));
+    }
+  });
+  return { lines: out, touched };
 }
 
 export type CollapseResult = {
@@ -152,8 +246,10 @@ export function collapseAssembled(text: string | null | undefined): CollapseResu
     }
     kept.push(line);
   }
-  const out = kept.join("\n");
-  return { text: out, units_collapsed: units, lines_dropped: dropped, changed: out !== raw };
+  // STAGE 3 — loops across a line break, on what stages 1 and 2 left. Counted as collapsed units (lines touched).
+  const across = collapseAcrossLines(kept);
+  const out = across.lines.join("\n");
+  return { text: out, units_collapsed: units + across.touched, lines_dropped: dropped, changed: out !== raw };
 }
 
 /**
