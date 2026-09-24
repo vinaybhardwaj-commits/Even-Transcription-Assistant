@@ -75,6 +75,10 @@ A read-scope MCP tool `scribe_room_alerts(after_id, lookback_minutes = 10, limit
 compares a timestamp to the Mini's clock. Read-only: the relay owns its cursor, and because commits can land out of id order (F2) the lookback is what
 guarantees a row is seen even if a later id was read first. Duplicates from the lookback are the relay's to drop (F3).
 
+**`late` has NO cursor, so it cannot be paged** (herdr-kit #492 found this; my earlier "page again on `late_truncated`" was wrong). It is capped at 200 rows and reports `late_truncated`;
+asking again returns the same first rows and makes no progress. So the relay treats `late_truncated: true` as a SILENT condition ("alerts committed late may be unseen"), not as a reason to loop.
+`new_truncated` DOES page: the cursor moves to the highest id in `new`, so the next call makes progress.
+
 ### C. The relay (Mini side — NOT mine; herdr-kit / pane-watch). The contract it must meet:
 Every 30-60 s call the tool with its cursor.
 1. **Dedupe before acting (F3).** Before posting row `<id>`, call `bus_thread("room-alert-<id>")` and skip the post if it exists; check the board for that id
