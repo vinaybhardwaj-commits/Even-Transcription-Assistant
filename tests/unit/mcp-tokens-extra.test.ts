@@ -63,6 +63,40 @@ describe("the additive map", () => {
     expect(who("same")).toEqual({ actor: "watcher", scopes: ["read"] });
   });
 
+  it("a primary entry that EXISTS but cannot be read still reserves its hash: the extra map cannot take it over (Refuter #519 note 1)", () => {
+    process.env.SCRIBE_MCP_TOKENS = JSON.stringify({ [sha("held")]: { scopes: ["read"] } });        // no actor: unreadable, grants nothing
+    process.env[MCP_TOKENS_EXTRA_ENV] = map({ [sha("held")]: { actor: "someone", scopes: ["read", "invoke", "write"] } });
+    // refused either way: with nothing readable left the door is "not configured" (503), otherwise 401. What matters is that it is NOT let in.
+    expect("fail" in who("held"), "not let in").toBe(true);
+    // an UPPERCASE copy of the same hash is the same key
+    process.env[MCP_TOKENS_EXTRA_ENV] = map({ [sha("held").toUpperCase()]: { actor: "someone", scopes: ["write"] } });
+    expect("fail" in who("held"), "not let in (uppercase copy)").toBe(true);
+  });
+
+  it("an extra entry may NOT reuse the single-token actor or an actor the primary names: audit rows stay attributable (Refuter #519 note 2)", () => {
+    process.env.SCRIBE_MCP_TOKENS = map({ [sha("old")]: { actor: "watcher", scopes: ["read"] } });
+    process.env[MCP_TOKENS_EXTRA_ENV] = map({
+      [sha("a")]: { actor: "operator-v1", scopes: ["read"] },
+      [sha("b")]: { actor: "watcher", scopes: ["read"] },
+      [sha("c")]: { actor: "room-alert-relay", scopes: ["read"] },
+    });
+    expect(who("a")).toEqual({ fail: 401 });
+    expect(who("b")).toEqual({ fail: 401 });
+    expect(who("c")).toEqual({ actor: "room-alert-relay", scopes: ["read"] });
+    expect(who("old")).toEqual({ actor: "watcher", scopes: ["read"] });
+  });
+
+  it("two extra entries may share a NEW actor (a token rotation), and a clean merge logs nothing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env[MCP_TOKENS_EXTRA_ENV] = map({
+      [sha("r1")]: { actor: "room-alert-relay", scopes: ["read"] },
+      [sha("r2")]: { actor: "room-alert-relay", scopes: ["read"] },
+    });
+    expect(who("r1")).toEqual({ actor: "room-alert-relay", scopes: ["read"] });
+    expect(who("r2")).toEqual({ actor: "room-alert-relay", scopes: ["read"] });
+    expect(warn, "nothing skipped, so nothing logged (also pins the > 0 guards)").not.toHaveBeenCalled();
+  });
+
   it("the single-token fallback still works beside it", () => {
     process.env.SCRIBE_MCP_TOKEN = "legacy";
     process.env[MCP_TOKENS_EXTRA_ENV] = map({ [sha("relay")]: { actor: "relay", scopes: ["read"] } });
