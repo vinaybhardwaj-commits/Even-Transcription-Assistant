@@ -29,7 +29,7 @@
 - **Schema NOT YET applied** — migration `0001_init.sql` is committed but Sprint 1 wires `/api/run-migrations` to apply
 
 ### Cloudflare R2 (audio storage)
-- **Account**: `c7f665855e6e4d22090000b0397c4d0d`
+- **Account**: `<redacted: Cloudflare account id, kept in the private lab repo and Vercel env>`
 - **Bucket**: `eta-audio` (Asia Pacific, Standard storage class, no public access)
 - **API token**: "ETA R2 — production", Object Read & Write scoped to `eta-audio`, TTL forever
 - **R2 activated** by V (free-tier billing authorization — 10GB free, overage billed to card on file)

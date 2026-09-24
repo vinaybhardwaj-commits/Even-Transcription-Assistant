@@ -13,7 +13,7 @@ export default async function AdminEntry() {
       const claims = await verifyAdminJwt(cookie);
       const email = String(claims.email ?? "");
       // JWT doesn't carry admin name; derive from email local-part:
-      // 'vinay.bhardwaj@even.in' → 'Vinay Bhardwaj'
+      // 'first.last@example.com' → 'First Last'
       const local = email.split("@")[0] ?? "";
       const name = local
         .split(/[._\-]/)
