@@ -27,6 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { respondError } from "@/lib/respond";
 import { classifyBusError, cleanLevels, pollCommands } from "@/lib/bench-commands";
+import { finiteNumberOrNull } from "@/lib/bench-levels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,11 +66,21 @@ export async function GET(req: NextRequest) {
       ...(zeroRatio === null ? {} : { zero_ratio: zeroRatio }),
     });
   };
-  // Native installs report peak/zero_ratio; the browser kiosk reports mic_peak/mic_avg.
+  // Native installs report peak/zero_ratio; the browser kiosk reports mic_peak/mic_avg/mic_zero_ratio.
   // Both enter the same latest listener reading and PHI-free room/day level log.
-  const mic = sp.has("mic_peak")
-    ? levelPair("mic_peak", "mic_avg", "mic_zero_ratio")
-    : levelPair("peak", "mic_avg", "zero_ratio");
+  //
+  // THE MAC SENDS BOTH KINDS IN ONE REQUEST: mic_peak/mic_avg (its primary levels) AND the install fields, whose zero ratio is the UNPREFIXED `zero_ratio`
+  // (InstallPollFields D7: "named exactly peak and zero_ratio"). It never sends `mic_zero_ratio`. So the `mic_peak` branch below read a key the Mac does
+  // not send, and DROPPED the Mac's exact-zero ratio: over two clinic days, 264,283 capturing level-log rows and none carried a zero_ratio, in every room
+  // (herdr-kit #1341; root cause eta-refuter #1346, 24 Sep). The `mic_` branch now falls back to the unprefixed `zero_ratio` when `mic_zero_ratio` is absent.
+  // The fallback is validated ON ITS OWN, 0..1 or nothing: a garbage value costs only the ratio, never the peak and avg that were fine.
+  const mic = (() => {
+    if (!sp.has("mic_peak")) return levelPair("peak", "mic_avg", "zero_ratio");
+    const m = levelPair("mic_peak", "mic_avg", "mic_zero_ratio");
+    if (!m || m.zeroRatio !== undefined) return m;
+    const z = finiteNumberOrNull(sp.get("zero_ratio"));
+    return z !== null && z >= 0 && z <= 1 ? { ...m, zeroRatio: z } : m;
+  })();
   const spare = levelPair("spare_peak", "spare_avg");
   // §2.4 — an EXPLICITLY chosen second device. Only ever true when the client says `spare_device=true`;
   // any other value (including absent — the browser kiosk never sends it) leaves it unreported, and
