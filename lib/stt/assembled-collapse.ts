@@ -132,8 +132,12 @@ function collapseUnits<T>(items: readonly T[], word: (t: T) => string): readonly
         }
         const unitWords = unit.map(word);
         let count = 1;
+        let rawSame = true; // every copy is byte-identical to the unit, not merely identical after folding
         let j = i + plen;
-        while (j + plen <= current.length && current.slice(j, j + plen).every((w, k) => foldToken(word(w)) === foldToken(unitWords[k]!))) {
+        while (j + plen <= current.length) {
+          const copy = current.slice(j, j + plen);
+          if (!copy.every((w, k) => foldToken(word(w)) === foldToken(unitWords[k]!))) break;
+          if (rawSame && !copy.every((w, k) => word(w) === unitWords[k])) rawSame = false;
           count++;
           j += plen;
         }
@@ -145,16 +149,21 @@ function collapseUnits<T>(items: readonly T[], word: (t: T) => string): readonly
             changed = true;
             continue;
           }
-          // A real run that is PROTECTED (a number in it, or too short to trust). Every window that lies ENTIRELY inside
-          // the run is a rotation of the unit: the same words, so the same digits, number share and length, protected for
-          // the same reason. Stepping through them one at a time re-scanned the rest of the run at each step: quadratic,
-          // and a digit-protected 8,000-word loop took ~9 s (measured 24 Sep, ETA-Refuter F2). So step past them in one go.
-          // NOT past the whole run: the windows that START in the run's last plen-1 words reach beyond it and are different
-          // content, and a collapsible run can begin there ("1.5 wait 1.5 wait wait wait wait": the waits). The result is
-          // identical to stepping one word at a time; a differential test against the previous version pins that.
-          const next = Math.max(i + 1, j - plen + 1);
-          for (let k = i; k < next; k++) out.push(current[k]!);
-          i = next;
+          // A real run that is PROTECTED (a number in it, or too short to trust). When every copy is BYTE-IDENTICAL to the
+          // unit, every window that lies ENTIRELY inside the run is a rotation of it: the same raw words, so the same digits,
+          // number share and length, protected for the same reason. Stepping through them one at a time re-scanned the rest
+          // of the run at each step: quadratic, and a digit-protected 8,000-word loop took ~9 s (measured 24 Sep, ETA-Refuter
+          // F2). So step past them in one go. Two limits, each found by a differential test against the previous version:
+          //  · NOT past the whole run: windows that START in its last plen-1 words reach beyond it, and a collapsible run can
+          //    begin there ("1.5 wait 1.5 wait wait wait wait": the waits).
+          //  · ONLY when the copies are raw-identical. Runs are matched on FOLDED tokens but protection reads the RAW words
+          //    (isNumberToken splits on - and / before stripping, so "one-more" is a number word and "onemore" is not; the
+          //    length test counts punctuation), so copies that differ in raw form can be protected in one window and not the
+          //    next, and a window after a protected one may collapse ("wait one-more" x2 then "wait onemore" x3). Then step one
+          //    word at a time, as before: quadratic in the run, but real loops are small (ETA-Refuter #550).
+          const skipTo = rawSame ? Math.max(i + 1, j - plen + 1) : i + 1;
+          for (let k = i; k < skipTo; k++) out.push(current[k]!);
+          i = skipTo;
           continue;
         }
         out.push(current[i]!);

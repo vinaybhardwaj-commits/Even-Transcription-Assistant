@@ -422,6 +422,13 @@ describe("skipping a protected run must not change any RESULT (only the time)", 
     expect(collapseLine(line)).toBe("1.5 wait 1.5 wait 1.5 wait 1.5 wait wait a night cough");
   });
 
+  it("copies that differ only in RAW form (a joiner, trailing punctuation) are protected one window and not the next: no skip across them (ETA-Refuter #550)", () => {
+    // "one-more" counts as a number word (isNumberToken splits on - and / first), "onemore" does not; both fold to the same token.
+    expect(collapseLine("wait one-more wait one-more wait onemore wait onemore wait onemore")).toBe("wait one-more wait one-more wait onemore");
+    // the length test counts punctuation: "abc de" is 6 characters (too short to trust), "abc!!! de" is 9
+    expect(collapseLine("abc de abc de abc!!! de abc!!! de abc!!! de")).toBe("abc de abc de abc!!! de");
+  });
+
   // The plain algorithm, stepping ONE word at a time, as the guard did before the skip. Same rules and constants.
   const PUNCT_RE = /[!-/:-@[-`{-~\u0964\u0965]/gu;
   const fold = (w: string) => w.toLowerCase().replace(PUNCT_RE, "");
@@ -450,14 +457,25 @@ describe("skipping a protected run must not change any RESULT (only the time)", 
     return cur === original ? line : cur.join(" ");
   }
   const RV = ["take", "rest", "water", "please", "wait", "again", "fever", "cough", "night", "do", "one", "ek", "goli", "2", "500", "mg", "hello", "1.5", "15", "ok", "a", "five", "half"];
-  it("matches the one-word-at-a-time reference on 3,000 seeded lines rich in protected runs", () => {
-    for (let seed = 1; seed <= 3000; seed++) {
+  // A copy of a word in a different RAW form that folds to the same token: trailing punctuation, a joiner inside it, or case.
+  const variant = (w: string, r: () => number): string => {
+    const k = r();
+    if (k < 0.55 || w.length < 2) return w; // most copies stay byte-identical
+    if (k < 0.7) return w + ",";
+    if (k < 0.8) return w + "!!!";
+    if (k < 0.9) return w[0] + "-" + w.slice(1);
+    if (k < 0.95) return w[0] + "/" + w.slice(1);
+    return w.toUpperCase();
+  };
+  it("matches the one-word-at-a-time reference on 6,000 seeded lines rich in protected runs AND in copies that vary in raw form", () => {
+    for (let seed = 1; seed <= 6000; seed++) {
       const r = rng(seed * 7919);
+      const varied = seed > 3000; // the second half varies the copies; the first half is byte-identical loops
       const line: string[] = [];
       for (let k = 0, n = 1 + Math.floor(r() * 12); k < n; k++) {
         const unit = Array.from({ length: 1 + Math.floor(r() * 5) }, () => RV[Math.floor(r() * RV.length)]);
         const times = r() < 0.5 ? 3 + Math.floor(r() * 6) : r() < 0.3 ? 2 : 1;
-        for (let x = 0; x < times; x++) line.push(...unit);
+        for (let x = 0; x < times; x++) line.push(...unit.map((w) => (varied ? variant(w, r) : w)));
       }
       const text = line.join(" ");
       expect(collapseLine(text), `seed ${seed}`).toBe(referenceCollapseLine(text));
