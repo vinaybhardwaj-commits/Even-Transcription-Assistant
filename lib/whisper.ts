@@ -57,6 +57,7 @@ import {
   whisperNoSpeechDropEnabled,
 } from "@/lib/stt/speech-gate";
 export { EMPTY_TRANSCRIPT };
+import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 
 export type WhisperSegment = {
   start_s: number;
@@ -98,8 +99,10 @@ export type WhisperResult =
       attempts?: number;
       /** Present whenever a retry happened: what attempt 1's failure actually was. */
       first_error?: string;
+      /** REDUNDANCY-R1 — the origin that answered; present only when a whisper pool is configured. */
+      served_by?: string;
     }
-  | { ok: false; error: string; latency_ms: number; attempts?: number; first_error?: string };
+  | { ok: false; error: string; latency_ms: number; attempts?: number; first_error?: string; served_by?: string };
 
 const TIMESTAMP_RE = /^(\d{1,2}):([0-5]?\d):([0-5]?\d)(?:[.,](\d{1,3}))?$/;
 
@@ -238,16 +241,36 @@ export async function transcribeWithWhisper(
   return { ...second, attempts: 2, first_error: first.error };
 }
 
+/**
+ * REDUNDANCY-R1 — which whisper answers mean "that endpoint is down, try the next": a transport failure,
+ * a timeout, or a 5xx (exactly the class `isRetryableWhisperError` already retries, plus the timeout).
+ * A 4xx or an empty transcript is the server's real answer and another endpoint would give the same one.
+ */
+export function whisperVerdict(r: WhisperResult): Verdict {
+  if (r.ok) return "ok";
+  return isRetryableWhisperError(r.error) || r.error.startsWith('timeout_') ? "failover" : "final";
+}
+
+/** One attempt, across the whisper pool (a single endpoint when no pool is configured). */
 async function whisperAttempt(
   audio: Buffer | Uint8Array,
   contentType: string = 'audio/webm',
   opts: { language?: string; timeoutMs?: number } = {},
 ): Promise<WhisperResult> {
-  const base = process.env.WHISPER_BASE_URL;
-  if (!base) {
+  const endpoints = endpointsFor('whisper');
+  if (endpoints.length === 0) {
     return { ok: false, error: 'whisper_base_url_missing', latency_ms: 0 };
   }
+  const { value, served_by } = await runPool('whisper', endpoints, (base) => whisperAttemptAt(base, audio, contentType, opts), whisperVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
 
+async function whisperAttemptAt(
+  base: string,
+  audio: Buffer | Uint8Array,
+  contentType: string = 'audio/webm',
+  opts: { language?: string; timeoutMs?: number } = {},
+): Promise<WhisperResult> {
   const url = `${base.replace(/\/+$/, '')}/inference`;
 
   // Construct multipart body. whisper.cpp's server expects a `file` field.

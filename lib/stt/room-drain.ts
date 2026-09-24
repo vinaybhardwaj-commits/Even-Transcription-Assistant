@@ -139,12 +139,20 @@ export function routerJobMaxWaitingMs(audioSeconds: number | null | undefined): 
  * enqueue, and this window's job is already enqueued and simply waiting its turn).
  *
  * Two independent caps, whichever is hit first: elapsed time since the FIRST busy answer, and a
- * defensive attempt ceiling (backoff is jittered 30-60 s, so ~15 min is ~15-30 attempts; the
- * count cap exists only to bound a pathological clock, not to be the normal stop condition).
+ * defensive attempt ceiling (backoff is jittered 30-60 s, so 6 h is ~360-720 attempts; the count
+ * cap exists only to bound a pathological clock, not to be the normal stop condition).
  * Past either cap this fails EXACTLY as an ordinary join failure did before this change.
+ *
+ * T2 (REDUNDANCY-R1, 24 Sep): THE WAIT CAP IS 6 HOURS, NOT 15 MINUTES. The 15-minute cap turned
+ * contention into failures: on 24 Sep an operator batch put 67 room_window jobs in flight at once
+ * against a single-flight join, and 16 + 34 of them burned an attempt on `join_already_running`
+ * within the hour. Busy is a queue, not a fault, so it now never burns an attempt for as long as a
+ * real queue can last. A join that is STILL busy after 6 h is not contention but a wedged service,
+ * and only then does the window fail as before, so the loop is still bounded. With a join pool
+ * configured, a busy instance also hands the call to the next instance first (lib/bench-join.ts).
  */
-export const JOIN_BUSY_MAX_WAIT_MS = 15 * 60_000;
-export const JOIN_BUSY_MAX_ATTEMPTS = 30;
+export const JOIN_BUSY_MAX_WAIT_MS = 6 * 60 * 60_000;
+export const JOIN_BUSY_MAX_ATTEMPTS = 1_000;
 export const JOIN_BUSY_BACKOFF_MIN_MS = 30_000;
 export const JOIN_BUSY_BACKOFF_MAX_MS = 60_000;
 /** One claim's retry loop must fit inside MAX_STEP_MS with real margin — the same shape as the

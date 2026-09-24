@@ -127,6 +127,12 @@ export type JobKind = {
    */
   scopeForArgs?: (args: Record<string, unknown>) => { scope: "read" | "invoke" | "write"; arg: string } | null;
   run: (ctx: StepContext) => Promise<StepOutcome>;
+  /**
+   * REDUNDANCY-R1 — whether this step is BULK work, so pooled service calls inside it try the *_BULK_URLS
+   * endpoints first. Absent = never bulk. Called by the runner once per step, inside the step's own error
+   * handling, so a strict-env throw counts as a step failure like any other.
+   */
+  poolBulk?: (ctx: StepContext) => Promise<boolean>;
 };
 
 /** Thrown by `parseArgs`; the submit tool turns it into a refusal rather than a queued job. */

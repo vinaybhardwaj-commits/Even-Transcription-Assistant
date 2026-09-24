@@ -32,6 +32,7 @@ import { parseFlag } from "@/lib/flags";
 import type { DiarizeSegment } from "@/lib/stt/speaker-clusters";
 import type { BenchLevelSample } from "@/lib/bench-levels";
 import { DEFAULT_ROOM_ENERGY_FLOOR } from "@/lib/stt/window-measure";
+import { isBulkContext, poolEndpoints, runPool, type Verdict } from "@/lib/service-pool";
 
 /** The Mini's VAD sample rate. `allow_cut` is sent in these units BEFORE the Mini answers, so a map
  *  that comes back at any other rate is rejected: the spans it was cut against would be misaligned. */
@@ -230,10 +231,17 @@ export function remapSegments(segments: readonly DiarizeSegment[], map: RegionMa
  * validated region map. `regionsEmpty` is a REAL answer that there was no speech — the only VAD answer
  * allowed to skip the paid call.
  */
-export type SpeechRegionsOutcome =
+export type SpeechRegionsOutcome = (
   | { ok: true; regionsEmpty: false; audio: Uint8Array; map: RegionMap; vadModel: string | null; latencyMs: number }
   | { ok: true; regionsEmpty: true; originalSeconds: number; vadModel: string | null; latencyMs: number }
-  | { ok: false; error: "vad_base_url_missing" | "vad_failed" | "vad_bad_response" | "vad_bad_map"; retryable: boolean };
+  | { ok: false; error: "vad_base_url_missing" | "vad_failed" | "vad_bad_response" | "vad_bad_map"; retryable: boolean }
+) & { /** REDUNDANCY-R1 — the origin that answered; present only when a diarize pool is configured. */ served_by?: string };
+
+/** REDUNDANCY-R1 — `retryable` is the endpoint-failed class (transport, timeout, 5xx); anything else is the answer. */
+export function speechRegionsVerdict(o: SpeechRegionsOutcome): Verdict {
+  if (o.ok) return "ok";
+  return o.retryable ? "failover" : "final";
+}
 
 /** Budget for one /speech_regions call: a decode, a VAD pass and a re-encode of a 15-minute clip. */
 export const VAD_TRIM_TIMEOUT_MS_DEFAULT = 120_000;
@@ -248,9 +256,20 @@ export async function requestSpeechRegions(
   opts: { label: string; allowCut: ReadonlyArray<readonly [number, number]>; env?: Record<string, string | undefined> },
 ): Promise<SpeechRegionsOutcome> {
   const env = opts.env ?? process.env;
-  const base = env.DIARIZE_BASE_URL;
-  if (!base) return { ok: false, error: "vad_base_url_missing", retryable: false };
+  // The same service as /diarize and /embed_speakers, so the same pool.
+  const endpoints = poolEndpoints("diarize", { bulk: isBulkContext() }, env);
+  if (endpoints.length === 0) return { ok: false, error: "vad_base_url_missing", retryable: false };
+  const { value, served_by } = await runPool("diarize", endpoints, (base) => speechRegionsAt(base, audio, params, opts, env), speechRegionsVerdict, { env });
+  return served_by ? { ...value, served_by } : value;
+}
 
+async function speechRegionsAt(
+  base: string,
+  audio: Uint8Array,
+  params: VadTrimParams,
+  opts: { label: string; allowCut: ReadonlyArray<readonly [number, number]> },
+  env: Record<string, string | undefined>,
+): Promise<SpeechRegionsOutcome> {
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: "audio/webm" }), "audio.webm");
   form.append("pad_s", String(params.pad_s));

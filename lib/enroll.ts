@@ -5,22 +5,36 @@
  * into a 192-dim ECAPA embedding (same model /diarize matches against), and
  * averages N sentence embeddings into the stored centroid.
  *
- * Env: DIARIZE_BASE_URL (shared with lib/diarize.ts).
+ * Env: DIARIZE_BASE_URL (shared with lib/diarize.ts), or the DIARIZE_BASE_URLS pool (REDUNDANCY-R1).
  */
+import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 
-const DIARIZE_BASE = process.env.DIARIZE_BASE_URL;
 const ENROLL_TIMEOUT_MS = 60_000;
 const DIM = 192;
 
 export type EnrollOutcome =
-  | { ok: true; embeddingBase64: string }
-  | { ok: false; error: string };
+  | { ok: true; embeddingBase64: string; served_by?: string }
+  | { ok: false; error: string; served_by?: string };
+
+/** REDUNDANCY-R1 — transport, timeout or 5xx: try the next endpoint. A refusal or `ok:false` is the answer. */
+export function enrollVerdict(o: EnrollOutcome): Verdict {
+  if (o.ok) return "ok";
+  if (o.error === "timeout" || o.error.startsWith("network:")) return "failover";
+  const m = /^http_(\d{3})/.exec(o.error);
+  return m && Number(m[1]) >= 500 ? "failover" : "final";
+}
 
 export async function runEnroll(
   audio: Buffer | Uint8Array,
   contentType: string,
 ): Promise<EnrollOutcome> {
-  if (!DIARIZE_BASE) return { ok: false, error: "diarize_base_url_missing" };
+  const endpoints = endpointsFor("diarize");
+  if (endpoints.length === 0) return { ok: false, error: "diarize_base_url_missing" };
+  const { value, served_by } = await runPool("diarize", endpoints, (base) => enrollAt(base, audio, contentType), enrollVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
+
+async function enrollAt(base: string, audio: Buffer | Uint8Array, contentType: string): Promise<EnrollOutcome> {
   const baseType = (contentType.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const ext = baseType.includes("webm") ? "webm" : baseType.includes("mp4") ? "mp4" : baseType.includes("wav") ? "wav" : "webm";
   const form = new FormData();
@@ -28,7 +42,7 @@ export async function runEnroll(
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), ENROLL_TIMEOUT_MS);
   try {
-    const res = await fetch(`${DIARIZE_BASE.replace(/\/+$/, "")}/enroll`, {
+    const res = await fetch(`${base.replace(/\/+$/, "")}/enroll`, {
       method: "POST", body: form, signal: ctrl.signal, cache: "no-store",
     });
     clearTimeout(tid);

@@ -27,9 +27,7 @@
 
 import type { DiarizeSegment } from "@/lib/stt/speaker-clusters";
 import type { ClinicianCentroid } from "@/lib/stt/diarize-window";
-
-/** Same base URL as the diarize bridge — it is the same service. */
-const DIARIZE_BASE = () => process.env.DIARIZE_BASE_URL;
+import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 
 /**
  * Budget for one embedding call. Far smaller than DIARIZE_TIMEOUT_MS because the work is far
@@ -56,8 +54,17 @@ export type EmbeddedSpeaker = {
 };
 
 export type EmbedOutcome =
-  | { ok: true; speakers: EmbeddedSpeaker[]; latencyMs: number }
-  | { ok: false; error: "embed_base_url_missing" | "embed_failed" | "embed_bad_response"; retryable: boolean };
+  | { ok: true; speakers: EmbeddedSpeaker[]; latencyMs: number; served_by?: string }
+  | { ok: false; error: "embed_base_url_missing" | "embed_failed" | "embed_bad_response"; retryable: boolean; served_by?: string };
+
+/**
+ * REDUNDANCY-R1 — `retryable` already says "that endpoint failed, not the request" (transport, timeout,
+ * 5xx): exactly the failover class. A refusal (4xx) or a malformed body is the answer.
+ */
+export function embedVerdict(o: EmbedOutcome): Verdict {
+  if (o.ok) return "ok";
+  return o.retryable ? "failover" : "final";
+}
 
 /**
  * PURE — the span to embed for each speaker: their LONGEST one.
@@ -102,10 +109,21 @@ export async function embedSpeakers(
   centroids: readonly ClinicianCentroid[],
   opts: { batchThreshold: number; label: string; contentType?: string } ,
 ): Promise<EmbedOutcome> {
-  const base = DIARIZE_BASE();
-  if (!base) return { ok: false, error: "embed_base_url_missing", retryable: false };
+  // Same endpoints as the diarize bridge: it is the same service.
+  const endpoints = endpointsFor("diarize");
+  if (endpoints.length === 0) return { ok: false, error: "embed_base_url_missing", retryable: false };
   if (speakers.length === 0) return { ok: true, speakers: [], latencyMs: 0 };
+  const { value, served_by } = await runPool("diarize", endpoints, (base) => embedAt(base, audio, speakers, centroids, opts), embedVerdict);
+  return served_by ? { ...value, served_by } : value;
+}
 
+async function embedAt(
+  base: string,
+  audio: Uint8Array,
+  speakers: readonly EmbedRequestSpeaker[],
+  centroids: readonly ClinicianCentroid[],
+  opts: { batchThreshold: number; label: string; contentType?: string },
+): Promise<EmbedOutcome> {
   const baseType = (opts.contentType?.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: baseType }), "audio.webm");

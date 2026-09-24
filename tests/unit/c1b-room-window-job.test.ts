@@ -652,6 +652,33 @@ describe("Drain throughput fix (23 Sep) — join_already_running is a wait, not 
     expect(DB.log.some((q) => q.includes("UPDATE stt_subject_job")), "still only busy, never a failure").toBe(false);
   });
 
+  it("T2 — a join still busy after FIVE HOURS has burned no attempt: every claim hands back, nothing recorded", async () => {
+    // REDUNDANCY-R1 T2: contention is a queue. Under the old 15-minute cap this run failed and recorded
+    // within ~6 claims; it must now keep handing the row back with the window's attempts untouched.
+    mockJoin(async () => ({ ok: false, error: "join_already_running" }));
+    vi.resetModules();
+    const { roomWindowKind } = await import("@/lib/jobs/kinds/room-window");
+
+    vi.useFakeTimers();
+    let step = "prepare";
+    let progress: Record<string, unknown> = {};
+    const kinds: string[] = [];
+    for (let i = 0; i < 90; i += 1) { // 90 x 200 s = 5 h
+      const p = roomWindowKind.run({ job: {} as never, step, args: ARGS, progress, runner: "r1" });
+      await vi.advanceTimersByTimeAsync(200_000);
+      const out = await p;
+      kinds.push(out.kind);
+      if (out.kind !== "next") break;
+      step = (out as { step: string }).step;
+      progress = (out as { progress: Record<string, unknown> }).progress;
+    }
+    vi.useRealTimers();
+
+    expect(kinds.every((k) => k === "next"), `every claim in 5 h hands back (got ${[...new Set(kinds)].join(",")})`).toBe(true);
+    expect(step).toBe("prepare");
+    expect(DB.log.some((q) => q.includes("UPDATE stt_subject_job")), "no attempt burned in 5 h of busy").toBe(false);
+  });
+
   it("BOUND — exceeding the cap finally fails the job like an ordinary join failure (never retries forever)", async () => {
     mockJoin(async () => ({ ok: false, error: "join_already_running" }));
     vi.resetModules();
@@ -661,7 +688,8 @@ describe("Drain throughput fix (23 Sep) — join_already_running is a wait, not 
     let step = "prepare";
     let progress: Record<string, unknown> = {};
     let out: Awaited<ReturnType<typeof roomWindowKind.run>> | null = null;
-    for (let i = 0; i < 40; i += 1) {
+    // T2: the cap is 6 h, so an unbroken busy run needs ~110 claims of 200 s to reach it.
+    for (let i = 0; i < 200; i += 1) {
       const p = roomWindowKind.run({ job: {} as never, step, args: ARGS, progress, runner: "r1" });
       await vi.advanceTimersByTimeAsync(200_000);
       out = await p;
