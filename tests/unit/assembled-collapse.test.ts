@@ -10,11 +10,15 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_PHRASE_WORDS,
+  NUMBER_EXEMPT_FRACTION,
   NUMBER_WORDS,
   NUMBER_WORDS_SHA,
+  collapseAcrossLines,
   collapseAssembled,
   collapseLine,
   foldText,
+  isNumberExemptUnit,
   isNumberToken,
   joinAndCollapse,
 } from "@/lib/stt/assembled-collapse";
@@ -213,5 +217,176 @@ describe("idempotence", () => {
   it("a nested loop reaches its fixed point in one call", () => {
     // "okay sir" x3 only appears after "okay" x3 collapses, so one pass must keep going.
     expect(collapseLine("okay okay okay sir okay okay okay sir okay okay okay sir")).toBe("okay sir");
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// 24 Sep (Fable rulings 116 and 141): three gaps that together let 13 of 168 production loops through.
+// All text below is synthetic. Clinical content beats dedupe: repeated numbers and dosing are NEVER removed.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// Letters only, on purpose: a token with a digit in it is number-exempt (ruling 141), which would hide the rule under test.
+const letters = (i: number): string => { let s = ""; let x = i; do { s = String.fromCharCode(97 + (x % 26)) + s; x = Math.floor(x / 26); } while (x > 0); return s; };
+const words = (n: number, tag = "w") => Array.from({ length: n }, (_, i) => `${tag}${letters(i)}`);
+const rep = (unit: string[], times: number) => Array.from({ length: times }, () => unit.join(" ")).join(" ");
+
+describe("gap 1 — units of 9-12 words", () => {
+  it("the longest unit considered is 12 words", () => {
+    expect(MAX_PHRASE_WORDS).toBe(12);
+  });
+  it("a 9-word and a 12-word phrase repeated 3 times collapse to one copy", () => {
+    for (const n of [9, 12]) {
+      const unit = words(n);
+      expect(collapseLine(rep(unit, 3)), `n=${n}`).toBe(unit.join(" "));
+    }
+  });
+  it("a 13-word phrase repeated 3 times is left alone: past the limit", () => {
+    const line = rep(words(13), 3);
+    expect(collapseLine(line)).toBe(line);
+  });
+});
+
+describe("gap 2 — a loop whose repeats strain across a line break", () => {
+  it("collapses a 6-word phrase said 10 times over three lines, keeping ONE copy", () => {
+    const unit = words(6);
+    const all = Array.from({ length: 10 }, () => unit).flat();
+    const lines = [all.slice(0, 14).join(" "), all.slice(14, 41).join(" "), all.slice(41).join(" ")];
+    const r = collapseAssembled(lines.join("\n"));
+    expect(r.text.split(/\s+/).filter(Boolean)).toEqual(unit);
+    expect(r.changed).toBe(true);
+  });
+  it("keeps the layout: an untouched line comes back byte-identical, blank lines stay, an emptied line goes", () => {
+    const unit = words(5);
+    const stream = Array.from({ length: 4 }, () => unit).flat(); // 20 words: the unit four times
+    const odd = "  spaced   oddly\tline  ";
+    // the loop is cut at arbitrary points: 7 + 7 + 6 words over three lines
+    const lines = [odd, "", stream.slice(0, 7).join(" "), stream.slice(7, 14).join(" "), stream.slice(14).join(" "), "tail line stays"];
+    const r = collapseAcrossLines(lines);
+    expect(r.lines).toEqual([odd, "", unit.join(" "), "tail line stays"]);
+    expect(r.lines[0]).toBe(odd); // byte-identical, odd spacing and all
+    expect(r.touched).toBe(3); // the line that kept the first copy, and the two that lost every word
+  });
+  it("a cross-line collapse is COUNTED in units_collapsed (it is stored on the run row), and reported as changed", () => {
+    const unit = words(5);
+    const stream = Array.from({ length: 4 }, () => unit).flat();
+    // no single line holds 3 repeats, so only stage 3 can see it
+    const lines = [stream.slice(0, 7).join(" "), stream.slice(7, 14).join(" "), stream.slice(14).join(" ")];
+    const r = collapseAssembled(lines.join("\n"));
+    expect(r.text).toBe(unit.join(" "));
+    expect(r).toMatchObject({ units_collapsed: 3, lines_dropped: 0, changed: true });
+  });
+  it("returns the lines untouched when there is no loop", () => {
+    const lines = ["how long have you had this", "", "about two weeks now"];
+    expect(collapseAcrossLines(lines)).toEqual({ lines, touched: 0 });
+  });
+  it("a loop in one line only is still handled by the per-line stage, and counted once", () => {
+    const unit = words(4);
+    const r = collapseAssembled(["before", rep(unit, 3), "after"].join("\n"));
+    expect(r.text).toBe(["before", unit.join(" "), "after"].join("\n"));
+    expect(r.units_collapsed).toBe(1);
+  });
+});
+
+describe("gap 3 — the number exemption: digits are NEVER removed; number words protect only when they are a third of the unit", () => {
+  it("the fraction is one third", () => {
+    expect(NUMBER_EXEMPT_FRACTION).toBe(1 / 3);
+  });
+  it("a long phrase that merely holds an everyday number word (do, one, half) now collapses", () => {
+    for (const nw of ["do", "one", "half"]) {
+      const unit = ["please", "wait", nw, "moment", "before", "you", "leave"]; // 1 number word in 7
+      expect(collapseLine(rep(unit, 3)), nw).toBe(unit.join(" "));
+    }
+  });
+  it("a unit containing a DIGIT is never collapsed, however small a share of it, in one line or across lines", () => {
+    const unit = ["take", "2", "tablets", "in", "the", "morning", "and", "rest", "well", "today"]; // 1 digit in 10
+    const line = rep(unit, 3);
+    expect(collapseLine(line)).toBe(line);
+    const lines = [unit.join(" "), unit.join(" "), unit.join(" ")];
+    expect(collapseAssembled(lines.join("\n")).text).toBe(lines.join("\n"));
+    // the loop that strains across a break, with the digit inside it
+    const split = [line.split(" ").slice(0, 13).join(" "), line.split(" ").slice(13).join(" ")];
+    expect(collapseAssembled(split.join("\n")).text).toBe(split.join("\n"));
+    // and Indic digits
+    const hi = ["गोली", "२", "सुबह", "आराम", "करें"];
+    expect(collapseLine(rep(hi, 3))).toBe(rep(hi, 3));
+  });
+  it("short dose phrases stay: number words are at least a third of the unit", () => {
+    for (const unit of [["ek", "goli", "subah"], [HI_FIFTY, "milligram"], [KN_QUARTER, KN_TABLET], ["do", "goli"], ["half", "tablet", "daily", "after", "food", "please"]]) {
+      // (the last unit is 1 in 6: NOT exempt — see below; the first four are)
+      if (unit.length === 6) continue;
+      expect(collapseLine(rep(unit, 3)), unit.join(" ")).toBe(rep(unit, 3));
+    }
+  });
+  it("the boundary is exact: 1 in 3 is exempt, 1 in 4 collapses; 2 in 6 is exempt, 1 in 6 collapses", () => {
+    expect(isNumberExemptUnit(["ek", "goli", "subah"])).toBe(true);
+    expect(isNumberExemptUnit(["do", "not", "worry", "please"])).toBe(false);
+    expect(isNumberExemptUnit(["ek", "goli", "aur", "do", "goli", "raat"])).toBe(true);
+    expect(isNumberExemptUnit(["please", "do", "come", "back", "next", "week"])).toBe(false);
+    expect(isNumberExemptUnit([])).toBe(false);
+    // digits protect at any share
+    expect(isNumberExemptUnit([..."abcdefghij"].map((c, i) => (i === 4 ? "5" : c)))).toBe(true);
+  });
+  it("a single number word repeated is still a regimen (unchanged)", () => {
+    expect(collapseLine("one one one")).toBe("one one one");
+    expect(collapseLine(`${HI_TWO} ${HI_TWO} ${HI_TWO} ${HI_TWO}`)).toBe(`${HI_TWO} ${HI_TWO} ${HI_TWO} ${HI_TWO}`);
+    expect(collapseLine("1 1 1 1")).toBe("1 1 1 1");
+  });
+});
+
+// A small seeded generator, so a failure names its seed and is reproducible.
+function rng(seed: number) {
+  let x = seed >>> 0;
+  return () => ((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) / 2 ** 32);
+}
+const VOCAB = ["take", "rest", "water", "please", "wait", "again", "fever", "cough", "night", "morning", "do", "one", "half", "ek", "goli", "2", "500", "1-0-1", "mg"];
+function synth(seed: number): string {
+  const r = rng(seed);
+  const lines: string[] = [];
+  for (let l = 0, nl = 2 + Math.floor(r() * 6); l < nl; l++) {
+    const line: string[] = [];
+    for (let k = 0, n = 1 + Math.floor(r() * 14); k < n; k++) {
+      const unit = Array.from({ length: 1 + Math.floor(r() * 6) }, () => VOCAB[Math.floor(r() * VOCAB.length)]);
+      const times = r() < 0.4 ? 3 + Math.floor(r() * 3) : 1;
+      for (let t = 0; t < times; t++) line.push(...unit);
+    }
+    lines.push(r() < 0.1 ? "" : line.join(" "));
+  }
+  return lines.join("\n");
+}
+const digitTokens = (t: string) => t.split(/\s+/).filter((w) => /\p{N}/u.test(w)).sort();
+
+describe("properties over 400 seeded texts (a failure prints its seed)", () => {
+  it("never removes a token that carries a digit; only ever removes words; is idempotent", () => {
+    for (let seed = 1; seed <= 400; seed++) {
+      const text = synth(seed);
+      const out = collapseAssembled(text).text;
+      // digits: the multiset of digit-bearing tokens is unchanged (Fable ruling 141)
+      expect(digitTokens(out), `digit tokens, seed ${seed}`).toEqual(digitTokens(text));
+      // only removal: every output word is an input word
+      const bag = new Map<string, number>();
+      for (const w of text.split(/\s+/).filter(Boolean)) bag.set(w, (bag.get(w) ?? 0) + 1);
+      for (const w of out.split(/\s+/).filter(Boolean)) {
+        const c = (bag.get(w) ?? 0) - 1;
+        expect(c, `added word ${w}, seed ${seed}`).toBeGreaterThanOrEqual(0);
+        bag.set(w, c);
+      }
+      // idempotent
+      expect(collapseAssembled(out).text, `idempotent, seed ${seed}`).toBe(out);
+    }
+  });
+  it("text with no repeated unit at all comes back byte-identical, odd spacing and blank lines included", () => {
+    const text = "  first   line here\n\nsecond\tline different words\n third line  entirely new ";
+    expect(collapseAssembled(text)).toMatchObject({ text, changed: false, units_collapsed: 0, lines_dropped: 0 });
+  });
+});
+
+describe("cost", () => {
+  it("a 20,000-word text with loops collapses in well under a second", () => {
+    const unit = words(7);
+    const body = Array.from({ length: 2000 }, (_, i) => (i % 97 === 0 ? rep(unit, 4) : words(9, `t${letters(i)}z`).join(" "))).join("\n");
+    const t0 = Date.now();
+    const r = collapseAssembled(body);
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(r.changed).toBe(true);
   });
 });
