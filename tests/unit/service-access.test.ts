@@ -68,6 +68,12 @@ describe("withServiceAccess — the init, untouched when there is nothing to add
     expect(h.get("authorization")).toBe("Bearer t");
     expect(out.method).toBe("POST");
   });
+  it("REDIRECTS: refused when the token is attached (Refuter-2 R1), absent when it is not, the caller's own choice kept", () => {
+    expect(withServiceAccess("https://a.llmvinayminihome.uk/x", {}, ON).redirect).toBe("error");
+    expect(withServiceAccess("https://a.llmvinayminihome.uk/x", { redirect: "follow" }, ON).redirect).toBe("follow");
+    expect("redirect" in withServiceAccess("https://a.llmvinayminihome.uk/x", { method: "GET" }, {})).toBe(false);
+    expect("redirect" in withServiceAccess("https://api.sarvam.ai/x", { method: "GET" }, ON)).toBe(false);
+  });
   it("never overrides a header the caller set", () => {
     const out = withServiceAccess("https://a.llmvinayminihome.uk/x", { headers: { "cf-access-client-id": "mine" } }, ON);
     expect(new Headers(out.headers).get("CF-Access-Client-Id")).toBe("mine");

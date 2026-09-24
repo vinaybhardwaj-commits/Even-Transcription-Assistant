@@ -35,12 +35,12 @@ const VARS = [
   "EMOTION_BULK_URLS", "ETA_ROUTER_URLS", "ETA_ROUTER_BULK_URLS", "INDICCONFORMER_BASE_URLS", "INDICCONFORMER_BULK_URLS", "BULK_AGE_MINUTES",
 ];
 const saved: Record<string, string | undefined> = {};
-type Seen = { url: string; headers: Headers };
+type Seen = { url: string; headers: Headers; redirect: RequestRedirect | undefined };
 let seen: Seen[] = [];
 
 const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
 const record = (input: string | URL | Request, init?: RequestInit) => {
-  seen.push({ url: typeof input === "string" ? input : input.toString(), headers: new Headers(init?.headers) });
+  seen.push({ url: typeof input === "string" ? input : input.toString(), headers: new Headers(init?.headers), redirect: init?.redirect });
 };
 const reply = (url: string): unknown => {
   if (url.endsWith("/embed_speakers")) return { ok: true, speakers: [] };
@@ -115,6 +115,7 @@ describe("token configured → every caller sends it to its service host", () =>
         expect(new URL(r.url).hostname.endsWith(`.${HOST}`), r.url).toBe(true);
         expect(r.headers.get("CF-Access-Client-Id"), `${label} → ${r.url}`).toBe("the-id");
         expect(r.headers.get("CF-Access-Client-Secret"), `${label} → ${r.url}`).toBe("the-secret");
+        expect(r.redirect, `${label} → ${r.url} must refuse a redirect while it carries the token`).toBe("error");
       }
     });
   }
@@ -129,9 +130,35 @@ describe("DARK: token not configured → no caller adds anything", () => {
       for (const r of seen) {
         expect(r.headers.has("CF-Access-Client-Id"), `${label} → ${r.url}`).toBe(false);
         expect(r.headers.has("CF-Access-Client-Secret"), `${label} → ${r.url}`).toBe(false);
+        expect(r.redirect, `${label} → ${r.url}: DARK means no redirect key at all`).toBeUndefined();
       }
     });
   }
+});
+
+describe("an Access login redirect must not read as healthy (Refuter-2 R1)", () => {
+  // What Access does to a call whose token it rejects: 302 to its login page, which answers 200. `redirect: "error"`
+  // makes undici throw instead of following it; without that option the stub follows and answers the login page's 200.
+  const accessLike = async (input: string | URL | Request, init?: RequestInit) => {
+    record(input, init);
+    if (init?.redirect === "error") throw new TypeError("fetch failed: unexpected redirect");
+    return ok({ login: "page" });
+  };
+  it("with the token attached, a rejected token turns the health probes RED, not green", async () => {
+    setServiceEnv();
+    process.env.CF_ACCESS_CLIENT_ID = "the-id";
+    process.env.CF_ACCESS_CLIENT_SECRET = "the-secret";
+    vi.stubGlobal("fetch", accessLike);
+    expect((await whisperAdapter.health()).ok).toBe(false);
+    expect((await indicconformerAdapter.health()).ok).toBe(false);
+    expect((await probePyannote()).ok).toBe(false);
+  });
+  it("DARK, the same stub follows the redirect exactly as before (nothing changed by shipping this)", async () => {
+    setServiceEnv();
+    vi.stubGlobal("fetch", accessLike);
+    expect((await whisperAdapter.health()).ok).toBe(true);
+    expect((await indicconformerAdapter.health()).ok).toBe(true);
+  });
 });
 
 describe("the token never travels to a host that is not a service host", () => {
@@ -171,9 +198,13 @@ describe("bulk pools carry it too — every endpoint in a *_BULK_URLS list", () 
 });
 
 describe("no caller can be added without the wrapper (source scan)", () => {
-  it("every lib/ or app/ file that reads a service base URL and calls fetch imports service-access", async () => {
+  it("every lib/ or app/ file that reads a service base URL or a pool and calls fetch imports service-access", async () => {
     const { readdirSync, readFileSync, statSync } = await import("node:fs");
     const { join } = await import("node:path");
+    // Pool callers never NAME an env var (endpointsFor("diarize_embed") does it for them), so the trigger is the pool helpers
+    // too (Refuter-2 R2). bench-join is the audio-join service: a Worker, not a tunnel hostname, with its own AUDIO_JOIN_TOKEN.
+    const NOT_A_TUNNEL_HOST = new Set(["lib/bench-join.ts"]);
+    const POOL_HELPERS = /\b(endpointsFor|poolEndpoints)\(/;
     const SERVICE_ENVS = /\b(WHISPER_BASE_URLS?|WHISPER_BULK_URLS|DIARIZE_BASE_URLS?|DIARIZE_BULK_URLS|EMOTION_BASE_URLS?|EMOTION_BULK_URLS|INDICCONFORMER_BASE_URLS?|INDICCONFORMER_BULK_URLS|ETA_ROUTER_URLS?|ETA_ROUTER_BULK_URLS)\b/;
     const walk = (dir: string): string[] =>
       readdirSync(dir).flatMap((n) => {
@@ -184,7 +215,9 @@ describe("no caller can be added without the wrapper (source scan)", () => {
     for (const f of [...walk("lib"), ...walk("app")]) {
       const src = readFileSync(f, "utf8");
       const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-      if (SERVICE_ENVS.test(code) && /\bfetch(Impl)?\(|doFetch\(/.test(code) && !/service-access/.test(code)) missing.push(f);
+      if (NOT_A_TUNNEL_HOST.has(f)) continue;
+      const reachesAService = SERVICE_ENVS.test(code) || POOL_HELPERS.test(code);
+      if (reachesAService && /\bfetch(Impl)?\(|doFetch\(/.test(code) && !/service-access/.test(code)) missing.push(f);
     }
     expect(missing, "a caller of a service hostname that never sends the Access headers").toEqual([]);
   });

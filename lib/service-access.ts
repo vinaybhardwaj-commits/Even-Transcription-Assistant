@@ -19,9 +19,7 @@
  * NEVER LOG, RETURN OR THROW THE VALUES. This file returns them only as the header object handed to fetch. Nothing here
  * reads or writes them anywhere else.
  *
- * FETCH FOLLOWS REDIRECTS, and custom headers survive a cross-origin redirect (only Authorization is stripped). An Access
- * app answers a missing or bad token with a redirect to the team's cloudflareaccess.com login, so a wrong token could be
- * replayed there. That host is Cloudflare's own, and it is why the suffix guard above matters for the FIRST hop.
+ * REDIRECTS: see `withServiceAccess`. When the token is attached the call refuses to follow a redirect.
  */
 
 export const CF_ACCESS_ID_ENV = "CF_ACCESS_CLIENT_ID";
@@ -82,11 +80,18 @@ export function serviceAccessConfigured(env: Env = process.env): boolean {
  * Wrap a fetch's init. With no token, or a host that may not receive it, the SAME object comes back untouched, so a call
  * with nothing configured is byte-for-byte the call it was. Otherwise the two headers are added; a header the caller
  * already set (case-insensitively) is never overridden.
+ *
+ * REDIRECTS ARE REFUSED WHEN THE TOKEN IS ATTACHED (`redirect: "error"`, unless the caller chose one). eta-refuter-2 measured
+ * both halves on Node 22: fetch strips Authorization on a cross-origin redirect but FORWARDS the two Access headers to
+ * the target; and an Access app that rejects a token answers 302 to its login page, which answers 200. A health probe that
+ * treats "status < 500" as up (the whisper adapter, IndicConformer) would then show GREEN while every real call is refused,
+ * exactly when a token is expired, rotated or mis-set. With the redirect refused the call throws, and every caller already
+ * turns a thrown fetch into a failure. No token → no `redirect` key → nothing changes.
  */
 export function withServiceAccess<T extends RequestInit>(url: string, init: T = {} as T, env: Env = process.env): T {
   const extra = serviceAccessHeaders(url, env);
   if (Object.keys(extra).length === 0) return init;
   const merged = new Headers(init.headers);
   for (const [k, v] of Object.entries(extra)) if (!merged.has(k)) merged.set(k, v);
-  return { ...init, headers: merged };
+  return { ...init, headers: merged, redirect: init.redirect ?? "error" };
 }
