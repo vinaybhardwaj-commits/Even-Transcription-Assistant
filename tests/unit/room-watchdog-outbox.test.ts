@@ -152,7 +152,7 @@ describe.runIf(HAVE_DOCKER)("atomicity — the state advances if and only if the
     expect(await stateOf("r1")).toBe("offline");
   }, 120_000);
 
-  it("a planned message that cannot be queued (no kind or no rooms) is LOGGED, never dropped in silence (Refuter-2 #422 finding 3)", async () => {
+  it("a planned message that cannot be queued (no kind or no rooms) is LOGGED, never dropped in silence (ETA-Refuter #422 finding 3)", async () => {
     const { persistPlan } = await import("@/lib/room-watchdog");
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
