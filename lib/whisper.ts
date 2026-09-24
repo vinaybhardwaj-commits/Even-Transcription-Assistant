@@ -15,7 +15,8 @@
  *   { "text": "...", "language": "en", "duration": 2.34, "segments": [...] }
  *
  * DECODER (K3 §5): temperature, beam_size and best_of are all genuinely parsed by this server
- * and are pinned below to greedy / single-candidate / zero. `seed` is NOT a parameter it has.
+ * and are pinned below to greedy / single-candidate / zero STARTING temperature. The temperature
+ * FALLBACK is left on (see the decoder block below). `seed` is NOT a parameter it has.
  *
  * SEGMENTS (speech turns, slice A). This client used to ask for `json` and read
  * only `text`, so the segment timings the model had already produced were thrown
@@ -304,11 +305,20 @@ async function whisperAttemptAt(
   // segments. That is why the write unit is now the window rather than the turn — but the churn
   // is still worth reducing, because every extra segment is an extra row and an extra key.
   //
-  // Greedy, single candidate, zero temperature: no sampling, no beam tie-breaking, no fallback
-  // to a hotter temperature on a low-confidence window. These three are what the endpoint
-  // actually honours, verified against the live Mac Mini rather than assumed — posting a garbage
-  // value to each returns HTTP 500 with `stoi: no conversion` / `stof: no conversion`, i.e. the
-  // server really does parse them, which a silent 200 would not have proved.
+  // Greedy, single candidate, zero STARTING temperature: no sampling on the first pass and no beam
+  // tie-breaking. These three are what the endpoint actually honours, verified against the live
+  // Mac Mini rather than assumed — posting a garbage value to each returns HTTP 500 with
+  // `stoi: no conversion` / `stof: no conversion`, i.e. the server really does parse them, which a
+  // silent 200 would not have proved.
+  //
+  // THE TEMPERATURE FALLBACK IS ON. This used to say "no fallback to a hotter temperature", and that was
+  // wrong: `temperature_inc` is not sent, so whisper.cpp's own fallback stays on, and a window that fails
+  // its confidence thresholds is re-decoded hotter. That fallback is the run-to-run non-determinism AND
+  // the escape from phrase loops. Measured on 58 labelled windows (eta-lab 5533af7,
+  // studies/2026-09-24-redundancy/FALLBACK-ARMS.md): fallback on covers 77.9 % of labelled speech; with
+  // temperature_inc=0 the output is identical on 58/58 windows but covers 72.8 % and loops on more of them.
+  // Production keeps the fallback ON (Fable ruling 72, 24 Sep). temperature_inc=0 is the EVALUATION and
+  // PARITY config for lab and twin comparisons, where two runs must be comparable. It is set there, not here.
   form.append('temperature', '0.0');
   form.append('beam_size', '1');
   form.append('best_of', '1');
