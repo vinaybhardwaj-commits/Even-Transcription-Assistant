@@ -281,6 +281,19 @@ describe("lib/llm.ts — the OpenAI SDK client (ruling 121)", () => {
     expect(seen[0].redirect).toBe("error");
     expect(seen[1].headers.get("CF-Access-Client-Id")).toBe("the-id");
   });
+  it("when a Request and init BOTH set a header, INIT wins; a header only the Request has is kept (eta-refuter-2 #509: pins the comment's 'init's winning')", async () => {
+    process.env.CF_ACCESS_CLIENT_ID = "the-id";
+    process.env.CF_ACCESS_CLIENT_SECRET = "the-secret";
+    const { serviceAccessFetch } = await import("@/lib/service-access");
+    await serviceAccessFetch(
+      new Request(`https://llm.${HOST}/v1/embeddings`, { method: "POST", headers: { "x-both": "from-request", "x-only-request": "kept" } }),
+      { headers: { "x-both": "from-init" } },
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers.get("x-both"), "init wins over the Request's own value").toBe("from-init");
+    expect(seen[0].headers.get("x-only-request"), "a header only the Request carried survives").toBe("kept");
+    expect(seen[0].headers.get("CF-Access-Client-Id")).toBe("the-id");
+  });
   it("token configured → the client gets serviceAccessFetch, and each request carries the token to an allowed host only", async () => {
     process.env.OLLAMA_BASE_URL = `https://llm.${HOST}/v1`;
     process.env.CF_ACCESS_CLIENT_ID = "the-id";
