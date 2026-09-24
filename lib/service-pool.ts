@@ -56,6 +56,7 @@
  * whose answer the caller actually used. It is never a constant.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { serviceAccessProblems } from "@/lib/service-access";
 
 export const POOL_SERVICES = ["whisper", "join", "diarize", "diarize_embed", "diarize_vad", "diarize_enroll", "emotion", "indic", "router"] as const;
 export type PoolService = (typeof POOL_SERVICES)[number];
@@ -157,6 +158,8 @@ export function poolConfigProblems(env: Env = process.env): string[] {
   const out: string[] = [];
   if (readAge(env).bad) out.push(BULK_AGE_MINUTES_ENV);
   if (readFallback(env).bad) out.push(BULK_FALLBACK_LIVE_ENV);
+  // TUNNEL-HARDENING P2(b): a half-set Access token sends nothing; name the missing half.
+  for (const name of serviceAccessProblems(env)) if (!out.includes(name)) out.push(name);
   for (const svc of POOL_SERVICES) {
     for (const which of ["list", "bulk"] as const) {
       const name = POOL_ENV[svc][which];

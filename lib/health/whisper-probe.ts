@@ -26,6 +26,7 @@
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { withServiceAccess } from "@/lib/service-access";
 
 /** Well inside the health route's own budget, and far above a healthy round trip. */
 export const WHISPER_PROBE_BUDGET_MS = 12_000;
@@ -124,7 +125,8 @@ export async function runWhisperProbe(opts: {
     form.append("best_of", "1");
     form.append("max_context", "0");
 
-    const res = await doFetch(`${base}/inference`, { method: "POST", body: form, signal: ac.signal });
+    const probeUrl = `${base}/inference`;
+    const res = await doFetch(probeUrl, withServiceAccess(probeUrl, { method: "POST", body: form, signal: ac.signal }));
     const elapsed_ms = now() - started;
     if (res.status !== 200) {
       return { ok: false, reason: "bad_status", status: res.status, elapsed_ms, budget_ms };

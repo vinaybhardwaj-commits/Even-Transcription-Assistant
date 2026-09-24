@@ -33,6 +33,7 @@ import type { DiarizeSegment } from "@/lib/stt/speaker-clusters";
 import type { BenchLevelSample } from "@/lib/bench-levels";
 import { DEFAULT_ROOM_ENERGY_FLOOR } from "@/lib/stt/window-measure";
 import { isBulkContext, poolEndpoints, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 /** The Mini's VAD sample rate. `allow_cut` is sent in these units BEFORE the Mini answers, so a map
  *  that comes back at any other rate is rejected: the spans it was cut against would be misaligned. */
@@ -298,9 +299,10 @@ async function speechRegionsAt(
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
   try {
-    const res = await fetch(`${base.replace(/\/+$/, "")}/speech_regions`, {
+    const url = `${base.replace(/\/+$/, "")}/speech_regions`;
+    const res = await fetch(url, withServiceAccess(url, {
       method: "POST", body: form, signal: controller.signal, cache: "no-store",
-    });
+    }));
     const text = await res.text().catch(() => "");
     if (!res.ok) {
       // Status and length only: the body can describe the audio.

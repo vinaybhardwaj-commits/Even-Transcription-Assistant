@@ -9,6 +9,7 @@
  * Default ON (kill-switch: ETA_ROUTER=0). Soft-fail: callers fall back to Sarvam.
  */
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 export const ROUTER_DEFAULT_URL = "https://route.llmvinayminihome.uk";
 const ROUTER_TIMEOUT_MS = 285_000; // background step has a 300s budget; cap under it
@@ -85,7 +86,7 @@ async function routeTranscribeAt(
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { method: "POST", body: form, signal: controller.signal, cache: "no-store" });
+    const res = await fetch(url, withServiceAccess(url, { method: "POST", body: form, signal: controller.signal, cache: "no-store" }));
     if (!res.ok) {
       const t = await res.text().catch(() => "");
       return { value: { ok: false, error: `http_${res.status}: ${t.slice(0, 140)}` }, down: res.status >= 500 };
@@ -162,7 +163,7 @@ async function submitRouteJobAt(
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(url, withServiceAccess(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -173,7 +174,7 @@ async function submitRouteJobAt(
       }),
       signal: controller.signal,
       cache: "no-store",
-    });
+    }));
     if (!res.ok) { const t = await res.text().catch(() => ""); return { value: { ok: false, error: `http_${res.status}: ${t.slice(0, 140)}` }, down: res.status >= 500 }; }
     const j = (await res.json()) as { ok?: boolean; job_id?: string };
     if (!j.job_id) return { value: { ok: false, error: "no_job_id" }, down: false };
@@ -195,7 +196,7 @@ export async function pollRouteJob(jobId: string, endpoint?: string | null): Pro
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), ROUTER_POLL_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    const res = await fetch(url, withServiceAccess(url, { signal: controller.signal, cache: "no-store" }));
     if (!res.ok) { const t = await res.text().catch(() => ""); return { ok: false, error: `http_${res.status}: ${t.slice(0, 120)}` }; }
     return (await res.json()) as RouterJobStatus;
   } catch (e) {

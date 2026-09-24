@@ -20,6 +20,7 @@ import { probe, type McpTool, argDetail, DETAIL_SCHEMA, type ToolArgs } from "..
 import { probeSttEngines, type EngineHealth } from "./stt";
 import { classifyBusError, listListeners } from "@/lib/bench-commands";
 import { POOL_SERVICES, poolConfigProblems, poolConfigured } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 const PYANNOTE_TIMEOUT_MS = 5_000;
 
@@ -30,7 +31,8 @@ export async function probePyannote(): Promise<PyannoteProbe> {
   const base = process.env.DIARIZE_BASE_URL?.trim();
   if (!base) return { ok: false, latency_ms: 0, error: "DIARIZE_BASE_URL not set", base_url_env: "DIARIZE_BASE_URL", configured: false };
   const r = await probe(async () => {
-    const res = await fetch(`${base.replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(PYANNOTE_TIMEOUT_MS), cache: "no-store" });
+    const healthUrl = `${base.replace(/\/$/, "")}/health`;
+    const res = await fetch(healthUrl, withServiceAccess(healthUrl, { signal: AbortSignal.timeout(PYANNOTE_TIMEOUT_MS), cache: "no-store" }));
     if (!res.ok) throw new Error(`pyannote_health_${res.status}`);
     const j = (await res.json().catch(() => ({}))) as { ok?: boolean; device?: string; models?: string[] };
     if (j.ok === false) throw new Error("pyannote_reports_not_ok");

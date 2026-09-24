@@ -28,6 +28,7 @@
 
 import { acquireDiarizeSlot, DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 /**
  * REDUNDANCY-R1 — which /diarize answers mean "try the next endpoint": a transport failure, a 5xx, or a 404 (that
@@ -229,9 +230,10 @@ export async function runDiarize(
     };
 
     try {
-      const res = await fetch(`${base.replace(/\/+$/, "")}/diarize`, {
+      const url = `${base.replace(/\/+$/, "")}/diarize`;
+      const res = await fetch(url, withServiceAccess(url, {
         method: "POST", body: form, signal: controller.signal, cache: "no-store",
-      });
+      }));
       clearTimeout(tid);
       const text = await res.text().catch(() => "");
       if (!res.ok) {

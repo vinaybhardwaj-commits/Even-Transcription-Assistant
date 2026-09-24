@@ -28,6 +28,7 @@
 import type { DiarizeSegment } from "@/lib/stt/speaker-clusters";
 import type { ClinicianCentroid } from "@/lib/stt/diarize-window";
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 /**
  * Budget for one embedding call. Far smaller than DIARIZE_TIMEOUT_MS because the work is far
@@ -144,9 +145,10 @@ async function embedAt(
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
   try {
-    const res = await fetch(`${base.replace(/\/+$/, "")}/embed_speakers`, {
+    const url = `${base.replace(/\/+$/, "")}/embed_speakers`;
+    const res = await fetch(url, withServiceAccess(url, {
       method: "POST", body: form, signal: controller.signal, cache: "no-store",
-    });
+    }));
     const text = await res.text().catch(() => "");
     if (!res.ok) {
       // The service's message can describe the audio; the log gets a status and a length.

@@ -35,6 +35,7 @@ import { isRouterSegmentation } from "../types";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { WHISPER_PROBE_FIXTURE } from "@/lib/health/whisper-probe";
+import { withServiceAccess } from "@/lib/service-access";
 
 /**
  * The ceiling for the synchronous transport, from the Slice C spec. Above this the router's own
@@ -246,7 +247,8 @@ export async function runRouteProbe(opts: { baseUrl?: string; fetchImpl?: Fetche
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: "audio/webm" }), "audio.webm");
     form.append("translate", "false");
-    const res = await doFetch(`${base}/route`, { method: "POST", body: form, signal: ac.signal, cache: "no-store" });
+    const probeUrl = `${base}/route`;
+    const res = await doFetch(probeUrl, withServiceAccess(probeUrl, { method: "POST", body: form, signal: ac.signal, cache: "no-store" }));
     const body: unknown = await res.json().catch(() => null);
     const elapsed_ms = Date.now() - t0;
     // Parsed `ok` is the authority. A 404 from FastAPI parses too — as {"detail":"Not Found"}.

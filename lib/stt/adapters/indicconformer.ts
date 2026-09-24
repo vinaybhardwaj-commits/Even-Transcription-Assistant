@@ -1,5 +1,6 @@
 import type { SttAdapter, SttTranscribeResult } from "../types";
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 /** AI4Bharat IndicConformer-600M — local Indic ASR on the Mac Mini (Pattern B,
  *  exposed at INDICCONFORMER_BASE_URL, default https://indic.llmvinayminihome.uk).
@@ -56,7 +57,8 @@ export const indicconformerAdapter: SttAdapter = {
   async health() {
     const t0 = Date.now();
     try {
-      const r = await fetch(`${BASE()}/healthz`, { signal: AbortSignal.timeout(8000) });
+      const healthUrl = `${BASE()}/healthz`;
+      const r = await fetch(healthUrl, withServiceAccess(healthUrl, { signal: AbortSignal.timeout(8000) }));
       const ok = r.status < 500;
       return { ok, latencyMs: Date.now() - t0, error: ok ? undefined : `http_${r.status}` };
     } catch (e) { return { ok: false, latencyMs: Date.now() - t0, error: String(e).slice(0, 120) }; }
@@ -70,7 +72,8 @@ async function inferenceAt(base: string, audio: Buffer, baseType: string, ext: s
   form.append("decoding", DECODING);
   const t0 = Date.now();
   try {
-    const res = await fetch(`${base.replace(/\/+$/, "")}/inference`, { method: "POST", body: form, cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+    const url = `${base.replace(/\/+$/, "")}/inference`;
+    const res = await fetch(url, withServiceAccess(url, { method: "POST", body: form, cache: "no-store", signal: AbortSignal.timeout(timeoutMs) }));
     const body = await res.text().catch(() => "");
     if (!res.ok) return { value: { original: null, english: null, language: lang, latencyMs: Date.now() - t0, costUsd: 0, error: `http_${res.status}: ${body.slice(0, 140)}` }, down: res.status >= 500 };
     const j = JSON.parse(body) as { text?: string; language?: string };

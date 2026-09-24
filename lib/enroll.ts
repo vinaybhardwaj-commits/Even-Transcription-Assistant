@@ -8,6 +8,7 @@
  * Env: DIARIZE_BASE_URL (shared with lib/diarize.ts), or the DIARIZE_BASE_URLS pool (REDUNDANCY-R1).
  */
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 const ENROLL_TIMEOUT_MS = 60_000;
 const DIM = 192;
@@ -54,9 +55,10 @@ async function enrollAt(base: string, audio: Buffer | Uint8Array, contentType: s
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${base.replace(/\/+$/, "")}/enroll`, {
+    const url = `${base.replace(/\/+$/, "")}/enroll`;
+    const res = await fetch(url, withServiceAccess(url, {
       method: "POST", body: form, signal: ctrl.signal, cache: "no-store",
-    });
+    }));
     clearTimeout(tid);
     const text = await res.text().catch(() => "");
     if (!res.ok) return { ok: false, error: `http_${res.status}: ${text.slice(0, 160)}` };

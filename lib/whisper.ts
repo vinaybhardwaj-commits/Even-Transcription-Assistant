@@ -59,6 +59,7 @@ import {
 } from "@/lib/stt/speech-gate";
 export { EMPTY_TRANSCRIPT };
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 
 export type WhisperSegment = {
   start_s: number;
@@ -348,12 +349,12 @@ async function whisperAttemptAt(
 
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
+    const res = await fetch(url, withServiceAccess(url, {
       method: 'POST',
       body: form,
       signal: controller.signal,
       cache: 'no-store',
-    });
+    }));
     clearTimeout(tid);
     const latency_ms = Date.now() - t0;
 

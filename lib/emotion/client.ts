@@ -14,6 +14,7 @@
  * BRANCH ON `ok`. The service answers inference errors with HTTP 200 and ok:false.
  */
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
+import { withServiceAccess } from "@/lib/service-access";
 export const EMOTION_MODEL_ID = "Aniemore/wavlm-emotion-v1-crosslingual";
 export const EMOTION_MODEL_KEY = "wavlm";
 export const EMOTION_LABELS = ["anger", "disgust", "enthusiasm", "fear", "happiness", "neutral", "sadness"] as const;
@@ -81,7 +82,8 @@ export async function emotionHealth(fetchImpl: Fetcher = fetch): Promise<Emotion
 
 async function emotionHealthAt(base: string, fetchImpl: Fetcher, timeoutMs: number): Promise<EmotionHealth> {
   try {
-    const res = await fetchImpl(`${trimBase(base)}/health`, { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
+    const healthUrl = `${trimBase(base)}/health`;
+    const res = await fetchImpl(healthUrl, withServiceAccess(healthUrl, { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" }));
     const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
     // TRUST NOTHING FROM AN UNHEALTHY ANSWER. A 500 with ok:false can still carry a max_duration_s;
     // a cap that arrives alongside a failure is not a cap.
@@ -229,13 +231,14 @@ async function scoreSegmentsAt(
 ): Promise<SegmentsResponse> {
   let res: Response;
   try {
-    res = await fetchImpl(`${trimBase(base)}/inference/wavlm/segments`, {
+    const segUrl = `${trimBase(base)}/inference/wavlm/segments`;
+    res = await fetchImpl(segUrl, withServiceAccess(segUrl, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
       body: JSON.stringify({ audio_url: audioUrl, segments }),
       signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
-    });
+    }));
   } catch (e) {
     return { ok: false, error: `emotion_unreachable: ${String((e as Error)?.name ?? e).slice(0, 40)}`, retryable: true };
   }

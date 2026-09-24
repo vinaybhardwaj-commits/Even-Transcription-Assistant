@@ -1,5 +1,6 @@
 import { transcribeWithWhisper } from "@/lib/whisper";
 import type { SttAdapter } from "../types";
+import { withServiceAccess } from "@/lib/service-access";
 
 export const whisperAdapter: SttAdapter = {
   key: "whisper",
@@ -14,7 +15,8 @@ export const whisperAdapter: SttAdapter = {
     if (!base) return { ok: false, latencyMs: 0, error: "whisper_base_url_missing" };
     const t0 = Date.now();
     try {
-      const r = await fetch(`${base.replace(/\/+$/, "")}/inference`, { method: "GET", signal: AbortSignal.timeout(8000) });
+      const probeUrl = `${base.replace(/\/+$/, "")}/inference`;
+      const r = await fetch(probeUrl, withServiceAccess(probeUrl, { method: "GET", signal: AbortSignal.timeout(8000) }));
       const ok = r.status < 500 || r.status === 501;
       return { ok, latencyMs: Date.now() - t0, error: ok ? undefined : `http_${r.status}` };
     } catch (e) { return { ok: false, latencyMs: Date.now() - t0, error: String(e).slice(0, 120) }; }

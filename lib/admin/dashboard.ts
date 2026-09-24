@@ -11,6 +11,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { withServiceAccess } from "@/lib/service-access";
 
 export type DashboardWindow = "today" | "week" | "month" | "all";
 
@@ -436,10 +437,11 @@ async function getHealth(): Promise<{ status: "ok" | "degraded"; services: Healt
     probeService(async () => {
       const base = process.env.WHISPER_BASE_URL;
       if (!base) throw new Error("no_whisper_url");
-      const r = await fetch(`${base}/inference`, {
+      const probeUrl = `${base}/inference`;
+      const r = await fetch(probeUrl, withServiceAccess(probeUrl, {
         method: "GET",
         signal: AbortSignal.timeout(5000),
-      });
+      }));
       if (r.status >= 500 && r.status !== 501) throw new Error(`whisper_${r.status}`);
     }),
     probeService(async () => {
