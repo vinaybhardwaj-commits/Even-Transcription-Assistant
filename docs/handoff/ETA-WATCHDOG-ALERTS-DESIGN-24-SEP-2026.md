@@ -2,6 +2,20 @@
 
 **Status: DESIGN, REVISION 2. Nothing here is built. eta-refuter refuted revision 1 (#397); this revision answers F1-F6. eta-refuter refutes it again before any build; Fable rules on the open decisions at the end.**
 
+## Revision 3 — eta-refuter's second pass (#404) closed F1-F6 and added four items, folded in below
+- **F7 (mine, B) — alert starvation, created by the F2 fix.** One list "ascending, id > after_id OR in the lookback, capped at 100" puts the already-delivered lookback rows
+  FIRST, so 100+ rows in the window means every poll returns the same 100 old rows and new alerts starve, during an alert storm. **The tool now returns TWO sets:**
+  `new` = `id > after_id ORDER BY id LIMIT n` (the limit bounds ONLY new rows) and `late` = `id <= after_id AND created_at > now() - lookback` (the lookback looks only where a skip can happen).
+- **F9 (mine, B + relay) — absent read as healthy, one level below F4.** A body without `heartbeat_age_s`, or with null (a fresh deploy where 0119 is applied and no run
+  has written the heartbeat yet, an older deploy, a bug) must be SILENT, never healthy. **The tool returns an explicit `heartbeat: { state: "ok" | "stale" | "none", age_s }`**,
+  never a bare null; `none` means no run has ever recorded. The relay treats `none`, a missing field and a null as SILENT.
+- **F8 (relay) — check-then-post is idempotent only under mutual exclusion.** The relay runs under a single-instance lock (pane-watch already has one).
+- **F10 (relay + conductor) — SILENT has an exit.** Post a recovery when a SILENT condition clears and RE-ARM it (or a second cron death is silent about being silent).
+  The edge state does NOT have to survive a relay restart: re-posting on restart is the safer default (loud beats lost). F6(c) needs an OWNER on conductor's side: the
+  relay writing its last-poll time does nothing unless conductor's cycle checks it.
+- Noted, not blocking: under overlapping runs the message TEXT (`status_from`, a recovery's "down for") comes from the read at run start and can be stale. The KIND is always right,
+  because the gate compares EXCLUDED with the CURRENT row.
+
 ## Revision 2 — what changed and why (eta-refuter #397)
 | finding | what was wrong in rev 1 | change |
 |---|---|---|
@@ -55,8 +69,9 @@ SELECT ... FROM jsonb_to_recordset(<plan.messages>) m
 - The email/WhatsApp senders stay in the code but are gated behind `ROOM_WATCHDOG_PAGE_V` (default OFF, `parseFlag`). Marked, never deleted.
 
 ### B. A read door for the outbox (app side — mine)
-A read-scope MCP tool `scribe_room_alerts(after_id, lookback_minutes = 10, limit <= 100)` returns, ascending by id, the rows with `id > after_id`
-OR `created_at > now() - lookback_minutes` (the DATABASE's clock), plus the heartbeat as **`heartbeat_age_s`, computed by the database** (F5). The relay never
+A read-scope MCP tool `scribe_room_alerts(after_id, lookback_minutes = 10, limit <= 100)` returns TWO sets (F7): `new` (`id > after_id`, ascending, capped at `limit`) and
+`late` (`id <= after_id AND created_at > now() - lookback_minutes`, the DATABASE's clock, uncapped by `limit` and small by construction), plus
+**`heartbeat: { state: "ok" | "stale" | "none", age_s }`, computed by the database** (F5, F9). The relay never
 compares a timestamp to the Mini's clock. Read-only: the relay owns its cursor, and because commits can land out of id order (F2) the lookback is what
 guarantees a row is seen even if a later id was read first. Duplicates from the lookback are the relay's to drop (F3).
 
@@ -66,11 +81,12 @@ Every 30-60 s call the tool with its cursor.
    before appending. A bus thread groups and does not dedupe, so this check IS the idempotency. It is also what makes the lookback (F2) safe.
 2. Post to the bus agent `conductor` (`urgent` for offline, degraded and fleet_outage; `normal` for recovered; `thread_id = room-alert-<id>`) and append one
    board line carrying the **`room_id` only**; the bus message may carry the name. Advance the cursor only after both, written atomically.
-3. **Three distinct SILENT conditions, each posted once, edge-triggered on the relay's own side:**
+3. **Run under a single-instance lock** (F8): two relays would both see an empty thread and both post.
+4. **Three distinct SILENT conditions, each posted once, edge-triggered on the relay's own side, each with an EXIT recovery message that RE-ARMS it (F10):**
    a. **cannot read the door** (network, auth failure, revoked or expired token, non-200): this must NEVER read as "no new rows" (F4);
-   b. **read ok but `heartbeat_age_s` > 300**, or `last_ok` is false: the watchdog cron is not running;
-   c. **the relay itself** (F6, minimum): it writes its last-poll time to the board and conductor's existing cycle checks it.
-4. If the bus or the board is unreachable the cursor does not move; the rows wait in the database.
+   b. **read ok but the heartbeat is not `ok`**: `stale` (age > 300 s or `last_ok` false), OR `none`, OR the field missing or null (F9) — the watchdog cron is not running or has never run;
+   c. **the relay itself** (F6, minimum): it writes its last-poll time to the board and **conductor's existing cycle checks it (owner: conductor, to confirm)**.
+5. If the bus or the board is unreachable the cursor does not move; the rows wait in the database.
 
 ### D. What is deliberately not changed
 Edge-trigger semantics, D2 seeding, mute, the fleet-outage threshold, the 1-minute cron, the classifier (`FLAG_REASON`).
@@ -86,6 +102,8 @@ Edge-trigger semantics, D2 seeding, mute, the fleet-outage threshold, the 1-minu
 - **Race:** two concurrent runs over the same change -> exactly one outbox row; upsert order is by `room_id`.
 - The read tool: cursor plus lookback returns a row committed out of id order; read scope only; `heartbeat_age_s` comes from the database.
 - Heartbeat: written on ok, on read failure and on error; a heartbeat write failure never fails the run.
+- **F7:** 100+ rows inside the lookback plus one new row -> the new row is returned in `new`. **F9:** a fresh table (no heartbeat row) reads `state: "none"`, never `ok`.
+- Relay-side tests (herdr-kit's), which eta-refuter will look for: two relays over the same row post once (F8); SILENT enter, clear, re-enter posts THREE messages, not one (F10).
 
 ## Open decisions (Fable)
 1. Approve outbox + pull relay. The app cannot push to the bus, so a Mini-side relay is unavoidable; the owner would be herdr-kit.
