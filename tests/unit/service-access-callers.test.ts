@@ -42,7 +42,7 @@ let seen: Seen[] = [];
 
 const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 const record = (input: string | URL | Request, init?: RequestInit) => {
-  seen.push({ url: typeof input === "string" ? input : input.toString(), headers: new Headers(init?.headers), redirect: init?.redirect });
+  seen.push({ url: typeof input === "string" ? input : input instanceof Request ? input.url : input.toString(), headers: new Headers(init?.headers), redirect: init?.redirect });
 };
 const reply = (url: string): unknown => {
   if (url.endsWith("/embed_speakers")) return { ok: true, speakers: [] };
@@ -142,6 +142,22 @@ describe("DARK: token not configured → no caller adds anything", () => {
       }
     });
   }
+});
+
+describe("the shared ollama probe keeps its own authorization header in BOTH modes (Refuter-2)", () => {
+  it("default key, custom key, token on and off", async () => {
+    const base = `https://llm.${HOST}/v1`;
+    await fetchOllamaModels(base, 1000);
+    expect(seen[0].headers.get("authorization")).toBe("Bearer ollama");
+    process.env.LLM_API_KEY = "custom-key";
+    await fetchOllamaModels(base, 1000);
+    expect(seen[1].headers.get("authorization")).toBe("Bearer custom-key");
+    process.env.CF_ACCESS_CLIENT_ID = "the-id";
+    process.env.CF_ACCESS_CLIENT_SECRET = "the-secret";
+    await fetchOllamaModels(base, 1000);
+    expect(seen[2].headers.get("authorization"), "attaching the token must not drop it").toBe("Bearer custom-key");
+    expect(seen[2].headers.get("CF-Access-Client-Id")).toBe("the-id");
+  });
 });
 
 describe("an Access login redirect must not read as healthy (Refuter-2 R1)", () => {
@@ -251,6 +267,19 @@ describe("lib/llm.ts — the OpenAI SDK client (ruling 121)", () => {
     expect(opts).toHaveLength(1);
     expect("fetch" in opts[0]).toBe(false);
     expect(opts[0]).toEqual({ baseURL: `https://llm.${HOST}/v1`, apiKey: "ollama" });
+  });
+  it("a Request input keeps its OWN headers (fetch would replace them with init's), and a URL input works (Refuter-2)", async () => {
+    process.env.CF_ACCESS_CLIENT_ID = "the-id";
+    process.env.CF_ACCESS_CLIENT_SECRET = "the-secret";
+    const { serviceAccessFetch } = await import("@/lib/service-access");
+    await serviceAccessFetch(new Request(`https://llm.${HOST}/v1/embeddings`, { method: "POST", headers: { "x-own": "kept" } }));
+    await serviceAccessFetch(new URL(`https://llm.${HOST}/v1/models`));
+    expect(seen).toHaveLength(2);
+    expect(seen[0].url).toBe(`https://llm.${HOST}/v1/embeddings`);
+    expect(seen[0].headers.get("x-own"), "the Request's own header survives").toBe("kept");
+    expect(seen[0].headers.get("CF-Access-Client-Id")).toBe("the-id");
+    expect(seen[0].redirect).toBe("error");
+    expect(seen[1].headers.get("CF-Access-Client-Id")).toBe("the-id");
   });
   it("token configured → the client gets serviceAccessFetch, and each request carries the token to an allowed host only", async () => {
     process.env.OLLAMA_BASE_URL = `https://llm.${HOST}/v1`;
