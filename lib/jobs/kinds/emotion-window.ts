@@ -27,7 +27,7 @@ import { signGetUrl } from "@/lib/r2";
 import { emotionEnabled } from "@/lib/emotion/gate";
 import { emotionHealth, scoreSegments, emotionSecretConfigured, EMOTION_MODEL_KEY, EMOTION_SECRET_ENV } from "@/lib/emotion/client";
 import { buildRuns, planSegments, speakerSpeechMs, splitByDiarizedSpeech, SEGMENTS_PER_CALL, type AttributedTurn, type MeasuredSegment, type PlannedSegment } from "@/lib/emotion/segments";
-import { finishEmotionWindow, recordEmotionFailureNarrow, recordEmotionWindow, recordStaleWindow, scoredOrFailedRow, skippedRow, stateFor, unscorableRow, writeNoSegmentsWindow, writeSpans, type SegmentWrite } from "@/lib/emotion/store";
+import { dedupeSpanRows, finishEmotionWindow, recordEmotionFailureNarrow, recordEmotionWindow, recordStaleWindow, scoredOrFailedRow, skippedRow, stateFor, unscorableRow, writeNoSegmentsWindow, writeSpans, type SegmentWrite } from "@/lib/emotion/store";
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -205,10 +205,13 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
   //
   // The two loops are one multi-row insert: a loop of autocommitted INSERTs has a half-state after every
   // iteration, and there is no reason these rows should be able to arrive four of nine.
-  const prepRows = [
+  const { rows: prepRows, collapsed } = dedupeSpanRows([
     ...skipped.map((s) => skippedRow(writeCtx, s, speakerSpeechMs(intervals, s.speaker_idx, s.start_ms - windowStart, s.end_ms - windowStart))),
     ...split.unscorable.map((u) => unscorableRow(writeCtx, u)),
-  ];
+  ]);
+  if (collapsed > 0) console.error("[emotion_window] span rows sharing a key were collapsed", JSON.stringify({ window: w.id, collapsed }));
+  const skippedN = prepRows.filter((r) => r.state === "skipped").length;
+  const unscorableN = prepRows.length - skippedN;
 
   if (segments.length === 0) {
     // Nothing the service could score: a fact about the audio, like no turns at all. Final, and it spends
@@ -220,16 +223,16 @@ async function prepare(ctx: StepContext): Promise<StepOutcome> {
     // run's spans too — otherwise a window could end here still holding another run's rows.
     await writeNoSegmentsWindow({
       rows: prepRows, windowId: w.id, roomDayId: w.room_day_id, diarizeRunId: base.diarize_run_id,
-      cap_s: health.cap_s, skipped: skipped.length, unscorable: split.unscorable.length,
+      cap_s: health.cap_s, skipped: skippedN, unscorable: unscorableN,
     });
-    return doneWith({ window_id: w.id, segments: 0, skipped: skipped.length, unscorable: split.unscorable.length, turns: attributed.length });
+    return doneWith({ window_id: w.id, segments: 0, skipped: skippedN, unscorable: unscorableN, turns: attributed.length });
   }
   await writeSpans(prepRows);
 
   const progress: Progress = {
     ...base, window_start_ms: windowStart, window_end_ms: Number(w.end_ms), clip_r2_key: w.clip_r2_key,
-    cap_s: health.cap_s, loaded_before: health.loaded, segments, skipped: skipped.length,
-    unscorable_unsent: split.unscorable.length, unscorable: 0,
+    cap_s: health.cap_s, loaded_before: health.loaded, segments, skipped: skippedN,
+    unscorable_unsent: unscorableN, unscorable: 0,
     batch: 0, calls: 0, scored: 0, failed: 0, model: null, subfolder: health.subfolder, device: null, started_ms: Date.now(),
   };
   return nextStep("warm", progress as unknown as Record<string, unknown>);
