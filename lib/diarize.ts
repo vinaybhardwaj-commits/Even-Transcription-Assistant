@@ -30,14 +30,18 @@ import { acquireDiarizeSlot, DIARIZE_QUEUE_WAIT_MS } from "@/lib/diarize-gate";
 import { endpointsFor, runPool, type Verdict } from "@/lib/service-pool";
 
 /**
- * REDUNDANCY-R1 — which /diarize answers mean "try the next endpoint": transport failure, OUR timeout, or a
- * 5xx. `aborted` is the CALLER cancelling, never a reason to ask another machine; a 4xx is the answer.
+ * REDUNDANCY-R1 — which /diarize answers mean "try the next endpoint": a transport failure, a 5xx, or a 404 (that
+ * endpoint does not serve /diarize — R2). NOT our own timeout (R1): a diarization that ran out of time has spent the
+ * whole budget and may still be running on that server; starting a second one would be double work. `aborted` is the
+ * CALLER cancelling, never a reason to ask another machine. Any other 4xx is the answer.
  */
 export function diarizeVerdict(o: DiarizeOutcome): Verdict {
   if (o.ok) return "ok";
-  if (o.error.startsWith("network:") || o.error.startsWith("timeout_")) return "failover";
+  if (o.error.startsWith("network:")) return "failover";
   const m = /^http_(\d{3})/.exec(o.error);
-  return m && Number(m[1]) >= 500 ? "failover" : "final";
+  if (!m) return "final";
+  const status = Number(m[1]);
+  return status >= 500 || status === 404 ? "failover" : "final";
 }
 
 /**
@@ -192,7 +196,7 @@ export async function runDiarize(
   const { hold } = slot;
 
   // ── DISPATCH, per endpoint. The clock starts HERE, and not one millisecond earlier. ─────────────
-  const dispatchAt = async (base: string): Promise<DiarizeOutcome> => {
+  const dispatchAt = async (base: string, budgetMs: number): Promise<DiarizeOutcome> => {
     const form = new FormData();
     form.append("audio", new Blob([audio], { type: baseType }), `audio.${ext}`);
     form.append("encounter_id", opts.encounterId);
@@ -201,7 +205,7 @@ export async function runDiarize(
     if (typeof opts.batchThreshold === "number") form.append("batch_threshold", String(opts.batchThreshold));
 
     const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), timeoutMs);
+    const tid = setTimeout(() => controller.abort(), budgetMs);
     const onOuterAbort = () => controller.abort();
     if (opts.signal) {
       if (opts.signal.aborted) controller.abort();
@@ -257,7 +261,7 @@ export async function runDiarize(
       const outerAborted = !!opts.signal?.aborted;
       const timedOut = controller.signal.aborted && !outerAborted;
       const timing = finish({ timed_out: timedOut });
-      if (timedOut) return { ok: false, error: `timeout_${timeoutMs}ms`, latencyMs: timing.wall_ms, timing };
+      if (timedOut) return { ok: false, error: `timeout_${budgetMs}ms`, latencyMs: timing.wall_ms, timing };
       if (outerAborted) return { ok: false, error: "aborted", latencyMs: timing.wall_ms, timing, retryable: true };
       return { ok: false, error: `network: ${e instanceof Error ? e.message : String(e)}`, latencyMs: timing.wall_ms, timing };
     } finally {
@@ -268,7 +272,8 @@ export async function runDiarize(
   // REDUNDANCY-R1: the dispatch, across the diarize pool (one endpoint when no pool is configured). The
   // slot above is still ONE slot for the whole pool: conservative, and exactly today's behaviour.
   try {
-    const { value, served_by } = await runPool("diarize", endpoints, dispatchAt, diarizeVerdict);
+    // R1: the whole pool gets the ONE timeout a /diarize call always had; a failover gets only what is left.
+    const { value, served_by } = await runPool("diarize", endpoints, dispatchAt, diarizeVerdict, { budgetMs: timeoutMs });
     return served_by ? { ...value, served_by } : value;
   } finally {
     // Release BEFORE returning to the caller, so the next waiter starts its dispatch immediately

@@ -261,7 +261,13 @@ async function whisperAttempt(
   if (endpoints.length === 0) {
     return { ok: false, error: 'whisper_base_url_missing', latency_ms: 0 };
   }
-  const { value, served_by } = await runPool('whisper', endpoints, (base) => whisperAttemptAt(base, audio, contentType, opts), whisperVerdict);
+  // R1: the whole pool gets the ONE timeout this attempt always had; a failover gets only what is left.
+  const { value, served_by } = await runPool(
+    'whisper', endpoints,
+    (base, budgetMs) => whisperAttemptAt(base, audio, contentType, { ...opts, timeoutMs: budgetMs }),
+    whisperVerdict,
+    { budgetMs: opts.timeoutMs ?? 90_000 },
+  );
   return served_by ? { ...value, served_by } : value;
 }
 

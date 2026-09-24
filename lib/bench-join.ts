@@ -278,7 +278,13 @@ export async function callJoinService(req: JoinRequest, opts: { timeoutMs?: numb
   // ONE token for every instance: the twins are the same service, deployed with the same secret.
   const token = process.env.AUDIO_JOIN_TOKEN;
   if (!token) return { ok: false, error: "join_token_not_configured" };
-  const { value, served_by } = await runPool("join", endpoints, (base) => callJoinAt(base, token, req, opts), joinVerdict);
+  // R1: the whole pool gets the ONE timeout this call always had; a failover gets only what is left.
+  const { value, served_by } = await runPool(
+    "join", endpoints,
+    (base, budgetMs) => callJoinAt(base, token, req, { timeoutMs: budgetMs }),
+    joinVerdict,
+    { budgetMs: opts.timeoutMs ?? JOIN_TIMEOUT_MS },
+  );
   return served_by ? { ...value, served_by } : value;
 }
 

@@ -58,12 +58,14 @@ export type EmbedOutcome =
   | { ok: false; error: "embed_base_url_missing" | "embed_failed" | "embed_bad_response"; retryable: boolean; served_by?: string };
 
 /**
- * REDUNDANCY-R1 — `retryable` already says "that endpoint failed, not the request" (transport, timeout,
- * 5xx): exactly the failover class. A refusal (4xx) or a malformed body is the answer.
+ * REDUNDANCY-R1 — `retryable` already says "that endpoint failed, not the request" (transport, timeout, 5xx):
+ * the failover class. So is a 404 (R2): that endpoint does not serve /embed_speakers. Any other refusal or a
+ * malformed body is the answer. The status travels beside the outcome and never reaches the caller, whose
+ * result is exactly the old one.
  */
-export function embedVerdict(o: EmbedOutcome): Verdict {
-  if (o.ok) return "ok";
-  return o.retryable ? "failover" : "final";
+export function embedVerdict(r: { o: EmbedOutcome; status: number | null }): Verdict {
+  if (r.o.ok) return "ok";
+  return r.o.retryable || r.status === 404 ? "failover" : "final";
 }
 
 /**
@@ -109,12 +111,18 @@ export async function embedSpeakers(
   centroids: readonly ClinicianCentroid[],
   opts: { batchThreshold: number; label: string; contentType?: string } ,
 ): Promise<EmbedOutcome> {
-  // Same endpoints as the diarize bridge: it is the same service.
-  const endpoints = endpointsFor("diarize");
+  // Its own route pool (R2), falling back to the diarize lists and then DIARIZE_BASE_URL.
+  const endpoints = endpointsFor("diarize_embed");
   if (endpoints.length === 0) return { ok: false, error: "embed_base_url_missing", retryable: false };
   if (speakers.length === 0) return { ok: true, speakers: [], latencyMs: 0 };
-  const { value, served_by } = await runPool("diarize", endpoints, (base) => embedAt(base, audio, speakers, centroids, opts), embedVerdict);
-  return served_by ? { ...value, served_by } : value;
+  // R1: the whole pool gets the ONE timeout an embed call always had; a failover gets only what is left.
+  const { value, served_by } = await runPool(
+    "diarize_embed", endpoints,
+    (base, budgetMs) => embedAt(base, audio, speakers, centroids, opts, budgetMs),
+    embedVerdict,
+    { budgetMs: EMBED_TIMEOUT_MS() },
+  );
+  return served_by ? { ...value.o, served_by } : value.o;
 }
 
 async function embedAt(
@@ -123,7 +131,8 @@ async function embedAt(
   speakers: readonly EmbedRequestSpeaker[],
   centroids: readonly ClinicianCentroid[],
   opts: { batchThreshold: number; label: string; contentType?: string },
-): Promise<EmbedOutcome> {
+  timeoutMs: number,
+): Promise<{ o: EmbedOutcome; status: number | null }> {
   const baseType = (opts.contentType?.split(";")[0] || "").trim().toLowerCase() || "audio/webm";
   const form = new FormData();
   form.append("audio", new Blob([audio], { type: baseType }), "audio.webm");
@@ -131,7 +140,6 @@ async function embedAt(
   form.append("clinician_centroids", JSON.stringify(centroids));
   form.append("batch_threshold", String(opts.batchThreshold));
 
-  const timeoutMs = EMBED_TIMEOUT_MS();
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
@@ -143,19 +151,19 @@ async function embedAt(
     if (!res.ok) {
       // The service's message can describe the audio; the log gets a status and a length.
       console.error("[embed] refused", JSON.stringify({ window: opts.label, status: res.status, body_len: text.length }));
-      return { ok: false, error: "embed_failed", retryable: res.status >= 500 };
+      return { o: { ok: false, error: "embed_failed", retryable: res.status >= 500 }, status: res.status };
     }
     const j = JSON.parse(text) as { ok?: boolean; speakers?: unknown };
     // Branch on `ok`, never on status: this service's sibling /enroll answers 200 with ok:false.
     if (j.ok !== true || !Array.isArray(j.speakers)) {
       console.error("[embed] bad response", JSON.stringify({ window: opts.label }));
-      return { ok: false, error: "embed_bad_response", retryable: false };
+      return { o: { ok: false, error: "embed_bad_response", retryable: false }, status: res.status };
     }
-    return { ok: true, speakers: j.speakers as EmbeddedSpeaker[], latencyMs: Date.now() - t0 };
+    return { o: { ok: true, speakers: j.speakers as EmbeddedSpeaker[], latencyMs: Date.now() - t0 }, status: res.status };
   } catch (e: unknown) {
     const timedOut = controller.signal.aborted;
     console.error("[embed] call failed", JSON.stringify({ window: opts.label, timed_out: timedOut }));
-    return { ok: false, error: "embed_failed", retryable: true };
+    return { o: { ok: false, error: "embed_failed", retryable: true }, status: null };
   } finally {
     clearTimeout(tid);
   }

@@ -19,6 +19,7 @@ import * as flags from "@/lib/live-flags";
 import { probe, type McpTool, argDetail, DETAIL_SCHEMA, type ToolArgs } from "../registry";
 import { probeSttEngines, type EngineHealth } from "./stt";
 import { classifyBusError, listListeners } from "@/lib/bench-commands";
+import { POOL_SERVICES, poolConfigProblems, poolConfigured } from "@/lib/service-pool";
 
 const PYANNOTE_TIMEOUT_MS = 5_000;
 
@@ -126,7 +127,19 @@ export async function composeHealth() {
     listeners: lst.listeners,
     ...(lst.note ? { listeners_note: lst.note } : {}),
     ...(app.degraded ? { app_health_degraded: true, app_health_error: app.error } : {}),
+    ...servicePoolHealth(),
   };
+}
+
+/**
+ * REDUNDANCY-R1 (R4) — pool configuration, NAMES only. An invalid pool setting is switched OFF rather than thrown
+ * inside a job step, so this is where it becomes visible. Absent when nothing is configured and nothing is wrong,
+ * so today's health answer is unchanged.
+ */
+export function servicePoolHealth(): { service_pools?: { configured: string[]; invalid: string[] } } {
+  const configured = POOL_SERVICES.filter((svc) => poolConfigured(svc));
+  const invalid = poolConfigProblems();
+  return configured.length === 0 && invalid.length === 0 ? {} : { service_pools: { configured: [...configured], invalid } };
 }
 
 const ENV_NAMES = [
