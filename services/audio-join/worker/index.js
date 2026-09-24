@@ -16,9 +16,9 @@
  * binding route needs neither, and R2 custom metadata (the provenance) has to be written through
  * the binding anyway.
  *
- * "One join at a time" (guard rail) is enforced INSIDE the Durable Object, not in the Worker
- * isolate: a `Container` is a Durable Object, `getContainer(env.JOINER, INSTANCE)` always
- * resolves to the same single object, and a Durable Object is single-threaded. A flag on the
+ * "One join at a time PER SHARD" (guard rail) is enforced INSIDE the Durable Object, not in the
+ * Worker isolate: a `Container` is a Durable Object, `getContainer(env.JOINER, name)` always
+ * resolves to the same object for one name, and a Durable Object is single-threaded. A flag on the
  * instance is therefore a real mutex across every isolate in every colo. A flag in the Worker
  * would only have been a mutex for one isolate.
  *
@@ -47,10 +47,17 @@ import {
   framePiecePrefix,
   frameWireLength,
   validateJoinRequest,
+  JOIN_SHARDS,
+  SHARD_HEADER,
+  shardInstanceName,
+  shardKeyFromHeaders,
 } from "../container/join-core.mjs";
 
-/** One box, one name — the mutex below depends on every request landing on the same object. */
-const INSTANCE = "joiner";
+// Which Durable Object a request lands on is `shardInstanceName(key)` (join-core.mjs): a request
+// with no `x-join-shard` header goes to the legacy "joiner" instance exactly as before; one with a
+// key goes to one of JOIN_SHARDS fixed shards. The mutex below depends on one KEY always landing on
+// the same object, which a deterministic hash guarantees — and on the number of objects staying
+// under `max_instances`, which a fixed shard count guarantees.
 
 /**
  * A join is three transfers and nothing else. Every one of them can fail with a stream error that
@@ -91,7 +98,8 @@ export class Joiner extends Container {
 
   pingEndpoint = "localhost/health";
 
-  /** Guard rail: refuse a second job while one is running. Do not queue. */
+  /** Guard rail: refuse a second job on THIS shard while one is running. Do not queue. Each shard
+   *  is its own Durable Object, so this is one flag per shard, not one for the whole service. */
   #busy = false;
 
   async fetch(request) {
@@ -319,6 +327,9 @@ export default {
         clips_prefix: CLIPS_PREFIX,
         version: JOIN_SERVICE_VERSION,
         formats: Object.keys(FORMATS),
+        // The deploy check for sharding: a pre-shard Worker answers without these.
+        shards: JOIN_SHARDS,
+        shard_header: SHARD_HEADER,
       });
     }
     if (url.pathname !== "/join") return json({ ok: false, error: "no_such_route" }, 404);
@@ -336,11 +347,20 @@ export default {
     // seen at two invocation layers — the Worker's fetch handler and the Joiner Durable Object's,
     // each of which emits its own invocation log — and TWO ids is a real retry.
     const rid = request.headers.get("x-join-request-id") ?? "none";
-    console.log(`[audio-join] layer=worker rid=${rid} forwarding to do`);
+
+    // Which shard. No header = the legacy instance; a malformed one is refused by name (the door
+    // sees only the request, so the key travels as a header the caller sets from `meta.session_id`).
+    const shard = shardKeyFromHeaders(request.headers);
+    if (!shard.ok) {
+      console.log(`[audio-join] layer=worker rid=${rid} refused=${shard.error}`);
+      return json({ ok: false, error: shard.error, rid });
+    }
+    const instance = shardInstanceName(shard.key);
+    console.log(`[audio-join] layer=worker rid=${rid} instance=${instance} forwarding to do`);
 
     // HOP 1 — the caller's POST into the Durable Object.
     try {
-      return await getContainer(env.JOINER, INSTANCE).fetch(request);
+      return await getContainer(env.JOINER, instance).fetch(request);
     } catch (e) {
       console.log(`[audio-join] layer=worker rid=${rid} failed hop=${HOPS.worker_to_do} ${String(e?.message ?? e).slice(0, 200)}`);
       return json({

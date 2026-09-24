@@ -14,9 +14,13 @@
     {
       "class_name": "Joiner",
       "image": "./container/Dockerfile",
-      // One box. "One join at a time" is enforced in the Durable Object; this makes the
-      // platform agree rather than quietly starting a second instance.
-      "max_instances": 1,
+      // The legacy "joiner" instance plus JOIN_SHARDS (32, in container/join-core.mjs) keyed
+      // shards. "One join at a time" is enforced per Durable Object; this makes the platform agree
+      // rather than quietly starting one more. Keep JOIN_SHARDS + 1 <= max_instances —
+      // tests/unit/join-shard.test.ts fails if they drift. Was 1 before JOIN-SHARD (24 Sep);
+      // sizing is in the comment beside JOIN_SHARDS. Account ceiling is 1,500 vCPU / 6 TiB, and
+      // 33 x standard-1 is 16.5 vCPU / 132 GiB.
+      "max_instances": 33,
       // 1/2 vCPU, 4 GiB, 8 GB disk. A 30-minute Opus re-encode is seconds of CPU and tens of
       // MB of scratch; `basic` (1/4 vCPU, 1 GiB) also fits, `standard-1` leaves headroom so a
       // long window never trips the disk.
