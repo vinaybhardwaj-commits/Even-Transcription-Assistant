@@ -31,7 +31,14 @@ const routerSingleBase = () => process.env.ETA_ROUTER_URL || ROUTER_DEFAULT_URL;
  */
 type Attempt<T> = { value: T; down: boolean };
 const attemptVerdict = <T>(a: Attempt<T>): Verdict => (a.down ? "failover" : "final");
-const isAbort = (e: unknown) => (e as Error)?.name === "AbortError" || (e as Error)?.name === "TimeoutError";
+/**
+ * A throw that does NOT mean "that endpoint is down": our own timeout (AbortError from controller.abort(),
+ * TimeoutError from AbortSignal.timeout) or an unparseable 200 (SyntaxError from res.json()). Either way the
+ * endpoint may already hold the audio or the job, so another endpoint must not be given it too (ETA-Refuter F1).
+ * Keep calling controller.abort() WITHOUT a reason: with one, fetch rejects with the reason itself (name
+ * "Error"), and a timeout would silently become a failover.
+ */
+const endpointMayHaveIt = (e: unknown) => ["AbortError", "TimeoutError", "SyntaxError"].includes((e as Error)?.name);
 
 export const ETA_ROUTER_ON = () => process.env.ETA_ROUTER !== "0";
 
@@ -86,7 +93,7 @@ async function routeTranscribeAt(
     const j = (await res.json()) as RouterResult;
     return { value: j, down: false };
   } catch (e) {
-    return { value: { ok: false, error: e instanceof Error ? e.message : String(e) }, down: !isAbort(e) };
+    return { value: { ok: false, error: e instanceof Error ? e.message : String(e) }, down: !endpointMayHaveIt(e) };
   } finally {
     clearTimeout(tid);
   }
@@ -172,7 +179,7 @@ async function submitRouteJobAt(
     if (!j.job_id) return { value: { ok: false, error: "no_job_id" }, down: false };
     return { value: { ok: true, job_id: j.job_id }, down: false };
   } catch (e) {
-    return { value: { ok: false, error: e instanceof Error ? e.message : String(e) }, down: !isAbort(e) };
+    return { value: { ok: false, error: e instanceof Error ? e.message : String(e) }, down: !endpointMayHaveIt(e) };
   } finally {
     clearTimeout(tid);
   }

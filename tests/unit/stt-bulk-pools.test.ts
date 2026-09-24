@@ -21,7 +21,7 @@ const VARS = [
 ];
 const saved: Record<string, string | undefined> = {};
 const calls: string[] = [];
-type Reply = { status: number; body: unknown } | "throw" | "timeout";
+type Reply = { status: number; body: unknown } | "throw" | "timeout" | "garbage200";
 let route: (url: string) => Reply = () => ({ status: 200, body: {} });
 
 const reply = (status: number, body: unknown) =>
@@ -32,6 +32,8 @@ const fakeFetch = async (input: string | URL | Request) => {
   const r = route(url);
   if (r === "throw") throw new TypeError("fetch failed");
   if (r === "timeout") throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  // A 200 whose body does not parse: res.json() throws a SyntaxError, as the real Response does.
+  if (r === "garbage200") return { ok: true, status: 200, json: async () => JSON.parse("<html>"), text: async () => "<html>" } as unknown as Response;
   return reply(r.status, r.body);
 };
 
@@ -126,6 +128,18 @@ describe("router — submit", () => {
     route = () => "timeout";
     await bulk(() => submitRouteJob("https://r2.example/a"));
     expect(calls).toEqual([`${BOX_ROUTER}/route/job`]);
+  });
+
+  it("does NOT fail over on a 200 it cannot parse: that router answered, and may have ACCEPTED the job (Refuter F1)", async () => {
+    process.env.ETA_ROUTER_BULK_URLS = `${BOX_ROUTER},${L4_ROUTER}`;
+    route = () => "garbage200";
+    const a = await bulk(() => submitRouteJob("https://r2.example/a"));
+    expect(calls).toEqual([`${BOX_ROUTER}/route/job`]);
+    expect(a.value.ok).toBe(false);
+    calls.length = 0; resetBreakers();
+    const b = await bulk(() => routeTranscribe(new Uint8Array([1])));
+    expect(calls, "the sync call: the audio is not transcribed twice").toEqual([`${BOX_ROUTER}/route`]);
+    expect(b.value.ok).toBe(false);
   });
 
   it("singleOnly ignores every pool list: a caller that cannot persist the endpoint submits where it polls", async () => {
@@ -232,7 +246,7 @@ describe("IndicConformer", () => {
     const five = await bulk(call);
     expect(calls).toEqual([`${BOX_INDIC}/inference`, `${L4_INDIC}/inference`]);
     expect(five.value.original).toBe("ನಮಸ್ಕಾರ");
-    for (const bad of [{ status: 400, body: {} }, "timeout"] as const) {
+    for (const bad of [{ status: 400, body: {} }, "timeout", "garbage200"] as const) {
       calls.length = 0; resetBreakers();
       route = () => bad;
       const r = await bulk(call);
