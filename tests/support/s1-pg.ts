@@ -49,7 +49,7 @@ export function dockerAvailable(): boolean {
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { stderr?: Buffer | string };
     if (err.code === "ENOENT") console.error("dockerAvailable: docker CLI not found");
-    else if ((err as { signal?: string }).signal === "SIGTERM") console.error("dockerAvailable: docker daemon did not answer within 15s (server unreachable)");
+    else if (err.code === "ETIMEDOUT") console.error("dockerAvailable: docker daemon did not answer within 15s (server unreachable)");
     else console.error(`dockerAvailable: server unreachable: ${String(err.stderr ?? err.message).slice(0, 200)}`);
     return false;
   }
