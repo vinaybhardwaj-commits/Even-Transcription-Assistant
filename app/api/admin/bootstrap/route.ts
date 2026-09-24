@@ -55,7 +55,11 @@ export async function POST(req: NextRequest) {
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { /* allow empty body */ }
 
-  const adminEmail = (body.admin_email as string) ?? "vinay.bhardwaj@even.in";
+  // No built-in address (ruling 135 / #391: this repo is public). The request body wins; else BOOTSTRAP_ADMIN_EMAIL; else refuse.
+  const adminEmail = (body.admin_email as string | undefined) ?? process.env.BOOTSTRAP_ADMIN_EMAIL;
+  if (!adminEmail) {
+    return respondError("VALIDATION_FAILED", "admin_email is required (in the body, or set BOOTSTRAP_ADMIN_EMAIL)");
+  }
   const adminName  = (body.admin_name  as string) ?? "Vinay Bhardwaj";
   const doctorFullName = (body.doctor_full_name as string) ?? "Vinay Bhardwaj";
   const doctorEmail = (body.doctor_email as string) ?? adminEmail;
