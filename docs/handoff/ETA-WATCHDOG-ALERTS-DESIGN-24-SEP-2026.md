@@ -1,6 +1,17 @@
 # Room Watchdog alert path — DESIGN (scribe, 24 Sep 2026, Fable ruling 128(a))
 
-**Status: DESIGN ONLY. Nothing here is built. eta-refuter refutes it first; Fable rules on the open decisions at the end.**
+**Status: DESIGN, REVISION 2. Nothing here is built. eta-refuter refuted revision 1 (#397); this revision answers F1-F6. eta-refuter refutes it again before any build; Fable rules on the open decisions at the end.**
+
+## Revision 2 — what changed and why (eta-refuter #397)
+| finding | what was wrong in rev 1 | change |
+|---|---|---|
+| **F1** (mine, A) | Outbox fed `FROM changed` state writes. Writes and messages are NOT one-to-one: D2 first sight = 1 write / 0 messages, D9 muted = 1 write / 0 messages, D3 fleet outage = N writes / 1 message. Rev 1 would have alerted on history, alerted muted rooms, and turned one fleet outage into N alerts. | Outbox is fed FROM `plan.messages`. `changed` is ONLY the race gate. Messages carry `room_ids`. |
+| **F2** (relay) | `id > after_id` on a bigserial: ids are taken at INSERT, not at COMMIT, so a poll can read a later id and skip an earlier one that commits after. | The tool returns `id > after_id` OR rows from a trailing DB-clock lookback; the relay dedupes (F3). Upsert rows are ordered by `room_id` so overlapping runs cannot deadlock. |
+| **F3** (relay) | "Idempotent by bus thread id" is FALSE: `messages.thread_id` is a plain non-unique TEXT column; a thread groups, it does not dedupe. | The relay checks `bus_thread("room-alert-<id>")` before posting and the board before appending. This is also what makes F2's lookback safe. |
+| **F4** (relay) | A failed read of the tool would read as "no new rows", so an app outage looks like "all rooms fine". | "Cannot read the door" (network, auth, revoked token) is its OWN silent condition, distinct from "read ok, zero rows". |
+| **F5** (mine, B) | The heartbeat is a timestamp compared to the Mini's clock. | The tool returns `heartbeat_age_s`, computed by the database. The lookback is also a DB clock. |
+| **F6** (Fable's call) | If the relay dies there is neither an alert nor a SILENT message. | Minimum: the relay writes its last-poll time to the board and conductor's existing cycle checks it. |
+Also found: today's write has NO `IS DISTINCT FROM`, so two overlapping cron runs can already BOTH dispatch. That is a live duplicate this design fixes.
 Target: the next train after tonight's. Order: alert path = bus + conductor board, no V pages.
 
 ## What "cannot alert" means (my reading; UNVERIFIED against eta-refuter #332, which I have not seen)
@@ -19,40 +30,61 @@ From `lib/room-watchdog.ts` on the next-train head:
 
 ### A. Outbox in the database, written in the SAME statement as the state (app side — mine)
 Migration `0119` (0118 is the current head on every branch; recheck before applying): `room_alert_outbox`
-`(id bigserial pk, created_at, kind in ('offline','degraded','recovered','fleet_outage'), room_id, room_name, status_from, status_to, subject, body)`
+`(id bigserial pk, created_at, kind in ('offline','degraded','recovered','fleet_outage'), room_ids text[], room_name, status_from, status_to, subject, body)`
 and one-row `room_watchdog_heartbeat (id = 1, last_run_at, last_ok, evaluated, last_error)`.
 
-`runWatchdog` replaces its per-room state writes with ONE statement per run:
-`WITH changed AS (INSERT INTO room_alert_state ... ON CONFLICT DO UPDATE ... WHERE status IS DISTINCT FROM EXCLUDED.status RETURNING ...) INSERT INTO room_alert_outbox ... FROM changed`.
-- **State advances if and only if the alert is queued.** If the statement fails, neither happens and the next minute retries. This is the E31
-  rule the other way round: here the coupling is wanted, because they are one fact.
-- **Two overlapping cron runs cannot both alert**: the `IS DISTINCT FROM` guard means only the run that actually changed the row inserts its outbox row.
-- Muted rooms still get the state write and get NO outbox row, as today. D2 (seed, never alert on history) and the fleet-outage rule
-  are unchanged: `planWatchdogRun` stays pure, and only gains `kind`, `room_id` and the two statuses on the messages it already returns.
+`planWatchdogRun` stays PURE and keeps every rule. Its messages only gain `kind` and `room_ids` (one id for an individual message; the
+rooms that crossed into offline for a fleet_outage). `runWatchdog` then does ONE statement per run, taking the plan's writes AND messages as
+arrays/JSON:
+```
+WITH changed AS (
+  INSERT INTO room_alert_state (room_id, status, since, updated_at)
+  SELECT ... FROM unnest(...) ORDER BY room_id          -- same lock order in every run
+  ON CONFLICT (room_id) DO UPDATE SET ... WHERE room_alert_state.status IS DISTINCT FROM EXCLUDED.status
+  RETURNING room_id
+)
+INSERT INTO room_alert_outbox (kind, room_ids, room_name, ..., subject, body)
+SELECT ... FROM jsonb_to_recordset(<plan.messages>) m
+ WHERE EXISTS (SELECT 1 FROM changed c WHERE c.room_id = ANY (m.room_ids))
+```
+- **The outbox is fed FROM `plan.messages`, never from the state writes** (F1). D2 (first sight: a write, no message), D9 (muted: a write,
+  no message) and D3 (fleet outage: N writes, ONE message, the individual ones swallowed) are therefore exactly what the planner says.
+- **`changed` is only the race gate:** an individual message is inserted iff its room actually changed in THIS statement; a fleet_outage iff at least one of its
+  rooms did. Two overlapping runs cannot both alert.
+- **State advances if and only if the alerts are queued.** One statement: if it fails, nothing advances and the next minute retries.
 - The email/WhatsApp senders stay in the code but are gated behind `ROOM_WATCHDOG_PAGE_V` (default OFF, `parseFlag`). Marked, never deleted.
 
 ### B. A read door for the outbox (app side — mine)
-A read-scope MCP tool `scribe_room_alerts(after_id, limit<=100)` returns rows with `id > after_id`, ascending, plus the heartbeat
-(`last_run_at`, `last_ok`). Read-only, no ack write: the relay owns its own cursor. At-least-once delivery, made idempotent by the bus
-thread id `room-alert-<id>`.
+A read-scope MCP tool `scribe_room_alerts(after_id, lookback_minutes = 10, limit <= 100)` returns, ascending by id, the rows with `id > after_id`
+OR `created_at > now() - lookback_minutes` (the DATABASE's clock), plus the heartbeat as **`heartbeat_age_s`, computed by the database** (F5). The relay never
+compares a timestamp to the Mini's clock. Read-only: the relay owns its cursor, and because commits can land out of id order (F2) the lookback is what
+guarantees a row is seen even if a later id was read first. Duplicates from the lookback are the relay's to drop (F3).
 
-### C. The relay (Mini side — NOT mine; herdr-kit / pane-watch)
-Every 30-60 s: call the tool with the saved cursor; for each row post to the bus agent `conductor` (`urgent` for offline, degraded and
-fleet_outage, `normal` for recovered; `thread_id = room-alert-<id>`) and append one line to the board's ROOM ALERTS section; advance the cursor
-ONLY after both succeed, written atomically. If the bus or the board is unreachable the cursor does not move, and the rows wait in the database.
-**Watchdog-of-the-watchdog:** if `heartbeat.last_run_at` is older than 5 min, or `last_ok` is false, the relay posts one `[room-watchdog SILENT]`
-message (edge-triggered on its own side, so it does not repeat every poll).
+### C. The relay (Mini side — NOT mine; herdr-kit / pane-watch). The contract it must meet:
+Every 30-60 s call the tool with its cursor.
+1. **Dedupe before acting (F3).** Before posting row `<id>`, call `bus_thread("room-alert-<id>")` and skip the post if it exists; check the board for that id
+   before appending. A bus thread groups and does not dedupe, so this check IS the idempotency. It is also what makes the lookback (F2) safe.
+2. Post to the bus agent `conductor` (`urgent` for offline, degraded and fleet_outage; `normal` for recovered; `thread_id = room-alert-<id>`) and append one
+   board line carrying the **`room_id` only**; the bus message may carry the name. Advance the cursor only after both, written atomically.
+3. **Three distinct SILENT conditions, each posted once, edge-triggered on the relay's own side:**
+   a. **cannot read the door** (network, auth failure, revoked or expired token, non-200): this must NEVER read as "no new rows" (F4);
+   b. **read ok but `heartbeat_age_s` > 300**, or `last_ok` is false: the watchdog cron is not running;
+   c. **the relay itself** (F6, minimum): it writes its last-poll time to the board and conductor's existing cycle checks it.
+4. If the bus or the board is unreachable the cursor does not move; the rows wait in the database.
 
 ### D. What is deliberately not changed
 Edge-trigger semantics, D2 seeding, mute, the fleet-outage threshold, the 1-minute cron, the classifier (`FLAG_REASON`).
 
 ## Tests planned (before any code is called done)
-- Pure: messages carry kind, room_id and statuses; muted rooms produce no outbox row; unchanged planning output otherwise.
-- **Real postgres, failure injected inside the statement** (the e31b pattern): a trigger that raises on the outbox insert must leave
-  `room_alert_state` on its EARLIER status. Split mutant: two statements instead of one must FAIL this test, because the state would advance and
-  the alert would be lost.
-- Two concurrent runs over the same change produce exactly one outbox row.
-- The read tool: cursor semantics, limit, read scope only, no room data beyond what the messages already carry.
+- Pure: messages carry `kind` and `room_ids`; planning output is otherwise unchanged.
+- **Real postgres, the writes-to-messages mapping (F1) — the tests rev 1 lacked:**
+  - a **seed** run (`prior === null`) -> 0 outbox rows and 1 state row;
+  - a **muted** transition -> 0 outbox rows and the state row moved;
+  - a **fleet outage** (N rooms into offline in one run) -> exactly ONE row, kind `fleet_outage`, and none of the swallowed individual ones;
+  - a normal transition -> exactly one row; a **recovery** -> one row.
+- **Atomicity (kept):** a trigger that raises on the outbox insert must leave `room_alert_state` on its EARLIER status; the split mutant (two statements) must FAIL it.
+- **Race:** two concurrent runs over the same change -> exactly one outbox row; upsert order is by `room_id`.
+- The read tool: cursor plus lookback returns a row committed out of id order; read scope only; `heartbeat_age_s` comes from the database.
 - Heartbeat: written on ok, on read failure and on error; a heartbeat write failure never fails the run.
 
 ## Open decisions (Fable)
@@ -63,8 +95,10 @@ Edge-trigger semantics, D2 seeding, mute, the fleet-outage threshold, the 1-minu
    repo, so I propose the board line carries `room_id` and the bus message carries the name. Your call.
 4. Turn the V-paging channels off by default (`ROOM_WATCHDOG_PAGE_V` unset) or leave them as they are.
 5. Migration 0119 is applied by an authenticated POST /api/run-migrations, as ever, never by a deploy.
-6. The 5-minute "watchdog silent" threshold.
+6. The 5-minute "watchdog silent" threshold (now a database-computed age, F5).
+7. **How far to take F6.** Minimum proposed: the relay writes its last-poll time to the board and conductor's existing cycle checks it. Anything stronger needs a
+   second, independent watcher, which is a separate piece of work.
 
 ## What I need from eta-refuter
-Tell me if #332 says something different from my five points. Then try to break this: a path where state advances without an alert, a
-duplicate alert, an alert on history, an alert to a muted room, or a way the heartbeat or the tool could hide a dead cron.
+Re-try to break revision 2: a path where state advances without an alert, a duplicate alert, an alert on history, an alert to a muted room, a row the
+relay can miss, or a way the heartbeat or the tool could hide a dead cron or a dead door. (#332 was an ack, not a finding; my five facts were confirmed in #397.)
