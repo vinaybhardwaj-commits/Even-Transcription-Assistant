@@ -28,6 +28,9 @@
  *     bench_chunk carries no app version, so this module cannot refuse "an unmeasured version". What it does: it only judges chunks whose content_type is audio/webm (anything else is never exact zero and is
  *     counted as unjudged by the caller), and it names the requirement for whoever wires it: derive the baseline in the release process by encoding 300 s of zeros with the shipped tapewriter and settings, and
  *     fail the release if it is not ZERO_CHUNK_SIZE_BYTES. Until that exists, PAGING ON THIS RULE IS NOT SAFE, which is also why it is inert (ruling 376).
+ *  4. OFF-NOMINAL DURATIONS ARE UNVERIFIED (eta-refuter #2185). All 1,610 zero chunks are exactly 300,000 ms, but 815 other full chunks have durations from 299,450 to 301,018 ms (198 of them more than 200 ms off). The
+ *     +/-1.0 B/s tolerance is 0.14 %: a zero chunk of 299,450 ms reads 709.2 B/s if its size stays 212,378 B (a MISS) and 707.93 only if the size scales with duration, and no zero chunk off 300,000 exists to say which.
+ *     Before wiring: judge by size == 212,378 when duration_ms == 300,000 and by scaled size otherwise, or state that off-nominal durations are not covered.
  *  3. PARTIAL CHUNKS. Only full 300 s chunks are judged, so a mute that starts mid-chunk is seen one chunk late, and the FINAL chunk of every session (shorter) is never judged. The constant is not scaled to other
  *     durations (container overhead is not proportional). The "two consecutive full chunks" trigger stays.
  */
