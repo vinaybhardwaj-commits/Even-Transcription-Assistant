@@ -18,11 +18,27 @@
  *  - a run is OPEN while it includes the latest full chunk its session has, RECOVERED when a later full chunk exists that is not exact;
  *  - a room is UNKNOWN when it should be recording and its latest chunk ended more than STALE_CHUNK_MS ago (or it has none): "we never looked" must not read as "fine".
  * It says WHAT the tape held (exact digital silence) and never WHY (a muted or unplugged input, a lost permission and a wrong input all look the same).
+ *
+ * THREE LIMITS, stated so they are not read as covered (eta-refuter #2148):
+ *  1. DEVICE CLASS. Three of the four rooms that produce exact zero (OPD 3, Cardiology OPD, OPD 7) are TM20 rooms, where r267/r280 ruled the cause the microphone's HARDWARE MUTE, a deliberate act; only OPD 4 (a
+ *     C270, which has no mute button) has exact zero with no benign explanation. The tape cannot tell them apart, so the message takes the input device's class and words a TM20 hit as "the input was silenced (a
+ *     hardware mute is likely deliberate)" and any other device as "no mute button on this device: investigate". The 57 historical runs are therefore NOT 57 unexplained faults.
+ *  2. THE ENCODER IS NOT PINNED, AND THE CHUNK ROW DOES NOT SAY WHICH BUILD MADE IT. 212,378 bytes is what this app's Opus-in-WebM settings produce for 300 s of digital zero; it was stable across the 1,610
+ *     chunks from 9 Sep to 24 Sep (several app releases), but a release that changed the bitrate, frame size or container would move it and the alarm would go silently BLIND (a "field stopped arriving" failure).
+ *     bench_chunk carries no app version, so this module cannot refuse "an unmeasured version". What it does: it only judges chunks whose content_type is audio/webm (anything else is never exact zero and is
+ *     counted as unjudged by the caller), and it names the requirement for whoever wires it: derive the baseline in the release process by encoding 300 s of zeros with the shipped tapewriter and settings, and
+ *     fail the release if it is not ZERO_CHUNK_SIZE_BYTES. Until that exists, PAGING ON THIS RULE IS NOT SAFE, which is also why it is inert (ruling 376).
+ *  3. PARTIAL CHUNKS. Only full 300 s chunks are judged, so a mute that starts mid-chunk is seen one chunk late, and the FINAL chunk of every session (shorter) is never judged. The constant is not scaled to other
+ *     durations (container overhead is not proportional). The "two consecutive full chunks" trigger stays.
  */
 import { sql } from "@/lib/db";
 
 /** bytes per second of a chunk of digital silence: 212,378 bytes / 300 s, the single value 1,610 chunks share. */
 export const ZERO_CHUNK_BPS = 707.93;
+/** the exact size of a full 300 s zero chunk: the spike is 1,610 chunks at exactly this many bytes (eta-refuter #2148). Documented; the rule itself is the rate above. */
+export const ZERO_CHUNK_SIZE_BYTES = 212_378;
+/** the only container the baseline was measured on. */
+export const MEASURED_CONTENT_TYPE = "audio/webm";
 /** tolerance around it; the next class starts 3.1 B/s higher (711.06), so this must stay small. */
 export const ZERO_CHUNK_TOLERANCE_BPS = 1.0;
 /** only chunks at least this long are judged (a full chunk is 300 s). */
@@ -43,6 +59,8 @@ export type TapeChunk = {
   ended_at_ms: number;
   duration_ms: number;
   size_bytes: number | null;
+  /** the chunk's content type; the baseline was measured on audio/webm only */
+  content_type: string | null;
 };
 
 /** PURE — bytes per second, or null when the size or the duration is not a usable number. */
@@ -54,9 +72,17 @@ export function chunkBps(c: Pick<TapeChunk, "size_bytes" | "duration_ms">): numb
 
 export const isFullChunk = (c: Pick<TapeChunk, "duration_ms">): boolean => Number.isFinite(c.duration_ms) && c.duration_ms >= MIN_FULL_CHUNK_MS;
 
-/** PURE — a FULL chunk whose rate is within the tolerance of the silence size. A short chunk, an unknown size or a malformed row is never exact zero. */
-export function isExactZeroChunk(c: Pick<TapeChunk, "size_bytes" | "duration_ms">): boolean {
+/** PURE — a chunk the baseline applies to: full, and (when the content type is known) in the container it was measured on. Only such a chunk can be exact zero OR evidence that a room recovered. */
+export function isJudgeableChunk(c: Pick<TapeChunk, "duration_ms"> & { content_type?: string | null }): boolean {
   if (!isFullChunk(c)) return false;
+  if (c.content_type === undefined) return true;
+  return (c.content_type ?? "").split(";")[0]!.trim().toLowerCase() === MEASURED_CONTENT_TYPE;
+}
+
+/** PURE — a FULL chunk whose rate is within the tolerance of the silence size. A short chunk, an unknown size or a malformed row is never exact zero. */
+export function isExactZeroChunk(c: Pick<TapeChunk, "size_bytes" | "duration_ms"> & { content_type?: string | null }): boolean {
+  // a short chunk, or one in a container the baseline was NOT measured on, is never exact zero
+  if (!isJudgeableChunk(c)) return false;
   const bps = chunkBps(c);
   return bps !== null && Math.abs(bps - ZERO_CHUNK_BPS) <= ZERO_CHUNK_TOLERANCE_BPS;
 }
@@ -93,13 +119,13 @@ export function findZeroRuns(chunks: readonly TapeChunk[], trigger: number = CON
   for (const key of [...groups.keys()].sort()) {
     const seen = new Set<number>();
     const list = groups.get(key)!.sort((a, b) => a.idx - b.idx).filter((c) => (seen.has(c.idx) ? false : (seen.add(c.idx), true)));
-    const lastFull = [...list].reverse().find(isFullChunk);
+    const lastFull = [...list].reverse().find(isJudgeableChunk);
     let cur: TapeChunk[] = [];
     const close = () => {
       if (cur.length > 0 && cur.length >= trigger) {
         const first = cur[0]!;
         const last = cur[cur.length - 1]!;
-        const later = list.find((c) => c.idx > last.idx && isFullChunk(c) && !isExactZeroChunk(c));
+        const later = list.find((c) => c.idx > last.idx && isJudgeableChunk(c) && !isExactZeroChunk(c));
         out.push({
           room_id: first.room_id, session_id: first.session_id, source: first.source,
           start_idx: first.idx, end_idx: last.idx, length: cur.length,
@@ -138,10 +164,25 @@ export function unknownRooms(expectedRoomIds: readonly string[], chunks: readonl
   return [...new Set(expectedRoomIds)].filter((r) => !(nowMs - (newest.get(r) ?? -Infinity) <= STALE_CHUNK_MS)).sort();
 }
 
+export type DeviceClass = "tm20" | "other" | "unknown";
+
+/** PURE — the class of an input device by its name: a TONOR TM20 (which has a hardware mute), any other named device, or unknown. */
+export function deviceClass(name: string | null | undefined): DeviceClass {
+  if (typeof name !== "string" || name.trim() === "") return "unknown";
+  return /\bTM20\b|TONOR/i.test(name) ? "tm20" : "other";
+}
+
+const DEVICE_SENTENCE: Record<DeviceClass, string> = {
+  tm20: "This input has a hardware mute; a mute is likely deliberate (a clinician pressing it), so this may be expected.",
+  other: "This input has no mute button: investigate.",
+  unknown: "The input device is not known here, so a hardware mute cannot be ruled in or out.",
+};
+
 /**
- * PURE — the message text. A room label the caller chooses, a count of chunks and minutes, a time: no audio, no transcript, no person. Says what the tape held and that it does not say why.
+ * PURE — the message text. A room label the caller chooses, a count of chunks and minutes, a time, the device class: no audio, no transcript, no person. Says what the tape held, that it does not say why, and
+ * (eta-refuter #2148) that a hit on a TM20 is likely a deliberate mute while a hit on a device with no mute is not.
  */
-export function tapeZeroMessage(roomLabel: string, run: Pick<ZeroRun, "length" | "start_ms" | "end_ms" | "open" | "recovered_at_ms">): { subject: string; text: string } {
+export function tapeZeroMessage(roomLabel: string, run: Pick<ZeroRun, "length" | "start_ms" | "end_ms" | "open" | "recovered_at_ms">, device: DeviceClass = "unknown"): { subject: string; text: string } {
   const minutes = Math.round((run.end_ms - run.start_ms) / 60_000);
   const at = (ms: number) => {
     const d = new Date(ms + 5.5 * 3_600_000);
@@ -153,7 +194,7 @@ export function tapeZeroMessage(roomLabel: string, run: Pick<ZeroRun, "length" |
     subject: `EvenScribe: ${roomLabel} recorded exact digital silence for ${run.length} consecutive chunks (${minutes} min)`,
     text:
       `${roomLabel}: ${run.length} consecutive 5-minute chunks (${minutes} minutes, from ${at(run.start_ms)}) on the tape hold exact digital silence (the recorder delivered all zeros); an empty room does not do this. ${state} ` +
-      `That does not say why: a muted or unplugged input, a lost microphone permission and a wrong input all look the same. Check the microphone and the selected input.`,
+      `That does not say why: a muted or unplugged input, a lost microphone permission and a wrong input all look the same. ${DEVICE_SENTENCE[device]}`,
   };
 }
 
@@ -166,14 +207,14 @@ export async function readTapeChunks(opts: { roomId?: string; sinceMs: number; u
   const until = new Date(opts.untilMs).toISOString();
   const room = opts.roomId ?? null;
   const rows = (await sql`
-    SELECT s.room_id, c.session_id, c.idx, coalesce(c.source, 'primary') AS source, c.started_at, c.ended_at, c.duration_ms, c.size_bytes
+    SELECT s.room_id, c.session_id, c.idx, coalesce(c.source, 'primary') AS source, c.started_at, c.ended_at, c.duration_ms, c.size_bytes, c.content_type
       FROM bench_chunk c
       JOIN bench_session s ON s.id = c.session_id
      WHERE c.started_at >= ${since}::timestamptz
        AND c.started_at <  ${until}::timestamptz
        AND (${room}::text IS NULL OR s.room_id = ${room}::text)
      ORDER BY s.room_id, c.session_id, source, c.idx
-  `) as Array<{ room_id: string; session_id: string; idx: number | string; source: string; started_at: string | Date; ended_at: string | Date; duration_ms: number | string; size_bytes: number | string | null }>;
+  `) as Array<{ room_id: string; session_id: string; idx: number | string; source: string; started_at: string | Date; ended_at: string | Date; duration_ms: number | string; size_bytes: number | string | null; content_type: string | null }>;
   return rows.map((r) => ({
     room_id: r.room_id,
     session_id: r.session_id,
@@ -183,5 +224,6 @@ export async function readTapeChunks(opts: { roomId?: string; sinceMs: number; u
     ended_at_ms: new Date(r.ended_at).getTime(),
     duration_ms: Number(r.duration_ms),
     size_bytes: r.size_bytes === null ? null : Number(r.size_bytes),
+    content_type: r.content_type,
   }));
 }
