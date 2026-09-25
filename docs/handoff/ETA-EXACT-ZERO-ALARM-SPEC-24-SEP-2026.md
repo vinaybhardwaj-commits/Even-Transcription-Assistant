@@ -104,3 +104,21 @@ The real-postgres test found a real bug in the first version of the query (a bou
 3. Should an alarming hour also mark the room `degraded` in `room_alert_state`, or stay a separate signal?
 4. Who receives the daily room-and-date list for V (ruling 255c), and in what form?
 5. Scope: only rooms whose app version reports `zero_ratio`, with the rest listed as unknown (proposed), or all rooms?
+
+## 9. Ruling 345 (25 Sep 2026): OPTION E ADOPTED, IN SHADOW — this section supersedes §§2b-2c and §8 where they disagree
+
+DECISION (Fable, r345): the v1 source is the level log's `peak`, not `zero_ratio`. The measure is "share of capturing polls with peak 0, per room per IST hour", worded **"near-silence (peak below -86 dBFS)", never "zero"**. Thresholds are set in SHADOW for 48 hours by scribe; NO pages until Fable rules on the numbers. The zero_ratio route fix (1e75667, on the watchdog train) stays useful as the bit-exact number but is not on this path.
+
+WHAT `peak` IS (eta-refuter #1856): the Mac's `mic_peak` is one 1.25 s RMS window from the tape index per poll, printed with 4 decimals, so `peak = 0` means RMS below about 5e-5 (-86 dBFS): a superset of bit-exact zero. It is a sampled point per poll, not a per-sample count, so no zero FRACTION exists.
+
+DEFINITION (replaces §3's bucket definitions for v1):
+- capturing sample = `session_open AND tape_advancing AND peak IS NOT NULL` in `bench_level_sample`;
+- near-silent sample = `peak = 0`;
+- hour share = near-silent / capturing samples in the IST hour; an hour is JUDGED only with at least 100 capturing samples (else `insufficient`, never `ok`);
+- proposed ALARM: judged hour with share >= 0.10. One message per EPISODE (consecutive alarming hours), one recovery, a re-notice only past 3 h (ruling 279); a SEPARATE signal, not `room_alert_state.degraded`; a room with no capturing samples is listed UNKNOWN, never green.
+
+FIRST CALIBRATION (25 Sep 09:00 IST, bench_level_sample 7 IST days, 9 rooms, counts only; posted as #1970): 171 capturing hours in the eight non-OPD-4 rooms, none at 5% or more (largest: one Dietary Room hour in the 1-5% bin); OPD 4: 14 hours, of which 7 at 10% or more (2 in 10-25%, 3 in 25-50%, 2 at 50% or more). At 10% the rule fires on 7 OPD 4 hours and 0 of the 171 others; 5% gives the same 7 (the 5-10% bin is empty). LIMITS: one positive room and two episodes (23 Sep 15:00-20:00, 24 Sep 12:00-14:00 IST), so this checks "no false alarm on healthy rooms, alarm on the one known fault" and is NOT a false-negative rate; the level log is 7 days deep, so the 11-14 Sep episode is outside it.
+
+SHADOW: an hourly job (read-only, this session) appends per-room per-hour `n` and `z` to a jsonl; 48-hour summary on 27 Sep for Fable's ruling on the numbers.
+
+WHAT THE DRAFT MODULE NEEDS (not done): `lib/exact-zero-alarm.ts` reads `zero_ratio` in 15-second buckets; option E needs a peak-based variant (sample counts per hour, the rule above, the UNKNOWN list), its tests and mutations, and the alarm wording. It stays inert until Fable's ruling on the numbers. The device-context columns of ruling 346 (migration 0120) will let a fired alarm say WHICH input the room was on.
