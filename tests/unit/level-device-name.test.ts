@@ -25,6 +25,10 @@ describe("levelDeviceName", () => {
     expect(levelDeviceName("Priya’s AirPods Pro")).toBe("AirPods Pro");
   });
 
+  it("stops at the FIRST possessive (as documented): only the leading owner is dropped", () => {
+    expect(levelDeviceName("Priya's Bob's AirPods")).toBe("Bob's AirPods");
+  });
+
   it("is null for nothing, for a non-string, and for a name that was only a possessive", () => {
     expect(levelDeviceName(null)).toBeNull();
     expect(levelDeviceName(undefined)).toBeNull();
