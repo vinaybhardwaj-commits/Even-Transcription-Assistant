@@ -13,12 +13,12 @@ Show an "as of" time beside the reading, or blank a reading older than 1 hour. R
 ## 3. Where the timestamp comes from
 Option 1 (recommended): new column `levels_at timestamptz` on `room_install`, set in the same UPDATE:
 `levels_at = CASE WHEN ${f.peak}::real IS NOT NULL OR ${f.zero_ratio}::real IS NOT NULL THEN now() ELSE levels_at END`
-Same statement as the values, so value and time cannot disagree. NULL for existing rows until their next reading = "unknown age" = blanked, which is the honest state. One additive migration; no backfill. Migration number: none of `0120`+ exists on `vinay/s1-auto-drain` or any live `vinay/*` branch as of 25 Sep 01:15 IST (0119 is the watchdog outbox); re-check before adding.
+Same statement as the values, so value and time cannot disagree. NULL for existing rows until their next reading = "unknown age" = blanked, which is the honest state. One additive migration; no backfill. Migration number: 0119 is the watchdog outbox and 0120 is the level-log device context (`vinay/level-log-device-context`, ruling 346), so this one is 0121; no 0121 or above existed on any remote branch as of 25 Sep 09:10 IST; re-check before adding.
 Option 2 (no migration): derive it from `poll_ring` (each entry has `at`, `peak`, `zero_ratio`). Rejected as the primary: the ring holds only `POLL_RING_SIZE = 10` polls, so it can say "a reading in the last 10 polls" but cannot say "1 h ago"; anything older than the ring would blank at minutes, not at the hour Fable asked for, and it needs the ring in the view's select (`room-install.ts:1655-1665` does not read it today).
 Option 3: also stamp `clip_count` / `silence_ms` the same way (they are COALESCEd too, added by 0081). Not asked for; noted so a later change does not repeat the defect. Out of scope here.
 
 ## 4. Changes (small)
-- `db/migrations/0120_room_install_levels_at.sql`: `ALTER TABLE room_install ADD COLUMN IF NOT EXISTS levels_at timestamptz;` (number to be confirmed at build).
+- `db/migrations/0121_room_install_levels_at.sql`: `ALTER TABLE room_install ADD COLUMN IF NOT EXISTS levels_at timestamptz;` (0120 is taken by ruling 346; re-check at build).
 - `lib/room-install.ts`: the CASE above in the poll UPDATE; select `levels_at` in the list read (~1660) and map it.
 - `lib/room-install-view.ts`: expose `levels_at` and a derived `levels_age_ms` computed from a `now` argument (never Date.now() inside the pure view).
 - `components/admin/BenchInstallFleet.tsx` (~726): age suffix under 1 h, "no reading for 1 h" at or over, nothing when `levels_at` is NULL and the values are NULL.
