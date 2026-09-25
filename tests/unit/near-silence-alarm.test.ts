@@ -121,6 +121,8 @@ describe("renoticeDue, unknownRooms and the message", () => {
       expect(all).toContain("2026-09-24 10:00 IST");
       expect(all).not.toMatch(/zero|digital silence|bit-exact|hardware-mute/i);
       expect(all).toContain("does not say why");
+      expect(all).toContain("EMPTY, closed room");                   // Fable 09:40: an empty room reads the same as a dead mic
+      expect(all).toContain("speaker self-test");
     }
     const loose = nearSilenceMessage("OPD 4", hour, "loose", classifyHour(hour, "loose"));
     expect(loose.text).toContain("300 of 400 level readings");

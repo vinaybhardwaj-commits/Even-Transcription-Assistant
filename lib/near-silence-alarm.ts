@@ -18,6 +18,10 @@
  *  - a room with NO judged hour in the window is UNKNOWN (never green): "we never measured" must not read as "fine" (the standing rule behind B2-D7 and the VAD starvation).
  *  - an EPISODE is a run of alarming hours in one room; an `insufficient` or missing hour HOLDS it open (absence of evidence does not end it), and only an `ok` hour ends it (recovered).
  *
+ * WHAT IT CANNOT SEPARATE, AND THEREFORE MUST NEVER DO ALONE (Fable, r355 closed, 25 Sep 09:40): near-silence from a FAULT (a muted, dropped or dead input) and near-silence from an EMPTY,
+ * CLOSED ROOM read the same on this measure. OPD 4's C270 was PROVEN working (a chime and speech played on its own Mac's speaker read 0.08-0.32 on the tape while the room read 0.000-0.04
+ * either side); that morning's near-silence, 70 % of its rows and peak exactly 0 on a fifth, was an empty room. So a share over the threshold is a CANDIDATE for verification (a speaker
+ * self-test, or a person), not a fault, and NOTHING in this module pages: the message text below says so, and any wiring must route an alarm to a verification step first.
  * CALIBRATION (posted #1970, #2048; 7 days of the level log, 9 rooms): at ALARM_SHARE 0.10 and MIN_SAMPLES 100, peak = 0 alarms on 8 of OPD 4's 16 judged hours and 0 of the 171 hours in the other
  * eight rooms; peak < 0.001 alarms on 9 of 16 and still 0 elsewhere (largest healthy share 1.1 %). ONE positive room, and every "healthy" hour is a C270 webcam hour (eta-refuter #1979): the
  * numbers below are PROPOSED, in shadow, to be re-run per mic type after the TM20 switch-back. Change them by ruling, not by feel.
@@ -149,8 +153,8 @@ export function nearSilenceMessage(roomLabel: string, hour: NearSilenceHour, flo
     subject: `EvenScribe: ${roomLabel} recorded ${FLOOR_WORDING[floor]} in the hour of ${label}`,
     text:
       `${roomLabel}: ${v.near_silent_samples} of ${v.samples} level readings in the hour starting ${label} were ${FLOOR_WORDING[floor]} (${pct}), while the room showed recording. ` +
-      `That is a sampled level, not a count of audio samples, and it does not say why (a muted or dropped microphone, a wrong input, or a very quiet room at a very low gain look the same). ` +
-      `Check the microphone and the selected input.`,
+      `That is a sampled level, not a count of audio samples, and it does not say why: a muted or dropped microphone, a wrong input, and an EMPTY, closed room look the same. ` +
+      `Verify the microphone (a speaker self-test) before treating this as a fault.`,
   };
 }
 
