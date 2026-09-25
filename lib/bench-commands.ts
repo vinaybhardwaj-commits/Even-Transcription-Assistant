@@ -18,7 +18,7 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
-import { finiteNumberOrNull, type MicLevels } from "@/lib/bench-levels";
+import { finiteNumberOrNull, levelDeviceName, type MicLevels } from "@/lib/bench-levels";
 import { applyInstallPoll, cleanPollFields, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
 
 /**
@@ -524,7 +524,7 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
             ${input.recordingSessionId !== null && !input.paused},
             'command_poll',
             ${dev?.mic_state ?? null}, ${dev?.input_volume ?? null},
-            ${dev?.input_device_name ?? null}, ${dev?.app_version ?? null}
+            ${levelDeviceName(dev?.input_device_name)}, ${dev?.app_version ?? null}
           )
         `;
       } catch (error) {

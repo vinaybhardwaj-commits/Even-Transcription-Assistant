@@ -205,6 +205,22 @@ describe("pollCommands — poll lifecycle", () => {
     expect(append.values.slice(-4)).toEqual(["authorized", 0.71, "C270 HD WEBCAM", "0.1.24"]);
   });
 
+  it("eta-refuter #2016: an owner's name in a device name never reaches the level row", async () => {
+    responder = () => [];
+    await pollCommands({
+      roomId: "room_1",
+      tabId: "tab_A",
+      prevPollAt: null,
+      recordingSessionId: "bs_live",
+      paused: false,
+      mic: { peak: 0.3, avg: 0.1 },
+      install: { install_id: "install_1", input_device_name: "Priya\u2019s AirPods Pro" },
+    });
+    const append = findCall(/INSERT INTO bench_level_sample/)!;
+    expect(append.values.slice(-4)).toEqual([null, null, "AirPods Pro", null]);
+    expect(JSON.stringify(append.values)).not.toContain("Priya");
+  });
+
   it("ruling 346: a field the poll omits is NULL, and an out-of-range volume is dropped without losing the rest", async () => {
     responder = () => [];
     await pollCommands({

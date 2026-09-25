@@ -10,7 +10,10 @@
 -- ADDITIVE, NULLABLE, NO BACKFILL, NO DEFAULT. A row written before this migration, a browser kiosk row and a poll that omits a field
 -- all read NULL = "not reported", never a guessed value. The values are the CLEANED install fields (cleanPollFields bounds each:
 -- 32-char mic state, a 0..1 volume, a bounded device name, a bounded app version), so nothing new can reach the table unbounded.
--- Device names are hardware model names (e.g. a webcam), not patient or clinician identity.
+-- DEVICE NAMES CAN CARRY A PERSON'S NAME (eta-refuter #2016): macOS names Continuity and Bluetooth inputs after their owner
+-- ("<Name>'s iPhone Microphone", "<Name>'s AirPods"). The code therefore drops everything up to and including a leading possessive
+-- ('s or a typographic ’s) before the name is stored (levelDeviceName, lib/bench-levels.ts). RESIDUAL RISK: a device its owner renamed
+-- to their own name WITHOUT a possessive is not caught; room_install.input_device_name already keeps the latest name unstripped.
 --
 -- APPLY ORDER: migrate BEFORE deploying the code that writes these columns. The level insert is best-effort (a failure logs and the
 -- command poll carries on), so the code deployed first would not break a room, but it would lose every level sample until the

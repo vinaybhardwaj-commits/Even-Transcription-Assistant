@@ -15,6 +15,21 @@ export type BenchLevelSample = {
   samples: number;
 };
 
+/**
+ * The input-device name as it is stored on the level log (migration 0120, Fable ruling 346), with a LEADING POSSESSIVE removed.
+ * macOS names Continuity and Bluetooth inputs after their owner ("<Name>'s iPhone Microphone", "<Name>'s AirPods"), so a device name
+ * CAN carry a person's name, and the level log would multiply it into every row for 7 days (eta-refuter #2016). Everything up to and
+ * including the first possessive ('s or a typographic ’s followed by a space) is dropped: "Priya's AirPods Pro" -> "AirPods Pro".
+ * A name that is only a possessive, or empty, is null. A hardware name with no possessive ("C270 HD WEBCAM", "TONOR TM20 Audio Device")
+ * is unchanged. RESIDUAL RISK, stated: an owner who renamed a device to their own name WITHOUT a possessive is not caught here; the
+ * fleet row (room_install.input_device_name) already keeps the latest name unstripped, so this adds no new kind of exposure.
+ */
+export function levelDeviceName(name: string | null | undefined): string | null {
+  if (typeof name !== "string") return null;
+  const stripped = name.replace(/^.*?['\u2019]s\s+/, "").trim();
+  return stripped === "" ? null : stripped;
+}
+
 /** A finite number from a number or non-empty numeric string; everything else is absent. */
 export function finiteNumberOrNull(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
