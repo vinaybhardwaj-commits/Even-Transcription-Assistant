@@ -168,6 +168,7 @@ describe("pollCommands — poll lifecycle", () => {
     const append = findCall(/INSERT INTO bench_level_sample/);
     expect(append).toBeTruthy();
     expect(append!.text).toContain("AT TIME ZONE 'Asia/Kolkata'");
+    // A poll with no install fields (a browser kiosk) writes NULL for the four device-context columns (ruling 346).
     expect(append!.values).toEqual([
       "room_1",
       0.42,
@@ -175,7 +176,48 @@ describe("pollCommands — poll lifecycle", () => {
       0.07,
       true,
       true,
+      null,
+      null,
+      null,
+      null,
     ]);
+  });
+
+  it("ruling 346: a native poll's level row carries THAT poll's own mic_state, input volume, device name and app version", async () => {
+    responder = () => [];
+    await pollCommands({
+      roomId: "room_1",
+      tabId: "tab_A",
+      prevPollAt: null,
+      recordingSessionId: "bs_live",
+      paused: false,
+      mic: { peak: 0, avg: 0, zeroRatio: 1 },
+      install: {
+        install_id: "install_1",
+        app_version: "0.1.24",
+        mic_state: "authorized",
+        input_device_name: "C270 HD WEBCAM",
+        input_volume: "0.71",
+      },
+    });
+    const append = findCall(/INSERT INTO bench_level_sample/)!;
+    expect(append.text).toContain("mic_state, input_volume, input_device_name, app_version");
+    expect(append.values.slice(-4)).toEqual(["authorized", 0.71, "C270 HD WEBCAM", "0.1.24"]);
+  });
+
+  it("ruling 346: a field the poll omits is NULL, and an out-of-range volume is dropped without losing the rest", async () => {
+    responder = () => [];
+    await pollCommands({
+      roomId: "room_1",
+      tabId: "tab_A",
+      prevPollAt: null,
+      recordingSessionId: "bs_live",
+      paused: false,
+      mic: { peak: 0.3, avg: 0.1 },
+      install: { install_id: "install_1", input_device_name: "C270 HD WEBCAM", input_volume: "7" },
+    });
+    const append = findCall(/INSERT INTO bench_level_sample/)!;
+    expect(append.values.slice(-4)).toEqual([null, null, "C270 HD WEBCAM", null]);
   });
 });
 

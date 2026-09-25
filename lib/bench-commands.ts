@@ -19,7 +19,7 @@ import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { finiteNumberOrNull, type MicLevels } from "@/lib/bench-levels";
-import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
+import { applyInstallPoll, cleanPollFields, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
 
 /**
  * R4-D1 adds the fifth, `set_audio_input`. Three definitions move together: this list, migration
@@ -504,18 +504,27 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // Level history is independent of tape and STT. Keep this best-effort so a missing migration
     // or logging fault can never block the command poll that controls a live room.
     if (mic) {
+      // Fable ruling 346. WHAT THIS POLL ITSELF REPORTED about the input, next to the level it reported: the
+      // cleaned install fields, NOT the room_install row (whose columns COALESCE and so keep an old value when a
+      // poll omits one). Null for a browser kiosk and for an app that does not send the field, which reads as "not
+      // reported". Its purpose is the question the level log could not answer for OPD 4: which input, in which
+      // mic state and at which volume, was the Mac using when a stretch went silent.
+      const dev = input.install ? cleanPollFields(input.install) : null;
       try {
         await sql`
           INSERT INTO bench_level_sample (
             room_id, ist_date, sampled_at, peak, avg, zero_ratio,
-            session_open, tape_advancing, source
+            session_open, tape_advancing, source,
+            mic_state, input_volume, input_device_name, app_version
           )
           VALUES (
             ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
             ${mic.peak}, ${mic.avg}, ${mic.zeroRatio ?? null},
             ${input.recordingSessionId !== null},
             ${input.recordingSessionId !== null && !input.paused},
-            'command_poll'
+            'command_poll',
+            ${dev?.mic_state ?? null}, ${dev?.input_volume ?? null},
+            ${dev?.input_device_name ?? null}, ${dev?.app_version ?? null}
           )
         `;
       } catch (error) {
