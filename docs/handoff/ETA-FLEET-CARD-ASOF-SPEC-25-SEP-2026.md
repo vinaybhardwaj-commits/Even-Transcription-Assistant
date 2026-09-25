@@ -18,7 +18,7 @@ Option 2 (no migration): derive it from `poll_ring` (each entry has `at`, `peak`
 Option 3: also stamp `clip_count` / `silence_ms` the same way (they are COALESCEd too, added by 0081). Not asked for; noted so a later change does not repeat the defect. Out of scope here.
 
 ## 4. Changes (small)
-- `db/migrations/0121_room_install_levels_at.sql`: `ALTER TABLE room_install ADD COLUMN IF NOT EXISTS levels_at timestamptz;` (0120 is taken by ruling 346; re-check at build).
+- `db/migrations/0121_room_install_levels_at.sql`: `ALTER TABLE room_install ADD COLUMN IF NOT EXISTS levels_at timestamptz;` PLUS the `INSERT INTO schema_migrations (version, name) VALUES (121, '0121_room_install_levels_at') ON CONFLICT (version) DO NOTHING;` line every migration must carry (tests/unit/migrations-self-record.test.ts fails the gate without it; it caught my 0120) (0120 is taken by ruling 346; re-check at build).
 - `lib/room-install.ts`: the CASE above in the poll UPDATE; select `levels_at` in the list read (~1660) and map it.
 - `lib/room-install-view.ts`: expose `levels_at` and a derived `levels_age_ms` computed from a `now` argument (never Date.now() inside the pure view).
 - `components/admin/BenchInstallFleet.tsx` (~726): age suffix under 1 h, "no reading for 1 h" at or over, nothing when `levels_at` is NULL and the values are NULL.
