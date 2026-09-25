@@ -14,7 +14,9 @@
 --
 -- APPLY ORDER: migrate BEFORE deploying the code that writes these columns. The level insert is best-effort (a failure logs and the
 -- command poll carries on), so the code deployed first would not break a room, but it would lose every level sample until the
--- migration ran, because the INSERT names the columns.
+-- migration ran, because the INSERT names the columns. NOTE: POST /api/run-migrations reads db/migrations from the DEPLOYED build, so
+-- it cannot apply this before the deploy that carries the file; applying it first means running this SQL directly against the app
+-- database (safe to run twice), which also records the schema_migrations row so the endpoint later sees it as applied.
 --
 -- Mark, never delete: nothing here removes or rewrites an existing row. Retention is unchanged (7 IST days).
 -- =====================================================================
@@ -23,3 +25,6 @@ ALTER TABLE bench_level_sample
   ADD COLUMN IF NOT EXISTS input_volume      real,
   ADD COLUMN IF NOT EXISTS input_device_name text,
   ADD COLUMN IF NOT EXISTS app_version       text;
+
+INSERT INTO schema_migrations (version, name) VALUES (120, '0120_level_sample_device_context')
+ON CONFLICT (version) DO NOTHING;
