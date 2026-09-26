@@ -151,7 +151,7 @@ describe("F5 — the trace is finalised on every non-success exit path", () => {
     expect(traceCalls).toHaveLength(1);
     const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
     expect(fin.status).toBe("errored");
-    expect(fin.error_message).toContain("network down");
+    expect(fin.error_message).toBe("jev_fetch_error: Error"); // W27.7(a): class name only, never the message text
   });
 
   it("a timed-out attempt finalises with status errored and reason jev_timeout", async () => {

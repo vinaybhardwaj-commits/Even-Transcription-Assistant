@@ -6,6 +6,7 @@
  * answer the caller already has (same fail-safe discipline as every MCP tool and gcp-auth's
  * mint-elapsed log, lib/mcp/registry.ts's own header) — see recordJevDecisions below.
  */
+import { safeJevErrorMessage } from "./safe-error";
 import { customAlphabet } from "nanoid";
 import { sql } from "@/lib/db";
 import type { JevSubjectType } from "./types";
@@ -69,6 +70,6 @@ export async function insertJevDecisions(rows: JevDecisionRow[]): Promise<{ ok: 
     `;
     return { ok: true, written: payload.length };
   } catch (e) {
-    return { ok: false, written: 0, error: String((e as Error)?.message ?? e).slice(0, 200) };
+    return { ok: false, written: 0, error: safeJevErrorMessage(e) };
   }
 }

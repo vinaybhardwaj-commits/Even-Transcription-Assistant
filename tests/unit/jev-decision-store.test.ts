@@ -104,6 +104,6 @@ describe("insertJevDecisions — the SQL shape", () => {
   it("a DB error is caught and reported, never thrown to the caller", async () => {
     responder = () => new Error("connection reset");
     const r = await insertJevDecisions([row]);
-    expect(r).toEqual({ ok: false, written: 0, error: expect.stringContaining("connection reset") });
+    expect(r).toEqual({ ok: false, written: 0, error: "jev_error: Error" });
   });
 });

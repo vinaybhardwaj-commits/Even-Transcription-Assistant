@@ -143,7 +143,8 @@ describe("runNoteSafetyShadow — the fire-and-forget wrapper", () => {
     expect(warn).toHaveBeenCalled();
     const [, payload] = warn.mock.calls[0]!;
     expect(String(payload)).toContain("enc_secret_patient_context");
-    expect(String(payload)).toContain("db unreachable");
+    expect(String(payload)).toContain("jev_error: Error"); // W27.7(a): class name only; "db unreachable" must NOT appear
+    expect(String(payload)).not.toContain("db unreachable");
     warn.mockRestore();
   });
 
