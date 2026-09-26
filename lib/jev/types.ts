@@ -79,8 +79,8 @@ export class JevHttpError extends Error {
   private static safeMessage(status: number, body: string): string {
     try {
       const parsed = JSON.parse(body) as { code?: unknown };
-      if (typeof parsed.code === "string" && parsed.code.length > 0) {
-        return `jev http ${status}: ${parsed.code.slice(0, 64)}`;
+      if (typeof parsed.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(parsed.code)) {
+        return `jev http ${status}: ${parsed.code}`;
       }
     } catch {
       /* body is not JSON, or has no code field — fall through to status only */

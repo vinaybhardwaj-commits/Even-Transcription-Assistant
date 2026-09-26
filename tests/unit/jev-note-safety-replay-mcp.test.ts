@@ -54,6 +54,14 @@ describe("scribe_note_safety_replay", () => {
     expect(out.ran).toBe(false);
   });
 
+  it("W27.7(a) F2: an error that quotes text never reaches the MCP caller; only the class name does", async () => {
+    runMock.mockRejectedValueOnce(new Error("upstream said: Tab Zylorex 40mg twice daily"));
+    const out = (await tool().handler({ encounter_id: "enc_leak" }, ctx)) as Record<string, unknown>;
+    expect(out.degraded).toBe(true);
+    expect(out.error).toBe("jev_error: Error");
+    expect(JSON.stringify(out)).not.toContain("Zylorex");
+  });
+
   it("is scoped invoke, not read — it can trigger real Jev calls when the flag is on", () => {
     expect(tool().scope).toBe("invoke");
   });
