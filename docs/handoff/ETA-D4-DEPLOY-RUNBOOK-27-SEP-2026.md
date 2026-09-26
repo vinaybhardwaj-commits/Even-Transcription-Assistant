@@ -19,6 +19,8 @@ NOT pending).
 **Rollback chain:** `dpl_8r91ub6H82QjNrz2ziCEXmFP8H8S` (1e75667) → `dpl_64VgFHbt76toqZkUMqR4EEovvgTy`
 (a92ebae) → `dpl_Peb1X1w527GCcKjGTzRWvZQ7iqxM` (73868e4) — deeper than the first hop is Fable's call only.
 
+**RE-TIMED 26 Sep 20:15 (V: the whole hospital runs 7 days; rooms START RECORDING at 08:30 tomorrow):** D4 + smoke END by **07:45**; the Home Office pre-check ENDS by **08:15**; NOTHING may load the production Mini queue after 08:15.
+
 **Do-not-forget (FABLE 439):** D4 ships FIRST, 07:00-07:30, AFTER PARITY-389's hard stop — the
 GO reads fleet's stop post, so the stop must LAND before the GO. SELFTEST is speech-only, ZERO
 patient audio. Fallback rig room = Cardiology OPD ONLY if Fable accepts the r423 clinic-hours-STT
@@ -74,9 +76,9 @@ trade — never assumed.
 3. Deeper hops (`dpl_64VgFHbt76toqZkUMqR4EEovvgTy` a92ebae, then
    `dpl_Peb1X1w527GCcKjGTzRWvZQ7iqxM` 73868e4): Fable's call only.
 4. The SELFTEST window (§4) runs regardless — it does not depend on the new build; any pre-check
-   failure is flagged to Fable before 09:00.
+   failure is flagged to Fable before 08:15.
 
-## 4. HOME OFFICE SELFTEST PRE-CHECK (07:35-08:55, room_2qe955hy) — the ruling-459.5 ADDITION
+## 4. HOME OFFICE SELFTEST PRE-CHECK (07:45-08:15, room_2qe955hy) — the ruling-459.5 ADDITION
 
 Baseline recorded 26 Sep ~17:22 IST (read-only): `room_2qe955hy` / slug `home-office-w8fb` /
 "Home Office"; hostname "Vinay's Mac mini" — the production Mini itself (D6); app 0.1.24;
@@ -84,7 +86,7 @@ input device TONOR TM20 Audio Device; session closed; `state_flags=[]`; polling 
 **both switches already OFF** (`transcript_enabled=false`, `visits_enabled=false` — the r340
 STOP-ALL state; nothing in this plan turns them on).
 
-Pre-check at 07:35, BEFORE any stimulus (scribe, read-only):
+Pre-check at 07:45, BEFORE any stimulus (scribe, read-only):
 
 1. **FLAGS CLEAR:** `room_install` row for room_2qe955hy → `state_flags=[]` and `last_seen_at`
    fresh (< 5 min). ANY flag (DEVICE_MISSING / ENCODER_STALLED / KIOSK_OFFLINE /
@@ -92,10 +94,10 @@ Pre-check at 07:35, BEFORE any stimulus (scribe, read-only):
    room needs Fable's explicit acceptance of the r423 trade (see header).
 2. **BOTH SWITCHES LISTED:** the room's two switches — `transcript_enabled` and
    `visits_enabled` — listed with their live state in the pre-check log (expected false/false).
-3. **SELFTEST RUNS 07:35-08:55:** speech-only stimuli, ZERO patient audio (Sunday, clinic
+3. **SELFTEST RUNS 07:45-08:15 (hard stop 08:15, rooms start at 08:30):** speech-only stimuli, ZERO patient audio (before the 08:30 start, clinic
    closed). The rig's own run plan is the SELFTEST workstream's (diar-lab lead per spec 7e55ef3);
    this runbook owns only the pre-check and the confirmations around it.
-4. **SWITCH-OFF BY 09:00:** confirm both switches OFF at the 09:00 read (`transcript_enabled=false`
+4. **SWITCH-OFF BY 08:15:** confirm both switches OFF at the 08:15 read (`transcript_enabled=false`
    AND `visits_enabled=false`). If either is found ON, report to Fable for the flip order — a
    switch flip is an admin write, never sent unruled by scribe.
 
@@ -103,13 +105,13 @@ Pre-check at 07:35, BEFORE any stimulus (scribe, read-only):
 
 | Time | Step | Owner |
 |---|---|---|
-| tonight ~21:15-21:30 | PARITY-389 GO; hard stop 07:25-07:30 | fleet |
-| ~07:25-07:30 | PARITY stop post LANDS → D4 GO reads it | fleet → Fable |
-| after stop post, ≤07:30 | pre-flight → 0119 → push (preview) → promote → smoke | scribe + minibot (GO: Fable) |
-| 07:35 | HO pre-check: flags clear + both switches listed (§4.1-4.2) | scribe (read-only) |
-| 07:35-08:55 | SELFTEST run, speech only, zero patient audio | SELFTEST workstream |
-| by 09:00 | switch-off CONFIRMED (§4.4) | scribe reads; Fable rules any flip |
-| 09:00+ | post-D4 report on the bus | scribe |
+| tonight ~21:15-21:30 | PARITY-389 GO; hard stop 07:25-07:30 (Fable to confirm this still fits the 07:45 D4 end) | fleet |
+| ~07:00-07:30 | PARITY stop post LANDS → D4 GO reads it | fleet → Fable |
+| after stop post | pre-flight → 0119 → push (preview) → promote → smoke | scribe + minibot (GO: Fable) |
+| **07:45** | **D4 + smoke FINISHED.** HO pre-check starts: flags clear + both switches listed (§4.1-4.2) | scribe (read-only) |
+| 07:45-08:15 | SELFTEST run, speech only, zero patient audio | SELFTEST workstream |
+| **08:15** | **switch-off CONFIRMED; nothing loads the Mini queue after this** (§4.4) | scribe reads; Fable rules any flip |
+| 08:30 | rooms start recording (7 days a week) | rooms |
+| 08:30+ | post-D4 report on the bus | scribe |
 
-If the PARITY stop post has NOT landed by 07:30, the deploy waits for Fable's word — no
-self-initiated judgment calls. Every production action above is Fable-gated by name.
+If the PARITY stop post has NOT landed in time for D4 to finish by 07:45, the deploy waits for Fable's word (it may slip to after the day's queue is idle, never into 08:15+ Mini load). Every production action above is Fable-gated by name.
