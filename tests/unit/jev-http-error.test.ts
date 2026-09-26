@@ -23,7 +23,7 @@ describe("JevHttpError — .message never contains the raw body", () => {
     expect(e.message).not.toContain(SYNTHETIC_NOTE_TEXT);
   });
 
-  it("a JSON body WITH a `code` field surfaces that code, bounded, and nothing else from the body", () => {
+  it("a JSON body WITH a token-shaped `code` field surfaces that code, and nothing else from the body", () => {
     const e = new JevHttpError(422, JSON.stringify({ code: "invalid_question_shape", detail: SYNTHETIC_NOTE_TEXT }));
     expect(e.message).toBe("jev http 422: invalid_question_shape");
     expect(e.message).not.toContain(SYNTHETIC_NOTE_TEXT);
@@ -37,6 +37,14 @@ describe("JevHttpError — .message never contains the raw body", () => {
   it("an unparseable body falls back to status only, never throwing from inside the error constructor itself", () => {
     expect(() => new JevHttpError(429, "not json at all { broken")).not.toThrow();
     expect(new JevHttpError(429, "not json at all { broken").message).toBe("jev http 429");
+  });
+
+  it("W27.7(a) F1: a `code` that is free text (a sentence quoted back) is dropped; status only", () => {
+    const sentinel = "Tab Zylorex 40mg twice daily for Ms Invented Patient";
+    const e = new JevHttpError(400, JSON.stringify({ code: sentinel }));
+    expect(e.message).toBe("jev http 400");
+    expect(e.message).not.toContain("Zylorex");
+    expect(new JevHttpError(400, JSON.stringify({ code: "rate.limit-1_x" })).message).toBe("jev http 400: rate.limit-1_x");
   });
 
   it("a very long code is bounded, not carried in full", () => {

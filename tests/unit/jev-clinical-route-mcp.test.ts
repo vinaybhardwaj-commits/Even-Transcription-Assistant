@@ -121,6 +121,6 @@ describe("scribe_clinical_route_replay — fails safe", () => {
     const out = (await tool().handler({ room_day_id: "rd_abc123" }, ctx)) as Row;
     expect(out.degraded).toBe(true);
     expect(out.ran).toBe(false);
-    expect(String(out.error)).toContain("db unreachable");
+    expect(out.error).toBe("jev_error: Error"); // W27.7(a): class name only
   });
 });

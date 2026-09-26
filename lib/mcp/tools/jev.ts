@@ -24,7 +24,20 @@ import { query } from "@/lib/brain/db";
 import { submitJob } from "@/lib/jobs/submit";
 import { runNoteSafetyShadowAsync } from "@/lib/jev/note-safety-shadow";
 import { runClinicalRouteAsync } from "@/lib/jev/clinical-route";
-import { argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+import { argInt, argStr, failSafe as baseFailSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext, type ToolResult } from "../registry";
+import { safeJevErrorMessage } from "@/lib/jev/safe-error";
+
+/** registry.failSafe returns the thrown error's message; on the Jev path that message can be provider
+ * or DB text (W27.7(a), verdict F2). Same degraded envelope, allowlisted message. */
+const failSafe = (empty: ToolResult, fn: () => Promise<ToolResult>): Promise<ToolResult> =>
+  baseFailSafe(empty, async () => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e instanceof ToolScopeError) throw e;
+      throw new Error(safeJevErrorMessage(e));
+    }
+  });
 
 const jevWindowRun: McpTool = {
   name: "scribe_jev_window_run",
