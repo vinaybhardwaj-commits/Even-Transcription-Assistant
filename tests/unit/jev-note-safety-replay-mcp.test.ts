@@ -6,13 +6,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/brain/db", () => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }));
-vi.mock("@/lib/jobs/submit", () => ({ submitJob: vi.fn() }));
+const submitJobMock = vi.fn();
+vi.mock("@/lib/jobs/submit", () => ({ submitJob: (...a: unknown[]) => submitJobMock(...a) }));
 
 const runMock = vi.fn(async (_encounterId: string) => ({ ran: true, u4Sentences: 3, u8Questions: 4 }));
 vi.mock("@/lib/jev/note-safety-shadow", () => ({ runNoteSafetyShadowAsync: (encounterId: string) => runMock(encounterId) }));
 
 import { JEV_TOOLS } from "@/lib/mcp/tools/jev";
-import type { ToolContext } from "@/lib/mcp/registry";
+import { ToolScopeError, type ToolContext } from "@/lib/mcp/registry";
 
 const tool = () => {
   const t = JEV_TOOLS.find((x) => x.name === "scribe_note_safety_replay");
@@ -60,6 +61,12 @@ describe("scribe_note_safety_replay", () => {
     expect(out.degraded).toBe(true);
     expect(out.error).toBe("jev_error: Error");
     expect(JSON.stringify(out)).not.toContain("Zylorex");
+  });
+
+  it("W27.7(a) N3: a scope refusal from submitJob is NOT flattened into a degraded 200 by the sanitising wrapper", async () => {
+    submitJobMock.mockRejectedValueOnce(new ToolScopeError("invoke", { kind: "jev_window" }));
+    const runTool = JEV_TOOLS.find((x) => x.name === "scribe_jev_window_run")!;
+    await expect(runTool.handler({ room_day_id: "rd_x" }, { ...ctx, scopes: new Set() })).rejects.toBeInstanceOf(ToolScopeError);
   });
 
   it("is scoped invoke, not read — it can trigger real Jev calls when the flag is on", () => {
