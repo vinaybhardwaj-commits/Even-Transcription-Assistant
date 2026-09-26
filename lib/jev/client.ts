@@ -21,7 +21,8 @@
 import { parseFlag, FlagValueError } from "@/lib/flags";
 import { openTrace } from "@/lib/llm-trace/log";
 import { getMockJevClient } from "./mock";
-import { JevDisabledError, JevHttpError, JevStateTooLargeError, type JevClient, type JevRequest, type JevResult } from "./types";
+import { safeJevErrorMessage } from "./safe-error";
+import { JevBadResponseError, JevDisabledError, JevHttpError, JevStateTooLargeError, type JevClient, type JevRequest, type JevResult } from "./types";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const STATE_CHAR_GUARD = 100_000; // ~25k tokens (spec §4)
@@ -125,7 +126,9 @@ export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClie
               await finaliseError(`jev_http_${res.status}`);
               throw err;
             }
-            const json = (await res.json()) as {
+            const json = (await res.json().catch(() => {
+              throw new JevBadResponseError();
+            })) as {
               model?: string;
               answers?: JevResult["answers"];
               usage?: { input_tokens?: number; output_tokens?: number };
@@ -148,7 +151,7 @@ export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClie
             if (isAbort) {
               await finaliseError(timedOut ? "jev_timeout" : "jev_aborted");
             } else {
-              await finaliseError(`jev_fetch_error: ${e instanceof Error ? e.message : String(e)}`);
+              await finaliseError(`jev_fetch_error: ${safeJevErrorMessage(e).replace(/^jev_error: /, "")}`);
             }
             throw e;
           } finally {
@@ -160,7 +163,7 @@ export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClie
       } catch (e) {
         // Belt-and-braces: any path above that threw without going through finaliseError (there
         // should be none left, but a future edit is cheaper to protect here than to re-audit).
-        await finaliseError(e instanceof Error ? e.message : "jev_error");
+        await finaliseError(safeJevErrorMessage(e));
         throw e;
       }
     },

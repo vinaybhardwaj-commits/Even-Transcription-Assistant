@@ -16,6 +16,7 @@ import "./prompts/note-safety-v1"; // module-load registration side effect
 import { parseFlag } from "@/lib/flags";
 import { sql } from "@/lib/db";
 import { askJev, type JevAsk } from "./ask";
+import { safeJevErrorMessage } from "./safe-error";
 import { flattenNoteText, groupNoteItemsByExcerpt } from "./note-sentences";
 import { NOTE_COMPLETENESS_PROMPT_VERSION, NOTE_FAITHFULNESS_PROMPT_VERSION, type CompletenessQuestionId } from "./prompts/note-safety-v1";
 
@@ -93,7 +94,7 @@ export function runNoteSafetyShadow(encounterId: string): void {
   void runNoteSafetyShadowAsync(encounterId).catch((e) => {
     console.warn(
       "[jev] note-safety shadow failed",
-      JSON.stringify({ encounter_id: encounterId, error: String((e as Error)?.message ?? e).slice(0, 200) }),
+      JSON.stringify({ encounter_id: encounterId, error: safeJevErrorMessage(e) }),
     );
   });
 }
