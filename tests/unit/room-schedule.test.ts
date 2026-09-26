@@ -8,11 +8,11 @@ import {
   NOT_STARTED_GRACE_MS,
 } from "@/lib/room-schedule";
 
-// IST wall clock -> UTC ms. 2026-09-28 is a Monday; 2026-09-27 a Sunday; 2026-09-26 a Saturday.
+// IST wall clock -> UTC ms. 2026-09-28 is a Monday; 2026-09-27 a Sunday.
 const ist = (d: string, hhmm: string) => Date.parse(`${d}T${hhmm}:00+05:30`);
 const MIN = 60_000;
 
-describe("clinic default: Mon-Sat 08:30-20:30 IST, Sundays off", () => {
+describe("clinic default: every day 08:30-20:30 IST, 7 days a week", () => {
   const s = DEFAULT_CLINIC_SCHEDULE;
   it("is inside on Monday at 08:30 and 20:29, outside at 08:29 and 20:30", () => {
     expect(activeWindow(s, ist("2026-09-28", "08:30"))).not.toBeNull();
@@ -20,10 +20,11 @@ describe("clinic default: Mon-Sat 08:30-20:30 IST, Sundays off", () => {
     expect(activeWindow(s, ist("2026-09-28", "08:29"))).toBeNull();
     expect(activeWindow(s, ist("2026-09-28", "20:30"))).toBeNull();
   });
-  it("Saturday is a working day, Sunday is off all day", () => {
-    expect(activeWindow(s, ist("2026-09-26", "12:00"))).not.toBeNull();
-    for (const t of ["00:30", "08:30", "12:00", "20:00", "23:59"]) {
-      expect(activeWindow(s, ist("2026-09-27", t))).toBeNull();
+  it("every weekday including Sunday is a working day", () => {
+    for (const d of ["2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03"]) {
+      expect(activeWindow(s, ist(d, "12:00"))).not.toBeNull();
+      expect(activeWindow(s, ist(d, "08:29"))).toBeNull();
+      expect(activeWindow(s, ist(d, "20:30"))).toBeNull();
     }
   });
   it("reports the window's real UTC bounds", () => {
@@ -56,7 +57,7 @@ describe("ORBOX: 06:00 -> 02:00 next day, every day (crosses midnight)", () => {
   });
 });
 
-describe("a clinic window does NOT spill: Monday 01:30 is not inside Sunday's or Monday's", () => {
+describe("a clinic window does NOT spill past 20:30", () => {
   it("Tuesday 00:30 for a clinic is outside", () => {
     expect(activeWindow(DEFAULT_CLINIC_SCHEDULE, ist("2026-09-29", "00:30"))).toBeNull();
   });
@@ -69,8 +70,9 @@ describe("notStartedAlert", () => {
     expect(notStartedAlert({ ...base, schedule: s, nowMs: ist("2026-09-28", "08:39") })).toBeNull();
     expect(notStartedAlert({ ...base, schedule: s, nowMs: ist("2026-09-28", "08:40") })).not.toBeNull();
   });
-  it("outside the window it never alerts, Sunday included", () => {
-    expect(notStartedAlert({ ...base, schedule: DEFAULT_CLINIC_SCHEDULE, nowMs: ist("2026-09-27", "10:00") })).toBeNull();
+  it("Sunday alerts like any other day (7-day hospital); outside the window it never does", () => {
+    expect(notStartedAlert({ ...base, schedule: DEFAULT_CLINIC_SCHEDULE, nowMs: ist("2026-09-27", "10:00") })).not.toBeNull();
+    expect(notStartedAlert({ ...base, schedule: DEFAULT_CLINIC_SCHEDULE, nowMs: ist("2026-09-27", "07:00") })).toBeNull();
     expect(notStartedAlert({ ...base, schedule: DEFAULT_CLINIC_SCHEDULE, nowMs: ist("2026-09-28", "07:00") })).toBeNull();
   });
   it("orbox3 at 01:30 with a session open is NOT flagged", () => {

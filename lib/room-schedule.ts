@@ -2,7 +2,7 @@
  * Per-room recording schedule — the ONE definition the app's auto-start and fleet-watch's
  * "has not started" alert both read (V, 26 Sep 2026, confirmed 20:10 IST).
  *
- *   clinic rooms   Mon–Sat 08:30–20:30 IST, Sundays off
+ *   clinic rooms   every day 08:30–20:30 IST (the whole hospital runs 7 days a week)
  *   orbox3 / ORB3  06:00 → 02:00 the NEXT day, every day (the window crosses midnight)
  *
  * PURE. No clock read, no I/O: every function takes `nowMs`. IST has no DST, so a fixed UTC offset
@@ -36,10 +36,10 @@ export type RoomSchedule = {
 
 export const IST_OFFSET_MINUTES = 330;
 
-/** Clinic default: Mon–Sat 08:30–20:30 IST, Sundays off. */
+/** Clinic default: every day, 08:30–20:30 IST. */
 export const DEFAULT_CLINIC_SCHEDULE: RoomSchedule = {
   utcOffsetMinutes: IST_OFFSET_MINUTES,
-  windows: [{ days: [1, 2, 3, 4, 5, 6], start: "08:30", end: "20:30" }],
+  windows: [{ days: [0, 1, 2, 3, 4, 5, 6], start: "08:30", end: "20:30" }],
 };
 
 /** ORBOX (Linux OT recorder): 06:00 → 02:00 next day, every day. */
