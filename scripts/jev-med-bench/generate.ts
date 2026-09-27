@@ -9,7 +9,7 @@
  * Layout: N_LINES truth lines per split; each line yields one transcript excerpt and four note
  * sentences (2 supported, 2 perturbed). Splits are by DRUG, so a drug never spans dev and test.
  */
-import { FORMULARY, FORMULARY_BY_KEY, type Drug } from "./formulary";
+import { FORMULARY, type Drug } from "./formulary";
 
 export type Split = "dev" | "test";
 export type Perturbation = "dose" | "number" | "drug";
@@ -195,7 +195,7 @@ function shiftFirstNumber(s: string, rng: () => number): string {
   return s.replace(m[1]!, txt);
 }
 
-export function perturbLine(line: Line, kind: Perturbation, rng: () => number, exclude: Set<string>): { line: Line; nameDrug: Drug; detail: string } {
+export function perturbLine(line: Line, kind: Perturbation, rng: () => number, exclude: Set<string>, pool: readonly Drug[]): { line: Line; nameDrug: Drug; detail: string } {
   if (kind === "dose") {
     const opts: Array<() => { s: string; d: string } | null> = [
       () => {
@@ -240,14 +240,14 @@ export function perturbLine(line: Line, kind: Perturbation, rng: () => number, e
   for (const k of kinds) {
     let target: Drug | undefined;
     if (k === "lasa") {
-      const p = line.drug.lasa ? FORMULARY_BY_KEY[line.drug.lasa] : undefined;
+      const p = line.drug.lasa ? pool.find((x) => x.key === line.drug.lasa) : undefined;
       target = p && !exclude.has(p.key) && p.key !== line.drug.key ? p : undefined;
     } else if (k === "class") {
-      const same = FORMULARY.filter((x) => x.cls === line.drug.cls && x.key !== line.drug.key && !exclude.has(x.key));
+      const same = pool.filter((x) => x.cls === line.drug.cls && x.key !== line.drug.key && !exclude.has(x.key));
       const sharing = same.filter((x) => x.strengths.includes(line.strength));
       target = same.length ? pick(rng, sharing.length ? sharing : same) : undefined;
     } else {
-      const rest = FORMULARY.filter((x) => x.key !== line.drug.key && !exclude.has(x.key));
+      const rest = pool.filter((x) => x.key !== line.drug.key && !exclude.has(x.key));
       const sharing = rest.filter((x) => x.strengths.includes(line.strength));
       target = pick(rng, sharing.length ? sharing : rest);
     }
@@ -261,11 +261,29 @@ export function perturbLine(line: Line, kind: Perturbation, rng: () => number, e
 // ---------------------------------------------------------------- truth lines and splits
 export function splitDrugs(seed: string): { dev: Drug[]; test: Drug[] } {
   const rng = makeRng(`${seed}:split`);
-  const cap1 = shuffle(rng, FORMULARY.filter((d) => d.fromCap1));
-  const rest = shuffle(rng, FORMULARY.filter((d) => !d.fromCap1));
+  const order = [...shuffle(rng, FORMULARY.filter((d) => d.fromCap1)), ...shuffle(rng, FORMULARY.filter((d) => !d.fromCap1))];
   const dev: Drug[] = [];
   const test: Drug[] = [];
-  [...cap1, ...rest].forEach((d, i) => (i % 2 === 0 ? dev : test).push(d));
+  const placed = new Set<string>();
+  const place = (d: Drug, into: Drug[]) => {
+    if (placed.has(d.key)) return;
+    placed.add(d.key);
+    into.push(d);
+  };
+  // A look-alike partner goes to the SAME half as its drug, so LASA swaps stay inside a split and
+  // no perturbed sentence names a drug from the other split.
+  for (const d of order) {
+    if (placed.has(d.key)) continue;
+    const into = dev.length <= test.length ? dev : test;
+    // the whole look-alike component (transitively), so no pair straddles the split
+    const queue = [d];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      if (placed.has(cur.key)) continue;
+      place(cur, into);
+      for (const other of FORMULARY) if (!placed.has(other.key) && (other.lasa === cur.key || cur.lasa === other.key)) queue.push(other);
+    }
+  }
   return { dev, test };
 }
 
@@ -308,7 +326,7 @@ export function generate(opts: GenOpts): Excerpt[] {
       seen.add(lineKey(line));
       const style: "en" | "mixed" = rng() < 0.4 ? "mixed" : "en";
       const spokenBrand = rng() < 0.5;
-      const distractor = rng() < 0.3 ? pick(rng, FORMULARY.filter((x) => x.key !== drug.key && (split === "dev" ? dev : test).includes(x))) : null;
+      const distractor = rng() < 0.3 ? pick(rng, drugs.filter((x) => x.key !== drug.key)) : null;
       const excerpt = renderExcerpt(line, style, spokenBrand, distractor, rng);
       const exclude = new Set<string>(distractor ? [distractor.key] : []);
       exclude.add(drug.key);
@@ -335,7 +353,7 @@ export function generate(opts: GenOpts): Excerpt[] {
         let abbrev = false;
         let useBrand = false;
         for (let tries = 0; ; tries++) {
-          made = perturbLine(line, kind, rng, exclude);
+          made = perturbLine(line, kind, rng, exclude, drugs);
           useBrand = rng() < 0.5;
           // A quantity change is only VISIBLE in wording 0 (the others omit the count), so force it there.
           const w: Wording = made.detail === "number:quantity" ? 0 : pick(rng, [0, 1, 2] as Wording[]);

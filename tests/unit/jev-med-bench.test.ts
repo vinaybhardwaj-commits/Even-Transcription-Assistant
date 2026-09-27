@@ -43,6 +43,26 @@ describe("dataset construction", () => {
     for (const e of data) expect((e.split === "dev" ? devKeys.has(e.drug_key) : !devKeys.has(e.drug_key))).toBe(true);
   });
 
+  it("N1: a swap target is never from the other split, and a look-alike pair shares a split", () => {
+    const { dev, test } = splitDrugs("t");
+    const own = { dev: new Set(dev.map((d) => d.key)), test: new Set(test.map((d) => d.key)) };
+    for (const d of FORMULARY) if (d.lasa && FORMULARY.some((x) => x.key === d.lasa)) expect(own.dev.has(d.key), d.key).toBe(own.dev.has(d.lasa));
+    const otherNames = (split: "dev" | "test") => (split === "dev" ? test : dev).flatMap((d) => [d.generic, ...d.brands]).map((n) => n.toLowerCase());
+    for (const e of data) {
+      const ownNames = (e.split === "dev" ? dev : test).flatMap((d) => [d.generic, ...d.brands]).map((n) => n.toLowerCase()).sort((a, b) => b.length - a.length);
+      for (const s of e.sentences.filter((x) => x.perturbation === "drug")) {
+        // strip this split's own (longest-first) names so a combination product's components, e.g. the
+        // "paracetamol" inside "ibuprofen plus paracetamol", are not mistaken for another split's drug
+        let text = s.text.toLowerCase();
+        for (const n of ownNames) text = text.split(n).join(" ");
+        for (const n of otherNames(e.split)) {
+          // whole-word: "cetirizine" inside "levocetirizine" is not a hit
+          expect(new RegExp(`(^|[^a-z])${n.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}([^a-z]|$)`).test(text), `${s.case_id} names other-split ${n}`).toBe(false);
+        }
+      }
+    }
+  });
+
   it("case ids are unique and no sentence repeats within an excerpt", () => {
     const ids = data.flatMap((e) => e.sentences.map((s) => s.case_id));
     expect(new Set(ids).size).toBe(ids.length);
@@ -141,6 +161,14 @@ describe("scoring — the pre-registered rule", () => {
     const rows = joinResults(one, { [first]: 0.2 });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.p).toBe(0.2);
+  });
+
+  it("N2: ECE confidence is the probability of the PREDICTED class at T, not max(p,1-p)", () => {
+    const dev: Scored[] = Array(100).fill(0.95).map((p) => mk("dev", "supported", p)); // T = 0.95
+    // p = 0.6 < T -> predicted unsupported, confidence 0.4 (max(p,1-p) would wrongly say 0.6)
+    const r = buildReport([...dev, mk("test", "unsupported", 0.6)]);
+    expect(r.test.accuracy).toBe(1);
+    expect(r.test.ece).toBeCloseTo(0.6, 5); // accuracy 1 vs confidence 0.4
   });
 
   it("catch is reported by perturbation type", () => {

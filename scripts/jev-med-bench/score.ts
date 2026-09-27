@@ -7,6 +7,8 @@
  *   rate is <= DEV_FF_CAP (0.08). If none qualifies, T = 0.05.
  *   TEST is then scored ONCE at that frozen T.
  *   PASS := test false-flag observed <= 0.10 AND its one-sided 95% Clopper-Pearson upper bound < 0.25.
+ *   (At n=200 the observed cap already implies an upper bound of ~14%, so in practice PASS = observed <= 10%;
+ *   the bound binds only if n is smaller. Both are kept because the ruling names both.)
  * false-flag = P(flag | label = supported). catch = P(flag | label = unsupported), by perturbation type.
  */
 import { scoreJevBench, type BenchItem } from "../../lib/jev/bench";
@@ -105,7 +107,8 @@ export function buildReport(all: Scored[], unanswered = 0): Report {
     subjectId: r.case_id,
     expected: r.label,
     predicted: flagged(r.p, T) ? "unsupported" : "supported",
-    confidence: Math.max(r.p, 1 - r.p),
+    // confidence in the PREDICTED class (the prediction is made at T, not 0.5)
+    confidence: flagged(r.p, T) ? 1 - r.p : r.p,
     latencyMs: 0,
     inputTokens: 0,
   }));
