@@ -557,6 +557,26 @@ public actor RoomEngine {
   private var lastDurableSampleIndex: Int64?
   /// 0.1.25 — the plain path's `tape_advancing`: the durable PCM file's size, poll to poll.
   private var tapeGrowth = TapeGrowthProbe()
+
+  // ─── 0.1.25: AUTO-START AT CLINIC OPEN ─────────────────────────────────────────────────────
+  /// The clock the schedule reads. `var` so a test can put the room inside or outside its window.
+  var autoStartClock: @Sendable () -> Date = { Date() }
+  /// The window rules. NIL = auto-start OFF, which is what every engine is until the resident app
+  /// turns it on: a test, a `swift run` binary or an unbundled build must never start a day just
+  /// because the wall clock happens to be inside a clinic window.
+  var autoStartSchedule: RoomSchedule?
+
+  /// The resident app calls this once after `load`. The clinic default until the server delivers a
+  /// per-room schedule.
+  public func enableAutoStart(
+    schedule: RoomSchedule = .defaultClinic,
+    clock: @escaping @Sendable () -> Date = { Date() }
+  ) {
+    autoStartSchedule = schedule
+    autoStartClock = clock
+  }
+  /// A failed start (offline, pending uploads) is tried again after a minute, not every loop.
+  private var autoStartRetryAfter = Date.distantPast
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
 
@@ -1228,6 +1248,7 @@ public actor RoomEngine {
         lastError = bounded(error)
         try? saveStatus()
       }
+      await autoStartIfDue()
 
       if Date() >= uploadRetryAfter {
         do {
@@ -3167,6 +3188,44 @@ public actor RoomEngine {
     // Idle, paused, or nothing running: the next capture opens on the new device by itself.
     guard let running = capture, running.process.isRunning else { return nil }
     return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: previousUID)
+  }
+
+  /// 0.1.25 — start the day by itself at clinic open. Only the plain capture path (the resident
+  /// archive lane is off on every Mac and journals its own control commands), only from `.ready`,
+  /// at most once per window, never when a desk started, paused or ended the day, and never when
+  /// the `auto-start-off` file or a Dietary slug says not to. The rule is `RoomAutoStart.decide`.
+  private func autoStartIfDue() async {
+    guard residentControlJournal == nil, residentRuntimeFactory == nil,
+      residentCaptureOwner == nil, !needsActiveReconciliation
+    else { return }
+    guard let schedule = autoStartSchedule else { return }
+    let now = autoStartClock()
+    let marker = RoomAutoStartMarker(root: persistence.root)
+    // A day started by hand (or adopted at launch) counts as this window's start, so a desk
+    // `end_day` later in the window is not undone by the next loop or a relaunch.
+    if phase == .recording, let window = schedule.activeWindow(at: now),
+      (marker.read() ?? .min) < window.startMs
+    {
+      marker.write(windowStartMs: window.startMs)
+      return
+    }
+    guard now >= autoStartRetryAfter else { return }
+    let decision = RoomAutoStart.decide(
+      schedule: schedule, now: now, phase: phase,
+      lastStartedWindowMs: marker.read(),
+      disabled: RoomAutoStart.disabledBySlug(configuration.roomSlug) || marker.killSwitchPresent())
+    guard case .start(let windowStartMs) = decision else { return }
+    log("auto-start: clinic window open, no day started; starting")
+    do {
+      try await beginOrResume(commandID: "auto-\(windowStartMs)")
+      marker.write(windowStartMs: windowStartMs)
+      log("auto-start: day started")
+    } catch {
+      lastError = bounded(error)
+      autoStartRetryAfter = now.addingTimeInterval(60)
+      log("auto-start failed (\(bounded(error, limit: 120))); retrying in 60 s")
+      try? saveStatus(preferred: .offline)
+    }
   }
 
   /// Close the running segment as a pause closes it and open the next one of the same session.
