@@ -189,6 +189,9 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
   case reportDiag
   /// Tier 1 §3. Ack, then exit for launchd to relaunch this app.
   case restartEngine
+  /// 0.1.25. The acoustic self-test: play the pinned stimulus pack, record it through the room's
+  /// mic into a separate segment. Refused while a session is open.
+  case selfTest
   case unknown(String)
 
   public init(rawValue: String) {
@@ -201,6 +204,7 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case "check_update_now": self = .checkUpdateNow
     case "report_diag": self = .reportDiag
     case "restart_engine": self = .restartEngine
+    case "self_test": self = .selfTest
     default: self = .unknown(rawValue)
     }
   }
@@ -215,6 +219,7 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case .checkUpdateNow: return "check_update_now"
     case .reportDiag: return "report_diag"
     case .restartEngine: return "restart_engine"
+    case .selfTest: return "self_test"
     case .unknown(let raw): return raw
     }
   }
