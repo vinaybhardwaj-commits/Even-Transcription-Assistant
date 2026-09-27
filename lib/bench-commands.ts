@@ -25,6 +25,8 @@ import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type Inst
  * R4-D1 adds the fifth, `set_audio_input`. Three definitions move together: this list, migration
  * 0080's CHECK, and the app's `BenchCommandKind`. The browser kiosk ignores it (R4-D7) — the native
  * app owns audio — so a room listening from a browser never acks it and the caller sees a timeout.
+ *
+ * 0.1.25 (W34.1) adds the ninth, `self_test`, migration 0121's CHECK.
  */
 export const COMMAND_KINDS = [
   "start_day",
@@ -35,6 +37,7 @@ export const COMMAND_KINDS = [
   "check_update_now",
   "report_diag",
   "restart_engine",
+  "self_test",
 ] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
 
@@ -42,13 +45,27 @@ export type CommandKind = (typeof COMMAND_KINDS)[number];
  * Tier 1 §3 — the three operator verbs, in lock-step with migration 0081's CHECK and the app's
  * `BenchCommandKind`. Like `set_audio_input` they are the NATIVE app's alone: the browser kiosk
  * ignores them without acking (R4-D7), and the server refuses them below 0.1.22.
+ *
+ * `self_test` (0.1.25, migration 0121) joins them: never journaled, decided and acked once, the
+ * native app's alone. It shares this list's 0.1.22 floor (`VERBS_MIN_APP_VERSION`) rather than a
+ * 0.1.25 one of its own — a build that does not know the kind refuses it by name (R4-D2,
+ * `unsupported_kind`), which is the mechanism built for exactly this case, so a finer floor here
+ * would only duplicate it.
  */
-export const TIER1_VERBS = ["check_update_now", "report_diag", "restart_engine"] as const;
+export const TIER1_VERBS = ["check_update_now", "report_diag", "restart_engine", "self_test"] as const;
 export type Tier1Verb = (typeof TIER1_VERBS)[number];
 export const isTier1Verb = (k: unknown): k is Tier1Verb => (TIER1_VERBS as readonly unknown[]).includes(k);
 
 /** Tier 1 §3. How many log lines `report_diag` may ask for. The app's default is 100. */
 export const REPORT_DIAG_MAX_LINES = 500;
+
+/**
+ * 0.1.25 — the built-in speaker's volume during a self-test, 0.2..0.8 (`RoomEngine.startSelfTest`'s
+ * own clamp). REFUSED outside it, never clamped by the server: a clamped 0.9 would read as a request
+ * for 0.8 that nobody made. Absent = the app's own default (0.5).
+ */
+export const SELF_TEST_VOLUME_MIN = 0.2;
+export const SELF_TEST_VOLUME_MAX = 0.8;
 
 /**
  * Tier 1 §3 — the args each verb takes, STRICT, for the reason `parseSetAudioInputArgs` gives: the
@@ -62,6 +79,10 @@ const VERB_ARGS = {
     .strict()
     .nullable(),
   restart_engine: z.object({ force: z.boolean().optional() }).strict().nullable(),
+  self_test: z
+    .object({ volume: z.number().min(SELF_TEST_VOLUME_MIN).max(SELF_TEST_VOLUME_MAX).optional() })
+    .strict()
+    .nullable(),
 } satisfies Record<Tier1Verb, z.ZodTypeAny>;
 
 /**

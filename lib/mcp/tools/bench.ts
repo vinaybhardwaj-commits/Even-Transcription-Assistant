@@ -655,14 +655,18 @@ const setAudioInput: McpTool = {
 const roomCommand: McpTool = {
   name: "scribe_room_command",
   description:
-    "Send one of the native Room Recorder's operator verbs to a room (app 0.1.22+) and wait for its ack. kind: check_update_now — run the self-update check now, bypassing the six-hour interval only; it still defers while a session is open (result {checked_at, offered_version?, deferred, held?}); report_diag — the app's version, build sha, config without its session, tapewriter/ffmpeg versions, input devices, free disk, the last N log lines (args {log_lines?: 0..500}, default 100) and the update ledger, in result.diag (waits 20 s); restart_engine — the app acks, then exits for launchd to relaunch it (result {restarting:true}); refused session_open while a session is open unless args {force:true}. Every refusal is ok:false with the app's error name. Refused with error {code:\"APP_TOO_OLD\", app_version} unless the room's bound Mac reports 0.1.22 or later — nothing is inserted. Requires a listener (app polled within 10 s) else kiosk_not_listening. A browser kiosk ignores these kinds.",
+    "Send one of the native Room Recorder's operator verbs to a room (app 0.1.22+) and wait for its ack. kind: check_update_now — run the self-update check now, bypassing the six-hour interval only; it still defers while a session is open (result {checked_at, offered_version?, deferred, held?}); report_diag — the app's version, build sha, config without its session, tapewriter/ffmpeg versions, input devices, free disk, the last N log lines (args {log_lines?: 0..500}, default 100) and the update ledger, in result.diag (waits 20 s); restart_engine — the app acks, then exits for launchd to relaunch it (result {restarting:true}); refused session_open while a session is open unless args {force:true}. self_test (app 0.1.25+) — plays the pinned acoustic stimulus pack through the room's built-in speaker and records it through the room's mic into a segment separate from any patient session, for the lab to score afterwards (args {volume?: 0.2..0.8}, default 0.5); it acks immediately (the run itself takes about a minute in the background); refused not_ready unless the room is idle with no reconciliation pending, self_test_running if one is already going, session_open if a session is open (no force for this one), and clinic_hours inside the room's clinic window UNLESS its slug is a `home-office*` test kiosk. Every refusal is ok:false with the app's error name. Refused with error {code:\"APP_TOO_OLD\", app_version} unless the room's bound Mac reports 0.1.22 or later (self_test needs 0.1.25; an older app refuses it itself as unsupported_kind, harmlessly) — nothing is inserted. Requires a listener (app polled within 10 s) else kiosk_not_listening. A browser kiosk ignores these kinds.",
   scope: "write",
   inputSchema: {
     type: "object",
     properties: {
       ...ROOM_WRITE_ARGS,
       kind: { type: "string", enum: [...TIER1_VERBS] },
-      args: { type: "object", description: "report_diag: {log_lines?: integer 0..500}; restart_engine: {force?: boolean}; check_update_now: omit" },
+      args: {
+        type: "object",
+        description:
+          "report_diag: {log_lines?: integer 0..500}; restart_engine: {force?: boolean}; self_test: {volume?: number 0.2..0.8}; check_update_now: omit",
+      },
     },
     required: ["kind"],
     additionalProperties: false,
