@@ -161,6 +161,14 @@ else
   die "Encoder/LGPL-NOTICES.txt is missing. X2 ships the vendored encoder ONLY with its notices bundled; without them this build must not be produced."
 fi
 
+# 0.1.25 — the acoustic self-test's stimulus pack (invented speech, hashes pinned in pack.json).
+# Optional: a build without Packaging/SelfTest/pack.json simply refuses `self_test` with
+# pack_missing. It is copied BEFORE the bundle is signed, so the signature seals it.
+if [ -f "${PACKAGE_DIR}/Packaging/SelfTest/pack.json" ]; then
+  /bin/mkdir -p "${APP}/Contents/Resources/SelfTest"
+  /bin/cp "${PACKAGE_DIR}/Packaging/SelfTest/"* "${APP}/Contents/Resources/SelfTest/"
+fi
+
 # ─── Info.plist (§5.2) ───────────────────────────────────────────────────────────────────────
 # No CFBundleURLTypes: the URL scheme went with D2. LSUIElement true: this is a resident agent
 # with no Dock icon and no window. ETABuildSHA is read back at runtime by BuildInfo.buildSHA, so
