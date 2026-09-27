@@ -102,7 +102,7 @@ public enum RoomCommandDecider {
     case .endDay:
       return phase == .recording || phase == .paused || phase == .failed
         ? .end : .refuse("no_active_session")
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown:
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown:
       // Not a day-lifecycle command. `RoomEngine.handle` dispatches these before it asks here
       // (R4, Tier 1 §3); a caller that asks anyway is refused rather than handed a phase decision.
       return .refuse("unsupported_kind")
@@ -584,6 +584,14 @@ public actor RoomEngine {
   }
   /// A failed start (offline, pending uploads) is tried again after a minute, not every loop.
   private var autoStartRetryAfter = Date.distantPast
+
+  // ─── 0.1.25: SELF-TEST ──────────────────────────────────────────────────────────────────────
+  private var selfTestRunning = false
+  /// Where the pinned pack lives. Nil = the app bundle's `Resources/SelfTest`. A test sets it.
+  var selfTestPackDirectory: URL?
+  var selfTestPlayer: any SelfTestPlaying = BuiltInSpeakerPlayer()
+  var selfTestLeadSeconds = 1.5
+  var selfTestGapSeconds = 0.5
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
 
@@ -1698,7 +1706,7 @@ public actor RoomEngine {
       completedCommands[command.id] = result
       await acknowledge(command, result: result)
       return
-    case .checkUpdateNow, .reportDiag, .restartEngine:
+    case .checkUpdateNow, .reportDiag, .restartEngine, .selfTest:
       // Tier 1 §3. Like set_audio_input: not the day, not journaled, decided once and remembered.
       await handleOperatorVerb(command)
       return
@@ -1720,8 +1728,12 @@ public actor RoomEngine {
     } else {
       overridePause = false
     }
-    let decision = RoomCommandDecider.decide(
+    var decision = RoomCommandDecider.decide(
       kind: command.kind, phase: phase, overridePause: overridePause)
+    // 0.1.25: the mic and speaker belong to a self-test for its minute; a start waits.
+    if selfTestRunning, command.kind == .startDay, decision == .start || decision == .resume {
+      decision = .refuse("self_test_running")
+    }
     let result: CommandResult
     do {
       switch decision {
@@ -2267,7 +2279,7 @@ public actor RoomEngine {
     case .pauseDay: return .pauseDay
     case .resumeDay: return .resumeDay
     case .endDay: return .endDay
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown: return nil
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown: return nil
     }
   }
 
@@ -2381,7 +2393,7 @@ public actor RoomEngine {
   )? {
     switch (kind, success) {
     case (.setAudioInput, _), (.checkUpdateNow, _), (.reportDiag, _), (.restartEngine, _),
-      (.unknown, _):
+      (.selfTest, _), (.unknown, _):
       return nil
     case (.startDay, true):
       return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
@@ -2808,7 +2820,7 @@ public actor RoomEngine {
 
   static func isOperatorVerb(_ kind: BenchCommandKind) -> Bool {
     switch kind {
-    case .checkUpdateNow, .reportDiag, .restartEngine: return true
+    case .checkUpdateNow, .reportDiag, .restartEngine, .selfTest: return true
     default: return false
     }
   }
@@ -2831,6 +2843,8 @@ public actor RoomEngine {
       result = reportDiag(command)
     case .restartEngine:
       result = restartEngine(command)
+    case .selfTest:
+      result = startSelfTest(command)
     default:
       return
     }
@@ -3218,7 +3232,7 @@ public actor RoomEngine {
     guard residentControlJournal == nil, residentRuntimeFactory == nil,
       residentCaptureOwner == nil, !needsActiveReconciliation
     else { return }
-    guard let schedule = autoStartSchedule else { return }
+    guard let schedule = autoStartSchedule, !selfTestRunning else { return }
     let now = autoStartClock()
     let marker = RoomAutoStartMarker(root: persistence.root)
     // A day started by hand (or adopted at launch) counts as this window's start, so a desk
@@ -3245,6 +3259,85 @@ public actor RoomEngine {
       autoStartRetryAfter = now.addingTimeInterval(60)
       log("auto-start failed (\(bounded(error, limit: 120))); retrying in 60 s")
       try? saveStatus(preferred: .offline)
+    }
+  }
+
+  /// Test seam: the pack, the speaker and the clock the self-test reads (and the auto-start clock).
+  func configureSelfTestForTests(pack: URL, speaker: any SelfTestPlaying, clock: Date) {
+    selfTestPackDirectory = pack
+    selfTestPlayer = speaker
+    selfTestLeadSeconds = 0.05
+    selfTestGapSeconds = 0.02
+    autoStartClock = { clock }
+  }
+
+  /// 0.1.25 — `self_test`. Decided and acked at once; the run itself is a background task that owns
+  /// the speaker and the mic for about a minute. Never a session: a run writes only into
+  /// `selftest/<run>/`, and every refusal is named in the ack.
+  private func startSelfTest(_ command: BenchCommand) -> CommandResult {
+    if residentCaptureOwner != nil || residentRuntimeFactory != nil {
+      return verbFailure("resident_archive_unsupported")
+    }
+    if capture != nil { return verbFailure("capture_active") }
+    if let why = SelfTestGate.refusal(
+      sessionOpen: sessionIsOpen, alreadyRunning: selfTestRunning, now: autoStartClock(),
+      schedule: autoStartSchedule ?? .defaultClinic, roomSlug: configuration.roomSlug)
+    {
+      log("self_test refused: \(why)")
+      return verbFailure(why)
+    }
+    let directory =
+      selfTestPackDirectory
+      ?? Bundle.main.resourceURL?.appendingPathComponent("SelfTest", isDirectory: true)
+    guard let directory else { return verbFailure("pack_missing") }
+    let pack: [SelfTestStimulus]
+    do {
+      pack = try SelfTestPack.load(directory: directory)
+    } catch {
+      log("self_test refused: pack (\(bounded(error, limit: 80)))")
+      return verbFailure("pack_invalid: \(bounded(error, limit: 80))")
+    }
+    var volume = 0.5
+    if case .object(let arguments) = command.args, case .some(.number(let asked)) = arguments["volume"],
+      asked.isFinite
+    {
+      volume = min(max(asked, 0.2), 0.8)
+    }
+    let runID = "st_\(UUID().uuidString.prefix(8).lowercased())"
+    let runDirectory = persistence.root.appendingPathComponent("selftest", isDirectory: true)
+      .appendingPathComponent(runID, isDirectory: true)
+    do {
+      try createPrivateDirectory(runDirectory)
+    } catch {
+      return verbFailure("selftest_dir_failed")
+    }
+    selfTestRunning = true
+    let runner = SelfTestRunner(
+      pack: pack, packSHA256: SelfTestPack.packHash(directory: directory),
+      player: selfTestPlayer, launcher: captureLauncher,
+      tapewriter: URL(fileURLWithPath: configuration.tapewriterPath),
+      micDeviceUID: configuration.deviceUID, roomSlug: configuration.roomSlug,
+      appVersion: BuildInfo.appVersion, volume: volume, leadSeconds: selfTestLeadSeconds,
+      gapSeconds: selfTestGapSeconds, log: log)
+    let runsLog = runDirectory.deletingLastPathComponent().appendingPathComponent("runs.log")
+    Task {
+      let manifest = await runner.run(runID: runID, directory: runDirectory)
+      await self.selfTestFinished(manifest, runsLog: runsLog)
+    }
+    return CommandResult(ok: true, sessionID: nil, error: nil)
+  }
+
+  private func selfTestFinished(_ manifest: SelfTestManifest, runsLog: URL) {
+    selfTestRunning = false
+    let line =
+      "\(Self.iso8601(Date())) \(manifest.runID) volume=\(manifest.speakerVolume) "
+      + "played=\(manifest.stimuli.count) pcm_bytes=\(manifest.pcmBytes) \(manifest.outcome)\n"
+    if let handle = try? FileHandle(forWritingTo: runsLog) {
+      defer { try? handle.close() }
+      _ = try? handle.seekToEnd()
+      try? handle.write(contentsOf: Data(line.utf8))
+    } else {
+      try? Data(line.utf8).write(to: runsLog)
     }
   }
 
