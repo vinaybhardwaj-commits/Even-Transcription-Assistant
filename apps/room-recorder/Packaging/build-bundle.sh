@@ -167,7 +167,13 @@ fi
 # The pack is NOT committed (binary WAVs): point SELFTEST_PACK_DIR at diar-lab's folder
 # (pack.json + the WAVs beside it, NOT selftest_pack.json or ref/), or drop it in Packaging/SelfTest.
 SELFTEST_SRC="${SELFTEST_PACK_DIR:-${PACKAGE_DIR}/Packaging/SelfTest}"
+# PINNED (eta-refuter R3): pack.json's sha256 is fixed here, and pack.json pins every WAV's sha256
+# (the app re-verifies them at run time). A different pack is a script edit, on purpose.
+SELFTEST_PACK_SHA256="57d9bfbc8046b3efe1fef9f6f4b44dbac122fe27f91edfbf9771f9bdbe3c1737"
 if [ -f "${SELFTEST_SRC}/pack.json" ]; then
+  ACTUAL_PACK_SHA256="$(/usr/bin/shasum -a 256 "${SELFTEST_SRC}/pack.json" | /usr/bin/cut -d' ' -f1)"
+  [ "$ACTUAL_PACK_SHA256" = "$SELFTEST_PACK_SHA256" ] \
+    || die "self-test pack.json sha256 ${ACTUAL_PACK_SHA256} is not the pinned ${SELFTEST_PACK_SHA256}."
   /bin/mkdir -p "${APP}/Contents/Resources/SelfTest"
   /bin/cp "${SELFTEST_SRC}/pack.json" "${SELFTEST_SRC}/"*.wav "${APP}/Contents/Resources/SelfTest/"
   say "Bundled the self-test pack from ${SELFTEST_SRC}"
