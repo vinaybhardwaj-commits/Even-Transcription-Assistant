@@ -206,7 +206,10 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
       clock: ist("2026-09-28", "10:00"), root: root, speaker: speaker)
     let task = Task { try await engine.run() }
     try await R4Fixture.waitUntil { await remote.reached(acks: 1, polls: 1) }
-    try await Task.sleep(nanoseconds: 1_500_000_000)
+    let runsLog = root.appendingPathComponent("selftest/runs.log")
+    for _ in 0..<600 where !FileManager.default.fileExists(atPath: runsLog.path) {
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
     task.cancel()
     try await task.value
 
