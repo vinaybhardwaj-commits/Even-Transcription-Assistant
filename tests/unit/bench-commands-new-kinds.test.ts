@@ -72,6 +72,18 @@ describe("the three verbs' args (zod, strict)", () => {
     }
   });
 
+  it("self_test (0.1.25) takes {volume?: 0.2..0.8}, never clamped", () => {
+    expect(B.parseVerbArgs("self_test", null)).toBeNull();
+    expect(B.parseVerbArgs("self_test", undefined)).toBeNull();
+    expect(B.parseVerbArgs("self_test", {})).toBeNull();
+    expect(B.parseVerbArgs("self_test", { volume: 0.2 })).toEqual({ volume: 0.2 });
+    expect(B.parseVerbArgs("self_test", { volume: 0.8 })).toEqual({ volume: 0.8 });
+    expect(B.parseVerbArgs("self_test", { volume: 0.5 })).toEqual({ volume: 0.5 });
+    for (const bad of [{ volume: 0.19 }, { volume: 0.81 }, { volume: "0.5" }, { volume: 1 }, { volume: 0 }, { loud: true }]) {
+      expect(() => B.parseVerbArgs("self_test", bad), JSON.stringify(bad)).toThrow(B.CommandArgsError);
+    }
+  });
+
   it("insertCommand validates them too, and a bad one writes nothing", async () => {
     await expect(B.insertCommand({ roomId: "room_1", kind: "report_diag", args: { log_lines: 9999 } })).rejects.toBeInstanceOf(B.CommandArgsError);
     expect(calls).toHaveLength(0);
@@ -190,7 +202,7 @@ describe("POST /api/admin/bench/command accepts the three verbs", () => {
     }
   });
 
-  it("an unknown kind is still 400, and lists the eight", async () => {
+  it("an unknown kind is still 400, and lists the nine", async () => {
     const { status, json } = await post({ room_id: "room_1", kind: "reboot" });
     expect(status).toBe(400);
     expect(json.allowed).toEqual([...B.COMMAND_KINDS, "close_orphan"]);

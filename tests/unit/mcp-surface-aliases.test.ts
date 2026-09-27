@@ -350,6 +350,7 @@ describe("every group variant runs its original handler", () => {
     ["scribe_room_command", { kind: "check_update_now", room: "r1" }, "scribe_room_command", { kind: "check_update_now", room: "r1" }],
     ["scribe_room_command", { kind: "report_diag", room: "r1", args: { log_lines: 5 } }, "scribe_room_command", { kind: "report_diag", room: "r1", args: { log_lines: 5 } }],
     ["scribe_room_command", { kind: "restart_engine", room: "r1", args: { force: true } }, "scribe_room_command", { kind: "restart_engine", room: "r1", args: { force: true } }],
+    ["scribe_room_command", { kind: "self_test", room: "r1", args: { volume: 0.5 } }, "scribe_room_command", { kind: "self_test", room: "r1", args: { volume: 0.5 } }],
     ["scribe_scratch", { action: "replay", session_id: "bs_1", limit: 10 }, "scribe_replay_write", { session_id: "bs_1", limit: 10 }],
     ["scribe_scratch", { action: "fuse", room_day_id: "rd_1", arm: "rules", dry_run: true }, "scribe_fuse_run", { room_day_id: "rd_1", arm: "rules", dry_run: true }],
   ];
@@ -517,7 +518,7 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
 
   it.each([
     ["scribe_health", "SAME TOOL, MORE ASPECTS. scribe_health called with no `aspect` (or aspect=all) is the old scribe_health: same arguments, same behaviour, same response."],
-    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine is the old scribe_room_command: same arguments, same behaviour, same response."],
+    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine | self_test is the old scribe_room_command: same arguments, same behaviour, same response."],
   ])("%s opens by saying the old call shape is the old tool", (name, opening) => {
     expect(desc(name).startsWith(opening)).toBe(true);
   });
@@ -526,11 +527,22 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
     for (const g of S.GROUPS) expect(g.description.startsWith("SAME TOOL"), g.name).toBe((REUSED_NAMES as readonly string[]).includes(g.name));
   });
 
-  it("scribe_room_command says where each of its nine kinds executes; close_orphaned_session is a server-side repair", () => {
+  it("scribe_room_command says where each of its ten kinds executes; close_orphaned_session is a server-side repair", () => {
     const d = desc("scribe_room_command");
     expect(d).toContain("start_day, pause_day, resume_day, end_day — queued as a bench_command for the room's listening kiosk.");
-    expect(d).toContain("set_audio_input, check_update_now, report_diag, restart_engine — queued as a bench_command for the native Room Recorder app, which a browser kiosk ignores.");
+    expect(d).toContain(
+      "set_audio_input, check_update_now, report_diag, restart_engine, self_test — queued as a bench_command for the native Room Recorder app, which a browser kiosk ignores.",
+    );
     expect(d).toContain("close_orphaned_session — a SERVER-SIDE REPAIR, not a stop: no command is queued and no kiosk is involved.");
+  });
+
+  // eta-refuter #4281 — the group has the SAME NAME as the inner tool, so a TIER1_VERB missing from
+  // its variants is unreachable through MCP even once the inner tool and the server both know it.
+  it("every TIER1_VERB is a variant of the scribe_room_command group", async () => {
+    const { TIER1_VERBS } = await import("@/lib/bench-commands");
+    const tool = S.CALLABLE_TOOLS.get("scribe_room_command")!;
+    const kindProp = tool.inputSchema.properties?.kind as { enum?: string[] } | undefined;
+    for (const verb of TIER1_VERBS) expect(kindProp?.enum, verb).toContain(verb);
   });
 
   it("the execution claims match the handlers: close_orphaned_session never queues a command; the other kinds do, to the site named", () => {

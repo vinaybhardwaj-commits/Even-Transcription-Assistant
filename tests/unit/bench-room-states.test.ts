@@ -509,7 +509,8 @@ describe("migration 0081", () => {
       "start_day", "pause_day", "resume_day", "end_day", "set_audio_input",
       "check_update_now", "report_diag", "restart_engine",
     ]);
-    for (const k of BC.COMMAND_KINDS) expect(kinds).toContain(k);
+    // Every kind THIS migration knows about — not 0121's later self_test.
+    for (const k of BC.COMMAND_KINDS) if (k !== "self_test") expect(kinds).toContain(k);
     expect(src).toMatch(/RAISE EXCEPTION '0081: % CHECK constraints on bench_command\.kind/);
   });
 
@@ -598,5 +599,25 @@ describe("the fleet read carries the flags; the card shows a chip each", () => {
     expect(html).toContain('data-state-flag="DISK_LOW"');
     expect(html).toContain(C.INSTALL_STATE_LABEL.SILENT_WHILE_RECORDING);
     expect(html).toContain(C.INSTALL_STATE_LABEL.DISK_LOW);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 0121 (0.1.25, W34.1) — self_test joins the kind CHECK
+// ---------------------------------------------------------------------------
+
+describe("migration 0121", () => {
+  const src = readFileSync("db/migrations/0121_bench_command_self_test.sql", "utf8");
+
+  it("swaps the kind CHECK to all nine kinds, ending in self_test, by the catalogue", () => {
+    const m = src.match(/CHECK \(kind IN \(([^)]*)\)\)/);
+    const kinds = m![1]!.split(",").map((s) => s.trim().replace(/'/g, ""));
+    expect(kinds).toEqual([...BC.COMMAND_KINDS]);
+    expect(kinds.at(-1)).toBe("self_test");
+    expect(src).toMatch(/RAISE EXCEPTION '0121: % CHECK constraints on bench_command\.kind/);
+  });
+
+  it("adds no column: self_test's args and result fit the existing jsonb columns", () => {
+    expect(src).not.toMatch(/ADD COLUMN/);
   });
 });

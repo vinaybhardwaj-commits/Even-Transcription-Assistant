@@ -457,6 +457,10 @@ export const GROUPS: readonly McpTool[] = [
       v("check_update_now", "scribe_room_command", { args: passThrough, executes: EXECUTES_NATIVE_APP }),
       v("report_diag", "scribe_room_command", { args: passThrough, executes: EXECUTES_NATIVE_APP }),
       v("restart_engine", "scribe_room_command", { args: passThrough, executes: EXECUTES_NATIVE_APP }),
+      // 0.1.25 (W34.1). Same shape as the other three native verbs: `kind` goes through unchanged.
+      // eta-refuter #4281 — this group has the SAME NAME as the inner tool, so a kind missing here
+      // is unreachable through MCP even once the inner tool and the server both know it.
+      v("self_test", "scribe_room_command", { args: passThrough, executes: EXECUTES_NATIVE_APP }),
     ],
   }),
   buildGroup({
