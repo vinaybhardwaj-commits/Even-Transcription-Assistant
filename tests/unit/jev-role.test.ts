@@ -45,6 +45,7 @@ const DB = vi.hoisted(() => ({
   existing: [] as Array<{ window_id: string; speaker_idx: number }>,
   written: {} as Record<string, RoleRow>,
   writes: 0,
+  jevDecisions: [] as Array<Record<string, unknown>>, // W41 F3: rows insertJevDecisions() would send to jev_decision
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -61,6 +62,11 @@ vi.mock("@/lib/db", () => ({
       const [id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id, note] = v as unknown[];
       DB.written[`${window_id}:${speaker_idx}`] = { id, window_id, room_day_id, speaker_idx, cluster_id, role, role_probs, role_confidence, turn_count, char_count, model, prompt_version, input_tokens, batch_id, note };
       DB.writes += 1;
+      return [];
+    }
+    if (q.includes("INSERT INTO jev_decision")) {
+      const payload = JSON.parse(v[0] as string) as Array<Record<string, unknown>>;
+      DB.jevDecisions.push(...payload);
       return [];
     }
     return [];
@@ -86,6 +92,7 @@ beforeEach(() => {
   DB.existing = [];
   DB.written = {};
   DB.writes = 0;
+  DB.jevDecisions = [];
   clearMockJevAnswers();
   process.env.ETA_JEV_MOCK = "1";
   delete process.env.ETA_JEV_ENABLED;
@@ -113,6 +120,21 @@ describe("J3 — grouping and the char floor", () => {
     expect(DB.writes).toBe(1);
     expect(DB.written["win1:0"]).toMatchObject({ role: "clinician", window_id: "win1", speaker_idx: 0 });
     expect(DB.written["win1:1"]).toBeUndefined();
+  });
+});
+
+// W41 F3: this kind now routes through lib/jev/ask.ts instead of calling client.systemOne
+// directly, so its answers also get a jev_decision row -- subject_type 'turn', subject_id
+// "<window_id>:S<speaker_idx>" (the joined turns of one diarized speaker cluster in one window;
+// jev_decision.subject_id is app-level polymorphic by design, migration 0116's own comment).
+describe("J3 — also persists jev_decision rows via askJev, subject_type 'turn'", () => {
+  it("one row per speaker, subject_id is '<window_id>:S<speaker_idx>'", async () => {
+    DB.diarWindows = [{ window_id: "win1" }];
+    DB.turns.win1 = [{ window_id: "win1", speaker_idx: 0, text: "since when is this cough about five days and any fever at night", clinician_id: "clin_9", match_confidence: 0.85 }];
+    setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "clinician", probabilities: { clinician: 0.9 }, confidence: 0.9 } });
+    await drive({ room_day_id: "rd1" });
+    expect(DB.jevDecisions.length).toBe(1);
+    expect(DB.jevDecisions[0]).toMatchObject({ subject_type: "turn", subject_id: "win1:S0", question_id: "role", prompt_version: "jev-role-v1" });
   });
 });
 
@@ -145,16 +167,20 @@ describe("J3 — force re-runs a speaker already signalled", () => {
 
 // =====================================================================================
 // REFUTER F4 (19 Sep): an off-menu role choice degrades to "other" instead of aborting.
+// W41 F3: routing through askJev moved the off-menu interception a layer earlier — its own
+// registry validation (isValidChoice) now drops a genuinely off-menu choice before jev-role.ts
+// ever sees it, coming back as "no answer" rather than the raw string (which askJev deliberately
+// never logs either — "could be arbitrary text"). The safety property F4 exists for (never reach
+// the CHECK constraint, never abort the job) still holds; only the raw-value note is gone.
 // =====================================================================================
 describe("F4 — an off-menu Jev answer never reaches the CHECK constraint or aborts the job", () => {
-  it("choice outside the five valid roles → row with role 'other' and a note recording the raw value", async () => {
+  it("choice outside the five valid roles → row with role 'other', job completes without crashing", async () => {
     DB.diarWindows = [{ window_id: "win1" }];
     DB.turns.win1 = [{ window_id: "win1", speaker_idx: 0, text: "handling the vitals and the tokens for the morning queue today", clinician_id: null, match_confidence: null }];
     setMockJevAnswers({ [roleQid("S0")]: { type: "choice", choice: "receptionist", probabilities: { receptionist: 0.9 }, confidence: 0.9 } });
     const result = await drive({ room_day_id: "rd1" });
     expect(result).toMatchObject({ speakers_written: 1 });
     expect(DB.written["win1:0"]).toMatchObject({ role: "other" });
-    expect(DB.written["win1:0"]!.note as string).toContain("off_menu_choice:receptionist");
   });
 });
 

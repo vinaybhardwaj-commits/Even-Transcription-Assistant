@@ -99,7 +99,7 @@ describe("askJev — fan-out through the registry, no caller builds its own requ
   it("an empty ask batch never calls systemOne at all", async () => {
     const out = await askJev({}, []);
     expect(systemOneMock).not.toHaveBeenCalled();
-    expect(out).toEqual({ model: "", latencyMs: 0, results: {}, persisted: { ok: true, written: 0 } });
+    expect(out).toEqual({ model: "", latencyMs: 0, usage: { input_tokens: 0, output_tokens: 0 }, results: {}, persisted: { ok: true, written: 0 } });
   });
 });
 

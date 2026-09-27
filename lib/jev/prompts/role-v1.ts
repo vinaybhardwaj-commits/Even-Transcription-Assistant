@@ -1,10 +1,16 @@
 /**
  * lib/jev/prompts/role-v1.ts — Slice J3 (ETA-JEV-ARM-D §6.2), prompt_version "jev-role-v1". The
  * spec's wording verbatim; no worked examples (leakage risk).
+ *
+ * W41 F3: registered (module-load side effect, same house pattern as note-safety-v1.ts) so
+ * lib/jobs/kinds/jev-role.ts can route through lib/jev/ask.ts instead of client.systemOne
+ * directly.
  */
+import { registerJevQuestion } from "../registry";
 import type { JevChoiceQ } from "../types";
 
 export const ROLE_PROMPT_VERSION = "jev-role-v1";
+export const ROLE_QUESTION_ID = "role";
 
 export const ROLE_CRITERIA = {
   clinician: "Asks about symptoms, examines, explains diagnosis, prescribes, gives medical advice.",
@@ -23,3 +29,5 @@ export function roleQuestion(speakerId: string): JevChoiceQ {
 }
 
 export const roleQid = (s: string) => `role_${s}`;
+
+registerJevQuestion(ROLE_QUESTION_ID, ROLE_PROMPT_VERSION, roleQuestion);

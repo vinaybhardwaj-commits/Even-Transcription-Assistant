@@ -24,6 +24,7 @@ const DB = vi.hoisted(() => ({
   existingSignals: [] as Array<{ window_id: string }>,
   written: {} as Record<string, SignalRow>,
   writes: 0,
+  jevDecisions: [] as Array<Record<string, unknown>>, // W41 F3: rows insertJevDecisions() would send to jev_decision
 }));
 
 // F6(a)/(b): capture the request `state` sent to the Jev client so batch-shape tests can inspect
@@ -57,6 +58,11 @@ vi.mock("@/lib/db", () => ({
         DB.written[window_id as string] = { window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence, p_start, p_end, p_clinician, p_clinical, model, prompt_version, input_tokens, batch_id };
       }
       DB.writes += 1;
+      return [];
+    }
+    if (q.includes("INSERT INTO jev_decision")) {
+      const payload = JSON.parse(v[0] as string) as Array<Record<string, unknown>>;
+      DB.jevDecisions.push(...payload);
       return [];
     }
     return [];
@@ -127,6 +133,7 @@ beforeEach(() => {
   DB.existingSignals = [];
   DB.written = {};
   DB.writes = 0;
+  DB.jevDecisions = [];
   captured.length = 0;
   clearMockJevAnswers();
   _resetJevInFlightForTests();
@@ -170,6 +177,21 @@ describe("J2 — day-clean.json dry run through the mock", () => {
         p_clinical: w.p_clinical,
         prompt_version: "jev-arm-d-v1",
       });
+    }
+  });
+
+  // W41 F3: this kind now routes through lib/jev/ask.ts instead of calling client.systemOne
+  // directly, so every answer also gets a jev_decision row (subject_type 'window') -- the same
+  // persistence coverage every registry-based Jev use already has.
+  it("also persists one jev_decision row per (window, question) via askJev, subject_type 'window'", async () => {
+    seedFromFixture();
+    await drive({ room_day_id: FIXTURE.room_day_id });
+    expect(DB.jevDecisions.length).toBe(FIXTURE.windows.length * 5); // phase/start/end/clinician/clinical
+    for (const row of DB.jevDecisions) {
+      expect(row.subject_type).toBe("window");
+      expect(FIXTURE.windows.map((w: { id: string }) => w.id)).toContain(row.subject_id);
+      expect(["phase", "start", "end", "clinician", "clinical"]).toContain(row.question_id);
+      expect(row.prompt_version).toBe("jev-arm-d-v1");
     }
   });
 

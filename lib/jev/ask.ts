@@ -41,6 +41,10 @@ export type JevAskAnswer = {
 export type JevAskOutcome = {
   model: string;
   latencyMs: number;
+  /** W41 F3: token counts from the underlying systemOne call, for a caller (e.g. a job kind) that
+   * tracks its own cost/token columns the way lib/jev/counters.ts's in-memory aggregate cannot
+   * answer per-call. Additive: existing callers that ignore it are unaffected. */
+  usage: { input_tokens: number; output_tokens: number };
   /** Keyed by answerKey. An ask Jev did not answer is simply absent here — never a fabricated
    * default — so a caller's `results[key]` being undefined IS the "no answer" signal. */
   results: Record<string, JevAskAnswer>;
@@ -98,7 +102,7 @@ export async function askJev(
   asks: JevAsk[],
   opts?: { signal?: AbortSignal; trace?: TraceHandle; model?: string; persist?: boolean },
 ): Promise<JevAskOutcome> {
-  if (asks.length === 0) return { model: "", latencyMs: 0, results: {}, persisted: { ok: true, written: 0 } };
+  if (asks.length === 0) return { model: "", latencyMs: 0, usage: { input_tokens: 0, output_tokens: 0 }, results: {}, persisted: { ok: true, written: 0 } };
 
   const seenKeys = new Set<string>();
   const questions: Record<string, JevQuestion> = {};
@@ -153,5 +157,5 @@ export async function askJev(
     console.warn("[jev] decision persist failed", JSON.stringify({ error: persisted.error, rows: rows.length }));
   }
 
-  return { model: result.model, latencyMs: result.latency_ms, results, persisted };
+  return { model: result.model, latencyMs: result.latency_ms, usage: result.usage, results, persisted };
 }
