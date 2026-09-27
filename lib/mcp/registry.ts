@@ -42,9 +42,11 @@ export type ToolContext = {
    *  by the handler, so this narrows within a tool, it never widens access to one. */
   scopes: ReadonlySet<McpScope>;
   /** The caller's room allowlist (lib/mcp/auth.ts's per-token `rooms`), or `undefined` when the
-   *  token is unrestricted (every token before 27 Sep 2026, and the single-token fallback). A
-   *  room-write tool checks this after resolving which room the call names — see
-   *  `resolveForWrite` in lib/mcp/tools/bench.ts, the one place that does. */
+   *  token is unrestricted (every token before 27 Sep 2026, and the single-token fallback). NOT
+   *  every tool checks this — `handler.ts`'s `ROOM_RESTRICTED_ALLOWED_TOOLS` is the real boundary,
+   *  refusing a room-restricted token before a tool that has not been vetted to check it ever
+   *  runs. `resolveForWrite` (lib/mcp/tools/bench.ts) is the one place that DOES check it, and is
+   *  what the tools on that allowlist are vetted against. */
   rooms?: ReadonlySet<string>;
 };
 
@@ -71,6 +73,35 @@ export class ToolRoomError extends Error {
     super(`scope_or_tool_unavailable: room ${room.slug} is not on this token's allowlist`);
   }
 }
+
+/**
+ * ─── DEFAULT-DENY FOR A ROOM-RESTRICTED TOKEN (eta-refuter-2 #5114, 27 Sep) ────────────────────
+ * The first cut of the room allowlist enforced `ctx.rooms` inside `resolveForWrite`, on the belief
+ * that every room-touching tool called it. FALSE, reproduced: `scribe_extract_audio` (and
+ * `scribe_transcribe_range`) resolve a room straight from a `session_id` WITHOUT calling
+ * `resolveForWrite` at all, so a token restricted to one room could read another room's audio by
+ * naming its session id — and roughly a dozen more tools (replay_write, post_cue, pin_visit,
+ * fuse_run, set_visit_clinician, jev_window_run, job_submit/job_cancel, silence_readjudicate,
+ * encounter_shadow_run, note_safety_replay, clinical_route_replay) touch a room, session, visit,
+ * window or job with NO room check whatsoever.
+ *
+ * Auditing every one of those — each derives "the room" from a different kind of id — is real work
+ * and the wrong shape for a same-day fix. So the boundary moves from "does this tool happen to
+ * check ctx.rooms" (provably incomplete; a new tool can silently reopen the gap) to "is this tool
+ * even REACHABLE for a room-restricted token" (default deny; a NEW tool is unreachable until
+ * someone deliberately adds it here, having verified it room-checks correctly).
+ *
+ * A room-restricted token (`ctx.rooms` set — including the empty set, the malformed-token fail-
+ * closed case) may call ONLY a tool named here; `callTool` refuses every other name before the
+ * handler ever runs, with the same -32001 `scope_or_tool_unavailable` shape. `scribe_room_command`
+ * is the only entry today: it is the published name for start_day, pause_day, resume_day, end_day,
+ * set_audio_input, close_orphaned_session, check_update_now, report_diag, restart_engine AND
+ * self_test (lib/mcp/surface.ts's group), and every one of those routes through `resolveForWrite`
+ * (verified, tests/unit/mcp-room-allowlist.test.ts). ADDING A NAME HERE without first confirming
+ * (by the same standard: a passing test, not a read) that its own handler enforces `ctx.rooms`
+ * before touching any room-scoped data reopens exactly the hole this closes.
+ */
+export const ROOM_RESTRICTED_ALLOWED_TOOLS: ReadonlySet<string> = new Set(["scribe_room_command"]);
 
 export type McpTool = {
   name: string;

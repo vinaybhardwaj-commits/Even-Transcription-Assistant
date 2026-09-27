@@ -26,7 +26,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
 import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
-import { ToolScopeError, ToolRoomError } from "@/lib/mcp/registry";
+import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS, LISTED_TOOLS } from "@/lib/mcp/surface";
 
 const SERVER_NAME = "even-scribe-mcp";
@@ -213,6 +213,12 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   if (!tool || !principal.scopes.has(tool.scope)) {
     // Not registered in this slice (e.g. write tools) or outside the token's scopes.
     throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, slice: SLICE }));
+  }
+  // A room-restricted token (registry.ts's ROOM_RESTRICTED_ALLOWED_TOOLS) may reach ONLY a tool
+  // vetted to enforce ctx.rooms itself — default deny, not "did this particular tool remember to
+  // check" (eta-refuter-2 #5114: several tools resolved a room from an id without checking it).
+  if (principal.rooms && !ROOM_RESTRICTED_ALLOWED_TOOLS.has(name)) {
+    throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, slice: SLICE, room_restricted: true }));
   }
 
   const t0 = Date.now();

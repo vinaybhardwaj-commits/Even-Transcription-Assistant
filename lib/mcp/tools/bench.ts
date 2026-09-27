@@ -466,6 +466,13 @@ type ResolveOutcome = { room: RoomRef } | { error: Record<string, unknown> };
  * caller may not act on this room at all), not a data-shape problem like `unknown_room`, so it
  * takes the same -32001 path `ToolScopeError` does (registry.ts, handler.ts) instead of a 200 with
  * an error field.
+ *
+ * THIS IS NOT THE SAFETY BOUNDARY BY ITSELF (eta-refuter-2 #5114, 27 Sep). It is correct for
+ * everything that calls it, but several tools in this file resolve "the room" from a session,
+ * visit, window or job id WITHOUT calling it — `resolveRangeArgs` below is one, when its caller
+ * names `session_id`. The actual boundary is `handler.ts`'s `ROOM_RESTRICTED_ALLOWED_TOOLS`
+ * (registry.ts): a room-restricted token cannot reach an unvetted tool AT ALL, whether or not that
+ * tool would have called this function.
  */
 async function resolveForWrite(args: ToolArgs, ctx: ToolContext): Promise<ResolveOutcome> {
   try {
