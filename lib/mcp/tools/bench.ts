@@ -174,7 +174,7 @@ import {
   type ListenerRow,
   type SetAudioInputArgs,
 } from "@/lib/bench-commands";
-import { argBool, argDate, argDetail, argInt, argStr, DETAIL_SCHEMA, failSafe, pickSummary, IST_DATE_RE, type McpTool, type ToolArgs, type ToolContext } from "../registry";
+import { argBool, argDate, argDetail, argInt, argStr, DETAIL_SCHEMA, failSafe, pickSummary, IST_DATE_RE, ToolRoomError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, postBrainCue, resolveRoom, type CueSource, type RoomRef } from "./brain";
 
 const PRESIGN_SECONDS = 3600; // 1 h family (matches manifest route)
@@ -458,13 +458,30 @@ const ROOM_WRITE_ARGS = {
 
 type ResolveOutcome = { room: RoomRef } | { error: Record<string, unknown> };
 
-async function resolveForWrite(args: ToolArgs): Promise<ResolveOutcome> {
+/**
+ * `ctx` is required (not optional) so a NEW call site can never forget the room-allowlist check by
+ * omission — every existing call site is updated to pass it below. When `ctx.rooms` is set (Tier 2
+ * §2.3, lib/mcp/auth.ts) and does not name the resolved room, this THROWS `ToolRoomError` rather
+ * than returning a `ResolveOutcome` error: a room restriction is an authorization refusal (the
+ * caller may not act on this room at all), not a data-shape problem like `unknown_room`, so it
+ * takes the same -32001 path `ToolScopeError` does (registry.ts, handler.ts) instead of a 200 with
+ * an error field.
+ */
+async function resolveForWrite(args: ToolArgs, ctx: ToolContext): Promise<ResolveOutcome> {
   try {
     const room = await resolveRoom(args);
     if (!room) return { error: { error: "unknown_room" } };
     if (!room.enabled) return { error: { error: "room_disabled", room: { id: room.id, slug: room.slug, name: room.name } } };
+    // Compared case-insensitively on BOTH sides — auth.ts's parseEntry already lower-cases a real
+    // token's `rooms`, but the check does not lean on that being the only way a `ctx` is built.
+    if (ctx.rooms) {
+      const slug = room.slug.toLowerCase();
+      const permitted = [...ctx.rooms].some((r) => r.toLowerCase() === slug);
+      if (!permitted) throw new ToolRoomError({ id: room.id, slug: room.slug, name: room.name });
+    }
     return { room };
   } catch (e) {
+    if (e instanceof ToolRoomError) throw e;
     if (e instanceof AmbiguousRoomError) {
       return { error: { error: "ambiguous_room", matches: e.matches.map((m) => ({ id: m.id, slug: m.slug, name: m.name })) } };
     }
@@ -531,8 +548,8 @@ const startRecording: McpTool = {
     properties: { ...ROOM_WRITE_ARGS, override_pause: { type: "boolean", default: false, description: "resume over a consent pause — rare, audited" } },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
-    const r = await resolveForWrite(args);
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return r.error;
     const room = r.room;
     const now = new Date();
@@ -557,8 +574,8 @@ function simpleVerb(name: string, kind: CommandKind, description: string): McpTo
     description,
     scope: "write",
     inputSchema: { type: "object", properties: ROOM_WRITE_ARGS, additionalProperties: false },
-    handler: async (args: ToolArgs) => {
-      const r = await resolveForWrite(args);
+    handler: async (args: ToolArgs, ctx: ToolContext) => {
+      const r = await resolveForWrite(args, ctx);
       if ("error" in r) return r.error;
       const room = r.room;
       const now = new Date();
@@ -609,7 +626,7 @@ const setAudioInput: McpTool = {
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
     // Only the two command fields go to the validator; JSON-RPC clients may send a number as a string.
     const raw: Record<string, unknown> = {};
     if (args.device_uid !== undefined) raw.device_uid = args.device_uid;
@@ -624,7 +641,7 @@ const setAudioInput: McpTool = {
       if (e instanceof CommandArgsError) return { ok: false, error: "bad_args", detail: e.reason };
       throw e;
     }
-    const r = await resolveForWrite(args);
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return r.error;
     const room = r.room;
     const roomRef = { id: room.id, slug: room.slug, name: room.name };
@@ -671,7 +688,7 @@ const roomCommand: McpTool = {
     required: ["kind"],
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
     const kind = args.kind;
     if (!isTier1Verb(kind)) return { ok: false, error: "unknown_kind", allowed: [...TIER1_VERBS] };
     let cmdArgs: Record<string, unknown> | null;
@@ -681,7 +698,7 @@ const roomCommand: McpTool = {
       if (e instanceof CommandArgsError) return { ok: false, error: "bad_args", detail: e.reason };
       throw e;
     }
-    const r = await resolveForWrite(args);
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return r.error;
     const room = r.room;
     const roomRef = { id: room.id, slug: room.slug, name: room.name };
@@ -735,16 +752,16 @@ const closeOrphaned: McpTool = {
     "REPAIR, NOT A STOP — close a session whose kiosk is GONE, server-side, so the room can record again. THE DEADLOCK IT BREAKS (seen on Home Office, 22 Aug): a kiosk tab dies mid-recording; end_day is a no-op because the kiosk ends its OWN session and the replacement tab holds none; start_day is refused because the room still has a session that is not 'ended'. The room is then unrecordable until the 30-minute reaper fires. REFUSES BY NAME when a kiosk is polling within 10 s AND claims that very session (kiosk_attached) — this can never stop a healthy recording, and stopping a live room is still end_day's job. Sets status='ended' and ended_at=NOW() on ONE row; NEVER touches bench_chunk, and returns the chunk count before and after so you can check that. Writes a bench.close_orphaned_session audit row carrying the session, the room, the actor and the listener evidence (tab, last poll, age, what it claimed). Returns { ok, session_id, ended_at, chunks_before, chunks_after, evidence }.",
   scope: "write",
   inputSchema: { type: "object", properties: ROOM_WRITE_ARGS, additionalProperties: false },
-  handler: async (args: ToolArgs) => {
-    const r = await resolveForWrite(args);
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return r.error;
     const room = r.room;
     const out = await closeOrphanedSession({ roomId: room.id, actorType: "system", actorId: "mcp" });
-    const ctx = { room: { id: room.id, slug: room.slug, name: room.name } };
+    const roomRef = { room: { id: room.id, slug: room.slug, name: room.name } };
     if (!out.ok) {
       return {
         ...out,
-        ...ctx,
+        ...roomRef,
         hint:
           out.error === "kiosk_attached"
             ? "a kiosk is polling and claims this session — it is alive. Use scribe_stop_recording."
@@ -753,7 +770,7 @@ const closeOrphaned: McpTool = {
               : undefined,
       };
     }
-    return { ...out, ...ctx };
+    return { ...out, ...roomRef };
   },
 };
 
@@ -775,7 +792,7 @@ const markConsult: McpTool = {
     additionalProperties: false,
   },
   handler: async (args: ToolArgs, ctx: ToolContext) => {
-    const r = await resolveForWrite(args);
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return r.error;
     const room = r.room;
     let at = new Date();
@@ -858,7 +875,7 @@ type RangeArgsOk = {
 };
 
 /** Shared arg resolution for extract/transcribe: session (by id or room+ist_date), window, source. */
-async function resolveRangeArgs(args: ToolArgs): Promise<RangeArgsOk | { error: Record<string, unknown> }> {
+async function resolveRangeArgs(args: ToolArgs, ctx: ToolContext): Promise<RangeArgsOk | { error: Record<string, unknown> }> {
   // U4: "not named" and "named primary" are different answers, so the absence is kept, not
   // defaulted away. Only an explicit name reaches `requested`.
   const sourceRaw = argStr(args, "source", 16);
@@ -871,7 +888,7 @@ async function resolveRangeArgs(args: ToolArgs): Promise<RangeArgsOk | { error: 
     session = await findBenchSession(sid);
     if (!session) return { error: { ok: false, error: "session_not_found" } };
   } else {
-    const r = await resolveForWrite(args);
+    const r = await resolveForWrite(args, ctx);
     if ("error" in r) return { error: r.error };
     const d = argStr(args, "ist_date", 10);
     if (d && !IST_DATE_RE.test(d)) return { error: { ok: false, error: "invalid_ist_date" } };
@@ -1042,7 +1059,7 @@ const extractAudio: McpTool = {
         throw e;
       }
     }
-    const r = await resolveRangeArgs(args);
+    const r = await resolveRangeArgs(args, ctx);
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
@@ -2011,7 +2028,7 @@ const transcribeRange: McpTool = {
     // absent fields — mean WRITE, which is the wrong way round for the one flag standing
     // between a transcription and rows in the graph.
     const dryRun = !(args.dry_run === false || args.dry_run === "false" || args.dry_run === 0);
-    const r = await resolveRangeArgs(args);
+    const r = await resolveRangeArgs(args, ctx);
     if ("error" in r) return r.error;
     const res = resolveRange(r.chunks, r.startMs, r.endMs, r.source);
     const requested = { start: new Date(r.startMs).toISOString(), end: new Date(r.endMs).toISOString(), start_ist: fmtIstClock(r.startMs), end_ist: fmtIstClock(r.endMs), source: r.source, ist_date: r.istDay };
@@ -2158,10 +2175,10 @@ const listCommandsTool: McpTool = {
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
     let roomId: string | null = null;
     if (argStr(args, "room", 128) || argStr(args, "room_id", 128) || argStr(args, "room_slug", 128)) {
-      const r = await resolveForWrite(args);
+      const r = await resolveForWrite(args, ctx);
       if ("error" in r) return { commands: [], ...r.error };
       roomId = r.room.id;
     }

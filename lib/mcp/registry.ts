@@ -41,6 +41,11 @@ export type ToolContext = {
    *  scribe_job_submit's per-kind check) reads this; the tool's own scope is still checked first
    *  by the handler, so this narrows within a tool, it never widens access to one. */
   scopes: ReadonlySet<McpScope>;
+  /** The caller's room allowlist (lib/mcp/auth.ts's per-token `rooms`), or `undefined` when the
+   *  token is unrestricted (every token before 27 Sep 2026, and the single-token fallback). A
+   *  room-write tool checks this after resolving which room the call names — see
+   *  `resolveForWrite` in lib/mcp/tools/bench.ts, the one place that does. */
+  rooms?: ReadonlySet<string>;
 };
 
 /**
@@ -51,6 +56,19 @@ export type ToolContext = {
 export class ToolScopeError extends Error {
   constructor(public needed: McpScope, public detail: Record<string, unknown> = {}) {
     super(`scope_or_tool_unavailable: needs ${needed}`);
+  }
+}
+
+/**
+ * Thrown by `resolveForWrite` when the caller's token has a room allowlist (`ctx.rooms`) that
+ * does not name the room the call resolved to. The SAME authorization category as `ToolScopeError`
+ * — the caller has the tool's scope, just not for this room — so `callTool` catches it the same
+ * way and gives the same -32001 `scope_or_tool_unavailable` shape: one refusal, not a second kind
+ * of "you may not do that".
+ */
+export class ToolRoomError extends Error {
+  constructor(public room: { id: string; slug: string; name: string }) {
+    super(`scope_or_tool_unavailable: room ${room.slug} is not on this token's allowlist`);
   }
 }
 
@@ -75,11 +93,12 @@ export async function failSafe(empty: ToolResult, fn: () => Promise<ToolResult>)
   try {
     return await fn();
   } catch (e) {
-    // A SCOPE REFUSAL IS NOT A DEGRADED ANSWER. Everything else here becomes `{degraded:true}` so
-    // a read that failed answers rather than 500s — but flattening "you may not do that" into that
-    // shape would tell a caller the data was unavailable when it was in fact withheld, and would
-    // turn a 403 into a 200. It goes up to the handler, which renders it as -32001.
-    if (e instanceof ToolScopeError) throw e;
+    // A SCOPE OR ROOM REFUSAL IS NOT A DEGRADED ANSWER. Everything else here becomes
+    // `{degraded:true}` so a read that failed answers rather than 500s — but flattening "you may
+    // not do that" into that shape would tell a caller the data was unavailable when it was in
+    // fact withheld, and would turn a 403 into a 200. It goes up to the handler, which renders it
+    // as -32001.
+    if (e instanceof ToolScopeError || e instanceof ToolRoomError) throw e;
     return { ...empty, degraded: true, error: String((e as Error)?.message ?? e).slice(0, 200) };
   }
 }

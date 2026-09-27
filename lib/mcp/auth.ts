@@ -39,14 +39,27 @@ export const MCP_TOKEN_ID = "operator-v1";
 export type McpScope = "read" | "invoke" | "write";
 export const ALL_SCOPES: readonly McpScope[] = ["read", "invoke", "write"];
 
-export type McpPrincipal = { token_id: string; scopes: ReadonlySet<McpScope> };
+/**
+ * PER-TOKEN ROOM ALLOWLIST (27 Sep 2026, W40 follow-up: a token that may act on ONE room only,
+ * e.g. an install pane's Home Office canary). Optional on an entry, alongside `scopes`:
+ *
+ *   { "<hash>": { "actor": "minibot", "scopes": ["write"], "rooms": ["home-office-w8fb"] } }
+ *
+ * ABSENT `rooms` = UNRESTRICTED (every existing token, and the single-token fallback, keep
+ * today's behaviour exactly). A PRESENT-BUT-MALFORMED `rooms` value fails CLOSED to the empty
+ * set — the same rule `scopes` already follows — because a botched attempt to restrict a token
+ * must never silently leave it unrestricted. Room slugs, matched case-insensitively.
+ */
+export type McpPrincipal = { token_id: string; scopes: ReadonlySet<McpScope>; rooms?: ReadonlySet<string> };
 
 export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured" };
 
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
 
+export const ROOM_SLUG_MAX = 128;
+
 /** PURE — one entry of the token map, or null for anything this build cannot read. */
-function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope> } | null {
+function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope>; rooms?: Set<string> } | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   const actor = typeof o.actor === "string" && o.actor.trim() ? o.actor.trim().slice(0, 64) : null;
@@ -57,10 +70,21 @@ function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope> } | nu
   const scopes = new Set<McpScope>(
     listed.filter((x): x is McpScope => typeof x === "string" && (ALL_SCOPES as readonly string[]).includes(x)),
   );
-  return { actor, scopes };
+  // `rooms` ABSENT (key not present at all) = unrestricted, `undefined` here. PRESENT (even `null`,
+  // even the wrong type) = restricted, to whatever valid slugs survive filtering — possibly none.
+  let rooms: Set<string> | undefined;
+  if ("rooms" in o) {
+    const listedRooms = Array.isArray(o.rooms) ? o.rooms : [];
+    rooms = new Set(
+      listedRooms
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0 && x.trim().length <= ROOM_SLUG_MAX)
+        .map((x) => x.trim().toLowerCase()),
+    );
+  }
+  return { actor, scopes, rooms };
 }
 
-type TokenMap = Record<string, { actor: string; scopes: Set<McpScope> }>;
+type TokenMap = Record<string, { actor: string; scopes: Set<McpScope>; rooms?: Set<string> }>;
 
 /** PURE — the configured map, keyed by sha256 hex. `{}` for absent or unreadable JSON. `envName` only names the variable in the warning. */
 export function parseTokenMap(raw: string | undefined, envName: string = MCP_TOKENS_ENV): TokenMap {
@@ -73,7 +97,7 @@ export function parseTokenMap(raw: string | undefined, envName: string = MCP_TOK
     return {};
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-  const out: Record<string, { actor: string; scopes: Set<McpScope> }> = {};
+  const out: TokenMap = {};
   for (const [hash, entry] of Object.entries(v as Record<string, unknown>)) {
     if (!/^[0-9a-f]{64}$/i.test(hash)) continue; // keys are sha256 hex; anything else is a typo
     const parsed = parseEntry(entry);
@@ -132,7 +156,7 @@ export function mergeTokenMaps(primary: TokenMap, extra: TokenMap, primaryOk: bo
     if (hash in out) { shadowed += 1; continue; }
     const actor = `${EXTRA_ACTOR_PREFIX}${entry.actor}`;
     if (takenAudit.has(mcpActorId(actor))) { clash += 1; continue; }
-    out[hash] = { actor, scopes: entry.scopes };
+    out[hash] = { actor, scopes: entry.scopes, rooms: entry.rooms };
   }
   if (shadowed > 0) console.warn(`[mcp-auth] ${shadowed} entr${shadowed === 1 ? "y" : "ies"} in ${MCP_TOKENS_EXTRA_ENV} shadowed by ${MCP_TOKENS_ENV}; the primary entry wins`);
   if (clash > 0) console.warn(`[mcp-auth] ${clash} entr${clash === 1 ? "y" : "ies"} in ${MCP_TOKENS_EXTRA_ENV} skipped: the audit actor would equal an existing principal's`);
@@ -156,9 +180,9 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
 
   // §2.3 — the map first. Hash lookup: no comparison, so no timing signal from the map's size.
   const hit = map[sha256Hex(presented)];
-  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes } };
+  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms } };
 
-  // Fallback: the original single token, unchanged — all three scopes, actor operator-v1.
+  // Fallback: the original single token, unchanged — all three scopes, every room, actor operator-v1.
   if (single) {
     const a = createHash("sha256").update(presented).digest();
     const b = createHash("sha256").update(single).digest();
