@@ -31,10 +31,10 @@
  */
 import { sql } from "@/lib/db";
 import { parseFlag, FlagValueError } from "@/lib/flags";
-import { getJevClient } from "@/lib/jev/client";
+import { askJev, type JevAsk } from "@/lib/jev/ask";
 import { compositeRole, type AcousticInfo } from "@/lib/jev/role-composite";
 import { SETTING } from "@/lib/jev/prompts/arm-d-v1";
-import { ROLE_PROMPT_VERSION, roleQid, roleQuestion } from "@/lib/jev/prompts/role-v1";
+import { ROLE_PROMPT_VERSION, ROLE_QUESTION_ID, roleQid } from "@/lib/jev/prompts/role-v1";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, type JobKind, type StepContext, type StepOutcome } from "../types";
 
@@ -89,7 +89,6 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
     existing = new Set(rows.map((r) => `${r.window_id}:${r.speaker_idx}`));
   }
 
-  const client = getJevClient();
   let windowsProcessed = 0;
   let windowsSkippedNonEnglish = 0;
   let speakersWritten = 0;
@@ -148,21 +147,34 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
     if (speakers.length === 0) continue;
 
     const state = { setting: SETTING, speakers: speakers.map((s) => ({ id: `S${s.idx}`, turns: [s.text] })) };
-    const questions: Record<string, ReturnType<typeof roleQuestion>> = {};
-    for (const s of speakers) questions[roleQid(`S${s.idx}`)] = roleQuestion(`S${s.idx}`);
+    // W41 F3: routed through lib/jev/ask.ts so this job's answers also land in jev_decision
+    // (subject_type 'turn', subject_id "<window_id>:S<speaker_idx>" -- the joined turns of one
+    // diarized speaker cluster within one window; jev_decision's subject_id is app-level
+    // polymorphic by design, see migration 0116's own column comment).
+    const asks: JevAsk[] = speakers.map((s) => ({
+      answerKey: roleQid(`S${s.idx}`), subjectType: "turn", subjectId: `${w.window_id}:S${s.idx}`,
+      questionId: ROLE_QUESTION_ID, promptVersion, args: [`S${s.idx}`],
+    }));
 
     const batchId = `${roomDayId}:${w.window_id}`;
-    const result = await client.systemOne({ state, questions }, { signal: ctx.signal });
+    const outcome = await askJev(state, asks, { signal: ctx.signal });
     calls += 1;
-    inputTokens += result.usage.input_tokens;
+    inputTokens += outcome.usage.input_tokens;
 
     for (const s of speakers) {
-      const ans: JevAnswer | undefined = result.answers[roleQid(`S${s.idx}`)];
+      const ans: JevAnswer | undefined = outcome.results[roleQid(`S${s.idx}`)]?.answer;
       const rawChoice = ans && ans.type === "choice" ? String(ans.choice) : "other";
       const roleProbs = ans && ans.type === "choice" ? ans.probabilities : {};
       const roleConfidence = ans && ans.type === "choice" ? ans.confidence : 0;
 
-      // F4: never let an off-menu answer reach the CHECK constraint or abort the job.
+      // F4: never let an off-menu answer reach the CHECK constraint or abort the job. W41 F3:
+      // askJev's own registry validation (isValidChoice in lib/jev/ask.ts) now intercepts a
+      // genuinely off-menu choice before it reaches `ans` at all -- it comes back as "no answer"
+      // (ans undefined), not the raw off-menu string, so the raw value can no longer be recorded
+      // in `note` the way it was when this kind called client.systemOne directly (that string is
+      // deliberately never logged upstream either -- ask.ts's own comment: "could be arbitrary
+      // text"). This branch is kept as a defensive fallback (never assume upstream validation is
+      // exhaustive), not as the primary catch any more.
       const offMenu = !VALID_ROLES.has(rawChoice);
       const textRole = offMenu ? "other" : rawChoice;
 
@@ -181,7 +193,7 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
         VALUES
           (${`jrs_${w.window_id}_${s.idx}`}, ${w.window_id}, ${roomDayId}, ${s.idx}, ${s.cluster_id},
            ${finalRole}, ${JSON.stringify(roleProbs)}::jsonb, ${roleConfidence},
-           ${s.turnCount}, ${s.charCount}, ${result.model}, ${promptVersion}, ${result.usage.input_tokens}, ${batchId}, ${note})
+           ${s.turnCount}, ${s.charCount}, ${outcome.model}, ${promptVersion}, ${outcome.usage.input_tokens}, ${batchId}, ${note})
         ON CONFLICT (window_id, speaker_idx, prompt_version) DO UPDATE SET
           cluster_id = EXCLUDED.cluster_id, role = EXCLUDED.role, role_probs = EXCLUDED.role_probs, role_confidence = EXCLUDED.role_confidence,
           turn_count = EXCLUDED.turn_count, char_count = EXCLUDED.char_count, model = EXCLUDED.model,

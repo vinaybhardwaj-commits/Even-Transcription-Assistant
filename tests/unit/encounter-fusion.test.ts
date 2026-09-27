@@ -422,7 +422,7 @@ const day = (): DayEvidence => {
   };
 };
 const answers = (asks: JevAsk[], pick: (a: JevAsk) => JevAskOutcome["results"][string]["answer"]): JevAskOutcome => ({
-  model: "m", latencyMs: 5, persisted: { ok: true, written: asks.length },
+  model: "m", latencyMs: 5, usage: { input_tokens: 0, output_tokens: 0 }, persisted: { ok: true, written: asks.length },
   results: Object.fromEntries(asks.map((a) => {
     const answer = pick(a);
     const confidence = answer.type === "noul" ? 0.95 : answer.confidence;

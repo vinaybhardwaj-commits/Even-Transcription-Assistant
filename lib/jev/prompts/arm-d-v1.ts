@@ -10,7 +10,14 @@
  * trial itself would have measured first.
  *
  * No worked examples in any instructions (leakage risk, spec §5.3 / INTEGRATION §7).
+ *
+ * W41 F3 (jev-audit finding #4/#5): these builders are now registered (module-load side effect,
+ * same house pattern as lib/jev/prompts/note-safety-v1.ts) so lib/jobs/kinds/jev-window.ts can
+ * route through the shared lib/jev/ask.ts entry point instead of calling client.systemOne
+ * directly -- jev_decision persistence now covers Arm D's window signal the same way it already
+ * covers every registry-based use.
  */
+import { registerJevQuestion } from "../registry";
 import type { JevChoiceQ, JevNoulQ } from "../types";
 
 export const PROMPT_VERSION = "jev-arm-d-v1";
@@ -73,3 +80,12 @@ export const qid = {
   clinician: (w: string) => `clinician_${w}`,
   clinical: (w: string) => `clinical_${w}`,
 };
+
+/** Stable registry question_ids -- one per builder, distinct from qid's per-window answerKeys. */
+export const QUESTION_ID = { phase: "phase", start: "start", end: "end", clinician: "clinician", clinical: "clinical" } as const;
+
+registerJevQuestion(QUESTION_ID.phase, PROMPT_VERSION, phaseQuestion);
+registerJevQuestion(QUESTION_ID.start, PROMPT_VERSION, startQuestion);
+registerJevQuestion(QUESTION_ID.end, PROMPT_VERSION, endQuestion);
+registerJevQuestion(QUESTION_ID.clinician, PROMPT_VERSION, clinicianQuestion);
+registerJevQuestion(QUESTION_ID.clinical, PROMPT_VERSION, clinicalQuestion);

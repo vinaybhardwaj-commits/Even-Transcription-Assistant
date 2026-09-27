@@ -24,6 +24,7 @@ const DB = vi.hoisted(() => ({
   existingSignals: [] as Array<{ window_id: string }>,
   written: {} as Record<string, SignalRow>,
   writes: 0,
+  jevDecisions: [] as Array<Record<string, unknown>>, // W41 F3: rows insertJevDecisions() would send to jev_decision
 }));
 
 // F6(a)/(b): capture the request `state` sent to the Jev client so batch-shape tests can inspect
@@ -57,6 +58,11 @@ vi.mock("@/lib/db", () => ({
         DB.written[window_id as string] = { window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence, p_start, p_end, p_clinician, p_clinical, model, prompt_version, input_tokens, batch_id };
       }
       DB.writes += 1;
+      return [];
+    }
+    if (q.includes("INSERT INTO jev_decision")) {
+      const payload = JSON.parse(v[0] as string) as Array<Record<string, unknown>>;
+      DB.jevDecisions.push(...payload);
       return [];
     }
     return [];
@@ -127,6 +133,7 @@ beforeEach(() => {
   DB.existingSignals = [];
   DB.written = {};
   DB.writes = 0;
+  DB.jevDecisions = [];
   captured.length = 0;
   clearMockJevAnswers();
   _resetJevInFlightForTests();
@@ -173,6 +180,21 @@ describe("J2 — day-clean.json dry run through the mock", () => {
     }
   });
 
+  // W41 F3: this kind now routes through lib/jev/ask.ts instead of calling client.systemOne
+  // directly, so every answer also gets a jev_decision row (subject_type 'window') -- the same
+  // persistence coverage every registry-based Jev use already has.
+  it("also persists one jev_decision row per (window, question) via askJev, subject_type 'window'", async () => {
+    seedFromFixture();
+    await drive({ room_day_id: FIXTURE.room_day_id });
+    expect(DB.jevDecisions.length).toBe(FIXTURE.windows.length * 5); // phase/start/end/clinician/clinical
+    for (const row of DB.jevDecisions) {
+      expect(row.subject_type).toBe("window");
+      expect(FIXTURE.windows.map((w: { id: string }) => w.id)).toContain(row.subject_id);
+      expect(["phase", "start", "end", "clinician", "clinical"]).toContain(row.question_id);
+      expect(row.prompt_version).toBe("jev-arm-d-v1");
+    }
+  });
+
   it("force re-runs windows already signalled; without force they are skipped", async () => {
     seedFromFixture();
     DB.existingSignals = FIXTURE.windows.map((w) => ({ window_id: w.id }));
@@ -183,6 +205,27 @@ describe("J2 — day-clean.json dry run through the mock", () => {
     const r2 = await drive({ room_day_id: FIXTURE.room_day_id, force: true });
     expect(r2.done).toMatchObject({ windows_asked: FIXTURE.windows.length });
     expect(DB.writes).toBe(FIXTURE.windows.length);
+  });
+});
+
+// W41 F3 (eta-refuter-2 review, jev-fix/f3-legacy-askjev @ 1acfe40): a third disclosed behaviour
+// change alongside the other two -- an off-menu phase choice used to reach jev_window_signal's
+// own `phase` CHECK constraint directly and fail the step; askJev's isValidChoice() now drops it
+// first, so the step degrades to "non_clinical" instead of crashing.
+describe("W41 F3 — an off-menu phase choice degrades to non_clinical instead of reaching the CHECK constraint", () => {
+  it("choice outside the six valid phases -> phase='non_clinical', job completes without crashing", async () => {
+    DB.windows = [{ id: "w1", session_id: "s1", start_ms: 0, end_ms: 30000 }];
+    DB.textRows = [{ window_id: "w1", english: "the doctor asked about symptoms" }];
+    setMockJevAnswers({
+      [qid.phase("w1")]: { type: "choice", choice: "lunch_break", probabilities: { lunch_break: 0.9 }, confidence: 0.9 },
+      [qid.start("w1")]: { type: "noul", noul: 0.1 },
+      [qid.end("w1")]: { type: "noul", noul: 0.1 },
+      [qid.clinician("w1")]: { type: "noul", noul: 0.8 },
+      [qid.clinical("w1")]: { type: "noul", noul: 0.8 },
+    } as never);
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ windows_asked: 1 });
+    expect(DB.written.w1).toMatchObject({ phase: "non_clinical", phase_probs: JSON.stringify({ non_clinical: 1 }), phase_confidence: 0 });
   });
 });
 

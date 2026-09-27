@@ -37,8 +37,8 @@
  *      `finally`, whether the call succeeds or throws.
  */
 import { sql } from "@/lib/db";
-import { getJevClient } from "@/lib/jev/client";
-import { PROMPT_VERSION, SETTING, clinicalQuestion, clinicianQuestion, endQuestion, phaseQuestion, qid, startQuestion } from "@/lib/jev/prompts/arm-d-v1";
+import { askJev, type JevAsk } from "@/lib/jev/ask";
+import { PROMPT_VERSION, QUESTION_ID, SETTING, qid } from "@/lib/jev/prompts/arm-d-v1";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 
@@ -233,23 +233,28 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
     ),
   };
 
-  const questions: Record<string, ReturnType<typeof phaseQuestion>> = {};
+  // W41 F3: routed through the shared lib/jev/ask.ts entry point (registry-resolved questions,
+  // lib/jev/prompts/arm-d-v1.ts's module-load registration) instead of calling client.systemOne
+  // directly, so this job's answers now also land in jev_decision (subject_type 'window') the
+  // same way every registry-based use's already do.
+  const asks: JevAsk[] = [];
   for (const id of targetIds) {
-    questions[qid.phase(id)] = phaseQuestion(id) as never;
-    questions[qid.start(id)] = startQuestion(id) as never;
-    questions[qid.end(id)] = endQuestion(id) as never;
-    questions[qid.clinician(id)] = clinicianQuestion(id) as never;
-    questions[qid.clinical(id)] = clinicalQuestion(id) as never;
+    asks.push(
+      { answerKey: qid.phase(id), subjectType: "window", subjectId: id, questionId: QUESTION_ID.phase, promptVersion, args: [id] },
+      { answerKey: qid.start(id), subjectType: "window", subjectId: id, questionId: QUESTION_ID.start, promptVersion, args: [id] },
+      { answerKey: qid.end(id), subjectType: "window", subjectId: id, questionId: QUESTION_ID.end, promptVersion, args: [id] },
+      { answerKey: qid.clinician(id), subjectType: "window", subjectId: id, questionId: QUESTION_ID.clinician, promptVersion, args: [id] },
+      { answerKey: qid.clinical(id), subjectType: "window", subjectId: id, questionId: QUESTION_ID.clinical, promptVersion, args: [id] },
+    );
   }
 
-  const client = getJevClient();
   const batchId = `${roomDayId}:${batchIndex}`;
 
   // F6(c): at most ETA_JEV_MAX_INFLIGHT_PER_JOB calls for this room-day, ETA_JEV_MAX_INFLIGHT_GLOBAL overall.
   const releaseSlot = await acquireJevSlot(roomDayId);
-  let result: Awaited<ReturnType<typeof client.systemOne>>;
+  let outcome: Awaited<ReturnType<typeof askJev>>;
   try {
-    result = await client.systemOne({ state, questions }, { signal: ctx.signal });
+    outcome = await askJev(state, asks, { signal: ctx.signal });
   } finally {
     releaseSlot();
   }
@@ -258,18 +263,24 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 
   // F6(b): the batch's own usage.input_tokens is a TOTAL for every target window asked about;
   // each row gets its share, the raw total is summed once into the job summary below.
-  const perWindowTokens = targetIds.length > 0 ? Math.round(result.usage.input_tokens / targetIds.length) : 0;
+  const perWindowTokens = targetIds.length > 0 ? Math.round(outcome.usage.input_tokens / targetIds.length) : 0;
 
   for (const id of targetIds) {
     const m = metaById.get(id)!;
-    const phaseAns = result.answers[qid.phase(id)];
+    // W41 F3, disclosed change (eta-refuter-2 review, jev-fix/f3-legacy-askjev @ 1acfe40): an
+    // off-menu phase choice is now dropped by askJev's own isValidChoice() before it reaches
+    // here, so phaseAns is undefined and this falls back to "non_clinical" -- before this
+    // change, an off-menu choice from client.systemOne would have gone straight into the INSERT
+    // below and hit jev_window_signal's own `phase` CHECK constraint, failing the step. Improvement,
+    // not a regression: the step now degrades instead of crashing on a bad phase value.
+    const phaseAns = outcome.results[qid.phase(id)]?.answer;
     const phase = phaseAns && phaseAns.type === "choice" ? phaseAns.choice : "non_clinical";
     const phaseProbs = phaseAns && phaseAns.type === "choice" ? phaseAns.probabilities : { non_clinical: 1 };
     const phaseConfidence = phaseAns && phaseAns.type === "choice" ? phaseAns.confidence : 0;
-    const p_start = nounVal(result.answers[qid.start(id)]);
-    const p_end = nounVal(result.answers[qid.end(id)]);
-    const p_clinician = nounVal(result.answers[qid.clinician(id)]);
-    const p_clinical = nounVal(result.answers[qid.clinical(id)]);
+    const p_start = nounVal(outcome.results[qid.start(id)]?.answer);
+    const p_end = nounVal(outcome.results[qid.end(id)]?.answer);
+    const p_clinician = nounVal(outcome.results[qid.clinician(id)]?.answer);
+    const p_clinical = nounVal(outcome.results[qid.clinical(id)]?.answer);
 
     await sql`
       INSERT INTO jev_window_signal
@@ -277,7 +288,7 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
          p_start, p_end, p_clinician, p_clinical, model, prompt_version, input_tokens, batch_id)
       VALUES
         (${id}, ${roomDayId}, ${m.session_id}, ${m.start_ms}, ${m.end_ms}, ${phase}, ${JSON.stringify(phaseProbs)}::jsonb, ${phaseConfidence},
-         ${p_start}, ${p_end}, ${p_clinician}, ${p_clinical}, ${result.model}, ${promptVersion}, ${perWindowTokens}, ${batchId})
+         ${p_start}, ${p_end}, ${p_clinician}, ${p_clinical}, ${outcome.model}, ${promptVersion}, ${perWindowTokens}, ${batchId})
       ON CONFLICT (window_id) DO UPDATE SET
         phase = EXCLUDED.phase, phase_probs = EXCLUDED.phase_probs, phase_confidence = EXCLUDED.phase_confidence,
         p_start = EXCLUDED.p_start, p_end = EXCLUDED.p_end, p_clinician = EXCLUDED.p_clinician, p_clinical = EXCLUDED.p_clinical,
@@ -288,7 +299,7 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 
   const windows_asked = (ctx.progress.windows_asked as number) + targetIds.length;
   const calls = (ctx.progress.calls as number) + 1;
-  const input_tokens = (ctx.progress.input_tokens as number) + result.usage.input_tokens; // raw batch total, once
+  const input_tokens = (ctx.progress.input_tokens as number) + outcome.usage.input_tokens; // raw batch total, once
 
   if (batchIndex + 1 < batches.length) {
     return nextStep("ask", { ...ctx.progress, batch_index: batchIndex + 1, windows_asked, calls, input_tokens });

@@ -26,6 +26,14 @@ export type JevRequest = { state: unknown; questions: Record<string, JevQuestion
  * Every subject a Jev decision can be about. ONE list: the type, the MCP filter and the migration's
  * CHECK all answer to it, and a drift test compares the CHECK's values against it. 'probe' (0118) is a
  * 60 s slice of a room-day, asked about by the E-6 fusion.
+ *
+ * 'turn' is DUAL-USE (W41 F3, eta-refuter-2 PASS on jev-fix/f3-legacy-askjev @ 1acfe40, condition
+ * accepted): NOTESAFE's own use is one room_turn row; lib/jobs/kinds/jev-role.ts's Arm D role job
+ * uses it for one diarized speaker cluster within one window, subject_id
+ * "<window_id>:S<speaker_idx>" — no single-turn row underlies it. Accepted rather than adding a
+ * 7th subject_type (0118 already took the last migration that touched this CHECK; a 7th value
+ * needs 0119) because subject_id has no FK either way and no code reads 'turn' rows by identity
+ * today.
  */
 export const JEV_SUBJECT_TYPES = ["window", "turn", "note_sentence", "encounter", "collapse", "probe"] as const;
 export type JevSubjectType = (typeof JEV_SUBJECT_TYPES)[number];
