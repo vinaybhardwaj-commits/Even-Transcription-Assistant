@@ -93,10 +93,14 @@ public enum SelfTestGate {
   /// refuses too, EXCEPT for the Home Office test kiosk, which V made a test room at any hour
   /// (26/27 Sep). Nothing else is ever an exception.
   public static func refusal(
-    sessionOpen: Bool, alreadyRunning: Bool, now: Date, schedule: RoomSchedule, roomSlug: String
+    sessionOpen: Bool, alreadyRunning: Bool, ready: Bool = true, now: Date, schedule: RoomSchedule,
+    roomSlug: String
   ) -> String? {
     if sessionOpen { return "session_open" }
     if alreadyRunning { return "self_test_running" }
+    // `ready` = phase .ready, no capture, no reconciliation pending. A `.failed` room can still hold
+    // a session that the next loop re-adopts (eta-refuter B2): never test over it.
+    if !ready { return "not_ready" }
     if schedule.activeWindow(at: now) != nil && !isTestRoom(roomSlug) { return "clinic_hours" }
     return nil
   }
@@ -172,6 +176,7 @@ public enum SelfTestError: Error, Equatable {
   case noBuiltInSpeaker
   case volumeNotSettable
   case captureDidNotStart
+  case timedOut
 }
 
 /// The real speaker: the built-in output device, chosen by CoreAudio transport type, volume set as
@@ -261,6 +266,7 @@ public struct BuiltInSpeakerPlayer: SelfTestPlaying {
     player.currentDevice = device.uid
     player.volume = 1.0  // the OUTPUT device volume is the fixed, logged one
     guard player.prepareToPlay(), player.play() else { throw SelfTestError.noBuiltInSpeaker }
+    defer { player.stop() }  // also on cancellation (the run's deadline)
     while player.isPlaying { try await Task.sleep(nanoseconds: 50_000_000) }
   }
 
@@ -271,6 +277,15 @@ public struct BuiltInSpeakerPlayer: SelfTestPlaying {
 }
 
 // MARK: - The runner
+
+/// What has been played so far. Kept outside the run's task group so a failure or a deadline still
+/// reports every stimulus that DID finish.
+final class SelfTestPlayLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var played: [SelfTestManifest.Played] = []
+  func append(_ item: SelfTestManifest.Played) { lock.withLock { played.append(item) } }
+  var items: [SelfTestManifest.Played] { lock.withLock { played } }
+}
 
 public struct SelfTestRunner: Sendable {
   public let pack: [SelfTestStimulus]
@@ -286,13 +301,17 @@ public struct SelfTestRunner: Sendable {
   public let leadSeconds: Double
   public let gapSeconds: Double
   public let log: @Sendable (String) -> Void
+  /// Hard cap on a whole run (eta-refuter B3). A hung speaker or capture can never hold the room.
+  public let maxSeconds: Double
 
   public init(
     pack: [SelfTestStimulus], packSHA256: String?, player: any SelfTestPlaying,
     launcher: any RoomCaptureLaunching, tapewriter: URL, micDeviceUID: String, roomSlug: String,
     appVersion: String?, volume: Double = 0.5, leadSeconds: Double = 1.5,
-    gapSeconds: Double = 0.5, log: @escaping @Sendable (String) -> Void
+    gapSeconds: Double = 0.5, maxSeconds: Double = 180,
+    log: @escaping @Sendable (String) -> Void
   ) {
+    self.maxSeconds = maxSeconds
     self.pack = pack
     self.packSHA256 = packSHA256
     self.player = player
@@ -321,6 +340,7 @@ public struct SelfTestRunner: Sendable {
       packSHA256: packSHA256, captureStartWallNS: 0, captureEndWallNS: 0, stimuli: [],
       pcmBytes: 0, outcome: "started")
     let pcm = directory.appendingPathComponent("tape.pcm")
+    let playLog = SelfTestPlayLog()
     var speaker: SelfTestSpeakerState?
     var process: (any RoomCaptureProcess)?
     do {
@@ -335,25 +355,30 @@ public struct SelfTestRunner: Sendable {
       process = launched
       manifest.captureStartWallNS = Self.wallNS()
       guard await Self.waitForGrowth(pcm, seconds: 10) else { throw SelfTestError.captureDidNotStart }
-      try await Task.sleep(nanoseconds: UInt64(leadSeconds * 1e9))
-      for stimulus in pack {
-        let start = Self.wallNS()
-        try await player.play(file: stimulus.file)
-        let end = Self.wallNS()
-        manifest.stimuli.append(
-          .init(
-            id: stimulus.id, kind: stimulus.kind, sha256: stimulus.sha256, startWallNS: start,
-            endWallNS: end, lang: stimulus.lang, truth: stimulus.truth))
-        try await Task.sleep(nanoseconds: UInt64(gapSeconds * 1e9))
+      try await withThrowingTaskGroup(of: Bool.self) { group in
+        group.addTask {
+          try await self.playAll(into: playLog)
+          return true
+        }
+        group.addTask {
+          try await Task.sleep(nanoseconds: UInt64(self.maxSeconds * 1e9))
+          return false  // the deadline: whichever finishes first wins
+        }
+        let finished = try await group.next() ?? false
+        group.cancelAll()
+        if !finished { throw SelfTestError.timedOut }
       }
-      try await Task.sleep(nanoseconds: UInt64(leadSeconds * 1e9))
       manifest.outcome = "complete"
     } catch {
       manifest.outcome = "failed: \(String(describing: error).prefix(120))"
     }
+    manifest.stimuli = playLog.items
     if let process {
       process.interrupt()
-      process.waitUntilExit()
+      // Bounded: a capture that will not exit is logged and left, never waited on for ever.
+      let deadline = Date().addingTimeInterval(5)
+      while process.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+      if process.isRunning { log("self-test \(runID): capture did not exit within 5 s") }
     }
     manifest.captureEndWallNS = Self.wallNS()
     if let speaker { player.restore(speaker) }
@@ -364,6 +389,21 @@ public struct SelfTestRunner: Sendable {
     }
     log("self-test \(runID): \(manifest.outcome); \(manifest.stimuli.count)/\(pack.count) played, \(manifest.pcmBytes) bytes")
     return manifest
+  }
+
+  private func playAll(into log: SelfTestPlayLog) async throws {
+    try await Task.sleep(nanoseconds: UInt64(leadSeconds * 1e9))
+    for stimulus in pack {
+      let start = Self.wallNS()
+      try await player.play(file: stimulus.file)
+      let end = Self.wallNS()
+      log.append(
+        .init(
+          id: stimulus.id, kind: stimulus.kind, sha256: stimulus.sha256, startWallNS: start,
+          endWallNS: end, lang: stimulus.lang, truth: stimulus.truth))
+      try await Task.sleep(nanoseconds: UInt64(gapSeconds * 1e9))
+    }
+    try await Task.sleep(nanoseconds: UInt64(leadSeconds * 1e9))
   }
 
   private static func waitForGrowth(_ url: URL, seconds: Double) async -> Bool {

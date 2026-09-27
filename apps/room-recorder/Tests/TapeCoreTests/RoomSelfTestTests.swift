@@ -38,6 +38,8 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
   private let lock = NSLock()
   private var _events: [String] = []
   var failOn: String?
+  /// Plays for ever (until cancelled): a wedged speaker.
+  var hangOn: String?
   var events: [String] { lock.withLock { _events } }
   private func note(_ e: String) { lock.withLock { _events.append(e) } }
   func prepare(volume: Double) throws -> SelfTestSpeakerState {
@@ -48,6 +50,7 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     let name = file.deletingPathExtension().lastPathComponent
     note("play:\(name)")
     if name == failOn { throw SelfTestError.noBuiltInSpeaker }
+    if name == hangOn { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
     try await Task.sleep(nanoseconds: 20_000_000)
   }
   func restore(_ state: SelfTestSpeakerState) { note("restore:\(state.previousVolume ?? -1)") }
@@ -111,6 +114,12 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(SelfTestGate.refusal(sessionOpen: false, alreadyRunning: false, now: outside, schedule: clinic, roomSlug: "opd-4-ortho-778q") == nil)
   }
 
+  /// eta-refuter B2: only `.ready` (no capture, no reconciliation pending) may be tested; a `.failed`
+  /// room can hold a session the next loop re-adopts.
+  @Test func aRoomThatIsNotReadyIsRefused() {
+    #expect(SelfTestGate.refusal(sessionOpen: false, alreadyRunning: false, ready: false, now: outside, schedule: clinic, roomSlug: "home-office-w8fb") == "not_ready")
+  }
+
   @Test func theHomeOfficeKioskIsATestRoomAtAnyHour() {
     #expect(SelfTestGate.refusal(sessionOpen: false, alreadyRunning: false, now: inside, schedule: clinic, roomSlug: "home-office-w8fb") == nil)
     #expect(SelfTestGate.refusal(sessionOpen: false, alreadyRunning: true, now: inside, schedule: clinic, roomSlug: "home-office-w8fb") == "self_test_running")
@@ -154,6 +163,31 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(manifest.pcmBytes >= 0)
     let written = try JSONDecoder().decode(SelfTestManifest.self, from: Data(contentsOf: dir.appendingPathComponent("manifest.json")))
     #expect(written == manifest)
+  }
+
+  /// eta-refuter B3: a wedged speaker must not hold the room. The run ends at its deadline, stops the
+  /// capture, restores the volume and says so.
+  @Test func aHungSpeakerEndsAtTheDeadline() async throws {
+    let pack = try SelfTestPack.load(directory: try makePack())
+    let speaker = FakeSpeaker()
+    speaker.hangOn = "sweep"
+    let launcher = R4FakeLauncher()
+    let dir = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var r = runner(speaker, pack, launcher)
+    r = SelfTestRunner(
+      pack: pack, packSHA256: nil, player: speaker, launcher: launcher,
+      tapewriter: URL(fileURLWithPath: "/usr/bin/false"), micDeviceUID: "device-a",
+      roomSlug: "home-office", appVersion: nil, volume: 0.5, leadSeconds: 0.02, gapSeconds: 0.02,
+      maxSeconds: 0.5, log: { _ in })
+    let started = Date()
+    let manifest = await r.run(runID: "st_hang", directory: dir)
+    #expect(Date().timeIntervalSince(started) < 10)
+    #expect(manifest.outcome.contains("timedOut"))
+    #expect(manifest.stimuli.isEmpty || manifest.stimuli.map(\.id) == ["tone-1k"])
+    #expect(launcher.runningDevices.isEmpty)
+    #expect(speaker.events.last == "restore:0.25")
   }
 
   @Test func aFailurePartWayStopsTheCaptureRestoresTheSpeakerAndSaysSo() async throws {
@@ -292,5 +326,24 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(pack.filter { $0.kind == "canary" }.count == 3)
     #expect(pack.filter { $0.kind == "phrase" }.count == 12)
     #expect(SelfTestPack.packHash(directory: dir)?.hasPrefix("57d9bfbc") == true)
+  }
+}
+
+@Suite struct AutoStartOptInTests {
+  /// eta-refuter B1: auto-start is opt-in per Mac. No file, no auto-start.
+  @Test func aMacIsOptedInOnlyByTheFile() throws {
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let marker = RoomAutoStartMarker(root: root)
+    #expect(!marker.optedIn())
+    FileManager.default.createFile(atPath: root.appendingPathComponent("auto-start-on").path, contents: Data())
+    #expect(marker.optedIn())
+  }
+
+  @Test func theDietaryRoomIsNeverAutoStartedWhateverItsSlugSays() {
+    #expect(RoomAutoStart.disabledBySlug("room-4-1-after-cards-before-5-494q"))
+    #expect(RoomAutoStart.disabledBySlug("dietary-x"))
+    #expect(!RoomAutoStart.disabledBySlug("home-office-w8fb"))
   }
 }

@@ -74,6 +74,7 @@ private let orbox = RoomSchedule(
     #expect(
       RoomAutoStart.decide(schedule: s, now: inside, phase: .ready, lastStartedWindowMs: nil, disabled: true) == .notDue)
     #expect(RoomAutoStart.disabledBySlug("dietary-1-ab12"))
+    #expect(RoomAutoStart.disabledBySlug("room-4-1-after-cards-before-5-494q"))
     #expect(RoomAutoStart.disabledBySlug("Dietary"))
     #expect(!RoomAutoStart.disabledBySlug("opd-4-ortho-778q"))
   }

@@ -90,9 +90,14 @@ public enum RoomAutoStart {
     return .start(windowStartMs: window.startMs)
   }
 
-  /// A room whose slug names it as Dietary never auto-starts unless re-enabled (Fable, 27 Sep).
+  /// The Dietary room never auto-starts unless re-enabled (Fable, 27 Sep). Its slug does NOT say
+  /// so (`room-4-1-after-cards-before-5-494q`, name "Dietary Room"), so it is listed by slug. This is
+  /// belt and braces: auto-start is opt-in per Mac, and Dietary is never opted in.
+  public static let neverAutoStartSlugs: Set<String> = ["room-4-1-after-cards-before-5-494q"]
+
   public static func disabledBySlug(_ slug: String) -> Bool {
-    slug.lowercased().contains("dietary")
+    let lowered = slug.lowercased()
+    return lowered.contains("dietary") || neverAutoStartSlugs.contains(lowered)
   }
 }
 
@@ -114,6 +119,14 @@ public struct RoomAutoStartMarker {
   public func write(windowStartMs: Int64) {
     let body = "{\"window_start_ms\":\(windowStartMs)}\n"
     try? Data(body.utf8).write(to: url, options: .atomic)
+  }
+
+  /// OPT-IN (eta-refuter B1, 27 Sep): auto-start runs ONLY on a Mac whose config directory holds an
+  /// `auto-start-on` file. Absent = off, so a self-update mid-day can never start a day by itself.
+  /// Home Office is opted in first; the server-delivered per-room schedule replaces this later.
+  public func optedIn() -> Bool {
+    FileManager.default.fileExists(
+      atPath: url.deletingLastPathComponent().appendingPathComponent("auto-start-on").path)
   }
 
   /// The kill switch: `auto-start-off` beside config.json disables auto-start for this Mac

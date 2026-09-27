@@ -592,6 +592,8 @@ public actor RoomEngine {
   var selfTestPlayer: any SelfTestPlaying = BuiltInSpeakerPlayer()
   var selfTestLeadSeconds = 1.5
   var selfTestGapSeconds = 0.5
+  /// Hard cap on a run (eta-refuter B3).
+  var selfTestMaxSeconds = 180.0
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
 
@@ -3263,7 +3265,10 @@ public actor RoomEngine {
   }
 
   /// Test seam: the pack, the speaker and the clock the self-test reads (and the auto-start clock).
-  func configureSelfTestForTests(pack: URL, speaker: any SelfTestPlaying, clock: Date) {
+  func configureSelfTestForTests(
+    pack: URL, speaker: any SelfTestPlaying, clock: Date, maxSeconds: Double = 180
+  ) {
+    selfTestMaxSeconds = maxSeconds
     selfTestPackDirectory = pack
     selfTestPlayer = speaker
     selfTestLeadSeconds = 0.05
@@ -3280,7 +3285,9 @@ public actor RoomEngine {
     }
     if capture != nil { return verbFailure("capture_active") }
     if let why = SelfTestGate.refusal(
-      sessionOpen: sessionIsOpen, alreadyRunning: selfTestRunning, now: autoStartClock(),
+      sessionOpen: sessionIsOpen, alreadyRunning: selfTestRunning,
+      ready: phase == .ready && !needsActiveReconciliation && !hasActiveCapture,
+      now: autoStartClock(),
       schedule: autoStartSchedule ?? .defaultClinic, roomSlug: configuration.roomSlug)
     {
       log("self_test refused: \(why)")
@@ -3318,7 +3325,7 @@ public actor RoomEngine {
       tapewriter: URL(fileURLWithPath: configuration.tapewriterPath),
       micDeviceUID: configuration.deviceUID, roomSlug: configuration.roomSlug,
       appVersion: BuildInfo.appVersion, volume: volume, leadSeconds: selfTestLeadSeconds,
-      gapSeconds: selfTestGapSeconds, log: log)
+      gapSeconds: selfTestGapSeconds, maxSeconds: selfTestMaxSeconds, log: log)
     let runsLog = runDirectory.deletingLastPathComponent().appendingPathComponent("runs.log")
     Task {
       let manifest = await runner.run(runID: runID, directory: runDirectory)
@@ -3404,6 +3411,9 @@ public actor RoomEngine {
 
   private func startCapture(trigger: RoomResidentCaptureStartContext.Trigger) throws {
     guard !hasActiveCapture else { throw RoomEngineError.captureAlreadyActive }
+    // 0.1.25 (eta-refuter B2): the mic belongs to a running self-test. A reconciliation or adopt
+    // that reaches here waits for the next loop rather than opening a second tapewriter on it.
+    guard !selfTestRunning else { throw RoomEngineError.io("self_test_running") }
     guard let sessionID else { throw RoomEngineError.noActiveSession }
     if let residentCaptureOwner {
       if residentCaptureOwner.requiresFinalization {
