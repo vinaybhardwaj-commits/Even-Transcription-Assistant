@@ -3260,6 +3260,9 @@ public actor RoomEngine {
     autoStartClock = { clock }
   }
 
+  /// Test seam: pretend a self-test capture that ignored its interrupt is still alive.
+  func holdMicForTests(_ process: any RoomCaptureProcess) { selfTestLingering = process }
+
   /// 0.1.25 — `self_test`. Decided and acked at once; the run itself is a background task that owns
   /// the speaker and the mic for about a minute. Never a session: a run writes only into
   /// `selftest/<run>/`, and every refusal is named in the ack.

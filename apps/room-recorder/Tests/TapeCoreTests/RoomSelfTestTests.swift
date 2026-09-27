@@ -245,7 +245,7 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     let engine = try await RoomEngine.load(
       rootURL: root, enrolmentReader: R4Fixture.enrolled, remoteFactory: { _ in remote },
       captureLauncher: launcher, pieceRunner: R4FakeEncoder(), updaterFactory: { _, _, _ in nil },
-      log: { _ in })
+      log: { line in if ProcessInfo.processInfo.environment["ETA_TEST_LOG"] != nil { print("ENGINE:", line) } })
     await engine.configureSelfTestForTests(pack: pack, speaker: speaker, clock: clock)
     return (engine, remote, launcher, pack)
   }
@@ -280,6 +280,35 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(await remote.createCalls() == 0)  // never a session
     #expect(speaker.events.first == "prepare:0.5" && speaker.events.last?.hasPrefix("restore") == true)
     #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("selftest/runs.log").path))
+  }
+
+  /// eta-refuter R1/R2: while a self-test capture lives, a session adopt must NOT open a second
+  /// tapewriter on the mic. The control run (same engine, no hold) proves the adopt does launch one.
+  @Test func aLingeringSelfTestCaptureHoldsTheMicAgainstAnAdopt() async throws {
+    // Control: no hold, the adopt opens the patient capture.
+    let controlRoot = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: controlRoot) }
+    let (control, _, controlLauncher, _) = try await engine(
+      slug: "home-office", polls: [], activeJSON: R4Fixture.recordingActiveJSON,
+      clock: ist("2026-09-28", "22:00"), root: controlRoot, speaker: FakeSpeaker())
+    let controlTask = Task { try await control.run() }
+    try await R4Fixture.waitUntil { controlLauncher.launchedDevices == ["device-a"] }
+    controlTask.cancel()
+    try await controlTask.value
+
+    // Held: the same adopt launches nothing while the self-test process lives.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let stuck = StubbornProcess()
+    let (engine, _, launcher, _) = try await engine(
+      slug: "home-office", polls: [], activeJSON: R4Fixture.recordingActiveJSON,
+      clock: ist("2026-09-28", "22:00"), root: root, speaker: FakeSpeaker())
+    await engine.holdMicForTests(stuck)
+    let task = Task { try await engine.run() }
+    try await Task.sleep(nanoseconds: 2_500_000_000)
+    #expect(launcher.launchedDevices.isEmpty)
+    task.cancel()
+    try await task.value
   }
 
   @Test func aClinicRoomInsideItsWindowIsRefusedAndPlaysNothing() async throws {
