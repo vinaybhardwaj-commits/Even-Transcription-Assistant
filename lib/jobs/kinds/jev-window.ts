@@ -267,6 +267,12 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 
   for (const id of targetIds) {
     const m = metaById.get(id)!;
+    // W41 F3, disclosed change (eta-refuter-2 review, jev-fix/f3-legacy-askjev @ 1acfe40): an
+    // off-menu phase choice is now dropped by askJev's own isValidChoice() before it reaches
+    // here, so phaseAns is undefined and this falls back to "non_clinical" -- before this
+    // change, an off-menu choice from client.systemOne would have gone straight into the INSERT
+    // below and hit jev_window_signal's own `phase` CHECK constraint, failing the step. Improvement,
+    // not a regression: the step now degrades instead of crashing on a bad phase value.
     const phaseAns = outcome.results[qid.phase(id)]?.answer;
     const phase = phaseAns && phaseAns.type === "choice" ? phaseAns.choice : "non_clinical";
     const phaseProbs = phaseAns && phaseAns.type === "choice" ? phaseAns.probabilities : { non_clinical: 1 };

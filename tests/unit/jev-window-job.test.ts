@@ -208,6 +208,27 @@ describe("J2 — day-clean.json dry run through the mock", () => {
   });
 });
 
+// W41 F3 (eta-refuter-2 review, jev-fix/f3-legacy-askjev @ 1acfe40): a third disclosed behaviour
+// change alongside the other two -- an off-menu phase choice used to reach jev_window_signal's
+// own `phase` CHECK constraint directly and fail the step; askJev's isValidChoice() now drops it
+// first, so the step degrades to "non_clinical" instead of crashing.
+describe("W41 F3 — an off-menu phase choice degrades to non_clinical instead of reaching the CHECK constraint", () => {
+  it("choice outside the six valid phases -> phase='non_clinical', job completes without crashing", async () => {
+    DB.windows = [{ id: "w1", session_id: "s1", start_ms: 0, end_ms: 30000 }];
+    DB.textRows = [{ window_id: "w1", english: "the doctor asked about symptoms" }];
+    setMockJevAnswers({
+      [qid.phase("w1")]: { type: "choice", choice: "lunch_break", probabilities: { lunch_break: 0.9 }, confidence: 0.9 },
+      [qid.start("w1")]: { type: "noul", noul: 0.1 },
+      [qid.end("w1")]: { type: "noul", noul: 0.1 },
+      [qid.clinician("w1")]: { type: "noul", noul: 0.8 },
+      [qid.clinical("w1")]: { type: "noul", noul: 0.8 },
+    } as never);
+    const r = await drive({ room_day_id: "rd1" });
+    expect(r.done).toMatchObject({ windows_asked: 1 });
+    expect(DB.written.w1).toMatchObject({ phase: "non_clinical", phase_probs: JSON.stringify({ non_clinical: 1 }), phase_confidence: 0 });
+  });
+});
+
 describe("J2 — a window with no english text is skipped without a Jev call", () => {
   it("writes phase='non_clinical', all p_*=0, prompt_version='skipped:no_english'", async () => {
     DB.windows = [{ id: "w1", session_id: "s1", start_ms: 0, end_ms: 30000 }];
