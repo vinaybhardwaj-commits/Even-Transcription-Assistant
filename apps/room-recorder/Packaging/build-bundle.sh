@@ -164,9 +164,13 @@ fi
 # 0.1.25 — the acoustic self-test's stimulus pack (invented speech, hashes pinned in pack.json).
 # Optional: a build without Packaging/SelfTest/pack.json simply refuses `self_test` with
 # pack_missing. It is copied BEFORE the bundle is signed, so the signature seals it.
-if [ -f "${PACKAGE_DIR}/Packaging/SelfTest/pack.json" ]; then
+# The pack is NOT committed (binary WAVs): point SELFTEST_PACK_DIR at diar-lab's folder
+# (pack.json + the WAVs beside it, NOT selftest_pack.json or ref/), or drop it in Packaging/SelfTest.
+SELFTEST_SRC="${SELFTEST_PACK_DIR:-${PACKAGE_DIR}/Packaging/SelfTest}"
+if [ -f "${SELFTEST_SRC}/pack.json" ]; then
   /bin/mkdir -p "${APP}/Contents/Resources/SelfTest"
-  /bin/cp "${PACKAGE_DIR}/Packaging/SelfTest/"* "${APP}/Contents/Resources/SelfTest/"
+  /bin/cp "${SELFTEST_SRC}/pack.json" "${SELFTEST_SRC}/"*.wav "${APP}/Contents/Resources/SelfTest/"
+  say "Bundled the self-test pack from ${SELFTEST_SRC}"
 fi
 
 # ─── Info.plist (§5.2) ───────────────────────────────────────────────────────────────────────

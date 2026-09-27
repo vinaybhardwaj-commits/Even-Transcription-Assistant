@@ -279,3 +279,18 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(speaker.events.isEmpty)
   }
 }
+
+/// Opt-in: the REAL pack diar-lab produced. `ETA_SELFTEST_PACK=<dir>` (a folder with pack.json and
+/// the WAVs). Proves the loader accepts the shipped layout and every pinned hash.
+@Suite struct SelfTestRealPackTests {
+  @Test(.enabled(if: ProcessInfo.processInfo.environment["ETA_SELFTEST_PACK"] != nil))
+  func theRealPackLoadsAndEveryHashHolds() throws {
+    let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ETA_SELFTEST_PACK"]!)
+    let pack = try SelfTestPack.load(directory: dir)
+    #expect(pack.count == 17)
+    #expect(pack.first?.id == "tone-1k")
+    #expect(pack.filter { $0.kind == "canary" }.count == 3)
+    #expect(pack.filter { $0.kind == "phrase" }.count == 12)
+    #expect(SelfTestPack.packHash(directory: dir)?.hasPrefix("57d9bfbc") == true)
+  }
+}
