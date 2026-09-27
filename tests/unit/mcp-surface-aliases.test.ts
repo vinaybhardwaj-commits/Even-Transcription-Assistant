@@ -350,6 +350,7 @@ describe("every group variant runs its original handler", () => {
     ["scribe_room_command", { kind: "check_update_now", room: "r1" }, "scribe_room_command", { kind: "check_update_now", room: "r1" }],
     ["scribe_room_command", { kind: "report_diag", room: "r1", args: { log_lines: 5 } }, "scribe_room_command", { kind: "report_diag", room: "r1", args: { log_lines: 5 } }],
     ["scribe_room_command", { kind: "restart_engine", room: "r1", args: { force: true } }, "scribe_room_command", { kind: "restart_engine", room: "r1", args: { force: true } }],
+    ["scribe_room_command", { kind: "self_test", room: "r1", args: { volume: 0.5 } }, "scribe_room_command", { kind: "self_test", room: "r1", args: { volume: 0.5 } }],
     ["scribe_scratch", { action: "replay", session_id: "bs_1", limit: 10 }, "scribe_replay_write", { session_id: "bs_1", limit: 10 }],
     ["scribe_scratch", { action: "fuse", room_day_id: "rd_1", arm: "rules", dry_run: true }, "scribe_fuse_run", { room_day_id: "rd_1", arm: "rules", dry_run: true }],
   ];
@@ -517,7 +518,7 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
 
   it.each([
     ["scribe_health", "SAME TOOL, MORE ASPECTS. scribe_health called with no `aspect` (or aspect=all) is the old scribe_health: same arguments, same behaviour, same response."],
-    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine is the old scribe_room_command: same arguments, same behaviour, same response."],
+    ["scribe_room_command", "SAME TOOL, MORE KINDS. scribe_room_command called with kind check_update_now | report_diag | restart_engine | self_test is the old scribe_room_command: same arguments, same behaviour, same response."],
   ])("%s opens by saying the old call shape is the old tool", (name, opening) => {
     expect(desc(name).startsWith(opening)).toBe(true);
   });
