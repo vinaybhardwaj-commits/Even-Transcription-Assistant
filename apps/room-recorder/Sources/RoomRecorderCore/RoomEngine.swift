@@ -562,6 +562,8 @@ public actor RoomEngine {
   /// GROWING, so one reading is never enough — the first poll of a session reports false, and
   /// that is correct rather than pessimistic: nothing has been shown to advance yet.
   private var lastDurableSampleIndex: Int64?
+  /// 0.1.25 — the plain path's `tape_advancing`: the durable PCM file's size, poll to poll.
+  private var tapeGrowth = TapeGrowthProbe()
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
 
@@ -1048,7 +1050,18 @@ public actor RoomEngine {
   private var sessionIsOpen: Bool { phase == .recording || phase == .paused }
 
   /// True only when the index is present now, was present before, and GREW.
+  ///
+  /// ─── 0.1.25: THE PLAIN PATH FOLLOWS `tape.pcm`, NOT `tape.idx` ─────────────────────────────
+  /// The question is "did audio bytes reach disk since the last poll", and the file that holds
+  /// them is `tape.pcm`. The index is tapewriter's own bookkeeping written beside it: a checkpoint
+  /// that lags, a marker record that repeats the last `samples`, or a torn last line the tail
+  /// reader leaves for later all made a growing tape read as stationary. The resident lane has no
+  /// plain segment and keeps its index comparison.
   private func tapeIsAdvancing() -> Bool {
+    if let capture {
+      return tapeGrowth.advanced(pcm: capture.pcmURL)
+    }
+    tapeGrowth.reset()
     let current = currentDurableSampleIndex()
     defer { lastDurableSampleIndex = current }
     guard let current, let previous = lastDurableSampleIndex else { return false }
@@ -3155,7 +3168,16 @@ public actor RoomEngine {
   /// and the next loop reopens the session's capture on the restored device.
   private func switchRecordingDevice(to uid: String, commandID: String) -> CommandResult? {
     let previousUID = configuration.deviceUID
-    guard uid != previousUID else { return nil }
+    // ─── 0.1.25: THE SAME UID IS A REOPEN, NOT A NO-OP ────────────────────────────────────────
+    // A `set_audio_input` naming the device already in use used to ack "applied" and reopen
+    // nothing (25 Sep: the desk believed it had bounced OPD 4's mic). It now closes and reopens the
+    // running segment exactly as a device change does, with no config write. It is reachable ONLY
+    // from a desk command: no recovery loop calls this, so a flapping device cannot spin it.
+    if uid == previousUID {
+      guard let running = capture, running.process.isRunning else { return nil }
+      log("recording device \(uid) reopened by the desk (same device)")
+      return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: nil)
+    }
     do {
       try saveDeviceUID(uid)
     } catch {
@@ -3164,14 +3186,23 @@ public actor RoomEngine {
     log("recording device set to \(uid) by the desk (was \(previousUID))")
     // Idle, paused, or nothing running: the next capture opens on the new device by itself.
     guard let running = capture, running.process.isRunning else { return nil }
+    return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: previousUID)
+  }
+
+  /// Close the running segment as a pause closes it and open the next one of the same session.
+  /// `restoreUID` is the device to put back if the reopen fails (nil for a same-device reopen,
+  /// where there is nothing to put back). Nil on success; otherwise the failure to ack.
+  private func reopenRunningCapture(
+    commandID: String, deviceUID uid: String, restoreUID: String?
+  ) -> CommandResult? {
     do {
       try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
       try startCapture(trigger: .reconciliation)
       return nil
     } catch {
       let switchError = bounded(error, limit: 120)
-      log("device switch to \(uid) failed (\(switchError)); back to \(previousUID)")
-      restoreDeviceUID(previousUID)
+      log("device switch to \(uid) failed (\(switchError)); back to \(restoreUID ?? uid)")
+      if let restoreUID { restoreDeviceUID(restoreUID) }
       // Only when no segment is retained: a retained one is a dead capture whose audio has not
       // been cut yet, and `finishUnexpectedCaptureIfNeeded` must cut it before anything replaces it.
       if capture == nil {
@@ -3975,4 +4006,32 @@ private func bounded(_ error: Error, limit: Int = 500) -> String {
   String(
     (error as? LocalizedError)?.errorDescription?.prefix(limit)
       ?? String(describing: error).prefix(limit))
+}
+
+/// 0.1.25 — did `tape.pcm` GROW since the previous reading? One reading is never enough (the first
+/// reading of a file reports false), a different file starts again (a device switch opens a new
+/// `seg_` directory, and comparing two files' sizes proves nothing), and a missing or unreadable
+/// file forgets everything so a dead file's size is never compared with a live one's.
+struct TapeGrowthProbe {
+  private var last: (url: URL, size: UInt64)?
+
+  mutating func reset() { last = nil }
+
+  mutating func advanced(pcm: URL?) -> Bool {
+    guard let pcm, let size = Self.size(of: pcm) else {
+      last = nil
+      return false
+    }
+    defer { last = (pcm, size) }
+    guard let last, last.url == pcm else { return false }
+    return size > last.size
+  }
+
+  private static func size(of url: URL) -> UInt64? {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      attributes[.type] as? FileAttributeType == .typeRegular,
+      let number = attributes[.size] as? NSNumber
+    else { return nil }
+    return number.uint64Value
+  }
 }
