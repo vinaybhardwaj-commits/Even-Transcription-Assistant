@@ -51,3 +51,6 @@ BEGIN
                     'check_update_now','report_diag','restart_engine','self_test'));
 END
 $$;
+
+INSERT INTO schema_migrations (version, name) VALUES (121, '0121_bench_command_self_test')
+ON CONFLICT (version) DO NOTHING;
