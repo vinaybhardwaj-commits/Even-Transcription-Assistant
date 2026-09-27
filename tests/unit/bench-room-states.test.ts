@@ -509,7 +509,8 @@ describe("migration 0081", () => {
       "start_day", "pause_day", "resume_day", "end_day", "set_audio_input",
       "check_update_now", "report_diag", "restart_engine",
     ]);
-    for (const k of BC.COMMAND_KINDS) expect(kinds).toContain(k);
+    // Every kind THIS migration knows about — not 0121's later self_test.
+    for (const k of BC.COMMAND_KINDS) if (k !== "self_test") expect(kinds).toContain(k);
     expect(src).toMatch(/RAISE EXCEPTION '0081: % CHECK constraints on bench_command\.kind/);
   });
 
