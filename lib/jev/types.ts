@@ -31,7 +31,7 @@ export type JevRequest = { state: unknown; questions: Record<string, JevQuestion
  * accepted): NOTESAFE's own use is one room_turn row; lib/jobs/kinds/jev-role.ts's Arm D role job
  * uses it for one diarized speaker cluster within one window, subject_id
  * "<window_id>:S<speaker_idx>" — no single-turn row underlies it. Accepted rather than adding a
- * 6th subject_type (0118 already took the last migration that touched this CHECK; a 7th value
+ * 7th subject_type (0118 already took the last migration that touched this CHECK; a 7th value
  * needs 0119) because subject_id has no FK either way and no code reads 'turn' rows by identity
  * today.
  */
