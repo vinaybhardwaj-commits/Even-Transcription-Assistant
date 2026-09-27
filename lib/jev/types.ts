@@ -69,19 +69,30 @@ export class JevStateTooLargeError extends Error {
  * nothing that merely reads `.message` (the normal thing to do with any Error) can reach it.
  */
 export class JevHttpError extends Error {
-  constructor(public status: number, public body: string) {
+  /** Raw provider text. Non-enumerable so JSON.stringify(err) / console.log(err) / spreads cannot reach it. */
+  declare readonly body: string;
+  constructor(public status: number, body: string) {
     super(JevHttpError.safeMessage(status, body));
+    Object.defineProperty(this, "body", { value: body, enumerable: false, writable: false });
   }
 
   private static safeMessage(status: number, body: string): string {
     try {
       const parsed = JSON.parse(body) as { code?: unknown };
-      if (typeof parsed.code === "string" && parsed.code.length > 0) {
-        return `jev http ${status}: ${parsed.code.slice(0, 64)}`;
+      if (typeof parsed.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(parsed.code)) {
+        return `jev http ${status}: ${parsed.code}`;
       }
     } catch {
       /* body is not JSON, or has no code field — fall through to status only */
     }
     return `jev http ${status}`;
+  }
+}
+
+/** The provider answered 2xx but the body was not valid JSON. Fixed message: a JSON.parse
+ * SyntaxError quotes a snippet of the body, which is provider text, so it is never propagated. */
+export class JevBadResponseError extends Error {
+  constructor() {
+    super("jev: response body was not valid JSON");
   }
 }
