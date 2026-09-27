@@ -39,19 +39,14 @@
 import { sql } from "@/lib/db";
 import { askJev, type JevAsk } from "@/lib/jev/ask";
 import { PROMPT_VERSION, QUESTION_ID, SETTING, qid } from "@/lib/jev/prompts/arm-d-v1";
+// Moved to lib/jev/thresholds.ts (W41 F4, jev-audit finding #5): these were the only uses of a
+// local envInt() in this file, so it's removed rather than left dead.
+import { ETA_JEV_BATCH_WINDOWS, ETA_JEV_CONTEXT_WINDOWS, ETA_JEV_MAX_INFLIGHT_PER_JOB, ETA_JEV_MAX_INFLIGHT_GLOBAL } from "@/lib/jev/thresholds";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 
 export const JEV_WINDOW_KIND = "jev_window";
 
-function envInt(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.round(n) : def;
-}
-const ETA_JEV_BATCH_WINDOWS = envInt("ETA_JEV_BATCH_WINDOWS", 20);
-const ETA_JEV_CONTEXT_WINDOWS = envInt("ETA_JEV_CONTEXT_WINDOWS", 2);
 const SKIPPED_PROMPT_VERSION = "skipped:no_english";
 const COST_PER_INPUT_TOKEN = 42e-9;
 
@@ -60,8 +55,6 @@ type WindowMeta = { id: string; session_id: string; start_ms: number; end_ms: nu
 // ---------------------------------------------------------------------------
 // F6(c) — in-flight semaphore: per-job (room_day_id) cap 2, module-wide cap 4.
 // ---------------------------------------------------------------------------
-const ETA_JEV_MAX_INFLIGHT_PER_JOB = envInt("ETA_JEV_MAX_INFLIGHT_PER_JOB", 2);
-const ETA_JEV_MAX_INFLIGHT_GLOBAL = envInt("ETA_JEV_MAX_INFLIGHT_GLOBAL", 4);
 
 let moduleInFlight = 0;
 const perJobInFlight = new Map<string, number>();
