@@ -74,7 +74,7 @@ describe("scribe_room_command — registration", () => {
     expect(tool.scope).toBe("write");
     const schema = tool.inputSchema as { properties: Record<string, { enum?: string[] }>; required?: string[] };
     expect(Object.keys(schema.properties).sort()).toEqual(["args", "kind", "room", "room_id", "room_slug"]);
-    expect(schema.properties.kind!.enum).toEqual(["check_update_now", "report_diag", "restart_engine"]);
+    expect(schema.properties.kind!.enum).toEqual(["check_update_now", "report_diag", "restart_engine", "self_test"]);
     expect(schema.required).toEqual(["kind"]);
     const names = BENCH_TOOLS.map((t) => t.name);
     expect(names.indexOf("scribe_room_command")).toBe(names.indexOf("scribe_set_audio_input") + 1);

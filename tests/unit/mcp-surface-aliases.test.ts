@@ -526,11 +526,22 @@ describe("descriptions state what the code does — derived, and capped (Ruling 
     for (const g of S.GROUPS) expect(g.description.startsWith("SAME TOOL"), g.name).toBe((REUSED_NAMES as readonly string[]).includes(g.name));
   });
 
-  it("scribe_room_command says where each of its nine kinds executes; close_orphaned_session is a server-side repair", () => {
+  it("scribe_room_command says where each of its ten kinds executes; close_orphaned_session is a server-side repair", () => {
     const d = desc("scribe_room_command");
     expect(d).toContain("start_day, pause_day, resume_day, end_day — queued as a bench_command for the room's listening kiosk.");
-    expect(d).toContain("set_audio_input, check_update_now, report_diag, restart_engine — queued as a bench_command for the native Room Recorder app, which a browser kiosk ignores.");
+    expect(d).toContain(
+      "set_audio_input, check_update_now, report_diag, restart_engine, self_test — queued as a bench_command for the native Room Recorder app, which a browser kiosk ignores.",
+    );
     expect(d).toContain("close_orphaned_session — a SERVER-SIDE REPAIR, not a stop: no command is queued and no kiosk is involved.");
+  });
+
+  // eta-refuter #4281 — the group has the SAME NAME as the inner tool, so a TIER1_VERB missing from
+  // its variants is unreachable through MCP even once the inner tool and the server both know it.
+  it("every TIER1_VERB is a variant of the scribe_room_command group", async () => {
+    const { TIER1_VERBS } = await import("@/lib/bench-commands");
+    const tool = S.CALLABLE_TOOLS.get("scribe_room_command")!;
+    const kindProp = tool.inputSchema.properties?.kind as { enum?: string[] } | undefined;
+    for (const verb of TIER1_VERBS) expect(kindProp?.enum, verb).toContain(verb);
   });
 
   it("the execution claims match the handlers: close_orphaned_session never queues a command; the other kinds do, to the site named", () => {
