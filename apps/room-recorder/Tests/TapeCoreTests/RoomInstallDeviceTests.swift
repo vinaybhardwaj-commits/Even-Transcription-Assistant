@@ -334,3 +334,29 @@ import Testing
     #expect((RoomConfigurationError.rootIsNotDirectory as NSError).code == 8)
   }
 }
+
+/// 0.1.25 item 2 — `device_state`, an additive poll field.
+@Suite struct DeviceStateFieldTests {
+  private func entry(_ uid: String) -> AudioInputDeviceEntry {
+    AudioInputDeviceEntry(name: "n-\(uid)", uid: uid, isDefault: false)
+  }
+
+  @Test func theRuleNeedsBothHalvesMeasured() {
+    #expect(MachineFacts.deviceState(configuredUID: "a", devices: [entry("a")]) == "ok")
+    #expect(MachineFacts.deviceState(configuredUID: "a", devices: [entry("b")]) == "lost")
+    #expect(MachineFacts.deviceState(configuredUID: "a", devices: []) == "lost")
+    #expect(MachineFacts.deviceState(configuredUID: "a", devices: nil) == nil)
+    #expect(MachineFacts.deviceState(configuredUID: nil, devices: [entry("a")]) == nil)
+    #expect(MachineFacts.deviceState(configuredUID: "", devices: [entry("a")]) == nil)
+  }
+
+  @Test func theQueryCarriesTheStateOnlyWhenKnownAndValid() {
+    func names(_ fields: InstallPollFields) -> [String: String] {
+      Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
+    }
+    #expect(names(InstallPollFields(installID: "i", tapeAdvancing: true, deviceState: "lost"))["device_state"] == "lost")
+    #expect(names(InstallPollFields(installID: "i", tapeAdvancing: true, deviceState: "ok"))["device_state"] == "ok")
+    #expect(names(InstallPollFields(installID: "i", tapeAdvancing: true))["device_state"] == nil)
+    #expect(names(InstallPollFields(installID: "i", tapeAdvancing: true, deviceState: "weird"))["device_state"] == nil)
+  }
+}

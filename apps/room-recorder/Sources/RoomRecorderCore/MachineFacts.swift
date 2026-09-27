@@ -42,6 +42,10 @@ public struct MachineFacts: Equatable, Sendable {
   /// Release R4 (D4). Whether that volume is settable. Nil when the device is not attached or
   /// CoreAudio would not answer; false — measured — when the device has no input volume control.
   public var inputVolumeSettable: Bool?
+  /// 0.1.25 — "ok" or "lost": whether the CONFIGURED device is in the attached-device list read in
+  /// the same breath. Nil when either half was not measured (no configured device, or CoreAudio
+  /// would not list). Additive; an older server ignores the key.
+  public var deviceState: String?
 
   public init(
     micState: String,
@@ -54,7 +58,8 @@ public struct MachineFacts: Equatable, Sendable {
     inputDeviceName: String?,
     inputDevices: [AudioInputDeviceEntry]? = nil,
     inputVolume: Double? = nil,
-    inputVolumeSettable: Bool? = nil
+    inputVolumeSettable: Bool? = nil,
+    deviceState: String? = nil
   ) {
     self.micState = micState
     self.neverSleep = neverSleep
@@ -67,6 +72,16 @@ public struct MachineFacts: Equatable, Sendable {
     self.inputDevices = inputDevices
     self.inputVolume = inputVolume
     self.inputVolumeSettable = inputVolumeSettable
+    self.deviceState = deviceState
+  }
+
+  /// 0.1.25 — the pure rule. Nil unless BOTH a configured uid and a device list were measured:
+  /// "we looked and it is not there" and "we could not look" are different facts.
+  public static func deviceState(
+    configuredUID: String?, devices: [AudioInputDeviceEntry]?
+  ) -> String? {
+    guard let configuredUID, !configuredUID.isEmpty, let devices else { return nil }
+    return devices.contains(where: { $0.uid == configuredUID }) ? "ok" : "lost"
   }
 }
 
@@ -84,6 +99,7 @@ public enum MachineFactsReader {
   /// shape of mistake the `install:` parameter was given no default to prevent.
   public static func read(inputDeviceUID: String?) -> MachineFacts {
     let volume = inputVolume(forUID: inputDeviceUID)
+    let devices = AudioInputDevices.list()
     return MachineFacts(
       micState: microphoneState(),
       neverSleep: neverSleep(),
@@ -93,9 +109,10 @@ public enum MachineFactsReader {
       hardwareModel: hardwareModel(),
       osVersion: osVersion(),
       inputDeviceName: inputDeviceName(forUID: inputDeviceUID),
-      inputDevices: AudioInputDevices.list(),
+      inputDevices: devices,
       inputVolume: volume?.value,
-      inputVolumeSettable: volume?.settable
+      inputVolumeSettable: volume?.settable,
+      deviceState: MachineFacts.deviceState(configuredUID: inputDeviceUID, devices: devices)
     )
   }
 
