@@ -213,6 +213,8 @@ private enum RoomRecorderCLI {
               remoteFactory: { _ in bench },
               retainedArchiveRecovery: recovery
             )
+            // 0.1.25: this Mac starts its own day at clinic open (RoomAutoStart).
+            await engine.enableAutoStart()
             try await engine.run()
             switch await engine.exitReason {
             case .handedOverToUpdate(let version):
