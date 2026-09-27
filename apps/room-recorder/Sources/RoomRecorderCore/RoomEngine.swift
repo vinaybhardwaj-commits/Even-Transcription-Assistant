@@ -587,6 +587,10 @@ public actor RoomEngine {
 
   // ─── 0.1.25: SELF-TEST ──────────────────────────────────────────────────────────────────────
   private var selfTestRunning = false
+  /// A self-test tapewriter that ignored its interrupt. While it lives the mic is claimed: no
+  /// start, adopt or second self-test may open another capture beside it (eta-refuter R1).
+  private var selfTestLingering: (any RoomCaptureProcess)?
+  private var selfTestHoldsMic: Bool { selfTestRunning || selfTestLingering?.isRunning == true }
   /// Where the pinned pack lives. Nil = the app bundle's `Resources/SelfTest`. A test sets it.
   var selfTestPackDirectory: URL?
   var selfTestPlayer: any SelfTestPlaying = BuiltInSpeakerPlayer()
@@ -1733,7 +1737,7 @@ public actor RoomEngine {
     var decision = RoomCommandDecider.decide(
       kind: command.kind, phase: phase, overridePause: overridePause)
     // 0.1.25: the mic and speaker belong to a self-test for its minute; a start waits.
-    if selfTestRunning, command.kind == .startDay, decision == .start || decision == .resume {
+    if selfTestHoldsMic, command.kind == .startDay, decision == .start || decision == .resume {
       decision = .refuse("self_test_running")
     }
     let result: CommandResult
@@ -3234,7 +3238,7 @@ public actor RoomEngine {
     guard residentControlJournal == nil, residentRuntimeFactory == nil,
       residentCaptureOwner == nil, !needsActiveReconciliation
     else { return }
-    guard let schedule = autoStartSchedule, !selfTestRunning else { return }
+    guard let schedule = autoStartSchedule, !selfTestHoldsMic else { return }
     let now = autoStartClock()
     let marker = RoomAutoStartMarker(root: persistence.root)
     // A day started by hand (or adopted at launch) counts as this window's start, so a desk
@@ -3285,7 +3289,7 @@ public actor RoomEngine {
     }
     if capture != nil { return verbFailure("capture_active") }
     if let why = SelfTestGate.refusal(
-      sessionOpen: sessionIsOpen, alreadyRunning: selfTestRunning,
+      sessionOpen: sessionIsOpen, alreadyRunning: selfTestHoldsMic,
       ready: phase == .ready && !needsActiveReconciliation && !hasActiveCapture,
       now: autoStartClock(),
       schedule: autoStartSchedule ?? .defaultClinic, roomSlug: configuration.roomSlug)
@@ -3328,13 +3332,15 @@ public actor RoomEngine {
       gapSeconds: selfTestGapSeconds, maxSeconds: selfTestMaxSeconds, log: log)
     let runsLog = runDirectory.deletingLastPathComponent().appendingPathComponent("runs.log")
     Task {
-      let manifest = await runner.run(runID: runID, directory: runDirectory)
-      await self.selfTestFinished(manifest, runsLog: runsLog)
+      let outcome = await runner.run(runID: runID, directory: runDirectory)
+      await self.selfTestFinished(outcome, runsLog: runsLog)
     }
     return CommandResult(ok: true, sessionID: nil, error: nil)
   }
 
-  private func selfTestFinished(_ manifest: SelfTestManifest, runsLog: URL) {
+  private func selfTestFinished(_ outcome: SelfTestRunOutcome, runsLog: URL) {
+    let manifest = outcome.manifest
+    selfTestLingering = outcome.lingering
     selfTestRunning = false
     let line =
       "\(Self.iso8601(Date())) \(manifest.runID) volume=\(manifest.speakerVolume) "
@@ -3413,7 +3419,7 @@ public actor RoomEngine {
     guard !hasActiveCapture else { throw RoomEngineError.captureAlreadyActive }
     // 0.1.25 (eta-refuter B2): the mic belongs to a running self-test. A reconciliation or adopt
     // that reaches here waits for the next loop rather than opening a second tapewriter on it.
-    guard !selfTestRunning else { throw RoomEngineError.io("self_test_running") }
+    guard !selfTestHoldsMic else { throw RoomEngineError.io("self_test_running") }
     guard let sessionID else { throw RoomEngineError.noActiveSession }
     if let residentCaptureOwner {
       if residentCaptureOwner.requiresFinalization {

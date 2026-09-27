@@ -143,7 +143,7 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
 
-    let manifest = await runner(speaker, pack, launcher).run(runID: "st_test", directory: dir)
+    let manifest = await runner(speaker, pack, launcher).run(runID: "st_test", directory: dir).manifest
 
     #expect(manifest.outcome == "complete")
     #expect(manifest.stimuli.map(\.id) == pack.map(\.id))
@@ -182,12 +182,35 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
       roomSlug: "home-office", appVersion: nil, volume: 0.5, leadSeconds: 0.02, gapSeconds: 0.02,
       maxSeconds: 0.5, log: { _ in })
     let started = Date()
-    let manifest = await r.run(runID: "st_hang", directory: dir)
+    let manifest = await r.run(runID: "st_hang", directory: dir).manifest
     #expect(Date().timeIntervalSince(started) < 10)
     #expect(manifest.outcome.contains("timedOut"))
     #expect(manifest.stimuli.isEmpty || manifest.stimuli.map(\.id) == ["tone-1k"])
     #expect(launcher.runningDevices.isEmpty)
     #expect(speaker.events.last == "restore:0.25")
+  }
+
+  /// eta-refuter R1: a capture that ignores its interrupt is handed back so the engine can keep the
+  /// mic claimed; a capture that exits is not.
+  @Test func aCaptureThatWillNotExitIsHandedBackAndOneThatExitsIsNot() async throws {
+    let pack = try SelfTestPack.load(directory: try makePack())
+    let dir = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let speaker = FakeSpeaker()
+    let stubborn = StubbornLauncher()
+    let r = SelfTestRunner(
+      pack: [pack[0]], packSHA256: nil, player: speaker, launcher: stubborn,
+      tapewriter: URL(fileURLWithPath: "/usr/bin/false"), micDeviceUID: "device-a",
+      roomSlug: "home-office", appVersion: nil, volume: 0.5, leadSeconds: 0.02, gapSeconds: 0.02,
+      maxSeconds: 30, log: { _ in })
+    let outcome = await r.run(runID: "st_stuck", directory: dir)
+    #expect(outcome.lingering?.isRunning == true)
+    stubborn.process.finish()
+    #expect(outcome.lingering?.isRunning == false)
+
+    let clean = await runner(speaker, [pack[0]], R4FakeLauncher()).run(runID: "st_ok", directory: dir)
+    #expect(clean.lingering == nil)
   }
 
   @Test func aFailurePartWayStopsTheCaptureRestoresTheSpeakerAndSaysSo() async throws {
@@ -199,7 +222,7 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
 
-    let manifest = await runner(speaker, pack, launcher).run(runID: "st_fail", directory: dir)
+    let manifest = await runner(speaker, pack, launcher).run(runID: "st_fail", directory: dir).manifest
 
     #expect(manifest.outcome.hasPrefix("failed"))
     #expect(manifest.stimuli.map(\.id) == ["tone-1k", "sweep"])
@@ -345,5 +368,27 @@ final class FakeSpeaker: SelfTestPlaying, @unchecked Sendable {
     #expect(RoomAutoStart.disabledBySlug("room-4-1-after-cards-before-5-494q"))
     #expect(RoomAutoStart.disabledBySlug("dietary-x"))
     #expect(!RoomAutoStart.disabledBySlug("home-office-w8fb"))
+  }
+}
+
+/// A capture process that writes something to tape.pcm and then ignores interrupt().
+final class StubbornProcess: RoomCaptureProcess, @unchecked Sendable {
+  private let lock = NSLock()
+  private var running = true
+  var isRunning: Bool { lock.withLock { running } }
+  var terminationStatus: Int32? { lock.withLock { running ? nil : 0 } }
+  func interrupt() {}
+  func waitUntilExit() { while isRunning { Thread.sleep(forTimeInterval: 0.002) } }
+  func finish() { lock.withLock { running = false } }
+}
+
+final class StubbornLauncher: RoomCaptureLaunching, @unchecked Sendable {
+  let process = StubbornProcess()
+  func launch(executable: URL, outputDirectory: URL, deviceUID: String, logURL: URL) throws
+    -> any RoomCaptureProcess
+  {
+    FileManager.default.createFile(
+      atPath: outputDirectory.appendingPathComponent("tape.pcm").path, contents: Data(count: 100))
+    return process
   }
 }

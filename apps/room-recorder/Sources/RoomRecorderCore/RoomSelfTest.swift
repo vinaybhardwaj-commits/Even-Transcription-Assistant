@@ -287,6 +287,13 @@ final class SelfTestPlayLog: @unchecked Sendable {
   var items: [SelfTestManifest.Played] { lock.withLock { played } }
 }
 
+/// What a run hands back: the manifest, and the capture process if it was STILL ALIVE after the
+/// bounded wait. The engine keeps the mic claimed while that process runs (eta-refuter R1).
+public struct SelfTestRunOutcome: Sendable {
+  public let manifest: SelfTestManifest
+  public let lingering: (any RoomCaptureProcess)?
+}
+
 public struct SelfTestRunner: Sendable {
   public let pack: [SelfTestStimulus]
   public let packSHA256: String?
@@ -333,7 +340,7 @@ public struct SelfTestRunner: Sendable {
   /// Run once into `directory` (created by the caller, private). Always stops the capture and
   /// restores the speaker volume, whatever fails. The manifest is written whatever happens, with
   /// its `outcome` saying what did.
-  public func run(runID: String, directory: URL) async -> SelfTestManifest {
+  public func run(runID: String, directory: URL) async -> SelfTestRunOutcome {
     var manifest = SelfTestManifest(
       runID: runID, appVersion: appVersion, roomSlug: roomSlug, micDeviceUID: micDeviceUID,
       speakerDeviceUID: nil, speakerVolume: volume, previousSpeakerVolume: nil,
@@ -341,6 +348,7 @@ public struct SelfTestRunner: Sendable {
       pcmBytes: 0, outcome: "started")
     let pcm = directory.appendingPathComponent("tape.pcm")
     let playLog = SelfTestPlayLog()
+    var lingering: (any RoomCaptureProcess)?
     var speaker: SelfTestSpeakerState?
     var process: (any RoomCaptureProcess)?
     do {
@@ -378,7 +386,11 @@ public struct SelfTestRunner: Sendable {
       // Bounded: a capture that will not exit is logged and left, never waited on for ever.
       let deadline = Date().addingTimeInterval(5)
       while process.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
-      if process.isRunning { log("self-test \(runID): capture did not exit within 5 s") }
+      if process.isRunning {
+        log("self-test \(runID): capture did not exit within 5 s; the mic stays claimed")
+        process.interrupt()  // once more; the engine keeps the claim while it lives
+        lingering = process
+      }
     }
     manifest.captureEndWallNS = Self.wallNS()
     if let speaker { player.restore(speaker) }
@@ -388,7 +400,7 @@ public struct SelfTestRunner: Sendable {
       try? data.write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
     }
     log("self-test \(runID): \(manifest.outcome); \(manifest.stimuli.count)/\(pack.count) played, \(manifest.pcmBytes) bytes")
-    return manifest
+    return SelfTestRunOutcome(manifest: manifest, lingering: lingering)
   }
 
   private func playAll(into log: SelfTestPlayLog) async throws {
