@@ -37,7 +37,7 @@ const { handleMcpRpc } = await import("@/lib/mcp/handler");
 const { LISTED_TOOLS, CALLABLE_TOOLS } = await import("@/lib/mcp/surface");
 const { ROOM_RESTRICTED_ALLOWED_TOOLS } = await import("@/lib/mcp/registry");
 
-const rpc = async (name: string, rooms: readonly string[] | undefined) => {
+const rpc = async (name: string, rooms: readonly string[] | undefined, tools?: readonly string[]) => {
   auditInserts.length = 0;
   const req = new NextRequest("https://x/api/mcp", {
     method: "POST",
@@ -48,14 +48,17 @@ const rpc = async (name: string, rooms: readonly string[] | undefined) => {
     token_id: "walker",
     scopes: new Set(["read", "invoke", "write"] as const),
     ...(rooms ? { rooms: new Set(rooms) } : {}),
+    ...(tools ? { tools: new Set(tools) } : {}),
   };
   const res = await handleMcpRpc(req, principal as never);
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 };
 
 describe("default deny: every tool/call name, walked with a room-restricted token", () => {
-  it("ROOM_RESTRICTED_ALLOWED_TOOLS names exactly ONE tool today, and it is registered", () => {
-    expect([...ROOM_RESTRICTED_ALLOWED_TOOLS]).toEqual(["scribe_room_command"]);
+  it("ROOM_RESTRICTED_ALLOWED_TOOLS names exactly the day-boundary trio today, and all are registered", () => {
+    expect([...ROOM_RESTRICTED_ALLOWED_TOOLS].sort()).toEqual([
+      "scribe_room_command", "scribe_start_recording", "scribe_stop_recording",
+    ]);
     for (const name of ROOM_RESTRICTED_ALLOWED_TOOLS) expect(CALLABLE_TOOLS.has(name), name).toBe(true);
   });
 
@@ -100,5 +103,52 @@ describe("default deny: every tool/call name, walked with a room-restricted toke
 
   it("LISTED_TOOLS (what tools/list publishes) and CALLABLE_TOOLS (what tools/call accepts) agree: nothing listed is unreachable, nothing reachable is hidden from this walk", () => {
     for (const t of LISTED_TOOLS) expect(CALLABLE_TOOLS.has(t.name), t.name).toBe(true);
+  });
+});
+
+/**
+ * 28 Sep 2026 — Fable's durable day-boundary owner: a token restricted to the clinic rooms AND
+ * narrowed to start_day/end_day, never self_test/restart_engine/report_diag/etc. `tools` can only
+ * NARROW what the room gate already admitted; it can never let a token reach a name
+ * ROOM_RESTRICTED_ALLOWED_TOOLS itself refuses.
+ */
+describe("per-token tools narrowing, ANDed with the room gate", () => {
+  const DAY_BOUNDARY = ["scribe_start_recording", "scribe_stop_recording"] as const;
+
+  it("a token narrowed to start_day/end_day reaches those two, not scribe_room_command (self_test etc.)", async () => {
+    for (const name of DAY_BOUNDARY) {
+      const { status, body } = await rpc(name, ["cardiology-opd-gh4a"], DAY_BOUNDARY);
+      const data = (body.error as Record<string, unknown> | undefined)?.data as Record<string, unknown> | undefined;
+      // Refused for some OTHER reason is fine (no DB is seeded); the tool gate specifically must not fire.
+      if (status === 403) expect(data?.tool_restricted, name).not.toBe(true);
+    }
+    const { status, body } = await rpc("scribe_room_command", ["cardiology-opd-gh4a"], DAY_BOUNDARY);
+    expect(status).toBe(403);
+    const data = (body.error as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.room_restricted).toBe(true);
+    expect(data.tool_restricted).toBe(true);
+  });
+
+  it("narrowing can only SHRINK: a tools list naming something outside ROOM_RESTRICTED_ALLOWED_TOOLS still cannot reach it", async () => {
+    const { status, body } = await rpc("scribe_extract_audio", ["cardiology-opd-gh4a"], ["scribe_extract_audio"]);
+    expect(status).toBe(403);
+    const data = (body.error as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.room_restricted).toBe(true);
+    // Refused by the ROOM gate (the name was never admitted), not the tools gate — tool_restricted
+    // is the narrower gate and only fires once the room gate has already let the name through.
+    expect(data.tool_restricted).toBeUndefined();
+  });
+
+  it("an empty tools array (malformed-token fail-closed case) refuses even the one allowed name", async () => {
+    const { status, body } = await rpc("scribe_room_command", ["cardiology-opd-gh4a"], []);
+    expect(status).toBe(403);
+    expect((body.error as Record<string, unknown>).data).toMatchObject({ room_restricted: true, tool_restricted: true });
+  });
+
+  it("tools with NO rooms is inert: the tools gate only applies alongside a room restriction", async () => {
+    const { body } = await rpc("scribe_extract_audio", undefined, ["scribe_start_recording"]);
+    const data = (body.error as Record<string, unknown> | undefined)?.data as Record<string, unknown> | undefined;
+    expect(data?.room_restricted).not.toBe(true);
+    expect(data?.tool_restricted).not.toBe(true);
   });
 });

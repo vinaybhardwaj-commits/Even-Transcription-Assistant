@@ -220,6 +220,13 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   if (principal.rooms && !ROOM_RESTRICTED_ALLOWED_TOOLS.has(name)) {
     throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, slice: SLICE, room_restricted: true }));
   }
+  // Per-token narrowing (28 Sep 2026): a room-restricted token whose entry ALSO names `tools`
+  // (lib/mcp/auth.ts) may reach only the intersection — this can only remove from the set the
+  // room gate above already admitted, never add to it (a name not in ROOM_RESTRICTED_ALLOWED_TOOLS
+  // is refused above regardless of `tools`).
+  if (principal.rooms && principal.tools && !principal.tools.has(name)) {
+    throw new HttpStatusError(403, rpcError(id, -32001, "scope_or_tool_unavailable", { tool: name, slice: SLICE, room_restricted: true, tool_restricted: true }));
+  }
 
   const t0 = Date.now();
   let result: unknown;

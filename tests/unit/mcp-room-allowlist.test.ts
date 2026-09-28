@@ -79,6 +79,60 @@ describe("auth.ts — the per-token rooms field", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The per-token TOOL allowlist (28 Sep 2026, day-boundary owner). Same shape, same rules as
+// `rooms`, parsed by the same function — proven here on its own so `rooms` and `tools` cannot
+// silently interfere with one another.
+// ---------------------------------------------------------------------------
+
+describe("auth.ts — the per-token tools field", () => {
+  it("ABSENT tools key = every tool ROOM_RESTRICTED_ALLOWED_TOOLS admits: principal.tools is undefined", () => {
+    process.env[MCP_TOKENS_ENV] = map({ [sha("m")]: { actor: "minibot", scopes: ["write"], rooms: ["opd-1-xqj7"] } });
+    expect(principalFor("m")?.tools).toBeUndefined();
+  });
+
+  it("a tools array restricts to exactly those names", () => {
+    process.env[MCP_TOKENS_ENV] = map({
+      [sha("m")]: {
+        actor: "minibot-day-boundary", scopes: ["write"], rooms: ["opd-1-xqj7"],
+        tools: ["scribe_start_recording", "scribe_stop_recording"],
+      },
+    });
+    expect([...(principalFor("m")?.tools ?? [])].sort()).toEqual(["scribe_start_recording", "scribe_stop_recording"]);
+  });
+
+  it("a PRESENT-but-malformed tools value fails CLOSED to an empty set, never to unrestricted", () => {
+    for (const bad of ["scribe_start_recording", null, 5, {}]) {
+      process.env[MCP_TOKENS_ENV] = map({ [sha("m")]: { actor: "minibot", scopes: ["write"], tools: bad } });
+      const p = principalFor("m");
+      expect(p?.tools, JSON.stringify(bad)).toBeDefined();
+      expect(p?.tools?.size, JSON.stringify(bad)).toBe(0);
+    }
+  });
+
+  it("tools and rooms are independent: either, neither, or both may be present", () => {
+    process.env[MCP_TOKENS_ENV] = map({
+      [sha("both")]: { actor: "a", scopes: ["write"], rooms: ["r1"], tools: ["t1"] },
+      [sha("room-only")]: { actor: "b", scopes: ["write"], rooms: ["r1"] },
+      [sha("tools-only")]: { actor: "c", scopes: ["write"], tools: ["t1"] },
+      [sha("neither")]: { actor: "d", scopes: ["write"] },
+    });
+    expect(principalFor("both")?.rooms).toBeDefined();
+    expect(principalFor("both")?.tools).toBeDefined();
+    expect(principalFor("room-only")?.rooms).toBeDefined();
+    expect(principalFor("room-only")?.tools).toBeUndefined();
+    expect(principalFor("tools-only")?.rooms).toBeUndefined();
+    expect(principalFor("tools-only")?.tools).toBeDefined();
+    expect(principalFor("neither")?.rooms).toBeUndefined();
+    expect(principalFor("neither")?.tools).toBeUndefined();
+  });
+
+  it("the single-token fallback is ALWAYS unrestricted, matching rooms' and scopes' behaviour", () => {
+    process.env.SCRIBE_MCP_TOKEN = "legacy";
+    expect(principalFor("legacy")?.tools).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Layer 2 — enforcement through the real scribe_room_command tool
 // ---------------------------------------------------------------------------
 

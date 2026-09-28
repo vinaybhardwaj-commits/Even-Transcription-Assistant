@@ -49,17 +49,47 @@ export const ALL_SCOPES: readonly McpScope[] = ["read", "invoke", "write"];
  * today's behaviour exactly). A PRESENT-BUT-MALFORMED `rooms` value fails CLOSED to the empty
  * set — the same rule `scopes` already follows — because a botched attempt to restrict a token
  * must never silently leave it unrestricted. Room slugs, matched case-insensitively.
+ *
+ * PER-TOKEN TOOL ALLOWLIST (28 Sep 2026, Fable's durable day-boundary owner: a token that may
+ * send start_day/end_day on the clinic rooms but not self_test, restart_engine or anything else).
+ * `ROOM_RESTRICTED_ALLOWED_TOOLS` (registry.ts) is the GLOBAL gate every room-restricted token
+ * shares — "this tool has been verified to enforce ctx.rooms" — and narrowing it per token needs
+ * a second, per-token layer, or every room-restricted token would gain everything any of them
+ * needs. `tools`, same shape and same rule as `rooms`:
+ *
+ *   { "<hash>": { "actor": "minibot-day-boundary", "scopes": ["write"],
+ *                 "rooms": ["cardiology-opd-gh4a", "opd-1-xqj7", …],
+ *                 "tools": ["scribe_start_recording", "scribe_stop_recording"] } }
+ *
+ * ABSENT `tools` = every tool `ROOM_RESTRICTED_ALLOWED_TOOLS` allows (today's behaviour, and
+ * `rooms`-only tokens like Home Office's self-test one are unaffected). PRESENT-but-malformed
+ * fails CLOSED to the empty set, same as `rooms`. The two gates are ANDed: a room-restricted
+ * token reaches a tool only if BOTH the global list and (when present) its own `tools` list admit
+ * it — `tools` can only NARROW what `rooms` alone would already have not-forbidden, never widen
+ * past the vetted global set. This gives exact per-verb granularity for `start_day` / `end_day`
+ * for free, because each already has its own published tool name distinct from the four native
+ * verbs (self_test/check_update_now/report_diag/restart_engine), which share the single name
+ * `scribe_room_command` and so cannot be split from one another by a tool-name filter alone — a
+ * genuine per-KIND filter within one tool name is a larger, separate change, not built here.
  */
-export type McpPrincipal = { token_id: string; scopes: ReadonlySet<McpScope>; rooms?: ReadonlySet<string> };
+export type McpPrincipal = {
+  token_id: string;
+  scopes: ReadonlySet<McpScope>;
+  rooms?: ReadonlySet<string>;
+  tools?: ReadonlySet<string>;
+};
 
 export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured" };
 
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
 
 export const ROOM_SLUG_MAX = 128;
+export const TOOL_NAME_MAX = 64;
 
 /** PURE — one entry of the token map, or null for anything this build cannot read. */
-function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope>; rooms?: Set<string> } | null {
+function parseEntry(
+  raw: unknown,
+): { actor: string; scopes: Set<McpScope>; rooms?: Set<string>; tools?: Set<string> } | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   const actor = typeof o.actor === "string" && o.actor.trim() ? o.actor.trim().slice(0, 64) : null;
@@ -70,8 +100,9 @@ function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope>; rooms
   const scopes = new Set<McpScope>(
     listed.filter((x): x is McpScope => typeof x === "string" && (ALL_SCOPES as readonly string[]).includes(x)),
   );
-  // `rooms` ABSENT (key not present at all) = unrestricted, `undefined` here. PRESENT (even `null`,
-  // even the wrong type) = restricted, to whatever valid slugs survive filtering — possibly none.
+  // `rooms` / `tools` ABSENT (key not present at all) = unrestricted, `undefined` here. PRESENT
+  // (even `null`, even the wrong type) = restricted, to whatever valid values survive filtering —
+  // possibly none.
   let rooms: Set<string> | undefined;
   if ("rooms" in o) {
     const listedRooms = Array.isArray(o.rooms) ? o.rooms : [];
@@ -81,10 +112,22 @@ function parseEntry(raw: unknown): { actor: string; scopes: Set<McpScope>; rooms
         .map((x) => x.trim().toLowerCase()),
     );
   }
-  return { actor, scopes, rooms };
+  let tools: Set<string> | undefined;
+  if ("tools" in o) {
+    const listedTools = Array.isArray(o.tools) ? o.tools : [];
+    tools = new Set(
+      listedTools.filter(
+        (x): x is string => typeof x === "string" && x.trim().length > 0 && x.trim().length <= TOOL_NAME_MAX,
+      ),
+    );
+  }
+  return { actor, scopes, rooms, tools };
 }
 
-type TokenMap = Record<string, { actor: string; scopes: Set<McpScope>; rooms?: Set<string> }>;
+type TokenMap = Record<
+  string,
+  { actor: string; scopes: Set<McpScope>; rooms?: Set<string>; tools?: Set<string> }
+>;
 
 /** PURE — the configured map, keyed by sha256 hex. `{}` for absent or unreadable JSON. `envName` only names the variable in the warning. */
 export function parseTokenMap(raw: string | undefined, envName: string = MCP_TOKENS_ENV): TokenMap {
@@ -156,7 +199,7 @@ export function mergeTokenMaps(primary: TokenMap, extra: TokenMap, primaryOk: bo
     if (hash in out) { shadowed += 1; continue; }
     const actor = `${EXTRA_ACTOR_PREFIX}${entry.actor}`;
     if (takenAudit.has(mcpActorId(actor))) { clash += 1; continue; }
-    out[hash] = { actor, scopes: entry.scopes, rooms: entry.rooms };
+    out[hash] = { actor, scopes: entry.scopes, rooms: entry.rooms, tools: entry.tools };
   }
   if (shadowed > 0) console.warn(`[mcp-auth] ${shadowed} entr${shadowed === 1 ? "y" : "ies"} in ${MCP_TOKENS_EXTRA_ENV} shadowed by ${MCP_TOKENS_ENV}; the primary entry wins`);
   if (clash > 0) console.warn(`[mcp-auth] ${clash} entr${clash === 1 ? "y" : "ies"} in ${MCP_TOKENS_EXTRA_ENV} skipped: the audit actor would equal an existing principal's`);
@@ -180,7 +223,7 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
 
   // §2.3 — the map first. Hash lookup: no comparison, so no timing signal from the map's size.
   const hit = map[sha256Hex(presented)];
-  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms } };
+  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms, tools: hit.tools } };
 
   // Fallback: the original single token, unchanged — all three scopes, every room, actor operator-v1.
   if (single) {

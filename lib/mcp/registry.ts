@@ -48,6 +48,11 @@ export type ToolContext = {
    *  runs. `resolveForWrite` (lib/mcp/tools/bench.ts) is the one place that DOES check it, and is
    *  what the tools on that allowlist are vetted against. */
   rooms?: ReadonlySet<string>;
+  /** The caller's PER-TOKEN tool allowlist (lib/mcp/auth.ts's per-token `tools`, 28 Sep 2026), or
+   *  `undefined` for every tool a room-restricted token could otherwise reach. Only meaningful
+   *  alongside `rooms`; checked by `handler.ts`'s gate ANDed with `ROOM_RESTRICTED_ALLOWED_TOOLS`
+   *  — it can only narrow, never widen past that vetted set. */
+  tools?: ReadonlySet<string>;
 };
 
 /**
@@ -93,15 +98,24 @@ export class ToolRoomError extends Error {
  *
  * A room-restricted token (`ctx.rooms` set — including the empty set, the malformed-token fail-
  * closed case) may call ONLY a tool named here; `callTool` refuses every other name before the
- * handler ever runs, with the same -32001 `scope_or_tool_unavailable` shape. `scribe_room_command`
- * is the only entry today: it is the published name for start_day, pause_day, resume_day, end_day,
- * set_audio_input, close_orphaned_session, check_update_now, report_diag, restart_engine AND
- * self_test (lib/mcp/surface.ts's group), and every one of those routes through `resolveForWrite`
- * (verified, tests/unit/mcp-room-allowlist.test.ts). ADDING A NAME HERE without first confirming
- * (by the same standard: a passing test, not a read) that its own handler enforces `ctx.rooms`
- * before touching any room-scoped data reopens exactly the hole this closes.
+ * handler ever runs, with the same -32001 `scope_or_tool_unavailable` shape.
+ *
+ * `scribe_room_command` covers start_day, pause_day, resume_day, end_day, set_audio_input,
+ * close_orphaned_session, check_update_now, report_diag, restart_engine AND self_test
+ * (lib/mcp/surface.ts's group) when called BY THAT NAME — every one of those routes through
+ * `resolveForWrite` (verified, tests/unit/mcp-room-allowlist.test.ts). `scribe_start_recording`
+ * and `scribe_stop_recording` are the SAME start_day/end_day handlers, reachable by their own
+ * published names (the group is one route to them, not the only one) — also verified to route
+ * through `resolveForWrite`, added 28 Sep 2026 for the day-boundary owner's per-tool allowlist
+ * (`McpPrincipal.tools`, lib/mcp/auth.ts) to narrow down to. ADDING A NAME HERE without first
+ * confirming (by the same standard: a passing test, not a read) that its own handler enforces
+ * `ctx.rooms` before touching any room-scoped data reopens exactly the hole this closes.
  */
-export const ROOM_RESTRICTED_ALLOWED_TOOLS: ReadonlySet<string> = new Set(["scribe_room_command"]);
+export const ROOM_RESTRICTED_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+  "scribe_room_command",
+  "scribe_start_recording",
+  "scribe_stop_recording",
+]);
 
 export type McpTool = {
   name: string;
