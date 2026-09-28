@@ -2739,7 +2739,24 @@ const diffRoom: McpTool = {
           } catch {
             reasons.push("sessions_unavailable");
           }
-          const recordingSession = sessions.find((s) => s.status === "recording") ?? null;
+          // ─── THE ACTIVE SESSION, DATE-INDEPENDENT ────────────────────────────────────────
+          // `sessions` above is scoped to TODAY's IST calendar date (deliberately, for the
+          // today-only metrics below: last_piece_at, any_tape_today, stalled, the day-report
+          // rows). A session that STARTED before midnight and is still open falls outside that
+          // window even though it is recording right now — `start_day`'s own already_recording
+          // check (findActiveSession, lib/bench-commands.ts) has no such filter for exactly this
+          // reason. Measured live, 28 Sep: OPD 5/6/7, Third Floor and ORB3 all had a `recording`
+          // session started 27 Sep that this view reported as `recording:false` before this fix,
+          // while start_day correctly answered already_recording for the same session. `recording`,
+          // `tape_lane` and `room_state` must agree with start_day, so they read from the same
+          // date-independent lookup it uses, not from the today-scoped `sessions` list.
+          let active: { id: string; status: string; started_at: string } | null = null;
+          try {
+            active = await findActiveSession(room.id);
+          } catch (e) {
+            reasons.push(`active_session_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+          }
+          const recordingSession = active?.status === "recording" ? active : null;
           const lastPieceMs = sessions.reduce<number | null>((acc, s) => {
             const t = msOfLoose(s.last_any_chunk_at);
             return t !== null && (acc === null || t > acc) ? t : acc;
@@ -2762,7 +2779,9 @@ const diffRoom: McpTool = {
           // bench_listener.paused and recording_session_id were already read into `listener`
           // above and thrown away. Reporting them costs no new query.
           const pausedListener = listener ? Boolean(listener.paused) : false;
-          const pausedSession = sessions.some((s) => s.status === "paused");
+          // Same fix, same reason: a session paused before midnight and never resumed or ended
+          // falls out of `sessions` (today-scoped) too. One active-session lookup answers both.
+          const pausedSession = active?.status === "paused";
           const stalledSession = sessions.find((s) => isBenchStalled(s, now.getTime())) ?? null;
           const stalledAgeMs = stalledSession
             ? now.getTime() - (msOfLoose(stalledSession.last_any_chunk_at) ?? msOfLoose(stalledSession.started_at) ?? now.getTime())
