@@ -212,21 +212,40 @@ describe("F3 — visits never span sessions", () => {
 // windowCount; a phase-streak visit opens at the FIRST of its two qualifying windows.
 // =====================================================================================
 describe("F8 — ETA_JEV_T_PHASE_CONF is env-overridable", () => {
+  // eta-refuter advisory on 9edce6d (bus #5423): with only 2 windows this test was vacuous —
+  // ETA_JEV_MIN_VISIT_WINDOWS (default 3) already blocks a visit regardless of the phase-confidence
+  // floor, so a broken envFloat() (silently ignoring the override) would still pass. 3 windows makes
+  // the window count sufficient on its own, so the assertion actually depends on the floor being 0.9
+  // and not the default 0.6 — a mutation that drops the env read would produce 1 visit here, not 0.
+  const mk = (id: string, startMs: number, over: Partial<JevWindowSignal> = {}): JevWindowSignal => ({
+    window_id: id, room_day_id: "rd1", session_id: "s1", start_ms: startMs, end_ms: startMs + 30_000,
+    phase: "arrival", phase_probs: {}, phase_confidence: 0.7, p_start: 0, p_end: 0, p_clinician: 0, p_clinical: 0.8,
+    ...over,
+  });
+  const windows = [mk("c1", 0), mk("c2", 30000), mk("c3", 60000)];
+
   it("raising the floor stops a phase-streak that used to qualify at the default 0.6", async () => {
     vi.resetModules();
     const prev = process.env.ETA_JEV_T_PHASE_CONF;
     process.env.ETA_JEV_T_PHASE_CONF = "0.9";
     const mod = await import("@/lib/brain/fuse/jev-arm");
-    const mk = (id: string, startMs: number, over: Partial<JevWindowSignal> = {}): JevWindowSignal => ({
-      window_id: id, room_day_id: "rd1", session_id: "s1", start_ms: startMs, end_ms: startMs + 30_000,
-      phase: "arrival", phase_probs: {}, phase_confidence: 0.7, p_start: 0, p_end: 0, p_clinician: 0, p_clinical: 0.8,
-      ...over,
-    });
-    const out = mod.runJevArm([], [mk("c1", 0), mk("c2", 30000)], SESSIONS);
+    const out = mod.runJevArm([], windows, SESSIONS);
     expect(out.visits).toHaveLength(0); // 0.7 < 0.9, streak never qualifies
 
     if (prev === undefined) delete process.env.ETA_JEV_T_PHASE_CONF;
     else process.env.ETA_JEV_T_PHASE_CONF = prev;
+    vi.resetModules();
+  });
+
+  it("at the default 0.6 floor, the same 3-window streak DOES qualify (proves the above isn't vacuous)", async () => {
+    vi.resetModules();
+    const prev = process.env.ETA_JEV_T_PHASE_CONF;
+    delete process.env.ETA_JEV_T_PHASE_CONF;
+    const mod = await import("@/lib/brain/fuse/jev-arm");
+    const out = mod.runJevArm([], windows, SESSIONS);
+    expect(out.visits).toHaveLength(1); // 0.7 >= default 0.6, streak qualifies
+
+    if (prev !== undefined) process.env.ETA_JEV_T_PHASE_CONF = prev;
     vi.resetModules();
   });
 });
