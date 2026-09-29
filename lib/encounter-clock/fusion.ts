@@ -35,14 +35,14 @@ import { summariseSpan, type ClosedBy, type Encounter, type ProbeVerdict } from 
 import type { AcousticProbe } from "@/lib/encounter-clock/shadow";
 import type { ConfidenceBand } from "@/lib/jev/confidence";
 import type { U1Option, U6Option } from "@/lib/jev/prompts/encounter-v1";
+// PROVISIONAL START_P/END_P (a U2 start/end at or above this splits/closes, the plan's act band)
+// and JEV_MIN_RUN (a Jev-proposed encounter's minimum span in consecutive probes). Moved to
+// lib/jev/thresholds.ts (W41 F4, jev-audit finding #5); re-exported here so no existing import
+// path changes.
+import { START_P, END_P, JEV_MIN_RUN } from "@/lib/jev/thresholds";
+export { START_P, END_P, JEV_MIN_RUN };
 
 export const FUSION_VERSION = "encounter-fusion-v1.1";
-/** PROVISIONAL: a U2 start at or above this splits an encounter (the plan's act band). */
-export const START_P = 0.9;
-/** PROVISIONAL: a U2 end at or above this closes a Jev-proposed encounter (the same act band). */
-export const END_P = 0.9;
-/** The order's floor: a Jev-proposed encounter spans at least this many consecutive probes. */
-export const JEV_MIN_RUN = 3;
 
 /** Who proposed an encounter: the acoustic smoother (confirmed or split by Jev), or Jev alone (E-6.1). */
 export type EncounterOrigin = "acoustic" | "jev";

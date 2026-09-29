@@ -12,16 +12,10 @@ export type CompositeResult =
   | { role: string; clinician_id: null }
   | { role: null; clinician_id: null; reason: "low_confidence" };
 
-export const ETA_JEV_T_ROLE_DEFAULT = 0.6;
-
-function envFloat(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : def;
-}
-
-export const ETA_JEV_T_ROLE = envFloat("ETA_JEV_T_ROLE", ETA_JEV_T_ROLE_DEFAULT);
+// Moved to lib/jev/thresholds.ts (W41 F4, jev-audit finding #5); re-exported here so no existing
+// import path changes.
+import { ETA_JEV_T_ROLE_DEFAULT, ETA_JEV_T_ROLE } from "@/lib/jev/thresholds";
+export { ETA_JEV_T_ROLE_DEFAULT, ETA_JEV_T_ROLE };
 
 /**
  * `compositeRole` — acoustic wins outright when a voiceprint matched (never overridden by text,

@@ -12,8 +12,11 @@ export type ConfidenceBand = "act" | "caution" | "review";
 
 export type ConfidenceThresholds = { act: number; caution: number };
 
-/** The plan's own defaults (principle 4), verbatim. */
-export const DEFAULT_CONFIDENCE_THRESHOLDS: ConfidenceThresholds = { act: 0.9, caution: 0.5 };
+/** The plan's own defaults (principle 4), verbatim. Moved to lib/jev/thresholds.ts (W41 F4,
+ * jev-audit finding #5); imported (for confidenceBand's own default parameter below) and
+ * re-exported here so no existing import path changes. */
+import { DEFAULT_CONFIDENCE_THRESHOLDS } from "./thresholds";
+export { DEFAULT_CONFIDENCE_THRESHOLDS };
 
 /**
  * `confidence` is expected in [0, 1]; anything outside that range still bands correctly (a value

@@ -61,26 +61,11 @@ export type JevWindowSignal = {
   p_clinical: number;
 };
 
-function envFloat(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : def;
-}
-function envInt(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.round(n) : def;
-}
-
-// Read once at module load (spec §5.4: "all thresholds env with defaults, read once at module load").
-export const ETA_JEV_T_START = envFloat("ETA_JEV_T_START", 0.7);
-export const ETA_JEV_T_END = envFloat("ETA_JEV_T_END", 0.7);
-export const ETA_JEV_T_CLINICAL = envFloat("ETA_JEV_T_CLINICAL", 0.6);
-export const ETA_JEV_T_PHASE_CONF = envFloat("ETA_JEV_T_PHASE_CONF", 0.6); // F8: was a bare 0.6 literal
-export const ETA_JEV_MIN_VISIT_WINDOWS = envInt("ETA_JEV_MIN_VISIT_WINDOWS", 3);
-export const ETA_JEV_MAX_GAP_WINDOWS = envInt("ETA_JEV_MAX_GAP_WINDOWS", 6);
+// Read once at module load (spec §5.4: "all thresholds env with defaults, read once at module
+// load"). Moved to lib/jev/thresholds.ts (W41 F4, jev-audit finding #5); re-exported here so no
+// existing import path changes and so this file's own use of them below needs no other edit.
+import { ETA_JEV_T_START, ETA_JEV_T_END, ETA_JEV_T_CLINICAL, ETA_JEV_T_PHASE_CONF, ETA_JEV_MIN_VISIT_WINDOWS, ETA_JEV_MAX_GAP_WINDOWS } from "@/lib/jev/thresholds";
+export { ETA_JEV_T_START, ETA_JEV_T_END, ETA_JEV_T_CLINICAL, ETA_JEV_T_PHASE_CONF, ETA_JEV_MIN_VISIT_WINDOWS, ETA_JEV_MAX_GAP_WINDOWS };
 
 const ms = (iso: string): number => {
   const t = Date.parse(iso);
