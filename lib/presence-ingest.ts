@@ -1,9 +1,10 @@
 /**
  * lib/presence-ingest.ts — validation for POST /api/presence (T-PRESENCE-5).
  *
- * Two producers, two exact shapes. Unknown top-level keys are rejected, so the
- * promoted columns can only come from known fields. `payload` is the original
- * event, stored verbatim.
+ * Two producers, two shapes. An item must carry every known key of one shape. Unknown extra
+ * top-level keys are kept in `payload` (the event verbatim) and never promoted, so the queryable
+ * columns come only from known fields. Any fault in one item rejects that item only; the caller
+ * counts it and inserts the rest. Strings and timestamps are checked to what Postgres/jsonb accepts.
  */
 
 export const EXT_KEYS = [
@@ -34,27 +35,48 @@ const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object
 const nstr = (x: unknown) => x === null || (typeof x === "string" && x.length <= MAX_STR);
 const str = (x: unknown) => typeof x === "string" && x.length > 0 && x.length <= MAX_STR;
 
-function parseTs(x: unknown): string | null {
-  if (typeof x !== "string" || x.length > 64) return null;
-  const d = new Date(x);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+// Lone UTF-16 surrogates and NUL are rejected by Postgres jsonb/text.
+const BAD_STRING = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const MAX_DEPTH = 8;
+const MAX_ITEM_CHARS = 16_384;
+
+/** True when every string (keys included) anywhere in v is safe for Postgres jsonb. */
+function stringsSafe(v: unknown, depth = 0): boolean {
+  if (depth > MAX_DEPTH) return false;
+  if (typeof v === "string") return !BAD_STRING.test(v);
+  if (Array.isArray(v)) return v.every((x) => stringsSafe(x, depth + 1));
+  if (isObj(v)) return Object.keys(v).every((k) => !BAD_STRING.test(k) && stringsSafe(v[k], depth + 1));
+  return true;
 }
 
-function exactKeys(o: Record<string, unknown>, keys: readonly string[]): string | null {
-  for (const k of Object.keys(o)) if (!keys.includes(k)) return `unknown key: ${k.slice(0, 40)}`;
-  for (const k of keys) if (!(k in o)) return `missing key: ${k}`;
-  return null;
+const TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))$/;
+
+/** Full ISO-8601 datetime with an offset, real calendar values, years 2000-2100. Returns ISO UTC or null. */
+export function parseTs(x: unknown): string | null {
+  if (typeof x !== "string" || x.length > 40) return null;
+  const m = TS_RE.exec(x);
+  if (!m) return null;
+  const [y, mo, d, h, mi, se] = [m[1], m[2], m[3], m[4], m[5], m[6]].map(Number) as [number, number, number, number, number, number];
+  if (y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || se > 59) return null;
+  if (d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return null;
+  if (m[7] !== "Z" && (Number(m[8]) > 14 || Number(m[9]) > 59)) return null;
+  const t = new Date(x).getTime();
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+function hasKeys(o: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((k) => k in o);
 }
 
 export function validateItem(x: unknown): ItemResult {
   if (!isObj(x)) return { ok: false, reason: "item is not an object" };
-  const isExt = "event" in x;
-  const isPoller = "state" in x || "machine" in x;
+  const isExt = hasKeys(x, EXT_KEYS);
+  const isPoller = hasKeys(x, POLLER_KEYS);
   if (isExt === isPoller) return { ok: false, reason: "unknown shape" };
+  if (!stringsSafe(x)) return { ok: false, reason: "unsafe string" };
+  if (JSON.stringify(x).length > MAX_ITEM_CHARS) return { ok: false, reason: "item too large" };
 
   if (isExt) {
-    const bad = exactKeys(x, EXT_KEYS);
-    if (bad) return { ok: false, reason: bad };
     for (const k of ["machine_id", "room", "email", "display_name", "encounter_id", "prescription_ref", "reason"]) {
       if (!nstr(x[k])) return { ok: false, reason: `bad ${k}` };
     }
@@ -69,8 +91,6 @@ export function validateItem(x: unknown): ItemResult {
     };
   }
 
-  const bad = exactKeys(x, POLLER_KEYS);
-  if (bad) return { ok: false, reason: bad };
   if (!str(x.machine)) return { ok: false, reason: "bad machine" };
   const ts = parseTs(x.ts);
   if (!ts) return { ok: false, reason: "bad ts" };
@@ -85,14 +105,16 @@ export function validateItem(x: unknown): ItemResult {
   };
 }
 
-export function validateBatch(body: unknown, maxItems: number): { ok: true; rows: PresenceRow[] } | { ok: false; status: 413 | 422; message: string } {
+/** Per-item validation. Only an oversize batch fails as a whole; bad items are counted, not fatal. */
+export function validateBatch(body: unknown, maxItems: number): { ok: true; rows: PresenceRow[]; rejected: number } | { ok: false; status: 413; message: string } {
   const items = Array.isArray(body) ? body : [body];
   if (items.length > maxItems) return { ok: false, status: 413, message: "batch too large" };
   const rows: PresenceRow[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const r = validateItem(items[i]);
-    if (!r.ok) return { ok: false, status: 422, message: `item ${i}: ${r.reason}` };
-    rows.push(r.row);
+  let rejected = 0;
+  for (const it of items) {
+    const r = validateItem(it);
+    if (r.ok) rows.push(r.row);
+    else rejected++;
   }
-  return { ok: true, rows };
+  return { ok: true, rows, rejected };
 }
