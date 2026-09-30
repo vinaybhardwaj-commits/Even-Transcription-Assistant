@@ -1,6 +1,6 @@
 import {
   pgTable, pgEnum, uuid, text, integer, boolean, jsonb, timestamp,
-  numeric, inet, index, primaryKey, doublePrecision,
+  numeric, inet, index, primaryKey, doublePrecision, bigserial,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { customType } from "drizzle-orm/pg-core";
@@ -397,3 +397,20 @@ export const sttEngine = pgTable("stt_engine", {
   sortOrder:        integer("sort_order").notNull().default(100),
   createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// pulse_presence_events (migration 0113) — append-only presence log fed by
+// POST /api/presence (Pulse Chrome extension = 'ext', tailnet poller = 'poller').
+export const pulsePresenceEvents = pgTable("pulse_presence_events", {
+  id:         bigserial("id", { mode: "number" }).primaryKey(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  source:     text("source").notNull(), // 'ext' | 'poller' (CHECK in SQL)
+  machine:    text("machine"),          // machine_id (ext) | machine (poller)
+  room:       text("room"),
+  event:      text("event"),            // event (ext) | state (poller)
+  ts:         timestamp("ts", { withTimezone: true }),
+  email:      text("email"),
+  payload:    jsonb("payload").notNull(),
+}, (t) => ({
+  byMachineTs: index("pulse_presence_events_machine_ts_idx").on(t.machine, t.ts),
+  byReceived:  index("pulse_presence_events_received_idx").on(t.receivedAt),
+}));
