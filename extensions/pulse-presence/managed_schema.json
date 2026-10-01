@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "machine_id": { "type": "string", "title": "Machine id" },
+    "room": { "type": "string", "title": "Room" },
+    "ingest_url": { "type": "string", "title": "ETA ingest URL (https)" },
+    "token": { "type": "string", "title": "Bearer token for ETA ingest" }
+  }
+}

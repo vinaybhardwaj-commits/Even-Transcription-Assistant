@@ -1,0 +1,7 @@
+{
+  "name": "eta-pulse-presence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MV3 extension prototype: doctor presence on Pulse, reported to ETA",
+  "scripts": { "test": "node --test test/*.test.js" }
+}

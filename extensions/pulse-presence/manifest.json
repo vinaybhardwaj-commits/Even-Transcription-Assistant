@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "ETA Pulse Presence",
+  "version": "0.1.0",
+  "description": "Reports doctor presence on Pulse to ETA. Captures identity (email, display name), route type, and consult ids only.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "webRequest", "idle", "tabs"],
+  "host_permissions": ["https://pulse.even.in/*", "https://www.evenscribe.app/*"],
+  "background": { "service_worker": "src/background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://pulse.even.in/*"],
+      "js": ["src/lib/route.js", "src/lib/identity.js", "src/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "eta_config": { "ingest_url": "", "token": "", "machine_id": "", "room": "" },
+  "storage": { "managed_schema": "managed_schema.json" }
+}
