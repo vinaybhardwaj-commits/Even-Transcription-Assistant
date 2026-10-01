@@ -64,7 +64,12 @@ export async function POST(req: NextRequest) {
     return err(422, "VALIDATION_FAILED", "Body is not JSON");
   }
 
-  const v = validateBatch(body, MAX_ITEMS);
+  // Accept both a bare array / single object and the extension's { events: [...] } wrapper.
+  const payload =
+    body && typeof body === "object" && !Array.isArray(body) && Array.isArray((body as { events?: unknown }).events)
+      ? (body as { events: unknown[] }).events
+      : body;
+  const v = validateBatch(payload, MAX_ITEMS);
   if (!v.ok) return err(v.status, "VALIDATION_FAILED", v.message);
   let rejected = v.rejected;
   if (v.rows.length === 0) return reply(200, { ok: true, inserted: 0, rejected, count: 0 });
