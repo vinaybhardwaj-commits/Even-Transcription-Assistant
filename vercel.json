@@ -41,5 +41,33 @@
       "path": "/api/admin/bench/levels-retention",
       "schedule": "5 * * * *"
     }
+  ],
+  "headers": [
+    {
+      "source": "/ext/update.xml",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "text/xml; charset=utf-8"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/ext/:file(.*).crx",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/x-chrome-extension"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=300"
+        }
+      ]
+    }
   ]
 }
