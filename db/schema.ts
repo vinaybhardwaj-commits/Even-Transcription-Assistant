@@ -1,6 +1,6 @@
 import {
   pgTable, pgEnum, uuid, text, integer, boolean, jsonb, timestamp,
-  numeric, inet, index, primaryKey, doublePrecision, bigserial,
+  numeric, inet, index, primaryKey, doublePrecision, bigserial, serial, bigint, uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { customType } from "drizzle-orm/pg-core";
@@ -413,4 +413,32 @@ export const pulsePresenceEvents = pgTable("pulse_presence_events", {
 }, (t) => ({
   byMachineTs: index("pulse_presence_events_machine_ts_idx").on(t.machine, t.ts),
   byReceived:  index("pulse_presence_events_received_idx").on(t.receivedAt),
+}));
+
+// eta_encounter_windows (migration 0123) — one row per consult window, derived from pulse_presence_events by
+// lib/encounter-windows and recomputed by /api/cron/encounter-windows. Value sets are CHECKs in SQL.
+export const etaEncounterWindows = pgTable("eta_encounter_windows", {
+  id:              serial("id").primaryKey(),
+  consultKey:      text("consult_key").notNull(),            // consult_uid, else ref:<prescription_ref>; UNIQUE
+  consultUid:      text("consult_uid"),
+  prescriptionRef: text("prescription_ref"),
+  machine:         text("machine").notNull(),
+  roomId:          text("room_id"),                          // FK-free; room_install.hostname = machine
+  roomSlug:        text("room_slug"),
+  doctorUid:       text("doctor_uid"),
+  displayName:     text("display_name"),
+  attribution:     text("attribution").notNull(),            // rows | occupant | none
+  tOpen:           timestamp("t_open", { withTimezone: true }).notNull(),
+  tClose:          timestamp("t_close", { withTimezone: true }),
+  closeReason:     text("close_reason").notNull(),           // endConsult|url_clear|next_open|logout|idle_timeout|cap_90m|open
+  quality:         text("quality").notNull(),                // clean|ambiguous|multi_doctor|unclosed|unattributed
+  reopenCount:     integer("reopen_count").notNull().default(0),
+  sourceEventIds:  bigint("source_event_ids", { mode: "number" }).array().notNull().default(sql`'{}'::bigint[]`),
+  resolverVersion: text("resolver_version").notNull(),
+  computedAt:      timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  byConsultKey: uniqueIndex("eta_encounter_windows_consult_key_key").on(t.consultKey),
+  byRoomOpen:   index("eta_encounter_windows_room_open_idx").on(t.roomId, t.tOpen),
+  byDoctorOpen: index("eta_encounter_windows_doctor_open_idx").on(t.doctorUid, t.tOpen),
+  byOpen:       index("eta_encounter_windows_open_idx").on(t.tOpen),
 }));

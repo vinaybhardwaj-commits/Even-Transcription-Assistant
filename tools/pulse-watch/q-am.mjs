@@ -1,0 +1,15 @@
+import { neon } from '@neondatabase/serverless';
+import { readFileSync } from 'fs';
+import { resolveMachines } from './occupancy.mjs';
+const sql = neon(process.env.DATABASE_URL || readFileSync(process.env.HOME+'/.claude/secrets/eta_database_url','utf8').trim());
+console.log('=== OCCUPANCY (resolved: idle/locked, 45m no genuine activity, nightly cutoff => logged out) ===');
+for (const m of await resolveMachines(sql)) console.log(`  ${m.machine.padEnd(26)} ${m.occupied ? ('PRESENT  ' + (m.ambiguous ? 'AMBIGUOUS(' + m.candidates.join('/') + ')' : m.display_name) + (m.background.length ? ' bg:' + m.background.join('/') : '')).padEnd(24) : ('out('+m.out_reason+')').padEnd(24)} last_genuine=${m.last_genuine_ts ? new Date(m.last_genuine_ts).toISOString().slice(5,19)+'Z' : '-'}  idle_state=${m.idle_state||'-'}`);
+console.log('=== MONITORED rooms — extension, last 6 min ===');
+const e = await sql`SELECT machine, count(*) n, max(ts) last FROM pulse_presence_events WHERE source='ext' AND ts>now()-interval '6 minutes' GROUP BY 1 ORDER BY 1`;
+for(const r of e) console.log(`  ${r.machine.padEnd(26)} n=${String(r.n).padStart(3)} last=${new Date(r.last).toISOString().slice(11,19)}Z`);
+console.log('=== POLLER — latest state per host (last 3 min) ===');
+const p = await sql`SELECT DISTINCT ON (machine) machine, event, ts FROM pulse_presence_events WHERE source='poller' AND ts>now()-interval '3 minutes' ORDER BY machine, ts DESC`;
+for(const r of p) console.log(`  ${(r.machine||'-').padEnd(12)} ${r.event.padEnd(12)} ${new Date(r.ts).toISOString().slice(11,19)}Z`);
+console.log('=== echo (Cardiology) + discussion (Dietary): last OK ever? ===');
+const back = await sql`SELECT machine, max(ts) FILTER (WHERE event='ok') last_ok, max(ts) last_any FROM pulse_presence_events WHERE source='poller' AND machine IN ('echo','discussion') GROUP BY 1`;
+for(const r of back) console.log(`  ${r.machine.padEnd(12)} last_ok=${r.last_ok?new Date(r.last_ok).toISOString().slice(5,19):'NEVER'}  last_seen=${new Date(r.last_any).toISOString().slice(5,19)}`);

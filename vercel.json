@@ -40,6 +40,10 @@
     {
       "path": "/api/admin/bench/levels-retention",
       "schedule": "5 * * * *"
+    },
+    {
+      "path": "/api/cron/encounter-windows",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [
