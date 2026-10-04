@@ -11,9 +11,12 @@
  * the fresh ones, in a single transaction. consult_key is `${encounter_id}@${machine}`, a pure function of the
  * consult, so the insert is ON CONFLICT (consult_key) DO UPDATE: a consult whose t_open drifted across the range
  * edge between two runs updates its own row and can never touch another consult's.
- * refreshWindowsByDay splits a long range at IST midnights and runs one refreshWindows (one transaction) per day.
+ * refreshWindowsByDay splits a long range at IST midnights and runs one refreshWindows (one transaction) per day;
+ * every day reads events up to the end of the whole range + 2 h (an explicit close has no time limit in the resolver,
+ * so a pre-midnight consult must see a late close). A long backfill therefore reads more per day than a short one.
  *
- * EVENT LOAD. Per range the adapter reads events from (the IST midnight before `from`) - 24 h to `to` + 2 h, not a
+ * EVENT LOAD. Per range the adapter reads events from (the IST midnight before `from`) - 24 h to `eventsTo` + 2 h
+ * (`eventsTo` defaults to `to`), not a
  * flat 72 h: the nightly cutoff means a stream's presence can never depend on activity older than the previous IST
  * midnight, and 24 h before that covers a login/logout control event.
  *
@@ -112,13 +115,16 @@ export type RefreshResult = {
 export async function refreshWindows(
   db: WindowsDb,
   range: { from: string | number | Date; to: string | number | Date },
-  opts: { asOf?: string | number | Date } = {},
+  opts: { asOf?: string | number | Date; eventsTo?: string | number | Date } = {},
 ): Promise<RefreshResult> {
   const from = new Date(range.from);
   const to = new Date(range.to);
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) throw new Error("refreshWindows: bad range");
+  // Events are read up to `eventsTo` (default: the range end) + 2 h. A day chunk of a longer run passes the end of the
+  // WHOLE run, so a consult opened just before midnight still sees an explicit close or reopen that lands after it.
+  const readTo = opts.eventsTo === undefined ? to : new Date(Math.max(new Date(opts.eventsTo).getTime(), to.getTime()));
 
-  const [crosswalk, events] = await Promise.all([loadCrosswalk(db), fetchEvents(db, from, to)]);
+  const [crosswalk, events] = await Promise.all([loadCrosswalk(db), fetchEvents(db, from, readTo)]);
   const { rows, summary } = computeWindowsDetailed(events, { from, to, asOf: opts.asOf ?? Date.now(), crosswalk });
 
   const del = db`
@@ -226,7 +232,8 @@ export async function refreshWindowsByDay(
       nextFrom = new Date(c.from).toISOString();
       break;
     }
-    const r = await refreshWindows(db, { from: c.from, to: c.to }, opts.asOf === undefined ? {} : { asOf: opts.asOf });
+    // every day reads events to the end of the WHOLE range (+ 2 h): see refreshWindows
+    const r = await refreshWindows(db, { from: c.from, to: c.to }, { eventsTo: to, ...(opts.asOf === undefined ? {} : { asOf: opts.asOf }) });
     chunks++;
     events += r.events;
     deleted += r.deleted;

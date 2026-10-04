@@ -42,11 +42,11 @@
       "schedule": "5 * * * *"
     },
     {
-      "path": "/api/cron/encounter-windows?mode=recent",
+      "path": "/api/cron/encounter-windows",
       "schedule": "*/5 * * * *"
     },
     {
-      "path": "/api/cron/encounter-windows?mode=sweep",
+      "path": "/api/cron/encounter-windows/sweep",
       "schedule": "7 * * * *"
     }
   ],

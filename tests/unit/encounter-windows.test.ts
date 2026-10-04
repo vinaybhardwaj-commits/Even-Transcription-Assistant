@@ -444,6 +444,45 @@ describe("background-heartbeat filter keeps focus flips", () => {
     const kept = keepFocusFlips(es).map((e) => `${e.uid}@${String(e.ts).slice(14, 19)}`);
     expect(kept).toEqual(["UA@00:00", "UB@00:00", "UA@01:00", "UA@01:30", "UA@02:10"]);
   });
+
+  // The SQL flag is (payload->>'tab_focus' = 'true'): NULL when the key is missing, so a missing flag is UNKNOWN, not false.
+  // LAG is NULL for "no previous row" AND "previous row had no flag"; NULL IS DISTINCT FROM NULL is false.
+  const hbf = (sec: number, uid: string, focus?: boolean | null) => ev("heartbeat", at(0, sec), { uid, focus });
+  const label = (e: PresenceEvent) => `${e.uid}@${String(e.ts).slice(14, 19)}`;
+
+  it("treats a missing tab_focus as unknown, exactly like the SQL rule (not as false)", () => {
+    const es = [
+      hbf(0, "UA"), //   first row, flag NULL        -> NULL vs NULL: not a flip, background: dropped (coercing to false would keep it)
+      hbf(30, "UA"), //  NULL -> NULL                -> dropped
+      hbf(60, "UA", false), // NULL -> false         -> flip: kept
+      hbf(90, "UA", false), // false -> false        -> dropped
+      hbf(120, "UA"), //  false -> NULL              -> flip: kept
+      hbf(150, "UA"), //  NULL -> NULL               -> dropped
+      hbf(180, "UA", true), // NULL -> true          -> kept (focused, and a flip)
+      hbf(210, "UA"), //  true -> NULL               -> flip: kept
+      ev("active", at(0, 240), { uid: "UA" }), //     not a heartbeat: kept; NULL -> NULL, no flip
+      hbf(270, "UA", true), // NULL -> true          -> kept
+      hbf(0, "UB"), //    another stream, first row NULL -> dropped
+      hbf(30, "UB"), //   NULL -> NULL                   -> dropped
+      hbf(0, "UC", null), // explicit JSON null behaves like missing -> dropped
+    ];
+    expect(keepFocusFlips(es).map(label)).toEqual(["UA@01:00", "UA@02:00", "UA@03:00", "UA@03:30", "UA@04:00", "UA@04:30"]);
+  });
+
+  it("a stream's flip to missing keeps the 'no longer focused' signal the resolver needs (full == filtered)", () => {
+    const es: PresenceEvent[] = [];
+    for (let sec = 0; sec <= 5 * 60; sec += 30) es.push(hbf(sec, "UA", true)); //     A focused 0-5 min
+    for (let sec = 5 * 60 + 30; sec <= 20 * 60; sec += 30) es.push(hbf(sec, "UA")); // then heartbeats with NO tab_focus
+    for (let sec = 6 * 60; sec <= 20 * 60; sec += 30) es.push(hbf(sec, "UB", true)); // B focused 6-20 min
+    es.push(open(at(20, 12), "E1"), close(at(24), { enc: "E1" }));
+    const kept = keepFocusFlips(es);
+    expect(kept.length).toBeLessThan(es.length);
+    expect(kept.filter((e) => e.uid === "UA" && e.focus === undefined)).toHaveLength(1); // the true -> NULL flip only
+    const r = computeWindows(kept)[0]!;
+    expect(r.doctor_uid).toBe("UB");
+    expect(r.quality).toBe("multi_doctor");
+    expect(computeWindows(es)[0]).toEqual(r);
+  });
 });
 
 // ---------------------------------------------------------------- refresh by IST day + bounded lookback
@@ -467,7 +506,7 @@ describe("refreshWindowsByDay and the bounded event load", () => {
 
   const responder = (q: Q) => (/room_install/.test(q.text) ? [] : []);
 
-  it("runs one transaction per IST day and reads events from (IST midnight before the day) - 24 h", async () => {
+  it("runs one transaction per IST day and reads events from (IST midnight before the day) - 24 h to the end of the whole range + 2 h", async () => {
     const { db, txns, issued } = fakeDb(responder);
     const from = mid("2026-10-02") + 5 * 3_600_000;
     const to = mid("2026-10-04") + 3_600_000;
@@ -482,9 +521,11 @@ describe("refreshWindowsByDay and the bounded event load", () => {
     expect(dels[2]).toEqual([new Date(mid("2026-10-04")).toISOString(), new Date(to).toISOString()]);
     const fetches = issued.filter((q) => /pulse_presence_events/.test(q.text));
     expect(fetches).toHaveLength(3);
-    // lo = IST midnight at or before the chunk start, minus 24 h; hi = chunk end + 2 h
-    expect(fetches[0]!.vals).toEqual([new Date(mid("2026-10-02") - 86_400_000).toISOString(), new Date(mid("2026-10-03") + 2 * 3_600_000).toISOString()]);
-    expect(fetches[1]!.vals[0]).toBe(new Date(mid("2026-10-03") - 86_400_000).toISOString());
+    // lo = IST midnight at or before the chunk start, minus 24 h; hi = end of the WHOLE range + 2 h, for every day
+    const hi = new Date(to + 2 * 3_600_000).toISOString();
+    expect(fetches[0]!.vals).toEqual([new Date(mid("2026-10-02") - 86_400_000).toISOString(), hi]);
+    expect(fetches[1]!.vals).toEqual([new Date(mid("2026-10-03") - 86_400_000).toISOString(), hi]);
+    expect(fetches[2]!.vals).toEqual([new Date(mid("2026-10-04") - 86_400_000).toISOString(), hi]);
   });
 
   it("stops before a new day once the deadline has passed and says where to resume", async () => {
@@ -496,6 +537,43 @@ describe("refreshWindowsByDay and the bounded event load", () => {
     expect(txns).toHaveLength(1);
     expect(r.complete).toBe(false);
     expect(r.next_from).toBe(new Date(mid("2026-10-03")).toISOString());
+  });
+
+  it("a consult opened 23:30 IST keeps its explicit close at 02:30 IST next day: one row, endConsult", async () => {
+    const d1 = mid("2026-10-03");
+    const d2 = mid("2026-10-04");
+    const evs: PresenceEvent[] = [
+      ev("encounter_open", new Date(d2 - 30 * 60_000).toISOString(), { enc: "N1", uid: "UA" }), //          23:30 IST on 3 Oct
+      ev("encounter_close", new Date(d2 + 150 * 60_000).toISOString(), { enc: "N1", uid: "UA" }), //        02:30 IST on 4 Oct
+    ];
+    // a database that honours the read window the adapter asks for: params are [lo, hi]
+    const windowed = (q: Q) => {
+      if (/room_install/.test(q.text)) return [];
+      if (!/pulse_presence_events/.test(q.text)) return [];
+      const [lo, hi] = (q.vals as string[]).map((x) => Date.parse(x));
+      return evs.filter((e) => Date.parse(e.ts as string) >= lo! && Date.parse(e.ts as string) <= hi!);
+    };
+    const asOf = d2 + 24 * 3_600_000;
+    const sentRows = (txns: Q[][]) =>
+      txns.flatMap((t) => t.filter((q) => /INSERT/.test(q.text))).flatMap((q) => JSON.parse(q.vals[0] as string) as Array<Record<string, unknown>>);
+
+    const { db, txns } = fakeDb(windowed);
+    const r = await refreshWindowsByDay(db, { from: d1, to: d2 + 6 * 3_600_000 }, { asOf });
+    expect(r.chunks).toBe(2);
+    const rows = sentRows(txns);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      consult_key: `N1@${M}`,
+      t_open: new Date(d2 - 30 * 60_000).toISOString(),
+      t_close: new Date(d2 + 150 * 60_000).toISOString(),
+      close_reason: "endConsult",
+    });
+    expect(r.summary.consults).toBe(1);
+
+    // control: day 1 on its own reads only to its own end + 2 h (02:00 IST), misses the 02:30 close, and caps at 90 min
+    const lone = fakeDb(windowed);
+    await refreshWindows(lone.db, { from: d1, to: d2 }, { asOf });
+    expect(sentRows(lone.txns)[0]).toMatchObject({ close_reason: "cap_90m" });
   });
 
   it("merges the per-day summaries", async () => {

@@ -9,6 +9,7 @@ vi.mock("@/lib/db", () => ({ sql: Object.assign(() => [], { transaction: async (
 vi.mock("@/lib/encounter-windows", () => ({ refreshWindowsByDay: M.refresh, queryWindows: M.query }));
 
 import { GET as cronGET } from "@/app/api/cron/encounter-windows/route";
+import { GET as sweepGET } from "@/app/api/cron/encounter-windows/sweep/route";
 import { GET as readGET } from "@/app/api/encounter-windows/route";
 import { NextRequest } from "next/server";
 
@@ -31,8 +32,8 @@ const RESULT = {
   summary: { consults: 3, unpaired_refs: 4, by_quality: { clean: 3 }, by_attribution: { rows: 3 }, by_close_reason: { endConsult: 3 } },
 };
 
-const cronReq = (auth?: string, qs = "") =>
-  new Request(`https://x.test/api/cron/encounter-windows${qs}`, { headers: auth ? { authorization: auth } : {} });
+const cronReq = (auth?: string, qs = "", path = "") =>
+  new Request(`https://x.test/api/cron/encounter-windows${path}${qs}`, { headers: auth ? { authorization: auth } : {} });
 const readReq = (qs = "", auth = "Bearer tok") =>
   new NextRequest(`https://x.test/api/encounter-windows${qs}`, { headers: auth ? { authorization: auth } : {} });
 
@@ -99,6 +100,36 @@ describe("GET /api/cron/encounter-windows", () => {
     expect(JSON.stringify(await r.json())).not.toContain("postgres");
     const [, range] = M.refresh.mock.calls[0]!;
     expect(range.to - range.from).toBe(720 * 3_600_000 + 5 * 60_000);
+  });
+});
+
+describe("GET /api/cron/encounter-windows/sweep", () => {
+  it("is the hourly 48 h sweep with no query string, behind the same bearer", async () => {
+    delete process.env.CRON_SECRET;
+    expect((await sweepGET(cronReq("Bearer x", "", "/sweep"))).status).toBe(503);
+    process.env.CRON_SECRET = "s3cret";
+    expect((await sweepGET(cronReq(undefined, "", "/sweep"))).status).toBe(401);
+    expect(M.refresh).not.toHaveBeenCalled();
+    M.refresh.mockResolvedValue(RESULT);
+    const r = await sweepGET(cronReq("Bearer s3cret", "", "/sweep"));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, mode: "sweep", hours: 48 });
+    const [, range] = M.refresh.mock.calls[0]!;
+    expect((range.to - range.from - 5 * 60_000) / 3_600_000).toBe(48);
+  });
+
+  it("ignores ?mode= (the door decides), while ?hours= is still a backfill", async () => {
+    process.env.CRON_SECRET = "s3cret";
+    M.refresh.mockResolvedValue(RESULT);
+    expect(await (await sweepGET(cronReq("Bearer s3cret", "?mode=recent", "/sweep"))).json()).toMatchObject({ mode: "sweep", hours: 48 });
+    expect(await (await sweepGET(cronReq("Bearer s3cret", "?hours=10", "/sweep"))).json()).toMatchObject({ mode: "backfill", hours: 10 });
+  });
+
+  it("the base door still defaults to recent with no query string, and ?mode=sweep still works on it", async () => {
+    process.env.CRON_SECRET = "s3cret";
+    M.refresh.mockResolvedValue(RESULT);
+    expect(await (await cronGET(cronReq("Bearer s3cret"))).json()).toMatchObject({ mode: "recent", hours: 3 });
+    expect(await (await cronGET(cronReq("Bearer s3cret", "?mode=sweep"))).json()).toMatchObject({ mode: "sweep", hours: 48 });
   });
 });
 

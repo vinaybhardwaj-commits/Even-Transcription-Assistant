@@ -35,12 +35,12 @@ The standing rules are in `~/.claude/CLAUDE.md`. This file adds only what is spe
 - As named in the kickoff. Never read `.env*` into the transcript.
 
 ## Deploy
-- **Production deploys from `main`** (Vercel Production Branch Tracking = `main` since 1 Oct 2026); `vinay/s1-auto-drain` is a retired mirror. Corrected 4 Oct.
-- **A push to `vinay/s1-auto-drain` DEPLOYS TO PRODUCTION** (`target: production`). It builds a production deployment by itself, which takes the `evenscribe.app` / `www.evenscribe.app` aliases about a minute after the push. Treat every push to that branch as a production deploy: gate first, fast-forward only, then verify the served `dpl_` id and `/api/health`. Verified repeatedly since 22 Sep, for example `086e341` → `dpl_E5vWkHYqddiELAyBQVmswUSrN8bM` and `a30186c` → `dpl_EnpLbxzcSn4L8kyEZbjRrAaHrh2R` (24 Sep), both `target: production`, `source: git`. (Until 21 Sep a push built only a preview, `target: null`; e.g. 19 Sep `843e7b2` sat as a preview while production stayed on `75cb0f9`. That is no longer true.) Corrected 24 Sep, Fable ruling 33.
+- **A push to `main` IS A PRODUCTION DEPLOY** (`target: production`). Vercel Production Branch Tracking has been `main` since 1 Oct 2026 (project doc ETA-GIT-RECONCILE-01-OCT-2026). The push builds a production deployment by itself and takes the `evenscribe.app` / `www.evenscribe.app` aliases about a minute later. Treat every push to `main` as a production deploy: gate first, fast-forward only, then verify the served `dpl_` id and `/api/health`.
+- **`vinay/s1-auto-drain` is a retired mirror. Do not push to it.**
 - **Promoting** is now needed only to ship a commit the branch does NOT point at. Run `npx -y vercel promote <dpl_...>` from the `-ow` worktree. The `-y` is not optional: without it, npx's own "Ok to proceed?" prompt blocks forever and the call returns no output at all, which looks exactly like a slow build. Despite the name, this does not flip an alias — it CREATES A NEW production deployment from that commit, and it must, because Vercel bakes env vars at build time and a preview build carries preview values.
 - **The Vercel MCP does expose `request_promote`**, but it returns 422 on a `target: null` deployment. It is for production-to-production rollback, not for shipping a preview. Use the CLI. (Its `projectId` is the `prj_...` id, not the project name; the name 404s.)
 - **Vercel env vars are baked at BUILD time.** Adding or changing one requires a redeploy, not just a settings change. `parseFlag` THROWS on an unrecognised value, so a typo is a 500, not a default.
-- You do not deploy on your own. Because a push to `vinay/s1-auto-drain` IS a production deploy, push to it only when the Orchestrator's order names that push. The Orchestrator rules on every verdict and on every production push.
+- You do not deploy on your own. Because a push to `main` IS a production deploy, push to it only when the Orchestrator's order names that push. The Orchestrator rules on every verdict and on every production push.
 
 ## OpenRouter
 
