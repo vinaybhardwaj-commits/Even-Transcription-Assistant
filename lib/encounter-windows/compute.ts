@@ -53,7 +53,6 @@ type Consult = {
   openIds: number[];
   refs: Set<string>;
   uids: Array<{ uid: string; dn: string | null }>;
-  unpaired: number;
   // filled by closes
   open: number;
   close: number | null;
@@ -71,7 +70,7 @@ function lookupRoom(cw: ComputeOptions["crosswalk"], machine: string): RoomRef |
   return null;
 }
 
-type MachineResult = { consults: Consult[]; unpairedRefs: number[]; all: NEvent[] };
+type MachineResult = { consults: Consult[]; unpairedRefs: number[] };
 
 function pairMachine(machine: string, all: NEvent[], asOf: number): MachineResult {
   const es = all.filter((e) => e.source === "ext"); // already (t, id) sorted
@@ -96,7 +95,7 @@ function pairMachine(machine: string, all: NEvent[], asOf: number): MachineResul
     if (best) used.add(best.id);
     let c = byEnc.get(e.enc!);
     if (!c) {
-      c = { machine, enc: e.enc!, opens: [], openIds: [], refs: new Set(), uids: [], unpaired: 0, open: 0, close: null, closeReason: "open", closeIds: [] };
+      c = { machine, enc: e.enc!, opens: [], openIds: [], refs: new Set(), uids: [], open: 0, close: null, closeReason: "open", closeIds: [] };
       byEnc.set(e.enc!, c);
       consults.push(c);
     }
@@ -105,7 +104,7 @@ function pairMachine(machine: string, all: NEvent[], asOf: number): MachineResul
     if (best) {
       if (best.rx) c.refs.add(best.rx);
       c.openIds.push(best.id);
-    } else c.unpaired++;
+    }
     for (const r of [e, best]) if (r && r.uid) c.uids.push({ uid: r.uid, dn: r.dn });
   }
   const unpairedRefs = ro.filter((r) => !used.has(r.id)).map((r) => r.t);
@@ -165,7 +164,7 @@ function pairMachine(machine: string, all: NEvent[], asOf: number): MachineResul
       }
     }
   }
-  return { consults, unpairedRefs, all };
+  return { consults, unpairedRefs };
 }
 
 function topUid(uids: Consult["uids"]): { uid: string; dn: string | null } | null {
@@ -212,7 +211,6 @@ export function computeWindowsDetailed(events: PresenceEvent[], opts: ComputeOpt
 
   const rows: EncounterWindowRow[] = [];
   const summary = { consults: 0, unpaired_refs: 0, by_quality: emptyQuality(), by_attribution: emptyAttr(), by_close_reason: {} as Record<string, number> };
-  const seenKeys = new Set<string>();
 
   for (const machine of [...byMachine.keys()].sort()) {
     const all = byMachine.get(machine)!;
@@ -249,13 +247,9 @@ export function computeWindowsDetailed(events: PresenceEvent[], opts: ComputeOpt
       else if (attribution === "none") quality = "unattributed";
       else quality = "clean";
 
-      let key = c.enc;
-      if (seenKeys.has(key)) key = `${c.enc}@${machine}`;
-      seenKeys.add(key);
-
       const ids = [...new Set([...c.openIds, ...c.closeIds])].sort((a, b) => a - b);
       rows.push({
-        consult_key: key,
+        consult_key: `${c.enc}@${machine}`,
         consult_uid: c.enc,
         prescription_ref: c.refs.size ? [...c.refs][0]! : null,
         machine,

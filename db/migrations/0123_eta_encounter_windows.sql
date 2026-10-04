@@ -6,11 +6,14 @@
 -- machine. Turning them into "this consult ran from A to B in room R with doctor D" needs a resolver
 -- (consult pairing, 45-minute genuine-activity rule, nightly cutoff, dual-profile tiebreak). The resolver
 -- lives in lib/encounter-windows and is proven against 114 consults for 2-4 Oct 2026. This table is its
--- output, recomputed idempotently every 5 minutes by /api/cron/encounter-windows over the last 48 hours:
--- delete rows with t_open in range, insert fresh ones, one transaction. Nothing reads it yet but
--- GET /api/encounter-windows.
+-- output, recomputed idempotently by /api/cron/encounter-windows: every 5 minutes over the last 3 hours, and an
+-- hourly 48-hour sweep (minute 7) for late-arriving events. Per range: delete rows with t_open in range, insert
+-- fresh ones, one transaction. Nothing reads it yet but GET /api/encounter-windows.
 --
--- consult_key IS UNIQUE: consult_uid (the extension's encounter_id) when known, else 'ref:<prescription_ref>'.
+-- consult_key IS UNIQUE and is ALWAYS '<encounter_id>@<machine>' (the same encounter_id on two machines is two
+-- consults, and the key is a pure function of the consult, so a refresh can only ever update its own row).
+-- consult_uid keeps the bare encounter_id in its own column for the Pulse join; prescription_ref is the paired
+-- Pulse URL ref when one was paired. A prescription_ref-only open with no encounter_id is not a consult.
 -- room_id is FK-FREE on purpose: it is resolved at compute time through room_install.hostname = machine, and
 -- a retired or renamed room must not block or cascade over history ("mark, never delete").
 -- attribution says how doctor_uid was found: rows (the consult's own events), occupant (the occupancy
@@ -22,7 +25,7 @@
 -- through the app role that runs this migration (same as bench_window, 0057, and 0119's outbox). Nothing
 -- else reads it, so there is no role to grant to.
 --
--- ADDITIVE AND IDEMPOTENT. One CREATE TABLE IF NOT EXISTS, two CREATE INDEX IF NOT EXISTS, comments, and the
+-- ADDITIVE AND IDEMPOTENT. One CREATE TABLE IF NOT EXISTS, three CREATE INDEX IF NOT EXISTS (room+t_open, doctor+t_open, t_open), comments, and the
 -- schema_migrations row. No ALTER, DROP, UPDATE or DELETE on any existing table; old code ignores it.
 -- APPLY BEFORE the cron deploys: until then every run fails its one transaction and writes nothing.
 -- =====================================================================
@@ -59,7 +62,7 @@ CREATE INDEX IF NOT EXISTS eta_encounter_windows_open_idx        ON eta_encounte
 COMMENT ON TABLE eta_encounter_windows IS
   'One row per consult window derived from pulse_presence_events by lib/encounter-windows (resolver_version says which). Recomputed idempotently by /api/cron/encounter-windows: rows with t_open in the refreshed range are deleted and reinserted in one transaction. Ids, times and doctor_uid/display_name only: no patient data.';
 COMMENT ON COLUMN eta_encounter_windows.consult_key IS
-  'consult_uid when known, else ref:<prescription_ref>. UNIQUE.';
+  '<encounter_id>@<machine>, always. UNIQUE. The bare encounter_id is in consult_uid.';
 COMMENT ON COLUMN eta_encounter_windows.room_id IS
   'FK-free. Resolved at compute time from room_install.hostname = machine.';
 COMMENT ON COLUMN eta_encounter_windows.source_event_ids IS

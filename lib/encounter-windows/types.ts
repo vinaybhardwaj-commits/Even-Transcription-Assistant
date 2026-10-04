@@ -36,6 +36,7 @@ export type Quality = "clean" | "ambiguous" | "multi_doctor" | "unclosed" | "una
 
 /** One row of eta_encounter_windows. Timestamps are ISO-8601 UTC strings. */
 export type EncounterWindowRow = {
+  /** `${consult_uid}@${machine}`, always. UNIQUE. consult_uid keeps its own column for the Pulse join. */
   consult_key: string;
   consult_uid: string | null;
   prescription_ref: string | null;
@@ -68,8 +69,6 @@ export type ComputeOptions = {
   nightlyCutoff?: string;
   lookbackH?: number;
   focusMin?: number;
-  /** Test hook: also return per-consult internals. */
-  debug?: boolean;
 };
 
 export type ComputeSummary = {

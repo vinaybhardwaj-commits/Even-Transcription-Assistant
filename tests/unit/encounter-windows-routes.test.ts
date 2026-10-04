@@ -6,7 +6,7 @@ const M = vi.hoisted(() => ({
   query: vi.fn(),
 }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign(() => [], { transaction: async () => [] }) }));
-vi.mock("@/lib/encounter-windows", () => ({ refreshWindows: M.refresh, queryWindows: M.query }));
+vi.mock("@/lib/encounter-windows", () => ({ refreshWindowsByDay: M.refresh, queryWindows: M.query }));
 
 import { GET as cronGET } from "@/app/api/cron/encounter-windows/route";
 import { GET as readGET } from "@/app/api/encounter-windows/route";
@@ -25,6 +25,11 @@ afterEach(() => {
   }
   vi.restoreAllMocks();
 });
+
+const RESULT = {
+  range: { from: "a", to: "b" }, chunks: 1, complete: true, next_from: null, events: 10, deleted: 2, inserted: 3,
+  summary: { consults: 3, unpaired_refs: 4, by_quality: { clean: 3 }, by_attribution: { rows: 3 }, by_close_reason: { endConsult: 3 } },
+};
 
 const cronReq = (auth?: string, qs = "") =>
   new Request(`https://x.test/api/cron/encounter-windows${qs}`, { headers: auth ? { authorization: auth } : {} });
@@ -48,18 +53,42 @@ describe("GET /api/cron/encounter-windows", () => {
 
   it("refreshes the last 48 h and returns counts only", async () => {
     process.env.CRON_SECRET = "s3cret";
-    M.refresh.mockResolvedValue({
-      range: { from: "a", to: "b" }, events: 10, deleted: 2, inserted: 3,
-      summary: { consults: 3, unpaired_refs: 4, by_quality: { clean: 3 }, by_attribution: { rows: 3 }, by_close_reason: { endConsult: 3 } },
-    });
+    M.refresh.mockResolvedValue(RESULT);
     const before = Date.now();
     const r = await cronGET(cronReq("Bearer s3cret"));
     expect(r.status).toBe(200);
     const body = await r.json();
-    expect(body).toMatchObject({ ok: true, hours: 48, consults: 3, unpaired_refs: 4, inserted: 3, by_quality: { clean: 3 } });
-    const [, range] = M.refresh.mock.calls[0]!;
-    expect(range.to - range.from).toBe(48 * 3_600_000 + 5 * 60_000);
-    expect(range.from).toBeGreaterThanOrEqual(before - 48 * 3_600_000);
+    expect(body).toMatchObject({ ok: true, mode: "recent", hours: 3, consults: 3, unpaired_refs: 4, inserted: 3, complete: true, by_quality: { clean: 3 } });
+    const [, range, opts] = M.refresh.mock.calls[0]!;
+    expect(range.to - range.from).toBe(3 * 3_600_000 + 5 * 60_000); // the last 3 h by default
+    expect(range.from).toBeGreaterThanOrEqual(before - 3 * 3_600_000);
+    expect(opts.deadlineMs).toBeGreaterThan(before);
+  });
+
+  it("?mode=recent is the 3 h refresh and ?mode=sweep the 48 h sweep", async () => {
+    process.env.CRON_SECRET = "s3cret";
+    M.refresh.mockResolvedValue(RESULT);
+    await cronGET(cronReq("Bearer s3cret", "?mode=recent"));
+    await cronGET(cronReq("Bearer s3cret", "?mode=sweep"));
+    const spans = M.refresh.mock.calls.map(([, r]) => (r.to - r.from - 5 * 60_000) / 3_600_000);
+    expect(spans).toEqual([3, 48]);
+  });
+
+  it("400 on an unknown mode or bad backfill params, running nothing", async () => {
+    process.env.CRON_SECRET = "s3cret";
+    for (const qs of ["?mode=bogus", "?hours=abc", "?hours=0", "?hours=24&from=not-a-date"]) {
+      expect((await cronGET(cronReq("Bearer s3cret", qs))).status, qs).toBe(400);
+    }
+    expect(M.refresh).not.toHaveBeenCalled();
+  });
+
+  it("backfill: ?hours=N (clamped to 720) and ?from= resume a stopped run; reports complete=false and next_from", async () => {
+    process.env.CRON_SECRET = "s3cret";
+    M.refresh.mockResolvedValue({ ...RESULT, complete: false, next_from: "2026-10-03T18:30:00.000Z" });
+    const r = await cronGET(cronReq("Bearer s3cret", "?hours=72&from=2026-10-01T00:00:00Z"));
+    const body = await r.json();
+    expect(body).toMatchObject({ mode: "backfill", hours: 72, complete: false, next_from: "2026-10-03T18:30:00.000Z" });
+    expect(M.refresh.mock.calls[0]![1].from).toBe(Date.parse("2026-10-01T00:00:00Z"));
   });
 
   it("widens with ?hours= (clamped) and reports a failed refresh as 500 without leaking the reason", async () => {
@@ -93,10 +122,10 @@ describe("GET /api/encounter-windows", () => {
 
   it("passes the filters through and returns the rows", async () => {
     process.env.ADMIN_TOKEN = "tok";
-    M.query.mockResolvedValue([{ consult_key: "E1" }]);
+    M.query.mockResolvedValue([{ consult_key: "E1@m" }]);
     const r = await readGET(readReq("?room_id=room_x&doctor_uid=UA&from=2026-10-03T00:00:00Z&to=2026-10-04T00:00:00Z&quality=clean&limit=50"));
     expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ ok: true, count: 1, windows: [{ consult_key: "E1" }] });
+    expect(await r.json()).toEqual({ ok: true, count: 1, windows: [{ consult_key: "E1@m" }] });
     expect(M.query.mock.calls[0]![1]).toEqual({
       room_id: "room_x", doctor_uid: "UA", from: "2026-10-03T00:00:00.000Z", to: "2026-10-04T00:00:00.000Z", quality: "clean", limit: 50,
     });

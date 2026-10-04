@@ -8,8 +8,20 @@
  * string arrays, and every value is a bound parameter.
  *
  * refreshWindows(db, {from, to}) recomputes the range idempotently: delete rows with from <= t_open < to, insert
- * the fresh ones, in a single transaction. The insert is ON CONFLICT (consult_key) DO UPDATE as a belt: a consult
- * whose t_open drifted across the range edge between two runs would otherwise hit the unique key.
+ * the fresh ones, in a single transaction. consult_key is `${encounter_id}@${machine}`, a pure function of the
+ * consult, so the insert is ON CONFLICT (consult_key) DO UPDATE: a consult whose t_open drifted across the range
+ * edge between two runs updates its own row and can never touch another consult's.
+ * refreshWindowsByDay splits a long range at IST midnights and runs one refreshWindows (one transaction) per day.
+ *
+ * EVENT LOAD. Per range the adapter reads events from (the IST midnight before `from`) - 24 h to `to` + 2 h, not a
+ * flat 72 h: the nightly cutoff means a stream's presence can never depend on activity older than the previous IST
+ * midnight, and 24 h before that covers a login/logout control event.
+ *
+ * FOCUS FILTER. Background heartbeats (tab_focus false) are dropped at the database, EXCEPT where tab_focus flips
+ * from the previous non-logout ext event of the same (machine, doctor_uid) stream. The occupancy tiebreak reads each
+ * stream's LATEST tab_focus flag; a stream that was focused and then backgrounded must read unfocused, which needs
+ * the flip event. Repeats of the same flag carry nothing the resolver reads, so the latest kept event always has
+ * the same flag as the latest real event. keepFocusFlips() in ./filter.ts is the same rule in TypeScript.
  */
 import type { NeonQueryFunction } from "@neondatabase/serverless";
 import { computeWindowsDetailed } from "./compute";
@@ -26,8 +38,13 @@ import {
 
 export type WindowsDb = NeonQueryFunction<false, false>;
 
-const LOOKBACK_H = 72; // occupancy lookback (matches the resolver default)
+const DAY_MS = 86_400_000;
+const IST_MS = 19_800_000;
 const TAIL_MS = 2 * 3_600_000; // events after `to` that can still close a consult opened before it
+const PRE_MIDNIGHT_MS = DAY_MS; // control events (login/logout) before the IST midnight preceding `from`
+
+/** The IST midnight at or before t, as epoch ms. */
+export const istMidnightAtOrBefore = (t: number): number => Math.floor((t + IST_MS) / DAY_MS) * DAY_MS - IST_MS;
 
 const iso = (x: unknown): string => new Date(x as string | number | Date).toISOString();
 const isoOrNull = (x: unknown): string | null => (x == null ? null : iso(x));
@@ -46,25 +63,38 @@ export async function loadCrosswalk(db: WindowsDb): Promise<Map<string, RoomRef>
 }
 
 /**
- * The events the resolver needs: ext + resolver rows, background heartbeats dropped (they never count as
- * activity), from `from - lookback` to `to + 2h`.
+ * The events the resolver needs: ext + resolver rows from (IST midnight before `from`) - 24 h to `to` + 2 h, with
+ * background heartbeats dropped except focus flips (see the FOCUS FILTER note in the file header).
  */
 export async function fetchEvents(db: WindowsDb, from: Date, to: Date): Promise<PresenceEvent[]> {
-  const lo = new Date(from.getTime() - LOOKBACK_H * 3_600_000).toISOString();
+  const lo = new Date(istMidnightAtOrBefore(from.getTime()) - PRE_MIDNIGHT_MS).toISOString();
   const hi = new Date(to.getTime() + TAIL_MS).toISOString();
   const rows = (await db`
-    SELECT id, source, machine, event, ts,
-           payload->>'doctor_uid'       AS uid,
-           payload->>'display_name'     AS dn,
-           payload->>'encounter_id'     AS enc,
-           payload->>'prescription_ref' AS rx,
-           payload->>'tab_focus'        AS focus,
-           payload->>'reason'           AS reason
-      FROM pulse_presence_events
-     WHERE source IN ('ext', 'resolver')
-       AND machine IS NOT NULL
-       AND ts >= ${lo}::timestamptz AND ts <= ${hi}::timestamptz
-       AND (event <> 'heartbeat' OR payload->>'tab_focus' = 'true')
+    WITH base AS (
+      SELECT id, source, machine, event, ts,
+             payload->>'doctor_uid'       AS uid,
+             payload->>'display_name'     AS dn,
+             payload->>'encounter_id'     AS enc,
+             payload->>'prescription_ref' AS rx,
+             payload->>'tab_focus'        AS focus,
+             payload->>'reason'           AS reason
+        FROM pulse_presence_events
+       WHERE source IN ('ext', 'resolver')
+         AND machine IS NOT NULL
+         AND ts >= ${lo}::timestamptz AND ts <= ${hi}::timestamptz
+    ),
+    flips AS (
+      SELECT id FROM (
+        SELECT id, (focus = 'true') AS f,
+               LAG(focus = 'true') OVER (PARTITION BY machine, uid ORDER BY ts, id) AS prev_f
+          FROM base
+         WHERE source = 'ext' AND event <> 'logout'
+      ) s
+      WHERE prev_f IS DISTINCT FROM f
+    )
+    SELECT id, source, machine, event, ts, uid, dn, enc, rx, focus, reason
+      FROM base
+     WHERE event <> 'heartbeat' OR focus = 'true' OR id IN (SELECT id FROM flips)
      ORDER BY ts, id
   `) as unknown as Array<PresenceEvent>;
   return rows;
@@ -128,6 +158,89 @@ export async function refreshWindows(
     events: events.length,
     deleted: count(0),
     inserted: rows.length === 0 ? 0 : count(1),
+    summary,
+  };
+}
+
+export type RefreshByDayResult = {
+  range: { from: string; to: string };
+  chunks: number;
+  /** false when the time budget ran out; resume with next_from. */
+  complete: boolean;
+  next_from: string | null;
+  events: number;
+  deleted: number;
+  inserted: number;
+  summary: ComputeSummary;
+};
+
+const emptySummary = (): ComputeSummary => ({
+  consults: 0,
+  unpaired_refs: 0,
+  by_quality: { clean: 0, ambiguous: 0, multi_doctor: 0, unclosed: 0, unattributed: 0 },
+  by_attribution: { rows: 0, occupant: 0, none: 0 },
+  by_close_reason: {},
+});
+
+function addSummary(a: ComputeSummary, b: ComputeSummary): void {
+  a.consults += b.consults;
+  a.unpaired_refs += b.unpaired_refs;
+  for (const k of Object.keys(b.by_quality) as Quality[]) a.by_quality[k] += b.by_quality[k];
+  for (const k of Object.keys(b.by_attribution) as Attribution[]) a.by_attribution[k] += b.by_attribution[k];
+  for (const [k, v] of Object.entries(b.by_close_reason)) a.by_close_reason[k] = (a.by_close_reason[k] ?? 0) + v;
+}
+
+/** [from, to) cut at every IST midnight, oldest first. */
+export function splitByIstDay(from: number, to: number): Array<{ from: number; to: number }> {
+  const out: Array<{ from: number; to: number }> = [];
+  let a = from;
+  while (a < to) {
+    const next = Math.min(istMidnightAtOrBefore(a) + DAY_MS, to);
+    out.push({ from: a, to: next });
+    a = next;
+  }
+  return out;
+}
+
+/**
+ * refreshWindows per IST day, oldest first: each day is its own fetch and its own transaction, so a long backfill
+ * never holds one huge transaction and a failure part-way leaves earlier days committed. With deadlineMs set, stops
+ * before starting a day that would begin after the deadline and returns complete=false and next_from.
+ */
+export async function refreshWindowsByDay(
+  db: WindowsDb,
+  range: { from: string | number | Date; to: string | number | Date },
+  opts: { asOf?: string | number | Date; deadlineMs?: number } = {},
+): Promise<RefreshByDayResult> {
+  const from = new Date(range.from).getTime();
+  const to = new Date(range.to).getTime();
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) throw new Error("refreshWindowsByDay: bad range");
+  const summary = emptySummary();
+  let events = 0;
+  let deleted = 0;
+  let inserted = 0;
+  let chunks = 0;
+  let nextFrom: string | null = null;
+  for (const c of splitByIstDay(from, to)) {
+    if (opts.deadlineMs !== undefined && chunks > 0 && Date.now() > opts.deadlineMs) {
+      nextFrom = new Date(c.from).toISOString();
+      break;
+    }
+    const r = await refreshWindows(db, { from: c.from, to: c.to }, opts.asOf === undefined ? {} : { asOf: opts.asOf });
+    chunks++;
+    events += r.events;
+    deleted += r.deleted;
+    inserted += r.inserted;
+    addSummary(summary, r.summary);
+  }
+  return {
+    range: { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+    chunks,
+    complete: nextFrom === null,
+    next_from: nextFrom,
+    events,
+    deleted,
+    inserted,
     summary,
   };
 }

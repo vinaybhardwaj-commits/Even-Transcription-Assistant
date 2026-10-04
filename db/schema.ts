@@ -419,7 +419,7 @@ export const pulsePresenceEvents = pgTable("pulse_presence_events", {
 // lib/encounter-windows and recomputed by /api/cron/encounter-windows. Value sets are CHECKs in SQL.
 export const etaEncounterWindows = pgTable("eta_encounter_windows", {
   id:              serial("id").primaryKey(),
-  consultKey:      text("consult_key").notNull(),            // consult_uid, else ref:<prescription_ref>; UNIQUE
+  consultKey:      text("consult_key").notNull(),            // `${encounter_id}@${machine}`, always; UNIQUE (bare id in consult_uid)
   consultUid:      text("consult_uid"),
   prescriptionRef: text("prescription_ref"),
   machine:         text("machine").notNull(),

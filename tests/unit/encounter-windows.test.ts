@@ -13,7 +13,11 @@ import { join } from "node:path";
 import {
   computeWindows,
   computeWindowsDetailed,
+  keepFocusFlips,
+  istMidnightAtOrBefore,
   refreshWindows,
+  refreshWindowsByDay,
+  splitByIstDay,
   RESOLVER_VERSION,
   type PresenceEvent,
   type RoomRef,
@@ -68,6 +72,8 @@ describe("computeWindows reproduces the reference run (2-4 Oct 2026)", () => {
     }
     expect(taken.size).toBe(114);
     expect(new Set(rows.map((r) => r.consult_key)).size).toBe(114);
+    // the key is always <encounter_id>@<machine>; the bare encounter id is its own column
+    for (const r of rows) expect(r.consult_key).toBe(`${r.consult_uid}@${r.machine}`);
   });
 
   it("attributes like the reference: 85 from rows, 15 from the occupant, 14 none (all at OPD 5)", () => {
@@ -159,7 +165,8 @@ describe("pairing edge cases", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.t_open).toBe(at(0));
     expect(rows[0]!.prescription_ref).toBe("R1");
-    expect(rows[0]!.consult_key).toBe("E1");
+    expect(rows[0]!.consult_key).toBe(`E1@${M}`);
+    expect(rows[0]!.consult_uid).toBe("E1");
     expect(rows[0]!.close_reason).toBe("url_clear");
     expect(rows[0]!.t_close).toBe(at(5));
   });
@@ -243,12 +250,17 @@ describe("pairing edge cases", () => {
     expect(stillOpen.quality).toBe("unclosed");
   });
 
-  it("keeps the same consult_key and one row per consult across machines and runs", () => {
+  it("keys every consult `<encounter_id>@<machine>`, independent of run order, range or other machines", () => {
     const other = { machine: "EHRC-TEST2s-Mac-mini" };
-    const es = [open(at(0), "E1"), close(at(3), { enc: "E1" }), ev("encounter_open", at(1), { enc: "E1", ...other }), ev("encounter_close", at(4), { enc: "E1", ...other })];
-    const { rows } = run(es);
-    expect(rows).toHaveLength(2);
-    expect(new Set(rows.map((r) => r.consult_key)).size).toBe(2);
+    const mine = [open(at(0), "E1"), close(at(3), { enc: "E1" })];
+    const theirs = [ev("encounter_open", at(1), { enc: "E1", ...other }), ev("encounter_close", at(4), { enc: "E1", ...other })];
+    const both = run([...mine, ...theirs]).rows;
+    expect(both.map((r) => r.consult_key).sort()).toEqual(["E1@EHRC-TEST1s-Mac-mini", "E1@EHRC-TEST2s-Mac-mini"]);
+    // the same consult gets the same key whether or not the other machine's identical encounter_id is in the run,
+    // and whichever order the machines come in (the old suffix-on-collision scheme depended on both)
+    expect(run(mine).rows[0]!.consult_key).toBe("E1@EHRC-TEST1s-Mac-mini");
+    expect(run([...theirs, ...mine]).rows.map((r) => r.consult_key).sort()).toEqual(both.map((r) => r.consult_key).sort());
+    expect(computeWindows([...mine, ...theirs], { from: at(0, 30), asOf: at(30) }).map((r) => r.consult_key)).toEqual(["E1@EHRC-TEST2s-Mac-mini"]);
   });
 });
 
@@ -360,7 +372,7 @@ describe("refreshWindows", () => {
     expect(txns[0]![1]!.text).toMatch(/ON CONFLICT \(consult_key\) DO UPDATE/);
     const sent = JSON.parse(txns[0]![1]!.vals[0] as string) as Array<{ consult_key: string; room_id: string; doctor_uid: string }>;
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ consult_key: "E1", room_id: "room_x", doctor_uid: "UA" });
+    expect(sent[0]).toMatchObject({ consult_key: "E1@EHRC-TEST1s-Mac-mini", consult_uid: "E1", room_id: "room_x", doctor_uid: "UA" });
     expect(r.summary.consults).toBe(1);
     expect(r.inserted).toBe(1);
     expect(r.events).toBe(2);
@@ -380,5 +392,125 @@ describe("refreshWindows", () => {
     expect(txns[0]).toHaveLength(1);
     expect(r.inserted).toBe(0);
     await expect(refreshWindows(db, { from: now, to: now - 1 })).rejects.toThrow(/bad range/);
+  });
+});
+
+// ---------------------------------------------------------------- focus filter (fetchEvents' rule)
+describe("background-heartbeat filter keeps focus flips", () => {
+  const hb = (sec: number, uid: string, focus: boolean) => ev("heartbeat", at(0, sec), { uid, focus });
+  // Refuter's case: A focused 0-5 min then background to 20 min; B focused 6-20 min; consult at 20.2 min, rows carry no uid.
+  const scenario = (): PresenceEvent[] => {
+    const es: PresenceEvent[] = [];
+    for (let sec = 0; sec <= 5 * 60; sec += 30) es.push(hb(sec, "UA", true));
+    for (let sec = 5 * 60 + 30; sec <= 20 * 60; sec += 30) es.push(hb(sec, "UA", false));
+    for (let sec = 6 * 60; sec <= 20 * 60; sec += 30) es.push(hb(sec, "UB", true));
+    es.push(open(at(20, 12), "E1"), close(at(24), { enc: "E1" }));
+    return es;
+  };
+  const dropAllBackground = (es: PresenceEvent[]) => es.filter((e) => e.event !== "heartbeat" || e.focus === true);
+
+  it("with the fetch-filtered set the occupant is B (A reads backgrounded), quality multi_doctor", () => {
+    const all = scenario();
+    const kept = keepFocusFlips(all);
+    expect(kept.length).toBeLessThan(all.length);
+    // A keeps exactly one background heartbeat: the flip at 5.5 min
+    expect(kept.filter((e) => e.uid === "UA" && e.focus === false)).toHaveLength(1);
+    const r = computeWindows(kept)[0]!;
+    expect(r.attribution).toBe("occupant");
+    expect(r.doctor_uid).toBe("UB");
+    expect(r.quality).toBe("multi_doctor");
+    // same answer as the full, unfiltered stream
+    expect(computeWindows(all)[0]).toEqual(r);
+  });
+
+  it("dropping ALL background heartbeats (the old fetch) makes both profiles look focused: ambiguous", () => {
+    const r = computeWindows(dropAllBackground(scenario()))[0]!;
+    expect(r.attribution).toBe("none");
+    expect(r.quality).toBe("ambiguous");
+  });
+
+  it("keeps the first event of a stream, every flip in both directions and non-heartbeats; drops repeats and logout-adjacent repeats", () => {
+    const es = [
+      hb(0, "UA", false), // first of the stream -> kept
+      hb(30, "UA", false), // repeat -> dropped
+      hb(60, "UA", true), // focused -> kept
+      hb(90, "UA", false), // flip true -> false -> kept
+      hb(120, "UA", false), // repeat -> dropped
+      ev("logout", at(0, 130), { uid: "UA", focus: false }), // not a heartbeat -> kept
+      hb(150, "UA", false), // previous NON-logout event was false -> dropped
+      hb(0, "UB", false), // another stream: first -> kept
+      hb(30, "UB", false), // repeat -> dropped
+    ];
+    const kept = keepFocusFlips(es).map((e) => `${e.uid}@${String(e.ts).slice(14, 19)}`);
+    expect(kept).toEqual(["UA@00:00", "UB@00:00", "UA@01:00", "UA@01:30", "UA@02:10"]);
+  });
+});
+
+// ---------------------------------------------------------------- refresh by IST day + bounded lookback
+describe("refreshWindowsByDay and the bounded event load", () => {
+  const mid = (d: string) => Date.parse(`${d}T00:00:00+05:30`);
+
+  it("splits at IST midnights, oldest first, covering the range exactly", () => {
+    const from = mid("2026-10-02") + 5 * 3_600_000;
+    const to = mid("2026-10-05") + 3_600_000;
+    const chunks = splitByIstDay(from, to);
+    expect(chunks).toEqual([
+      { from, to: mid("2026-10-03") },
+      { from: mid("2026-10-03"), to: mid("2026-10-04") },
+      { from: mid("2026-10-04"), to: mid("2026-10-05") },
+      { from: mid("2026-10-05"), to },
+    ]);
+    expect(splitByIstDay(from, from + 1000)).toEqual([{ from, to: from + 1000 }]);
+    expect(istMidnightAtOrBefore(from)).toBe(mid("2026-10-02"));
+    expect(istMidnightAtOrBefore(mid("2026-10-03"))).toBe(mid("2026-10-03"));
+  });
+
+  const responder = (q: Q) => (/room_install/.test(q.text) ? [] : []);
+
+  it("runs one transaction per IST day and reads events from (IST midnight before the day) - 24 h", async () => {
+    const { db, txns, issued } = fakeDb(responder);
+    const from = mid("2026-10-02") + 5 * 3_600_000;
+    const to = mid("2026-10-04") + 3_600_000;
+    const r = await refreshWindowsByDay(db, { from, to }, { asOf: to });
+    expect(r.chunks).toBe(3);
+    expect(r.complete).toBe(true);
+    expect(r.next_from).toBeNull();
+    expect(txns).toHaveLength(3);
+    const dels = txns.map((t) => t[0]!.vals as string[]);
+    expect(dels[0]).toEqual([new Date(from).toISOString(), new Date(mid("2026-10-03")).toISOString()]);
+    expect(dels[1]).toEqual([new Date(mid("2026-10-03")).toISOString(), new Date(mid("2026-10-04")).toISOString()]);
+    expect(dels[2]).toEqual([new Date(mid("2026-10-04")).toISOString(), new Date(to).toISOString()]);
+    const fetches = issued.filter((q) => /pulse_presence_events/.test(q.text));
+    expect(fetches).toHaveLength(3);
+    // lo = IST midnight at or before the chunk start, minus 24 h; hi = chunk end + 2 h
+    expect(fetches[0]!.vals).toEqual([new Date(mid("2026-10-02") - 86_400_000).toISOString(), new Date(mid("2026-10-03") + 2 * 3_600_000).toISOString()]);
+    expect(fetches[1]!.vals[0]).toBe(new Date(mid("2026-10-03") - 86_400_000).toISOString());
+  });
+
+  it("stops before a new day once the deadline has passed and says where to resume", async () => {
+    const { db, txns } = fakeDb(responder);
+    const from = mid("2026-10-02");
+    const to = mid("2026-10-05");
+    const r = await refreshWindowsByDay(db, { from, to }, { asOf: to, deadlineMs: Date.now() - 1 });
+    expect(r.chunks).toBe(1); // always does the first day
+    expect(txns).toHaveLength(1);
+    expect(r.complete).toBe(false);
+    expect(r.next_from).toBe(new Date(mid("2026-10-03")).toISOString());
+  });
+
+  it("merges the per-day summaries", async () => {
+    const day = mid("2026-10-03");
+    const evs: PresenceEvent[] = [
+      ev("encounter_open", new Date(day + 3_600_000).toISOString(), { enc: "D1", uid: "UA" }),
+      ev("encounter_close", new Date(day + 3_900_000).toISOString(), { enc: "D1", uid: "UA" }),
+      ev("encounter_open", new Date(day + 86_400_000 + 3_600_000).toISOString(), { enc: "D2", uid: "UA" }),
+      ev("encounter_close", new Date(day + 86_400_000 + 3_900_000).toISOString(), { enc: "D2", uid: "UA" }),
+    ];
+    const { db } = fakeDb((q) => (/pulse_presence_events/.test(q.text) ? evs : []));
+    const r = await refreshWindowsByDay(db, { from: day, to: day + 2 * 86_400_000 }, { asOf: day + 3 * 86_400_000 });
+    expect(r.chunks).toBe(2);
+    expect(r.summary.consults).toBe(2);
+    expect(r.summary.by_close_reason).toEqual({ endConsult: 2 });
+    expect(r.summary.by_attribution.rows).toBe(2);
   });
 });
