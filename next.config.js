@@ -11,6 +11,22 @@ const nextConfig = {
   // Ensure the bug log markdown is traced into the /buglog serverless function
   // so it can be read at request time (it is the source of truth — editing it +
   // pushing republishes /buglog with no separate sync step).
+  // Presence extension delivery: Chrome force-install reads /ext/<machine>/update.xml then the .crx.
+  async headers() {
+    return [
+      {
+        source: "/ext/:machine/:file.crx",
+        headers: [{ key: "Content-Type", value: "application/x-chrome-extension" }],
+      },
+      {
+        source: "/ext/:machine/update.xml",
+        headers: [
+          { key: "Content-Type", value: "text/xml; charset=utf-8" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+    ];
+  },
   outputFileTracingIncludes: {
     "/buglog": ["./content/ETA-BUG-LOG.md"],
   },
