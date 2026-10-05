@@ -94,25 +94,69 @@ describe("SILENT_WHILE_RECORDING", () => {
     expect(base({ tapeAdvancing: null, ring: [entry({ silent_polls: 80 })] }).flags).not.toContain("SILENT_WHILE_RECORDING");
   });
 
-  it("0.1.22: silence_ms decides on its own when present — SILENT_MS is the boundary", () => {
+  it("a short silence_ms does not veto a digital-zero run, and a long one does not raise the flag alone", () => {
     expect(C.SILENT_MS).toBe(80 * 1_500);
-    expect(base({ silenceMs: C.SILENT_MS - 1 }).flags).not.toContain("SILENT_WHILE_RECORDING");
-    expect(base({ silenceMs: C.SILENT_MS }).flags).toContain("SILENT_WHILE_RECORDING");
-    // Present and short overrides a long carried count: the app measured sound.
-    expect(base({ silenceMs: 0, ring: [entry({ silent_polls: 200 })] }).flags).not.toContain("SILENT_WHILE_RECORDING");
+    // The PCM clock under-states. Hours of exact zeros still count.
+    expect(base({ silenceMs: 0, ring: [entry({ silent_polls: 80, peak: 0, zero_ratio: 1 })] }).flags).toContain("SILENT_WHILE_RECORDING");
+    expect(base({ silenceMs: 1_500, ring: [entry({ silent_polls: 80, peak: 0, zero_ratio: 1 })] }).flags).toContain("SILENT_WHILE_RECORDING");
+    // Nothing above −55 dBFS is not bit-exact zero. A quiet live room must not page.
+    expect(base({ silenceMs: C.SILENT_MS * 10, ring: [entry({ silent_polls: 0, peak: 0.015, zero_ratio: 0.4 })] }).flags).not.toContain("SILENT_WHILE_RECORDING");
   });
 
-  it("0.1.21 fallback: no silence_ms, and the carried zero_ratio count decides", () => {
+  it("the carried zero_ratio count decides whether or not silence_ms was sent", () => {
     expect(base({ silenceMs: null, ring: [entry({ silent_polls: 80 })] }).flags).toContain("SILENT_WHILE_RECORDING");
     expect(base({ silenceMs: undefined, ring: [entry({ silent_polls: 80 })] }).flags).toContain("SILENT_WHILE_RECORDING");
+    expect(base({ silenceMs: C.SILENT_MS, ring: [entry({ silent_polls: 79 })] }).flags).not.toContain("SILENT_WHILE_RECORDING");
   });
 
   it("pollIsSilent: zero_ratio 0.98 is silent, 0.9799 is not, absent is not, paused is not", () => {
+    expect(C.SILENT_ZERO_RATIO).toBe(0.98);
     expect(C.pollIsSilent({ rec: true, tape_advancing: true, zero_ratio: 0.98 })).toBe(true);
     expect(C.pollIsSilent({ rec: true, tape_advancing: true, zero_ratio: 0.9799 })).toBe(false);
     expect(C.pollIsSilent({ rec: true, tape_advancing: true, zero_ratio: null })).toBe(false);
     expect(C.pollIsSilent({ rec: false, tape_advancing: true, zero_ratio: 1 })).toBe(false);
     expect(C.pollIsSilent({ rec: true, tape_advancing: false, zero_ratio: 1 })).toBe(false);
+  });
+
+  it("(a) exact zeros and an advancing tape accumulate to a fire inside two minutes", () => {
+    const dead = { rec: true, tape_advancing: true as const, zero_ratio: 1, peak: 0 };
+    expect(C.pollIsSilent(dead)).toBe(true);
+    expect(C.pollIsSilent({ ...dead, zero_ratio: 0.98, peak: 0 })).toBe(true);
+    expect(C.nextSilentPolls(79, dead)).toBe(80);
+    expect(base({
+      silenceMs: 1_500,
+      ring: [entry({ silent_polls: C.nextSilentPolls(79, dead), peak: 0, zero_ratio: 1 })],
+    }).flags).toContain("SILENT_WHILE_RECORDING");
+  });
+
+  it("(b) low ambient above the alive floor does not count and does not fire", () => {
+    expect(C.SILENT_PEAK_MAX).toBe(0.01);
+    // Speak-test band (0.012–0.026): the mic is alive even if most samples happen to be zero.
+    const alive = { rec: true, tape_advancing: true as const, zero_ratio: 0.99, peak: 0.015 };
+    expect(C.pollIsSilent(alive)).toBe(false);
+    expect(C.pollIsSilent({ rec: true, tape_advancing: true, zero_ratio: 1, peak: 0.01 })).toBe(false);
+    expect(C.pollIsSilent({ rec: true, tape_advancing: true, zero_ratio: 0.98, peak: 0.009 })).toBe(true);
+    // A noise floor keeps the ratio under the Bench line. A long silence_ms does not promote it.
+    const ambient = { rec: true, tape_advancing: true as const, zero_ratio: 0.4, peak: 0.015 };
+    expect(C.nextSilentPolls(40, ambient)).toBe(0);
+    expect(base({
+      silenceMs: C.SILENT_MS * 10,
+      ring: [entry({ silent_polls: 0, peak: 0.015, zero_ratio: 0.4 })],
+    }).flags).not.toContain("SILENT_WHILE_RECORDING");
+  });
+
+  it("(c) speak energy clears the run and the flag on that poll", () => {
+    const speak = { rec: true, tape_advancing: true as const, zero_ratio: 0.2, peak: 0.02 };
+    expect(C.pollIsSilent(speak)).toBe(false);
+    expect(C.nextSilentPolls(80, speak)).toBe(0);
+    const flagged = base({ ring: [entry({ silent_polls: 80, peak: 0, zero_ratio: 1 })] });
+    expect(flagged.flags).toContain("SILENT_WHILE_RECORDING");
+    const cleared = base({
+      ring: [entry({ silent_polls: C.nextSilentPolls(80, speak), peak: 0.02, zero_ratio: 0.2 })],
+      prev: flagged,
+      silenceMs: 0,
+    });
+    expect(cleared.flags).not.toContain("SILENT_WHILE_RECORDING");
   });
 });
 
@@ -334,6 +378,17 @@ describe("applyInstallPoll writes the ring in the same UPDATE (no extra round tr
     const ringEntry = calls[0]!.values.find((v) => typeof v === "string" && v.includes('"rec"')) as string;
     expect(JSON.parse(ringEntry).rec).toBe(false);
     // The silentNow parameter sits right after the ring entry.
+    const at = calls[0]!.values.indexOf(ringEntry);
+    expect(calls[0]!.values[at + 1]).toBe(false);
+  });
+
+  it("a live peak does not count as digital silence, even at zero_ratio 1", async () => {
+    responder = () => [{ install_id: "install_a" }];
+    await RI.applyInstallPoll(
+      { install_id: "install_a", tape_advancing: true, zero_ratio: "1", peak: "0.015" },
+      { recording: true, now: new Date(NOW_MS) },
+    );
+    const ringEntry = calls[0]!.values.find((v) => typeof v === "string" && v.includes('"rec"')) as string;
     const at = calls[0]!.values.indexOf(ringEntry);
     expect(calls[0]!.values[at + 1]).toBe(false);
   });

@@ -413,19 +413,39 @@ export const INSTALL_STATE_FLAGS: readonly InstallStateFlag[] = [
 export const POLL_RING_SIZE = 10;
 
 /**
- * SILENT_WHILE_RECORDING — eighty consecutive polls, about two minutes at the recording cadence.
+ * SILENT_WHILE_RECORDING — eighty consecutive polls, about two minutes at the recording cadence
+ * (`SILENT_POLLS` × `POLL_VISIBLE_MS` = 120 s). That is the capture-dead window: a room must not
+ * sit in exact digital zero for hours before the flag is raised, and two minutes is long enough
+ * that a pause between patients does not raise it — the tape runs through those.
  *
- * `zero_ratio` is BIT-EXACT zeros (B2-D7), not quiet: a quiet room still has a noise floor and reads
- * near zero here, while a dead input reads 1. 0.98 rather than 1 so a device that emits the odd
- * non-zero glitch is still called dead. Two minutes so a room is not called silent for the length of
- * a pause between patients — the tape runs through those.
+ * DIGITAL ZERO, NOT A QUIET ROOM. `zero_ratio` is the share of BIT-EXACT zero samples (B2-D7).
+ * An empty OPD still has a noise floor (AC, corridor, HVAC), so its samples are not exact zeros
+ * and the ratio stays well under this line. A dead or muted capture path reads ~1. 0.98, not 1,
+ * is the Bench live meter's digital-silence rule (`lib/bench-meter.ts`), so one odd non-zero
+ * glitch does not hide a dead input. The alert uses that same ratio.
+ *
+ * PEAK IS THE OTHER HALF, AND IT IS A DELIBERATE DELTA FROM THE METER. The meter paints "digital
+ * silence" from the ratio alone, on the current slice, even when that slice also has a peak.
+ * The alert does not: a checkpoint peak at or above `SILENT_PEAK_MAX` is a live microphone.
+ * The 5 Oct 2026 speak-test on a working C270 measured peaks of 0.012–0.026; 0.01 sits just
+ * under that band. A reported peak at or above it breaks the run, so quiet-but-alive ambient
+ * is not paged as capture death. A poll that omits peak (an app that has not sent one) makes
+ * no claim, and the ratio decides alone.
+ *
+ * `silence_ms` (0.1.22, time since a sample above −55 dBFS) does NOT decide this flag. The PCM
+ * tail meter under-states it: a read covers at most the last 30 s, and a longer gap or a new
+ * file restarts the clock, so the value can stay under two minutes through hours of exact zeros.
+ * While it was allowed to veto the ratio, that is what it did. It also counts any room whose
+ * samples merely sit under −55 dBFS, which is quieter than speech and is not bit-exact zero.
  */
 export const SILENT_POLLS = 80;
 export const SILENT_ZERO_RATIO = 0.98;
+/** A reported checkpoint peak at or above this is a live mic, not digital capture silence. */
+export const SILENT_PEAK_MAX = 0.01;
 /**
- * The same two minutes, measured by the app itself (0.1.22 `silence_ms`): time since the last sample
- * above −55 dBFS. DERIVED from the poll count and the recording cadence, so the two paths name the
- * same duration and cannot drift.
+ * Two minutes in milliseconds, from the poll count and the recording cadence. Kept so a reader
+ * can name the window. Not a second silence rule: `silence_ms` is stored and is not consulted
+ * when the flag is raised.
  */
 export const SILENT_MS = SILENT_POLLS * POLL_VISIBLE_MS;
 
@@ -467,7 +487,7 @@ export const CHANNEL_DRIFT_MS = 30 * 60_000;
 
 /** What a person reads on the card and in the MCP. Short: they sit in a chip. */
 export const INSTALL_STATE_LABEL: Record<InstallStateFlag, string> = {
-  SILENT_WHILE_RECORDING: "silent while recording",
+  SILENT_WHILE_RECORDING: "digital silence",
   CLIPPING: "clipping",
   DEVICE_MISSING: "device missing",
   DEVICE_CHANGED: "device changed",
@@ -559,12 +579,36 @@ export function parsePollRing(raw: unknown): PollRingEntry[] {
 }
 
 /**
- * PURE — is THIS poll a silent one, for the carried count? Only this poll's own readings: the history
- * is the count the SQL carries, and a poll that did not report `zero_ratio` breaks the run (it made
- * no claim, and "two minutes of silence" must be two minutes of MEASURED silence).
+ * PURE — is THIS poll digital capture silence, for the carried count?
+ *
+ * Recording, the tape advancing, and `zero_ratio` at or above the Bench line (0.98). A reported
+ * peak at or above `SILENT_PEAK_MAX` is a live mic and is not silence. A poll that did not report
+ * `zero_ratio` breaks the run: it made no claim, and two minutes of silence must be two minutes
+ * of measured silence. The history is the count the SQL carries (`nextSilentPolls`).
  */
-export function pollIsSilent(p: { rec: boolean; tape_advancing: boolean | null; zero_ratio: number | null }): boolean {
-  return p.rec && p.tape_advancing === true && p.zero_ratio !== null && p.zero_ratio >= SILENT_ZERO_RATIO;
+export function pollIsSilent(p: {
+  rec: boolean;
+  tape_advancing: boolean | null;
+  zero_ratio: number | null;
+  peak?: number | null;
+}): boolean {
+  if (!(p.rec && p.tape_advancing === true && p.zero_ratio !== null && p.zero_ratio >= SILENT_ZERO_RATIO)) return false;
+  if (typeof p.peak === "number" && Number.isFinite(p.peak) && p.peak >= SILENT_PEAK_MAX) return false;
+  return true;
+}
+
+/**
+ * PURE — the consecutive digital-silence count after this poll, including it.
+ *
+ * The poll UPDATE in `applyInstallPoll` implements this: a silent poll adds one to the previous
+ * head, and any other poll writes zero. A speak-energy poll therefore clears the run on that poll.
+ */
+export function nextSilentPolls(
+  previous: number,
+  poll: { rec: boolean; tape_advancing: boolean | null; zero_ratio: number | null; peak?: number | null },
+): number {
+  const prev = Number.isFinite(previous) ? Math.max(0, Math.trunc(previous)) : 0;
+  return pollIsSilent(poll) ? prev + 1 : 0;
 }
 
 /** PURE — did this ring entry see clipping? `clip_count` when the app sent one, else `peak`. */
@@ -580,8 +624,10 @@ export function pollClipped(e: PollRingEntry): boolean {
  * UPDATE returned, so a poll that omitted a field is judged on the last value the row holds — the same
  * value the card shows. `recording` and `tapeAdvancing` are THIS poll's.
  *
- * `silenceMs` is the 0.1.22 heartbeat. PRESENT, it decides SILENT_WHILE_RECORDING on its own; ABSENT
- * (every 0.1.21 app), the carried `zero_ratio` count decides. The fallback is the spec's, not a guess.
+ * SILENT_WHILE_RECORDING follows the carried digital-silence count (`silent_polls`), which
+ * `pollIsSilent` built from this poll's `zero_ratio` and peak. `silenceMs` is not read: a short
+ * value under-states (the PCM clock restarts) and used to hide hours of exact zeros, and a long
+ * value is only "nothing above −55 dBFS", which a quiet live room can be.
  *
  * Returns the new record. The caller writes it only when it differs from `prev`.
  */
@@ -597,6 +643,10 @@ export function evaluateInstallStates(input: {
   assignedChannel: string | null;
   /** Tier 1 §3. The 0.1.22 heartbeat's lock. Absent on every earlier app, and absent is not locked. */
   channelLocked?: boolean | null;
+  /**
+   * 0.1.22 heartbeat, kept on the call so a poll can still pass it through. Not read: digital
+   * silence is the carried zero-ratio count. See `SILENT_POLLS`.
+   */
   silenceMs?: number | null;
   prev: InstallStateRecord;
   nowMs: number;
@@ -604,11 +654,8 @@ export function evaluateInstallStates(input: {
   const flags = new Set<InstallStateFlag>();
   const head = input.ring[0];
 
-  if (input.recording && input.tapeAdvancing === true) {
-    const ms = typeof input.silenceMs === "number" && Number.isFinite(input.silenceMs) ? input.silenceMs : null;
-    if (ms !== null ? ms >= SILENT_MS : (head?.silent_polls ?? 0) >= SILENT_POLLS) {
-      flags.add("SILENT_WHILE_RECORDING");
-    }
+  if (input.recording && input.tapeAdvancing === true && (head?.silent_polls ?? 0) >= SILENT_POLLS) {
+    flags.add("SILENT_WHILE_RECORDING");
   }
 
   if (input.recording && input.ring.filter((e) => e.rec && pollClipped(e)).length >= CLIP_POLLS_MIN) {
