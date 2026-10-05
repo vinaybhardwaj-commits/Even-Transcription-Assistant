@@ -25,12 +25,13 @@
  * REBOOTED RECENTLY (a flag on any row, not a status), within REBOOT_WINDOW_S (15 min) of asOf, either of:
  *   (a) the poller flipped unreachable -> ok and the first ok poll has idle_s <= REBOOT_IDLE_MAX_S (the console has just logged in); or
  *   (b) the poller stayed ok but idle_s fell from >= REBOOT_IDLE_BEFORE_S (600) to <= 120 between two consecutive polls AND the extension went quiet
- *       at that moment (its newest event is no later than 2 min after the drop, and it has been silent for 2 min since) — the Cardiology 14:09 pattern:
+ *       at that moment (its newest event is within 2 min either side of the drop, and it has been silent for 2 min since) — the Cardiology 14:09 pattern:
  *       idle 1028 s -> 0 s with lock=true, ext last row 14:09:27, poller ok the whole time because the reboot fell between two polls.
  * It is when macOS discards the extension's policy file; R8's action says so and gives the time.
  *
- * MACHINE KEYS. Every read matches a Mac under all its spellings (lib/encounter-windows/machine-keys.ts: canonical, raw hostname, pre-5-Oct poller short
- * key) — the same set fleet-attention uses — so an `asOf` before the 5 Oct 04:44Z poller cutover finds the poller rows that were filed under "echo" etc.
+ * MACHINE KEYS (lib/encounter-windows/machine-keys.ts). POLLER lookups match a Mac under all its spellings (canonical, raw hostname, pre-5-Oct short key),
+ * so an `asOf` before the 5 Oct 04:44Z poller cutover finds the rows filed under "echo" etc. EXTENSION lookups match the full normalised hostname ONLY (the
+ * extension's machine_id): one index range per machine, not three.
  *
  * EXCLUSIONS. A machine on EXT_HEALTH_EXCLUDED_MACHINES never appears — no row, no count, no attention item. There is no room flag in the schema
  * (room has no per-room settings column) and no existing allow-list for presence, so this is an explicit constant. It is an EXCLUSION list rather than
@@ -168,7 +169,8 @@ const ms = (iso: string | null | undefined): number => (iso ? Date.parse(iso) : 
  * PURE. When did the Mac come back from a restart, if it did so within REBOOT_WINDOW_S of asOf? Returns that poll's ISO time, else null; the newest of:
  *  (a) an `ok` poll whose immediately preceding poll was `unreachable`, with idle_s <= REBOOT_IDLE_MAX_S;
  *  (b) an `ok` poll with idle_s <= REBOOT_IDLE_MAX_S whose immediately preceding poll was `ok` with idle_s >= REBOOT_IDLE_BEFORE_S, when the extension
- *      went quiet at that moment: `lastExtMs` is no later than REBOOT_EXT_GAP_S after the poll and at least REBOOT_EXT_GAP_S before asOf.
+ *      went quiet AT that moment: `lastExtMs` lies within REBOOT_EXT_GAP_S either side of the poll (a machine silent for hours and then touched after 10 min
+ *      away is not a reboot) and at least REBOOT_EXT_GAP_S before asOf.
  */
 export function detectReboot(history: PollerPoll[] | undefined, asOfMs: number, lastExtMs: number | null = null): string | null {
   const rows = (history ?? [])
@@ -183,7 +185,8 @@ export function detectReboot(history: PollerPoll[] | undefined, asOfMs: number, 
     const flip = prev.state === "unreachable";
     const idleDrop =
       prev.state === "ok" && prev.idle !== null && prev.idle >= REBOOT_IDLE_BEFORE_S &&
-      lastExtMs !== null && Number.isFinite(lastExtMs) && lastExtMs <= r.t + REBOOT_EXT_GAP_S * 1000 && asOfMs - lastExtMs >= REBOOT_EXT_GAP_S * 1000;
+      lastExtMs !== null && Number.isFinite(lastExtMs) &&
+      lastExtMs >= r.t - REBOOT_EXT_GAP_S * 1000 && lastExtMs <= r.t + REBOOT_EXT_GAP_S * 1000 && asOfMs - lastExtMs >= REBOOT_EXT_GAP_S * 1000;
     if (flip || idleDrop) found = r.t;
   }
   return found === null ? null : new Date(found).toISOString();
@@ -302,12 +305,12 @@ const numOrNull = (x: unknown): number | null => {
 
 /**
  * Per presence machine: the newest ext event of any kind, the newest ext_version, the newest poller row (each: one index lookup per machine spelling on
- * (machine, ts), newest wins); then, ONLY for the machines that need them, where the behind-target / Chrome-down run began, and the poller's last 30
+ * (machine, ts); the poller one per spelling, newest wins); then, ONLY for the machines that need them, where the behind-target / Chrome-down run began, and the poller's last 30
  * minutes for the reboot flag. `rooms` may be passed when the caller already read them (fleet-attention does); otherwise they are read here. `asOf`
  * bounds every read, so a replay at any past instant is reproducible.
  *
- * Every lookup is `machine = k.key` inside a LATERAL with ORDER BY ts DESC LIMIT 1 (or `= ANY(keys)` under an aggregate over a bounded ts range), so
- * it rides pulse_presence_events_machine_ts_idx. `machine IN (a, b)` under ORDER BY ts LIMIT 1 made the planner Sort a bitmap scan, and a plain JOIN
+ * Every lookup is an equality on `machine` (`= m.n` for the extension, `= k.key` per poller spelling) inside a LATERAL with ORDER BY ts DESC LIMIT 1, or
+ * (poller aggregates only) `= ANY(keys)` over a bounded ts range, so it rides pulse_presence_events_machine_ts_idx. `machine IN (a, b)` under ORDER BY ts LIMIT 1 made the planner Sort a bitmap scan, and a plain JOIN
  * was flattened into a hash join over a Seq Scan — both caught by the EXPLAIN test in tests/unit/fleet-attention-sql.test.ts.
  */
 export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: readonly ExtHealthRoom[]): Promise<ExtHealthInput[]> {
@@ -327,27 +330,17 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
            l.ts AS poller_ts, l.state AS poller_state, l.chrome AS chrome, l.console_user AS console_user, l.idle AS poller_idle
       FROM jsonb_to_recordset(${mj}::jsonb) AS m(n text, keys text[])
       LEFT JOIN LATERAL (
-        SELECT t.event, t.ts, t.reason
-          FROM unnest(m.keys) AS k(key)
-         CROSS JOIN LATERAL (
-           SELECT p.event, p.ts, p.payload->>'reason' AS reason
-             FROM pulse_presence_events p
-            WHERE p.source = 'ext' AND p.machine = k.key AND p.ts > ${lo}::timestamptz AND p.ts <= ${hi}::timestamptz
-            ORDER BY p.ts DESC LIMIT 1
-         ) t
-         ORDER BY t.ts DESC LIMIT 1
+        SELECT p.event, p.ts, p.payload->>'reason' AS reason
+          FROM pulse_presence_events p
+         WHERE p.source = 'ext' AND p.machine = m.n AND p.ts > ${lo}::timestamptz AND p.ts <= ${hi}::timestamptz
+         ORDER BY p.ts DESC LIMIT 1
       ) x ON true
       LEFT JOIN LATERAL (
-        SELECT t.ver
-          FROM unnest(m.keys) AS k(key)
-         CROSS JOIN LATERAL (
-           SELECT p.ts, p.payload->>'ext_version' AS ver
-             FROM pulse_presence_events p
-            WHERE p.source = 'ext' AND p.machine = k.key AND p.ts > ${lo}::timestamptz AND p.ts <= ${hi}::timestamptz
-              AND p.payload->>'ext_version' IS NOT NULL
-            ORDER BY p.ts DESC LIMIT 1
-         ) t
-         ORDER BY t.ts DESC LIMIT 1
+        SELECT p.payload->>'ext_version' AS ver
+          FROM pulse_presence_events p
+         WHERE p.source = 'ext' AND p.machine = m.n AND p.ts > ${lo}::timestamptz AND p.ts <= ${hi}::timestamptz
+           AND p.payload->>'ext_version' IS NOT NULL
+         ORDER BY p.ts DESC LIMIT 1
       ) v ON true
       LEFT JOIN LATERAL (
         SELECT t.ts, t.state, t.chrome, t.console_user, t.idle
@@ -378,10 +371,10 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
       SELECT m.n AS machine, min(p.ts) AS since
         FROM jsonb_to_recordset(${JSON.stringify(behind)}::jsonb) AS m(n text, keys text[])
         JOIN pulse_presence_events p
-          ON p.source = 'ext' AND p.machine = ANY(m.keys) AND p.ts <= ${hi}::timestamptz AND p.payload->>'ext_version' IS NOT NULL
+          ON p.source = 'ext' AND p.machine = m.n AND p.ts <= ${hi}::timestamptz AND p.payload->>'ext_version' IS NOT NULL
          AND p.ts > COALESCE((
                SELECT max(o.ts) FROM pulse_presence_events o
-                WHERE o.source = 'ext' AND o.machine = ANY(m.keys) AND o.ts > ${loB}::timestamptz AND o.ts <= ${hi}::timestamptz
+                WHERE o.source = 'ext' AND o.machine = m.n AND o.ts > ${loB}::timestamptz AND o.ts <= ${hi}::timestamptz
                   AND o.payload->>'ext_version' ~ '^[0-9]{1,6}(\\.[0-9]{1,6}){0,5}$'
                   AND CASE WHEN o.payload->>'ext_version' ~ '^[0-9]{1,6}(\\.[0-9]{1,6}){0,5}$'
                            THEN string_to_array(o.payload->>'ext_version', '.')::int[] >= ${target}::int[] END

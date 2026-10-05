@@ -3,8 +3,9 @@
  *
  * Extension rows key `machine` on the extension's machine_id, the NORMALISED hostname ("EHRC-ECHOs-Mac-mini"). Poller rows written BEFORE the 5 Oct 2026
  * cutover (04:44Z, poller commit "key machine on full hostname") key it on a short name ("echo"); every row since keys on the full hostname,
- * `unreachable` rows included. A reader that wants "the newest row for this Mac" at ANY instant — including an `asOf` before the cutover — must look under
- * every spelling. fleet-attention and ext-health both do, through machineKeys(), so a replay of 4 Oct reads the same rows the live code would have.
+ * `unreachable` rows included. A reader that wants "the newest POLLER row for this Mac" at ANY instant — including an `asOf` before the cutover — must look
+ * under every spelling (ext-health's poller reads do, through machineKeys()). Extension rows never carried a short key: ext lookups use the full
+ * normalised hostname only.
  *
  * Kept in its own dependency-free file so ext-health.ts (imported by fleet-attention.ts) can use it without a cycle, and fleet-attention.ts re-exports
  * the two names it has always exported.

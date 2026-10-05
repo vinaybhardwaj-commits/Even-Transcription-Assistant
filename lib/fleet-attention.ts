@@ -29,7 +29,7 @@
  *                           R8/R9 never fire for a machine on EXT_HEALTH_EXCLUDED_MACHINES (Home Office, ORB3, ORB2: no extension).
  *                           R8's action says "(machine rebooted at HH:MM, policy file lost)" when the poller shows a reboot in the last 15 min (unreachable -> ok with idle_s ~0,
  *                           or an ok -> ok idle_s drop from >= 600 to <= 120 while the extension went quiet); otherwise "(policy file lost, usually after a reboot)".
- *                           Status `quiet` (the console was used after the extension went quiet, so it may simply be idle) raises nothing; the table shows it.
+ *                           Status `quiet` (nobody has used the console since the extension went quiet, so the Mac may simply be idle) raises nothing; the table shows it.
  * R10 chrome_not_running    the poller is ok and says chrome_running=false (any extension age): Chrome is down, so presence cannot report. Amber.
  *                           Only between 08:00 and 21:30 IST (the Kiosk Bot and the nightly shutdown make it noise overnight).
  *                           R8 is red only when chrome_running=true; the two never fire together for one machine.
@@ -545,7 +545,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     }
 
     // R8 / R9 / R10 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
-    // R8: the extension has been silent for >= 10 min while the Mac is up, Chrome is running and nobody has used the console since it went quiet.
+    // R8: the extension has been silent for >= 10 min while the Mac is up, Chrome is running and somebody HAS used the console since it went quiet (else it is `quiet`).
     // R9: collected here, raised ONCE for the fleet after the loop. `quiet` raises nothing.
     if (r.ext) {
       const e = r.ext;

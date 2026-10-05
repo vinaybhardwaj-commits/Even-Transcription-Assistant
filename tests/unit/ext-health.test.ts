@@ -272,6 +272,62 @@ describe("rebooted_recently — pattern (b): the poller stayed ok but the consol
     expect(at("08:55:00").rebooted_recently).toBe(false);
   });
 
+  it("the Cardiology 4-5 Oct sequence: the idle drop at 14:09:58 IST is the ONLY reboot; the eight other drops (a console touched after 10+ min away, the extension long silent) are not", () => {
+    const ist = (t: string) => new Date(Date.parse(`2026-10-${t}+05:30`)).toISOString(); // "04T14:09:58"
+    const BEFORE_INSTALL = ist("03T18:07:00"); // 4 Oct, before the 13:50 re-install: the extension last spoke the evening before
+    const AFTER_REBOOT = ist("04T14:09:27"); // 5 Oct: the extension never came back after the reboot
+    const drops: Array<[string, string, boolean]> = [
+      ["04T09:06:00", BEFORE_INSTALL, false],
+      ["04T11:58:00", BEFORE_INSTALL, false],
+      ["04T12:39:00", BEFORE_INSTALL, false],
+      ["04T13:23:00", BEFORE_INSTALL, false],
+      ["04T14:09:58", ist("04T14:09:27"), true], // 31 s before the drop: the extension died with the reboot
+      ["05T08:03:00", AFTER_REBOOT, false],
+      ["05T10:00:00", AFTER_REBOOT, false],
+      ["05T13:13:00", AFTER_REBOOT, false],
+      ["05T14:24:00", AFTER_REBOOT, false],
+    ];
+    for (const [dropAt, lastExt, expected] of drops) {
+      const t = Date.parse(ist(dropAt));
+      const r = computeExtHealth(
+        [
+          mk({
+            last_ext: { ts: lastExt, event: "active", reason: null },
+            poller_recent: [
+              { ts: new Date(t - 60_000).toISOString(), state: "ok", idle_s: 900 },
+              { ts: new Date(t).toISOString(), state: "ok", idle_s: 4 },
+            ],
+            poller: { ts: new Date(t).toISOString(), state: "ok", chrome_running: true, console_user: "console-a", idle_s: 4 },
+          }),
+        ],
+        t + 3 * 60_000,
+      )[0]!;
+      expect(r.rebooted_recently, dropAt).toBe(expected);
+      expect(r.rebooted_at, dropAt).toBe(expected ? new Date(t).toISOString() : null);
+    }
+  });
+
+  it("the last extension event must lie within 2 minutes EITHER side of the drop: 120 s before counts, 121 s before does not", () => {
+    const t = Date.parse(T("08:39:50"));
+    const run = (extSecBefore: number) =>
+      computeExtHealth(
+        [
+          mk({
+            last_ext: { ts: new Date(t - extSecBefore * 1000).toISOString(), event: "active", reason: null },
+            poller_recent: [
+              { ts: T("08:38:50"), state: "ok", idle_s: 900 },
+              { ts: T("08:39:50"), state: "ok", idle_s: 0 },
+            ],
+            poller: { ts: T("08:39:50"), state: "ok", chrome_running: true, console_user: "console-a", idle_s: 0 },
+          }),
+        ],
+        t + 5 * 60_000,
+      )[0]!.rebooted_recently;
+    expect(run(120)).toBe(true);
+    expect(run(121)).toBe(false);
+    expect(run(-120)).toBe(true); // 120 s AFTER the drop
+  });
+
   it("it is a flag, not a status: the Cardiology row is `missing` at 14:25 IST, idle_s 657 s, with the flag set", () => {
     // 14:20 IST: age 633 s, idle 357 s (somebody used the Mac at ~14:14, after the extension died) -> missing, not quiet.
     const r = computeExtHealth(
@@ -581,8 +637,11 @@ describe("loadExtHealthInputs / extHealth", () => {
     const parsed = JSON.parse(String(presence.vals[0])) as Array<{ n: string; keys: string[] }>;
     expect(parsed).toContainEqual({ n: "EHRC-ECHOs-Mac-mini", keys: ["EHRC-ECHOs-Mac-mini", "EHRC-ECHO\u2019s Mac mini", "echo"] });
     expect(parsed).toContainEqual({ n: "EHRC-CONSUL5s-Mac-mini", keys: ["EHRC-CONSUL5s-Mac-mini", "EHRC-CONSUL5\u2019s Mac mini", "consul5"] });
-    // the other reads take the same alias set
-    for (const q of issued.filter((x) => /AS since|AS idle_s|AS chrome_down_since/.test(x.text))) expect(String(q.vals[0])).toContain('"keys"');
+    // the old short key is for POLLER lookups only: no extension lookup uses the alias set
+    expect(presence.text).not.toContain("'ext' AND p.machine = k.key");
+    expect(presence.text.match(/'ext' AND p\.machine = m\.n/g)).toHaveLength(2); // newest event, newest version
+    for (const q of issued.filter((x) => /AS since/.test(x.text))) expect(q.text).not.toContain("m.keys");
+    for (const q of issued.filter((x) => /AS idle_s|AS chrome_down_since/.test(x.text))) expect(q.text).toContain("m.keys");
   });
 
   it("all values are BOUND parameters (no value text in the SQL), the reads are bounded by asOf, and nothing writes", async () => {

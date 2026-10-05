@@ -507,7 +507,7 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres
 // F3 — every read of the two big tables rides an index. Proven by EXPLAIN (ANALYZE) on the statements the loader ACTUALLY sent, at volume.
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 
-type PlanNode = { "Node Type": string; "Relation Name"?: string; "Index Name"?: string; Plans?: PlanNode[] };
+type PlanNode = { "Node Type": string; "Relation Name"?: string; "Index Name"?: string; "Index Cond"?: string; Filter?: string; "Actual Loops"?: number; Plans?: PlanNode[] };
 const walk = (n: PlanNode, out: PlanNode[] = []): PlanNode[] => { out.push(n); for (const c of n.Plans ?? []) walk(c, out); return out; };
 const lit = (v: unknown): string => {
   if (v === null || v === undefined) return "NULL";
@@ -706,6 +706,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
       expect(q).not.toContain("EHRC-");
     }
     const usedIndexes = new Set<string>();
+    let extScans = 0;
     for (const { q, v } of mine) {
       const text = q.replace(/\$(\d+)/g, (_m, n) => lit(v[Number(n) - 1]));
       const raw = (await pg.sql`SELECT explain_json(${text}) AS plan`) as Array<{ plan: string }>;
@@ -714,7 +715,17 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
       const seq = nodes.filter((n) => n["Node Type"] === "Seq Scan" && n["Relation Name"] === "pulse_presence_events");
       expect(seq.length, `Seq Scan of pulse_presence_events in: ${q.replace(/\s+/g, " ").slice(0, 120)}`).toBe(0);
       for (const n of nodes) if (n["Index Name"]) usedIndexes.add(n["Index Name"]);
+      // EXTENSION lookups scan ONE key per machine (the full hostname): equality on the machine's own name, one loop per fleet machine — never the
+      // alias set (that triples the buffers read on every 30 s poll). The short poller keys are for poller lookups only.
+      for (const n of nodes.filter((x) => x["Relation Name"] === "pulse_presence_events" && /'ext'/.test(`${x.Filter ?? ""} ${x["Index Cond"] ?? ""}`))) {
+        extScans++;
+        const cond = `${n["Index Cond"] ?? ""} ${n.Filter ?? ""}`;
+        expect(cond, `ext lookup must use the machine name alone: ${cond}`).toMatch(/machine = (\(?m\.n|\w+\.n)\b/);
+        expect(cond).not.toMatch(/k\.key|keys|ANY/);
+        expect(n["Actual Loops"] ?? 0, "one loop per fleet machine (3 rooms), not one per spelling").toBeLessThanOrEqual(3);
+      }
     }
+    expect(extScans).toBeGreaterThanOrEqual(3); // newest event, newest version, behind-since
     expect(usedIndexes.has("pulse_presence_events_machine_ts_idx")).toBe(true);
   }, 180_000);
 });
@@ -775,16 +786,21 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
     expect(item.action).toBe(`Re-run the presence install on CONSUL 4 (machine rebooted at ${hhmm}, policy file lost).`);
   });
 
-  it("rebooted_recently from the idle drop alone (the Cardiology 14:09 pattern): the poller stays ok, idle_s falls 1028 -> 0 while the extension goes quiet = flagged; and `quiet` vs `missing` on the real SELECTs", async () => {
+  it("rebooted_recently from the idle drop alone (the Cardiology 14:09 pattern): the poller stays ok, idle_s falls 1088 -> 0 while the extension dies with the reboot = flagged, status missing, R8 names the time", async () => {
     pg.exec([
-      extRow(M7, "active", "12 minutes", '{"ext_version":"0.1.1.39"}'),
-      pollerRow(M7, "ok", "9 minutes", '{"state":"ok","chrome_running":true,"idle_s":1028}'), pollerRow(M7, "ok", "8 minutes", '{"state":"ok","chrome_running":true,"idle_s":1088}'),
-      pollerRow(M7, "ok", "7 minutes", '{"state":"ok","chrome_running":true,"idle_s":0}'), pollerRow(M7, "ok", "6 minutes", '{"state":"ok","chrome_running":true,"idle_s":30}'),
-      pollerRow(M7, "ok", "30 seconds", '{"state":"ok","chrome_running":true,"idle_s":330}'),
+      extRow(M7, "active", "12 minutes 30 seconds", '{"ext_version":"0.1.1.39"}'), // the last extension row: 30 s before the drop
+      pollerRow(M7, "ok", "14 minutes", '{"state":"ok","chrome_running":true,"idle_s":1028}'), pollerRow(M7, "ok", "13 minutes", '{"state":"ok","chrome_running":true,"idle_s":1088}'),
+      pollerRow(M7, "ok", "12 minutes", '{"state":"ok","chrome_running":true,"idle_s":0}'), pollerRow(M7, "ok", "11 minutes", '{"state":"ok","chrome_running":true,"idle_s":30}'),
+      pollerRow(M7, "ok", "30 seconds", '{"state":"ok","chrome_running":true,"idle_s":630}'),
+      // r6: the same idle drop, but the extension kept talking for 6 more minutes — a user back at the desk, not a reboot
+      extRow(M6, "heartbeat", "20 seconds", '{"ext_version":"0.1.1.39"}'), extRow(M6, "heartbeat", "6 minutes", '{"ext_version":"0.1.1.39"}'),
+      pollerRow(M6, "ok", "14 minutes", '{"state":"ok","chrome_running":true,"idle_s":1028}'), pollerRow(M6, "ok", "12 minutes", '{"state":"ok","chrome_running":true,"idle_s":0}'),
     ].join("\n"));
-    const r7 = (await extHealthNow()).find((r) => r.room_id === "r7")!;
-    expect(r7).toMatchObject({ status: "missing", rebooted_recently: true, poller: { idle_s: 330 } });
-    expect(minutesBetween(r7.rebooted_at as string, Date.now() - 7 * 60_000)).toBeLessThan(1);
+    const rows = await extHealthNow();
+    const r7 = rows.find((r) => r.room_id === "r7")!;
+    expect(r7).toMatchObject({ status: "missing", rebooted_recently: true, poller: { idle_s: 630 } });
+    expect(minutesBetween(r7.rebooted_at as string, Date.now() - 12 * 60_000)).toBeLessThan(1);
+    expect(rows.find((r) => r.room_id === "r6")).toMatchObject({ rebooted_recently: false, rebooted_at: null });
     const hhmm = new Date(Date.parse(r7.rebooted_at as string) + 19_800_000).toISOString().slice(11, 16);
     expect((await attention()).items.find((i) => i.room_id === "r7" && i.kind === "extension_missing")!.action).toBe(`Re-run the presence install on CONSUL 4 (machine rebooted at ${hhmm}, policy file lost).`);
   });
@@ -800,12 +816,12 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
     expect(kindsOf(await attention()).filter((k) => k.includes("extension"))).toEqual(["r6:extension_missing"]);
   });
 
-  it("as_of REPLAY finds a machine under every spelling: poller rows under the pre-5-Oct short key (consul4), ext rows under the raw hostname; rows newer than as_of are ignored", async () => {
+  it("as_of REPLAY finds POLLER rows under every spelling (the pre-5-Oct short key consul4, the raw hostname) and ext rows under the full hostname; rows newer than as_of are ignored", async () => {
     pg.exec([
       // r7: poller under the short key, 3 h ago; ext under the canonical key
       pollerRow("consul4", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true,"idle_s":5}'), extRow(M7, "heartbeat", "3 hours 10 seconds", '{"ext_version":"0.1.1.39"}'),
-      // r6: both under the raw hostname spelling (smart apostrophe, "(2)")
-      pollerRow("EHRC-OPD6’s Mac mini (2)", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true}'), extRow("EHRC-OPD6’s Mac mini (2)", "heartbeat", "3 hours 5 seconds", '{"ext_version":"0.1.0.36"}'),
+      // r6: poller under the raw hostname spelling (smart apostrophe, "(2)"); ext under the canonical key (extension lookups use the full hostname only)
+      pollerRow("EHRC-OPD6’s Mac mini (2)", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true}'), extRow(M6, "heartbeat", "3 hours 5 seconds", '{"ext_version":"0.1.0.36"}'),
       // everything newer than as_of: must not be seen
       pollerRow(M7, "unreachable", "1 minute", '{"state":"unreachable"}'), pollerRow(M4, "ok", "10 seconds", POLLER_OK()), extRow(M4, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.39"}'),
     ].join("\n"));
