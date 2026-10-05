@@ -7,7 +7,8 @@
 //   stamped         a source='resolver' logout exists on the stream with no genuine activity after it
 //   locked          the MACHINE's latest idle-state event (active|idle|locked, any uid) is `locked`
 //   idle_45m        the machine's latest idle-state event is `idle`, it began >= IDLE_OUT_MIN (default 45) minutes ago, and the
-//                   stream has no genuine activity (active/login/encounter/focused heartbeat) after it. A plain `idle` YOUNGER than
+//                   stream has no active/login/encounter_open/encounter_close after it. Heartbeats, focused or not, NEVER reset this
+//                   clock (a Pulse tab left in the foreground keeps sending tab_focus=true). A plain `idle` YOUNGER than
 //                   that never logs anyone out: chrome.idle fires after 120 s without keyboard/mouse, normal mid-consult (5 Oct 2026:
 //                   34 idle events in OPD rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
 //   idle_timeout    no GENUINE activity on the stream within GENUINE_MIN minutes (default 45)
@@ -66,6 +67,7 @@ streams as (
     (array_agg(coalesce(focus, false) order by ts desc, id desc) filter (where source = 'ext' and event <> 'logout'))[1] as last_focus_flag,
     max(ts) filter (where event in ('encounter_open','encounter_close')) as last_enc_ts,
     max(ts) filter (where event in ('login','active','encounter_open','encounter_close') or (event = 'heartbeat' and focus)) as last_genuine_ts,
+    max(ts) filter (where event in ('login','active','encounter_open','encounter_close')) as last_reset_ts,
     (array_agg(event order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout')))[1] as ctl_event,
     (array_agg(ts    order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout')))[1] as ctl_ts,
     max(ts) filter (where source = 'resolver' and event = 'logout') as res_logout_ts,
@@ -79,7 +81,7 @@ resolved as (
       when s.res_logout_ts is not null and (s.last_genuine_ts is null or s.last_genuine_ts <= s.res_logout_ts) then 'stamped:' || coalesce(s.res_reason, '?')
       when mi.idle_state = 'locked' then 'locked'
       when mi.idle_state = 'idle' and mi.idle_ts <= cfg.asof - (cfg.imin * interval '1 minute')
-           and (s.last_genuine_ts is null or s.last_genuine_ts <= mi.idle_ts) then 'idle_45m'
+           and (s.last_reset_ts is null or s.last_reset_ts <= mi.idle_ts) then 'idle_45m'
       when s.last_genuine_ts is null or s.last_genuine_ts < cfg.asof - (cfg.gmin * interval '1 minute') then 'idle_timeout'
       when s.last_genuine_ts < cfg.cutoff_ts then 'nightly_cutoff'
       else null end as out_reason

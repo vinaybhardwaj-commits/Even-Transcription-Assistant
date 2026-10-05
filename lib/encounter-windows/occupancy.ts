@@ -10,7 +10,8 @@
  *   stamped         a source='resolver' logout exists on the stream with no genuine activity after it
  *   locked          the MACHINE's latest idle-state event (active|idle|locked, any uid) is `locked`
  *   idle_45m        the machine's latest idle-state event is `idle`, it began >= idleOutMin (default 45) minutes ago, and this
- *                   stream has no genuine activity after it. A plain `idle` younger than that NEVER logs anyone out: chrome.idle
+ *                   stream has no active/login/encounter_open/encounter_close after it. Heartbeats, focused or not, NEVER reset
+ *                   this clock (a Pulse tab left in the foreground keeps sending tab_focus=true). A plain `idle` younger than that NEVER logs anyone out: chrome.idle
  *                   fires after 120 s without keyboard/mouse, which is normal mid-consult (5 Oct 2026: 34 idle events across the OPD
  *                   rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
  *   idle_timeout    no GENUINE activity on the stream within genuineMin minutes (default 45)
@@ -129,6 +130,7 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     last_focus_flag: boolean;
     last_enc_ts: number | null;
     last_genuine_ts: number | null;
+    last_reset_ts: number | null; // latest login|active|encounter_open|encounter_close (no heartbeats): resets the idle_45m clock
     ctl_event: string | null;
     res_logout_ts: number | null;
   };
@@ -144,7 +146,7 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     if (e.uid == null) continue;
     let a = acc.get(e.uid);
     if (!a) {
-      a = { uid: e.uid, dn: null, last_focus_ts: null, last_focus_flag: false, last_enc_ts: null, last_genuine_ts: null, ctl_event: null, res_logout_ts: null };
+      a = { uid: e.uid, dn: null, last_focus_ts: null, last_focus_flag: false, last_enc_ts: null, last_genuine_ts: null, last_reset_ts: null, ctl_event: null, res_logout_ts: null };
       acc.set(e.uid, a);
     }
     // events arrive ascending by (t, id): later assignments are "latest"
@@ -158,6 +160,7 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
       e.event === "login" || e.event === "active" || e.event === "encounter_open" || e.event === "encounter_close" ||
       (e.event === "heartbeat" && e.focus)
     ) a.last_genuine_ts = e.t;
+    if (e.event === "login" || e.event === "active" || e.event === "encounter_open" || e.event === "encounter_close") a.last_reset_ts = e.t;
     if (e.source === "ext" && (e.event === "login" || e.event === "logout")) a.ctl_event = e.event;
     if (e.source === "resolver" && e.event === "logout") a.res_logout_ts = e.t;
   }
@@ -170,7 +173,7 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     else if (idleState === "locked") reason = "locked";
     else if (
       idleState === "idle" && idleTs != null && idleTs <= asOf - idleOutMs &&
-      (a.last_genuine_ts == null || a.last_genuine_ts <= idleTs)
+      (a.last_reset_ts == null || a.last_reset_ts <= idleTs)
     ) reason = "idle_45m";
     else if (a.last_genuine_ts == null || a.last_genuine_ts < asOf - genuineMin * 60_000) reason = "idle_timeout";
     else if (a.last_genuine_ts < cut) reason = "nightly_cutoff";

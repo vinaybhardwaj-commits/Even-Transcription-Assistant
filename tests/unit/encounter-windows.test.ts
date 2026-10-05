@@ -331,13 +331,28 @@ describe("attribution and quality", () => {
     expect(streamsAt([login(-50, "UA"), ev("idle", at(-45))], 0)[0]).toMatchObject({ out_reason: "idle_45m" });
   });
 
-  it("a stream with genuine activity after a long idle is not idle_45m (focused heartbeat, login, encounter)", () => {
+  it("focused heartbeats every 30 s do not reset the idle clock: idle 50 min -> out idle_45m", () => {
+    const beats = Array.from({ length: 100 }, (_, i) => hb(-50 + i * 0.5, "UA", true)); // 30 s cadence from the idle to now
+    const es = [login(-60, "UA"), ev("idle", at(-50)), ...beats];
+    expect(streamsAt(es, 0)[0]).toMatchObject({ present: false, out_reason: "idle_45m" });
+    // the same beats with a younger idle (44 min): still present
+    const young = [login(-60, "UA"), ev("idle", at(-44)), ...Array.from({ length: 88 }, (_, i) => hb(-44 + i * 0.5, "UA", true))];
+    expect(streamsAt(young, 0)[0]).toMatchObject({ present: true, out_reason: null });
+  });
+
+  it("idle 50 min then one `active` event: present", () => {
+    const es = [login(-60, "UA"), ev("idle", at(-50)), ev("active", at(-1), { uid: "UA" })];
+    expect(streamsAt(es, 0)[0]).toMatchObject({ present: true, out_reason: null });
+  });
+
+  it("login, encounter_open or encounter_close after a long idle resets the clock (a heartbeat does not)", () => {
     const base = [login(-60, "UA"), ev("idle", at(-50))];
-    expect(streamsAt([...base, hb(-10, "UA", true)], 0)[0]).toMatchObject({ present: true, out_reason: null });
     expect(streamsAt([...base, login(-10, "UA")], 0)[0]).toMatchObject({ present: true, out_reason: null });
     expect(streamsAt([...base, ev("encounter_open", at(-10), { uid: "UA", enc: "E9" })], 0)[0]).toMatchObject({ present: true, out_reason: null });
-    // a background (unfocused) heartbeat is not activity
+    expect(streamsAt([...base, ev("encounter_close", at(-10), { uid: "UA", enc: "E9" })], 0)[0]).toMatchObject({ present: true, out_reason: null });
+    // heartbeats, focused or not, are not activity for this clause
     expect(streamsAt([...base, hb(-10, "UA", false)], 0)[0]).toMatchObject({ present: false, out_reason: "idle_45m" });
+    expect(streamsAt([...base, hb(-10, "UA", true)], 0)[0]).toMatchObject({ present: false, out_reason: "idle_45m" });
   });
 
   it("locked takes the stream out immediately (locked), until the machine goes active again", () => {
