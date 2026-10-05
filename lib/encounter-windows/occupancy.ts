@@ -8,7 +8,11 @@
  * A (machine, doctor_uid) STREAM is LOGGED OUT (out_reason), evaluated in this order, as of `asOf`:
  *   logout          last real ext login/logout on that stream is a logout (a new login re-opens it)
  *   stamped         a source='resolver' logout exists on the stream with no genuine activity after it
- *   idle_state      the MACHINE's latest idle-state event (active|idle|locked, any uid) is idle or locked
+ *   locked          the MACHINE's latest idle-state event (active|idle|locked, any uid) is `locked`
+ *   idle_45m        the machine's latest idle-state event is `idle`, it began >= idleOutMin (default 45) minutes ago, and this
+ *                   stream has no genuine activity after it. A plain `idle` younger than that NEVER logs anyone out: chrome.idle
+ *                   fires after 120 s without keyboard/mouse, which is normal mid-consult (5 Oct 2026: 34 idle events across the OPD
+ *                   rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
  *   idle_timeout    no GENUINE activity on the stream within genuineMin minutes (default 45)
  *   nightly_cutoff  last genuine activity predates the most recent nightly cutoff (IST, default 00:00)
  * Genuine activity = login | active | encounter_open | encounter_close | heartbeat with tab_focus=true.
@@ -25,6 +29,7 @@ export const OCC_DEFAULTS = {
   nightlyCutoff: "00:00", // HH:MM IST
   lookbackH: 72,
   focusMin: 10,
+  idleOutMin: 45,
 };
 
 export type OccOptions = Partial<typeof OCC_DEFAULTS>;
@@ -113,8 +118,10 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
   const cut = cutoffTs(asOf, opts.nightlyCutoff ?? OCC_DEFAULTS.nightlyCutoff);
   const end = upperBound(machineEvents, asOf);
   const lowT = asOf - lookbackMs;
+  const idleOutMs = (opts.idleOutMin ?? OCC_DEFAULTS.idleOutMin) * 60_000;
 
   let idleState: string | null = null; // machine's latest active|idle|locked
+  let idleTs: number | null = null; // ts of that latest idle-state event
   type Acc = {
     uid: string;
     dn: string | null;
@@ -130,7 +137,10 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     const e = machineEvents[i]!;
     if (e.t <= lowT) continue;
     if (e.source !== "ext" && e.source !== "resolver") continue;
-    if (e.event === "active" || e.event === "idle" || e.event === "locked") idleState = e.event;
+    if (e.event === "active" || e.event === "idle" || e.event === "locked") {
+      idleState = e.event;
+      idleTs = e.t;
+    }
     if (e.uid == null) continue;
     let a = acc.get(e.uid);
     if (!a) {
@@ -157,7 +167,11 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     let reason: string | null;
     if (a.ctl_event === "logout") reason = "logout";
     else if (a.res_logout_ts != null && (a.last_genuine_ts == null || a.last_genuine_ts <= a.res_logout_ts)) reason = "stamped";
-    else if (idleState === "idle" || idleState === "locked") reason = "idle_state";
+    else if (idleState === "locked") reason = "locked";
+    else if (
+      idleState === "idle" && idleTs != null && idleTs <= asOf - idleOutMs &&
+      (a.last_genuine_ts == null || a.last_genuine_ts <= idleTs)
+    ) reason = "idle_45m";
     else if (a.last_genuine_ts == null || a.last_genuine_ts < asOf - genuineMin * 60_000) reason = "idle_timeout";
     else if (a.last_genuine_ts < cut) reason = "nightly_cutoff";
     else reason = null;

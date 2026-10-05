@@ -7,7 +7,7 @@
  * 114 consults for 2-4 Oct 2026. See docs/handoff/ETA-ENCOUNTER-WINDOWS-BUILD-04-OCT-2026.md.
  */
 
-export const RESOLVER_VERSION = "encounter-windows/1";
+export const RESOLVER_VERSION = "encounter-windows/2";
 
 /** One presence event, flattened to the fields the resolver needs. Timestamps may be ISO strings (Neon HTTP). */
 export type PresenceEvent = {

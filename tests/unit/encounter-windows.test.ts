@@ -23,6 +23,7 @@ import {
   type RoomRef,
   type WindowsDb,
 } from "@/lib/encounter-windows";
+import { normalizeEvent, byTimeThenId, resolveStreams, type NEvent } from "@/lib/encounter-windows/occupancy";
 
 // ---------------------------------------------------------------- reference fixture
 const FIX = join(process.cwd(), "tests/fixtures/encounter-windows");
@@ -301,10 +302,58 @@ describe("attribution and quality", () => {
     expect(rows[0]!.quality).toBe("unattributed");
   });
 
-  it("does not count a stream with no genuine activity in 45 minutes, nor one logged out, nor an idle machine", () => {
+  it("does not count a stream with no genuine activity in 45 minutes, nor one logged out, nor a locked machine", () => {
     expect(run([login(-60, "UA"), open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("none"); // 45-minute rule
     expect(run([login(-5, "UA"), ev("logout", at(-2), { uid: "UA" }), open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("none");
-    expect(run([login(-5, "UA"), ev("idle", at(-1)), open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("none");
+    expect(run([login(-5, "UA"), ev("locked", at(-1)), open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("none");
+  });
+
+  // 5 Oct 2026 rule: a plain `idle` (chrome.idle fires after 120 s without keyboard/mouse) is NOT a logout; only `locked`, or an
+  // `idle` that began >= 45 min ago with no later genuine activity, takes the stream out.
+  const streamsAt = (es: PresenceEvent[], asOfMin: number) =>
+    resolveStreams(es.map((e) => normalizeEvent(e)!).filter(Boolean).sort(byTimeThenId) as NEvent[], T0 + asOfMin * 60_000);
+
+  it("idle for 3 minutes inside a session keeps the doctor present (occupant at open, mid-consult too)", () => {
+    const es = [login(-5, "UA", "Dr A"), ev("idle", at(-3)), open(at(0), "E1"), close(at(4), { enc: "E1" })];
+    const r = run(es).rows[0]!;
+    expect(r.attribution).toBe("occupant");
+    expect(r.doctor_uid).toBe("UA");
+    expect(streamsAt(es, 0)[0]).toMatchObject({ uid: "UA", present: true, out_reason: null });
+    // idle began 44 min ago with the last genuine activity before it: the 45-minute activity rule has not fired either
+    expect(streamsAt([login(-44, "UA"), ev("idle", at(-43))], 0)[0]).toMatchObject({ present: true, out_reason: null });
+  });
+
+  it("idle that began 50 minutes ago with no later genuine activity is out (idle_45m)", () => {
+    const es = [login(-55, "UA"), ev("idle", at(-50))];
+    expect(streamsAt(es, 0)[0]).toMatchObject({ present: false, out_reason: "idle_45m" });
+    expect(run([...es, open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("none");
+    // exactly 45 minutes counts (>=)
+    expect(streamsAt([login(-50, "UA"), ev("idle", at(-45))], 0)[0]).toMatchObject({ out_reason: "idle_45m" });
+  });
+
+  it("a stream with genuine activity after a long idle is not idle_45m (focused heartbeat, login, encounter)", () => {
+    const base = [login(-60, "UA"), ev("idle", at(-50))];
+    expect(streamsAt([...base, hb(-10, "UA", true)], 0)[0]).toMatchObject({ present: true, out_reason: null });
+    expect(streamsAt([...base, login(-10, "UA")], 0)[0]).toMatchObject({ present: true, out_reason: null });
+    expect(streamsAt([...base, ev("encounter_open", at(-10), { uid: "UA", enc: "E9" })], 0)[0]).toMatchObject({ present: true, out_reason: null });
+    // a background (unfocused) heartbeat is not activity
+    expect(streamsAt([...base, hb(-10, "UA", false)], 0)[0]).toMatchObject({ present: false, out_reason: "idle_45m" });
+  });
+
+  it("locked takes the stream out immediately (locked), until the machine goes active again", () => {
+    expect(streamsAt([login(-5, "UA"), ev("locked", at(-1))], 0)[0]).toMatchObject({ present: false, out_reason: "locked" });
+    expect(streamsAt([login(-5, "UA"), ev("locked", at(-3)), ev("active", at(-1))], 0)[0]).toMatchObject({ present: true, out_reason: null });
+  });
+
+  it("idle then active: present, with the active event counting as genuine activity", () => {
+    const es = [login(-60, "UA"), ev("idle", at(-50)), ev("active", at(-2), { uid: "UA" })];
+    expect(streamsAt(es, 0)[0]).toMatchObject({ present: true, out_reason: null, last_genuine_ts: T0 - 2 * 60_000 });
+    expect(run([...es, open(at(0), "E1"), close(at(4), { enc: "E1" })]).rows[0]!.attribution).toBe("occupant");
+  });
+
+  it("logout and resolver stamps still win over a young idle", () => {
+    expect(streamsAt([login(-10, "UA"), ev("idle", at(-3)), ev("logout", at(-1), { uid: "UA" })], 0)[0]).toMatchObject({ out_reason: "logout" });
+    expect(streamsAt([login(-10, "UA"), ev("idle", at(-3)), ev("logout", at(-1), { uid: "UA", source: "resolver" })], 0)[0]).toMatchObject({ out_reason: "stamped" });
   });
 
   it("does not count a stream whose last activity predates the 00:00 IST cutoff", () => {

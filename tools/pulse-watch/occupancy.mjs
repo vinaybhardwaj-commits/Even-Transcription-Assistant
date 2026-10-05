@@ -5,7 +5,11 @@
 // A (machine, doctor_uid) STREAM is LOGGED OUT (out_reason) if, evaluated in this order, as of `asOf` (default now):
 //   logout          last real ext login/logout on that stream is a logout (a new login re-opens it)
 //   stamped         a source='resolver' logout exists on the stream with no genuine activity after it
-//   idle_state      the MACHINE's latest idle-state event (active|idle|locked, any uid) is idle or locked   [primary]
+//   locked          the MACHINE's latest idle-state event (active|idle|locked, any uid) is `locked`
+//   idle_45m        the machine's latest idle-state event is `idle`, it began >= IDLE_OUT_MIN (default 45) minutes ago, and the
+//                   stream has no genuine activity (active/login/encounter/focused heartbeat) after it. A plain `idle` YOUNGER than
+//                   that never logs anyone out: chrome.idle fires after 120 s without keyboard/mouse, normal mid-consult (5 Oct 2026:
+//                   34 idle events in OPD rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
 //   idle_timeout    no GENUINE activity on the stream within GENUINE_MIN minutes (default 45)
 //   nightly_cutoff  last genuine activity predates the most recent NIGHTLY_CUTOFF (IST, default 00:00)
 // Genuine activity = login | active | encounter_open | encounter_close | heartbeat with tab_focus=true.
@@ -28,16 +32,17 @@ export const DEFAULTS = {
   nightlyCutoff: process.env.NIGHTLY_CUTOFF || '00:00', // HH:MM IST
   lookbackH: Number(process.env.OCC_LOOKBACK_H || 168),
   focusMin: Number(process.env.OCC_FOCUS_MIN || 10),
+  idleOutMin: Number(process.env.OCC_IDLE_OUT_MIN || 45),
 };
 
 export const connect = () =>
   neon(process.env.DATABASE_URL || readFileSync((process.env.ETA_DB_URL_FILE || os.homedir() + '/.claude/secrets/eta_database_url'), 'utf8').trim());
 
-// $1 asOf timestamptz|null  $2 genuine minutes  $3 cutoff 'HH:MM'  $4 lookback hours
+// $1 asOf timestamptz|null  $2 genuine minutes  $3 cutoff 'HH:MM'  $4 lookback hours  $5 idle-out minutes
 export const OCCUPANCY_SQL = `
-with prm as (select coalesce($1::timestamptz, now()) as asof, $2::int as gmin, $3::time as cut, $4::int as lb),
-c0 as (select asof, gmin, lb, ((date_trunc('day', asof at time zone 'Asia/Kolkata') + cut) at time zone 'Asia/Kolkata') as c from prm),
-cfg as (select asof, gmin, lb, case when c > asof then c - interval '1 day' else c end as cutoff_ts from c0),
+with prm as (select coalesce($1::timestamptz, now()) as asof, $2::int as gmin, $3::time as cut, $4::int as lb, $5::int as imin),
+c0 as (select asof, gmin, lb, imin, ((date_trunc('day', asof at time zone 'Asia/Kolkata') + cut) at time zone 'Asia/Kolkata') as c from prm),
+cfg as (select asof, gmin, lb, imin, case when c > asof then c - interval '1 day' else c end as cutoff_ts from c0),
 ev as (
   select e.id, e.machine, e.room, e.event, e.ts, e.source,
          e.payload->>'doctor_uid' as uid, e.payload->>'display_name' as dn, e.payload->>'reason' as reason,
@@ -72,7 +77,9 @@ resolved as (
     case
       when s.ctl_event = 'logout' then 'logout'
       when s.res_logout_ts is not null and (s.last_genuine_ts is null or s.last_genuine_ts <= s.res_logout_ts) then 'stamped:' || coalesce(s.res_reason, '?')
-      when mi.idle_state in ('idle','locked') then 'idle_state'
+      when mi.idle_state = 'locked' then 'locked'
+      when mi.idle_state = 'idle' and mi.idle_ts <= cfg.asof - (cfg.imin * interval '1 minute')
+           and (s.last_genuine_ts is null or s.last_genuine_ts <= mi.idle_ts) then 'idle_45m'
       when s.last_genuine_ts is null or s.last_genuine_ts < cfg.asof - (cfg.gmin * interval '1 minute') then 'idle_timeout'
       when s.last_genuine_ts < cfg.cutoff_ts then 'nightly_cutoff'
       else null end as out_reason
@@ -87,7 +94,8 @@ left join resolved r using (machine)
 order by ml.machine, r.last_genuine_ts desc nulls last`;
 
 const args = (o = {}) => [o.asOf ? new Date(o.asOf).toISOString() : null,
-  o.genuineMin ?? DEFAULTS.genuineMin, o.nightlyCutoff ?? DEFAULTS.nightlyCutoff, o.lookbackH ?? DEFAULTS.lookbackH];
+  o.genuineMin ?? DEFAULTS.genuineMin, o.nightlyCutoff ?? DEFAULTS.nightlyCutoff, o.lookbackH ?? DEFAULTS.lookbackH,
+  o.idleOutMin ?? DEFAULTS.idleOutMin];
 
 // One row per (machine, doctor_uid) stream; machines with no uid stream appear once with uid=null.
 export async function resolveSessions(sql, opts) {
