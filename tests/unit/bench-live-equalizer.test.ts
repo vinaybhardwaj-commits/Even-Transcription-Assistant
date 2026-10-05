@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isDigitalSilence } from "@/lib/bench-meter";
+import { SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
 import { isIsoDate } from "@/lib/bench-levels";
 
 describe("Bench Live Equalizer", () => {
@@ -9,6 +10,9 @@ describe("Bench Live Equalizer", () => {
     expect(isDigitalSilence({ peak: 0.2, avg: 0.1, zero_ratio: 0.2 })).toBe(false);
     expect(isDigitalSilence({ peak: 0.2, avg: 0.1 }, true)).toBe(true);
     expect(isDigitalSilence(null)).toBe(false);
+    // The meter and the watchdog share one ratio. Moving either without the other fails here.
+    expect(isDigitalSilence({ peak: 0, avg: 0, zero_ratio: SILENT_ZERO_RATIO })).toBe(true);
+    expect(isDigitalSilence({ peak: 0, avg: 0, zero_ratio: SILENT_ZERO_RATIO - 0.0001 })).toBe(false);
   });
 
   it("validates timeline day parameters", () => {
