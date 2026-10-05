@@ -14,11 +14,11 @@
  * occupant and occupant_display = { uid, name, source: 'warehouse'|'cookie', cookie_uid, cookie_name, stale }. The warehouse consulting doctor of the
  * machine's most recent consult (opened within 90 min of as_of, or unclosed) is shown in preference to the extension's Google-cookie identity, which
  * Pulse never clears (lib/encounter-windows/occupant.ts). stale = the cookie identity differs from the warehouse doctor. Read-only.
- * The occupancy response also carries `ext_health`: counts by status ({ok, no_tab, missing, behind, offline, total}) of the Pulse Presence extension
+ * The occupancy response also carries `ext_health`: counts by status ({ok, no_tab, missing, quiet, behind, offline, no_chrome, total}) of the Pulse Presence extension
  * across the presence machines, or null when that read failed (it never fails the occupancy read).
  * ?ext_health=1 (optionally as_of=<ISO>) returns { ok, as_of, count, summary, machines: [...] }: one row per presence machine
  * (lib/encounter-windows/ext-health.ts) with last_ext_ts, ext_age_s, ext_version, version_state, poller {ok, chrome_running, console_user, age_s} and
- * status ok | no_tab | missing | behind | offline. Home Office, ORB3 and ORB2 (no extension) are never listed. Read-only.
+ * status ok | no_tab | missing | quiet | behind | offline | no_chrome. Home Office, ORB3 and ORB2 (no extension) are never listed. Read-only.
  * No transcripts, no patient identifiers. Bad params -> 400.
  */
 import { NextRequest, NextResponse } from "next/server";

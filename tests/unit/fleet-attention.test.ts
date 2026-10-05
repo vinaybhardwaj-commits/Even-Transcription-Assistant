@@ -641,9 +641,10 @@ describe("R8 extension_missing / R9 extension_behind", () => {
     ext_age_s: Math.round((ist(NOW) - ist("2026-10-04 14:09:27")) / 1000),
     ext_version: "0.1.0.36",
     version_state: "behind",
-    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20 },
+    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20, idle_s: null },
     status: "missing",
     behind_since: null,
+    behind_at_floor: false,
     chrome_down_since: null,
     rebooted_recently: false,
     rebooted_at: null,
@@ -707,38 +708,71 @@ describe("R8 extension_missing / R9 extension_behind", () => {
     expect(kinds(run(NOW, ...rooms))).toEqual(["room_cardio:extension_missing"]);
   });
 
-  it("R9: alive but below target for 90 minutes = AMBER naming machine, room, last heartbeat and version; same action", () => {
-    const ext = extRow({ status: "behind", last_ext_ts: iso("2026-10-05 14:59:40"), ext_age_s: 20, behind_since: iso("2026-10-05 13:30:00"), ext_version: "0.1.0.36" });
-    const items = run(NOW, cardio(ext));
-    expect(kinds(items)).toEqual(["room_cardio:extension_behind"]);
-    const it = items[0]!;
-    expect(it.severity).toBe("amber");
-    expect(it.since).toBe(iso("2026-10-05 13:30:00"));
-    expect(it.detail).toContain("Cardiology OPD");
-    expect(it.detail).toContain("EHRC-ECHOs-Mac-mini");
-    expect(it.detail).toContain("version 0.1.0.36");
-    expect(it.detail).toContain(EXT_TARGET_VERSION);
-    expect(it.detail).toContain("last heartbeat 14:59 IST");
-    expect(it.action).toBe(ACTION);
+  /** An alive, behind-target row for a room. */
+  const behindRow = (room_name: string, ext_version: string, behind_since: string | null, over: Partial<ExtHealthRow> = {}): ExtHealthRow =>
+    extRow({ room_id: `room_${room_name}`, room_name, machine: `m-${room_name}`, status: "behind", last_ext_ts: iso("2026-10-05 14:59:40"), ext_age_s: 20, ext_version, behind_since, ...over });
+  const roomOf = (ext: ExtHealthRow | null) => room({ room_id: ext?.room_id ?? "room_x", room_name: ext?.room_name ?? "X", machine: ext?.machine ?? "mx", ext });
+  const fleetRow = (items: ReturnType<typeof run>) => items.filter((i) => i.kind === "extension_behind");
+
+  it("R9: ONE fleet-level AMBER row for every room on an old build, naming each room with its version, and the target to update to", () => {
+    const rows = [
+      behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:30:00")),
+      behindRow("OPD 6", "0.1.0.34", iso("2026-10-05 13:00:00")),
+      behindRow("Third Floor Consultation", "0.1.0.38", iso("2026-10-05 14:00:00")),
+    ];
+    const items = run(NOW, ...rows.map(roomOf));
+    const f = fleetRow(items);
+    expect(f).toHaveLength(1);
+    expect(items).toHaveLength(1);
+    expect(f[0]).toMatchObject({ room_id: "fleet", room_name: "Fleet", machine: null, kind: "extension_behind", severity: "amber" });
+    expect(f[0]!.detail).toBe("3 rooms on old extension builds: OPD 6 (0.1.0.34), OPD 5 (0.1.0.33), Third Floor Consultation (0.1.0.38); update to 0.1.1.39.");
+    expect(f[0]!.since).toBe(iso("2026-10-05 13:00:00")); // the earliest
+    expect(f[0]!.action).toContain("Update the Pulse Presence extension to 0.1.1.39");
+    expect(f[0]!.action).not.toMatch(/re-?run|install|policy/i);
+    expect(f[0]!.detail.trim().endsWith(".") && f[0]!.action.trim().endsWith(".")).toBe(true);
+  });
+
+  it("R9 with one room says \"1 room\" and \"that Mac\"; the target is EXT_TARGET_VERSION", () => {
+    const f = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:30:00")))));
+    expect(f[0]!.detail).toBe(`1 room on old extension builds: OPD 5 (0.1.0.33); update to ${EXT_TARGET_VERSION}.`);
+    expect(f[0]!.action).toContain("that Mac");
+  });
+
+  it("R9 says \"at least 2 h\" when a room's behind_since is the loader's look-back floor, and nothing of the kind otherwise", () => {
+    const floor = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:00:00"), { behind_at_floor: true })), roomOf(behindRow("OPD 6", "0.1.0.34", iso("2026-10-05 14:00:00")))));
+    expect(floor[0]!.detail.endsWith("update to 0.1.1.39. Behind for at least 2 h.")).toBe(true);
+    const plain = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:30:00")))));
+    expect(plain[0]!.detail).not.toContain("at least");
   });
 
   it("R9 waits an hour: 59 minutes behind is nothing, 60 minutes fires; no known start (null) is nothing", () => {
-    const beh = (since: string | null) => cardio(extRow({ status: "behind", last_ext_ts: iso("2026-10-05 14:59:40"), ext_age_s: 20, behind_since: since }));
+    const beh = (since: string | null) => roomOf(behindRow("Cardiology OPD", "0.1.0.36", since));
     expect(run(NOW, beh(iso("2026-10-05 14:01:00")))).toEqual([]);
-    expect(kinds(run(NOW, beh(iso("2026-10-05 14:00:00"))))).toEqual(["room_cardio:extension_behind"]);
+    expect(kinds(run(NOW, beh(iso("2026-10-05 14:00:00"))))).toEqual(["fleet:extension_behind"]);
     expect(run(NOW, beh(null))).toEqual([]);
   });
 
-  it("R9 only for status behind: ok, no_tab, missing and offline rows carrying a behind_since do not raise it", () => {
-    for (const status of ["ok", "no_tab", "missing", "offline"] as const) {
+  it("R9 counts only the rooms that have waited their hour: a room 30 minutes behind is left off the list", () => {
+    const f = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:00:00"))), roomOf(behindRow("OPD 6", "0.1.0.34", iso("2026-10-05 14:30:00")))));
+    expect(f[0]!.detail).toContain("1 room on old extension builds: OPD 5");
+    expect(f[0]!.detail).not.toContain("OPD 6");
+  });
+
+  it("R9 only for status behind: ok, no_tab, missing, quiet and offline rows carrying a behind_since do not raise it", () => {
+    for (const status of ["ok", "no_tab", "missing", "quiet", "offline"] as const) {
       expect(only(run(NOW, cardio(extRow({ status, behind_since: iso("2026-10-05 08:00:00") }))), "extension_behind"), status).toEqual([]);
     }
   });
 
-  it("composes with the rest: red missing sorts before amber behind, one item per kind per room, labels in plain words", () => {
-    const a = room({ room_id: "room_a", room_name: "OPD 5", machine: "m5", ext: extRow({ room_id: "room_a", room_name: "OPD 5", machine: "m5", status: "behind", last_ext_ts: iso("2026-10-05 14:59:50"), ext_age_s: 10, behind_since: iso("2026-10-02 10:00:00") }) });
+  it("`quiet` raises NOTHING (no item of any kind), whatever its age: the 5 Oct OPD 6 / OPD 7 shape", () => {
+    expect(run(NOW, cardio(extRow({ status: "quiet", ext_age_s: 9000, last_ext_ts: iso("2026-10-05 12:30:00"), ext_version: "0.1.0.34" })))).toEqual([]);
+    expect(run(NOW, cardio(extRow({ status: "quiet", ext_age_s: 25 * 3600, last_ext_ts: iso("2026-10-04 14:00:00") })))).toEqual([]);
+  });
+
+  it("composes with the rest: red missing sorts before the amber fleet row, labels in plain words", () => {
+    const a = roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-02 10:00:00")));
     const b = cardio(extRow());
-    expect(run(NOW, a, b).map((i) => `${i.room_id}:${i.kind}:${i.severity}`)).toEqual(["room_cardio:extension_missing:red", "room_a:extension_behind:amber"]);
+    expect(run(NOW, a, b).map((i) => `${i.room_id}:${i.kind}:${i.severity}`)).toEqual(["room_cardio:extension_missing:red", "fleet:extension_behind:amber"]);
     expect(KIND_LABEL.extension_missing).toBe("Presence extension missing");
     expect(KIND_LABEL.extension_behind).toBe("Presence extension out of date");
   });
@@ -755,9 +789,10 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
     ext_age_s: 40 * 60,
     ext_version: "0.1.1.39",
     version_state: "current",
-    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20 },
+    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20, idle_s: null },
     status: "missing",
     behind_since: null,
+    behind_at_floor: false,
     chrome_down_since: null,
     rebooted_recently: false,
     rebooted_at: null,
@@ -765,10 +800,11 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
   });
   const cardio = (ext: ExtHealthRow | null) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
 
-  it("R8 after a reboot: the action gains the time the Mac came back, in IST HH:MM, and keeps the base wording", () => {
+  it("R8 after a reboot: the action names the time the Mac came back, in IST HH:MM, with the policy-file wording said once", () => {
     const items = run(NOW, cardio(extRow({ rebooted_recently: true, rebooted_at: iso("2026-10-05 14:48:00") })));
     expect(kinds(items)).toEqual(["room_cardio:extension_missing"]);
-    expect(items[0]!.action).toBe(`${BASE_ACTION} (machine rebooted at 14:48, policy file lost)`);
+    expect(items[0]!.action).toBe("Re-run the presence install on Cardiology OPD (machine rebooted at 14:48, policy file lost).");
+    expect(items[0]!.action.match(/policy file lost/g)).toHaveLength(1); // said once, not twice
     expect(items[0]!.severity).toBe("red");
   });
 
@@ -782,14 +818,15 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
     expect(run(NOW, cardio(extRow({ rebooted_recently: true, rebooted_at: null })))[0]!.action).toBe(BASE_ACTION);
   });
 
-  it("the reboot note is R8's only: R9's action is unchanged on a rebooted machine", () => {
+  it("the reboot note is R8's only: the fleet-level R9 row on a rebooted machine says nothing of reboots or the policy file", () => {
     const items = run(NOW, cardio(extRow({ status: "behind", ext_age_s: 20, last_ext_ts: iso("2026-10-05 14:59:40"), ext_version: "0.1.0.36", behind_since: iso("2026-10-05 13:00:00"), rebooted_recently: true, rebooted_at: iso("2026-10-05 14:48:00") })));
-    expect(kinds(items)).toEqual(["room_cardio:extension_behind"]);
-    expect(items[0]!.action).toBe(BASE_ACTION);
+    expect(kinds(items)).toEqual(["fleet:extension_behind"]);
+    expect(items[0]!.action).not.toMatch(/reboot|policy/i);
+    expect(items[0]!.detail).not.toMatch(/reboot|policy/i);
   });
 
   it("R10: status no_chrome = AMBER chrome_not_running with the specified wording, dated from where the Chrome-down run began", () => {
-    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20 }, chrome_down_since: iso("2026-10-05 14:31:00") })));
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20, idle_s: null }, chrome_down_since: iso("2026-10-05 14:31:00") })));
     expect(kinds(items)).toEqual(["room_cardio:chrome_not_running"]);
     const it = items[0]!;
     expect(it.severity).toBe("amber");
@@ -799,13 +836,28 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
     expect(it.machine).toBe("EHRC-ECHOs-Mac-mini");
   });
 
+  it("R10 speaks only between 08:00 and 21:30 IST, every day: 07:59 and 21:30 are silent, 08:00 and 21:29 fire; a Sunday morning fires; 02:00 is silent", () => {
+    const down = extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: null, age_s: 20, idle_s: null }, chrome_down_since: iso("2026-10-05 01:00:00") });
+    const at = (t: string) => kinds(run(t, cardio(down)));
+    expect(at("2026-10-05 07:59:00")).toEqual([]);
+    expect(at("2026-10-05 08:00:00")).toEqual(["room_cardio:chrome_not_running"]);
+    expect(at("2026-10-05 21:29:00")).toEqual(["room_cardio:chrome_not_running"]);
+    expect(at("2026-10-05 21:30:00")).toEqual([]);
+    expect(at("2026-10-05 02:00:00")).toEqual([]);
+    expect(at("2026-10-04 10:00:00")).toEqual(["room_cardio:chrome_not_running"]); // a Sunday
+  });
+
+  it("the clinic-hours gate is R10's alone: an R8 `missing` is raised at 03:00 IST", () => {
+    expect(kinds(run("2026-10-05 03:00:00", cardio(extRow({ ext_age_s: 3 * 3600, last_ext_ts: iso("2026-10-05 00:00:00") }))))).toEqual(["room_cardio:extension_missing"]);
+  });
+
   it("R10 without a known start falls back to the poll that reported it", () => {
-    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: null, age_s: 30 }, chrome_down_since: null })));
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: null, age_s: 30, idle_s: null }, chrome_down_since: null })));
     expect(items[0]!.since).toBe(new Date(ist(NOW) - 30_000).toISOString());
   });
 
   it("R8 and R10 never fire together for one machine: a no_chrome row with a very old extension raises only R10", () => {
-    const items = run(NOW, cardio(extRow({ status: "no_chrome", ext_age_s: 25 * 3600, last_ext_ts: iso("2026-10-04 14:09:27"), poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20 } })));
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", ext_age_s: 25 * 3600, last_ext_ts: iso("2026-10-04 14:09:27"), poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20, idle_s: null } })));
     expect(kinds(items)).toEqual(["room_cardio:chrome_not_running"]);
   });
 

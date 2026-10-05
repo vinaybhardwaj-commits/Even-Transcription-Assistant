@@ -14,8 +14,8 @@ vi.mock("@/lib/encounter-windows", () => ({
   machineOccupancy: M.occ,
   extHealth: M.ext,
   // the real counter: it is pure, and the routes' summary shape is part of what these tests pin
-  summarizeExtHealth: (rows: Array<{ status: "ok" | "no_tab" | "missing" | "behind" | "offline" | "no_chrome" }>) => {
-    const s = { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 };
+  summarizeExtHealth: (rows: Array<{ status: "ok" | "no_tab" | "missing" | "quiet" | "behind" | "offline" | "no_chrome" }>) => {
+    const s = { ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 };
     for (const r of rows) { s[r.status]++; s.total++; }
     return s;
   },
@@ -200,7 +200,7 @@ describe("GET /api/encounter-windows", () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({
       ok: true, as_of: "2026-10-05T07:00:00.000Z", count: 1, machines,
-      ext_health: { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 },
+      ext_health: { ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 },
     });
     expect(M.occ.mock.calls[0]![1]).toBe("2026-10-05T07:00:00.000Z");
     expect(M.query).not.toHaveBeenCalled();
@@ -220,9 +220,9 @@ describe("GET /api/encounter-windows?occupancy=1 — ext_health summary", () => 
   it("carries counts by status of the presence machines' extension health", async () => {
     process.env.ADMIN_TOKEN = "tok";
     M.occ.mockResolvedValue([]);
-    M.ext.mockResolvedValue([{ status: "missing" }, { status: "behind" }, { status: "behind" }, { status: "ok" }, { status: "offline" }, { status: "no_chrome" }]);
+    M.ext.mockResolvedValue([{ status: "missing" }, { status: "behind" }, { status: "behind" }, { status: "ok" }, { status: "offline" }, { status: "no_chrome" }, { status: "quiet" }]);
     const body = await (await readGET(readReq("?occupancy=1&as_of=2026-10-05T07:00:00Z"))).json();
-    expect(body.ext_health).toEqual({ ok: 1, no_tab: 0, missing: 1, behind: 2, offline: 1, no_chrome: 1, total: 6 });
+    expect(body.ext_health).toEqual({ ok: 1, no_tab: 0, missing: 1, quiet: 1, behind: 2, offline: 1, no_chrome: 1, total: 7 });
     expect(M.ext.mock.calls[0]![1]).toEqual({ asOf: "2026-10-05T07:00:00.000Z" });
   });
 
@@ -261,7 +261,7 @@ describe("GET /api/encounter-windows?ext_health=1", () => {
     expect(r.headers.get("cache-control")).toBe("no-store");
     expect(await r.json()).toEqual({
       ok: true, as_of: "2026-10-05T10:00:00.000Z", count: 2,
-      summary: { ok: 0, no_tab: 0, missing: 1, behind: 1, offline: 0, no_chrome: 0, total: 2 },
+      summary: { ok: 0, no_tab: 0, missing: 1, quiet: 0, behind: 1, offline: 0, no_chrome: 0, total: 2 },
       machines,
     });
     expect(M.ext.mock.calls[0]![1]).toEqual({ asOf: "2026-10-05T10:00:00.000Z" });

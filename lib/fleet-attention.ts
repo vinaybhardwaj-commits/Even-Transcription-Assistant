@@ -24,10 +24,14 @@
  * R7 stale_start            a remote start_day failed in the last 60 min and no session has opened since. Red.
  * R8 extension_missing      the Pulse Presence extension has sent nothing for >= 10 min while the poller says Chrome is running and the Mac is up
  *                           (lib/encounter-windows/ext-health.ts status `missing`; the 4 Oct Cardiology reboot lost its policy file). Red.
- * R9 extension_behind       the extension is alive but below EXT_TARGET_VERSION, and has been for >= 60 min. Amber.
+ * R9 extension_behind       ONE fleet-level amber row ("N rooms on old extension builds: <room (version), ...>; update to <target>") for every room whose extension is
+ *                           alive but below EXT_TARGET_VERSION and has been for >= 60 min. Action is to update the extension, not to re-install the policy.
  *                           R8/R9 never fire for a machine on EXT_HEALTH_EXCLUDED_MACHINES (Home Office, ORB3, ORB2: no extension).
- *                           R8's action gains "(machine rebooted at HH:MM, policy file lost)" when the poller shows an unreachable -> ok flip with idle_s ~0 in the last 15 min.
+ *                           R8's action says "(machine rebooted at HH:MM, policy file lost)" when the poller shows a reboot in the last 15 min (unreachable -> ok with idle_s ~0,
+ *                           or an ok -> ok idle_s drop from >= 600 to <= 120 while the extension went quiet); otherwise "(policy file lost, usually after a reboot)".
+ *                           Status `quiet` (the console was used after the extension went quiet, so it may simply be idle) raises nothing; the table shows it.
  * R10 chrome_not_running    the poller is ok and says chrome_running=false (any extension age): Chrome is down, so presence cannot report. Amber.
+ *                           Only between 08:00 and 21:30 IST (the Kiosk Bot and the nightly shutdown make it noise overnight).
  *                           R8 is red only when chrome_running=true; the two never fire together for one machine.
  *
  * `computeAttention` is PURE (no I/O). `loadAttentionInputs` / `getFleetAttention` are the DB half: read-only SELECTs, bound parameters only (the
@@ -41,7 +45,8 @@
  */
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
-import { EXT_TARGET_VERSION, extHealth, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
+import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
+import { POLLER_LEGACY_KEYS, legacyPollerKey } from "@/lib/encounter-windows/machine-keys";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -89,6 +94,9 @@ export const EXT_MISSING_AFTER_MS = 10 * 60_000;
 export const EXT_BEHIND_AFTER_MS = 60 * 60_000;
 /** R8 when the extension has never been heard in the loader's look-back: the condition is at least this old. */
 const EXT_NEVER_SEEN_MS = 14 * 86_400_000;
+/** R10 only speaks between 08:00 and 21:30 IST, every day. */
+const EXT_CHROME_ALERT_OPEN_MIN = 8 * 60;
+const EXT_CHROME_ALERT_CLOSE_MIN = 21 * 60 + 30;
 
 /** Clinic hours, IST: 08:30–20:30, Monday to Saturday. */
 export const CLINIC_OPEN_MIN = 8 * 60 + 30;
@@ -108,27 +116,8 @@ export function isClinicHours(ms: number): boolean {
   return dow >= 1 && dow <= 6 && minutes >= CLINIC_OPEN_MIN && minutes < CLINIC_CLOSE_MIN;
 }
 
-/**
- * Poller rows written BEFORE the 5 Oct 2026 cutover (04:44Z, poller commit "key machine on full hostname") key `machine` on the short name;
- * every row since keys on the full hostname, `unreachable` rows included (poller/events.py `make_event(host["machine"], …, None)`: one `machine`
- * for ok and unreachable alike). The loader reads BOTH spellings so a lock/unreachable run that straddles the cutover is not cut in two. The two
- * `-2` Macs (OPD 1, OPD 4 Ortho) were always keyed on full names and have no short form. Legacy key -> canonical key.
- */
-export const POLLER_LEGACY_KEYS: Readonly<Record<string, string>> = {
-  consul4: "EHRC-CONSUL4s-Mac-mini",
-  consul5: "EHRC-CONSUL5s-Mac-mini",
-  consul6: "EHRC-CONSUL6s-Mac-mini",
-  consul7: "EHRC-CONSUL7s-Mac-mini",
-  echo: "EHRC-ECHOs-Mac-mini",
-  discussion: "EHRC-DISCUSSIONs-Mac-mini",
-  audiometry: "EHRC-AUDIOMETRYs-Mac-mini",
-};
-
-/** The pre-rename poller key for a canonical machine key, or null. */
-export function legacyPollerKey(canonical: string): string | null {
-  for (const [legacy, canon] of Object.entries(POLLER_LEGACY_KEYS)) if (canon === canonical) return legacy;
-  return null;
-}
+// The pre-5-Oct poller short keys live in lib/encounter-windows/machine-keys.ts (shared with the ext-health loader); re-exported here for callers and tests.
+export { POLLER_LEGACY_KEYS, legacyPollerKey };
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -344,6 +333,7 @@ export function isSilentChunk(c: Pick<ChunkLite, "size_bytes" | "duration_ms">):
 export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
   const now = inputs.now_ms;
   const out: AttentionItem[] = [];
+  const behindRooms: Array<{ name: string; version: string; since: number; atFloor: boolean }> = [];
 
   for (const r of inputs.rooms) {
     const mk = (kind: AttentionKind, severity: AttentionSeverity, sinceMs: number, detail: string, action: string): void => {
@@ -554,18 +544,19 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       }
     }
 
-    // R8 / R9 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
-    // R8: the extension has been silent for >= 10 min while the Mac is up and Chrome is running — the policy file is gone (usually a reboot).
-    // R9: the extension is alive but below EXT_TARGET_VERSION, and has been for >= 60 min.
+    // R8 / R9 / R10 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
+    // R8: the extension has been silent for >= 10 min while the Mac is up, Chrome is running and nobody has used the console since it went quiet.
+    // R9: collected here, raised ONCE for the fleet after the loop. `quiet` raises nothing.
     if (r.ext) {
       const e = r.ext;
       const lastMs = e.last_ext_ts ? Date.parse(e.last_ext_ts) : NaN;
       const ver = e.ext_version ? `version ${clean(e.ext_version, 40)}` : "version unknown";
       const beat = Number.isFinite(lastMs) ? `last heartbeat ${fmtIst(new Date(lastMs).toISOString(), now)}` : `no heartbeat on record in the last ${EXT_NEVER_SEEN_MS / 86_400_000} days`;
       const place = `${name}${e.machine ? ` (${clean(e.machine, 60)})` : ""}`;
-      const action = `Re-run the presence install on ${name} (policy file lost, usually after a reboot).`;
-      // R8 only: the poller saw the Mac restart in the last 15 minutes, so the policy file is known to be gone.
-      const missingAction = e.rebooted_recently && e.rebooted_at ? `${action} (machine rebooted at ${istHourMinute(e.rebooted_at)}, policy file lost)` : action;
+      const missingAction =
+        e.rebooted_recently && e.rebooted_at
+          ? `Re-run the presence install on ${name} (machine rebooted at ${istHourMinute(e.rebooted_at)}, policy file lost).`
+          : `Re-run the presence install on ${name} (policy file lost, usually after a reboot).`;
       if (e.status === "missing" && (e.ext_age_s === null || e.ext_age_s * 1000 >= EXT_MISSING_AFTER_MS)) {
         mk(
           "extension_missing",
@@ -578,17 +569,13 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       if (e.status === "behind" && e.behind_since) {
         const since = Date.parse(e.behind_since);
         if (Number.isFinite(since) && now - since >= EXT_BEHIND_AFTER_MS) {
-          mk(
-            "extension_behind",
-            "amber",
-            since,
-            `The Pulse Presence extension on ${place} is on ${ver}, behind the target ${EXT_TARGET_VERSION}; ${beat}.`,
-            action,
-          );
+          behindRooms.push({ name, version: e.ext_version ? clean(e.ext_version, 40) : "version unknown", since, atFloor: e.behind_at_floor });
         }
       }
       // R10 — CHROME NOT RUNNING. The extension lives inside Chrome; with Chrome down nothing can report. Amber: a person (or the Kiosk Bot) opens it.
-      if (e.status === "no_chrome") {
+      // Clinic hours only (08:00–21:30 IST, every day): overnight Chrome is down by design.
+      const istMin = istParts(now).minutes;
+      if (e.status === "no_chrome" && istMin >= EXT_CHROME_ALERT_OPEN_MIN && istMin < EXT_CHROME_ALERT_CLOSE_MIN) {
         const down = e.chrome_down_since ? Date.parse(e.chrome_down_since) : NaN;
         mk(
           "chrome_not_running",
@@ -599,6 +586,24 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
         );
       }
     }
+  }
+
+  // R9 — one fleet-level row for every room still on an old build.
+  if (behindRooms.length > 0) {
+    behindRooms.sort((x, y) => x.since - y.since || x.name.localeCompare(y.name));
+    const n = behindRooms.length;
+    const list = behindRooms.map((b) => `${b.name} (${b.version})`).join(", ");
+    const floor = behindRooms.some((b) => b.atFloor) ? ` Behind for at least ${BEHIND_LOOKBACK_H} h.` : "";
+    out.push({
+      room_id: "fleet",
+      room_name: "Fleet",
+      machine: null,
+      kind: "extension_behind",
+      since: new Date(behindRooms[0].since).toISOString(),
+      detail: `${n} ${n === 1 ? "room" : "rooms"} on old extension builds: ${list}; update to ${EXT_TARGET_VERSION}.${floor}`,
+      action: `Update the Pulse Presence extension to ${EXT_TARGET_VERSION} on ${n === 1 ? "that Mac" : "those Macs"} (reload it from chrome://extensions, or re-pack from the current build).`,
+      severity: "amber",
+    });
   }
 
   // One item per kind per room (the earliest wins), then red first, oldest first.
