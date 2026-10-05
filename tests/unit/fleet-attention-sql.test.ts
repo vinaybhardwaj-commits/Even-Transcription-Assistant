@@ -565,3 +565,143 @@ describe.runIf(HAVE_DOCKER)("F3 — the bench_level_sample / bench_chunk reads n
     expect([...usedIndexes].sort().join(",")).toContain("bench_chunk_session_source_idx_key"); // the chunk reads go through (session_id, source, idx)
   }, 180_000);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// R8 / R9 and lib/encounter-windows/ext-health.ts — the extension-health SELECTs against a real postgres.
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+const extHealthNow = async () => {
+  const { extHealth } = await import("@/lib/encounter-windows/ext-health");
+  const { sql } = await import("@/lib/db");
+  return extHealth(sql as never, {});
+};
+const POLLER_OK = (user = "console-a", chrome = true) => `{"state":"ok","chrome_running":${chrome},"console_user":"${user}"}`;
+const extRow = (machine: string, event: string, when: string, payload = "{}") => presence("ext", machine, event, when, payload);
+
+describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () => {
+  it("the 4 Oct Cardiology case: extension rows stop 25 h ago while the poller says ok + chrome_running = missing, RED on the attention list; a live current extension is ok; an unreachable poller is offline", async () => {
+    pg.exec([
+      // r7 — vanished extension
+      extRow(M7, "heartbeat", "26 hours", '{"ext_version":"0.1.0.36"}'), extRow(M7, "active", "25 hours", '{"ext_version":"0.1.0.36"}'),
+      presence("poller", M7, "ok", "30 seconds", POLLER_OK()), presence("poller", M7, "ok", "90 seconds", POLLER_OK()),
+      // r6 — alive, current
+      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.39","tab_focus":false}'), presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
+      // r4 — poller unreachable
+      extRow(M4, "heartbeat", "9 hours", '{"ext_version":"0.1.0.36"}'), presence("poller", M4, "unreachable", "30 seconds", '{"state":"unreachable"}'),
+    ].join("\n"));
+    const rows = await extHealthNow();
+    const by = Object.fromEntries(rows.map((r) => [r.room_id, r]));
+    expect(by.r7).toMatchObject({ status: "missing", ext_version: "0.1.0.36", version_state: "behind", poller: { ok: true, chrome_running: true, console_user: "console-a" } });
+    expect(by.r7!.ext_age_s).toBeGreaterThan(25 * 3600 - 5);
+    expect(by.r6).toMatchObject({ status: "ok", version_state: "current", ext_version: "0.1.1.39" });
+    expect(by.r4).toMatchObject({ status: "offline" });
+
+    const r = await attention();
+    expect(r.degraded).toBeUndefined();
+    const item = r.items.find((i) => i.room_id === "r7" && i.kind === "extension_missing")!;
+    expect(item).toBeDefined();
+    expect(item.severity).toBe("red");
+    expect(item.detail).toContain("CONSUL 4");
+    expect(item.detail).toContain(M7);
+    expect(item.detail).toContain("version 0.1.0.36");
+    expect(item.action).toBe("Re-run the presence install on CONSUL 4 (policy file lost, usually after a reboot).");
+    expect(kindsOf(r).filter((k) => k.includes("extension"))).toEqual(["r7:extension_missing"]);
+  });
+
+  it("no_tab: a tab_closed logout 30 minutes ago on a reachable Mac with Chrome running is not missing and raises nothing", async () => {
+    pg.exec([
+      extRow(M7, "heartbeat", "2 hours", '{"ext_version":"0.1.1.39"}'), extRow(M7, "logout", "30 minutes", '{"ext_version":"0.1.1.39","reason":"tab_closed"}'),
+      presence("poller", M7, "ok", "30 seconds", POLLER_OK()),
+    ].join("\n"));
+    expect((await extHealthNow()).find((r) => r.room_id === "r7")).toMatchObject({ status: "no_tab" });
+    expect(kindsOf(await attention()).filter((k) => k.includes("extension"))).toEqual([]);
+  });
+
+  it("behind: alive on 0.1.0.36 since 4 h ago (after an at-target row at 5 h, with a garbage version in the middle that must not break the cast) = behind, behind_since ~4 h, AMBER R9", async () => {
+    pg.exec([
+      extRow(M6, "heartbeat", "6 hours", '{"ext_version":"0.1.1.39"}'), extRow(M6, "heartbeat", "5 hours", '{"ext_version":"0.1.1.39"}'),
+      extRow(M6, "heartbeat", "4 hours", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "3 hours 30 minutes", '{"ext_version":"junk"}'),
+      extRow(M6, "heartbeat", "2 hours", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "20 seconds", '{"ext_version":"0.1.0.36"}'),
+      extRow(M6, "heartbeat", "10 seconds", '{"tab_focus":false}'), // a row with no version at all
+      presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
+    ].join("\n"));
+    const row = (await extHealthNow()).find((r) => r.room_id === "r6")!;
+    expect(row).toMatchObject({ status: "behind", ext_version: "0.1.0.36", version_state: "behind" });
+    const dbNow = Date.now();
+    expect(minutesBetween(row.behind_since as string, dbNow - 4 * 3_600_000)).toBeLessThan(3);
+    const item = (await attention()).items.find((i) => i.kind === "extension_behind")!;
+    expect(item).toMatchObject({ room_id: "r6", severity: "amber" });
+    expect(item.detail).toContain("version 0.1.0.36");
+    expect(item.detail).toContain("0.1.1.39");
+  });
+
+  it("behind for under an hour raises nothing yet; an extension that has never been on target is dated by the 24-hour look-back (a lower bound), so it fires", async () => {
+    pg.exec([
+      extRow(M6, "heartbeat", "30 minutes", '{"ext_version":"0.1.1.39"}'), extRow(M6, "heartbeat", "20 minutes", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.0.36"}'),
+      presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
+    ].join("\n"));
+    expect(kindsOf(await attention()).filter((k) => k.includes("extension"))).toEqual([]);
+    pg.exec(`TRUNCATE pulse_presence_events;` + [
+      extRow(M6, "heartbeat", "2 days", '{"ext_version":"0.1.0.30"}'), extRow(M6, "heartbeat", "23 hours", '{"ext_version":"0.1.0.30"}'), extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.0.36"}'),
+      presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
+    ].join("\n"));
+    const row = (await extHealthNow()).find((r) => r.room_id === "r6")!;
+    expect(minutesBetween(row.behind_since as string, Date.now() - 23 * 3_600_000)).toBeLessThan(3); // the 2-day-old row is outside the window
+    expect(kindsOf(await attention()).filter((k) => k.includes("extension"))).toEqual(["r6:extension_behind"]);
+  });
+
+  it("EXCLUDED machines (Home Office, ORB3, ORB2) never appear, even silent with an ok poller and Chrome running; the clinic Macs still do", async () => {
+    pg.exec(`
+      INSERT INTO room (id, slug, name) VALUES ('rh', 'home-office-x', 'Home Office'), ('ro3', 'orb3-x', 'ORB3'), ('ro2', 'orb2-x', 'ORB2');
+      INSERT INTO room_install (install_id, room_id, hostname, enrolled_at) VALUES
+        ('ih', 'rh', 'Vinay’s Mac mini', now() - interval '30 days'), ('io3', 'ro3', 'ORBOX3', now() - interval '30 days'), ('io2', 'ro2', 'vinay-orb2', now() - interval '30 days');
+    ` + [
+      presence("poller", "Vinays-Mac-mini", "ok", "30 seconds", POLLER_OK()), presence("poller", "ORBOX3", "ok", "30 seconds", POLLER_OK()), presence("poller", "vinay-orb2", "ok", "30 seconds", POLLER_OK()),
+      presence("poller", M7, "ok", "30 seconds", POLLER_OK()),
+    ].join("\n"));
+    const rows = await extHealthNow();
+    expect(rows.map((r) => r.room_id).sort()).toEqual(["r4", "r6", "r7"]);
+    const r = await attention();
+    expect(r.rooms_checked).toBe(6);
+    expect(kindsOf(r).filter((k) => /^(rh|ro3|ro2):/.test(k) && k.includes("extension"))).toEqual([]);
+    expect(kindsOf(r)).toContain("r7:extension_missing");
+  });
+
+  it("one read per presence table lookup, bound values only, and at volume (≈80k ext rows, ≈80k poller rows over 14 days) no statement Seq Scans pulse_presence_events — every read rides (machine, ts)", async () => {
+    pg.exec(`
+      INSERT INTO pulse_presence_events (source, machine, event, ts, payload)
+      SELECT 'ext', m, 'heartbeat', t, '{"ext_version":"0.1.0.36","tab_focus":false}'::jsonb
+        FROM unnest(ARRAY['${M6}', '${M4}', '${M7}', 'EHRC-DECOY1s-Mac-mini', 'EHRC-DECOY2s-Mac-mini', 'EHRC-DECOY3s-Mac-mini']) m,
+             generate_series(now() - interval '3 days', now(), interval '5 minutes') t;
+      INSERT INTO pulse_presence_events (source, machine, event, ts, payload)
+      SELECT 'ext', m, 'heartbeat', t, '{"ext_version":"0.1.0.36","tab_focus":false}'::jsonb
+        FROM unnest(ARRAY['${M6}', '${M7}']) m, generate_series(now() - interval '3 days', now() - interval '1 minute', interval '15 seconds') t;
+      INSERT INTO pulse_presence_events (source, machine, event, ts, payload)
+      SELECT 'poller', m, 'ok', t, '{"state":"ok","chrome_running":true,"console_user":"u"}'::jsonb
+        FROM unnest(ARRAY['${M6}', '${M4}', '${M7}', 'EHRC-DECOY1s-Mac-mini', 'EHRC-DECOY2s-Mac-mini', 'EHRC-DECOY3s-Mac-mini']) m,
+             generate_series(now() - interval '3 days', now(), interval '1 minute') t;
+      ANALYZE pulse_presence_events;
+    `);
+    H.rec.length = 0;
+    const rows = await extHealthNow();
+    expect(rows.find((r) => r.room_id === "r6")!.status).toBe("behind");
+    const mine = H.rec.filter((x) => /ext_version/.test(x.q) && /pulse_presence_events/.test(x.q));
+    expect(mine.length).toBeGreaterThanOrEqual(2); // the three LATERAL lookups (one statement) and the behind-since read
+    for (const { q } of H.rec) {
+      expect(q).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
+      expect(q).not.toContain("EHRC-");
+    }
+    const usedIndexes = new Set<string>();
+    for (const { q, v } of mine) {
+      const text = q.replace(/\$(\d+)/g, (_m, n) => lit(v[Number(n) - 1]));
+      const raw = (await pg.sql`SELECT explain_json(${text}) AS plan`) as Array<{ plan: string }>;
+      const nodes = walk((JSON.parse(raw[0]!.plan) as Array<{ Plan: PlanNode }>)[0]!.Plan);
+      if (process.env.FA_EXPLAIN_DEBUG) console.log(q.replace(/\s+/g, " ").slice(0, 70), "=>", nodes.map((n) => `${n["Node Type"]}:${n["Relation Name"] ?? ""}${n["Index Name"] ? "@" + n["Index Name"] : ""}`).join(" | "));
+      const seq = nodes.filter((n) => n["Node Type"] === "Seq Scan" && n["Relation Name"] === "pulse_presence_events");
+      expect(seq.length, `Seq Scan of pulse_presence_events in: ${q.replace(/\s+/g, " ").slice(0, 120)}`).toBe(0);
+      for (const n of nodes) if (n["Index Name"]) usedIndexes.add(n["Index Name"]);
+    }
+    expect(usedIndexes.has("pulse_presence_events_machine_ts_idx")).toBe(true);
+  }, 180_000);
+});
+

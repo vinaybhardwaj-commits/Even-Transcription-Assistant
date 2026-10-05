@@ -5,9 +5,21 @@ const M = vi.hoisted(() => ({
   refresh: vi.fn(),
   query: vi.fn(),
   occ: vi.fn(),
+  ext: vi.fn(),
 }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign(() => [], { transaction: async () => [] }) }));
-vi.mock("@/lib/encounter-windows", () => ({ refreshWindowsByDay: M.refresh, queryWindows: M.query, machineOccupancy: M.occ }));
+vi.mock("@/lib/encounter-windows", () => ({
+  refreshWindowsByDay: M.refresh,
+  queryWindows: M.query,
+  machineOccupancy: M.occ,
+  extHealth: M.ext,
+  // the real counter: it is pure, and the routes' summary shape is part of what these tests pin
+  summarizeExtHealth: (rows: Array<{ status: "ok" | "no_tab" | "missing" | "behind" | "offline" }>) => {
+    const s = { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, total: 0 };
+    for (const r of rows) { s[r.status]++; s.total++; }
+    return s;
+  },
+}));
 
 import { GET as cronGET } from "@/app/api/cron/encounter-windows/route";
 import { GET as sweepGET } from "@/app/api/cron/encounter-windows/sweep/route";
@@ -19,6 +31,8 @@ beforeEach(() => {
   M.refresh.mockReset();
   M.query.mockReset();
   M.occ.mockReset();
+  M.ext.mockReset();
+  M.ext.mockResolvedValue([]);
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => {
@@ -184,7 +198,10 @@ describe("GET /api/encounter-windows", () => {
     M.occ.mockResolvedValue(machines);
     const r = await readGET(readReq("?occupancy=1&as_of=2026-10-05T07:00:00Z"));
     expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ ok: true, as_of: "2026-10-05T07:00:00.000Z", count: 1, machines });
+    expect(await r.json()).toEqual({
+      ok: true, as_of: "2026-10-05T07:00:00.000Z", count: 1, machines,
+      ext_health: { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, total: 0 },
+    });
     expect(M.occ.mock.calls[0]![1]).toBe("2026-10-05T07:00:00.000Z");
     expect(M.query).not.toHaveBeenCalled();
   });
@@ -194,6 +211,70 @@ describe("GET /api/encounter-windows", () => {
     expect((await readGET(readReq("?occupancy=1&as_of=nope"))).status).toBe(400);
     M.occ.mockRejectedValue(new Error("boom secret"));
     const r = await readGET(readReq("?occupancy=true"));
+    expect(r.status).toBe(500);
+    expect(JSON.stringify(await r.json())).not.toContain("secret");
+  });
+});
+
+describe("GET /api/encounter-windows?occupancy=1 — ext_health summary", () => {
+  it("carries counts by status of the presence machines' extension health", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    M.occ.mockResolvedValue([]);
+    M.ext.mockResolvedValue([{ status: "missing" }, { status: "behind" }, { status: "behind" }, { status: "ok" }, { status: "offline" }]);
+    const body = await (await readGET(readReq("?occupancy=1&as_of=2026-10-05T07:00:00Z"))).json();
+    expect(body.ext_health).toEqual({ ok: 1, no_tab: 0, missing: 1, behind: 2, offline: 1, total: 5 });
+    expect(M.ext.mock.calls[0]![1]).toEqual({ asOf: "2026-10-05T07:00:00.000Z" });
+  });
+
+  it("a failing ext_health read never takes the occupancy read down: ext_health is null, the machines still come back", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    M.occ.mockResolvedValue([{ machine: "m" }]);
+    M.ext.mockRejectedValue(new Error("boom secret"));
+    const r = await readGET(readReq("?occupancy=1"));
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.ext_health).toBeNull();
+    expect(body.machines).toEqual([{ machine: "m" }]);
+    expect(JSON.stringify(body)).not.toContain("secret");
+  });
+});
+
+describe("GET /api/encounter-windows?ext_health=1", () => {
+  it("401 without the admin token (and reads nothing)", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    expect((await readGET(readReq("?ext_health=1", ""))).status).toBe(401);
+    expect((await readGET(readReq("?ext_health=1", "Bearer wrong"))).status).toBe(401);
+    delete process.env.ADMIN_TOKEN;
+    expect((await readGET(readReq("?ext_health=1"))).status).toBe(401);
+    expect(M.ext).not.toHaveBeenCalled();
+  });
+
+  it("returns the per-machine table and its summary (not windows, not occupancy)", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    const machines = [
+      { machine: "EHRC-ECHOs-Mac-mini", room_name: "Cardiology OPD", status: "missing" },
+      { machine: "EHRC-CONSUL5s-Mac-mini", room_name: "OPD 5", status: "behind" },
+    ];
+    M.ext.mockResolvedValue(machines);
+    const r = await readGET(readReq("?ext_health=1&as_of=2026-10-05T10:00:00Z"));
+    expect(r.status).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(await r.json()).toEqual({
+      ok: true, as_of: "2026-10-05T10:00:00.000Z", count: 2,
+      summary: { ok: 0, no_tab: 0, missing: 1, behind: 1, offline: 0, total: 2 },
+      machines,
+    });
+    expect(M.ext.mock.calls[0]![1]).toEqual({ asOf: "2026-10-05T10:00:00.000Z" });
+    expect(M.query).not.toHaveBeenCalled();
+    expect(M.occ).not.toHaveBeenCalled();
+  });
+
+  it("?ext_health=true works too; a bad as_of is a 400; a failing read is a 500 that leaks nothing", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    expect((await readGET(readReq("?ext_health=true"))).status).toBe(200);
+    expect((await readGET(readReq("?ext_health=1&as_of=nope"))).status).toBe(400);
+    M.ext.mockRejectedValue(new Error("boom secret"));
+    const r = await readGET(readReq("?ext_health=1"));
     expect(r.status).toBe(500);
     expect(JSON.stringify(await r.json())).not.toContain("secret");
   });

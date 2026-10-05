@@ -6,3 +6,5 @@ export type { WindowsDb, RefreshResult, RefreshByDayResult, WindowFilter } from 
 export { keepFocusFlips } from "./filter";
 export { consultingDoctorForMachine, machineOccupancy, buildOccupantDisplay, WAREHOUSE_WINDOW_MIN } from "./occupant";
 export type { OccupantDisplay, MachineOccupancy, ConsultingDoctor } from "./occupant";
+export { extHealth, computeExtHealth, summarizeExtHealth, EXT_TARGET_VERSION, EXT_HEALTH_EXCLUDED_MACHINES } from "./ext-health";
+export type { ExtHealthRow, ExtHealthSummary, ExtStatus } from "./ext-health";

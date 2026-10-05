@@ -22,6 +22,10 @@
  * R6 open_outbox            a watchdog offline/degraded alert with no GENUINE recovery since (chunk after it AND >= 2 distinct levels). Red/amber.
  *                           R6 clears on the FIRST genuine evidence, by spec (a single recovery chunk is enough; there is no hold-down).
  * R7 stale_start            a remote start_day failed in the last 60 min and no session has opened since. Red.
+ * R8 extension_missing      the Pulse Presence extension has sent nothing for >= 10 min while the poller says Chrome is running and the Mac is up
+ *                           (lib/encounter-windows/ext-health.ts status `missing`; the 4 Oct Cardiology reboot lost its policy file). Red.
+ * R9 extension_behind       the extension is alive but below EXT_TARGET_VERSION, and has been for >= 60 min. Amber.
+ *                           R8/R9 never fire for a machine on EXT_HEALTH_EXCLUDED_MACHINES (Home Office, ORB3, ORB2: no extension).
  *
  * `computeAttention` is PURE (no I/O). `loadAttentionInputs` / `getFleetAttention` are the DB half: read-only SELECTs, bound parameters only (the
  * Neon HTTP driver has no sql.unsafe), timestamps normalised from whatever the driver returns. Every bench_level_sample / bench_chunk read is
@@ -34,6 +38,7 @@
  */
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
+import { EXT_TARGET_VERSION, extHealth, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -75,6 +80,12 @@ export const ACTIVITY_WINDOW_MS = 30 * 60_000;
 export const CONSULT_DISPLAY_MS = 90 * 60_000;
 /** R7 */
 export const FAILED_START_WINDOW_MS = 60 * 60_000;
+/** R8: the extension must have been silent this long (ext-health `missing` already implies it; the rule keeps it explicit). */
+export const EXT_MISSING_AFTER_MS = 10 * 60_000;
+/** R9: the machine must have been below the target version this long. */
+export const EXT_BEHIND_AFTER_MS = 60 * 60_000;
+/** R8 when the extension has never been heard in the loader's look-back: the condition is at least this old. */
+const EXT_NEVER_SEEN_MS = 14 * 86_400_000;
 
 /** Clinic hours, IST: 08:30–20:30, Monday to Saturday. */
 export const CLINIC_OPEN_MIN = 8 * 60 + 30;
@@ -199,6 +210,8 @@ export type RoomAttentionInputs = {
   outbox: OutboxFacts | null;
   /** R7: the room's newest failed start_day ack, with `error` the ack reason. */
   failed_start: { acked_at: string; error: string | null } | null;
+  /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
+  ext?: ExtHealthRow | null;
 };
 
 export type AttentionInputs = { now_ms: number; rooms: RoomAttentionInputs[] };
@@ -531,6 +544,39 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
         );
       }
     }
+
+    // R8 / R9 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
+    // R8: the extension has been silent for >= 10 min while the Mac is up and Chrome is running — the policy file is gone (usually a reboot).
+    // R9: the extension is alive but below EXT_TARGET_VERSION, and has been for >= 60 min.
+    if (r.ext) {
+      const e = r.ext;
+      const lastMs = e.last_ext_ts ? Date.parse(e.last_ext_ts) : NaN;
+      const ver = e.ext_version ? `version ${clean(e.ext_version, 40)}` : "version unknown";
+      const beat = Number.isFinite(lastMs) ? `last heartbeat ${fmtIst(new Date(lastMs).toISOString(), now)}` : `no heartbeat on record in the last ${EXT_NEVER_SEEN_MS / 86_400_000} days`;
+      const place = `${name}${e.machine ? ` (${clean(e.machine, 60)})` : ""}`;
+      const action = `Re-run the presence install on ${name} (policy file lost, usually after a reboot).`;
+      if (e.status === "missing" && (e.ext_age_s === null || e.ext_age_s * 1000 >= EXT_MISSING_AFTER_MS)) {
+        mk(
+          "extension_missing",
+          "red",
+          Number.isFinite(lastMs) ? lastMs : now - EXT_NEVER_SEEN_MS,
+          `The Pulse Presence extension on ${place} has gone silent although the Mac is up and Chrome is running; ${beat}, ${ver}. Doctor and room attribution is blind on this Mac.`,
+          action,
+        );
+      }
+      if (e.status === "behind" && e.behind_since) {
+        const since = Date.parse(e.behind_since);
+        if (Number.isFinite(since) && now - since >= EXT_BEHIND_AFTER_MS) {
+          mk(
+            "extension_behind",
+            "amber",
+            since,
+            `The Pulse Presence extension on ${place} is on ${ver}, behind the target ${EXT_TARGET_VERSION}; ${beat}.`,
+            action,
+          );
+        }
+      }
+    }
   }
 
   // One item per kind per room (the earliest wins), then red first, oldest first.
@@ -593,7 +639,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     });
   const mj = JSON.stringify(machines);
 
-  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, failed] = await Promise.all([
+  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, failed, extRows] = await Promise.all([
     // R1 — the newest lock-determining ext event per machine (same predicate as classifyExtEvent).
     safe("presence_ext", degraded, async () => (await sql`
       SELECT m.n AS machine, e.event, e.ts, e.focus
@@ -731,7 +777,10 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
          AND c.acked_at > now() - interval '60 minutes' AND c.created_at > now() - interval '3 hours'
        ORDER BY c.room_id, c.acked_at DESC
     `) as Array<{ room_id: string; acked_at: unknown; error: string | null }>, []),
+    // R8/R9 — the extension's health per presence machine (excluded machines have no row). Its own source name, so a failure degrades only R8/R9.
+    safe("ext_health", degraded, () => extHealth(sql, { asOf: nowMs, rooms: roomRows }), [] as ExtHealthRow[]),
   ]);
+  const extHealthBy = new Map(extRows.filter((x) => x.room_id).map((x) => [x.room_id as string, x]));
 
   const byMachine = <T extends { machine: string }>(rows: T[]) => new Map(rows.map((r) => [r.machine, r]));
   const extBy = new Map<string, PresenceEventLite[]>();
@@ -862,6 +911,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
             }
           : null,
       failed_start: fs && fsAt ? { acked_at: fsAt, error: fs.error } : null,
+      ext: extHealthBy.get(r.room_id) ?? null,
     };
   });
 

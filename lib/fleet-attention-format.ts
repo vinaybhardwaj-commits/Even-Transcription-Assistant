@@ -8,7 +8,7 @@
 
 export type AttentionSeverity = "red" | "amber";
 
-/** One kind per rule R1..R7. A room carries at most one item of each kind. */
+/** One kind per rule R1..R9. A room carries at most one item of each kind. */
 export type AttentionKind =
   | "asleep"
   | "capture_frozen"
@@ -16,7 +16,9 @@ export type AttentionKind =
   | "consult_without_tape"
   | "no_session_in_clinic"
   | "open_outbox"
-  | "stale_start";
+  | "stale_start"
+  | "extension_missing"
+  | "extension_behind";
 
 export type AttentionItem = {
   room_id: string;
@@ -50,6 +52,8 @@ export const KIND_LABEL: Record<AttentionKind, string> = {
   no_session_in_clinic: "No recording started",
   open_outbox: "Watchdog alert still open",
   stale_start: "Remote start failed",
+  extension_missing: "Presence extension missing",
+  extension_behind: "Presence extension out of date",
 };
 
 /** "for 3 h 12 m", "for 45 m", "for under a minute", "for 4 d 3 h". Never negative. */

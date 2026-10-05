@@ -14,12 +14,17 @@
  * occupant and occupant_display = { uid, name, source: 'warehouse'|'cookie', cookie_uid, cookie_name, stale }. The warehouse consulting doctor of the
  * machine's most recent consult (opened within 90 min of as_of, or unclosed) is shown in preference to the extension's Google-cookie identity, which
  * Pulse never clears (lib/encounter-windows/occupant.ts). stale = the cookie identity differs from the warehouse doctor. Read-only.
+ * The occupancy response also carries `ext_health`: counts by status ({ok, no_tab, missing, behind, offline, total}) of the Pulse Presence extension
+ * across the presence machines, or null when that read failed (it never fails the occupancy read).
+ * ?ext_health=1 (optionally as_of=<ISO>) returns { ok, as_of, count, summary, machines: [...] }: one row per presence machine
+ * (lib/encounter-windows/ext-health.ts) with last_ext_ts, ext_age_s, ext_version, version_state, poller {ok, chrome_running, console_user, age_s} and
+ * status ok | no_tab | missing | behind | offline. Home Office, ORB3 and ORB2 (no extension) are never listed. Read-only.
  * No transcripts, no patient identifiers. Bad params -> 400.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin-gate";
 import { sql } from "@/lib/db";
-import { machineOccupancy, queryWindows } from "@/lib/encounter-windows";
+import { extHealth, machineOccupancy, queryWindows, summarizeExtHealth } from "@/lib/encounter-windows";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,6 +45,19 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   const p = req.nextUrl.searchParams;
+  const extRaw = p.get("ext_health");
+  if (extRaw === "1" || extRaw === "true") {
+    const asOf = isoParam(p.get("as_of"));
+    if (asOf === "bad") return bad("as_of is not a timestamp");
+    try {
+      const at = asOf ?? new Date().toISOString();
+      const machines = await extHealth(sql, { asOf: at });
+      return NextResponse.json({ ok: true, as_of: at, count: machines.length, summary: summarizeExtHealth(machines), machines }, NO_STORE);
+    } catch (e) {
+      console.error(`[encounter-windows] ext_health read failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+      return NextResponse.json({ error: { code: "READ_FAILED", message: "read failed" } }, { status: 500, ...NO_STORE });
+    }
+  }
   const occRaw = p.get("occupancy");
   if (occRaw === "1" || occRaw === "true") {
     const asOf = isoParam(p.get("as_of"));
@@ -47,7 +65,14 @@ export async function GET(req: NextRequest) {
     try {
       const at = asOf ?? new Date().toISOString();
       const machines = await machineOccupancy(sql, at);
-      return NextResponse.json({ ok: true, as_of: at, count: machines.length, machines }, NO_STORE);
+      // The extension's health rides along; a failure here must never take the occupancy read down with it.
+      let ext_health: ReturnType<typeof summarizeExtHealth> | null = null;
+      try {
+        ext_health = summarizeExtHealth(await extHealth(sql, { asOf: at }));
+      } catch (e) {
+        console.error(`[encounter-windows] occupancy ext_health failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+      }
+      return NextResponse.json({ ok: true, as_of: at, count: machines.length, machines, ext_health }, NO_STORE);
     } catch (e) {
       console.error(`[encounter-windows] occupancy read failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
       return NextResponse.json({ error: { code: "READ_FAILED", message: "read failed" } }, { status: 500, ...NO_STORE });

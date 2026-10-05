@@ -1,5 +1,5 @@
 /**
- * lib/fleet-attention.ts — behaviour tests for rules R1–R7, driven through the PURE `computeAttention` with fixtures that encode what was
+ * lib/fleet-attention.ts — behaviour tests for rules R1–R9, driven through the PURE `computeAttention` with fixtures that encode what was
  * measured on 5 Oct 2026: OPD 6's Mac fell into DarkWake at 01:36:50 IST while the extension kept sending heartbeats and logged a `locked` event;
  * its level meter froze to one identical reading from 01:36:52; the watchdog announced `recovered` at 04:36 while the Macs were still asleep;
  * OPD 4 had recorded nothing for four days; a remote start failed with "tapewriter exited with status 1".
@@ -23,6 +23,7 @@ import {
 } from "@/lib/fleet-attention";
 import { KIND_LABEL, fmtFor, fmtIst, type AttentionKind } from "@/lib/fleet-attention-format";
 import { degradedMessage, offlineMessage } from "@/lib/room-watchdog";
+import { computeExtHealth, EXT_TARGET_VERSION, type ExtHealthInput, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { makeFakeClinician } from "../support/fake-identity";
 
 // Doctors come from the fake-identity helper (tests/unit/no-identity-literals.test.ts bans hard-coded people).
@@ -625,6 +626,122 @@ describe("R7 stale_start", () => {
 });
 
 // ---------------------------------------------------------------------------
+// R8 extension_missing / R9 extension_behind
+// ---------------------------------------------------------------------------
+
+describe("R8 extension_missing / R9 extension_behind", () => {
+  const NOW = "2026-10-05 15:00:00";
+  const ACTION = "Re-run the presence install on Cardiology OPD (policy file lost, usually after a reboot).";
+  /** The extension health row as ext-health.ts would produce it; override what the case changes. */
+  const extRow = (over: Partial<ExtHealthRow> = {}): ExtHealthRow => ({
+    machine: "EHRC-ECHOs-Mac-mini",
+    room_id: "room_cardio",
+    room_name: "Cardiology OPD",
+    last_ext_ts: iso("2026-10-04 14:09:27"),
+    ext_age_s: Math.round((ist(NOW) - ist("2026-10-04 14:09:27")) / 1000),
+    ext_version: "0.1.0.36",
+    version_state: "behind",
+    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20 },
+    status: "missing",
+    behind_since: null,
+    ...over,
+  });
+  const cardio = (ext: ExtHealthRow | null | undefined) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
+  const only = (items: ReturnType<typeof run>, kind: AttentionKind) => items.filter((i) => i.kind === kind);
+
+  it("the 4 Oct Cardiology case: extension silent since 14:09 IST on a reachable Mac with Chrome running = RED, naming machine, room, last heartbeat and version", () => {
+    const items = run(NOW, cardio(extRow()));
+    expect(kinds(items)).toEqual(["room_cardio:extension_missing"]);
+    const it = items[0]!;
+    expect(it.severity).toBe("red");
+    expect(it.since).toBe(iso("2026-10-04 14:09:27"));
+    expect(it.machine).toBe("EHRC-ECHOs-Mac-mini");
+    expect(it.detail).toContain("Cardiology OPD");
+    expect(it.detail).toContain("EHRC-ECHOs-Mac-mini");
+    expect(it.detail).toContain("last heartbeat 4 Oct 14:09 IST");
+    expect(it.detail).toContain("version 0.1.0.36");
+    expect(it.detail.trim().endsWith(".")).toBe(true);
+    expect(it.action).toBe(ACTION);
+  });
+
+  it("a machine never heard from in the look-back is RED too, dated 14 days back, saying so", () => {
+    const items = run(NOW, cardio(extRow({ last_ext_ts: null, ext_age_s: null, ext_version: null, version_state: "unknown" })));
+    expect(kinds(items)).toEqual(["room_cardio:extension_missing"]);
+    expect(items[0]!.detail).toContain("no heartbeat on record in the last 14 days");
+    expect(items[0]!.detail).toContain("version unknown");
+    expect(items[0]!.since).toBe(new Date(ist(NOW) - 14 * 86_400_000).toISOString());
+  });
+
+  it("never fires for ok, no_tab, behind or offline statuses", () => {
+    for (const status of ["ok", "no_tab", "behind", "offline"] as const) {
+      expect(only(run(NOW, cardio(extRow({ status }))), "extension_missing"), status).toEqual([]);
+    }
+  });
+
+  it("requires the extension to have been silent for 10 minutes (a row claiming `missing` at 9 min does not fire)", () => {
+    expect(only(run(NOW, cardio(extRow({ ext_age_s: 9 * 60 + 59, last_ext_ts: iso("2026-10-05 14:50:01") }))), "extension_missing")).toEqual([]);
+    expect(only(run(NOW, cardio(extRow({ ext_age_s: 10 * 60, last_ext_ts: iso("2026-10-05 14:50:00") }))), "extension_missing")).toHaveLength(1);
+  });
+
+  it("a room with no extension row (no machine, or a source that could not be read) raises neither rule", () => {
+    expect(run(NOW, cardio(null))).toEqual([]);
+    expect(run(NOW, cardio(undefined))).toEqual([]);
+  });
+
+  it("NEVER fires for an excluded machine: Home Office, ORB3 and ORB2 produce no health row, so no item, even when silent with Chrome running", () => {
+    const silent = (machine: string, room_id: string): ExtHealthInput => ({
+      machine,
+      room_id,
+      room_name: room_id,
+      last_ext: null,
+      ext_version: null,
+      poller: { ts: iso("2026-10-05 14:59:40"), state: "ok", chrome_running: true, console_user: "console-a" },
+    });
+    const rows = computeExtHealth([silent("Vinays-Mac-mini", "room_home"), silent("ORBOX3", "room_orb3"), silent("vinay-orb2", "room_orb2"), silent("EHRC-ECHOs-Mac-mini", "room_cardio")], ist(NOW));
+    const byRoom = new Map(rows.map((r) => [r.room_id as string, r]));
+    expect([...byRoom.keys()]).toEqual(["room_cardio"]);
+    const rooms = ["room_home", "room_orb3", "room_orb2", "room_cardio"].map((id) => room({ room_id: id, room_name: id, ext: byRoom.get(id) ?? null }));
+    expect(kinds(run(NOW, ...rooms))).toEqual(["room_cardio:extension_missing"]);
+  });
+
+  it("R9: alive but below target for 90 minutes = AMBER naming machine, room, last heartbeat and version; same action", () => {
+    const ext = extRow({ status: "behind", last_ext_ts: iso("2026-10-05 14:59:40"), ext_age_s: 20, behind_since: iso("2026-10-05 13:30:00"), ext_version: "0.1.0.36" });
+    const items = run(NOW, cardio(ext));
+    expect(kinds(items)).toEqual(["room_cardio:extension_behind"]);
+    const it = items[0]!;
+    expect(it.severity).toBe("amber");
+    expect(it.since).toBe(iso("2026-10-05 13:30:00"));
+    expect(it.detail).toContain("Cardiology OPD");
+    expect(it.detail).toContain("EHRC-ECHOs-Mac-mini");
+    expect(it.detail).toContain("version 0.1.0.36");
+    expect(it.detail).toContain(EXT_TARGET_VERSION);
+    expect(it.detail).toContain("last heartbeat 14:59 IST");
+    expect(it.action).toBe(ACTION);
+  });
+
+  it("R9 waits an hour: 59 minutes behind is nothing, 60 minutes fires; no known start (null) is nothing", () => {
+    const beh = (since: string | null) => cardio(extRow({ status: "behind", last_ext_ts: iso("2026-10-05 14:59:40"), ext_age_s: 20, behind_since: since }));
+    expect(run(NOW, beh(iso("2026-10-05 14:01:00")))).toEqual([]);
+    expect(kinds(run(NOW, beh(iso("2026-10-05 14:00:00"))))).toEqual(["room_cardio:extension_behind"]);
+    expect(run(NOW, beh(null))).toEqual([]);
+  });
+
+  it("R9 only for status behind: ok, no_tab, missing and offline rows carrying a behind_since do not raise it", () => {
+    for (const status of ["ok", "no_tab", "missing", "offline"] as const) {
+      expect(only(run(NOW, cardio(extRow({ status, behind_since: iso("2026-10-05 08:00:00") }))), "extension_behind"), status).toEqual([]);
+    }
+  });
+
+  it("composes with the rest: red missing sorts before amber behind, one item per kind per room, labels in plain words", () => {
+    const a = room({ room_id: "room_a", room_name: "OPD 5", machine: "m5", ext: extRow({ room_id: "room_a", room_name: "OPD 5", machine: "m5", status: "behind", last_ext_ts: iso("2026-10-05 14:59:50"), ext_age_s: 10, behind_since: iso("2026-10-02 10:00:00") }) });
+    const b = cardio(extRow());
+    expect(run(NOW, a, b).map((i) => `${i.room_id}:${i.kind}:${i.severity}`)).toEqual(["room_cardio:extension_missing:red", "room_a:extension_behind:amber"]);
+    expect(KIND_LABEL.extension_missing).toBe("Presence extension missing");
+    expect(KIND_LABEL.extension_behind).toBe("Presence extension out of date");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Composition
 // ---------------------------------------------------------------------------
 
@@ -665,7 +782,7 @@ describe("computeAttention as a whole", () => {
       expect(it.action.trim().endsWith(".")).toBe(true);
       expect(Number.isFinite(Date.parse(it.since))).toBe(true);
     }
-    const all: AttentionKind[] = ["asleep", "capture_frozen", "silent_tape", "consult_without_tape", "no_session_in_clinic", "open_outbox", "stale_start"];
+    const all: AttentionKind[] = ["asleep", "capture_frozen", "silent_tape", "consult_without_tape", "no_session_in_clinic", "open_outbox", "stale_start", "extension_missing", "extension_behind"];
     for (const k of all) expect(KIND_LABEL[k].length).toBeGreaterThan(3);
   });
 });
