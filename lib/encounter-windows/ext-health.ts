@@ -3,7 +3,7 @@
  *
  * WHY (proven 5 Oct 2026). The extension is installed by a hand-written Chrome policy file in /Library/Managed Preferences that macOS discards on
  * every reboot. Cardiology rebooted 4 Oct 14:10 IST and its extension vanished (last ext row 14:09:27) while the tailnet poller kept saying
- * chrome_running=true, so nobody noticed for 24 h. This module reads state — never events — and says, per machine, which of five things is true:
+ * chrome_running=true, so nobody noticed for 24 h. This module reads state — never events — and says, per machine, which of six things is true:
  *
  *   offline   the poller's newest row is not `ok` (unreachable), or it is older than POLLER_FRESH_S (5 min), or there is none. We cannot say anything
  *             about the extension of a Mac we cannot see; a separate rule (fleet-attention R1) owns "Mac unreachable".
@@ -13,8 +13,13 @@
  *             stop heartbeating with no Pulse tab).
  *   missing   poller ok, chrome_running=true, nothing from the extension for 10 min, and no such tab_closed logout: the extension is gone (policy file
  *             lost) or has never been installed. THE 4 OCT CARDIOLOGY CASE.
- *   ok (also) poller ok but Chrome is NOT running and no extension events: nothing is expected of the extension. This is a deliberate gap (the spec
- *             lists five statuses and Chrome-down is not one of them); the row still carries poller.chrome_running so a reader can see it.
+ *   no_chrome poller ok and chrome_running=false, whatever the extension's age: Chrome is down, so the extension cannot report. Amber (R10), not red:
+ *             `missing` is red ONLY when chrome_running=true. The Kiosk Bot (or a person) opens Chrome.
+ *
+ * ORDER: offline, then no_chrome, then (alive: ok | behind) or (silent with Chrome up: no_tab | missing).
+ *
+ * REBOOTED RECENTLY (a flag on any row, not a status). The poller's last 15 minutes show a flip unreachable -> ok whose idle_s is ~0 (<= REBOOT_IDLE_MAX_S):
+ * the Mac came back from a restart, which is exactly when macOS discards the extension's policy file. R8's action says so and gives the time.
  *
  * "Alive" means ANY ext-source event (heartbeat, active, idle, locked, login, logout…), not only heartbeats: every one is sent by the extension.
  *
@@ -43,6 +48,12 @@ export const EXT_LOOKBACK_DAYS = 14;
  * inside this window. 24 h keeps the read to ~2,900 rows per machine (it runs on every fleet-attention poll); R9 only needs to know it is >= 60 min.
  */
 export const BEHIND_LOOKBACK_H = 24;
+/** A reboot is only reported while it is this recent (the unreachable -> ok flip must be inside the window). */
+export const REBOOT_WINDOW_S = 15 * 60;
+/** After a restart the console user has just logged in: idle_s at or below this counts as "reset to ~0". */
+export const REBOOT_IDLE_MAX_S = 120;
+/** How far back the loader looks for the start of a Chrome-not-running run (a lower bound, like BEHIND_LOOKBACK_H). */
+export const CHROME_DOWN_LOOKBACK_H = 24;
 
 /**
  * Presence machines that run NO extension and must never be reported (normalised hostnames, compared case-insensitively):
@@ -60,7 +71,7 @@ export function isExtHealthExcluded(hostname: string): boolean {
   return EXCLUDED_KEYS.has(normalizeHostname(hostname).toLowerCase());
 }
 
-export type ExtStatus = "ok" | "no_tab" | "missing" | "behind" | "offline";
+export type ExtStatus = "ok" | "no_tab" | "missing" | "behind" | "offline" | "no_chrome";
 export type VersionState = "current" | "behind" | "unknown";
 
 /** A dotted-integer version (1–6 parts of 1–6 digits), or null. The SQL's guard regex is the same shape. */
@@ -103,6 +114,10 @@ export type ExtHealthInput = {
   poller: { ts: string; state: string | null; chrome_running: boolean | null; console_user: string | null } | null;
   /** When the machine's CURRENT run of behind-target versions began (the first ext row after its last at-or-above-target row); null when unknown. */
   behind_since?: string | null;
+  /** no_chrome only: when the current run of chrome_running=false polls began (the loader's look-back is a lower bound), or null. */
+  chrome_down_since?: string | null;
+  /** The poller's rows from the last ~30 min, any order: `state` ok | unreachable, `idle_s` the console's idle seconds (null when absent). Feeds the reboot flag. */
+  poller_recent?: Array<{ ts: string; state: string | null; idle_s: number | null }>;
 };
 
 export type ExtHealthRow = {
@@ -117,9 +132,32 @@ export type ExtHealthRow = {
   status: ExtStatus;
   /** status === "behind" only: when the run of behind-target versions began, else null. */
   behind_since: string | null;
+  /** status === "no_chrome" only: when the Chrome-down run began (a lower bound), else null. */
+  chrome_down_since: string | null;
+  /** The poller flipped unreachable -> ok with idle_s ~0 within the last REBOOT_WINDOW_S: the Mac restarted (policy files are discarded on restart). */
+  rebooted_recently: boolean;
+  /** The ok poll that ended the outage (when the Mac came back), or null. */
+  rebooted_at: string | null;
 };
 
 const ms = (iso: string | null | undefined): number => (iso ? Date.parse(iso) : NaN);
+
+/**
+ * PURE. When did the Mac come back from a restart, if it did so within REBOOT_WINDOW_S of asOf? The newest poll that is `ok`, whose immediately
+ * preceding poll (by time) was `unreachable`, with idle_s <= REBOOT_IDLE_MAX_S. Returns that poll's ISO time, else null.
+ */
+export function detectReboot(history: ExtHealthInput["poller_recent"], asOfMs: number): string | null {
+  const rows = (history ?? [])
+    .map((r) => ({ t: Date.parse(r.ts), state: r.state, idle: r.idle_s }))
+    .filter((r) => Number.isFinite(r.t) && r.t <= asOfMs)
+    .sort((a, b) => a.t - b.t);
+  let found: number | null = null;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i]!;
+    if (r.state === "ok" && rows[i - 1]!.state === "unreachable" && r.idle !== null && r.idle <= REBOOT_IDLE_MAX_S && asOfMs - r.t <= REBOOT_WINDOW_S * 1000) found = r.t;
+  }
+  return found === null ? null : new Date(found).toISOString();
+}
 
 /** PURE. One row per input, in input order; the caller has already applied the exclusion list (computeExtHealth re-applies it as a backstop). */
 export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: number, target: string = EXT_TARGET_VERSION): ExtHealthRow[] {
@@ -136,12 +174,14 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
 
     let status: ExtStatus;
     if (!pollerOk) status = "offline";
+    else if (i.poller!.chrome_running === false) status = "no_chrome"; // Chrome is down: the extension cannot report, whatever its age
     else if (alive) status = vState === "behind" ? "behind" : "ok";
     else if (i.poller!.chrome_running === true) {
       const tabClosed =
         i.last_ext?.event === "logout" && (i.last_ext.reason ?? "").includes("tab_closed") && extAge !== null && extAge < NO_TAB_WINDOW_S;
       status = tabClosed ? "no_tab" : "missing";
-    } else status = "ok"; // Chrome is not running: nothing is expected of the extension (documented gap)
+    } else status = "ok"; // chrome_running unknown (the poller did not say): no evidence either way
+    const rebootedAt = detectReboot(i.poller_recent, asOfMs);
 
     rows.push({
       machine: i.machine,
@@ -159,6 +199,9 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
       },
       status,
       behind_since: status === "behind" ? (i.behind_since ?? null) : null,
+      chrome_down_since: status === "no_chrome" ? (i.chrome_down_since ?? null) : null,
+      rebooted_recently: rebootedAt !== null,
+      rebooted_at: rebootedAt,
     });
   }
   return rows;
@@ -168,7 +211,7 @@ export type ExtHealthSummary = Record<ExtStatus, number> & { total: number };
 
 /** Counts by status, every key present. */
 export function summarizeExtHealth(rows: readonly Pick<ExtHealthRow, "status">[]): ExtHealthSummary {
-  const s: ExtHealthSummary = { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, total: 0 };
+  const s: ExtHealthSummary = { ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 };
   for (const r of rows) {
     s[r.status]++;
     s.total++;
@@ -282,6 +325,53 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
     for (const r of since) behindSince.set(r.machine, toIso(r.since));
   }
 
+  // Where the current Chrome-not-running run began: only for machines whose newest poll says chrome_running=false (poller rows are ~1/min).
+  const down = machines.filter((m) => by.get(m.n)?.chrome === "false" && by.get(m.n)?.poller_state === "ok");
+  const chromeDownSince = new Map<string, string | null>();
+  if (down.length > 0) {
+    const loC = new Date(A - CHROME_DOWN_LOOKBACK_H * 3_600_000).toISOString();
+    const since = (await db`
+      SELECT m.n AS machine, c.first_ts AS chrome_down_since
+        FROM jsonb_to_recordset(${JSON.stringify(down)}::jsonb) AS m(n text)
+        CROSS JOIN LATERAL (
+          SELECT min(p.ts) AS first_ts
+            FROM pulse_presence_events p
+           WHERE p.source = 'poller' AND p.machine = m.n AND p.ts <= ${hi}::timestamptz AND p.payload->>'chrome_running' = 'false'
+             AND p.ts > COALESCE((
+                   SELECT max(o.ts) FROM pulse_presence_events o
+                    WHERE o.source = 'poller' AND o.machine = m.n AND o.ts > ${loC}::timestamptz AND o.ts <= ${hi}::timestamptz
+                      AND o.payload->>'chrome_running' = 'true'
+                 ), ${loC}::timestamptz)
+        ) c
+       WHERE c.first_ts IS NOT NULL
+    `) as unknown as Array<{ machine: string; chrome_down_since: unknown }>;
+    for (const r of since) chromeDownSince.set(r.machine, toIso(r.chrome_down_since));
+  }
+
+  // The poller's last 30 minutes per machine (a LATERAL with a LIMIT, so the planner cannot flatten it into a hash join over a Seq Scan), for the reboot flag: detectReboot() reads the unreachable -> ok flip.
+  const recentLo = new Date(A - 2 * REBOOT_WINDOW_S * 1000).toISOString();
+  const recent = (await db`
+    SELECT m.n AS machine, p.ts AS ts, COALESCE(p.payload->>'state', p.event) AS state,
+           CASE WHEN p.payload->>'idle_s' ~ '^[0-9]{1,9}(\\.[0-9]+)?$' THEN (p.payload->>'idle_s')::numeric END AS idle_s
+      FROM jsonb_to_recordset(${mj}::jsonb) AS m(n text)
+      CROSS JOIN LATERAL (
+        SELECT pp.ts, pp.event, pp.payload
+          FROM pulse_presence_events pp
+         WHERE pp.source = 'poller' AND pp.machine = m.n AND pp.ts > ${recentLo}::timestamptz AND pp.ts <= ${hi}::timestamptz
+         ORDER BY pp.ts DESC LIMIT 200
+      ) p
+     ORDER BY m.n, p.ts
+  `) as unknown as Array<{ machine: string; ts: unknown; state: string | null; idle_s: unknown }>;
+  const recentBy = new Map<string, Array<{ ts: string; state: string | null; idle_s: number | null }>>();
+  for (const r of recent) {
+    const ts = toIso(r.ts);
+    if (!ts) continue;
+    const idle = r.idle_s === null || r.idle_s === undefined ? null : Number(r.idle_s);
+    const list = recentBy.get(r.machine) ?? [];
+    list.push({ ts, state: r.state, idle_s: idle !== null && Number.isFinite(idle) ? idle : null });
+    recentBy.set(r.machine, list);
+  }
+
   return fleet.map((r): ExtHealthInput => {
     const n = normalizeHostname(r.hostname as string);
     const e = by.get(n);
@@ -297,6 +387,8 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
         ? { ts: polTs, state: e?.poller_state ?? null, chrome_running: e?.chrome === "true" ? true : e?.chrome === "false" ? false : null, console_user: e?.console_user ?? null }
         : null,
       behind_since: behindSince.get(n) ?? null,
+      chrome_down_since: chromeDownSince.get(n) ?? null,
+      poller_recent: recentBy.get(n) ?? [],
     };
   });
 }

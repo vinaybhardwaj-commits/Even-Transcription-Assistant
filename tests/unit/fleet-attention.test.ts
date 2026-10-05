@@ -644,6 +644,9 @@ describe("R8 extension_missing / R9 extension_behind", () => {
     poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20 },
     status: "missing",
     behind_since: null,
+    chrome_down_since: null,
+    rebooted_recently: false,
+    rebooted_at: null,
     ...over,
   });
   const cardio = (ext: ExtHealthRow | null | undefined) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
@@ -673,7 +676,7 @@ describe("R8 extension_missing / R9 extension_behind", () => {
   });
 
   it("never fires for ok, no_tab, behind or offline statuses", () => {
-    for (const status of ["ok", "no_tab", "behind", "offline"] as const) {
+    for (const status of ["ok", "no_tab", "behind", "offline", "no_chrome"] as const) {
       expect(only(run(NOW, cardio(extRow({ status }))), "extension_missing"), status).toEqual([]);
     }
   });
@@ -741,6 +744,91 @@ describe("R8 extension_missing / R9 extension_behind", () => {
   });
 });
 
+describe("R8 reboot note / R10 chrome_not_running", () => {
+  const NOW = "2026-10-05 15:00:00";
+  const BASE_ACTION = "Re-run the presence install on Cardiology OPD (policy file lost, usually after a reboot).";
+  const extRow = (over: Partial<ExtHealthRow> = {}): ExtHealthRow => ({
+    machine: "EHRC-ECHOs-Mac-mini",
+    room_id: "room_cardio",
+    room_name: "Cardiology OPD",
+    last_ext_ts: iso("2026-10-05 14:20:00"),
+    ext_age_s: 40 * 60,
+    ext_version: "0.1.1.39",
+    version_state: "current",
+    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20 },
+    status: "missing",
+    behind_since: null,
+    chrome_down_since: null,
+    rebooted_recently: false,
+    rebooted_at: null,
+    ...over,
+  });
+  const cardio = (ext: ExtHealthRow | null) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
+
+  it("R8 after a reboot: the action gains the time the Mac came back, in IST HH:MM, and keeps the base wording", () => {
+    const items = run(NOW, cardio(extRow({ rebooted_recently: true, rebooted_at: iso("2026-10-05 14:48:00") })));
+    expect(kinds(items)).toEqual(["room_cardio:extension_missing"]);
+    expect(items[0]!.action).toBe(`${BASE_ACTION} (machine rebooted at 14:48, policy file lost)`);
+    expect(items[0]!.severity).toBe("red");
+  });
+
+  it("R8 pads the clock (09:05) and reads IST, not UTC", () => {
+    const items = run("2026-10-05 09:12:00", cardio(extRow({ rebooted_recently: true, rebooted_at: iso("2026-10-05 09:05:00"), last_ext_ts: iso("2026-10-05 08:40:00"), ext_age_s: 32 * 60 })));
+    expect(items[0]!.action).toContain("(machine rebooted at 09:05, policy file lost)");
+  });
+
+  it("R8 without the flag, or with the flag but no time, keeps the plain action", () => {
+    expect(run(NOW, cardio(extRow()))[0]!.action).toBe(BASE_ACTION);
+    expect(run(NOW, cardio(extRow({ rebooted_recently: true, rebooted_at: null })))[0]!.action).toBe(BASE_ACTION);
+  });
+
+  it("the reboot note is R8's only: R9's action is unchanged on a rebooted machine", () => {
+    const items = run(NOW, cardio(extRow({ status: "behind", ext_age_s: 20, last_ext_ts: iso("2026-10-05 14:59:40"), ext_version: "0.1.0.36", behind_since: iso("2026-10-05 13:00:00"), rebooted_recently: true, rebooted_at: iso("2026-10-05 14:48:00") })));
+    expect(kinds(items)).toEqual(["room_cardio:extension_behind"]);
+    expect(items[0]!.action).toBe(BASE_ACTION);
+  });
+
+  it("R10: status no_chrome = AMBER chrome_not_running with the specified wording, dated from where the Chrome-down run began", () => {
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20 }, chrome_down_since: iso("2026-10-05 14:31:00") })));
+    expect(kinds(items)).toEqual(["room_cardio:chrome_not_running"]);
+    const it = items[0]!;
+    expect(it.severity).toBe("amber");
+    expect(it.since).toBe(iso("2026-10-05 14:31:00"));
+    expect(it.detail).toBe("Chrome is not running on Cardiology OPD; presence cannot report.");
+    expect(it.action).toBe("Open Chrome on the kiosk (or wait for the Kiosk Bot).");
+    expect(it.machine).toBe("EHRC-ECHOs-Mac-mini");
+  });
+
+  it("R10 without a known start falls back to the poll that reported it", () => {
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", poller: { ok: true, chrome_running: false, console_user: null, age_s: 30 }, chrome_down_since: null })));
+    expect(items[0]!.since).toBe(new Date(ist(NOW) - 30_000).toISOString());
+  });
+
+  it("R8 and R10 never fire together for one machine: a no_chrome row with a very old extension raises only R10", () => {
+    const items = run(NOW, cardio(extRow({ status: "no_chrome", ext_age_s: 25 * 3600, last_ext_ts: iso("2026-10-04 14:09:27"), poller: { ok: true, chrome_running: false, console_user: "console-a", age_s: 20 } })));
+    expect(kinds(items)).toEqual(["room_cardio:chrome_not_running"]);
+  });
+
+  it("R10 only for no_chrome: ok, no_tab, missing, behind and offline rows do not raise it", () => {
+    for (const status of ["ok", "no_tab", "missing", "behind", "offline"] as const) {
+      expect(run(NOW, cardio(extRow({ status }))).filter((i) => i.kind === "chrome_not_running"), status).toEqual([]);
+    }
+  });
+
+  it("R10 never fires for an excluded machine (no health row exists), and sorts amber after a red R8", () => {
+    const silentDown = (machine: string, room_id: string): ExtHealthInput => ({
+      machine, room_id, room_name: room_id, last_ext: null, ext_version: null,
+      poller: { ts: iso("2026-10-05 14:59:40"), state: "ok", chrome_running: false, console_user: "console-a" },
+    });
+    const rows = computeExtHealth([silentDown("ORBOX3", "room_orb3"), silentDown("EHRC-ECHOs-Mac-mini", "room_cardio")], ist(NOW));
+    expect(rows.map((r) => r.room_id)).toEqual(["room_cardio"]);
+    const a = room({ room_id: "room_a", room_name: "OPD 5", machine: "m5", ext: extRow({ room_id: "room_a", room_name: "OPD 5", machine: "m5" }) });
+    const b = room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext: rows[0]! });
+    expect(run(NOW, b, a).map((i) => `${i.room_id}:${i.kind}:${i.severity}`)).toEqual(["room_a:extension_missing:red", "room_cardio:chrome_not_running:amber"]);
+    expect(KIND_LABEL.chrome_not_running).toBe("Chrome not running");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Composition
 // ---------------------------------------------------------------------------
@@ -782,7 +870,7 @@ describe("computeAttention as a whole", () => {
       expect(it.action.trim().endsWith(".")).toBe(true);
       expect(Number.isFinite(Date.parse(it.since))).toBe(true);
     }
-    const all: AttentionKind[] = ["asleep", "capture_frozen", "silent_tape", "consult_without_tape", "no_session_in_clinic", "open_outbox", "stale_start", "extension_missing", "extension_behind"];
+    const all: AttentionKind[] = ["asleep", "capture_frozen", "silent_tape", "consult_without_tape", "no_session_in_clinic", "open_outbox", "stale_start", "extension_missing", "extension_behind", "chrome_not_running"];
     for (const k of all) expect(KIND_LABEL[k].length).toBeGreaterThan(3);
   });
 });

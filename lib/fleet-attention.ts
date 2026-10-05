@@ -26,6 +26,9 @@
  *                           (lib/encounter-windows/ext-health.ts status `missing`; the 4 Oct Cardiology reboot lost its policy file). Red.
  * R9 extension_behind       the extension is alive but below EXT_TARGET_VERSION, and has been for >= 60 min. Amber.
  *                           R8/R9 never fire for a machine on EXT_HEALTH_EXCLUDED_MACHINES (Home Office, ORB3, ORB2: no extension).
+ *                           R8's action gains "(machine rebooted at HH:MM, policy file lost)" when the poller shows an unreachable -> ok flip with idle_s ~0 in the last 15 min.
+ * R10 chrome_not_running    the poller is ok and says chrome_running=false (any extension age): Chrome is down, so presence cannot report. Amber.
+ *                           R8 is red only when chrome_running=true; the two never fire together for one machine.
  *
  * `computeAttention` is PURE (no I/O). `loadAttentionInputs` / `getFleetAttention` are the DB half: read-only SELECTs, bound parameters only (the
  * Neon HTTP driver has no sql.unsafe), timestamps normalised from whatever the driver returns. Every bench_level_sample / bench_chunk read is
@@ -317,6 +320,12 @@ function recentWarehouseConsult(windows: WindowLite[], now: number): WindowLite 
   return top && top.source === "warehouse" ? top : null;
 }
 
+/** "15:44" — the IST clock time of an instant (24 h, no date, no zone word). */
+const istHourMinute = (iso: string): string => {
+  const d = new Date(Date.parse(iso) + IST_OFFSET_MS);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+};
+
 const sevRank = (s: AttentionSeverity): number => (s === "red" ? 0 : 1);
 
 /** Bytes per second of audio, or null when the chunk's size or length is unknown. */
@@ -555,13 +564,15 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       const beat = Number.isFinite(lastMs) ? `last heartbeat ${fmtIst(new Date(lastMs).toISOString(), now)}` : `no heartbeat on record in the last ${EXT_NEVER_SEEN_MS / 86_400_000} days`;
       const place = `${name}${e.machine ? ` (${clean(e.machine, 60)})` : ""}`;
       const action = `Re-run the presence install on ${name} (policy file lost, usually after a reboot).`;
+      // R8 only: the poller saw the Mac restart in the last 15 minutes, so the policy file is known to be gone.
+      const missingAction = e.rebooted_recently && e.rebooted_at ? `${action} (machine rebooted at ${istHourMinute(e.rebooted_at)}, policy file lost)` : action;
       if (e.status === "missing" && (e.ext_age_s === null || e.ext_age_s * 1000 >= EXT_MISSING_AFTER_MS)) {
         mk(
           "extension_missing",
           "red",
           Number.isFinite(lastMs) ? lastMs : now - EXT_NEVER_SEEN_MS,
           `The Pulse Presence extension on ${place} has gone silent although the Mac is up and Chrome is running; ${beat}, ${ver}. Doctor and room attribution is blind on this Mac.`,
-          action,
+          missingAction,
         );
       }
       if (e.status === "behind" && e.behind_since) {
@@ -575,6 +586,17 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
             action,
           );
         }
+      }
+      // R10 — CHROME NOT RUNNING. The extension lives inside Chrome; with Chrome down nothing can report. Amber: a person (or the Kiosk Bot) opens it.
+      if (e.status === "no_chrome") {
+        const down = e.chrome_down_since ? Date.parse(e.chrome_down_since) : NaN;
+        mk(
+          "chrome_not_running",
+          "amber",
+          Number.isFinite(down) ? down : now - (e.poller.age_s ?? 0) * 1000,
+          `Chrome is not running on ${name}; presence cannot report.`,
+          "Open Chrome on the kiosk (or wait for the Kiosk Bot).",
+        );
       }
     }
   }

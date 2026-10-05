@@ -104,10 +104,101 @@ describe("status — ok", () => {
     expect(one({ last_ext: { ts: ago(10 * MIN), event: "heartbeat", reason: null } }).status).toBe("missing");
   });
 
-  it("Chrome not running and no extension events: nothing is expected of the extension (documented gap) — the row still shows chrome_running=false", () => {
-    const r = one({ last_ext: { ts: ago(3 * 3600), event: "heartbeat", reason: null }, poller: { ts: ago(20), state: "ok", chrome_running: false, console_user: null } });
-    expect(r.status).toBe("ok");
-    expect(r.poller.chrome_running).toBe(false);
+});
+
+describe("status — no_chrome (poller ok, chrome_running=false)", () => {
+  const down = (over: Partial<NonNullable<ExtHealthInput["poller"]>> = {}) => ({ ts: ago(20), state: "ok", chrome_running: false, console_user: "console-a", ...over });
+
+  it("Chrome down with the extension heartbeating 20 s ago is no_chrome — ANY extension age", () => {
+    expect(one({ poller: down() })).toMatchObject({ status: "no_chrome", ext_age_s: 20, poller: { ok: true, chrome_running: false } });
+  });
+
+  it("Chrome down with a stale extension (3 h, or the Cardiology 25 h) is no_chrome, NOT missing: `missing` is red only when chrome_running=true", () => {
+    expect(one({ poller: down(), last_ext: { ts: ago(3 * 3600), event: "heartbeat", reason: null } }).status).toBe("no_chrome");
+    expect(one({ poller: down(), last_ext: { ts: ago(25 * 3600), event: "active", reason: null } }).status).toBe("no_chrome");
+    expect(one({ poller: down(), last_ext: null }).status).toBe("no_chrome");
+  });
+
+  it("a tab_closed logout or an old version does not change it", () => {
+    expect(one({ poller: down(), last_ext: { ts: ago(30 * MIN), event: "logout", reason: "tab_closed" } }).status).toBe("no_chrome");
+    expect(one({ poller: down(), ext_version: "0.1.0.36" }).status).toBe("no_chrome");
+  });
+
+  it("offline outranks it (the poller is not ok / not fresh, so chrome_running says nothing)", () => {
+    expect(one({ poller: down({ state: "unreachable" }) }).status).toBe("offline");
+    expect(one({ poller: down({ ts: ago(5 * MIN + 1) }) }).status).toBe("offline");
+  });
+
+  it("chrome_running unknown (null) is not no_chrome", () => {
+    expect(one({ poller: down({ chrome_running: null }), last_ext: null }).status).toBe("ok");
+  });
+
+  it("missing needs chrome_running=true: the same silent extension flips between the two on that flag alone", () => {
+    const silent = { last_ext: { ts: ago(3 * 3600), event: "heartbeat", reason: null } };
+    expect(one({ ...silent, poller: down({ chrome_running: true }) }).status).toBe("missing");
+    expect(one({ ...silent, poller: down({ chrome_running: false }) }).status).toBe("no_chrome");
+  });
+
+  it("chrome_down_since is carried for no_chrome only", () => {
+    expect(one({ poller: down(), chrome_down_since: ago(40 * MIN) })).toMatchObject({ status: "no_chrome", chrome_down_since: ago(40 * MIN) });
+    expect(one({ chrome_down_since: ago(40 * MIN) }).chrome_down_since).toBeNull();
+    expect(one({ poller: down() }).chrome_down_since).toBeNull();
+  });
+});
+
+describe("rebooted_recently — the poller's unreachable -> ok flip with idle_s ~0 in the last 15 minutes", () => {
+  const poll = (secAgo: number, state: string, idle_s: number | null) => ({ ts: ago(secAgo), state, idle_s });
+  /** unreachable 8 and 6 min ago, back at 5 min ago with a fresh console session. */
+  const flip = (idle = 3) => [poll(20 * MIN, "ok", 5000), poll(8 * MIN, "unreachable", null), poll(6 * MIN, "unreachable", null), poll(5 * MIN, "ok", idle), poll(4 * MIN, "ok", idle + 60)];
+  const rb = (poller_recent: ExtHealthInput["poller_recent"], now = NOW) => computeExtHealth([mk({ poller_recent })], now)[0]!;
+
+  it("flags the machine and says when it came back", () => {
+    expect(rb(flip())).toMatchObject({ rebooted_recently: true, rebooted_at: ago(5 * MIN) });
+  });
+
+  it("is a flag on the row, not a status: a missing extension on a rebooted Mac is `missing` with the flag set", () => {
+    const r = computeExtHealth([mk({ poller_recent: flip(), last_ext: { ts: ago(2 * 3600), event: "active", reason: null } })], NOW)[0]!;
+    expect(r).toMatchObject({ status: "missing", rebooted_recently: true });
+  });
+
+  it("no flip, no flag: a steady ok history, an empty or absent history", () => {
+    expect(rb([poll(900, "ok", 4000), poll(600, "ok", 4000), poll(30, "ok", 4000)])).toMatchObject({ rebooted_recently: false, rebooted_at: null });
+    expect(rb([])).toMatchObject({ rebooted_recently: false, rebooted_at: null });
+    expect(computeExtHealth([mk()], NOW)[0]).toMatchObject({ rebooted_recently: false, rebooted_at: null });
+  });
+
+  it("idle_s must have reset: 120 s counts as ~0, 121 s and 'no idle_s' do not (a network blip is not a restart)", () => {
+    expect(rb(flip(120)).rebooted_recently).toBe(true);
+    expect(rb(flip(121)).rebooted_recently).toBe(false);
+    expect(rb([poll(8 * MIN, "unreachable", null), poll(5 * MIN, "ok", null)]).rebooted_recently).toBe(false);
+  });
+
+  it("the flip must be inside the last 15 minutes: 14 min 59 s is recent, 15 min 01 s is not", () => {
+    expect(rb([poll(16 * MIN, "unreachable", null), poll(15 * MIN - 1, "ok", 2)]).rebooted_recently).toBe(true);
+    expect(rb([poll(16 * MIN, "unreachable", null), poll(15 * MIN + 1, "ok", 2)]).rebooted_recently).toBe(false);
+  });
+
+  it("only an unreachable row immediately before the ok counts (ok, ok with a low idle is a user returning to the desk)", () => {
+    expect(rb([poll(10 * MIN, "ok", 3000), poll(5 * MIN, "ok", 2)]).rebooted_recently).toBe(false);
+  });
+
+  it("order-independent, and the newest qualifying flip wins", () => {
+    const rows = [poll(2 * MIN, "ok", 1), poll(5 * MIN, "unreachable", null), poll(3 * MIN, "ok", 4), poll(13 * MIN, "unreachable", null), poll(12 * MIN, "ok", 2)];
+    expect(rb(rows)).toMatchObject({ rebooted_recently: true, rebooted_at: ago(3 * MIN) });
+  });
+
+  it("OPD 4, 5 Oct: unreachable 15:22-15:30 IST and again 15:42 IST — the 15:31 flip is flagged until 15:46, the 15:50 flip until 16:05", () => {
+    const at = (hhmm: string) => `2026-10-05T${hhmm}:00.000Z`; // UTC = IST - 5:30
+    const hist = [
+      { ts: at("09:51"), state: "ok", idle_s: 900 }, { ts: at("09:52"), state: "unreachable", idle_s: null }, { ts: at("10:00"), state: "unreachable", idle_s: null },
+      { ts: at("10:01"), state: "ok", idle_s: 4 }, { ts: at("10:05"), state: "ok", idle_s: 300 },
+      { ts: at("10:12"), state: "unreachable", idle_s: null }, { ts: at("10:13"), state: "unreachable", idle_s: null },
+      { ts: at("10:20"), state: "ok", idle_s: 2 }, { ts: at("10:24"), state: "ok", idle_s: 240 },
+    ];
+    const when = (hhmm: string) => computeExtHealth([mk({ poller_recent: hist, poller: { ts: at(hhmm), state: "ok", chrome_running: true, console_user: "console-a" } })], Date.parse(at(hhmm)))[0]!;
+    expect(when("10:10")).toMatchObject({ rebooted_recently: true, rebooted_at: at("10:01") }); // 15:40 IST
+    expect(when("10:25")).toMatchObject({ rebooted_recently: true, rebooted_at: at("10:20") }); // 15:55 IST: the 15:50 flip; the 15:31 one is 24 min old
+    expect(when("10:36")).toMatchObject({ rebooted_recently: false, rebooted_at: null }); // 16:06 IST
   });
 });
 
@@ -222,7 +313,7 @@ describe("exclusions — Home Office, ORB3, ORB2 never appear", () => {
 
 describe("summarizeExtHealth", () => {
   it("counts every status, all keys present", () => {
-    expect(summarizeExtHealth([])).toEqual({ ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, total: 0 });
+    expect(summarizeExtHealth([])).toEqual({ ok: 0, no_tab: 0, missing: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 });
     const rows = computeExtHealth(
       [
         mk({ machine: "m1" }),
@@ -231,10 +322,11 @@ describe("summarizeExtHealth", () => {
         mk({ machine: "m4", last_ext: null }),
         mk({ machine: "m5", last_ext: { ts: ago(30 * MIN), event: "logout", reason: "tab_closed" } }),
         mk({ machine: "m6", poller: null }),
+        mk({ machine: "m7", poller: { ts: ago(30), state: "ok", chrome_running: false, console_user: null } }),
       ],
       NOW,
     );
-    expect(summarizeExtHealth(rows)).toEqual({ ok: 1, no_tab: 1, missing: 1, behind: 2, offline: 1, total: 6 });
+    expect(summarizeExtHealth(rows)).toEqual({ ok: 1, no_tab: 1, missing: 1, behind: 2, offline: 1, no_chrome: 1, total: 7 });
   });
 });
 
@@ -271,7 +363,7 @@ describe("loadExtHealthInputs / extHealth", () => {
   const responder = (q: Q): unknown => {
     if (/FROM room_install/.test(q.text)) return ROOMS;
     if (/LEFT JOIN LATERAL/.test(q.text)) return eventRows;
-    if (/min\(p\.ts\)/.test(q.text)) return [{ machine: "EHRC-CONSUL5s-Mac-mini", since: ago(4 * 3600) }];
+    if (/AS since/.test(q.text)) return [{ machine: "EHRC-CONSUL5s-Mac-mini", since: ago(4 * 3600) }];
     return [];
   };
 
@@ -302,7 +394,7 @@ describe("loadExtHealthInputs / extHealth", () => {
   it("the behind-since read runs ONLY for machines that are alive and behind right now (not for the missing one, not when all are current)", async () => {
     const a = fakeDb(responder);
     await extHealth(a.db, { asOf: NOW });
-    const since = a.issued.filter((q) => /min\(p\.ts\)/.test(q.text));
+    const since = a.issued.filter((q) => /AS since/.test(q.text));
     expect(since).toHaveLength(1);
     expect(String(since[0]!.vals[0])).toContain("EHRC-CONSUL5s-Mac-mini");
     expect(String(since[0]!.vals[0])).not.toContain("EHRC-ECHOs-Mac-mini");
@@ -310,7 +402,7 @@ describe("loadExtHealthInputs / extHealth", () => {
 
     const b = fakeDb((q) => (/LEFT JOIN LATERAL/.test(q.text) ? [{ ...eventRows[1]!, ver: "0.1.1.39" }] : /FROM room_install/.test(q.text) ? ROOMS : []));
     await extHealth(b.db, { asOf: NOW });
-    expect(b.issued.filter((q) => /min\(p\.ts\)/.test(q.text))).toHaveLength(0);
+    expect(b.issued.filter((q) => /AS since/.test(q.text))).toHaveLength(0);
   });
 
   it("passed rooms are used as given (no room_install read); an all-excluded fleet reads nothing", async () => {
@@ -332,11 +424,68 @@ describe("loadExtHealthInputs / extHealth", () => {
     expect(inputs[0]).toMatchObject({ machine: "EHRC-ECHOs-Mac-mini", last_ext: null, ext_version: null, poller: { state: "ok", chrome_running: false, console_user: null } });
     expect(inputs[1]).toMatchObject({ machine: "EHRC-CONSUL5s-Mac-mini", last_ext: null, poller: null });
     const rows = computeExtHealth(inputs, NOW);
-    expect(rows.map((r) => r.status)).toEqual(["ok", "offline"]);
+    expect(rows.map((r) => r.status)).toEqual(["no_chrome", "offline"]); // chrome_running=false on an ok poll
   });
 
   it("a bad asOf is refused", async () => {
     const { db } = fakeDb(responder);
     await expect(extHealth(db, { asOf: "nope" })).rejects.toThrow(/bad asOf/);
+  });
+});
+
+describe("loadExtHealthInputs — Chrome-down start and the reboot history", () => {
+  const base = { ext_event: "heartbeat", ext_ts: ago(10), ext_reason: null, ver: "0.1.1.39", poller_ts: ago(10), poller_state: "ok", console_user: "console-a" };
+
+  it("the Chrome-down read runs ONLY for machines whose newest poll is ok with chrome_running=false, and its answer lands on the row", async () => {
+    const rowsFor = (chrome5: string) => [
+      { machine: "EHRC-ECHOs-Mac-mini", ...base, chrome: "false" },
+      { machine: "EHRC-CONSUL5s-Mac-mini", ...base, chrome: chrome5 },
+    ];
+    const run = (chrome5: string) =>
+      fakeDb((q) => {
+        if (/FROM room_install/.test(q.text)) return ROOMS;
+        if (/LEFT JOIN LATERAL/.test(q.text)) return rowsFor(chrome5);
+        if (/AS chrome_down_since/.test(q.text)) return [{ machine: "EHRC-ECHOs-Mac-mini", chrome_down_since: ago(50 * 60) }];
+        return [];
+      });
+    const a = run("true");
+    const rows = await extHealth(a.db, { asOf: NOW });
+    const down = a.issued.filter((q) => /AS chrome_down_since/.test(q.text));
+    expect(down).toHaveLength(1);
+    expect(String(down[0]!.vals[0])).toContain("EHRC-ECHOs-Mac-mini");
+    expect(String(down[0]!.vals[0])).not.toContain("EHRC-CONSUL5s-Mac-mini");
+    expect(rows[0]).toMatchObject({ status: "no_chrome", chrome_down_since: ago(50 * 60) });
+    expect(rows[1]!.status).toBe("ok");
+
+    const b = run("false");
+    await extHealth(b.db, { asOf: NOW });
+    expect(String(b.issued.find((q) => /AS chrome_down_since/.test(q.text))!.vals[0])).toContain("EHRC-CONSUL5s-Mac-mini");
+  });
+
+  it("no machine is Chrome-down: that read is never issued", async () => {
+    const { db, issued } = fakeDb((q) => (/FROM room_install/.test(q.text) ? ROOMS : /LEFT JOIN LATERAL/.test(q.text) ? [{ machine: "EHRC-ECHOs-Mac-mini", ...base, chrome: "true" }] : []));
+    await extHealth(db, { asOf: NOW });
+    expect(issued.some((q) => /AS chrome_down_since/.test(q.text))).toBe(false);
+  });
+
+  it("one bound poller-history read for the whole fleet (excluded machines absent), idle_s coerced to a number, and the flip becomes rebooted_recently", async () => {
+    const hist = [
+      { machine: "EHRC-ECHOs-Mac-mini", ts: ago(8 * 60), state: "unreachable", idle_s: null },
+      { machine: "EHRC-ECHOs-Mac-mini", ts: ago(5 * 60), state: "ok", idle_s: "3" },
+      { machine: "EHRC-CONSUL5s-Mac-mini", ts: ago(5 * 60), state: "ok", idle_s: "3000.5" },
+    ];
+    const { db, issued } = fakeDb((q) => (/FROM room_install/.test(q.text) ? ROOMS : /LEFT JOIN LATERAL/.test(q.text) ? [{ machine: "EHRC-ECHOs-Mac-mini", ...base, chrome: "true" }] : /AS idle_s/.test(q.text) ? hist : []));
+    const rows = await extHealth(db, { asOf: NOW });
+    const reads = issued.filter((q) => /AS idle_s/.test(q.text));
+    expect(reads).toHaveLength(1);
+    expect(String(reads[0]!.vals[0])).toContain("EHRC-ECHOs-Mac-mini");
+    for (const banned of ["Vinay", "ORBOX3", "orb2"]) expect(String(reads[0]!.vals[0])).not.toContain(banned);
+    expect(reads[0]!.vals).toContain(new Date(NOW).toISOString());
+    expect(reads[0]!.vals).toContain(new Date(NOW - 30 * 60_000).toISOString());
+    expect(reads[0]!.text).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
+    expect(rows[0]).toMatchObject({ rebooted_recently: true, rebooted_at: ago(5 * 60) });
+    expect(rows[1]).toMatchObject({ rebooted_recently: false, rebooted_at: null });
+    const inputs = await loadExtHealthInputs(db, new Date(NOW), [ROOMS[0]!, ROOMS[1]!]);
+    expect(inputs[1]!.poller_recent).toEqual([{ ts: ago(5 * 60), state: "ok", idle_s: 3000.5 }]);
   });
 });

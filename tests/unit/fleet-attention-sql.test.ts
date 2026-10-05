@@ -685,8 +685,8 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
     H.rec.length = 0;
     const rows = await extHealthNow();
     expect(rows.find((r) => r.room_id === "r6")!.status).toBe("behind");
-    const mine = H.rec.filter((x) => /ext_version/.test(x.q) && /pulse_presence_events/.test(x.q));
-    expect(mine.length).toBeGreaterThanOrEqual(2); // the three LATERAL lookups (one statement) and the behind-since read
+    const mine = H.rec.filter((x) => /ext_version|idle_s/.test(x.q) && /pulse_presence_events/.test(x.q));
+    expect(mine.length).toBeGreaterThanOrEqual(3); // the three LATERAL lookups (one statement), the behind-since read and the poller-history read
     for (const { q } of H.rec) {
       expect(q).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
       expect(q).not.toContain("EHRC-");
@@ -705,3 +705,53 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
   }, 180_000);
 });
 
+describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10, reboot flag)", () => {
+  const pollerRow = (machine: string, event: string, when: string, payload: string) => presence("poller", machine, event, when, payload);
+
+  it("no_chrome: poller ok + chrome_running=false (after chrome_running=true earlier) = no_chrome, chrome_down_since is where the false run began, AMBER R10 and NO R8 — a stale extension no longer reads as missing", async () => {
+    pg.exec([
+      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.1.39"}'),
+      pollerRow(M7, "ok", "3 hours", POLLER_OK()), pollerRow(M7, "ok", "50 minutes", POLLER_OK()),
+      pollerRow(M7, "ok", "40 minutes", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "20 minutes", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "30 seconds", POLLER_OK("console-a", false)),
+    ].join("\n"));
+    const row = (await extHealthNow()).find((r) => r.room_id === "r7")!;
+    expect(row).toMatchObject({ status: "no_chrome", poller: { ok: true, chrome_running: false } });
+    expect(minutesBetween(row.chrome_down_since as string, Date.now() - 40 * 60_000)).toBeLessThan(2);
+    const r = await attention();
+    expect(r.degraded).toBeUndefined();
+    const item = r.items.find((i) => i.room_id === "r7" && i.kind === "chrome_not_running")!;
+    expect(item).toMatchObject({ severity: "amber", detail: "Chrome is not running on CONSUL 4; presence cannot report.", action: "Open Chrome on the kiosk (or wait for the Kiosk Bot)." });
+    expect(minutesBetween(item.since, Date.now() - 40 * 60_000)).toBeLessThan(2);
+    expect(kindsOf(r).filter((k) => k.startsWith("r7:") && k.includes("extension"))).toEqual([]);
+  });
+
+  it("missing stays RED when chrome_running=true, and a never-chrome-true history still resolves a start (24 h look-back)", async () => {
+    pg.exec([extRow(M7, "heartbeat", "5 hours", '{"ext_version":"0.1.1.39"}'), pollerRow(M7, "ok", "30 seconds", POLLER_OK())].join("\n"));
+    expect(kindsOf(await attention()).filter((k) => k.startsWith("r7:"))).toEqual(["r7:extension_missing"]);
+    pg.exec(`TRUNCATE pulse_presence_events;` + [pollerRow(M7, "ok", "2 hours", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "30 seconds", POLLER_OK("console-a", false))].join("\n"));
+    const row = (await extHealthNow()).find((r) => r.room_id === "r7")!;
+    expect(row.status).toBe("no_chrome");
+    expect(minutesBetween(row.chrome_down_since as string, Date.now() - 2 * 3_600_000)).toBeLessThan(2);
+  });
+
+  it("rebooted_recently: unreachable 8 min and 6 min ago, back 5 min ago with idle_s 3 = flagged; R8's action names the IST time; a fresh blip with idle_s 4000 is not a reboot", async () => {
+    pg.exec([
+      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.1.39"}'),
+      pollerRow(M7, "ok", "20 minutes", '{"state":"ok","chrome_running":true,"idle_s":5000}'),
+      pollerRow(M7, "unreachable", "8 minutes", '{"state":"unreachable"}'), pollerRow(M7, "unreachable", "6 minutes", '{"state":"unreachable"}'),
+      pollerRow(M7, "ok", "5 minutes", '{"state":"ok","chrome_running":true,"idle_s":3}'), pollerRow(M7, "ok", "1 minute", '{"state":"ok","chrome_running":true,"idle_s":63}'),
+      // r6: a blip with the console still idle for hours — not a restart
+      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.39"}'),
+      pollerRow(M6, "ok", "9 minutes", '{"state":"ok","chrome_running":true,"idle_s":4000}'), pollerRow(M6, "unreachable", "7 minutes", '{"state":"unreachable"}'),
+      pollerRow(M6, "ok", "2 minutes", '{"state":"ok","chrome_running":true,"idle_s":4100}'),
+    ].join("\n"));
+    const rows = await extHealthNow();
+    const r7 = rows.find((r) => r.room_id === "r7")!;
+    expect(r7).toMatchObject({ status: "missing", rebooted_recently: true });
+    expect(minutesBetween(r7.rebooted_at as string, Date.now() - 5 * 60_000)).toBeLessThan(1);
+    expect(rows.find((r) => r.room_id === "r6")).toMatchObject({ rebooted_recently: false, rebooted_at: null });
+    const hhmm = new Date(Date.parse(r7.rebooted_at as string) + 19_800_000).toISOString().slice(11, 16);
+    const item = (await attention()).items.find((i) => i.room_id === "r7" && i.kind === "extension_missing")!;
+    expect(item.action).toBe(`Re-run the presence install on CONSUL 4 (policy file lost, usually after a reboot). (machine rebooted at ${hhmm}, policy file lost)`);
+  });
+});
