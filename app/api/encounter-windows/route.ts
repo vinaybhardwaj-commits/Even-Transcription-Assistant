@@ -10,12 +10,16 @@
  * both views of the doctor: doctor_uid/display_name/attribution (the extension's) and warehouse_* (Pulse's own consult record,
  * migration 0124), plus consulting_doctor_uid/_name + attribution_source (the one to report: warehouse > extension > none)
  * and doctor_mismatch.
+ * ?occupancy=1 (optionally as_of=<ISO>) returns { ok, as_of, count, machines: [...] } instead: one row per machine with the extension's resolved
+ * occupant and occupant_display = { uid, name, source: 'warehouse'|'cookie', cookie_uid, cookie_name, stale }. The warehouse consulting doctor of the
+ * machine's most recent consult (opened within 90 min of as_of, or unclosed) is shown in preference to the extension's Google-cookie identity, which
+ * Pulse never clears (lib/encounter-windows/occupant.ts). stale = the cookie identity differs from the warehouse doctor. Read-only.
  * No transcripts, no patient identifiers. Bad params -> 400.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin-gate";
 import { sql } from "@/lib/db";
-import { queryWindows } from "@/lib/encounter-windows";
+import { machineOccupancy, queryWindows } from "@/lib/encounter-windows";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +40,19 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   const p = req.nextUrl.searchParams;
+  const occRaw = p.get("occupancy");
+  if (occRaw === "1" || occRaw === "true") {
+    const asOf = isoParam(p.get("as_of"));
+    if (asOf === "bad") return bad("as_of is not a timestamp");
+    try {
+      const at = asOf ?? new Date().toISOString();
+      const machines = await machineOccupancy(sql, at);
+      return NextResponse.json({ ok: true, as_of: at, count: machines.length, machines }, NO_STORE);
+    } catch (e) {
+      console.error(`[encounter-windows] occupancy read failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+      return NextResponse.json({ error: { code: "READ_FAILED", message: "read failed" } }, { status: 500, ...NO_STORE });
+    }
+  }
   const from = isoParam(p.get("from"));
   const to = isoParam(p.get("to"));
   if (from === "bad") return bad("from is not a timestamp");

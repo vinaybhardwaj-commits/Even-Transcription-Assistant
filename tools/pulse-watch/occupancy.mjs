@@ -24,6 +24,12 @@
 // BACKGROUND profile = present stream with no tab_focus=true event in the last focusMin (default 10) AND no encounter in
 // genuineMin; never chosen over a focused/encounter-bearing stream. AMBIGUOUS: >=2 streams focused-now and encounter
 // evidence cannot single one out -> machine.ambiguous=true, candidates=[names], no single occupant is picked.
+// WAREHOUSE DISPLAY (5 Oct 2026). The extension's doctor_uid comes from a Google __session cookie Pulse never clears; a doctor who signs in by
+// phone OTP runs the page under a bearer the extension cannot see, so the extension keeps naming the previous Google-login doctor. The warehouse
+// doctor on each consult (eta_encounter_windows.consulting_doctor_uid/name, attribution_source='warehouse') is authoritative. Each machine row
+// therefore also carries occupant_display = {uid, name, source:'warehouse'|'cookie', cookie_uid, cookie_name, stale}: the warehouse doctor of the
+// machine's most recent consult (t_open within WAREHOUSE_MIN minutes of asOf, or unclosed within 4 h) when there is one, else the cookie identity.
+// stale = a cookie identity is present and differs from the warehouse doctor. Attribution logic is untouched; this only decides what is SHOWN.
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { neon } from '@neondatabase/serverless';
@@ -135,9 +141,39 @@ export function pickOccupant(present, asOf, opts = {}) {
   return { best: c.slice().sort(fresh)[0], ambiguous: false, candidates: [], rule: 'freshest' };   // rule 3
 }
 
+export const WAREHOUSE_MIN = Number(process.env.OCC_WAREHOUSE_MIN || 90);
+export const ALIVE_S = Number(process.env.OCC_ALIVE_S || 180);
+
+// machine -> {uid, name, t_open, t_close} of the machine's MOST RECENT consult within WAREHOUSE_MIN of asOf (or unclosed, t_open within 4 h),
+// kept only when that consult's attribution_source is 'warehouse'. Most-recent-first so an older doctor never shows through a newer consult.
+export async function consultingDoctorsByMachine(sql, asOf, minutes = WAREHOUSE_MIN) {
+  const q = `select distinct on (machine) machine, consulting_doctor_uid as uid, consulting_doctor_name as name,
+       attribution_source as src, t_open, t_close
+    from eta_encounter_windows
+    where machine is not null and t_open <= coalesce($1::timestamptz, now())
+      and (t_open >= coalesce($1::timestamptz, now()) - ($2::int * interval '1 minute')
+           or (t_close is null and t_open >= coalesce($1::timestamptz, now()) - interval '4 hours'))
+    order by machine, t_open desc`;
+  const a = [asOf ? new Date(asOf).toISOString() : null, minutes];
+  const rows = await (sql.query ? sql.query(q, a) : sql(q, a));  // neon <1.0 has no .query
+  const m = new Map();
+  for (const r of rows) if (r.src === 'warehouse' && r.uid) m.set(r.machine, { uid: r.uid, name: r.name, t_open: r.t_open, t_close: r.t_close });
+  return m;
+}
+
+// What the "who is in the room" line shows. warehouse = {uid,name}|null, cookie = {uid,name}|null (the extension's resolved occupant).
+export function occupantDisplay(warehouse, cookie) {
+  const cu = cookie && cookie.uid ? cookie.uid : null, cn = cookie && cookie.name ? cookie.name : null;
+  if (warehouse && warehouse.uid)
+    return { uid: warehouse.uid, name: warehouse.name || null, source: 'warehouse', cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid };
+  if (cu) return { uid: cu, name: cn, source: 'cookie', cookie_uid: cu, cookie_name: cn, stale: false };
+  return null;
+}
+
 // One row per machine, shaped like watch.mjs's old fetchState() rows plus occupancy fields.
 export async function resolveMachines(sql, opts) {
   const sess = await resolveSessions(sql, opts);
+  const wh = await consultingDoctorsByMachine(sql, opts && opts.asOf);
   const by = new Map();
   for (const s of sess) { if (!by.has(s.machine)) by.set(s.machine, []); by.get(s.machine).push(s); }
   const out = [];
@@ -148,6 +184,7 @@ export async function resolveMachines(sql, opts) {
     const best = pick.best;
     const ref = best || present[0] || streams[0] || null;
     const names = pick.candidates.map((s) => s.dn || s.uid);
+    const consulting = wh.get(machine) || null;
     out.push({
       machine, room: ss[0].m_room, event: ss[0].m_event, ts: ss[0].machine_last_ts,
       occupied: present.length > 0,
@@ -159,6 +196,9 @@ export async function resolveMachines(sql, opts) {
       since: best ? best.since : null, last_genuine_ts: ref ? ref.last_genuine_ts : null,
       idle_state: ss[0].m_idle_state, idle_ts: ss[0].m_idle_ts, asof: ss[0].asof, cutoff_ts: ss[0].cutoff_ts,
       sessions: streams,
+      ext_alive: ss[0].machine_last_ts != null && new Date(ss[0].asof).getTime() - new Date(ss[0].machine_last_ts).getTime() <= ALIVE_S * 1000,
+      consulting,
+      occupant_display: occupantDisplay(consulting, best ? { uid: best.uid, name: best.dn } : null),
     });
   }
   return out;

@@ -4,3 +4,5 @@ export { pickOccupant, resolveStreams, occupancyAt, cutoffTs, OCC_DEFAULTS } fro
 export { refreshWindows, refreshWindowsByDay, splitByIstDay, istMidnightAtOrBefore, queryWindows, loadCrosswalk, fetchEvents } from "./db";
 export type { WindowsDb, RefreshResult, RefreshByDayResult, WindowFilter } from "./db";
 export { keepFocusFlips } from "./filter";
+export { consultingDoctorForMachine, machineOccupancy, buildOccupantDisplay, WAREHOUSE_WINDOW_MIN } from "./occupant";
+export type { OccupantDisplay, MachineOccupancy, ConsultingDoctor } from "./occupant";

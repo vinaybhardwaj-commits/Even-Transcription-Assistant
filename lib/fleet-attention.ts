@@ -17,6 +17,8 @@
  * R3 silent_tape            the two newest chunks of the open session are digital silence by RATE: <= 800 bytes/s over >= 150 s. Red.
  * R4 consult_without_tape   Pulse says a consult is open (or opened < 15 min ago) and no chunk has arrived for 10 min. Red.
  * R5 no_session_in_clinic   clinic hours, the Mac was in use in the last 30 min, and no session is open. Amber.
+ *                            R4 and R5 NAME the warehouse consulting doctor; when the extension's cookie login names someone else they add
+ *                            "The session shows <name>, unverified." (the cookie is a Google session Pulse never clears; see encounter-windows/occupant.ts).
  * R6 open_outbox            a watchdog offline/degraded alert with no GENUINE recovery since (chunk after it AND >= 2 distinct levels). Red/amber.
  *                           R6 clears on the FIRST genuine evidence, by spec (a single recovery chunk is enough; there is no hold-down).
  * R7 stale_start            a remote start_day failed in the last 60 min and no session has opened since. Red.
@@ -69,6 +71,8 @@ export const CONSULT_NO_CHUNK_MS = 10 * 60_000;
 export const CONSULT_MAX_OPEN_MS = 4 * 3_600_000;
 /** R5 */
 export const ACTIVITY_WINDOW_MS = 30 * 60_000;
+/** R5: a warehouse consult this recent (or still open) names the doctor at the Mac. */
+export const CONSULT_DISPLAY_MS = 90 * 60_000;
 /** R7 */
 export const FAILED_START_WINDOW_MS = 60 * 60_000;
 
@@ -135,7 +139,19 @@ export type ChunkLite = {
   /** the chunk's audio length; null when unknown (then it can never be called silent) */
   duration_ms?: number | null;
 };
-export type WindowLite = { display_name: string | null; t_open: string; t_close: string | null };
+/**
+ * display_name is the doctor to NAME (the warehouse consulting doctor when Pulse's own consult record answered, else the extension's). `source` is the
+ * window's attribution_source; `stale` = the extension's cookie login names a DIFFERENT doctor than the warehouse (doctor_mismatch with source
+ * 'warehouse'), and `cookie_name` is that login. The cookie identity comes from a Google session cookie Pulse never clears, so it is unverified.
+ */
+export type WindowLite = {
+  display_name: string | null;
+  t_open: string;
+  t_close: string | null;
+  cookie_name?: string | null;
+  source?: string | null;
+  stale?: boolean;
+};
 
 /** The newest watchdog offline/degraded alert for the room, with the two facts a GENUINE recovery needs, measured since that alert. */
 export type OutboxFacts = {
@@ -273,6 +289,20 @@ const doctorLabel = (name: string | null): string => {
   if (!n) return "A doctor";
   return /^dr\.?\s/i.test(n) ? n : `Dr ${n}`;
 };
+
+/** " The session shows Dr X, unverified." when the extension's cookie login disagrees with the warehouse consult doctor; "" otherwise. */
+const staleNote = (w: WindowLite): string =>
+  w.stale ? ` The session shows ${clean(w.cookie_name, 80) ? doctorLabel(w.cookie_name ?? null) : "a different login"}, unverified.` : "";
+
+/** R5: the warehouse doctor of the room's most recent consult (opened within CONSULT_DISPLAY_MS, or unclosed within CONSULT_MAX_OPEN_MS), or null. */
+function recentWarehouseConsult(windows: WindowLite[], now: number): WindowLite | null {
+  const recent = windows
+    .map((w) => ({ w, open: Date.parse(w.t_open) }))
+    .filter(({ w, open }) => Number.isFinite(open) && open <= now && (now - open <= CONSULT_DISPLAY_MS || (w.t_close === null && now - open <= CONSULT_MAX_OPEN_MS)))
+    .sort((a, b) => b.open - a.open);
+  const top = recent[0]?.w;
+  return top && top.source === "warehouse" ? top : null;
+}
 
 const sevRank = (s: AttentionSeverity): number => (s === "red" ? 0 : 1);
 
@@ -439,7 +469,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           "consult_without_tape",
           "red",
           first.open,
-          `${doctorLabel(first.w.display_name)} is consulting but nothing is being recorded — no recording has reached the server in the last 10 minutes.`,
+          `${doctorLabel(first.w.display_name)} is consulting but nothing is being recorded — no recording has reached the server in the last 10 minutes.${staleNote(first.w)}`,
           `Go to ${name} now: check the recorder app is running and the microphone is connected, and start the day recording if it is not.`,
         );
       }
@@ -449,11 +479,12 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     if (isClinicHours(now) && r.recent_activity && !r.open_session) {
       const first = Date.parse(r.recent_activity.first_at);
       const clinicOpen = istParts(now).midnightMs + CLINIC_OPEN_MIN * 60_000;
+      const consult = recentWarehouseConsult(r.windows, now);
       mk(
         "no_session_in_clinic",
         "amber",
         Math.max(clinicOpen, Number.isFinite(first) ? first : clinicOpen),
-        `The Mac in ${name} has been in use during clinic hours but no recording is open.`,
+        `The Mac in ${name} has been in use during clinic hours but no recording is open.${consult ? ` Consulting doctor per Pulse: ${doctorLabel(consult.display_name)}.${staleNote(consult)}` : ""}`,
         `Start the day recording from the room page on the Mac in ${name}.`,
       );
     }
@@ -650,12 +681,13 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
          AND c.created_at > now() - interval '30 minutes'
     `) as Array<{ room_id: string; session_id: string; source: string; created_at: unknown; started_at: unknown; size_bytes: unknown; duration_ms: unknown }>, []),
     safe("eta_encounter_windows", degraded, async () => (await sql`
-      SELECT w.room_id, COALESCE(w.consulting_doctor_name, w.display_name) AS display_name, w.t_open, w.t_close
+      SELECT w.room_id, COALESCE(w.consulting_doctor_name, w.display_name) AS display_name, w.t_open, w.t_close,
+             w.display_name AS cookie_name, w.attribution_source, w.doctor_mismatch
         FROM eta_encounter_windows w
        WHERE w.room_id = ANY(${ids}::text[])
-         AND (w.t_open > now() - interval '15 minutes'
+         AND (w.t_open > now() - interval '90 minutes'
               OR ((w.t_close IS NULL OR w.t_close > now()) AND w.t_open > now() - interval '4 hours'))
-    `) as Array<{ room_id: string; display_name: string | null; t_open: unknown; t_close: unknown }>, []),
+    `) as Array<{ room_id: string; display_name: string | null; t_open: unknown; t_close: unknown; cookie_name: string | null; attribution_source: string | null; doctor_mismatch: unknown }>, []),
     // R6 — the newest offline/degraded alert per room (last 7 days) plus, measured since it: any chunk (only sessions that had not ended before the
     // alert can have one), and whether any level sample differs from the first one after the alert. `distinct_levels_since_alert` is 0 (no
     // samples), 1 (all identical) or 2 (at least two values). Every sample read is per room (a.room_id) and bounded by the alert's IST date.
@@ -752,7 +784,16 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
   });
   const windowsBy = group(windows, (r): WindowLite | null => {
     const open = toIso(r.t_open);
-    return open ? { display_name: r.display_name, t_open: open, t_close: toIso(r.t_close) } : null;
+    return open
+      ? {
+          display_name: r.display_name,
+          t_open: open,
+          t_close: toIso(r.t_close),
+          cookie_name: r.cookie_name ?? null,
+          source: r.attribution_source ?? null,
+          stale: r.attribution_source === "warehouse" && r.doctor_mismatch === true,
+        }
+      : null;
   });
   const lastSampleBy = new Map(lastSamples.map((r) => [r.room_id, toIso(r.last_sample_at)]));
   const outboxBy = new Map(outbox.map((r) => [r.room_id, r]));

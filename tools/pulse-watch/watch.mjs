@@ -95,12 +95,19 @@ function render({ current, feed }) {
       const star = r.machine === THIRD_FLOOR ? `${C.cyan}★${C.reset}` : ' ';
       const mach = (r.machine || '?').padEnd(28).slice(0, 28);
       const room = (r.room || '').padEnd(14).slice(0, 14);
+      const od = r.occupant_display;
+      const alive = !!r.ext_alive;
       let who;
-      if (occ === null) who = `${C.red}— logged out${C.reset}${r.out_reason ? ' ' + C.dim + '(' + r.out_reason + (r.last_display_name ? ': ' + r.last_display_name : '') + ')' + C.reset : ''}`;
+      if (od && od.source === 'warehouse') {
+        // the warehouse consult doctor is authoritative; the extension's cookie identity is only a dim, possibly stale, second opinion
+        who = `${C.green}${od.name || od.uid}${C.reset} ${C.dim}(consulting)${C.reset}`;
+        if (od.cookie_uid) who += ` ${C.dim}session: ${od.cookie_name || od.cookie_uid}${od.stale ? ' ' + C.yellow + 'stale' + C.dim : ''}${C.reset}`;
+      } else if (occ === null && r.out_reason === 'no_identity' && alive) who = `${C.dim}— no consult yet${C.reset}`;
+      else if (occ === null) who = `${C.red}— logged out${C.reset}${r.out_reason ? ' ' + C.dim + '(' + r.out_reason + (r.last_display_name ? ': ' + r.last_display_name : '') + ')' + C.reset : ''}`;
       else if (r.ambiguous) who = `${C.yellow}${occ}${C.reset}`;
       else if (stale) who = `${C.yellow}${occ} ${C.dim}(stale ${ageStr(r.ts)})${C.reset}`;
       else who = `${C.green}${occ}${C.reset}`;
-      if (occ !== null && !r.ambiguous && r.background && r.background.length) who += ` ${C.dim}[background: ${r.background.join(', ')}]${C.reset}`;
+      if (occ !== null && !(od && od.source === 'warehouse') && !r.ambiguous && r.background && r.background.length) who += ` ${C.dim}[background: ${r.background.join(', ')}]${C.reset}`;
       const last = `${C.dim}[${r.event} ${ageStr(r.ts)} ago]${C.reset}`;
       L.push(`  ${star} ${C.bold}${mach}${C.reset} ${C.dim}${room}${C.reset} ${who}  ${last}`);
     }
@@ -140,7 +147,7 @@ async function tick() {
 if (ONCE) {
   const { current, feed } = await fetchState();
   console.log('CURRENT(ext) rows:', current.length);
-  for (const r of current) console.log('  ', r.machine, '|', r.event, '|', r.ambiguous ? identOf(r) : r.occupied ? r.display_name + (r.background.length ? ' [bg: ' + r.background.join(', ') + ']' : '') : 'LOGGED-OUT(' + r.out_reason + ')', '|', r.ts);
+  for (const r of current) console.log('  ', r.machine, '|', r.event, '|', r.ambiguous ? identOf(r) : r.occupied ? r.display_name + (r.background.length ? ' [bg: ' + r.background.join(', ') + ']' : '') : 'LOGGED-OUT(' + r.out_reason + ')', '|', r.ts, r.occupant_display && r.occupant_display.source === 'warehouse' ? '| consulting: ' + r.occupant_display.name + (r.occupant_display.stale ? ' (session ' + (r.occupant_display.cookie_name || '?') + ' stale)' : '') : '');
   console.log('FEED rows:', feed.length);
   for (const r of feed.slice(0, 8)) console.log('  ', r.ts, r.source, r.machine, r.event, r.email || '');
   process.exit(0);

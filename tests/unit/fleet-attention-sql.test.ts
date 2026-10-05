@@ -299,6 +299,58 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.items[0]!.detail).not.toContain(DOC2.label);
   });
 
+  it("R4 says the session shows the cookie doctor, unverified, only when the warehouse and the extension name different doctors", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, doctor_uid, display_name, consulting_doctor_uid, consulting_doctor_name,
+                                         attribution_source, doctor_mismatch, attribution, t_open, t_close, close_reason, quality, resolver_version)
+      VALUES ('e1@m', 'm', 'r4', 'ux2', '${DOC2.full_name}', 'ux1', '${DOC.full_name}', 'warehouse', true, 'rows', ${ago("20 minutes")}, NULL, 'open', 'unclosed', 'v');
+    `);
+    const r = await attention();
+    expect(kindsOf(r)).toEqual(["r4:consult_without_tape"]);
+    expect(r.items[0]!.detail).toContain(`${DOC.label} is consulting`);
+    expect(r.items[0]!.detail).toContain(`The session shows ${DOC2.label}, unverified.`);
+    // the same consult with agreeing doctors: named, nothing unverified
+    pg.exec(`UPDATE eta_encounter_windows SET doctor_mismatch = false, doctor_uid = consulting_doctor_uid, display_name = consulting_doctor_name;`);
+    const agree = await attention();
+    expect(agree.items[0]!.detail).toContain(`${DOC.label} is consulting`);
+    expect(agree.items[0]!.detail).not.toContain("unverified");
+  });
+
+  it("consultingDoctorForMachine / machineOccupancy — the real SELECTs: newest consult within 90 min wins, an unwarehoused newer one hides an older warehouse doctor", async () => {
+    const { consultingDoctorForMachine, machineOccupancy } = await import("@/lib/encounter-windows/occupant");
+    const db = pg.sql as unknown as import("@/lib/encounter-windows").WindowsDb;
+    const w = (key: string, machine: string, uid: string, name: string, src: string, openAgo: string, closeAgo: string | null) =>
+      `('${key}', '${machine}', 'r4', ${src === "warehouse" ? `'${uid}'` : "NULL"}, ${src === "warehouse" ? `'${name}'` : "NULL"}, '${src}', 'rows', ${ago(openAgo)}, ${closeAgo ? ago(closeAgo) : "NULL"}, 'open', 'clean', 'v')`;
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, consulting_doctor_uid, consulting_doctor_name, attribution_source, attribution, t_open, t_close, close_reason, quality, resolver_version)
+      VALUES ${[
+        w("a1@x", "mx", "u1", DOC.full_name, "warehouse", "120 minutes", "110 minutes"), // older than 90 min, closed: out
+        w("a2@x", "mx", "u2", DOC2.full_name, "warehouse", "40 minutes", "30 minutes"),  // newest in the window: wins
+        w("b1@x", "my", "u1", DOC.full_name, "warehouse", "60 minutes", "50 minutes"),
+        w("b2@x", "my", "u2", DOC2.full_name, "extension", "10 minutes", "5 minutes"),   // newer but not warehouse: hides b1
+        w("c1@x", "mz", "u1", DOC.full_name, "warehouse", "3 hours", null),         // unclosed, within 4 h: in
+        w("d1@x", "mw", "u1", DOC.full_name, "warehouse", "5 hours", null),         // unclosed, past 4 h: out
+      ].join(",\n")};
+    `);
+    const at = Date.now();
+    expect((await consultingDoctorForMachine(db, "mx", at))?.uid).toBe("u2");
+    expect(await consultingDoctorForMachine(db, "my", at)).toBeNull();
+    expect((await consultingDoctorForMachine(db, "mz", at))?.t_close).toBeNull();
+    expect(await consultingDoctorForMachine(db, "mw", at)).toBeNull();
+    expect(await consultingDoctorForMachine(db, "unknown-machine", at)).toBeNull();
+    // as-of an earlier instant the older consult is the newest in ITS window
+    expect((await consultingDoctorForMachine(db, "mx", at - 100 * 60_000))?.uid).toBe("u1");
+    // machineOccupancy: the cookie doctor logged in on mx is stale against the warehouse doctor
+    const cookie = { doctor_uid: "cookie-uid", display_name: DOC.full_name };
+    pg.exec(presence("ext", "mx", "login", "15 minutes", JSON.stringify(cookie))
+      + presence("ext", "mx", "heartbeat", "1 minute", JSON.stringify({ ...cookie, tab_focus: "true" })));
+    const occ = await machineOccupancy(db, at);
+    const mx = occ.find((m) => m.machine === "mx")!;
+    expect(mx.occupied).toBe(true);
+    expect(mx.occupant_display).toMatchObject({ uid: "u2", name: DOC2.full_name, source: "warehouse", cookie_uid: "cookie-uid", cookie_name: DOC.full_name, stale: true });
+    expect(occ.find((m) => m.machine === "my")).toBeUndefined(); // no events and no warehouse doctor: not a machine this reads
+  });
+
   it("R6 open_outbox — open until a chunk lands after the alert AND the levels moved since", async () => {
     const { degradedMessage } = await import("@/lib/room-watchdog");
     const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");

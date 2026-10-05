@@ -389,6 +389,22 @@ describe("R4 consult_without_tape", () => {
     expect(b[0]!.detail.startsWith("A doctor is consulting")).toBe(true);
   });
 
+  it("names the warehouse doctor and says the session shows the cookie doctor, unverified, when the two differ (stale)", () => {
+    const stale = { ...win("2026-10-05 14:05:00", null, DOC.full_name), cookie_name: DOC2.full_name, source: "warehouse", stale: true };
+    const items = run(NOW, room({ open_session: open, samples: moving, windows: [stale] }));
+    expect(items[0]!.detail).toContain(`${DOC.label} is consulting but nothing is being recorded`);
+    expect(items[0]!.detail).toContain(`The session shows ${DOC2.label}, unverified.`);
+    // a missing cookie name still says so, without inventing one
+    const noName = run(NOW, room({ open_session: open, samples: moving, windows: [{ ...stale, cookie_name: null }] }));
+    expect(noName[0]!.detail).toContain("The session shows a different login, unverified.");
+  });
+
+  it("adds nothing when the cookie and the warehouse agree (not stale), or there is no warehouse doctor", () => {
+    const agree = { ...win("2026-10-05 14:05:00", null, DOC.full_name), cookie_name: DOC.full_name, source: "warehouse", stale: false };
+    expect(run(NOW, room({ open_session: open, samples: moving, windows: [agree] }))[0]!.detail).not.toContain("unverified");
+    expect(run(NOW, room({ open_session: open, samples: moving, windows: [win("2026-10-05 14:05:00", null)] }))[0]!.detail).not.toContain("unverified");
+  });
+
   it("stays quiet when a chunk arrived inside 10 minutes", () => {
     expect(run(NOW, room({ open_session: open, samples: moving, windows: [win("2026-10-05 14:05:00", null)], chunks: [chunk("2026-10-05 14:21:00", 3_400_000)] }))).toEqual([]);
   });
@@ -442,6 +458,30 @@ describe("R5 no_session_in_clinic", () => {
     expect(kinds(items)).toEqual(["room_opd4:no_session_in_clinic"]);
     expect(items[0]!.severity).toBe("amber");
     expect(items[0]!.since).toBe(iso("2026-10-05 14:05:00"));
+  });
+
+  it("names the warehouse consulting doctor at the Mac, and the unverified cookie login when it differs", () => {
+    const w = (openIST: string, closeIST: string | null, over: Record<string, unknown> = {}) =>
+      ({ display_name: DOC.full_name, t_open: iso(openIST), t_close: closeIST ? iso(closeIST) : null, cookie_name: DOC2.full_name, source: "warehouse", stale: true, ...over });
+    const a = run("2026-10-05 14:30:00", opd4({ recent_activity: active("2026-10-05 14:05:00", "2026-10-05 14:29:30"), windows: [w("2026-10-05 13:20:00", "2026-10-05 13:40:00")] }));
+    expect(a[0]!.detail).toContain(`Consulting doctor per Pulse: ${DOC.label}.`);
+    expect(a[0]!.detail).toContain(`The session shows ${DOC2.label}, unverified.`);
+    // agreeing cookie: doctor named, no unverified note
+    const b = run("2026-10-05 14:30:00", opd4({ recent_activity: active("2026-10-05 14:05:00", "2026-10-05 14:29:30"), windows: [w("2026-10-05 13:20:00", "2026-10-05 13:40:00", { stale: false })] }));
+    expect(b[0]!.detail).toContain(`Consulting doctor per Pulse: ${DOC.label}.`);
+    expect(b[0]!.detail).not.toContain("unverified");
+  });
+
+  it("names no doctor when the newest consult is older than 90 minutes, or is not warehouse-attributed", () => {
+    const base = { display_name: DOC.full_name, cookie_name: DOC2.full_name, stale: true };
+    const old = run("2026-10-05 14:30:00", opd4({ recent_activity: active("2026-10-05 14:05:00", "2026-10-05 14:29:30"), windows: [{ ...base, source: "warehouse", t_open: iso("2026-10-05 12:50:00"), t_close: iso("2026-10-05 13:00:00") }] }));
+    expect(old[0]!.detail).not.toContain("Consulting doctor");
+    // the newest consult is extension-sourced: an older warehouse doctor must not show through it
+    const newer = run("2026-10-05 14:30:00", opd4({ recent_activity: active("2026-10-05 14:05:00", "2026-10-05 14:29:30"), windows: [
+      { ...base, source: "warehouse", t_open: iso("2026-10-05 13:30:00"), t_close: iso("2026-10-05 13:40:00") },
+      { display_name: DOC2.full_name, t_open: iso("2026-10-05 14:10:00"), t_close: iso("2026-10-05 14:20:00"), source: "extension", stale: false },
+    ] }));
+    expect(newer[0]!.detail).not.toContain("Consulting doctor");
   });
 
   it("since never precedes the clinic day's opening at 08:30", () => {

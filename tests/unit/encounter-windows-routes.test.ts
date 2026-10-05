@@ -4,9 +4,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const M = vi.hoisted(() => ({
   refresh: vi.fn(),
   query: vi.fn(),
+  occ: vi.fn(),
 }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign(() => [], { transaction: async () => [] }) }));
-vi.mock("@/lib/encounter-windows", () => ({ refreshWindowsByDay: M.refresh, queryWindows: M.query }));
+vi.mock("@/lib/encounter-windows", () => ({ refreshWindowsByDay: M.refresh, queryWindows: M.query, machineOccupancy: M.occ }));
 
 import { GET as cronGET } from "@/app/api/cron/encounter-windows/route";
 import { GET as sweepGET } from "@/app/api/cron/encounter-windows/sweep/route";
@@ -17,6 +18,7 @@ const SAVED = { CRON_SECRET: process.env.CRON_SECRET, ADMIN_TOKEN: process.env.A
 beforeEach(() => {
   M.refresh.mockReset();
   M.query.mockReset();
+  M.occ.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => {
@@ -172,5 +174,27 @@ describe("GET /api/encounter-windows", () => {
     M.query.mockClear();
     expect((await readGET(readReq("?mismatch=yes"))).status).toBe(400);
     expect(M.query).not.toHaveBeenCalled();
+  });
+
+  it("?occupancy=1 returns the per-machine occupant display (not windows), behind the same admin gate", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    expect((await readGET(readReq("?occupancy=1", ""))).status).toBe(401);
+    expect(M.occ).not.toHaveBeenCalled();
+    const machines = [{ machine: "m", occupant_display: { uid: "u1", name: "n", source: "warehouse", cookie_uid: "u2", cookie_name: "c", stale: true } }];
+    M.occ.mockResolvedValue(machines);
+    const r = await readGET(readReq("?occupancy=1&as_of=2026-10-05T07:00:00Z"));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, as_of: "2026-10-05T07:00:00.000Z", count: 1, machines });
+    expect(M.occ.mock.calls[0]![1]).toBe("2026-10-05T07:00:00.000Z");
+    expect(M.query).not.toHaveBeenCalled();
+  });
+
+  it("?occupancy=1 with a bad as_of is a 400; a failing read is a 500 that leaks nothing", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    expect((await readGET(readReq("?occupancy=1&as_of=nope"))).status).toBe(400);
+    M.occ.mockRejectedValue(new Error("boom secret"));
+    const r = await readGET(readReq("?occupancy=true"));
+    expect(r.status).toBe(500);
+    expect(JSON.stringify(await r.json())).not.toContain("secret");
   });
 });
