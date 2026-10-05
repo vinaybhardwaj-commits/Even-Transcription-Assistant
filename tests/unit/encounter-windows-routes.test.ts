@@ -158,7 +158,19 @@ describe("GET /api/encounter-windows", () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ ok: true, count: 1, windows: [{ consult_key: "E1@m" }] });
     expect(M.query.mock.calls[0]![1]).toEqual({
-      room_id: "room_x", doctor_uid: "UA", from: "2026-10-03T00:00:00.000Z", to: "2026-10-04T00:00:00.000Z", quality: "clean", limit: 50,
+      room_id: "room_x", doctor_uid: "UA", from: "2026-10-03T00:00:00.000Z", to: "2026-10-04T00:00:00.000Z", quality: "clean", mismatch: null, limit: 50,
     });
+  });
+
+  it("?mismatch=true reaches the query as true; false or absent means no filter; anything else is a 400", async () => {
+    process.env.ADMIN_TOKEN = "tok";
+    M.query.mockResolvedValue([]);
+    await readGET(readReq("?mismatch=true"));
+    await readGET(readReq("?mismatch=false"));
+    await readGET(readReq(""));
+    expect(M.query.mock.calls.map(([, f]) => f.mismatch)).toEqual([true, null, null]);
+    M.query.mockClear();
+    expect((await readGET(readReq("?mismatch=yes"))).status).toBe(400);
+    expect(M.query).not.toHaveBeenCalled();
   });
 });

@@ -579,7 +579,7 @@ describe("refreshWindowsByDay and the bounded event load", () => {
     expect(r.complete).toBe(true);
     expect(r.next_from).toBeNull();
     expect(txns).toHaveLength(3);
-    const dels = txns.map((t) => t[0]!.vals as string[]);
+    const dels = txns.map((t) => (t[0]!.vals as string[]).slice(0, 2)); // [from, to]; the third bound value is the keep-list (consult_key <> ALL)
     expect(dels[0]).toEqual([new Date(from).toISOString(), new Date(mid("2026-10-03")).toISOString()]);
     expect(dels[1]).toEqual([new Date(mid("2026-10-03")).toISOString(), new Date(mid("2026-10-04")).toISOString()]);
     expect(dels[2]).toEqual([new Date(mid("2026-10-04")).toISOString(), new Date(to).toISOString()]);

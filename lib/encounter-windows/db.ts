@@ -7,8 +7,9 @@
  * sql.transaction([...]) as ONE non-interactive transaction), timestamps come back as strings, bigint arrays as
  * string arrays, and every value is a bound parameter.
  *
- * refreshWindows(db, {from, to}) recomputes the range idempotently: delete rows with from <= t_open < to, insert
- * the fresh ones, in a single transaction. consult_key is `${encounter_id}@${machine}`, a pure function of the
+ * refreshWindows(db, {from, to}) recomputes the range idempotently: delete the rows with from <= t_open < to that the
+ * fresh compute no longer produces, upsert the fresh ones, in a single transaction. Rows that survive keep their
+ * warehouse_* columns (0124) — see PRESERVING THE WAREHOUSE COLUMNS below. consult_key is `${encounter_id}@${machine}`, a pure function of the
  * consult, so the insert is ON CONFLICT (consult_key) DO UPDATE: a consult whose t_open drifted across the range
  * edge between two runs updates its own row and can never touch another consult's.
  * refreshWindowsByDay splits a long range at IST midnights and runs one refreshWindows (one transaction) per day;
@@ -33,7 +34,8 @@ import {
   type Attribution,
   type CloseReason,
   type ComputeSummary,
-  type EncounterWindowRow,
+  type AttributionSource,
+  type EncounterWindowRead,
   type PresenceEvent,
   type Quality,
   type RoomRef,
@@ -127,25 +129,38 @@ export async function refreshWindows(
   const [crosswalk, events] = await Promise.all([loadCrosswalk(db), fetchEvents(db, from, readTo)]);
   const { rows, summary } = computeWindowsDetailed(events, { from, to, asOf: opts.asOf ?? Date.now(), crosswalk });
 
+  // PRESERVING THE WAREHOUSE COLUMNS (0124). The delete used to take every row in the range, so a refresh threw away
+  // each row's warehouse_* / consulting_* columns and the insert rebuilt them blank. It now removes only the rows the
+  // fresh compute no longer produces (a consult that vanished) and leaves the rest for the upsert below, whose
+  // DO UPDATE never names the warehouse_* columns, so they stay as written by lib/encounter-windows/warehouse-attribution.ts.
+  const keys = rows.map((r) => r.consult_key);
   const del = db`
     DELETE FROM eta_encounter_windows
      WHERE t_open >= ${from.toISOString()}::timestamptz AND t_open < ${to.toISOString()}::timestamptz
+       AND consult_key <> ALL(${keys}::text[])
      RETURNING 1
   `;
   let results: unknown[];
   if (rows.length === 0) {
     results = (await db.transaction([del])) as unknown[];
   } else {
+    // consulting_* / attribution_source / doctor_mismatch: the INSERT side seeds them from the extension (precedence
+    // rule 2/3 of migration 0124); the DO UPDATE side re-derives them against the STORED warehouse doctor, so a row
+    // already answered by the warehouse keeps reading 'warehouse' and its mismatch follows the fresh extension doctor.
     const ins = db`
       INSERT INTO eta_encounter_windows
         (consult_key, consult_uid, prescription_ref, machine, room_id, room_slug, doctor_uid, display_name,
-         attribution, t_open, t_close, close_reason, quality, reopen_count, source_event_ids, resolver_version, computed_at)
+         attribution, t_open, t_close, close_reason, quality, reopen_count, source_event_ids, resolver_version, computed_at,
+         consulting_doctor_uid, consulting_doctor_name, attribution_source, doctor_mismatch)
       SELECT r->>'consult_key', r->>'consult_uid', r->>'prescription_ref', r->>'machine', r->>'room_id', r->>'room_slug',
              r->>'doctor_uid', r->>'display_name', r->>'attribution',
              (r->>'t_open')::timestamptz, (r->>'t_close')::timestamptz, r->>'close_reason', r->>'quality',
              (r->>'reopen_count')::int,
              COALESCE((SELECT array_agg(x::bigint ORDER BY x::bigint) FROM jsonb_array_elements_text(r->'source_event_ids') AS x), '{}'::bigint[]),
-             r->>'resolver_version', now()
+             r->>'resolver_version', now(),
+             r->>'doctor_uid', r->>'display_name',
+             CASE WHEN r->>'doctor_uid' IS NOT NULL THEN 'extension' ELSE 'none' END,
+             false
         FROM jsonb_array_elements(${JSON.stringify(rows)}::jsonb) AS r
       ON CONFLICT (consult_key) DO UPDATE SET
         consult_uid = EXCLUDED.consult_uid, prescription_ref = EXCLUDED.prescription_ref, machine = EXCLUDED.machine,
@@ -153,7 +168,15 @@ export async function refreshWindows(
         display_name = EXCLUDED.display_name, attribution = EXCLUDED.attribution, t_open = EXCLUDED.t_open,
         t_close = EXCLUDED.t_close, close_reason = EXCLUDED.close_reason, quality = EXCLUDED.quality,
         reopen_count = EXCLUDED.reopen_count, source_event_ids = EXCLUDED.source_event_ids,
-        resolver_version = EXCLUDED.resolver_version, computed_at = EXCLUDED.computed_at
+        resolver_version = EXCLUDED.resolver_version, computed_at = EXCLUDED.computed_at,
+        consulting_doctor_uid = CASE WHEN eta_encounter_windows.warehouse_doctor_uid IS NOT NULL
+                                     THEN eta_encounter_windows.warehouse_doctor_uid ELSE EXCLUDED.consulting_doctor_uid END,
+        consulting_doctor_name = CASE WHEN eta_encounter_windows.warehouse_doctor_uid IS NOT NULL
+                                      THEN eta_encounter_windows.consulting_doctor_name ELSE EXCLUDED.consulting_doctor_name END,
+        attribution_source = CASE WHEN eta_encounter_windows.warehouse_doctor_uid IS NOT NULL
+                                  THEN 'warehouse' ELSE EXCLUDED.attribution_source END,
+        doctor_mismatch = (eta_encounter_windows.warehouse_doctor_uid IS NOT NULL AND EXCLUDED.doctor_uid IS NOT NULL
+                           AND eta_encounter_windows.warehouse_doctor_uid <> EXCLUDED.doctor_uid)
       RETURNING 1
     `;
     results = (await db.transaction([del, ins])) as unknown[];
@@ -258,21 +281,26 @@ export type WindowFilter = {
   from?: string | null;
   to?: string | null;
   quality?: string | null;
+  /** true: only rows where the warehouse and the extension name different doctors. */
+  mismatch?: boolean | null;
   limit?: number;
 };
 
-/** Read rows ordered by t_open. Only what the table holds: ids, times, doctor_uid/display_name, labels. */
-export async function queryWindows(db: WindowsDb, f: WindowFilter): Promise<EncounterWindowRow[]> {
+/** Read rows ordered by t_open. Only what the table holds: ids, times, doctor uids/names (extension and warehouse), labels. */
+export async function queryWindows(db: WindowsDb, f: WindowFilter): Promise<EncounterWindowRead[]> {
   const limit = Math.min(Math.max(Math.trunc(f.limit ?? 1000), 1), 5000);
   const rows = (await db`
     SELECT consult_key, consult_uid, prescription_ref, machine, room_id, room_slug, doctor_uid, display_name,
-           attribution, t_open, t_close, close_reason, quality, reopen_count, source_event_ids, resolver_version
+           attribution, t_open, t_close, close_reason, quality, reopen_count, source_event_ids, resolver_version,
+           warehouse_doctor_uid, warehouse_doctor_name, warehouse_checked_at, warehouse_prescription_uid,
+           consulting_doctor_uid, consulting_doctor_name, attribution_source, doctor_mismatch
       FROM eta_encounter_windows
      WHERE (${f.room_id ?? null}::text IS NULL OR room_id = ${f.room_id ?? null}::text)
        AND (${f.doctor_uid ?? null}::text IS NULL OR doctor_uid = ${f.doctor_uid ?? null}::text)
        AND (${f.from ?? null}::timestamptz IS NULL OR t_open >= ${f.from ?? null}::timestamptz)
        AND (${f.to ?? null}::timestamptz IS NULL OR t_open < ${f.to ?? null}::timestamptz)
        AND (${f.quality ?? null}::text IS NULL OR quality = ${f.quality ?? null}::text)
+       AND (${f.mismatch === true ? true : null}::boolean IS NULL OR doctor_mismatch = true)
      ORDER BY t_open, id
      LIMIT ${limit}
   `) as unknown as Array<Record<string, unknown>>;
@@ -293,5 +321,13 @@ export async function queryWindows(db: WindowsDb, f: WindowFilter): Promise<Enco
     reopen_count: Number(r.reopen_count ?? 0),
     source_event_ids: Array.isArray(r.source_event_ids) ? (r.source_event_ids as unknown[]).map(Number) : [],
     resolver_version: String(r.resolver_version),
+    warehouse_doctor_uid: (r.warehouse_doctor_uid as string | null) ?? null,
+    warehouse_doctor_name: (r.warehouse_doctor_name as string | null) ?? null,
+    warehouse_checked_at: isoOrNull(r.warehouse_checked_at),
+    warehouse_prescription_uid: (r.warehouse_prescription_uid as string | null) ?? null,
+    consulting_doctor_uid: (r.consulting_doctor_uid as string | null) ?? null,
+    consulting_doctor_name: (r.consulting_doctor_name as string | null) ?? null,
+    attribution_source: (r.attribution_source as AttributionSource | null) ?? null,
+    doctor_mismatch: r.doctor_mismatch === true,
   }));
 }

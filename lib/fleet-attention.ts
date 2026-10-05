@@ -650,7 +650,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
          AND c.created_at > now() - interval '30 minutes'
     `) as Array<{ room_id: string; session_id: string; source: string; created_at: unknown; started_at: unknown; size_bytes: unknown; duration_ms: unknown }>, []),
     safe("eta_encounter_windows", degraded, async () => (await sql`
-      SELECT w.room_id, w.display_name, w.t_open, w.t_close
+      SELECT w.room_id, COALESCE(w.consulting_doctor_name, w.display_name) AS display_name, w.t_open, w.t_close
         FROM eta_encounter_windows w
        WHERE w.room_id = ANY(${ids}::text[])
          AND (w.t_open > now() - interval '15 minutes'

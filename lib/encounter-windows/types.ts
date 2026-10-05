@@ -55,6 +55,25 @@ export type EncounterWindowRow = {
   resolver_version: string;
 };
 
+export type AttributionSource = "warehouse" | "extension" | "none";
+
+/**
+ * What the read side returns: the resolver's row plus the warehouse attribution columns (migration 0124), filled by
+ * lib/encounter-windows/warehouse-attribution.ts. doctor_uid / display_name / attribution above stay the EXTENSION's view.
+ * consulting_doctor_* is the one to report: the warehouse doctor when found, else the extension's. attribution_source is
+ * provisional ('extension' | 'none') until warehouse_checked_at is set.
+ */
+export type EncounterWindowRead = EncounterWindowRow & {
+  warehouse_doctor_uid: string | null;
+  warehouse_doctor_name: string | null;
+  warehouse_checked_at: string | null;
+  warehouse_prescription_uid: string | null;
+  consulting_doctor_uid: string | null;
+  consulting_doctor_name: string | null;
+  attribution_source: AttributionSource | null;
+  doctor_mismatch: boolean;
+};
+
 export type RoomRef = { room_id: string; slug: string | null };
 
 export type ComputeOptions = {

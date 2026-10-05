@@ -436,9 +436,19 @@ export const etaEncounterWindows = pgTable("eta_encounter_windows", {
   sourceEventIds:  bigint("source_event_ids", { mode: "number" }).array().notNull().default(sql`'{}'::bigint[]`),
   resolverVersion: text("resolver_version").notNull(),
   computedAt:      timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  // migration 0124 — the Even warehouse's doctor for the consult, and the doctor to report (warehouse > extension > none)
+  warehouseDoctorUid:      text("warehouse_doctor_uid"),
+  warehouseDoctorName:     text("warehouse_doctor_name"),
+  warehouseCheckedAt:      timestamp("warehouse_checked_at", { withTimezone: true }),
+  warehousePrescriptionUid: text("warehouse_prescription_uid"),
+  consultingDoctorUid:     text("consulting_doctor_uid"),
+  consultingDoctorName:    text("consulting_doctor_name"),
+  attributionSource:       text("attribution_source"),        // warehouse | extension | none (CHECK in SQL)
+  doctorMismatch:          boolean("doctor_mismatch").notNull().default(false),
 }, (t) => ({
   byConsultKey: uniqueIndex("eta_encounter_windows_consult_key_key").on(t.consultKey),
   byRoomOpen:   index("eta_encounter_windows_room_open_idx").on(t.roomId, t.tOpen),
   byDoctorOpen: index("eta_encounter_windows_doctor_open_idx").on(t.doctorUid, t.tOpen),
   byOpen:       index("eta_encounter_windows_open_idx").on(t.tOpen),
+  byWhUnchecked: index("eta_encounter_windows_wh_unchecked_idx").on(t.tOpen).where(sql`warehouse_checked_at IS NULL`),
 }));

@@ -73,7 +73,7 @@ beforeAll(() => {
       BEGIN EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO r; RETURN r; END
     $f$;
   `);
-  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows"]) {
+  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
   H.sql = pg.sql as Sql;
@@ -286,6 +286,17 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     // a recent chunk silences it
     pg.exec(session("bs4", "r4", "2 hours") + chunkRow("c1", "bs4", "3 minutes", 3_400_000) + samples("r4", "10 minutes", "1 second", "moving"));
     expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
+  it("R4 names the consulting doctor (warehouse, 0124) when present, not the extension's display_name", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, display_name, consulting_doctor_name, attribution, t_open, t_close, close_reason, quality, resolver_version)
+      VALUES ('e1@m', 'm', 'r4', '${DOC2.full_name}', '${DOC.full_name}', 'rows', ${ago("20 minutes")}, NULL, 'open', 'unclosed', 'v');
+    `);
+    const r = await attention();
+    expect(kindsOf(r)).toEqual(["r4:consult_without_tape"]);
+    expect(r.items[0]!.detail).toContain(DOC.label);
+    expect(r.items[0]!.detail).not.toContain(DOC2.label);
   });
 
   it("R6 open_outbox — open until a chunk lands after the alert AND the levels moved since", async () => {
